@@ -121,7 +121,10 @@ pub use packaging::{
 };
 pub use path_utils::{is_absolute, resolve};
 pub use permission::{Permission, ShellApprovalThreshold};
-pub use process::{IdleTimeoutError, ProcessOutput, run_command_with_idle_timeout};
+pub use process::{
+    IdleTimeoutError, OutputStream, ProcessOutput, run_command_with_idle_timeout,
+    run_command_with_idle_timeout_with_output,
+};
 pub use providers::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, ImageUrlPart, Provider, ProviderError,
     ProviderErrorType, StreamEvent,

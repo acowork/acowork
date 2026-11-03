@@ -15,10 +15,7 @@ use tokio::time::{Duration, timeout};
 
 use crate::config::McpServerConfig;
 use crate::protocol::{JsonRpcRequest, MCP_PROTOCOL_VERSION, McpToolDef, McpToolsListResult};
-use crate::transport::{McpTransportConn, create_transport};
-
-/// Timeout for receiving a response from an MCP server during init/list.
-const RECV_TIMEOUT: Duration = constants::MCP_RECV;
+use crate::transport::{McpTransportConn, create_transport_with};
 
 /// Default timeout for tool calls when not configured per-server.
 const DEFAULT_TOOL_TIMEOUT: Duration = constants::MCP_DEFAULT_TOOL;
@@ -83,8 +80,50 @@ impl Clone for McpClient {
 
 impl McpClient {
     /// Connect to the server, perform the initialize handshake, and fetch the tool list.
+    ///
+    /// The handshake bound is derived from the command kind
+    /// ([`crate::install::handshake_bound_for`]): a lazily resolved package
+    /// launches through `npx`/`uvx`, whose first answer includes resolving and
+    /// importing it, so the protocol default would report a healthy but slow
+    /// server as dead.
     pub async fn connect(config: McpServerConfig) -> Result<Self> {
-        let mut transport = create_transport(&config).with_context(|| {
+        let bound = crate::install::handshake_bound_for(&config.command);
+        Self::connect_with_timeout(config, None, Some(bound)).await
+    }
+
+    /// Same as [`McpClient::connect`], forwarding the server process's stderr
+    /// to `sink` while the connection lives — used by the first-enable health
+    /// check, where a lazy `npx`/`uvx` download prints its progress there.
+    pub async fn connect_with(
+        config: McpServerConfig,
+        sink: Option<crate::transport::ServerOutputSink>,
+    ) -> Result<Self> {
+        let bound = crate::install::handshake_bound_for(&config.command);
+        Self::connect_with_timeout(config, sink, Some(bound)).await
+    }
+
+    /// Same as [`McpClient::connect_with`] with an explicit handshake bound.
+    ///
+    /// The wait is a property of *the command being spawned*, not of the MCP
+    /// protocol: a lazily resolved package downloads during the first spawn, so
+    /// a fixed cap cannot tell a healthy first launch from a hang. `None`
+    /// leaves the handshake unbounded, which is what a caller that watches
+    /// output activity wants — it enforces its own "no progress" deadline
+    /// (the Runtime's probe does exactly that, ADR-090 §5.4).
+    ///
+    /// For stdio the bound is handed to the transport, which is the only place
+    /// that sees the child: one owner, no outer wrapper racing it. HTTP/SSE
+    /// transports have no child process, so their bound stays on the caller
+    /// side (the `timeout` wrappers below).
+    pub async fn connect_with_timeout(
+        config: McpServerConfig,
+        sink: Option<crate::transport::ServerOutputSink>,
+        recv_timeout: Option<Duration>,
+    ) -> Result<Self> {
+        let is_stdio = matches!(config.transport, crate::config::McpTransportDef::Stdio);
+        let outer_bound = if is_stdio { None } else { recv_timeout };
+
+        let mut transport = create_transport_with(&config, sink, recv_timeout).with_context(|| {
             format!(
                 "failed to create transport for MCP server `{}`",
                 config.name
@@ -105,14 +144,17 @@ impl McpClient {
             }),
         );
 
-        let init_resp = timeout(RECV_TIMEOUT, transport.send_and_recv(&init_req))
-            .await
-            .with_context(|| {
-                format!(
-                    "MCP server `{}` timed out waiting for initialize response",
-                    config.name
-                )
-            })??;
+        let init_resp = match outer_bound {
+            Some(limit) => timeout(limit, transport.send_and_recv(&init_req))
+                .await
+                .with_context(|| {
+                    format!(
+                        "MCP server `{}` timed out waiting for initialize response",
+                        config.name
+                    )
+                })??,
+            None => transport.send_and_recv(&init_req).await?,
+        };
 
         if init_resp.error.is_some() {
             bail!(
@@ -129,14 +171,17 @@ impl McpClient {
         // ── Fetch tool list ──────────────────────────────────────────────
         let list_req = JsonRpcRequest::new(2u64, "tools/list", json!({}));
 
-        let list_resp = timeout(RECV_TIMEOUT, transport.send_and_recv(&list_req))
-            .await
-            .with_context(|| {
-                format!(
-                    "MCP server `{}` timed out waiting for tools/list response",
-                    config.name
-                )
-            })??;
+        let list_resp = match outer_bound {
+            Some(limit) => timeout(limit, transport.send_and_recv(&list_req))
+                .await
+                .with_context(|| {
+                    format!(
+                        "MCP server `{}` timed out waiting for tools/list response",
+                        config.name
+                    )
+                })??,
+            None => transport.send_and_recv(&list_req).await?,
+        };
 
         let result = list_resp
             .result

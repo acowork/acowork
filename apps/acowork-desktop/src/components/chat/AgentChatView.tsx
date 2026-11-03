@@ -1216,7 +1216,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           >
             {/* Per-chat ledger read (plan §4.6 phase two): the pair's
                 router spend lives on this one agent. */}
-            <ChatUsageIcon agentIds={[agentId]} chatSessionId={sessionId} />
+            <ChatUsageIcon
+              agentIds={[agentId]}
+              chatSessionId={sessionId}
+              editableAgentId={agentId}
+            />
             <Tooltip content={t("chatPanel.attach")} variant="plain">
               <button
                 className={cn(toolbarIconButton, uploading && "opacity-50")}

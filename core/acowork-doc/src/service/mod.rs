@@ -10,6 +10,10 @@
 //!   create / list / rename / delete on directory nodes.
 //! - `acl.rs` — `AclService`: node-level view/edit permissions with
 //!   closest-ancestor inheritance and creator/admin management (design §9).
+//! - `policy.rs` — `WritePolicy`: the single, orthogonal governance decision
+//!   (`Apply` vs `pending_review`) for every content write, plus the ownership
+//!   gate for structural operations. Keeps governance out of the operation
+//!   names (see the module docs for why).
 //! - `request.rs` / `request_impl.rs` — `RequestService` PR-style review
 //!   flow: submit (base_version check), list, approve (merge + version+1),
 //!   reject, TTL expiry (design §5).
@@ -28,6 +32,7 @@ pub mod directory;
 pub mod directory_impl;
 pub mod document;
 pub mod document_impl;
+pub mod policy;
 pub mod request;
 pub mod request_impl;
 pub mod search;
@@ -42,6 +47,7 @@ pub use directory::{CreateDirectoryInput, DirectoryService};
 pub use directory_impl::LibraryDirectoryService;
 pub use document::{CreateDocumentInput, DocumentService, UpdateDocumentInput};
 pub use document_impl::LibraryDocumentService;
+pub use policy::{gate_owner, gate_write, OwnerGate, WriteGate};
 pub use request::{ApproveOutcome, RequestService, SubmitRequestInput};
 pub use request_impl::LibraryRequestService;
 pub use search::SearchService;

@@ -42,7 +42,7 @@ doc and pm differ on their invariants, so pm cannot be reused wholesale:
 | Directory semantics | `children/` isolated subdirectories | **a directory is a folder** |
 | Content carrier | `task.json` + attachment directory | the Markdown is the content; metadata lives in `library.json` |
 | Concurrency | version number | version number (`base_version` validated) |
-| Modification path | humans edit; agents claim → submit | humans PUT; agents `doc_submit_update` → PR review |
+| Modification path | humans edit; agents claim → submit | humans PUT; agents `doc_write` (policy returns `pending_review` for another owner's document → PR review) |
 
 Design §2.2/Q8 originally put the data at `{data}/acowork-doc/` nested in the Gateway data
 directory. Implementation aligned it with pm at `$HOME/.acowork/acowork-doc/`,
@@ -118,6 +118,30 @@ negative.
   only: list/read/search/pull/check_request).
 - The doc server MUST NOT keep its own agent allowlist — the trust decision lives at the
   single Gateway authentication point.
+
+### Decision 6: governance is policy (not a verb), size has two ceilings, replace parks in the trash
+
+- **Write permission is policy, not a verb** (`service/policy.rs`, design §5.1): one
+  `doc_write` covers create/overwrite/append. Editing your own document (`creator == actor`)
+  or acting as an admin applies directly; editing someone else's document, or a document
+  with no recorded creator, returns `pending_review` + `request_id`. The old verb triple
+  (`doc_add`/`doc_submit_update`/`doc_pull`) encoded governance into the name, making
+  "create, but reviewed" and "overwrite, without review" inexpressible.
+- **Structural operations are ownership-gated** (`move` / `remove`): a review request models
+  a *content proposal* and cannot express delete/rename, so they do not enter the review
+  flow. A document with no recorded creator is deliberately **not** refused on ownership —
+  it falls through to the node ACL, because with no review channel an ownership refusal
+  would make the document permanently unreachable (a deadlock, not protection).
+- **Two size ceilings** (`limit.rs`): `transport_ceiling` (wire JSON, worst-case escape
+  factor) and `ensure_document_size` (decoded body, including the **resulting** size of an
+  `append`). Checking only the former rejects a legal document whose escaping inflates it;
+  checking only the latter allows unbounded memory. Every 413 answers with the
+  `payload_too_large` JSON envelope (a custom `DocJson` extractor, so axum's plain-text
+  rejection never leaks).
+- **Replace parks the old body in the trash**: the overwrite branch of `move_doc` records the
+  displaced document in `.trash/` and keeps its body for rollback. Deleting the destination
+  first (the old MCP implementation) left a failed move in the state "destination deleted,
+  source unmoved".
 
 ## Consequences
 

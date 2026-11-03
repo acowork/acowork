@@ -30,6 +30,14 @@ pub trait ChatUsageService: Send + Sync {
     /// not duplicate the pricing path. `chat_kind` is the router's
     /// Session-kind string; blank / empty records "kind not known" (the
     /// ledger stores NULL), never a value that pretends to be a kind.
+    ///
+    /// `history_tokens` is the router's projected-history occupancy for
+    /// this turn (design 29 §4, Block B) — `None` when the turn did not
+    /// measure it. It is the ONLY number comparable to the
+    /// `chat_router.history_max_tokens` budget: the provider-reported
+    /// prompt count also carries the system prompt and the tool schemas,
+    /// so it routinely exceeds that budget and must not be used as the
+    /// budget's occupancy.
     fn record_chat_llm_usage(
         &self,
         chat_session_id: &str,
@@ -37,6 +45,7 @@ pub trait ChatUsageService: Send + Sync {
         usage: &UsageInfo,
         provider_label: &str,
         model_id: &str,
+        history_tokens: Option<u64>,
     );
 
     /// Drop one Chat session's ledger row and net its breakdown out of

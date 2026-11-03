@@ -40,4 +40,16 @@ pub trait DirectoryService: Send + Sync {
     /// `.trash/`). Implemented in PR-1 with single-directory .trash;
     /// cross-directory restore comes with the recycle-bin service in PR-2.
     async fn delete(&self, dir_id: &str) -> Result<()>;
+
+    /// Human-readable path of a directory relative to the library root
+    /// (`"研发/会议"`, `""` for the root).
+    ///
+    /// Resolved by walking **up** the `parent` chain, so the cost is
+    /// O(depth) index reads. The alternative — walking the whole tree down
+    /// from the root — costs O(directories) per lookup, i.e. a full library
+    /// scan to render one `mv` result path. Callers that render many paths in
+    /// one request (search hits) memoise the per-directory result for the
+    /// duration of that request; there is deliberately no cross-request cache,
+    /// because every directory mutation would then owe an invalidation hook.
+    async fn path_of(&self, dir_id: &str) -> Result<String>;
 }

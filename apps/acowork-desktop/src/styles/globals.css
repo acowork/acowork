@@ -114,6 +114,16 @@
      If you change one, change the other. */
   --color-editor-canvas: #FFFFFF;
   /* = Monaco `vs` background — file editor / preview surface (light) */
+  /* Transparency backdrop behind a bitmap preview (image-checkerboard).
+     Two alternating cells: `a` matches the editor canvas so an opaque
+     image reads exactly as before, `b` sits one hair away from it
+     (darker in light, lighter in dark) so a transparent PNG shows the
+     board instead of dissolving into the canvas. Auto-flipped in
+     `.dark`, so the utility needs no `dark:` prefix. */
+  --color-image-checker-a: #FFFFFF;
+  /* = canvas colour — keeps the board invisible under opaque pixels (light) */
+  --color-image-checker-b: #F0F0F1;
+  /* one hair below white — the visible half of the checkerboard (light) */
   /* App-wide surface palette — the large empty planes users see first:
         - page-bg        : unified page background (chat/settings/harness/
                           pm/doc surfaces). Light = #FAFAFA (zinc-50, a hair
@@ -516,6 +526,35 @@
   padding-block: var(--spacing-panel-gutter);
 }
 
+/* ── Bitmap transparency backdrop ────────────────────────────────
+   Painted BEHIND the <img> stage of the image preview (ImageViewer),
+   never on the <img> itself, so it costs zero layout: the stage stays
+   exactly `natural × scale`, which is what the pointer→pixel readout
+   and the region crop divide by. A `border` would not do — under
+   `box-sizing: border-box` it eats 1px off each side and the bitmap
+   would render 2px smaller than the geometry the app computes with.
+
+   Why a board at all: the preview surface is `bg-editor-canvas`
+   (`#FFFFFF` / `#1E1E1E`, Monaco's own colours), so a PNG with a
+   transparent background simply dissolved into it and lost its edges.
+   Cell A equals the canvas colour, so an opaque image looks unchanged;
+   cell B is one hair off it and only shows through transparent or
+   semi-transparent pixels.
+
+   Cells are screen-space (8px at every zoom), matching Photoshop /
+   Figma: the board must not scale with the image, otherwise it starts
+   to look like image content. That also keeps `scale` — the single
+   number the geometry module owns — out of the stylesheet. */
+@utility image-checkerboard {
+  background-color: var(--color-image-checker-a);
+  background-image: repeating-conic-gradient(
+    var(--color-image-checker-b) 0% 25%,
+    var(--color-image-checker-a) 0% 50%
+  );
+  background-size: 16px 16px;
+  background-position: 0 0;
+}
+
 /* ── Per-accent frosted-glass tints ──────────────────────────────
    Each `.accent-{id}` class on <html> selects the matching preset.
    Light mode reads --glass-tint-light (L=92%), dark mode reads
@@ -606,6 +645,11 @@
   /* Editor canvas (dark) — auto-flips the @theme light value. */
   --color-editor-canvas: #1E1E1E;
   /* = Monaco `vs-dark` background — file editor / preview surface (dark) */
+  /* Transparency backdrop (dark) — auto-flips the @theme light values. */
+  --color-image-checker-a: #1E1E1E;
+  /* = canvas colour — board stays invisible under opaque pixels (dark) */
+  --color-image-checker-b: #2B2B2F;
+  /* one hair above the canvas — the visible half of the board (dark) */
   /* App-wide surface palette (dark) — auto-flips the @theme light values. */
   --color-page-bg: hsl(240 3.8% 8%);
   /* = zinc-950 附近，#131316 — unified page background (chat/settings/harness/pm/doc) */

@@ -76,3 +76,6 @@ dev/tmp/
 
 # Local-only test output (e.g. `vitest run > vt.log`)
 *.log
+
+# Local scratch at the repo root (probe/debug scripts)
+dev-tmp/

@@ -605,6 +605,8 @@ async fn run_turn(
         provider_label: &prepared.provider_label,
         model: &prepared.model,
         timeout_ms: cfg.timeout_ms(),
+        // The window this turn projected — the budget's occupancy.
+        history_tokens: Some(block_b.token_len as u64),
     };
 
     let mut response = match calls.call(request.clone()).await {
@@ -1005,6 +1007,15 @@ struct ModelCalls<'a> {
     provider_label: &'a str,
     model: &'a str,
     timeout_ms: u64,
+    /// Tokens the projected history window (Block B) cost on this turn.
+    ///
+    /// This is the budget's occupancy: `chat_router.history_max_tokens`
+    /// bounds the HISTORY window alone, so the provider-reported prompt
+    /// count (which also carries the system prompt and the tool schemas)
+    /// is not comparable with it. Booked onto the ledger row as a
+    /// snapshot — the window is refilled per turn, so only the latest
+    /// occupancy is meaningful.
+    history_tokens: Option<u64>,
 }
 
 impl ModelCalls<'_> {
@@ -1017,6 +1028,7 @@ impl ModelCalls<'_> {
                 usage,
                 self.provider_label,
                 self.model,
+                self.history_tokens,
             );
         }
         Ok(response)
@@ -1467,6 +1479,7 @@ mod tests {
             _usage: &acowork_core::providers::traits::UsageInfo,
             provider_label: &str,
             model_id: &str,
+            _history_tokens: Option<u64>,
         ) {
             self.records.lock().unwrap().push(format!(
                 "{chat_session_id}|{chat_kind}|{provider_label}|{model_id}"
@@ -1513,6 +1526,7 @@ mod tests {
                 provider_label: "mock|mock-model",
                 model: "mock-model",
                 timeout_ms: 5_000,
+                history_tokens: None,
             }
         }
 

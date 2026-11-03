@@ -49,6 +49,17 @@ export interface ChatUsageRow {
   tokens: ChatUsageTokens;
   /** key = `"{provider}|{model}"`；空明细序列化为 `null`。 */
   model_usage: Record<string, ChatUsageModelEntry> | null;
+  /**
+   * 路由器投影历史窗口（Block B）最近一轮占用的 tokens ——
+   * `chat_router.history_max_tokens` 预算的占用量。
+   *
+   * `null` = 未测量（v10 之前写的行，或从未投影过历史窗口的轮次）：
+   * 界面渲染破折号，绝不伪造 0（ADR-027「宁可 miss 也不估计」）。
+   *
+   * 这**不是** provider 报的 prompt tokens：那个数还含系统提示词与
+   * 工具 schema，常常超过历史预算，不能拿来当预算占用量。
+   */
+  history_tokens?: number | null;
 }
 
 /** 一个 agent 参与者对这张 chat 的台账（`null` = 404，从未记账）。 */
@@ -76,6 +87,14 @@ export interface ChatUsageSummary {
   modelItems: TokenStatItem[];
   /** 各 agent `last_active_at` 的最大值（epoch ms；全无 → `null`）。 */
   lastActiveMs: number | null;
+  /**
+   * 路由器投影历史窗口（Block B）的占用量（tokens）——跨 agent 取
+   * **最大值**而非求和：多个 agent 各自投影自己的窗口，预算也是各自
+   * 的，求和会得出一个没有对应预算的数。
+   *
+   * `null` = 没有 agent 测量过（未测量 ≠ 0）。
+   */
+  historyTokens: number | null;
 }
 
 /**
@@ -98,6 +117,7 @@ export function summarizeChatUsage(perAgent: AgentChatUsage[]): ChatUsageSummary
     totalCost: 0,
     modelItems: [],
     lastActiveMs: null,
+    historyTokens: null,
   };
   for (const { row } of rows) {
     if (!row) continue;
@@ -106,6 +126,15 @@ export function summarizeChatUsage(perAgent: AgentChatUsage[]): ChatUsageSummary
     out.totalOutput += row.tokens.total_output;
     out.totalCacheRead += row.tokens.total_cache_read;
     out.totalCacheWrite += row.tokens.total_cache_write;
+    // The history-window occupancy is a per-turn snapshot, so the merged
+    // value is the MAX across participants (each agent projects its own
+    // window against its own budget) — never a sum.
+    if (
+      typeof row.history_tokens === "number" &&
+      (out.historyTokens === null || row.history_tokens > out.historyTokens)
+    ) {
+      out.historyTokens = row.history_tokens;
+    }
     const active = Date.parse(row.last_active_at);
     if (!Number.isNaN(active) && (lastActiveMs === null || active > lastActiveMs)) {
       lastActiveMs = active;

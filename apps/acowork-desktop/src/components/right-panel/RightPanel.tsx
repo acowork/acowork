@@ -871,15 +871,20 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               chat card sits on top when the chat tab owns the pane).
               Renders only when the ledger has rows: an agent that never
               routed this chat has nothing to show, and "—" rows next to
-              an all-zero donut would read as a bug. */}
+              an all-zero donut would read as a bug.
+
+              Scope is THIS agent (`fetchChatUsage([selectedAgentId], …)`),
+              unlike the composer's `ChatUsageIcon`, which merges the whole
+              roster — hence the distinct title: a group chat must not show
+              the same label for two different numbers. */}
           {chatForegroundId && chatUsage && chatUsage.llmCallCount > 0 && (
             <div className="mb-2">
               <ListBox dividers={false}>
                 <ExpandableRow
                   open={chatUsageOpen}
                   onToggle={() => setChatUsageOpen((v) => !v)}
-                  title={t("chatUsage.title")}
-                  ariaLabel={t("chatUsage.title")}
+                  title={t("chatUsage.titleAgent")}
+                  ariaLabel={t("chatUsage.titleAgent")}
                   bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-2 text-xs"
                 >
                   <StatRow

@@ -99,7 +99,21 @@
     "globalSearch": "全局搜索 (Ctrl+Shift+F)",
     "collapseRightPanel": "折叠右侧面板",
     "expandRightPanel": "展开右侧面板",
-    "gatewayDetails": "详情"
+    "gatewayDetails": "详情",
+    "appearance": "外观"
+  },
+  "accentColors": {
+    "blue": "蓝色",
+    "indigo": "靛蓝",
+    "violet": "紫罗兰",
+    "cyan": "青色",
+    "teal": "蓝绿色",
+    "green": "绿色",
+    "rose": "玫瑰色",
+    "orange": "橙色",
+    "amber": "琥珀色",
+    "pink": "粉色",
+    "custom": "自定义颜色"
   },
   "navBar": {
     "editProfile": "编辑资料",
@@ -447,6 +461,7 @@
   "chatUsage": {
     "ariaLabel": "会话用量",
     "title": "会话用量",
+    "titleAgent": "会话用量（本 Agent）",
     "close": "关闭",
     "llmCalls": "LLM 调用",
     "totalInput": "累计输入",
@@ -457,7 +472,8 @@
     "byModel": "按模型",
     "byAgent": "按 Agent",
     "unknownModel": "未知模型",
-    "noData": "本会话尚无 LLM 用量"
+    "noData": "本会话尚无 LLM 用量",
+    "usedNotMeasured": "尚未测量 — 路由器会在本会话的下一轮记录历史长度"
   },
   "contextUsage": {
     "ariaLabel": "上下文用量",
@@ -750,8 +766,7 @@
     "temperatureDesc": "控制 LLM 输出的随机性。降低使输出更确定，升高使更富创造性。范围 0.0–2.0，留空使用包默认值。",
     "compressionRatioThreshold": "压缩比阈值",
     "compressionRatioThresholdDesc": "上下文压缩后保留的比例。90% 表示压缩到剩余 10%。范围 50%–95%，默认 90%。",
-    "sectionChatRouter": "Chat 路由",
-    "chatRouterEnabled": "启用 Chat 路由",
+    "sectionChatRouter": "Chat Session 路由",
     "chatRouterModel": "路由模型",
     "chatRouterModelAuto": "自动（精简模型链）",
     "chatRouterModelDesc": "用于路由 LLM 轮次的模型，该轮次决定是直接回复还是转发到执行会话。它不跟随会话所选的聊天模型。保持“自动”即使用 agent 的精简模型链。",
@@ -759,7 +774,6 @@
     "chatRouterTimeoutMsDesc": "单次路由 LLM 调用在回退为直接转发前的超时时间。范围 1000–300000，默认 60000。",
     "chatRouterHistoryMaxTokens": "Chat 历史上下文长度",
     "chatRouterHistoryMaxTokensDesc": "路由判断前可以读取的聊天历史长度（tokens）。窗口按上下文大小裁剪，而不是按消息条数。范围 1000–64000，默认 8000。",
-    "chatRouterDisabledHint": "Chat 路由已关闭；每条聊天消息都将不经路由轮次直接处理。",
     "resetTemperature": "清除温度设置，使用包默认值",
     "contextWindow": "上下文窗口",
     "contextWindowDesc": "每次请求的最大上下文 token 数。设为 0 或留空表示不限制（使用模型全窗口）。设定数值可为该 Agent 限制tokens用量。",
@@ -777,7 +791,11 @@
     "sessionLanguageFollow": "跟随用户设置",
     "ensureProbing": "探测中…",
     "ensureInstalling": "安装中…",
-    "ensureFailed": "安装失败",
+    "ensureViewLogs": "查看日志",
+    "ensureLogsTitle": "MCP 启动日志 — {{name}}",
+    "ensureLogsWaiting": "等待输出…",
+    "ensureLogsHint": "若这里长时间没有输出，说明该服务器无需下载（本机已有，或不是 stdio 传输）。",
+    "ensureFailed": "启动失败",
     "mcpRecommended": "建议的 MCP（{{count}}）",
     "mcpRecommendedAllHandled": "建议项都已处理，没有待办。",
     "mcpRecommendedShowIgnored": "显示 {{count}} 个已忽略",

@@ -26,7 +26,7 @@
 | Q1 | **前端 = Desktop 本地 React 组件**（不 WebView 内嵌） | WebView 内嵌独立前端会导致两套技术栈与样式，风格不统一。Desktop 已有成熟的 `MarkdownPreviewView`（react-markdown + remark-gfm + CodeBlock）与设计 token，直接复用。acowork-doc 服务**只提供 REST API**，不内置前端 |
 | Q2 | **add to doc = 快照副本** | 避免工作区后续变化导致的链接失效；导入后与原工作区解耦，KISS |
 | Q3 | **MCP transport = HTTP** | 服务常驻、连接开销低；现有 `McpTransport` 已支持 HTTP |
-| Q4 | **Agent 修改已有文档走 PR 式审核流** | Agent 先在本地生成缓存副本 → 修改 → `doc_submit_update` 提交更新请求（pending）→ 人类在 Desktop 审核（approve/reject）→ approve 后合并入库。**新增文档（add to doc）直接生效，不审核**。临时文件放工作区 `.acowork/tmp/` 或系统 tmp（agent home 工作区除外） |
+| Q4 | **Agent 修改他人已有文档走 PR 式审核流；改自己的文档直接生效** | 治理由策略决定，不由动词决定（`service/policy.rs`）：调用者是文档创建人（或管理员）→ 直接生效；改他人文档 / 文档无创建人记录 → 返回 `pending_review` + `request_id`，人类在 Desktop 审核（approve/reject）后合并入库。**新建文档直接生效**（此时调用者成为创建人，其后续 append 也直通）。结构性操作（`move`/`remove`）按所有权放行，不进审核流——审核模型只表达「内容提案」；无创建人记录时按节点 ACL 放行（避免历史文档不可达） |
 | Q7 | **暴露给远程节点** | 与 embed 一致：endpoint 用 `advertise_host` 构造，经 MQTT 全局资源/AgentHello 下发，远程 Runtime 可访问 doc MCP（§8） |
 | Q8 | **数据目录 = `$HOME/.acowork/acowork-doc/`** | ADR-070 决策 3：修正草案 `{data}/acowork-doc/`（嵌套 Gateway 数据目录）——与 pm 对齐，doc 数据与 Gateway 数据目录**平级独立**（`$HOME/.acowork/` 下与 gateway/node/pm 并列），生命周期互不耦合 |
 
@@ -149,7 +149,9 @@ trash_retention_days = 30             # 回收站保留天数
 | GET | `/api/docs/:id/requests` | 某文档的更新请求历史 | Desktop / Agent |
 | GET | `/api/trash` / `POST /api/trash/:id/restore` | 回收站查看与恢复（P2） | Desktop |
 
-> `PUT /api/docs/:id` 仅对人类开放；Agent 必须走 §5 的更新请求（`doc_submit_update`）。服务端在请求层校验调用方身份（MCP 调用带 agent_id）。
+> `PUT /api/docs/:id` 仅对人类开放；Agent 一律经 MCP 的 `doc_write`。是否需要
+> 人工审核由 `service::policy` 判定（改他人文档 → `pending_review`，见 §5），
+> 与走哪个动词无关。服务端在请求层校验调用方身份（MCP 调用带 instance_id）。
 
 ---
 
@@ -157,7 +159,29 @@ trash_retention_days = 30             # 回收站保留天数
 
 ### 5.1 动机
 
-多个 Agent 共享同一文档库，若 Agent 直接覆写他人内容会破坏协作。参照 git PR：**Agent 的修改先提交请求，人类审核后合并**。新增文档（add to doc）不审核（导入即分享）。
+多个 Agent 共享同一文档库，若 Agent 直接覆写他人内容会破坏协作。参照 git PR：
+**改他人内容的修改先提交请求，人类审核后合并**。
+
+关键点：**审核是治理策略，不是动词**。调用者改自己的文档（`creator == actor`）
+直接生效——这是 Agent 迭代自己产出的常见路径，把人类放在这里只会让流程瘫掉；
+改他人文档才进审核队列。策略实现见
+[service/policy.rs](../../../core/acowork-doc/src/service/policy.rs)，判定表：
+
+| 情形 | 结果 |
+|------|------|
+| 调用者是管理员 | 直接生效 |
+| 调用者是文档创建人 | 直接生效 |
+| 文档无创建人记录（历史数据） | 进审核（按「共享」处理，取安全侧） |
+| 文档属于他人 | 进审核 |
+
+新建文档永远直接生效（调用者即成为创建人）。结构性操作（`move`/`remove`）
+不进审核流，按所有权放行——审核请求模型只能表达「内容提案」。
+
+**无创建人记录的结构性操作**（同一张表里内容写入取「进审核」的安全侧）不走
+所有权拒绝：结构性操作没有审核通道，一律拒绝等于让这类历史文档在 Agent 面上
+永久不可达（既不能改名也不能删）——那不是保护，是死锁。因此改由节点 ACL 裁决
+（`gate_owner` 返回 `Unowned` → `AclService::check(Doc, Edit)`）：ACL 默认公开，
+显式收紧时才拦人，admin 在 ACL 层内豁免。
 
 ### 5.2 流程
 
@@ -168,11 +192,11 @@ sequenceDiagram
     participant D as acowork-doc
     participant H as "人类 (Desktop)"
 
-    A->>A: doc_pull: 本地缓存副本
-    Note over A: 缓存到工作区 .acowork/tmp 或系统 tmp，详见 §5.5
-    A->>A: 编辑缓存副本
-    A->>D: doc_submit_update(doc_id, content, base_version)
-    D->>D: 校验 base_version → 创建 pending 请求 (.requests/)
+    A->>D: doc_stat(doc_id)
+    D-->>A: version, size_bytes（不传正文）
+    A->>A: 在 Agent 侧编辑内容
+    A->>D: doc_write(ref, content, if_version=version)
+    D->>D: 校验 if_version → 策略判定：改他人文档 → 创建 pending 请求 (.requests/)
     D-->>H: 推送通知（MQTT /docs/requests 事件）
     H->>D: GET /api/requests（审核队列）
     alt approve
@@ -210,13 +234,20 @@ sequenceDiagram
 - **expired**：超过 `request_ttl_hours` 未审核自动标记 expired，由 Agent 重新提交。
 - 审核通过写库后版本号 +1，所有已读客户端（含其他 Agent 的缓存）应感知版本变化。
 
-### 5.5 Agent 端缓存副本（Q4 细节）
+### 5.5 Agent 端暂存（Q4 细节）
 
-- 缓存位置优先级：
-  1. 当前 Agent 工作区根下 `.acowork/tmp/docs/{doc_id}.md`（工作区专用临时目录，类似其他 Agent 应用约定）。
-  2. **例外**：Agent 工作区即 agent home（无独立 workspace 目录）时，用系统 tmp `{temp_dir()}/acowork-doc/{agent_id}/{doc_id}.md`。
-- `.acowork/` 仅存临时/缓存，不进入文档库、不随共享导出。
-- `doc_pull` 语义（D3 实施修正，见 §12 OD-1）：**服务端不落盘**——返回 Markdown 原文 + `base_version` + 建议缓存相对路径（`.acowork/tmp/docs/{doc_id}.md`），由调用方（Runtime/Agent 文件工具）写入其工作区。doc 进程与 Agent 工作区可能不在同一信任边界（远程 Agent），落盘职责归 Agent 侧。
+协议里**没有**「服务端给建议缓存路径」这一步：`doc_read` 返回正文，`doc_stat`
+返回版本，Agent 想落盘就用自己的文件工具落盘——doc 进程与 Agent 工作区可能不
+在同一信任边界（远程 Agent），落盘职责只能归 Agent 侧。若 Agent 需要暂存，位置
+按工作区约定：
+
+1. 当前 Agent 工作区根下 `.acowork/tmp/docs/{doc_id}.md`；
+2. **例外**：Agent 工作区即 agent home（无独立 workspace 目录）时，用系统 tmp
+   `{temp_dir()}/acowork-doc/{instance_id}/{doc_id}.md`；
+3. 或者干脆不落盘——库内 `报告.md.tmp.md` + `doc_move` 就是原子发布方案
+   （§6.2），不需要本地临时文件。
+
+`.acowork/` 仅存临时/缓存，不进入文档库、不随共享导出。
 
 ---
 
@@ -224,18 +255,60 @@ sequenceDiagram
 
 - MCP Server 端点：`http://127.0.0.1:{doc_port}/mcp`（doc 进程内部端点，仅 loopback；Q3 = HTTP）。Gateway 反代公开入口为 `http://{advertise_host}:{gw_http_port}/api/doc/mcp`（§8）。
 - Gateway 将 doc MCP 配置注入每个 Agent 的 `catalog` 列表（`auto_inject_mcp=true` 时），Agent 默认获得 `doc_*` 工具。
-- 每个工具调用携带 `agent_id`（由 Runtime MCP 层注入或服务端从连接上下文取），服务端据此做身份归属校验（NFR-04）。
+- 每个工具调用携带 **`agent_instance_id`**（ADR-073：Runtime 实例 UUID；由
+  Gateway 经 `X-MCP-Actor` 注入，缺失即匿名只读），服务端据此做身份归属与
+  所有权判定（NFR-04）。包 id（`agent_id`）不上 wire。
 
-| 工具 | 参数 | 返回 | 说明 |
-|------|------|------|------|
-| `doc_list` | `path?`（目录，缺省根）`query?` `offset?` `limit?` | 该目录下文档/子目录条目 | 目录树逐级浏览 |
-| `doc_read` | `doc_id` 或 `path` | Markdown 原文 + `version` + 元数据 | 读取共享文档 |
-| `doc_pull` | `doc_id` 或 `path` | 内容 + `base_version` + 建议缓存相对路径 | 拉取缓存副本（§5.5，服务端不落盘），供修改后提交 |
-| `doc_add` | `path?`（目标目录，缺省根）`title?` `content` `source_workspace?` `source_path?` | 新 `doc_id` | **add to doc**：新增文档直接生效（快照导入）；同名冲突返回 409 |
-| `doc_submit_update` | `doc_id` 或 `path` `content` `base_version` | `request_id` + `status=pending` | **PR 式更新请求**（§5），不直接写库 |
-| `doc_check_request` | `request_id` | 审核状态（pending/approved/rejected/expired） | Agent 轮询审核结果 |
-| `doc_mkdir` | `path` | 新目录 | 创建子目录 |
-| `doc_search` | `keyword` | 命中文档列表（含路径） | 跨目录检索 |
+**工具面按文件系统语义定义**：资源（文档/目录）+ 标准动作（`read`/`write`/
+`stat`/`move`/`remove`/`mkdir`/`ls`/`grep`），不为每个用例新造动词。**审核
+是正交维度**：同一个 `doc_write` 命中治理策略时返回 `status: pending_review`
++ `request_id`，而不是换成另一个动词（§5）。
+
+| 工具 | 等价 POSIX | 参数 | 返回 | 说明 |
+|------|-----------|------|------|------|
+| `doc_list` | `ls` | `path?`（目录，缺省根）`query?` `offset?` `limit?` | 该目录下文档/子目录条目 | 目录树逐级浏览 |
+| `doc_read` | `read` | `doc_id` 或 `path` | Markdown 原文 + `version` + 元数据 | 读取共享文档 |
+| `doc_stat` | `stat` | `doc_id` 或 `path` | 仅元数据（`version` / `size_bytes` / 路径 / 时间戳），**不含正文** | 取 `version` 做 `if_version` 乐观并发守卫；取代旧 `doc_pull`（不再为拿一个整数回传整篇） |
+| `doc_write` | `>` / `O_EXCL` / `>>` | `ref`（`doc_id` 或 `path`）`content` `mode?`=`overwrite`\|`create`\|`append` `if_version?` `source_workspace?` `source_path?` | `status=applied` + `doc_id` + `version`；或 `status=pending_review` + `request_id` | 唯一的写入动词。`create`=同名冲突即失败（O_EXCL）；`append`=追加（短写契约见 §6.2）；`if_version`=乐观并发 |
+| `doc_move` | `mv` | `from` `to` `overwrite?` | 移动后元数据 | 改名/跨目录移动；**temp+rename 原子发布**（§6.2）。需源文档所有权 |
+| `doc_remove` | `unlink` | `doc_id` 或 `path` | `removed: true` | 进回收站（可恢复，非物理删除）。需文档所有权 |
+| `doc_mkdir` | `mkdir` | `path` | 新目录 | 父目录须已存在 |
+| `doc_search` | `grep -r` | `keyword` `limit?` | 命中文档列表（含路径） | 跨目录检索 |
+| `doc_check_request` | — | `request_id` | 审核状态（pending/approved/rejected/expired） | 轮询 `pending_review` 的结果 |
+
+> 旧动词 `doc_add`（→ `doc_write(mode=create)`）、`doc_submit_update`（→
+> `doc_write(mode=overwrite, if_version)`）、`doc_pull`（→ `doc_stat`）已删除，
+> 不留兼容层。
+
+### 6.2 大文档写入：为什么 `doc_write` 必须支持 `append`
+
+单次工具调用的载荷受**调用方**限制（LLM 单次响应长度），与服务端上限无关。
+因此「一次写完一个大文档」在调用方侧不可行，必须给出分段协议。终态方案就是
+文件系统的经典 temp+rename，不需要任何 draft / staging 状态机：
+
+```text
+1. doc_write(ref="报告.md.tmp.md", mode="create", content=第1块)
+2. doc_write(ref="报告.md.tmp.md", mode="append", content=第2..N块)   ← 可重复
+3. doc_move(from="报告.md.tmp.md", to="报告.md", overwrite=true)      ← 原子发布
+```
+
+读者永远看不到半成品。`append` 的返回值带 `version` 与累计 `size_bytes`，
+调用方按需续写；服务端按**结果大小**校验上限（§6.3），所以分段也无法绕过。
+
+### 6.3 大小上限的语义
+
+`max_doc_size_bytes`（默认 2 MiB）约束的是**解码后的文档大小**，不是 HTTP
+请求体大小——JSON 转义会膨胀（控制字符 ×6），用信封大小去限文档会让一篇合法
+文档莫名其妙被拒。两者因此是两个数：
+
+| 量 | 值 | 作用 |
+|----|----|------|
+| 文档上限 | `max_doc_size_bytes` | 用户可见语义；在 `create`/`overwrite` 上按替换后大小、在 `append` 上按 `current + chunk` 校验 |
+| 传输上限 | `max_doc_size_bytes × 6 + 64 KiB` | 仅防无界内存；超出返回 413 + `payload_too_large` JSON 信封 |
+
+超限错误必须**可诊断**：错误消息里带实际字节数与上限值（旧实现返回 axum 的
+纯文本 `Failed to buffer the request body: length limit exceeded`，调用方分不清
+「太大」和「JSON 坏了」）。
 
 > Agent 与现有内置工具一致地调用 `doc_*`（经 Runtime `McpManager`），无需改动 Agent 本体。
 
@@ -285,7 +358,10 @@ graph LR
 | 威胁 | 缓解 |
 |------|------|
 | MCP 端点暴露到 advertise_host 被匿名调用 | MCP HTTP 端点要求鉴权：连接时校验 Runtime 携带的 agent 身份 / node token（Gateway 注入）；无身份调用仅允许只读工具（doc_list/read/search），写操作（add/submit_update/mkdir）必须带可信 agent_id |
-| Agent 越权改他人文档 | 更新走 PR 审核流（§5），Agent 不能直接覆写；`doc_submit_update` 记录 `submitted_by` |
+| Agent 改他人文档 | 策略判定 → `doc_write` 返回 `pending_review`，正文不进库；请求记录 `submitted_by`（§5） |
+| Agent `move`/`remove` 他人文档 | 所有权校验失败 → `forbidden`（无审核兜底：审核模型无法表达删除/改名） |
+| 大文档一次写不完 | `doc_write(mode=append)` 分段 + `doc_move` 原子发布（§6.2）；读者看不到半成品 |
+| 请求体超过上限 | 文档超限 → `payload_too_large` 且消息含实际字节数与上限；传输超限 → 413 + `payload_too_large` JSON 信封（§6.3） |
 | 并发覆盖 | 版本号乐观并发：写库/合并均校验 `base_version`，冲突 409 |
 | 路径穿越 | 所有 `path` 参数解析后必须落在文档库根内（`starts_with` 校验），拒绝 `..` 与绝对路径 |
 | 内容注入 | Markdown 渲染复用 Desktop 已有 sanitize 链路（rehype-raw 行为与现有一致） |
@@ -308,7 +384,7 @@ graph LR
 | **D0 骨架** | `core/acowork-doc` crate（CLI + axum + /health + 日志 + shutdown）；Gateway `[doc]` 配置 + `lifecycle/doc.rs` 拉起/监督 | 服务可起停、可监督 |
 | **D1 存储 + REST** | 目录树存储（library.json + .md）、REST API（tree/docs/search/dirs）、版本号并发 | 服务端完整 |
 | **D2 Desktop docs 视图** | 目录树组件 + 复用 MarkdownPreviewView 编辑器 + 服务离线态，接入 AppLayout | 人类可用基础在线文档 |
-| **D3 更新审核流** | `.requests/` 模型、`doc_submit_update`/approve/reject、审核队列 UI、MQTT 通知 | PR 式审核全链路 |
+| **D3 更新审核流** | `.requests/` 模型、`doc_write` 命中策略 → `pending_review`、approve/reject、审核队列 UI、MQTT 通知 | PR 式审核全链路 |
 | **D4 Agent 接口 + 远程** | doc MCP HTTP Server（§6 全部工具）、Gateway catalog 自动注入、advertise endpoint 下发、身份校验 | Agent 可用；远程可用 |
 
 ---
@@ -317,7 +393,7 @@ graph LR
 
 | 编号 | 问题 | 决策（实施定案） |
 |------|------|------|
-| OD-1 | `.acowork/tmp` 缓存是否需要在 Agent 重启/会话结束时清理？ | **服务端不落盘**（D3 实施修正）：`doc_pull` 只返回内容 + base_version + 建议缓存相对路径（`.acowork/tmp/docs/{doc_id}.md`），由调用方（Runtime/Agent 文件工具）写入其工作区——doc 进程与 Agent 工作区可能不在同一信任边界（远程 Agent），落盘职责归 Agent 侧。见 [mcp/tools.rs](../../../core/acowork-doc/src/mcp/tools.rs) |
+| OD-1 | `.acowork/tmp` 缓存是否需要在 Agent 重启/会话结束时清理？ | **服务端不落盘，也不再提供「建议缓存路径」**：`doc_read` 返回正文、`doc_stat` 返回版本，落盘由 Agent 自己的文件工具负责（信任边界见 §5.5）。库内 `doc_write(mode=append)` + `doc_move` 已能覆盖大文档原子发布，Agent 侧缓存是可选项。见 [mcp/tools.rs](../../../core/acowork-doc/src/mcp/tools.rs) |
 | OD-2 | 更新请求是否支持「驳回后 Agent 重新提交」的迭代，还是每次新请求？ | **每次新请求**（简单、可审计）；reject 保留 `review_note` 供 Agent 参考重新提交 |
 | OD-3 | 文档编辑是否需要「草稿」概念？ | **不需要**——仅 Desktop 客户端本地状态（editorStore dirty + 409 conflict 引导刷新）；服务端无草稿 |
 | OD-4 | 回收站是否纳入 v1 范围？ | **纳入 v1**：`.trash/` + sidecar（恢复信息）+ `trash_retention_days`（默认 30 天）启动惰性清理；Desktop TrashDialog 支持 restore / purge |

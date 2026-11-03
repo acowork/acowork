@@ -44,9 +44,20 @@ impl DocService {
     /// D0 skeleton: only the health route. D1 attaches the REST router
     /// (`api::router::doc_router`); D3 merges the MCP router (`POST /mcp`).
     pub fn router(&self) -> axum::Router {
+        // `max_doc_size_bytes` bounds the **document**; the wire body is
+        // bounded by `limit::transport_ceiling` (escaping headroom), see that
+        // module for why they are two numbers.
+        //
+        // The layer below is only a memory backstop for routes that do not go
+        // through `api::body::DocJson` or the MCP endpoint (both of which read
+        // the body themselves and return the `payload_too_large` JSON
+        // envelope). Those two paths are what a document actually travels
+        // through, and they intercept at the same ceiling first.
+        let limit = crate::limit::transport_ceiling(self.config.max_doc_size_bytes);
         axum::Router::new()
             .merge(crate::api::router::doc_router((*self.state).clone()))
             .merge(crate::mcp::mcp_router((*self.state).clone()))
+            .layer(axum::extract::DefaultBodyLimit::max(limit))
     }
 
     /// Serve the full router on `bind` (REST + MCP + `/health`).

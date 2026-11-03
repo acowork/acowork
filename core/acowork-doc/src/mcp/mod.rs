@@ -32,15 +32,19 @@
 //! ## Security (design §9)
 //!
 //! - Anonymous (`X-MCP-Actor` absent): read-only tools only
-//!   (`doc_list` / `doc_read` / `doc_pull` / `doc_search` /
+//!   (`doc_list` / `doc_read` / `doc_stat` / `doc_search` /
 //!   `doc_check_request`) — mutation tools return 403 `forbidden`.
 //! - Writes carry the authenticated **runtime instance identity** (UUID,
 //!   ADR-073) and record it as `submitted_by` /
 //!   `ImportSource.instance_id`. The Gateway doc_proxy validates the
 //!   header value against `installed_agents` (which is keyed by
 //!   instance_id), so an attacker cannot forge it from the client side.
-//! - Version concurrency and the PR review flow are enforced by the
-//!   service layer (`base_version` checks, design §5.4).
+//! - **Governance is orthogonal to the verb** (`service::policy`): every
+//!   content write goes through `doc_write`, and `gate_write` decides
+//!   whether it applies now or becomes a `pending` review request.
+//!   Structural operations (`doc_move` / `doc_remove`) are ownership-gated.
+//! - Version concurrency (`if_version`) and the PR review flow are enforced
+//!   by the service layer (design §5.4).
 //!
 //! ## Mounting
 //!
@@ -54,15 +58,16 @@
 pub mod manifest;
 pub mod tools;
 
-use axum::body::Bytes;
-use axum::extract::State;
+use axum::extract::{Request, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{Value, json};
 
+use crate::api::ApiError;
 use crate::error::DocError;
+use crate::limit::transport_ceiling;
 use crate::state::DocState;
 
 /// MCP 协议版本（与 acowork-mcp 客户端握手版本一致）。
@@ -129,13 +134,30 @@ struct JsonRpcRequest {
 ///
 /// 请求体：`{"jsonrpc":"2.0","id":1,"method":"...","params":{...}}`
 /// 身份：`X-MCP-Actor` header（可选；缺失视为匿名只读）。
-#[tracing::instrument(skip(state, body))]
+///
+/// 请求体由本函数自己按 [`transport_ceiling`] 限长（而不是交给
+/// `DefaultBodyLimit` 层）：工具参数里可能带着整篇文档内容，超限时必须
+/// 回与 REST 相同的 `payload_too_large` JSON 信封，而不是 axum 的纯文本
+/// 拒绝——否则调用方分不清「太大了」和「JSON 坏了」。
+#[tracing::instrument(skip(state, req))]
 pub async fn jsonrpc_endpoint(
     State(state): State<DocState>,
     headers: HeaderMap,
-    body: Bytes,
+    req: Request,
 ) -> Response {
     let actor = extract_actor(&headers);
+
+    let ceiling = transport_ceiling(state.config.max_doc_size_bytes);
+    let body = match axum::body::to_bytes(req.into_body(), ceiling).await {
+        Ok(b) => b,
+        Err(_) => {
+            return ApiError::from(DocError::PayloadTooLarge {
+                size: None,
+                max: state.config.max_doc_size_bytes,
+            })
+            .into_response();
+        }
+    };
 
     // 解析失败 → -32700 Parse error
     let text = match std::str::from_utf8(&body) {
@@ -332,14 +354,15 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 8);
+        assert_eq!(tools.len(), 9);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for expected in [
             "doc_list",
             "doc_read",
-            "doc_pull",
-            "doc_add",
-            "doc_submit_update",
+            "doc_stat",
+            "doc_write",
+            "doc_move",
+            "doc_remove",
             "doc_check_request",
             "doc_mkdir",
             "doc_search",

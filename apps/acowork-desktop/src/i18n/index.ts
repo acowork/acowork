@@ -7,7 +7,11 @@ import zhTW from "./locales/zh-TW.json";
 import ja from "./locales/ja.json";
 import ko from "./locales/ko.json";
 import { log } from "../lib/logger";
+import { readPref, writePref, onScopeChange } from "../lib/prefsScope";
 
+/** Logical key — UI language is a user-level preference, so `prefsScope`
+ *  namespaces it per account (the account record carries its own `language`
+ *  field, but the UI choice is client-side and applied on next boot). */
 const STORAGE_KEY = "i18nextLng";
 
 const SUPPORTED_LANGS = ["en", "zh-CN", "zh-TW", "ja", "ko"];
@@ -99,10 +103,8 @@ runRuntimeI18nLint();
 
 // Detect initial language: localStorage > navigator > fallback
 function detectLanguage(): string {
-    try {
-        const stored = localStorage.getItem(STORAGE_KEY);
-        if (stored && SUPPORTED_LANGS.includes(stored)) return stored;
-    } catch { /* ignore */ }
+    const stored = readPref(STORAGE_KEY);
+    if (stored && SUPPORTED_LANGS.includes(stored)) return stored;
     const navLang = navigator.language;
     // Match exact or prefix (e.g. "zh-CN", "zh-TW", "ja", "ko")
     if (SUPPORTED_LANGS.includes(navLang)) return navLang;
@@ -133,9 +135,16 @@ i18n
 
 i18n.on("languageChanged", (lng) => {
     log.debug("[i18n] Language changed to:", lng);
-    try {
-        localStorage.setItem(STORAGE_KEY, lng);
-    } catch { /* ignore */ }
+    writePref(STORAGE_KEY, lng);
+});
+
+// A login that does not reload the page must also re-apply the new account's
+// language, or the UI stays in the previous user's language for the rest of
+// the session. Guarded against a no-op change so persisting the same value
+// back under the new scope is the only write this causes.
+onScopeChange(() => {
+    const next = detectLanguage();
+    if (next !== i18n.language) void i18n.changeLanguage(next);
 });
 
 export default i18n;

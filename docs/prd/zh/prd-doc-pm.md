@@ -79,8 +79,8 @@
 **S1. 人类在文档视图创建并编辑一篇 Markdown 文档**
 用户点击左侧 `文档`，进入文档库列表 → 新建文档 → 编辑 Markdown → 预览渲染效果 → 保存。其他人类/Agent 可阅读。
 
-**S2. Agent 将工作区文档共享到在线文档（add to doc）**
-Agent 完成分析后调用 `doc_add` 工具，把工作区中某篇 Markdown 文档导入在线文档库，并附来源（agent_id + workspace 路径）。该文档即刻对所有 Agent 与人类可见。人类也可在文档视图手动"添加工作区文档"。
+**S2. Agent 将工作区文档共享到在线文档**
+Agent 完成分析后调用 `doc_write(mode=create)`，把工作区中某篇 Markdown 写入在线文档库，并附来源（instance_id + workspace 路径）。该文档即刻对所有 Agent 与人类可见。人类也可在文档视图手动"添加工作区文档"。
 
 **S3. Agent 阅读共享文档辅助任务**
 Agent 接到任务后，调用 `doc_search` / `doc_read` 检索相关共享文档作为上下文，再执行任务。
@@ -121,20 +121,27 @@ acowork-doc / acowork-pm 进程异常退出，Gateway 按指数退避自动重�
 | DOC-08 | 文档浏览历史 / 最近打开 | P2 | |
 | DOC-09 | 并发写保护：每文档带版本号（etag），保存携带版本号，冲突返回 409 由调用方决定 | P0 | 多 Agent 并发写场景必需；不做实时合并 |
 | DOC-10 | 版本快照：保存时记录历史版本，可回滚 | P2 | |
-| DOC-11 | **add to doc**：将 Agent 工作区文档导入文档库 | P0 | 支持 Agent 经 `doc_add` 与人类经 UI 两种入口，见 DOC-12 |
-| DOC-12 | add to doc 来源标记：记录来源 agent_id、workspace 相对路径、导入时间 | P0 | 便于溯源与后续同步 |
+| DOC-11 | **add to doc**：将 Agent 工作区文档导入文档库 | P0 | 支持 Agent 经 `doc_write(mode=create)` 与人类经 UI 两种入口，见 DOC-12 |
+| DOC-12 | add to doc 来源标记：记录来源 instance_id（ADR-073）、workspace 相对路径、导入时间 | P0 | 便于溯源与后续同步 |
 | DOC-13 | 文档共享可见性：文档库内文档默认对所有 Agent/人类可见 | P0 | 本版全局共享，无 ACL |
 | DOC-14 | 文档导入策略：默认**导入快照副本**（导入后与原工作区解耦） | P0 | 后续迭代可选"链接/双向同步"，见 §9 |
 
 ### 4.3 Agent 接口（doc MCP 工具）
 
+工具面按文件系统语义（资源 + 标准动作），审核是正交维度而非独立动词；完整
+契约见 [设计 §6](../../design/zh/20-doc-online-document.md)。
+
 | 工具 | 参数 | 返回 | 说明 |
 |------|------|------|------|
-| `doc_list` | `query?` `offset?` `limit?` | 文档摘要列表 | 检索文档库 |
-| `doc_read` | `doc_id` 或 `title` | Markdown 原文 + 版本号 + 元数据 | Agent 读取共享文档 |
-| `doc_add` | `title?` `content` `source_workspace?` `source_path?` | 新建文档 ID | **add to doc 主入口**；`source_*` 记录来源 |
-| `doc_update` | `doc_id` `content` `version` | 新版本号 / 409 | 冲突返回 409 与当前版本 |
-| `doc_search` | `keyword` | 命中文档列表 | 关键字检索（doc_read 的检索前置） |
+| `doc_list` | `path?` `query?` `offset?` `limit?` | 目录下文档/子目录条目 | 浏览目录树 |
+| `doc_read` | `doc_id` 或 `path` | Markdown 原文 + 版本号 + 元数据 | Agent 读取共享文档 |
+| `doc_stat` | `doc_id` 或 `path` | 元数据（版本号、字节数），不含正文 | 取版本号做并发守卫 |
+| `doc_write` | `ref` `content` `mode?`=`overwrite`\|`create`\|`append` `if_version?` `source_workspace?` `source_path?` | 新版本号；或 `pending_review` + `request_id` | **唯一写入动词**；`create` 即 add to doc 主入口，`source_*` 记录来源 |
+| `doc_move` | `from` `to` `overwrite?` | 移动后元数据 | 改名/移动；也用于大文档 temp+rename 原子发布 |
+| `doc_remove` | `doc_id` 或 `path` | 已删除 | 进回收站（可恢复） |
+| `doc_mkdir` | `path` | 新目录 | 建子目录 |
+| `doc_search` | `keyword` `limit?` | 命中文档列表 | 关键字检索（doc_read 的检索前置） |
+| `doc_check_request` | `request_id` | 审核状态 | 轮询待审核写入的结果 |
 
 > MCP 工具命名 `doc_*`；Agent 调用与内置工具一致，经 Runtime 现有 McpManager 注入，无需改动 Agent 本体。
 

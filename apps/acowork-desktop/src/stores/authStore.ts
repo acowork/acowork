@@ -38,6 +38,7 @@ import {
 } from "../lib/session/tokens";
 import type { AuthMode, AuthState, TokenPair, UserAccount } from "../lib/types";
 import { useUserProfileStore } from "./userProfileStore";
+import { setPrefScope } from "../lib/prefsScope";
 import { RECOVERY_RELOAD_FLAG } from "../lib/recoveryReload";
 
 /** Reload the webview so every store + MQTT listener reboots clean (§决策 7).
@@ -166,6 +167,11 @@ interface AuthStore {
 function app(account: UserAccount | null): void {
   // §决策 7: the account is the authority; userProfileStore keeps the
   // presentation mirror the top-bar avatar reads.
+  //
+  // Move the preference scope onto this account before mirroring, so the
+  // user-level prefs (theme / accent / font size / width / opacity / language)
+  // that `settingsStore` re-reads are the ones belonging to *this* user.
+  setPrefScope(account?.user_id ?? null);
   if (!account) return;
   useUserProfileStore.getState().setProfile({
     displayName: account.display_name,

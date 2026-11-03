@@ -137,8 +137,11 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// (Chat Router token accounting — one aggregate row per Chat session,
 /// no conversation state); 10 = `sessions.intent_key` / `intent_closed`
 /// (ADR-106 D11 — the intent context a session owns, and that context's
-/// terminal mark, both on the session's own row instead of a side file).
-pub const SCHEMA_VERSION: i64 = 10;
+/// terminal mark, both on the session's own row instead of a side file);
+/// 11 = `chat_token_usage.history_tokens` (the router's projected-history
+/// occupancy — the only number comparable to the
+/// `chat_router.history_max_tokens` budget).
+pub const SCHEMA_VERSION: i64 = 11;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -154,13 +157,17 @@ pub const SCHEMA_VERSION: i64 = 10;
 /// version runs only the steps it is missing. One code path, no "fresh install
 /// vs upgrade" branch, and no way for a table to exist at version 0.
 ///
-/// ponytail: idempotency belongs inside the SQL itself. SQLite has no
-/// `ALTER TABLE ADD COLUMN IF NOT EXISTS`, so a step that adds a column
-/// guards with `WHERE NOT EXISTS (... pragma_table_info ...)`. The same
-/// step is then a no-op against a fresh database (which got the column
-/// from [`SCHEMA_SQL`]) and a real change against an older one (which did
-/// not). [`SCHEMA_SQL`] does not stamp `user_version`; that stamp is the
-/// last statement of the migration transaction.
+/// ponytail: idempotency belongs inside the step. SQLite has no
+/// `ALTER TABLE ADD COLUMN IF NOT EXISTS`, and it rejects a `WHERE`
+/// clause on `ADD COLUMN` outright (a syntax error, not a no-op), so a
+/// column-adding step cannot guard itself in SQL. The two steps that
+/// need the guard do it in Rust instead: [`apply_migrations`] checks
+/// `has_column` and skips the statement when the column is already
+/// there. The same step is then a no-op against a fresh database (which
+/// got the column from [`SCHEMA_SQL`]) and a real change against an
+/// older one (which did not). [`SCHEMA_SQL`] does not stamp
+/// `user_version`; that stamp is the last statement of the migration
+/// transaction.
 const MIGRATIONS: &[(i64, &str)] = &[
     (
         1,
@@ -281,6 +288,24 @@ const MIGRATIONS: &[(i64, &str)] = &[
         10,
         "ALTER TABLE sessions ADD COLUMN intent_key TEXT; \n         ALTER TABLE sessions ADD COLUMN intent_closed INTEGER NOT NULL DEFAULT 0; \n         CREATE INDEX IF NOT EXISTS idx_sessions_intent_key \n             ON sessions(intent_key);",
     ),
+    // The Chat Session Router's *history occupancy* — how many tokens the
+    // projected history window (Block B, design 29 §4) actually cost on the
+    // most recent turn. This is NOT the provider-reported prompt count
+    // (which also carries the system prompt and the tool schemas, and
+    // therefore routinely exceeds the history budget): the budget
+    // (`chat_router.history_max_tokens`) bounds the history window alone,
+    // so only this column can be compared against it truthfully.
+    //
+    // Nullable with no default: a row written before this migration reads
+    // as NULL, i.e. "no occupancy measured yet" — the UI renders a dash,
+    // never a fabricated 0 (same "宁可 miss 也不估计" rule as ADR-027).
+    // The column-adding statement cannot guard itself in SQL (SQLite
+    // rejects a `WHERE` clause on `ADD COLUMN`), so `apply_migrations`
+    // checks `has_column` and skips it when the column is already there.
+    (
+        11,
+        "ALTER TABLE chat_token_usage ADD COLUMN history_tokens INTEGER;",
+    ),
 ];
 
 /// Apply every [`MIGRATIONS`] step whose target version is strictly greater
@@ -313,6 +338,15 @@ pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Res
             // the source column is absent; the end state (`initiator`) is
             // identical.
             if *target == 8 && !has_column(&tx, "sessions", "user_id")? {
+                continue;
+            }
+            // The v11 column-adding step has the same problem from the other
+            // side: SQLite rejects a `WHERE` clause on `ADD COLUMN`
+            // outright, so the guard cannot live in the SQL. Skip the
+            // statement when the column is already there — a database
+            // written by a build that shipped the column before stamping
+            // the version must still open.
+            if *target == 11 && has_column(&tx, "chat_token_usage", "history_tokens")? {
                 continue;
             }
             tx.execute_batch(sql)?;
@@ -422,6 +456,87 @@ mod tests {
             })
             .expect("row intact");
         assert_eq!(owner, "u-alice");
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// The v11 step adds the router's history-occupancy column to the
+    /// Chat ledger. A store written by v10 must gain the column AND keep
+    /// its rows — a broken step here would leave every installed
+    /// workspace's chat ledger unreadable.
+    #[test]
+    fn migration_11_adds_the_history_tokens_column_and_keeps_the_rows() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        // The v10 shape: the ledger table without the column.
+        conn.execute_batch(
+            "CREATE TABLE chat_token_usage ( \
+                 chat_session_id TEXT PRIMARY KEY, \
+                 chat_kind TEXT, \
+                 created_at INTEGER NOT NULL, \
+                 last_active_at INTEGER NOT NULL, \
+                 llm_call_count INTEGER NOT NULL DEFAULT 0 \
+             ); \
+             INSERT INTO chat_token_usage (chat_session_id, created_at, last_active_at) \
+                 VALUES ('c-1', 0, 0); \
+             PRAGMA user_version = 10;",
+        )
+        .expect("seed v10 store");
+
+        apply_migrations(&mut conn).expect("migrate");
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(chat_token_usage)")
+            .expect("table_info")
+            .query_map([], |r| r.get::<_, String>(1))
+            .expect("rows")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect");
+        assert!(
+            cols.iter().any(|c| c == "history_tokens"),
+            "columns: {cols:?}"
+        );
+
+        // The pre-existing row survives, and its occupancy reads as
+        // "not measured" (NULL) rather than a fabricated zero.
+        let occupancy: Option<i64> = conn
+            .query_row(
+                "SELECT history_tokens FROM chat_token_usage WHERE chat_session_id = 'c-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row survives the migration");
+        assert_eq!(occupancy, None);
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// The v11 step is guarded against an already-present column: a
+    /// database written by a build that shipped the column before
+    /// stamping the version must still open, not fail on a duplicate
+    /// `ADD COLUMN`.
+    #[test]
+    fn migration_11_is_a_noop_when_the_column_is_already_present() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE chat_token_usage ( \
+                 chat_session_id TEXT PRIMARY KEY, \
+                 chat_kind TEXT, \
+                 created_at INTEGER NOT NULL, \
+                 last_active_at INTEGER NOT NULL, \
+                 llm_call_count INTEGER NOT NULL DEFAULT 0, \
+                 history_tokens INTEGER \
+             ); \
+             PRAGMA user_version = 10;",
+        )
+        .expect("seed already-migrated store");
+
+        apply_migrations(&mut conn).expect("open must not fail on the duplicate column");
+
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("version");

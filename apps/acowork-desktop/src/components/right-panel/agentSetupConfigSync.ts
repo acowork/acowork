@@ -127,17 +127,18 @@ export function buildProfilePatchFromServerConfig(
   if (cfg.session_language !== undefined) {
     patch.sessionLanguage = cfg.session_language;
   }
-  // ADR-099 Chat Router sub-fields. Race-safe like every other field:
-  // only overwrite when the server returned a concrete value. An
+  // ADR-099 Chat Session Router sub-fields. Race-safe like every other
+  // field: only overwrite when the server returned a concrete value. An
   // explicit clear (`""` on the PUT wire → `None` on disk) drops the
   // key from the GET response, and the local `""`/undefined optimistic
   // value already renders the "auto" option — so no clobbering is
   // needed to keep the two in agreement.
+  //
+  // `enabled` is deliberately NOT read back: the router is always on
+  // (ADR-099 D1) and the kill switch is not a product control, so the
+  // panel has no field to fill.
   const router = cfg.chat_router;
   if (router) {
-    if (typeof router.enabled === "boolean") {
-      patch.chatRouterEnabled = router.enabled;
-    }
     if (typeof router.model === "string" && router.model) {
       patch.chatRouterModel = router.model;
     }

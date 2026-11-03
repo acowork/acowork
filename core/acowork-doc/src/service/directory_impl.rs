@@ -18,6 +18,10 @@ use crate::types::{
 
 type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
+/// Safety cap for the ancestor walk: a corrupt `parent` cycle must not hang
+/// a request (mirrors `service::acl::MAX_DEPTH`).
+const MAX_DEPTH: usize = 64;
+
 pub struct LibraryDirectoryService {
     store: LibraryStore,
     trash: TrashStore,
@@ -290,6 +294,58 @@ impl DirectoryService for LibraryDirectoryService {
         crate::mqtt_publisher::notify_tree_changed(vec![parent_id]);
         Ok(())
     }
+
+    async fn path_of(&self, dir_id: &str) -> Result<String> {
+        validate_dir_id(dir_id)?;
+        if dir_id == ROOT_DIR_ID {
+            return Ok(String::new());
+        }
+        // A directory's display name lives on its **parent's** `dirs[]` entry
+        // (its own `library.json` has `dir_id` + `parent`, no name), so one
+        // upward step needs one index load: the parent index answers both
+        // "what is this level called" and "what is above it".
+        let mut cursor = dir_id.to_string();
+        let mut cursor_idx = self.store.load(&cursor).await?;
+        let mut parts: Vec<String> = Vec::new();
+        let mut depth = 0usize;
+        while let Some(parent) = cursor_idx.parent.clone() {
+            // A parent that is indexed but absent from disk is corruption,
+            // not "this directory does not exist": the caller asked for the
+            // path of a live node.
+            let parent_idx = self.store.load(&parent).await.map_err(|e| match e {
+                DocError::DirNotFound(missing) => DocError::CorruptIndex(format!(
+                    "dir {cursor} points at a missing parent {missing}"
+                )),
+                other => other,
+            })?;
+            let name = parent_idx
+                .dirs
+                .iter()
+                .find(|d| d.dir_id == cursor && !d.deleted)
+                .map(|d| d.name.clone())
+                .ok_or_else(|| {
+                    DocError::CorruptIndex(format!(
+                        "dir {cursor} is not listed under its parent {parent}"
+                    ))
+                })?;
+            parts.push(name);
+            cursor = parent;
+            cursor_idx = parent_idx;
+            depth += 1;
+            if depth > MAX_DEPTH {
+                return Err(DocError::CorruptIndex(format!(
+                    "parent cycle detected above dir {dir_id}"
+                )));
+            }
+        }
+        if cursor != ROOT_DIR_ID {
+            return Err(DocError::CorruptIndex(format!(
+                "dir {dir_id} has no parent chain to the root"
+            )));
+        }
+        parts.reverse();
+        Ok(parts.join("/"))
+    }
 }
 
 // ── Tests ──────────────────────────────────────────────────────────────
@@ -434,6 +490,56 @@ mod tests {
             .unwrap();
         let entry = root_idx.dirs.iter().find(|d| d.dir_id == sub.dir_id).unwrap();
         assert_eq!(entry.name, "new");
+    }
+
+    /// `path_of` walks **up** the parent chain (O(depth)); it must render
+    /// names, not ids, at every level.
+    #[tokio::test]
+    async fn path_of_renders_the_ancestor_names() {
+        let (_tmp, dirs, _docs) = setup().await;
+        assert_eq!(dirs.path_of(ROOT_DIR_ID).await.unwrap(), "");
+        let a = dirs
+            .create(CreateDirectoryInput {
+                parent_dir_id: ROOT_DIR_ID.into(),
+                name: "研发".into(),
+                creator: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(dirs.path_of(&a.dir_id).await.unwrap(), "研发");
+        let b = dirs
+            .create(CreateDirectoryInput {
+                parent_dir_id: a.dir_id.clone(),
+                name: "会议".into(),
+                creator: None,
+            })
+            .await
+            .unwrap();
+        assert_eq!(dirs.path_of(&b.dir_id).await.unwrap(), "研发/会议");
+    }
+
+    /// A directory whose parent chain does not reach the root is a corrupt
+    /// index, not a shorter path: rendering `""`+name would silently relocate
+    /// it to the root in tool output.
+    #[tokio::test]
+    async fn path_of_rejects_a_broken_parent_chain() {
+        let (tmp, dirs, _docs) = setup().await;
+        let a = dirs
+            .create(CreateDirectoryInput {
+                parent_dir_id: ROOT_DIR_ID.into(),
+                name: "孤儿".into(),
+                creator: None,
+            })
+            .await
+            .unwrap();
+        // Simulate an index whose parent points at a non-existent directory.
+        let store = LibraryStore::new(tmp.path().to_path_buf());
+        let mut idx = store.load(&a.dir_id).await.unwrap();
+        idx.parent = Some("dir-0000000000ff".into());
+        store.save(&idx).await.unwrap();
+
+        let err = dirs.path_of(&a.dir_id).await.unwrap_err();
+        assert!(matches!(err, DocError::CorruptIndex(_)), "got {err:?}");
     }
 
     #[tokio::test]

@@ -444,3 +444,115 @@ async fn search_hits_title_and_body_across_dirs() {
     assert_eq!(body.as_array().unwrap().len(), 0);
 }
 
+// ── request-size limits (413 payload_too_large) ─────────────────────────
+//
+// Two ceilings, two failure modes, both of which used to be lies:
+//   * the wire ceiling (axum's `DefaultBodyLimit`, 2 MiB) rejected with a
+//     plain-text body before any handler ran, so `max_doc_size_bytes` never
+//     took effect and the caller could not tell "too large" from "bad JSON";
+//   * the document ceiling had no enforcement at all on some paths.
+// These tests pin the observable behaviour of both, through the real router.
+
+/// A server with a deliberately tiny document limit so the ceilings are cheap
+/// to cross (`DocConfig::max_doc_size_bytes` is the only knob).
+async fn spawn_with_limit(max_doc_size_bytes: usize) -> TestServer {
+    let data = TempDir::new().unwrap();
+    let config = DocConfig {
+        data_dir: data.path().to_path_buf(),
+        max_doc_size_bytes,
+        ..DocConfig::default()
+    };
+    let svc = Arc::new(DocService::new(config).await.unwrap());
+    let addr: SocketAddr = svc
+        .clone()
+        .serve(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    TestServer {
+        base: format!("http://{addr}"),
+        client: reqwest::Client::new(),
+        _data: data,
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn wire_body_over_the_transport_ceiling_returns_the_json_envelope() {
+    let limit = 1024usize;
+    let srv = spawn_with_limit(limit).await;
+    // Comfortably over `transport_ceiling(1024)` = 1024*6 + 64 KiB.
+    let ceiling = acowork_doc::limit::transport_ceiling(limit);
+    let body = json!({
+        "parent_dir_id": "root",
+        "title": "huge",
+        "content": "x".repeat(ceiling + 1),
+    });
+    let (status, resp) = srv.post("/docs", body).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{resp}");
+    assert_eq!(TestServer::error_code(&resp), "payload_too_large");
+    // The envelope carries `code` / `message` / `required`: the numbers
+    // ride in the message, so the caller can still report them.
+    let message = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains(&limit.to_string()), "{message}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn document_over_the_decoded_limit_is_rejected_even_though_the_body_fits() {
+    let limit = 1024usize;
+    let srv = spawn_with_limit(limit).await;
+    // One byte over the *document* limit. The JSON envelope is small (ASCII,
+    // no escapes), so the wire ceiling is nowhere near tripped: this asserts
+    // the decoded check, which is the one the config promises.
+    let content = "x".repeat(limit + 1);
+    assert!(content.len() < acowork_doc::limit::transport_ceiling(limit));
+    let (status, resp) = srv
+        .post(
+            "/docs",
+            json!({ "parent_dir_id": "root", "title": "big", "content": content }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{resp}");
+    assert_eq!(TestServer::error_code(&resp), "payload_too_large");
+    let message = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains(&(limit + 1).to_string()), "{message}");
+    assert!(message.contains(&limit.to_string()), "{message}");
+
+    // Exactly at the limit is accepted — the boundary is inclusive.
+    let doc_id = srv.mkdoc("root", "at-limit", &"y".repeat(limit)).await;
+    let (status, body) = srv.get(&format!("/docs/{doc_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["content"].as_str().unwrap().len(), limit);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn update_and_submit_share_the_document_ceiling() {
+    let limit = 1024usize;
+    let srv = spawn_with_limit(limit).await;
+    let doc_id = srv.mkdoc("root", "PRD", "small").await;
+
+    // PUT (direct human update)
+    let (status, resp) = srv
+        .put(
+            &format!("/docs/{doc_id}"),
+            json!({ "base_version": 1, "content": "z".repeat(limit + 1) }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{resp}");
+    assert_eq!(TestServer::error_code(&resp), "payload_too_large");
+
+    // POST /docs/{id}/requests (agent proposal → human review). The proposal
+    // is stored, so it must obey the same ceiling rather than smuggling an
+    // oversized body in through the review queue.
+    let (status, resp) = srv
+        .post(
+            "/requests",
+            json!({
+                "doc_id": doc_id,
+                "base_version": 1,
+                "content": "w".repeat(limit + 1),
+                "submitted_by": "inst-0000-0000-0000-0000-000000000001",
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{resp}");
+    assert_eq!(TestServer::error_code(&resp), "payload_too_large");
+}

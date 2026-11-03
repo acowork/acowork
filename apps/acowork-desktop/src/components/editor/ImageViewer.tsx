@@ -23,6 +23,11 @@
 // by `scale` against the element's own bounding box — no transform stack to
 // invert, and panning is native scrolling (no drag-to-pan gesture competing
 // with drag-to-select).
+//
+// Boundary: a transparent bitmap on the `#FFFFFF`/`#1E1E1E` editor canvas has
+// no visible edge, so the stage carries the `image-checkerboard` backdrop plus
+// a hairline `ring`. Both paint only — no `border`, no padding — which is what
+// keeps `natural × scale` (and the readout/crop built on it) exact.
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent } from "react";
@@ -447,8 +452,13 @@ export function ImageViewer({
                     className="flex min-h-full min-w-full"
                     style={{ padding: VIEWPORT_PADDING_PX }}
                 >
+                    {/* The stage IS the bitmap's box (`natural × scale`), so the
+                        transparency board and the hairline frame below land exactly
+                        on the image edges. Neither is a `border`/padding: both paint
+                        only, leaving the box the geometry module divides by intact. */}
                     <div
-                        className="relative m-auto shrink-0"
+                        data-testid="image-viewer-stage"
+                        className="image-checkerboard relative m-auto shrink-0 ring-1 ring-zinc-300/60 dark:ring-zinc-600/60"
                         style={
                             natural
                                 ? { width: natural.width * scale, height: natural.height * scale }

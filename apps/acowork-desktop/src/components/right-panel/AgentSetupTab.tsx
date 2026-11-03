@@ -14,7 +14,6 @@ import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
-import { Switch } from "../common/Switch";
 import { fetchProviders } from "../../lib/gateway-api";
 import type { VaultKeyEntry } from "../../lib/types";
 import {
@@ -86,10 +85,11 @@ type WiredField =
   // Agent Setup panel. Skill mode (Progressive vs Manual) is now
   // driven entirely by the `load_skill` tool switch in the Tools
   // panel — see ADR-094 §4 (single source of truth, no drift).
-  // ADR-099: Chat Router knobs. `chatRouterModel` / `chatRouterProvider`
-  // are written together from the model dropdown; empty string clears
-  // (fall back to the agent's compact-model chain).
-  | "chatRouterEnabled"
+  // ADR-099: Chat Session Router knobs. `chatRouterModel` /
+  // `chatRouterProvider` are written together from the model dropdown;
+  // empty string clears (fall back to the agent's compact-model chain).
+  // The router's kill switch (`chat_router_enabled`) is NOT wired here:
+  // the router is always on, so there is no field to write.
   | "chatRouterModel"
   | "chatRouterProvider"
   | "chatRouterTimeoutMs"
@@ -105,7 +105,6 @@ const WIRE_FIELD: Record<WiredField, string> = {
   approvalTimeoutSecs: "approval_timeout_secs",
   compressionRatioThreshold: "compression_ratio_threshold",
   sessionLanguage: "session_language",
-  chatRouterEnabled: "chat_router_enabled",
   chatRouterModel: "chat_router_model",
   chatRouterProvider: "chat_router_provider",
   chatRouterTimeoutMs: "chat_router_timeout_ms",
@@ -129,7 +128,6 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   maxSessions: FIELD_DEBOUNCE_MS,
   compressionRatioThreshold: FIELD_DEBOUNCE_MS,
   sessionLanguage: FIELD_DEBOUNCE_MS,
-  chatRouterEnabled: FIELD_DEBOUNCE_MS,
   chatRouterModel: FIELD_DEBOUNCE_MS,
   chatRouterProvider: FIELD_DEBOUNCE_MS,
   chatRouterTimeoutMs: FIELD_DEBOUNCE_MS,
@@ -1314,33 +1312,25 @@ export function AgentSetupTab() {
       </ListBox>
 <div className="-mx-3 my-2 border-t border-border-divider" />
 
-      {/* ── Card 4: Chat Router (ADR-099) ──────────────────────
+      {/* ── Card 4: Chat Session Router (ADR-099) ───────────────
           Model override for the router LLM turn. The router does NOT
           follow the session's chat-model selection — by design it uses
           the agent's compact-model chain. This card lets the user pin
           an explicit (provider, model) for it, the call timeout, and the
           chat-history context budget (tokens — how much of the
           conversation the router reads before deciding).
-          The kill switch (`chat_router.enabled`) lives in the title row
-          (default on, matching the `None = enabled` design default). */}
+
+          The router is always on (ADR-099 D1: `chat_router.enabled`
+          defaults to enabled and the kill switch is not exposed as a
+          product control) — so there is no switch here. The same
+          `chat_router.history_max_tokens` value is edited from the
+          Chat surface's usage popover; both write the one field. */}
       <ListBox dividers={false}>
         <ExpandableRow
           open={chatRouterOpen}
           onToggle={() => setChatRouterOpen((v) => !v)}
           title={t("agentSetup.sectionChatRouter")}
           ariaLabel={t("agentSetup.sectionChatRouter")}
-          trailing={
-            // ExpandableRow's contract: trailing interactive elements
-            // swallow the click so toggling does not fold the card.
-            <span onClick={(e) => e.stopPropagation()}>
-              <Switch
-                checked={profile.chatRouterEnabled !== false}
-                onChange={(v) => saveField("chatRouterEnabled", v)}
-                size="sm"
-                aria-label={t("agentSetup.chatRouterEnabled")}
-              />
-            </span>
-          }
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
         >
           <div className="space-y-3">
@@ -1353,7 +1343,6 @@ export function AgentSetupTab() {
                 value={routerModelValue}
                 onChange={handleRouterModelChange}
                 options={routerModelDropdownOptions}
-                disabled={profile.chatRouterEnabled === false}
               />
               <p className="text-9 text-text-tertiary ">
                 {t("agentSetup.chatRouterModelDesc")}
@@ -1434,12 +1423,6 @@ export function AgentSetupTab() {
                 {t("agentSetup.chatRouterHistoryMaxTokensDesc")}
               </p>
             </div>
-
-            {profile.chatRouterEnabled === false && (
-              <p className="text-9 text-text-tertiary ">
-                {t("agentSetup.chatRouterDisabledHint")}
-              </p>
-            )}
           </div>
         </ExpandableRow>
       </ListBox>
