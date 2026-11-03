@@ -74,7 +74,10 @@ const VIEWPORT_PADDING_PX = 16;
 
 export interface PdfRegionPickerProps {
     /** PDF bytes for the whole document (converted Office file, or a native
-     *  PDF). Identity must be stable — a new array re-opens the document. */
+     *  PDF). Identity must be stable — a new array re-opens the document.
+     *  The array itself may be shared and may be opened more than once (a
+     *  remount re-runs the open effect); `pdfRasterize` copies before handing
+     *  anything to pdf.js, so this stays readable afterwards. */
     bytes: Uint8Array;
     /** Source file name — stems the cropped attachment's name. */
     fileName: string;

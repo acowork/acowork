@@ -58,6 +58,9 @@ let workerSrcConfigured = false;
  * The legacy bundle is deliberate: the modern one targets `Promise.withResolvers`,
  * which older WKWebView builds do not have — and a preview gesture must not
  * depend on the newest engine the OS happens to ship.
+ *
+ * `bytes` stays the caller's afterwards: it is copied at the transfer point
+ * below, so an array can be opened as many times as a re-running effect asks.
  */
 async function loadPdfDocument(bytes: Uint8Array): Promise<PdfPageDocument> {
     const [pdfjs, workerUrl] = await Promise.all([
@@ -68,9 +71,18 @@ async function loadPdfDocument(bytes: Uint8Array): Promise<PdfPageDocument> {
         pdfjs.GlobalWorkerOptions.workerSrc = workerUrl.default;
         workerSrcConfigured = true;
     }
-    // `data` is transferred to the worker, so the caller's array must not be
-    // reused afterwards — every caller here hands over a private copy.
-    const loading = pdfjs.getDocument({ data: bytes as Uint8Array<ArrayBuffer> });
+    // pdf.js does not copy what it is given: it posts the document to its
+    // worker with the underlying `ArrayBuffer` in the transfer list
+    // (`sendWithPromise("GetDocRequest", docParams, [data.buffer])`), which
+    // DETACHES it for the caller — `byteLength` drops to 0 and the next use
+    // throws `DataCloneError: An ArrayBuffer is detached`. So the copy is
+    // taken here, at the transfer point: whoever invalidates a buffer has to
+    // own it. Leaving it to the callers is what broke the framed screenshot —
+    // `PdfRegionPicker` opens from an effect, an effect may re-run over the
+    // same `bytes` prop (a remount, React StrictMode's dev double-invoke),
+    // and the second open was handed a buffer the first one had already given
+    // away. A few MB copied once per gesture is the whole cost.
+    const loading = pdfjs.getDocument({ data: bytes.slice(0) as Uint8Array<ArrayBuffer> });
     const doc = await loading.promise;
     return {
         numPages: doc.numPages,

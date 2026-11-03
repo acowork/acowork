@@ -155,11 +155,12 @@ export default function PdfViewer(props: PdfViewerProps) {
 
     const canReadBytes = state.blobUrl !== null || state.blob !== null;
     const [picking, setPicking] = useState(false);
-    /** Private copy handed to pdf.js. Kept in state rather than derived
+    /** The bytes this gesture reads from. Kept in state rather than derived
      *  during render because `PdfRegionPicker` re-opens its document whenever
-     *  the array identity changes — and because `getDocument` *transfers*
-     *  whatever buffer it is given, so the copy must not be the converter's
-     *  cached bytes nor the ones the attachment is built from. */
+     *  the array identity changes — so the value has to be stable across
+     *  renders. It may be the converter's cached array: `pdfRasterize` takes
+     *  its own copy at the pdf.js transfer point, so opening the document
+     *  never eats the bytes the tab still holds. */
     const [pickerBytes, setPickerBytes] = useState<Uint8Array | null>(null);
     const [sending, setSending] = useState(false);
 
@@ -184,7 +185,7 @@ export default function PdfViewer(props: PdfViewerProps) {
                 showToast({ type: "error", message: t("fileEditor.pdfViewer.rasterizeFailed") });
                 return;
             }
-            setPickerBytes(bytes.slice(0));
+            setPickerBytes(bytes);
             setPicking(true);
         } catch (err) {
             log.error("[PdfViewer] reading the PDF bytes failed:", err);
@@ -208,8 +209,8 @@ export default function PdfViewer(props: PdfViewerProps) {
                 return;
             }
             // `File` copies its parts, so `bytes` stays usable afterwards —
-            // pdf.js, which *transfers* whatever it is given, only ever sees a
-            // private copy handed over elsewhere.
+            // and pdf.js, which *transfers* whatever it is given, only ever
+            // sees the copy `pdfRasterize` takes at its own transfer point.
             onAddDocumentToChat(
                 new File([bytes as Uint8Array<ArrayBuffer>], pdfAttachmentName(props.fileName), {
                     type: "application/pdf",

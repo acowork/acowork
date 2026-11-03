@@ -7,7 +7,9 @@
  * claim the feature makes ("the agent sees what you framed"):
  *
  *   1. the document is opened once, page 1 is painted into a canvas, and the
- *      page readout shows what the document reported;
+ *      page readout shows what the document reported — and a remount that
+ *      re-opens the SAME bytes (what React StrictMode does in dev) still ends
+ *      on a painted page, with the abandoned document released;
  *   2. a drag becomes a selection box in the SAME space the crop is measured
  *      in, and releasing under `MIN_SELECTION_PX` is treated as a click;
  *   3. the hand-off is a PNG `File` named after the source plus the region,
@@ -122,7 +124,7 @@ function stubRenderer(numPages = 3) {
 
 async function renderPicker(
   overrides: Partial<PdfRegionPickerProps> = {},
-  options: { waitForPage?: boolean } = {},
+  options: { waitForPage?: boolean; strictMode?: boolean } = {},
 ) {
   const bytes = new Uint8Array([0x25, 0x50, 0x44, 0x46]);
   const { renderer, rendered } = stubRenderer();
@@ -138,7 +140,7 @@ async function renderPicker(
     openDocument,
     ...overrides,
   };
-  const view = render(<PdfRegionPicker {...props} />);
+  const view = render(<PdfRegionPicker {...props} />, { reactStrictMode: options.strictMode });
   const stage =
     // The page box only exists once the stub has painted: awaiting it is the
     // test's version of "the first page is on screen". A test that mounts a
@@ -183,6 +185,28 @@ describe("PdfRegionPicker page rendering", () => {
     const stage = screen.getByTestId("pdf-region-stage");
     expect(stage.style.width).toBe(`${PAGE_W}px`);
     expect(stage.style.height).toBe(`${PAGE_H}px`);
+  });
+
+  it("survives a remount that re-opens the same bytes (React StrictMode)", async () => {
+    // Dev React mounts, cleans up and re-mounts, so the open effect runs twice
+    // over ONE `bytes` array. The second open is the one the user sees: the
+    // orphan must be released and the failure body must not appear. This is
+    // also why `pdfRasterize` copies at the pdf.js transfer point — an engine
+    // that ate the caller's buffer would make this very call throw.
+    const docs: PdfPageRenderer[] = [];
+    const openDocument = vi.fn(async () => {
+      const { renderer } = stubRenderer();
+      docs.push(renderer);
+      return renderer;
+    });
+
+    await renderPicker({ openDocument }, { strictMode: true });
+
+    expect(openDocument.mock.calls.length).toBe(2);
+    expect(openDocument.mock.calls[0][0]).toBe(openDocument.mock.calls[1][0]);
+    expect(screen.queryByText("Could not read this PDF")).toBeNull();
+    expect(screen.getByTestId("pdf-page-indicator").textContent).toBe("1 / 3");
+    await waitFor(() => expect(docs[0].destroy).toHaveBeenCalled());
   });
 
   it("says what went wrong when the document will not open", async () => {

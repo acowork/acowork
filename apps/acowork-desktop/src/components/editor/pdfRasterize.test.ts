@@ -1,18 +1,48 @@
 /**
- * The glue over pdf.js — page bounds, canvas sizing, release, error shape.
+ * The glue over pdf.js — page bounds, canvas sizing, release, error shape,
+ * and the buffer invariant.
  *
  * pdf.js itself is NEVER loaded here: `createPdfPageRenderer` takes the loader
  * and the canvas factory precisely so this file can assert on what the picker
  * depends on (that a page renders into a canvas the page sized, that a bad
  * page number is refused before any work, that a destroyed picker destroyed
  * the document) without a worker, a parser, or a 2-D context.
+ *
+ * The one thing an injected loader cannot show is what the REAL loader does to
+ * the caller's bytes, so the last block mocks the pdf.js module itself and
+ * lets a real `structuredClone` transfer eat a real buffer: `getDocument` posts
+ * the document with the caller's `ArrayBuffer` in the transfer list
+ * (`sendWithPromise("GetDocRequest", docParams, [data.buffer])`), which
+ * DETACHES it — `byteLength` drops to 0 and the next use throws
+ * `DataCloneError: An ArrayBuffer is detached`. `PdfRegionPicker` opens from an
+ * effect, and an effect may re-run over the same `bytes` prop (a remount,
+ * React StrictMode's dev double-invoke), so the copy has to live at the
+ * transfer point. Pinning that here is what keeps a framed screenshot from
+ * answering "Could not read this PDF" while the native preview beside it is
+ * perfectly fine.
  */
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
     createPdfPageRenderer,
     PDF_OUTPUT_SCALE,
     type PdfPageDocument,
 } from "./pdfRasterize";
+
+// ── The real loader, over a fake pdf.js ────────────────────────────
+// Only the last block needs these; the mocks are hoisted, so they are inert
+// for every test that injects its own loader.
+const pdf = vi.hoisted(() => ({
+    getDocument: vi.fn(),
+    GlobalWorkerOptions: { workerSrc: "" },
+}));
+
+vi.mock("pdfjs-dist/legacy/build/pdf.mjs", () => ({
+    GlobalWorkerOptions: pdf.GlobalWorkerOptions,
+    getDocument: (params: { data: Uint8Array }) => pdf.getDocument(params),
+}));
+vi.mock("pdfjs-dist/legacy/build/pdf.worker.min.mjs?url", () => ({
+    default: "http://localhost/pdf.worker.min.mjs",
+}));
 
 /** A stand-in for the pdf.js document: it sizes the canvas it is handed, the
  *  way `render({ viewport })` does, and records every call. */
@@ -110,5 +140,78 @@ describe("createPdfPageRenderer", () => {
         const renderer = await createPdfPageRenderer(BYTES, async () => doc, stubCanvasFactory().create);
         await renderer.destroy();
         expect(doc.destroy).toHaveBeenCalledTimes(1);
+    });
+});
+
+describe("the buffer handed to the real pdf.js loader", () => {
+    /** What pdf.js received, captured BEFORE its transfer eats the buffer — a
+     *  detached array cannot be read back by an assertion. */
+    let handed: { buffer: ArrayBuffer; bytes: number[] }[] = [];
+
+    /** Fresh bytes per test: a transfer invalidates the buffer it ate, so no
+     *  test may inherit another test's detached array. */
+    function pdfBytes(): Uint8Array {
+        return new Uint8Array([0x25, 0x50, 0x44, 0x46, 1, 2, 3, 4]);
+    }
+
+    /** Behave exactly like pdf.js 6.x: transfer the buffer it is given. */
+    beforeEach(() => {
+        handed = [];
+        pdf.getDocument.mockReset();
+        pdf.getDocument.mockImplementation(({ data }: { data: Uint8Array }) => {
+            handed.push({ buffer: data.buffer, bytes: Array.from(data) });
+            // The real call is `sendWithPromise(…, [data.buffer])`. Handing
+            // over an already-detached buffer is the bug under test: the
+            // browser throws here and the picker shows its failure body.
+            structuredClone({ docParams: { data } }, { transfer: [data.buffer] });
+            const doc = {
+                numPages: 3,
+                getPage: async (pageNumber: number) => ({
+                    pageNumber,
+                    getViewport: ({ scale }: { scale: number }) => ({
+                        width: 400 * scale,
+                        height: 300 * scale,
+                    }),
+                    render: () => ({ promise: Promise.resolve() }),
+                }),
+                loadingTask: { destroy: () => Promise.resolve() },
+            };
+            return { promise: Promise.resolve(doc) };
+        });
+    });
+
+    it("leaves the caller's bytes usable after one open", async () => {
+        const bytes = pdfBytes();
+
+        const renderer = await createPdfPageRenderer(bytes);
+
+        expect(renderer.numPages).toBe(3);
+        // The whole point: the array the caller kept is not the one pdf.js ate.
+        expect(bytes.byteLength).toBe(8);
+        await renderer.destroy();
+    });
+
+    it("opens the same bytes twice, because an effect may re-run", async () => {
+        const bytes = pdfBytes();
+
+        const first = await createPdfPageRenderer(bytes);
+        await first.destroy();
+        // Without a copy at the transfer point this rejects with DataCloneError.
+        const second = await createPdfPageRenderer(bytes);
+
+        expect(handed).toHaveLength(2);
+        expect(second.numPages).toBe(3);
+        await second.destroy();
+    });
+
+    it("hands pdf.js a buffer that is not the caller's", async () => {
+        const bytes = pdfBytes();
+
+        const renderer = await createPdfPageRenderer(bytes);
+
+        expect(handed).toHaveLength(1);
+        expect(handed[0].buffer).not.toBe(bytes.buffer);
+        expect(handed[0].bytes).toEqual(Array.from(bytes));
+        await renderer.destroy();
     });
 });
