@@ -9,9 +9,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+use crate::providers::anthropic_compat::{AnthropicCompatCache, AnthropicTrim};
 
 /// Per-chunk read timeout (45s) — used by backwards-compatible constructors.
 const DEFAULT_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(45);
@@ -29,6 +32,14 @@ pub struct AnthropicProvider {
     api_key: Option<String>,
     http_client: Client,
     stream_read_timeout: Duration,
+    /// Provider id used as the `(provider, model)` namespace of the compat
+    /// cache. `None` = standalone mode, key falls back to `"anthropic"`.
+    provider_id: Option<String>,
+    /// Learned parameter corrections for this agent
+    /// (`{work_dir}/config/provider_compat_anthropic.json`). `None` = no cache
+    /// (unit tests / standalone), in which case the cold-path corrections still
+    /// run but nothing is remembered.
+    compat_cache: Option<Arc<AnthropicCompatCache>>,
 }
 
 impl AnthropicProvider {
@@ -69,12 +80,25 @@ impl AnthropicProvider {
             api_key: api_key.map(ToString::to_string),
             http_client,
             stream_read_timeout,
+            provider_id: None,
+            compat_cache: None,
         }
     }
 
     /// Set API key after construction (e.g., from Vault KeyRelease)
     pub fn set_api_key(&mut self, key: String) {
         self.api_key = Some(key);
+    }
+
+    /// Provider id — the namespace of the compat-cache key.
+    pub fn set_provider_id(&mut self, provider_id: String) {
+        self.provider_id = Some(provider_id);
+    }
+
+    /// Install the compat cache. Typically called once during startup; without
+    /// it the corrections still run but are not remembered across requests.
+    pub fn set_compat_cache(&mut self, cache: Arc<AnthropicCompatCache>) {
+        self.compat_cache = Some(cache);
     }
 }
 
@@ -758,22 +782,67 @@ fn normalize_stop_reason(reason: &str) -> String {
     }
 }
 
-// ── Provider trait implementation ───────────────────────────────────────
+// ── Parameter corrections ────────────────────────────────────────────────
+//
+// A Messages endpoint rejects a request field it does not accept, and the two
+// shapes observed in the wild are "temperature is deprecated for this model"
+// and "thinking.type.enabled is not supported — use adaptive". A custom
+// provider carries no capability data, so the 400 body is the only evidence;
+// [`next_trim`] turns it into the next adjustment, and the confirmed result is
+// remembered by the compat cache.
 
-#[async_trait]
-impl Provider for AnthropicProvider {
-    fn name(&self) -> &str {
-        "anthropic"
+/// Apply a learned trim to a request before it becomes wire JSON.
+fn apply_trim(request: &ChatRequest, trim: &AnthropicTrim) -> ChatRequest {
+    let mut req = request.clone();
+    if trim.omit_temperature {
+        req.temperature = None;
     }
+    if trim.adaptive_thinking {
+        req.thinking_mode = Some("adaptive".to_string());
+    }
+    req
+}
 
-    async fn chat(&self, request: ChatRequest) -> acowork_core::error::Result<ChatResponse> {
+/// Next adjustment implied by a 400 body, or `None` when the body names
+/// nothing we know how to fix.
+///
+/// Deliberately narrow: each flag can be set once, so the correction loop is
+/// bounded at two retries, and an unrecognised body surfaces untouched instead
+/// of silently degrading the request.
+fn next_trim(trim: &AnthropicTrim, body: &str) -> Option<AnthropicTrim> {
+    let lower = body.to_ascii_lowercase();
+    if !trim.omit_temperature
+        && lower.contains("temperature")
+        && (lower.contains("deprecat")
+            || lower.contains("not support")
+            || lower.contains("unsupported"))
+    {
+        return Some(AnthropicTrim {
+            omit_temperature: true,
+            ..trim.clone()
+        });
+    }
+    if !trim.adaptive_thinking && lower.contains("adaptive") {
+        return Some(AnthropicTrim {
+            adaptive_thinking: true,
+            ..trim.clone()
+        });
+    }
+    None
+}
+
+impl AnthropicProvider {
+    /// Turn a [`ChatRequest`] into the wire shape.
+    ///
+    /// Shared by both entry points: they used to carry two near-identical
+    /// copies that had already drifted (`stream: None` vs `Some(true)`).
+    fn build_wire_request(request: &ChatRequest, stream: bool) -> AnthropicRequest {
         let (messages, system) = convert_messages(&request.messages);
 
-        // Anthropic API requires at least one non-system message.
-        // When context trimming removes all user/assistant messages,
-        // only the system prompt remains (extracted to the `system` field),
-        // leaving `messages` empty — which the API rejects with 400.
-        // Insert a minimal user message as a safety net.
+        // Anthropic API requires at least one non-system message. When context
+        // trimming removes all user/assistant messages only the system prompt
+        // remains (extracted to the `system` field), leaving `messages` empty —
+        // which the API rejects with 400. Insert a minimal user message.
         let messages = if messages.is_empty() {
             tracing::warn!(
                 model = %request.model,
@@ -798,24 +867,35 @@ impl Provider for AnthropicProvider {
             request.temperature,
         );
 
-        let anthropic_request = AnthropicRequest {
-            model: request.model,
+        AnthropicRequest {
+            model: request.model.clone(),
             messages,
             system,
             max_tokens: Some(effective_max_tokens),
             temperature,
             tools: convert_tools(request.tools.as_deref()),
-            stream: None,
+            stream: stream.then_some(true),
             thinking,
             output_config,
-        };
+        }
+    }
 
-        // Log request payload for debugging tool definitions
+    /// POST one Messages request and return the raw response (success or not).
+    async fn post_messages(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> acowork_core::error::Result<reqwest::Response> {
+        let wire = Self::build_wire_request(request, stream);
+
         tracing::debug!(
-            request_len = serde_json::to_string(&anthropic_request).map(|s| s.len()).unwrap_or(0),
-            model = %anthropic_request.model,
-            has_tools = anthropic_request.tools.is_some(),
-            "Anthropic chat request"
+            request_len = serde_json::to_string(&wire).map(|s| s.len()).unwrap_or(0),
+            model = %wire.model,
+            has_tools = wire.tools.is_some(),
+            temperature = ?wire.temperature,
+            has_thinking = wire.thinking.is_some(),
+            adaptive_thinking = wire.output_config.is_some(),
+            "Anthropic request"
         );
 
         let url = format!("{}/messages", self.base_url);
@@ -826,39 +906,147 @@ impl Provider for AnthropicProvider {
             ))
         })?;
 
-        let response = self
-            .http_client
+        self.http_client
             .post(&url)
             .header("x-api-key", api_key.as_str())
             .header("anthropic-version", "2023-06-01")
             .header("content-type", "application/json")
-            .json(&anthropic_request)
+            .json(&wire)
             .send()
             .await
             .map_err(|e| {
-                acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(format!(
-                    "Anthropic request failed: {e}"
-                )))
-            })?;
+                let what = if stream { "streaming" } else { "non-streaming" };
+                acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(
+                    format!("Anthropic {what} request failed: {e}"),
+                ))
+            })
+    }
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let headers = response.headers().clone();
-            let body = response.text().await.unwrap_or_default();
+    /// Send a request, correcting the parameters the endpoint rejects and
+    /// retrying, then remembering what worked.
+    ///
+    /// Fast path: a confirmed trim for this `(provider, model)` goes out first —
+    /// one request, no probing. Cold path: send as asked, and on a 400/422
+    /// adjust **one** parameter named by the body at a time (see [`next_trim`]).
+    /// At most two corrections, then the last body surfaces.
+    ///
+    /// ponytail: ceiling — corrections are keyword-driven off the error body
+    /// rather than a capability table, which is the point (a custom provider
+    /// carries no capability data). The price is one extra round trip per
+    /// `(provider, model)` until the trim is confirmed and persisted.
+    async fn send_with_compat(
+        &self,
+        request: &ChatRequest,
+        stream: bool,
+    ) -> acowork_core::error::Result<reqwest::Response> {
+        let key = self.compat_cache.as_ref().map(|_| {
+            crate::providers::anthropic_compat::trim_key(
+                self.provider_id.as_deref().unwrap_or("anthropic"),
+                &request.model,
+            )
+        });
 
-            // Try to parse Anthropic error structure for better classification
-            let message = if let Ok(err_resp) = serde_json::from_str::<AnthropicError>(&body) {
-                format!(
-                    "Anthropic API error [{}]: {}",
-                    err_resp.error.error_type, err_resp.error.message
-                )
-            } else {
-                format!("Anthropic API error: {status} — {body}")
-            };
-
-            let err = crate::providers::from_http_parts(status.as_u16(), message, &headers);
-            return Err(acowork_core::AcoworkError::Provider(err));
+        // ── Fast path: a confirmed trim exists ──────────────────────────
+        if let (Some(cache), Some(key)) = (self.compat_cache.as_ref(), key.as_deref())
+            && let Some(trim) = cache.get(key)
+        {
+            let resp = self
+                .post_messages(&apply_trim(request, &trim), stream)
+                .await?;
+            if resp.status().is_success() {
+                cache.touch(key);
+                return Ok(resp);
+            }
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                key,
+                status = %status,
+                error_body = %body,
+                "Anthropic compat trim no longer valid - invalidating and re-probing",
+            );
+            cache.invalidate(key, "fast-path request failed after applying cached trim");
+            // Fall through: re-probe from the unmodified request, so a stale
+            // trim cannot mask the real error.
         }
+
+        // ── Cold path: send as asked, then correct ──────────────────────
+        let mut trim = AnthropicTrim::default();
+        loop {
+            let resp = self
+                .post_messages(&apply_trim(request, &trim), stream)
+                .await?;
+            let status = resp.status();
+            if status.is_success() {
+                if let (Some(cache), Some(key)) = (self.compat_cache.as_ref(), key.as_deref()) {
+                    if trim.is_empty() {
+                        cache.record_plain_success(key);
+                    } else {
+                        // The correction itself is the evidence, and it is
+                        // schema-shaped by construction.
+                        cache.record_fallback_success(
+                            key,
+                            trim.clone(),
+                            crate::providers::compat::ErrorClass::RequestSchema,
+                        );
+                    }
+                }
+                return Ok(resp);
+            }
+
+            let headers = resp.headers().clone();
+            let body = resp.text().await.unwrap_or_default();
+
+            // Only 400/422 can be a rejected parameter; auth / 404 / 5xx are
+            // surfaced as-is.
+            if status.as_u16() != 400 && status.as_u16() != 422 {
+                return Err(provider_error(status.as_u16(), &body, &headers));
+            }
+
+            match next_trim(&trim, &body) {
+                Some(next) => {
+                    tracing::warn!(
+                        status = %status,
+                        adjusted = ?next.changed_fields(),
+                        error_body = %body,
+                        "Anthropic rejected a request parameter - retrying with it adjusted",
+                    );
+                    trim = next;
+                }
+                None => return Err(provider_error(status.as_u16(), &body, &headers)),
+            }
+        }
+    }
+}
+
+/// Build the user-facing provider error, using the parsed Anthropic error shape
+/// when the body carries one.
+fn provider_error(
+    status: u16,
+    body: &str,
+    headers: &reqwest::header::HeaderMap,
+) -> acowork_core::AcoworkError {
+    let message = match serde_json::from_str::<AnthropicError>(body) {
+        Ok(err_resp) => format!(
+            "Anthropic API error [{}]: {}",
+            err_resp.error.error_type, err_resp.error.message
+        ),
+        Err(_) if body.is_empty() => format!("Anthropic API error: HTTP {status}"),
+        Err(_) => format!("Anthropic API error: HTTP {status} - {body}"),
+    };
+    acowork_core::AcoworkError::Provider(crate::providers::from_http_parts(status, message, headers))
+}
+
+// ── Provider trait implementation ───────────────────────────────────────
+
+#[async_trait]
+impl Provider for AnthropicProvider {
+    fn name(&self) -> &str {
+        "anthropic"
+    }
+
+    async fn chat(&self, request: ChatRequest) -> acowork_core::error::Result<ChatResponse> {
+        let response = self.send_with_compat(&request, false).await?;
 
         let native_resp: AnthropicResponse = response.json().await.map_err(|e| {
             acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unknown(format!(
@@ -873,84 +1061,7 @@ impl Provider for AnthropicProvider {
         &self,
         request: ChatRequest,
     ) -> acowork_core::error::Result<Box<dyn Stream<Item = StreamEvent> + Send>> {
-        let (messages, system) = convert_messages(&request.messages);
-
-        // Anthropic API requires at least one non-system message.
-        // When context trimming removes all user/assistant messages,
-        // only the system prompt remains (extracted to the `system` field),
-        // leaving `messages` empty — which the API rejects with 400.
-        // Insert a minimal user message as a safety net.
-        let messages = if messages.is_empty() {
-            tracing::warn!(
-                model = %request.model,
-                "Anthropic: no non-system messages after conversion, inserting placeholder"
-            );
-            vec![AnthropicMessage {
-                role: "user".to_string(),
-                content: Some(serde_json::Value::String(
-                    "[Context too large — all conversation history was trimmed. Please start a new conversation or reduce attached files.]".to_string()
-                )),
-                cache_control: None,
-            }]
-        } else {
-            messages
-        };
-
-        let effective_max_tokens = request.max_tokens.unwrap_or(4096);
-        let (thinking, output_config, temperature) = map_anthropic_thinking(
-            request.reasoning_effort.as_ref(),
-            request.thinking_mode.as_deref(),
-            effective_max_tokens,
-            request.temperature,
-        );
-
-        let anthropic_request = AnthropicRequest {
-            model: request.model,
-            messages,
-            system,
-            max_tokens: Some(effective_max_tokens),
-            temperature,
-            tools: convert_tools(request.tools.as_deref()),
-            stream: Some(true),
-            thinking,
-            output_config,
-        };
-
-        // Log request payload for debugging tool definitions
-        tracing::debug!(
-            request_len = serde_json::to_string(&anthropic_request).map(|s| s.len()).unwrap_or(0),
-            model = %anthropic_request.model,
-            has_tools = anthropic_request.tools.is_some(),
-            "Anthropic chat_stream request"
-        );
-
-        let url = format!("{}/messages", self.base_url);
-
-        let api_key = self.api_key.as_ref().ok_or_else(|| {
-            acowork_core::AcoworkError::Provider(acowork_core::ProviderError::unauthorized(
-                "Anthropic API key is required".to_string(),
-            ))
-        })?;
-
-        let response = self
-            .http_client
-            .post(&url)
-            .header("x-api-key", api_key.as_str())
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&anthropic_request)
-            .send()
-            .await
-            .map_err(|e| {
-                acowork_core::AcoworkError::Provider(acowork_core::ProviderError::network(format!(
-                    "Anthropic streaming request failed: {e}"
-                )))
-            })?;
-
-        if !response.status().is_success() {
-            let err = crate::providers::from_http_response(response).await;
-            return Err(acowork_core::AcoworkError::Provider(err));
-        }
+        let response = self.send_with_compat(&request, true).await?;
 
         let (tx, rx) = mpsc::channel(32);
         let stream_read_timeout = self.stream_read_timeout;
@@ -2286,5 +2397,80 @@ mod tests {
         };
         let json = serde_json::to_value(&cc).unwrap();
         assert!(json.get("ttl").is_none(), "ttl=None must skip serialization");
+    }
+
+    // ── Parameter corrections (compat cache) ────────────────────────────
+
+    /// The two 400 shapes actually seen against a custom Anthropic endpoint
+    /// (Bedrock-fronted claude-haiku-5-5) must each turn into exactly one
+    /// adjustment, and never loop: a flag already set stays a no-op.
+    #[test]
+    fn next_trim_recognises_the_rejections_and_terminates() {
+        let empty = AnthropicTrim::default();
+
+        let temp_body = r#"{"error":{"message":"InvokeModelWithResponseStream: operation error Bedrock Runtime, ValidationException: `temperature` is deprecated for this model."}}"#;
+        let after_temp = next_trim(&empty, temp_body).expect("temperature rejection must be correctable");
+        assert!(after_temp.omit_temperature);
+        assert!(!after_temp.adaptive_thinking);
+        assert!(next_trim(&after_temp, temp_body).is_none(), "a set flag must not loop");
+
+        let thinking_body = r#"{"error":{"message":"ValidationException: \"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."}}"#;
+        let after_thinking =
+            next_trim(&empty, thinking_body).expect("extended-thinking rejection must be correctable");
+        assert!(after_thinking.adaptive_thinking);
+        assert!(!after_thinking.omit_temperature);
+
+        // Both corrections accumulate, then stop.
+        let both = next_trim(&after_temp, thinking_body).expect("second distinct correction");
+        assert!(both.omit_temperature && both.adaptive_thinking);
+        assert!(next_trim(&both, thinking_body).is_none());
+        assert!(next_trim(&both, temp_body).is_none());
+    }
+
+    /// Unrelated 400s must surface untouched — a wrong "correction" silently
+    /// changes the request.
+    #[test]
+    fn next_trim_ignores_unrelated_bodies() {
+        let empty = AnthropicTrim::default();
+        for body in [
+            r#"{"error":{"message":"invalid x-api-key"}}"#,
+            r#"{"error":{"message":"prompt is too long"}}"#,
+            r#"{"error":{"message":"temperature must be between 0 and 1"}}"#,
+            "",
+        ] {
+            assert!(next_trim(&empty, body).is_none(), "body must not be corrected: {body}");
+        }
+    }
+
+    #[test]
+    fn apply_trim_changes_only_the_flagged_parameters() {
+        let request = ChatRequest {
+            model: "claude-haiku-5-5".to_string(),
+            messages: vec![],
+            temperature: Some(0.7),
+            max_tokens: Some(16_000),
+            tools: None,
+            reasoning_effort: Some(ReasoningEffort::High),
+            thinking_mode: None,
+        };
+
+        let untouched = apply_trim(&request, &AnthropicTrim::default());
+        assert_eq!(untouched.temperature, Some(0.7));
+        assert_eq!(untouched.thinking_mode, None);
+
+        let trimmed = apply_trim(
+            &request,
+            &AnthropicTrim {
+                omit_temperature: true,
+                adaptive_thinking: true,
+                last_success_unix_ts: 0,
+            },
+        );
+        assert_eq!(trimmed.temperature, None, "deprecated temperature must be dropped");
+        assert_eq!(
+            trimmed.thinking_mode.as_deref(),
+            Some("adaptive"),
+            "extended thinking must be replaced by the adaptive shape"
+        );
     }
 }

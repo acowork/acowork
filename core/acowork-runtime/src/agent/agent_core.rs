@@ -117,6 +117,11 @@ pub struct AgentCore {
     pub(crate) responses_compat_cache:
         Option<Arc<crate::providers::responses_compat::ResponsesCompatCache>>,
 
+    /// Messages-API parameter trims (`temperature` / thinking shape) learned
+    /// from rejected Anthropic requests, shared exactly like `compat_cache`.
+    pub(crate) anthropic_compat_cache:
+        Option<Arc<crate::providers::anthropic_compat::AnthropicCompatCache>>,
+
     /// Provider→compact_model mapping from provider_list at AgentHello.
     ///
     /// Shared across sessions via `Arc<RwLock<...>>` (ADR-063 §3.7.5
@@ -448,6 +453,7 @@ impl AgentCore {
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
             compat_cache: None,
             responses_compat_cache: None,
+            anthropic_compat_cache: None,
             provider_compact_models: Arc::new(RwLock::new(HashMap::new())),
             default_compact_models: Arc::new(RwLock::new(Vec::new())),
             max_output_tokens_override: None,
@@ -1122,6 +1128,7 @@ impl AgentCore {
             provider_id: Some(provider_meta.id.clone()),
             compat_cache: self.compat_cache.clone(),
             responses_compat_cache: self.responses_compat_cache.clone(),
+            anthropic_compat_cache: self.anthropic_compat_cache.clone(),
         };
         // ADR-103 D2: the compact provider is built for the provider's
         // compact model — consume the model-level protocol/base_url the
@@ -1413,6 +1420,7 @@ impl Clone for AgentCore {
             provider_key_vault: self.provider_key_vault.clone(),
             compat_cache: self.compat_cache.clone(),
             responses_compat_cache: self.responses_compat_cache.clone(),
+            anthropic_compat_cache: self.anthropic_compat_cache.clone(),
             provider_compact_models: Arc::clone(&self.provider_compact_models),
             default_compact_models: Arc::clone(&self.default_compact_models),
             max_output_tokens_override: self.max_output_tokens_override,

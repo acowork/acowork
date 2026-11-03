@@ -631,6 +631,7 @@ impl SessionTask {
                     provider_key_vault: &core_mut.provider_key_vault,
                     compat_cache: core_mut.compat_cache.as_ref(),
                     responses_compat_cache: core_mut.responses_compat_cache.as_ref(),
+                    anthropic_compat_cache: core_mut.anthropic_compat_cache.as_ref(),
                 },
             )
         {

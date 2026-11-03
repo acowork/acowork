@@ -58,6 +58,9 @@ pub(crate) struct ProviderBuildContext<'a> {
     /// ADR-103 D8/S7 trim cache for `/responses` providers.
     pub responses_compat_cache:
         Option<&'a Arc<crate::providers::responses_compat::ResponsesCompatCache>>,
+    /// Parameter-trim cache for Anthropic-protocol providers.
+    pub anthropic_compat_cache:
+        Option<&'a Arc<crate::providers::anthropic_compat::AnthropicCompatCache>>,
 }
 
 /// Per-session state for one AgentLoop instance.
@@ -802,6 +805,7 @@ impl SessionCore {
         let provider_key_vault = ctx.provider_key_vault;
         let compat_cache = ctx.compat_cache;
         let responses_compat_cache = ctx.responses_compat_cache;
+        let anthropic_compat_cache = ctx.anthropic_compat_cache;
         let provider_meta = {
             let list = global_provider_list.read().unwrap();
             list.iter().find(|p| p.id == provider_id).cloned()
@@ -847,6 +851,7 @@ impl SessionCore {
             provider_id: Some(provider_meta.id.clone()),
             compat_cache: compat_cache.cloned(),
             responses_compat_cache: responses_compat_cache.cloned(),
+            anthropic_compat_cache: anthropic_compat_cache.cloned(),
         };
         let raw = crate::providers::router::create_provider_with_wiring(
             &provider_meta.id,
