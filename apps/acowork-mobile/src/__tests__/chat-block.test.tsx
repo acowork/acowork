@@ -21,7 +21,7 @@
  * real store would never have been read at all), not about batching — that is
  * `chatBlockStore.test.ts`.
  */
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ItemView, RowView, type ItemProps, type RowProps } from '../screens/chat/AgentChatScreen'
 import { ChatExecutionBlock } from '../components/ChatExecutionBlock'
@@ -30,12 +30,34 @@ import { buildTranscriptItems, type RunBlock } from '../lib/chatTranscriptGroups
 import type { ChatBlockEntry, ChatMessageRow } from '../lib/types'
 
 const store = vi.hoisted(() => ({
+  /** The foreground session's live status, as the chat store would hold it. */
+  live: null as { status: string } | null,
   /** The one entry the rendered rounds read, keyed by their ref. */
   entry: undefined as ChatBlockEntry | undefined,
   entries: undefined as Record<string, ChatBlockEntry> | undefined,
   useChatBlocks: vi.fn(),
   reload: vi.fn(),
 }))
+
+// The live line is read off the chat store, but a static render never reaches a
+// subscription: the store is stood in for, so a case can say what the foreground
+// session is doing. Everything else about the store stays real.
+vi.mock('../stores/chatStore', async (importOriginal) => {
+  const orig = await importOriginal<typeof import('../stores/chatStore')>()
+  const useChatStore = (selector: (s: unknown) => unknown) =>
+    selector({
+      agentStates: store.live
+        ? { ag: { activeSessionId: 's1', status: store.live } }
+        : {},
+    })
+  return {
+    ...orig,
+    useChatStore: Object.assign(useChatStore, {
+      getState: orig.useChatStore.getState,
+      setState: orig.useChatStore.setState,
+    }),
+  }
+})
 
 vi.mock('../stores/chatBlockStore', () => ({
   useChatBlocks: (chatId: string, refs: readonly string[]) =>
@@ -518,6 +540,32 @@ describe('the decision lives in the block (D8)', () => {
     // Untitled run: the opening question is the name, so a block and the tab
     // that later shows its session do not name the same run two ways.
     expect(html).toContain('帮我整理一份季度报表')
+  })
+})
+
+describe('the live line the SESSION owns (D9)', () => {
+  afterEach(() => {
+    store.live = null
+  })
+
+  it('a busy session speaks in the header even after the block reads settle', () => {
+    seed(entryOf())
+    store.live = { status: 'tool_executing' }
+    const html = renderRows([triggerRow('u1', '帮我整理报表'), refRow({ in_reply_to: 'u1' })])
+    // `session_state` is the freshest fact on this surface: the round it is busy
+    // with may not have reached this Chat as a reference row yet.
+    expect(html).toContain('执行工具中')
+    // It may not manufacture liveness though: the read is terminal, so the block
+    // stays settled — no live marker, and the answer is still its own word.
+    expect(html).not.toContain('is-live')
+  })
+
+  it('an idle session leaves the header to the block own outcome', () => {
+    seed(entryOf())
+    store.live = { status: 'idle' }
+    const html = renderRows([triggerRow('u1', '帮我整理报表'), refRow({ in_reply_to: 'u1' })])
+    expect(html).toContain('已完成')
+    expect(html).not.toContain('is-live')
   })
 })
 

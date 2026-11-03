@@ -158,8 +158,13 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
     const entry = entries[r.ref]
     return !!entry?.projection?.card && entry.status === 'pending'
   })
+  // The session's own activity outranks the block's settled rounds: a session
+  // that IS busy is the freshest fact on this surface, and the round it is busy
+  // with may simply not have reached this Chat as a reference row yet. What the
+  // live state may NOT do is create liveness out of nothing — the live marker and
+  // the auto-open below stay tied to this block's own pending read (D9).
   const shownState =
-    (inProgress && liveStatus && isActiveStatus(liveStatus) ? liveStatusText(liveStatus) : '') ||
+    (liveStatus && isActiveStatus(liveStatus) ? liveStatusText(liveStatus) : '') ||
     blockStatusText(outcome)
 
   // Rounds beyond the recent window stay in the block, one tap away — except the
