@@ -314,6 +314,81 @@ describe('liveness is positive evidence only (D9)', () => {
   })
 })
 
+/**
+ * What the block's header claims (t-1b7bdb21) — the failure this suite was
+ * extended for:
+ *  1. the human's own sentence vanished from the transcript: the round that owns
+ *     a folded chat question sat outside the recent-rounds window, so the only
+ *     place the sentence was ever drawn was hidden — and the visible rows read
+ *     as the agent answering questions nobody asked here;
+ *  2. the state word answered "is ANY round of this session pending" instead of
+ *     "how did the round you are reading end": a run parked on a card read as
+ *     "执行中" (it is waiting for the human) and a settled newest round could
+ *     still look live. On a 390pt screen the header is the only thing a folded
+ *     block shows, so a wrong word there is the whole story.
+ */
+describe("what the block's header claims (t-1b7bdb21)", () => {
+  it("never windows away the round that carries this Chat's own question", () => {
+    // One chat question opened round 1; the human then kept nudging from the
+    // execution surface, so rounds 2 and 3 answer sentences this Chat never saw.
+    const rows = [
+      triggerRow('u1', '帮我整理报表'),
+      refRow({ in_reply_to: 'u1' }),
+      refRow({ round_id: 'r2', message_id: 'round:r2' }),
+      refRow({ round_id: 'r3', message_id: 'round:r3' }),
+    ]
+    const block = onlyBlock(rows)
+    seedEntries({
+      'ag|s1|r1': entryOf({ ref: 'ag|s1|r1' }),
+      'ag|s1|r2': entryOf({ ref: 'ag|s1|r2', round_id: 'r2' }),
+      'ag|s1|r3': entryOf({ ref: 'ag|s1|r3', round_id: 'r3' }),
+    })
+    const html = renderBlock(block)
+    // All three rounds are listed, so nothing sits behind "查看更早".
+    expect(html).toContain('第 1 轮')
+    expect(html).toContain('第 3 轮')
+    expect(html).not.toContain('查看更早')
+    expect(html).toContain('帮我整理报表')
+  })
+
+  it('a settled block reads 已完成 even when an older read still says pending', () => {
+    const rows = [triggerRow('u1', 'q'), refRow({ in_reply_to: 'u1' }), refRow({ round_id: 'r2', message_id: 'round:r2' })]
+    seedEntries({
+      'ag|s1|r1': entryOf({ ref: 'ag|s1|r1', status: 'pending', projection: { round_id: 'r1', terminal: false, status: 'in_progress' } }),
+      'ag|s1|r2': entryOf({ ref: 'ag|s1|r2', round_id: 'r2' }),
+    })
+    const html = renderBlock(onlyBlock(rows))
+    // The newest round is the block's claim; an older read that never resolves
+    // must not keep the whole run looking live.
+    expect(html).toContain(blockStatusText('completed'))
+    expect(html).not.toContain('执行中')
+  })
+
+  it('a round parked on a card reads as waiting for the human, not as running', () => {
+    seed(
+      entryOf({
+        status: 'pending',
+        projection: {
+          round_id: 'r1',
+          terminal: false,
+          status: 'waiting',
+          card: { kind: 'approval', request_id: 'q1', prompt: 'Approve `bash`?' },
+        },
+      }),
+    )
+    const html = renderRows([refRow()])
+    expect(html).toContain(blockStatusText('waiting'))
+    expect(html).not.toContain('执行中')
+  })
+
+  it('a newest read that is a hole says so instead of claiming a state', () => {
+    seed(entryOf({ status: 'not_found', projection: undefined }))
+    const html = renderRows([refRow()])
+    expect(html).toContain(blockStatusText('unknown'))
+    expect(html).not.toContain('执行中')
+  })
+})
+
 describe('the decision lives in the block (D8)', () => {
   it('an approval is one collapsed line that opens the sheet', () => {
     seed(

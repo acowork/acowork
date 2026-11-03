@@ -58,10 +58,14 @@ export function blockStatusText(status: string): string {
       return '本轮执行超时'
     case 'waiting':
       return '等待你回复'
+    case 'in_progress':
+      return '执行中'
     case 'unknown':
       return '结果未知'
     default:
-      return '执行中'
+      // "执行中" is a claim that needs evidence (D9): an unrecognised — or
+      // missing — status is an unknown outcome, never a running one.
+      return '结果未知'
   }
 }
 
