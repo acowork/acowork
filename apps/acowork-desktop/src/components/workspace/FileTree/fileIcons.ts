@@ -107,6 +107,15 @@ const EXT_MAP: Record<string, FileIconInfo> = {
     csv: { name: "csv" },
     xlsx: { name: "xls" },
     xls: { name: "xls" },
+    xlsm: { name: "xls" },
+
+    // Word processing / presentations
+    doc: { name: "word" },
+    docx: { name: "word" },
+    docm: { name: "word" },
+    ppt: { name: "pptx" },
+    pptx: { name: "pptx" },
+    pptm: { name: "pptx" },
 
     // Database
     db: { name: "db" },

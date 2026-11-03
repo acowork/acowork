@@ -62,6 +62,8 @@ const DARK_COLORS: Record<string, string> = {
     vite: "#C9A046",
     tsconfig: "#519ABA",
     xls: "#5FA05F",
+    word: "#519ABA",
+    pptx: "#D0633C",
 };
 
 const LIGHT_COLORS: Record<string, string> = {
@@ -118,6 +120,8 @@ const LIGHT_COLORS: Record<string, string> = {
     vite: "#A07A20",
     tsconfig: "#3B7BA5",
     xls: "#3D8B3D",
+    word: "#3B7BA5",
+    pptx: "#C0502A",
 };
 
 /* ─── SVG sanitization ────────────────────────────────────────────── */

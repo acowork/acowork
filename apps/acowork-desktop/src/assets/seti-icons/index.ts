@@ -1,5 +1,6 @@
 /**
  * Seti UI file icons — MIT licensed SVG icons from https://github.com/jesseweed/seti-ui
+ * Exception: pptx.svg is from the file-icons set (ISC, John Gardner) — Seti has no presentation icon.
  * Imported as raw strings via Vite's ?raw suffix for inline SVG rendering.
  */
 
@@ -56,6 +57,9 @@ import vite from "./vite.svg?raw";
 import tsconfig from "./tsconfig.svg?raw";
 import favicon from "./favicon.svg?raw";
 import xls from "./xls.svg?raw";
+import word from "./word.svg?raw";
+// Not from Seti: file-icons set (ISC, John Gardner) — the MS Office silhouette for PowerPoint.
+import pptx from "./pptx.svg?raw";
 
 /** Map of icon name → raw SVG string */
 export const SETI_ICONS: Record<string, string> = {
@@ -112,4 +116,6 @@ export const SETI_ICONS: Record<string, string> = {
     tsconfig,
     favicon,
     xls,
+    word,
+    pptx,
 };
