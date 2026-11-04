@@ -106,7 +106,7 @@ pub use manifest::{
     McpServerDecl, McpSourceKind, ProviderConfig, RagToolConfig, RoutingConfig, SkillDecl, SkillMode,
     SkillsConfig, ToolDeclaration,
 };
-pub use message_ref::{MessageRef, REF_KIND_CHAT_BACKGROUND};
+pub use message_ref::{MessageRef, REF_KIND_CHAT_BACKGROUND, REF_KIND_REFERENCED_ROUND};
 pub use protocol::{
     ConversationEntryDto, GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo,
     ModelModalities, ProtocolType, SessionInfoDto, SessionStatusDto,

@@ -811,6 +811,19 @@ pub const EXPLICIT_MENTION_PARAM: &str = "explicit_mention";
 /// continuation and lets the router open a session with its own brief.
 pub const FORCE_NEW_PARAM: &str = "force_new";
 
+/// Delivery-params key carrying the pinned `@session` reference material of a
+/// Chat turn (ADR-106 revision 2026-11-04 · reference redrawing).
+///
+/// The value is the array the Gateway pinned at write time —
+/// `[{agent_instance_id, session_id, round_id, terminal}]` — already filtered
+/// to the receiving instance (each target only carries its own refs, the same
+/// rule as `target_session_id`). The Runtime reads it twice: to suppress the
+/// level-3 continuation branch (a message that attaches material is not asking
+/// "where should this go"), and to render the rounds it names as context
+/// material. Like the other addressing keys it rides `params`, not the
+/// envelope — a human turn renders `params.message` to the model, never this.
+pub const CHAT_REFS_PARAM: &str = "chat_refs";
+
 /// Legacy — replaced by `AttachedItem` (ADR-046). Retained for
 /// deserialization of old `attached_context` payloads during transition.
 /// Will be removed after all frontend clients ship `attached_items`.
