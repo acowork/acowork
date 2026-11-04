@@ -6,7 +6,7 @@
 - **决策者**：ACowork 架构组
 - **关联**：设计 27（Intent 消息与群聊）、设计 29（Chat Session 上下文编排）、ADR-060（Prompt Cache 友好的上下文块重排）、ADR-063（包级 Prompt 覆盖）、ADR-066（Provider Cache Tokens）、ADR-076（多用户账号体系）、ADR-085（Agent 生命周期状态机）、ADR-092（用户消息身份与有界读取）、ADR-096（请求路径禁止全量读会话）、ADR-098（统一标准群组模型）
 
-> **取代说明（2026-11-03）**：[ADR-106](./ADR-106-chat-execution-reference-projection.md) D6 / D14 收缩了本 ADR 的 **D3**：模型不再有 `dispatch(target = <已存在候选>)` 的静默投递权——两个 act 变成 `new_task(brief)`（唯一允许的投递，新建会话不污染任何既有上下文）与 `propose_existing(alias, why)`（**不投递**，只递一张确认卡，由发起这句话的人拍板）。只读信息工具（`memory_recall`、GET-only `http_request`）不变。D3 内"`turn_started` 指针在送达时写入 chat"与下文流程图里的 `resolve_card_answer` / `dispatch 已有` 分支也随 ADR-106 D8 / D10 / D12 退役（轮次在轮次边界开一条 `execution_round` 引用行）。**D1 / D2 / D4 / D5 / D6 / D8 仍完全生效**：无状态重建、受限工具集、降级不丢消息、按 token 预算裁剪的 Block B 窗口、路由时锚定的执行侧 pending 队列都仍是现行设计；本文余下内容为设计历史。
+> **取代说明（2026-11-03）**：[ADR-106](./ADR-106-chat-execution-reference-projection.md) D6 / D14 收缩了本 ADR 的 **D3**：模型不再有 `dispatch(target = <已存在候选>)` 的静默投递权——两个 act 变成 `exec_session_create(brief)`（原 `new_task`；唯一允许的投递，新建会话不污染任何既有上下文）与 `exec_session_propose_continue(alias, why)`（原 `propose_existing`；**不投递**，只递一张确认卡，由发起这句话的人拍板）。只读信息工具（`memory_recall`、GET-only `http_request`，及 2026-11-04 增设的 `exec_session_read_round`）同样不含投递权。D3 内"`turn_started` 指针在送达时写入 chat"与下文流程图里的 `resolve_card_answer` / `dispatch 已有` 分支也随 ADR-106 D8 / D10 / D12 退役（轮次在轮次边界开一条 `execution_round` 引用行）。**D1 / D2 / D4 / D5 / D6 / D8 仍完全生效**：无状态重建、受限工具集、降级不丢消息、按 token 预算裁剪的 Block B 窗口、路由时锚定的执行侧 pending 队列都仍是现行设计；本文余下内容为设计历史。
 
 ## 摘要
 
@@ -68,7 +68,7 @@
 
 `dispatch(target = "<候选别名>" | "new", message?, session_config?)`；不调用 `dispatch` 即纯文本回答。候选使用 `S1/S2` 短别名，运行时映射真实 session id。
 
-> **本节被 ADR-106 D6 改写**：`dispatch` 作为单一路由工具已不存在，现在暴露的是 `new_task`（无 `target`，只能新开）与 `propose_existing(target, why)`（只提案不投递）。别名表仍用 `S1/S2`（候选 session id 不给模型看），但它只能被**提议**给已存在的会话，不能直接被选中。下方工具矩阵、表格首行与"投递时写 `turn_started` 指针"一段同样只适用于修订前。
+> **本节被 ADR-106 D6 改写**：`dispatch` 作为单一路由工具已不存在，现在暴露的是 `exec_session_create`（原 `new_task`；无 `target`，只能新开）与 `exec_session_propose_continue(target, why)`（原 `propose_existing`；只提案不投递），外加只读的 `exec_session_read_round(target, rounds)`（2026-11-04 增设，见 ADR-106 修订章节）。别名表仍用 `S1/S2`（候选 session id 不给模型看），但别名只能被**提议**给已存在的会话，或用来读回轮次，不能直接被选中投递。下方工具矩阵、表格首行与"投递时写 `turn_started` 指针"一段同样只适用于修订前。
 
 为了让「答案需要一点信息」不再退化为「转交给执行会话」，router 同时暴露两个**只读信息工具**：
 

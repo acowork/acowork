@@ -1,7 +1,7 @@
 # ADR-106：chat 与 execute 的边界重划——引用而非副本
 
 - **编号**：ADR-106
-- **状态**：提议（待架构评审）——**已全部落地**：P1（`round_id` 铸造 + 轮次侧表 + 区间闭合）、P2（投影读接口）、P3（`rounds.sqlite` 缓存 + `GET /api/chat-blocks`）、P4（chat 写侧切换为引用行）、P5（寻址阶梯与两级 `@`）、P6（卡片归块与回答直投，块渲染器落在 Desktop 两视图与 Mobile）。本 ADR 列出的各"废止 / 退役"项目已从代码里删除；Desktop 与 Mobile 的转录形状已统一（四类词表 + 引用行 + 块投影）。**修订（2026-11-03·等待行）**：D9 的等待行判据窗口由"本地在途的 POST"延长为"本设备自己那次发送的 claim"（见文末修订章节与设计 27 v3.1.2）。**修订（2026-11-03·轮次门铃）**：新增轮次门铃事件 `round_state`（`SessionMessage` 字段 34），补回 D3 零写删掉的通知面，pending 重读由一次性 `setTimeout` 改为周期兜底（见文末修订章节与设计 27 v3.1.3）。
+- **状态**：提议（待架构评审）——**已全部落地**：P1（`round_id` 铸造 + 轮次侧表 + 区间闭合）、P2（投影读接口）、P3（`rounds.sqlite` 缓存 + `GET /api/chat-blocks`）、P4（chat 写侧切换为引用行）、P5（寻址阶梯与两级 `@`）、P6（卡片归块与回答直投，块渲染器落在 Desktop 两视图与 Mobile）。本 ADR 列出的各"废止 / 退役"项目已从代码里删除；Desktop 与 Mobile 的转录形状已统一（四类词表 + 引用行 + 块投影）。**修订（2026-11-03·等待行）**：D9 的等待行判据窗口由"本地在途的 POST"延长为"本设备自己那次发送的 claim"（见文末修订章节与设计 27 v3.1.2）。**修订（2026-11-03·轮次门铃）**：新增轮次门铃事件 `round_state`（`SessionMessage` 字段 34），补回 D3 零写删掉的通知面，pending 重读由一次性 `setTimeout` 改为周期兜底（见文末修订章节与设计 27 v3.1.3）。**修订（2026-11-04·呈现分叉与 act 族更名）**：呈现契约的折叠规则按 `opened_new` 分叉（新开会话的触发行保留为独立气泡）；D6 的 act 空间更名 `exec_session_*` 族并新增只读 `exec_session_read_round`（见文末修订章节与设计 29 §11）。
 - **日期**：2026-11-02
 - **决策者**：ACowork 架构组
 - **关联**：ADR-100（本 ADR 废止其 D2/D8/D9/D10/D11/D12，重述 D1/D3 的边界）、ADR-099（收缩其 `dispatch` 权力）、ADR-105（废止其 D4/D5 的镜像判据）、ADR-097（可弃侧表模式的直接先例）、ADR-096（写时派生 / 禁止全量读）、ADR-092（per-session 单写者与有界读取）、ADR-084（chat 存储归属 acowork-user）、ADR-055（跨机可达性是本设计的支柱）、ADR-076（单发起人）、ADR-046（附件判别联合）、ADR-102（TurnOrigin 策略表仍生效）
@@ -139,14 +139,14 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 | 2 | `@agent` + 指名 session（两级 @ 的第二级） | 投给指名会话 | 无 |
 | 3 | `@agent`，该 agent 在本 chat 只有 1 个可投会话 | 直接投；多个 → 回一张 session 选择卡 | 无 |
 | 4 | 群无 `@` → `default_responder`（ADR-105 D1–D3 保留） | 进入该 agent 的 chat 会话，走 5 | — |
-| 5 | 无 `@`（单聊 / 兜底后） | **默认闲聊**；仅当明显是新任务 → `new_task(brief)`；仅当像接续某旧会话 → `propose_existing` + **确认卡** | 只能提议 |
+| 5 | 无 `@`（单聊 / 兜底后） | **默认闲聊**；仅当明显是新任务 → `exec_session_create(brief)`；仅当像接续某旧会话 → `exec_session_propose_continue` + **确认卡** | 只能提议 |
 | 6 | PM `task-dispatch` | 机器形式的显式寻址（`conv:task` 键） | 无 |
 
 - **级别 1 是最高频连续性场景的正解**：「agent 刚汇报完进展，我回一句」不需要 LLM 猜——回复那个块就是寻址。这让级别 5 的"猜"用例大幅减少，确认的点击成本不摊到每条消息上。
-- **级别 5 的确认必须有廉价出口**：只有存在**可投候选**（D7 的可见集合非空）时才提议；候选为空则静默走 `new_task` 或闲聊。确认卡上"新建任务"永远是并列选项，一次点击即可逃逸。
+- **级别 5 的确认必须有廉价出口**：只有存在**可投候选**（D7 的可见集合非空）时才提议；候选为空则静默走 `exec_session_create` 或闲聊。确认卡上"新建任务"永远是并列选项，一次点击即可逃逸。
 - **答一张寻址卡不是一句新话语**（P6 落地补条）：`session_choice` / `confirm_continue` 问的是"你刚才那句话要去哪"，所以答案 = **原文本 + 刚选定的地址重投递**，并带上原行的 `message_id`；chat 存储按该 id 幂等，转录因此仍只有一条消息——另起一行等于把同一句话给人看两遍。地址也只写给**提问的那个 agent**（D7 的 `force_new_for` 同理）。卡片不因答了而消失：已答的判据是转录里存在指向该消息的引用行（D3），命中即按钮置静（禁用但保留）——"一点就没"会抹掉"这里曾经有个决定"的事实，而再点一次会重复投递。
 - **"谁能答"是呈现层的权限，不是数据的属性**（D10 第三层）：卡只递给 `meta.to` 那个人；本地模式（无账号体系，`to` 解不出 id）下只有一个人在说话，因此必须放行。
-- **`dispatch(target=existing)` 的静默投递权删除**，Block C 的 `S1..S10` alias 表随之退役（寻址从"LLM 引用别名"变成"人指名"）。Router 的 act 空间：`answer` / `new_task(brief)` / `propose_existing(session, why)` / `ask_human(question)`。
+- **`dispatch(target=existing)` 的静默投递权删除**，Block C 的 `S1..S10` alias 表随之退役（寻址从"LLM 引用别名"变成"人指名"）。Router 的 act 空间：`answer` / `exec_session_create(brief)` / `exec_session_propose_continue(session, why)` / `ask_human(question)`（act 名随 2026-11-04 修订更名，旧名 `new_task` / `propose_existing` 见文末修订章节；只读侧同批新增 `exec_session_read_round`，别名表为该工具重新复活）。
 - **`route_intent_legacy` 的 `routing_key` 猜测链**（`conv:task` > `chat:{csid}:{initiator}` > `conv` > `msg`）只保留 `task:` 与"引用行/ @ 指名"两支，`chat:csid:initiator` 的"默认回到上一个会话"一支删除——它就是"高概率出错"的那一类。
 - ADR-099 的分层（D1）、无状态 Router + per-chat 队列（D2）、候选隔离（D4）、上下文三段式（D5）、chat/execute prompt 严格分离（D6）、失败降级（D8）**全部保留**；降级不再需要机器拼接 chat 摘要（级别 5 的默认目标是闲聊，不是某个会话）。
 
@@ -216,7 +216,7 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 
 执行会话里的 explore 块折叠了一次"多工具调用 + 思考"的过程；chat 里的块折叠的是**一个执行会话**的"多轮提问 + 回复 + 等待中的卡片"。语法照抄 explore 块，唯一发明是行的载荷：`user`/`assistant` 取代 `tool_call`/`tool_result`。
 
-**存储按轮，渲染按会话**（D3/D4 的呈现面）：一个执行会话在转录里只出现一次，成一个块；被它折叠的触发行（引用行 `in_reply_to` 指向的人类消息）不再作为独立气泡出现——一句话只出现在一个地方，D6 的重投递是同一规则的既例。
+**存储按轮，渲染按会话**（D3/D4 的呈现面）：一个执行会话在转录里只出现一次，成一个块；被它折叠的触发行（引用行 `in_reply_to` 指向的人类消息）不再作为独立气泡出现——一句话只出现在一个地方，D6 的重投递是同一规则的既例。**修订（2026-11-04）**：开新会话的那一轮（引用行 `meta.opened_new` 为真）是这条折叠规则的分叉——它的触发行保留为独立气泡，见文末修订章节。
 
 - **块的锚点**：该会话在已加载窗口里的**最新**引用行。长命会话跨天推进时块跟着往下走，而不是停在第一次出现的位置——这是"session 是渲染目标、不是存储单位"的落地形式。同一窗口里两个会话各自成块，块的先后由各自锚点决定。
 - **折叠头**：agent 头像 + 名字（块总是起新一轮，所以它戴气泡那套头像/名字）+ 任务名（优先会话标题，空则首轮触发消息正文截断——ADR-100 D8 的任务名解析逻辑原样搬到呈现层）+ `N 轮 · 状态词` + 任务号（D13：标签，不是链接）。
@@ -319,6 +319,16 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 **D9 的纪律不变**：门铃不建立 liveness，也不作为"进行中"的证据位——它只触发一次读，读回来的 `terminal = false` 才是判据。这条区分必须写明，否则本事件会被读成它刚刚废掉的东西。
 
 落点：[mqtt_payload.proto](../../../core/acowork-core/proto/mqtt_payload.proto)（字段 34）、[loop_.rs](../../../core/acowork-runtime/src/agent/loop_.rs)（`RoundState` / `close_turn_round` / `publish_round_state`）、[subsystems.rs](../../../core/acowork-runtime/src/startup/subsystems.rs)（relay 分支）、[client.rs](../../../core/acowork-runtime/src/mqtt/client.rs)（发布 + 线格式单测）、Desktop 的 [chat_mqtt.rs](../../../apps/acowork-desktop/src-tauri/src/commands/chat_mqtt.rs) → [chatStore.ts](../../../apps/acowork-desktop/src/stores/chatStore.ts) → [chatBlockStore.ts](../../../apps/acowork-desktop/src/stores/chatBlockStore.ts)，Mobile 的 [proto-wire.ts](../../../apps/acowork-mobile/src/lib/proto-wire.ts) → [presence.ts](../../../apps/acowork-mobile/src/lib/presence.ts) → [chatBlockStore.ts](../../../apps/acowork-mobile/src/stores/chatBlockStore.ts)。一个刻意的设计：`round_state` **不**进 Desktop 的 `CONTENT_EVENT_TYPES`——它的 `session_id` 是执行会话，不得被当成一个对话会话写进消息窗口。同批同步：设计文档 27 的呈现契约 §6.2（门铃与三个约）与 §6.5（Mobile 的门铃不走 `realtime.ts`），以及 MQTT 协议主题树 [protocols/zh/mqtt.md](../../protocols/zh/mqtt.md)。
+
+## 修订（2026-11-04）：呈现契约按 `opened_new` 分叉；act 空间更名 `exec_session_*` 族并新增只读 `exec_session_read_round`
+
+**修订一：折叠规则按 `opened_new` 分叉（呈现契约）**。缺陷形状：新开执行会话的那条用户消息被折叠进块后，独立气泡消失——新会话恰好出现在创造它的那句话旁边却没有可见的成对关系，块读起来像自说自话的孤儿，而不是"一问一答、有前因后果"的交换；续投轮没有这个问题，它的前因就是同一会话上一轮的输出。
+
+因此：引用行 `meta.opened_new === true` 且有触发行时，其 `user_message` **不**被块认领，保留为独立用户气泡，与块构成"问题 → 块"的成对布局；续投轮（`opened_new` 为假或缺省）维持折叠，"一句话只出现在一个地方"的纪律两个分支都不破——opener 轮在块内的行摘要改以 `assignment_brief`（D13：它本就是呈现提示）领头，不再画问题面板重涂触发行原文；无 brief 时回落轮次投影的 `user.body` 截断。块头任务名派生照旧用触发行正文（布局层仍保留 `triggerRow` 引用，只供标题派生）；定位映射里 opener 触发行的 seq 指向它自己的气泡而非块。数据层零改动：`user_message` 行本就由 Gateway 在路由前置盘，分叉只发生在呈现层。实现落点：Desktop 与 Mobile 的 `chatTranscriptGroups` 新增显式标记 `questionOnTranscript`（与 fan-out 的 `showUserLine = false` 区分：两者都是"不在块内重画"，但理由不同），认领集合、块 seq 表与定位映射随之前者；pinned 窗口逻辑（"永不隐藏携带本 chat 问题的轮"）对 opener 不再依赖折叠——原句已在转录独立可见。两端同一规则，防止契约漂移。
+
+**修订二：D6 的 act 空间更名为 `exec_session_*` 族**。`new_task` → `exec_session_create`，`propose_existing` → `exec_session_propose_continue`：名字描述的是操作对象（执行会话），不是模型的主观判断；两个 act 的授权边界一字不变（前者仍是唯一允许的投递且只能新建，后者仍只提议、确认卡、`why` 必填、级别 5 廉价出口照旧）。旧名连同初代 `dispatch` 进 `RETIRED_ACT_NAMES` 漂移守卫，内核 prompt 不得再出现它们；确认卡的 wire 字段 `allow_new_task` 是协议形状不是工具名，不改。
+
+同批新增只读 act `exec_session_read_round(target, rounds)`，补上"那个任务结果如何"此前没有的合法信息源：`target` 取本轮别名表里的候选（权限过滤后的集合，不新增授权面），`rounds` 钳 1–3；读的就是 D4 的轮次投影（侧表 fold + 两行有界读 + 附件窗背书），disk-only 故 Closed 会话照样可读；结果只进本轮 tool_result，**不进 durable**（引用行依旧无正文，Block B 照旧不投影轮次内容）；一切失败都是显式空洞，绝不整轮降级。Safety tail 相应放宽：由"永不声称执行会话做了什么"改为"只可转述 `exec_session_read_round` 本轮读回的内容，不得声称其进行中或将要做什么"。**不提供 `exec_session_send_msg`**：寻址归人，本修订不打开 D6 的静默投递禁令。改名与 prompt/tail 字面量变化会让 provider 前缀缓存 miss 一次，属预期；上下文与缓存的硬约束见设计 29 §11（执行会话信息进上下文只允许 Block C 动态区或 Block B 按 seq 确定性投影两条路，呈现层的视觉重排永不反馈到投影顺序）。
 
 ## 参考
 

@@ -1,8 +1,10 @@
 # Chat Session Context Orchestration Design (Chat Router)
 
-> Version: v1.1 | Updated: 2026-11-03
+> Version: v1.2 | Updated: 2026-11-04
 >
 > v1.1: chat kind vocabulary synced with [ADR-106](../../adr/en/ADR-106-chat-execution-reference-projection.md) — `execution_round` reference rows are not projected into the router context, and `interaction_request` / `turn_started` / `router_fallback` keep a projection only for historical rows (no longer written after P4 / P6).
+>
+> v1.2: the acts are renamed to `exec_session_create` / `exec_session_propose_continue`, the read-only `exec_session_read_round` is added, the retired `current` candidate column is dropped from the text, and the hard context-caching constraint is written down (see §11).
 >
 > Related: [ADR-099](../../adr/en/ADR-099-chat-session-llm-router.md) (Chat Router decision), [ADR-060](../../adr/en/ADR-060-prompt-cache-friendly-context-block-reorg.md) (stable prefix + append at the tail), [ADR-063](../../adr/en/ADR-063-package-level-prompt-override.md) (package-level prompt overrides), [ADR-066](../../adr/en/ADR-066-llm-provider-cache-tokens.md) (cache token accounting), Design 27 (Intent Messaging and Group Chat)
 
@@ -54,7 +56,7 @@ Block C and the current message are merged into one user message to avoid two co
                                  // only {{agent_name}} is substituted
 — otherwise the built-in default —
 [CHAT_ROUTER_BASE_PROMPT]        // Runtime constant (acowork_core::chat_prompt)
-                                 // role boundary / new_task·propose_existing contract / decision rules / safety rules
+                                 // role boundary / exec_session_* act contract (incl. exec_session_read_round) / decision rules / safety rules
 ## Persona                       // manifest fallback
 <persona text>
 ## Scenario                      // 1:1 or group, two stable variants
@@ -71,11 +73,11 @@ The order is fixed and the separator is fixed (`\n\n`); no content-based sorting
 The base is maintained by the Runtime and contains:
 
 1. Role boundary: you are the conversation front desk of `<agent display_name>`; you may answer, look a fact up, route, or create an execution session;
-2. Tool contract: the routing acts are only `new_task` (no `target`, so it can only open a session) and `propose_existing(target, why)` (a proposal that delivers nothing, and `why` is mandatory — a card with no reason hands the routing work back to the human); two read-only information tools are also exposed (`memory_recall`, `http_request` GET-only); the number of lookup rounds is a prompt-level soft limit ("usually zero, rarely one or two"), never a hard code cap;
+2. Tool contract: the routing acts are only `exec_session_create` (no `target`, so it can only open a session; formerly `new_task`) and `exec_session_propose_continue(target, why)` (a proposal that delivers nothing, and `why` is mandatory — a card with no reason hands the routing work back to the human; formerly `propose_existing`); the read-only information tools are `memory_recall` and `http_request` (GET-only, per enablement) plus the always-exposed `exec_session_read_round(target, rounds)` (added 2026-11-04, see §11); the number of lookup rounds is a prompt-level soft limit ("usually zero, rarely one or two"), never a hard code cap;
 3. Decision rules: answer / hand off / create / clarify (aligned with ADR-099's routing guidelines, whose core is the cost asymmetry of routing: a wrong handoff is far more expensive than a missed one — when unsure, ask);
 4. Safety rules: use only information in the candidate list; never restate other chats; never promise execution details; never @ another agent on the human's behalf.
 
-When a `chat.md` is present and non-blank it **replaces the whole built-in chat prompt body** (kernel + persona + scenario), with only `{{agent_name}}` substituted; absent, the built-in default is used. Two parts are never the file's to drop. First, the `# Safety` invariants are a non-trimmable tail the Runtime re-appends to the body on every turn (`chat_prompt::with_chat_prompt_tail`), so removing them from a `chat.md` has no effect on what the model sees. Second, the safety boundary is structural, not literal: the router only ever holds `new_task` / `propose_existing` and the two read-only tools, so rewriting the prompt cannot grant it a new capability (ADR-099 D6). A group's `chat.md` is also **writable only by its owner or an admin** (ADR-098 governance) and read by any participant, so one member cannot inject a prompt that steers another member's agent. The right-hand panel edits the body only — the `# Safety` tail is not shown there (the `chat-md` API returns the body with the tail stripped) and is re-applied by the store and the Runtime on save, so a member is never handed editable text that saving would silently revert.
+When a `chat.md` is present and non-blank it **replaces the whole built-in chat prompt body** (kernel + persona + scenario), with only `{{agent_name}}` substituted; absent, the built-in default is used. Two parts are never the file's to drop. First, the `# Safety` invariants are a non-trimmable tail the Runtime re-appends to the body on every turn (`chat_prompt::with_chat_prompt_tail`), so removing them from a `chat.md` has no effect on what the model sees. Second, the safety boundary is structural, not literal: the router only ever holds `exec_session_create` / `exec_session_propose_continue` and the read-only tools, so rewriting the prompt cannot grant it a new capability (ADR-099 D6). A group's `chat.md` is also **writable only by its owner or an admin** (ADR-098 governance) and read by any participant, so one member cannot inject a prompt that steers another member's agent. The right-hand panel edits the body only — the `# Safety` tail is not shown there (the `chat-md` API returns the body with the tail stripped) and is re-applied by the store and the Runtime on save, so a member is never handed editable text that saving would silently revert.
 
 ### 3.3 Persona and the `chat.md` precedence
 
@@ -234,14 +236,14 @@ The attachment line appears only when the turn actually carried files, and alway
 
 ```
 [candidates]
-S1  current  working  2m   chat   Fix login redirect
-S2           idle     3h   task   Review ADR-098
-S3           closed   2d   chat   Refactor auth middleware
+S1  working   2m    chat   Fix login redirect
+S2  idle      3h    task   Review ADR-098
+S3  closed    2d    chat   Refactor auth middleware
 ```
 
-Columns: alias, `current` marker, status, last activity (relative time allowed only here), source (chat/task), title. No session ids, owners, or models — fewer tokens and less leakage; the router may only use an alias in `propose_existing`; it cannot deliver through one.
+Columns: alias, status, last activity (relative time allowed only here), source (chat/task), title. No session ids, owners, or models — fewer tokens and less leakage; the router may only use an alias in `exec_session_propose_continue` or the read-only `exec_session_read_round`; it cannot deliver through one.
 
-Ordering: `current` first, the rest by `last_active_at` descending. The order is stable (ties broken by title) so the same candidate set renders identically every turn.
+Ordering: `last_active_at` descending. The order is stable (ties broken by title) so the same candidate set renders identically every turn. (The former `current` marker column was retired with ADR-106 P5 — candidates sort purely by recency, and the kernel prompt no longer teaches the column.)
 
 ### 5.3 Merge with the current message
 
@@ -254,8 +256,8 @@ speaker: alice
 now: 2026-10-21T14:03:00+08:00
 draft: (none)
 [candidates]
-S1  current  working  2m  chat  Fix login redirect
-S2           idle     3h  task  Review ADR-098
+S1  working   2m    chat   Fix login redirect
+S2  idle      3h    task   Review ADR-098
 
 [user message]
 Continuing the login redirect issue, and please check the review comments on ADR-098
@@ -284,8 +286,8 @@ The `ChatMessage.cache_control` field already exists (ADR-060); only the flaggin
 Byte-identical across turns:
 
 - `model` / `provider` (from the `chat_router` config, independent of messages);
-- `temperature` (default 0), `max_tokens` (default 8,192 as `chat_router.max_output_tokens`, clamped 1024-32768, settable in the config file and deliberately off the UI wire). The ceiling has to fit an information round's think + tool arguments + final text **and** a `new_task` brief. The old 2,048 did not fit the latter: the truncated response carried an incomplete tool-call JSON, `act_call()` found no act, and the whole turn degraded to a chat sentence — the user saw an agent message and no execution session was created. `finish_reason == "length"` (Anthropic's `max_tokens`, normalised to `length` by the provider layer) is now checked explicitly and degrades as a truncation rather than being read as a decision, so it no longer masquerades as `reply` / `empty reply` in the decision log;
-- `tools`: `new_task` + `propose_existing` plus the read-only information tools the agent has enabled (`memory_recall`, GET-only `http_request`), serialised from fixed literals in fixed field order — byte-stable for a given (binary version, enablement set). The act names the prompt teaches and the set advertised here are pinned to each other by a unit test (`tool.rs::the_prompt_teaches_exactly_the_tools_the_wire_offers`); drifting once was enough;
+- `temperature` (default 0), `max_tokens` (default 8,192 as `chat_router.max_output_tokens`, clamped 1024-32768, settable in the config file and deliberately off the UI wire). The ceiling has to fit an information round's think + tool arguments + final text **and** an `exec_session_create` brief. The old 2,048 did not fit the latter: the truncated response carried an incomplete tool-call JSON, `act_call()` found no act, and the whole turn degraded to a chat sentence — the user saw an agent message and no execution session was created. `finish_reason == "length"` (Anthropic's `max_tokens`, normalised to `length` by the provider layer) is now checked explicitly and degrades as a truncation rather than being read as a decision, so it no longer masquerades as `reply` / `empty reply` in the decision log;
+- `tools`: `exec_session_create` + `exec_session_propose_continue` plus the read-only information tools the agent has enabled (`memory_recall`, GET-only `http_request`) plus the always-present read-only `exec_session_read_round` at the tail, serialised from fixed literals in fixed field order — byte-stable for a given (binary version, enablement set). The act names the prompt teaches and the set advertised here are pinned to each other by a unit test (`tool.rs::the_prompt_teaches_exactly_the_tools_the_wire_offers`); drifting once was enough;
 - `tool_choice`: `auto`, never varying;
 - the `assistant(tool_calls)` / `tool` messages an information round produces live only inside that turn's request — never written back to chat history, never entering Block B.
 
@@ -359,3 +361,11 @@ Metrics are observational only and never change routing behaviour.
 | ADR-066 | Reuses cache-token accounting and hit-rate semantics |
 | ADR-096 | Candidates and history are read through bounded reads, never JSONL bodies |
 | Design 27 | Message vocabulary and write-back channels are unchanged; this design only decides what enters the model |
+
+## 11. Revision (2026-11-04): the act family rename, `exec_session_read_round`, and the hard caching constraint
+
+**The act family rename.** The router's two acts move from the historical nicknames `new_task` / `propose_existing` to `exec_session_create` / `exec_session_propose_continue`, in one family with the read-only tool: the names describe the object operated on (an execution session), not the model's subjective judgement ("is this a new task"). The old names join `RETIRED_ACT_NAMES`' drift guard, and the kernel prompt and the wire tool/parameter names stay pinned to each other by the existing unit tests; `allow_new_task` is the confirmation card's wire-protocol field and is not part of this rename. The rename and the literal changes cost one provider prefix-cache miss — expected, and stable from then on.
+
+**The new read-only act: `exec_session_read_round`.** Answering "how did that task turn out" previously had no legitimate information source: the `execution_round` reference row carries no body (D1), Block B does not project round content either (D4's write-time derivation serves the execution side), and the safety tail forbids claiming what an execution session did — together they left the model only a refusal. The new tool rides the same info-tool loop (under the same per-turn model-call timeout budget): `target` takes a candidate alias from this turn's alias table (the permission-filtered set — no new authorization surface), `rounds` clamps to 1–3; the implementation reuses the D4 round projection read in-process (sidecar fold + two bounded row reads + the attachment-window endorsement), disk-only so Closed sessions read fine; the answer body is cut at 2KB, the question summary at 512B, and the whole result passes `truncate_info_result`'s 8KB ceiling. Every failure (bad alias, unreadable, moved coordinates) is an explicit hole in the tool_result text — never a whole-turn degrade. There is no `exec_session_send_msg`: addressing stays with the human, keeping ADR-106 D6's silent-delivery ban. The safety tail relaxes accordingly to "you may report only what `exec_session_read_round` returned this turn; never claim what an execution session is doing or will do".
+
+**The hard caching constraint** (so the presentation change is never misread as a context reshuffle): sinking a block's anchor to its newest row happens in the presentation layer only; Block B's seq-deterministic projection is untouched, and the transcript's visual order was never the function that produces the model's order. Execution-session information may enter the router's context through exactly two doors: the Block C dynamic region (rebuilt every turn, outside the cached prefix), or Block B's seq-deterministic projection. Visual re-layout of execution blocks — including the presentation-contract fold fork by `opened_new` (see ADR-106's revision) — never feeds back into the projection order. The `execution_round` reference rows themselves are not projected into Block B for now: "knowing a round was dispatched and how it ended" is covered by `exec_session_read_round`, at no cost of prefix stability.
