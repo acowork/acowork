@@ -112,27 +112,27 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 
 由应用为你启动 Gateway。
 
-**第 1 步**——启动 Desktop App。
-**第 2 步**——在 Gateway 模式选择器中选择**本地**。
+- **第 1 步**——启动 Desktop App。
+- **第 2 步**——在 Gateway 模式选择器中选择**本地**。
 
 ### 2. 远程（Remote）
 
 连接运行在另一台机器上的 Gateway。
 
-**第 1 步**——在 Gateway 所在机器上启动它：
+- **第 1 步**——在 Gateway 所在机器上启动它：
 
 ```bash
 acowork-gateway --daemon
 ```
 
-**第 2 步**——启动 Desktop App。
-**第 3 步**——选择**远程**，填入 `http://<gateway-host>:19876`。
+- **第 2 步**——启动 Desktop App。
+- **第 3 步**——选择**远程**，填入 `http://<gateway-host>:19876`。
 
 ### 3. 中继（Relay）
 
 通过云端中继访问 Gateway。
 
-**第 1 步**——在 Gateway 所在机器的 `gateway.toml`
+- **第 1 步**——在 Gateway 所在机器的 `gateway.toml`
 （`~/.acowork/acowork-gateway/config/`）中启用隧道：
 
 ```toml
@@ -141,8 +141,8 @@ enabled = true
 url = "wss://<relay-domain>/tunnel"
 ```
 
-**第 2 步**——启动 Desktop App。
-**第 3 步**——选择**中继**，填入 `https://<gw-id>.<relay-domain>`。
+- **第 2 步**——启动 Desktop App。
+- **第 3 步**——选择**中继**，填入 `https://<gw-id>.<relay-domain>`。
 `<gw-id>` 在 Desktop App 的 Gateway 设置里可以看到。
 
 Agent 在应用内通过**创建 Agent 向导**创建。

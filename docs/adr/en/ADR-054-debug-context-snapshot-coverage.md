@@ -284,6 +284,7 @@ named.push(NamedSection::new("tool_definitions", tool_defs_str, req.model));
 // messages special-cased: metadata only, content lazily loaded from messages_by_iteration
 let messages_json = serde_json::to_string(history.messages())?;
 named.push(NamedSection::new("messages", messages_json, req.model));
+```
 
 The `build()` function itself is **unchanged** — `workspace_prompt_file` is still assembled into `system_content` as a `## Workspace Prompt File` section. What changes is that **the snapshot side no longer merges them**, so the UI can edit them separately.
 

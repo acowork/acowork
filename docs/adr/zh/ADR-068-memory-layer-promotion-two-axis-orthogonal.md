@@ -740,7 +740,6 @@ fn get_episodes_by_subtype(
 - Step 2a 不做谓词标准化(LLM 自由生成)
 - Step 2b 改用 embedding 相似度聚簇(不依赖字符串相等,也不依赖 canonical 池子)
 - 因此 Provider 不需要暴露 canonical predicate 查询接口
-```
 
 ### 3.6 沉淀层节点的 `source_episode_ids` 扩展
 
@@ -761,6 +760,7 @@ pub struct PromotionMetadata {
     pub llm_judge_confidence: f32,
     pub llm_judge_reasoning: String,
 }
+```
 
 (ProceduralNode 与 AutobiographicalNode 同样扩展)
 
