@@ -63,10 +63,10 @@ graph TD
 
 | # | 事实 | 位置 | 对 ADR-095 的意义 |
 |---|------|------|------------------|
-| F1 | `hybrid_search_full(label, query, embedding, k, text_w, vector_w, min_cosine)` 已实现：双路各取 `2k` 候选池 → 向量路 cosine 门控 → 加权 RRF（k=60）→ 去重截断 | [core/acowork-sqlite/src/retrieval.rs:51](../../../core/acowork-sqlite/src/retrieval.rs) | **通用融合引擎已存在**，D3 的"有界候选池 + 加权 RRF + 词法独立证据"结构无需新建，只需扩展返回值 |
+| F1 | `hybrid_search_full(label, query, embedding, k, text_w, vector_w, min_cosine)` 已实现：双路各取 `2k` 候选池 → 向量路 cosine 门控 → 加权 RRF（k=60）→ 去重截断 | [core/acowork-sqlite/src/retrieval.rs:51](../../../core/acowork-memory/src/sqlite/retrieval.rs) | **通用融合引擎已存在**，D3 的"有界候选池 + 加权 RRF + 词法独立证据"结构无需新建，只需扩展返回值 |
 | F2 | 融合结果只返回 `Vec<(u64, f64)>`（id + RRF 分数），**matched_by / 各路 rank / cosine 在融合处丢失** | 同上 | D4 的根因缺口：元数据必须先在引擎层保留 |
-| F3 | `memory_recall` 已是双查询形态：`MemoryQuery.embedding_text`（当前用户整句）→ 向量源；`MemoryQuery.query_text`（LLM 提取关键词）→ BM25 源；Semantic hint 权重 `(0.8, 0.2)` = 4:1 | [core/acowork-memory/src/manager.rs:287](../../../core/acowork-memory/src/manager.rs)、[manager.rs:964](../../../core/acowork-memory/src/manager.rs)、[tools/builtin/memory_recall.rs:187](../../../core/acowork-runtime/src/tools/builtin/memory_recall.rs) | D2 的"双查询表达"与 D3 的 4:1 权重**在 memory 路径已被验证**，是抽取通用原语的直接依据 |
-| F4 | 全局搜索 memory 走 `admin.rs::semantic_search`：同一查询文本驱动向量+文本两路、等权 `(1.0, 1.0)`、无 cosine floor，且 `global_search.rs` 把返回顺序改写为合成 `1.0 - i*1e-4` | [core/acowork-sqlite/src/admin.rs:102](../../../core/acowork-sqlite/src/admin.rs)、[core/acowork-runtime/src/http/global_search.rs:262](../../../core/acowork-runtime/src/http/global_search.rs) | 与 F3 是**同一引擎的两条平行调用路径**——收敛到 memory 已验证的策略即是复用 |
+| F3 | `memory_recall` 已是双查询形态：`MemoryQuery.embedding_text`（当前用户整句）→ 向量源；`MemoryQuery.query_text`（LLM 提取关键词）→ BM25 源；Semantic hint 权重 `(0.8, 0.2)` = 4:1 | [core/acowork-memory/src/manager.rs:287](../../../core/acowork-memory/src/manager.rs)、[manager.rs:964](../../../core/acowork-memory/src/manager.rs)、[tools/builtin/memory_recall.rs:187](../../../core/acowork-memory/src/service/mcp/tools.rs) | D2 的"双查询表达"与 D3 的 4:1 权重**在 memory 路径已被验证**，是抽取通用原语的直接依据 |
+| F4 | 全局搜索 memory 走 `admin.rs::semantic_search`：同一查询文本驱动向量+文本两路、等权 `(1.0, 1.0)`、无 cosine floor，且 `global_search.rs` 把返回顺序改写为合成 `1.0 - i*1e-4` | [core/acowork-sqlite/src/admin.rs:102](../../../core/acowork-memory/src/sqlite/admin.rs)、[core/acowork-runtime/src/http/global_search.rs:262](../../../core/acowork-runtime/src/http/global_search.rs) | 与 F3 是**同一引擎的两条平行调用路径**——收敛到 memory 已验证的策略即是复用 |
 | F5 | 全局搜索 conversation 走 `ConversationStore::search`：等权 `(1.0, 1.0)` + cosine floor `DEFAULT_MIN_COSINE=0.3`，单查询文本 | [core/acowork-sqlite/src/conversation.rs:283](../../../core/acowork-sqlite/src/conversation.rs) | D3 要求词法候选不受向量 floor 影响——现状已满足（floor 只门控向量路），保留 |
 | F6 | FTS 查询构造（空白切词、≥3 字符词项、短语引号转义、<3 字符 LIKE 回退）内嵌在 `text_search` 中；trigram tokenizer 下无空格中文整串按一个短语匹配 | [core/acowork-sqlite/src/lib.rs:841](../../../core/acowork-sqlite/src/lib.rs) | D2 的 term 编码/转义/上限**已有部分实现**；analyzer 应输出词项列表，把编码职责留在存储层（单一实现） |
 | F7 | `acowork-memory::keyword.rs` 是**写入时**关键词净化器（长度≤30、小写、去重、停用词、≤8 个），非查询时分析器 | [core/acowork-memory/src/keyword.rs](../../../core/acowork-memory/src/keyword.rs) | 其规则与停用词表可复用为查询 analyzer 的一部分（同一治理意图：防 LLM/整句污染 BM25） |
@@ -273,7 +273,7 @@ pub struct FusedHit {
     pub fused_rank: usize,
 }
 
-// acowork-sqlite/src/retrieval.rs — the engine.
+// core/acowork-memory/src/sqlite/retrieval.rs — the engine.
 impl SqliteStore {
     /// The single shared hybrid retrieval engine (ADR-095 D3).
     /// `lexical_query` drives BM25/FTS; `embedding` drives cosine.
@@ -339,7 +339,7 @@ pub struct SearchResult {
 }
 ```
 
-- `MatchedBy` / `FusedHit` / `FusionPolicy` 一律来自 `acowork-core::retrieval`（§2.1 原则 6）：`acowork-memory` 与 `acowork-sqlite` 各自只依赖 core 契约，**memory 不依赖 sqlite，sqlite 也不从 memory 借域类型**。`MemoryProvider` trait（定义在 memory，实现在 sqlite）增加 `hybrid_search_detailed`，返回 `Vec<acowork_core::retrieval::FusedHit>`；带默认实现（委托 `hybrid_search_full`、元数据降级为 `None`），保证 Grafeo 遗留实现/测试桩不破。
+- `MatchedBy` / `FusedHit` / `FusionPolicy` 一律来自 `acowork-core::retrieval`（§2.1 原则 6）：`acowork-memory` 与 `acowork-sqlite` 各自只依赖 core 契约，**memory 不依赖 sqlite，sqlite 也不从 memory 借域类型**。`MemoryProvider` trait（定义在 `core/acowork-memory/src/provider.rs`，实现于 SQLite 后端）增加 `hybrid_search_detailed`，返回 `Vec<acowork_core::retrieval::FusedHit>`；带默认实现（委托 `hybrid_search_full`、元数据降级为 `None`），使既有实现与测试桩无需同步改动。
 
 #### `manager.rs::retrieve`
 

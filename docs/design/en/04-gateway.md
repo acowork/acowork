@@ -1,7 +1,7 @@
 ﻿# Gateway Component Detailed Design
 
 > Version: v3.2 | Last Updated: 2026-07-12
-> Major revision in this version: §9 IPC section fully aligned with [ADR-033](./docs/design/zh/../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) — Gateway ↔ Runtime channel replaced with **MQTT pub/sub + HTTP reverse proxy**. HTTP API still keeps REST interfaces; streaming events changed from WebSocket to MQTT topic subscription.
+> Major revision in this version: §9 IPC section fully aligned with [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md) — Gateway ↔ Runtime channel replaced with **MQTT pub/sub + HTTP reverse proxy**. HTTP API still keeps REST interfaces; streaming events changed from WebSocket to MQTT topic subscription.
 
 ---
 
@@ -153,13 +153,13 @@ Coordinates concurrent requests from multiple Agents to the same LLM Provider, a
 - **Each Agent's workspace**: `~/.local/share/agent-gateway/agents/<agent_id>/workspace/`:
   - `data/`: Copied from package, read-write.
   - `config/`: User-modifiable configuration (initially from package config).
-  - `memory/`: Private SQLite memory layer database file (`private.sqlite`).
+  - `memory/`: Workspace store SQLite file (`private.sqlite`) — carries the session meta and the conversation index (ADR-082). Memory nodes live in the standalone memory service (`$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`, ADR-101).
   - `runtime/`: Temporary files (pid, HTTP port).
 - **Logs**: Gateway collects stdout/stderr from all Agents, writes to `~/.local/share/agent-gateway/logs/`, supports filtering by Agent.
 
 ## 9. HTTP API (Desktop App / CLI Access Layer)
 
-> **Current implementation status**: HTTP API is fully implemented based on Axum, providing REST interfaces; streaming events go through MQTT (see §9.1 dual-protocol architecture and [`docs/protocols/zh/README.md`](../../zh/protocols/README.md)). The following interface definitions reflect actual implementation, but for documentation conciseness, only core routes are listed. Complete route list see code `crates/acowork-gateway/src/http/routes.rs`.
+> **Current implementation status**: HTTP API is fully implemented based on Axum, providing REST interfaces; streaming events go through MQTT (see §9.1 dual-protocol architecture and [`docs/protocols/zh/README.md`](../../protocols/zh/README.md)). The following interface definitions reflect actual implementation, but for documentation conciseness, only core routes are listed. Complete route list see code `crates/acowork-gateway/src/http/routes.rs`.
 
 The IPC between Gateway and Agent Runtime, starting from [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md), is unified as **MQTT pub/sub + HTTP reverse proxy**: MQTT handles real-time event push (chat chunk, tool_call, done, device status Will+Retained), HTTP reverse proxy handles large data queries and session history pulls. HTTP API as the unified access layer for Desktop App and CLI, invisible to Runtime.
 

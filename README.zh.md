@@ -109,17 +109,18 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 git clone https://github.com/tranxon/ACowork.git
 cd ACowork
 
-# 1. 安装 ONNX Runtime（一次性）并编译后端
-./dev/common/setup_ort.sh      # Linux / macOS / WSL / Git Bash
-./dev/common/build_core.sh     # Windows：.\dev\common\setup_ort.ps1 / build_core.ps1
+# 1. 编译后端（Gateway + Runtime + Node Agent）
+./dev/common/build_core.sh     # Windows：.\dev\common\build_core.ps1
 
 # 2. 启动 Desktop App
 cd apps/acowork-desktop
 npm install && npm run tauri dev
 ```
 
-`build_core.*` 负责编译 Gateway、Runtime 与 Node Agent；Desktop App 是 Tauri v2 壳，React/TS 前端通过 HTTP
-与 Gateway 对话。加 `--debug` / `-Debug` 可切到调试构建并打开详细日志。
+`build_core.*` 会自行处理 ONNX Runtime——探测 `.ort/` 下的本地安装；若未找到则提示下载（macOS 上通过
+cargo 拉取，Apple Silicon 自动启用 CoreML 加速）。加 `--debug` / `-Debug` 可切到调试构建并打开详细日志。
+
+Desktop App 是 Tauri v2 壳，React/TS 前端通过 HTTP 与 Gateway 对话。
 
 > 前置依赖、打包、CI 与部署：
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)

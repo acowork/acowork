@@ -113,17 +113,19 @@ staging — prefer them over calling `cargo` directly.
 git clone https://github.com/tranxon/ACowork.git
 cd ACowork
 
-# 1. Install ONNX Runtime (one-time) and build the backend
-./dev/common/setup_ort.sh      # Linux / macOS / WSL / Git Bash
-./dev/common/build_core.sh     # Windows: .\dev\common\setup_ort.ps1 / build_core.ps1
+# 1. Build the backend (Gateway + Runtime + Node Agent)
+./dev/common/build_core.sh     # Windows: .\dev\common\build_core.ps1
 
 # 2. Launch the Desktop App
 cd apps/acowork-desktop
 npm install && npm run tauri dev
 ```
 
-`build_core.*` builds the Gateway, Runtime, and Node Agent; the Desktop App is a Tauri v2 shell whose React/TS
-frontend talks to the Gateway over HTTP. Add `--debug` / `-Debug` for a debug build with verbose logs.
+`build_core.*` handles ONNX Runtime itself — it detects a local install under `.ort/`, and on a
+missing one offers to fetch it (on macOS it downloads ORT via cargo with CoreML acceleration on Apple
+Silicon). Add `--debug` / `-Debug` for a debug build with verbose logs.
+
+The Desktop App is a Tauri v2 shell whose React/TS frontend talks to the Gateway over HTTP.
 
 > Prerequisites, packaging, CI, and deployment:
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)

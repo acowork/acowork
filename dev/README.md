@@ -18,8 +18,9 @@ One-off probes, debug helpers, and ad-hoc experiments do not belong here — see
 | Python 3 + `pillow` | frontend smoke tests, store logos |
 | PowerShell 7 (`pwsh`) | the `.ps1` scripts on Windows |
 
-ONNX Runtime is **not** a manual prerequisite — `setup_ort.*` installs it into
-`.ort/`, and `ort_env.js` makes Tauri auto-detect it on every platform.
+ONNX Runtime is **not** a manual prerequisite — `build_core.*` probes `.ort/` and offers to
+run `setup_ort.*` in place when it is missing, and `ort_env.js` makes Tauri auto-detect it
+on every platform.
 
 ## Layout
 
@@ -36,15 +37,20 @@ Scripts are grouped by **scope**, not by file type:
 ## First build
 
 ```bash
-./dev/common/setup_ort.sh           # Linux only (macOS: skip — build_core.sh
-                                    # downloads ORT itself via cargo download-ort)
-./dev/common/setup_ort.ps1          # Windows
 ./dev/common/build_core.sh          # or build_core.ps1 on Windows
 ```
 
 `build_core.*` builds the Gateway, Runtime, and Node Agent in the release
 profile. `-Debug` / `--debug` switches to the debug profile and auto-raises
 `ACOWORK_GATEWAY_LOG_LEVEL` to `debug` for every process it spawns.
+
+ONNX Runtime is handled by the same script — there is no separate setup step.
+It probes `.ort/` for a local install and, when one is missing, offers to run
+`setup_ort.*` in place (interactive terminals only; CI and piped stdin keep
+the hard-exit behaviour and never block on input). On macOS the embedding
+runtime is built with `--features download-ort[,coreml]` instead, so
+`setup_ort.sh` is not needed there at all. To install ORT up front, run
+`setup_ort.sh` (Linux) or `setup_ort.ps1` (Windows) yourself.
 
 ## Build and run
 

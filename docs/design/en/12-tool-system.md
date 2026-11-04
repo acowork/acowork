@@ -33,7 +33,7 @@ The following tools are built-in implementations of Agent Runtime; Agents can de
 
 | Tool Name | Function | Required Permission | Description |
 |-----------|----------|---------------------|-------------|
-| ~~`memory_recall`~~ | ~~Semantic search of private SQLite memory layer~~ | ~~`memory:read`~~ | **Migrated** — ADR-101: memory is a standalone service now, so this tool is `mcp_memory__memory_recall` on the Gateway-hosted memory MCP. No permission domain; per-tool opt-in happens in `agent_mcp_tools.json` (ADR-069). Hybrid search (HNSW + BM25) + associative diffusion semantics unchanged |
+| ~~`memory_recall`~~ | ~~Semantic search of private SQLite memory layer~~ | ~~`memory:read`~~ | **Migrated** — ADR-101: memory is a standalone service now, so this tool is `mcp_memory__memory_recall` on the Gateway-hosted memory MCP. No permission domain; per-tool opt-in happens in `agent_mcp_tools.json` (ADR-069). Hybrid retrieval semantics changed with ADR-082: text search is FTS5 and vectors are scanned brute-force (no HNSW); associative diffusion was never implemented |
 | ~~`memory_store`~~ | ~~Write to private SQLite memory layer~~ | ~~`memory:write`~~ | **Migrated** — same as above, now `mcp_memory__memory_store`; real-time extraction, the five types and the importance / privacy parameters keep their semantics, only the call channel changed |
 | `http_request` | HTTP requests (GET/POST/PUT/DELETE) | `network:<url_pattern>` | Supports method parameter for HTTP method selection; JSON responses auto-parsed; supports JSON body and form |
 | `web_fetch` | Fetch web page content | `network:<url_pattern>` | HTML → Markdown conversion, Agent directly receives readable text |

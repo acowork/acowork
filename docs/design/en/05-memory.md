@@ -570,7 +570,7 @@ This is a comprehensive architecture document covering memory layers, retrieval 
 - **Compaction = Distillation** (ADR-011): single LLM call for both memory replacement and experience layer writing
 - **Privacy levels** (Public/Personal/Sensitive) for package sharing
 - **Forgetting mechanisms** with three-factor decay and Dormant→Purge lifecycle
-- **SQLite-native** HNSW + BM25 + RRF hybrid retrieval, with a dual-source query split (`embedding_text` = user message → vector, `query_text` = LLM keywords → BM25)
+- **SQLite-native** FTS5 + brute-force vector + RRF hybrid retrieval, with a dual-source query split (`embedding_text` = user message → vector, `query_text` = LLM keywords → lexical)
 - **Associative diffusion**: design goal only — never implemented; the `expand_hops` field was removed as dead code (backend is SQLite since ADR-082, no graph traversal)
 
 For full details on sections 4.2 (Offline Consolidation), 4.3 (Conflict Detection), 4.4 (Pending → Active Promotion), 4.5 (LLM Judge), 4.6 (Embedding Update), and chapters 5-11 (Quality Framework, Self-Evaluation, etc.), see the Chinese source document `docs/design/zh/05-memory.md`.

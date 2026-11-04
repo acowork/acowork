@@ -2,7 +2,11 @@
 
 > 版本：v3.13 | 更新日期：2026-05-28
 
-> 本文档定义 ACowork Agent 的对话持久化架构，采用"原始文件 + 提炼记忆"双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。主要变更（v3.13）：**上下文压缩策略简化**（§1.8）：放弃程序化折叠策略，压缩简化为三阶段（70% 告警 → 80% LLM 摘要 → 95% emergency_trim），移除 BudgetGuard per-session 配额机制——见 [ADR-010](../adr/ADR-010-context-compression-simplification.md)。主要变更（v3.12）：**Token 预算分配策略**（§1.8）：per-session 隔离 + 全局上限；**JSONL 安全性保证**（§1.9）：轮转事务性、并发读写保护、Episode offset 原子更新；IPC 消息格式见通信协议文档（§06-communication.md §1.5）。主要变更（v3.11）：Session Actor 多会话并发模型（§1.7）、selectedSession 前端模型（§1.7）、配置作用域矩阵（§1.8）。主要变更（v3.10）：SQLite 记忆层 private.sqlite、Session 选择器、打包数据隔离、异步扫描、Episode consolidated 状态、巩固产出三类节点。
+> 本文档定义 ACowork Agent 的对话持久化架构，采用"原始文件 + 提炼记忆"双层设计。原始对话以 JSONL 格式按 session 存储，用于界面渲染和历史回放；Episode 存储从对话提炼的情景记忆摘要，服务于检索和关联扩散。
+>
+> **存储位置更正（ADR-082 / ADR-101）**：v3.10 引入的 "SQLite 记忆层 `private.sqlite`" 已被后续 ADR 取代——`private.sqlite` 现在只承载 **会话元数据与对话索引**（[ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)），记忆节点本身迁至独立的记忆服务 `memory.db`（[ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)）。本文 §0.2 架构图已按新布局更新；下文其余章节描述的是 v3.13 时期的设计，内存管理、检索与提炼管线的实现细节以 `05-memory.md` 与 ADR 为准。
+>
+> 主要变更（v3.13）：**上下文压缩策略简化**（§1.8）：放弃程序化折叠策略，压缩简化为三阶段（70% 告警 → 80% LLM 摘要 → 95% emergency_trim），移除 BudgetGuard per-session 配额机制——见 [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md)。主要变更（v3.12）：**Token 预算分配策略**（§1.8）：per-session 隔离 + 全局上限；**JSONL 安全性保证**（§1.9）：轮转事务性、并发读写保护、Episode offset 原子更新；IPC 消息格式见通信协议文档（§06-communication.md §1.5）。主要变更（v3.11）：Session Actor 多会话并发模型（§1.7）、selectedSession 前端模型（§1.7）、配置作用域矩阵（§1.8）。主要变更（v3.10）：SQLite 记忆层 private.sqlite、Session 选择器、打包数据隔离、异步扫描、Episode consolidated 状态、巩固产出三类节点。
 
 **交叉引用**：
 - Session Actor 架构：本文档 §1.7
@@ -10,7 +14,7 @@
 - Session IPC 消息格式：`06-communication.md` §1.5
 - Episode 提炼触发点：`03-agent-runtime.md` §2（主循环图 §②.5 LLM 摘要时 和 §⑦ Session 结束时）
 - Token 预算管理策略：本文档 §1.8
-- 上下文压缩简化决策：[ADR-010](../adr/ADR-010-context-compression-simplification.md)
+- 上下文压缩简化决策：[ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md)
 - JSONL 安全保证（轮转事务性/并发读写/offset）：本文档 §1.9
 - 会话管理 gRPC Proto 定义：`06-communication.md` §1.5
 
@@ -42,8 +46,8 @@
 │  提炼记忆层（Episode）                                    │
 │  ─────────────────────────                                       │
 │  职责：存储从对话提炼的情景记忆摘要，服务于检索和关联扩散         │
-│  格式：SQLite `episodes` 行（LPG Label）                         │
-│  存储：<agent_workspace>/memory/private.sqlite                   │
+│  格式：记忆服务 SQLite 节点行（`Episodic` label，`props` JSON 列）│
+│  存储：<memory_service>/instances/<instance_id>/memory.db        │
 │  消费者：Runtime 记忆检索、巩固管道（Episode → 沉淀层节点）    │
 │  生命周期：天→周，巩固后晋升至沉淀层                              │
 └─────────────────────────────────────────────────────────────────┘

@@ -7,7 +7,7 @@
 - [ADR-051](./ADR-051-runtime-memory-provider-decoupling.md)(Runtime 与 Grafeo 解耦)
 - [ADR-057](./ADR-057-compaction-distillation-into-graph.md)(压缩蒸馏入图,triples 撤回)
 - [ADR-062 §0、§6.2.1](./ADR-062-memory-quality-config-and-retrieval-gate.md)(记忆质量门禁、keyword sanitize)
-- [05-memory.md §0、§2、§3、§4](../design/zh/05-memory.md)(分层与巩固设计基线)
+- [05-memory.md §0、§2、§3、§4](../../design/zh/05-memory.md)(分层与巩固设计基线)
 
 ---
 
@@ -280,18 +280,18 @@ pub struct Episode {
 
 | 位置 | 当前 | 删除原因 |
 |---|---|---|
-| [`instant.rs:181-182`](../../core/acowork-grafeo/src/consolidation/instant.rs#L181) | `if let Some(ref autobio) = input.autobiographical { return process_autobiographical(...); }` | LLM 不再传 autobiographical |
-| [`instant.rs:185-187`](../../core/acowork-grafeo/src/consolidation/instant.rs#L185) | `if matches!(input.sub_type, KnowledgeSubType::Procedure) { return process_procedure(...); }` | Procedural 不再由 LLM 直写 |
-| [`instant.rs:152-200`](../../core/acowork-grafeo/src/consolidation/instant.rs#L152) 整段 `process_memory_store` | LLM 写入 → 沉淀层 完整 pipeline | 整段删除,LLM 入口只调 `store_episode` |
-| [`instant.rs:340-440`](../../core/acowork-grafeo/src/consolidation/instant.rs#L340) `process_procedure` | ProceduralNode 创建 | 删除,改由 `EpisodicDistiller` 调 `store_procedural` |
-| [`instant.rs:448-525`](../../core/acowork-grafeo/src/consolidation/instant.rs#L448) `process_autobiographical` | autobiographical 写入 | 删除,改由 `EpisodicDistiller` + manifest bootstrap 调用 |
-| [`instant.rs:79-91`](../../core/acowork-grafeo/src/consolidation/instant.rs#L79) `derive_autobiographical_key` History nanos 分支 | append-only milestone key | 删除,History 完全由离线归纳器决定 |
-| [`offline.rs:225`](../../core/acowork-grafeo/src/consolidation/offline.rs#L225) `compress_history_nodes` | 10 条 History 自动合并 | 删除,旧设施下线 |
-| [`offline.rs:718-810`](../../core/acowork-grafeo/src/consolidation/offline.rs#L718) 相关单测 | History 合并测试 | 删除 |
-| [`memory_store.rs:18-26`](../../core/acowork-runtime/src/tools/builtin/memory_store.rs#L18) `AUTOBIO_DEFAULT_CONFIDENCE` 常量 | autobiographical 默认 0.85 | 删除 |
-| [`memory_store.rs:214-256`](../../core/acowork-runtime/src/tools/builtin/memory_store.rs#L214) autobiographical input 装配 | autobiographical 参数解析 | 删除 |
-| [`memory_store.rs:855-1057`](../../core/acowork-runtime/src/tools/builtin/memory_store.rs#L855) autobiographical 单测 4 个 | schema 行为测试 | 删除 |
-| [`distill.rs:5-12`](../../core/acowork-grafeo/src/consolidation/distill.rs#L5) 注释 | "knowledge updates now flow through memory_store tool / procedural creation paths" | **改写**:明确"LLM 入口仅写 Episodic,沉淀层由 EpisodicDistiller 离线产生" |
+| [`instant.rs:181-182`](../../../core/acowork-memory/src/consolidation/distiller.rs) | `if let Some(ref autobio) = input.autobiographical { return process_autobiographical(...); }` | LLM 不再传 autobiographical |
+| [`instant.rs:185-187`](../../../core/acowork-memory/src/consolidation/distiller.rs) | `if matches!(input.sub_type, KnowledgeSubType::Procedure) { return process_procedure(...); }` | Procedural 不再由 LLM 直写 |
+| [`instant.rs:152-200`](../../../core/acowork-memory/src/consolidation/distiller.rs) 整段 `process_memory_store` | LLM 写入 → 沉淀层 完整 pipeline | 整段删除,LLM 入口只调 `store_episode` |
+| [`instant.rs:340-440`](../../../core/acowork-memory/src/consolidation/distiller.rs) `process_procedure` | ProceduralNode 创建 | 删除,改由 `EpisodicDistiller` 调 `store_procedural` |
+| [`instant.rs:448-525`](../../../core/acowork-memory/src/consolidation/distiller.rs) `process_autobiographical` | autobiographical 写入 | 删除,改由 `EpisodicDistiller` + manifest bootstrap 调用 |
+| [`instant.rs:79-91`](../../../core/acowork-memory/src/consolidation/distiller.rs) `derive_autobiographical_key` History nanos 分支 | append-only milestone key | 删除,History 完全由离线归纳器决定 |
+| [`offline.rs:225`](../../../core/acowork-memory/src/consolidation/distiller.rs) `compress_history_nodes` | 10 条 History 自动合并 | 删除,旧设施下线 |
+| [`offline.rs:718-810`](../../../core/acowork-memory/src/consolidation/distiller.rs) 相关单测 | History 合并测试 | 删除 |
+| [`memory_store.rs:18-26``memory_store.rs:18` `AUTOBIO_DEFAULT_CONFIDENCE` 常量 | autobiographical 默认 0.85 | 删除 |
+| [`memory_store.rs:214-256``memory_store.rs:214` autobiographical input 装配 | autobiographical 参数解析 | 删除 |
+| [`memory_store.rs:855-1057``memory_store.rs:855` autobiographical 单测 4 个 | schema 行为测试 | 删除 |
+| [`distill.rs:5-12`](../../../core/acowork-memory/src/consolidation/distiller.rs) 注释 | "knowledge updates now flow through memory_store tool / procedural creation paths" | **改写**:明确"LLM 入口仅写 Episodic,沉淀层由 EpisodicDistiller 离线产生" |
 | `generalization.rs::generalize_patterns_with_config` 中扫描 input | 曾从 episodic + (action, tool_calls) 元组提取 | **下线**(2026-09 revision)— 该函数已无生产调用;`(trigger_condition, action_pattern)` 提取改由 `EpisodicDistiller::promote_procedures` 扫描 `Episode.knowledge_subtype=Procedure` + 服务端 LLM 完成,见 §3.4.4 |
 
 ### 3.4 `EpisodicDistiller` 设计(本 ADR 的核心)
@@ -299,7 +299,7 @@ pub struct Episode {
 #### 3.4.1 组件位置与接口
 
 ```
-core/acowork-grafeo/src/consolidation/distiller.rs   (新文件)
+core/acowork-memory/src/consolidation/distiller.rs   (新文件)
 core/acowork-memory/src/consolidation.rs              (新增 DistillerConfig / DistillerResult 类型)
 ```
 
@@ -352,7 +352,7 @@ pub enum PromotionDecision {
 ```
 
 ```rust
-// core/acowork-grafeo/src/consolidation/distiller.rs
+// core/acowork-memory/src/consolidation/distiller.rs
 pub trait EpisodicDistiller: Send + Sync {
     async fn run(
         &self,
@@ -745,7 +745,7 @@ fn get_episodes_by_subtype(
 ### 3.6 沉淀层节点的 `source_episode_ids` 扩展
 
 ```rust
-// core/acowork-grafeo/src/types.rs:171
+// core/acowork-memory/src/types.rs:171
 pub struct KnowledgeNode {
     // ... 现有字段 ...
     pub source_episode_id: Option<NodeId>,         // 单值(兼容旧数据)

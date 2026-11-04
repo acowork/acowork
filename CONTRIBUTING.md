@@ -44,9 +44,8 @@ cd ACowork
 # 2. Branch off master
 git checkout -b fix/<short-slug>
 
-# 3. Install ONNX Runtime (one-time; see README for the manual path)
-./dev/common/setup_ort.sh          # Linux / macOS / WSL / Git Bash
-.\dev\common\setup_ort.ps1         # Windows PowerShell
+# 3. Build the backend (also sets up ONNX Runtime on first run)
+./dev/common/build_core.sh         # Windows: .\dev\common\build_core.ps1
 
 # 4. Make the change, then run the full gate
 ./dev/ci.sh all
@@ -100,8 +99,9 @@ answered by an ADR that already decided the question, including the reason.
 in `core/Cargo.toml` is what carries dependency constraints. If you bump a dependency,
 bump the floor in the same commit.
 
-ONNX Runtime is **not** a manual prerequisite — `dev/common/setup_ort.*` installs it into
-`.ort/`, and `dev/ort_env.js` makes Tauri auto-detect it on every platform.
+ONNX Runtime is **not** a manual prerequisite — `dev/common/build_core.*` probes `.ort/` and
+offers to run `setup_ort.*` in place when it is missing, and `dev/ort_env.js` makes Tauri
+auto-detect it on every platform.
 
 ### Building
 
