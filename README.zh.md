@@ -147,7 +147,11 @@ url = "wss://<relay-domain>/tunnel"
 
 Agent 在应用内通过**创建 Agent 向导**创建。
 
-### 从源码编译
+---
+
+## 🔨 从源码编译
+
+开发构建——原生窗口 + 前端热更新：
 
 ```bash
 cd apps/acowork-desktop

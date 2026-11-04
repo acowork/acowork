@@ -150,7 +150,11 @@ The `<gw-id>` is shown in the Desktop App's Gateway settings.
 
 Agents are created through the **Create Agent wizard** in the app.
 
-### Building from source
+---
+
+## 🔨 Building from Source
+
+Development build — native window with a hot-reloading frontend:
 
 ```bash
 cd apps/acowork-desktop
