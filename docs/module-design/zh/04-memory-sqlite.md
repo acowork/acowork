@@ -344,7 +344,7 @@ pub enum Error {
 
 下面这些能力在 `acowork-grafeo` 时代存在，但 ADR-082 实施后已下线。**新代码不应再调用**：
 
-- ❌ `grafeo-engine` crates（grafeo/gradfo-common/gradfo-core）—— crate 已从 workspace 删除。
+- ❌ `grafeo-engine` crates（grafeo / grafeo-common / grafeo-core）—— crate 已从 workspace 删除。
 - ❌ `grafeo-engine` 原生 LPG / GQL / HNSW / BM25 / PageRank / CDC / 社区检测 API。
 - ❌ `MemoryProvider` 的 `graph_expand_*` / `create_memory_edge` / `apply_pagerank_boost` 方法（ADR-082 D4 删除）。
 - ❌ `.grafeo` 单文件存储 —— 历史工作树残留（`memory/private.grafeo*`）可物理删除。

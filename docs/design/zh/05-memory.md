@@ -141,7 +141,7 @@ Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下�
 </user_intent>
 ```
 
-- **summary**：自然语言摘要文本，存入 `Episode.content`，同时用于向量检索（HNSW）与 BM25 全文匹配
+- **summary**：自然语言摘要文本，存入 `Episode.content`，同时用于向量检索（内存缓存 + 暴力扫）与 FTS5 全文匹配
 - **user_intent**：当前对话用户的核心意图（可选块），存入 `Episode.metadata.user_intent`，便于历史回放时还原用户目标
 
 沉淀层落地收敛为两条语义管道（ADR-068 2026-09 revision）：
@@ -771,7 +771,7 @@ Level 3（内存模式）
    │
    ▼
 ① 并行检索两层数据
-   ├─ 经历层 hybrid_search（label=Episodic）：sqlite-vss HNSW + FTS5 + RRF
+   ├─ 经历层 hybrid_search（label=Episodic）：向量内存缓存暴力扫 + FTS5 + RRF
    │   返回 Top-K 相似情景
    └─ 沉淀层 hybrid_search（label=Knowledge/Procedural/Autobiographical）：同上
        返回 Top-K 匹配知识

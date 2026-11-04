@@ -106,87 +106,67 @@ same protocol path lights up. The Gateway has **zero local-vs-remote code branch
 
 ## 🚀 Quick Start
 
-Cross-platform build scripts under [`dev/`](./dev/) handle ONNX Runtime discovery, profile switching, and resource
-staging — prefer them over calling `cargo` directly.
+Install the Desktop App for your platform — Windows `.msi`, macOS `.dmg`, Linux `.deb` / `.rpm` /
+AppImage. The installer bundles the Gateway and every service it supervises.
+
+On first launch, pick one of three Gateway modes.
+
+### 1. Local
+
+The app starts a Gateway for you.
+
+- **Step 1** — launch the Desktop App.
+- **Step 2** — choose **Local** in the Gateway mode picker.
+
+### 2. Remote
+
+Connect to a Gateway running on another machine.
+
+- **Step 1** — on the Gateway machine, start it:
 
 ```bash
-git clone https://github.com/tranxon/ACowork.git
-cd ACowork
-
-# 1. Install ONNX Runtime (one-time) and build the backend
-./dev/common/setup_ort.sh      # Linux / macOS / WSL / Git Bash
-./dev/common/build_core.sh     # Windows: .\dev\common\setup_ort.ps1 / build_core.ps1
-
-# 2. Launch the Desktop App
-cd apps/acowork-desktop
-npm install && npm run tauri dev
+acowork-gateway --daemon
 ```
 
-`build_core.*` builds the Gateway, Runtime, and Node Agent; the Desktop App is a Tauri v2 shell whose React/TS
-frontend talks to the Gateway over HTTP. Add `--debug` / `-Debug` for a debug build with verbose logs.
+- **Step 2** — launch the Desktop App.
+- **Step 3** — choose **Remote** and enter `http://<gateway-host>:19876`.
 
-> Prerequisites, packaging, CI, and deployment:
+### 3. Relay
+
+Reach a Gateway through the cloud relay.
+
+- **Step 1** — on the Gateway machine, enable the tunnel in `gateway.toml`
+(`~/.acowork/acowork-gateway/config/`):
+
+```toml
+[relay]
+enabled = true
+url = "wss://<relay-domain>/tunnel"
+```
+
+- **Step 2** — launch the Desktop App.
+- **Step 3** — choose **Relay** and enter `https://<gw-id>.<relay-domain>`.
+The `<gw-id>` is shown in the Desktop App's Gateway settings.
+
+Agents are created through the **Create Agent wizard** in the app.
+
+> Building from source, packaging, CI, and deployment:
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
 
 ### ☁️ Remote access (optional)
 
-By default Gateway binds HTTP/MQTT to localhost only. To reach a NAT'd Gateway from the public internet, deploy
-`acowork-relay` — a **thin, protocol-agnostic relay**: Gateway dials out one WSS tunnel, the relay routes traffic
-purely by TLS SNI / Host header and never parses HTTP or MQTT. The relay holds **zero accounts and zero secrets**;
-all authentication is decided by your Gateway.
+Gateway binds HTTP/MQTT to localhost only. To reach it from the public internet, deploy `acowork-relay`
+— a thin, protocol-agnostic relay: the Gateway dials out one WSS tunnel, the relay routes traffic by TLS SNI /
+Host header, and all authentication is decided by your Gateway.
 
 - Design: [`docs/design/zh/24-cloud-relay-remote-access.md`](./docs/design/zh/24-cloud-relay-remote-access.md)
 - Deploy (Cloudflare DNS + Aliyun ECS): [`docs/runbooks/relay-ecs-cloudflare-deploy.md`](./docs/runbooks/relay-ecs-cloudflare-deploy.md)
 - Self-host in mainland China (ICP filing): [`docs/runbooks/relay-selfhost-cn-deploy.md`](./docs/runbooks/relay-selfhost-cn-deploy.md)
 
-### ✍️ Try it: write a manifest in 30 seconds
-
-```toml
-# examples/qa-agent/manifest.toml
-[package]
-id = "com.example.qa-agent"
-name = "Quality Assurance"
-display_name = "QA-Tom"
-role = "QA"
-version = "1.0.0"
-
-[llm]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[permissions]
-tools = ["rag_query", "read_file", "write_file"]
-```
-
-```markdown
-<!-- prompts/system.md -->
-You are a QA Agent, helping users with quality management and code review.
-```
-
-Then build & sign:
-
-```bash
-./dev/common/build-agent.sh examples/qa-agent   # produces com.example.qa-agent.agent
-```
-
 > **Status**: ACowork is in **alpha**. The Gateway, Runtime, memory engine, and Desktop App are under active
 > development. See [Roadmap](#-roadmap) for what is shipping today and what is next.
 
 For more — packaging installers, signing, CI, remote-node onboarding — see [`docs/design/zh/`](./docs/design/zh/).
-
----
-
-## 🧪 Agent Development Workflow
-
-```
-① Authoring       manifest.toml + prompts/ + skills/SKILL.md + optional tools/*.wasm
-② Signing         acowork-keygen → acowork-sign  (developer key, signed package)
-③ Debugging       Desktop App DevMode → conversational debug, SKILL.md hot-reload, breakpoints, recording/replay
-④ Publishing      Publishing wizard → remote registry, or share the .agent file directly
-```
-
-Developers build agents by **tuning declarative configurations** — system prompts, tool capabilities, memory behavior —
-not writing imperative code. The whole pipeline from authoring to publishing is supported by the platform.
 
 ---
 

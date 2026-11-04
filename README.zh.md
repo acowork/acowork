@@ -103,85 +103,67 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 
 ## 🚀 快速开始
 
-跨平台编译脚本位于 [`dev/`](./dev/)，统一处理 ONNX Runtime 探测、profile 切换、资源 staging——优先使用脚本而非直接调用 `cargo`。
+安装对应平台的 Desktop App——Windows `.msi`、macOS `.dmg`、Linux `.deb` / `.rpm` / AppImage。
+安装包内含 Gateway 及其托管的全部服务。
+
+首次启动时选择一种 Gateway 模式。
+
+### 1. 本地（Local）
+
+由应用为你启动 Gateway。
+
+- **第 1 步**——启动 Desktop App。
+- **第 2 步**——在 Gateway 模式选择器中选择**本地**。
+
+### 2. 远程（Remote）
+
+连接运行在另一台机器上的 Gateway。
+
+- **第 1 步**——在 Gateway 所在机器上启动它：
 
 ```bash
-git clone https://github.com/tranxon/ACowork.git
-cd ACowork
-
-# 1. 安装 ONNX Runtime（一次性）并编译后端
-./dev/common/setup_ort.sh      # Linux / macOS / WSL / Git Bash
-./dev/common/build_core.sh     # Windows：.\dev\common\setup_ort.ps1 / build_core.ps1
-
-# 2. 启动 Desktop App
-cd apps/acowork-desktop
-npm install && npm run tauri dev
+acowork-gateway --daemon
 ```
 
-`build_core.*` 负责编译 Gateway、Runtime 与 Node Agent；Desktop App 是 Tauri v2 壳，React/TS 前端通过 HTTP
-与 Gateway 对话。加 `--debug` / `-Debug` 可切到调试构建并打开详细日志。
+- **第 2 步**——启动 Desktop App。
+- **第 3 步**——选择**远程**，填入 `http://<gateway-host>:19876`。
 
-> 前置依赖、打包、CI 与部署：
+### 3. 中继（Relay）
+
+通过云端中继访问 Gateway。
+
+- **第 1 步**——在 Gateway 所在机器的 `gateway.toml`
+（`~/.acowork/acowork-gateway/config/`）中启用隧道：
+
+```toml
+[relay]
+enabled = true
+url = "wss://<relay-domain>/tunnel"
+```
+
+- **第 2 步**——启动 Desktop App。
+- **第 3 步**——选择**中继**，填入 `https://<gw-id>.<relay-domain>`。
+`<gw-id>` 在 Desktop App 的 Gateway 设置里可以看到。
+
+Agent 在应用内通过**创建 Agent 向导**创建。
+
+> 从源码编译、打包、CI 与部署：
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
 
 ### ☁️ 云端中继远程访问（可选）
 
-默认情况下 Gateway 的 HTTP/MQTT 只绑定 localhost。若要在公网访问位于 NAT 之后的 Gateway，可部署 `acowork-relay`
-——一个**协议无关的瘦中继**：Gateway 主动拨出建立一条 WSS 隧道，中继仅按 TLS SNI / Host 头路由字节流，
-不解析 HTTP/MQTT。中继**零账号、零秘密**，所有鉴权由你的 Gateway 裁决。
+Gateway 的 HTTP/MQTT 只绑定 localhost。若要在公网访问位于 NAT 之后的 Gateway，可部署 `acowork-relay`
+——一个协议无关的瘦中继：Gateway 主动拨出建立一条 WSS 隧道，中继仅按 TLS SNI / Host 头路由字节流，
+所有鉴权由你的 Gateway 裁决。
 
 - 设计：[`docs/design/zh/24-cloud-relay-remote-access.md`](./docs/design/zh/24-cloud-relay-remote-access.md)
 - 部署（Cloudflare DNS + 阿里云 ECS）：[`docs/runbooks/relay-ecs-cloudflare-deploy.md`](./docs/runbooks/relay-ecs-cloudflare-deploy.md)
 - 境内自建（ICP 备案）：[`docs/runbooks/relay-selfhost-cn-deploy.md`](./docs/runbooks/relay-selfhost-cn-deploy.md)
 
-### ✍️ 30 秒写出第一个 Agent
-
-```toml
-# examples/qa-agent/manifest.toml
-[package]
-id = "com.example.qa-agent"
-name = "Quality Assurance"
-display_name = "QA-Tom"
-role = "QA"
-version = "1.0.0"
-
-[llm]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[permissions]
-tools = ["rag_query", "read_file", "write_file"]
-```
-
-```markdown
-<!-- prompts/system.md -->
-你是一个 QA Agent，擅长帮助用户做质量管理与代码审查。
-```
-
-构建并签名：
-
-```bash
-./dev/common/build-agent.sh examples/qa-agent   # 产出 com.example.qa-agent.agent
-```
-
 > **当前状态**：ACowork 处于 **Alpha 阶段**。Gateway、Runtime、记忆引擎与 Desktop App 都在积极开发中。
 > 详见 [路线图](#-路线图) 了解当前已交付与下一步计划。
 
 打包安装包、签名、CI、远程节点接入等更多内容请参见 [`docs/design/zh/`](./docs/design/zh/)。
-
----
-
-## 🧪 Agent 开发流程
-
-```
-① 编写       manifest.toml + prompts/ + skills/SKILL.md + 可选 tools/*.wasm
-② 签名       acowork-keygen → acowork-sign  （Developer 私钥 + 包签名）
-③ 调试       Desktop App DevMode → 对话调试、SKILL.md 热加载、断点、录制回放
-④ 发布       发布向导 → 远程仓库，或直接分享 .agent 文件
-```
-
-开发者通过**调优声明式配置**来构建 Agent——系统提示词、工具能力、记忆行为——而非编写命令式代码。
-从编写到发布的完整链路，平台均提供工具支撑。
 
 ---
 

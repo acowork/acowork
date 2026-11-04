@@ -44,9 +44,8 @@ cd ACowork
 # 2. Branch off master
 git checkout -b fix/<short-slug>
 
-# 3. Install ONNX Runtime (one-time; see README for the manual path)
-./dev/common/setup_ort.sh          # Linux / macOS / WSL / Git Bash
-.\dev\common\setup_ort.ps1         # Windows PowerShell
+# 3. Build the backend (also sets up ONNX Runtime on first run)
+./dev/common/build_core.sh         # Windows: .\dev\common\build_core.ps1
 
 # 4. Make the change, then run the full gate
 ./dev/ci.sh all
@@ -100,8 +99,9 @@ answered by an ADR that already decided the question, including the reason.
 in `core/Cargo.toml` is what carries dependency constraints. If you bump a dependency,
 bump the floor in the same commit.
 
-ONNX Runtime is **not** a manual prerequisite — `dev/common/setup_ort.*` installs it into
-`.ort/`, and `dev/ort_env.js` makes Tauri auto-detect it on every platform.
+ONNX Runtime is **not** a manual prerequisite — `dev/common/build_core.*` probes `.ort/` and
+offers to run `setup_ort.*` in place when it is missing, and `dev/ort_env.js` makes Tauri
+auto-detect it on every platform.
 
 ### Building
 
@@ -432,8 +432,10 @@ verifies the signature.
 ### Signing rules
 
 - **Never commit a private key.** See [`SECURITY.md`](SECURITY.md). The signing keys used
-  by `dev/common/build-agent.*` land in `examples/.signing-keys/` — that directory must
-  never be committed. If you have already committed one, rotate it.
+  by `dev/common/build-agent.*` land in `examples/.signing-keys/` — that directory is
+  git-ignored and generated per machine, so regenerate it with
+  `cargo run --bin acowork-keygen -- --type developer --output-dir examples/.signing-keys`
+  rather than committing it.
 - Signing keys are generated per machine by `acowork-keygen`. The developer key type
   signs for local development; the platform key type is reserved for official builds.
 - The signature covers the whole ZIP content (local files + central directory + end of

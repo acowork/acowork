@@ -658,14 +658,20 @@ Content-Type: application/json
 Desktop App → Gateway POST /api/agents/:id/clone
        │
        ▼
-
-
-### 7.2 克隆流程
-
-```
-Desktop App → Gateway POST /api/agents/:id/clone
-       │
-       ▼
+Gateway → Node 控制平面（克隆是 node-local 的，ADR-055 §6.6 L2-5）：
+  ├─ 读取源安装目录 {packages_dir}/{agent_id}/{instance_id}/
+  ├─ 按模式复制（边界定义见 §7.3）：
+  │   ├─ skeleton：包级全部文件
+  │   │           （manifest.toml 且 agent_id 已改写、prompts/、
+  │   │            skills/、assets/、…）
+  │   │
+  │   └─ full：skeleton + 该实例的 workspace 状态：
+  │       conversations/（当前会话 JSONL 快照）
+  │       memory/private.sqlite（快照，含 -wal/-shm 边车文件）
+  │
+  ├─ 写入 {packages_dir}/{new_agent_id}/{new_instance_id}/
+  ├─ 标记克隆件 dev: true
+  └─ 返回克隆结果
 ```
 
 ### 7.3 骨架 / 完整 边界

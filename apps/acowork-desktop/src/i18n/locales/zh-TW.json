@@ -544,7 +544,7 @@
     "relayUrlSavedPlainHttp": "目前儲存的位址不是 https://。中繼模式下 MQTT 無法連線：請改成 https://<gw-id>.<中繼網域> 後重新診斷。",
     "relayReadFrom": "讀取自",
     "relayGwIdHelp": "該閘道的遠端存取裝置識別碼。要把手機或另一台電腦配對進來，把它們的閘道位址在中繼模式下填成 https://{{gwId}}.<中繼網域>。",
-    "relayGwIdHowTo": "尚無裝置識別碼——本閘道尚未啟用過中繼通道。\n\n啟用一次即可自動產生並保存（檔案：閘道設定目錄下的 relay_identity.json）：\n\ncurl -X POST {{gatewayUrl}}/api/relay/enable -H 'Content-Type: application/json'",
+    "relayGwIdHowTo": "尚無裝置識別碼——本閘道尚未啟用過中繼通道。\n\n在閘道的 gateway.toml（閘道目錄下的 config/gateway.toml）中啟用一次並重新啟動閘道：\n\n[relay]\nenabled = true\nurl = \"wss://<relay-domain>/tunnel\"\n\n裝置識別碼會在首次連線時產生，並保存到 relay_identity.json。",
     "relayGwIdHelpLabel": "裝置 ID 有什麼用？",
     "localGateway": "本機閘道",
     "localModeKeepsUrl": "切換至本機模式後，Desktop 會先用此位址探測（如不通才 spawn 本機子進程）",

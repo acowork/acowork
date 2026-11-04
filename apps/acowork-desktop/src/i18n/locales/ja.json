@@ -545,7 +545,7 @@
     "relayUrlSavedPlainHttp": "保存されているアドレスが https:// ではありません。リレーモードでは MQTT に接続できません。https://<gw-id>.<リレードメイン> に変更して再診断してください。",
     "relayReadFrom": "取得元",
     "relayGwIdHelp": "このゲートウェイのリモートアクセス用デバイス ID。スマートフォンや別の PC を接続するには、それらのリレーモードのゲートウェイ URL を https://{{gwId}}.<リレードメイン> に設定してください。",
-    "relayGwIdHowTo": "デバイス ID はまだありません——このゲートウェイではリレットンネルが一度も有効になっていません。\n\n一度有効にすると生成され保存されます（ファイル: ゲートウェイ設定ディレクトリの relay_identity.json）：\n\ncurl -X POST {{gatewayUrl}}/api/relay/enable -H 'Content-Type: application/json'",
+    "relayGwIdHowTo": "デバイス ID はまだありません——このゲートウェイではリレートンネルが一度も有効になっていません。\n\nゲートウェイの gateway.toml（ゲートウェイディレクトリの config/gateway.toml）で一度有効にして、ゲートウェイを再起動します：\n\n[relay]\nenabled = true\nurl = \"wss://<relay-domain>/tunnel\"\n\nデバイス ID は最初の接続時に生成され、relay_identity.json に保存されます。",
     "relayGwIdHelpLabel": "デバイス ID は何に使いますか？",
     "localGateway": "ローカルゲートウェイ",
     "localModeKeepsUrl": "ローカルモードでは、Desktop はまずこのアドレスをプローブし、応答がない場合のみ子 Gateway を起動します。",
