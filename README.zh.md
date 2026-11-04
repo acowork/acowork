@@ -125,14 +125,15 @@ Desktop 所在机器：  启动 Desktop App → 选择「远程」→ 填入
 **3. 中继（Relay）**——通过云端中继访问 Gateway。
 
 ```
-Gateway 所在机器：  启用中继隧道
-                    curl -X POST http://127.0.0.1:19876/api/relay/enable \
-                         -H 'Content-Type: application/json' \
-                         -d '{"url":"wss://<relay-domain>/tunnel"}'
+Gateway 所在机器：  在 gateway.toml 中启用中继隧道
+                    [relay]
+                    enabled = true
+                    url = "wss://<relay-domain>/tunnel"
 Desktop 所在机器：  启动 Desktop App → 选择「中继」→ 填入
                     https://<gw-id>.<relay-domain>
 ```
 
+`gateway.toml` 位于 `~/.acowork/acowork-gateway/config/`（Windows 为 `%USERPROFILE%\.acowork\acowork-gateway\config\`）。
 `<gw-id>` 在 Desktop App 的 Gateway 设置里可以看到。
 
 Agent 在应用内通过**创建 Agent 向导**创建。

@@ -128,14 +128,15 @@ On the Desktop machine:  Launch the Desktop App → choose Remote → enter
 **3. Relay** — reach a Gateway through the cloud relay.
 
 ```
-On the Gateway machine:  enable the relay tunnel
-                         curl -X POST http://127.0.0.1:19876/api/relay/enable \
-                              -H 'Content-Type: application/json' \
-                              -d '{"url":"wss://<relay-domain>/tunnel"}'
+On the Gateway machine:  enable the relay tunnel in gateway.toml
+                         [relay]
+                         enabled = true
+                         url = "wss://<relay-domain>/tunnel"
 On the Desktop machine:  Launch the Desktop App → choose Relay → enter
                          https://<gw-id>.<relay-domain>
 ```
 
+`gateway.toml` lives in `~/.acowork/acowork-gateway/config/` (`%USERPROFILE%\.acowork\acowork-gateway\config\` on Windows).
 `<gw-id>` is shown in the Desktop App's Gateway settings.
 
 Agents are created through the **Create Agent wizard** in the app.
