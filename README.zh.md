@@ -103,27 +103,41 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 
 ## 🚀 快速开始
 
-跨平台编译脚本位于 [`dev/`](./dev/)，统一处理 ONNX Runtime 探测、profile 切换、资源 staging——优先使用脚本而非直接调用 `cargo`。
+### 安装
+
+下载对应平台的 Desktop App 安装包并安装：
+
+| 平台 | 安装包 |
+|---|---|
+| Windows | `.msi` / NSIS 安装程序（`.exe`） |
+| macOS | `.app` / `.dmg` |
+| Linux | `.deb` / `.rpm` / AppImage |
+
+安装包内含 Gateway、Runtime、Node Agent 及其托管的服务——机器上无需再装别的东西。
+
+### 运行
+
+Desktop App 就是完整产品。启动后在首屏选择如何接入 Gateway：
+
+- **本地（Local）**——由应用为你启动一个 Gateway。默认选项，无需任何配置。
+- **远程（Remote）**——连接你自己启动的 Gateway，可以在本机，也可以在别的机器上。
+- **中继（Relay）**——通过云端中继访问局域网内的 Gateway。
+
+若想用命令行驱动 Gateway：
 
 ```bash
-git clone https://github.com/tranxon/ACowork.git
-cd ACowork
-
-# 1. 编译后端（Gateway + Runtime + Node Agent）
-./dev/common/build_core.sh     # Windows：.\dev\common\build_core.ps1
-
-# 2. 启动 Desktop App
-cd apps/acowork-desktop
-npm install && npm run tauri dev
+acowork-gateway --daemon   # 监听 127.0.0.1:19876（HTTP）/ :19875（MQTT）
 ```
 
-`build_core.*` 会自行处理 ONNX Runtime——探测 `.ort/` 下的本地安装；若未找到则提示下载（macOS 上通过
-cargo 拉取，Apple Silicon 自动启用 CoreML 加速）。加 `--debug` / `-Debug` 可切到调试构建并打开详细日志。
+`--daemon` 是必需的——不加它只会打印帮助信息。全新安装时，Gateway 会在开始服务前要求设置一次
+admin 密码。
 
-Desktop App 是 Tauri v2 壳，React/TS 前端通过 HTTP 与 Gateway 对话。Agent 在应用内通过
-**创建 Agent 向导**创建——manifest 由向导代写，无需手写。
+之后再启动 Desktop App，选择 **远程**并填入该地址；也可以保持**本地**模式——此时它会复用已在运行的
+Gateway，而不会再起一个。
 
-> 前置依赖、打包、CI 与部署：
+Agent 在应用内通过**创建 Agent 向导**创建——manifest 由向导代写，无需手写。
+
+> 从源码编译、打包、CI 与部署：
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
 
 ### ☁️ 云端中继远程访问（可选）

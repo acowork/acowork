@@ -106,29 +106,48 @@ same protocol path lights up. The Gateway has **zero local-vs-remote code branch
 
 ## 🚀 Quick Start
 
-Cross-platform build scripts under [`dev/`](./dev/) handle ONNX Runtime discovery, profile switching, and resource
-staging — prefer them over calling `cargo` directly.
+### Install
+
+Download the Desktop App for your platform and install it:
+
+| Platform | Package |
+|---|---|
+| Windows | `.msi` / NSIS installer (`.exe`) |
+| macOS | `.app` / `.dmg` |
+| Linux | `.deb` / `.rpm` / AppImage |
+
+The installer ships the Gateway, Runtime, Node Agent and the services they
+supervise — nothing else is needed on the machine.
+
+### Run
+
+The Desktop App is the whole product. Launch it and pick how to reach a
+Gateway on the first screen:
+
+- **Local** — the app starts a Gateway for you. This is the default and needs
+  no setup.
+- **Remote** — connect to a Gateway you started yourself, on this machine or
+  another.
+- **Relay** — reach a Gateway on your LAN through the cloud relay.
+
+To drive a Gateway from the command line instead:
 
 ```bash
-git clone https://github.com/tranxon/ACowork.git
-cd ACowork
-
-# 1. Build the backend (Gateway + Runtime + Node Agent)
-./dev/common/build_core.sh     # Windows: .\dev\common\build_core.ps1
-
-# 2. Launch the Desktop App
-cd apps/acowork-desktop
-npm install && npm run tauri dev
+acowork-gateway --daemon   # serves on 127.0.0.1:19876 (HTTP) / :19875 (MQTT)
 ```
 
-`build_core.*` handles ONNX Runtime itself — it detects a local install under `.ort/`, and on a
-missing one offers to fetch it (on macOS it downloads ORT via cargo with CoreML acceleration on Apple
-Silicon). Add `--debug` / `-Debug` for a debug build with verbose logs.
+`--daemon` is required — without it the binary only prints its help. On a
+fresh install the Gateway asks for an admin password once before it starts
+serving.
 
-The Desktop App is a Tauri v2 shell whose React/TS frontend talks to the Gateway over HTTP.
-Agents are created through the **Create Agent wizard** in the app — it writes the manifest for you.
+Start the Desktop App afterwards and choose **Remote** pointing at that
+address — or leave it in **Local**, which adopts an already-running Gateway
+instead of starting a second one.
 
-> Prerequisites, packaging, CI, and deployment:
+Agents are created through the **Create Agent wizard** in the app; it writes
+the manifest for you.
+
+> Building from source, packaging, CI, and deployment:
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
 
 ### ☁️ Remote access (optional)
