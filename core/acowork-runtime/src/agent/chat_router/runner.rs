@@ -58,14 +58,6 @@ use crate::agent::session::intent_routing::SessionSeed;
 use crate::agent::session::{SessionManager, SessionMessage};
 use crate::agent_config::ChatRouterConfig;
 
-/// Router output ceiling. A routed turn's own text is a one-to-three-sentence
-/// acknowledgement (design 29 §3.2), but the ceiling must also leave room for
-/// an information round — a thinking block plus tool-call arguments plus the
-/// final sentence — so one `user → assistant → tool_call → tool_result →
-/// assistant` chain stays complete instead of being cut mid-call by a
-/// length-truncated response.
-const MAX_OUTPUT_TOKENS: u32 = 2048;
-
 /// Per-result ceiling for an information tool fed back to the model. Generous
 /// (a whole page of search hits or recalled memories), yet bounded: one
 /// runaway HTTP body must not swamp the router request. The truncation
@@ -572,7 +564,11 @@ async fn run_turn(
         model: prepared.model.clone(),
         messages,
         temperature: Some(0.0),
-        max_tokens: Some(MAX_OUTPUT_TOKENS),
+        // `cfg.max_output_tokens()`, not a constant: the ceiling must cover a
+        // `new_task` brief *and* an information round (a thinking block plus
+        // tool-call arguments plus the final sentence), which the old
+        // hardcoded 2,048 did not. See `ChatRouterConfig::max_output_tokens`.
+        max_tokens: Some(cfg.max_output_tokens()),
         tools: Some(tools),
         reasoning_effort: None,
         thinking_mode: None,
@@ -719,10 +715,41 @@ async fn run_turn(
     let usage = response.usage.clone();
     match act {
         None => {
+            // A truncated response is not a decision. `finish_reason == "length"`
+            // means the provider cut the model off at `chat_router
+            // .max_output_tokens`, so whatever `content` holds is the tail of an
+            // unfinished thought. Publishing it as the router's answer is exactly
+            // how a `new_task` turn became "an agent message with no execution
+            // session": the brief ran long, the tool-call JSON was cut mid-way,
+            // `act_call()` found no act, and the partial prose was written to the
+            // chat as if the model had chosen to reply. The provider already
+            // normalises Anthropic's `max_tokens` to `length` (see
+            // `providers/anthropic.rs::normalize_stop_reason`); the router is the
+            // caller that has to look at it.
+            if is_truncated(&response) {
+                let reason = format!(
+                    "output truncated at {} tokens — a `{NEW_TASK_TOOL}` brief that \
+                     does not fit is cut mid-call",
+                    cfg.max_output_tokens()
+                );
+                trace.write("fallback", None, "error", Some(reason.clone()), None);
+                return degrade(deps, envelope, &chat_id, reason, &rows).await;
+            }
             let body = response.content.trim().to_string();
-            if body.is_empty() {
-                trace.write("fallback", None, "error", Some("empty reply".into()), None);
-                return degrade(deps, envelope, &chat_id, "empty reply".to_string(), &rows).await;
+            // Some Anthropic-compatible endpoints hand the tool call back inside
+            // the message body (`<tool_call><invoke name=…>`). The router has no
+            // textual tool-call parser — and should not grow one — but it must
+            // not publish that envelope to the human as if the model had written
+            // prose. Observed in production: the whole turn surfaced as a chat
+            // answer that *looked* like a tool call and routed nothing.
+            if body.is_empty() || looks_like_tool_call_envelope(&body) {
+                let reason = if body.is_empty() {
+                    "empty reply".to_string()
+                } else {
+                    "tool call written as message text (no structured act)".to_string()
+                };
+                trace.write("fallback", None, "error", Some(reason.clone()), None);
+                return degrade(deps, envelope, &chat_id, reason, &rows).await;
             }
             // ADR-106 D12: the router's own answer is a chat-native row, so it
             // is written here and not carried back through an intent response —
@@ -1178,6 +1205,35 @@ fn act_call(response: &ChatResponse) -> Option<ToolCall> {
 /// lookup, and a refusal text must name what the model may actually call.
 fn is_act(name: &str) -> bool {
     name == NEW_TASK_TOOL || name == PROPOSE_TOOL
+}
+
+/// True when the provider stopped because it ran out of output budget rather
+/// than because the model finished. Accepts both vocabularies: the adapters
+/// normalise Anthropic's `max_tokens` to `length`, but a provider adapter added
+/// later may pass the vendor string through unchanged.
+fn is_truncated(response: &ChatResponse) -> bool {
+    response
+        .finish_reason
+        .as_deref()
+        .is_some_and(|reason| reason == "length" || reason == "max_tokens")
+}
+
+/// True when the model put a tool call in the message body instead of emitting
+/// a structured one.
+///
+/// The router deliberately has no textual tool-call parser: an act carries a
+/// delivery decision, and guessing one out of prose is not a decision the model
+/// actually made. Recognising the envelope is still required, because otherwise
+/// the raw markup is published to the human as the agent's answer — a chat row
+/// that looks like a tool call and routes nothing.
+///
+/// Matching is case-insensitive and marker-based, not a parse. Some endpoints
+/// splice a zero-width character into the opening tag (`<\u{200b}tool_call>`),
+/// so the markers are the fragments either side of that seam.
+fn looks_like_tool_call_envelope(body: &str) -> bool {
+    const MARKERS: &[&str] = &["<invoke", "tool_call", "function_call"];
+    let lowered = body.to_ascii_lowercase();
+    MARKERS.iter().any(|marker| lowered.contains(marker))
 }
 
 fn parse_act(call: &ToolCall, aliases: &AliasTable) -> Result<Act, ActError> {
@@ -2258,6 +2314,47 @@ mod tests {
         assert!(excerpt.starts_with("[user] first\n[user] xxx"));
         assert!(excerpt.len() < 4000);
         assert!(!excerpt.ends_with('y')); // clipped, not copied whole
+    }
+
+    /// A truncated response is not a decision. The production failure this
+    /// pins: a `new_task` brief ran past `max_output_tokens`, the provider cut
+    /// the tool-call JSON mid-way, `act_call()` found no act, and the partial
+    /// prose was published to the chat as the router's answer — the user saw an
+    /// agent message and no execution session was ever created.
+    #[test]
+    fn an_output_budget_exhaustion_is_detected_in_both_vocabularies() {
+        let with = |reason: Option<&str>| ChatResponse {
+            finish_reason: reason.map(str::to_string),
+            ..Default::default()
+        };
+        // Anthropic reports `max_tokens`; the adapter normalises it to `length`.
+        // A future adapter may pass the vendor string through unchanged, so both
+        // spellings must read as truncated.
+        assert!(is_truncated(&with(Some("length"))));
+        assert!(is_truncated(&with(Some("max_tokens"))));
+        assert!(!is_truncated(&with(Some("stop"))));
+        assert!(!is_truncated(&with(Some("tool_calls"))));
+        // A missing finish_reason is not evidence of truncation.
+        assert!(!is_truncated(&with(None)));
+    }
+
+    /// The router has no textual tool-call parser by design — an act carries a
+    /// delivery decision, and none can be inferred from prose. Recognising the
+    /// envelope is still required, or the raw markup is published to the human
+    /// as the agent's answer.
+    #[test]
+    fn a_tool_call_written_as_text_is_recognised_and_withheld() {
+        assert!(looks_like_tool_call_envelope(
+            "<tool_call>\n<invoke name=\"new_task\"><message>do it"
+        ));
+        // Some endpoints splice a zero-width space into the opening tag; the
+        // `tool_call` marker survives on the other side of that seam.
+        assert!(looks_like_tool_call_envelope("<\u{200b}tool_call>"));
+        assert!(looks_like_tool_call_envelope("<INVOKE name=\"x\">"));
+        assert!(!looks_like_tool_call_envelope("Sure - I will start that."));
+        assert!(!looks_like_tool_call_envelope(
+            "I can look that up if you want."
+        ));
     }
 }
 
