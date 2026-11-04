@@ -8,13 +8,13 @@
 
 > **v3.9 变更（2026-05-28）**：经历层写入来源简化——见 [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md)。核心变更：移除每轮对话实时写入记忆层，经历层仅通过 Compaction 摘要和 Session 关闭蒸馏写入。Compaction 与 Distillation 统一为单次 Compact Model 调用（"摘要即蒸馏"）。
 
-> **v4.0 变更**：记忆层切到 SQLite（单库 + WAL + FTS5 + sqlite-vss 向量；沉淀层图关系由应用层 `MemoryNode.edges` 边表承担，不再依赖存储引擎原生 LPG/GQL；详见 [ADR-082](../../adr/zh/ADR-082-sqlite-memory-cutover.md)）。`acowork-grafeo` crate 已删除，记忆引擎代码（`EpisodicDistiller` / `RetrievalMetrics`）迁移至 `core/acowork-memory/`。
+> **v4.0 变更**：记忆层切到 SQLite（单库 + WAL + FTS5 + 向量表；详见 [ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)）。`acowork-grafeo` crate 已删除，记忆引擎代码（`EpisodicDistiller` / `RetrievalMetrics`）迁移至 `core/acowork-memory/`。
 
 > **v4.1 变更（已实施，2026-10-23）**：记忆模块已从 Runtime 剥离为 Gateway 托管的独立进程 `acowork-memory`；Agent 侧经 MCP 调用该服务的工具（注册名 `mcp_memory__memory_store` / `mcp_memory__memory_recall`，工具级 opt-in 走 `agent_mcp_tools.json`，ADR-069），面板经 Gateway 反代访问；auto-inject 移除、`memory:read` / `memory:write` 权限项删除，Runtime 达到零记忆业务代码——详见 [ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)。**本文档其余章节仍以剥离前的（内置）形态行文**；分层数据模型（瞬态 / 经历 / 沉淀）、蒸馏与遗忘流水线语义不变，变的只是进程归属与访问通道。
 
 ---
 
-Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Agent 拥有完全独立的私有 Memory（单文件 SQLite 数据库 `memory/private.sqlite`，应用层隔离；详见 [ADR-009](../../adr/zh/ADR-009-gateway-workspace-isolation.md)），不存在 Gateway 维护的公共数据库。跨 Agent 的数据共享通过 Intent 查询和系统 Agent 服务实现，而非共享存储。
+Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Agent 拥有完全独立的私有 Memory（单文件 SQLite 数据库，由记忆服务 `acowork-memory` 持有，路径 `$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`；应用层隔离，详见 [ADR-009](../../adr/zh/ADR-009-gateway-workspace-isolation.md) 与 [ADR-101](../../adr/zh/ADR-101-memory-standalone-mcp-service.md)），不存在 Gateway 维护的公共数据库。跨 Agent 的数据共享通过 Intent 查询和系统 Agent 服务实现，而非共享存储。
 
 **设计哲学**：记忆不是存储，是认知。一个没有遗忘的记忆系统是垃圾场，一个没有巩固的记忆系统是碎片堆，一个没有自我认知的记忆系统是数据库。Memory 模块要回答的不是"怎么存"，而是"怎么记、怎么忘、怎么想"。
 
@@ -29,9 +29,9 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Ag
 ├─────────────────────────────────────────────────────────┤
 │  经历层（Experiential）                                  │
 │  ───                                                    │
-│  情景记忆 — episodes 表（`category` / `consolidated` 字段）│
+│  情景记忆 — `nodes` 表（`label = 'Episodic'`）             │
 │  交互片段、对话快照、感知原始记录                         │
-│  sqlite-vss HNSW 向量索引 + SQLite FTS5 全文检索          │
+│  向量内存缓存 + 暴力扫（recall 100%）+ SQLite FTS5 全文检索 │
 │  生命周期：天→周，巩固后晋升至沉淀层                      │
 │  仿生对应：海马体临时编码                                 │
 ├─────────────────────────────────────────────────────────┤
@@ -73,20 +73,26 @@ Memory 采用**仿生分层**设计，以人类认知科学为参照。每个 Ag
 | 瞬态层 → 经历层     | 摘要写入 | Compaction 触发（80% token 使用）或 Session 关闭时，LLM 摘要异步写入经历层 SQLite `episodes` 表。不再每轮写入，避免与 JSONL 冗余 |
 | 经历层 → 沉淀层     | 巩固管道 | 唯一管道 = 离线 `EpisodicDistiller`（ADR-068,per-agent opt-in:`[memory.distiller].enabled = true`）。**已下线**:即时提取直写沉淀层、PendingKnowledgeNode、rule-based generalization、offline compress_history_nodes、Relationship 自动生成(2026-09 revision) |
 | 沉淀层 → 瞬态层     | 检索注入 | 用户输入到达时，检索相关记忆注入上下文。**默认关闭（per-agent opt-in）**：`MemoryManagerConfig::auto_inject_enabled = false`，开启后每 session 首轮触发一次（ADR-060 §6.3）；开启方式：manifest `[memory.quality].auto_inject_enabled = true`。历史：2026-09-12 因召回质量不足默认关闭（Dormant 垃圾进上下文等）；ADR-062 M5 曾默认开启（Dormant 排除 + min_score 修复 + keyword 质量门），后因与 LLM 自主 `memory_recall` 双路径召回重复（两条路径同以 user 消息为 query，核心节点必然重叠）回退为 per-agent opt-in，`memory_recall` 工具描述已加防重复召回提示。显式 `memory_recall` 工具不受影响 |
-| 沉淀层/经历层内流动 | 关联扩散 | 检索时沿图边 1-2 跳扩展                                                                                      |
+| 沉淀层/经历层内流动 | 关联扩散 | **未实现**（ADR-082 D4 删除图遍历，无 `edges` 表；§6 保留为设计目标）                                   |
 | 沉淀层 → Dormant    | 遗忘衰减 | 后台定期计算 decay_score                                                                                     |
 
 **不可逆的单向门：** 经历层 → 沉淀层是信息精炼过程（原始片段 → 结构化知识），天然单向。但沉淀层 → 经历层可以通过"回忆"机制实现——用户或 Agent 主动触发时，从沉淀层提取关联知识，作为新的情景上下文注入瞬态层。
 
 **分层与 SQLite 存储的映射：**
 
-| 认知层 | 内容                        | SQLite 表                                                  | 说明                                              |
-| ------ | --------------------------- | ----------------------------------------------------------- | ------------------------------------------------------------ |
-| 瞬态层 | 工作记忆                    | 无（进程内）                                               | LLM 上下文窗口，纯进程内存                                |
-| 经历层 | 情景记忆                    | `episodes`（+ `episodes_vec` 虚拟表 + `episodes_fts` 虚表） | sqlite-vss HNSW + FTS5 + 元数据；详见 [§2](#2-经历层情景记忆) |
-| 沉淀层 | 语义/程序/自传体/Skill 经验 | `nodes`（`kind` ∈ {Knowledge, Procedure, Self}）+ `edges`  | 应用层知识图谱，关联扩散由应用层多跳实现 |
+| 认知层 | 内容                        | SQLite 表                                     | 说明                                              |
+| ------ | --------------------------- | --------------------------------------------- | ------------------------------------------------- |
+| 瞬态层 | 工作记忆                    | 无（进程内）                                  | LLM 上下文窗口，纯进程内存                        |
+| 经历层 | 情景记忆                    | `nodes`（`label = 'Episodic'`）+ `vectors` + `fts_episodic` | 向量存 `vectors` 表（f32 BLOB），词法走 FTS5 trigram 虚表 |
+| 沉淀层 | 语义/程序/自传体/Skill 经验 | `nodes`（`label` ∈ {Knowledge, Procedural, Autobiographical}）+ 各自 `vectors` / `fts_*` | 每类一个 FTS5 虚表，无 `edges` 表 |
 
-不存在"经历层节点存在沉淀层 `nodes` 中"的歧义——认知分层和 `kind` 列是一一映射的，存储格式为单文件 `memory/private.sqlite`（含 WAL/SHM 兄弟文件）。
+不存在"经历层节点存在沉淀层 `nodes` 中"的歧义——认知分层和 `nodes.label` 是一一映射的。存储格式为单文件 SQLite
+（ADR-082 D1，rusqlite bundled），每个 Agent 实例一份。
+
+> **v4.1 变更**：本表原描述的 `episodes` / `episodes_vec` / `episodes_fts` 三表结构、sqlite-vss HNSW 索引与
+> `edges` 表均已不存在。ADR-082 D2 放弃 HNSW（改内存缓存 + 暴力扫，recall = 100%）、D3 文本检索改 FTS5、
+> D4 删除图层间图遍历（不建 `edges` 表、不模拟图遍历）。存储路径随 ADR-101 迁移为
+> `$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`。
 
 ## 0.1 LLM 优先原则
 
@@ -151,7 +157,7 @@ Compaction 不再生成 `entities` / `triples` 块——LLM 在压缩场景下�
 
 所有检索统一使用默认 RRF 权重（vector: 0.7, text: 0.3），不再基于 memory_hint 类型动态调整。HintType 枚举保留但仅在 `memory_store` 工具调用时由 LLM 显式指定（用于即时提取管道的 sub_type 分类）。
 
-> **v3.13 更正（[ADR-082](../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md) C4 / P4）**：实现为**等权 RRF（`k = 60`）**——`hint_weights` 传入 `hybrid_search_full` 后即被忽略，加权 RRF 曾被显式否决（*"weight scaling after RRF is meaningless"*）。上文所述 vector 0.7 / text 0.3 的默认权重**尚未接入**，排序不体现查询意图。
+> **v3.13 更正（[ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md) C4 / P4）**：实现为**等权 RRF（`k = 60`）**——`hint_weights` 传入 `hybrid_search_full` 后即被忽略，加权 RRF 曾被显式否决（*"weight scaling after RRF is meaningless"*）。上文所述 vector 0.7 / text 0.3 的默认权重**尚未接入**，排序不体现查询意图。
 
 **瞬态层的管理策略（v3.8 简化）**：
 
@@ -194,9 +200,9 @@ SQLite `episodes` 行
 
 **检索能力（基于 `SqliteStore` provider trait）：**
 
-- **语义检索**：`MemoryStore::vector_search` — sqlite-vss HNSW 向量索引，支持余弦距离
-- **关键词检索**：`MemoryStore::text_search` — SQLite FTS5 全文索引，`unicode61` 分词器
-- **混合检索**：`MemoryStore::hybrid_search` — 应用层 RRF 融合排序（vector + text 分数按 `1/(k+rank)` 加权求和）
+- **语义检索**：`vector_search` — 向量按 label 懒加载进内存缓存后暴力扫（精确解，recall = 100%；ADR-082 D2 放弃 HNSW）
+- **关键词检索**：`text_search` — SQLite FTS5 全文索引，`trigram` 分词器（ADR-082 D3，支持中文子串匹配；<3 字符查询回退 LIKE）
+- **混合检索**：应用层 RRF 融合排序（vector + text 分数按 `1/(k+rank)` 加权求和，各源先各自把门、取并集）
 - **双源查询拆分（memory_recall，2026-10）**：`MemoryQuery.embedding_text` 承载当前轮用户完整消息驱动向量源（整句 embedding 质量远高于关键词袋），`query_text` 承载 LLM 提取的关键词驱动 BM25 词法源；`embedding_text` 缺省（或全空白）时回落为 `query_text` 单源（历史行为）。用户消息与 session ID 经 `ToolContext`（`execute_with_context`）在每次工具调用时由 loop 从 per-session 状态注入——**不得**存放在 agent 级共享的 `MemorySessionHandle` 或工具实例上（多会话并发下 last-writer-wins 竞态，2026-10 已修复）。
 - **MMR 去重**：`MemoryStore::mmr_search` — Maximal Marginal Relevance，保证结果多样性，避免重复语义
 - **时间过滤**：按时间范围缩小检索空间
@@ -858,7 +864,7 @@ Level 3（内存模式）
 
 **设计动机**：当检索结果的置信度不足时，Agent 应选择拒答而非生成可能不准确的回答。这是检索系统的最终质量门控——比检索降级策略（Level 0-3）更后置，是在检索结果已返回后的语义级别保障。
 
-**门控阈值机制（v3.13 修正，见 [ADR-082](../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)）**：
+**门控阈值机制（v3.13 修正，见 [ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)）**：
 
 过滤**不作用于融合分**，而是各源在各自分数域内独立过滤后**取并集**：向量源按绝对余弦相似度 `min_cosine`（默认 0.3）过滤；文本源（BM25）命中即保留（BM25 含 IDF，无可靠绝对阈值）。融合分（RRF，仅含名次）不参与任何阈值判定。若过滤后结果为空，触发 Abstention（拒答）：
 
@@ -885,7 +891,7 @@ Level 3（内存模式）
 > **实现澄清（v3.13，取代 v3.12 的 G9 说明）**：代码中现为**两个不同名的量**，勿混淆：
 > - `AbstentionConfig.default_min_score = 0.6`（`abstention.rs`）：作用于 `check_abstention` 的 **raw scores**（向量/BM25 原始相似度），用于拒答判定。**当前尚未接入检索链路，属死代码**（ADR-082 P6）。
 > - `MemoryQualityConfig.min_cosine = 0.3`（`quality.rs`）：作用于**向量源的绝对余弦**（`cos = 1 − distance`，对外归一化为 `(1 + cos)/2 ∈ [0,1]`），在 `hybrid_search_full` 内完成过滤。
-> - 旧的 `MemoryManagerConfig.min_score`（融合 RRF 域，默认 0.0）**已删除**：它对**单源向量路径**（`score = cos − 1`，恒非正）等价于要求 `cos >= 1`，会静默滤光全部结果——即 2026-09 中文查询 `memory_recall` 返回 0 条的根因。详见 [ADR-082](../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)。
+> - 旧的 `MemoryManagerConfig.min_score`（融合 RRF 域，默认 0.0）**已删除**：它对**单源向量路径**（`score = cos − 1`，恒非正）等价于要求 `cos >= 1`，会静默滤光全部结果——即 2026-09 中文查询 `memory_recall` 返回 0 条的根因。详见 [ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)。
 
 **与检索降级策略的关系**：
 
@@ -1091,13 +1097,13 @@ Zone 用于区分记忆的**业务场景分区**，与 NodeType 正交：
 
 **交付内容：**
 
-三层架构落地（瞬态层 / 经历层 / 沉淀层），SQLite `nodes` 表通过 `label` 列支持 Episodic + Knowledge + Procedural + Autobiographical 四类节点，`edges` 表存节点间关系。存储为单文件 `memory/private.sqlite`（含 WAL/SHM）。经历层存储对话原始记录（episode），沉淀层存储精炼知识（KnowledgeNode / AutobiographicalNode）。
+三层架构落地（瞬态层 / 经历层 / 沉淀层），SQLite `nodes` 表通过 `label` 列支持 Episodic + Knowledge + Procedural + Autobiographical 四类节点，向量存 `vectors` 表、词法走各 label 的 FTS5 trigram 虚表。存储为单文件 SQLite（ADR-082 D1，含 WAL/SHM），由记忆服务 `acowork-memory` 持有，路径 `$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`。经历层存储对话原始记录（episode），沉淀层存储精炼知识（KnowledgeNode / AutobiographicalNode）。
 
 即时提取通过 Tool Call 机制实现：`memory_store` 工具加入 Agent 内置工具列表，System Prompt 加入提取指引，LLM 在生成回复时自主判断是否调用。即时阶段仅做 embedding 相似度粗筛（相似度 > 0.85 → 标记候选冲突），不做三元组提取。三元组提取和精确去重发生在**离线巩固阶段**（Phase 3），详见 §4.1 和 §6.4。
 
 基础遗忘机制落地：乘法衰减模型 decay_score = importance × activity_signal，activity_signal = clamp(recency_boost + access_boost, 0.05, 1.0)。Dormant 态区分：Fact/Relation 永不清除，Preference/ProceduralNode Dormant 超过 90 天可 Purge。dormant_since 字段计时，reactivate_node 时归零。
 
-关联扩散检索落地：hybrid_search 基础上加 `edges` 表多跳 JOIN 扩展，经历层 episode 通过 KnowledgeNode.source_episode 反向查询建立跨层关联，边权重 = min(0.8, confidence_avg × recency_factor)，扩散阈值 0.2（可配置），硬限制 **3 跳**（通过早期终止实际大多在 1-2 跳停止）。
+关联扩散检索**未落地**（设计目标）：ADR-082 D4 删除了图层间图遍历，不建 `edges` 表；`MemoryQuery.expand_hops` 字段从未被 `MemoryManager::retrieve()` 消费，已作为死字段删除。§6 保留为未来实现参考。
 
 AutobiographicalNode 从 manifest.toml 自动派生（Identity / Capability），History 节点超过 10 条时摘要压缩，注入上限 200 token。PrivacyLevel（Public / Personal / Sensitive）用于打包分享时的节点过滤。
 

@@ -16,10 +16,14 @@
 | APK (DEX + resources)  | .agent 包 (config + prompts + skills) | 声明式，无自定义代码           |
 | APK Signature          | .agent Signing Block                  | 包签名，验证完整性和来源       |
 | ActivityManagerService | Gateway                               | 生命周期管理                   |
-| Binder IPC             | Gateway Service API                   | 进程间通信（传输层由平台实现） |
-| ContentProvider        | Gateway UserProfile                   | 用户身份与偏好管理             |
+| Binder IPC             | MQTT pub/sub + HTTP 反向代理           | 进程间通信（ADR-033）          |
+| ContentProvider        | `acowork-user` 用户域                  | 用户身份与偏好管理             |
 | PackageManagerService  | Package Manager                       | 安装/卸载                      |
 | AndroidManifest.xml    | manifest.toml                         | 权限声明                       |
+
+> **v3.5 变更**：IPC 通道由 gRPC 双向流替换为 **MQTT pub/sub + HTTP 反向代理**（ADR-033），
+> 用户域由 Gateway 剥离为独立服务 `acowork-user`（ADR-084），记忆由独立服务 `acowork-memory`
+> 承担（ADR-101）。详见 [`06-communication.md`](./06-communication.md)。
 
 ## 2. 核心特性
 
@@ -27,9 +31,14 @@
 - **统一执行引擎**：Agent Runtime 是平台提供的唯一二进制，负责加载 .agent 包并执行 Agent 逻辑（LLM 交互、工具调度、记忆读写）。
 - **进程级隔离**：每个 Agent 由 Gateway 启动为独立 Agent Runtime 进程，拥有独立工作区、私有 SQLite 记忆数据库、文件系统隔离、可选资源限制（cgroups/容器）。
 - **Agent 自治**：Agent 进程内直连 LLM API、自主执行工具、自主管理权限校验，不依赖 Gateway 代理业务逻辑。
-- **仿生 Memory 系统**：每个 Agent 内嵌私有 SQLite 记忆层（`memory/private.sqlite`），采用三层五类仿生分层（瞬态层/经历层/沉淀层），包含遗忘机制（三因子衰减）、隐私分级（PrivacyLevel）、关联扩散检索、记忆生命周期（Retrieve/Inject/Record/Consolidate/Decay/Compact）和内容分类压缩。Gateway 通过 UserProfile 直接管理用户身份与偏好等系统级数据，通过握手协议差量同步到 Agent。云端同步全部 Zone 明文同步，平台托管（PrivacyLevel 仅控制打包分享时是否剥离，与同步策略解耦）。
+- **仿生 Memory 系统**：记忆由独立的记忆服务 `acowork-memory` 承担（ADR-101），每个 Agent 实例一份
+  SQLite 库（`$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`）。存储后端为 SQLite
+  （ADR-082）：向量存 `vectors` 表，词法走 FTS5 trigram 索引，检索为向量 + 词法混合；分层落在四类标签
+  （经历 / 语义 / 程序 / 自传体），瞬态层即 LLM 上下文窗口、不落盘。包含遗忘机制（三因子衰减）、隐私分级
+  （PrivacyLevel）与记忆生命周期（Retrieve/Inject/Record/Consolidate/Decay/Compact）。
+  > 关联扩散检索（§6）是设计目标，当前未实现——ADR-082 D4 删除了图层间的图遍历，不建 `edges` 表。
 - **权限声明与授权**：Agent 在清单中声明所需权限（网络、文件、调用其他 Agent 等），Gateway 在启动时配置沙箱，Agent 在运行时自主校验。
-- **跨平台支持**：.agent 包格式和 Gateway Service API 合同跨平台统一，各平台运行时机制（进程模型、传输层、沙箱）可按平台特性适配。
+- **跨平台支持**：.agent 包格式和 MQTT + HTTP 协议合同跨平台统一，各平台运行时机制（进程模型、传输层、沙箱）可按平台特性适配。
 
 ## 3. 总体架构
 
@@ -48,7 +57,8 @@
 │  └────────────┘ └───────────┘             └───────────┘   │
 │                                                              │
 └──────────────────────────┬───────────────────────────────────┘
-                           │ Gateway Service API
+                           │ MQTT pub/sub + HTTP 反代
+                           │ (ADR-033)
                            │ (传输层：Unix Socket / Named Pipe / Local TCP)
        ┌───────────────────┼───────────────────┐
        │                   │                   │
@@ -92,14 +102,14 @@
 | ---------------- | ------------------------- | ------------------------------------- |
 | LLM 调用         | Agent 进程                | 直连无 RPC 开销，流式自然，Agent 自治 |
 | Tool 执行        | Agent 进程                | 自治权限校验，低延迟                  |
-| 私有 Memory 读写 | Agent 进程（内嵌 SqliteStore） | 零延迟，数据隔离                      |
+| 私有 Memory 读写 | 记忆服务 `acowork-memory` | 工具调用（ADR-101），零业务逻辑入 Runtime |
 | API Key 存储     | Gateway Vault             | 安全集中管理                          |
 | API Key 分发     | 启动时一次性给 Agent      | Agent 直连 LLM 需要                   |
 | 预算追踪         | Gateway（接收上报）       | 跨 Agent 统计                         |
 | 预算执行         | Agent（本地预检）         | 低延迟，自治                          |
 | 预算硬限         | Gateway（超限信号）       | 兜底保障                              |
 | 速率限制         | Gateway（令牌分配）       | 共享资源协调                          |
-| 用户身份与偏好   | Gateway（UserProfile）    | 集中式身份管理，通过握手协议注入      |
+| 用户身份与偏好   | `acowork-user` 用户域      | 集中式身份管理（ADR-084）             |
 | Intent 路由      | Gateway                   | 跨进程调度                            |
 | 沙箱配置         | Gateway（启动时）         | 系统级权限                            |
 
@@ -130,9 +140,8 @@
 > - [03-agent-runtime.md](./03-agent-runtime.md) — Agent Runtime 内部结构与主循环
 > - [04-gateway.md](./04-gateway.md) — Gateway 组件详细设计
 > - [05-memory.md](./05-memory.md) — Memory 分层架构
-> - [06-communication.md](./06-communication.md) — 通信协议（Gateway Service API + Intent 机制）
+> - [06-communication.md](./06-communication.md) — 通信协议（MQTT pub/sub + HTTP 反代 + Intent 机制）
 > - [08-security.md](./08-security.md) — 安全设计
-> - [09-roadmap-and-scenarios.md](./09-roadmap-and-scenarios.md) — 实现路线图与使用场景
 > - [10-debug-protocol.md](./10-debug-protocol.md) — 调试协议（DevMode、断点、录制回放）
 > - [12-tool-system.md](./12-tool-system.md) — 工具系统（Built-in / WASM / Gateway）
 > - [13-skill-system.md](./13-skill-system.md) — 技能系统（SKILL.md + SQLite 经验层）

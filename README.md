@@ -43,52 +43,17 @@
 
 ---
 
-## What is ACowork?
-
-ACowork is a **multi-user, distributed, AI-native collaboration platform**. It brings together people, AI
-agents, computers, projects, and documents into one runtime — so a team can plan work, write specs, review code, and ship
-features alongside their agents the same way they would alongside a human teammate.
-
-- **Multi-user by default.** Real accounts, roles, sessions, and per-user audit trails. No more single-actor demo mode.
-- **Distributed by default.** Gateway is the single control plane; Node Agents run on every machine that hosts
-  Runtimes — your GPU box, your laptop, your cloud VM — and the Gateway talks to all of them over the same protocol.
-- **AI-native project & document management.** Project / task management (`acowork-pm`) and the online document
-  library (`acowork-doc`) are first-class services — agents read, write, and collaborate on them through REST +
-  MCP, with real-time multi-user editing.
-- **Seamless human ↔ AI collaboration.** Users talk to agents in the same chat surface where humans talk to each
-  other; agents subscribe to project / document events; intents route between any two actors.
-- **Standalone or cluster.** Run a single host for personal use; flip a flag and the same binary becomes a
-  cluster spanning every machine in your team — one protocol, no code branches.
-
-Every Agent is still an independent **"digital being"**: its own runtime process, private memory, workspace, and
-configuration. **Tune prompt, tools, and memory = build an agent.** Personal and sensitive data is
-automatically stripped during packaging, so you can share an agent's capabilities freely without leaking your
-private memories.
-
----
-
-## 🎯 Why ACowork
-
-These are the bets ACowork is built around — and the reasons to choose it over a single-process agent playground.
-
-| | |
-|---|---|
-| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, audit. The same chat / project / document surface is shared by humans and agents. |
-| 🌐 **Distributed agents, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Agents run on every host. A GPU box, a workstation, and a cloud VM all look the same to the Gateway. |
-| 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services with REST + MCP. Agents read, write, and edit them like any other teammate — including real-time multi-user editing (Yjs CRDT). |
-| 🤝 **Humans and AI in one conversation** | One chat surface, one project tree, one doc library. AI subscribes to events, raises intents, and ships work alongside humans — no "AI side panel" silo. |
-| 🚀 **Standalone or cluster — same binary** | Run a single host for personal use, or scale out to a cluster across your team. One protocol path, no local-vs-remote code branches. |
-
----
-
 ## ✨ Highlights
 
+ACowork is a **multi-user, distributed, AI-native collaboration platform**. People, AI agents, projects, and
+documents share one runtime — so a team can plan work, write specs, review code, and ship features alongside
+their agents the same way they would alongside a human teammate.
+
 | | |
 |---|---|
-| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, per-user audit. Humans and agents share the same chat / project / doc surface. |
+| 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, per-user audit. Humans and agents share the same chat / project / doc surface — no "AI side panel" silo. |
 | 🌐 **Distributed agents, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Agents run on every host that hosts Runtimes (GPU box / workstation / cloud VM) — single-host and multi-host share one protocol path. |
 | 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services; agents read, write, and collaborate on tasks and documents through REST + MCP — including real-time multi-user editing (Yjs CRDT). |
-| 🤝 **Human ↔ AI in one conversation** | One chat surface, one project tree, one doc library. AI subscribes to project / doc events and ships work alongside humans — no "AI side panel" silo. |
 | 🚀 **Standalone or cluster — same binary** | Start a single host for personal use; flip a flag and the same binary becomes a cluster across your team. No local-vs-remote code branches in Gateway. |
 | 🧩 **Declarative agents** | `.agent` packages contain manifest + prompts + skills — **no executable code**, signed and verified at install time. |
 | ⚙️ **Universal runtime** | A single Rust binary loads any `.agent` package; Agents connect directly to LLM APIs — no Gateway proxy, no extra latency. |
@@ -98,45 +63,44 @@ These are the bets ACowork is built around — and the reasons to choose it over
 | 💬 **Intent collaboration** | Agents advertise capabilities in a registry, route requests/observations, sync or async, with the Gateway as broker. |
 | 🛠️ **Full-stack dev loop** | Desktop App (Tauri v2) supports DevMode: conversational debug, skill hot-reload, breakpoints, recording & replay, publishing wizard. |
 
+Every Agent is still an independent **"digital being"**: its own runtime process, private memory, workspace, and
+configuration. **Tune prompt, tools, and memory = build an agent.** Personal and sensitive data is
+automatically stripped during packaging, so you can share an agent's capabilities freely without leaking your
+private memories.
+
 ---
 
 ## 🏛️ Architecture
 
-ACowork has a flat three-tier topology: **Gateway** (one control plane per cluster), **Node Agent** (one per
-machine that hosts Runtimes), **Runtime** (one per `.agent` instance). Every actor — human, AI agent, project
+ACowork has a flat three-tier topology: **Gateway** (one control plane per cluster) → **Node Agent** (one per
+machine that hosts Runtimes) → **Runtime** (one per `.agent` instance). Every actor — human, AI agent, project
 service, document service — talks to the Gateway over the same protocol path.
 
-| Tier | Component | Role |
-|------|-----------|------|
-| **Gateway** (`acowork-gateway`) | One keep-alive Rust process per cluster | HTTP API on `:19876`, embedded MQTT broker on `:19875`, reverse proxy to every Node / Runtime, package manager, intent router, global resources (LLM providers / MCP / budget / cron / rate-limit). |
-| **Node Agent** (`acowork-node`) | One per machine that hosts Runtimes | Process table (spawn / kill / reap Runtimes), local package store, MQTT enrollment with the Gateway, local reverse proxy on `:19900`, LSP sidecar supervisor, node-local fs browse. |
-| **Runtime** (`acowork-runtime`) | One per running `.agent` instance | Universal Rust binary that loads a `.agent` package, hosts the LLM loop, tool execution (memory access is a tool call against the memory service, ADR-101), and per-agent HTTP on loopback. |
+- **Gateway** (`acowork-gateway`) — one keep-alive Rust process per cluster. HTTP API on `:19876`, embedded MQTT
+  broker on `:19875`, reverse proxy to every Node / Runtime, package manager, intent router, global resources
+  (LLM providers / MCP / budget / cron / rate-limit).
+- **Node Agent** (`acowork-node`) — one per machine that hosts Runtimes. Process table (spawn / kill / reap),
+  local package store, MQTT enrollment, local reverse proxy on `:19900`, LSP sidecar supervisor.
+- **Runtime** (`acowork-runtime`) — one per running `.agent` instance. Universal Rust binary that loads the
+  package, hosts the LLM loop, tool execution, and per-agent HTTP on loopback.
 
-Alongside these, five co-resident services plug into the same Gateway protocol path and are reachable to Runtimes
-through the same REST + MCP surface that humans use:
+Alongside these, five co-resident services plug into the same Gateway protocol path — `acowork-user` (accounts,
+roles, profiles), `acowork-pm` (project & task management), `acowork-doc` (online document library), and
+`acowork-memory` (the standalone memory service) are reachable to both humans and agents through the same
+REST + MCP surface.
 
-| Service | Role |
-|---------|------|
-| `acowork-user` | User domain — accounts, credentials, roles, profiles / avatars, user↔user chat. |
-| `acowork-pm`   | Project & task management — first-class service, agents and humans read / write / subscribe to the same project tree. |
-| `acowork-doc`  | Online document library with real-time multi-user editing (Tiptap + Yjs). |
-| `acowork-memory` | Standalone memory service (ADR-101) — the SQLite storage engine (vectors + FTS5, ADR-082) plus distill / consolidation pipeline, one SQLite instance per Agent instance id, exposed as REST + MCP and supervised by the Gateway. |
-| `acowork-embed` / `acowork-lsp-relay` / `acowork-vault` / `acowork-sqlite` / `acowork-sign` | Embedding model runner, LSP relay, encrypted KV store, storage backend, package signing — supporting tiers. |
-
-### Standalone vs. cluster
-
-- **Standalone** — Gateway auto-spawns one local Node (`acowork-node --mode local`) on the same host. Best for
-  personal use, demos, and edge devices. One process tree, one MQTT broker, one HTTP entry.
-- **Cluster** — install `acowork-node` on every host you want Runtimes to live on (`GPU box`, `workstation`,
-  `cloud VM`), enroll them with the Gateway's MQTT broker, and the same protocol path lights up. Gateway has
-  **zero local-vs-remote code branches** — see
-  the project's design docs for the rationale and frozen ceilings.
-
-### System Architecture
+**Standalone** — the Gateway auto-spawns one local Node on the same host: one process tree, one MQTT broker, one
+HTTP entry. **Cluster** — install `acowork-node` on every host you want Runtimes to live on and enroll them; the
+same protocol path lights up. The Gateway has **zero local-vs-remote code branches**.
 
 <p align="center">
   <img src="./assets/architecture.svg" alt="ACowork System Architecture" width="100%" />
 </p>
+
+> Full topology, protocol paths, and the frozen design boundaries:
+> [`docs/design/zh/01-overview.md`](./docs/design/zh/01-overview.md) ·
+> [`docs/module-design/zh/`](./docs/module-design/zh/) ·
+> [`docs/adr/zh/`](./docs/adr/zh/)
 
 ---
 
@@ -145,129 +109,35 @@ through the same REST + MCP surface that humans use:
 Cross-platform build scripts under [`dev/`](./dev/) handle ONNX Runtime discovery, profile switching, and resource
 staging — prefer them over calling `cargo` directly.
 
-### Prerequisites
-
-| Tool         | Version     | Notes                                                                                                              |
-| ------------ | ----------- | ------------------------------------------------------------------------------------------------------------------ |
-| Rust         | **nightly** | `rustup default nightly`                                                                                           |
-| Node.js      | >= 18       | Desktop App and Tauri CLI                                                                                          |
-| PowerShell   | 7.x         | Required on Windows (`.ps1` scripts); `pwsh` recommended                                                          |
-| ONNX Runtime | auto-managed | Installed by `dev/common/setup_ort.*` into `.ort/onnxruntime-<plat>-<arch>-<ver>/`                                       |
-
 ```bash
 git clone https://github.com/tranxon/ACowork.git
 cd ACowork
-```
 
-### Step 1 — Install ONNX Runtime (one-time)
+# 1. Install ONNX Runtime (one-time) and build the backend
+./dev/common/setup_ort.sh      # Linux / macOS / WSL / Git Bash
+./dev/common/build_core.sh     # Windows: .\dev\common\setup_ort.ps1 / build_core.ps1
 
-```bash
-# Windows PowerShell
-.\dev\common\setup_ort.ps1
-
-# macOS / Linux / WSL / Git Bash
-./dev/common/setup_ort.sh
-```
-
-### Step 2 — Build & start the backend (Gateway + Runtime + Node)
-
-```bash
-# Windows — release build, then start Gateway
-.\dev\common\build_core.ps1 -Start
-
-# macOS / Linux — release build + start
-./dev/common/build_core.sh
-
-# Debug profile
-.\dev\common\build_core.ps1 -Debug -Start      # Windows
-./dev/common/build_core.sh --debug              # bash
-```
-
-macOS users get a one-click build from `./dev/common/build_core.sh` itself: on Apple Silicon it downloads ONNX Runtime via cargo with CoreML acceleration enabled (pass `--cpu` to force CPU inference).
-
-### Step 3 — Launch the Desktop App
-
-The Desktop App is a Tauri v2 shell — the React/TS frontend talks to the Gateway over HTTP, while the Rust side
-handles the system tray and the MQTT client that subscribes to real-time events.
-
-```bash
+# 2. Launch the Desktop App
 cd apps/acowork-desktop
-npm install
-
-# Browser-only dev server
-npm run dev               # → http://localhost:5173
-
-# Or full Tauri desktop window
-npm run tauri dev
+npm install && npm run tauri dev
 ```
 
-### ☁️ Remote access via cloud relay (optional)
+`build_core.*` builds the Gateway, Runtime, and Node Agent; the Desktop App is a Tauri v2 shell whose React/TS
+frontend talks to the Gateway over HTTP. Add `--debug` / `-Debug` for a debug build with verbose logs.
+
+> Prerequisites, packaging, CI, and deployment:
+> [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
+
+### ☁️ Remote access (optional)
 
 By default Gateway binds HTTP/MQTT to localhost only. To reach a NAT'd Gateway from the public internet, deploy
-`acowork-relay` — a **thin, protocol-agnostic relay**: Gateway dials out one WSS tunnel (`wss://relay.../tunnel`),
-the relay routes traffic purely by TLS SNI / Host header and never parses HTTP or MQTT. The relay holds **zero
-accounts and zero secrets** (only each Gateway's pinned Ed25519 public key); all authentication is decided by your
-Gateway. Design: [docs/design/zh/24-cloud-relay-remote-access.md](./docs/design/zh/24-cloud-relay-remote-access.md).
+`acowork-relay` — a **thin, protocol-agnostic relay**: Gateway dials out one WSS tunnel, the relay routes traffic
+purely by TLS SNI / Host header and never parses HTTP or MQTT. The relay holds **zero accounts and zero secrets**;
+all authentication is decided by your Gateway.
 
-**1) Deploy the relay on a public server.** Requirements: a domain `relay.example.com` with a wildcard DNS record
-`*.relay.example.com → <server IP>` and a public CA certificate (e.g. Let's Encrypt — Desktop validates TLS).
-
-```bash
-cd core && cargo build --release -p acowork-relay   # copy target/release/acowork-relay to the server
-
-acowork-relay \
-  --listen 0.0.0.0:443 \
-  --service-domain relay.example.com \
-  --device-domain-suffix relay.example.com \
-  --tls-cert /etc/letsencrypt/live/relay.example.com/fullchain.pem \
-  --tls-key  /etc/letsencrypt/live/relay.example.com/privkey.pem \
-  --data-dir /var/lib/acowork-relay \
-  --admin-token <secret>          # optional; enables /api/admin/* (list/pre-register/revoke devices, list tunnels)
-```
-
-Omit `--tls-cert/--tls-key` for plain `ws://` (dev/test only). Device registration is TOFU by default (Gateway's
-public key is pinned on first connect); add `--require-registration` for pre-registration-only deployments.
-Device public keys persist under `--data-dir`.
-
-**2) Enable the tunnel on the Gateway (behind NAT).** Add to `~/.acowork/acowork-gateway/config/gateway.toml`
-(restart to apply), or toggle at runtime via `POST /api/relay/enable {"url": "wss://relay.example.com/tunnel"}` /
-`POST /api/relay/disable`:
-
-```toml
-[relay]
-enabled = true
-url = "wss://relay.example.com/tunnel"
-```
-
-On first enable the Gateway mints `relay_identity.json` (0600, private key never leaves the machine). Query
-`GET /api/relay/status` for the tunnel state and your **gw-id** (a stable UUID).
-
-**3) Connect Desktop from anywhere.** Settings → connection mode **Relay** → enter
-`https://<gw-id>.relay.example.com`, then log in with your normal account — the login request itself travels the
-tunnel back to your Gateway. Remote-origin requests are served by a dedicated loopback listener with a stricter
-ACL (debug / fs-browse / config-write endpoints are 404'd remotely). `relay.enabled=false` fully disables the path
-with zero outbound connections.
-
-**Production deployment (Linux).** Build `acowork-relay` with `cargo build --release -p acowork-relay` (or cross-compile
-for the server), drop the binary at `/usr/local/bin/`, and install the ready-made unit + renewal hook from
-[dev/deploy/relay/](./dev/deploy/relay/):
-
-```bash
-sudo useradd -r -s /usr/sbin/nologin acowork-relay
-sudo install -d -o acowork-relay /var/lib/acowork-relay
-sudo cp dev/deploy/relay/acowork-relay.service /etc/systemd/system/
-sudo systemctl enable --now acowork-relay
-```
-
-Wildcard TLS (`*.relay.example.com`) requires a DNS-01 challenge — see
-[dev/deploy/relay/certbot-wildcard.sh](./dev/deploy/relay/certbot-wildcard.sh) for a copy-paste example; the relay
-picks up rotated certs on restart, and Gateway tunnels reconnect automatically.
-
-**End-to-end walkthrough** (Cloudflare DNS + Aliyun ECS, including the wildcard certificate and the
-grey-cloud requirement): [docs/runbooks/relay-ecs-cloudflare-deploy.md](./docs/runbooks/relay-ecs-cloudflare-deploy.md).
-
-**Self-hosting inside mainland China** (Aliyun ECS + a domain eligible for ICP filing; self-use needs no
-telecom licence but **does** need ICP filing): [docs/runbooks/relay-selfhost-cn-deploy.md](./docs/runbooks/relay-selfhost-cn-deploy.md).
+- Design: [`docs/design/zh/24-cloud-relay-remote-access.md`](./docs/design/zh/24-cloud-relay-remote-access.md)
+- Deploy (Cloudflare DNS + Aliyun ECS): [`docs/runbooks/relay-ecs-cloudflare-deploy.md`](./docs/runbooks/relay-ecs-cloudflare-deploy.md)
+- Self-host in mainland China (ICP filing): [`docs/runbooks/relay-selfhost-cn-deploy.md`](./docs/runbooks/relay-selfhost-cn-deploy.md)
 
 ### ✍️ Try it: write a manifest in 30 seconds
 
