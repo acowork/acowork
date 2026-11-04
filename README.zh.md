@@ -143,20 +143,6 @@ Desktop App 是 Tauri v2 壳，React/TS 前端通过 HTTP 与 Gateway 对话。A
 
 ---
 
-## 🧪 Agent 开发流程
-
-```
-① 编写       manifest.toml + prompts/ + skills/SKILL.md + 可选 tools/*.wasm
-② 签名       acowork-keygen → acowork-sign  （Developer 私钥 + 包签名）
-③ 调试       Desktop App DevMode → 对话调试、SKILL.md 热加载、断点、录制回放
-④ 发布       发布向导 → 远程仓库，或直接分享 .agent 文件
-```
-
-开发者通过**调优声明式配置**来构建 Agent——系统提示词、工具能力、记忆行为——而非编写命令式代码。
-从编写到发布的完整链路，平台均提供工具支撑。
-
----
-
 ## 📈 路线图
 
 | 阶段    | 内容                                                                                                                                                                                                                                          | 状态     |

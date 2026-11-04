@@ -149,20 +149,6 @@ For more — packaging installers, signing, CI, remote-node onboarding — see [
 
 ---
 
-## 🧪 Agent Development Workflow
-
-```
-① Authoring       manifest.toml + prompts/ + skills/SKILL.md + optional tools/*.wasm
-② Signing         acowork-keygen → acowork-sign  (developer key, signed package)
-③ Debugging       Desktop App DevMode → conversational debug, SKILL.md hot-reload, breakpoints, recording/replay
-④ Publishing      Publishing wizard → remote registry, or share the .agent file directly
-```
-
-Developers build agents by **tuning declarative configurations** — system prompts, tool capabilities, memory behavior —
-not writing imperative code. The whole pipeline from authoring to publishing is supported by the platform.
-
----
-
 ## 📈 Roadmap
 
 | Phase | Scope                                                                                                                                            | Status         |
