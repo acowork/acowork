@@ -72,26 +72,22 @@ private memories.
 
 ## 🏛️ Architecture
 
-ACowork has a flat three-tier topology: **Gateway** (one control plane per cluster) → **Node Agent** (one per
-machine that hosts Runtimes) → **Runtime** (one per `.agent` instance). Every actor — human, AI agent, project
-service, document service — talks to the Gateway over the same protocol path.
+Humans drive it from Desktop or Mobile; agents and domain services reach it over the same protocol path. Under the
+Gateway sits a flat three-tier chain: **Gateway** → **Node Agent** → **Runtime**.
 
-- **Gateway** (`acowork-gateway`) — one keep-alive Rust process per cluster. HTTP API on `:19876`, embedded MQTT
-  broker on `:19875`, reverse proxy to every Node / Runtime, package manager, intent router, global resources
-  (LLM providers / MCP / budget / cron / rate-limit).
-- **Node Agent** (`acowork-node`) — one per machine that hosts Runtimes. Process table (spawn / kill / reap),
-  local package store, MQTT enrollment, local reverse proxy on `:19900`, LSP sidecar supervisor.
-- **Runtime** (`acowork-runtime`) — one per running `.agent` instance. Universal Rust binary that loads the
-  package, hosts the LLM loop, tool execution, and per-agent HTTP on loopback.
+| Tier | Count | Responsibility |
+|---|---|---|
+| **Clients** · Desktop App · Mobile App | per device | Tauri v2 UI over HTTP + MQTT — same surface, same account |
+| **Gateway** · `acowork-gateway` | 1 per cluster | HTTP `:19876`, MQTT `:19875`, reverse proxy, package manager, intent routing, global resources |
+| **Node Agent** · `acowork-node` | 1 per host | process table, local package store, reverse proxy `:19900`, LSP supervisor |
+| **Runtime** · `acowork-runtime` | 1 per `.agent` | loads the package, LLM loop, tool execution, loopback HTTP |
 
-Alongside these, five co-resident services plug into the same Gateway protocol path — `acowork-user` (accounts,
-roles, profiles), `acowork-pm` (project & task management), `acowork-doc` (online document library), and
-`acowork-memory` (the standalone memory service) are reachable to both humans and agents through the same
-REST + MCP surface.
+Four co-resident services sit on the same path, exposed to humans and agents alike over REST + MCP:
+`acowork-user` (accounts · roles) · `acowork-pm` (projects · tasks) · `acowork-doc` (document library) ·
+`acowork-memory` (memory service).
 
-**Standalone** — the Gateway auto-spawns one local Node on the same host: one process tree, one MQTT broker, one
-HTTP entry. **Cluster** — install `acowork-node` on every host you want Runtimes to live on and enroll them; the
-same protocol path lights up. The Gateway has **zero local-vs-remote code branches**.
+**Standalone** — the Gateway auto-spawns one local Node. **Cluster** — enroll `acowork-node` on every host.
+One binary, one protocol path, **zero local-vs-remote branches** in the Gateway.
 
 <p align="center">
   <img src="./assets/architecture.svg" alt="ACowork System Architecture" width="100%" />

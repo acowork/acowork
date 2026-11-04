@@ -446,7 +446,11 @@ interface AgentStoreState {
    *  showing a dead node as online. */
   markNodesOffline: () => void;
   selectAgent: (id: string | null) => void;
-  installAgent: (packagePath: string, nodeId?: string) => Promise<void>;
+  /** Installs a local `.agent` package and refreshes the inventory.
+   *  Resolves with the INSTANCE key the Gateway acked (ADR-073) so the
+   *  caller can select what it just created; `null` only if a Gateway
+   *  predates the ack field, in which case the selection is left alone. */
+  installAgent: (packagePath: string, nodeId?: string) => Promise<string | null>;
   uninstallAgent: (agentId: string) => Promise<void>;
   startAgent: (agentId: string, devMode?: boolean) => Promise<void>;
   stopAgent: (agentId: string) => Promise<void>;
@@ -901,8 +905,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   installAgent: async (packagePath, nodeId) => {
     try {
-      await invoke("install_agent", { packagePath, devMode: true, nodeId: nodeId ?? null });
+      const ack = await invoke<{ instance_id?: string }>("install_agent", {
+        packagePath,
+        devMode: true,
+        nodeId: nodeId ?? null,
+      });
       await get().fetchAgents();
+      return ack.instance_id ?? null;
     } catch (e) {
       set({ error: String(e) });
       throw e;

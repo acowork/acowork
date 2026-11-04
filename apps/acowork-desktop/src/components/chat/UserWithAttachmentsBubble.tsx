@@ -166,46 +166,52 @@ export function UserWithAttachmentsBubble({
           </div>
         )}
 
-        {/* User text bubble. The timestamp is rendered as a sibling
-            BELOW the bubble (not absolutely positioned above) so it
-            can never collide with the username row or attachment
-            chips. Hover behaviour is preserved: the timestamp
-            reveals with an opacity fade when the wrapper is hovered. The
-            bubble and timestamp share a column with `max-w-[85%]`, anchored
-            by `bubbleMetaAnchor("own")` — the human's own meta block hugs the
-            bubble's RIGHT edge, the side the bubble is on. It used to be
-            `items-start`, which parked this side's timestamp under the
-            bubble's LEFT edge (`bubbleMetaAnchor.ts` records the defect). */}
-        {userMessage.content && (
-          <div
-            className={`group mt-[6px] max-w-[85%] flex flex-col ${bubbleMetaAnchor("own")}`}
-          >
-            <div
-              className="w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
-              style={fontSizeStyle}
-            >
-              {/* Uncapped — see MessageBubble's user branch. */}
-              <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
-                {userMessage.content}
-              </div>
-            </div>
-            {userMessage.timestamp && (
-              <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
-                {formatBubbleTime(userMessage.timestamp)}
-              </span>
-            )}
-          </div>
-        )}
+        {/* One column per turn: the bubble, then its reference parts, then the
+            timestamp.
 
-        {/* Reference parts (ADR-107) — runtime-supplied context that came
-            WITH the message rather than from the human. Rendered BELOW the
-            bubble because that is the order the turn reads in: the human's
-            words lead, the background follows. Constrained like the bubble
-            and right-aligned with it so the block still reads as one turn.
-            Rendered even when `content` is empty — an attachment-only or
-            reference-only turn has no bubble but does have this card. */}
-        {refs.length > 0 && (
-          <div className="mt-[6px] flex w-full max-w-[85%] flex-col items-stretch">
+            The timestamp is a sibling BELOW the bubble rather than an
+            absolutely positioned element, so it can never collide with the
+            username row or the attachment chips; hover reveals it with an
+            opacity fade. It is deliberately the **last** child: it keeps its
+            height while hidden (`opacity-0`, not `hidden`), so putting a
+            hover-only meta line between the words and their background opened
+            an empty strip in the middle of the turn — the two looked like
+            separate turns. Meta belongs at the end of the turn, not inside it.
+
+            The column is `w-full max-w-[85%]`, anchored by
+            `bubbleMetaAnchor("own")`: the human's own meta block hugs the
+            bubble's RIGHT edge, the side the bubble is on. It used to be
+            `items-start`, which parked this side's timestamp under the bubble's
+            LEFT edge (`bubbleMetaAnchor.ts` records the defect).
+
+            Its width comes from the ROW (`w-full` + `max-w-[85%]`), never from
+            its children, and the bubble inside is `w-fit`: a column sized by its
+            contents let the widest child set everyone's width, so a two-word
+            message stretched to the width of its reference card — and stretched
+            again when that card expanded. A fixed column with intrinsically
+            sized children cannot do that. */}
+        {(userMessage.content || refs.length > 0) && (
+          <div
+            className={`group mt-[6px] w-full max-w-[85%] flex flex-col ${bubbleMetaAnchor("own")}`}
+          >
+            {userMessage.content && (
+              <div
+                className="w-fit max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
+                style={fontSizeStyle}
+              >
+                {/* Uncapped — see MessageBubble's user branch. */}
+                <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
+                  {userMessage.content}
+                </div>
+              </div>
+            )}
+
+            {/* Reference parts (ADR-107) — runtime-supplied context that came
+                WITH the message rather than from the human. They sit directly
+                under the words and inside the same column, so they hug the
+                bubble's right edge and read as one turn: words lead, background
+                follows. Rendered even when `content` is empty — an
+                attachment-only turn has no bubble but does have this card. */}
             {refs.map((refMsg) => (
               <MessageRefBlock
                 key={refMsg.id}
@@ -213,6 +219,12 @@ export function UserWithAttachmentsBubble({
                 content={refMsg.content}
               />
             ))}
+
+            {userMessage.timestamp && (
+              <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
+                {formatBubbleTime(userMessage.timestamp)}
+              </span>
+            )}
           </div>
         )}
       </div>

@@ -9,6 +9,7 @@ pub mod debug;
 pub mod doc_convert;
 pub mod effects;
 pub mod gateway;
+pub mod hub;
 pub mod netinfo;
 pub mod publish;
 pub mod reveal;

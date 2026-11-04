@@ -62,6 +62,9 @@ export const MessageRefBlock = memo(function MessageRefBlock({
   const [expanded, setExpanded] = useState(false);
   if (!content.trim()) return null;
 
+  // `w-full` of the turn column, not of its own content: the pill hugs its
+  // label while the expanded body still has the whole column to breathe in.
+  // Sizing this root by its content would hand the column's width to a pill.
   return (
     <div className="mt-1 flex w-full flex-col items-end">
       <button
@@ -81,13 +84,14 @@ export const MessageRefBlock = memo(function MessageRefBlock({
       </button>
 
       {expanded && (
+        // Right edge carries the accent so the panel reads as hanging off the
+        // bubble's own side; the text inside stays left-aligned (markdown
+        // right-aligned would be unreadable).
         <div
-          className="mr-2 mt-1 w-full overflow-y-auto rounded-md border-r-2 border-zinc-300 bg-zinc-50 py-2 pl-2 pr-3 text-right dark:border-zinc-600 dark:bg-zinc-800/30"
+          className="mt-1 w-full overflow-y-auto rounded-md border-r-2 border-zinc-300 bg-zinc-50 py-2 pl-3 pr-2 dark:border-zinc-600 dark:bg-zinc-800/30"
           style={{ maxHeight: "240px" }}
         >
-          <div className="text-left">
-            <ChatMarkdown content={content} style={{ fontSize: CARD_FONT_SIZE }} />
-          </div>
+          <ChatMarkdown content={content} style={{ fontSize: CARD_FONT_SIZE }} />
         </div>
       )}
     </div>

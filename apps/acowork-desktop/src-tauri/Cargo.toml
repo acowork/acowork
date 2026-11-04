@@ -33,6 +33,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "local-time"] 
 if-addrs = "0.15"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 toml = "0.8"
+# Agent Hub package integrity check (hub_client::verify_sha256). Same version
+# as the core workspace's `sha2` so both sides of the IPC boundary agree.
+sha2 = "0.10"
 
 # MQTT (ADR-033 Phase 3): Desktop MQTT client for real-time events
 # `default-features = false`: rumqttc's default `use-rustls` enables the
