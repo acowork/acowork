@@ -55,8 +55,11 @@ use axum::{
 use futures_util::TryStreamExt;
 use serde::{Deserialize, Serialize};
 
-use acowork_core::protocol::{ChatAttachmentMeta, CHAT_ATTACHMENTS_PARAM, TARGET_SESSION_PARAM};
+use acowork_core::protocol::{
+    ChatAttachmentMeta, CHAT_ATTACHMENTS_PARAM, CHAT_REFS_PARAM, TARGET_SESSION_PARAM,
+};
 
+use crate::http::proxy::runtime_json_get;
 use crate::http::routes::{ApiError, AppState};
 use crate::intent::accept;
 use crate::intent::chat_client;
@@ -70,6 +73,18 @@ use crate::intent::delivery::{self, DeliveryContext};
 /// silently truncated downstream.
 const MAX_CHAT_ATTACHMENTS: usize = 32;
 const MAX_CHAT_ATTACHMENTS_JSON_LEN: usize = 32 * 1024;
+
+/// ADR-106 revision 2026-11-04: how many `@session` references one human
+/// utterance may attach. The material is assembled into the receiving
+/// session's context under one total byte budget; more references than a
+/// model can read in one turn are a paste job, not an addressing job.
+const MAX_CHAT_REFS: usize = 5;
+
+/// The longest accepted referenced session id — the Runtime's own
+/// `MAX_SESSION_ID_BYTES` (http/rounds.rs): the Gateway pins the coordinate
+/// through that endpoint, so a longer id is refused here with the same 400
+/// the Runtime would answer, before any row is written.
+const MAX_REF_SESSION_ID_BYTES: usize = 128;
 
 
 /// Is `id` acceptable as a client-supplied Chat row id (ADR-100)?
@@ -1392,8 +1407,30 @@ pub struct MentionRequest {
     /// 2 and the turn never reaches the Chat Router. A key that is not in
     /// `targets` is refused rather than ignored — dropping an address the human
     /// typed would silently turn "continue that session" into "guess one".
+    ///
+    /// **Answering channel only** (ADR-106 revision 2026-11-04, narrow
+    /// retirement): the `@` picker no longer produces this field — a typed
+    /// session reference is material (`refs`), not a delivery. The field stays
+    /// because answering a level-3 `session_choice` card IS a delivery, and that
+    /// address was chosen by the human in reply to the agent's own question,
+    /// not typed by the picker.
     #[serde(default)]
     pub target_sessions: std::collections::HashMap<String, String>,
+    /// ADR-106 revision 2026-11-04 (reference redrawing): the execution-session
+    /// rounds the human attached as **material** via the second level of the
+    /// `@` — a reference, not a delivery. Each entry arrives as
+    /// `{agent_instance_id, session_id}` and the Gateway pins the newest
+    /// terminal round before the row is written; the pinned coordinates are
+    /// stored on the row (`meta.refs`) and forwarded per target under
+    /// [`CHAT_REFS_PARAM`]. A ref whose agent is not in `targets` is refused
+    /// like a stray `target_sessions` key, and the same agent may not both
+    /// receive a delivery (`target_sessions`) and carry material — one
+    /// sentence cannot ask "deliver this there" and "quote that here" at once.
+    /// `round_id`/`terminal` may be echoed back pre-pinned by an addressing-card
+    /// answer (the re-delivery of the same utterance carries the original row's
+    /// `meta.refs` verbatim — the material of a sentence is not re-decided).
+    #[serde(default)]
+    pub refs: Vec<MentionRef>,
     /// ADR-106 D6 level 5's cheap escape: "continue nothing, this is new work".
     /// It is always offered next to an `exec_session_propose_continue`
     /// confirmation, and here
@@ -1444,6 +1481,36 @@ pub struct MentionRequest {
     pub message_id: Option<String>,
 }
 
+/// One `@session` reference attached to a human utterance (ADR-106 revision
+/// 2026-11-04 · reference redrawing).
+///
+/// The client names only the **coordinates it knows** — the agent instance and
+/// the execution session the human picked in the `@` list. The round is not the
+/// human's to guess: the Gateway pins "the newest terminal round at send time"
+/// through the Runtime's `latest=1` read before the row is written, and the
+/// pinned quadruple is what lands in `meta.refs` and in `params.chat_refs`.
+/// A pre-pinned echo (`round_id` + `terminal` present) is the card-answer
+/// re-delivery of the same utterance: the material was decided when the row was
+/// written and is never re-pinned.
+#[derive(Debug, Clone, Deserialize)]
+pub struct MentionRef {
+    /// The agent instance that owns the referenced session — must be one of
+    /// this message's targets (the material travels to the agent the human
+    /// named, never to a bystander).
+    pub agent_instance_id: String,
+    /// The referenced execution session id, as the picker's candidate list
+    /// offered it (the Runtime's own id charset is re-checked server-side).
+    pub session_id: String,
+    /// Pinned round, only from an echoing card answer. Absent = the Gateway
+    /// pins it now.
+    #[serde(default)]
+    pub round_id: Option<String>,
+    /// Whether the pinned round had reached terminal, echoed with `round_id`.
+    /// The projection renders a non-terminal pin as "progress as of then".
+    #[serde(default)]
+    pub terminal: Option<bool>,
+}
+
 /// ADR-106 D6/D7: refuse a group address the Gateway could not honour.
 ///
 /// An address that cannot be attached to a target of this message must not be
@@ -1455,6 +1522,7 @@ fn validate_mention_addresses(
     target_sessions: &std::collections::HashMap<String, String>,
     force_new_for: &[String],
     targets: &[String],
+    refs: &[MentionRef],
 ) -> Result<(), ApiError> {
     for (target, sid) in target_sessions {
         if sid.trim().is_empty() {
@@ -1480,7 +1548,206 @@ fn validate_mention_addresses(
             )));
         }
     }
+    validate_refs(refs, targets, target_sessions)
+}
+
+/// ADR-106 revision 2026-11-04: validate `@session` reference material with the
+/// same "never guess, answer 400" discipline as [`validate_mention_addresses`].
+///
+/// A reference is a fact the human supplied, like an address — so a ref naming
+/// an agent this message does not deliver to, a blank or path-shaped session id,
+/// a duplicate (agent, session) pair, or the contradiction of the same agent
+/// both receiving a delivery and carrying material are all client bugs, refused
+/// before anything is written. `force_new_for` is NOT a contradiction: "new
+/// task" plus "quote this round while you do it" is a coherent instruction
+/// (unlike an address, a reference never decides where the sentence goes).
+///
+/// The delivery-vs-quote contradiction is checked only for a FRESH ref (one the
+/// Gateway is about to pin). A pre-pinned echo — a card answer re-delivering the
+/// human's own sentence, with that sentence's already-pinned coordinates — is a
+/// fact about an utterance already on disk, not a new delivery instruction, so it
+/// rides beside the answer's target. Refusing it would 400 the only way to answer
+/// a `confirm_continue` card the human reached by quoting material.
+fn validate_refs(
+    refs: &[MentionRef],
+    targets: &[String],
+    target_sessions: &std::collections::HashMap<String, String>,
+) -> Result<(), ApiError> {
+    if refs.len() > MAX_CHAT_REFS {
+        return Err(ApiError::bad_request(&format!(
+            "refs accepts at most {MAX_CHAT_REFS} entries, got {}",
+            refs.len()
+        )));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for r in refs {
+        if !targets.iter().any(|t| t == &r.agent_instance_id) {
+            return Err(ApiError::bad_request(&format!(
+                "`refs` names agent '{}', which this message does not deliver to",
+                r.agent_instance_id
+            )));
+        }
+        if !valid_ref_session_id(&r.session_id) {
+            return Err(ApiError::bad_request(&format!(
+                "`refs` session id {:?} is not a well-formed execution session id",
+                r.session_id
+            )));
+        }
+        if r.round_id.as_deref().is_some_and(|s| s.trim().is_empty()) {
+            return Err(ApiError::bad_request(
+                "`refs` carries a blank round_id — a pinned echo must name the round it pins",
+            ));
+        }
+        // A pre-pinned echo is the re-delivered sentence's own coordinates (a
+        // card answer that names a session also carries them back) — that is a
+        // fact of an already-written turn, not a fresh delivery-vs-quote intent,
+        // so only a FRESH ref beside a delivery to the same agent is the
+        // contradiction refused here.
+        let pre_pinned = r
+            .round_id
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|s| !s.is_empty());
+        if !pre_pinned && target_sessions.contains_key(&r.agent_instance_id) {
+            return Err(ApiError::bad_request(&format!(
+                "'{}' both receives a `target_sessions` delivery and carries `refs` material — one sentence cannot deliver to and quote the same agent",
+                r.agent_instance_id
+            )));
+        }
+        if !seen.insert((r.agent_instance_id.clone(), r.session_id.clone())) {
+            return Err(ApiError::bad_request(&format!(
+                "duplicate ref for ({}, {}) — the same session must be quoted once",
+                r.agent_instance_id, r.session_id
+            )));
+        }
+    }
     Ok(())
+}
+
+/// The Runtime's session-id charset ([`MAX_REF_SESSION_ID_BYTES`],
+/// `[A-Za-z0-9_-]`): the id travels into a URL path to the pinning read, so it
+/// is validated with the endpoint's own rule here — a `..` never reaches either
+/// the path build or the filesystem behind it.
+fn valid_ref_session_id(sid: &str) -> bool {
+    !sid.is_empty()
+        && sid.len() <= MAX_REF_SESSION_ID_BYTES
+        && sid
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
+
+/// ADR-106 revision 2026-11-04: pin each `@session` reference to the round it
+/// quotes, **before the chat row is written**.
+///
+/// The client names (agent, session); the round is resolved here as "the newest
+/// terminal round now, or the newest running round if nothing has terminated"
+/// through the Runtime's bounded `latest=1` read ([`runtime_json_get`], same
+/// addressing as the chat's own round reads). A terminal round is immutable, so
+/// the pinned coordinate cannot rot under the row.
+///
+/// Refuse-not-degrade: a reference whose round cannot be resolved answers 400
+/// (the session is gone, unreadable, or has never run a round — the picker's
+/// list was stale, not the node down) or 502 (Runtime/node unreachable), and
+/// **no row is written**. The coordinates on the row are facts; if the Gateway
+/// cannot establish the fact it must not record a sentence that claims it.
+///
+/// A ref that arrives already pinned (`round_id` echoed by a card answer — the
+/// same utterance re-delivered) is passed through verbatim: re-deciding the
+/// material of a sentence that was already written is exactly the re-guessing
+/// this endpoint exists to prevent.
+async fn pin_reference_rounds(
+    state: &AppState,
+    refs: &[MentionRef],
+    verified_user: &str,
+    chat_session_id: &str,
+) -> Result<Vec<serde_json::Value>, ApiError> {
+    if refs.is_empty() {
+        return Ok(Vec::new());
+    }
+    // The read is the human's own scope, same pair the auth middleware injects
+    // for proxied round reads: owner-match plus this chat's membership. Local
+    // mode (empty verified user) sends neither header and gets `Unfiltered`.
+    // A value that is not a legal header value is refused as a client bug —
+    // both ids are validated elsewhere, so reaching here with one means the
+    // caller built a request nothing on this path could honour.
+    let mut scope = axum::http::HeaderMap::new();
+    if !verified_user.is_empty() {
+        let header = |name, value: &str| -> Result<axum::http::HeaderValue, ApiError> {
+            axum::http::HeaderValue::from_str(value).map_err(|_| {
+                ApiError::bad_request(&format!(
+                    "refusing the pinning read: '{name}' is not a legal header value"
+                ))
+            })
+        };
+        scope.insert(
+            crate::http::auth_middleware::USER_SCOPE_HEADER,
+            header("user id", verified_user)?,
+        );
+        scope.insert(
+            crate::http::auth_middleware::CHAT_SCOPE_HEADER,
+            header("chat session id", chat_session_id)?,
+        );
+    }
+    let mut pinned = Vec::with_capacity(refs.len());
+    for r in refs {
+        // The scoped `rounds?latest=1` read is an authorization gate for BOTH
+        // arms, not just the fresh one. It runs `authorize_read` against the
+        // caller's user + chat scope (design 27 §8.2), so a `session_id` the
+        // human cannot read — one bound to a different Chat on this host —
+        // answers 404 here instead of having its material injected from a
+        // forged pre-pinned echo coordinate. Passing the gate does NOT re-decide
+        // an already-pinned round; it only proves the caller may read the session.
+        let path = format!("/sessions/{}/rounds", r.session_id);
+        let body = runtime_json_get(state, &r.agent_instance_id, &path, "latest=1", &scope)
+            .await
+            .map_err(|(status, message)| {
+                tracing::warn!(
+                    agent = %r.agent_instance_id,
+                    session = %r.session_id,
+                    status = %status,
+                    error = %message,
+                    "@session reference pinning read failed — row not written"
+                );
+                if status == axum::http::StatusCode::NOT_FOUND {
+                    ApiError::bad_request(&format!(
+                        "referenced session '{}' cannot be quoted: no such session or not readable",
+                        r.session_id
+                    ))
+                } else {
+                    ApiError::bad_gateway(&format!(
+                        "cannot pin the referenced round now: {message}"
+                    ))
+                }
+            })?;
+        let (round_id, terminal) = match r.round_id.as_deref().map(str::trim) {
+            // Pre-pinned echo: the gate above proved this session is readable;
+            // the sentence's frozen coordinates win and are passed through
+            // verbatim, never re-resolved.
+            Some(id) if !id.is_empty() => (id.to_string(), r.terminal.unwrap_or(true)),
+            _ => {
+                let latest = &body["latest"];
+                let round_id = latest["round_id"]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| {
+                        ApiError::bad_request(&format!(
+                            "referenced session '{}' has no round to quote",
+                            r.session_id
+                        ))
+                    })?
+                    .to_string();
+                let terminal = latest["terminal"].as_bool().unwrap_or(false);
+                (round_id, terminal)
+            }
+        };
+        pinned.push(serde_json::json!({
+            "agent_instance_id": r.agent_instance_id,
+            "session_id": r.session_id,
+            "round_id": round_id,
+            "terminal": terminal,
+        }));
+    }
+    Ok(pinned)
 }
 
 /// The `params` payload of a chat delivery — the one place the Chat Router's
@@ -1520,6 +1787,13 @@ struct DeliveryAddress<'a> {
     explicit_mention: bool,
     /// The human asked for new work, so no session may be continued.
     force_new: bool,
+    /// Pinned `@session` reference material for **this** target (ADR-106
+    /// revision 2026-11-04): the `meta.refs` entries whose
+    /// `agent_instance_id` equals the delivery's agent, nothing else — a
+    /// quoted round travels to the agent the human quoted it for, the same
+    /// per-target discipline as `session`. The Runtime reads the key to
+    /// suppress level 3 and to assemble the material.
+    refs: &'a [serde_json::Value],
 }
 
 fn chat_delivery_params(
@@ -1556,6 +1830,11 @@ fn chat_delivery_params(
     }
     if address.force_new {
         params[acowork_core::protocol::FORCE_NEW_PARAM] = serde_json::Value::Bool(true);
+    }
+    // Absent when empty for the same reason as the session address: a key that
+    // says "this turn quotes nothing" is noise the model would have to ignore.
+    if !address.refs.is_empty() {
+        params[CHAT_REFS_PARAM] = serde_json::Value::Array(address.refs.to_vec());
     }
     params
 }
@@ -1693,7 +1972,14 @@ async fn deliver_mentions(
 
     // ADR-106 D7: an address is a fact the human supplied, so it is never
     // dropped and never re-decided — see [`validate_mention_addresses`].
-    validate_mention_addresses(&req.target_sessions, &req.force_new_for, &targets)?;
+    validate_mention_addresses(&req.target_sessions, &req.force_new_for, &targets, &req.refs)?;
+
+    // ADR-106 revision 2026-11-04: pin the reference material BEFORE the row
+    // exists. A pin that cannot be resolved answers 400/502 and the row is
+    // never written — the coordinates on a durable row are facts, and a row
+    // that could not establish its own facts is a lie with an id.
+    let pinned_refs =
+        pin_reference_rounds(&state, &req.refs, &verified_user, &req.chat_session_id).await?;
 
     // §5.3.1 (Wave 2B): one human utterance is ONE `user_message` row;
     // the mentioned targets are a field on it (`mentions`), not N copies
@@ -1728,6 +2014,13 @@ async fn deliver_mentions(
     // a reference is still a quote the human made.
     if !req.in_reply_to.trim().is_empty() {
         meta["in_reply_to"] = serde_json::Value::String(req.in_reply_to.trim().to_string());
+    }
+    // The pinned quadruples, durable with the row: the transcript renders them
+    // as source chips and an addressing-card answer echoes them back verbatim
+    // so the re-delivery carries the same material it asked about (ADR-106
+    // revision 2026-11-04). Coordinates only — never round content.
+    if !pinned_refs.is_empty() {
+        meta["refs"] = serde_json::Value::Array(pinned_refs.clone());
     }
     if let Some(responder) = auto_routed_to.as_deref()
         && let Some(map) = meta.as_object_mut()
@@ -1849,12 +2142,20 @@ async fn deliver_mentions(
         // names the round's own session; a level-2 pick names the session the
         // human chose for this agent. A refusal to continue is dropped wherever
         // an address exists: the Runtime must never read "continue exactly this
-        // session" and "start a new one" in one turn.
+        // session" and "start a new one" in one turn. Reference material is
+        // filtered per target for the same reason an address is per-target:
+        // `@A @B` quoting A's round hands material to A, not to B.
+        let target_refs: Vec<serde_json::Value> = pinned_refs
+            .iter()
+            .filter(|v| v["agent_instance_id"].as_str() == Some(target.as_str()))
+            .cloned()
+            .collect();
         let address = match &addressed {
             Some((agent, sid)) if agent == target => DeliveryAddress {
                 session: Some(sid.as_str()),
                 explicit_mention: true,
                 force_new: false,
+                refs: target_refs.as_slice(),
             },
             _ => {
                 let picked = req.target_sessions.get(target).map(String::as_str);
@@ -1867,6 +2168,7 @@ async fn deliver_mentions(
                     explicit_mention: req.targets.iter().any(|t| t == target),
                     force_new: picked.is_none()
                         && req.force_new_for.iter().any(|f| f == target),
+                    refs: target_refs.as_slice(),
                 }
             }
         };
@@ -2017,8 +2319,17 @@ pub struct ChatMessageRequest {
     /// picked for this message. With one agent in the chat the first level is
     /// degenerate, so the picker opens straight on sessions. Empty = no address
     /// (and a plain DM message is therefore a level-5 turn, not a continuation).
+    /// **Answering channel** (ADR-106 revision 2026-11-04, narrow retirement):
+    /// the `@` picker no longer produces this field — it delivers level-3
+    /// continuation-card answers only, the group form being `target_sessions`.
     #[serde(default)]
     pub target_session: Option<String>,
+    /// ADR-106 revision 2026-11-04: the 1:1 form of the `@session` material
+    /// references — see [`MentionRequest::refs`]. With one agent in the chat
+    /// every ref must name that agent; a ref beside a `target_session` pick is
+    /// the same contradiction the group form refuses.
+    #[serde(default)]
+    pub refs: Vec<MentionRef>,
     /// ADR-106 D6's cheap escape from continuation — "new work, continue
     /// nothing". Consulted only when this message carries no session address.
     #[serde(default)]
@@ -2259,6 +2570,24 @@ async fn deliver_chat_message(
         .map(|(_, session)| session);
     let repo = session.repo.unwrap_or_default();
 
+    // ADR-106 revision 2026-11-04: the 1:1 reference material. The single agent
+    // is the only legal ref owner, so it stands in for the group's `targets`;
+    // a `target_session` pick beside refs is the same delivery-vs-quote
+    // contradiction the group form refuses. The pin runs before the row is
+    // written and a failed pin refuses the send (400/502, no row).
+    let picked = req
+        .target_session
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let mut dm_target_sessions = std::collections::HashMap::new();
+    if let Some(picked_sid) = picked {
+        dm_target_sessions.insert(target.clone(), picked_sid.to_string());
+    }
+    validate_refs(&req.refs, std::slice::from_ref(&target), &dm_target_sessions)?;
+    let pinned_refs =
+        pin_reference_rounds(&state, &req.refs, &verified_user, &req.chat_session_id).await?;
+
     let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {
         return Err(ApiError::internal("Gateway MQTT control plane is not available"));
     };
@@ -2285,11 +2614,17 @@ async fn deliver_chat_message(
     // `attached_items` / `exec_attachments` were normalized above, ahead of
     // the content gate, so the row and the delivery describe one and the
     // same turn.
-    let meta = serde_json::json!({
+    let mut meta = serde_json::json!({
         "message_id": message_id,
         "in_reply_to": req.in_reply_to,
         "exec_attachments": exec_attachments,
     });
+    // Pinned reference coordinates, durable with the row — the 1:1 twin of the
+    // group form: chips render from them and the row is the source of truth for
+    // what the turn quoted (ADR-106 revision 2026-11-04).
+    if !pinned_refs.is_empty() {
+        meta["refs"] = serde_json::Value::Array(pinned_refs.clone());
+    }
     // Stored attachment metadata, not the client's word: the store re-reads
     // name / mime / size from this session's `files/` dir. Forwarded so the
     // receiving Chat Router can see what the turn carried (its history window
@@ -2335,11 +2670,6 @@ async fn deliver_chat_message(
     // NOT an address: D6 puts 单聊 at level 5, where the Router may only answer or
     // open new work. `explicit_mention` therefore stays false here, so the
     // deterministic level-3 shortcut never swallows a DM's first "hi".
-    let picked = req
-        .target_session
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
     let address = DeliveryAddress {
         session: addressed_session.as_deref().or(picked),
         explicit_mention: false,
@@ -2347,6 +2677,8 @@ async fn deliver_chat_message(
         // would let the Runtime read "continue exactly this session" and
         // "continue nothing" out of one turn.
         force_new: addressed_session.is_none() && picked.is_none() && req.force_new,
+        // The single agent owns every ref here — validation enforced it.
+        refs: pinned_refs.as_slice(),
     };
     let mut params = chat_delivery_params(
         &req.text,
@@ -2983,14 +3315,15 @@ mod chat_params_tests {
         let targets = vec!["a".to_string(), "b".to_string()];
         let mut sessions = std::collections::HashMap::new();
         sessions.insert("a".to_string(), "s-1".to_string());
-        assert!(validate_mention_addresses(&sessions, &["b".to_string()], &targets).is_ok());
+        assert!(validate_mention_addresses(&sessions, &["b".to_string()], &targets, &[]).is_ok());
 
         // Nothing addressed is the normal case, not an error: it is what keeps
         // the turn on the ladder's lower levels.
         assert!(validate_mention_addresses(
             &std::collections::HashMap::new(),
             &[],
-            &targets
+            &targets,
+            &[]
         )
         .is_ok());
 
@@ -2999,18 +3332,18 @@ mod chat_params_tests {
         // "guess one".
         let mut stray = std::collections::HashMap::new();
         stray.insert("c".to_string(), "s-9".to_string());
-        assert!(validate_mention_addresses(&stray, &[], &targets).is_err());
-        assert!(validate_mention_addresses(&sessions, &["c".to_string()], &targets).is_err());
+        assert!(validate_mention_addresses(&stray, &[], &targets, &[]).is_err());
+        assert!(validate_mention_addresses(&sessions, &["c".to_string()], &targets, &[]).is_err());
 
         // A blank session id is not "no address": it names nothing while
         // claiming to name something.
         let mut blank = std::collections::HashMap::new();
         blank.insert("a".to_string(), "  ".to_string());
-        assert!(validate_mention_addresses(&blank, &[], &targets).is_err());
+        assert!(validate_mention_addresses(&blank, &[], &targets, &[]).is_err());
 
         // And the contradiction: an address and a refusal to continue, in one
         // turn. The Runtime would have to pick, which is the guess D6 removes.
-        assert!(validate_mention_addresses(&sessions, &["a".to_string()], &targets).is_err());
+        assert!(validate_mention_addresses(&sessions, &["a".to_string()], &targets, &[]).is_err());
     }
 }
 
@@ -3307,5 +3640,253 @@ mod project_group_deleted_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+}
+
+/// ADR-106 revision 2026-11-04: the `@session` reference validation, pinned to
+/// the same "no guessing, direct 400" discipline as the address rules it sits
+/// beside. Every refusal here is a client bug caught **before the row is
+/// written** — a shape that reaches the Runtime would be a durable row claiming
+/// a coordinate nobody established.
+#[cfg(test)]
+mod mention_refs_tests {
+    use super::*;
+
+    fn r(agent: &str, session: &str) -> MentionRef {
+        MentionRef {
+            agent_instance_id: agent.to_string(),
+            session_id: session.to_string(),
+            round_id: None,
+            terminal: None,
+        }
+    }
+
+    fn check(
+        target_sessions: &[(&str, &str)],
+        force_new_for: &[&str],
+        targets: &[&str],
+        refs: Vec<MentionRef>,
+    ) -> Result<(), ApiError> {
+        let ts: std::collections::HashMap<String, String> = target_sessions
+            .iter()
+            .map(|(a, s)| (a.to_string(), s.to_string()))
+            .collect();
+        let fnf: Vec<String> = force_new_for.iter().map(|s| s.to_string()).collect();
+        let tt: Vec<String> = targets.iter().map(|s| s.to_string()).collect();
+        validate_mention_addresses(&ts, &fnf, &tt, &refs)
+    }
+
+    #[test]
+    fn plain_refs_pass() {
+        assert!(check(
+            &[],
+            &[],
+            &["A"],
+            vec![r("A", "20260101_aaa"), r("A", "20260102_bbb")],
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn refs_beside_force_new_are_coherent() {
+        // "new task" + "quote this round while you do it" — a reference never
+        // decides where the sentence goes, so it is not a contradiction.
+        assert!(check(&[], &["A"], &["A"], vec![r("A", "s-1")]).is_ok());
+    }
+
+    #[test]
+    fn ref_naming_a_bystander_agent_is_400() {
+        let e = check(&[], &[], &["A"], vec![r("B", "s-1")]).unwrap_err();
+        assert_eq!(e.code, 400);
+    }
+
+    #[test]
+    fn same_agent_delivered_and_quoted_is_400() {
+        // Delivery (`target_sessions`, the card-answer channel) and material
+        // for one agent in one sentence are contradictory instructions.
+        let e = check(&[("A", "s-x")], &[], &["A"], vec![r("A", "s-1")]).unwrap_err();
+        assert_eq!(e.code, 400);
+    }
+
+    #[test]
+    fn blank_path_or_oversized_session_ids_are_400() {
+        for bad in ["", "  ", "..", "a/b", "a b", &"s".repeat(200)] {
+            let e = check(&[], &[], &["A"], vec![r("A", bad)]).unwrap_err();
+            assert_eq!(e.code, 400, "session id {bad:?} must be refused");
+        }
+    }
+
+    #[test]
+    fn blank_round_echo_is_400() {
+        let mut pinned = r("A", "s-1");
+        pinned.round_id = Some("  ".to_string());
+        let e = check(&[], &[], &["A"], vec![pinned]).unwrap_err();
+        assert_eq!(e.code, 400);
+    }
+
+    #[test]
+    fn pinned_echo_passes_through() {
+        let mut pinned = r("A", "s-1");
+        pinned.round_id = Some("r:m-7".to_string());
+        pinned.terminal = Some(true);
+        assert!(check(&[], &[], &["A"], vec![pinned]).is_ok());
+    }
+
+    #[test]
+    fn card_answer_echo_with_delivery_is_accepted() {
+        // C-1: answering a `confirm_continue` card re-delivers the human's own
+        // sentence, which already quoted material. That echo (round_id present)
+        // rides beside the answer's target_session for the SAME agent — it is a
+        // fact of an already-written turn, not a fresh delivery-vs-quote intent.
+        // The `same_agent_delivered_and_quoted_is_400` case above is a FRESH ref
+        // (round_id None); the two arms must not be conflated.
+        let mut echo = r("A", "s-1");
+        echo.round_id = Some("r:m-7".to_string());
+        echo.terminal = Some(true);
+        assert!(check(&[("A", "s-x")], &[], &["A"], vec![echo]).is_ok());
+    }
+
+    #[test]
+    fn duplicates_are_400() {
+        let e = check(&[], &[], &["A"], vec![r("A", "s-1"), r("A", "s-1")]).unwrap_err();
+        assert_eq!(e.code, 400);
+        // Same session under two agents is two distinct references — legal.
+        assert!(check(&[], &[], &["A", "B"], vec![r("A", "s-1"), r("B", "s-1")]).is_ok());
+    }
+
+    #[test]
+    fn ref_count_is_clamped() {
+        let refs: Vec<MentionRef> = (0..=MAX_CHAT_REFS)
+            .map(|i| r("A", &format!("s-{i}")))
+            .collect();
+        let e = check(&[], &[], &["A"], refs).unwrap_err();
+        assert_eq!(e.code, 400, "{MAX_CHAT_REFS}+1 refs must be refused");
+    }
+
+    #[test]
+    fn refs_describe_the_pinned_wire_shape() {
+        // The params contract the Runtime's `turn_refs` reads: the quadruple,
+        // per-target filtered. A rename on this side without the reader's is a
+        // silent "turn quotes nothing" — this test is the tripwire.
+        let pinned = serde_json::json!({
+            "agent_instance_id": "A",
+            "session_id": "s-1",
+            "round_id": "r:m-9",
+            "terminal": true,
+        });
+        let params = chat_delivery_params(
+            "hi",
+            &[],
+            &[],
+            "user_group",
+            None,
+            DeliveryAddress {
+                refs: std::slice::from_ref(&pinned),
+                ..Default::default()
+            },
+        );
+        assert_eq!(params[CHAT_REFS_PARAM].as_array().unwrap().len(), 1);
+        assert_eq!(params[CHAT_REFS_PARAM][0]["round_id"], "r:m-9");
+        // Empty refs write no key at all ("quotes nothing" is noise).
+        let bare = chat_delivery_params(
+            "hi",
+            &[],
+            &[],
+            "user_group",
+            None,
+            DeliveryAddress::default(),
+        );
+        assert!(bare.get(CHAT_REFS_PARAM).is_none());
+    }
+}
+
+/// ADR-106 revision · S-1 hardening: the scoped pinning read is now an
+/// authorization gate for a pre-pinned echo too. A forged `{session_id, round_id}`
+/// naming a session the caller cannot read (a different Chat on this host) must
+/// be refused, while a legible echo keeps its own frozen coordinates and is
+/// never re-resolved.
+#[cfg(test)]
+mod pin_reference_rounds_tests {
+    use super::*;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn echo(session: &str, round: &str) -> MentionRef {
+        MentionRef {
+            agent_instance_id: "agent-pin".to_string(),
+            session_id: session.to_string(),
+            round_id: Some(round.to_string()),
+            terminal: Some(true),
+        }
+    }
+
+    async fn state_with_stub() -> AppState {
+        // A stub "Runtime": every session resolves to round r:m-9 EXCEPT one
+        // whose path names `foreign`, which answers 404 (unreadable / other Chat).
+        let runtime_app = axum::Router::new().route(
+            "/sessions/{sid}/rounds",
+            axum::routing::get(|uri: axum::http::Uri| async move {
+                if uri.path().contains("foreign") {
+                    return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
+                }
+                axum::Json(serde_json::json!({
+                    "session_id": "s-1",
+                    "latest": { "round_id": "r:m-9", "terminal": true, "ts": "2026-01-01T00:00:00Z" },
+                }))
+                .into_response()
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, runtime_app).await.unwrap() });
+
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-pin-refs-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        let mut state = crate::http::routes::AppState::new(
+            Arc::new(RwLock::new(gw_state)),
+            Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        let registry = crate::http::proxy::new_shared_registry();
+        registry
+            .write()
+            .await
+            .register("agent-pin", &format!("http://127.0.0.1:{port}"));
+        state.runtime_http_registry = Some(registry);
+        state
+    }
+
+    #[tokio::test]
+    async fn echo_passes_frozen_coordinates_through_the_gate() {
+        // A readable echo is proven legible by the gate, then passed through
+        // verbatim — the stub's own r:m-9 must NOT replace the client's r:m-7.
+        let state = state_with_stub().await;
+        let pinned = pin_reference_rounds(&state, &[echo("s-1", "r:m-7")], "u-alice", "chat-1")
+            .await
+            .expect("readable echo passes the gate");
+        assert_eq!(pinned[0]["round_id"], "r:m-7", "echo is never re-resolved");
+        assert_eq!(pinned[0]["terminal"], true);
+    }
+
+    #[tokio::test]
+    async fn forged_echo_into_unreadable_session_is_400() {
+        // S-1: before this change the echo arm read nothing, so a forged
+        // coordinate into a session of another Chat was injected unchecked. The
+        // gate read now runs for it too, and its 404 is the caller's 400.
+        let state = state_with_stub().await;
+        let e = pin_reference_rounds(
+            &state,
+            &[echo("foreign-s", "r:m-7")],
+            "u-alice",
+            "chat-1",
+        )
+        .await
+        .expect_err("unreadable echo session must be refused");
+        assert_eq!(e.code, 400);
     }
 }

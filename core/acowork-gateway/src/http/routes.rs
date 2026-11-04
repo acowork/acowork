@@ -779,6 +779,20 @@ impl ApiError {
         }
     }
 
+    /// 502 Bad Gateway — a Gateway-side read of a downstream Runtime
+    /// answered unreachable/broken (e.g. pinning an `@session` reference
+    /// round before a chat row is written, ADR-106 revision 2026-11-04).
+    /// Distinct from 503 so the surface can say "the node did not give us
+    /// the coordinate" — and therefore did not write the row — rather than
+    /// "this Gateway is not ready".
+    pub fn bad_gateway(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 502,
+            structured: None,
+        }
+    }
+
     /// 504 Gateway Timeout — the request depended on a downstream
     /// round-trip (e.g. a Node control-plane command) that exceeded its
     /// deadline. Distinct from 500 so clients can surface "the node did
