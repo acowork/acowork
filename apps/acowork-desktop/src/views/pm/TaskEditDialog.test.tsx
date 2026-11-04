@@ -468,6 +468,32 @@ describe("leaving a dirty form", () => {
     expect(screen.getByText("pm.task.discardChangesTitle")).toBeTruthy();
   });
 
+  // 用户报的 bug：点 取消 → 弹出放弃确认 → 点「放弃修改」没反应，只有点
+  // 「取消」才关得掉。根因是确认回调又走了一次带 dirty 守卫的导航，守卫把
+  // 刚关掉的确认框重新装回去了。
+  it("discarding actually leaves — the confirm must not re-arm itself", () => {
+    mocks.dirty = true;
+    const onClose = vi.fn();
+    render(<TaskEditDialog onClose={onClose} />);
+    fireEvent.click(screen.getByText("common.cancel"));
+    fireEvent.click(screen.getByText("pm.task.discardChangesConfirm"));
+
+    expect(mocks.reset).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // …and the confirm is gone, not re-opened over the (now discarded) form.
+    expect(screen.queryByText("pm.task.discardChangesTitle")).toBeNull();
+  });
+
+  it("discarding from ESC or the backdrop leaves too", () => {
+    mocks.dirty = true;
+    const onClose = vi.fn();
+    const { container } = render(<TaskEditDialog onClose={onClose} />);
+    fireEvent.click(container.querySelector(".absolute.inset-0")!);
+    fireEvent.click(screen.getByText("pm.task.discardChangesConfirm"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("pm.task.discardChangesTitle")).toBeNull();
+  });
+
   it("ESC goes through the guard rather than closing over the draft", () => {
     mocks.dirty = true;
     render(<TaskEditDialog onClose={() => {}} />);

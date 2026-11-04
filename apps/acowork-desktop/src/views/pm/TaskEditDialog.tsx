@@ -25,6 +25,10 @@
  * row, must not resize the dialog — that resize was the "跳来跳去" the old
  * tab shell produced.
  *
+ * Leaving a dirty form is guarded exactly once (`requestLeave`); the confirm's
+ * own button exits directly (`leave`). Calling back into the guard from the
+ * confirm re-armed the same dialog, which is why 放弃修改 used to do nothing.
+ *
  * Status transitions live in the board (drag between columns) and on the task
  * card's 批准/拒绝 buttons, both of which call the same `boardStore.moveTask`.
  * The footer carries a third door to the same write (`TaskStatusMove`): not
@@ -129,23 +133,21 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
   }, [mode, detail?.id]);
 
   /**
-   * Navigate away from the form, asking first when it holds unsaved edits.
-   * Without this an accidental ESC or backdrop click ate a half-written task —
-   * the old form had no guard at all.
+   * The unconditional exit: the form is on its way out, whoever asked for it.
+   *
+   * Three destinations — jump to another row (`after`), go back to the parent a
+   * subtask form was opened from, or close. `reset()` runs on the closing path
+   * so an abandoned draft cannot resurrect when the same row is opened again
+   * (`useTaskForm` keeps the draft for the row's lifetime); navigation does not
+   * need it, because the form re-keys on the new row.
    */
-  const navigate = useCallback(
+  const leave = useCallback(
     (after?: () => void) => {
-      if (form.dirty) {
-        setPendingDiscard(() => after ?? null);
-        setConfirmDiscard(true);
-        return;
-      }
       if (after) {
         after();
         return;
       }
-      // Saving a new task lands on the new row so its attachments are one click
-      // away; cancelling a subtask form goes back to the parent it came from.
+      // Cancelling a subtask form goes back to the parent it came from.
       form.reset();
       if (isCreate && returnTo) void openTask(returnTo);
       else onClose();
@@ -153,13 +155,37 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
     [form, isCreate, returnTo, openTask, onClose],
   );
 
+  /**
+   * Navigate away from the form, asking first when it holds unsaved edits.
+   * Without this an accidental ESC or backdrop click ate a half-written task —
+   * the old form had no guard at all.
+   *
+   * The guard is consulted exactly ONCE per exit. The confirm's own button
+   * calls `leave()`, never this: routing it back through the guard re-armed the
+   * very dialog the user had just accepted (`dirty` is still true at that
+   * moment, because discarding IS the act of throwing the draft away), so
+   * 放弃修改 did nothing and the only way out was 取消. Acceptance of the
+   * confirm *is* the answer to the guard.
+   */
+  const requestLeave = useCallback(
+    (after?: () => void) => {
+      if (form.dirty) {
+        setPendingDiscard(() => after ?? null);
+        setConfirmDiscard(true);
+        return;
+      }
+      leave(after);
+    },
+    [form.dirty, leave],
+  );
+
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !form.saving) navigate();
+      if (e.key === "Escape" && !form.saving) requestLeave();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [navigate, form.saving]);
+  }, [requestLeave, form.saving]);
 
   const handleSave = useCallback(async () => {
     const outcome = await form.save();
@@ -234,7 +260,7 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
         {/* House pattern (MemberManagerDialog, ConfirmDialog): a separate
             overlay layer with onClick, so a click that starts inside the panel
             and ends outside does not close the form over the user's draft. */}
-        <div className="absolute inset-0 bg-modal-overlay" onClick={() => navigate()} />
+        <div className="absolute inset-0 bg-modal-overlay" onClick={() => requestLeave()} />
         <div
           ref={dialogRef}
           tabIndex={-1}
@@ -252,7 +278,7 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
             </h3>
             <button
               type="button"
-              onClick={() => navigate()}
+              onClick={() => requestLeave()}
               className="shrink-0 rounded-md px-1.5 py-0.5 text-sm text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
               aria-label={t("common.close")}
             >
@@ -444,12 +470,12 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
                   <div>
                     <SubtaskTree
                       rootId={detail.id}
-                      onSelect={(id) => navigate(() => void openTask(id))}
+                      onSelect={(id) => requestLeave(() => void openTask(id))}
                     />
                     <button
                       type="button"
                       onClick={() =>
-                        navigate(() =>
+                        requestLeave(() =>
                           openCreate({
                             projectId: detail.project_id,
                             parentId: detail.id,
@@ -492,7 +518,7 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
             )}
             <button
               type="button"
-              onClick={() => navigate()}
+              onClick={() => requestLeave()}
               disabled={form.saving}
               className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
             >
@@ -541,11 +567,14 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
         confirmLabel={t("pm.task.discardChangesConfirm")}
         destructive
         onConfirm={() => {
-          setConfirmDiscard(false);
+          // Acceptance IS the answer to the dirty guard: leave directly.
+          // Bouncing back through `requestLeave` re-opened this dialog, because
+          // `dirty` is still true at this instant (discarding is exactly what
+          // makes it false), so 放弃修改 looked like it did nothing.
           const after = pendingDiscard;
+          setConfirmDiscard(false);
           setPendingDiscard(null);
-          if (after) after();
-          else navigate();
+          leave(after ?? undefined);
         }}
         onCancel={() => {
           setConfirmDiscard(false);
