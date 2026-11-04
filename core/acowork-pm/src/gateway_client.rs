@@ -16,6 +16,21 @@
 
 use std::time::Duration;
 
+use acowork_core::timeout_config::constants::{INTENT_ACCEPT, INTENT_DEFAULT};
+
+/// Request budget for [`GatewayClient::dispatch_task`]. The Gateway path is
+/// bounded by design at `wake_and_deliver` (up to `INTENT_DEFAULT` — a cold
+/// target may spend it all in `wait_online`) plus the acceptance wait
+/// (`INTENT_ACCEPT`): 35s before the answer. The client-side default (10s)
+/// MUST NOT cut under that: aborting while the first publish is still
+/// completing server-side makes the retry — same `message_id`, target
+/// already routing — re-deliver the Intent, which is exactly the failure
+/// the receipt protocol exists to prevent. The margin covers connection
+/// setup and response transfer.
+fn dispatch_timeout() -> Duration {
+    INTENT_DEFAULT + INTENT_ACCEPT + Duration::from_secs(5)
+}
+
 /// Talks to the Gateway's project-group endpoint.
 #[derive(Clone)]
 pub struct GatewayClient {
@@ -215,6 +230,11 @@ impl GatewayClient {
     /// so a failing delivery can neither pile up rows nor burn the
     /// conversation's request budget. An empty string lets the Gateway
     /// mint one (pre-idempotency behavior).
+    ///
+    /// Carries its own request timeout ([`dispatch_timeout`]): this call
+    /// blocks on the target's wake *and* its acceptance receipt, so the
+    /// client default would abort a still-healthy dispatch and provoke a
+    /// duplicate delivery on retry.
     #[allow(clippy::too_many_arguments)]
     pub async fn dispatch_task(
         &self,
@@ -226,10 +246,10 @@ impl GatewayClient {
         assignment_brief: &str,
         message_id: &str,
     ) -> Result<String, String> {
-        let mut req = self.client.post(format!(
-            "{}/api/intents/task-dispatch",
-            self.gateway_url
-        ));
+        let mut req = self
+            .client
+            .post(format!("{}/api/intents/task-dispatch", self.gateway_url))
+            .timeout(dispatch_timeout());
         if let Some(token) = &self.auth_token {
             req = req.bearer_auth(token);
         }
@@ -271,7 +291,17 @@ impl GatewayClient {
                 .get("error_code")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            return Err(format!("gateway rejected ({status}): {code}"));
+            // The Gateway relays the receiving Runtime's own refusal text
+            // (`intent_rejected` carries e.g. `no such column: intent_key`).
+            // It is the only description of the breakage the operator will
+            // ever see — it lands in `task.dispatch_error` — so it is kept,
+            // not collapsed into the code.
+            let detail = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(if detail.is_empty() {
+                format!("gateway rejected ({status}): {code}")
+            } else {
+                format!("gateway rejected ({status}): {code}: {detail}")
+            });
         }
         let mid = body
             .get("message_id")

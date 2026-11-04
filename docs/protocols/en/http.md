@@ -399,13 +399,15 @@ Runtime consumption rule: `503` **does not update local cache**, backs off per `
 
 ---
 
-### 4.16 Internal service-to-service endpoints (acowork-pm → Gateway, Intent dispatch surface)
+### 4.16 Internal service-to-service endpoints (acowork-pm / acowork-runtime → Gateway, Intent dispatch surface)
 
 > **Implementation**: [`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs).
-> This section covers only the two endpoints acowork-pm calls; the rest of `/api/intents/*` is the
-> Gateway↔Runtime / frontend chat surface whose contract is owned by Design 27 §4.5's field table and is
-> not duplicated here. Auth is the internal-service boundary (same as `/api/intents/project-group`): PM
-> acts as the project owner from its own domain data; the Gateway does not re-validate `owner`.
+> This section covers the endpoints acowork-pm calls (§4.16.1–§4.16.3) and the acceptance receipt acowork-runtime
+> calls (§4.16.4); the rest of `/api/intents/*` is the Gateway↔Runtime / frontend chat surface whose contract is
+> owned by Design 27 §4.5's field table and is not duplicated here. Auth is the internal-service boundary (node
+> token, same as `/api/intents/project-group`): in §4.16.1–§4.16.3 PM acts as the project owner from its own
+> domain data and the Gateway does not re-validate `owner`; the §4.16.4 reporter is verified per D4 attribution,
+> and only the mailbox's recorded target may speak for a message.
 
 #### 4.16.1 `POST /api/intents/task-dispatch`
 
@@ -427,8 +429,21 @@ The envelope `kind` is always stamped `pm_task` (human input, keyed routing, Cha
 ```json
 { "message_id": "…", "status": "delivered | failed",
   "conversation_id": "task:…", "chat_session_id": "…",
-  "error_code": "target_not_installed | not_authorized | conversation_limit_exceeded | chat_log_unavailable | …", "error": "…" }
+  "error_code": "target_not_installed | not_authorized | conversation_limit_exceeded | chat_log_unavailable | intent_rejected | …", "error": "…" }
 ```
+
+`intent_rejected` is an **explicit refusal by the target Runtime** (§4.16.4): a successful MQTT publish only means the
+broker took the bytes, while routing into an execution session can still fail (the incident: the target Runtime's
+session-meta store lacked the `intent_key` column, answered `no such column`, and dropped the message). This endpoint
+therefore **waits for the receipt, bounded** by `INTENT_ACCEPT` (5s, `acowork_core::timeout_config`): `accepted` →
+`delivered`; `rejected` → `status=failed`, `error_code=intent_rejected`, `error` carrying the Runtime's verbatim text
+(PM records it in `dispatch_error` and its existing backoff retry takes over); no receipt (a pre-receipt Runtime, or a
+timeout) → the old publish-means-delivered semantics, no regression — noting that a pre-receipt Runtime eats the full 5s
+by construction, so a mixed-version fleet pays it on every dispatch. Caller budget: the worst-case latency is the wake
+bound `INTENT_DEFAULT` (30s) plus `INTENT_ACCEPT`, and the PM client gives `dispatch_task` its own 40s request timeout —
+a shorter default would abort while the first publish is still completing server-side and make the same-id retry
+re-deliver the Intent. This is the *only* caller that waits: the generic
+`/api/intents` surface records the fact without blocking, so agent-to-agent delivery pays nothing for it.
 
 #### 4.16.2 `POST /api/intents/task-close`
 
@@ -437,6 +452,30 @@ Ends the target agent's logical execution context for a task when it reaches a t
 #### 4.16.3 New PM task resource field (acowork-pm REST; source of truth: Design 27 §5.4.2)
 
 `Task.dispatch_message_id: string | null` — the dispatch generation identity: persisted before the first attempt, reused across retries, cleared on state transitions (reopen / reassignment); passed through in the task JSON, read-only for clients.
+
+#### 4.16.4 `POST /api/intents/{message_id}/accept` (Runtime → Gateway acceptance receipt)
+
+> **Implementation**: [`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs),
+> [`core/acowork-gateway/src/intent/accept.rs`](../../../core/acowork-gateway/src/intent/accept.rs), Runtime side
+> [`core/acowork-runtime/src/agent/intent_accept.rs`](../../../core/acowork-runtime/src/agent/intent_accept.rs).
+> Semantics and rationale: Design 27 §5.7 "Receiver acceptance receipt".
+
+A receiving Runtime reports the routing outcome of an **inbound request** (`kind != "response"` with a non-empty
+`message_id`). Request body:
+
+| Field | Required | Description |
+|---|---|---|
+| `sender` | yes | The reporting instance id. Verified per D4 (node-token attribution + online) and compared against the mailbox `to_instance` — **only the recorded target may accept or reject**; anything else is 403 |
+| `accepted` | yes | `true` = handed to an execution session (queued counts); `false` = routing refused |
+| `error` | no | The refusal reason, verbatim (ignored and cleared when `accepted=true`). It is the only description of the breakage the dispatcher receives, so it is never normalized |
+
+Response `{ "message_id": "…", "status": "recorded", "accepted": true|false }`; unknown `message_id` → 404,
+mailbox not initialised → 500. A receipt **writes a fact only**: it delivers nothing, and on success it immediately
+wakes the dispatch waiting on that `message_id` (in-process oneshot, event-driven, no polling). The mailbox then
+exposes `accepted` (`null` = no receipt, which is **not** a refusal), `accepted_at` and `accept_error` on
+`GET /api/intents/{id}`; `delivered_at` is untouched (the two facts are allowed to disagree — that is the whole
+point of the receipt). A receipt is a **per-attempt** verdict: re-dispatching the same `message_id` clears the
+previous verdict, while `delivered_at` stays as historical fact.
 
 ---
 

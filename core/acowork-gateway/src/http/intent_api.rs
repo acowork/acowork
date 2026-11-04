@@ -58,6 +58,7 @@ use serde::{Deserialize, Serialize};
 use acowork_core::protocol::{ChatAttachmentMeta, CHAT_ATTACHMENTS_PARAM, TARGET_SESSION_PARAM};
 
 use crate::http::routes::{ApiError, AppState};
+use crate::intent::accept;
 use crate::intent::chat_client;
 use crate::intent::gate::{
     attribute_sender, permission_denial, validate_repo, validate_session_config,
@@ -122,6 +123,9 @@ pub fn intent_routes() -> Router<AppState> {
         .route("/api/intents/task-close", post(close_task_context))
         .route("/api/intents/{message_id}", get(intent_status))
         .route("/api/intents/{message_id}/response", post(deliver_response))
+        // The receiving Runtime's acceptance decision — the fact that turns
+        // "the broker took the bytes" into "the target could route it".
+        .route("/api/intents/{message_id}/accept", post(accept_intent))
 }
 
 /// Design 27 Phase 2: "PM 创建项目时幂等创建唯一项目群聊" — the PM
@@ -317,11 +321,15 @@ fn strip_untrusted_brief(
 /// The dispatch row's identity: a usable caller-supplied id is reused so
 /// retries dedupe at the chat store and the mailbox (see
 /// `TaskDispatchRequest::message_id`); an unusable one (absent, blank,
-/// oversized) degrades to minting — never an error, the worst case is the
-/// old one-row-per-call behavior.
+/// separator-bearing) degrades to minting — never an error, the worst case
+/// is the old one-row-per-call behavior. The character rule is
+/// `is_valid_row_id`'s: this id travels into URL paths (the receiving
+/// Runtime posts its acceptance receipt to `/api/intents/{id}/accept`) and
+/// into store keys, so a value smuggling `/ ? #` must not be adopted as an
+/// identity. PM mints `pm-{uuid}` (39 chars), well inside the 64 cap.
 fn dispatch_message_id(supplied: Option<&str>) -> String {
     match supplied.map(str::trim) {
-        Some(s) if !s.is_empty() && s.len() <= 128 => s.to_string(),
+        Some(s) if is_valid_row_id(s) => s.to_string(),
         _ => uuid::Uuid::new_v4().to_string(),
     }
 }
@@ -450,6 +458,11 @@ async fn dispatch_task(
             "conversation_id": conversation_id,
         })));
     }
+    // Registered before the publish, after every early exit above (see the
+    // wait below): a warm Runtime can answer within microseconds, and a
+    // listener attached afterwards would miss it and degrade a good answer
+    // into "no receipt".
+    let acceptance_waiter = crate::intent::accept::AcceptanceWaiter::register(&message_id);
 
     // ADR-106 D12: a PM dispatch writes no Chat row. The dispatch text IS the
     // first user row of the round it opens, so the block the receiving
@@ -490,8 +503,40 @@ async fn dispatch_task(
     let outcome =
         delivery::wake_and_deliver(&ctx, &dreq, acowork_core::timeout_config::constants::INTENT_DEFAULT)
             .await;
+    // The publish proves the broker took the bytes — not that the target
+    // could route them (the incident: a Runtime whose session-meta store
+    // lacked `intent_key` rejected every Intent and the task was stamped
+    // delivered anyway, so the PM scanner never retried). Wait for the
+    // receiving Runtime's decision, bounded by `INTENT_ACCEPT`:
+    //
+    //   accepted          → delivered
+    //   rejected(reason)  → failed / intent_rejected → PM's existing
+    //                       backoff retry takes over, no PM change needed
+    //   no receipt (timeout, pre-receipt Runtime) → delivered, as before
+    //
+    // The waiter was registered before the publish above, so a fast receiver
+    // cannot answer before we listen.
+    let acceptance = if outcome.is_ok() {
+        acceptance_waiter
+            .wait(acowork_core::timeout_config::constants::INTENT_ACCEPT)
+            .await
+    } else {
+        None
+    };
     let (status, error_code, error) = match outcome {
-        Ok(()) => ("delivered", None, None),
+        Ok(()) => match acceptance {
+            Some(a) if !a.accepted => {
+                tracing::warn!(
+                    task_id = %req.task_id,
+                    message_id = %message_id,
+                    target = %req.target_agent,
+                    reason = %a.error,
+                    "target runtime rejected the task dispatch"
+                );
+                ("failed", Some("intent_rejected".to_string()), Some(a.error))
+            }
+            _ => ("delivered", None, None),
+        },
         Err(e) => ("failed", Some(e.code().to_string()), Some(e.to_string())),
     };
     Ok(Json(serde_json::json!({
@@ -2352,6 +2397,87 @@ async fn deliver_chat_message(
     }
 }
 
+/// Body of `POST /api/intents/{id}/accept`.
+#[derive(Debug, Deserialize)]
+struct IntentAcceptRequest {
+    /// The reporting instance. Verified like any sender claim (D4): the
+    /// value is never adopted from the body, only matched against the
+    /// registered identity.
+    sender: String,
+    /// `true` = routed and handed to a session; `false` = refused.
+    accepted: bool,
+    /// Refusal reason, verbatim. Ignored when `accepted`.
+    #[serde(default)]
+    error: String,
+}
+
+/// `POST /api/intents/{message_id}/accept` — the target Runtime states
+/// whether it took the Intent.
+///
+/// This closes the gap that stranded the PM task on 2026-11-04: the Gateway
+/// could observe its own publish but not the receiver's routing decision, so
+/// a Runtime answering `no such column: intent_key` looked delivered and the
+/// sender, having no error, never retried.
+///
+/// Only the recorded target may speak for a message. A rejection is what
+/// makes the sender retry, so an unrelated caller must be able neither to
+/// fake one nor to overwrite a real one. Recording is the whole job — the
+/// handler answers as soon as the fact is stored (and wakes a waiting
+/// `task-dispatch`); it never tries to deliver anything itself.
+async fn accept_intent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(message_id): Path<String>,
+    Json(req): Json<IntentAcceptRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    verify_sender_identity(&state, &headers, &req.sender).await?;
+
+    let mailbox = {
+        let gw = state.gateway_state.read().await;
+        gw.intent_mailbox.clone()
+    };
+    let mailbox = mailbox
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("intent mailbox is not initialised"))?;
+    let entry = mailbox
+        .get(&message_id)
+        .ok_or_else(|| ApiError::not_found("no such intent message id"))?;
+    let reporter_is_target = {
+        let gw = state.gateway_state.read().await;
+        gw.resolve_installed_key(&req.sender).as_deref() == Some(entry.to_instance.as_str())
+    };
+    if !reporter_is_target {
+        return Err(ApiError::forbidden(
+            "only the recorded target of the intent may accept or reject it",
+        ));
+    }
+
+    let acceptance = if req.accepted {
+        accept::Acceptance::accepted()
+    } else {
+        accept::Acceptance::rejected(req.error.trim())
+    };
+    mailbox
+        .record_acceptance(&message_id, &acceptance)
+        .map_err(|e| ApiError::internal(&format!("mailbox write failed: {e}")))?;
+    // Wakes the dispatch waiting on this id; a receipt nobody waits for
+    // (every non-PM intent) is a no-op.
+    let woken = accept::notify(&message_id, acceptance.clone());
+
+    tracing::info!(
+        message_id = %message_id,
+        to = %entry.to_instance,
+        status = acceptance.status(),
+        woken,
+        "intent acceptance recorded"
+    );
+    Ok(Json(serde_json::json!({
+        "message_id": message_id,
+        "status": "recorded",
+        "accepted": acceptance.accepted,
+    })))
+}
+
 /// D3 observability: the mailbox truth for one message id.
 async fn intent_status(
     State(state): State<AppState>,
@@ -2380,6 +2506,17 @@ async fn intent_status(
         // really answered.
         "answered": entry.answered(),
         "answered_at": entry.answered_at,
+        // The receiving Runtime's acceptance decision, when it reported one
+        // (`POST /api/intents/{id}/accept`). `accepted == null` means *no
+        // receipt* — a pre-receipt Runtime or one that died before routing —
+        // which is not the same as a refusal and must not be read as one.
+        "accepted": if entry.acceptance.is_empty() {
+            None
+        } else {
+            Some(!entry.acceptance.is_rejected())
+        },
+        "accepted_at": entry.acceptance.at,
+        "accept_error": entry.acceptance.error,
     })))
 }
 
@@ -2876,6 +3013,220 @@ mod chat_params_tests {
     }
 }
 
+/// `POST /api/intents/{id}/accept` — the receiving Runtime's routing verdict.
+///
+/// The contract these pin is what makes the PM retry machine work: a
+/// rejection must be *recorded* (so `GET /api/intents/{id}` can explain a
+/// silent task), the reason must survive verbatim (it is the only bug report
+/// the sender ever gets), and it must not touch `delivered_at` (the publish
+/// did happen; the two facts are allowed to disagree).
+#[cfg(test)]
+mod accept_route_tests {
+    use super::*;
+    use crate::gateway::state::GatewayState;
+    use crate::http::auth::HttpAuth;
+    use crate::intent::accept::AcceptanceWaiter;
+    use crate::intent::mailbox::IntentMailbox;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tower::ServiceExt;
+
+    const TARGET: &str = "11111111-1111-4111-8111-111111111111";
+    const OTHER: &str = "22222222-2222-4222-8222-222222222222";
+
+    fn manifest(agent_id: &str) -> acowork_core::AgentManifest {
+        let toml = format!(
+            "agent_id = \"{agent_id}\"\nversion = \"1.0.0\"\nname = \"Test\"\ndescription = \"d\"\nauthor = \"t\"\nruntime_version = \"0.1.0\"\n"
+        );
+        acowork_core::AgentManifest::from_toml(&toml).expect("minimal manifest")
+    }
+
+    async fn state_with(mailbox: Arc<IntentMailbox>) -> AppState {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-intent-accept-{}",
+            std::process::id()
+        ));
+        let mut gw = GatewayState::new(&dir.to_string_lossy());
+        gw.intent_mailbox = Some(Arc::clone(&mailbox));
+        for (instance, agent_id) in [(TARGET, "com.test.target"), (OTHER, "com.test.other")] {
+            gw.installed_agents.insert(
+                instance.to_string(),
+                crate::gateway::state::AgentInfo {
+                    instance_id: instance.to_string(),
+                    agent_id: agent_id.to_string(),
+                    version: "1.0.0".to_string(),
+                    name: "Test".to_string(),
+                    install_path: format!("/tmp/pkg/{agent_id}"),
+                    manifest: manifest(agent_id),
+                    node_id: "local".to_string(),
+                },
+            );
+        }
+        let mut state = AppState::new(
+            Arc::new(tokio::sync::RwLock::new(gw)),
+            Arc::new(HttpAuth::new(false)),
+        );
+        // Both instances are asserted online by their own MQTT session; the
+        // identity check refuses a sender it cannot attribute.
+        let reg = crate::mqtt::agent_registry::new_shared_registry();
+        for instance in [TARGET, OTHER] {
+            let envelope = acowork_core::mqtt_proto::DataEnvelope {
+                version: 1,
+                payload: Some(acowork_core::mqtt_proto::data_envelope::Payload::AgentStatus(
+                    acowork_core::mqtt_proto::AgentStatus {
+                        agent_id: "com.test.target".to_string(),
+                        online: true,
+                        instance_id: instance.to_string(),
+                        node_id: "local".to_string(),
+                        state: acowork_core::mqtt_proto::AgentLifecycleState::SessionsReady as i32,
+                        detail: String::new(),
+                    },
+                )),
+            };
+            reg.write().await.update_from_mqtt(
+                &format!("acowork/agents/{instance}/status"),
+                &prost::Message::encode_to_vec(&envelope),
+            );
+        }
+        state.agent_registry = Some(reg);
+        state
+    }
+
+    fn entry(message_id: &str) -> crate::intent::mailbox::MailboxEntry {
+        crate::intent::mailbox::MailboxEntry {
+            message_id: message_id.to_string(),
+            conversation_id: String::new(),
+            from_instance: "owner".into(),
+            from_session_id: String::new(),
+            to_instance: TARGET.into(),
+            body: "{}".into(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+            delivered_at: chrono::Utc::now().to_rfc3339(),
+            acceptance: Default::default(),
+            result_ref: String::new(),
+            kind: "task".into(),
+            status: String::new(),
+            source_chat_session_id: String::new(),
+            answered_at: String::new(),
+            last_activity_at: String::new(),
+            has_human: None,
+        }
+    }
+
+    async fn post(
+        state: AppState,
+        message_id: &str,
+        sender: &str,
+        accepted: bool,
+        error: &str,
+    ) -> StatusCode {
+        let body = serde_json::json!({
+            "sender": sender,
+            "accepted": accepted,
+            "error": error,
+        });
+        let request = Request::builder()
+            .method("POST")
+            .uri(format!("/api/intents/{message_id}/accept"))
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        intent_routes()
+            .with_state(state)
+            .oneshot(request)
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn a_rejection_is_recorded_verbatim_and_wakes_the_waiter() {
+        let mailbox = Arc::new(IntentMailbox::in_memory());
+        let message_id = "msg-rejected";
+        mailbox.record(entry(message_id)).unwrap();
+        let waiter = AcceptanceWaiter::register(message_id);
+
+        let status = post(
+            state_with(Arc::clone(&mailbox)).await,
+            message_id,
+            TARGET,
+            false,
+            "no such column: intent_key",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let stored = mailbox.get(message_id).unwrap();
+        assert!(stored.acceptance.is_rejected());
+        assert_eq!(stored.acceptance.error, "no such column: intent_key");
+        // The publish still happened: acceptance is an extra fact, not a
+        // revision of the delivery one.
+        assert!(stored.delivered());
+
+        let acceptance = waiter
+            .wait(acowork_core::timeout_config::constants::INTENT_ACCEPT)
+            .await
+            .expect("the waiting dispatch must be woken");
+        assert!(!acceptance.accepted);
+        assert_eq!(acceptance.error, "no such column: intent_key");
+    }
+
+    #[tokio::test]
+    async fn only_the_recorded_target_may_speak_for_a_message() {
+        let mailbox = Arc::new(IntentMailbox::in_memory());
+        let message_id = "msg-forged";
+        mailbox.record(entry(message_id)).unwrap();
+
+        let status = post(
+            state_with(Arc::clone(&mailbox)).await,
+            message_id,
+            OTHER,
+            false,
+            "forced failure",
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        // Neither a forged rejection nor a forged acceptance may land.
+        assert!(mailbox.get(message_id).unwrap().acceptance.is_empty());
+    }
+
+    #[tokio::test]
+    async fn accepting_leaves_no_rejection_reason_behind() {
+        let mailbox = Arc::new(IntentMailbox::in_memory());
+        let message_id = "msg-accepted";
+        mailbox.record(entry(message_id)).unwrap();
+
+        let status = post(
+            state_with(Arc::clone(&mailbox)).await,
+            message_id,
+            TARGET,
+            true,
+            "stale text from a previous attempt",
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let stored = mailbox.get(message_id).unwrap();
+        assert_eq!(stored.acceptance.status, "accepted");
+        assert!(stored.acceptance.error.is_empty());
+        assert!(!stored.acceptance.at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unknown_message_id_is_404() {
+        let mailbox = Arc::new(IntentMailbox::in_memory());
+        let status = post(
+            state_with(Arc::clone(&mailbox)).await,
+            "msg-never-sent",
+            TARGET,
+            true,
+            "",
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+}
 /// `POST /api/intents/project-group/deleted` — the PM's delete-stamp push
 /// (design 27 §4.4). The PM now retries these verdicts within a warm-up
 /// window, so the three refusals are contract-relevant, not trivia: 401

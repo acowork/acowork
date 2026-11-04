@@ -137,6 +137,16 @@ pub(crate) async fn phase_d_run(
     // two turns of one chat from racing on the same anchor.
     let chat_sessions = Arc::new(crate::agent::chat_router::ChatSessionManager::new());
 
+    // The Runtime's half of the acceptance protocol: every inbound Intent it
+    // routes is answered back to the Gateway that published it, so a message
+    // this process cannot route stops looking delivered (see
+    // `agent::intent_accept`).
+    let acceptance_reporter = crate::agent::intent_accept::AcceptanceReporter::new(
+        config.agent_instance_id.clone(),
+        config.gateway_host.as_deref().unwrap_or("127.0.0.1"),
+        config.mqtt_password.clone().unwrap_or_default(),
+    );
+
     let result = mqtt_only_loop(
         &session_manager,
         &chat_sessions,
@@ -153,6 +163,7 @@ pub(crate) async fn phase_d_run(
         ctx.lsps_update_rx.take(),
         &config.work_dir,
         config.mqtt_password.as_deref(),
+        &acceptance_reporter,
     )
     .await;
 
@@ -277,6 +288,11 @@ async fn mqtt_only_loop(
     // below can authenticate to Gateway-hosted MCP (pm / doc) the same
     // way the startup connect does. `None` standalone.
     node_token: Option<&str>,
+    // Design 27 §4.5 / plan D3: tells the Gateway whether each inbound
+    // Intent could be routed (`POST /api/intents/{id}/accept`). Without it a
+    // routing failure is visible only in this process's own log, while the
+    // sender's mailbox says `delivered`.
+    acceptance: &crate::agent::intent_accept::AcceptanceReporter,
 ) -> Result<()> {
     tracing::info!("MQTT-only gateway loop started");
     let work_dir = std::path::PathBuf::from(work_dir);
@@ -287,7 +303,17 @@ async fn mqtt_only_loop(
             dispatch_result = mqtt_dispatch_rx.recv() => {
                 match dispatch_result {
                     Some((session_id, msg)) => {
-                        if let Err(e) = dispatch_inbound(
+                        // A request owes the Gateway a routing verdict: the
+                        // publish proved only that the bytes arrived. Reported
+                        // off the loop (`spawn_report`) so a slow Gateway can
+                        // never delay the next inbound message.
+                        let receipt = match &msg {
+                            crate::agent::inbound::InboundMessage::IntentMessage(env) => {
+                                crate::agent::intent_accept::acceptance_target(env)
+                            }
+                            _ => None,
+                        };
+                        let outcome = dispatch_inbound(
                             session_manager,
                             chat_sessions,
                             lifecycle_publisher,
@@ -295,7 +321,14 @@ async fn mqtt_only_loop(
                             msg,
                             &work_dir,
                             node_token.unwrap_or(""),
-                        ).await {
+                        ).await;
+                        if let Some(message_id) = receipt {
+                            match &outcome {
+                                Ok(()) => acceptance.spawn_report(message_id, true, String::new()),
+                                Err(e) => acceptance.spawn_report(message_id, false, e.to_string()),
+                            }
+                        }
+                        if let Err(e) = outcome {
                             tracing::warn!(error = %e, "MQTT dispatch failed");
                         }
                     }

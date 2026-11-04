@@ -563,12 +563,13 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 
 ---
 
-### 4.16 服务间内部端点（acowork-pm → Gateway，Intent 派发面）
+### 4.16 服务间内部端点（acowork-pm / acowork-runtime → Gateway，Intent 派发面）
 
 > **实现**：[`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs)。
-> 本节只收录 acowork-pm 作为调用方的两个端点；其余 `/api/intents/*` 是 Gateway↔Runtime / 前端会话面，
-> 契约以设计 27 §4.5 字段表为真源，不在此重复。鉴权为内部服务边界（同 `/api/intents/project-group`）：
-> PM 以项目 owner 身份行事，Gateway 不反向校验 `owner`。
+> 本节收录 acowork-pm 作为调用方的端点（§4.16.1–§4.16.3）与 acowork-runtime 作为调用方的验收回执（§4.16.4）；
+> 其余 `/api/intents/*` 是 Gateway↔Runtime / 前端会话面，契约以设计 27 §4.5 字段表为真源，不在此重复。
+> 鉴权同为内部服务边界（node token，同 `/api/intents/project-group`）：§4.16.1–§4.16.3 里 PM 以项目 owner
+> 身份行事，Gateway 不反向校验 `owner`；§4.16.4 的回执方按 D4 校验归属，且只有信箱记录在案的 target 可以上报。
 
 #### 4.16.1 `POST /api/intents/task-dispatch`
 
@@ -590,8 +591,18 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 ```json
 { "message_id": "…", "status": "delivered | failed",
   "conversation_id": "task:…", "chat_session_id": "…",
-  "error_code": "target_not_installed | not_authorized | conversation_limit_exceeded | chat_log_unavailable | …", "error": "…" }
+  "error_code": "target_not_installed | not_authorized | conversation_limit_exceeded | chat_log_unavailable | intent_rejected | …", "error": "…" }
 ```
+
+`intent_rejected` 是**目标 Runtime 的明确拒绝**（§4.16.4）：MQTT 发布成功只说明 broker 收到字节，路由进执行会话
+可能失败（历史事故：目标 Runtime 的 session-meta 库缺 `intent_key` 列，报 `no such column` 后丢弃消息）。
+因此本端点发布后**有界等待**回执 `INTENT_ACCEPT`（5s，`acowork_core::timeout_config`）：`accepted` → `delivered`；
+`rejected` → `status=failed`、`error_code=intent_rejected`、`error` 携带 Runtime 原文（PM 落进 `dispatch_error`
+并走既有退避重试）；无回执（旧版 Runtime 或超时）→ 沿用"发布即投递"的旧语义，不回归——注意旧版 Runtime
+必然吃满这 5s，混版舰队每次派发都付这笔时延。调用方预算：本端点最坏耗时为唤醒上限 `INTENT_DEFAULT`（30s）
+加回执等待 `INTENT_ACCEPT`，PM 客户端对 `dispatch_task` 单独设 40s 请求超时——不得用默认短超时截断它，
+否则首笔发布仍在服务端进行时客户端已用同一 `message_id` 重投，造成重复投递。本端点是唯一等待回执的
+调用方——通用 `/api/intents` 只记录事实、不等待，agent 间投递不因此增加延迟。
 
 #### 4.16.2 `POST /api/intents/task-close`
 
@@ -600,6 +611,28 @@ Runtime 消费规则：`503` **不更新本地 cache**，按 `Retry-After` 退�
 #### 4.16.3 PM 任务资源新增字段（acowork-pm REST，字段真源在设计 27 §5.4.2）
 
 `Task.dispatch_message_id: string | null`——派发代次身份，首试前落盘、重试复用、状态跃迁（重开/重派）时清除；随任务 JSON 透传，客户端只读。
+
+#### 4.16.4 `POST /api/intents/{message_id}/accept`（Runtime → Gateway 验收回执）
+
+> **实现**：[`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs)、
+> [`core/acowork-gateway/src/intent/accept.rs`](../../../core/acowork-gateway/src/intent/accept.rs)、
+> Runtime 侧 [`core/acowork-runtime/src/agent/intent_accept.rs`](../../../core/acowork-runtime/src/agent/intent_accept.rs)。
+> 语义与理由见设计 27 §5.7「接收侧验收回执」。
+
+接收 Runtime 处理完一条**入站 request**（`kind != "response"` 且 `message_id` 非空）后回报路由结果。请求体：
+
+| 字段 | 必需 | 说明 |
+|---|---|---|
+| `sender` | 是 | 回报方 instance id；按 D4 校验（node token 归属 + 在线），并与信箱记录的 `to_instance` 比对——**只有记录在案的 target 可以接受或拒绝**，其余 403 |
+| `accepted` | 是 | `true` = 已交给某个 execution session（含排队待跑）；`false` = 拒绝路由 |
+| `error` | 否 | 拒绝原因原文（`accepted=true` 时忽略并清空）。这是唯一抵达派发方的故障自述，不做归一化 |
+
+响应 `{ "message_id": "…", "status": "recorded", "accepted": true|false }`；未知 `message_id` → 404，
+信箱未初始化 → 500。回执**只写事实**：不投递任何消息，写成功后立刻唤醒正在等该 `message_id` 的派发方
+（进程内 oneshot，事件驱动，不轮询）。信箱随后在 `GET /api/intents/{id}` 上暴露
+`accepted`（`null` = 无回执，**不等于**拒绝）、`accepted_at`、`accept_error`；`delivered_at` 不受影响
+（两个事实允许不一致，这正是回执存在的理由）。回执是**每次尝试**的判定：同一 `message_id` 重新派发会清空上一轮
+判定，而 `delivered_at` 作为历史事实保留。
 
 ---
 

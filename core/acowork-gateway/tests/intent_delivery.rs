@@ -93,6 +93,7 @@ fn entry(
         body: "{}".into(),
         created_at: created_at.into(),
         delivered_at: delivered_at.into(),
+        acceptance: acowork_gateway::intent::mailbox::AcceptanceReceipt::default(),
         result_ref: String::new(),
         kind: "request".into(),
         status: String::new(),

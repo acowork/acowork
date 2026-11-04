@@ -255,6 +255,29 @@ pub mod constants {
     /// (was `DEFAULT_INTENT_TIMEOUT_SECS = 30`).
     pub const INTENT_DEFAULT: Duration = Duration::from_secs(30);
 
+    /// How long a **task dispatch** waits for the target Runtime's
+    /// acceptance receipt (`POST /api/intents/{id}/accept`) after the
+    /// Gateway has published the Intent.
+    ///
+    /// Publishing only proves the broker took the bytes. Without the
+    /// receipt a Runtime that could not route the message — the incident
+    /// was `no such column: intent_key` in its session-meta store — looks
+    /// exactly like a healthy one at the Gateway, so the dispatch is
+    /// stamped delivered and the task is stranded: the sender has no
+    /// error to retry on and no fact to reconcile against later.
+    ///
+    /// Accepting is a local decision (one session-meta read, maybe one
+    /// session create), so the success path returns in milliseconds. The
+    /// bound is eaten whole by a wedged Runtime — **and by a peer built
+    /// before this protocol**, which never answers at all: a mixed-version
+    /// fleet pays it on every dispatch (design 27 §5.7). Reaching it
+    /// degrades to the pre-receipt behaviour (trust the publish), which is
+    /// why it is generous enough not to trip on a loaded machine.
+    /// Callers must budget the whole dispatch path, not this leg alone:
+    /// a task dispatch may spend up to `INTENT_DEFAULT` waking the target
+    /// plus this wait before it answers.
+    pub const INTENT_ACCEPT: Duration = Duration::from_secs(5);
+
     /// MCP receive timeout for init / list (was `RECV_TIMEOUT_SECS = 30`).
     pub const MCP_RECV: Duration = Duration::from_secs(30);
 
@@ -549,6 +572,7 @@ mod tests {
         assert_eq!(APPROVAL, Duration::from_secs(300));
         assert_eq!(SESSION_IPC, Duration::from_secs(10));
         assert_eq!(INTENT_DEFAULT, Duration::from_secs(30));
+        assert_eq!(INTENT_ACCEPT, Duration::from_secs(5));
         assert_eq!(MCP_RECV, Duration::from_secs(30));
         assert_eq!(MCP_PROBE_IDLE, Duration::from_secs(30));
         assert_eq!(MCP_PROBE_IDLE_LAZY, Duration::from_secs(60 * 60));

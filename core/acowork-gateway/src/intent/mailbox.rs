@@ -31,6 +31,39 @@ use serde::{Deserialize, Serialize};
 /// history). Counts live in a separate map and are never evicted.
 const MAX_ENTRIES: usize = 10_000;
 
+/// The target Runtime's acceptance receipt, persisted on the mailbox entry.
+///
+/// Three empty strings mean "no receipt" — the state of every entry written
+/// by a Runtime that predates the protocol, and the reason callers must treat
+/// absence as *unknown*, never as refusal.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AcceptanceReceipt {
+    /// RFC 3339 stamp of the decision; empty = no receipt.
+    #[serde(default)]
+    pub at: String,
+    /// [`crate::intent::accept::Acceptance::status`] — "accepted" |
+    /// "rejected"; empty = no receipt.
+    #[serde(default)]
+    pub status: String,
+    /// The Runtime's refusal reason, verbatim (empty when accepted). Opaque
+    /// text: the sender decides what it means, and the PM dispatch turns it
+    /// into a retryable failure with the text attached.
+    #[serde(default)]
+    pub error: String,
+}
+
+impl AcceptanceReceipt {
+    /// No receipt recorded (also the pre-protocol state).
+    pub fn is_empty(&self) -> bool {
+        self.status.is_empty()
+    }
+
+    /// Was the Intent refused by the target Runtime?
+    pub fn is_rejected(&self) -> bool {
+        self.status == "rejected"
+    }
+}
+
 /// One delivered (or attempted) Intent.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MailboxEntry {
@@ -56,6 +89,15 @@ pub struct MailboxEntry {
     /// delivered. An entry with `delivered_at` set is the "已投递" fact.
     #[serde(default)]
     pub delivered_at: String,
+    /// The target Runtime's acceptance receipt (`POST /api/intents/{id}/accept`).
+    ///
+    /// Deliberately a *separate* fact from `delivered_at`: the Gateway
+    /// publishing the bytes and the Runtime being able to route them are two
+    /// independent events, and the incident behind this field is exactly the
+    /// case where the first held and the second did not
+    /// ([`crate::intent::accept`]).
+    #[serde(default)]
+    pub acceptance: AcceptanceReceipt,
     /// Response association (design doc 27 §4.5 `in_reply_to`): for a
     /// response entry, the request `message_id` it answers. Empty on
     /// requests until their response is routed back.
@@ -251,6 +293,38 @@ impl IntentMailbox {
         Ok(())
     }
 
+    /// Record the target Runtime's acceptance decision for a request.
+    ///
+    /// Separate from [`record`] on purpose. `record` merges a *re-dispatch*
+    /// (the PM scanner reuses one message id across attempts), and a retry
+    /// that lands here must not erase the rejection the previous attempt
+    /// earned — nor may a rejection clear `delivered_at`, because "the broker
+    /// took the bytes" remains true. The two facts can legitimately disagree,
+    /// and `intent_status` exists to show that.
+    ///
+    /// Unknown ids are not an error: a receipt for an entry evicted from the
+    /// bounded buffer has nothing to stamp.
+    pub fn record_acceptance(
+        &self,
+        message_id: &str,
+        acceptance: &crate::intent::accept::Acceptance,
+    ) -> Result<(), MailboxError> {
+        let mut inner = self.inner.lock().unwrap();
+        if let Some(e) = inner
+            .entries
+            .iter_mut()
+            .find(|e| e.message_id == message_id)
+        {
+            e.acceptance = AcceptanceReceipt {
+                at: chrono::Utc::now().to_rfc3339(),
+                status: acceptance.status().to_string(),
+                error: acceptance.error.clone(),
+            };
+            self.save_locked(&inner)?;
+        }
+        Ok(())
+    }
+
     /// Close a request: its answer (real response or §7.1 fallback receipt)
     /// has been emitted. Idempotent — a second mark is a no-op refresh.
     pub fn mark_answered(&self, message_id: &str) -> Result<(), MailboxError> {
@@ -379,6 +453,7 @@ mod tests {
             body: "{}".into(),
             created_at: chrono::Utc::now().to_rfc3339(),
             delivered_at: String::new(),
+            acceptance: AcceptanceReceipt::default(),
             result_ref: String::new(),
             kind: "request".into(),
             status: String::new(),
@@ -396,6 +471,39 @@ mod tests {
         assert!(!mb.get("m1").unwrap().delivered());
         mb.mark_delivered("m1").unwrap();
         assert!(mb.get("m1").unwrap().delivered());
+    }
+
+    /// Acceptance is a *per-attempt* verdict, unlike delivery.
+    ///
+    /// `record()` is a re-dispatch of the same message id (the PM scanner
+    /// replays its identity on every retry), and the new attempt has not been
+    /// judged yet — so its verdict starts empty and the previous refusal must
+    /// not survive to describe a message that no longer exists. `delivered_at`
+    /// stays, because the broker really did take the earlier bytes.
+    #[test]
+    fn a_re_dispatch_clears_the_verdict_and_keeps_the_delivery() {
+        let mb = IntentMailbox::in_memory();
+        mb.record(entry("m-acc", "c1")).unwrap();
+        mb.mark_delivered("m-acc").unwrap();
+        mb.record_acceptance(
+            "m-acc",
+            &crate::intent::accept::Acceptance::rejected("no such column: intent_key"),
+        )
+        .unwrap();
+        assert!(mb.get("m-acc").unwrap().acceptance.is_rejected());
+
+        mb.record(entry("m-acc", "c1")).unwrap();
+        let after = mb.get("m-acc").unwrap();
+        assert!(after.acceptance.is_empty(), "a fresh attempt has no verdict yet");
+        assert!(after.delivered(), "the earlier publish is still a fact");
+    }
+
+    #[test]
+    fn an_acceptance_for_an_unknown_id_is_not_an_error() {
+        let mb = IntentMailbox::in_memory();
+        assert!(mb
+            .record_acceptance("never-recorded", &crate::intent::accept::Acceptance::accepted())
+            .is_ok());
     }
 
     #[test]

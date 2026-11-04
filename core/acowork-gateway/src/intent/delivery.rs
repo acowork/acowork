@@ -25,7 +25,7 @@ use acowork_core::mqtt_proto::{self, control_command::Command};
 
 use crate::gateway::state::GatewayState;
 use crate::handlers::server::SharedState;
-use crate::intent::mailbox::{IntentMailbox, MailboxEntry};
+use crate::intent::mailbox::{AcceptanceReceipt, IntentMailbox, MailboxEntry};
 use crate::mqtt::agent_registry::SharedAgentRegistry;
 use crate::mqtt::GatewayMqttClient;
 use crate::mqtt::node_control::NodeControlClient;
@@ -175,6 +175,7 @@ pub async fn wake_and_deliver(
             body: req.params_json.clone(),
             created_at: chrono::Utc::now().to_rfc3339(),
             delivered_at: String::new(),
+            acceptance: AcceptanceReceipt::default(),
             result_ref: req.in_reply_to.clone(),
             kind: req.kind.clone(),
             status: req.status.clone(),

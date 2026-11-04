@@ -5,6 +5,7 @@
 //! plus the [`mailbox`] delivery buffer. The pre-ADR-033 `IntentRouter`
 //! (gRPC-era dead code, never instantiated) was removed with D7.
 
+pub mod accept;
 pub mod chat_client;
 pub mod gate;
 pub mod delivery;

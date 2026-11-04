@@ -918,6 +918,15 @@ Intent 保持消息语义，不引入通用任务状态机；最低限度的可�
 
 建议至少区分 `invalid_repo`、`unauthorized_directory`、`target_not_found`、`source_chat_session_not_found`、`session_config_invalid`、`not_authorized`、`delivery_unavailable`、`conversation_request_limit_reached`、`response_unavailable`（应对方 turn 异常终止时随兜底 response 携带）和重复 message ID。正式错误码在 HTTP / MQTT 协议修订时统一。
 
+**接收侧验收回执（v3.2）。** 「MQTT 发布成功」只证明 broker 收到了字节，**不证明接收 Runtime 能把消息路由进执行会话**，而后者会失败：2026-11-04 的事故里，目标 Runtime 的 session-meta 库缺 `intent_key` 列，`route_intent_inbound` 的查询报 `no such column`，消息只留下一行 WARN 就被丢弃；与此同时 Gateway 把信箱记成 `delivered`、PM 把 `dispatched_at` 盖章，于是这条任务既不执行也不会重试——派发链路两端各自"成功"，中间的失败没有任何人能看见。因此接收侧补一条**回执**（`POST /api/intents/{message_id}/accept`，协议面见 `protocols/http.md` §4.16.4）：
+
+- Runtime 处理完一条 request（`kind != response` 且有 `message_id`）后 best-effort 回报 `{sender, accepted, error}`；`accepted=false` 时 `error` 是路由失败原文，不归一化（它就是这次故障唯一自述）。回报在派发循环之外 `spawn`，不阻塞下一条入站消息；失败只打 debug —— 诊断通道不得自己变成重试循环。
+- Gateway 只接受**记录在案的 target** 的回执（D4 身份校验 + `to_instance` 比对，其余 403），写入信箱 `acceptance{at, status, error}`，并**唤醒**正在等该 `message_id` 的派发方（进程内 oneshot，事件驱动）。`GET /api/intents/{id}` 暴露 `accepted`（`null` = 无回执，**不等于**拒绝）、`accepted_at`、`accept_error`。
+- 只有 `POST /api/intents/task-dispatch` 等回执，且有上界（`INTENT_ACCEPT` = 5s）：`accepted` → `delivered`；`rejected` → `status=failed` + `error_code=intent_rejected` + 原文，PM 落 `dispatch_error` 后由既有退避自动接管；**无回执（旧版 Runtime / 超时）→ 沿用发布即成事的旧语义**，混版部署不回归。通用 `/api/intents` 只记事实、不等待，agent 间投递不为它加延迟，也不引入任何轮询。
+- 回执是**每次尝试**的判定：同一 `message_id` 重新派发（PM 按代次重放）清空上一轮 `acceptance`，`delivered_at` 作为历史事实保留。两者本就允许不一致——这正是本次事故的形态。
+
+不变式：`delivered_at` 是 Gateway 的发布事实，`acceptance` 是接收侧的受理事实，**互不覆盖、互不推断**；"无回执"只表示"不知道"，任何一方都不得把它当成成功或失败。
+
 ## 6. 前端交互设计
 
 - **Agent 页标签栏 = 固定 Chat tab + execution session tab**：打开 Agent 必然落在该 pair 唯一的 Chat session（首次打开时幂等创建），tab 标题 = Agent 名，不可关闭（v2.1 微信模型）。execution session 是同一标签栏里可随意开关的普通 tab，`+` 新建的是 execution session tab。现有 Session history 保持原行为。
