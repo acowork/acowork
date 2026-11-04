@@ -335,7 +335,7 @@ export function GatewayTab() {
               {t("settings.relayGwId")}:{" "}
               <span className="font-mono">{relayGwId ?? "—"}</span>
             </span>
-            <GatewayGwIdHelp gwId={relayGwId} gatewayUrl={gatewayUrl} />
+            <GatewayGwIdHelp gwId={relayGwId} />
           </div>
         </ExpandableRow>
       </ListBox>
@@ -634,13 +634,14 @@ function HelpHint({ content, label }: { content: string; label?: string }) {
  *  `gatewayUrl` is passed rather than re-read from the store so the command
  *  points at the Gateway this row was fetched from.
  *
- *  320px, not the 200px default: the pairing address and the curl command are
- *  both long, and a 200px box would shred them into an unreadable column. */
-function GatewayGwIdHelp({ gwId, gatewayUrl }: { gwId: string | null; gatewayUrl: string }) {
+ *  320px, not the 200px default: the pairing address and the config snippet
+ *  are both long, and a 200px box would shred them into an unreadable
+ *  column. */
+function GatewayGwIdHelp({ gwId }: { gwId: string | null }) {
   const { t } = useTranslation();
   const content = gwId
     ? t("settings.relayGwIdHelp", { gwId })
-    : t("settings.relayGwIdHowTo", { gatewayUrl });
+    : t("settings.relayGwIdHowTo");
   return <HelpHint content={content} label={t("settings.relayGwIdHelpLabel")} />;
 }
 

@@ -544,7 +544,7 @@
     "relayUrlSavedPlainHttp": "저장된 주소가 https:// 가 아닙니다. 릴레이 모드에서는 MQTT에 연결할 수 없습니다. https://<gw-id>.<릴레이 도메인> 로 변경한 뒤 다시 진단하세요.",
     "relayReadFrom": "읽은 위치",
     "relayGwIdHelp": "이 게이트웨이의 원격 접근용 장치 ID입니다. 휴대폰이나 다른 PC를 연결하려면 해당 기기의 릴레이 모드 게이트웨이 주소를 https://{{gwId}}.<릴레이 도메인> 으로 설정하세요.",
-    "relayGwIdHowTo": "아직 장치 ID가 없습니다 — 이 게이트웨이에서 릴레이 터널을 한 번도 활성화하지 않았습니다.\n\n한 번 활성화하면 생성되어 저장됩니다(파일: 게이트웨이 설정 디렉터리의 relay_identity.json):\n\ncurl -X POST {{gatewayUrl}}/api/relay/enable -H 'Content-Type: application/json'",
+    "relayGwIdHowTo": "아직 장치 ID가 없습니다 — 이 게이트웨이에서 릴레이 터널을 한 번도 활성화하지 않았습니다.\n\n게이트웨이의 gateway.toml(게이트웨이 디렉터리의 config/gateway.toml)에서 한 번 활성화하고 게이트웨이를 재시작합니다:\n\n[relay]\nenabled = true\nurl = \"wss://<relay-domain>/tunnel\"\n\n장치 ID는 첫 연결 시 생성되어 relay_identity.json에 저장됩니다.",
     "relayGwIdHelpLabel": "장치 ID는 무엇에 쓰이나요?",
     "localGateway": "로컬 게이트웨이",
     "localModeKeepsUrl": "로컬 모드에서 Desktop은 먼저 이 주소로 프로브하며, 응답이 없을 때만 하위 Gateway를 시작합니다.",

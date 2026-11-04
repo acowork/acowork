@@ -993,7 +993,7 @@
     "relayUrlSavedPlainHttp": "The saved address is not https://. MQTT cannot connect in relay mode — change it to https://<gw-id>.<relay-domain> and re-run the diagnosis.",
     "relayReadFrom": "Read from",
     "relayGwIdHelp": "Remote-access device id for this Gateway. To pair a phone or another computer, set its Gateway address in relay mode to https://{{gwId}}.<relay-domain>.",
-    "relayGwIdHowTo": "No device id yet — the relay tunnel has never been enabled on this Gateway.\n\nEnable it once to generate and persist one (file: relay_identity.json in the Gateway config directory):\n\ncurl -X POST {{gatewayUrl}}/api/relay/enable -H 'Content-Type: application/json'",
+    "relayGwIdHowTo": "No device id yet — the relay tunnel has never been enabled on this Gateway.\n\nEnable it once in the Gateway's gateway.toml (config/gateway.toml in the Gateway directory) and restart the Gateway:\n\n[relay]\nenabled = true\nurl = \"wss://<relay-domain>/tunnel\"\n\nThe device id is generated on the first connection and persisted in relay_identity.json.",
     "relayGwIdHelpLabel": "What is the device ID for?",
     "localGateway": "Local Gateway",
     "localModeKeepsUrl": "In Local mode, Desktop probes this address first and only spawns a child Gateway if it can't be reached.",

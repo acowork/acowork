@@ -237,10 +237,12 @@ describe("local-mode URL hint", () => {
     hoverHelp();
 
     const text = tip(/No device id yet/).textContent ?? "";
+    // The hint points at the config-file way of enabling the tunnel —
+    // that is the path the README documents, and the one an operator
+    // can actually take without hand-crafting a request body.
+    expect(text).toContain("gateway.toml");
+    expect(text).toContain("[relay]");
     expect(text).toContain("relay_identity.json");
-    expect(text).toContain("/api/relay/enable");
-    // The command must point at the Gateway we actually read from.
-    expect(text).toContain("http://127.0.0.1:19876");
   });
 
   it("is a hover hint, not a click popup", async () => {
