@@ -54,7 +54,7 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
                                  // 只有 {{agent_name}} 被替换
 — 无覆盖时为内置默认 —
 [CHAT_ROUTER_BASE_PROMPT]        // Runtime 常量（acowork_core::chat_prompt）
-                                 // 角色边界 / dispatch 契约 / 决策规则 / 安全规则
+                                 // 角色边界 / new_task·propose_existing 契约 / 决策规则 / 安全规则
 ## Persona                       // manifest 回退
 <persona text>
 ## Scenario                      // 1:1 或 group，两个稳定变体
@@ -71,11 +71,11 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
 基座由 Runtime 维护，包含：
 
 1. 角色边界：你是 `<agent display_name>` 的对话前台，只能回答、查一个信息、路由或新建执行会话；
-2. 工具契约：路由工具只有 `dispatch`（参数语义与别名规则）；另有两个只读信息工具 `memory_recall` / `http_request`（GET-only），轮数由提示词软约束（"通常零次，最多一两次"），不用代码硬上限；
-3. 决策规则：回答 / 转交 / 新建 / 澄清的判据（与 ADR-099「路由行为准则」一致，核心是 dispatch 代价不对称：错发远比漏发贵，不确定就问）；
+2. 工具契约：路由 act 只有 `new_task`（无 `target`，只能新开）与 `propose_existing(target, why)`（只提案不投递，`propose_existing` 的 `why` 必须给——一张不写理由的卡等于把路由工作推回给人类）；另有两个只读信息工具 `memory_recall` / `http_request`（GET-only），轮数由提示词软约束（"通常零次，最多一两次"），不用代码硬上限；
+3. 决策规则：回答 / 转交 / 新建 / 澄清的判据（与 ADR-099「路由行为准则」一致，核心是路由代价不对称：错发远比漏发贵，不确定就问）；
 4. 安全规则：只使用候选清单中的信息；不复述其他 chat 的内容；不承诺执行细节；不代人类 @ 其他 agent。
 
-`chat.md` 存在且非空白时**整段替换**内置 chat prompt 正文（基座 + Persona + 场景段），只替换 `{{agent_name}}`；缺省时使用内置默认。有两部分不是该文件能删掉的。其一，`# Safety` 不变量是一段不可裁剪的尾块，Runtime 每轮都会重新追加到正文末尾（`chat_prompt::with_chat_prompt_tail`），从 `chat.md` 里删掉它对模型实际看到的内容没有影响。其二，安全边界由结构而非提示词字面量保证：router 只有 `dispatch` 与两个只读工具，改写提示词不会给它新的能力（ADR-099 D6）。此外，群聊的 `chat.md` **仅群主或管理员可写**（ADR-098 治理），任何成员可读，因此单个成员无法注入一段去操控他人 agent 的提示词。群聊右侧设置面板只编辑正文——`# Safety` 尾块不在面板中显示（`chat-md` 接口返回的是剥掉尾块后的正文），保存时由存储与 Runtime 重新追加，因此不会把成员改不动的内容摆进可编辑框再静默还原。
+`chat.md` 存在且非空白时**整段替换**内置 chat prompt 正文（基座 + Persona + 场景段），只替换 `{{agent_name}}`；缺省时使用内置默认。有两部分不是该文件能删掉的。其一，`# Safety` 不变量是一段不可裁剪的尾块，Runtime 每轮都会重新追加到正文末尾（`chat_prompt::with_chat_prompt_tail`），从 `chat.md` 里删掉它对模型实际看到的内容没有影响。其二，安全边界由结构而非提示词字面量保证：router 只持有 `new_task` / `propose_existing` 与两个只读工具，改写提示词不会给它新的能力（ADR-099 D6）。此外，群聊的 `chat.md` **仅群主或管理员可写**（ADR-098 治理），任何成员可读，因此单个成员无法注入一段去操控他人 agent 的提示词。群聊右侧设置面板只编辑正文——`# Safety` 尾块不在面板中显示（`chat-md` 接口返回的是剥掉尾块后的正文），保存时由存储与 Runtime 重新追加，因此不会把成员改不动的内容摆进可编辑框再静默还原。
 
 ### 3.3 Persona 与 chat.md 来源优先级
 
@@ -239,7 +239,7 @@ S2           idle     3h   task   Review ADR-098
 S3           closed   2d   chat   Refactor auth middleware
 ```
 
-列：别名、`current` 标记、状态、最近活动（相对时间，仅此处允许）、来源（chat/task）、title。不含 session id、owner、model——减少 token 与泄漏面；router 需要时通过 dispatch 别名间接操作。
+列：别名、`current` 标记、状态、最近活动（相对时间，仅此处允许）、来源（chat/task）、title。不含 session id、owner、model——减少 token 与泄漏面；router 只能把别名用在 `propose_existing` 里，不能凭它直接投递。
 
 排序：`current` 优先，其余按 `last_active_at` 倒序。排序稳定（同时间戳按 title 字典序），保证同一候选集每轮顺序一致。
 
@@ -284,8 +284,8 @@ S2           idle     3h  task  Review ADR-098
 跨轮必须逐字节一致：
 
 - `model` / `provider`（来自 `chat_router` 配置，不随消息变化）；
-- `temperature`（默认 0）、`max_tokens`（默认 2048，保证一轮 `assistant → tool_call → tool_result → assistant` 的 think + 工具参数 + 终稿不被截断）；
-- `tools` 数组：`dispatch` + 按启用状态拼接的只读信息工具（`memory_recall`、GET-only `http_request`），schema 用固定字面量序列化，字段顺序固定，对固定的（二进制版本，启用集合）逐字节稳定；
+- `temperature`（默认 0）、`max_tokens`（默认 8192，`chat_router.max_output_tokens`，clamp 1024–32768，Config 文件可配、不上 UI wire）。这个上限必须同时容纳一次信息轮的 think + 工具参数 + 终稿**和**一份 `new_task` 简报——旧值 2048 容不下后者，被截断的响应里工具调用 JSON 是不完整的，`act_call()` 找不到 act，于是整轮降级成一句聊天回复：用户看到一条 agent 消息，执行会话根本没建。`finish_reason == "length"`（Anthropic 的 `max_tokens` 在 provider 层已归一化为 `length`）现在被显式检查，按截断降级而不是当作决策，日志里也不会再伪装成 `reply` / `empty reply`；
+- `tools` 数组：`new_task` + `propose_existing` + 按启用状态拼接的只读信息工具（`memory_recall`、GET-only `http_request`），schema 用固定字面量序列化，字段顺序固定，对固定的（二进制版本，启用集合）逐字节稳定；提示词里教到的动作名与这里下发的集合由单测锁死（`tool.rs::the_prompt_teaches_exactly_the_tools_the_wire_offers`），两者漂移过一次就够；
 - `tool_choice`：默认 `auto`，不随轮次变化；
 - 信息轮次产生的 `assistant(tool_calls)` / `tool` 消息只存在于本轮 request 内，不写回 chat 历史，不进入 Block B。
 
