@@ -106,6 +106,49 @@ describe("context_ref part — rendering", () => {
     expect(container.textContent).toContain(USER_WORDS);
   });
 
+  it("puts the reference card between the bubble and the timestamp", () => {
+    // The timestamp is a hover-revealed sibling that keeps its height while
+    // hidden (`opacity-0`, not `hidden`). Sitting between the bubble and the
+    // card, it opened an empty strip mid-turn and the two read as separate
+    // turns — so the order is pinned here: words → background → meta.
+    const { container } = renderTurn([refRow()]);
+    const bubble = container.querySelector(".bg-chat-user");
+    expect(bubble).not.toBeNull();
+    const column = bubble!.parentElement!;
+    const cardRoot = screen.getByRole("button", { name: /messageRef.chatBackground/ })
+      .parentElement!;
+
+    expect(cardRoot.parentElement).toBe(column);
+    const kids = Array.from(column.children);
+    expect(kids.indexOf(bubble as Element)).toBe(0);
+    expect(kids.indexOf(cardRoot)).toBe(1);
+    // Whatever comes last is the turn's own meta, never the card's neighbour.
+    expect(kids.length).toBe(3);
+    expect(kids[2].textContent).toMatch(/\d/);
+  });
+
+  it("sizes the bubble by its own text, not by the reference card", () => {
+    // Reported defect: once the card joined the bubble's column, the column
+    // (sized by its widest child) stretched a two-word bubble to the card's
+    // width — and stretched it again when the card expanded. jsdom paints
+    // nothing, so the contract pinned here is the sizing ownership: the column
+    // takes its width from the ROW, the bubble is intrinsically sized, and only
+    // the card fills the column.
+    const { container } = renderTurn([refRow()]);
+    const bubble = container.querySelector(".bg-chat-user")!;
+    const column = bubble.parentElement!;
+    const cardRoot = screen.getByRole("button", { name: /messageRef.chatBackground/ })
+      .parentElement!;
+
+    expect(column.classList.contains("w-full")).toBe(true);
+    expect(column.classList.contains("max-w-[85%]")).toBe(true);
+    expect(bubble.classList.contains("w-fit")).toBe(true);
+    // Token, not substring — `max-w-full` contains "w-full" and means the
+    // opposite thing (a cap, not a fill).
+    expect(bubble.classList.contains("w-full")).toBe(false);
+    expect(cardRoot.classList.contains("w-full")).toBe(true);
+  });
+
   it("renders the reference for a turn with no words", () => {
     const { container } = renderTurn([refRow()], "");
     expect(screen.getByRole("button", { name: /messageRef.chatBackground/ })).toBeTruthy();
