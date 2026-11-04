@@ -82,7 +82,9 @@ ADR-046 规定附件是**部件**：`user` 行之后新增 `role="system"` 的�
 
 ### D5　前端：一种折叠、两种槽位
 
-`foldMessages` 的折块类型从 `user_with_attachments` 更名为 `user_with_parts`，折叠判据从"附件条目"扩为"任一部件的条目"（`isAttachmentPart` / `isMessageRefPart`，由 `messageFolder.ts` 导出）。块的 `items` 保持日志顺序，**渲染器**决定每个部件进哪个槽位：
+`foldMessages` 的折块类型从 `user_with_attachments` 更名为 `user_with_parts`，折叠判据从"附件条目"扩为"任一部件的条目"。
+
+**部件类型的判据只允许有一份定义**（`[messageParts.ts](../../../apps/acowork-desktop/src/components/chat/messageParts.ts)`）。它同时被两个消费者使用：JSONL 加载器（`chatStore.convertConversationEntry`，决定"这条行的 `metadata` 值不值得留在消息上"）与折叠器（`messageFolder`）。首版把这份判据写了两份——加载器里一份附件集合、折叠器里一份——于是新增第二种部件时加载器先丢掉了 `context_ref` 的 metadata，引用行以"没有 metadata 的 `system` 消息"抵达折叠器，不折叠，最终被渲染成一条满宽的系统气泡（实测缺陷）。一份定义，两个消费者；`messageRefPart.test.tsx` 的 "the JSONL load path" 用例从 Runtime 真实写出的 wire 形状出发钉死这条链。块的 `items` 保持日志顺序，**渲染器**决定每个部件进哪个槽位：
 
 - 附件 → 气泡上方的 chip 行（不变）；
 - 引用 → 气泡**下方**的折叠卡片（[MessageRefBlock.tsx](../../../apps/acowork-desktop/src/components/chat/MessageRefBlock.tsx)），`ChatMarkdown` 渲染正文，默认收起。
@@ -135,4 +137,4 @@ ADR-046 规定附件是**部件**：`user` 行之后新增 `role="system"` 的�
 | 回合 | `loop_.rs` | `turn_message_refs` 在 `user` 行之后、附件之前落盘；标题输入仍取 `raw_user_message` |
 | Router | [chat_router/runner.rs](../../../core/acowork-runtime/src/agent/chat_router/runner.rs) `dispatch_parts`、[chat_router/tool.rs](../../../core/acowork-runtime/src/agent/chat_router/tool.rs) schema、[chat_prompt.rs](../../../core/acowork-core/src/chat_prompt.rs) | 入参 `background`；新会话产出 `(原话, [ref])`，续会话产出 `(原话, [])`；背景与原话同文时丢弃 |
 | 降级 | [startup/gateway_loop.rs](../../../core/acowork-runtime/src/startup/gateway_loop.rs) | `degraded_background` 产出引用部件，`params.message` 不动 |
-| 前端 | [messageFolder.ts](../../../apps/acowork-desktop/src/components/chat/messageFolder.ts) `user_with_parts`；[MessageRefBlock.tsx](../../../apps/acowork-desktop/src/components/chat/MessageRefBlock.tsx) | 折叠 + 折叠卡片 markdown；`messageRefPart.test.tsx` 钉 5 条契约（折叠、字面、默认收起、展开 markdown、无原话仍渲染） |
+| 前端 | [messageParts.ts](../../../apps/acowork-desktop/src/components/chat/messageParts.ts)（部件类型唯一判据）、[messageFolder.ts](../../../apps/acowork-desktop/src/components/chat/messageFolder.ts) `user_with_parts`、[MessageRefBlock.tsx](../../../apps/acowork-desktop/src/components/chat/MessageRefBlock.tsx)、`chatStore.convertConversationEntry`（保留部件 metadata） | 折叠 + 折叠卡片 markdown；`messageRefPart.test.tsx` 钉 7 条契约（折叠、字面、默认收起、展开 markdown、无原话仍渲染、载入链保留 metadata、附件不回归） |
