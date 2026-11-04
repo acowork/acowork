@@ -126,6 +126,7 @@ missing one offers to fetch it (on macOS it downloads ORT via cargo with CoreML 
 Silicon). Add `--debug` / `-Debug` for a debug build with verbose logs.
 
 The Desktop App is a Tauri v2 shell whose React/TS frontend talks to the Gateway over HTTP.
+Agents are created through the **Create Agent wizard** in the app — it writes the manifest for you.
 
 > Prerequisites, packaging, CI, and deployment:
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
@@ -140,36 +141,6 @@ all authentication is decided by your Gateway.
 - Design: [`docs/design/zh/24-cloud-relay-remote-access.md`](./docs/design/zh/24-cloud-relay-remote-access.md)
 - Deploy (Cloudflare DNS + Aliyun ECS): [`docs/runbooks/relay-ecs-cloudflare-deploy.md`](./docs/runbooks/relay-ecs-cloudflare-deploy.md)
 - Self-host in mainland China (ICP filing): [`docs/runbooks/relay-selfhost-cn-deploy.md`](./docs/runbooks/relay-selfhost-cn-deploy.md)
-
-### ✍️ Try it: write a manifest in 30 seconds
-
-```toml
-# examples/qa-agent/manifest.toml
-[package]
-id = "com.example.qa-agent"
-name = "Quality Assurance"
-display_name = "QA-Tom"
-role = "QA"
-version = "1.0.0"
-
-[llm]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[permissions]
-tools = ["rag_query", "read_file", "write_file"]
-```
-
-```markdown
-<!-- prompts/system.md -->
-You are a QA Agent, helping users with quality management and code review.
-```
-
-Then build & sign:
-
-```bash
-./dev/common/build-agent.sh examples/qa-agent   # produces com.example.qa-agent.agent
-```
 
 > **Status**: ACowork is in **alpha**. The Gateway, Runtime, memory engine, and Desktop App are under active
 > development. See [Roadmap](#-roadmap) for what is shipping today and what is next.

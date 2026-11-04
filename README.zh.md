@@ -120,7 +120,8 @@ npm install && npm run tauri dev
 `build_core.*` 会自行处理 ONNX Runtime——探测 `.ort/` 下的本地安装；若未找到则提示下载（macOS 上通过
 cargo 拉取，Apple Silicon 自动启用 CoreML 加速）。加 `--debug` / `-Debug` 可切到调试构建并打开详细日志。
 
-Desktop App 是 Tauri v2 壳，React/TS 前端通过 HTTP 与 Gateway 对话。
+Desktop App 是 Tauri v2 壳，React/TS 前端通过 HTTP 与 Gateway 对话。Agent 在应用内通过
+**创建 Agent 向导**创建——manifest 由向导代写，无需手写。
 
 > 前置依赖、打包、CI 与部署：
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
@@ -134,36 +135,6 @@ Desktop App 是 Tauri v2 壳，React/TS 前端通过 HTTP 与 Gateway 对话。
 - 设计：[`docs/design/zh/24-cloud-relay-remote-access.md`](./docs/design/zh/24-cloud-relay-remote-access.md)
 - 部署（Cloudflare DNS + 阿里云 ECS）：[`docs/runbooks/relay-ecs-cloudflare-deploy.md`](./docs/runbooks/relay-ecs-cloudflare-deploy.md)
 - 境内自建（ICP 备案）：[`docs/runbooks/relay-selfhost-cn-deploy.md`](./docs/runbooks/relay-selfhost-cn-deploy.md)
-
-### ✍️ 30 秒写出第一个 Agent
-
-```toml
-# examples/qa-agent/manifest.toml
-[package]
-id = "com.example.qa-agent"
-name = "Quality Assurance"
-display_name = "QA-Tom"
-role = "QA"
-version = "1.0.0"
-
-[llm]
-provider = "deepseek"
-model = "deepseek-v4-flash"
-
-[permissions]
-tools = ["rag_query", "read_file", "write_file"]
-```
-
-```markdown
-<!-- prompts/system.md -->
-你是一个 QA Agent，擅长帮助用户做质量管理与代码审查。
-```
-
-构建并签名：
-
-```bash
-./dev/common/build-agent.sh examples/qa-agent   # 产出 com.example.qa-agent.agent
-```
 
 > **当前状态**：ACowork 处于 **Alpha 阶段**。Gateway、Runtime、记忆引擎与 Desktop App 都在积极开发中。
 > 详见 [路线图](#-路线图) 了解当前已交付与下一步计划。
