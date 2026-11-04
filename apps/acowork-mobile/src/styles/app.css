@@ -2525,3 +2525,146 @@
   font-size: 14px;
   padding: 6px 4px;
 }
+
+/* ------------------------------------------------------------------ */
+/* @session references (ADR-106 revision 2026-11-04)                    */
+/* ------------------------------------------------------------------ */
+
+/* The `@` sheet is a reference MULTI-select now: a row toggles its material and
+   stays open, and a separate "去续投" navigates to the run's block. The row is
+   two buttons side by side, so neither tap is ambiguous. */
+.chat-sheet-ref-row {
+  display: flex;
+  gap: 8px;
+  align-items: stretch;
+  margin-bottom: 8px;
+}
+.chat-sheet-ref {
+  flex: 1;
+  min-width: 0;
+  margin-bottom: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  text-align: left;
+}
+.chat-sheet-ref .chat-sheet-option-label {
+  flex: 1;
+}
+.chat-sheet-ref .chat-sheet-option-value {
+  margin-top: 0;
+}
+.chat-sheet-ref:disabled {
+  opacity: 0.4;
+}
+.chat-sheet-ref.is-checked {
+  border-color: var(--color-tint-strong, #f59e0b);
+  background: rgba(245, 158, 11, 0.12);
+}
+.chat-sheet-ref-mark {
+  flex: none;
+  font-size: 11px;
+  color: var(--color-accent, #0ea5e9);
+}
+.chat-sheet-continue {
+  flex: none;
+  width: auto;
+  margin-bottom: 0;
+  padding: 12px;
+  text-align: center;
+  font-size: 13px;
+}
+.chat-sheet-done {
+  margin-top: 4px;
+}
+.chat-sheet-done:disabled {
+  opacity: 0.5;
+}
+
+/* The composer's removable reference chip carries a quote glyph beside the
+   run's name. */
+.composer-ref-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+
+/* Source chips under a user bubble — the runs that utterance quoted. One tap
+   jumps to that block. */
+.chat-ref-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 6px;
+}
+.chat-ref-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 14em;
+  padding: 3px 8px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--color-label-secondary);
+  font-size: 11px;
+  cursor: pointer;
+}
+.chat-ref-chip-icon {
+  flex: none;
+  width: 12px;
+  height: 12px;
+}
+.chat-ref-chip-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The block's in-place reply row: always present while the block is open, never
+   while it is folded (the parent gates it on `open`). */
+.chat-block-reply {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--color-border, rgba(128, 128, 128, 0.2));
+}
+.chat-block-reply-input {
+  flex: 1;
+  min-height: 34px;
+  resize: none;
+  padding: 7px 10px;
+  border: 1px solid var(--color-border, rgba(128, 128, 128, 0.25));
+  border-radius: 10px;
+  background: var(--color-surface, rgba(128, 128, 128, 0.06));
+  color: inherit;
+  font-size: 14px;
+  font-family: inherit;
+}
+.chat-block-reply-send {
+  flex: none;
+  padding: 8px 14px;
+  border: none;
+  border-radius: 10px;
+  background: var(--color-tint-strong, #f59e0b);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chat-block-reply-send:disabled {
+  opacity: 0.5;
+}
+
+/* A locate that found no block says so once, briefly, above the composer. */
+.composer-locate-hint {
+  flex: none;
+  padding: 6px 12px;
+  font-size: 12px;
+  text-align: center;
+  color: var(--color-label-secondary);
+  background: rgba(120, 120, 128, 0.1);
+}

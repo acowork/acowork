@@ -110,9 +110,17 @@ describe('ChatAddressSheet', () => {
     host.remove()
   })
 
-  async function open(pick = vi.fn()): Promise<typeof pick> {
+  async function open(pick = vi.fn(), locate = vi.fn()): Promise<typeof pick> {
     await act(async () => {
-      root.render(<ChatAddressSheet instanceId={AGENT} chatSessionId={CHAT} onPick={pick} onClose={() => {}} />)
+      root.render(
+        <ChatAddressSheet
+          instanceId={AGENT}
+          chatSessionId={CHAT}
+          onPick={pick}
+          onLocate={locate}
+          onClose={() => {}}
+        />,
+      )
     })
     await act(async () => {})
     return pick
@@ -134,11 +142,67 @@ describe('ChatAddressSheet', () => {
     )
   })
 
-  it("puts the cheap escape first and names a run on tap", async () => {
+  it('puts the cheap escape first, and it names new work immediately', async () => {
     const pick = await open()
     expect(host.querySelector('.chat-sheet-option')!.getAttribute('data-testid')).toBe('address-new')
+    act(() => buttons('address-new')[0]!.click())
+    expect(pick).toHaveBeenLastCalledWith({ forceNew: true })
+  })
+
+  it('toggling a run attaches it as material; 完成 commits the selection', async () => {
+    const pick = await open()
+    // A tap QUOTES the run and keeps the sheet open — multi-select means one
+    // click is not yet the answer.
     act(() => buttons('address-session')[1]!.click())
-    expect(pick).toHaveBeenLastCalledWith({ sessionId: 's-2', label: '任务 s-2' })
+    expect(pick).not.toHaveBeenCalled()
+    // A second run joins the selection.
+    act(() => buttons('address-session')[0]!.click())
+    act(() => buttons('address-done')[0]!.click())
+    expect(pick).toHaveBeenLastCalledWith({
+      refs: [
+        { agentInstanceId: AGENT, sessionId: 's-2' },
+        { agentInstanceId: AGENT, sessionId: 's-1' },
+      ],
+      labels: { [`${AGENT}|s-2`]: '任务 s-2', [`${AGENT}|s-1`]: '任务 s-1' },
+    })
+  })
+
+  it('a checked row toggles back off, and 完成 re-disables on the empty selection', async () => {
+    const pick = await open()
+    act(() => buttons('address-session')[0]!.click())
+    expect(buttons('address-done')[0]!.disabled).toBe(false)
+    // Un-pick returns to nothing. 完成 re-disables rather than offering a
+    // silent empty commit — the explicit empty answer is "不指定".
+    act(() => buttons('address-session')[0]!.click())
+    expect(buttons('address-done')[0]!.disabled).toBe(true)
+    act(() => buttons('address-none')[0]!.click())
+    expect(pick).toHaveBeenLastCalledWith({})
+  })
+
+  it("'去续投' is a navigation — it locates, it never addresses", async () => {
+    const locate = vi.fn()
+    const pick = await open(vi.fn(), locate)
+    act(() => buttons('address-continue')[1]!.click())
+    expect(locate).toHaveBeenCalledWith('s-2', '任务 s-2')
+    // Locating is not an address: it commits nothing and closes nothing.
+    expect(pick).not.toHaveBeenCalled()
+  })
+
+  it('clamps the reference at the Gateway ceiling and keeps commit reachable', async () => {
+    const pick = await open()
+    // Two rows here; the fifth is the ceiling (asserted in the desktop twin with
+    // a longer list) — unchecked rows go disabled once full. With only two runs
+    // both stay selectable, and the done footer stays put.
+    act(() => buttons('address-session')[0]!.click())
+    act(() => buttons('address-session')[1]!.click())
+    expect(buttons('address-session')[0]!.disabled).toBe(false)
+    expect(buttons('address-done')[0]!.disabled).toBe(false)
+    act(() => buttons('address-done')[0]!.click())
+    expect(pick).toHaveBeenCalledTimes(1)
+  })
+
+  it("keeps '不指定' as an answer when the list is not empty", async () => {
+    const pick = await open()
     act(() => buttons('address-none')[0]!.click())
     expect(pick).toHaveBeenLastCalledWith({})
   })

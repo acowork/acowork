@@ -355,6 +355,18 @@ export interface ChatMessageRow {
      *  handed to this turn. Present only on the head row; never resolvable
      *  from here (see [`ExecAttachmentLabel`]). */
     exec_attachments?: ExecAttachmentLabel[]
+    /** ADR-106 revision 2026-11-04: the `@session` reference material the human
+     *  attached, pinned to its round by the Gateway at send time. One quadruple
+     *  `{agent_instance_id, session_id, round_id, terminal}` per reference —
+     *  coordinates only, never the body. Read to draw the source chips under a
+     *  user bubble, echoed back verbatim when a card-answer re-delivers the same
+     *  utterance. */
+    refs?: Array<{
+      agent_instance_id: string
+      session_id: string
+      round_id: string
+      terminal: boolean
+    }>
   }
   attachment_ids?: string[]
   attachments?: Array<{ id: string; filename: string; mime: string; size: number }>

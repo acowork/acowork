@@ -40,8 +40,8 @@
  * on foreground return. No streaming, ever, in v1 (design doc 25 §8).
  */
 
-import { Fragment, useEffect, useMemo, useState, type ReactNode } from 'react'
-import { AtSign, Send } from 'lucide-react'
+import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { AtSign, Quote, Send } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -118,6 +118,19 @@ export function AgentChatScreen() {
    *  is "the sheet is open", `address` is "what was chosen for this draft". */
   const [addressStage, setAddressStage] = useState(false)
   const [address, setAddress] = useState<AddressPick | null>(null)
+  /** ADR-106 revision 2026-11-04: the run whose block the `@` sheet's "去续投"
+   *  (or a source chip) just located — that block opens + focuses its in-place
+   *  reply row. Cleared on the next send so a stale focus never re-fires. */
+  const [focusBlockSessionId, setFocusBlockSessionId] = useState<string | null>(null)
+  /** A locate that found no block in the loaded window says so once, briefly —
+   *  the navigation is best-effort, the reference it pointed at is already on
+   *  the row regardless. No toast primitive exists on mobile, so it rides a
+   *  transient pill above the composer. */
+  const [locateHint, setLocateHint] = useState<string | null>(null)
+  // The scroll container, kept in a ref object alongside the hook's callback
+  // ref, so a locate can find a block's DOM node (mobile is not virtualized —
+  // every loaded row is in the tree).
+  const containerRef = useRef<HTMLDivElement | null>(null)
   /** The uploaded file whose viewer is open. Held here, above the list, so a
    *  poll tick that re-renders (or re-keys) a row cannot close the overlay. */
   const [viewing, setViewing] = useState<ChatAttachment | null>(null)
@@ -167,6 +180,7 @@ export function AgentChatScreen() {
     setDraft('')
     setReplyTo(null)
     setAddress(null)
+    setFocusBlockSessionId(null)
     // Sending re-claims the follow (the IM convention), before the echo lands.
     stickNow()
     void useChatSessionStore.getState().sendText(sessionId, text, inReplyTo, attachmentIds, addr)
@@ -179,8 +193,11 @@ export function AgentChatScreen() {
     // for a plain message must not ride that send — the two are contradictory
     // instructions and the refusal belongs to the backend, not to a guess here.
     const chosen = replyTo ? null : address
-    const wire: ChatAddress | undefined = chosen?.sessionId
-      ? { targetSession: chosen.sessionId }
+    // ADR-106 revision 2026-11-04: a typed `@session` is now material, never a
+    // delivery — the composer carries `refs` (the picked coordinates) and the
+    // Gateway pins each round at send time. "new task" is still `forceNew`.
+    const wire: ChatAddress | undefined = chosen?.refs?.length
+      ? { refs: chosen.refs }
       : chosen?.forceNew
         ? { forceNew: true }
         : undefined
@@ -202,6 +219,43 @@ export function AgentChatScreen() {
   const replyToRound = (rowId: string, quote: string) => {
     setReplyTo({ id: rowId, quote })
     setAddress(null)
+  }
+
+  /** ADR-106 revision 2026-11-04: "去续投" / a source-chip click locate the run's
+   *  block. Mobile is not virtualized, so the block's DOM node is found by the
+   *  execution session it names and scrolled into view; the block then opens +
+   *  focuses its in-place reply row. A run with no block in the loaded window
+   *  answers with a transient hint and no auto-paging (v1). */
+  const handleLocateRef = (execSessionId: string) => {
+    setAddressStage(false)
+    const scope = containerRef.current
+    if (!scope || !execSessionId) {
+      setLocateHint('任务块不在已加载历史')
+      return
+    }
+    const el = scope.querySelector<HTMLElement>(
+      `[data-session$="|${execSessionId}"]`,
+    )
+    if (!el) {
+      setLocateHint('任务块不在已加载历史')
+      return
+    }
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    setFocusBlockSessionId(execSessionId)
+  }
+
+  // Auto-dismiss a locate hint; the navigation already parked wherever it could.
+  useEffect(() => {
+    if (!locateHint) return
+    const id = setTimeout(() => setLocateHint(null), 2600)
+    return () => clearTimeout(id)
+  }, [locateHint])
+
+  /** The block's in-place reply sends straight down the level-1 branch: the
+   *  text continues the freshest round the block names, exactly as a card
+   *  answer does — the claim and the wait line fall out of `deliver`. */
+  const handleReplyInPlace = (rowId: string, text: string) => {
+    deliver(text, rowId)
   }
 
   /** §6.5: the block's drill — the existing execution-session screen, reached
@@ -281,7 +335,13 @@ export function AgentChatScreen() {
 
         {failed ? <Banner tone="error">无法打开与该 Agent 的会话，请返回重试</Banner> : null}
 
-        <div className="scroll scroll-chat" ref={scrollRef}>
+        <div
+          className="scroll scroll-chat"
+          ref={(el) => {
+            containerRef.current = el
+            if (typeof scrollRef === 'function') scrollRef(el)
+          }}
+        >
           {win?.loadingOlder ? <div className="time-sep">载入更早消息…</div> : null}
           {!st?.resolved ? <div className="empty-state">载入中…</div> : null}
           {st?.resolved && !failed && rows.length === 0 ? (
@@ -318,6 +378,9 @@ export function AgentChatScreen() {
                     roundTriggers.has(item.row.meta.in_reply_to)
                   }
                   onOpenAttachment={setViewing}
+                  onLocateRef={handleLocateRef}
+                  focusBlockSessionId={focusBlockSessionId ?? undefined}
+                  onReplyInPlace={handleReplyInPlace}
                 />
               </Fragment>
             )
@@ -354,9 +417,10 @@ export function AgentChatScreen() {
           ) : null}
         </div>
 
-        {/* What this draft is addressed to. Both are shown because an instruction
-            the surface swallowed would be indistinguishable from one never given
-            — and the address is the one fact no model may re-decide (D7). */}
+        {/* What this draft carries. Each instruction is shown because one the
+            surface swallowed would be indistinguishable from one never given —
+            and a reference is material the human attached, shown as its own chip
+            so it can be dropped one at a time (ADR-106 D7, rev 2026-11-04). */}
         {replyTo || address ? (
           <div className="composer-chips">
             {replyTo ? (
@@ -374,20 +438,59 @@ export function AgentChatScreen() {
                 </button>
               </span>
             ) : address ? (
-              <span className="composer-chip">
-                <span className="composer-chip-text">
-                  投给哪个任务：{address.forceNew ? '开新任务' : address.label || '已指定'}
-                </span>
-                <button
-                  type="button"
-                  className="composer-chip-clear"
-                  onClick={() => setAddress(null)}
-                  aria-label="清除地址"
-                >
-                  ×
-                </button>
-              </span>
+              <>
+                {address.forceNew ? (
+                  <span className="composer-chip">
+                    <span className="composer-chip-text">新任务</span>
+                    <button
+                      type="button"
+                      className="composer-chip-clear"
+                      onClick={() => setAddress(null)}
+                      aria-label="清除地址"
+                    >
+                      ×
+                    </button>
+                  </span>
+                ) : null}
+                {(address.refs ?? []).map((r) => {
+                  const key = `${r.agentInstanceId}|${r.sessionId}`
+                  const label = address.labels?.[key] || r.sessionId
+                  return (
+                    <span key={key} className="composer-chip composer-ref-chip">
+                      <Quote className="composer-ref-icon" aria-hidden />
+                      <span className="composer-chip-text">{label}</span>
+                      <button
+                        type="button"
+                        className="composer-chip-clear"
+                        onClick={() => {
+                          const rest = (address.refs ?? []).filter(
+                            (x) => `${x.agentInstanceId}|${x.sessionId}` !== key,
+                          )
+                          const labels = { ...(address.labels ?? {}) }
+                          delete labels[key]
+                          setAddress(
+                            rest.length > 0
+                              ? { refs: rest, labels, forceNew: address.forceNew }
+                              : address.forceNew
+                                ? { forceNew: true }
+                                : null,
+                          )
+                        }}
+                        aria-label="移除引用"
+                      >
+                        ×
+                      </button>
+                    </span>
+                  )
+                })}
+              </>
             ) : null}
+          </div>
+        ) : null}
+
+        {locateHint ? (
+          <div className="composer-locate-hint" role="status">
+            {locateHint}
           </div>
         ) : null}
 
@@ -427,9 +530,10 @@ export function AgentChatScreen() {
             instanceId={agentId}
             chatSessionId={sessionId}
             onPick={(pick) => {
-              setAddress(pick.sessionId || pick.forceNew ? pick : null)
+              setAddress(pick.refs?.length || pick.forceNew ? pick : null)
               setAddressStage(false)
             }}
+            onLocate={(sid) => handleLocateRef(sid)}
             onClose={() => setAddressStage(false)}
           />
         ) : null}
@@ -476,6 +580,15 @@ export interface RowProps {
   /** A tap on an uploaded file's capsule. The parent owns the viewer so one
    *  overlay serves every row in the list (and outlives re-renders of it). */
   onOpenAttachment: (attachment: ChatAttachment) => void
+  /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
+   *  sheet's "去续投") to locate that run's block. A navigation, not an address —
+   *  it never changes what a message carries. */
+  onLocateRef?: (sessionId: string) => void
+  /** Which execution session the sheet just asked to continue: the matching
+   *  block opens + focuses its in-place reply row. */
+  focusBlockSessionId?: string
+  /** The block's in-place reply sends straight down the level-1 branch. */
+  onReplyInPlace?: (rowId: string, text: string) => void
 }
 
 export function RowView(props: RowProps) {
@@ -489,6 +602,7 @@ export function RowView(props: RowProps) {
     onChooseCard,
     cardAnswered,
     onOpenAttachment,
+    onLocateRef,
   } = props
 
   if (row.kind === 'execution_round') {
@@ -573,6 +687,26 @@ export function RowView(props: RowProps) {
                 ))}
               </div>
             ) : null}
+            {/* ADR-106 revision 2026-11-04: the `@session` material attached to
+                this utterance, read off the row's pinned `meta.refs` (no new
+                read). Source chips under the bubble — the human sees what they
+                quoted and one tap jumps to that run's block. */}
+            {isSelf && row.meta?.refs && row.meta.refs.length > 0 ? (
+              <div className="chat-ref-chips">
+                {row.meta.refs.map((r) => (
+                  <button
+                    key={`${r.agent_instance_id}|${r.session_id}|${r.round_id}`}
+                    type="button"
+                    className="chat-ref-chip"
+                    onClick={() => onLocateRef?.(r.session_id)}
+                    title={r.session_id}
+                  >
+                    <Quote className="chat-ref-chip-icon" aria-hidden />
+                    <span className="chat-ref-chip-text">{r.session_id}</span>
+                  </button>
+                ))}
+              </div>
+            ) : null}
           </div>
         </div>
       </div>
@@ -611,6 +745,11 @@ export function ItemView({ item, hasFollowUp, ...rowProps }: ItemProps) {
         agentName={rowProps.agentName}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
+        focusInput={
+          !!rowProps.focusBlockSessionId &&
+          item.execSessionId === rowProps.focusBlockSessionId
+        }
+        onReplyInPlace={rowProps.onReplyInPlace}
       />
     )
   }

@@ -22,7 +22,9 @@
  * `chatBlockStore.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { act } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
+import { createRoot, type Root } from 'react-dom/client'
 import { ItemView, RowView, type ItemProps, type RowProps } from '../screens/chat/AgentChatScreen'
 import { ChatExecutionBlock } from '../components/ChatExecutionBlock'
 import { blockRefOf, blockStatusText, isFailureStatus, truncateLabel } from '../lib/chatBlocks'
@@ -653,5 +655,94 @@ describe('truncateLabel', () => {
     expect(truncateLabel('  a\n b  ')).toBe('a b')
     expect(truncateLabel('')).toBe('')
     expect(truncateLabel('x'.repeat(80), 34)).toBe(`${'x'.repeat(34)}…`)
+  })
+})
+
+// The block's in-place reply (ADR-106 rev 2026-11-04). A static render proves
+// presence/absence; the send and the focus rising edge need a live tree, so this
+// block renders `ChatExecutionBlock` in jsdom (the file already mocks the block +
+// chat stores). It is NOT hover-gated like the desktop twin — a phone has no
+// hover — it lives at the bottom of the OPEN body and vanishes when folded.
+describe('in-place reply row (ADR-106 rev 2026-11-04)', () => {
+  let host: HTMLDivElement
+  let root: Root
+
+  beforeEach(() => {
+    ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
+    host = document.createElement('div')
+    document.body.append(host)
+    root = createRoot(host)
+    seed(entryOf())
+  })
+
+  afterEach(() => {
+    act(() => root.unmount())
+    host.remove()
+    store.entry = undefined
+    store.entries = undefined
+  })
+
+  function renderExec(block: RunBlock, over: { focusInput?: boolean; hasFollowUp?: boolean; onSend?: (rowId: string, text: string) => void } = {}) {
+    act(() =>
+      root.render(
+        <ChatExecutionBlock
+          block={block}
+          chatSessionId="cs-1"
+          agentAvatar="ag"
+          agentName="agent"
+          hasFollowUp={over.hasFollowUp ?? false}
+          onJumpToExec={() => {}}
+          onReplyToRound={() => {}}
+          canAnswer
+          focusInput={over.focusInput ?? false}
+          onReplyInPlace={over.onSend ?? (() => {})}
+        />,
+      ),
+    )
+  }
+
+  const box = () => host.querySelector<HTMLTextAreaElement>('textarea.chat-block-reply-input')
+
+  it('shows the reply row at the bottom of an open block', () => {
+    renderExec(onlyBlock([refRow()]))
+    expect(box()).not.toBeNull()
+  })
+
+  it('a folded block never shows an input (§6.5)', () => {
+    renderExec(onlyBlock([refRow()]), { hasFollowUp: true })
+    expect(host.querySelector('.chat-block-reply')).toBeNull()
+  })
+
+  it('typing and sending continues the freshest round straight down level 1', () => {
+    // The freshest round's reference row id is the coordinate a level-1 reply
+    // answers — not the block's `ag|s1|r1` ref string.
+    const onSend = vi.fn()
+    renderExec(onlyBlock([refRow({ message_id: 'round:ag|s1|r1' })]), { onSend })
+    const el = box()!
+    const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!
+    act(() => {
+      setter.call(el, 'continue please')
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    })
+    const send = host.querySelector<HTMLButtonElement>('[data-testid="block-reply-send"]')!
+    expect(send.disabled).toBe(false)
+    act(() => send.click())
+    expect(onSend).toHaveBeenCalledWith('round:ag|s1|r1', 'continue please')
+    // The box stays for the next continuation, so it clears rather than vanishes.
+    expect(box()!.value).toBe('')
+  })
+
+  it('a locate (去续投) rising edge focuses the row once, not on every re-render', () => {
+    const block = onlyBlock([refRow()])
+    renderExec(block, { focusInput: false })
+    expect(document.activeElement).not.toBe(box())
+    // The `@` sheet located this run: the flag rises and the box takes focus.
+    renderExec(block, { focusInput: true })
+    expect(document.activeElement).toBe(box())
+    // A held signal (re-render, still true) must not yank focus back mid-typing.
+    const el = box()!
+    el.blur()
+    renderExec(block, { focusInput: true })
+    expect(document.activeElement).not.toBe(el)
   })
 })

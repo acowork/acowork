@@ -73,6 +73,13 @@ interface ChatExecutionBlockProps {
   /** A viewer who is not a round's answerer (`answerable_by`): the question
    *  shows, the buttons do not (D10's read/write split). */
   canAnswer?: boolean
+  /** ADR-106 revision 2026-11-04: the `@` sheet's "去续投" located this run —
+   *  open the block and focus its in-place reply row on the rising edge. */
+  focusInput?: boolean
+  /** The block's in-place reply: continue the freshest round straight down the
+   *  level-1 branch (`deliver(text, rowId)`). Absent = no in-place box (a
+   *  surface that only drills into the execution view). */
+  onReplyInPlace?: (rowId: string, text: string) => void
 }
 
 /** The session's live state, in as few words as a header line can carry. This is
@@ -114,6 +121,8 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   onJumpToExec,
   onReplyToRound,
   canAnswer = true,
+  focusInput = false,
+  onReplyInPlace,
 }: ChatExecutionBlockProps) {
   const instanceId = block.instanceId
   const execSid = block.execSessionId
@@ -200,6 +209,19 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
       manuallyCollapsed.current = false
     }
   }, [hasFollowUp, inProgress, hasOpenCard])
+
+  // A locate from the `@` sheet's "去续投" opens the block on its rising edge,
+  // so the human arrives at the run they pointed at, not a collapsed header. The
+  // in-place reply row is inside the body, so opening it is what makes the focus
+  // land. This overrides a manual collapse on purpose — it was an explicit ask.
+  const lastFocus = useRef(false)
+  useEffect(() => {
+    if (focusInput && !lastFocus.current) {
+      setOpen(true)
+      manuallyCollapsed.current = false
+    }
+    lastFocus.current = focusInput
+  }, [focusInput])
 
   const question0 = block.rounds.find((r) => r.triggerRow)?.triggerRow?.body ?? ''
   const name = runTitle?.trim() || summarize(question0, 24) || '执行会话'
@@ -291,6 +313,19 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
               reload={reload}
             />
           ))}
+          {/* ADR-106 revision 2026-11-04: continue the run in place. The row is
+              present whenever the block is OPEN and the viewer may answer, and
+              NEVER when the block is folded (§6.5 — a collapsed run shows no
+              input). Its send rides `deliver(text, rowId)` — the level-1 branch —
+              so the claim and the wait line are the same machinery a card answer
+              already uses. The freshest round's reference row is what it answers. */}
+          {canAnswer && onReplyInPlace ? (
+            <BlockReplyRow
+              rowId={newest?.roundRow.meta?.message_id ?? ''}
+              focusSignal={focusInput}
+              onSend={onReplyInPlace}
+            />
+          ) : null}
         </div>
       ) : null}
 
@@ -654,5 +689,71 @@ function CardSheet({
       )}
       {failed ? <div className="chat-sheet-failed">回复未能发送，请重试</div> : null}
     </Sheet>
+  )
+}
+
+interface BlockReplyRowProps {
+  /** The freshest round's reference row id — replying to it continues THAT run
+   *  (D6 level 1). Empty means no round to answer yet, so the box does nothing. */
+  rowId: string
+  /** A rising edge (the `@` sheet's "去续投") focuses the row once it is shown. */
+  focusSignal?: boolean
+  onSend: (rowId: string, text: string) => void
+}
+
+/** The block's in-place reply row (ADR-106 revision 2026-11-04). Unlike the
+ *  desktop box it is not hover-gated — a phone has no hover — it simply lives at
+ *  the bottom of the OPEN block (the parent renders it only while `open`), so
+ *  continuing a run the human can already see is a tap, not a hunt. An empty
+ *  send is refused here and there: the composer's own gate is the trim guard. */
+function BlockReplyRow({ rowId, focusSignal, onSend }: BlockReplyRowProps) {
+  const [draft, setDraft] = useState('')
+  const boxRef = useRef<HTMLTextAreaElement>(null)
+  // Focus on the picker's rising edge only — a held signal must not yank focus
+  // back to the box on every re-render while the human is typing elsewhere.
+  const lastSignal = useRef(false)
+  useEffect(() => {
+    if (focusSignal && !lastSignal.current) boxRef.current?.focus()
+    lastSignal.current = focusSignal ?? false
+  }, [focusSignal])
+
+  const send = () => {
+    const text = draft.trim()
+    if (!text || !rowId) return
+    // Clear first, then hand off: an in-place continuation stays put for the
+    // next one, so the box never disappears out from under the reader.
+    setDraft('')
+    onSend(rowId, text)
+  }
+
+  return (
+    <div className="chat-block-reply">
+      <textarea
+        ref={boxRef}
+        className="chat-block-reply-input"
+        rows={1}
+        placeholder="回复以继续此任务…"
+        aria-label="继续此任务"
+        value={draft}
+        disabled={!rowId}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' && !e.shiftKey) {
+            e.preventDefault()
+            send()
+          }
+        }}
+      />
+      <button
+        type="button"
+        className="chat-block-reply-send"
+        data-testid="block-reply-send"
+        disabled={!draft.trim() || !rowId}
+        onClick={send}
+        aria-label="发送"
+      >
+        发送
+      </button>
+    </div>
   )
 }

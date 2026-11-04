@@ -99,6 +99,22 @@ export interface ChatAddress {
    *  and the backend dedupes on this id — so the transcript keeps one message
    *  instead of drawing the same sentence twice. */
   messageId?: string
+  /** ADR-106 revision 2026-11-04: the `@session` runs attached as quoted
+   *  material for this utterance. A typed `@` is MATERIAL now, not a delivery:
+   *  the picker hands back the picked coordinates, which ride the send as
+   *  `refs` and are pinned to their round by the Gateway. 1:1 form: every ref
+   *  names this agent's own session. Absent = no material. */
+  refs?: ChatRefPick[]
+}
+
+/** One reference the human attached: the run quoted as material. `roundId`/
+ *  `terminal` are only present on a card-answer echo — a fresh pick sends just
+ *  the `{agent, session}` coordinate and lets the Gateway pin the round. */
+export interface ChatRefPick {
+  agentInstanceId: string
+  sessionId: string
+  roundId?: string
+  terminal?: boolean
 }
 
 export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({

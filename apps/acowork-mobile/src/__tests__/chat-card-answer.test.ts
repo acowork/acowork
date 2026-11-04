@@ -86,6 +86,48 @@ describe('buildCardAnswer', () => {
     expect(buildCardAnswer(card(), original(), { sessionId: '  ' })).toBeNull()
     expect(buildCardAnswer(card(), original(), { sessionId: '  ', forceNew: true })?.forceNew).toBe(true)
   })
+
+  it('re-delivers the ORIGINAL message quoted material, pinned coords included (ADR-106 rev 2)', () => {
+    // A card answer is the same sentence, so the reference it first carried must
+    // ride back verbatim — the pre-pinned {round, terminal} are NOT re-resolved
+    // here (the Gateway passes an already-pinned ref straight through).
+    const withRefs = original({
+      meta: {
+        message_id: 'm-1',
+        refs: [
+          {
+            agent_instance_id: 'ag-1',
+            session_id: 's-7',
+            round_id: 'r-3',
+            terminal: true,
+          },
+        ],
+      },
+    } as Partial<ChatMessageRow>)
+    const answer = buildCardAnswer(card(), withRefs, { sessionId: 's-9' })!
+    expect(answer.refs).toEqual([
+      { agentInstanceId: 'ag-1', sessionId: 's-7', roundId: 'r-3', terminal: true },
+    ])
+  })
+
+  it('drops references that belong to another agent, and omits the key when nothing survives', () => {
+    const foreign = original({
+      meta: {
+        message_id: 'm-1',
+        refs: [
+          {
+            agent_instance_id: 'ag-OTHER',
+            session_id: 's-7',
+            round_id: 'r-3',
+            terminal: true,
+          },
+        ],
+      },
+    } as Partial<ChatMessageRow>)
+    // The answering card was authored by ag-1; another instance's material is
+    // not this re-delivery's to carry.
+    expect(buildCardAnswer(card(), foreign, { sessionId: 's-9' })).not.toHaveProperty('refs')
+  })
 })
 
 describe('directCardAddress', () => {
@@ -94,6 +136,28 @@ describe('directCardAddress', () => {
     expect(directCardAddress(answer)).toEqual({ targetSession: 's-9', messageId: 'm-1' })
     const fresh = buildCardAnswer(card(), original(), { forceNew: true })!
     expect(directCardAddress(fresh)).toEqual({ forceNew: true, messageId: 'm-1' })
+  })
+
+  it('carries the echoed references onto the address so the send wires them (ADR-106 rev 2)', () => {
+    const withRefs = original({
+      meta: {
+        message_id: 'm-1',
+        refs: [
+          {
+            agent_instance_id: 'ag-1',
+            session_id: 's-7',
+            round_id: 'r-3',
+            terminal: true,
+          },
+        ],
+      },
+    } as Partial<ChatMessageRow>)
+    const answer = buildCardAnswer(card(), withRefs, { sessionId: 's-9' })!
+    expect(directCardAddress(answer)).toEqual({
+      targetSession: 's-9',
+      messageId: 'm-1',
+      refs: [{ agentInstanceId: 'ag-1', sessionId: 's-7', roundId: 'r-3', terminal: true }],
+    })
   })
 })
 

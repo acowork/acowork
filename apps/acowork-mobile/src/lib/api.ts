@@ -698,7 +698,29 @@ export async function sendChatMessage(
     ...(address?.targetSession ? { target_session: address.targetSession } : {}),
     ...(address?.forceNew ? { force_new: true } : {}),
     ...(address?.messageId ? { message_id: address.messageId } : {}),
+    ...(() => {
+      const wireRefs = toWireRefs(address?.refs)
+      return wireRefs ? { refs: wireRefs } : {}
+    })(),
   })
+}
+
+/** Maps the composer's reference picks onto the wire shape the Gateway pins
+ *  (snake_case coordinates). A fresh pick sends `{agent_instance_id,
+ *  session_id}`; a card-answer echo also carries `round_id`/`terminal` so the
+ *  Gateway passes it through instead of re-pinning the material of a sentence
+ *  already written. Empty is not sent — absence of an address is what keeps a
+ *  turn on the ladder's lower levels. */
+function toWireRefs(
+  refs?: ChatAddress['refs'],
+): Array<Record<string, string | boolean>> | undefined {
+  if (!refs || refs.length === 0) return undefined
+  return refs.map((r) => ({
+    agent_instance_id: r.agentInstanceId,
+    session_id: r.sessionId,
+    ...(r.roundId ? { round_id: r.roundId } : {}),
+    ...(r.terminal !== undefined ? { terminal: r.terminal } : {}),
+  }))
 }
 
 /* ------------------------------------------------------------------ */

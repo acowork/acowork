@@ -16,7 +16,7 @@
  * group's per-agent `target_sessions`.
  */
 
-import type { ChatAddress } from '../stores/chatSessionStore'
+import type { ChatAddress, ChatRefPick } from '../stores/chatSessionStore'
 import type { ChatMessageRow } from './types'
 
 /** What the human clicked. */
@@ -35,6 +35,11 @@ export interface CardAnswer {
   messageId: string
   sessionId?: string
   forceNew?: boolean
+  /** ADR-106 revision 2026-11-04: the reference material the ORIGINAL utterance
+   *  carried. A card answer is the same sentence, so its quoted material must
+   *  not be lost — the pre-pinned `{round, terminal}` coordinates ride back
+   *  verbatim and the Gateway passes them through instead of re-pinning. */
+  refs?: ChatRefPick[]
 }
 
 /**
@@ -66,7 +71,27 @@ export function buildCardAnswer(
   const attachmentIds = original.attachments
     ? original.attachments.map((a) => a.id)
     : original.attachment_ids ?? []
-  return { text, attachmentIds, agentId, messageId, sessionId, forceNew }
+  // Echo the material the original row quoted, filtered to the answering
+  // agent: the reference belongs to the instance whose runs were on offer, and
+  // the re-delivery is one sentence — dropping its quoted material would send
+  // less than what was first said.
+  const refs = (original.meta?.refs ?? [])
+    .filter((r) => r.agent_instance_id === agentId)
+    .map<ChatRefPick>((r) => ({
+      agentInstanceId: r.agent_instance_id,
+      sessionId: r.session_id,
+      roundId: r.round_id,
+      terminal: r.terminal,
+    }))
+  return {
+    text,
+    attachmentIds,
+    agentId,
+    messageId,
+    sessionId,
+    forceNew,
+    ...(refs.length > 0 ? { refs } : {}),
+  }
 }
 
 /** Whether this human may answer the card (ADR-106 D10). The card asks the
@@ -81,7 +106,8 @@ export function mayAnswerCard(card: ChatMessageRow, me: string): boolean {
 /** The 1:1 form of the answer's address (the first level is degenerate there,
  *  so one session id). */
 export function directCardAddress(answer: CardAnswer): ChatAddress {
-  return answer.sessionId
+  const base: ChatAddress = answer.sessionId
     ? { targetSession: answer.sessionId, messageId: answer.messageId }
     : { forceNew: true, messageId: answer.messageId }
+  return answer.refs?.length ? { ...base, refs: answer.refs } : base
 }
