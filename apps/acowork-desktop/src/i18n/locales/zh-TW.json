@@ -1065,7 +1065,6 @@
       "converting": "正在準備預覽檔案…",
       "engineMissing": "未偵測到 Office 或 LibreOffice——目前為近似排版預覽",
       "convertFailed": "轉換為 PDF 失敗——已降級為近似排版",
-      "printLayoutNote": "已依印刷版式渲染（本機轉換）",
       "installHint": "安裝 LibreOffice 或 Microsoft Office 後可依實際版式預覽"
     },
     "sheetViewer": {

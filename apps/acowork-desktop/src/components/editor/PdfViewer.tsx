@@ -1,56 +1,41 @@
 /**
- * PdfViewer — workspace PDF preview via the WebView's native viewer.
+ * PdfViewer — workspace PDF preview, rendered by us.
  *
- * The blob URL from the Gateway raw route (already authorised through
- * the fetch interceptor) is handed to an `<iframe>`; WebView2 (Windows)
- * and WKWebView (macOS) render PDFs natively with their own page
- * controls, so the component itself is just chrome + a frame. This is
- * the P0 decision from the preview plan — pdfjs-dist (selection
- * gestures, text layer) is a deliberate later step, not a missing piece
- * here.
+ * The bytes come from the Gateway raw route (already authorised through the
+ * fetch interceptor) or from the Office → PDF converter, and are drawn by
+ * `PdfColumnViewer`: one continuous column of pdf.js pages, our own toolbar,
+ * our own typography. It used to be an `<iframe>` of the WebView's built-in
+ * viewer, which cost more than it saved — that chrome is not our DOM (its 15
+ * px UI can never match the app's 11 px one), its page / zoom / scroll offset
+ * cannot be read back, and framing a region therefore needed a SECOND renderer
+ * whose arrival threw away where the user was looking. One surface now answers
+ * both, and `framing` is a prop rather than a mode switch.
  *
- * `external` is the second byte source: PDFs produced on this machine by
- * the Office → PDF converter (`lib/docConvert.ts`). Supplying it skips the
- * blob fetch entirely (the tab's own bytes are a .docx, not a PDF) and
- * feeds the same iframe from an object URL minted from the returned bytes,
- * revoked on unmount. Everything else — header, save-as, open-externally,
- * the loading / error gate — is the frame's, unchanged.
+ * `external` is the second byte source: PDFs produced on this machine by the
+ * Office → PDF converter (`lib/docConvert.ts`). Supplying it skips the blob
+ * fetch entirely (the tab's own bytes are a .docx, not a PDF). Everything else
+ * — header, save-as, open-externally, the loading / error gate — is the
+ * frame's, unchanged.
  *
  * The two "show the agent this file" entries are what the rest of this
- * component is about. Both need the PDF *bytes*, and only both of them ever
- * touch them: a normal preview never loads pdf.js. Framing a region mounts
- * `PdfRegionPicker` (lazy, and its engine import is lazy inside it) over a
- * canvas of its own, because the native viewer's page / zoom / scroll offset
- * cannot be read back — see the note in `pdfRasterize.ts`. Sending the whole
- * document hands the file to the panel's callback and needs no renderer at
- * all: the bytes are already in hand, and the agent is being given the file,
- * not a picture of it.
+ * component is about. Both need the PDF *bytes*, and this component reads them
+ * once, up front: the preview needs them too now, so there is no "only when the
+ * user asks" path left to optimise. Sending the whole document hands the file
+ * to the panel's callback and needs no renderer at all — the agent is being
+ * given the file, not a picture of it.
  *
- * Neither entry appears when there are no PDF bytes: with the converter
- * missing or the conversion failed, `external.state` is not `ready`, and
- * promising the agent a look at the print layout of something we cannot even
- * preview would be a promise we cannot keep. The degraded JS renderers stay
- * on their own path.
+ * Neither entry appears when there are no PDF bytes: with the converter missing
+ * or the conversion failed, `external.state` is not `ready`, and promising the
+ * agent a look at the print layout of something we cannot even preview would be
+ * a promise we cannot keep. The degraded JS renderers stay on their own path.
  */
-import {
-    useCallback,
-    useEffect,
-    useMemo,
-    useState,
-    lazy,
-    Suspense,
-    type ReactNode,
-} from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Crop, Loader2, MessageSquarePlus, X } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { showToast } from "../common/ToastProvider";
 import { log } from "../../lib/logger";
 import { useWorkspaceFileBlob, type WorkspaceFileBlobState } from "../../hooks/useWorkspaceFileBlob";
 import { DocumentViewerFrame, type ViewerFileProps } from "./DocumentViewerFrame";
-
-/** The crop mode is mounted on demand: 650 lines of gesture code plus an
- *  engine nobody pays for until they ask to frame something. */
-const PdfRegionPicker = lazy(() => import("./PdfRegionPicker"));
+import { PdfColumnViewer } from "./PdfColumnViewer";
 
 /** Pre-converted PDF bytes, owned by the caller (see OfficePdfViewer). */
 export interface ExternalPdfState {
@@ -63,9 +48,6 @@ export interface ExternalPdfState {
 
 export interface PdfViewerProps extends ViewerFileProps, PdfChatProps {
     external?: ExternalPdfState;
-    /** Notice slot forwarded to the frame — used by OfficePdfViewer to
-     *  label a converted Office document as print-layout output. */
-    banner?: ReactNode;
 }
 
 /**
@@ -153,15 +135,19 @@ export default function PdfViewer(props: PdfViewerProps) {
         [external, externalUrl, feed],
     );
 
-    const canReadBytes = state.blobUrl !== null || state.blob !== null;
     const [picking, setPicking] = useState(false);
-    /** Private copy handed to pdf.js. Kept in state rather than derived
-     *  during render because `PdfRegionPicker` re-opens its document whenever
-     *  the array identity changes — and because `getDocument` *transfers*
-     *  whatever buffer it is given, so the copy must not be the converter's
-     *  cached bytes nor the ones the attachment is built from. */
-    const [pickerBytes, setPickerBytes] = useState<Uint8Array | null>(null);
-    const [sending, setSending] = useState(false);
+    /** The PDF the column draws. Read once per source and kept in state,
+     *  because the column re-opens its document whenever the array identity
+     *  changes — so the value has to be stable across renders. It may be the
+     *  converter's cached array: `pdfRasterize` takes its own copy at the pdf.js
+     *  transfer point, so opening a document never eats the bytes the tab still
+     *  holds. */
+    const [bytes, setBytes] = useState<Uint8Array | null>(null);
+    /** The read settled with nothing in hand. Distinct from `bytes === null`
+     *  (still reading) because the body has to say which of the two it is: a
+     *  spinner that never ends is how a dead document gets presented. */
+    const [readFailed, setReadFailed] = useState(false);
+    const [readKey, setReadKey] = useState(0);
 
     // Read the PDF behind the preview, from whichever source fed it. Every
     // path is same-origin (`blob:` of our own object URL), so this never
@@ -177,70 +163,70 @@ export default function PdfViewer(props: PdfViewerProps) {
         return null;
     }, [external, state.blob, state.blobUrl]);
 
-    const startPicking = useCallback(async () => {
-        try {
-            const bytes = await readBytes();
-            if (!bytes || bytes.length === 0) {
-                showToast({ type: "error", message: t("fileEditor.pdfViewer.rasterizeFailed") });
-                return;
-            }
-            setPickerBytes(bytes.slice(0));
-            setPicking(true);
-        } catch (err) {
-            log.error("[PdfViewer] reading the PDF bytes failed:", err);
-            showToast({ type: "error", message: t("fileEditor.pdfViewer.rasterizeFailed") });
-        }
-    }, [readBytes, t]);
+    // Framing is a prop on the surface that is already showing the document, so
+    // entering it cannot move the user: no read, no remount, no second renderer.
+    const startPicking = useCallback(() => setPicking(true), []);
+    const stopPicking = useCallback(() => setPicking(false), []);
 
-    const stopPicking = useCallback(() => {
-        setPicking(false);
-        setPickerBytes(null);
-    }, []);
+    // The preview and both hand-offs read from one array, taken once per source.
+    // Every path is same-origin (`blob:` of our own object URL), so this never
+    // leaves the machine and never re-authorises anything.
+    useEffect(() => {
+        let cancelled = false;
+        void readBytes()
+            .then((next) => {
+                if (cancelled) return;
+                // An empty read is a failed read: a zero-length array is truthy
+                // and would otherwise be handed to the column as a document.
+                const ok = next !== null && next.length > 0;
+                setBytes(ok ? next : null);
+                setReadFailed(!ok);
+            })
+            .catch((err) => {
+                log.error("[PdfViewer] reading the PDF bytes failed:", err);
+                if (!cancelled) {
+                    setBytes(null);
+                    setReadFailed(true);
+                }
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, [readBytes, readKey]);
 
-    const sendDocument = useCallback(async () => {
+    const sendDocument = useCallback(() => {
         const onAddDocumentToChat = props.onAddDocumentToChat;
-        if (!onAddDocumentToChat) return;
-        setSending(true);
-        try {
-            const bytes = await readBytes();
-            if (!bytes || bytes.length === 0) {
-                showToast({ type: "error", message: t("fileEditor.pdfViewer.rasterizeFailed") });
-                return;
-            }
-            // `File` copies its parts, so `bytes` stays usable afterwards —
-            // pdf.js, which *transfers* whatever it is given, only ever sees a
-            // private copy handed over elsewhere.
-            onAddDocumentToChat(
-                new File([bytes as Uint8Array<ArrayBuffer>], pdfAttachmentName(props.fileName), {
-                    type: "application/pdf",
-                }),
-            );
-        } catch (err) {
-            log.error("[PdfViewer] sending the PDF to the chat failed:", err);
-            showToast({ type: "error", message: t("fileEditor.pdfViewer.rasterizeFailed") });
-        } finally {
-            setSending(false);
-        }
-    }, [props.fileName, props.onAddDocumentToChat, readBytes, t]);
+        if (!onAddDocumentToChat || !bytes) return;
+        // `File` copies its parts, so `bytes` stays usable afterwards — and
+        // pdf.js, which *transfers* whatever it is given, only ever sees the
+        // copy `pdfRasterize` takes at its own transfer point.
+        onAddDocumentToChat(
+            new File([bytes as Uint8Array<ArrayBuffer>], pdfAttachmentName(props.fileName), {
+                type: "application/pdf",
+            }),
+        );
+    }, [bytes, props.fileName, props.onAddDocumentToChat]);
 
     const headerBtn =
         "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-hover hover:text-text disabled:opacity-50";
+    const toolBtn =
+        "inline-flex h-6 shrink-0 items-center rounded border border-border-default px-2 text-11 transition-colors hover:bg-hover";
     const onAddRegionToChat = props.onAddRegionToChat;
     // One slot, two entries: framing needs the picker, the whole document
     // needs the bytes — neither is offered before the preview itself has
     // succeeded, and neither is offered at all without a callback to take it.
     const extraActions =
-        canReadBytes && (onAddRegionToChat || props.onAddDocumentToChat) ? (
+        bytes !== null && (onAddRegionToChat || props.onAddDocumentToChat) ? (
             <>
                 {onAddRegionToChat && (
                     <button
                         type="button"
                         className={headerBtn}
-                        onClick={() => (picking ? stopPicking() : void startPicking())}
-                        disabled={!picking && sending}
+                        onClick={() => (picking ? stopPicking() : startPicking())}
+                        aria-pressed={picking}
+                        data-testid="pdf-region-toggle"
                         aria-label={t("fileEditor.pdfViewer.selectRegion")}
                         title={t("fileEditor.pdfViewer.selectRegion")}
-                        data-testid="pdf-region-toggle"
                     >
                         {picking ? <X className="h-3.5 w-3.5" /> : <Crop className="h-3.5 w-3.5" />}
                     </button>
@@ -249,49 +235,55 @@ export default function PdfViewer(props: PdfViewerProps) {
                     <button
                         type="button"
                         className={headerBtn}
-                        onClick={() => void sendDocument()}
-                        disabled={sending || picking}
+                        onClick={sendDocument}
+                        disabled={picking}
                         aria-label={t("fileEditor.pdfViewer.addDocument")}
                         title={t("fileEditor.pdfViewer.addDocument")}
                         data-testid="pdf-add-document"
                     >
-                        {sending ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                            <MessageSquarePlus className="h-3.5 w-3.5" />
-                        )}
+                        <MessageSquarePlus className="h-3.5 w-3.5" />
                     </button>
                 )}
             </>
         ) : undefined;
 
     return (
-        <DocumentViewerFrame file={props} state={state} banner={props.banner} extraActions={extraActions}>
-            {picking && pickerBytes && onAddRegionToChat ? (
-                <Suspense
-                    fallback={
-                        <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
+        <DocumentViewerFrame file={props} state={state} extraActions={extraActions}>
+            {bytes ? (
+                /*  One surface for both jobs: the column stays mounted, and
+                 *  `framing` decides whether a pointer draws a box or pans the
+                 *  document. The region callback is only ever handed to the
+                 *  surface that can produce a region, and leaving framing must
+                 *  not lose it — the column would remount and the user would be
+                 *  back at the top of the document. */
+                <PdfColumnViewer
+                    bytes={bytes}
+                    framing={picking}
+                    onExitFraming={stopPicking}
+                    {...(onAddRegionToChat ? { onAddRegionToChat } : {})}
+                    fileName={pdfAttachmentName(props.fileName)}
+                    addToChatDisabledTitle={props.addToChatDisabledTitle ?? null}
+                />
+            ) : (
+                <div className="flex h-full flex-col items-center justify-center gap-2 text-xs text-text-tertiary">
+                    {readFailed ? (
+                        <>
+                            <span>{t("fileEditor.docViewer.loadFailed")}</span>
+                            <button
+                                type="button"
+                                className={toolBtn}
+                                onClick={() => setReadKey((k) => k + 1)}
+                            >
+                                {t("fileEditor.docViewer.retry")}
+                            </button>
+                        </>
+                    ) : (
+                        <>
                             <Loader2 className="h-4 w-4 animate-spin" />
                             {t("fileEditor.previewLoading")}
-                        </div>
-                    }
-                >
-                    <PdfRegionPicker
-                        bytes={pickerBytes}
-                        fileName={pdfAttachmentName(props.fileName)}
-                        addToChatDisabledTitle={props.addToChatDisabledTitle ?? null}
-                        onAddRegionToChat={onAddRegionToChat}
-                        onClose={stopPicking}
-                    />
-                </Suspense>
-            ) : (
-                state.blobUrl && (
-                    <iframe
-                        src={state.blobUrl}
-                        className="h-full w-full border-0 bg-modal-surface"
-                        title={props.fileName || t("fileEditor.pdfViewer.title")}
-                    />
-                )
+                        </>
+                    )}
+                </div>
             )}
         </DocumentViewerFrame>
     );

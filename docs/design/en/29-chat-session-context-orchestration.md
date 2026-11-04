@@ -54,7 +54,7 @@ Block C and the current message are merged into one user message to avoid two co
                                  // only {{agent_name}} is substituted
 — otherwise the built-in default —
 [CHAT_ROUTER_BASE_PROMPT]        // Runtime constant (acowork_core::chat_prompt)
-                                 // role boundary / dispatch contract / decision rules / safety rules
+                                 // role boundary / new_task·propose_existing contract / decision rules / safety rules
 ## Persona                       // manifest fallback
 <persona text>
 ## Scenario                      // 1:1 or group, two stable variants
@@ -71,11 +71,11 @@ The order is fixed and the separator is fixed (`\n\n`); no content-based sorting
 The base is maintained by the Runtime and contains:
 
 1. Role boundary: you are the conversation front desk of `<agent display_name>`; you may answer, look a fact up, route, or create an execution session;
-2. Tool contract: `dispatch` is the only routing tool, with its parameter semantics and alias rules; two read-only information tools are also exposed (`memory_recall`, `http_request` GET-only); the number of lookup rounds is a prompt-level soft limit ("usually zero, rarely one or two"), never a hard code cap;
-3. Decision rules: answer / hand off / create / clarify (aligned with ADR-099's routing guidelines, whose core is the cost asymmetry of dispatch: a wrong handoff is far more expensive than a missed one — when unsure, ask);
+2. Tool contract: the routing acts are only `new_task` (no `target`, so it can only open a session) and `propose_existing(target, why)` (a proposal that delivers nothing, and `why` is mandatory — a card with no reason hands the routing work back to the human); two read-only information tools are also exposed (`memory_recall`, `http_request` GET-only); the number of lookup rounds is a prompt-level soft limit ("usually zero, rarely one or two"), never a hard code cap;
+3. Decision rules: answer / hand off / create / clarify (aligned with ADR-099's routing guidelines, whose core is the cost asymmetry of routing: a wrong handoff is far more expensive than a missed one — when unsure, ask);
 4. Safety rules: use only information in the candidate list; never restate other chats; never promise execution details; never @ another agent on the human's behalf.
 
-When a `chat.md` is present and non-blank it **replaces the whole built-in chat prompt body** (kernel + persona + scenario), with only `{{agent_name}}` substituted; absent, the built-in default is used. Two parts are never the file's to drop. First, the `# Safety` invariants are a non-trimmable tail the Runtime re-appends to the body on every turn (`chat_prompt::with_chat_prompt_tail`), so removing them from a `chat.md` has no effect on what the model sees. Second, the safety boundary is structural, not literal: the router only ever holds `dispatch` and the two read-only tools, so rewriting the prompt cannot grant it a new capability (ADR-099 D6). A group's `chat.md` is also **writable only by its owner or an admin** (ADR-098 governance) and read by any participant, so one member cannot inject a prompt that steers another member's agent. The right-hand panel edits the body only — the `# Safety` tail is not shown there (the `chat-md` API returns the body with the tail stripped) and is re-applied by the store and the Runtime on save, so a member is never handed editable text that saving would silently revert.
+When a `chat.md` is present and non-blank it **replaces the whole built-in chat prompt body** (kernel + persona + scenario), with only `{{agent_name}}` substituted; absent, the built-in default is used. Two parts are never the file's to drop. First, the `# Safety` invariants are a non-trimmable tail the Runtime re-appends to the body on every turn (`chat_prompt::with_chat_prompt_tail`), so removing them from a `chat.md` has no effect on what the model sees. Second, the safety boundary is structural, not literal: the router only ever holds `new_task` / `propose_existing` and the two read-only tools, so rewriting the prompt cannot grant it a new capability (ADR-099 D6). A group's `chat.md` is also **writable only by its owner or an admin** (ADR-098 governance) and read by any participant, so one member cannot inject a prompt that steers another member's agent. The right-hand panel edits the body only — the `# Safety` tail is not shown there (the `chat-md` API returns the body with the tail stripped) and is re-applied by the store and the Runtime on save, so a member is never handed editable text that saving would silently revert.
 
 ### 3.3 Persona and the `chat.md` precedence
 
@@ -239,7 +239,7 @@ S2           idle     3h   task   Review ADR-098
 S3           closed   2d   chat   Refactor auth middleware
 ```
 
-Columns: alias, `current` marker, status, last activity (relative time allowed only here), source (chat/task), title. No session ids, owners, or models — fewer tokens and less leakage; the router acts through the alias only.
+Columns: alias, `current` marker, status, last activity (relative time allowed only here), source (chat/task), title. No session ids, owners, or models — fewer tokens and less leakage; the router may only use an alias in `propose_existing`; it cannot deliver through one.
 
 Ordering: `current` first, the rest by `last_active_at` descending. The order is stable (ties broken by title) so the same candidate set renders identically every turn.
 
@@ -284,8 +284,8 @@ The `ChatMessage.cache_control` field already exists (ADR-060); only the flaggin
 Byte-identical across turns:
 
 - `model` / `provider` (from the `chat_router` config, independent of messages);
-- `temperature` (default 0), `max_tokens` (default 2048 — enough that one `assistant → tool_call → tool_result → assistant` round of think + tool arguments + final text is never cut mid-call);
-- `tools`: `dispatch` plus the read-only information tools the agent has enabled (`memory_recall`, GET-only `http_request`), serialised from fixed literals in fixed field order — byte-stable for a given (binary version, enablement set);
+- `temperature` (default 0), `max_tokens` (default 8,192 as `chat_router.max_output_tokens`, clamped 1024-32768, settable in the config file and deliberately off the UI wire). The ceiling has to fit an information round's think + tool arguments + final text **and** a `new_task` brief. The old 2,048 did not fit the latter: the truncated response carried an incomplete tool-call JSON, `act_call()` found no act, and the whole turn degraded to a chat sentence — the user saw an agent message and no execution session was created. `finish_reason == "length"` (Anthropic's `max_tokens`, normalised to `length` by the provider layer) is now checked explicitly and degrades as a truncation rather than being read as a decision, so it no longer masquerades as `reply` / `empty reply` in the decision log;
+- `tools`: `new_task` + `propose_existing` plus the read-only information tools the agent has enabled (`memory_recall`, GET-only `http_request`), serialised from fixed literals in fixed field order — byte-stable for a given (binary version, enablement set). The act names the prompt teaches and the set advertised here are pinned to each other by a unit test (`tool.rs::the_prompt_teaches_exactly_the_tools_the_wire_offers`); drifting once was enough;
 - `tool_choice`: `auto`, never varying;
 - the `assistant(tool_calls)` / `tool` messages an information round produces live only inside that turn's request — never written back to chat history, never entering Block B.
 

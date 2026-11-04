@@ -62,7 +62,7 @@ pub struct GatewayConfig {
     pub vault_dir: String,
     /// Packages directory for installed .agent packages
     pub packages_dir: String,
-    /// Data directory for agent workspaces and Grafeo
+    /// Data directory for agent workspaces and the memory service
     pub data_dir: String,
     /// Log level (trace/debug/info/warn/error)
     #[serde(default = "default_log_level")]

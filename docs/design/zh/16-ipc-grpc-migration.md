@@ -1,6 +1,9 @@
-# 16. IPC 通信层 gRPC 迁移设计
+# 16. IPC 通信层 gRPC 迁移设计（历史文档）
 
-> 版本：v1.0 | 日期：2026-05-03 | 状态：设计阶段
+> 版本：v1.0 | 日期：2026-05-03
+> **状态：历史文档** —— 记录 v3.1 的 gRPC 迁移历程。v3.2 已进一步迁移到 MQTT + HTTP 反向代理
+> （见 [ADR-033](../../adr/zh/ADR-033-mqtt-replace-grpc-websocket.md)）；当前通信协议见
+> [06-communication.md](./06-communication.md)。
 
 ---
 

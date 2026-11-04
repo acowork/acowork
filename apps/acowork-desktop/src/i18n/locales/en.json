@@ -1518,7 +1518,6 @@
       "converting": "Preparing file for preview…",
       "engineMissing": "No Office or LibreOffice found — this is an approximate layout preview",
       "convertFailed": "Conversion to PDF failed — showing the approximate layout instead",
-      "printLayoutNote": "Shown at print layout (converted on this machine)",
       "installHint": "Install LibreOffice or Microsoft Office to preview this exactly as it prints"
     },
     "sheetViewer": {

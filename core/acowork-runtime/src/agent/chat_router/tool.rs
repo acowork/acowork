@@ -52,6 +52,12 @@ pub const MEMORY_RECALL_SERVICE_TOOL: &str = "memory_recall";
 /// mutating field so a chat turn cannot issue a side-effecting request.
 pub const HTTP_REQUEST_TOOL: &str = "http_request";
 
+/// Act names a previous prompt generation taught and the wire no longer
+/// offers. ADR-106 D6 retired `dispatch`; any text still naming it describes a
+/// tool the model cannot call, so the drift guard in this module's tests fails
+/// when the kernel prompt teaches one.
+pub const RETIRED_ACT_NAMES: &[&str] = &["dispatch"];
+
 /// The `all_tools` name of the memory service's recall tool.
 ///
 /// ADR-101: the Runtime no longer carries a builtin `memory_recall`, so the
@@ -487,5 +493,69 @@ mod tests {
             .map(|t| t["name"].as_str().unwrap())
             .collect();
         assert_eq!(names, vec![NEW_TASK_TOOL, PROPOSE_TOOL, HTTP_REQUEST_TOOL]);
+    }
+
+    /// The prompt and the wire schema are two halves of one contract, and they
+    /// have drifted twice with the same outcome — the model could not call any
+    /// act, so no execution session was ever created:
+    ///
+    /// 1. ADR-106 D6 replaced `dispatch` with `new_task` / `propose_existing`
+    ///    but left the kernel prompt teaching `dispatch` (2026-11).
+    /// 2. Before that, the OpenAI-nested tool shape made every router tool
+    ///    arrive as `name = "unknown"` with an empty schema.
+    ///
+    /// Neither was caught by review; both were caught from a production log.
+    /// This pins the two halves to each other instead of trusting a reader to
+    /// notice the mismatch. It covers parameter names as well as tool names: a
+    /// schema that renames `message` while the prompt still says `brief` is
+    /// just as broken and just as invisible.
+    #[test]
+    fn the_prompt_teaches_exactly_the_tools_the_wire_offers() {
+        use acowork_core::chat_prompt::CHAT_ROUTER_BASE_PROMPT as prompt;
+
+        // The acts and the HTTP lookup carry names fixed across turns, so the
+        // prompt can and must name them exactly. The memory tool cannot: its
+        // wire name is the MCP-resolved `mcp_<server>__<tool>`, which a
+        // byte-stable prompt may not hardcode — the prompt names the capability
+        // and the model reads the real name off the tools array. That asymmetry
+        // is deliberate, so it is asserted rather than left implicit.
+        for name in [NEW_TASK_TOOL, PROPOSE_TOOL, HTTP_REQUEST_TOOL] {
+            assert!(
+                prompt.contains(name),
+                "`{name}` is offered on the wire but never named in \
+                 CHAT_ROUTER_BASE_PROMPT — the model cannot call what the prompt \
+                 does not teach"
+            );
+        }
+        assert!(
+            prompt.contains("memory"),
+            "the router may carry a memory-recall tool, but the prompt never \
+             mentions memory at all"
+        );
+
+        // Each act's parameters, not only its name.
+        for (tool, spec) in [
+            (NEW_TASK_TOOL, new_task_tool_spec()),
+            (PROPOSE_TOOL, propose_existing_tool_spec()),
+        ] {
+            for param in spec["properties"].as_object().unwrap().keys() {
+                assert!(
+                    prompt.contains(param.as_str()),
+                    "`{tool}` takes `{param}`, but CHAT_ROUTER_BASE_PROMPT never \
+                     mentions it — the prompt is documenting a different schema"
+                );
+            }
+        }
+
+        // Reverse direction: nothing the prompt calls an act may be absent
+        // from the wire.
+        for retired in RETIRED_ACT_NAMES {
+            assert!(
+                !prompt.contains(retired),
+                "CHAT_ROUTER_BASE_PROMPT still names `{retired}`, which is not on \
+                 the wire any more; the model would call it and `act_call()` would \
+                 find no act, so the turn would fall back to a plain reply"
+            );
+        }
     }
 }

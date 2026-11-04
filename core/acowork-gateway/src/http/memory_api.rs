@@ -109,7 +109,7 @@ pub struct MemoryStatsResponse {
     pub by_type: std::collections::HashMap<String, u64>,
     pub by_status: std::collections::HashMap<String, u64>,
     pub index_health: String,
-    /// Embedding dimension of the Grafeo HNSW vector index actually persisted on disk.
+    /// Embedding dimension of the vector index actually persisted on disk.
     /// 0 if the store has not yet built a vector index.
     pub stored_dim: u64,
     /// Number of memory nodes (across all labels) that currently have a

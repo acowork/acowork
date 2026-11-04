@@ -22,6 +22,8 @@
 // context and no way to parse a PDF, so the unit under test is the glue above
 // it (page bounds, sizing, destroy), which the stub lets us pin exactly.
 
+import type { ImageSize } from "./imageViewerGeometry";
+
 /**
  * Output resolution, as pdf.js viewport scale. A PDF point is 1/72 inch, so
  * `2` renders an A4 page at ~170 dpi — comfortably readable text for a model
@@ -36,6 +38,14 @@ export interface PdfPageDocument {
     numPages: number;
     /** Draw page `pageNumber` (1-based) at `scale` onto `canvas`. */
     renderPage(pageNumber: number, scale: number, canvas: HTMLCanvasElement): Promise<void>;
+    /**
+     * Page `pageNumber`'s size at `scale`, without drawing anything.
+     *
+     * This is what makes a continuous column possible: the scroll geometry of
+     * thirty pages has to exist before any of them is rasterized, and reading
+     * a page's viewport through pdf.js is a worker round trip, not a render.
+     */
+    pageSize(pageNumber: number, scale: number): Promise<ImageSize>;
     /** Release the worker + document. */
     destroy(): Promise<void>;
 }
@@ -58,6 +68,9 @@ let workerSrcConfigured = false;
  * The legacy bundle is deliberate: the modern one targets `Promise.withResolvers`,
  * which older WKWebView builds do not have — and a preview gesture must not
  * depend on the newest engine the OS happens to ship.
+ *
+ * `bytes` stays the caller's afterwards: it is copied at the transfer point
+ * below, so an array can be opened as many times as a re-running effect asks.
  */
 async function loadPdfDocument(bytes: Uint8Array): Promise<PdfPageDocument> {
     const [pdfjs, workerUrl] = await Promise.all([
@@ -68,9 +81,18 @@ async function loadPdfDocument(bytes: Uint8Array): Promise<PdfPageDocument> {
         pdfjs.GlobalWorkerOptions.workerSrc = workerUrl.default;
         workerSrcConfigured = true;
     }
-    // `data` is transferred to the worker, so the caller's array must not be
-    // reused afterwards — every caller here hands over a private copy.
-    const loading = pdfjs.getDocument({ data: bytes as Uint8Array<ArrayBuffer> });
+    // pdf.js does not copy what it is given: it posts the document to its
+    // worker with the underlying `ArrayBuffer` in the transfer list
+    // (`sendWithPromise("GetDocRequest", docParams, [data.buffer])`), which
+    // DETACHES it for the caller — `byteLength` drops to 0 and the next use
+    // throws `DataCloneError: An ArrayBuffer is detached`. So the copy is
+    // taken here, at the transfer point: whoever invalidates a buffer has to
+    // own it. Leaving it to the callers is what broke the framed screenshot —
+    // The viewer opens from an effect, an effect may re-run over the
+    // same `bytes` prop (a remount, React StrictMode's dev double-invoke),
+    // and the second open was handed a buffer the first one had already given
+    // away. A few MB copied once per gesture is the whole cost.
+    const loading = pdfjs.getDocument({ data: bytes.slice(0) as Uint8Array<ArrayBuffer> });
     const doc = await loading.promise;
     return {
         numPages: doc.numPages,
@@ -80,6 +102,13 @@ async function loadPdfDocument(bytes: Uint8Array): Promise<PdfPageDocument> {
             canvas.width = Math.floor(viewport.width);
             canvas.height = Math.floor(viewport.height);
             await page.render({ canvas, viewport }).promise;
+        },
+        // The same viewport a render would size its canvas from, read without
+        // one: the column's layout and its bitmaps cannot disagree.
+        async pageSize(pageNumber, scale) {
+            const page = await doc.getPage(pageNumber);
+            const viewport = page.getViewport({ scale });
+            return { width: Math.floor(viewport.width), height: Math.floor(viewport.height) };
         },
         // The loading task owns the worker; `PDFDocumentProxy` itself only
         // exposes `cleanup()`, which frees the page caches but leaves the
@@ -91,6 +120,14 @@ async function loadPdfDocument(bytes: Uint8Array): Promise<PdfPageDocument> {
 export interface PdfPageRenderer {
     /** Page count as the document reported it (≥ 1). */
     numPages: number;
+    /**
+     * Every page's bitmap size, in document order, at `PDF_OUTPUT_SCALE`.
+     *
+     * Cheap enough to take once for the whole document (nothing is drawn),
+     * which is what lets a continuous column lay out its own scroll height
+     * before the first page has painted.
+     */
+    measure(): Promise<ImageSize[]>;
     /**
      * A canvas holding page `pageNumber` at `scale`.
      * Rejects on a bad page number or a failed render — the caller turns that
@@ -114,6 +151,16 @@ export async function createPdfPageRenderer(
     const doc = await load(bytes);
     return {
         numPages: doc.numPages,
+        async measure() {
+            // Sequential on purpose: `getPage` is a worker round trip, and
+            // thirty of them at once would compete with the renders the user
+            // is actually waiting for.
+            const sizes: ImageSize[] = [];
+            for (let pageNumber = 1; pageNumber <= doc.numPages; pageNumber += 1) {
+                sizes.push(await doc.pageSize(pageNumber, PDF_OUTPUT_SCALE));
+            }
+            return sizes;
+        },
         async render(pageNumber: number, scale = PDF_OUTPUT_SCALE) {
             if (!Number.isInteger(pageNumber) || pageNumber < 1 || pageNumber > doc.numPages) {
                 throw new Error(`Page ${pageNumber} is outside 1..${doc.numPages}`);

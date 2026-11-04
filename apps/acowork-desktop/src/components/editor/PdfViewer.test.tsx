@@ -1,24 +1,13 @@
 /**
- * PdfViewer — minimal mount test for the native-iframe PDF path.
+ * PdfViewer — what the viewer owns, which is the BYTES and the gates, not the
+ * pages.
  *
- * The WebView's built-in viewer does the actual rendering; what this
- * component owns (and what this file pins) is the chrome contract from the
- * preview plan:
- *   - the blob URL from `useWorkspaceFileBlob(mode:"url")` is handed to an
- *     `<iframe>` as-is (no re-fetch, no data: re-encode);
- *   - loading / error states are the frame's, with a working retry;
- *   - the two escape hatches call the Gateway-route transfer helpers with
- *     the file's own addressing (agentId / workspaceId / relPath).
- *
- * `external` mode (the converted-Office path) is the second half of the
- * file: the blob feed must stay switched off — the tab's own bytes are the
- * SOURCE document, not a PDF — and the iframe has to come from an object
- * URL minted from the supplied bytes and revoked on unmount.
- *
- * The third half is when the two "add to Chat" entries appear, and what the
- * whole-document one hands the panel. The crop mode itself is not exercised
- * here: it mounts `PdfRegionPicker` (lazy) and its gestures are that
- * component's own test file.
+ * The column that draws them (`./PdfColumnViewer`) is mocked: its gestures, its
+ * lazy painting and its toolbar are that file's own business. What is pinned
+ * here is the addressing the frame still owes the Gateway, which bytes reach the
+ * column from which source, when the two "add to Chat" entries appear, and that
+ * turning framing on is a prop change on the instance the user is already
+ * looking at.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, waitFor, act } from "@testing-library/react";
@@ -56,7 +45,20 @@ vi.mock("../../i18n/useTranslation", () => ({
   }),
 }));
 
+/** The seam the real column would rather not offer in jsdom (it needs a pdf.js
+ *  document): record what the viewer handed it and render a marker instead. */
+const column = vi.hoisted(() => ({ props: null as Record<string, unknown> | null }));
+vi.mock("./PdfColumnViewer", () => ({
+  PdfColumnViewer: (props: Record<string, unknown>) => {
+    column.props = props;
+    return <div data-testid="pdf-column" />;
+  },
+}));
+
 import PdfViewer from "./PdfViewer";
+
+/** What the stubbed blob feed serves. */
+const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 7]);
 
 const file = {
   agentId: "a1",
@@ -83,9 +85,12 @@ beforeEach(() => {
   h.saveToDisk.mockClear();
   h.openExternal.mockClear();
   h.toast.mockClear();
+  column.props = null;
   objectUrlSeq = 0;
   createObjectURLMock.mockClear();
   revokeObjectURLMock.mockClear();
+  // The url-mode read goes through fetch(); jsdom has no server to ask.
+  vi.stubGlobal("fetch", vi.fn(() => Promise.resolve(new Response(PDF_BYTES, { status: 200 }))));
   // jsdom implements neither — same stub as workspaceFileBlob.test.ts.
   Object.defineProperty(URL, "createObjectURL", { value: createObjectURLMock, configurable: true });
   Object.defineProperty(URL, "revokeObjectURL", { value: revokeObjectURLMock, configurable: true });
@@ -96,23 +101,25 @@ afterEach(() => {
 });
 
 describe("PdfViewer", () => {
-  it("requests url-mode bytes for its own file and embeds the blob URL", () => {
+  it("requests url-mode bytes for its own file and draws them itself", async () => {
     render(<PdfViewer {...file} />);
     expect(h.hookCalls[0]).toEqual({
       ref: { agentId: "a1", workspaceId: "ws1", relPath: "docs/report.pdf" },
       opts: { mode: "url", reloadSeq: 2, enabled: true },
     });
-    const frame = document.querySelector("iframe");
-    expect(frame).toBeTruthy();
-    expect(frame?.getAttribute("src")).toBe("blob:gw/report.pdf");
+    // The blob URL is not handed to the browser any more. The viewer reads it
+    // back and gives the bytes to the column, because drawing the pages is ours
+    // now — which is also what makes framing cost nothing.
+    await waitFor(() => expect(screen.getByTestId("pdf-column")).toBeTruthy());
+    expect(column.props?.bytes).toEqual(PDF_BYTES);
   });
 
-  it("shows the frame spinner while the feed is loading, without an iframe", () => {
+  it("shows the frame spinner while the feed is loading, without a column", () => {
     h.hookState.loading = true;
     h.hookState.blobUrl = null;
     h.hookState.mime = null;
     render(<PdfViewer {...file} />);
-    expect(document.querySelector("iframe")).toBeNull();
+    expect(screen.queryByTestId("pdf-column")).toBeNull();
     expect(screen.getByText("fileEditor.previewLoading")).toBeTruthy();
   });
 
@@ -152,9 +159,11 @@ describe("PdfViewer external mode (converted Office document)", () => {
       // would download the source document all over again.
       opts: { mode: "url", reloadSeq: 2, enabled: false },
     });
-    await waitFor(() =>
-      expect(document.querySelector("iframe")?.getAttribute("src")).toBe("blob:external/1"),
-    );
+    await waitFor(() => expect(screen.getByTestId("pdf-column")).toBeTruthy());
+    // The converter's array reaches the column as-is: no second copy, and no
+    // fetch of the .docx the tab is actually addressed to.
+    expect(column.props?.bytes).toBe(bytes);
+    // The frame still needs an object URL, for save-as / open-externally.
     expect(createObjectURLMock).toHaveBeenCalledTimes(1);
     const blob = createObjectURLMock.mock.calls[0][0] as Blob;
     expect(blob.type).toBe("application/pdf");
@@ -164,12 +173,12 @@ describe("PdfViewer external mode (converted Office document)", () => {
     expect(revokeObjectURLMock).toHaveBeenCalledWith("blob:external/1");
   });
 
-  it("shows the loading state without an iframe while converting", () => {
+  it("shows the loading state without a column while converting", () => {
     render(
       <PdfViewer {...converted} external={{ state: "loading", retry: vi.fn() }} />,
     );
     expect(createObjectURLMock).not.toHaveBeenCalled();
-    expect(document.querySelector("iframe")).toBeNull();
+    expect(screen.queryByTestId("pdf-column")).toBeNull();
     expect(screen.getByText("fileEditor.previewLoading")).toBeTruthy();
   });
 
@@ -187,17 +196,6 @@ describe("PdfViewer external mode (converted Office document)", () => {
     // The feed hook's own retry must not be used — it has no feed.
     expect(h.hookState.retry).not.toHaveBeenCalled();
   });
-
-  it("renders the forwarded banner above the frame body", async () => {
-    render(
-      <PdfViewer
-        {...converted}
-        banner={<div>print-layout note</div>}
-        external={{ state: "ready", bytes: new Uint8Array([1]), retry: vi.fn() }}
-      />,
-    );
-    expect(screen.getByText("print-layout note")).toBeTruthy();
-  });
 });
 
 describe("PdfViewer chat entries", () => {
@@ -214,7 +212,7 @@ describe("PdfViewer chat entries", () => {
     onAddDocumentToChat.mockClear();
   });
 
-  it("offers both entries once the bytes are in hand", () => {
+  it("offers both entries once the bytes are in hand", async () => {
     render(
       <PdfViewer
         {...file}
@@ -223,7 +221,13 @@ describe("PdfViewer chat entries", () => {
         onAddDocumentToChat={onAddDocumentToChat}
       />,
     );
-    expect(screen.getByRole("button", { name: "fileEditor.pdfViewer.selectRegion" })).toBeTruthy();
+    // The read is async now and the entries are gated on it: no bytes, no
+    // promise to the agent.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "fileEditor.pdfViewer.selectRegion" }),
+      ).toBeTruthy(),
+    );
     expect(screen.getByRole("button", { name: "fileEditor.pdfViewer.addDocument" })).toBeTruthy();
   });
 
@@ -261,9 +265,11 @@ describe("PdfViewer chat entries", () => {
         onAddDocumentToChat={onAddDocumentToChat}
       />,
     );
-    // Reading the bytes is async (`arrayBuffer()` on a Blob), and the handler
-    // settles `sending` back to false when it lands — so the gesture and its
-    // continuation are awaited inside one `act`.
+    // The bytes are read up front and asynchronously, so the button only exists
+    // once that has landed.
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "fileEditor.pdfViewer.addDocument" })).toBeTruthy(),
+    );
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "fileEditor.pdfViewer.addDocument" }));
       await vi.waitFor(() => expect(onAddDocumentToChat).toHaveBeenCalledTimes(1));
@@ -279,6 +285,9 @@ describe("PdfViewer chat entries", () => {
     h.hookState.blob = new Blob(["%PDF-1.7"], { type: "application/pdf" });
     h.hookState.blobUrl = null;
     render(<PdfViewer {...file} onAddDocumentToChat={onAddDocumentToChat} />);
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "fileEditor.pdfViewer.addDocument" })).toBeTruthy(),
+    );
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "fileEditor.pdfViewer.addDocument" }));
       await vi.waitFor(() => expect(onAddDocumentToChat).toHaveBeenCalledTimes(1));
@@ -288,14 +297,48 @@ describe("PdfViewer chat entries", () => {
     expect(sent.type).toBe("application/pdf");
   });
 
-  it("reports unreadable bytes instead of attaching an empty document", async () => {
+  it("offers nothing when the bytes cannot be read, and retries on request", async () => {
+    // An empty read used to be a button that toasted when clicked. It is now no
+    // button at all: the preview needs those same bytes, so a document we cannot
+    // read is a document we cannot show — and saying so is the body's job, with
+    // a way out that does not need the tab to be reopened.
     h.hookState.blob = new Blob([""], { type: "application/pdf" });
     h.hookState.blobUrl = null;
-    render(<PdfViewer {...file} onAddDocumentToChat={onAddDocumentToChat} />);
-    await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "fileEditor.pdfViewer.addDocument" }));
-      await vi.waitFor(() => expect(h.toast).toHaveBeenCalledTimes(1));
-    });
+    render(
+      <PdfViewer
+        {...file}
+        onAddRegionToChat={onAddRegionToChat}
+        onAddDocumentToChat={onAddDocumentToChat}
+      />,
+    );
+    await waitFor(() => expect(screen.getByText("fileEditor.docViewer.loadFailed")).toBeTruthy());
+    expect(screen.queryByTestId("pdf-column")).toBeNull();
+    expect(screen.queryByRole("button", { name: "fileEditor.pdfViewer.addDocument" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "fileEditor.pdfViewer.selectRegion" })).toBeNull();
     expect(onAddDocumentToChat).not.toHaveBeenCalled();
+
+    // The retry re-reads the same source. It is not the feed hook's retry,
+    // which would refetch a document the frame already holds.
+    h.hookState.blob = new Blob([PDF_BYTES], { type: "application/pdf" });
+    fireEvent.click(screen.getByText("fileEditor.docViewer.retry"));
+    await waitFor(() => expect(screen.getByTestId("pdf-column")).toBeTruthy());
+    expect(column.props?.bytes).toEqual(PDF_BYTES);
   });
+
+  it("turns framing on without handing the column a new document", async () => {
+    render(<PdfViewer {...file} onAddRegionToChat={onAddRegionToChat} />);
+    await waitFor(() => expect(screen.getByTestId("pdf-column")).toBeTruthy());
+    const before = column.props?.bytes;
+    const toggle = screen.getByRole("button", { name: "fileEditor.pdfViewer.selectRegion" });
+    expect(column.props?.framing).toBe(false);
+    fireEvent.click(toggle);
+    expect(column.props?.framing).toBe(true);
+    // A new array would make the column re-open the document and lose the
+    // scroll position — which is the whole reason framing is a prop.
+    expect(column.props?.bytes).toBe(before);
+    fireEvent.click(screen.getByRole("button", { name: "fileEditor.pdfViewer.selectRegion" }));
+    expect(column.props?.framing).toBe(false);
+    expect(column.props?.bytes).toBe(before);
+  });
+
 });

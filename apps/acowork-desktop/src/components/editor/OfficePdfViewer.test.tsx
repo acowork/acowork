@@ -93,10 +93,10 @@ describe("OfficePdfViewer", () => {
       previewSeq: 4,
       external: { state: "ready", bytes, retry: h.convState.retry },
     });
-    // The note travels as the frame banner slot — the stub does not render
-    // props, so the element itself is what can be inspected.
-    const banner = h.pdfProps[0].banner as { props?: { children?: unknown } };
-    expect(banner.props?.children).toBe("fileEditor.officePdf.printLayoutNote");
+    // And nothing is stacked above it. The print-layout note used to occupy a
+    // row of the document on every ready preview, to explain a distinction the
+    // user never had to make: the degraded paths say what they could not do,
+    // which is the only case where the layout is in question.
   });
 
   it("passes the tab's file version to the converter", () => {

@@ -1076,7 +1076,6 @@
       "converting": "미리보기를 준비하는 중…",
       "engineMissing": "Office 또는 LibreOffice을 찾을 수 없습니다 — 대략적인 레이아웃 미리보기입니다",
       "convertFailed": "PDF 변환에 실패했습니다 — 대략적인 레이아웃으로 표시합니다",
-      "printLayoutNote": "인쇄 레이아웃으로 표시했습니다 (이 기기에서 변환)",
       "installHint": "LibreOffice 또는 Microsoft Office를 설치하면 실제 레이아웃 그대로 미리볼 수 있습니다"
     },
     "sheetViewer": {
