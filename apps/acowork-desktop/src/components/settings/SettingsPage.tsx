@@ -309,9 +309,23 @@ export function GatewayTab() {
                   language as the gw-id row, not as a paragraph under the
                   toggle. Hand-rolled because a <button> must not sit
                   inside the Switch's <label>: clicking the hint would
-                  also flip the switch. */}
+                  also flip the switch.
+
+                  Type step: `text-xs`, no color/weight override — this is
+                  an operable control's label, so it must read at the same
+                  scale and contrast as the mode radios right above it
+                  (both inherit `--color-text`). The row used to carry
+                  `text-10 font-medium text-text-tertiary`, copied
+                  verbatim from Switch's internal label slot; that is a
+                  component default for dense inline labels, NOT a
+                  caller-facing design token, and at 10px it rendered
+                  ~17% smaller than every other label in this card
+                  (`--text-10` = 0.714em vs `--text-xs` = 0.857em). Do not
+                  restore a `--text-9/10/11` step or a dimming color here:
+                  micro steps are the meta-line scale (URL, device id),
+                  never the control-label scale. */}
               <div className="flex items-center justify-between gap-2">
-                <span className="flex flex-1 items-center gap-1.5 text-10 font-medium text-text-tertiary">
+                <span className="flex flex-1 items-center gap-1.5 text-xs">
                   {t("settings.autoStartLocalNode")}
                   <HelpHint content={t("settings.autoStartLocalNodeHelp")} />
                 </span>
