@@ -257,6 +257,57 @@ describe('the fold: one block per execution session (D3/D4)', () => {
     expect(html.match(/chat-run-question/g)).toHaveLength(1)
   })
 
+  /** ADR-106 presentation-contract amendment: the round that OPENED the
+   *  session pairs with its own question bubble — "question, then block" —
+   *  and the block's line leads with the router's brief instead. */
+  it('an opener round keeps its trigger as its own bubble', () => {
+    const rows = [
+      triggerRow('u1', '修复分页不满屏', 1),
+      refRow({ in_reply_to: 'u1', opened_new: true, assignment_brief: 'Fix the pagination bug' }),
+      triggerRow('u2', 'also add tests', 4),
+      { ...refRow({ round_id: 'r2', message_id: 'round:r2', in_reply_to: 'u2', opened_new: false }), seq: 5 },
+    ]
+    const { items, keyOfSeq } = buildTranscriptItems(rows, (r) => `k:${r.meta?.message_id}`)
+    // The opener's question stands alone; the continuation stays folded — one
+    // bubble, then the block that answers both.
+    expect(items.map((i) => i.kind)).toEqual(['row', 'run'])
+    const block = items[1] as RunBlock
+    const [opener, continuation] = block.rounds
+    expect(opener?.questionOnTranscript).toBe(true)
+    expect(opener?.showUserLine).toBe(false)
+    // The block still holds the trigger row for the header's title derivation.
+    expect(opener?.triggerRow?.body).toBe('修复分页不满屏')
+    expect(continuation?.questionOnTranscript).toBeUndefined()
+    expect(continuation?.showUserLine).toBe(true)
+    // Locate: the opener's seq points at its OWN bubble, the continuation's
+    // trigger still points at the block that draws it.
+    expect(keyOfSeq.get(1)).toBe('k:u1')
+    expect(keyOfSeq.get(4)).toBe('k:round:r2')
+
+    seedEntries({
+      'ag|s1|r1': entryOf({
+        projection: {
+          round_id: 'r1',
+          terminal: true,
+          status: 'completed',
+          user: { body: 'Fix the pagination bug\n\n[user message]\n修复分页不满屏', ts: '1' },
+          answer: { body: 'done', ts: '2' },
+          card: null,
+        },
+      }),
+      'ag|s1|r2': entryOf({ ref: 'ag|s1|r2', round_id: 'r2' }),
+    })
+    const html = renderRows(rows)
+    // The human's words stay on the transcript as their own bubble…
+    expect(html).toContain('bubble-raw')
+    // …and the opener's block line leads with the brief, not the delivered
+    // prompt text (which would carry the `[user message]` tail verbatim).
+    expect(html).toContain('>Fix the pagination bug<')
+    expect(html).not.toContain('[user message]')
+    // Only the continuation round renders a question panel inside the block.
+    expect(html.match(/chat-run-question/g)).toHaveLength(1)
+  })
+
   it('a reference row with no coordinates is a hole of its own, not a block', () => {
     expect(renderRow(refRow({ round_id: undefined as never }))).toContain('本轮执行已不可用')
     expect(renderRow(refRow({ round_id: undefined as never }))).not.toContain('exec-block')

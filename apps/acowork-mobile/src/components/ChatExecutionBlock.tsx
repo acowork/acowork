@@ -328,7 +328,14 @@ interface RoundItemProps {
 function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: RoundItemProps) {
   const [open, setOpen] = useState(defaultOpen)
   const projection = entry?.projection
-  const question = (round.showUserLine ? round.triggerRow?.body : '') || projection?.user?.body || ''
+  // An opener round's sentence stands on the transcript as its own bubble —
+  // the block's line leads with what the execution session actually received
+  // (the router's brief), never with a second copy of the raw text.
+  const question =
+    (round.showUserLine ? round.triggerRow?.body : '') ||
+    (round.questionOnTranscript ? round.roundRow.meta?.assignment_brief ?? '' : '') ||
+    projection?.user?.body ||
+    ''
   const summary =
     summarize(question) || summarize(round.roundRow.meta?.assignment_brief ?? '') || '（无提问内容）'
   const pending = entry?.status === 'pending'
