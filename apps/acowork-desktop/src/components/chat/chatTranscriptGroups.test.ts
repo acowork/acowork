@@ -41,6 +41,7 @@ function round(
   execSid: string,
   roundId: string,
   trigger: string,
+  extraMeta?: Record<string, unknown>,
 ): ChatMessageRow {
   return {
     seq,
@@ -55,6 +56,7 @@ function round(
       agent_session_id: execSid,
       round_id: roundId,
       in_reply_to: trigger,
+      ...extraMeta,
     },
   };
 }
@@ -173,6 +175,39 @@ describe("buildTranscriptItems", () => {
 
     expect(items).toHaveLength(1);
     expect(items[0]?.kind).toBe("row");
+  });
+
+  /** ADR-106 presentation-contract amendment: the round that OPENED the
+   *  session pairs with its own question bubble — the exchange reads "question,
+   *  then block", and the block line leads with the brief instead. */
+  it("an opener round keeps its trigger as its own bubble", () => {
+    const { items, keyOfSeq } = buildTranscriptItems(
+      [
+        ask(1, "fix the bug", A),
+        round(2, A, "s1", "r1", "u1", { opened_new: true, assignment_brief: "Fix the pagination bug" }),
+        ask(3, "also add tests", A),
+        round(4, A, "s1", "r2", "u3", { opened_new: false }),
+      ],
+      keyOf,
+    );
+
+    // The opener's question stands alone; the continuation stays folded — one
+    // bubble, then the block that answers both.
+    expect(items.map((i) => i.kind)).toEqual(["row", "run"]);
+    const block = items[1];
+    if (block?.kind !== "run") throw new Error("expected a run block");
+    const [opener, continuation] = block.rounds;
+    expect(opener?.questionOnTranscript).toBe(true);
+    expect(opener?.showUserLine).toBe(false);
+    // The block still holds the trigger row for the header's title derivation.
+    expect(opener?.triggerRow?.body).toBe("fix the bug");
+    expect(continuation?.questionOnTranscript).toBeUndefined();
+    expect(continuation?.showUserLine).toBe(true);
+    // Locate: the opener's seq points at its OWN bubble, the continuation's
+    // trigger still points at the block that draws it.
+    const anchorKey = keyOf(block.anchorRow);
+    expect(keyOfSeq.get(1)).toBe("k:u1");
+    expect(keyOfSeq.get(3)).toBe(anchorKey);
   });
 
   it("an answer that opened no run stays the agent's speech", () => {

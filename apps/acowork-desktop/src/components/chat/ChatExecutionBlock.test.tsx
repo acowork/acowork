@@ -198,6 +198,45 @@ describe("ChatExecutionBlock", () => {
     expect(container.querySelector('[data-seq="3"]')).toBeTruthy();
   });
 
+  /** ADR-106 presentation-contract amendment: the opener round's sentence is
+   *  already on the transcript as its own bubble, so the block repeats neither
+   *  the panel nor the raw text — its line leads with the router's brief. */
+  it("an opener round leads with the brief and renders no question panel", () => {
+    const base = roundRow(3, "r1");
+    const opener: RoundItem = {
+      ref: REF1,
+      roundRow: {
+        ...base,
+        meta: { ...base.meta, opened_new: true, assignment_brief: "Fix the pagination bug" },
+      },
+      triggerRow: triggerRow(1, "修复分页不满屏"),
+      showUserLine: false,
+      questionOnTranscript: true,
+    };
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            user: { body: "Fix the pagination bug\n\n[user message]\n修复分页不满屏", ts: "1", attachments: [] },
+            answer: { body: "done", ts: "2" },
+            card: null,
+          },
+        }),
+      },
+      {},
+      blockOf([opener]),
+    );
+    // The row's summary is the brief — what the session actually received.
+    const row = container.querySelector('[data-seq="3"]');
+    expect(row?.textContent).toContain("Fix the pagination bug");
+    // The raw sentence is not painted a second time inside the block: no
+    // question panel carries the trigger's seq (that row stands on its own).
+    expect(container.querySelector('pre[data-seq="1"]')).toBeNull();
+  });
+
   it("states 'in progress' only on positive evidence: a pending read", () => {
     renderBlock({
       [REF1]: entryOf({

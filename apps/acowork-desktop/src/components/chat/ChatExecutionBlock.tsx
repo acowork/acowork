@@ -478,8 +478,12 @@ function RoundItem({
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
   const projection = entry?.projection;
+  // An opener round's sentence stands on the transcript as its own bubble —
+  // the block's line leads with what the execution session actually received
+  // (the router's brief), never with a second copy of the raw text.
   const question =
     (round.showUserLine ? round.triggerRow?.body : "") ||
+    (round.questionOnTranscript ? round.roundRow.meta?.assignment_brief ?? "" : "") ||
     projection?.user?.body ||
     "";
   const summary =
@@ -550,8 +554,9 @@ function RoundItem({
       {open && (
         <div className="mt-0.5 ml-5 space-y-0.5">
           {/* A round this surface does not own the question for (an `@A @B`
-              fan-out, where the other session's block already wears it) renders
-              the answer alone — one sentence never appears twice. */}
+              fan-out, where the other session's block already wears it; or the
+              opener round, whose bubble stands on the transcript itself)
+              renders the answer alone — one sentence never appears twice. */}
           {round.showUserLine && question && (
             <pre
               data-seq={round.triggerRow?.seq}

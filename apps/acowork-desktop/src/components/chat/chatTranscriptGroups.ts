@@ -16,6 +16,15 @@
  * question as the round's own line, so the transcript must not hold the same
  * sentence twice (D6's re-delivery rule is the precedent).
  *
+ * One exception, ADR-106's presentation-contract amendment: the round that
+ * OPENED the session (`meta.opened_new`) keeps its trigger row as its own
+ * bubble. A new session otherwise appears beside the words that created it with
+ * no visible pairing at all — "a question and an answer, back and forth" is
+ * what makes the block read as an exchange rather than an orphan. The block's
+ * line for that round then leads with the router's `assignment_brief`, which is
+ * what the execution session actually received — not a second copy of the raw
+ * sentence.
+ *
  * Two shapes stay standalone:
  * - a reference row missing a coordinate addresses nothing, so it has no block
  *   to join and renders its own explicit hole (D3);
@@ -35,9 +44,14 @@ export interface RoundItem {
    *  owns it. Rendered as the round's question line, not as a bubble. */
   triggerRow?: ChatMessageRow;
   /** False when the same sentence is already standing on its own in the
-   *  transcript (a fan-out trigger claimed by another session's block): then the
-   *  block shows the answer only, so one message never appears twice. */
+   *  transcript (a fan-out trigger claimed by another session's block, or the
+   *  opener round of a new session): then the block shows the answer only, so
+   *  one message never appears twice. */
   showUserLine: boolean;
+  /** The trigger row stays a bubble of its own: this round opened the session
+   *  (`meta.opened_new`), so the transcript shows the human's words that
+   *  created it and the block must not claim them. */
+  questionOnTranscript?: boolean;
 }
 
 /** One execution session's worth of rounds, rendered as a single block. */
@@ -118,19 +132,26 @@ export function buildTranscriptItems(
 
     const triggerId = r.meta?.in_reply_to?.trim() ?? "";
     const trigger = triggerId ? byMessageId.get(triggerId) : undefined;
+    // The round that opened a NEW session is the paired half of an exchange:
+    // its question stays on the transcript as its own bubble, and the block
+    // line leads with the brief instead of repeating the sentence.
+    const opener = r.meta?.opened_new === true && !!trigger;
     let showUserLine = true;
-    if (trigger) {
+    if (trigger && !opener) {
       if (claimedTriggers.has(trigger.meta?.message_id ?? "")) {
         showUserLine = false;
       } else {
         claimedTriggers.add(trigger.meta?.message_id ?? "");
       }
+    } else if (opener) {
+      showUserLine = false;
     }
     group.rounds.push({
       ref: `${key}|${coord.roundId}`,
       roundRow: r,
       ...(trigger ? { triggerRow: trigger } : {}),
       showUserLine,
+      ...(opener ? { questionOnTranscript: true } : {}),
     });
   }
 
@@ -202,12 +223,15 @@ export function buildTranscriptItems(
 
 /** The rows a folded block renders as its own question lines — the transcript
  *  must not paint them twice, but the locate/highlight path still needs their
- *  seq to find the block. */
+ *  seq to find the block. An opener round's trigger is NOT one of them: it
+ *  renders as its own bubble, and its seq belongs to that row. */
 export function blockSeqs(block: RunBlock): number[] {
   const seqs: number[] = [block.anchorRow.seq];
   for (const round of block.rounds) {
     seqs.push(round.roundRow.seq);
-    if (round.triggerRow) seqs.push(round.triggerRow.seq);
+    if (round.triggerRow && !round.questionOnTranscript) {
+      seqs.push(round.triggerRow.seq);
+    }
   }
   return [...new Set(seqs)];
 }
