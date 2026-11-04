@@ -23,6 +23,7 @@ import i18n from "../i18n";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "../lib/logger";
 import { blockRefOf } from "../lib/chatBlocks";
+import { isTurnPartMeta } from "../components/chat/messageParts";
 import { noteRoundState } from "./chatBlockStore";
 import type { LlmAvailability } from "../lib/llmAvailability";
 import { llmAvailabilityFromWire } from "../lib/llmAvailability";
@@ -3857,7 +3858,14 @@ function stripSummaryTags(text: string): string {
   return (match ? match[1] : trimmed).trim();
 }
 
-function convertConversationEntry(entry: ConversationEntry, agentId: string): ChatMessage | null {
+/** Exported for the load → fold regression test: a part row whose metadata is
+ *  dropped here cannot be folded back into the user block downstream, and that
+ *  failure is invisible to any test that starts from a `ChatMessage`.
+ */
+export function convertConversationEntry(
+  entry: ConversationEntry,
+  agentId: string,
+): ChatMessage | null {
   // Internal runtime entries (e.g. the output-budget nudge the Runtime
   // appends to history and persists for replay fidelity) are kept out of the
   // chat transcript. They are never broadcast over MQTT, so this only affects
@@ -3915,18 +3923,14 @@ function convertConversationEntry(entry: ConversationEntry, agentId: string): Ch
   const meta = entry.metadata;
   if (!meta) return base;
 
-  // ADR-046 §2.5: 5 attachment-type system entries. Each carries a
-  // `metadata.type` discriminator matching the backend `AttachmentMeta`
-  // serde tag. The raw metadata is stored on `ChatMessage.metadata` so
-  // the renderer (MessageBubble) can read it without re-parsing.
-  const ATTACHMENT_TYPES = new Set([
-    "file_upload",
-    "image_upload",
-    "attached_file",
-    "attached_selection",
-    "attached_folder",
-  ]);
-  if (entry.role === "system" && typeof meta.type === "string" && ATTACHMENT_TYPES.has(meta.type)) {
+  // ADR-046 §2.5 / ADR-107: the rows that are a *part* of the user turn above
+  // them — attachments and references alike. Their `metadata.type` is the only
+  // thing that tells `foldMessages` which slot the row belongs in, so it MUST
+  // survive this conversion; dropping it turns a reference into a plain
+  // `system` row and the transcript shows a full-width system bubble where the
+  // card belongs. The registry is shared with the folder (`messageParts`) so a
+  // new part kind cannot be half-wired: one definition, both consumers.
+  if (isTurnPartMeta(entry.role, meta as Record<string, unknown>)) {
     base.metadata = meta as Record<string, unknown>;
     return base;
   }

@@ -11,23 +11,13 @@
  */
 
 import type { ChatMessage } from "../../lib/types";
+import { isUserTurnPart } from "./messageParts";
 
-/** ADR-046 §2.5: 5 attachment metadata types. */
-const ATTACHMENT_META_TYPES = new Set([
-  "file_upload",
-  "image_upload",
-  "attached_file",
-  "attached_selection",
-  "attached_folder",
-]);
-
-/** ADR-107: message-part metadata types. A *part* is any row that belongs to
- *  the user turn above it instead of being a message of its own — attachments
- *  (things the human dragged in) and references (context the runtime
- *  supplied, e.g. the chat background a routed turn came from). One union of
- *  two sets, because the fold rule and the block type are the same for both:
- *  the difference is only which slot of the bubble renders them. */
-const MESSAGE_REF_META_TYPES = new Set(["context_ref"]);
+/** The part registry lives in `messageParts` because the JSONL loader needs the
+ *  same definition (it decides which rows keep their `metadata` at all). Keeping
+ *  a private copy here is what let a `context_ref` row reach the folder as a
+ *  metadata-less `system` message and render as a system bubble. */
+export { isAttachmentPart, isMessageRefPart, isUserTurnPart } from "./messageParts";
 
 /** Max timestamp delta (ms) between a user message and its attachment
  *  system entries for them to be folded into a single block. */
@@ -76,25 +66,6 @@ export interface MessageBlock {
    * remain functional during streaming.  Default false (history-only).
    */
   isLive: boolean;
-}
-
-/** Check if a system message is an attachment entry (ADR-046 §2.5). */
-export function isAttachmentPart(msg: ChatMessage): boolean {
-  if (msg.type !== "system") return false;
-  const metaType = msg.metadata?.type as string | undefined;
-  return metaType !== undefined && ATTACHMENT_META_TYPES.has(metaType);
-}
-
-/** Check if a system message is a reference part (ADR-107). */
-export function isMessageRefPart(msg: ChatMessage): boolean {
-  if (msg.type !== "system") return false;
-  const metaType = msg.metadata?.type as string | undefined;
-  return metaType !== undefined && MESSAGE_REF_META_TYPES.has(metaType);
-}
-
-/** Any row that folds into the user turn above it. */
-export function isUserTurnPart(msg: ChatMessage): boolean {
-  return isAttachmentPart(msg) || isMessageRefPart(msg);
 }
 
 /**
