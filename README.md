@@ -155,10 +155,9 @@ Agents are created through the **Create Agent wizard** in the app.
 
 ### ☁️ Remote access (optional)
 
-By default Gateway binds HTTP/MQTT to localhost only. To reach a NAT'd Gateway from the public internet, deploy
-`acowork-relay` — a **thin, protocol-agnostic relay**: Gateway dials out one WSS tunnel, the relay routes traffic
-purely by TLS SNI / Host header and never parses HTTP or MQTT. The relay holds **zero accounts and zero secrets**;
-all authentication is decided by your Gateway.
+Gateway binds HTTP/MQTT to localhost only. To reach it from the public internet, deploy `acowork-relay`
+— a thin, protocol-agnostic relay: the Gateway dials out one WSS tunnel, the relay routes traffic by TLS SNI /
+Host header, and all authentication is decided by your Gateway.
 
 - Design: [`docs/design/zh/24-cloud-relay-remote-access.md`](./docs/design/zh/24-cloud-relay-remote-access.md)
 - Deploy (Cloudflare DNS + Aliyun ECS): [`docs/runbooks/relay-ecs-cloudflare-deploy.md`](./docs/runbooks/relay-ecs-cloudflare-deploy.md)

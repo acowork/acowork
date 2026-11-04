@@ -152,9 +152,9 @@ Agent 在应用内通过**创建 Agent 向导**创建。
 
 ### ☁️ 云端中继远程访问（可选）
 
-默认情况下 Gateway 的 HTTP/MQTT 只绑定 localhost。若要在公网访问位于 NAT 之后的 Gateway，可部署 `acowork-relay`
-——一个**协议无关的瘦中继**：Gateway 主动拨出建立一条 WSS 隧道，中继仅按 TLS SNI / Host 头路由字节流，
-不解析 HTTP/MQTT。中继**零账号、零秘密**，所有鉴权由你的 Gateway 裁决。
+Gateway 的 HTTP/MQTT 只绑定 localhost。若要在公网访问位于 NAT 之后的 Gateway，可部署 `acowork-relay`
+——一个协议无关的瘦中继：Gateway 主动拨出建立一条 WSS 隧道，中继仅按 TLS SNI / Host 头路由字节流，
+所有鉴权由你的 Gateway 裁决。
 
 - 设计：[`docs/design/zh/24-cloud-relay-remote-access.md`](./docs/design/zh/24-cloud-relay-remote-access.md)
 - 部署（Cloudflare DNS + 阿里云 ECS）：[`docs/runbooks/relay-ecs-cloudflare-deploy.md`](./docs/runbooks/relay-ecs-cloudflare-deploy.md)
