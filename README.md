@@ -362,6 +362,9 @@ The project is in **active implementation (Alpha)**. Code, design feedback, and 
 
 - Open issues for bug reports, proposals, or design feedback
 - Read [`AGENTS.md`](./AGENTS.md) for project conventions before opening a PR
+- Read [`CONTRIBUTING.md`](./CONTRIBUTING.md) for the build, test, and review gates
+- Report security issues privately, per [`SECURITY.md`](./SECURITY.md)
+- Participation is governed by the [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
 
 ---
 

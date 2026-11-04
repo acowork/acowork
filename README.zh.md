@@ -351,6 +351,9 @@ ACowork 的设计深受以下开源项目启发：
 
 - 通过 issue 提交 bug 报告、提案或设计反馈
 - 提 PR 前请先阅读 [`AGENTS.md`](./AGENTS.md) 了解项目约定
+- 构建、测试与评审要求见 [`CONTRIBUTING.md`](./CONTRIBUTING.md)
+- 安全问题请按 [`SECURITY.md`](./SECURITY.md) 私下报告
+- 参与本项目须遵守 [`CODE_OF_CONDUCT.md`](./CODE_OF_CONDUCT.md)
 
 ---
 
