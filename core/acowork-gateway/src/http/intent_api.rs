@@ -1395,7 +1395,8 @@ pub struct MentionRequest {
     #[serde(default)]
     pub target_sessions: std::collections::HashMap<String, String>,
     /// ADR-106 D6 level 5's cheap escape: "continue nothing, this is new work".
-    /// It is always offered next to a `propose_existing` confirmation, and here
+    /// It is always offered next to an `exec_session_propose_continue`
+    /// confirmation, and here
     /// it takes the ladder's continuation branch away (level 3 is skipped) while
     /// the new session's brief still comes from the Chat Router.
     ///

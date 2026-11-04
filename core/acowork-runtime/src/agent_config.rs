@@ -325,8 +325,8 @@ pub struct ChatRouterConfig {
     /// the execution session, so inheriting the agent's number would be wrong
     /// exactly when the two models differ.
     ///
-    /// Why it exists at all: `new_task` is the only act that asks the model for
-    /// long-form output — a self-contained brief for a session that starts with
+    /// Why it exists at all: `exec_session_create` is the only act that asks the
+    /// model for long-form output — a self-contained brief for a session that starts with
     /// no history. The original hardcoded 2,048 was hit exactly by a brief that
     /// ran long, the response was truncated mid-tool-call, and the turn fell
     /// back to a plain chat reply: the user got an "answer" and no session.
@@ -373,13 +373,13 @@ impl ChatRouterConfig {
     pub const DEFAULT_MAX_CANDIDATES: usize = 10;
     /// Output ceiling for one router turn, used when the config says nothing.
     ///
-    /// Sized for `new_task`: the brief is the only long-form output a router
+    /// Sized for `exec_session_create`: the brief is the only long-form output a router
     /// turn produces, and it has to fit *inside* the same budget as the tool
     /// call's JSON envelope. 8,192 matches the `max_output_tokens` the shipped
     /// agent manifests allow their own execution sessions, so the router is no
     /// longer the narrowest pipe in the agent.
     pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8_192;
-    /// Floor: below this a `new_task` brief cannot be written at all, so a
+    /// Floor: below this an `exec_session_create` brief cannot be written at all, so a
     /// hand-edited config cannot silently reintroduce the truncation bug.
     pub const MIN_MAX_OUTPUT_TOKENS: u32 = 1_024;
     /// Ceiling: keeps one router turn affordable regardless of the config.
@@ -402,8 +402,8 @@ impl ChatRouterConfig {
             .clamp(1_000, 300_000)
     }
 
-    /// Clamped output ceiling for one router turn. The lower bound keeps a
-    /// `new_task` brief writable; the upper bound keeps a single turn
+    /// Clamped output ceiling for one router turn. The lower bound keeps an
+    /// `exec_session_create` brief writable; the upper bound keeps a single turn
     /// affordable no matter what a hand-edited config says.
     pub fn max_output_tokens(&self) -> u32 {
         self.max_output_tokens

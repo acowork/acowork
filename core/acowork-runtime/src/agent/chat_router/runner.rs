@@ -14,8 +14,9 @@
 //! 3. history read over node-auth HTTP (bounded by a timeout — it is the only
 //!    network hop before the model);
 //! 4. Block B projection + Block C tail, model call(s) — the two acts
-//!    (`new_task`, `propose_existing`) plus read-only information tools
-//!    (`memory_recall`, GET-only `http_request`); information rounds stay inside
+//!    (`exec_session_create`, `exec_session_propose_continue`) plus read-only
+//!    information tools (`memory_recall`, GET-only `http_request`,
+//!    `exec_session_read_round`); information rounds stay inside
 //!    one turn so a full user → assistant → tool_call → tool_result → assistant
 //!    chain is never cut across turns;
 //! 5. act: reply (the write-back channel), start a NEW execution session, ask
@@ -45,8 +46,10 @@ use super::context::{
 use super::decision::{append_decision, DecisionRecord};
 use super::prompt::{build_block_a, surface_label, PersonaSource};
 use super::tool::{
-    memory_recall_tool_name, parse_new_task, parse_propose, router_tools, Act, ActError,
-    AliasTable, HTTP_REQUEST_TOOL, NEW_TASK_TOOL, PROPOSE_TOOL, Target,
+    memory_recall_tool_name, parse_exec_session_create, parse_exec_session_propose_continue,
+    parse_exec_session_read_round, router_tools, Act, ActError, AliasTable,
+    EXEC_SESSION_CREATE_TOOL, EXEC_SESSION_PROPOSE_CONTINUE_TOOL, EXEC_SESSION_READ_ROUND_TOOL,
+    HTTP_REQUEST_TOOL, Target,
 };
 use super::ChatSlot;
 use crate::agent::agent_core::AgentCore;
@@ -565,7 +568,7 @@ async fn run_turn(
         messages,
         temperature: Some(0.0),
         // `cfg.max_output_tokens()`, not a constant: the ceiling must cover a
-        // `new_task` brief *and* an information round (a thinking block plus
+        // `exec_session_create` brief *and* an information round (a thinking block plus
         // tool-call arguments plus the final sentence), which the old
         // hardcoded 2,048 did not. See `ChatRouterConfig::max_output_tokens`.
         max_tokens: Some(cfg.max_output_tokens()),
@@ -650,15 +653,23 @@ async fn run_turn(
             info_calls.clone(),
         ));
         for call in &info_calls {
-            let result = execute_info_tool(
-                &prepared.info_tools,
-                call,
-                deps,
-                text,
-                &chat_id,
-                cfg.timeout_ms(),
-            )
-            .await;
+            // `exec_session_read_round` is not a `Tool` off the catalog: it is
+            // the router's own bounded read over the round projection store,
+            // resolved against this turn's alias table — an arm of the router,
+            // not a shared builtin.
+            let result = if call.function.name == EXEC_SESSION_READ_ROUND_TOOL {
+                exec_read_round(call, deps, &aliases)
+            } else {
+                execute_info_tool(
+                    &prepared.info_tools,
+                    call,
+                    deps,
+                    text,
+                    &chat_id,
+                    cfg.timeout_ms(),
+                )
+                .await
+            };
             request.messages.push(ChatMessage::tool(call.id.clone(), result));
         }
         response = match calls.call(request.clone()).await {
@@ -719,7 +730,7 @@ async fn run_turn(
             // means the provider cut the model off at `chat_router
             // .max_output_tokens`, so whatever `content` holds is the tail of an
             // unfinished thought. Publishing it as the router's answer is exactly
-            // how a `new_task` turn became "an agent message with no execution
+            // how an `exec_session_create` turn became "an agent message with no execution
             // session": the brief ran long, the tool-call JSON was cut mid-way,
             // `act_call()` found no act, and the partial prose was written to the
             // chat as if the model had chosen to reply. The provider already
@@ -728,7 +739,7 @@ async fn run_turn(
             // caller that has to look at it.
             if is_truncated(&response) {
                 let reason = format!(
-                    "output truncated at {} tokens — a `{NEW_TASK_TOOL}` brief that \
+                    "output truncated at {} tokens — an `{EXEC_SESSION_CREATE_TOOL}` brief that \
                      does not fit is cut mid-call",
                     cfg.max_output_tokens()
                 );
@@ -779,7 +790,7 @@ async fn run_turn(
                 }
             }
         }
-        Some((Act::Propose(proposal), label)) => {
+        Some((Act::ProposeContinue(proposal), label)) => {
             // The act IS the question. Nothing is delivered: continuing a
             // session is addressing, and addressing belongs to the human
             // (ADR-106 D6). The card names the candidate, the router's reason
@@ -828,8 +839,8 @@ async fn run_turn(
                 }
             }
         }
-        Some((Act::NewTask(args), label)) => {
-            // A `new_task` without `session_config` still honours the user's
+        Some((Act::ExecSessionCreate(args), label)) => {
+            // An `exec_session_create` without `session_config` still honours the user's
             // draft configuration — that is the whole point of not forcing a
             // new session on a config change.
             let seed = args
@@ -929,12 +940,12 @@ async fn run_turn(
                     Outcome::Handled
                 }
                 (Ok(_), Err(e)) => {
-                    let reason = format!("new_task delivery failed: {e}");
+                    let reason = format!("exec_session_create delivery failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
                     degrade(deps, envelope, &chat_id, reason, &rows).await
                 }
                 (Err(e), _) => {
-                    let reason = format!("new_task session creation failed: {e}");
+                    let reason = format!("exec_session_create session creation failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
                     degrade(deps, envelope, &chat_id, reason, &rows).await
                 }
@@ -1109,7 +1120,7 @@ async fn execute_info_tool(
             .collect::<Vec<_>>()
             .join(", ");
         return format!(
-            "Error: `{name}` is not available on a chat turn — valid tools: {NEW_TASK_TOOL}, {PROPOSE_TOOL}, {available} (GET only for {HTTP_REQUEST_TOOL})"
+            "Error: `{name}` is not available on a chat turn — valid tools: {EXEC_SESSION_CREATE_TOOL}, {EXEC_SESSION_PROPOSE_CONTINUE_TOOL}, {EXEC_SESSION_READ_ROUND_TOOL}, {available} (GET only for {HTTP_REQUEST_TOOL})"
         );
     };
     let raw: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
@@ -1187,6 +1198,103 @@ fn truncate_info_result(text: &str) -> String {
     format!("{}…[truncated]", &text[..end])
 }
 
+/// Per-round ceiling on the answer body inside an `exec_session_read_round`
+/// result. The whole result is additionally bounded by
+/// [`INFO_RESULT_MAX_BYTES`]; this one is per round, so one long latest
+/// report cannot crowd the other asked rounds out.
+const READ_ROUND_ANSWER_MAX_BYTES: usize = 2 * 1024;
+/// The same rule for the human's question: a summary line, not a transcript.
+const READ_ROUND_USER_MAX_BYTES: usize = 512;
+
+/// Run one `exec_session_read_round` call: the bounded round projection read
+/// (ADR-106 D4) straight against this process's conversations directory —
+/// the same files and the same fold the loopback HTTP endpoint serves, minus
+/// the hop, and disk-only like it, so a session that is not resident is
+/// still readable.
+///
+/// The alias discipline is the proposal's: the read can only name a session
+/// this turn's permission-filtered candidate set admitted. Everything failing
+/// here is a *tool result*, never a turn failure — a torn transcript is an
+/// explicit hole the model reports as one, not a reason to degrade the turn.
+fn exec_read_round(call: &ToolCall, deps: &RouterDeps, aliases: &AliasTable) -> String {
+    let raw: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
+    let parsed = match parse_exec_session_read_round(&raw, aliases) {
+        Ok(p) => p,
+        Err(err) => return format!("Error: {}", err.message()),
+    };
+    let dir = std::path::Path::new(&deps.work_dir).join("conversations");
+    let text = read_round_result(&dir, &parsed.session_id, &parsed.alias, parsed.rounds);
+    truncate_info_result(&text)
+}
+
+/// The read itself, split from the call envelope so tests can point it at a
+/// temp directory without a live `RouterDeps`.
+fn read_round_result(
+    conversations_dir: &std::path::Path,
+    session_id: &str,
+    alias: &str,
+    rounds: u32,
+) -> String {
+    use super::context::truncate_body;
+    let jsonl = conversations_dir.join(format!("{session_id}.jsonl"));
+    let rounds_path = crate::rounds::rounds_path(conversations_dir, session_id);
+    let index = match crate::rounds::fold_or_rebuild(&rounds_path, &jsonl) {
+        Ok(m) => m,
+        Err(e) => return format!("Error: could not read the round index: {e}"),
+    };
+    if index.is_empty() {
+        return format!(
+            "Session `{alias}` has no recorded round yet — the delivery may still \
+             be queued, or its first turn is still running."
+        );
+    }
+    // Newest N by commit time: `ts` is ISO-8601, so the lexical order is the
+    // time order, and `round_id` breaks ties deterministically.
+    let mut recs: Vec<&crate::rounds::RoundRecord> = index.values().collect();
+    recs.sort_by(|a, b| (&a.ts, &a.round_id).cmp(&(&b.ts, &b.round_id)));
+    let mut picked: Vec<_> = recs.into_iter().rev().take(rounds as usize).collect();
+    // Oldest of the picked first: the model reads the tail of the story in
+    // the order it happened.
+    picked.reverse();
+    let mut out = String::new();
+    for rec in picked {
+        match crate::rounds::project(&jsonl, rec) {
+            Ok(Some(p)) => {
+                out.push_str(&format!(
+                    "round {} · {}{}\n",
+                    p.round_id,
+                    p.status,
+                    if p.terminal { "" } else { " (still running)" }
+                ));
+                if let Some(u) = &p.user {
+                    out.push_str(&format!(
+                        "question: {}\n",
+                        truncate_body(&u.body, READ_ROUND_USER_MAX_BYTES)
+                    ));
+                }
+                match &p.answer {
+                    Some(a) => out.push_str(&format!(
+                        "answer: {}\n",
+                        truncate_body(&a.body, READ_ROUND_ANSWER_MAX_BYTES)
+                    )),
+                    None => out.push_str("answer: (none yet)\n"),
+                }
+                if p.card.is_some() {
+                    out.push_str("card: parked on a question for the human\n");
+                }
+            }
+            // An explicit projection hole: say it is one — the model then
+            // reports "no readable result yet", which is the honest answer.
+            Ok(None) => out.push_str(&format!(
+                "round {}: content unavailable (transcript pruned or rows moved)\n",
+                rec.round_id
+            )),
+            Err(e) => out.push_str(&format!("round {}: read failed: {e}\n", rec.round_id)),
+        }
+    }
+    out
+}
+
 /// The turn's act call, if the model made one.
 ///
 /// When a model emits both acts in one response the **proposal wins**: it is the
@@ -1196,15 +1304,19 @@ fn act_call(response: &ChatResponse) -> Option<ToolCall> {
     let calls = response.tool_calls.as_ref()?;
     calls
         .iter()
-        .find(|call| call.function.name == PROPOSE_TOOL)
-        .or_else(|| calls.iter().find(|call| call.function.name == NEW_TASK_TOOL))
+        .find(|call| call.function.name == EXEC_SESSION_PROPOSE_CONTINUE_TOOL)
+        .or_else(|| {
+            calls
+                .iter()
+                .find(|call| call.function.name == EXEC_SESSION_CREATE_TOOL)
+        })
         .cloned()
 }
 
 /// Either act name — the information-round filter must not run an act as a
 /// lookup, and a refusal text must name what the model may actually call.
 fn is_act(name: &str) -> bool {
-    name == NEW_TASK_TOOL || name == PROPOSE_TOOL
+    name == EXEC_SESSION_CREATE_TOOL || name == EXEC_SESSION_PROPOSE_CONTINUE_TOOL
 }
 
 /// True when the provider stopped because it ran out of output budget rather
@@ -1238,14 +1350,15 @@ fn looks_like_tool_call_envelope(body: &str) -> bool {
 
 fn parse_act(call: &ToolCall, aliases: &AliasTable) -> Result<Act, ActError> {
     let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
-    if call.function.name == PROPOSE_TOOL {
-        parse_propose(&args, aliases).map(Act::Propose)
+    if call.function.name == EXEC_SESSION_PROPOSE_CONTINUE_TOOL {
+        parse_exec_session_propose_continue(&args, aliases).map(Act::ProposeContinue)
     } else {
-        parse_new_task(&args).map(Act::NewTask)
+        parse_exec_session_create(&args).map(Act::ExecSessionCreate)
     }
 }
 
-/// `new_task` / `propose_existing:S3` — the decision label for the log.
+/// `exec_session_create` / `exec_session_propose_continue:S3` — the decision
+/// label for the log.
 fn call_label(call: &ToolCall) -> String {
     let raw: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
     match raw.get("target").and_then(Value::as_str).map(str::trim) {
@@ -1492,7 +1605,7 @@ fn dispatch_content(opened_new: bool, brief: Option<&str>, user_text: &str) -> S
 
 #[cfg(test)]
 mod tests {
-    use super::super::tool::{NewTaskArgs, ProposeArgs};
+    use super::super::tool::{ExecSessionCreateArgs, ProposeContinueArgs};
     use super::*;
     use crate::agent::session::chat_candidates::{CandidateOrigin, CandidateStatus};
     use acowork_core::providers::mock::{MockProvider, MockResponse};
@@ -2047,36 +2160,40 @@ mod tests {
             id: "call-1".into(),
             call_type: "function".into(),
             function: acowork_core::providers::traits::FunctionCall {
-                name: super::super::tool::PROPOSE_TOOL.into(),
-                arguments: r#"{"target":"S1","why":"same login bug"}"#.into(),
+                name: super::super::tool::EXEC_SESSION_PROPOSE_CONTINUE_TOOL.into(),
+                arguments: r#"{"target":"S1","why":"same login bug"}"# .into(),
             },
         };
         assert_eq!(
             parse_act(&proposal, &aliases).unwrap(),
-            Act::Propose(ProposeArgs {
+            Act::ProposeContinue(ProposeContinueArgs {
                 alias: "S1".into(),
                 session_id: "sess-1".into(),
                 why: "same login bug".into(),
             })
         );
-        assert_eq!(call_label(&proposal), "propose_existing:S1");
+        assert_eq!(
+            call_label(&proposal),
+            "exec_session_propose_continue:S1"
+        );
 
         let task = ToolCall {
             function: acowork_core::providers::traits::FunctionCall {
-                name: super::super::tool::NEW_TASK_TOOL.into(),
-                arguments: r#"{"message":"do the thing"}"#.into(),
+                name: super::super::tool::EXEC_SESSION_CREATE_TOOL.into(),
+                arguments: r#"{"message":"do the thing"}"# .into(),
             },
             ..proposal
         };
         assert_eq!(
             parse_act(&task, &aliases).unwrap(),
-            Act::NewTask(NewTaskArgs {
+            Act::ExecSessionCreate(ExecSessionCreateArgs {
                 message: "do the thing".into(),
                 seed: None,
             })
         );
-        // `new_task` addresses nothing, so its label carries no target.
-        assert_eq!(call_label(&task), "new_task");
+        // `exec_session_create` addresses nothing, so its label carries no
+        // target.
+        assert_eq!(call_label(&task), "exec_session_create");
     }
 
     #[test]
@@ -2085,12 +2202,106 @@ mod tests {
             id: "c".into(),
             call_type: "function".into(),
             function: acowork_core::providers::traits::FunctionCall {
-                name: super::super::tool::NEW_TASK_TOOL.into(),
+                name: super::super::tool::EXEC_SESSION_CREATE_TOOL.into(),
                 arguments: "{not json".into(),
             },
         };
         assert_eq!(parse_act(&call, &AliasTable::new()), Err(ActError::MissingBrief));
-        assert_eq!(call_label(&call), "new_task");
+        assert_eq!(call_label(&call), "exec_session_create");
+    }
+
+    /// Fixtures for the read tool: a transcript whose rows carry their round
+    /// stamp plus its side table, exactly as the runtime writer leaves them.
+    fn round_entry(role: &str, content: &str, round_id: &str) -> crate::conversation::ConversationEntry {
+        crate::conversation::ConversationEntry {
+            id: format!("{role}-{content}"),
+            ts: "2026-11-03T00:00:00.000Z".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            metadata: Some(serde_json::json!({ crate::rounds::META_KEY_ROUND_ID: round_id })),
+            kind: None,
+        }
+    }
+
+    fn write_fixture_transcript(dir: &std::path::Path, sid: &str, entries: &[crate::conversation::ConversationEntry]) {
+        let lines: Vec<String> = entries.iter().map(|e| serde_json::to_string(e).unwrap()).collect();
+        std::fs::write(dir.join(format!("{sid}.jsonl")), lines.join("\n") + "\n").unwrap();
+    }
+
+    fn fixture_record(round_id: &str, user: u64, answer: Option<u64>, ts: &str) -> crate::rounds::RoundRecord {
+        crate::rounds::RoundRecord {
+            round_id: round_id.to_string(),
+            user,
+            answer,
+            card: None,
+            terminal: true,
+            status: Some("completed".to_string()),
+            ts: ts.to_string(),
+        }
+    }
+
+    /// The happy read: the newest asked rounds, oldest first, each with its
+    /// question, answer and terminal state — the facts the router is allowed
+    /// to report.
+    #[test]
+    fn read_round_result_renders_the_newest_rounds_in_order() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conv = dir.path();
+        write_fixture_transcript(
+            conv,
+            "sess-1",
+            &[
+                round_entry("user", "first ask", "r:1"),
+                round_entry("assistant", "first answer", "r:1"),
+                round_entry("user", "second ask", "r:2"),
+                round_entry("assistant", "second answer", "r:2"),
+            ],
+        );
+        let rounds = crate::rounds::rounds_path(conv, "sess-1");
+        crate::rounds::append_record(&rounds, &fixture_record("r:1", 0, Some(1), "2026-11-03T00:00:01.000Z")).unwrap();
+        crate::rounds::append_record(&rounds, &fixture_record("r:2", 2, Some(3), "2026-11-03T00:00:02.000Z")).unwrap();
+
+        let all = read_round_result(conv, "sess-1", "S1", 3);
+        assert!(all.contains("second ask"), "{all}");
+        assert!(all.contains("second answer"), "{all}");
+        assert!(all.contains("first ask"), "{all}");
+        assert!(all.contains("completed"), "{all}");
+        // Chronological: the older round is rendered first.
+        assert!(
+            all.find("first ask").unwrap() < all.find("second ask").unwrap(),
+            "{all}"
+        );
+
+        // `rounds` bounds the read to the newest N.
+        let one = read_round_result(conv, "sess-1", "S1", 1);
+        assert!(one.contains("second ask"), "{one}");
+        assert!(!one.contains("first ask"), "{one}");
+    }
+
+    /// A session with no round on disk is an explicit "not yet" — the queued
+    /// dispatch reads as queued, never as a failure and never as a guess.
+    #[test]
+    fn read_round_result_states_an_explicit_hole_when_nothing_is_recorded() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let text = read_round_result(dir.path(), "sess-9", "S3", 1);
+        assert!(text.contains("S3"), "{text}");
+        assert!(text.contains("no recorded round yet"), "{text}");
+    }
+
+    /// A side-table coordinate the transcript can no longer vouch for renders
+    /// as the hole it is — the read must never serve whatever sits at the
+    /// position (ADR-106 D4/D5).
+    #[test]
+    fn read_round_result_reports_unprojectable_rounds_as_holes() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conv = dir.path();
+        write_fixture_transcript(conv, "sess-2", &[round_entry("user", "only row", "r:1")]);
+        let rounds = crate::rounds::rounds_path(conv, "sess-2");
+        crate::rounds::append_record(&rounds, &fixture_record("r:1", 40, None, "2026-11-03T00:00:01.000Z")).unwrap();
+
+        let text = read_round_result(conv, "sess-2", "S1", 1);
+        assert!(text.contains("content unavailable"), "{text}");
+        assert!(!text.contains("only row"), "a drifted coordinate must not be served: {text}");
     }
 
     #[test]
@@ -2317,7 +2528,7 @@ mod tests {
     }
 
     /// A truncated response is not a decision. The production failure this
-    /// pins: a `new_task` brief ran past `max_output_tokens`, the provider cut
+    /// pins: an `exec_session_create` brief ran past `max_output_tokens`, the provider cut
     /// the tool-call JSON mid-way, `act_call()` found no act, and the partial
     /// prose was published to the chat as the router's answer — the user saw an
     /// agent message and no execution session was ever created.
@@ -2345,7 +2556,7 @@ mod tests {
     #[test]
     fn a_tool_call_written_as_text_is_recognised_and_withheld() {
         assert!(looks_like_tool_call_envelope(
-            "<tool_call>\n<invoke name=\"new_task\"><message>do it"
+            "<tool_call>\n<invoke name=\"exec_session_create\"><message>do it"
         ));
         // Some endpoints splice a zero-width space into the opening tag; the
         // `tool_call` marker survives on the other side of that seam.

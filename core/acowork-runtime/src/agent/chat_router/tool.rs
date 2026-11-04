@@ -3,12 +3,13 @@
 //! The router has two delivery acts and neither of them silently moves a human
 //! message into an execution context:
 //!
-//! - `new_task(brief)` — open a fresh execution session. This is the only
-//!   delivery a model may perform, because a new session belongs to nobody's
-//!   prior context, so nothing can be contaminated by a wrong guess;
-//! - `propose_existing(alias, why)` — say "this looks like a continuation of
-//!   that one" and hand the human a confirmation card. It delivers nothing: a
-//!   proposal is acted on only when the person who typed the message confirms it.
+//! - `exec_session_create(message)` — open a fresh execution session. This is
+//!   the only delivery a model may perform, because a new session belongs to
+//!   nobody's prior context, so nothing can be contaminated by a wrong guess;
+//! - `exec_session_propose_continue(target, why)` — say "this looks like a
+//!   continuation of that one" and hand the human a confirmation card. It
+//!   delivers nothing: a proposal is acted on only when the person who typed
+//!   the message confirms it.
 //!
 //! **`dispatch(target = <existing alias>)` is deleted** (ADR-106 D6: "LLM 失去
 //! 静默投递权"). Continuing a session is addressing, and addressing belongs to
@@ -20,11 +21,14 @@
 //! also how the router asks a clarifying question (`ask_human` in the ADR's act
 //! list needs no separate tool: a chat answer addressed to the human *is* the
 //! question). Alongside the acts sit read-only information tools
-//! (`memory_recall`, `http_request` narrowed to GET) so answering a factual
-//! question does not require touching an execution session at all. The executor
-//! boundary is unchanged: no execution tool is ever visible here, so a package
-//! cannot talk the router into doing work — lookups read information, they never
-//! change anything.
+//! (`memory_recall`, `http_request` narrowed to GET, and
+//! `exec_session_read_round`, which reads back the most recent rounds of one
+//! candidate session over the same bounded projection read the panel uses,
+//! ADR-106 D4) so answering a factual question — including "how did that task
+//! end up?" — does not require touching an execution session at all. The
+//! executor boundary is unchanged: no execution tool is ever visible here, so
+//! a package cannot talk the router into doing work — lookups read
+//! information, they never change anything.
 //!
 //! The alias form (`S1`, `S2`, …) survives, with a narrowed purpose: it is the
 //! proposal vocabulary. Candidate ids are runtime state; a model that only ever
@@ -40,9 +44,12 @@ use serde_json::{json, Value};
 use crate::agent::session::intent_routing::SessionSeed;
 
 /// Tool names, fixed across turns — they are part of the cached prefix.
-pub const NEW_TASK_TOOL: &str = "new_task";
+pub const EXEC_SESSION_CREATE_TOOL: &str = "exec_session_create";
 /// The proposal act: name a candidate, ask the human to confirm the continue.
-pub const PROPOSE_TOOL: &str = "propose_existing";
+pub const EXEC_SESSION_PROPOSE_CONTINUE_TOOL: &str = "exec_session_propose_continue";
+/// The read-back act-shaped information tool: report what a candidate session
+/// last said, over the bounded D4 round projection read. Read-only.
+pub const EXEC_SESSION_READ_ROUND_TOOL: &str = "exec_session_read_round";
 /// MCP server name the official memory service registers under (ADR-101).
 pub const MEMORY_SERVER_NAME: &str = "memory";
 /// The recall tool the memory service exposes (ADR-101 §MCP).
@@ -53,10 +60,16 @@ pub const MEMORY_RECALL_SERVICE_TOOL: &str = "memory_recall";
 pub const HTTP_REQUEST_TOOL: &str = "http_request";
 
 /// Act names a previous prompt generation taught and the wire no longer
-/// offers. ADR-106 D6 retired `dispatch`; any text still naming it describes a
-/// tool the model cannot call, so the drift guard in this module's tests fails
-/// when the kernel prompt teaches one.
-pub const RETIRED_ACT_NAMES: &[&str] = &["dispatch"];
+/// offers. ADR-106 D6 retired `dispatch`; the `exec_session_*` renaming
+/// retired `new_task` and `propose_existing`. Any text still naming one
+/// describes a tool the model cannot call, so the drift guard in this
+/// module's tests fails when the kernel prompt teaches one.
+pub const RETIRED_ACT_NAMES: &[&str] = &["dispatch", "new_task", "propose_existing"];
+
+/// How many most recent rounds one `exec_session_read_round` call may read
+/// back. The read is bounded so a router turn cannot pull a whole execution
+/// transcript into the chat context.
+pub const READ_ROUNDS_MAX: u32 = 3;
 
 /// The `all_tools` name of the memory service's recall tool.
 ///
@@ -73,13 +86,13 @@ pub fn memory_recall_tool_name() -> String {
 /// Alias → real session id for one router turn.
 pub type AliasTable = HashMap<String, String>;
 
-/// The `new_task` schema: a brief, and an optional configuration for the
-/// session it opens. There is no `target` — this tool cannot address anything,
-/// it only ever starts something (ADR-106 D6).
+/// The `exec_session_create` schema: a brief, and an optional configuration
+/// for the session it opens. There is no `target` — this tool cannot address
+/// anything, it only ever starts something (ADR-106 D6).
 ///
 /// Field order and wording are part of the cached prefix (design 29 §6.2):
 /// never make them depend on turn state.
-pub fn new_task_tool_spec() -> Value {
+pub fn exec_session_create_tool_spec() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -102,11 +115,11 @@ pub fn new_task_tool_spec() -> Value {
     })
 }
 
-/// The `propose_existing` schema: which candidate, and the one sentence the
-/// human reads before deciding. `why` is required because a card that names a
-/// session without a reason asks the human to do the routing work the proposal
-/// was supposed to save them.
-pub fn propose_existing_tool_spec() -> Value {
+/// The `exec_session_propose_continue` schema: which candidate, and the one
+/// sentence the human reads before deciding. `why` is required because a card
+/// that names a session without a reason asks the human to do the routing work
+/// the proposal was supposed to save them.
+pub fn exec_session_propose_continue_tool_spec() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -136,16 +149,43 @@ pub fn propose_existing_tool_spec() -> Value {
 pub fn act_tools() -> Vec<Value> {
     vec![
         json!({
-            "name": NEW_TASK_TOOL,
+            "name": EXEC_SESSION_CREATE_TOOL,
             "description": "Start a new execution session for this turn's work. Call at most once.",
-            "parameters": new_task_tool_spec(),
+            "parameters": exec_session_create_tool_spec(),
         }),
         json!({
-            "name": PROPOSE_TOOL,
+            "name": EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
             "description": "Ask the human whether this turn continues one of the listed sessions. Delivers nothing by itself - the human confirms or refuses a card.",
-            "parameters": propose_existing_tool_spec(),
+            "parameters": exec_session_propose_continue_tool_spec(),
         }),
     ]
+}
+
+/// Router-facing `exec_session_read_round` definition — a read-only
+/// information tool, not a delivery act. It reads back the most recent rounds
+/// of one candidate session (the human's question, the session's answer, its
+/// terminal state) through the same bounded projection read the panel uses
+/// (ADR-106 D4), so it works whether or not the session is resident. Flat
+/// shape — see [`act_tools`].
+pub fn exec_session_read_round_router_spec() -> Value {
+    json!({
+        "name": EXEC_SESSION_READ_ROUND_TOOL,
+        "description": "Read back what one candidate execution session last reported: its recent rounds - the question, the answer, the terminal state. Read-only: delivers nothing, changes nothing. The only legitimate source for anything you say about what a session did.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "target": {
+                    "type": "string",
+                    "description": "A candidate alias from the [candidates] block (S1, S2, …)."
+                },
+                "rounds": {
+                    "type": "integer",
+                    "description": "How many most recent rounds to read back (1 to 3, default 1)."
+                }
+            },
+            "required": ["target"]
+        }
+    })
 }
 
 /// Router-facing memory-recall definition. A deliberate subset of the
@@ -209,11 +249,15 @@ pub fn http_request_router_spec() -> Value {
 }
 
 /// Assemble the request's `tools` array from the two acts plus the enabled
-/// information tools (order fixed: new_task, propose_existing, memory recall,
-/// http_request).
+/// information tools (order fixed: exec_session_create,
+/// exec_session_propose_continue, memory recall, http_request,
+/// exec_session_read_round).
 ///
 /// `memory_tool` is `None` when the catalog has no official memory server —
 /// the router then simply has no memory tool for that turn (ADR-101).
+/// `exec_session_read_round` is always present: it can only read sessions the
+/// permission filter already admitted to this turn's candidate set, so it
+/// needs no separate enablement.
 pub fn router_tools(memory_tool: Option<&str>, http_enabled: bool) -> Vec<Value> {
     let mut tools = act_tools();
     if let Some(name) = memory_tool {
@@ -222,6 +266,7 @@ pub fn router_tools(memory_tool: Option<&str>, http_enabled: bool) -> Vec<Value>
     if http_enabled {
         tools.push(http_request_router_spec());
     }
+    tools.push(exec_session_read_round_router_spec());
     tools
 }
 
@@ -245,14 +290,14 @@ pub enum Target {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Act {
     /// Open a new execution session and deliver the turn to it.
-    NewTask(NewTaskArgs),
+    ExecSessionCreate(ExecSessionCreateArgs),
     /// Offer the human a continuation of one candidate session.
-    Propose(ProposeArgs),
+    ProposeContinue(ProposeContinueArgs),
 }
 
-/// A validated `new_task` call.
+/// A validated `exec_session_create` call.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NewTaskArgs {
+pub struct ExecSessionCreateArgs {
     /// The task brief. Required: the session this opens has no history, so a
     /// turn with no brief would receive nothing but the raw user text.
     pub message: String,
@@ -260,9 +305,9 @@ pub struct NewTaskArgs {
     pub seed: Option<SessionSeed>,
 }
 
-/// A validated `propose_existing` call.
+/// A validated `exec_session_propose_continue` call.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProposeArgs {
+pub struct ProposeContinueArgs {
     /// The alias the model used — kept alongside the resolved id so the
     /// decision log reads the way the model wrote it.
     pub alias: String,
@@ -272,6 +317,19 @@ pub struct ProposeArgs {
     pub session_id: String,
     /// The one sentence shown on the confirmation card.
     pub why: String,
+}
+
+/// A validated `exec_session_read_round` call: the session behind a
+/// candidate alias plus the bounded number of most recent rounds to read.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReadRoundArgs {
+    /// The alias the model used — kept so the decision trace reads the way
+    /// the model wrote it.
+    pub alias: String,
+    /// The session behind that alias, resolved against this turn's table.
+    pub session_id: String,
+    /// Rounds to read back, already clamped to 1..=`READ_ROUNDS_MAX`.
+    pub rounds: u32,
 }
 
 /// Why an act call was rejected. The message is fed back to the model for
@@ -291,31 +349,31 @@ impl ActError {
     pub fn message(&self) -> String {
         match self {
             Self::MissingBrief => {
-                "`new_task` requires a non-empty `message` — the execution agent starts with no \
+                "`exec_session_create` requires a non-empty `message` — the execution agent starts with no \
                  history, so your brief IS its only starting context. Write a self-contained \
                  instruction summarising the user's goal and the background it needs."
                     .to_string()
             }
-            Self::MissingTarget => format!(
-                "`{PROPOSE_TOOL}` requires `target`: one of the aliases from the [candidates] block"
-            ),
+            Self::MissingTarget => {
+                "`target` is required: one of the aliases from the [candidates] block".to_string()
+            }
             Self::UnknownAlias(alias) => format!(
                 "unknown candidate alias `{alias}` — use one of the aliases from the [candidates] block"
             ),
             Self::MissingWhy => format!(
-                "`{PROPOSE_TOOL}` requires a non-empty `why` — the human is deciding on your \
+                "`{EXEC_SESSION_PROPOSE_CONTINUE_TOOL}` requires a non-empty `why` — the human is deciding on your \
                  reason, so say in one sentence what makes this session the right one"
             ),
         }
     }
 }
 
-/// Parse and validate one `new_task` call.
+/// Parse and validate one `exec_session_create` call.
 ///
 /// Validation is model-facing and never panics. A blank brief is rejected
 /// rather than dropped: an empty instruction would open a session with nothing
 /// to work on, and the human would read that as the agent ignoring them.
-pub fn parse_new_task(args: &Value) -> Result<NewTaskArgs, ActError> {
+pub fn parse_exec_session_create(args: &Value) -> Result<ExecSessionCreateArgs, ActError> {
     let message = args
         .get("message")
         .and_then(Value::as_str)
@@ -327,17 +385,20 @@ pub fn parse_new_task(args: &Value) -> Result<NewTaskArgs, ActError> {
         Some(cfg) if !cfg.is_null() => SessionSeed::from_json(&cfg.to_string()),
         _ => None,
     };
-    Ok(NewTaskArgs { message, seed })
+    Ok(ExecSessionCreateArgs { message, seed })
 }
 
-/// Parse and validate one `propose_existing` call against the turn's alias
-/// table.
+/// Parse and validate one `exec_session_propose_continue` call against the
+/// turn's alias table.
 ///
 /// The alias must be a known candidate (case-insensitive, as before). The
 /// table is built from the permission-filtered candidate list, so an invented
 /// or out-of-scope alias is refused here and never reaches a card — the human
 /// is only ever offered sessions the filter admitted.
-pub fn parse_propose(args: &Value, aliases: &AliasTable) -> Result<ProposeArgs, ActError> {
+pub fn parse_exec_session_propose_continue(
+    args: &Value,
+    aliases: &AliasTable,
+) -> Result<ProposeContinueArgs, ActError> {
     let target = args
         .get("target")
         .and_then(Value::as_str)
@@ -356,10 +417,44 @@ pub fn parse_propose(args: &Value, aliases: &AliasTable) -> Result<ProposeArgs, 
         .filter(|s| !s.is_empty())
         .ok_or(ActError::MissingWhy)?
         .to_string();
-    Ok(ProposeArgs {
+    Ok(ProposeContinueArgs {
         alias,
         session_id,
         why,
+    })
+}
+
+/// Parse and validate one `exec_session_read_round` call against the turn's
+/// alias table.
+///
+/// Same alias discipline as a proposal: the read can only name a session this
+/// turn's permission-filtered candidate set admitted. `rounds` is clamped, not
+/// rejected — an oversized request is a bounded read of the newest rounds, so
+/// the right repair is "fewer", not a wasted retry.
+pub fn parse_exec_session_read_round(
+    args: &Value,
+    aliases: &AliasTable,
+) -> Result<ReadRoundArgs, ActError> {
+    let target = args
+        .get("target")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or(ActError::MissingTarget)?;
+    let alias = target.to_ascii_uppercase();
+    let session_id = aliases
+        .get(&alias)
+        .ok_or_else(|| ActError::UnknownAlias(target.to_string()))?
+        .clone();
+    let rounds = args
+        .get("rounds")
+        .and_then(Value::as_u64)
+        .map(|r| (r as u32).clamp(1, READ_ROUNDS_MAX))
+        .unwrap_or(1);
+    Ok(ReadRoundArgs {
+        alias,
+        session_id,
+        rounds,
     })
 }
 
@@ -375,26 +470,29 @@ mod tests {
     }
 
     #[test]
-    fn new_task_carries_the_brief_and_a_seed() {
+    fn exec_session_create_carries_the_brief_and_a_seed() {
         let args = json!({
             "message": "  pick this up  ",
             "session_config": { "model": "m1", "provider": "p1" }
         });
-        let parsed = parse_new_task(&args).unwrap();
+        let parsed = parse_exec_session_create(&args).unwrap();
         assert_eq!(parsed.message, "pick this up");
         let seed = parsed.seed.expect("seed parsed");
         assert_eq!(seed.model.as_deref(), Some("m1"));
         assert_eq!(seed.provider.as_deref(), Some("p1"));
     }
 
-    /// The regression this pins: a brief-less `new_task` used to be legal for an
-    /// `Existing` target (`message` was optional because the user's own words
-    /// were forwarded). Now the only act that delivers must state the task, or a
-    /// fresh session opens on raw text with no context.
+    /// The regression this pins: a brief-less create call used to be legal for
+    /// an `Existing` target (`message` was optional because the user's own
+    /// words were forwarded). Now the only act that delivers must state the
+    /// task, or a fresh session opens on raw text with no context.
     #[test]
-    fn a_new_task_without_a_brief_is_rejected() {
+    fn a_create_without_a_brief_is_rejected() {
         for args in [json!({}), json!({ "message": "   " }), json!({ "message": null })] {
-            assert_eq!(parse_new_task(&args), Err(ActError::MissingBrief));
+            assert_eq!(
+                parse_exec_session_create(&args),
+                Err(ActError::MissingBrief)
+            );
         }
     }
 
@@ -402,8 +500,11 @@ mod tests {
     fn a_proposal_resolves_its_alias_and_keeps_the_reason() {
         // Case-insensitive alias match is unchanged: the model has no reason to
         // know the table is uppercase-keyed.
-        let parsed = parse_propose(&json!({ "target": "s1", "why": "same login bug" }), &aliases())
-            .unwrap();
+        let parsed = parse_exec_session_propose_continue(
+            &json!({ "target": "s1", "why": "same login bug" }),
+            &aliases(),
+        )
+        .unwrap();
         assert_eq!(parsed.session_id, "sess-1");
         assert_eq!(parsed.alias, "S1");
         assert_eq!(parsed.why, "same login bug");
@@ -415,20 +516,64 @@ mod tests {
     #[test]
     fn an_unknown_alias_or_a_missing_reason_is_rejected() {
         assert_eq!(
-            parse_propose(&json!({ "target": "S9", "why": "x" }), &aliases()),
+            parse_exec_session_propose_continue(&json!({ "target": "S9", "why": "x" }), &aliases()),
             Err(ActError::UnknownAlias("S9".into()))
         );
         assert_eq!(
-            parse_propose(&json!({ "why": "x" }), &aliases()),
+            parse_exec_session_propose_continue(&json!({ "why": "x" }), &aliases()),
             Err(ActError::MissingTarget)
         );
         assert_eq!(
-            parse_propose(&json!({ "target": "S1" }), &aliases()),
+            parse_exec_session_propose_continue(&json!({ "target": "S1" }), &aliases()),
             Err(ActError::MissingWhy)
         );
         assert_eq!(
-            parse_propose(&json!({ "target": "S1", "why": "  " }), &aliases()),
+            parse_exec_session_propose_continue(&json!({ "target": "S1", "why": "  " }), &aliases()),
             Err(ActError::MissingWhy)
+        );
+    }
+
+    /// The read tool shares the proposal's alias discipline — it can name no
+    /// session the candidate filter did not admit — and clamps `rounds` rather
+    /// than rejecting it: the honest repair for an oversized read is fewer
+    /// rounds, not a retry.
+    #[test]
+    fn a_read_resolves_its_alias_and_clamps_the_round_count() {
+        let parsed = parse_exec_session_read_round(&json!({ "target": "s2", "rounds": 2 }), &aliases())
+            .unwrap();
+        assert_eq!(parsed.session_id, "sess-2");
+        assert_eq!(parsed.alias, "S2");
+        assert_eq!(parsed.rounds, 2);
+        // Default and both clamp bounds.
+        assert_eq!(
+            parse_exec_session_read_round(&json!({ "target": "S1" }), &aliases())
+                .unwrap()
+                .rounds,
+            1
+        );
+        assert_eq!(
+            parse_exec_session_read_round(&json!({ "target": "S1", "rounds": 0 }), &aliases())
+                .unwrap()
+                .rounds,
+            1
+        );
+        assert_eq!(
+            parse_exec_session_read_round(
+                &json!({ "target": "S1", "rounds": READ_ROUNDS_MAX + 10 }),
+                &aliases()
+            )
+            .unwrap()
+            .rounds,
+            READ_ROUNDS_MAX
+        );
+        // Same alias refusals as a proposal.
+        assert_eq!(
+            parse_exec_session_read_round(&json!({ "target": "S7" }), &aliases()),
+            Err(ActError::UnknownAlias("S7".into()))
+        );
+        assert_eq!(
+            parse_exec_session_read_round(&json!({}), &aliases()),
+            Err(ActError::MissingTarget)
         );
     }
 
@@ -437,20 +582,21 @@ mod tests {
     /// (name/description/parameters at the top level) is the `ChatRequest.tools`
     /// convention every provider adapter reads; the OpenAI nested wrapper must
     /// NOT appear here (regression: it made the adapters emit `name = "unknown"`
-    /// and killed router dispatch). And `new_task` must never grow a `target`
-    /// again: naming a session is the delivery right ADR-106 D6 took away.
+    /// and killed router dispatch). And `exec_session_create` must never grow a
+    /// `target` again: naming a session is the delivery right ADR-106 D6 took
+    /// away.
     #[test]
     fn the_act_schemas_are_stable_and_carry_no_delivery_address() {
         let tools = act_tools();
         assert_eq!(tools.len(), 2);
-        assert_eq!(tools[0]["name"], NEW_TASK_TOOL);
-        assert_eq!(tools[1]["name"], PROPOSE_TOOL);
+        assert_eq!(tools[0]["name"], EXEC_SESSION_CREATE_TOOL);
+        assert_eq!(tools[1]["name"], EXEC_SESSION_PROPOSE_CONTINUE_TOOL);
         assert!(tools[0].get("function").is_none());
         let new_params = &tools[0]["parameters"];
         assert_eq!(new_params["required"], json!(["message"]));
         assert!(
             new_params["properties"].get("target").is_none(),
-            "`new_task` must not be able to name a session"
+            "`exec_session_create` must not be able to name a session"
         );
         let propose_params = &tools[1]["parameters"];
         assert_eq!(propose_params["required"], json!(["target", "why"]));
@@ -466,15 +612,23 @@ mod tests {
             .collect();
         assert_eq!(
             names,
-            vec![NEW_TASK_TOOL, PROPOSE_TOOL, memory.as_str(), HTTP_REQUEST_TOOL]
+            vec![
+                EXEC_SESSION_CREATE_TOOL,
+                EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
+                memory.as_str(),
+                HTTP_REQUEST_TOOL,
+                EXEC_SESSION_READ_ROUND_TOOL
+            ]
         );
         // The router-side http schema must not offer a way to mutate anything.
         let http_params = &all[3]["parameters"];
         assert!(!http_params["properties"].as_object().unwrap().contains_key("method"));
         assert!(!http_params["properties"].as_object().unwrap().contains_key("body"));
         assert_eq!(http_params["required"], json!(["url"]));
-        // With nothing enabled the array is exactly the two acts.
-        assert_eq!(router_tools(None, false).len(), 2);
+        // The read tool is always present (it can only name admitted
+        // candidates), so with nothing else enabled the array is the two acts
+        // plus the read.
+        assert_eq!(router_tools(None, false).len(), 3);
         // Deterministic bytes for a fixed enablement set (cached prefix).
         assert_eq!(
             serde_json::to_string(&all).unwrap(),
@@ -492,7 +646,15 @@ mod tests {
             .iter()
             .map(|t| t["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, vec![NEW_TASK_TOOL, PROPOSE_TOOL, HTTP_REQUEST_TOOL]);
+        assert_eq!(
+            names,
+            vec![
+                EXEC_SESSION_CREATE_TOOL,
+                EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
+                HTTP_REQUEST_TOOL,
+                EXEC_SESSION_READ_ROUND_TOOL
+            ]
+        );
     }
 
     /// The prompt and the wire schema are two halves of one contract, and they
@@ -500,7 +662,8 @@ mod tests {
     /// act, so no execution session was ever created:
     ///
     /// 1. ADR-106 D6 replaced `dispatch` with `new_task` / `propose_existing`
-    ///    but left the kernel prompt teaching `dispatch` (2026-11).
+    ///    but left the kernel prompt teaching `dispatch` (2026-11); the
+    ///    `exec_session_*` renaming then retired those two names in turn.
     /// 2. Before that, the OpenAI-nested tool shape made every router tool
     ///    arrive as `name = "unknown"` with an empty schema.
     ///
@@ -519,7 +682,12 @@ mod tests {
         // byte-stable prompt may not hardcode — the prompt names the capability
         // and the model reads the real name off the tools array. That asymmetry
         // is deliberate, so it is asserted rather than left implicit.
-        for name in [NEW_TASK_TOOL, PROPOSE_TOOL, HTTP_REQUEST_TOOL] {
+        for name in [
+            EXEC_SESSION_CREATE_TOOL,
+            EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
+            HTTP_REQUEST_TOOL,
+            EXEC_SESSION_READ_ROUND_TOOL,
+        ] {
             assert!(
                 prompt.contains(name),
                 "`{name}` is offered on the wire but never named in \
@@ -535,8 +703,15 @@ mod tests {
 
         // Each act's parameters, not only its name.
         for (tool, spec) in [
-            (NEW_TASK_TOOL, new_task_tool_spec()),
-            (PROPOSE_TOOL, propose_existing_tool_spec()),
+            (EXEC_SESSION_CREATE_TOOL, exec_session_create_tool_spec()),
+            (
+                EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
+                exec_session_propose_continue_tool_spec(),
+            ),
+            (
+                EXEC_SESSION_READ_ROUND_TOOL,
+                exec_session_read_round_router_spec()["parameters"].clone(),
+            ),
         ] {
             for param in spec["properties"].as_object().unwrap().keys() {
                 assert!(

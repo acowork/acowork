@@ -7,8 +7,8 @@
 //!    replaces the built-in body **verbatim** (only `{{agent_name}}` is
 //!    substituted) — the whole prompt is replaceable, not just the persona
 //!    section. Otherwise the built-in default from [`acowork_core::chat_prompt`]
-//!    is assembled: the Runtime-owned kernel (role boundary, `dispatch`
-//!    contract, decision rules), the agent's manifest persona, and the surface
+//!    is assembled: the Runtime-owned kernel (role boundary, `exec_session_*`
+//!    act contract, decision rules), the agent's manifest persona, and the surface
 //!    scenario (`SCENARIO_DM` / `SCENARIO_GROUP`, so 1:1 and group chats each
 //!    form their own cache prefix). The `# Safety` tail
 //!    ([`CHAT_PROMPT_TAIL`]) is then re-applied to whichever body resulted, so
