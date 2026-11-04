@@ -106,46 +106,39 @@ same protocol path lights up. The Gateway has **zero local-vs-remote code branch
 
 ## 🚀 Quick Start
 
-### Install
+Install the Desktop App for your platform — Windows `.msi`, macOS `.dmg`, Linux `.deb` / `.rpm` /
+AppImage. The installer bundles the Gateway and every service it supervises.
 
-Download the Desktop App for your platform and install it:
+On first launch, pick one of three Gateway modes.
 
-| Platform | Package |
-|---|---|
-| Windows | `.msi` / NSIS installer (`.exe`) |
-| macOS | `.app` / `.dmg` |
-| Linux | `.deb` / `.rpm` / AppImage |
+**1. Local** — the app starts a Gateway for you.
 
-The installer ships the Gateway, Runtime, Node Agent and the services they
-supervise — nothing else is needed on the machine.
-
-### Run
-
-The Desktop App is the whole product. Launch it and pick how to reach a
-Gateway on the first screen:
-
-- **Local** — the app starts a Gateway for you. This is the default and needs
-  no setup.
-- **Remote** — connect to a Gateway you started yourself, on this machine or
-  another.
-- **Relay** — reach a Gateway on your LAN through the cloud relay.
-
-To drive a Gateway from the command line instead:
-
-```bash
-acowork-gateway --daemon   # serves on 127.0.0.1:19876 (HTTP) / :19875 (MQTT)
+```
+Launch the Desktop App → choose Local → done
 ```
 
-`--daemon` is required — without it the binary only prints its help. On a
-fresh install the Gateway asks for an admin password once before it starts
-serving.
+**2. Remote** — connect to a Gateway on another machine.
 
-Start the Desktop App afterwards and choose **Remote** pointing at that
-address — or leave it in **Local**, which adopts an already-running Gateway
-instead of starting a second one.
+```
+On the Gateway machine:  acowork-gateway --daemon
+On the Desktop machine:  Launch the Desktop App → choose Remote → enter
+                         http://<gateway-host>:19876
+```
 
-Agents are created through the **Create Agent wizard** in the app; it writes
-the manifest for you.
+**3. Relay** — reach a Gateway through the cloud relay.
+
+```
+On the Gateway machine:  enable the relay tunnel
+                         curl -X POST http://127.0.0.1:19876/api/relay/enable \
+                              -H 'Content-Type: application/json' \
+                              -d '{"url":"wss://<relay-domain>/tunnel"}'
+On the Desktop machine:  Launch the Desktop App → choose Relay → enter
+                         https://<gw-id>.<relay-domain>
+```
+
+`<gw-id>` is shown in the Desktop App's Gateway settings.
+
+Agents are created through the **Create Agent wizard** in the app.
 
 > Building from source, packaging, CI, and deployment:
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)

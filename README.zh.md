@@ -103,39 +103,39 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 
 ## 🚀 快速开始
 
-### 安装
+安装对应平台的 Desktop App——Windows `.msi`、macOS `.dmg`、Linux `.deb` / `.rpm` / AppImage。
+安装包内含 Gateway 及其托管的全部服务。
 
-下载对应平台的 Desktop App 安装包并安装：
+首次启动时选择一种 Gateway 模式。
 
-| 平台 | 安装包 |
-|---|---|
-| Windows | `.msi` / NSIS 安装程序（`.exe`） |
-| macOS | `.app` / `.dmg` |
-| Linux | `.deb` / `.rpm` / AppImage |
+**1. 本地（Local）**——由应用为你启动 Gateway。
 
-安装包内含 Gateway、Runtime、Node Agent 及其托管的服务——机器上无需再装别的东西。
-
-### 运行
-
-Desktop App 就是完整产品。启动后在首屏选择如何接入 Gateway：
-
-- **本地（Local）**——由应用为你启动一个 Gateway。默认选项，无需任何配置。
-- **远程（Remote）**——连接你自己启动的 Gateway，可以在本机，也可以在别的机器上。
-- **中继（Relay）**——通过云端中继访问局域网内的 Gateway。
-
-若想用命令行驱动 Gateway：
-
-```bash
-acowork-gateway --daemon   # 监听 127.0.0.1:19876（HTTP）/ :19875（MQTT）
+```
+启动 Desktop App → 选择「本地」→ 完成
 ```
 
-`--daemon` 是必需的——不加它只会打印帮助信息。全新安装时，Gateway 会在开始服务前要求设置一次
-admin 密码。
+**2. 远程（Remote）**——连接另一台机器上的 Gateway。
 
-之后再启动 Desktop App，选择 **远程**并填入该地址；也可以保持**本地**模式——此时它会复用已在运行的
-Gateway，而不会再起一个。
+```
+Gateway 所在机器：  acowork-gateway --daemon
+Desktop 所在机器：  启动 Desktop App → 选择「远程」→ 填入
+                    http://<gateway-host>:19876
+```
 
-Agent 在应用内通过**创建 Agent 向导**创建——manifest 由向导代写，无需手写。
+**3. 中继（Relay）**——通过云端中继访问 Gateway。
+
+```
+Gateway 所在机器：  启用中继隧道
+                    curl -X POST http://127.0.0.1:19876/api/relay/enable \
+                         -H 'Content-Type: application/json' \
+                         -d '{"url":"wss://<relay-domain>/tunnel"}'
+Desktop 所在机器：  启动 Desktop App → 选择「中继」→ 填入
+                    https://<gw-id>.<relay-domain>
+```
+
+`<gw-id>` 在 Desktop App 的 Gateway 设置里可以看到。
+
+Agent 在应用内通过**创建 Agent 向导**创建。
 
 > 从源码编译、打包、CI 与部署：
 > [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
