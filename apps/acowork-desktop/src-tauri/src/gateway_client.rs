@@ -316,29 +316,62 @@ async fn parse_gateway_response<T: DeserializeOwned>(resp: Response) -> Result<T
     }
 }
 
-/// Build the multipart body of `POST /api/agents/install`.
+/// Build the multipart body shared by `POST /api/agents/install` and
+/// `POST /api/agents/ensure`.
+///
+/// These are exactly the fields the Gateway parses (`read_agent_upload`:
+/// `package` / `node_id` / `expected_version`) — anything else it ignores.
 ///
 /// A free function instead of inline code inside
 /// [`GatewayClient::install_agent`] because that request is rebuilt for the
 /// transparent 401 replay ([`GatewayClient::send`]) and a multipart body
 /// cannot be cloned.
+fn upload_form(package_bytes: &[u8], node_id: Option<&str>) -> Result<reqwest::multipart::Form> {
+    let mut form = reqwest::multipart::Form::new().part(
+        "package",
+        reqwest::multipart::Part::bytes(package_bytes.to_vec())
+            .file_name("package.agent")
+            .mime_str("application/octet-stream")?,
+    );
+    if let Some(node) = node_id {
+        form = form.text("node_id", node.to_string());
+    }
+    Ok(form)
+}
+
+/// Build the multipart body of `POST /api/agents/install`.
+///
+/// The extra `dev_mode` field is sent for wire compatibility only: the
+/// Gateway does not read it, signature strictness is decided by its own
+/// `gateway_dev_mode` config (PRD agent-hub-install-dialog §9 F3). It never
+/// weakens or strengthens verification from the client side.
 fn install_form(
     package_bytes: &[u8],
     dev_mode: bool,
     node_id: Option<&str>,
 ) -> Result<reqwest::multipart::Form> {
-    let mut form = reqwest::multipart::Form::new()
-        .part(
-            "package",
-            reqwest::multipart::Part::bytes(package_bytes.to_vec())
-                .file_name("package.agent")
-                .mime_str("application/octet-stream")?,
-        )
-        .text("dev_mode", dev_mode.to_string());
-    if let Some(node) = node_id {
-        form = form.text("node_id", node.to_string());
-    }
-    Ok(form)
+    Ok(upload_form(
+        package_bytes,
+        node_id,
+    )?
+    .text("dev_mode", dev_mode.to_string()))
+}
+
+/// Mirror of Gateway's `EnsureAck` (`POST /api/agents/ensure`, ADR-073).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EnsureAck {
+    /// Package whose presence was ensured.
+    pub agent_id: String,
+    /// Instance this request resolved to. On the already-present path it is
+    /// the instance the node holds; on the dispatch path it is the candidate
+    /// the Gateway minted.
+    pub instance_id: String,
+    /// `true` when the package was already on the node: nothing was
+    /// dispatched and this request created nothing.
+    pub already_present: bool,
+    /// ADR-059 §6 tracking id — present only when an install was dispatched.
+    #[serde(default)]
+    pub operation_id: Option<String>,
 }
 
 /// Gateway HTTP client
@@ -409,8 +442,8 @@ impl GatewayClient {
     }
 
     /// Raw request builder against the Gateway, for the call sites that hit
-    /// an endpoint this client has no method for (`/api/agents/ensure`,
-    /// `/api/debug/mqtt/*`). Pair it with [`GatewayClient::send`] so the
+    /// an endpoint this client has no dedicated method for yet
+    /// (`/api/debug/mqtt/*`). Pair it with [`GatewayClient::send`] so the
     /// request still carries the account credentials and the transparent
     /// 401 replay.
     pub fn request(&self, method: reqwest::Method, url: &str) -> reqwest::RequestBuilder {
@@ -508,6 +541,32 @@ impl GatewayClient {
                     .client
                     .post(&url)
                     .multipart(install_form(package_bytes, dev_mode, node_id)?))
+            })
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
+    /// `POST /api/agents/ensure` — declarative "make sure this package is
+    /// installed on this node" (ADR-073).
+    ///
+    /// The difference from [`GatewayClient::install_agent`] is intent:
+    /// `/install` always lands one more instance (multi-instance is legal),
+    /// while `/ensure` is idempotent and creates at most one, so a repeated
+    /// click converges instead of multiplying. `already_present = true`
+    /// (HTTP 200) means nothing was dispatched and `instance_id` is the
+    /// instance the node already holds.
+    pub async fn ensure_agent(
+        &self,
+        package_bytes: &[u8],
+        node_id: Option<&str>,
+    ) -> Result<EnsureAck> {
+        let url = format!("{}/api/agents/ensure", self.base_url);
+        let resp = self
+            .send(|| {
+                Ok(self
+                    .client
+                    .post(&url)
+                    .multipart(upload_form(package_bytes, node_id)?))
             })
             .await?;
         parse_gateway_response(resp).await

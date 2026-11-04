@@ -13,6 +13,7 @@ import { cn } from "../../lib/utils";
 import { reasoningLevelsFor } from "../../lib/reasoningEfforts";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
+import { isFileDropClaimed } from "../../lib/fileDropClaim";
 import { blobToBase64, extensionForFile } from "./clipboardImageExt";
 import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
 import { detectPaste } from "./pasteDetect";
@@ -752,6 +753,12 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // OS-drop handler), so we accept every drop and refocus the textarea
   // so the user sees where the pending chips will land.
   //
+  // That changed with the Agent library dialog, which accepts dropped
+  // `.agent` files itself. `desktop://file-drop` is window-level, so a drop
+  // onto the dialog would reach both surfaces and land the package as a chat
+  // attachment as well. A modal that handles drops claims the channel while
+  // it is mounted (lib/fileDropClaim.ts); we yield while any claim is held.
+  //
   // Effect lifetime: set up once on mount, torn down on unmount. The
   // upload handler is read via a ref so the listener closure stays
   // stable (avoids re-subscribing on every render).
@@ -776,6 +783,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     (async () => {
       try {
         const fn = await listen<string[]>("desktop://file-drop", (event) => {
+          // A mounted modal owns the drop — see the comment above.
+          if (isFileDropClaimed()) return;
           const paths = event.payload ?? [];
           if (paths.length === 0) return;
           const key = paths.join("\n");

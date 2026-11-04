@@ -20,11 +20,14 @@
 //! 4. If mode = remote, frontend skips spawn and just polls `/health`
 //!    on the user-configured URL.
 //! 5. After the gateway is reachable, frontend onboarding / agentStore
-//!    installs agents via the standard `POST /api/agents/ensure` endpoint;
-//!    no special "ensure System Agent" Tauri command is needed (ADR-077).
+//!    installs agents via the standard `POST /api/agents/install` endpoint
+//!    (one instance per call — ADR-073); no special "ensure System Agent"
+//!    Tauri command is needed (ADR-077). The idempotent
+//!    `POST /api/agents/ensure` path is used by the Agent library dialog.
 
 mod commands;
 mod gateway_client;
+mod hub_client;
 mod mqtt_client;
 mod navigation_guard;
 mod process_stop;
@@ -631,6 +634,9 @@ pub fn run() {
             commands::agent::get_agent_detail,
             commands::agent::install_agent,
             commands::agent::install_bundled_agent,
+            commands::hub::fetch_hub_index,
+            commands::hub::inspect_local_package,
+            commands::hub::install_from_hub,
             commands::agent::wait_agent_installed,
             commands::agent::uninstall_agent,
             commands::agent::start_agent,

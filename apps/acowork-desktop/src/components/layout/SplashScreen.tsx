@@ -92,7 +92,7 @@ async function bootGateway(): Promise<void> {
 
     // 3) ADR-077: System Agent is a regular bundled agent. Installation
     //    happens through the standard flow (onboarding wizard / agentStore
-    //    `installAgent` → `POST /api/agents/ensure`), not a dedicated Tauri
+    //    `installAgent` → `POST /api/agents/install`), not a dedicated Tauri
     //    command. No per-boot System-Agent step needed here.
     //
     // 4) Register the frontend event listeners UNCONDITIONALLY and BEFORE
