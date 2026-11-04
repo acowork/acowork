@@ -133,5 +133,37 @@ impl super::loop_::AgentLoop {
             conversation.append_message_with_id("system", &content, metadata, client_id);
         }
     }
+
+    /// Persist a turn's reference parts as `system` entries beside the `user`
+    /// row (ADR-107).
+    ///
+    /// Written right after the `user` row for the same reason attachments are
+    /// (ADR-046 §ADR-046 §2.1): the `user` row itself holds the human's words
+    /// verbatim, so everything the Runtime added to the turn lives in its own
+    /// row. The frontend folds both kinds of part back into one visual block.
+    ///
+    /// No id is supplied: unlike an attachment, a reference has no client-side
+    /// twin to deduplicate against, so the fresh uuid is the id.
+    pub fn write_message_refs(&self, refs: &[acowork_core::MessageRef]) {
+        let Some(ref conversation) = self.session.conversation else {
+            return;
+        };
+        for r in refs {
+            // An empty or unknown-kind reference is not written: it would be a
+            // row the UI cannot label and the model would not read (the same
+            // two filters `intent_turn::render_user_turn` applies, so what is
+            // persisted and what was sent can never disagree).
+            if r.is_empty() || r.model_header().is_none() {
+                continue;
+            }
+            let metadata = serde_json::to_value(crate::conversation::MessagePartMeta::ContextRef(
+                crate::conversation::ContextRefMeta {
+                    kind: r.kind.clone(),
+                },
+            ))
+            .expect("ContextRefMeta is always serializable");
+            conversation.append_message_with_id("system", r.content.trim(), Some(metadata), None);
+        }
+    }
 }
 

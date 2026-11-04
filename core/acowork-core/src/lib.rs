@@ -73,6 +73,7 @@ pub mod logging;
 pub mod lsp;
 pub mod manifest;
 pub mod memory;
+pub mod message_ref;
 pub mod node;
 pub mod operation;
 pub mod packaging;
@@ -105,6 +106,7 @@ pub use manifest::{
     McpServerDecl, McpSourceKind, ProviderConfig, RagToolConfig, RoutingConfig, SkillDecl, SkillMode,
     SkillsConfig, ToolDeclaration,
 };
+pub use message_ref::{MessageRef, REF_KIND_CHAT_BACKGROUND};
 pub use protocol::{
     ConversationEntryDto, GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo,
     ModelModalities, ProtocolType, SessionInfoDto, SessionStatusDto,

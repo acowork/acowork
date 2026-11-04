@@ -848,9 +848,10 @@ async fn run_turn(
                 .clone()
                 .or_else(|| SessionSeed::from_json(&envelope.session_config_json));
             // `opened_new` is read back from the dispatch rather than assumed:
-            // `Target::New` creates, and the brief must not be dropped if that
-            // ever stops being true — the new session would open on raw text.
-            let brief = Some(args.message.clone());
+            // `Target::New` creates, and the background must not be dropped if
+            // that ever stops being true — the new session would open on the
+            // human's words alone, with nothing to resolve them against.
+            let background = Some(args.background.clone());
             let delivered = {
                 let mut guard = session_manager.lock().await;
                 match guard
@@ -858,7 +859,8 @@ async fn run_turn(
                     .await
                 {
                     Ok((session_id, opened_new)) => {
-                        let content = dispatch_content(opened_new, brief.as_deref(), text);
+                        let (content, context_refs) =
+                            dispatch_parts(opened_new, background.as_deref(), text);
                         // §5.5.5 pending queue: record BEFORE delivering. The
                         // only place that drops this row is the SessionTask
                         // dequeue, which can run only once the send below has
@@ -875,8 +877,16 @@ async fn run_turn(
                             crate::agent::session_state::PendingIntent {
                                 message_id: envelope.message_id.clone(),
                                 from: envelope.from.clone(),
+                                // The queue row is the only place the human
+                                // reads what is waiting on a busy session, so
+                                // it falls back to the background when the turn
+                                // carried no words of its own (an
+                                // attachment-only message).
                                 preview: crate::agent::session_state::pending_preview(
-                                    &content,
+                                    &crate::agent::session_state::preview_source(
+                                        &content,
+                                        &context_refs,
+                                    ),
                                 ),
                                 from_chat: true,
                             },
@@ -921,6 +931,9 @@ async fn run_turn(
                                 // cannot see it — it replaces the retired
                                 // `turn_routed` reaction row.
                                 opened_new: Some(opened_new),
+                                // ADR-107: the router's framing, delivered as a
+                                // reference part of the human's turn.
+                                context_refs,
                             },
                         );
                         (Ok((session_id, opened_new)), sent)
@@ -1562,40 +1575,49 @@ impl TurnTrace<'_> {
 
 /// What the execution session actually receives for a dispatched turn.
 ///
-/// The router's brief exists for one thing only: a session that starts empty
-/// has no history to resolve "commit the local changes" against, so the
-/// brief has to carry the conversation. A **continued** session already has
-/// its own history — a compaction included, since a compacted session keeps
-/// its summary and its tail and continues in place (ADR-032/ADR-061) — so it
-/// receives the user's own words verbatim. Overwriting them with a router
-/// paraphrase would put the paraphrase in the persisted `user` row and in
-/// the auto-title (ADR-046 keeps those the user's actual message) and
-/// re-inject context the session already holds; anything it genuinely lacks it
-/// pulls with `chat_history_read`.
+/// Two things, and they are never the same string (ADR-107):
 ///
-/// A **new** session gets both, in that order. The brief alone was the
-/// original design, and it silently discarded the human's words: the router's
-/// summary became the whole of the message the Agent read and the transcript
-/// recorded, so nuance the router did not consider load-bearing ("只改测试，别动
-/// 实现") vanished at the one hop where it stopped being recoverable. The brief
-/// is a framing the router adds, not a replacement for what was said — so it
-/// introduces the turn and the verbatim text follows it.
+/// - **the message** — the human's own words, verbatim. This is what the
+///   session persists as its `user` row, and therefore what the auto-title is
+///   written from (ADR-046). It must never be re-authored here;
+/// - **the background** — the router's framing, delivered as a reference part
+///   that follows the words in the model-facing message and lands beside them
+///   as a `context_ref` row on disk.
+///
+/// The background is attached only when this turn physically opened the
+/// session. A **continued** session already has its own history — a compaction
+/// included, since a compacted session keeps its summary and its tail and
+/// continues in place (ADR-032/ADR-061) — so it receives the user's words
+/// alone; anything it genuinely lacks it pulls with `chat_history_read`.
 ///
 /// `opened_new` is the routing-time authority for "this turn landed in a
 /// physically new session", which is why the choice is made here rather than
 /// from `Target`: `Target::Existing` against a session that is gone from disk
-/// also creates one, and that one still needs the brief.
-fn dispatch_content(opened_new: bool, brief: Option<&str>, user_text: &str) -> String {
-    let brief = match (opened_new, brief.map(str::trim)) {
-        (true, Some(brief)) if !brief.is_empty() => brief,
-        // Continued session, or nothing to add: the human's words are the turn.
-        _ => return user_text.to_string(),
+/// also creates one, and that one still needs the background.
+///
+/// History: the words originally vanished entirely — the brief was the whole
+/// message. Prepending them (the brief, a blank line, `[user message]`, then
+/// the words) fixed that, but made every dispatched session's first `user` row
+/// — and so every auto-title — open with the router's fixed sentence, which is
+/// what ADR-107 removes by splitting the two into parts.
+fn dispatch_parts(
+    opened_new: bool,
+    background: Option<&str>,
+    user_text: &str,
+) -> (String, Vec<acowork_core::MessageRef>) {
+    let content = user_text.to_string();
+    let background = match opened_new {
+        true => background.map(str::trim).filter(|b| !b.is_empty()),
+        false => None,
     };
-    let words = user_text.trim();
-    if words.is_empty() || words == brief {
-        return brief.to_string();
-    }
-    format!("{brief}\n\n[user message]\n{words}")
+    // A background that only restates the words adds nothing the session does
+    // not already have as its message: the router doing that was common while
+    // the schema still asked for a self-contained brief.
+    let background = background.filter(|b| b.trim() != content.trim());
+    let refs = background
+        .map(|b| vec![acowork_core::MessageRef::chat_background(b)])
+        .unwrap_or_default();
+    (content, refs)
 }
 
 // The `SessionStatus` → `CandidateStatus` vocabulary table lives in
@@ -2180,14 +2202,14 @@ mod tests {
         let task = ToolCall {
             function: acowork_core::providers::traits::FunctionCall {
                 name: super::super::tool::EXEC_SESSION_CREATE_TOOL.into(),
-                arguments: r#"{"message":"do the thing"}"# .into(),
+                arguments: r#"{"background":"what was decided"}"# .into(),
             },
             ..proposal
         };
         assert_eq!(
             parse_act(&task, &aliases).unwrap(),
             Act::ExecSessionCreate(ExecSessionCreateArgs {
-                message: "do the thing".into(),
+                background: "what was decided".into(),
                 seed: None,
             })
         );
@@ -2206,7 +2228,7 @@ mod tests {
                 arguments: "{not json".into(),
             },
         };
-        assert_eq!(parse_act(&call, &AliasTable::new()), Err(ActError::MissingBrief));
+        assert_eq!(parse_act(&call, &AliasTable::new()), Err(ActError::MissingBackground));
         assert_eq!(call_label(&call), "exec_session_create");
     }
 
@@ -2339,39 +2361,61 @@ mod tests {
     }
 
     #[test]
-    fn a_continued_session_receives_the_users_own_words() {
+    fn a_continued_session_receives_the_users_own_words_and_no_background() {
         // Regression (2026-10-24): the router appended a context brief when
         // dispatching to an existing session, and it replaced the user's
         // message — the execution session's persisted `user` row and its
         // auto-title then held the router's paraphrase, and the brief restated
         // history that session already has.
-        let brief = "把本地修改的代码提交一下。\n\n上下文（同一 session 内刚完成的工作）：1. …";
-        assert_eq!(
-            dispatch_content(false, Some(brief), "把本地修改的代码提交一下。"),
-            "把本地修改的代码提交一下。"
+        let (content, refs) = dispatch_parts(
+            false,
+            Some("上下文（同一 session 内刚完成的工作）：1. …"),
+            "把本地修改的代码提交一下。",
+        );
+        assert_eq!(content, "把本地修改的代码提交一下。");
+        assert!(
+            refs.is_empty(),
+            "a session with its own history needs no re-briefing"
         );
     }
 
     #[test]
-    fn a_fresh_session_gets_the_brief_and_the_users_own_words() {
-        // A session that starts empty has nothing else to work from. This
-        // covers `dispatch(new)` and a `target=S3` whose session has vanished
-        // from disk — `chat_dispatch` reports `opened_new` for both.
-        //
-        // The brief frames the turn; it does not replace it. Dropping the
-        // human's words here is what made "只改测试" disappear between the chat
-        // and the Agent that had to honour it.
-        assert_eq!(
-            dispatch_content(true, Some("Commit the batch described below: …"), "raw"),
-            "Commit the batch described below: …\n\n[user message]\nraw"
+    fn a_fresh_session_gets_the_words_as_the_message_and_the_background_as_a_ref() {
+        // ADR-107. The message is the human's, byte for byte — this is what the
+        // session persists and what its auto-title is written from. The
+        // background travels as a reference part, which the model reads AFTER
+        // the words and the transcript shows beside them.
+        let (content, refs) = dispatch_parts(
+            true,
+            Some("Commit the batch described below: …"),
+            "raw",
         );
-        // Without a brief (e.g. an attachment-only turn) the text still lands.
-        assert_eq!(dispatch_content(true, None, "raw"), "raw");
-        assert_eq!(dispatch_content(true, Some("   "), "raw"), "raw");
-        // A router that echoed the message verbatim must not print it twice.
+        assert_eq!(content, "raw", "the human's words are the message");
         assert_eq!(
-            dispatch_content(true, Some("提交一下"), "  提交一下 \n"),
-            "提交一下"
+            refs,
+            vec![acowork_core::MessageRef::chat_background(
+                "Commit the batch described below: …"
+            )],
+            "the router's framing is a reference part, never the message"
+        );
+
+        // Without a background (e.g. an attachment-only turn) the words still
+        // land, alone.
+        for absent in [None, Some("   ")] {
+            let (content, refs) = dispatch_parts(true, absent, "raw");
+            assert_eq!(content, "raw");
+            assert!(refs.is_empty());
+        }
+
+        // A router that echoed the message verbatim must not ship a reference
+        // that says exactly what the message already says.
+        let (content, refs) = dispatch_parts(true, Some("  提交一下 "), "  提交一下 
+");
+        assert_eq!(content, "  提交一下 
+", "the message is never rewritten");
+        assert!(
+            refs.is_empty(),
+            "a background identical to the message adds nothing"
         );
     }
 

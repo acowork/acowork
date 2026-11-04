@@ -49,6 +49,9 @@ async fn end_turn_obligations(
     agent_loop.forget_interactions_of_kind(&["approval", "ask_question"]);
     agent_loop.turn_surface = Default::default();
     agent_loop.turn_reference = Default::default();
+    // ADR-107: a turn that ended without persisting its parts (an abort before
+    // the user-row write) must not hand them to the next turn.
+    agent_loop.turn_message_refs.clear();
     (ctx, outcome)
 }
 
@@ -264,6 +267,14 @@ pub enum SessionMessage {
         /// reference row — the only place a reader learns that a Chat message
         /// started new work rather than continuing it.
         opened_new: Option<bool>,
+        /// ADR-107: reference parts the sender attached to this turn — context
+        /// the Runtime supplies and the human did not type, today the Chat
+        /// Router's `exec_session_create(background)`. NEVER folded into
+        /// `content`: the model sees them after the human's words
+        /// (`intent_turn::render_user_turn`) and the JSONL keeps them as
+        /// `context_ref` rows beside the `user` row. Empty for every origin
+        /// that has no such context.
+        context_refs: Vec<acowork_core::MessageRef>,
     },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
     // streaming, the front/back suppression mechanism is gone.
@@ -1040,9 +1051,9 @@ impl SessionTask {
                     // `agent_loop.run()` (loop_.rs) AFTER the user message, so
                     // their timestamps are slightly later than the user entry.
                     // This ensures the frontend's `foldMessages` (which looks
-                    // for attachment entries *after* the user message by
+                    // for part entries *after* the user message by
                     // timestamp) can fold them into a single
-                    // `user_with_attachments` block.
+                    // `user_with_parts` block.
 
                     // Save the raw user message before any prompt assembly.
                     // Used by AgentLoop for session title generation and
@@ -1394,6 +1405,7 @@ impl SessionTask {
                     assignment_brief,
                     task_id,
                     opened_new,
+                    context_refs,
                 }) => {
                     // A PM dispatch's playbook joins Block A for this
                     // session's remaining requests: constant per task, so
@@ -1503,7 +1515,19 @@ impl SessionTask {
                     // The model-facing message starts as the user's verbatim
                     // text; the auto-title and the JSONL `user` entry stay
                     // clean (ADR-046).
-                    let mut llm_message = content.clone();
+                    //
+                    // ADR-107: the turn's reference parts are handed to the
+                    // loop for the user-row write, and rendered AFTER the words
+                    // for the model — the ask leads, the framing follows. This
+                    // is the whole fix for "every chat-dispatched session opens
+                    // with the same sentence": the persisted row (and with it
+                    // the auto-title) is the human's message, not the router's
+                    // paraphrase of it.
+                    agent_loop.turn_message_refs = context_refs;
+                    let mut llm_message = crate::agent::intent_turn::render_user_turn(
+                        &content,
+                        &agent_loop.turn_message_refs,
+                    );
                     // Design 27 §4.2.1 chat attachments: the Intent carries
                     // ids only — the bytes are pulled over node-auth HTTP
                     // through the Gateway (never the MQTT envelope) and

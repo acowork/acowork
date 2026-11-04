@@ -86,9 +86,16 @@ pub fn memory_recall_tool_name() -> String {
 /// Alias → real session id for one router turn.
 pub type AliasTable = HashMap<String, String>;
 
-/// The `exec_session_create` schema: a brief, and an optional configuration
-/// for the session it opens. There is no `target` — this tool cannot address
-/// anything, it only ever starts something (ADR-106 D6).
+/// The `exec_session_create` schema: the **background** the new session needs,
+/// and an optional configuration for it. There is no `target` — this tool
+/// cannot address anything, it only ever starts something (ADR-106 D6).
+///
+/// **The human's own message is not an argument.** The runtime already holds
+/// it verbatim and delivers it as the turn; asking the model to restate it was
+/// what produced a persisted `user` row that began with the router's fixed
+/// opening sentence instead of the person's words (ADR-107). `background` is
+/// context only: what was decided, what is constrained, what was already
+/// discussed — never the ask itself.
 ///
 /// Field order and wording are part of the cached prefix (design 29 §6.2):
 /// never make them depend on turn state.
@@ -96,9 +103,9 @@ pub fn exec_session_create_tool_spec() -> Value {
     json!({
         "type": "object",
         "properties": {
-            "message": {
+            "background": {
                 "type": "string",
-                "description": "REQUIRED, non-empty task brief. The new execution session starts with no history, so this IS its only context: write a self-contained instruction that states the user's goal plus the background from this conversation it needs."
+                "description": "REQUIRED, non-empty. The new execution session has no history, so this is the context it is missing: what was decided in this conversation, constraints and preferences already stated, files already looked at. Do NOT restate the user's request - the runtime delivers the user's own message itself. Keep it compact: a few lines, not a document."
             },
             "session_config": {
                 "type": "object",
@@ -111,7 +118,7 @@ pub fn exec_session_create_tool_spec() -> Value {
                 }
             }
         },
-        "required": ["message"]
+        "required": ["background"]
     })
 }
 
@@ -298,9 +305,11 @@ pub enum Act {
 /// A validated `exec_session_create` call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ExecSessionCreateArgs {
-    /// The task brief. Required: the session this opens has no history, so a
-    /// turn with no brief would receive nothing but the raw user text.
-    pub message: String,
+    /// The background the new session needs (ADR-107). Required: the session
+    /// this opens has no history, so a human sentence that refers to "the thing
+    /// we discussed" would arrive with nothing to resolve it against. Delivered
+    /// as a reference part AFTER the human's words — never as the message.
+    pub background: String,
     /// Already clamped downstream.
     pub seed: Option<SessionSeed>,
 }
@@ -337,7 +346,7 @@ pub struct ReadRoundArgs {
 /// deterministic routing path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActError {
-    MissingBrief,
+    MissingBackground,
     MissingTarget,
     UnknownAlias(String),
     MissingWhy,
@@ -348,10 +357,8 @@ impl ActError {
     /// succeed without a second round of guessing.
     pub fn message(&self) -> String {
         match self {
-            Self::MissingBrief => {
-                "`exec_session_create` requires a non-empty `message` — the execution agent starts with no \
-                 history, so your brief IS its only starting context. Write a self-contained \
-                 instruction summarising the user's goal and the background it needs."
+            Self::MissingBackground => {
+                "`exec_session_create` requires a non-empty `background`: the execution agent starts with no history, so this is the context it is missing. Give it what was decided, what constrains the work and what was already discussed. Do not restate the user's request - the runtime delivers the user's own message."
                     .to_string()
             }
             Self::MissingTarget => {
@@ -370,22 +377,23 @@ impl ActError {
 
 /// Parse and validate one `exec_session_create` call.
 ///
-/// Validation is model-facing and never panics. A blank brief is rejected
-/// rather than dropped: an empty instruction would open a session with nothing
-/// to work on, and the human would read that as the agent ignoring them.
+/// Validation is model-facing and never panics. A blank background is rejected
+/// rather than dropped: a session with no history would then be handed a
+/// sentence that refers to "what we discussed" with nothing to resolve it
+/// against, and the human would read the result as the agent ignoring them.
 pub fn parse_exec_session_create(args: &Value) -> Result<ExecSessionCreateArgs, ActError> {
-    let message = args
-        .get("message")
+    let background = args
+        .get("background")
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or(ActError::MissingBrief)?
+        .ok_or(ActError::MissingBackground)?
         .to_string();
     let seed = match args.get("session_config") {
         Some(cfg) if !cfg.is_null() => SessionSeed::from_json(&cfg.to_string()),
         _ => None,
     };
-    Ok(ExecSessionCreateArgs { message, seed })
+    Ok(ExecSessionCreateArgs { background, seed })
 }
 
 /// Parse and validate one `exec_session_propose_continue` call against the
@@ -470,28 +478,38 @@ mod tests {
     }
 
     #[test]
-    fn exec_session_create_carries_the_brief_and_a_seed() {
+    fn exec_session_create_carries_the_background_and_a_seed() {
         let args = json!({
-            "message": "  pick this up  ",
+            "background": "  decided: keep the tests untouched  ",
             "session_config": { "model": "m1", "provider": "p1" }
         });
         let parsed = parse_exec_session_create(&args).unwrap();
-        assert_eq!(parsed.message, "pick this up");
+        assert_eq!(parsed.background, "decided: keep the tests untouched");
         let seed = parsed.seed.expect("seed parsed");
         assert_eq!(seed.model.as_deref(), Some("m1"));
         assert_eq!(seed.provider.as_deref(), Some("p1"));
     }
 
-    /// The regression this pins: a brief-less create call used to be legal for
-    /// an `Existing` target (`message` was optional because the user's own
+    /// The regression this pins: a background-less create call used to be legal
+    /// for an `Existing` target (the field was optional because the user's own
     /// words were forwarded). Now the only act that delivers must state the
-    /// task, or a fresh session opens on raw text with no context.
+    /// context the fresh session is missing, or a message like "continue the
+    /// thing we discussed" opens a session with nothing to resolve it against.
+    ///
+    /// ADR-107 also pins the OLD field name: `message` is not accepted at all,
+    /// because a schema that still takes it invites the model to re-author the
+    /// human's message — the failure this change removes.
     #[test]
-    fn a_create_without_a_brief_is_rejected() {
-        for args in [json!({}), json!({ "message": "   " }), json!({ "message": null })] {
+    fn a_create_without_a_background_is_rejected() {
+        for args in [
+            json!({}),
+            json!({ "background": "   " }),
+            json!({ "background": null }),
+            json!({ "message": "do the thing" }),
+        ] {
             assert_eq!(
                 parse_exec_session_create(&args),
-                Err(ActError::MissingBrief)
+                Err(ActError::MissingBackground)
             );
         }
     }
@@ -593,7 +611,11 @@ mod tests {
         assert_eq!(tools[1]["name"], EXEC_SESSION_PROPOSE_CONTINUE_TOOL);
         assert!(tools[0].get("function").is_none());
         let new_params = &tools[0]["parameters"];
-        assert_eq!(new_params["required"], json!(["message"]));
+        assert_eq!(new_params["required"], json!(["background"]));
+        assert!(
+            new_params["properties"].get("message").is_none(),
+            "the human's message is the runtime's to deliver, never the model's to restate (ADR-107)"
+        );
         assert!(
             new_params["properties"].get("target").is_none(),
             "`exec_session_create` must not be able to name a session"

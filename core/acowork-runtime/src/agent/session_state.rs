@@ -133,6 +133,23 @@ pub fn pending_preview(text: &str) -> String {
     }
 }
 
+/// What the queue preview should be written from (ADR-107).
+///
+/// The preview is the only thing the human sees for a message waiting on a busy
+/// session, so it must not read as empty: a turn that carried no words (the
+/// human attached a file and typed nothing) falls back to the first reference
+/// block, and only then to the empty string — a queue row with a blank preview
+/// looks like a bug in the queue rather than like a message with no text.
+pub fn preview_source(content: &str, refs: &[acowork_core::MessageRef]) -> String {
+    if !content.trim().is_empty() {
+        return content.to_string();
+    }
+    refs.iter()
+        .find(|r| !r.is_empty())
+        .map(|r| r.content.clone())
+        .unwrap_or_default()
+}
+
 /// A single item in the session-level todo list.
 ///
 /// Re-exported from `acowork_core::session_meta::TodoItem` (canonical
