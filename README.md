@@ -92,8 +92,8 @@ These are the bets ACowork is built around — and the reasons to choose it over
 | 🚀 **Standalone or cluster — same binary** | Start a single host for personal use; flip a flag and the same binary becomes a cluster across your team. No local-vs-remote code branches in Gateway. |
 | 🧩 **Declarative agents** | `.agent` packages contain manifest + prompts + skills — **no executable code**, signed and verified at install time. |
 | ⚙️ **Universal runtime** | A single Rust binary loads any `.agent` package; Agents connect directly to LLM APIs — no Gateway proxy, no extra latency. |
-| 🔒 **Process-level isolation** | Every Agent runs as an independent OS process with its own filesystem, Grafeo DB, and sandboxed tool execution. |
-| 🧠 **Biomimetic memory** | 3-tier / 5-class layered memory on a per-Agent Grafeo graph DB — HNSW + BM25 hybrid retrieval, associative diffusion. |
+| 🔒 **Process-level isolation** | Every Agent runs as an independent OS process with its own filesystem, memory database, and sandboxed tool execution. |
+| 🧠 **Biomimetic memory** | Layered memory on a per-Agent SQLite store — episodic / knowledge / procedural / autobiographical, retrieved by vector + FTS5 hybrid search. |
 | 🛡️ **Three-layer security** | Package signing + OS process sandbox + Wasmtime tool sandbox. |
 | 💬 **Intent collaboration** | Agents advertise capabilities in a registry, route requests/observations, sync or async, with the Gateway as broker. |
 | 🛠️ **Full-stack dev loop** | Desktop App (Tauri v2) supports DevMode: conversational debug, skill hot-reload, breakpoints, recording & replay, publishing wizard. |
@@ -120,7 +120,7 @@ through the same REST + MCP surface that humans use:
 | `acowork-user` | User domain — accounts, credentials, roles, profiles / avatars, user↔user chat. |
 | `acowork-pm`   | Project & task management — first-class service, agents and humans read / write / subscribe to the same project tree. |
 | `acowork-doc`  | Online document library with real-time multi-user editing (Tiptap + Yjs). |
-| `acowork-memory` | Standalone memory service (ADR-101) — the Grafeo storage engine plus distill / consolidation pipeline, one SQLite instance per Agent instance id, exposed as REST + MCP and supervised by the Gateway. |
+| `acowork-memory` | Standalone memory service (ADR-101) — the SQLite storage engine (vectors + FTS5, ADR-082) plus distill / consolidation pipeline, one SQLite instance per Agent instance id, exposed as REST + MCP and supervised by the Gateway. |
 | `acowork-embed` / `acowork-lsp-relay` / `acowork-vault` / `acowork-sqlite` / `acowork-sign` | Embedding model runner, LSP relay, encrypted KV store, storage backend, package signing — supporting tiers. |
 
 ### Standalone vs. cluster
@@ -299,7 +299,7 @@ Then build & sign:
 ./dev/common/build-agent.sh examples/qa-agent   # produces com.example.qa-agent.agent
 ```
 
-> **Status**: ACowork is in **alpha**. The Gateway, Runtime, Grafeo memory engine, and Desktop App are under active
+> **Status**: ACowork is in **alpha**. The Gateway, Runtime, memory engine, and Desktop App are under active
 > development. See [Roadmap](#-roadmap) for what is shipping today and what is next.
 
 For more — packaging installers, signing, CI, remote-node onboarding — see [`docs/design/zh/`](./docs/design/zh/).
@@ -325,7 +325,7 @@ not writing imperative code. The whole pipeline from authoring to publishing is 
 | Phase | Scope                                                                                                                                            | Status         |
 | ----- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- |
 | 1     | Foundation + LLM interaction (MVP): package parsing, signing, Runtime main loop, Gateway basics                                                  | ✅ Done         |
-| 2     | Memory layering + multi-user accounts: Grafeo biomimetic layers, instant extraction, associative diffusion; per-user sessions & audit | ✅ Done         |
+| 2     | Memory layering + multi-user accounts: biomimetic memory layers, instant extraction; per-user sessions & audit | ✅ Done         |
 | 3     | AI-native PM & Doc: `acowork-pm` and `acowork-doc` standalone services, REST + MCP, multi-user real-time editing (Tiptap + Yjs) | 🚧 In progress |
 | 4     | Distributed runtime: Node Agent enrollment, cluster mode, shared protocol path | 🚧 In progress |
 | 5     | Permissions & sandbox: filesystem isolation, WASM sandbox (Wasmtime), Approval Gate                                                             | 🚧 Partial     |
@@ -348,7 +348,7 @@ not writing imperative code. The whole pipeline from authoring to publishing is 
 ACowork's design draws inspiration from:
 
 - [ZeroClaw 🦀](https://github.com/zeroclaw-labs/zeroclaw) — trait-driven runtime, security decorators, streaming parser
-- [Grafeo](https://github.com/GrafeoDB/grafeo) — HNSW vector index, BM25 full-text search, hybrid search
+- [Grafeo](https://github.com/GrafeoDB/grafeo) — hybrid (vector + lexical) retrieval over a local store; the storage engine has since moved to SQLite (ADR-082)
 - [Mem0](https://github.com/mem0ai/mem0) — multi-level memory, user/session/Agent state
 - [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG) — neurobiology-inspired long-term memory, associative diffusion
 - [LightMem](https://github.com/zjunlp/LightMem) — lightweight memory compression

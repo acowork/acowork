@@ -89,8 +89,8 @@ ACowork 是一个**多用户、分布式、AI 原生的协作平台**。它把�
 | 🚀 **Standalone 或集群——同一份二进制** | 单机自用就开 standalone；翻一个开关，同一份二进制成为横跨团队的集群。Gateway 代码里没有「本地 / 远程」分支。 |
 | 🧩 **声明式 Agent** | `.agent` 包只包含 manifest + prompts + skills——**无可执行代码**，签名后在安装时强制验证。 |
 | ⚙️ **统一 Runtime** | 单一 Rust 二进制加载任意 `.agent` 包；Agent 直连 LLM API——不经 Gateway 代理，零额外延迟。 |
-| 🔒 **进程级隔离** | 每个 Agent 作为独立 OS 进程运行，自带文件系统、Grafeo DB 与沙箱化的工具执行。 |
-| 🧠 **仿生记忆** | 每个 Agent 拥有私有 Grafeo 图数据库，三层五类分层记忆 + HNSW/BM25 混合检索 + 关联扩散。 |
+| 🔒 **进程级隔离** | 每个 Agent 作为独立 OS 进程运行，自带文件系统、记忆数据库与沙箱化的工具执行。 |
+| 🧠 **仿生记忆** | 每个 Agent 拥有私有 SQLite 存储，经历 / 语义 / 程序 / 自传体分层记忆，向量 + FTS5 混合检索。 |
 | 🛡️ **三层安全** | 包签名 + 操作系统进程沙箱 + Wasmtime 工具沙箱。 |
 | 💬 **Intent 协作** | Agent 通过 Capability Registry 声明能力，Gateway 作为 broker 路由请求/订阅，支持同步/异步。 |
 | 🛠️ **全链路开发** | Desktop App（Tauri v2）内置 DevMode：对话调试、Skill 热加载、断点、录制回放、发布向导。 |
@@ -116,7 +116,7 @@ ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面�
 | `acowork-user` | 用户域——账号、凭据、角色、档案/头像、用户↔用户聊天。 |
 | `acowork-pm`   | 项目与任务管理——一等公民服务，Agent 和人读写/订阅同一棵项目树。 |
 | `acowork-doc`  | 在线文档库，支持多人实时编辑（Tiptap + Yjs）。 |
-| `acowork-memory` | 独立记忆服务（ADR-101）——Grafeo 存储引擎 + distill / consolidation 流水线，按 Agent 实例 id 一实例一库，以 REST + MCP 暴露，由 Gateway 托管。 |
+| `acowork-memory` | 独立记忆服务（ADR-101）——SQLite 存储引擎（向量 + FTS5，ADR-082）+ distill / consolidation 流水线，按 Agent 实例 id 一实例一库，以 REST + MCP 暴露，由 Gateway 托管。 |
 | `acowork-embed` / `acowork-lsp-relay` / `acowork-vault` / `acowork-sqlite` / `acowork-sign` | Embedding 模型 runner、LSP relay、加密 KV、存储后端、包签名——支撑层。 |
 
 ### Standalone vs. 集群
@@ -288,7 +288,7 @@ tools = ["rag_query", "read_file", "write_file"]
 ./dev/common/build-agent.sh examples/qa-agent   # 产出 com.example.qa-agent.agent
 ```
 
-> **当前状态**：ACowork 处于 **Alpha 阶段**。Gateway、Runtime、Grafeo 记忆引擎与 Desktop App 都在积极开发中。
+> **当前状态**：ACowork 处于 **Alpha 阶段**。Gateway、Runtime、记忆引擎与 Desktop App 都在积极开发中。
 > 详见 [路线图](#-路线图) 了解当前已交付与下一步计划。
 
 打包安装包、签名、CI、远程节点接入等更多内容请参见 [`docs/design/zh/`](./docs/design/zh/)。
@@ -314,7 +314,7 @@ tools = ["rag_query", "read_file", "write_file"]
 | 阶段    | 内容                                                                                                                                                                                                                                          | 状态     |
 | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
 | Phase 1 | 基础框架 + LLM 交互（MVP）：包解析、签名验证、Runtime 主循环、Gateway 基础                                                                                                                                                                  | ✅ 已完成 |
-| Phase 2 | Memory 分层 + 多用户账号：Grafeo 仿生分层、即时提取、关联扩散；按用户的会话与审计                                                                                                       | ✅ 已完成 |
+| Phase 2 | Memory 分层 + 多用户账号：仿生记忆分层、即时提取；按用户的会话与审计                                                                                                       | ✅ 已完成 |
 | Phase 3 | AI 原生的项目 & 文档管理：`acowork-pm` 与 `acowork-doc` 独立进程服务，REST + MCP，多人实时编辑（Tiptap + Yjs）                                                                                                                                                | 🚧 进行中 |
 | Phase 4 | 分布式 Runtime：Node Agent 接入、多主机集群模式、共用同一条协议路径                                                                                                                                                                                  | 🚧 进行中 |
 | Phase 5 | 权限与沙箱：文件系统隔离、WASM 沙箱（Wasmtime）、Approval Gate                                                                                                                                                                                 | 🚧 部分实现 |
@@ -337,7 +337,7 @@ tools = ["rag_query", "read_file", "write_file"]
 ACowork 的设计深受以下开源项目启发：
 
 - [ZeroClaw 🦀](https://github.com/zeroclaw-labs/zeroclaw) — Trait 驱动运行时、安全装饰器、流式解析
-- [Grafeo](https://github.com/GrafeoDB/grafeo) — HNSW 向量索引、BM25 全文检索、混合搜索
+- [Grafeo](https://github.com/GrafeoDB/grafeo) — 本地存储上的向量 + 词法混合检索；存储引擎此后已迁移至 SQLite（ADR-082）
 - [Mem0](https://github.com/mem0ai/mem0) — 多层级记忆、用户/会话/Agent 状态
 - [HippoRAG](https://github.com/OSU-NLP-Group/HippoRAG) — 神经生物学启发长时记忆、关联扩散
 - [LightMem](https://github.com/zjunlp/LightMem) — 轻量级记忆压缩
