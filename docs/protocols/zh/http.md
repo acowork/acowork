@@ -1162,6 +1162,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 |---|---|---|---|
 | GET | `/sessions/{sid}/rounds/{round_id}` | 单轮投影 | `authorize_read`（scope 同 [§5.2](#52-会话只读查询)） |
 | GET | `/sessions/{sid}/rounds?ids=a,b` | 批量投影，一次请求 ≤ 64 个轮次 | 同上 |
+| GET | `/sessions/{sid}/rounds?latest=1` | **钉轮读**：返回该会话「最新终态轮」的坐标（无终态轮则退到最新进行中轮，再空则 `latest: null`）；Gateway 在发送带 `@session` 引用的消息时用它解析 `round_id`（ADR-106 修订 2026-11-04 · 引用重划） | 同上 |
 
 响应形状（单条；批量把每项放进 `{"session_id": "…", "rounds": [ … ]}` 并额外带 `found`）：
 
@@ -1171,6 +1172,12 @@ RAG 不属记忆面，仍由 Runtime 持有：
   "answer": { "body": "…", "ts": "…" },
   "card": null, "chat_session_id": "…" }
 ```
+
+`latest=1` 是一条**坐标查询、不是列表**：每请求只回一轮，形状 `{ "session_id": "…", "latest":
+{ "round_id": "r:…", "terminal": bool, "ts": "ISO-8601" } | null, "chat_session_id": "…" }`。取「最新终
+态轮」是因为终态轮不可变，钉进 `meta.refs` 的坐标不会在它脚下腐烂；一个终态轮都没有时才答进行轮
+（`terminal: false`，即「截至当时的进展」），侧表为空则 `latest: null`——这是显式空洞，不是空列表。`ids` 与
+`latest` 同时缺省 → 400（无上界的「全部轮次」读不该出现在请求路径上）。
 
 错误码：`400` 单条读的轮次 id 形状非法 / `ids` 为空 / 批量超出 64 个；`404` 会话 id 形状非法、会话不存
 在或不可读、无此轮次、或该轮的转录坐标已不再能佐证它（单条）；`500` 投影装配失败（单条；批量则把失败
@@ -1249,6 +1256,29 @@ RAG 不属记忆面，仍由 Runtime 持有：
 - **盘扫在锁外**（设计 29 §5）：bindings 与 meta 两次遍历在 `SessionManager` 全局锁**之前**完成，否则打开
   一次 picker 会把 `POST /sessions` 排在一次文件遍历后面。
 - 空 `chat_session_id` → 400；`surface` 只认 `group`，其余（含缺省）按 `direct`。这是只读面，不在执行会话上开写入口：选中某条之后的投递仍走 `POST /api/intents/mentions`（§4.5）。
+
+### 5.9 `@session` 引用材料的钉轮与落库（ADR-106 修订 2026-11-04 · 引用重划）
+
+> **实现**：[`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs)（`validate_refs` / `pin_reference_rounds`）；钉轮读见 [§5.7](#57-轮次投影读取adr-106-d4) 的 `rounds?latest=1`。**完整意图字段表以设计 27 §4.5 为真源**，此处只钉通信纪律。
+
+`POST /api/intents/mentions`（及 1:1 的 `POST /api/intents/chat-message`）body 新增可选 `refs`：一条消息把若干执行会话轮作为**材料**引用，而不是投递目标——`@` picker 不再产生 `target_sessions`（窄退役，仅寻址卡应答保留）。数组每项：
+
+| 字段 | 必填 | 说明 |
+|---|---|---|
+| `agent_instance_id` | 是 | 必须是本消息的投递目标之一（材料随人所点的 agent 走，从不递给旁观者） |
+| `session_id` | 是 | picker 候选列表给出的执行会话 id；服务端按 Runtime 字符集（`[A-Za-z0-9_-]`，≤ 128 字节）复校 |
+| `round_id` | 否 | 仅寻址卡应答的重投递回带（原行已钉好）；缺省 = Gateway 现在钉。**带 `round_id` 的 echo 可与卡应答的 `target_sessions` 并存**（它是「同一句已写话的事实回声」，非新投递指令） |
+| `terminal` | 否 | 与 `round_id` 一起回带，标记被钉轮是否已终态 |
+
+- **钉轮（落库前）**：Gateway 对**每条** ref（含 echo）都先经 `rounds?latest=1` 做一次作用域内读——这道读同时是**授权门**：它跑 Runtime 的 `authorize_read`（按调用者 user + chat 作用域），故一个不属于本 Chat / 不可读的 `session_id` 会在此 404，而不是让伪造的 echo 坐标注入他会话材料（ADR-106 修订 · S-1）。对未带 `round_id` 的 fresh ref，这道读**兼作钉轮**，解析「当时最新终态轮」（无终态轮退最新进行中轮），得到完整四元组 `{agent_instance_id, session_id, round_id, terminal}`。对已预钉的 echo（带 `round_id`+`terminal`），这道读**只证可读、不改写坐标**——客户端坐标原样透传，**绝不重解析**（重投递是同一句话，重猜一条已写句子的轮次正是本端点要消除的）。
+- **落库**：钉好的完整坐标数组写进 `user_message` 的 `meta["refs"]`（**只有坐标、无正文**）；`build_chat_params` 新增 `chat_refs` 键（每 target 只带自己 instance 的 refs）。
+
+纪律（**行不落库优先**）：
+
+- `refs` 超过 5 条（`MAX_CHAT_REFS`）→ 400；ref 的 agent 非本消息目标、空 / 路径形 `session_id`、空 `round_id`、**fresh** ref 的同一 agent 既 `target_sessions` 投递又带 `refs`、重复 `(agent, session)` → 400。**唯「投递与引用同一 agent」的矛盾只判 fresh**：预钉 echo（带 `round_id`，即卡应答的重投递）可与 `target_sessions` 并存，因为它是已写句子的回声，不是新投递指令。`force_new_for` + `refs` **不矛盾**：新任务 + 引用某轮是一句连贯指令（引用不像地址，它不决定这句话去哪）。
+- 钉轮读失败：**行不落库**、前端保草稿。Runtime 答 `404`（会话不存在 / 不可读）→ `400`；Runtime / 节点不可达等其余 → `502`；侧表 `latest: null`（无轮可引）→ `400`。
+- **带 `refs` 的消息跳过级别 3 续投分支**（引用已是明确材料，不再让模型猜归属）。
+- **命名歧义须知**：`meta.refs`（chat 材料坐标，本节）、`context_refs`（ADR-107 参照 part 通道）、chat-block `refs`（D4 块投影读取的 `instance|session|r:round` 三元组）是三个不同层的东西，实现与文档中不得互混。
 
 ---
 

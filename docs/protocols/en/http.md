@@ -756,6 +756,7 @@ Mapping and gating rules:
 |---|---|---|---|
 | GET | `/sessions/{sid}/rounds/{round_id}` | One round's projection | `authorize_read` (same scope as [§5.2](#52-session-read-only-queries)) |
 | GET | `/sessions/{sid}/rounds?ids=a,b` | The same projections, one request, ≤ 64 round ids | same as above |
+| GET | `/sessions/{sid}/rounds?latest=1` | **Pinning read**: the session's newest TERMINAL round coordinate (falling back to the newest running round when nothing has terminated, then to `latest: null` on an empty table); the Gateway calls it to resolve `round_id` when a human's message attaches `@session` references (ADR-106 revision 2026-11-04 · reference redrawing) | same as above |
 
 Response shape (single; the batch wraps each item in `{"session_id": "…", "rounds": [ … ]}` and adds `found`):
 
@@ -765,6 +766,14 @@ Response shape (single; the batch wraps each item in `{"session_id": "…", "rou
   "answer": { "body": "…", "ts": "…" },
   "card": null, "chat_session_id": "…" }
 ```
+
+`latest=1` is a **coordinate lookup, not a listing**: one round per request, shaped `{ "session_id": "…",
+"latest": { "round_id": "r:…", "terminal": bool, "ts": "ISO-8601" } | null, "chat_session_id": "…" }`.
+The newest *terminal* round wins because a terminal round is immutable, so the coordinate pinned into
+`meta.refs` cannot rot under it; only when there is no terminal round at all does it answer the running
+round (`terminal: false`, "progress as of then"), and an empty side table answers `latest: null` — an
+explicit hole, not an empty list. Neither `ids` nor `latest` present → 400 (an unbounded "all rounds"
+read has no place on a request path).
 
 Error codes: `400` malformed round id on the single read / empty `ids` / more than 64 ids; `404` malformed session id, session does not exist or is not readable, no such round, or its recorded coordinates no longer resolve to it (single shape); `500` projection assembly failed (single shape; the batch records the failure on that item as `found: false` plus `error`). A malformed `round_id` inside a batch does **not** reject the request — it answers `found: false` in its own entry, because one bad ref must not turn the rest of the chunk into something unreadable. `found: false` and `found: false` + `error` are two different facts: the first is a permanent hole, the second says "the round exists but its rows could not be read", which [§4.17](#417-chat-execution-block-projection-read-adr-106-d5d9d10) maps to `unreachable`, not `not_found`.
 
@@ -831,6 +840,29 @@ Conventions:
 - An empty `chat_session_id` → 400; `surface` recognises only `group`, anything else (including absent) is
   `direct`. This is a read-only surface and opens no write entry on an execution session: delivering to a
   chosen session still goes through `POST /api/intents/mentions` (§4.5).
+
+### 5.9 `@session` Reference Material: Pinning and Persistence (ADR-106 revision 2026-11-04 · reference redrawing)
+
+> **Implementation**: [`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs) (`validate_refs` / `pin_reference_rounds`); the pinning read is [`§5.7`](#57-round-projection-read-adr-106-d4)'s `rounds?latest=1`. **The full intent field table is owned by design 27 §4.5**; only the communication discipline is pinned here.
+
+`POST /api/intents/mentions` (and the 1:1 `POST /api/intents/chat-message`) body gains an optional `refs`: a message quotes several execution-session rounds as **material**, not as a delivery target — the `@` picker no longer produces `target_sessions` (narrowly retired; only the addressing-card answer keeps it). Each array item:
+
+| Field | Required | Notes |
+|---|---|---|
+| `agent_instance_id` | yes | Must be one of this message's delivery targets (material travels to the agent the human named, never to a bystander) |
+| `session_id` | yes | The execution-session id as the picker's candidate list offered it; re-checked server-side against the Runtime charset (`[A-Za-z0-9_-]`, ≤ 128 bytes) |
+| `round_id` | no | Only echoed back by an addressing-card re-delivery (its row was already pinned); absent = the Gateway pins it now. **An echo with a `round_id` may ride beside the card answer's `target_sessions`** — it is a fact of an already-written sentence, not a new delivery instruction |
+| `terminal` | no | Echoed with `round_id`, marks whether the pinned round had reached terminal |
+
+- **Pinning (before the row exists)**: for **every** ref (echo included), the Gateway first performs one scoped read through `rounds?latest=1` — this read is also the **authorization gate**: it runs the Runtime's `authorize_read` against the caller's user + chat scope, so a `session_id` that does not belong to this Chat / is not readable answers 404 here rather than letting a forged echo coordinate inject another session's material (ADR-106 revision · S-1). For a **fresh** ref (no `round_id`) this same read **also pins** the coordinate, resolving "the newest terminal round at that moment" (falling back to the newest running round), yielding the full quadruple `{agent_instance_id, session_id, round_id, terminal}`. For a pre-pinned echo (with `round_id`+`terminal`) the read **only proves readability and never rewrites the coordinate** — the client's coordinates are passed through verbatim and **never re-resolved** (a re-delivery is the same sentence, and re-guessing the round of an already-written utterance is exactly what this endpoint exists to prevent).
+- **Persistence**: the pinned coordinate array is written to the `user_message` row's `meta["refs"]` (**coordinates only, never content**); `build_chat_params` gains a `chat_refs` key (each target carries only its own instance's refs).
+
+Discipline (**the row is not written first**):
+
+- more than 5 refs (`MAX_CHAT_REFS`) → 400; a ref naming an agent this message does not deliver to, a blank or path-shaped `session_id`, a blank `round_id`, a **fresh** ref whose agent both receives a `target_sessions` delivery and carries `refs`, or a duplicate `(agent, session)` → 400. **The delivery-vs-quote contradiction is judged only for a fresh ref**: a pre-pinned echo (with `round_id`, i.e. the card answer's re-delivery) may ride beside `target_sessions`, because it is a fact of an already-written sentence, not a new delivery instruction. `force_new_for` + `refs` is **not** a contradiction: "new task" plus "quote this round while you do it" is one coherent instruction (unlike an address, a reference never decides where the sentence goes).
+- A pinning read that fails: **the row is not written**, the surface keeps the draft. A Runtime `404` (no such session / not readable) → `400`; Runtime / node unreachable and every other failure → `502`; an empty side table `latest: null` (no round to quote) → `400`.
+- **A message carrying `refs` skips the level-3 continuation branch** (a reference is already explicit material, so the model is not left to guess the target).
+- **Naming caveat**: `meta.refs` (chat material coordinates, this section), `context_refs` (the ADR-107 reference-part channel) and the chat-block `refs` (the `instance|session|r:round` triple of a D4 block projection read) are three different layers and must never be conflated in code or docs.
 
 ---
 

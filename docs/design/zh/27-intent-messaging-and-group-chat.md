@@ -1,7 +1,9 @@
 # Intent 通信与聊天 Session 设计
 
 > 状态：设计定稿（框架、需求、数据模型、协议、前端、模块边界已确认；API 与 schema 细节待实现设计）
-> 版本：v3.1.4 | 更新日期：2026-11-04
+> 版本：v3.2 | 更新日期：2026-11-04
+>
+> v3.2 为 **`@session` 引用重划与块内就地续投**（ADR-106 修订二 2026-11-04）：① 两级 `@` 的第二级 picker 从"这条消息投递到哪个执行会话"改为"引用哪几个执行会话轮作为材料"——行变**多选**（1–5 条），每行两个动作「引用 / 去续投」；"去续投"是导航（locate 该会话块 → 聚焦其块内输入框），不投递、不改消息承载；`target_sessions`/`target_session` 从人 @ 路径**窄退役**（仅寻址卡应答保留）。② 落库的消息带钉好的 `meta.refs`（四元组坐标，发送时由 Gateway 经 `rounds?latest=1` 钉轮；钉失败 400/502、行不落库、前端保草稿），渲染为用户气泡的来源 chips（点击 = 同 locate）；带 refs 的消息**跳过级别 3 续投分支**。③ 块展开态底部常驻一个轻量输入行（desktop 为 hover/focus reveal、草稿非空或持焦绝不收起；mobile 无 hover，展开即在 open 体底部、收起绝不出现），发送走级别 1（`sendGroupText(chatId, text, [], rowId)` / `deliver(text, rowId)`），与 pause 卡的"继续执行"（借道主 composer）并存不动。交付物化走 ADR-107 参照 part（新 kind=`referenced_round`），装配规则见设计 29 §11。不做兼容层：wire 直接改形，历史行无 `meta.refs` 天然为空、不迁移。逐项见 §5.5.5、§6.5。
 >
 > v3.1.4 为**块头主语与可见窗口修订**（ADR-106 呈现契约补正）：v3.1.1 把"一个执行会话"折成一块、块内默认只展开最近 2 轮之后，出现两种把话说错的情形。①**状态词的主语错位**：块头把 `session_state`（会话此刻在干什么）与"本块最新一轮的终态"混在一句话里，且"是否在跑"按整个会话任一轮 `pending` 投票——于是块里最后一轮的答复已经显示、状态词却还是"执行中"（会话正在跑一条本聊天还没有引用行的新轮），停在未答卡片上的轮也被说成"执行中"（它其实在等人），读成空洞的轮什么都不说。改为：状态词只有一个主语——**这个会话此刻在干什么**：会话在跑就照会话状态词说（哪怕块内最新一轮已答复，会话可能已在跑一条本聊天还没有引用行的新轮），会话空闲才落到本块最新一轮的投影（停在未答卡片上说等待你、终态说终态、空洞与故障说结果未知）。与此**独立**的一条断言是"在跑"标记（转圈图标、自动展开）：它只认本块最新一轮的 `pending`，会话另有新轮不许冒充本块在跑。②**触发行被窗口藏掉**：用户那句话的 `user_message` 行已折进块（一句话只出现一个地方），而承载它的那一轮可能落在"显示更早 N 轮"后面——于是整条转录里这句话消失，可见的几行反倒像 agent 在回答没人问过的问题。改为：承载触发行的那一轮与停在未答卡片上的轮常驻可见，只有块自己长出来的轮留在揭示之后。逐项见 §5.5.5。
 >
@@ -863,6 +865,10 @@ execution session 中需要人决策的东西——`ask_user_question` 的选项
 **执行界面的 pending 队列仍是投影，与本次改动无关。**输入框上方的「消息队列」盒反映后端真实排队消息：一条 chat 转发的 `user_message` 被路由进一个正忙的 execution session 时，Runtime 维护一份**有界**的 pending 清单——意图在目标 session 正忙时于入队侧记录、在该轮出队开跑时清除；条目只携带 `message_id`、发送者、受限摘要（≤ 120 字符，ADR-096 受限读）与 `from_chat` 标记，随既有的 retained `session_state` 快照（design 29 §6.4 的同一投影面）推送。它是 **execution 视图内**的能力，保留不动；本次只改 **chat 侧**的呈现。idle session 不入队（消息直接开跑、落进历史即可），因此这份清单不引入第二个写入口、也不落库。
 
 **工具授权 / ask_question 落在块里（v3.1 修订）。**`ask_user_question`、权限审批这类需要人决策的东西随轮次投影进入那一轮的块，在块里就地可答（1:1、群聊、PM 任务共用同一套块语法）；它不再是 chat 的 durable 行（§5.5.4 / ADR-106 D8）。它不是 live 镜像——卡的内容只在读时存在，chat 不持有一份会变旧的状态副本。本轮执行到哪一步、正在等哪个工具，仍只在 execution 视图里细看，从块头"查看执行"跳转过去。
+
+**块内就地续投输入行（v3.2 修订二，ADR-106 修订二 2026-11-04）。**续投一条已看见的任务不该被赶到主 composer 去重新寻址：块展开态底部常驻一个轻量输入行，发送走级别 1（`sendGroupText(chatId, text, [], rowId)` / mobile `deliver(text, rowId)`，`rowId` 是最新一轮**引用行的 `meta.message_id`**（`round:…`），不是块 ref 串），claim / 等待行自动成立——与工具授权卡、pause 卡的"继续执行"（借道主 composer）是并存的三条路径，彼此不动。两面的呈现差异只在展开时机：Desktop 无屏尺寸限制，输入行 hover/focus reveal，但**草稿非空或持焦绝不收起**（一个正在打的字不该因为指针移出就消失）；Mobile 无 hover，输入行就在 open 体底部常驻，**收起绝不出现**（§6.5：折叠的运行不展示输入）。`@` picker 的"去续投"与用户气泡的来源 chip 点击都走同一条 locate（经 `keyOfSeq`/`scrollToKey` 定位该会话块锚点→置一个上升沿 focus 信号→块展开并聚焦输入行）；窗口外 locate 失败只提示"任务块不在已加载历史"，v1 不自动翻页。
+
+**来源 chips 是行内呈现、不是块认领（v3.2 修订二）。**一条 `user_message` 钉好的 `meta.refs`（四元组坐标）在其用户气泡上渲染为一排来源 chip，点击 = 同一条 locate。它属行内呈现，`chatTranscriptGroups` 的折叠不参与（材料认领一条轮，不拥有一个块）；坐标只读行 meta，无新读。
 
 **点击权限按"是否该 Chat session 的参与者"判定，不按 owner。**群聊的存在理由就是成员共享同一份工作上下文，因此**群聊触发的 execution session 对该群聊全体参与者可读**——否则成员看到的是"Agent 在干活"却永远无法知道它卡在哪，群聊退化成给 Agent 发工单。单聊里用户本就是 owner，行为不变。判定依据是**派生，不是新表**：群聊 execution session 由 routing key `chat:{chat_session_id}` 创建（§5.4.1），该 key 已持久化在 Runtime `sessions` 表的 `intent_key` / `intent_closed` 两列（v3.1：`intent-sessions.json` / `terminal-sessions.json` 已退役，ADR-106 D11），因此"这个 execution session 属于哪个 Chat session"是已知事实，读权限 = 该 Chat session 的参与者集合。不引入独立 ACL 存储。**不得使用现有 `SessionVisibility::Public`**——它语义是"任何已认证用户可读"（[session_meta.rs](../../../core/acowork-memory/src/session_meta.rs)），是平台级可见，会让非群成员读到群执行历史，比原问题更糟。具体建模留实现设计（§10.20）。
 
