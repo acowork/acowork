@@ -440,7 +440,7 @@ describe("mergeMessageWindow: backend-authoritative ts ordering", () => {
   });
 });
 
-// ── foldMessages: user_with_attachments ─────────────────────────────────
+// ── foldMessages: user_with_parts ─────────────────────────────────
 
 import { foldMessages } from "../components/chat/messageFolder";
 
@@ -467,7 +467,7 @@ function attachmentMsg(
   };
 }
 
-describe("foldMessages: user_with_attachments folding", () => {
+describe("foldMessages: user_with_parts folding", () => {
   it("folds user + attachment system entries within 100ms into a single block", () => {
     const msgs = [
       userMsg("u1", 1000),
@@ -476,7 +476,7 @@ describe("foldMessages: user_with_attachments folding", () => {
     ];
     const blocks = foldMessages(msgs);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe("user_with_attachments");
+    expect(blocks[0].type).toBe("user_with_parts");
     expect(blocks[0].items).toHaveLength(3);
     expect(blocks[0].items[0].id).toBe("u1");
     expect(blocks[0].items[1].id).toBe("a1");
@@ -519,11 +519,11 @@ describe("foldMessages: user_with_attachments folding", () => {
     ];
     const blocks = foldMessages(msgs);
     expect(blocks).toHaveLength(1);
-    expect(blocks[0].type).toBe("user_with_attachments");
+    expect(blocks[0].type).toBe("user_with_parts");
     expect(blocks[0].items).toHaveLength(6);
   });
 
-  it("preserves explore_group folding alongside user_with_attachments", () => {
+  it("preserves explore_group folding alongside user_with_parts", () => {
     const msgs = [
       userMsg("u1", 1000),
       attachmentMsg("a1", 1001, "file_upload"),
@@ -533,12 +533,12 @@ describe("foldMessages: user_with_attachments folding", () => {
     ];
     const blocks = foldMessages(msgs);
     expect(blocks).toHaveLength(3);
-    expect(blocks[0].type).toBe("user_with_attachments");
+    expect(blocks[0].type).toBe("user_with_parts");
     expect(blocks[1].type).toBe("explore_group");
     expect(blocks[2].type).toBe("assistant");
   });
 
-  it("sets anchorToLatest correctly on user_with_attachments block", () => {
+  it("sets anchorToLatest correctly on user_with_parts block", () => {
     const msgs = [
       userMsg("u1", 1000),
       attachmentMsg("a1", 1001, "file_upload"),

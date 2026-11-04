@@ -1479,6 +1479,10 @@
     "level": "압축 레벨 {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
   },
+  "messageRef": {
+"chatBackground": "이 작업을 시작한 채팅의 배경 정보",
+"generic": "참조"
+  },
   "chatError": {
     "contextOverflow": "컨텍스트 오버플로우: 모델 기능 정보가 없어 컨텍스트 사용량을 정확히 계산할 수 없습니다. 모델 이름이 정확한지(대소문자 구분) 확인하세요."
   },

@@ -670,7 +670,7 @@ export const VirtualMessageList = React.forwardRef<
                 })()}
 
                 {/* Regular message */}
-                {item.type !== "explore_group" && item.type !== "user_with_attachments" && (() => {
+                {item.type !== "explore_group" && item.type !== "user_with_parts" && (() => {
                   const msg = item.items[0];
                   // ADR-050 post-C5 fix: isLive assistant block -> streaming preview
                   if (item.isLive && msg.type === "assistant") {
@@ -697,14 +697,15 @@ export const VirtualMessageList = React.forwardRef<
                   );
                 })()}
 
-                {/* User message with attachments */}
-                {item.type === "user_with_attachments" && (() => {
+                {/* User turn: the words plus their parts (attachments
+                    ADR-046, references ADR-107) */}
+                {item.type === "user_with_parts" && (() => {
                   const userMsg = item.items[0];
-                  const attachments = item.items.slice(1);
+                  const parts = item.items.slice(1);
                   return (
                     <UserWithAttachmentsBubble
                       userMessage={userMsg}
-                      attachments={attachments}
+                      parts={parts}
                       currentSessionId={currentSessionId ?? ""}
                       liveUserName={userDisplayName}
                       liveUserAvatarUrl={userAvatarUrl}
