@@ -111,33 +111,42 @@ AppImage. The installer bundles the Gateway and every service it supervises.
 
 On first launch, pick one of three Gateway modes.
 
-**1. Local** — the app starts a Gateway for you.
+### 1. Local
 
-```
-Launch the Desktop App → choose Local → done
-```
+The app starts a Gateway for you.
 
-**2. Remote** — connect to a Gateway on another machine.
+**Step 1** — launch the Desktop App.
+**Step 2** — choose **Local** in the Gateway mode picker.
 
-```
-On the Gateway machine:  acowork-gateway --daemon
-On the Desktop machine:  Launch the Desktop App → choose Remote → enter
-                         http://<gateway-host>:19876
-```
+### 2. Remote
 
-**3. Relay** — reach a Gateway through the cloud relay.
+Connect to a Gateway running on another machine.
 
-```
-On the Gateway machine:  enable the relay tunnel in gateway.toml
-                         [relay]
-                         enabled = true
-                         url = "wss://<relay-domain>/tunnel"
-On the Desktop machine:  Launch the Desktop App → choose Relay → enter
-                         https://<gw-id>.<relay-domain>
+**Step 1** — on the Gateway machine, start it:
+
+```bash
+acowork-gateway --daemon
 ```
 
-`gateway.toml` lives in `~/.acowork/acowork-gateway/config/` (`%USERPROFILE%\.acowork\acowork-gateway\config\` on Windows).
-`<gw-id>` is shown in the Desktop App's Gateway settings.
+**Step 2** — launch the Desktop App.
+**Step 3** — choose **Remote** and enter `http://<gateway-host>:19876`.
+
+### 3. Relay
+
+Reach a Gateway through the cloud relay.
+
+**Step 1** — on the Gateway machine, enable the tunnel in `gateway.toml`
+(`~/.acowork/acowork-gateway/config/`):
+
+```toml
+[relay]
+enabled = true
+url = "wss://<relay-domain>/tunnel"
+```
+
+**Step 2** — launch the Desktop App.
+**Step 3** — choose **Relay** and enter `https://<gw-id>.<relay-domain>`.
+The `<gw-id>` is shown in the Desktop App's Gateway settings.
 
 Agents are created through the **Create Agent wizard** in the app.
 
