@@ -432,8 +432,10 @@ verifies the signature.
 ### Signing rules
 
 - **Never commit a private key.** See [`SECURITY.md`](SECURITY.md). The signing keys used
-  by `dev/common/build-agent.*` land in `examples/.signing-keys/` — that directory must
-  never be committed. If you have already committed one, rotate it.
+  by `dev/common/build-agent.*` land in `examples/.signing-keys/` — that directory is
+  git-ignored and generated per machine, so regenerate it with
+  `cargo run --bin acowork-keygen -- --type developer --output-dir examples/.signing-keys`
+  rather than committing it.
 - Signing keys are generated per machine by `acowork-keygen`. The developer key type
   signs for local development; the platform key type is reserved for official builds.
 - The signature covers the whole ZIP content (local files + central directory + end of
