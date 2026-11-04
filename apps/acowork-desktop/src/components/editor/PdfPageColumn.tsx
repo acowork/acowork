@@ -389,16 +389,22 @@ export const PdfPageColumn = forwardRef<PdfPageColumnHandle, PdfPageColumnProps>
             viewport.scrollTop += drift.y;
         }, [scale]);
 
-        // Wheel zoom: a native non-passive listener, because React's synthetic
-        // `onWheel` is passive and would let the panel scroll while the column
-        // zooms.
+        // A wheel moves through the document; Ctrl + wheel (and a trackpad
+        // pinch, which Chromium reports the same way) makes the pages bigger.
+        // The unmodified wheel is left to the browser — this is a document with
+        // somewhere to scroll, and stealing that would be the surprising
+        // version of the gesture. Native non-passive listener, because React's
+        // synthetic `onWheel` is passive and could not cancel the ctrl case.
         useEffect(() => {
             const viewport = viewportRef.current;
             if (!viewport) return;
             const onWheel = (e: WheelEvent) => {
                 if (!sizesRef.current) return;
+                if (!e.ctrlKey) return;
                 const factor = wheelZoomFactor(e.deltaY);
                 if (factor === 1) return;
+                // The WebView's own ctrl + wheel is page zoom: without this it
+                // would scale the whole shell on top of our column.
                 e.preventDefault();
                 zoomTo(scaleRef.current * factor, { x: e.clientX, y: e.clientY });
             };

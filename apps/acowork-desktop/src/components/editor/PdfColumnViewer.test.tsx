@@ -33,7 +33,7 @@
  * a pointer event and those two.
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { PdfColumnViewer, type PdfColumnViewerProps } from "./PdfColumnViewer";
 import type { PdfPageRenderer } from "./pdfRasterize";
 import { PAGE_GAP_PX } from "./pdfPageStack";
@@ -543,6 +543,34 @@ describe("PdfColumnViewer column scrolling", () => {
 
     await scrollColumn(PITCH);
     await waitFor(() => expect(screen.getByTestId("pdf-page-indicator").textContent).toBe("2 / 3"));
+  });
+
+  it("scrolls on a plain wheel and zooms only on ctrl + wheel", async () => {
+    await renderPicker();
+    const viewport = await measureViewport();
+    const zoom = () => screen.getByTestId("pdf-zoom-level").textContent;
+    expect(zoom()).toBe("100%");
+
+    const wheel = new WheelEvent("wheel", { deltaY: 120, bubbles: true, cancelable: true });
+    await act(async () => {
+        viewport.dispatchEvent(wheel);
+    });
+    // Not cancelled means the browser scrolls it — the column is the only
+    // surface here with somewhere to go.
+    expect(wheel.defaultPrevented).toBe(false);
+    expect(zoom()).toBe("100%");
+
+    const pinch = new WheelEvent("wheel", {
+        deltaY: -120,
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+    });
+    await act(async () => {
+        viewport.dispatchEvent(pinch);
+    });
+    expect(pinch.defaultPrevented).toBe(true);
+    expect(zoom()).not.toBe("100%");
   });
 
   it("moves the column to the next page instead of swapping it", async () => {
