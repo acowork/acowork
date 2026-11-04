@@ -54,6 +54,21 @@ runtime is built with `--features download-ort[,coreml]` instead, so
 
 ## Build and run
 
+The desktop and mobile apps shell out to the core binaries, so those come
+first. The desktop app drives the core build from its own npm scripts:
+
+| Command | Where | What it does |
+|---|---|---|
+| `npm run core:build:debug` | `apps/acowork-desktop` | Builds the nine core binaries the app shells out to (gateway / runtime / embed / doc / lsp-relay / node / pm / user / memory) in the debug profile. ONNX Runtime is discovered by `dev/ort_env.js` — no separate setup step. |
+| `npm run tauri dev` | `apps/acowork-desktop` | Native window with the HMR frontend. Run `core:build:debug` first. |
+| `npm run tauri build` | `apps/acowork-desktop` | Release installer. `beforeBuildCommand` auto-runs `core:build:release` + `npm build` + the Tauri bundle — you do not need to build the core twice. |
+| `npm run dev` | `apps/acowork-desktop` · `apps/acowork-mobile` | Browser-only Vite dev server (desktop :5173, mobile :19877). No native window. |
+
+The mobile app bundles no core binaries of its own — it talks to a Gateway
+over the network, so there is nothing extra to compile. `npm run tauri:dev`
+in `apps/acowork-mobile` is enough (see
+[apps/acowork-mobile/README.md](../apps/acowork-mobile/README.md)).
+
 | Script | What it does |
 |---|---|
 | [`build_core.ps1`](common/build_core.ps1) · [`build_core.sh`](common/build_core.sh) | Build Gateway + Runtime + Node Agent. `-Start` / `--start` stops the old Gateway and starts a new one; `--start --remote` binds `0.0.0.0` and advertises the detected LAN IP instead of `127.0.0.1` — this is how you make the Gateway reachable from a phone on the same network. On macOS the embed build downloads ONNX Runtime via cargo (`download-ort`, CoreML on Apple Silicon; `--cpu` to opt out) and syncs it into `.ort/`, so no `setup_ort.sh` run is needed; `--install-deps` sets up Homebrew `pkg-config`/`cmake` and `--mirror` configures the USTC cargo mirror (both opt-in). |
@@ -125,7 +140,9 @@ Tests that live outside the Cargo test harness:
 | [`acowork-relay.service`](deploy/relay/acowork-relay.service) | systemd unit. Add `--log-level debug` when diagnosing a wedged device tunnel: yamux logs its stream lifecycle and ping/pong RTT at debug, and that is the only evidence a stalled pipe leaves behind (design doc 24 §5.2). |
 | [`certbot-wildcard.sh`](deploy/relay/certbot-wildcard.sh) | Wildcard certificate for `*.<relay-domain>` — the relay serves every device from its own subdomain, so one wildcard cert covers all of them. |
 
-See the root [README § Relay server](../README.md) for the deployment walkthrough.
+Deployment walkthrough: [`docs/runbooks/relay-ecs-cloudflare-deploy.md`](../docs/runbooks/relay-ecs-cloudflare-deploy.md)
+(Cloudflare DNS + Aliyun ECS) · [`docs/runbooks/relay-selfhost-cn-deploy.md`](../docs/runbooks/relay-selfhost-cn-deploy.md)
+(self-host in mainland China, ICP filing). Design: [design doc 24 §3](../docs/design/zh/24-cloud-relay-remote-access.md).
 
 ## What is deliberately absent
 
