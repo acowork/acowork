@@ -517,6 +517,18 @@ pub struct AgentLoop {
     /// "nothing to reference" by `end_turn_obligations` so a turn cannot inherit
     /// another's task name.
     pub(crate) turn_reference: crate::agent::intent_turn::TurnReference,
+
+    /// ADR-107: the **reference parts** of this turn's inbound message —
+    /// context the Runtime supplies and the human did not type (today: the
+    /// Chat Router's `exec_session_create(background)`).
+    ///
+    /// Set per turn by the arm that dequeued the message, consumed exactly once
+    /// at the top of [`Self::run_inner`]: the model-facing message takes them
+    /// through `intent_turn::render_user_turn`, and the JSONL keeps them as
+    /// `context_ref` rows beside the `user` row — never inside it. Cleared at
+    /// turn end so a turn that never reaches its user-row write (a replay, an
+    /// early failure) cannot leave a reference to be attached to the next one.
+    pub(crate) turn_message_refs: Vec<acowork_core::MessageRef>,
 }
 
 impl AgentLoop {
@@ -589,6 +601,7 @@ impl AgentLoop {
             turn_surface: Default::default(),
             open_interactions: Vec::new(),
             turn_reference: Default::default(),
+            turn_message_refs: Vec::new(),
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -663,6 +676,7 @@ impl AgentLoop {
             turn_surface: Default::default(),
             open_interactions: Vec::new(),
             turn_reference: Default::default(),
+            turn_message_refs: Vec::new(),
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -1116,6 +1130,12 @@ impl AgentLoop {
         // abort from the previous turn must not leak into this one.
         self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Completed;
 
+        // ADR-107: this turn's reference parts, consumed exactly once. Taken
+        // here (not in the `!replay` branch) so a replay turn also drops them —
+        // they belong to a message that is already in history, and a lease that
+        // outlived its turn would land on the next one.
+        let message_refs = std::mem::take(&mut self.turn_message_refs);
+
         // Replay is a debug path over existing history; the staged turn
         // message from the live run is not re-embedded (memory tools fall
         // back to keyword-only recall).
@@ -1184,6 +1204,15 @@ impl AgentLoop {
                     None,
                     message_id,
                 );
+            }
+
+            // ADR-107: the turn's reference parts, written AFTER the user row
+            // for the same reason (and by the same fold contract) as the
+            // attachments below: they are rows of their own, and the human's
+            // row keeps their words untouched. Before the attachments, so the
+            // transcript reads words → background → files.
+            if !message_refs.is_empty() {
+                self.write_message_refs(&message_refs);
             }
 
             // ADR-046: Persist attachment records AFTER the user message so
@@ -4447,6 +4476,131 @@ mod tests {
         assert!(
             user_entry.contains(r#""id":"msg-1""#),
             "JSONL user entry should have the correct message id, got: {user_entry}",
+        );
+    }
+
+    /// ADR-107: the turn's reference parts become `context_ref` rows of their
+    /// own, immediately after the `user` row — the `user` row keeps the
+    /// human's words alone.
+    ///
+    /// This is the durable half of the title fix. The auto-title is written
+    /// from the first `user` row (`read_first_user_message`), so as long as the
+    /// router's background could only enter the session as a reference, a
+    /// dispatched session's title describes what the person asked instead of
+    /// the router's fixed opening sentence.
+    #[tokio::test]
+    async fn test_run_persists_reference_parts_beside_the_user_row() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let work_dir = dir.path();
+        let session_id = "test-reference-parts";
+        let committed = Arc::new(AtomicUsize::new(0));
+        let config = crate::conversation::SessionConfig {
+            agent_id: "com.test.loop".to_string(),
+            workspace_id: None,
+            model: None,
+            provider: None,
+        };
+        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
+            work_dir, session_id, config, 0, // max_sessions
+            committed,
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            Arc::new(MockProvider::single_text("ok")),
+            entries(vec![]),
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+
+        // What the Chat Router hands over: the human's words as the message,
+        // the router's framing as a reference part.
+        let words = "提交一下本地修改";
+        let background = "只改测试，别动实现；上一个会话已经跑过 clippy。";
+        agent_loop.turn_message_refs =
+            vec![acowork_core::MessageRef::chat_background(background)];
+        let llm_message = crate::agent::intent_turn::render_user_turn(
+            words,
+            &agent_loop.turn_message_refs,
+        );
+
+        let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
+        let result = agent_loop
+            .run(
+                &llm_message,
+                &mut context_builder,
+                None,
+                Some("msg-ref-1".to_string()),
+                Some(words),
+                None,
+            )
+            .await;
+        assert!(result.is_ok(), "run() should succeed: {result:?}");
+        conversation
+            .flush_pending()
+            .await
+            .expect("flush should succeed");
+
+        let jsonl_path = work_dir
+            .join("conversations")
+            .join(format!("{session_id}.jsonl"));
+        let mut raw = String::new();
+        std::fs::File::open(&jsonl_path)
+            .unwrap()
+            .read_to_string(&mut raw)
+            .unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+
+        let user_idx = lines
+            .iter()
+            .position(|l| l.contains(r#""id":"msg-ref-1""#))
+            .expect("the user row is written");
+        let user_line = lines[user_idx];
+        assert!(user_line.contains(r#""role":"user""#), "{user_line}");
+        assert!(
+            user_line.contains(words),
+            "the user row keeps the human's words: {user_line}"
+        );
+        assert!(
+            !user_line.contains(background),
+            "the router's framing must never enter the user row — that row is what              auto-title is written from: {user_line}"
+        );
+
+        // The reference is its own row, directly after the user row so the
+        // transcript folds it into the same visual block (ADR-046's rule).
+        let ref_line = lines
+            .get(user_idx + 1)
+            .expect("a reference row follows the user row");
+        assert!(ref_line.contains(r#""role":"system""#), "{ref_line}");
+        assert!(ref_line.contains(background), "{ref_line}");
+        assert!(
+            ref_line.contains(r#""type":"context_ref""#),
+            "the row is discriminated by metadata.type: {ref_line}"
+        );
+        assert!(
+            ref_line.contains(r#""kind":"chat_background""#),
+            "the row states what kind of reference it is: {ref_line}"
+        );
+
+        // The title reader sees the words, and only the words.
+        assert_eq!(
+            crate::conversation::read_first_user_message(&jsonl_path).as_deref(),
+            Some(words),
+            "auto-title input is the human's first message"
+        );
+
+        // Consumed once: a later turn cannot inherit this turn's references.
+        assert!(
+            agent_loop.turn_message_refs.is_empty(),
+            "the reference lease is taken by the turn that ran"
         );
     }
 

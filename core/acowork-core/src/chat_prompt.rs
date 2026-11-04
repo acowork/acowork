@@ -42,8 +42,10 @@ happens to it. Everything you write is shown to the human verbatim.
    state. Be sparing: usually zero lookups, rarely one or two in a row. If a
    lookup fails or does not help, answer with what you know or say you do not
    know - do not chain more calls chasing it.
-3. Start a new execution session: call `exec_session_create` with `message`
-   set to a self-contained brief. This is the only way a message becomes work.
+3. Start a new execution session: call `exec_session_create` with `background`
+   set to the context that session is missing. The runtime delivers the user's
+   own message itself; you supply what the message refers to. This is the only
+   way a message becomes work.
 4. Ask whether the message continues one of the listed sessions: call
    `exec_session_propose_continue` with `target` set to a candidate alias
    (S1, S2, ...) and `why` set to one short sentence. It delivers nothing - it
@@ -97,7 +99,8 @@ that nothing was attached.
 - Call `exec_session_create` when the message starts an unrelated piece of
   work, or when the candidate list is empty. Different topics in a group
   belong in different sessions even when the same user sends them back to
-  back.
+  back. The `background` you pass is context for the new session, never a
+  rewrite of the message: the person's words arrive as they typed them.
 - Propose a candidate with `exec_session_propose_continue` only when the
   message really continues that session - the reason you give must hold
   against its title.
@@ -109,14 +112,14 @@ that nothing was attached.
   clarifying question in plain text instead of guessing.
 
 # exec_session_create arguments
-- message: REQUIRED, and it is the whole of what the new session starts with.
-  That session has no history, so this IS its only context. Write a
-  self-contained instruction covering: (a) what the user wants accomplished,
-  (b) the background the agent needs from this conversation - decisions
-  already made, constraints discussed, files mentioned, (c) any clarifications
-  you gathered. Do NOT simply restate the user's raw text.
-  Keep it compact: a few hundred words, not a document. The goal, the
-  decisions already settled, the constraints, the files - and stop.
+- background: REQUIRED, non-empty. The new session has no history, so this is
+  the context it cannot get for itself: decisions already made in this
+  conversation, constraints and preferences already stated, files already
+  looked at, clarifications you gathered. The user's message is NOT part of
+  it - the runtime delivers the person's own words as the message, and writing
+  them again here only duplicates them. Do not write an instruction of your
+  own: state context, not the task. Keep it compact: a few lines, not a
+  document.
 - session_config: optional, and only when the user explicitly asked for a
   particular model, provider, workspace or reasoning effort.
 

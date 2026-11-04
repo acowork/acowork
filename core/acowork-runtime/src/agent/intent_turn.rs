@@ -636,6 +636,65 @@ pub fn attached_items_from_params(
         .filter(|v: &Vec<acowork_core::protocol::AttachedItem>| !v.is_empty())
 }
 
+/// Parse the reference parts an Intent envelope carries (ADR-107).
+///
+/// A reference is context the Runtime supplies and the human did not type —
+/// today only the Chat Router's `exec_session_create(background)`, plus the
+/// degraded route's chat tail. It rides `params.context_refs` for the same
+/// reason attachments ride `params.attached_items`: the envelope has one
+/// opaque `params` object, and a second transport field would need a proto
+/// change for data only the Runtime produces and only the Runtime reads.
+///
+/// Empty and unparseable entries are dropped rather than failing the turn —
+/// a producer bug degrades one block, it does not cost the human's message.
+/// The same rule the attachment parse applies, and for the same reason.
+pub fn context_refs_from_params(params: &Value) -> Vec<acowork_core::MessageRef> {
+    params
+        .get("context_refs")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|d| serde_json::from_value::<acowork_core::MessageRef>(d.clone()).ok())
+                .filter(|r| !r.is_empty() && r.model_header().is_some())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The model-facing message for a turn that carries reference parts: the
+/// human's words FIRST, then one block per reference.
+///
+/// Order is the whole decision (ADR-107). The words lead because they are the
+/// instruction, because a model reads the head of a message as the ask, and
+/// because the router's previous brief-first composition is exactly what made
+/// every chat-dispatched session open with the same sentence. A reference is
+/// framing the Session needs to act — it follows, clearly delimited, and
+/// labelled with [`acowork_core::MessageRef::model_header`] so it can never be
+/// mistaken for something the human said.
+///
+/// `content` is returned untouched when there are no usable references, so a
+/// turn without them keeps byte-identical prompt input to before this change.
+pub fn render_user_turn(content: &str, refs: &[acowork_core::MessageRef]) -> String {
+    let blocks: Vec<String> = refs
+        .iter()
+        .filter(|r| !r.is_empty())
+        .filter_map(|r| r.model_header().map(|h| format!("{h}\n{}", r.content.trim())))
+        .collect();
+    if blocks.is_empty() {
+        return content.to_string();
+    }
+    if content.trim().is_empty() {
+        // A turn that carried no words (the human attached something, or the
+        // router routed an attachment-only message). The blocks are the entire
+        // message, so no empty user line is put in front of them — an empty
+        // first line reads to a model as "the human said nothing", which is
+        // true, but rendering it as a blank the blocks hang off is noise.
+        return blocks.join("\n\n");
+    }
+    format!("{}\n\n{}", content.trim_end(), blocks.join("\n\n"))
+}
+
 /// Pull one Chat attachment pinned to the durable `user_message` row this
 /// Intent answers (design 27 §4.2.1). The bytes travel over node-auth HTTP
 /// through the Gateway (`GET /api/intents/chat-attachments/…`), never over
@@ -1093,5 +1152,94 @@ mod tests {
         assert_eq!(acowork_core::intent::task_id_from_conversation("chat-9"), None);
         assert_eq!(acowork_core::intent::task_id_from_conversation("task:p-1:"), None);
         assert_eq!(acowork_core::intent::task_id_from_conversation("task:"), None);
+    }
+
+    // ── ADR-107: reference parts ─────────────────────────────────────
+
+    fn refs(value: serde_json::Value) -> Vec<acowork_core::MessageRef> {
+        context_refs_from_params(&serde_json::json!({ "context_refs": value }))
+    }
+
+    #[test]
+    fn reference_parts_are_parsed_off_the_envelope() {
+        let parsed = refs(serde_json::json!([
+            { "kind": "chat_background", "content": "the user asked to commit" }
+        ]));
+        assert_eq!(
+            parsed,
+            vec![acowork_core::MessageRef::chat_background("the user asked to commit")]
+        );
+        // No key, an empty array, or a non-array all mean "no references" —
+        // the turn must still run.
+        for absent in [
+            serde_json::json!({}),
+            serde_json::json!({ "context_refs": [] }),
+            serde_json::json!({ "context_refs": "nope" }),
+        ] {
+            assert!(context_refs_from_params(&absent).is_empty());
+        }
+    }
+
+    #[test]
+    fn unusable_reference_parts_are_dropped_not_fatal() {
+        // An unreadable entry, an empty body and an unknown kind are all
+        // "nothing this build can render": the good entry still arrives, and
+        // a bad one never makes the human's turn fail.
+        let parsed = refs(serde_json::json!([
+            { "kind": "chat_background", "content": "   " },
+            { "kind": "some_future_kind", "content": "future body" },
+            { "content": "kind missing" },
+            { "kind": "chat_background", "content": "kept" }
+        ]));
+        assert_eq!(
+            parsed,
+            vec![acowork_core::MessageRef::chat_background("kept")]
+        );
+    }
+
+    #[test]
+    fn the_words_lead_and_the_reference_follows() {
+        // The reason this function exists (ADR-107). The old composition was
+        // `{brief}\n\n[user message]\n{words}`: the router's framing came
+        // first, so the first `user` row — and therefore the auto-title —
+        // opened with the same sentence in every dispatched session.
+        let out = render_user_turn(
+            "提交本地修改",
+            &[acowork_core::MessageRef::chat_background(
+                "The user asked to commit the pending work.",
+            )],
+        );
+        assert!(
+            out.starts_with("提交本地修改"),
+            "the human's words must open the message: {out}"
+        );
+        let background = out.find("[background:").expect("the block is labelled");
+        assert!(
+            background > "提交本地修改".len(),
+            "the reference must follow the words: {out}"
+        );
+        assert!(out.contains("The user asked to commit the pending work."));
+    }
+
+    #[test]
+    fn a_turn_without_references_is_byte_identical_to_the_words() {
+        assert_eq!(render_user_turn("hello  ", &[]), "hello  ");
+        assert_eq!(
+            render_user_turn("hello", &[acowork_core::MessageRef::chat_background("  ")]),
+            "hello",
+            "an empty reference must not add a header with nothing under it"
+        );
+    }
+
+    #[test]
+    fn a_wordless_turn_is_the_reference_blocks_alone() {
+        // Attachment-only, or a routed message with no typed text: the blocks
+        // are the message. No empty first line is put in front of them.
+        let out = render_user_turn(
+            "  ",
+            &[acowork_core::MessageRef::chat_background("tail of the chat")],
+        );
+        assert!(out.starts_with("[background:"), "{out}");
+        assert!(out.ends_with("tail of the chat"), "{out}");
     }
 }

@@ -1469,6 +1469,10 @@
     "level": "壓縮級別 {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
   },
+  "messageRef": {
+"chatBackground": "來自發起本任務的對話的背景資訊",
+"generic": "引用"
+  },
   "chatError": {
     "contextOverflow": "上下文溢出：模型能力資訊缺失，無法準確計算上下文用量。請檢查模型名稱是否正確（區分大小寫）。"
   },

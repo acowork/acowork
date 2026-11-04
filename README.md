@@ -150,23 +150,27 @@ The `<gw-id>` is shown in the Desktop App's Gateway settings.
 
 Agents are created through the **Create Agent wizard** in the app.
 
-> Building from source, packaging, CI, and deployment:
-> [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
+---
 
-### ☁️ Remote access (optional)
+## 🔨 Building from Source
 
-Gateway binds HTTP/MQTT to localhost only. To reach it from the public internet, deploy `acowork-relay`
-— a thin, protocol-agnostic relay: the Gateway dials out one WSS tunnel, the relay routes traffic by TLS SNI /
-Host header, and all authentication is decided by your Gateway.
+Development build — native window with a hot-reloading frontend:
 
-- Design: [`docs/design/zh/24-cloud-relay-remote-access.md`](./docs/design/zh/24-cloud-relay-remote-access.md)
-- Deploy (Cloudflare DNS + Aliyun ECS): [`docs/runbooks/relay-ecs-cloudflare-deploy.md`](./docs/runbooks/relay-ecs-cloudflare-deploy.md)
-- Self-host in mainland China (ICP filing): [`docs/runbooks/relay-selfhost-cn-deploy.md`](./docs/runbooks/relay-selfhost-cn-deploy.md)
+```bash
+cd apps/acowork-desktop
+npm install
+npm run core:build:debug      # build the core binaries the app shells out to
+npm run tauri dev             # native window, HMR frontend
+```
 
-> **Status**: ACowork is in **alpha**. The Gateway, Runtime, memory engine, and Desktop App are under active
-> development. See [Roadmap](#-roadmap) for what is shipping today and what is next.
+Release installers (`.msi` / `.dmg` / `.deb` / `.rpm` / AppImage):
 
-For more — packaging installers, signing, CI, remote-node onboarding — see [`docs/design/zh/`](./docs/design/zh/).
+```bash
+cd apps/acowork-desktop
+npm run tauri build           # beforeBuildCommand auto-runs core:build:release + npm build + tauri bundle
+```
+
+Full build, packaging, CI, and deployment guide: [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
 
 ---
 

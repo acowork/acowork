@@ -236,6 +236,43 @@ pub struct AttachedFolderMeta {
     pub name: String,
 }
 
+/// Discriminator tag for [`MessagePartMeta`]. Parallel to the
+/// `ATTACHMENT_TYPE_*` tags and sharing the same `metadata.type` field: both
+/// describe a `system` entry that is a **part of the user turn above it**
+/// rather than a message of its own.
+pub const MESSAGE_PART_TYPE_CONTEXT_REF: &str = "context_ref";
+
+/// Metadata for a [`MessagePartMeta::ContextRef`] entry (ADR-107).
+///
+/// The block's markdown body is the entry's `content` — not a metadata field —
+/// so a reader that knows nothing about references (a dump, the search index,
+/// a plain transcript view) still sees the text instead of an empty row with
+/// an opaque payload. `kind` is the one thing metadata must carry: it decides
+/// the label the human reads and the header the model reads.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub struct ContextRefMeta {
+    /// One of `acowork_core::message_ref::REF_KIND_*`.
+    pub kind: String,
+}
+
+/// Discriminated union for `ConversationEntry.metadata` on entries that are a
+/// **part of the turn above them** rather than a message of their own.
+///
+/// One union, one `metadata.type` discriminator, so the frontend keeps a single
+/// branch shape for "is this row part of the user block above me?" and adding a
+/// part type cannot collide with an attachment's tag.
+///
+/// Serialized flat, like [`AttachmentMeta`]: `{"type":"context_ref",
+/// "kind":"chat_background"}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum MessagePartMeta {
+    /// A reference block belonging to the `user` row above it (ADR-107). The
+    /// body is the entry's `content`.
+    ContextRef(ContextRefMeta),
+}
+
 /// Commands sent to the background writer thread.
 pub enum WriterCommand {
     /// Append a conversation entry to the JSONL file.

@@ -1,10 +1,12 @@
 # Chat Session 上下文编排设计（Chat Router）
 
-> 版本：v1.2 | 更新日期：2026-11-04
+> 版本：v1.3 | 更新日期：2026-11-04
 >
 > v1.1：按 [ADR-106](../../adr/zh/ADR-106-chat-execution-reference-projection.md) 同步 chat kind 词表——`execution_round` 引用行不进 Router 上下文，`interaction_request` / `turn_started` / `router_fallback` 只为历史行保留投影（P4 / P6 后不再新增）。
 >
 > v1.2：act 族更名 `exec_session_create` / `exec_session_propose_continue`，新增只读 `exec_session_read_round`，候选列删 `current` 表述，并写明上下文缓存硬约束（见 §11）。
+>
+> v1.3：`exec_session_create` 的入参由 `message`（整段简报）改为 `background`（只补背景，人的原话由 Runtime 原样投递），背景以引用部件（`params.context_refs` → `context_ref` 条目）随行在执行会话的 `user` 行之后，见 [ADR-107](../../adr/zh/ADR-107-message-ref-part.md)。
 >
 > 关联：[ADR-099](../../adr/zh/ADR-099-chat-session-llm-router.md)（Chat Router 决策）、[ADR-060](../../adr/zh/ADR-060-prompt-cache-friendly-context-block-reorg.md)（稳定前缀 + 末尾追加）、[ADR-063](../../adr/zh/ADR-063-package-level-prompt-override.md)（包级 Prompt 覆盖）、[ADR-066](../../adr/zh/ADR-066-llm-provider-cache-tokens.md)（Cache Token 统计）、设计 27（Intent 消息与群聊）
 
@@ -73,7 +75,7 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
 基座由 Runtime 维护，包含：
 
 1. 角色边界：你是 `<agent display_name>` 的对话前台，只能回答、查一个信息、路由或新建执行会话；
-2. 工具契约：路由 act 只有 `exec_session_create`（无 `target`，只能新开；原 `new_task`）与 `exec_session_propose_continue(target, why)`（只提案不投递，`why` 必须给——一张不写理由的卡等于把路由工作推回给人类；原 `propose_existing`）；另有只读信息工具 `memory_recall` / `http_request`（GET-only，按启用状态拼接）与恒常暴露的 `exec_session_read_round(target, rounds)`（2026-11-04 增设，见 §11），轮数由提示词软约束（"通常零次，最多一两次"），不用代码硬上限；
+2. 工具契约：路由 act 只有 `exec_session_create(background)`（无 `target`，只能新开；`background` 只补背景、不复述人的原话——原话由 Runtime 原样投递，背景作为引用部件跟在 `user` 行之后，ADR-107；原 `new_task`）与 `exec_session_propose_continue(target, why)`（只提案不投递，`why` 必须给——一张不写理由的卡等于把路由工作推回给人类；原 `propose_existing`）；另有只读信息工具 `memory_recall` / `http_request`（GET-only，按启用状态拼接）与恒常暴露的 `exec_session_read_round(target, rounds)`（2026-11-04 增设，见 §11），轮数由提示词软约束（"通常零次，最多一两次"），不用代码硬上限；
 3. 决策规则：回答 / 转交 / 新建 / 澄清的判据（与 ADR-099「路由行为准则」一致，核心是路由代价不对称：错发远比漏发贵，不确定就问）；
 4. 安全规则：只使用候选清单中的信息；不复述其他 chat 的内容；不承诺执行细节；不代人类 @ 其他 agent。
 

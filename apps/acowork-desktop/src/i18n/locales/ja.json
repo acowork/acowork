@@ -1478,6 +1478,10 @@
     "level": "圧縮レベル {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
   },
+  "messageRef": {
+"chatBackground": "このタスクを開始したチャットの背景情報",
+"generic": "参照"
+  },
   "chatError": {
     "contextOverflow": "コンテキストオーバーフロー：モデル能力情報が見つからないため、コンテキスト使用量を正確に計算できません。モデル名が正確であるか（大文字小文字を区別）を確認してください。"
   },

@@ -1903,6 +1903,10 @@
     "level": "compression level: {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
   },
+  "messageRef": {
+"chatBackground": "Background from the chat that opened this task",
+"generic": "Reference"
+  },
   "chatError": {
     "contextOverflow": "Context overflow: model capability info is missing, so context usage cannot be computed accurately. Check that the model name matches exactly (case-sensitive)."
   },

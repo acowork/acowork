@@ -1775,11 +1775,13 @@ mod tests {
         );
         // Parameters must survive too — an act with an empty schema is just as
         // uncallable as a misnamed one.
+        // ADR-107: the create act carries `background`; the human's own
+        // message is delivered by the runtime, never re-authored by the model.
         assert_eq!(
             native[0].function.parameters["required"],
-            serde_json::json!(["message"])
+            serde_json::json!(["background"])
         );
-        assert!(native[0].function.parameters["properties"]["message"].is_object());
+        assert!(native[0].function.parameters["properties"]["background"].is_object());
         assert!(!native[0].function.description.is_empty());
     }
 }

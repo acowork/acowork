@@ -147,23 +147,27 @@ url = "wss://<relay-domain>/tunnel"
 
 Agent 在应用内通过**创建 Agent 向导**创建。
 
-> 从源码编译、打包、CI 与部署：
-> [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
+---
 
-### ☁️ 云端中继远程访问（可选）
+## 🔨 从源码编译
 
-Gateway 的 HTTP/MQTT 只绑定 localhost。若要在公网访问位于 NAT 之后的 Gateway，可部署 `acowork-relay`
-——一个协议无关的瘦中继：Gateway 主动拨出建立一条 WSS 隧道，中继仅按 TLS SNI / Host 头路由字节流，
-所有鉴权由你的 Gateway 裁决。
+开发构建——原生窗口 + 前端热更新：
 
-- 设计：[`docs/design/zh/24-cloud-relay-remote-access.md`](./docs/design/zh/24-cloud-relay-remote-access.md)
-- 部署（Cloudflare DNS + 阿里云 ECS）：[`docs/runbooks/relay-ecs-cloudflare-deploy.md`](./docs/runbooks/relay-ecs-cloudflare-deploy.md)
-- 境内自建（ICP 备案）：[`docs/runbooks/relay-selfhost-cn-deploy.md`](./docs/runbooks/relay-selfhost-cn-deploy.md)
+```bash
+cd apps/acowork-desktop
+npm install
+npm run core:build:debug      # 编译应用会调用的核心二进制
+npm run tauri dev             # 原生窗口，前端热更新
+```
 
-> **当前状态**：ACowork 处于 **Alpha 阶段**。Gateway、Runtime、记忆引擎与 Desktop App 都在积极开发中。
-> 详见 [路线图](#-路线图) 了解当前已交付与下一步计划。
+发布安装包（`.msi` / `.dmg` / `.deb` / `.rpm` / AppImage）：
 
-打包安装包、签名、CI、远程节点接入等更多内容请参见 [`docs/design/zh/`](./docs/design/zh/)。
+```bash
+cd apps/acowork-desktop
+npm run tauri build           # beforeBuildCommand 自动执行 core:build:release + npm build + tauri bundle
+```
+
+完整的编译、打包、CI 与部署说明：[`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
 
 ---
 

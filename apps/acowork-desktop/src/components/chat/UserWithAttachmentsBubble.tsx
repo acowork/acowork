@@ -5,7 +5,7 @@
  * (file_upload, image_upload, attached_file, attached_selection,
  * attached_folder) in a single right-aligned block with the user avatar.
  *
- * This is the rendering counterpart of the `user_with_attachments`
+ * This is the rendering counterpart of the `user_with_parts`
  * block type produced by `foldMessages`.
  */
 import { useCallback } from "react";
@@ -18,12 +18,16 @@ import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
+import { MessageRefBlock } from "./MessageRefBlock";
+import { isAttachmentPart, isMessageRefPart } from "./messageFolder";
 
 export interface UserWithAttachmentsBubbleProps {
   /** The user text message (items[0] of the block). */
   userMessage: ChatMessage;
-  /** Attachment system entries (items[1..] of the block). */
-  attachments: ChatMessage[];
+  /** The turn's message parts (items[1..] of the block): attachments
+   *  (ADR-046) and references (ADR-107), in log order. Split here by
+   *  metadata type — the block is one slot per kind, not one per row. */
+  parts: ChatMessage[];
   /** User display name. */
   liveUserName: string | null | undefined;
   /** User avatar URL. */
@@ -93,7 +97,7 @@ function metadataToAttachedItem(msg: ChatMessage): AttachedItem | null {
 
 export function UserWithAttachmentsBubble({
   userMessage,
-  attachments,
+  parts,
   liveUserName,
   liveUserAvatarUrl,
   liveUserBuiltinAvatarId,
@@ -128,6 +132,9 @@ export function UserWithAttachmentsBubble({
   );
 
   const fontSizeStyle: React.CSSProperties = { fontSize: "var(--ui-font-size, 0.875rem)" };
+
+  const attachments = parts.filter(isAttachmentPart);
+  const refs = parts.filter(isMessageRefPart);
 
   return (
     <div className="flex items-start justify-end gap-2">
@@ -187,6 +194,25 @@ export function UserWithAttachmentsBubble({
                 {formatBubbleTime(userMessage.timestamp)}
               </span>
             )}
+          </div>
+        )}
+
+        {/* Reference parts (ADR-107) — runtime-supplied context that came
+            WITH the message rather than from the human. Rendered BELOW the
+            bubble because that is the order the turn reads in: the human's
+            words lead, the background follows. Constrained like the bubble
+            and right-aligned with it so the block still reads as one turn.
+            Rendered even when `content` is empty — an attachment-only or
+            reference-only turn has no bubble but does have this card. */}
+        {refs.length > 0 && (
+          <div className="mt-[6px] flex w-full max-w-[85%] flex-col items-stretch">
+            {refs.map((refMsg) => (
+              <MessageRefBlock
+                key={refMsg.id}
+                kind={refMsg.metadata?.kind as string | undefined}
+                content={refMsg.content}
+              />
+            ))}
           </div>
         )}
       </div>

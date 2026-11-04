@@ -1,10 +1,12 @@
 # Chat Session Context Orchestration Design (Chat Router)
 
-> Version: v1.2 | Updated: 2026-11-04
+> Version: v1.3 | Updated: 2026-11-04
 >
 > v1.1: chat kind vocabulary synced with [ADR-106](../../adr/en/ADR-106-chat-execution-reference-projection.md) — `execution_round` reference rows are not projected into the router context, and `interaction_request` / `turn_started` / `router_fallback` keep a projection only for historical rows (no longer written after P4 / P6).
 >
 > v1.2: the acts are renamed to `exec_session_create` / `exec_session_propose_continue`, the read-only `exec_session_read_round` is added, the retired `current` candidate column is dropped from the text, and the hard context-caching constraint is written down (see §11).
+>
+> v1.3: `exec_session_create` takes `background` instead of `message` (background only — the Runtime delivers the human's own words unchanged), and that background rides as a reference part (`params.context_refs` → a `context_ref` entry) after the execution session's `user` row; see [ADR-107](../../adr/en/ADR-107-message-ref-part.md).
 >
 > Related: [ADR-099](../../adr/en/ADR-099-chat-session-llm-router.md) (Chat Router decision), [ADR-060](../../adr/en/ADR-060-prompt-cache-friendly-context-block-reorg.md) (stable prefix + append at the tail), [ADR-063](../../adr/en/ADR-063-package-level-prompt-override.md) (package-level prompt overrides), [ADR-066](../../adr/en/ADR-066-llm-provider-cache-tokens.md) (cache token accounting), Design 27 (Intent Messaging and Group Chat)
 
@@ -73,7 +75,7 @@ The order is fixed and the separator is fixed (`\n\n`); no content-based sorting
 The base is maintained by the Runtime and contains:
 
 1. Role boundary: you are the conversation front desk of `<agent display_name>`; you may answer, look a fact up, route, or create an execution session;
-2. Tool contract: the routing acts are only `exec_session_create` (no `target`, so it can only open a session; formerly `new_task`) and `exec_session_propose_continue(target, why)` (a proposal that delivers nothing, and `why` is mandatory — a card with no reason hands the routing work back to the human; formerly `propose_existing`); the read-only information tools are `memory_recall` and `http_request` (GET-only, per enablement) plus the always-exposed `exec_session_read_round(target, rounds)` (added 2026-11-04, see §11); the number of lookup rounds is a prompt-level soft limit ("usually zero, rarely one or two"), never a hard code cap;
+2. Tool contract: the routing acts are only `exec_session_create(background)` (no `target`, so it can only open a session; `background` supplies context only and never restates the human's words — the Runtime delivers those unchanged, and the background rides as a reference part after the `user` row, ADR-107; formerly `new_task`) and `exec_session_propose_continue(target, why)` (a proposal that delivers nothing, and `why` is mandatory — a card with no reason hands the routing work back to the human; formerly `propose_existing`); the read-only information tools are `memory_recall` and `http_request` (GET-only, per enablement) plus the always-exposed `exec_session_read_round(target, rounds)` (added 2026-11-04, see §11); the number of lookup rounds is a prompt-level soft limit ("usually zero, rarely one or two"), never a hard code cap;
 3. Decision rules: answer / hand off / create / clarify (aligned with ADR-099's routing guidelines, whose core is the cost asymmetry of routing: a wrong handoff is far more expensive than a missed one — when unsure, ask);
 4. Safety rules: use only information in the candidate list; never restate other chats; never promise execution details; never @ another agent on the human's behalf.
 
