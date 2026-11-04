@@ -761,7 +761,6 @@ pub struct PromotionMetadata {
     pub llm_judge_confidence: f32,
     pub llm_judge_reasoning: String,
 }
-```
 
 (ProceduralNode 与 AutobiographicalNode 同样扩展)
 

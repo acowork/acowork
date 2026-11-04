@@ -2050,7 +2050,6 @@ if !trimmed_messages.is_empty() {
 // Session 结束时 — 触发 Session 级 Episode 提炼
 // 在 ConversationSession::end() 中触发
 ```
-```
 
 ### 7.2 Gateway 需要改什么
 
