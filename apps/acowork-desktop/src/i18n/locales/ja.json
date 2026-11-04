@@ -1075,7 +1075,6 @@
       "converting": "プレビューの準備中…",
       "engineMissing": "Office / LibreOffice が見つかりません—近似レイアウトのプレビューです",
       "convertFailed": "PDF への変換に失敗しました—近似レイアウトで表示しています",
-      "printLayoutNote": "印刷レイアウトで表示しています（このマシン上で変換）",
       "installHint": "LibreOffice または Microsoft Office をインストールすると、実際のレイアウトでプレビューできます"
     },
     "sheetViewer": {

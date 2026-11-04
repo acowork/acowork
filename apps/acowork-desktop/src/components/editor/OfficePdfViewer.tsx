@@ -13,7 +13,7 @@
  * The `fallback` element is the renderer this tab used before — it stays
  * reachable and is what gets shown when conversion cannot happen:
  *
- *   - `ready`          → PdfViewer (print layout), with a quiet note
+ *   - `ready`          → PdfViewer (print layout)
  *   - `detecting` / `converting` / first render → the frame's loading body
  *   - `unavailable`    → fallback + "no engine, this is an approximate
  *                        layout" (the honest state of a bare machine)
@@ -80,11 +80,6 @@ export default function OfficePdfViewer(props: OfficePdfViewerProps) {
                 onAddRegionToChat={props.onAddRegionToChat}
                 onAddDocumentToChat={props.onAddDocumentToChat}
                 external={{ state: "ready", bytes: conv.pdfBytes, retry: conv.retry }}
-                banner={
-                    <div className="shrink-0 border-b border-border-divider bg-input px-3 py-1 text-11 text-text-tertiary">
-                        {t("fileEditor.officePdf.printLayoutNote")}
-                    </div>
-                }
             />
         );
     }

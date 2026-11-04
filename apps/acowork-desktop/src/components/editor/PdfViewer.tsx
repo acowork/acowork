@@ -29,7 +29,7 @@
  * agent a look at the print layout of something we cannot even preview would be
  * a promise we cannot keep. The degraded JS renderers stay on their own path.
  */
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Crop, Loader2, MessageSquarePlus, X } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { log } from "../../lib/logger";
@@ -48,9 +48,6 @@ export interface ExternalPdfState {
 
 export interface PdfViewerProps extends ViewerFileProps, PdfChatProps {
     external?: ExternalPdfState;
-    /** Notice slot forwarded to the frame — used by OfficePdfViewer to
-     *  label a converted Office document as print-layout output. */
-    banner?: ReactNode;
 }
 
 /**
@@ -251,7 +248,7 @@ export default function PdfViewer(props: PdfViewerProps) {
         ) : undefined;
 
     return (
-        <DocumentViewerFrame file={props} state={state} banner={props.banner} extraActions={extraActions}>
+        <DocumentViewerFrame file={props} state={state} extraActions={extraActions}>
             {bytes ? (
                 /*  One surface for both jobs: the column stays mounted, and
                  *  `framing` decides whether a pointer draws a box or pans the

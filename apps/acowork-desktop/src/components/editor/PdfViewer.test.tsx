@@ -196,17 +196,6 @@ describe("PdfViewer external mode (converted Office document)", () => {
     // The feed hook's own retry must not be used — it has no feed.
     expect(h.hookState.retry).not.toHaveBeenCalled();
   });
-
-  it("renders the forwarded banner above the frame body", async () => {
-    render(
-      <PdfViewer
-        {...converted}
-        banner={<div>print-layout note</div>}
-        external={{ state: "ready", bytes: new Uint8Array([1]), retry: vi.fn() }}
-      />,
-    );
-    expect(screen.getByText("print-layout note")).toBeTruthy();
-  });
 });
 
 describe("PdfViewer chat entries", () => {

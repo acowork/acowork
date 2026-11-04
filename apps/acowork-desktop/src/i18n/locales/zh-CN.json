@@ -1228,7 +1228,6 @@
       "converting": "正在准备预览文件…",
       "engineMissing": "未检测到 Office 或 LibreOffice——当前为近似排版预览",
       "convertFailed": "转换为 PDF 失败——已降级为近似排版",
-      "printLayoutNote": "已按印刷版式渲染（本机转换）",
       "installHint": "安装 LibreOffice 或 Microsoft Office 后可按真实版式预览"
     },
     "sheetViewer": {
