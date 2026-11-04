@@ -38,6 +38,8 @@ function labelKey(kind: string | undefined): string {
   switch (kind) {
     case "chat_background":
       return "messageRef.chatBackground";
+    case "referenced_round":
+      return "messageRef.referencedRound";
     default:
       return "messageRef.generic";
   }

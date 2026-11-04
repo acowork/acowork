@@ -84,6 +84,71 @@ describe("buildCardAnswer", () => {
     const answer = buildCardAnswer(card(), withFiles, { forceNew: true });
     expect(answer?.attachmentIds).toEqual(["att-1"]);
   });
+
+  it("echoes the original row's pinned material back verbatim", () => {
+    // ADR-106 revision 2026-11-04: a re-delivery is the SAME utterance, so the
+    // `@session` material it carried travels with its RESOLVED coordinates —
+    // the Gateway passes the echo through rather than re-pinning a sentence
+    // already written. And only the answering agent's own refs may ride: a
+    // card is that agent's question about ITS runs.
+    const quoted = row({
+      meta: {
+        message_id: "m-1",
+        refs: [
+          {
+            agent_instance_id: "agent-a",
+            session_id: "s-9",
+            round_id: "r-1",
+            terminal: true,
+          },
+          {
+            agent_instance_id: "agent-b",
+            session_id: "s-8",
+            round_id: "r-2",
+            terminal: false,
+          },
+        ],
+      },
+    });
+    const answer = buildCardAnswer(card(), quoted, { sessionId: "s-1" })!;
+    expect(answer.refs).toEqual([
+      {
+        agentInstanceId: "agent-a",
+        sessionId: "s-9",
+        roundId: "r-1",
+        terminal: true,
+      },
+    ]);
+    expect(groupCardAddress(answer)).toEqual({
+      targetSessions: { "agent-a": "s-1" },
+      messageId: "m-1",
+      refs: [
+        {
+          agentInstanceId: "agent-a",
+          sessionId: "s-9",
+          roundId: "r-1",
+          terminal: true,
+        },
+      ],
+    });
+    expect(directCardAddress(answer)).toEqual({
+      targetSession: "s-1",
+      messageId: "m-1",
+      refs: [
+        {
+          agentInstanceId: "agent-a",
+          sessionId: "s-9",
+          roundId: "r-1",
+          terminal: true,
+        },
+      ],
+    });
+  });
+
+  it("omits an empty material list — absence is not `[]`-noise", () => {
+    const answer = buildCardAnswer(card(), original, { sessionId: "s-1" })!;
+    expect("refs" in answer).toBe(false);
+  });
 });
 
 describe("the answer's address, per surface", () => {

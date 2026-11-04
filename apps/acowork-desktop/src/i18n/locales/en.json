@@ -196,6 +196,8 @@
       "chooseSession": "Which task did you mean?",
       "confirmSession": "Continue this task?",
       "newTask": "Start a new task",
+      "replyPlaceholder": "Reply to continue this run…",
+      "send": "Send",
       "chooseThis": "Continue this one",
       "roundCount_one": "{{count}} round",
       "roundCount_other": "{{count}} rounds",
@@ -232,7 +234,12 @@
       "untitled": "Untitled session",
       "pagerOf": "Page {{current}} of {{total}}",
       "prevPage": "Previous page",
-      "nextPage": "Next page"
+      "nextPage": "Next page",
+      "referenceAction": "Reference",
+      "goContinue": "Go continue",
+      "refCount": "{{count}} / {{max}} referenced",
+      "done": "Done",
+      "blockNotLoaded": "That task block is not in the loaded history"
     },
     "execSessionGone": "This execution session has been deleted"
   },
@@ -1905,6 +1912,7 @@
   },
   "messageRef": {
 "chatBackground": "Background from the chat that opened this task",
+"referencedRound": "Referenced round",
 "generic": "Reference"
   },
   "chatError": {

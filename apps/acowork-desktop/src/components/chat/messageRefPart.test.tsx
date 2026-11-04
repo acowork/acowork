@@ -45,13 +45,13 @@ function userRow(content = USER_WORDS, ts = 1_700_000_000_000): ChatMessage {
   return { id: "u1", type: "user", content, timestamp: ts } as ChatMessage;
 }
 
-function refRow(ts = 1_700_000_000_100): ChatMessage {
+function refRow(ts = 1_700_000_000_100, kind = "chat_background"): ChatMessage {
   return {
     id: "r1",
     type: "system",
     content: REF_BODY,
     timestamp: ts,
-    metadata: { type: "context_ref", kind: "chat_background" },
+    metadata: { type: "context_ref", kind },
   } as unknown as ChatMessage;
 }
 
@@ -109,5 +109,15 @@ describe("context_ref part — rendering", () => {
     const { container } = renderTurn([refRow()], "");
     expect(screen.getByRole("button", { name: /messageRef.chatBackground/ })).toBeTruthy();
     expect(container.textContent).not.toContain("**把这段**");
+  });
+
+  it("labels a referenced_round material with its own kind, not chat_background", () => {
+    // ADR-106 revision 2026-11-04: quoted @session rounds ride the same
+    // reference part channel as a distinct kind, so the collapsed card names
+    // what it is. The fold card component is unchanged; only the label maps.
+    renderTurn([refRow(1_700_000_000_100, "referenced_round")]);
+    expect(
+      screen.getByRole("button", { name: /messageRef.referencedRound/ }),
+    ).toBeTruthy();
   });
 });

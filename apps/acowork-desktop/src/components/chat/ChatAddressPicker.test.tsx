@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 /**
- * The second level of the `@` (ADR-106 D7).
+ * The second level of the `@` (ADR-106 D7, redrawn by the 2026-11-04
+ * revision): a typed `@session` is MATERIAL, not a delivery.
  *
  * The list is the session-history menu's list: the same `GET …/sessions` paging
  * path, narrowed to this chat by the `chat_session_id` / `surface` parameters,
@@ -14,6 +15,11 @@
  *   in one click rather than after a scroll;
  * - declining to name a session is still an answer (the ladder's lower levels
  *   must stay reachable);
+ * - a reference TOGGLES and stays open across picks — the commit is the
+ *   footer's "done", which hands `{refs, labels}` to the composer, and the
+ *   fifth pick is the last the Gateway's 400 allows;
+ * - "去续投" is a navigation (`onLocate`), never an address — it commits
+ *   nothing to the message;
  * - the popup's chrome (one visible case + one source anchor below): the cursor
  *   row carries the app-wide accent tint, inset from the hairline, because a
  *   neutral full-bleed band made the two `@` levels look glued to their frame.
@@ -21,7 +27,7 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { ChatAddressPicker } from "./ChatAddressPicker";
 import { chatListKey, useAgentStore } from "../../stores/agentStore";
@@ -77,17 +83,18 @@ function seed(
   return fetchChatSessions;
 }
 
-function picker(onPick = vi.fn(), onClose = vi.fn()) {
+function picker(onPick = vi.fn(), onClose = vi.fn(), onLocate = vi.fn()) {
   render(
     <ChatAddressPicker
       instanceId="agent-a"
       chatSessionId={CHAT}
       agentName="Architect"
       onPick={onPick}
+      onLocate={onLocate}
       onClose={onClose}
     />,
   );
-  return { onPick, onClose };
+  return { onPick, onClose, onLocate };
 }
 
 describe("ChatAddressPicker", () => {
@@ -107,15 +114,54 @@ describe("ChatAddressPicker", () => {
     );
   });
 
-  it("names the session it is given, and the escape names none", async () => {
+  it("attaches the picked session as material on commit; the escape names none", async () => {
     const { onPick } = picker();
-    fireEvent.click(await screen.findByText("Review the schema"));
+    const done = await screen.findByTestId("chat-address-done");
+    fireEvent.click(screen.getByText("Review the schema"));
+    // A reference keeps the list open — multi-select means one click is not
+    // yet the answer; "done" is what commits it.
+    expect(onPick).not.toHaveBeenCalled();
+    fireEvent.click(done);
     expect(onPick).toHaveBeenLastCalledWith({
-      sessionId: "s-2",
-      label: "Review the schema",
+      refs: [{ agentInstanceId: "agent-a", sessionId: "s-2" }],
+      labels: { "agent-a|s-2": "Review the schema" },
     });
     fireEvent.click(screen.getByText("chatView.address.noPreference"));
     expect(onPick).toHaveBeenLastCalledWith({});
+  });
+
+  it("the escape row still means new work, immediately", async () => {
+    const { onPick } = picker();
+    fireEvent.click(await screen.findByText("chatView.block.newTask"));
+    expect(onPick).toHaveBeenCalledWith({ forceNew: true });
+  });
+
+  it("『去续投』 is a navigation — it locates, it never addresses", async () => {
+    const { onPick, onLocate } = picker();
+    const row = (
+      await screen.findByText("Review the schema")
+    ).closest("[data-address-index]") as HTMLElement;
+    fireEvent.click(within(row).getByText("chatView.address.goContinue"));
+    expect(onLocate).toHaveBeenCalledWith("s-2", "Review the schema");
+    expect(onPick).not.toHaveBeenCalled();
+  });
+
+  it("clamps the reference at the Gateway's five and keeps commit visible", async () => {
+    seed([
+      session("s-1", "one"),
+      session("s-2", "two"),
+      session("s-3", "three"),
+      session("s-4", "four"),
+      session("s-5", "five"),
+      session("s-6", "six"),
+    ]);
+    picker();
+    const boxes = await screen.findAllByRole("checkbox");
+    expect(boxes).toHaveLength(6);
+    for (const box of boxes.slice(0, 5)) fireEvent.click(box);
+    // The sixth is stopped at the pick, not learned from a failed send.
+    expect(boxes[5].hasAttribute("disabled")).toBe(true);
+    expect(screen.getByTestId("chat-address-done")).toBeTruthy();
   });
 
   it("keeps 'no preference' as an answer when the list is not empty", async () => {
@@ -132,15 +178,18 @@ describe("ChatAddressPicker", () => {
     expect(onPick).not.toHaveBeenCalled();
   });
 
-  it("walks the list with the arrows and picks the highlighted row on Enter", async () => {
+  it("walks the list with the arrows and toggles the highlighted run's reference on Enter", async () => {
     const { onPick } = picker();
     const list = await screen.findByTestId("chat-address-picker");
     // The highlight starts on the escape row; one step down is the first session.
     fireEvent.keyDown(list, { key: "ArrowDown" });
     fireEvent.keyDown(list, { key: "Enter" });
+    // Enter QUOTES the run — the list stays open for more picks; "done" commits.
+    expect(onPick).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByTestId("chat-address-done"));
     expect(onPick).toHaveBeenCalledWith({
-      sessionId: "s-1",
-      label: "Draft the release note",
+      refs: [{ agentInstanceId: "agent-a", sessionId: "s-1" }],
+      labels: { "agent-a|s-1": "Draft the release note" },
     });
   });
 
@@ -160,9 +209,10 @@ describe("ChatAddressPicker", () => {
     fireEvent.change(input, { target: { value: "draft" } });
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
+    fireEvent.click(screen.getByTestId("chat-address-done"));
     expect(onPick).toHaveBeenCalledWith({
-      sessionId: "s-1",
-      label: "Draft the release note",
+      refs: [{ agentInstanceId: "agent-a", sessionId: "s-1" }],
+      labels: { "agent-a|s-1": "Draft the release note" },
     });
   });
 
@@ -305,7 +355,7 @@ describe("ChatAddressPicker", () => {
     });
     picker();
     const row = (await screen.findByText("Draft the release note")).closest(
-      "button[data-address-index]",
+      "[data-address-index]",
     ) as HTMLElement;
     // Solid + breathing — the session-history list's own "still working" mark
     // (design 27 §6.1), so the two lists speak one cue.
@@ -316,7 +366,7 @@ describe("ChatAddressPicker", () => {
   it("marks a settled task with the outline brain, inventing no breath", async () => {
     picker();
     const row = (await screen.findByText("Review the schema")).closest(
-      "button[data-address-index]",
+      "[data-address-index]",
     ) as HTMLElement;
     // No entry in the session-state map = never reported busy: outline, static.
     expect(row.querySelector("svg")).toBeTruthy();

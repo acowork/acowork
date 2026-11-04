@@ -63,6 +63,7 @@ vi.mock("../../lib/session-control", () => ({
 }));
 
 import { sendAnswer, sendApproval } from "../../lib/session-control";
+import { useChatSessionStore } from "../../stores/chatSessionStore";
 
 const REF1 = "ag|s1|r1";
 const REF2 = "ag|s1|r2";
@@ -636,5 +637,71 @@ describe("ChatExecutionBlock — what a session's header claims (t-1b7bdb21)", (
     // D9: "in progress" is a positive claim; a missing read is not evidence of it.
     expect(headerText(container)).toContain("chatView.block.unknown");
     expect(headerText(container)).not.toContain("chatView.block.inProgress");
+  });
+});
+
+/**
+ * The block's in-place reply box (ADR-106 revision 2026-11-04). It lives OUTSIDE
+ * the collapse body, so a run that is folded away is still continuable in place.
+ * The three behaviours the IM habit demands, and the one wire contract:
+ *   - reveal on hover, but a held draft or focus NEVER collapses it (typed
+ *     words lost to a stray mouse-out is the failure mode);
+ *   - the `@` picker's "去续投" focus signal reveals AND focuses on its rising
+ *     edge, so the human arrives ready to type;
+ *   - a send rides `sendGroupText(chat, text, [], referenceRowId)` — the level-1
+ *     branch — where the id is the freshest round's reference-row message_id
+ *     (same value the pause card's continue button uses), not the block ref.
+ */
+describe("ChatExecutionBlock in-place reply", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store.chat = { agentStates: {} };
+    vi.restoreAllMocks();
+  });
+
+  it("reveals on hover and refuses to hide while a draft holds", () => {
+    renderBlock({ [REF1]: entryOf({}) });
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    const shell = box.parentElement as HTMLElement;
+    const hoverZone = shell.parentElement as HTMLElement;
+    // Collapsed at rest: transparent and non-interactive.
+    expect(shell.className).toContain("opacity-0");
+    fireEvent.mouseEnter(hoverZone);
+    expect(shell.className).toContain("opacity-100");
+    // Type, then the pointer leaves — the draft pins it open.
+    fireEvent.change(box, { target: { value: "keep typing" } });
+    fireEvent.mouseLeave(hoverZone);
+    expect(shell.className).toContain("opacity-100");
+  });
+
+  it("the picker's focus signal reveals and focuses the box", async () => {
+    renderBlock({ [REF1]: entryOf({}) }, { focusInput: true });
+    const box = screen.getByRole("textbox");
+    await waitFor(() => expect(document.activeElement).toBe(box));
+    expect((box.parentElement as HTMLElement).className).toContain(
+      "opacity-100",
+    );
+  });
+
+  it("sends an in-place continuation to the freshest round's reference row", async () => {
+    const sendGroupText = vi.fn(async () => true);
+    vi.spyOn(useChatSessionStore, "getState").mockReturnValue({
+      sendGroupText,
+    } as unknown as ReturnType<typeof useChatSessionStore.getState>);
+    renderBlock({ [REF1]: entryOf({}) });
+    const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+    fireEvent.focus(box);
+    fireEvent.change(box, { target: { value: "continue please" } });
+    fireEvent.click(screen.getByRole("button", { name: "chatView.block.send" }));
+    await waitFor(() =>
+      expect(sendGroupText).toHaveBeenCalledWith(
+        "c1",
+        "continue please",
+        [],
+        "round:ag|s1|r1",
+      ),
+    );
+    // Cleared after send, box stays put for the next follow-up.
+    expect(box.value).toBe("");
   });
 });

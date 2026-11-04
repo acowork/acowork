@@ -18,6 +18,7 @@
 import type {
   ChatAddress,
   ChatMessageRow,
+  ChatRefPick,
 } from "../stores/chatSessionStore";
 
 /** What the human clicked. */
@@ -37,6 +38,11 @@ export interface CardAnswer {
   messageId: string;
   sessionId?: string;
   forceNew?: boolean;
+  /** ADR-106 revision 2026-11-04: the original row's `@session` material,
+   *  pinned coordinates and all, re-sent verbatim so a re-delivery of the SAME
+   *  utterance does not lose (or re-decide) the reference the human attached.
+   *  Only the answering agent's own refs — a card is that agent's question. */
+  refs?: ChatRefPick[];
 }
 
 /**
@@ -68,7 +74,31 @@ export function buildCardAnswer(
   const attachmentIds = original.attachments
     ? original.attachments.map((a) => a.id)
     : original.attachment_ids ?? [];
-  return { text, attachmentIds, agentId, messageId, sessionId, forceNew };
+  // ADR-106 revision 2026-11-04: the original row's reference material belongs
+  // to the same utterance, so the re-delivery carries it back pre-pinned
+  // (round_id + terminal already resolved) — the Gateway passes the echo
+  // through rather than re-pinning a sentence already written. Only this
+  // agent's refs travel: a card answers one agent's question about its runs.
+  const refs = (original.meta?.refs ?? [])
+    .filter((r) => r.agent_instance_id === agentId)
+    .map<ChatRefPick>((r) => ({
+      agentInstanceId: r.agent_instance_id,
+      sessionId: r.session_id,
+      roundId: r.round_id,
+      terminal: r.terminal,
+    }));
+  return {
+    text,
+    attachmentIds,
+    agentId,
+    messageId,
+    sessionId,
+    forceNew,
+    // An empty material list is omitted, not sent as `[]`-noise: "the original
+    // row carried no reference" is the absence, and every consumer already
+    // reads `refs?.length`.
+    ...(refs.length > 0 ? { refs } : {}),
+  };
 }
 
 /** Whether this human may answer the card (ADR-106 D10). The card asks the
@@ -86,13 +116,26 @@ export function groupCardAddress(answer: CardAnswer): ChatAddress {
     ? {
         targetSessions: { [answer.agentId]: answer.sessionId },
         messageId: answer.messageId,
+        ...(answer.refs?.length ? { refs: answer.refs } : {}),
       }
-    : { forceNewFor: [answer.agentId], messageId: answer.messageId };
+    : {
+        forceNewFor: [answer.agentId],
+        messageId: answer.messageId,
+        ...(answer.refs?.length ? { refs: answer.refs } : {}),
+      };
 }
 
 /** The 1:1 form (the first level is degenerate there, so one session id). */
 export function directCardAddress(answer: CardAnswer): ChatAddress {
   return answer.sessionId
-    ? { targetSession: answer.sessionId, messageId: answer.messageId }
-    : { forceNew: true, messageId: answer.messageId };
+    ? {
+        targetSession: answer.sessionId,
+        messageId: answer.messageId,
+        ...(answer.refs?.length ? { refs: answer.refs } : {}),
+      }
+    : {
+        forceNew: true,
+        messageId: answer.messageId,
+        ...(answer.refs?.length ? { refs: answer.refs } : {}),
+      };
 }

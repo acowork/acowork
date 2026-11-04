@@ -39,12 +39,15 @@ import {
   Wrench,
   X,
   Check,
+  Send,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
+import { cn } from "../../lib/utils";
 import type { BlockCard, ChatBlockEntry } from "../../lib/chatBlocks";
 import type { RunBlock } from "./chatTranscriptGroups";
 import { useChatBlockStore, useChatBlocks } from "../../stores/chatBlockStore";
 import { useChatStore } from "../../stores/chatStore";
+import { useChatSessionStore } from "../../stores/chatSessionStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSessionTitle } from "../../lib/useSessionTitle";
 import { sendAnswer, sendApproval } from "../../lib/session-control";
@@ -96,6 +99,10 @@ interface ChatExecutionBlockProps {
   canAnswer?: boolean;
   /** Group surface only: right-click the author → the panel's "@name" menu. */
   onAuthorContextMenu?: (e: React.MouseEvent) => void;
+  /** ADR-106 revision 2026-11-04: the `@` picker's "去续投" located this block
+   *  and wants its in-place input focused. A rising edge focuses (and reveals)
+   *  the reply box, so the human lands ready to type instead of hunting. */
+  focusInput?: boolean;
   className?: string;
 }
 
@@ -168,6 +175,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   onReplyToRound,
   canAnswer = true,
   onAuthorContextMenu,
+  focusInput = false,
   className,
 }: ChatExecutionBlockProps) {
   const { t } = useTranslation();
@@ -438,6 +446,21 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                     ))}
                   </div>
                 </OverlayScrollbar>
+              )}
+              {/* ADR-106 revision 2026-11-04: reply in place. Continuing a run
+                  is answering its freshest round (D6 level 1), and the point of
+                  the `@`'s "去续投" is that the human never leaves the block to
+                  do it. Rendered only for an answerer; the box itself reveals
+                  on hover / focus and refuses to hide while it holds a draft. */}
+              {canAnswer && (
+                <BlockInlineReply
+                  chatSessionId={chatSessionId}
+                  rowId={
+                    block.rounds[block.rounds.length - 1]?.roundRow.meta
+                      ?.message_id ?? ""
+                  }
+                  focusSignal={focusInput}
+                />
               )}
             </div>
           </div>
@@ -881,6 +904,115 @@ function BlockCardActions({
           ) : null}
         </div>
       )}
+    </div>
+  );
+}
+
+interface BlockInlineReplyProps {
+  chatSessionId: string;
+  /** The freshest round's reference row id — replying to it continues THAT run
+   *  (D6 level 1); the backend resolves the row into its session. Empty means
+   *  the block has no round to answer yet, so the box does nothing. */
+  rowId: string;
+  /** A rising edge (the `@` picker's "去续投") reveals and focuses the box. */
+  focusSignal?: boolean;
+}
+
+/**
+ * The block's in-place reply box (ADR-106 revision 2026-11-04).
+ *
+ * Continuing a run used to mean borrowing the main composer, which made the
+ * human leave the block they were pointing at. This sends `sendGroupText(chat,
+ * text, [], rowId)` — the existing level-1 branch — so the claim and the wait
+ * line fall out of the same machinery a card answer already uses, and a reply
+ * to a specific round never re-opens the routing question.
+ *
+ * The IM habit it has to respect: the box reveals on hover or focus, but a
+ * non-empty draft or held focus NEVER collapses it (losing typed words to a
+ * stray mouse-out is the failure), and it only hides when it is empty AND
+ * unfocused AND the pointer has left. After a send it clears and stays put, so
+ * a second follow-up is one keystroke away.
+ */
+function BlockInlineReply({
+  chatSessionId,
+  rowId,
+  focusSignal,
+}: BlockInlineReplyProps) {
+  const { t } = useTranslation();
+  const [draft, setDraft] = useState("");
+  const [hovering, setHovering] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const [sending, setSending] = useState(false);
+  const boxRef = useRef<HTMLTextAreaElement>(null);
+
+  // A locate from the picker reveals + focuses the box on its rising edge, so
+  // the human arrives ready to type rather than hunting for a hidden control.
+  const lastSignal = useRef(false);
+  useEffect(() => {
+    if (focusSignal && !lastSignal.current) {
+      boxRef.current?.focus();
+    }
+    lastSignal.current = focusSignal ?? false;
+  }, [focusSignal]);
+
+  const visible = hovering || focused || draft.length > 0;
+
+  const send = async () => {
+    const text = draft.trim();
+    if (!text || !rowId || sending) return;
+    setSending(true);
+    try {
+      await useChatSessionStore
+        .getState()
+        .sendGroupText(chatSessionId, text, [], rowId);
+      // Clear and keep the box: an in-place continuation invites the next one.
+      setDraft("");
+    } finally {
+      setSending(false);
+    }
+  };
+
+  return (
+    <div
+      className="mt-1"
+      onMouseEnter={() => setHovering(true)}
+      onMouseLeave={() => setHovering(false)}
+    >
+      <div
+        className={cn(
+          "flex items-end gap-1 rounded-md border border-border-outer bg-surface px-1.5 py-1 transition-opacity",
+          visible ? "opacity-100" : "pointer-events-none opacity-0",
+        )}
+      >
+        <textarea
+          ref={boxRef}
+          rows={1}
+          value={draft}
+          disabled={sending}
+          aria-label={t("chatView.block.replyPlaceholder")}
+          placeholder={t("chatView.block.replyPlaceholder")}
+          onFocus={() => setFocused(true)}
+          onBlur={() => setFocused(false)}
+          onChange={(e) => setDraft(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === "Enter" && !e.shiftKey) {
+              e.preventDefault();
+              void send();
+            }
+          }}
+          className="min-h-[1.5rem] w-full resize-none border-0 bg-transparent px-1 outline-none placeholder:text-text-disabled disabled:opacity-50"
+          style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
+        />
+        <button
+          type="button"
+          onClick={() => void send()}
+          disabled={!draft.trim() || sending || !rowId}
+          aria-label={t("chatView.block.send")}
+          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-brand-primary hover:bg-[var(--color-accent)]/10 disabled:opacity-40"
+        >
+          <Send className="h-3.5 w-3.5" />
+        </button>
+      </div>
     </div>
   );
 }

@@ -290,6 +290,8 @@
       "chooseSession": "你指的是哪一个任务？",
       "confirmSession": "继续这个任务吗？",
       "newTask": "开新任务",
+      "replyPlaceholder": "回复以继续这个运行…",
+      "send": "发送",
       "chooseThis": "就继续这个",
       "roundCount_one": "{{count}} 轮",
       "roundCount_other": "{{count}} 轮",
@@ -326,7 +328,12 @@
       "untitled": "未命名会话",
       "pagerOf": "第 {{current}} / {{total}} 页",
       "prevPage": "上一页",
-      "nextPage": "下一页"
+      "nextPage": "下一页",
+      "referenceAction": "引用",
+      "goContinue": "去续投",
+      "refCount": "已引用 {{count}} / {{max}}",
+      "done": "完成",
+      "blockNotLoaded": "该任务块不在已加载的历史中"
     },
     "execSessionGone": "该执行会话已被删除，无法查看"
   },
@@ -1640,6 +1647,7 @@
   },
   "messageRef": {
 "chatBackground": "来自发起本任务的对话的背景信息",
+"referencedRound": "引用的轮次",
 "generic": "引用"
   },
   "chatError": {

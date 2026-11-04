@@ -130,6 +130,19 @@ export interface ChatMessageRow {
      *  instead — Rev. 8 / D14). Present only on the head row; never resolvable
      *  from here (see [`ExecAttachmentLabel`]). */
     exec_attachments?: ExecAttachmentLabel[];
+    /** ADR-106 revision 2026-11-04: the `@session` reference material the
+     *  human attached, pinned to their round by the Gateway at send time.
+     *  One quadruple `{agent_instance_id, session_id, round_id, terminal}`
+     *  per reference — coordinates only, never the body (the block renders
+     *  the material from the execution side). Read to draw the source chips
+     *  under a user bubble, and echoed back verbatim when a card-answer
+     *  re-delivers the same utterance. */
+    refs?: Array<{
+      agent_instance_id: string;
+      session_id: string;
+      round_id: string;
+      terminal: boolean;
+    }>;
   };
   attachment_ids?: string[];
   /** Files attached to this row. `thumb` is the upload-time sidecar token
@@ -302,6 +315,25 @@ export interface ChatAddress {
    *  and the backend dedupes on this id - so the transcript keeps one message
    *  instead of drawing the same sentence twice. */
   messageId?: string;
+  /** ADR-106 revision 2026-11-04 (reference redrawing): the execution-session
+   *  rounds the human attached as **material** via the second level of the `@`.
+   *  A reference is not a delivery — it never becomes `targetSessions`. Each
+   *  entry carries the coordinates the picker knows (`agentInstanceId` +
+   *  `sessionId`); the round is pinned server-side at send time. A card-answer
+   *  re-delivery instead echoes the ORIGINAL row's already-pinned `meta.refs`
+   *  verbatim, so it fills `roundId`/`terminal` too and the Gateway must not
+   *  re-decide the material of a sentence already written. */
+  refs?: ChatRefPick[];
+}
+
+/** One `@session` reference as the client states it. `roundId`/`terminal` are
+ *  only present on a card-answer echo — a freshly picked reference names just
+ *  the agent and session and lets the Gateway pin the round. */
+export interface ChatRefPick {
+  agentInstanceId: string;
+  sessionId: string;
+  roundId?: string;
+  terminal?: boolean;
 }
 
 /** `POST /api/intents/chat-message` response. `message_id` is the durable id
@@ -325,6 +357,23 @@ interface MentionSendResponse {
   message_id: string;
   routed?: string;
   results?: Array<{ target?: string; message_id?: string; status?: string }>;
+}
+
+/** Map the client's reference picks to the wire `refs` array (snake_case). A
+ *  fresh pick sends `{agent_instance_id, session_id}`; a card-answer echo also
+ *  carries `round_id`/`terminal` so the Gateway passes it through instead of
+ *  re-pinning the material of a sentence already written. Empty is not sent —
+ *  its absence is "the human attached no material" on the wire. */
+function toWireRefs(
+  refs?: ChatRefPick[],
+): Array<Record<string, string | boolean>> | undefined {
+  if (!refs || refs.length === 0) return undefined;
+  return refs.map((r) => ({
+    agent_instance_id: r.agentInstanceId,
+    session_id: r.sessionId,
+    ...(r.roundId ? { round_id: r.roundId } : {}),
+    ...(r.terminal !== undefined ? { terminal: r.terminal } : {}),
+  }));
 }
 
 /** Post one turn into a Chat session. Goes through the intent channel
@@ -365,6 +414,13 @@ function sendChatMessage(
     // (design 27 §4.2.1) — they are paths, not bytes, so nothing is copied
     // into the Chat store.
     ...(attachedItems && attachedItems.length > 0 ? { attached_items: attachedItems } : {}),
+    // ADR-106 revision 2026-11-04: `@session` reference material. The Gateway
+    // pins each round before writing the row, so a bare pick sends only
+    // (agent, session); a card-answer echo arrives pre-pinned.
+    ...(() => {
+      const wireRefs = toWireRefs(address?.refs);
+      return wireRefs ? { refs: wireRefs } : {};
+    })(),
   });
 }
 
@@ -407,6 +463,13 @@ function fanoutMentions(
     ...(Object.keys(targetSessions).length > 0 ? { target_sessions: targetSessions } : {}),
     ...(forceNewFor.length > 0 ? { force_new_for: forceNewFor } : {}),
     ...(address?.messageId ? { message_id: address.messageId } : {}),
+    // ADR-106 revision 2026-11-04: `@session` reference material (see the 1:1
+    // entry). A reference is not a delivery, so it never overlaps the (now
+    // answer-only) `target_sessions`.
+    ...(() => {
+      const wireRefs = toWireRefs(address?.refs);
+      return wireRefs ? { refs: wireRefs } : {};
+    })(),
   });
 }
 

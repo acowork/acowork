@@ -94,28 +94,46 @@ describe("resolveMentions (picked name must actually fan out)", () => {
 });
 
 describe("buildChatAddress (the second level rides the targets of THIS send)", () => {
-  it("names the session for the agent it was chosen for", () => {
+  it("attaches the references for the agent they were picked for", () => {
     expect(
-      buildChatAddress(["a1"], { a1: { sessionId: "s-1" } }),
-    ).toEqual({ targetSessions: { a1: "s-1" } });
+      buildChatAddress(["a1"], {
+        a1: { refs: [{ agentInstanceId: "a1", sessionId: "s-1" }] },
+      }),
+    ).toEqual({ refs: [{ agentInstanceId: "a1", sessionId: "s-1" }] });
   });
 
-  it("carries the refusal to continue per agent, never as a blanket flag", () => {
-    // @A @B with "new task" picked for A only must not start a new session for
-    // B: that would rewrite a routing decision nobody addressed.
+  it("aggregates multi-picks and carries the refusal per agent, never as a blanket flag", () => {
+    // @A @B: A gets two quoted runs, B a "new task" refusal. B must not be
+    // swept into A's material, and a refusal for A must not start new sessions
+    // for anyone else: that would rewrite a routing decision nobody addressed.
     expect(
       buildChatAddress(["a1", "b2"], {
-        a1: { forceNew: true },
-        b2: { sessionId: "s-9" },
+        a1: {
+          refs: [
+            { agentInstanceId: "a1", sessionId: "s-1" },
+            { agentInstanceId: "a1", sessionId: "s-2" },
+          ],
+        },
+        b2: { forceNew: true },
       }),
-    ).toEqual({ targetSessions: { b2: "s-9" }, forceNewFor: ["a1"] });
+    ).toEqual({
+      refs: [
+        { agentInstanceId: "a1", sessionId: "s-1" },
+        { agentInstanceId: "a1", sessionId: "s-2" },
+      ],
+      forceNewFor: ["b2"],
+    });
   });
 
-  it("drops an address whose @ the human deleted", () => {
+  it("drops a reference whose @ the human deleted", () => {
     // The chip stays in state until the send, but an address that is not a
     // target of this message is refused by the Gateway rather than dropped — so
     // the composer must not send it.
-    expect(buildChatAddress([], { a1: { sessionId: "s-1" } })).toBeUndefined();
+    expect(
+      buildChatAddress([], {
+        a1: { refs: [{ agentInstanceId: "a1", sessionId: "s-1" }] },
+      }),
+    ).toBeUndefined();
   });
 
   it("sends nothing when nothing was chosen", () => {

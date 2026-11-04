@@ -35,6 +35,7 @@ import {
   memo,
   useRef,
   useState,
+  Fragment,
   type UIEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
@@ -47,6 +48,7 @@ import {
   ChevronsDown,
   ArrowRight,
   AtSign,
+  Quote,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { Components } from "react-markdown";
@@ -94,6 +96,7 @@ import {
   type ChatMessageRow,
   type ChatAttachmentMeta,
   type ChatAddress,
+  type ChatRefPick,
 } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { sessionExists } from "../../lib/session-control";
@@ -253,6 +256,13 @@ interface RowProps {
    *  transcript must keep showing what was decided, and a second click would
    *  deliver the same utterance again. */
   cardAnswered?: boolean;
+  /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
+   *  picker's "去续投") to locate that run's block in the transcript. A
+   *  navigation, not an address — it never changes what a message carries. */
+  onLocateRef?: (sessionId: string) => void;
+  /** Which execution session the picker just asked to continue: the matching
+   *  block reveals + focuses its in-place reply box. */
+  focusBlockSessionId?: string;
 }
 
 /**
@@ -320,6 +330,7 @@ const GroupRowView = memo(function GroupRowView({
   onMentionContextMenu,
   onChooseCard,
   cardAnswered,
+  onLocateRef,
 }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
@@ -559,6 +570,31 @@ const GroupRowView = memo(function GroupRowView({
               )}
             </div>
           )}
+          {/* ADR-106 revision 2026-11-04: the `@session` material attached to
+              this utterance, read off the row's pinned `meta.refs` (no new
+              read). Source chips on the speaker's side under the bubble — one
+              click jumps to that run's block. */}
+          {row.meta?.refs && row.meta.refs.length > 0 && (
+            <div
+              className={cn(
+                "mb-0.5 mt-1 flex flex-wrap gap-1",
+                own ? "justify-end self-end" : "justify-start self-start",
+              )}
+            >
+              {row.meta.refs.map((r) => (
+                <button
+                  key={`${r.agent_instance_id}|${r.session_id}|${r.round_id}`}
+                  type="button"
+                  onClick={() => onLocateRef?.(r.session_id)}
+                  className="inline-flex max-w-[12rem] items-center gap-1 rounded bg-chat-bubble px-1.5 py-0.5 text-10 text-text-tertiary hover:text-text-secondary"
+                  title={r.session_id}
+                >
+                  <Quote className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{r.session_id}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="mt-1 flex items-center gap-2">
             <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
@@ -598,7 +634,13 @@ const GroupItemView = memo(function GroupItemView({
   ...rowProps
 }: GroupItemProps) {
   if (item.kind === "run") {
-    const { onMentionContextMenu, nameOf, chatSessionId, readOnly } = rowProps;
+    const {
+      onMentionContextMenu,
+      nameOf,
+      chatSessionId,
+      readOnly,
+      focusBlockSessionId,
+    } = rowProps;
     return (
       <ChatExecutionBlock
         block={item}
@@ -611,6 +653,9 @@ const GroupItemView = memo(function GroupItemView({
         canAnswer={!readOnly}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
+        focusInput={
+          !!focusBlockSessionId && item.execSessionId === focusBlockSessionId
+        }
         onAuthorContextMenu={
           onMentionContextMenu
             ? (e) => onMentionContextMenu(e, item.instanceId)
@@ -688,35 +733,36 @@ export function applyMention(
 }
 
 /**
- * Turn the composer's address picks into the wire address (ADR-106 D6/D7).
+ * Turn the composer's address picks into the wire address (ADR-106 D6/D7,
+ * redrawn by the 2026-11-04 revision).
  *
- * An address rides ONLY the targets this message actually delivers to. The
- * Gateway refuses a stray one with a 400 instead of dropping it — dropping
- * "continue that session" silently turns it into "guess one" — so a chip whose
- * `@` the human later deleted must never reach the body, and a refusal to
- * continue is carried per agent rather than as a flag that would sweep up a
- * second agent's turn.
+ * A typed `@session` is MATERIAL now, not a delivery: the picker hands back
+ * `refs` (the runs attached as quoted context), which ride the send as the flat
+ * `ChatAddress.refs` the Gateway pins per round. `target_sessions` is no longer
+ * produced here — it survives only on the addressing-card answer path
+ * (`chatCardAnswer`), where the human is genuinely choosing a delivery.
+ * "new task" is still a per-agent `force_new_for` refusal to continue.
  *
- * `undefined` (nothing chosen, or nothing still mentioned) is not an empty
- * object: the absence of an address is what keeps the turn on the ladder's
- * lower levels, where an un-addressed message may be answered as chat.
+ * An address rides ONLY the targets this message actually mentions: a chip
+ * whose `@` the human later deleted must never reach the body. `undefined`
+ * (nothing chosen, or nothing still mentioned) is not an empty object — the
+ * absence of an address is what keeps the turn on the ladder's lower levels.
  */
 export function buildChatAddress(
   targets: string[],
   addresses: Record<string, AddressPick>,
 ): ChatAddress | undefined {
-  const targetSessions: Record<string, string> = {};
+  const refs: ChatRefPick[] = [];
   const forceNewFor: string[] = [];
   for (const target of targets) {
     const pick = addresses[target];
     if (!pick) continue;
-    if (pick.sessionId) targetSessions[target] = pick.sessionId;
+    if (pick.refs?.length) refs.push(...pick.refs);
     else if (pick.forceNew) forceNewFor.push(target);
   }
-  if (Object.keys(targetSessions).length === 0 && forceNewFor.length === 0)
-    return undefined;
+  if (refs.length === 0 && forceNewFor.length === 0) return undefined;
   return {
-    ...(Object.keys(targetSessions).length > 0 ? { targetSessions } : {}),
+    ...(refs.length > 0 ? { refs } : {}),
     ...(forceNewFor.length > 0 ? { forceNewFor } : {}),
   };
 }
@@ -791,10 +837,17 @@ export function GroupChatPanel() {
     instanceId: string;
     name: string;
   } | null>(null);
-  // Addresses the human has named for this draft, per agent instance. They ride
-  // the send as `target_sessions` / `force_new_for`, which is the one fact the
-  // Router is never allowed to re-decide (D6: an address is an instruction).
+  // Reference picks the human has made for this draft, per agent instance. They
+  // ride the send as `refs` (material) / `force_new_for` (a refusal to
+  // continue), which is the one fact the Router is never allowed to re-decide
+  // (D6: an address is an instruction).
   const [addresses, setAddresses] = useState<Record<string, AddressPick>>({});
+  // ADR-106 revision 2026-11-04: the run whose block the `@` picker's "去续投"
+  // just located — that block reveals + focuses its in-place reply box. Cleared
+  // on the next commit so a stale focus never re-fires.
+  const [focusBlockSessionId, setFocusBlockSessionId] = useState<string | null>(
+    null,
+  );
 
   // Virtualized transcript handle (see the adapters below). Declared before the
   // follow hook: the hook delegates bottom-positioning to the list's
@@ -1089,7 +1142,7 @@ export function GroupChatPanel() {
       if (stage) {
         setAddresses((prev) => {
           const next = { ...prev };
-          if (pick.sessionId || pick.forceNew) {
+          if (pick.refs?.length || pick.forceNew) {
             next[stage.instanceId] = pick;
           } else {
             delete next[stage.instanceId];
@@ -1111,6 +1164,58 @@ export function GroupChatPanel() {
       return next;
     });
   }, []);
+
+  // Remove ONE reference from an agent's pick. Dropping the last one clears the
+  // chip entirely (unless a `forceNew` refusal still stands) — swallowing a
+  // picked reference would make it indistinguishable from one never given.
+  const removeRef = useCallback((instanceId: string, key: string) => {
+    setAddresses((prev) => {
+      const pick = prev[instanceId];
+      if (!pick) return prev;
+      const refs = (pick.refs ?? []).filter(
+        (x) => `${x.agentInstanceId}|${x.sessionId}` !== key,
+      );
+      const labels = { ...pick.labels };
+      delete labels[key];
+      const next = { ...prev };
+      if (refs.length === 0 && !pick.forceNew) delete next[instanceId];
+      else next[instanceId] = { ...pick, refs, labels };
+      return next;
+    });
+  }, []);
+
+  // ADR-106 revision 2026-11-04: "去续投" / a source-chip click locate the run's
+  // block. The block is the newest `execution_round` row whose session matches;
+  // its seq resolves through the layout's `keyOfSeq` to the virtual item, which
+  // the list scrolls to. A run with no block in the loaded window answers with a
+  // toast and no auto-paging (v1) — the navigation is best-effort, the reference
+  // it was pointing at is already on the row regardless.
+  const handleLocateRef = useCallback(
+    (sessionId: string) => {
+      setAddressStage(null);
+      const rows = rowsRef.current;
+      let seq: number | null = null;
+      for (const r of rows) {
+        if (
+          r.kind === "execution_round" &&
+          r.meta?.agent_session_id === sessionId
+        ) {
+          seq = r.seq;
+        }
+      }
+      if (seq === null) {
+        showToast({
+          type: "info",
+          message: t("chatView.address.blockNotLoaded"),
+        });
+        return;
+      }
+      const key = keyOfSeqRef.current.get(seq);
+      if (key) listRef.current?.scrollToKey(key, "center");
+      setFocusBlockSessionId(sessionId);
+    },
+    [t],
+  );
 
   // Answering an addressing card (ADR-106 D6): re-send the human's OWN words
   // with the address they just chose, keyed by the original row's id so the
@@ -1173,6 +1278,7 @@ export function GroupChatPanel() {
     const sentAddresses = addresses;
     setPendingAttachments([]);
     setAddresses({});
+    setFocusBlockSessionId(null);
     stickNow();
     const targets = resolveMentions(body, agentParticipants);
     // A reply to a block is already level 1 — the round it points at names its
@@ -1574,6 +1680,8 @@ export function GroupChatPanel() {
                     !!row?.meta?.in_reply_to &&
                     roundTriggers.has(row.meta.in_reply_to)
                   }
+                  onLocateRef={handleLocateRef}
+                  focusBlockSessionId={focusBlockSessionId ?? undefined}
                 />
               );
             }}
@@ -1670,27 +1778,46 @@ export function GroupChatPanel() {
                 </span>
               </div>
             )}
-            {/* Second-level addresses the human named (ADR-106 D7). They are
-                shown as chips because an address is an instruction, and an
-                instruction the surface swallowed would be indistinguishable
-                from one never given. */}
+            {/* Second-level references the human attached (ADR-106 D7, revision
+                2026-11-04). Each is its own chip because a reference is an
+                instruction, and an instruction the surface swallowed would be
+                indistinguishable from one never given. */}
             {addressRows.length > 0 && (
               <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
                 {addressRows.map(({ instanceId, name, pick }) => (
-                  <span key={instanceId} className={composerChip}>
-                    @{name} ·{" "}
-                    {pick.forceNew
-                      ? t("chatView.block.newTask")
-                      : pick.label || t("chatView.address.pick")}
-                    <button
-                      type="button"
-                      onClick={() => clearAddress(instanceId)}
-                      className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
-                      aria-label={t("chatView.address.clear")}
-                    >
-                      ×
-                    </button>
-                  </span>
+                  <Fragment key={instanceId}>
+                    {pick.forceNew && (
+                      <span className={composerChip}>
+                        @{name} · {t("chatView.block.newTask")}
+                        <button
+                          type="button"
+                          onClick={() => clearAddress(instanceId)}
+                          className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                          aria-label={t("chatView.address.clear")}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                    {(pick.refs ?? []).map((r) => {
+                      const key = `${r.agentInstanceId}|${r.sessionId}`;
+                      return (
+                        <span key={key} className={composerChip}>
+                          @{name} ·{" "}
+                          <Quote className="h-3 w-3 shrink-0" />{" "}
+                          {pick.labels?.[key] || r.sessionId}
+                          <button
+                            type="button"
+                            onClick={() => removeRef(instanceId, key)}
+                            className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                            aria-label={t("chatView.address.clear")}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </Fragment>
                 ))}
               </div>
             )}
@@ -1729,6 +1856,7 @@ export function GroupChatPanel() {
                   surface="group"
                   agentName={addressStage.name}
                   onPick={applyAddress}
+                  onLocate={(sid) => handleLocateRef(sid)}
                   onClose={() => setAddressStage(null)}
                 />
               </div>

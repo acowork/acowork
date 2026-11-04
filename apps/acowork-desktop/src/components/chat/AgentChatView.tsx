@@ -59,6 +59,7 @@ import {
   ChevronDown,
   ChevronsDown,
   AtSign,
+  Quote,
 } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
@@ -142,6 +143,13 @@ interface RowProps {
    *  asked about), so its buttons go quiet instead of offering a second
    *  delivery of the same words. */
   cardAnswered?: boolean;
+  /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
+   *  picker's "去续投") to locate that run's block in the transcript. A
+   *  navigation, not an address — it never changes what a message carries. */
+  onLocateRef?: (sessionId: string) => void;
+  /** Which execution session the picker just asked to continue: the matching
+   *  block reveals + focuses its in-place reply box. */
+  focusBlockSessionId?: string;
 }
 
 /**
@@ -159,6 +167,7 @@ const RowView = memo(function RowView({
   showHeader,
   onChooseCard,
   cardAnswered,
+  onLocateRef,
 }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
@@ -355,6 +364,26 @@ const RowView = memo(function RowView({
                 </div>
               </div>
             )}
+            {/* ADR-106 revision 2026-11-04: the `@session` material attached to
+                this utterance, read off the row's pinned `meta.refs` (no new
+                read). Source chips, right-aligned under the bubble — the human
+                sees what they quoted and one click jumps to that run's block. */}
+            {row.meta?.refs && row.meta.refs.length > 0 && (
+              <div className="mb-0.5 mt-1 flex flex-wrap justify-end gap-1 self-end">
+                {row.meta.refs.map((r) => (
+                  <button
+                    key={`${r.agent_instance_id}|${r.session_id}|${r.round_id}`}
+                    type="button"
+                    onClick={() => onLocateRef?.(r.session_id)}
+                    className="inline-flex max-w-[12rem] items-center gap-1 rounded bg-chat-bubble px-1.5 py-0.5 text-10 text-text-tertiary hover:text-text-secondary"
+                    title={r.session_id}
+                  >
+                    <Quote className="h-3 w-3 shrink-0" />
+                    <span className="truncate">{r.session_id}</span>
+                  </button>
+                ))}
+              </div>
+            )}
             <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
             </span>
@@ -402,6 +431,10 @@ const ItemView = memo(function ItemView({
         hasFollowUp={hasFollowUp}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
+        focusInput={
+          !!rowProps.focusBlockSessionId &&
+          item.execSessionId === rowProps.focusBlockSessionId
+        }
       />
     );
   }
@@ -478,6 +511,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     null,
   );
   const [address, setAddress] = useState<AddressPick | null>(null);
+  // ADR-106 revision 2026-11-04: the run whose block the `@` picker's "去续投"
+  // just located — that block reveals + focuses its in-place reply box. Cleared
+  // on the next commit so a stale focus never re-fires.
+  const [focusBlockSessionId, setFocusBlockSessionId] = useState<string | null>(
+    null,
+  );
   // The card asks the person who spoke, and in local mode there is exactly one
   // person but no id to compare against (see `mayAnswerCard`).
   const me = useAuthStore((s) => s.account?.user_id ?? "");
@@ -703,6 +742,36 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     textareaRef.current?.focus();
   }, []);
 
+  // ADR-106 revision 2026-11-04: "去续投" / a source-chip click locate the run's
+  // block. The block is the newest `execution_round` row whose session matches;
+  // its seq resolves through the layout's `keyOfSeq` to the virtual item, which
+  // the list scrolls to. A run with no block in the loaded window answers with a
+  // toast and no auto-paging (v1) — the navigation is best-effort, the reference
+  // it was pointing at is already on the row regardless.
+  const handleLocateRef = useCallback(
+    (sessionId: string) => {
+      setAddressStage(null);
+      const rows = rowsRef.current;
+      let seq: number | null = null;
+      for (const r of rows) {
+        if (
+          r.kind === "execution_round" &&
+          r.meta?.agent_session_id === sessionId
+        ) {
+          seq = r.seq;
+        }
+      }
+      if (seq === null) {
+        showToast({ type: "info", message: t("chatView.address.blockNotLoaded") });
+        return;
+      }
+      const key = keyOfSeqRef.current.get(seq);
+      if (key) listRef.current?.scrollToKey(key, "center");
+      setFocusBlockSessionId(sessionId);
+    },
+    [t],
+  );
+
   // Answering an addressing card (ADR-106 D6): re-send the human's OWN words
   // with the address they just chose, keyed by the original row's id so the
   // transcript keeps one message instead of narrating the decision twice.
@@ -755,13 +824,17 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     // for a plain message must not ride that send — the two are contradictory
     // instructions and the refusal belongs to the backend, not to a guess here.
     const chosen = replyTo ? null : address;
-    const wire: ChatAddress | undefined = chosen?.sessionId
-      ? { targetSession: chosen.sessionId }
+    // ADR-106 revision 2026-11-04: a typed `@session` is now material, never a
+    // delivery — the composer carries `refs` (the picked coordinates) and the
+    // Gateway pins each round at send time. "new task" is still `forceNew`.
+    const wire: ChatAddress | undefined = chosen?.refs?.length
+      ? { refs: chosen.refs }
       : chosen?.forceNew
         ? { forceNew: true }
         : undefined;
     setInput("");
     setReplyTarget(null);
+    setFocusBlockSessionId(null);
     setAddress(null);
     setPendingAttachments([]);
     stickNow();
@@ -997,10 +1070,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       chatSessionId={sessionId}
       anchorRef={addressBtnRef}
       onPick={(pick) => {
-        setAddress(pick.sessionId || pick.forceNew ? pick : null);
+        setAddress(pick.refs?.length || pick.forceNew ? pick : null);
         setAddressStage(null);
         textareaRef.current?.focus();
       }}
+      onLocate={(sid) => handleLocateRef(sid)}
       onClose={() => {
         setAddressStage(null);
         textareaRef.current?.focus();
@@ -1087,6 +1161,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                   !!item.row.meta?.in_reply_to &&
                   roundTriggers.has(item.row.meta.in_reply_to)
                 }
+                onLocateRef={handleLocateRef}
+                focusBlockSessionId={focusBlockSessionId ?? undefined}
               />
             )}
           />
@@ -1177,21 +1253,58 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             address the surface swallowed would be indistinguishable from one
             never given — and it is the one fact no model may re-decide. */}
         {address && !replyTarget && (
-          <div className="flex items-center gap-1 px-3 pt-2">
-            <span className={composerChip}>
-              {t("chatView.address.pick")}:{" "}
-              {address.forceNew
-                ? t("chatView.block.newTask")
-                : address.label || t("chatView.address.pick")}
-              <button
-                type="button"
-                onClick={() => setAddress(null)}
-                className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
-                aria-label={t("chatView.address.clear")}
-              >
-                ×
-              </button>
-            </span>
+          <div className="flex flex-wrap items-center gap-1 px-3 pt-2">
+            {address.forceNew && (
+              <span className={composerChip}>
+                {t("chatView.block.newTask")}
+                <button
+                  type="button"
+                  onClick={() =>
+                    setAddress((a) => {
+                      if (!a) return null;
+                      const next = { ...a, forceNew: false };
+                      return next.refs?.length ? next : null;
+                    })
+                  }
+                  className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                  aria-label={t("chatView.address.clear")}
+                >
+                  ×
+                </button>
+              </span>
+            )}
+            {/* ADR-106 revision 2026-11-04: each attached reference is its own
+                removable chip — swallowing one the human picked would make it
+                indistinguishable from never picked, and it is a fact no model
+                may re-decide. */}
+            {(address.refs ?? []).map((r) => {
+              const key = `${r.agentInstanceId}|${r.sessionId}`;
+              return (
+                <span key={key} className={composerChip}>
+                  <Quote className="h-3 w-3 shrink-0" />
+                  {address.labels?.[key] || r.sessionId}
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setAddress((a) => {
+                        if (!a) return null;
+                        const refs = (a.refs ?? []).filter(
+                          (x) => `${x.agentInstanceId}|${x.sessionId}` !== key,
+                        );
+                        const labels = { ...a.labels };
+                        delete labels[key];
+                        if (refs.length === 0 && !a.forceNew) return null;
+                        return { refs, labels, forceNew: a.forceNew };
+                      })
+                    }
+                    className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                    aria-label={t("chatView.address.clear")}
+                  >
+                    ×
+                  </button>
+                </span>
+              );
+            })}
           </div>
         )}
         {/* Second level of the `@` — the agent's own routable tasks, opened by

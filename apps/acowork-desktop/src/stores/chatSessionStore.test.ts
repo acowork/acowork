@@ -395,6 +395,80 @@ describe("the explicit address rides the send (ADR-106 D6/D7)", () => {
     });
     expect(bodyOf("/api/intents/chat-message").target_session).toBeUndefined();
   });
+
+  it("a fresh `@session` pick sends only its coordinates — the Gateway pins the round", async () => {
+    // ADR-106 revision 2026-11-04: material is pinned at SEND time on the
+    // server, so the client never guesses a round id. The wire is snake_case
+    // (`agent_instance_id` / `session_id`), the client shape is camel.
+    await useChatSessionStore.getState().sendGroupText(
+      "grp-1",
+      "@A look at this",
+      ["a"],
+      undefined,
+      undefined,
+      {
+        refs: [
+          { agentInstanceId: "a", sessionId: "s-1" },
+          { agentInstanceId: "a", sessionId: "s-2" },
+        ],
+      },
+    );
+    expect(bodyOf("/api/intents/mentions").refs).toEqual([
+      { agent_instance_id: "a", session_id: "s-1" },
+      { agent_instance_id: "a", session_id: "s-2" },
+    ]);
+    await useChatSessionStore
+      .getState()
+      .sendText("cs-1", "look at this", undefined, undefined, undefined, {
+        refs: [{ agentInstanceId: "a", sessionId: "s-1" }],
+      });
+    expect(bodyOf("/api/intents/chat-message").refs).toEqual([
+      { agent_instance_id: "a", session_id: "s-1" },
+    ]);
+  });
+
+  it("a card-answer echo keeps the pinned round and terminal flag", async () => {
+    // The re-delivery is the SAME sentence — its material was already pinned
+    // when the row was written, so `round_id`/`terminal` travel verbatim and
+    // the Gateway must not re-decide them.
+    await useChatSessionStore
+      .getState()
+      .sendText("cs-1", "go on", undefined, undefined, undefined, {
+        messageId: "m-1",
+        targetSession: "s-9",
+        refs: [
+          {
+            agentInstanceId: "a",
+            sessionId: "s-1",
+            roundId: "r-1",
+            terminal: false,
+          },
+        ],
+      });
+    expect(bodyOf("/api/intents/chat-message").refs).toEqual([
+      {
+        agent_instance_id: "a",
+        session_id: "s-1",
+        round_id: "r-1",
+        terminal: false,
+      },
+    ]);
+  });
+
+  it("no material, no field — absence is not an empty list", async () => {
+    await useChatSessionStore
+      .getState()
+      .sendGroupText("grp-1", "hi", ["a"], undefined, undefined, {
+        forceNewFor: ["a"],
+      });
+    expect(bodyOf("/api/intents/mentions").refs).toBeUndefined();
+    await useChatSessionStore
+      .getState()
+      .sendText("cs-1", "hi", undefined, undefined, undefined, {
+        forceNew: true,
+      });
+    expect(bodyOf("/api/intents/chat-message").refs).toBeUndefined();
+  });
 });
 
 /**
