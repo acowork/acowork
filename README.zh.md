@@ -70,25 +70,22 @@ ACowork 是一个**多用户、分布式、AI 原生的协作平台**。团队�
 
 ## 🏛️ 架构
 
-ACowork 采用扁平的三层拓扑：**Gateway**（每个集群唯一控制面）→ **Node Agent**（每台需要承载 Runtime
-的主机一个）→ **Runtime**（每个运行中的 `.agent` 实例一个）。无论是人、AI Agent、项目服务还是文档服务，
-都通过同一条协议路径与 Gateway 对话。
+人可以通过 Desktop 或 Mobile 驱动它；AI Agent 与各领域服务则走同一条协议路径。Gateway 之下是一条扁平的三层
+链路：**Gateway** → **Node Agent** → **Runtime**。
 
-- **Gateway**（`acowork-gateway`）—— 每个集群一个常驻 Rust 进程。`:19876` 上的 HTTP API，`:19875` 上内嵌的
-  MQTT broker；反代到所有 Node / Runtime；包管理；Intent 路由；全局资源（LLM providers / MCP / budget /
-  cron / rate-limit）。
-- **Node Agent**（`acowork-node`）—— 每台承载 Runtime 的主机一个。进程表（spawn / kill / reap）、本地包
-  存储、向 Gateway 的 MQTT 接入、本地反代 `:19900`、LSP sidecar 监督。
-- **Runtime**（`acowork-runtime`）—— 每个运行中的 `.agent` 实例一个。通用 Rust 二进制：加载 `.agent` 包、
-  跑 LLM 主循环、工具执行，以及 loopback 上的 per-agent HTTP。
+| 层级 | 数量 | 职责 |
+|---|---|---|
+| **客户端** · Desktop App · Mobile App | 每台设备 | Tauri v2 界面，走 HTTP + MQTT——同一套界面、同一个账号 |
+| **Gateway** · `acowork-gateway` | 每集群 1 个 | HTTP `:19876`、MQTT `:19875`、反向代理、包管理、Intent 路由、全局资源 |
+| **Node Agent** · `acowork-node` | 每台主机 1 个 | 进程表、本地包存储、反向代理 `:19900`、LSP 监督 |
+| **Runtime** · `acowork-runtime` | 每个 `.agent` 1 个 | 加载包、LLM 主循环、工具执行、loopback HTTP |
 
-除了这三层之外，五个常驻服务挂在同一条 Gateway 协议路径上——`acowork-user`（账号、角色、档案）、
-`acowork-pm`（项目与任务管理）、`acowork-doc`（在线文档库）、`acowork-memory`（独立记忆服务）对人和 Agent
-暴露同一套 REST + MCP 接口。
+四个常驻服务挂在同一条路径上，对人和 Agent 一律以 REST + MCP 暴露：
+`acowork-user`（账号 · 角色）· `acowork-pm`（项目 · 任务）· `acowork-doc`（文档库）·
+`acowork-memory`（记忆服务）。
 
-**Standalone** —— Gateway 在本机自动 spawn 一个本地 Node：一个进程树、一个 MQTT broker、一个 HTTP 入口。
-**集群** —— 在每台要承载 Runtime 的机器上安装 `acowork-node` 并完成接入，同一条协议路径即刻点亮。
-**Gateway 代码里完全无「本地 / 远程」分支**。
+**Standalone** —— Gateway 在本机自动 spawn 一个本地 Node。**集群** —— 在每台主机接入 `acowork-node`。
+同一份二进制、同一条协议路径，Gateway 里**没有「本地 / 远程」分支**。
 
 <p align="center">
   <img src="./assets/architecture.svg" alt="ACowork 系统架构" width="100%" />

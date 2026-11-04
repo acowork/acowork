@@ -1,228 +1,123 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1400 920" width="100%" height="100%" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1160 560" width="100%" height="100%" font-family="system-ui, -apple-system, 'Segoe UI', sans-serif">
   <defs>
-    <marker id="ar-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <marker id="a-purple" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" fill="#8b5cf6" />
     </marker>
-    <marker id="ar-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <marker id="a-purple-s" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#8b5cf6" />
+    </marker>
+    <marker id="a-blue" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" fill="#0ea5e9" />
     </marker>
-    <marker id="ar-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <marker id="a-blue-s" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0ea5e9" />
+    </marker>
+    <marker id="a-orange" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" fill="#f59e0b" />
     </marker>
-    <marker id="ar-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+    <marker id="a-orange-s" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#f59e0b" />
+    </marker>
+    <marker id="a-green" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0,0 L10,5 L0,10 z" fill="#16a34a" />
     </marker>
-    <marker id="ar-purple-start" viewBox="0 0 10 10" refX="1" refY="5" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M10,0 L0,5 L10,10 z" fill="#8b5cf6" />
+    <marker id="a-slate" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#94a3b8" />
     </marker>
   </defs>
 
-  <rect width="1400" height="920" fill="#ffffff" rx="12" />
+  <rect width="1160" height="560" fill="#ffffff" rx="12" />
 
-  <!-- ==================== TITLE ==================== -->
-  <text x="700" y="28" text-anchor="middle" fill="#0f172a" font-size="16" font-weight="700">ACowork.AI · Multi-user · Distributed · AI-native PM &amp; Doc</text>
-
-  <!-- ==================== LEGEND ==================== -->
-  <g transform="translate(40, 46)">
-    <rect x="-10" y="0" width="1320" height="26" rx="6" fill="#f8fafc" stroke="#e2e8f0" />
-    <text x="4" y="17" fill="#475569" font-size="11" font-weight="600">Legend:</text>
-    <line x1="62" y1="13" x2="94" y2="13" stroke="#8b5cf6" stroke-width="2" marker-end="url(#ar-purple)" />
-    <text x="104" y="17" fill="#475569" font-size="11">MQTT — control &amp; events</text>
-    <line x1="304" y1="13" x2="336" y2="13" stroke="#0ea5e9" stroke-width="2" marker-end="url(#ar-blue)" />
-    <text x="346" y="17" fill="#475569" font-size="11">HTTP REST — data plane</text>
-    <line x1="540" y1="13" x2="572" y2="13" stroke="#f59e0b" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#ar-orange)" />
-    <text x="582" y="17" fill="#475569" font-size="11">HTTP reverse proxy — cross-network</text>
-    <line x1="830" y1="13" x2="862" y2="13" stroke="#16a34a" stroke-width="2" stroke-dasharray="2,2" marker-end="url(#ar-green)" />
-    <text x="872" y="17" fill="#475569" font-size="11">Spawn / lifecycle (Node → Runtime)</text>
+  <!-- ==================== HUMANS ==================== -->
+  <g>
+    <rect x="490" y="42" width="180" height="42" rx="10" fill="#eff6ff" stroke="#3b82f6" stroke-width="1.5" />
+    <text x="580" y="68" text-anchor="middle" fill="#1e3a8a" font-size="15" font-weight="700">👤 Humans</text>
   </g>
 
-  <!-- ==================== HUMANS ROW ==================== -->
-  <text x="700" y="100" text-anchor="middle" fill="#475569" font-size="12" font-weight="600">👥 Humans · multi-user (real accounts, roles, sessions, audit)</text>
-
-  <g transform="translate(420, 114)">
-    <circle cx="30" cy="30" r="26" fill="#dbeafe" stroke="#3b82f6" stroke-width="2" />
-    <text x="30" y="38" text-anchor="middle" font-size="22">👤</text>
-    <text x="30" y="76" text-anchor="middle" fill="#1e3a8a" font-size="12" font-weight="600">alice</text>
-    <text x="30" y="90" text-anchor="middle" fill="#64748b" font-size="10">admin</text>
-  </g>
-  <g transform="translate(670, 114)">
-    <circle cx="30" cy="30" r="26" fill="#dbeafe" stroke="#3b82f6" stroke-width="2" />
-    <text x="30" y="38" text-anchor="middle" font-size="22">👤</text>
-    <text x="30" y="76" text-anchor="middle" fill="#1e3a8a" font-size="12" font-weight="600">bob</text>
-    <text x="30" y="90" text-anchor="middle" fill="#64748b" font-size="10">member</text>
-  </g>
-  <g transform="translate(920, 114)">
-    <circle cx="30" cy="30" r="26" fill="#dbeafe" stroke="#3b82f6" stroke-width="2" />
-    <text x="30" y="38" text-anchor="middle" font-size="22">👤</text>
-    <text x="30" y="76" text-anchor="middle" fill="#1e3a8a" font-size="12" font-weight="600">carol</text>
-    <text x="30" y="90" text-anchor="middle" fill="#64748b" font-size="10">member</text>
-  </g>
-  <text x="320" y="148" fill="#94a3b8" font-size="22" font-style="italic">…</text>
-  <text x="1050" y="148" fill="#94a3b8" font-size="22" font-style="italic">…</text>
-
-  <!-- vertical lines from users down to Desktop -->
-  <line x1="450" y1="206" x2="450" y2="228" stroke="#cbd5e1" stroke-width="1.5" />
-  <line x1="700" y1="206" x2="700" y2="228" stroke="#cbd5e1" stroke-width="1.5" />
-  <line x1="950" y1="206" x2="950" y2="228" stroke="#cbd5e1" stroke-width="1.5" />
+  <!-- Humans → clients (orthogonal fan-out) -->
+  <line x1="580" y1="84" x2="580" y2="100" stroke="#94a3b8" stroke-width="2" />
+  <line x1="380" y1="100" x2="780" y2="100" stroke="#94a3b8" stroke-width="2" />
+  <line x1="380" y1="100" x2="380" y2="114" stroke="#94a3b8" stroke-width="2" marker-end="url(#a-slate)" />
+  <line x1="780" y1="100" x2="780" y2="114" stroke="#94a3b8" stroke-width="2" marker-end="url(#a-slate)" />
 
   <!-- ==================== DESKTOP APP ==================== -->
-  <g transform="translate(30, 230)">
-    <rect width="1340" height="76" rx="10" fill="#fef3c7" stroke="#fbbf24" stroke-width="1.5" />
-    <text x="670" y="26" text-anchor="middle" fill="#92400e" font-size="14" font-weight="700">Desktop App (Tauri v2) · per-user window · no state persistence</text>
-    <rect x="30" y="42" width="290" height="22" rx="11" fill="#ffffff" stroke="#cbd5e1" />
-    <text x="175" y="57" text-anchor="middle" fill="#475569" font-size="11">React/TS UI · Chat · PM · Doc · DevMode</text>
-    <rect x="340" y="42" width="260" height="22" rx="11" fill="#ffffff" stroke="#cbd5e1" />
-    <text x="470" y="57" text-anchor="middle" fill="#475569" font-size="11">HTTP Client → Gateway :19876</text>
-    <rect x="620" y="42" width="260" height="22" rx="11" fill="#ffffff" stroke="#cbd5e1" />
-    <text x="750" y="57" text-anchor="middle" fill="#475569" font-size="11">MQTT Subscriber → broker</text>
-    <rect x="900" y="42" width="290" height="22" rx="11" fill="#ffffff" stroke="#cbd5e1" />
-    <text x="1045" y="57" text-anchor="middle" fill="#475569" font-size="11">Tauri Rust backend · system tray</text>
+  <g>
+    <rect x="250" y="118" width="260" height="44" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5" />
+    <text x="380" y="146" text-anchor="middle" fill="#92400e" font-size="14" font-weight="700">Desktop App · Tauri v2</text>
+  </g>
+  <line x1="380" y1="162" x2="380" y2="198" stroke="#0ea5e9" stroke-width="2" marker-end="url(#a-blue)" marker-start="url(#a-blue-s)" />
+  <text x="394" y="185" fill="#0369a1" font-size="11" font-weight="600">HTTP · MQTT</text>
+
+  <!-- ==================== MOBILE APP ==================== -->
+  <g>
+    <rect x="650" y="118" width="260" height="44" rx="10" fill="#fffbeb" stroke="#f59e0b" stroke-width="1.5" />
+    <text x="780" y="146" text-anchor="middle" fill="#92400e" font-size="14" font-weight="700">Mobile App · Tauri v2</text>
+  </g>
+  <line x1="780" y1="162" x2="780" y2="198" stroke="#0ea5e9" stroke-width="2" marker-end="url(#a-blue)" marker-start="url(#a-blue-s)" />
+  <text x="794" y="185" fill="#0369a1" font-size="11" font-weight="600">HTTP · MQTT</text>
+
+  <!-- ==================== GATEWAY ==================== -->
+  <g>
+    <rect x="130" y="202" width="900" height="76" rx="12" fill="#faf5ff" stroke="#8b5cf6" stroke-width="2" />
+    <text x="580" y="233" text-anchor="middle" fill="#5b21b6" font-size="16" font-weight="700">acowork-gateway</text>
+    <text x="580" y="257" text-anchor="middle" fill="#7c3aed" font-size="12">:19876 HTTP · :19875 MQTT</text>
   </g>
 
-  <!-- Desktop → Gateway HTTP + MQTT (split arrows) -->
-  <line x1="380" y1="306" x2="380" y2="338" stroke="#0ea5e9" stroke-width="2" marker-end="url(#ar-blue)" />
-  <text x="386" y="328" fill="#0369a1" font-size="10" font-weight="600">HTTP</text>
-  <line x1="1020" y1="306" x2="1020" y2="338" stroke="#8b5cf6" stroke-width="2" marker-end="url(#ar-purple)" />
-  <text x="1026" y="328" fill="#7c3aed" font-size="10" font-weight="600">MQTT</text>
+  <!-- Gateway ⇄ co-resident services -->
+  <line x1="270" y1="278" x2="270" y2="340" stroke="#f59e0b" stroke-width="2" marker-end="url(#a-orange)" marker-start="url(#a-orange-s)" />
+  <text x="284" y="313" fill="#b45309" font-size="11" font-weight="600">REST · MCP</text>
 
-  <!-- ==================== MACHINE A · STANDALONE ==================== -->
-  <rect x="30" y="340" width="650" height="450" rx="12" fill="#f1f5f9" stroke="#94a3b8" stroke-width="2" />
-  <text x="50" y="368" fill="#334155" font-size="14" font-weight="700">Machine A · Standalone (your laptop)</text>
-  <text x="50" y="385" fill="#64748b" font-size="10">one process tree · one MQTT broker · one HTTP entry · same Gateway code runs everywhere</text>
+  <!-- Gateway ⇄ agent host A -->
+  <line x1="580" y1="278" x2="580" y2="340" stroke="#8b5cf6" stroke-width="2" marker-end="url(#a-purple)" marker-start="url(#a-purple-s)" />
+  <text x="594" y="313" fill="#7c3aed" font-size="11" font-weight="600">MQTT · HTTP</text>
 
-  <!-- Gateway -->
-  <g transform="translate(50, 398)">
-    <rect width="610" height="86" rx="8" fill="#ffffff" stroke="#8b5cf6" stroke-width="2" />
-    <rect width="610" height="22" rx="8" fill="#8b5cf6" />
-    <text x="14" y="16" fill="white" font-size="12" font-weight="700">acowork-gateway · single control plane per cluster</text>
-    <rect x="14" y="34" width="186" height="40" rx="6" fill="#faf5ff" stroke="#8b5cf6" />
-    <text x="107" y="50" text-anchor="middle" fill="#5b21b6" font-size="11" font-weight="600">HTTP API</text>
-    <text x="107" y="65" text-anchor="middle" fill="#7c3aed" font-size="10">:19876 · Axum</text>
-    <rect x="212" y="34" width="186" height="40" rx="6" fill="#faf5ff" stroke="#8b5cf6" />
-    <text x="305" y="50" text-anchor="middle" fill="#5b21b6" font-size="11" font-weight="600">MQTT Broker</text>
-    <text x="305" y="65" text-anchor="middle" fill="#7c3aed" font-size="10">:19875 · rumqttd</text>
-    <rect x="410" y="34" width="186" height="40" rx="6" fill="#faf5ff" stroke="#8b5cf6" />
-    <text x="503" y="50" text-anchor="middle" fill="#5b21b6" font-size="11" font-weight="600">Reverse Proxy + Resources</text>
-    <text x="503" y="65" text-anchor="middle" fill="#7c3aed" font-size="10">intent · budget · vault · cron</text>
+  <!-- Gateway ⇄ agent host B -->
+  <line x1="890" y1="278" x2="890" y2="340" stroke="#8b5cf6" stroke-width="2" marker-end="url(#a-purple)" marker-start="url(#a-purple-s)" />
+  <text x="904" y="313" fill="#7c3aed" font-size="11" font-weight="600">MQTT · HTTP</text>
+
+  <!-- ==================== CO-RESIDENT SERVICES ==================== -->
+  <g>
+    <rect x="130" y="344" width="280" height="176" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5" />
+    <text x="146" y="368" fill="#64748b" font-size="11" font-weight="700">Co-resident services</text>
+
+    <rect x="146" y="382" width="248" height="28" rx="7" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="270" y="401" text-anchor="middle" fill="#334155" font-size="12" font-weight="600">acowork-user</text>
+
+    <rect x="146" y="416" width="248" height="28" rx="7" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="270" y="435" text-anchor="middle" fill="#334155" font-size="12" font-weight="600">acowork-pm</text>
+
+    <rect x="146" y="450" width="248" height="28" rx="7" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="270" y="469" text-anchor="middle" fill="#334155" font-size="12" font-weight="600">acowork-doc</text>
+
+    <rect x="146" y="484" width="248" height="28" rx="7" fill="#ffffff" stroke="#e2e8f0" />
+    <text x="270" y="503" text-anchor="middle" fill="#334155" font-size="12" font-weight="600">acowork-memory</text>
   </g>
 
-  <!-- Co-resident services -->
-  <text x="50" y="505" fill="#334155" font-size="11" font-weight="700">Co-resident services · first-class (humans &amp; AI share the same surface)</text>
-  <g transform="translate(50, 514)">
-    <rect x="0" y="0" width="195" height="64" rx="8" fill="#fff7ed" stroke="#f59e0b" stroke-width="1.5" />
-    <text x="97" y="22" text-anchor="middle" fill="#9a3412" font-size="12" font-weight="700">acowork-user</text>
-    <text x="97" y="40" text-anchor="middle" fill="#c2410c" font-size="10">accounts · roles · audit</text>
-    <text x="97" y="55" text-anchor="middle" fill="#c2410c" font-size="10">user ↔ user chat</text>
+  <!-- ==================== AGENT HOST A ==================== -->
+  <g>
+    <rect x="440" y="344" width="280" height="176" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5" />
+    <text x="456" y="368" fill="#64748b" font-size="11" font-weight="700">Agent host A</text>
 
-    <rect x="207" y="0" width="195" height="64" rx="8" fill="#fff7ed" stroke="#f59e0b" stroke-width="1.5" />
-    <text x="304" y="22" text-anchor="middle" fill="#9a3412" font-size="12" font-weight="700">acowork-pm</text>
-    <text x="304" y="40" text-anchor="middle" fill="#c2410c" font-size="10">project · task tree</text>
-    <text x="304" y="55" text-anchor="middle" fill="#c2410c" font-size="10">REST + MCP</text>
+    <rect x="456" y="382" width="248" height="44" rx="9" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5" />
+    <text x="580" y="410" text-anchor="middle" fill="#15803d" font-size="13" font-weight="700">acowork-node · :19900</text>
 
-    <rect x="414" y="0" width="196" height="64" rx="8" fill="#fff7ed" stroke="#f59e0b" stroke-width="1.5" />
-    <text x="512" y="22" text-anchor="middle" fill="#9a3412" font-size="12" font-weight="700">acowork-doc</text>
-    <text x="512" y="40" text-anchor="middle" fill="#c2410c" font-size="10">doc library · Tiptap + Yjs</text>
-    <text x="512" y="55" text-anchor="middle" fill="#c2410c" font-size="10">real-time multi-user edit</text>
+    <rect x="456" y="456" width="248" height="44" rx="9" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5" />
+    <text x="580" y="484" text-anchor="middle" fill="#334155" font-size="13" font-weight="700">acowork-runtime × N</text>
   </g>
+  <line x1="580" y1="426" x2="580" y2="452" stroke="#16a34a" stroke-width="2" marker-end="url(#a-green)" />
+  <text x="592" y="444" fill="#15803d" font-size="11" font-weight="600">spawn</text>
 
-  <!-- Local Node Agent -->
-  <g transform="translate(50, 600)">
-    <rect width="610" height="46" rx="8" fill="#ecfdf5" stroke="#16a34a" stroke-width="1.5" />
-    <text x="14" y="20" fill="#15803d" font-size="12" font-weight="700">acowork-node (local) · node_id="local" · :19900</text>
-    <text x="14" y="38" fill="#16a34a" font-size="10">process mgr · package mgr · LSP relay · node reverse proxy</text>
+  <!-- ==================== AGENT HOST B ==================== -->
+  <g>
+    <rect x="750" y="344" width="280" height="176" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5" />
+    <text x="766" y="368" fill="#64748b" font-size="11" font-weight="700">Agent host B</text>
+
+    <rect x="766" y="382" width="248" height="44" rx="9" fill="#f0fdf4" stroke="#16a34a" stroke-width="1.5" />
+    <text x="890" y="410" text-anchor="middle" fill="#15803d" font-size="13" font-weight="700">acowork-node · :19900</text>
+
+    <rect x="766" y="456" width="248" height="44" rx="9" fill="#ffffff" stroke="#94a3b8" stroke-width="1.5" />
+    <text x="890" y="484" text-anchor="middle" fill="#334155" font-size="13" font-weight="700">acowork-runtime × N</text>
   </g>
-
-  <!-- Local Runtimes -->
-  <g transform="translate(50, 660)">
-    <rect x="0" y="0" width="296" height="118" rx="8" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
-    <text x="148" y="22" text-anchor="middle" fill="#334155" font-size="12" font-weight="700">acowork-runtime</text>
-    <text x="148" y="40" text-anchor="middle" fill="#64748b" font-size="10">Agent "com.acowork.senior-engineer"</text>
-    <text x="148" y="62" text-anchor="middle" fill="#475569" font-size="10">✓ Grafeo · ✓ direct LLM</text>
-    <text x="148" y="78" text-anchor="middle" fill="#475569" font-size="10">✓ WASM tools · ✓ loopback HTTP</text>
-    <text x="148" y="102" text-anchor="middle" fill="#94a3b8" font-size="10">spawned by local Node</text>
-
-    <rect x="314" y="0" width="296" height="118" rx="8" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
-    <text x="462" y="22" text-anchor="middle" fill="#334155" font-size="12" font-weight="700">acowork-runtime</text>
-    <text x="462" y="40" text-anchor="middle" fill="#64748b" font-size="10">Agent "com.acowork.qa-tom"</text>
-    <text x="462" y="62" text-anchor="middle" fill="#475569" font-size="10">✓ Grafeo · ✓ direct LLM</text>
-    <text x="462" y="78" text-anchor="middle" fill="#475569" font-size="10">✓ WASM tools · ✓ loopback HTTP</text>
-    <text x="462" y="102" text-anchor="middle" fill="#94a3b8" font-size="10">spawned by local Node</text>
-  </g>
-
-  <!-- Internal connections in Machine A (control plane spine + spawn arrows) -->
-  <line x1="198" y1="646" x2="198" y2="658" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="2,2" marker-end="url(#ar-green)" />
-  <line x1="512" y1="646" x2="512" y2="658" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="2,2" marker-end="url(#ar-green)" />
-  <line x1="355" y1="578" x2="355" y2="598" stroke="#cbd5e1" stroke-width="1.2" stroke-dasharray="3,3" />
-
-  <!-- ==================== MACHINE B · CLUSTER NODE ==================== -->
-  <rect x="720" y="340" width="650" height="450" rx="12" fill="#f0fdf4" stroke="#16a34a" stroke-width="2" />
-  <text x="740" y="368" fill="#15803d" font-size="14" font-weight="700">Machine B · Cluster node (GPU workstation / cloud VM)</text>
-  <text x="740" y="385" fill="#16a34a" font-size="10">same protocol path as Machine A · zero Gateway code branches</text>
-
-  <!-- Node Agent -->
-  <g transform="translate(740, 398)">
-    <rect width="610" height="86" rx="8" fill="#ecfdf5" stroke="#16a34a" stroke-width="2" />
-    <rect width="610" height="22" rx="8" fill="#16a34a" />
-    <text x="14" y="16" fill="white" font-size="12" font-weight="700">acowork-node · node_id="gpu-01" · :19900</text>
-    <rect x="14" y="34" width="186" height="40" rx="6" fill="#f0fdf4" stroke="#16a34a" />
-    <text x="107" y="50" text-anchor="middle" fill="#15803d" font-size="11" font-weight="600">Process Mgr</text>
-    <text x="107" y="65" text-anchor="middle" fill="#16a34a" font-size="10">spawn · kill · reap</text>
-    <rect x="212" y="34" width="186" height="40" rx="6" fill="#f0fdf4" stroke="#16a34a" />
-    <text x="305" y="50" text-anchor="middle" fill="#15803d" font-size="11" font-weight="600">Package Mgr</text>
-    <text x="305" y="65" text-anchor="middle" fill="#16a34a" font-size="10">local install · skills</text>
-    <rect x="410" y="34" width="186" height="40" rx="6" fill="#f0fdf4" stroke="#16a34a" />
-    <text x="503" y="50" text-anchor="middle" fill="#15803d" font-size="11" font-weight="600">Reverse Proxy :19900</text>
-    <text x="503" y="65" text-anchor="middle" fill="#16a34a" font-size="10">token-auth boundary</text>
-  </g>
-
-  <!-- Remote Runtimes -->
-  <text x="740" y="505" fill="#15803d" font-size="11" font-weight="700">Runtimes on this node</text>
-  <g transform="translate(740, 514)">
-    <rect x="0" y="0" width="296" height="118" rx="8" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
-    <text x="148" y="22" text-anchor="middle" fill="#334155" font-size="12" font-weight="700">acowork-runtime</text>
-    <text x="148" y="40" text-anchor="middle" fill="#64748b" font-size="10">Agent "com.acowork.docflow"</text>
-    <text x="148" y="62" text-anchor="middle" fill="#475569" font-size="10">✓ Grafeo · ✓ direct LLM</text>
-    <text x="148" y="78" text-anchor="middle" fill="#475569" font-size="10">✓ WASM tools · ✓ loopback HTTP</text>
-    <text x="148" y="102" text-anchor="middle" fill="#94a3b8" font-size="10">lives on Machine B</text>
-
-    <rect x="314" y="0" width="296" height="118" rx="8" fill="#f8fafc" stroke="#e2e8f0" stroke-width="1.5" />
-    <text x="462" y="22" text-anchor="middle" fill="#334155" font-size="12" font-weight="700">acowork-runtime</text>
-    <text x="462" y="40" text-anchor="middle" fill="#64748b" font-size="10">Agent "com.example.qa-tom"</text>
-    <text x="462" y="62" text-anchor="middle" fill="#475569" font-size="10">✓ Grafeo · ✓ direct LLM</text>
-    <text x="462" y="78" text-anchor="middle" fill="#475569" font-size="10">✓ WASM tools · ✓ loopback HTTP</text>
-    <text x="462" y="102" text-anchor="middle" fill="#94a3b8" font-size="10">lives on Machine B</text>
-  </g>
-  <text x="1045" y="660" text-anchor="middle" fill="#94a3b8" font-size="11" font-style="italic">… N runtimes / node · M nodes / cluster</text>
-
-  <!-- Spawn arrows from Machine B Node Agent to Runtimes -->
-  <line x1="888" y1="486" x2="888" y2="512" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="2,2" marker-end="url(#ar-green)" />
-  <line x1="1202" y1="486" x2="1202" y2="512" stroke="#16a34a" stroke-width="1.5" stroke-dasharray="2,2" marker-end="url(#ar-green)" />
-
-  <!-- ==================== CROSS-NETWORK ARROWS (Gateway ⇄ Remote Node) ==================== -->
-  <line x1="660" y1="420" x2="720" y2="420" stroke="#8b5cf6" stroke-width="2" marker-end="url(#ar-purple)" marker-start="url(#ar-purple-start)" />
-  <text x="690" y="412" text-anchor="middle" fill="#7c3aed" font-size="10" font-weight="600">MQTT · control &amp; events</text>
-  <line x1="660" y1="462" x2="720" y2="462" stroke="#f59e0b" stroke-width="2" stroke-dasharray="5,3" marker-end="url(#ar-orange)" />
-  <text x="690" y="480" text-anchor="middle" fill="#9a3412" font-size="10" font-weight="600">HTTP RP · bulk queries</text>
-
-  <!-- ==================== FOOTER PRINCIPLES ==================== -->
-  <g transform="translate(30, 810)">
-    <rect width="1340" height="98" rx="10" fill="#f8fafc" stroke="#cbd5e1" />
-    <text x="20" y="22" fill="#334155" font-size="13" font-weight="700">Three principles make this a true multi-user · distributed · AI-native platform</text>
-
-    <g transform="translate(20, 38)">
-      <text x="0" y="14" fill="#3b82f6" font-size="11" font-weight="700">① Multi-user by default</text>
-      <text x="0" y="32" fill="#475569" font-size="10">Real accounts, roles, sessions, per-user audit — humans and AI share chat / PM / Doc.</text>
-      <text x="0" y="48" fill="#94a3b8" font-size="10">ADR-076 · ADR-084</text>
-    </g>
-    <g transform="translate(470, 38)">
-      <text x="0" y="14" fill="#f59e0b" font-size="11" font-weight="700">② AI-native PM &amp; Doc</text>
-      <text x="0" y="32" fill="#475569" font-size="10">acowork-pm and acowork-doc are first-class services — agents read / write / collab like teammates.</text>
-      <text x="0" y="48" fill="#94a3b8" font-size="10">ADR-064 · ADR-079</text>
-    </g>
-    <g transform="translate(910, 38)">
-      <text x="0" y="14" fill="#16a34a" font-size="11" font-weight="700">③ Standalone or cluster · same binary</text>
-      <text x="0" y="32" fill="#475569" font-size="10">One protocol path. Gateway has zero local-vs-remote code branches.</text>
-      <text x="0" y="48" fill="#94a3b8" font-size="10">ADR-055</text>
-    </g>
-  </g>
+  <line x1="890" y1="426" x2="890" y2="452" stroke="#16a34a" stroke-width="2" marker-end="url(#a-green)" />
+  <text x="902" y="444" fill="#15803d" font-size="11" font-weight="600">spawn</text>
 </svg>
