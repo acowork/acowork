@@ -173,6 +173,11 @@ async fn boot(work_dir: PathBuf) -> u16 {
     store
         .upsert(&meta("s-other", "u-bob", Some(SessionVisibility::Private)))
         .unwrap();
+    // A visible session that has never run a round: no transcript, no side table.
+    // The `latest` read must answer the explicit hole (`"latest": null`) for it.
+    store
+        .upsert(&meta("s-empty", "u-alice", Some(SessionVisibility::Private)))
+        .unwrap();
     seed_files(&work_dir);
 
     let (_dispatch_tx, dispatch_rx) =
@@ -371,4 +376,97 @@ async fn path_shaped_ids_are_refused_before_the_filesystem() {
     }
     let (status, _) = get_round(port, &format!("/sessions/{SID}/rounds/r:with space"), "u-alice").await;
     assert_eq!(status, 400, "a malformed round id is a client error, not a hole");
+}
+
+/// Append extra entries to the seeded side table (the file is JSONL, one
+/// `RoundRecord` per line).
+fn seed_extra_rounds(work_dir: &Path, sid: &str, records: &[serde_json::Value]) {
+    let path = work_dir
+        .join("conversations")
+        .join(format!("{sid}.jsonl.rounds"));
+    let mut text = std::fs::read_to_string(&path).unwrap_or_default();
+    for r in records {
+        text.push_str(&serde_json::to_string(r).unwrap());
+        text.push('\n');
+    }
+    std::fs::write(&path, text).unwrap();
+}
+
+/// `latest=1` — the pinning read behind ADR-106's reference redrawing: the
+/// newest TERMINAL round wins even when a newer round is still running (a
+/// terminal round is immutable, so the pinned coordinate cannot rot); the
+/// gate is the session's own visibility, same as every other round read.
+#[tokio::test]
+async fn latest_read_pins_the_newest_terminal_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().to_path_buf();
+    let port = boot(work.clone()).await;
+
+    // A still-running round newer than the terminal one must not win the pin.
+    seed_extra_rounds(
+        &work,
+        SID,
+        &[serde_json::json!({
+            "round_id": "r:m-2",
+            "user": 0,
+            "answer": null,
+            "card": null,
+            "terminal": false,
+            "status": null,
+            "ts": "2026-01-02T00:00:00.000Z",
+        })],
+    );
+
+    let (status, body) = get_round(port, &format!("/sessions/{SID}/rounds?latest=1"), "u-alice").await;
+    assert_eq!(status, 200, "latest read: {body}");
+    assert_eq!(body["latest"]["round_id"], "r:m-1", "terminal beats a newer running round");
+    assert_eq!(body["latest"]["terminal"], true);
+    assert_eq!(body["latest"]["ts"], "2026-01-01T00:00:02.000Z");
+    assert_eq!(body["chat_session_id"], "chat-1", "binding stamped like every read");
+
+    assert_eq!(
+        get_round(port, &format!("/sessions/{SID}/rounds?latest=1"), "u-bob")
+            .await
+            .0,
+        404,
+        "the pin read gates on the same visibility as the projection reads"
+    );
+}
+
+/// No terminal round at all ⇒ the newest round is answered with
+/// `terminal: false` ("progress as of then", rendered with the existing
+/// still-running label downstream). A session with no rounds answers an
+/// explicit `"latest": null` — the hole, not an empty listing — and one you
+/// may not read is the same 404 as always.
+#[tokio::test]
+async fn latest_read_falls_back_to_running_and_answers_the_hole() {
+    let dir = tempfile::tempdir().unwrap();
+    let work = dir.path().to_path_buf();
+    let port = boot(work.clone()).await;
+
+    // Make the only seeded round non-terminal.
+    let rounds_file = work.join("conversations").join(format!("{SID}.jsonl.rounds"));
+    let rewritten = serde_json::json!({
+        "round_id": "r:m-1",
+        "user": 0,
+        "answer": null,
+        "card": null,
+        "terminal": false,
+        "status": null,
+        "ts": "2026-01-01T00:00:02.000Z",
+    });
+    std::fs::write(&rounds_file, format!("{}\n", serde_json::to_string(&rewritten).unwrap()))
+        .unwrap();
+    let (status, body) = get_round(port, &format!("/sessions/{SID}/rounds?latest=1"), "u-alice").await;
+    assert_eq!(status, 200, "running-only fallback: {body}");
+    assert_eq!(body["latest"]["round_id"], "r:m-1");
+    assert_eq!(body["latest"]["terminal"], false, "the flag rides so the pin says 'as of then'");
+
+    // A visible session with no side table and no transcript at all answers the
+    // explicit hole: `"latest": null`, not an empty listing, not a 404 — the
+    // session exists, it simply has never had a round to pin.
+    let (status, body) = get_round(port, "/sessions/s-empty/rounds?latest=1", "u-alice").await;
+    assert_eq!(status, 200, "no-round session: {body}");
+    assert!(body["latest"].is_null(), "the hole is stated, not invented: {body}");
+    assert_eq!(body["chat_session_id"], "chat-1");
 }

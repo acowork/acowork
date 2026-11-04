@@ -348,6 +348,156 @@ pub(crate) fn turn_refs(envelope: &IntentEnvelope) -> Vec<acowork_core::protocol
         .collect()
 }
 
+/// One `@session` reference the Gateway pinned onto this turn (ADR-106
+/// revision 2026-11-04 · reference redrawing).
+///
+/// The quadruple is the pin the Gateway wrote before the row landed: the
+/// round is decided, not re-decided here. Distinct from [`turn_refs`] —
+/// those are *workspace* files the composer pointed at; these are quoted
+/// rounds of an execution session, material for the model to read.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize)]
+pub(crate) struct PinnedChatRef {
+    #[allow(dead_code)] // the owning agent — the Gateway already filtered per target
+    pub agent_instance_id: String,
+    pub session_id: String,
+    pub round_id: String,
+    #[serde(default)]
+    pub terminal: bool,
+}
+
+/// The single reader of `params.chat_refs` — the suppression check, the
+/// Block C section, the decision path's reference parts and the delivery
+/// chain all go through here, so "does this turn quote material?" has
+/// exactly one answer.
+///
+/// Tolerant like [`turn_attachments`]: a missing key, a non-array, or an
+/// element that does not describe a full coordinate all read as no
+/// material — a producer bug may cost one block, never the human's message.
+/// A pinned quadruple without a non-blank `round_id`/`session_id` describes
+/// nothing and is dropped: the renderer would have to guess what to read.
+pub(crate) fn pinned_chat_refs(envelope: &IntentEnvelope) -> Vec<PinnedChatRef> {
+    pinned_chat_refs_from_params(&envelope.params)
+}
+
+/// [`pinned_chat_refs`] on raw params — the delivery chain reads the
+/// envelope apart (gateway_loop destructures it), and both halves must
+/// answer from one reader.
+pub(crate) fn pinned_chat_refs_from_params(params: &Value) -> Vec<PinnedChatRef> {
+    params
+        .get(acowork_core::protocol::CHAT_REFS_PARAM)
+        .and_then(Value::as_array)
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|v| serde_json::from_value::<PinnedChatRef>(v.clone()).ok())
+                .filter(|r| {
+                    !r.session_id.trim().is_empty() && !r.round_id.trim().is_empty()
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Total budget for one turn's `[referenced rounds]` material (Block C and
+/// the delivered `referenced_round` parts alike). Per-ref bodies already
+/// carry the per-field clamps of [`read_round_result`]; this bounds the
+/// *segment*, because five references at full size
+/// would out-shout the human's own message. Past the budget the remaining
+/// refs collapse into one explicit dropped line — the reader learns the
+/// material was cut, it never learns it silently vanished.
+pub(crate) const REFS_TOTAL_MAX_BYTES: usize = 8 * 1024;
+
+/// The collapse line [`render_pinned_rounds`] writes for refs past the
+/// budget. Public wording: it reaches the model and the execution-side
+/// transcript verbatim.
+const REFS_DROPPED_LINE: &str = "dropped: reference budget exhausted";
+
+/// Render the pinned rounds of [`PinnedChatRef`]s into one body per ref —
+/// the same lines [`read_round_result`] paints for `exec_session_read_round`
+/// (question / answer / card, same per-field clamps), prefixed with the
+/// source coordinates the parts must name, plus the pin's non-terminal
+/// mark. Disk-only through `fold_or_rebuild` + `project`, so a session that
+/// is not resident is still readable; every failure shape is an explicit
+/// hole, never a swallowed ref.
+///
+/// This is the ONE producer of the material bytes: Block C renders these
+/// strings and the delivery ships them as `referenced_round` parts, so what
+/// the router was shown and what the execution session receives cannot
+/// drift.
+pub(crate) fn render_pinned_rounds(
+    conversations_dir: &std::path::Path,
+    refs: &[PinnedChatRef],
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(refs.len());
+    let mut used = 0usize;
+    for r in refs {
+        let entry = render_one_pinned_round(conversations_dir, r);
+        if used + entry.len() > REFS_TOTAL_MAX_BYTES {
+            out.push(REFS_DROPPED_LINE.to_string());
+            break;
+        }
+        used += entry.len();
+        out.push(entry);
+    }
+    out
+}
+
+fn render_one_pinned_round(conversations_dir: &std::path::Path, r: &PinnedChatRef) -> String {
+    let jsonl = conversations_dir.join(format!("{}.jsonl", r.session_id));
+    let rounds_path = crate::rounds::rounds_path(conversations_dir, &r.session_id);
+    let index = match crate::rounds::fold_or_rebuild(&rounds_path, &jsonl) {
+        Ok(m) => m,
+        Err(e) => {
+            return format!(
+                "session {} · round {}: read failed: {e}\n",
+                r.session_id, r.round_id
+            )
+        }
+    };
+    let Some(rec) = index.get(&r.round_id) else {
+        return format!(
+            "session {} · round {}: content unavailable (no such round on this host)\n",
+            r.session_id, r.round_id
+        );
+    };
+    match crate::rounds::project(&jsonl, rec) {
+        Ok(Some(p)) => {
+            let mut out = format!(
+                "session {} · round {} · {}{}\n",
+                r.session_id,
+                p.round_id,
+                p.status,
+                if r.terminal { "" } else { " (was still running)" }
+            );
+            if let Some(u) = &p.user {
+                out.push_str(&format!(
+                    "question: {}\n",
+                    truncate_body(&u.body, READ_ROUND_USER_MAX_BYTES)
+                ));
+            }
+            match &p.answer {
+                Some(a) => out.push_str(&format!(
+                    "answer: {}\n",
+                    truncate_body(&a.body, READ_ROUND_ANSWER_MAX_BYTES)
+                )),
+                None => out.push_str("answer: (none yet)\n"),
+            }
+            if p.card.is_some() {
+                out.push_str("card: parked on a question for the human\n");
+            }
+            out
+        }
+        Ok(None) => format!(
+            "session {} · round {}: content unavailable (transcript pruned or rows moved)\n",
+            r.session_id, r.round_id
+        ),
+        Err(e) => format!(
+            "session {} · round {}: read failed: {e}\n",
+            r.session_id, r.round_id
+        ),
+    }
+}
+
 /// Chat surface from the envelope. Absent (older Gateway) reads as a group —
 /// the privacy-safe default (design 29 §3.2).
 fn chat_kind_of(envelope: &IntentEnvelope) -> String {
@@ -529,6 +679,19 @@ async fn run_turn(
     let task = task_label(&envelope.conversation_id);
     let attachments = turn_attachments(envelope);
     let refs = turn_refs(envelope);
+    // ADR-106 revision 2026-11-04: the pinned `@session` material, read from
+    // disk once per turn. The same rendered bodies enter Block C here and
+    // become `referenced_round` parts if the turn is dispatched — one
+    // producer, so the router and the execution session cannot drift.
+    let pinned = pinned_chat_refs(envelope);
+    let referenced_rounds = if pinned.is_empty() {
+        Vec::new()
+    } else {
+        render_pinned_rounds(
+            std::path::Path::new(&deps.work_dir).join("conversations").as_path(),
+            &pinned,
+        )
+    };
     let turn_view = TurnContext {
         surface: surface_label(&chat_kind),
         speaker: &envelope.from,
@@ -540,6 +703,7 @@ async fn run_turn(
         user_message: text,
         attachments: &attachments,
         refs: &refs,
+        referenced_rounds: &referenced_rounds,
     }
     .render();
 
@@ -860,7 +1024,7 @@ async fn run_turn(
                 {
                     Ok((session_id, opened_new)) => {
                         let (content, context_refs) =
-                            dispatch_parts(opened_new, background.as_deref(), text);
+                            dispatch_parts(opened_new, background.as_deref(), text, &referenced_rounds);
                         // §5.5.5 pending queue: record BEFORE delivering. The
                         // only place that drops this row is the SessionTask
                         // dequeue, which can run only once the send below has
@@ -1604,6 +1768,7 @@ fn dispatch_parts(
     opened_new: bool,
     background: Option<&str>,
     user_text: &str,
+    referenced_rounds: &[String],
 ) -> (String, Vec<acowork_core::MessageRef>) {
     let content = user_text.to_string();
     let background = match opened_new {
@@ -1614,9 +1779,19 @@ fn dispatch_parts(
     // not already have as its message: the router doing that was common while
     // the schema still asked for a self-contained brief.
     let background = background.filter(|b| b.trim() != content.trim());
-    let refs = background
+    let mut refs = background
         .map(|b| vec![acowork_core::MessageRef::chat_background(b)])
         .unwrap_or_default();
+    // ADR-106 revision 2026-11-04: the quoted rounds are the human's own
+    // material, not the router's framing — they travel whether or not the
+    // session is new, and the same rendered bodies Block C showed (one
+    // producer, same clamps).
+    for body in referenced_rounds {
+        let part = acowork_core::MessageRef::referenced_round(body.trim().to_string());
+        if !part.is_empty() {
+            refs.push(part);
+        }
+    }
     (content, refs)
 }
 
@@ -1907,6 +2082,7 @@ mod tests {
             user_message: "look at this",
             attachments: &attachments,
             refs: &[],
+            referenced_rounds: &[],
         }
         .render();
         assert!(
@@ -1960,6 +2136,7 @@ mod tests {
             user_message: "",
             attachments: &[],
             refs: &refs,
+            referenced_rounds: &[],
         }
         .render();
         assert!(
@@ -2067,6 +2244,7 @@ mod tests {
             user_message: "对比一下",
             attachments: &uploads,
             refs: &refs,
+            referenced_rounds: &[],
         }
         .render();
         assert!(rendered.contains("[attachments] spec.pdf (application/pdf, 12KB)"));
@@ -2354,6 +2532,7 @@ mod tests {
             user_message: "continue",
             attachments: &[],
             refs: &[],
+            referenced_rounds: &[],
         }
         .render();
         assert!(rendered.contains("S1"));
@@ -2371,6 +2550,7 @@ mod tests {
             false,
             Some("上下文（同一 session 内刚完成的工作）：1. …"),
             "把本地修改的代码提交一下。",
+            &[],
         );
         assert_eq!(content, "把本地修改的代码提交一下。");
         assert!(
@@ -2389,6 +2569,7 @@ mod tests {
             true,
             Some("Commit the batch described below: …"),
             "raw",
+            &[],
         );
         assert_eq!(content, "raw", "the human's words are the message");
         assert_eq!(
@@ -2402,7 +2583,7 @@ mod tests {
         // Without a background (e.g. an attachment-only turn) the words still
         // land, alone.
         for absent in [None, Some("   ")] {
-            let (content, refs) = dispatch_parts(true, absent, "raw");
+            let (content, refs) = dispatch_parts(true, absent, "raw", &[]);
             assert_eq!(content, "raw");
             assert!(refs.is_empty());
         }
@@ -2410,13 +2591,168 @@ mod tests {
         // A router that echoed the message verbatim must not ship a reference
         // that says exactly what the message already says.
         let (content, refs) = dispatch_parts(true, Some("  提交一下 "), "  提交一下 
-");
+", &[]);
         assert_eq!(content, "  提交一下 
 ", "the message is never rewritten");
         assert!(
             refs.is_empty(),
             "a background identical to the message adds nothing"
         );
+    }
+
+    /// ADR-106 revision 2026-11-04: the single reader of `chat_refs` — the
+    /// quadruple the Gateway pinned before the row landed. Tolerant like
+    /// `turn_attachments`: a degenerate wire costs the material, never the
+    /// turn.
+    #[test]
+    fn pinned_chat_refs_reads_the_quadruples_and_survives_degenerate_wires() {
+        let turn = envelope(
+            "user_message",
+            "cs-1",
+            serde_json::json!({
+                "message": "汇总一下",
+                acowork_core::protocol::CHAT_REFS_PARAM: [{
+                    "agent_instance_id": "i-1",
+                    "session_id": "sess-a",
+                    "round_id": "r:m-1",
+                    "terminal": true,
+                }],
+            }),
+        );
+        let got = pinned_chat_refs(&turn);
+        assert_eq!(got.len(), 1);
+        assert_eq!(got[0].session_id, "sess-a");
+        assert_eq!(got[0].round_id, "r:m-1");
+        assert!(got[0].terminal, "the pin's terminal fact must survive the wire");
+
+        let at = |v: Value| {
+            pinned_chat_refs(&envelope(
+                "user_message",
+                "cs-1",
+                serde_json::json!({
+                    "message": "x",
+                    acowork_core::protocol::CHAT_REFS_PARAM: v,
+                }),
+            ))
+        };
+        // Wrong shape, wrong type, an unpinned quadruple, a blank id: all read
+        // as "no material" — never an error, never a dropped message.
+        assert!(at(serde_json::json!([])).is_empty());
+        assert!(at(serde_json::json!("nope")).is_empty());
+        assert!(at(serde_json::json!([{"session_id": "s"}])).is_empty());
+        assert!(at(serde_json::json!([{
+            "agent_instance_id": "i", "session_id": " ", "round_id": "r", "terminal": true
+        }]))
+        .is_empty());
+        // `terminal` absent defaults false; the material still travels.
+        let part = at(serde_json::json!([
+            {"agent_instance_id": "i", "session_id": "s", "round_id": "r"}
+        ]));
+        assert_eq!(part.len(), 1);
+        assert!(!part[0].terminal);
+    }
+
+    /// Block C's material and the delivered parts come from this one renderer:
+    /// the `read_round_result` line shape with the source coordinates, the
+    /// pin's non-terminal mark, explicit holes, and the segment budget that
+    /// collapses the tail instead of silently dropping it.
+    #[test]
+    fn render_pinned_rounds_paints_lines_holes_and_the_budget_collapse() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let conv = dir.path();
+        write_fixture_transcript(
+            conv,
+            "sess-a",
+            &[
+                round_entry("user", "ask A", "r:1"),
+                round_entry("assistant", &format!("answer A {}", "x".repeat(4000)), "r:1"),
+            ],
+        );
+        crate::rounds::append_record(
+            &crate::rounds::rounds_path(conv, "sess-a"),
+            &fixture_record("r:1", 0, Some(1), "2026-11-04T00:00:01.000Z"),
+        )
+        .unwrap();
+        write_fixture_transcript(conv, "sess-b", &[round_entry("user", "ask B", "r:2")]);
+        let mut running = fixture_record("r:2", 0, None, "2026-11-04T00:00:02.000Z");
+        running.terminal = false;
+        running.status = Some("working".to_string());
+        crate::rounds::append_record(&crate::rounds::rounds_path(conv, "sess-b"), &running)
+            .unwrap();
+
+        let pin = |session_id: &str, round_id: &str, terminal: bool| PinnedChatRef {
+            agent_instance_id: "i-1".into(),
+            session_id: session_id.into(),
+            round_id: round_id.into(),
+            terminal,
+        };
+        let bodies = render_pinned_rounds(
+            conv,
+            &[
+                pin("sess-a", "r:1", true),
+                pin("sess-b", "r:2", false),
+                pin("sess-gone", "r:9", true),
+            ],
+        );
+        assert_eq!(bodies.len(), 3, "every ref renders, holes included");
+        // Coordinates first — the parts must name where the material came from.
+        assert!(
+            bodies[0].starts_with("session sess-a · round r:1 · completed\n"),
+            "{bodies:?}"
+        );
+        assert!(bodies[0].contains("question: ask A"), "{bodies:?}");
+        // The 4 KB answer arrives clamped like `exec_session_read_round` clamps.
+        assert!(bodies[0].contains(super::super::context::TRUNCATION_SUFFIX));
+        assert!(bodies[0].len() < 3 * 1024, "per-field clamps bound one entry");
+        // A pin taken while the round still ran says so — the material is
+        // progress as of send time, and the reader must know.
+        assert!(bodies[1].contains("(was still running)"), "{bodies:?}");
+        assert!(bodies[1].contains("answer: (none yet)"), "{bodies:?}");
+        // Unreadable is an explicit hole, never a swallowed ref.
+        assert!(bodies[2].contains("no such round on this host"), "{bodies:?}");
+
+        // The segment budget: refs past the cap collapse into one explicit
+        // dropped line, in ref order — the reader learns the material was cut.
+        let many: Vec<PinnedChatRef> = (0..6).map(|_| pin("sess-a", "r:1", true)).collect();
+        let capped = render_pinned_rounds(conv, &many);
+        assert!(capped.len() < many.len(), "the budget must trip: {capped:?}");
+        assert_eq!(
+            capped.last().expect("a collapsed tail").as_str(),
+            "dropped: reference budget exhausted",
+        );
+        assert!(
+            capped[..capped.len() - 1]
+                .iter()
+                .all(|b| b.contains("ask A")),
+            "refs within the budget keep their bodies: {capped:?}",
+        );
+    }
+
+    /// ADR-106 revision 2026-11-04: the quoted material is the human's, not
+    /// the router's framing — it travels on both dispatch arms, as
+    /// `referenced_round` parts (ADR-107), never folded into the message.
+    #[test]
+    fn material_travels_whether_or_not_the_session_is_new() {
+        let material = vec![
+            "session sess-a · round r:1 · completed\nquestion: q\n".to_string(),
+            "   ".to_string(),
+        ];
+        let (content, refs) = dispatch_parts(true, Some("bg"), "words", &material);
+        assert_eq!(content, "words", "the human's words stay the message");
+        assert_eq!(refs.len(), 2, "the blank body never ships: no header without a block");
+        assert_eq!(refs[0], acowork_core::MessageRef::chat_background("bg"));
+        assert_eq!(
+            refs[1],
+            acowork_core::MessageRef::referenced_round(
+                "session sess-a · round r:1 · completed\nquestion: q"
+            ),
+        );
+
+        // A continued session gets no re-briefing — but the material is not a
+        // briefing: it travels anyway.
+        let (_, refs) = dispatch_parts(false, Some("bg"), "words", &material[..1]);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, acowork_core::REF_KIND_REFERENCED_ROUND);
     }
 
     fn info_call(name: &str, arguments: &str) -> ToolCall {

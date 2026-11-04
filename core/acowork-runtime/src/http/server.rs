@@ -1701,10 +1701,10 @@ async fn read_workspace_raw(
 
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(header::ETAG, dto.etag.parse().unwrap_or_else(|_| HeaderValue::from_static("\"\"")));
-    if let Some(lm) = dto.last_modified {
-        if let Ok(v) = HeaderValue::from_str(&lm) {
-            resp_headers.insert(header::LAST_MODIFIED, v);
-        }
+    if let Some(lm) = dto.last_modified
+        && let Ok(v) = HeaderValue::from_str(&lm)
+    {
+        resp_headers.insert(header::LAST_MODIFIED, v);
     }
     // 304: no body, no Content-Type/Length (RFC 9110 §15.4.5).
     if dto.body.is_none() {

@@ -84,11 +84,25 @@ pub(crate) async fn get_session_round(
 /// Query for `GET /sessions/{sid}/rounds`.
 #[derive(Debug, serde::Deserialize)]
 pub(crate) struct ListRoundsQuery {
-    /// Comma-separated round ids. Required: an unbounded "all rounds" read has no
-    /// place on a request path, and the caller always knows which rounds the chat
-    /// references (those are the rows it is rendering).
+    /// Comma-separated round ids. Required unless `latest` is set: an unbounded
+    /// "all rounds" read has no place on a request path, and the caller always
+    /// knows which rounds the chat references (those are the rows it is rendering).
     #[serde(default)]
     ids: Option<String>,
+    /// `latest=1` — pinning read for the Gateway's `@session` reference path
+    /// (ADR-106 revision 2026-11-04 · reference redrawing): answer the newest
+    /// TERMINAL round (`round_id` + `terminal`), or the newest round overall
+    /// when nothing has reached terminal yet, or an explicit `"latest": null`.
+    /// One row per request — this is a coordinate lookup, never a listing.
+    /// Kept a tolerant string: a query-flag over HTTP must not fail the whole
+    /// request on spelling (`1` and `true` both mean yes, anything else is off).
+    #[serde(default)]
+    latest: Option<String>,
+}
+
+/// Whether `?latest` names the pinning arm.
+fn latest_flag(latest: Option<&str>) -> bool {
+    matches!(latest.map(str::trim), Some("1") | Some("true"))
 }
 
 /// `GET /sessions/{sid}/rounds?ids=a,b` — the same projections, one request.
@@ -109,6 +123,9 @@ pub(crate) async fn list_session_rounds(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let (jsonl, rounds) = session_paths(&state, &sid)?;
     let meta = authorize_read(&state, &sid, &scope_from_headers(&headers))?;
+    if latest_flag(query.latest.as_deref()) {
+        return latest_round(&sid, &jsonl, &rounds, &meta).await;
+    }
     let ids: Vec<String> = query
         .ids
         .as_deref()
@@ -194,6 +211,42 @@ pub(crate) async fn list_session_rounds(
         }
     }
     Ok(Json(serde_json::json!({ "session_id": sid, "rounds": rounds_out })))
+}
+
+/// `latest=1` arm of [`list_session_rounds`]: the pin-the-coordinate read the
+/// Gateway performs when a human's message attaches `@session` references
+/// (ADR-106 revision 2026-11-04). The newest terminal round wins — a terminal
+/// round is immutable, so the coordinate the Gateway pins into `meta.refs`
+/// cannot rot under it. With no terminal round at all the newest round is
+/// answered with `terminal: false` ("progress as of then", which the projection
+/// renders with its existing still-running label). An empty index answers
+/// `"latest": null` — the explicit hole, not an empty listing.
+async fn latest_round(
+    sid: &str,
+    jsonl: &FsPath,
+    rounds: &FsPath,
+    meta: &acowork_core::session_meta::SessionMeta,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let index = crate::rounds::fold_or_rebuild(rounds, jsonl).map_err(|e| {
+        tracing::warn!(session_id = %sid, error = %e, "rounds index fold failed (latest read)");
+        err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string())
+    })?;
+    // `ts` is ISO-8601 so the lexical order is the time order; `round_id`
+    // breaks ties deterministically (same rule as `exec_session_read_round`).
+    let newest = |a: &&crate::rounds::RoundRecord, b: &&crate::rounds::RoundRecord| {
+        (&a.ts, &a.round_id).cmp(&(&b.ts, &b.round_id))
+    };
+    let picked = index
+        .values()
+        .filter(|r| r.terminal)
+        .max_by(newest)
+        .or_else(|| index.values().max_by(newest));
+    let latest = picked.map(|r| {
+        serde_json::json!({ "round_id": r.round_id, "terminal": r.terminal, "ts": r.ts })
+    });
+    let mut body = serde_json::json!({ "session_id": sid, "latest": latest });
+    stamp_chat_binding(&mut body, meta);
+    Ok(Json(body))
 }
 
 /// Resolve one session's transcript and round side table.

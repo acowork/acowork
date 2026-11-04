@@ -1158,7 +1158,7 @@ async fn route_intent_inbound(
     if let Some(session_id) = crate::agent::chat_router::runner::addressed_session(&env)
         && !env.source_chat_session_id.is_empty()
     {
-        return route_intent_addressed(session_manager, &session_id, env).await;
+        return route_intent_addressed(session_manager, &session_id, env, work_dir).await;
     }
 
     // ADR-106 D6 level 3: the human addressed this agent and the chat has exactly
@@ -1170,10 +1170,18 @@ async fn route_intent_inbound(
     // human's row is already durable, so answering the card is a normal second-level
     // `@` and no turn is lost; zero candidates leave nothing to continue and the
     // ladder falls through to levels 4-5.
+    //
+    // ADR-106 revision 2026-11-04: a turn that quotes `@session` material takes
+    // this whole branch away, exactly like `force_new` — the human attached
+    // rounds for the router to READ, and letting the bindings auto-continue
+    // (or parking a choice card) would answer a question the message did not
+    // ask. The turn lands on the router, which can still create, answer, or
+    // propose.
     if crate::agent::chat_router::runner::is_chat_turn(&env)
         && !env.source_chat_session_id.is_empty()
         && crate::agent::chat_router::runner::explicit_mention(&env)
         && !crate::agent::chat_router::runner::force_new(&env)
+        && crate::agent::chat_router::runner::pinned_chat_refs(&env).is_empty()
     {
         let chat = env.source_chat_session_id.clone();
         let initiator = Some(env.from.as_str()).filter(|s| !s.is_empty());
@@ -1188,7 +1196,7 @@ async fn route_intent_inbound(
         match candidates.as_slice() {
             [] => {}
             [only] => {
-                return route_intent_addressed(session_manager, &only.session_id, env).await;
+                return route_intent_addressed(session_manager, &only.session_id, env, work_dir).await;
             }
             many => {
                 let asked = {
@@ -1247,13 +1255,14 @@ async fn route_intent_inbound(
                 Arc::clone(session_manager),
                 Arc::clone(chat_sessions),
                 chat_id,
+                work_dir.to_path_buf(),
             );
         }
         return Ok(());
     }
 
     // Router off: the deterministic route, unchanged (ADR-099).
-    route_intent_legacy(session_manager, designated_session_id, env, false).await
+    route_intent_legacy(session_manager, designated_session_id, env, false, work_dir).await
 }
 
 /// Run one chat's router turns, strictly in arrival order, on a task of its
@@ -1274,6 +1283,7 @@ fn spawn_chat_router_drain(
     session_manager: Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     chat_sessions: Arc<crate::agent::chat_router::ChatSessionManager>,
     chat_id: String,
+    work_dir: std::path::PathBuf,
 ) {
     tokio::spawn(async move {
         loop {
@@ -1291,11 +1301,12 @@ fn spawn_chat_router_drain(
             let envelope = turn.envelope;
             let designated = turn.designated_session_id;
             let token = turn.node_token.clone();
+            let work_dir = work_dir.clone();
             let turn_result = tokio::spawn(async move {
                 let outcome =
                     crate::agent::chat_router::runner::handle_intent(&sm, &cs, &envelope, &token)
                         .await;
-                finish_chat_turn(&sm, outcome, &designated, envelope)
+                finish_chat_turn(&sm, outcome, &designated, envelope, &work_dir)
                     .await
                     .map_err(|e| e.to_string())
             })
@@ -1361,13 +1372,15 @@ pub(crate) async fn finish_chat_turn(
     outcome: crate::agent::chat_router::runner::Outcome,
     designated_session_id: &str,
     mut envelope: Box<crate::agent::inbound::IntentEnvelope>,
+    work_dir: &std::path::Path,
 ) -> crate::error::Result<()> {
     use crate::agent::chat_router::runner::Outcome;
 
     match outcome {
         Outcome::Handled => Ok(()),
         Outcome::PassThrough => {
-            route_intent_legacy(session_manager, designated_session_id, envelope, false).await
+            route_intent_legacy(session_manager, designated_session_id, envelope, false, work_dir)
+                .await
         }
         Outcome::Fallback {
             reason,
@@ -1416,7 +1429,8 @@ pub(crate) async fn finish_chat_turn(
             // task on a guess is worse than starting a new one. PM tasks and
             // agent-agent intents keep the deterministic reuse (their
             // conversation_id / msg key IS the task identity).
-            route_intent_legacy(session_manager, designated_session_id, envelope, true).await
+            route_intent_legacy(session_manager, designated_session_id, envelope, true, work_dir)
+                .await
         }
     }
 }
@@ -1439,9 +1453,10 @@ async fn route_intent_legacy(
     designated_session_id: &str,
     env: Box<crate::agent::inbound::IntentEnvelope>,
     fresh: bool,
+    work_dir: &std::path::Path,
 ) -> crate::error::Result<()> {
     let target = resolve_legacy_route(session_manager, designated_session_id, &env, fresh).await?;
-    deliver_intent_turn(session_manager, target, env).await
+    deliver_intent_turn(session_manager, target, env, work_dir).await
 }
 
 /// ADR-106 D6 level 1: deliver an explicitly addressed turn into that session.
@@ -1457,6 +1472,7 @@ async fn route_intent_addressed(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     session_id: &str,
     env: Box<crate::agent::inbound::IntentEnvelope>,
+    work_dir: &std::path::Path,
 ) -> crate::error::Result<()> {
     let chat_session_id = env.source_chat_session_id.clone();
     let initiator = env.from.clone();
@@ -1475,7 +1491,7 @@ async fn route_intent_addressed(
             )
             .await?
     };
-    deliver_intent_turn(session_manager, target, env).await
+    deliver_intent_turn(session_manager, target, env, work_dir).await
 }
 
 /// Which execution session the deterministic route delivers into, and whether
@@ -1580,6 +1596,37 @@ fn chat_surface(
     }
 }
 
+/// The reference parts one delivery carries: whatever the sender already
+/// stamped into `params.context_refs` (ADR-107 — today the degraded route's
+/// background), plus this turn's pinned `@session` material rendered to
+/// `referenced_round` parts (ADR-106 revision 2026-11-04).
+///
+/// The material travels on EVERY delivery path a reference-carrying turn
+/// takes — the addressed continuation (levels 1–2, card answers' re-delivery
+/// included) and the degraded route alike. One renderer with the router's
+/// Block C (`render_pinned_rounds`): the same bodies, the same per-field
+/// clamps and the same total budget, so what the router was shown and what
+/// this session receives cannot drift.
+fn context_refs_with_material(
+    params: &serde_json::Value,
+    work_dir: &std::path::Path,
+) -> Vec<acowork_core::MessageRef> {
+    let mut context_refs = crate::agent::intent_turn::context_refs_from_params(params);
+    let pinned = crate::agent::chat_router::runner::pinned_chat_refs_from_params(params);
+    if !pinned.is_empty() {
+        context_refs.extend(
+            crate::agent::chat_router::runner::render_pinned_rounds(
+                &work_dir.join("conversations"),
+                &pinned,
+            )
+            .into_iter()
+            .map(|body| acowork_core::MessageRef::referenced_round(body.trim().to_string()))
+            .filter(|part| !part.is_empty()),
+        );
+    }
+    context_refs
+}
+
 /// Hand one intent to the session the routing stage chose.
 ///
 /// Split out of [`route_intent_legacy`] so the addressed path (D6 level 1) and
@@ -1589,6 +1636,7 @@ async fn deliver_intent_turn(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     target: (String, bool),
     env: Box<crate::agent::inbound::IntentEnvelope>,
+    work_dir: &std::path::Path,
 ) -> crate::error::Result<()> {
     use crate::agent::inbound::IntentEnvelope;
     use crate::agent::intent_turn::render_intent_message;
@@ -1625,7 +1673,7 @@ async fn deliver_intent_turn(
     // router's degraded-route background). Read off `params` for the same
     // reason the attachments are: one opaque object, no wire change for data
     // only the Runtime produces and only the Runtime reads.
-    let context_refs = crate::agent::intent_turn::context_refs_from_params(&params);
+    let context_refs = context_refs_with_material(&params, work_dir);
     let content = render_intent_message(
         &from,
         &action,
@@ -2075,6 +2123,152 @@ A: hi")).unwrap();
         );
     }
 
+    /// ADR-106 revision 2026-11-04: a turn that quotes `@session` material
+    /// takes the whole level-3 branch away — the bindings deliver nothing and
+    /// no choice card is parked; the message waits on the router instead (a
+    /// quoted round is material to read, not a continuation to decide).
+    /// Control: the same `@` without material keeps the deterministic
+    /// continuation — the suppression must not widen into disabling level 3.
+    #[tokio::test]
+    async fn quoted_material_takes_the_level_three_branch_away() {
+        use crate::agent::chat_router::tool::Target;
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, chat_sessions) = chat_router_test_pair(dir.path());
+        // Exactly one continuation candidate: a session bound to this chat and
+        // this speaker, so level 3 would auto-deliver if it ran.
+        let bound = {
+            let mut guard = sm.lock().await;
+            guard
+                .chat_dispatch("cs-refs", Target::New, None, Some("user:u-1"))
+                .await
+                .expect("bind a session to the chat")
+                .0
+        };
+
+        let mut env = chat_envelope("cs-refs", "把引用的轮次汇总一下");
+        env.params[acowork_core::protocol::EXPLICIT_MENTION_PARAM] = serde_json::json!(true);
+        env.params[acowork_core::protocol::CHAT_REFS_PARAM] = serde_json::json!([{
+            "agent_instance_id": "i-1",
+            "session_id": bound,
+            "round_id": "r:m-2",
+            "terminal": true,
+        }]);
+        route_intent_inbound(
+            &sm,
+            &chat_sessions,
+            "",
+            InboundMessage::IntentMessage(env),
+            dir.path(),
+            "node-token",
+        )
+        .await
+        .expect("queueing a referenced turn must not fail");
+        assert_eq!(
+            chat_sessions.pending_turns("cs-refs"),
+            1,
+            "refs skip level 3 — the turn lands on the router queue, delivered by nobody"
+        );
+        assert_eq!(
+            sm.try_lock().expect("free").active_sessions().len(),
+            1,
+            "no second session was opened for a suppressed continuation"
+        );
+
+        // Control: the same @ with no material still auto-continues — level 3
+        // delivers directly, so the turn never joins the router queue. The
+        // referenced turn above is still parked there, so the observable is
+        // that the queue does not grow, not that it drains.
+        let pending_before = chat_sessions.pending_turns("cs-refs");
+        let mut plain = chat_envelope("cs-refs", "继续");
+        plain.params[acowork_core::protocol::EXPLICIT_MENTION_PARAM] = serde_json::json!(true);
+        route_intent_inbound(
+            &sm,
+            &chat_sessions,
+            "",
+            InboundMessage::IntentMessage(plain),
+            dir.path(),
+            "node-token",
+        )
+        .await
+        .expect("an unreferenced @ must keep the deterministic route");
+        assert_eq!(
+            chat_sessions.pending_turns("cs-refs"),
+            pending_before,
+            "without refs level 3 still fires — the router is never paid for a settled address"
+        );
+        assert_eq!(
+            sm.try_lock().expect("free").active_sessions().len(),
+            1,
+            "the continuation reused the bound session"
+        );
+    }
+
+    /// ADR-106 revision 2026-11-04 + ADR-107: the delivery path's reference
+    /// parts are the sender's own refs first, then one `referenced_round` per
+    /// pinned quadruple, rendered from disk with the router's own renderer.
+    #[test]
+    fn delivery_attaches_pinned_material_after_the_senders_own_refs() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let conv = dir.path().join("conversations");
+        std::fs::create_dir_all(&conv).expect("conversations dir");
+        // One recorded round on disk, exactly as the runtime writer leaves it:
+        // a transcript whose rows carry their round stamp, plus the side table.
+        let entry = |role: &str, content: &str| crate::conversation::ConversationEntry {
+            id: format!("{role}-{content}"),
+            ts: "2026-11-04T00:00:00.000Z".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            metadata: Some(serde_json::json!({
+                crate::rounds::META_KEY_ROUND_ID: "r:m-2"
+            })),
+            kind: None,
+        };
+        let lines: Vec<String> = [
+            entry("user", "the pinned ask"),
+            entry("assistant", "the pinned answer"),
+        ]
+        .iter()
+        .map(|e| serde_json::to_string(e).unwrap())
+        .collect();
+        std::fs::write(conv.join("sess-a.jsonl"), lines.join("\n") + "\n").unwrap();
+        crate::rounds::append_record(
+            &crate::rounds::rounds_path(&conv, "sess-a"),
+            &crate::rounds::RoundRecord {
+                round_id: "r:m-2".into(),
+                user: 0,
+                answer: Some(1),
+                card: None,
+                terminal: true,
+                status: Some("completed".into()),
+                ts: "2026-11-04T00:00:01.000Z".into(),
+            },
+        )
+        .unwrap();
+
+        let params = serde_json::json!({
+            "message": "汇总一下",
+            // The degraded route's background is already stamped in params —
+            // the material must append to it, never replace it.
+            "context_refs": [{"kind": "chat_background", "content": "the chat tail"}],
+            acowork_core::protocol::CHAT_REFS_PARAM: [{
+                "agent_instance_id": "i-1",
+                "session_id": "sess-a",
+                "round_id": "r:m-2",
+                "terminal": true,
+            }],
+        });
+        let refs = context_refs_with_material(&params, dir.path());
+        assert_eq!(refs.len(), 2, "{refs:?}");
+        assert_eq!(refs[0], acowork_core::MessageRef::chat_background("the chat tail"));
+        assert_eq!(refs[1].kind, acowork_core::REF_KIND_REFERENCED_ROUND);
+        assert!(refs[1].content.starts_with("session sess-a · round r:m-2 · completed"), "{refs:?}");
+        assert!(refs[1].content.contains("the pinned ask"), "{refs:?}");
+
+        // No refs on the turn: the function is exactly the old reader.
+        let plain = serde_json::json!({"message": "hi"});
+        assert!(context_refs_with_material(&plain, dir.path()).is_empty());
+    }
+
     /// ADR-099 §5: the router's failure mode is latency, never message loss.
     /// A turn the router declined or could not decide is finished by the
     /// deterministic route on the drain task; a turn it `Handled` is left alone
@@ -2092,6 +2286,7 @@ A: hi")).unwrap();
             Outcome::Handled,
             "",
             chat_envelope("cs-handled", "hello"),
+            dir.path(),
         )
         .await
         .expect("a handled turn is already complete");
@@ -2112,7 +2307,7 @@ A: hi")).unwrap();
                 Outcome::PassThrough => "cs-passthrough",
                 _ => "cs-fallback",
             };
-            finish_chat_turn(&sm, outcome, "", chat_envelope(chat, "hello"))
+            finish_chat_turn(&sm, outcome, "", chat_envelope(chat, "hello"), dir.path())
                 .await
                 .expect("the deterministic route must deliver a declined turn");
         }
