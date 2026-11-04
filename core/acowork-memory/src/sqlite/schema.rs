@@ -9,9 +9,12 @@
 //! substrings instead of collapsing into one token under `unicode61`.
 //!
 //! The DDL is idempotent: opening an existing database re-runs it harmlessly.
-//! `user_version` is the schema-version gate; every open runs
-//! [`apply_migrations`] which only executes the steps whose target version
-//! is strictly greater than the stored one.
+//! Every open runs [`apply_migrations`], which does two things: it executes the
+//! version-gated [`MIGRATIONS`] steps whose target version is strictly greater
+//! than the stored `user_version`, and then converges [`TARGET_SCHEMA`] by
+//! presence. The second pass is not redundant — `user_version` is a cache, and
+//! a database that carries a stamp it never earned (two branches allocating the
+//! same version number) stays broken forever under the version gate alone.
 
 use crate::labels;
 
@@ -308,21 +311,220 @@ const MIGRATIONS: &[(i64, &str)] = &[
     ),
 ];
 
-/// Apply every [`MIGRATIONS`] step whose target version is strictly greater
-/// than the database's current `PRAGMA user_version`. Safe to call on every
-/// open — a database already at [`SCHEMA_VERSION`] is a no-op (no
-/// transaction opened, no statement executed). All work runs in a single
-/// transaction so a crash mid-upgrade leaves the database at its previous
-/// version, never half-migrated.
+/// One structural fact the **target** schema asserts, reconciled by presence.
 ///
-/// Stamp: `PRAGMA user_version = SCHEMA_VERSION` is the last statement of
-/// the transaction. This is the only path that writes `user_version`; the
-/// DDL string and the open code never touch it.
+/// [`MIGRATIONS`] is *history*: it carries a database forward one version at a
+/// time and must stay version-gated, because some steps hold one-shot data
+/// work (step 6 seeds `token_stats` — replaying it would double-count). History
+/// alone cannot be the whole contract, because `user_version` is only a *cache*
+/// of what ran and a version number is unique only within one branch: two
+/// branches that both allocate v10 merge into a chain where the step that lost
+/// the numbering never runs on a database the other branch already stamped. The
+/// consequence is silent — the retained `user_version` satisfies
+/// `stored >= SCHEMA_VERSION`, so `apply_migrations` skipped the upgrade and the
+/// column was never added.
+///
+/// That is exactly how four workspaces ended up stamped `user_version = 11`
+/// without `sessions.intent_key` (v10 on the intent branch) while carrying
+/// `chat_token_usage.history_tokens` (v10 on the response-api branch). Every PM
+/// task wake-up then died in the Runtime with
+/// `no such column: intent_key`, the Gateway had already reported the intent as
+/// delivered, and PM had stamped `dispatched_at` — so the task was stuck
+/// `pending` forever and saving it again could not recover it.
+///
+/// So the target shape is asserted here independently of the version: a
+/// missing column is added, a retired column is dropped, a half-done rename is
+/// finished, a missing table / index is created — whatever `user_version`
+/// claims. Every entry is idempotent, so reconciliation is also the integrity
+/// check: a database already in shape costs one pragma lookup per entry.
+#[derive(Clone, Copy, Debug)]
+enum SchemaObject {
+    /// Must exist: `ALTER TABLE {table} ADD COLUMN {decl}`.
+    Column {
+        table: &'static str,
+        name: &'static str,
+        decl: &'static str,
+    },
+    /// Must be gone (a later step retired it): `DROP COLUMN {name}`.
+    Retired {
+        table: &'static str,
+        name: &'static str,
+    },
+    /// Must be `{to}`: rename `{from}` while it is still there.
+    Renamed {
+        table: &'static str,
+        from: &'static str,
+        to: &'static str,
+    },
+    /// Must exist: a `CREATE TABLE IF NOT EXISTS` this chain introduced.
+    Table {
+        name: &'static str,
+        sql: &'static str,
+    },
+    /// Must exist: a `CREATE INDEX IF NOT EXISTS` this chain introduced.
+    Index {
+        name: &'static str,
+        sql: &'static str,
+    },
+}
+
+/// The shape this build expects, in migration order.
+///
+/// Objects that [`SCHEMA_SQL`] already creates on every open are deliberately
+/// absent — that DDL is itself the assertion. This list covers only what the
+/// version chain adds on top of the frozen v0 baseline.
+const TARGET_SCHEMA: &[SchemaObject] = &[
+    // v1
+    SchemaObject::Column {
+        table: "sessions",
+        name: "version",
+        decl: "version INTEGER NOT NULL DEFAULT 3",
+    },
+    SchemaObject::Column {
+        table: "sessions",
+        name: "corrupted",
+        decl: "corrupted INTEGER NOT NULL DEFAULT 0",
+    },
+    // v2 adds `user_id`, v8 renames it in place — the target state is
+    // `initiator`, so the rename is the fact to assert, not the old column.
+    SchemaObject::Renamed {
+        table: "sessions",
+        from: "user_id",
+        to: "initiator",
+    },
+    SchemaObject::Column {
+        table: "sessions",
+        name: "visibility",
+        decl: "visibility TEXT",
+    },
+    // v3
+    SchemaObject::Column {
+        table: "sessions",
+        name: "perf_tps_sum",
+        decl: "perf_tps_sum REAL",
+    },
+    SchemaObject::Column {
+        table: "sessions",
+        name: "perf_tps_samples",
+        decl: "perf_tps_samples INTEGER",
+    },
+    SchemaObject::Column {
+        table: "sessions",
+        name: "perf_ttft_ms_sum",
+        decl: "perf_ttft_ms_sum REAL",
+    },
+    SchemaObject::Column {
+        table: "sessions",
+        name: "perf_ttft_ms_samples",
+        decl: "perf_ttft_ms_samples INTEGER",
+    },
+    // v4
+    SchemaObject::Column {
+        table: "sessions",
+        name: "chat_session_id",
+        decl: "chat_session_id TEXT",
+    },
+    // v5 added `last_compaction_summary`, v7 retired it: the target state is
+    // "absent", so that is what convergence enforces.
+    SchemaObject::Retired {
+        table: "sessions",
+        name: "last_compaction_summary",
+    },
+    SchemaObject::Table {
+        name: "conversation_state",
+        sql: "CREATE TABLE IF NOT EXISTS conversation_state (\n \
+              session_id  TEXT PRIMARY KEY,\n \
+              next_line   INTEGER NOT NULL DEFAULT 0,\n \
+              byte_offset INTEGER NOT NULL DEFAULT 0\n \
+              )",
+    },
+    // v6 (the column; the aggregate's one-shot seed stays version-gated)
+    SchemaObject::Column {
+        table: "sessions",
+        name: "model_usage",
+        decl: "model_usage TEXT",
+    },
+    SchemaObject::Table {
+        name: "token_stats",
+        sql: "CREATE TABLE IF NOT EXISTS token_stats (\n \
+              provider              TEXT NOT NULL,\n \
+              model                 TEXT NOT NULL,\n \
+              total_input           INTEGER NOT NULL DEFAULT 0,\n \
+              total_output          INTEGER NOT NULL DEFAULT 0,\n \
+              total_cache_read      INTEGER NOT NULL DEFAULT 0,\n \
+              total_cache_write     INTEGER NOT NULL DEFAULT 0,\n \
+              total_cost            REAL,\n \
+              PRIMARY KEY (provider, model)\n \
+              )",
+    },
+    // v9
+    SchemaObject::Table {
+        name: "chat_token_usage",
+        sql: "CREATE TABLE IF NOT EXISTS chat_token_usage (\n \
+              chat_session_id          TEXT PRIMARY KEY,\n \
+              chat_kind                TEXT,\n \
+              created_at               INTEGER NOT NULL,\n \
+              last_active_at           INTEGER NOT NULL,\n \
+              llm_call_count           INTEGER NOT NULL DEFAULT 0,\n \
+              token_last_input         INTEGER NOT NULL DEFAULT 0,\n \
+              token_last_output        INTEGER NOT NULL DEFAULT 0,\n \
+              token_total_input        INTEGER NOT NULL DEFAULT 0,\n \
+              token_total_output       INTEGER NOT NULL DEFAULT 0,\n \
+              token_last_cache_read    INTEGER NOT NULL DEFAULT 0,\n \
+              token_last_cache_write   INTEGER NOT NULL DEFAULT 0,\n \
+              token_total_cache_read   INTEGER NOT NULL DEFAULT 0,\n \
+              token_total_cache_write  INTEGER NOT NULL DEFAULT 0,\n \
+              model_usage              TEXT\n \
+              )",
+    },
+    SchemaObject::Index {
+        name: "idx_chat_token_usage_last_active",
+        sql: "CREATE INDEX IF NOT EXISTS idx_chat_token_usage_last_active\n \
+              ON chat_token_usage(last_active_at DESC)",
+    },
+    // v10 — the pair that this design exists for: the intent-routing binding
+    // and its terminal mark on the session's own row (ADR-106 D11).
+    SchemaObject::Column {
+        table: "sessions",
+        name: "intent_key",
+        decl: "intent_key TEXT",
+    },
+    SchemaObject::Column {
+        table: "sessions",
+        name: "intent_closed",
+        decl: "intent_closed INTEGER NOT NULL DEFAULT 0",
+    },
+    SchemaObject::Index {
+        name: "idx_sessions_intent_key",
+        sql: "CREATE INDEX IF NOT EXISTS idx_sessions_intent_key ON sessions(intent_key)",
+    },
+    // v11
+    SchemaObject::Column {
+        table: "chat_token_usage",
+        name: "history_tokens",
+        decl: "history_tokens INTEGER",
+    },
+];
+
+/// Apply the version-gated [`MIGRATIONS`] chain, then converge [`TARGET_SCHEMA`],
+/// then stamp `user_version`. Safe to call on every open — a database that is
+/// already at [`SCHEMA_VERSION`] **and** in shape opens no transaction and
+/// executes no DDL (the per-object presence checks still run on every open).
+/// All work that does run happens in one transaction, so a crash
+/// mid-upgrade leaves the database at its previous version, never
+/// half-migrated.
+///
+/// Stamp: `PRAGMA user_version = SCHEMA_VERSION` is the last statement of the
+/// transaction, written only when the stored version is behind (a database
+/// stamped by a *newer* build keeps its stamp — this build must not downgrade
+/// it). This is the only path that writes `user_version`; the DDL string and
+/// the open code never touch it.
 pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Result<()> {
     let stored: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
         .unwrap_or(0);
-    if stored >= SCHEMA_VERSION {
+    let behind = stored < SCHEMA_VERSION;
+    if !behind && is_converged(conn)? {
         return Ok(());
     }
     let tx = conn.transaction()?;
@@ -352,12 +554,97 @@ pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Res
             tx.execute_batch(sql)?;
         }
     }
-    tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+    // The chain only covers databases whose stamp is behind. Whatever the stamp
+    // claims, the shape is now enforced by presence — this is the repair for a
+    // step that lost a version-number collision on another branch.
+    for object in TARGET_SCHEMA {
+        converge(&tx, object)?;
+    }
+    if behind {
+        tx.execute_batch(&format!("PRAGMA user_version = {SCHEMA_VERSION}"))?;
+    }
     tx.commit()
 }
 
-/// Whether `table` currently has a column named `column` (pragma lookup,
-/// used by the v8 rename guard in [`apply_migrations`]).
+/// `true` when every [`TARGET_SCHEMA`] fact already holds — the no-op open.
+fn is_converged(conn: &rusqlite::Connection) -> rusqlite::Result<bool> {
+    for object in TARGET_SCHEMA {
+        if !is_in_place(conn, object)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Whether one [`SchemaObject`] already holds.
+fn is_in_place(conn: &rusqlite::Connection, object: &SchemaObject) -> rusqlite::Result<bool> {
+    Ok(match object {
+        SchemaObject::Column { table, name, .. } => has_column(conn, table, name)?,
+        SchemaObject::Retired { table, name } => !has_column(conn, table, name)?,
+        // A rename is still owed only while the source column exists and the
+        // target does not; both-present is not a shape this chain can produce,
+        // and renaming over an existing column would hard-fail `open`.
+        SchemaObject::Renamed { table, from, to } => {
+            !(has_column(conn, table, from)? && !has_column(conn, table, to)?)
+        }
+        SchemaObject::Table { name, .. } => has_object(conn, "table", name)?,
+        SchemaObject::Index { name, .. } => has_object(conn, "index", name)?,
+    })
+}
+
+/// Idempotent repair of one [`SchemaObject`]; a no-op when already in place.
+fn converge(conn: &rusqlite::Connection, object: &SchemaObject) -> rusqlite::Result<()> {
+    match object {
+        SchemaObject::Column { table, name, decl } => {
+            if !has_column(conn, table, name)? {
+                conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {decl}"))?;
+            }
+        }
+        SchemaObject::Retired { table, name } => {
+            if has_column(conn, table, name)? {
+                conn.execute_batch(&format!("ALTER TABLE {table} DROP COLUMN {name}"))?;
+            }
+        }
+        SchemaObject::Renamed { table, from, to } => {
+            if has_column(conn, table, from)? && !has_column(conn, table, to)? {
+                conn.execute_batch(&format!(
+                    "ALTER TABLE {table} RENAME COLUMN {from} TO {to}"
+                ))?;
+            }
+        }
+        SchemaObject::Table { name, sql } | SchemaObject::Index { name, sql } => {
+            if !has_object(conn, object_kind(object), name)? {
+                conn.execute_batch(sql)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn object_kind(object: &SchemaObject) -> &'static str {
+    match object {
+        SchemaObject::Index { .. } => "index",
+        _ => "table",
+    }
+}
+
+/// Whether `name` currently exists in `sqlite_master` as `kind`
+/// (`"table"` / `"index"`).
+fn has_object(conn: &rusqlite::Connection, kind: &str, name: &str) -> rusqlite::Result<bool> {
+    use rusqlite::OptionalExtension;
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT name FROM sqlite_master WHERE type = ?1 AND name = ?2",
+            rusqlite::params![kind, name],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found.is_some())
+}
+
+/// Whether `table` currently has a column named `column` (pragma lookup, the
+/// single presence primitive behind both the v8 rename guard in the version
+/// chain and [`converge`]).
 fn has_column(conn: &rusqlite::Connection, table: &str, column: &str) -> rusqlite::Result<bool> {
     use rusqlite::OptionalExtension;
     let found: Option<String> = conn
@@ -392,6 +679,8 @@ pub(crate) fn fts_table(label: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use rusqlite::OptionalExtension;
+
     use super::{apply_migrations, SCHEMA_VERSION};
 
     /// ADR-076 §决策 4: an existing store keeps its rows across the
@@ -469,9 +758,11 @@ mod tests {
     #[test]
     fn migration_11_adds_the_history_tokens_column_and_keeps_the_rows() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
-        // The v10 shape: the ledger table without the column.
+        // The v10 shape: the ledger table without the column. `sessions` exists
+        // because `SCHEMA_SQL` always runs before the migrations.
         conn.execute_batch(
-            "CREATE TABLE chat_token_usage ( \
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY); \
+             CREATE TABLE chat_token_usage ( \
                  chat_session_id TEXT PRIMARY KEY, \
                  chat_kind TEXT, \
                  created_at INTEGER NOT NULL, \
@@ -523,7 +814,8 @@ mod tests {
     fn migration_11_is_a_noop_when_the_column_is_already_present() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
         conn.execute_batch(
-            "CREATE TABLE chat_token_usage ( \
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY); \
+             CREATE TABLE chat_token_usage ( \
                  chat_session_id TEXT PRIMARY KEY, \
                  chat_kind TEXT, \
                  created_at INTEGER NOT NULL, \
@@ -541,5 +833,183 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("version");
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// The incident this whole convergence pass exists for.
+    ///
+    /// Two branches both allocated schema version 10: the intent branch used it
+    /// for `sessions.intent_key` / `intent_closed`, the response-api branch for
+    /// `chat_token_usage.history_tokens`. A workspace stamped 10 by the second
+    /// branch opened once under the merged build, which found v10 already
+    /// "applied", skipped the intent step, ran v11 and stamped 11 — leaving a
+    /// database that claims to be current with no `intent_key` at all.
+    ///
+    /// From there every PM task dispatch died in the Runtime with
+    /// `no such column: intent_key`, and `user_version` gave nobody a reason to
+    /// look. The assertion is behavioural, not cosmetic: the exact statement
+    /// `SqliteSessionMetaStore::intent_lookup` runs must succeed afterwards.
+    #[test]
+    fn a_shadowed_version_number_still_heals_the_missing_column() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        // A v11 store that carries the response-api branch's v10 and nothing of
+        // the intent branch's v10.
+        conn.execute_batch(
+            "CREATE TABLE sessions ( \
+                 session_id TEXT PRIMARY KEY, \
+                 initiator TEXT, \
+                 last_active_at INTEGER NOT NULL \
+             ); \
+             CREATE TABLE chat_token_usage ( \
+                 chat_session_id TEXT PRIMARY KEY, \
+                 created_at INTEGER NOT NULL, \
+                 last_active_at INTEGER NOT NULL, \
+                 history_tokens INTEGER \
+             ); \
+             INSERT INTO sessions (session_id, initiator, last_active_at) \
+                 VALUES ('s-1', 'babea202', 0); \
+             PRAGMA user_version = 11;",
+        )
+        .expect("seed the incident's store shape");
+
+        apply_migrations(&mut conn).expect("open must heal, not stay broken");
+
+        // The Runtime's routing read — the statement that failed in production.
+        // Zero rows is the correct answer here (no binding yet); the point is
+        // that the statement runs at all instead of failing on a missing column.
+        let mapped: Option<String> = conn
+            .query_row(
+                "SELECT session_id FROM sessions \
+                 WHERE intent_key = ?1 AND intent_closed = 0 \
+                 ORDER BY last_active_at DESC LIMIT 1",
+                rusqlite::params!["conv:task:p-66e68d1a:t-1b7bdb21"],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("intent routing must work again");
+        assert_eq!(mapped, None, "no binding yet — but the query must not fail");
+
+        // A missing column heals without touching the rows that were there.
+        let owner: String = conn
+            .query_row("SELECT initiator FROM sessions WHERE session_id = 's-1'", [], |r| {
+                r.get(0)
+            })
+            .expect("row intact");
+        assert_eq!(owner, "babea202");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, 11, "the stamp is not rewritten downwards or upwards");
+    }
+
+    /// Every fact [`TARGET_SCHEMA`] asserts must hold after opening a baseline
+    /// database — otherwise the convergence list is describing something the
+    /// chain does not actually build.
+    #[test]
+    fn target_schema_holds_after_the_full_chain() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(super::SCHEMA_SQL).expect("baseline DDL");
+        apply_migrations(&mut conn).expect("migrate");
+        for object in super::TARGET_SCHEMA {
+            assert!(
+                super::is_in_place(&conn, object).expect("presence check"),
+                "target schema object missing after the chain: {object:?}"
+            );
+        }
+    }
+
+    /// The same class of damage one level up: a table or index that a shadowed
+    /// step never created. Convergence must build it from nothing, and in list
+    /// order — `chat_token_usage` before its `history_tokens` column.
+    #[test]
+    fn a_stamped_database_missing_whole_tables_still_gets_them() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, initiator TEXT); \
+             PRAGMA user_version = 11;",
+        )
+        .expect("seed a v11 store with the ledger tables gone");
+
+        apply_migrations(&mut conn).expect("open must rebuild what is missing");
+
+        for table in ["conversation_state", "token_stats", "chat_token_usage"] {
+            let exists: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                    rusqlite::params![table],
+                    |r| r.get(0),
+                )
+                .expect("sqlite_master");
+            assert_eq!(exists, 1, "missing table: {table}");
+        }
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(chat_token_usage)")
+            .expect("table_info")
+            .query_map([], |r| r.get::<_, String>(1))
+            .expect("rows")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect");
+        assert!(
+            cols.iter().any(|c| c == "history_tokens"),
+            "columns: {cols:?}"
+        );
+    }
+
+    /// The root cause of the incident was two branches handing out the *same*
+    /// version number, which no per-branch test can see. Pin the invariant that
+    /// makes a merge detectable: targets form the contiguous range
+    /// `1..=SCHEMA_VERSION`, each exactly once.
+    #[test]
+    fn migration_targets_are_contiguous_and_match_the_schema_version() {
+        let targets: Vec<i64> = super::MIGRATIONS.iter().map(|(t, _)| *t).collect();
+        let expected: Vec<i64> = (1..=SCHEMA_VERSION).collect();
+        assert_eq!(targets, expected, "migration versions must be dense and unique");
+    }
+
+    /// Convergence is only a safety net if it covers what the chain actually
+    /// does. Every object a migration creates or adds must therefore be
+    /// declared in [`TARGET_SCHEMA`] — otherwise a future version collision
+    /// leaves that object silently unrepaired.
+    #[test]
+    fn every_object_the_chain_creates_is_declared_in_the_target_schema() {
+        use super::SchemaObject;
+
+        let mut declared: Vec<&str> = Vec::new();
+        for object in super::TARGET_SCHEMA {
+            declared.push(match object {
+                SchemaObject::Column { name, .. }
+                | SchemaObject::Retired { name, .. }
+                | SchemaObject::Table { name, .. }
+                | SchemaObject::Index { name, .. } => name,
+                SchemaObject::Renamed { from, .. } => from,
+            });
+        }
+
+        fn following_identifier<'a>(sql: &'a str, needle: &str) -> Vec<&'a str> {
+            sql.match_indices(needle)
+                .map(|(at, _)| {
+                    let rest = &sql[at + needle.len()..];
+                    let end = rest
+                        .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+                        .unwrap_or(rest.len());
+                    &rest[..end]
+                })
+                .collect()
+        }
+
+        for (target, sql) in super::MIGRATIONS {
+            for needle in [
+                "ADD COLUMN ",
+                "CREATE TABLE IF NOT EXISTS ",
+                "CREATE INDEX IF NOT EXISTS ",
+            ] {
+                for name in following_identifier(sql, needle) {
+                    assert!(
+                        declared.contains(&name),
+                        "migration v{target} creates `{name}` but TARGET_SCHEMA does not declare it"
+                    );
+                }
+            }
+        }
     }
 }
