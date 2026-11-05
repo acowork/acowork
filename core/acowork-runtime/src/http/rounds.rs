@@ -334,7 +334,7 @@ mod tests {
     fn rec(round_id: &str, user: u64, answer: Option<u64>, terminal: bool) -> RoundRecord {
         RoundRecord {
             round_id: round_id.to_string(),
-            user,
+            user: Some(user),
             answer,
             card: None,
             terminal,
@@ -421,5 +421,28 @@ mod tests {
         assert!(p.terminal);
         let rendered = serde_json::to_string(&p).unwrap();
         assert!(!rendered.contains("not in the projection"));
+    }
+
+    /// The block's read is triggered by the very reference row that announcing
+    /// precedes (ADR-106 D3), so the first read of a round can arrive before its
+    /// opener is written. It must answer `found: true` with `terminal: false` — the
+    /// Gateway's `pending`, which the surface re-reads — because the batch shape's
+    /// "not found" is cached as the block's permanent content (D5) and would report a
+    /// run that is still going as "no longer available".
+    #[test]
+    fn an_announced_round_reads_as_open_not_as_a_hole() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let jsonl = dir.path().join("s.jsonl");
+        let rounds = dir.path().join("s.jsonl.rounds");
+        std::fs::write(&jsonl, "").unwrap();
+        crate::rounds::announce_round(&rounds, "r:1", "2026-11-05T00:00:00.000Z").unwrap();
+
+        let index = crate::rounds::fold_or_rebuild(&rounds, &jsonl).unwrap();
+        let rec = index.get("r:1").expect("the announced round is in the index");
+        let p = crate::rounds::project(&jsonl, rec)
+            .unwrap()
+            .expect("an announced round is not a hole");
+        assert!(!p.terminal, "open ⇒ pending, not not_found");
+        assert!(p.user.is_none(), "no row is invented for a round that has none");
     }
 }

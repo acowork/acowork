@@ -2431,7 +2431,7 @@ mod tests {
     fn fixture_record(round_id: &str, user: u64, answer: Option<u64>, ts: &str) -> crate::rounds::RoundRecord {
         crate::rounds::RoundRecord {
             round_id: round_id.to_string(),
-            user,
+            user: Some(user),
             answer,
             card: None,
             terminal: true,

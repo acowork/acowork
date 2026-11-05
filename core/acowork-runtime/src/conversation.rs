@@ -336,6 +336,21 @@ pub enum WriterCommand {
         status: Option<String>,
         card: Option<serde_json::Value>,
     },
+    /// ADR-106 D3/D4: make a round addressable in the index **before** the Chat row
+    /// that references it can be read.
+    ///
+    /// Ordered through the same writer channel as the JSONL and the snapshots, for
+    /// two reasons: the side table keeps its single writer (ADR-092), and FIFO with
+    /// the entry appends means the marker is on disk before the round's first row
+    /// snapshot — which is what lets the later snapshot carry the coordinate over it.
+    ///
+    /// Synchronous (`done` replies only after the line is flushed): the caller writes
+    /// a Chat reference row immediately afterwards, and a reader that can see that row
+    /// must be able to resolve the round it names.
+    AnnounceRound {
+        round_id: String,
+        done: std::sync::mpsc::SyncSender<()>,
+    },
     /// Flush and shut down the writer.
     Shutdown(oneshot::Sender<()>),
 }
@@ -466,6 +481,59 @@ impl ConversationWriter {
         }
     }
 
+    /// ADR-106 D3/D4: record a round in the side table ahead of its first row, and
+    /// make it the one this writer tracks.
+    ///
+    /// Two things have to be true at the moment the Chat's reference row becomes
+    /// visible: the index knows the round (or a projection read answers "not found"
+    /// for a run that is about to happen — and D5 caches that answer forever), and the
+    /// tracker holds it (or the turn's own `end_round` is refused as "for a round the
+    /// writer does not hold", leaving the round open with no way to close it).
+    ///
+    /// A continuation (the round is already the tracked one) keeps its coordinates; a
+    /// round the index already knows is resumed *as recorded*, so a turn that writes no
+    /// user row cannot erase the coordinate the transcript still has.
+    fn announce_round(&mut self, round_id: &str) {
+        let ts = crate::rounds::now_ts();
+        // Index first: the marker only says "this round exists", so it is safe even if
+        // the tracker transition below turns out to be a continuation.
+        let known = crate::rounds::announce_round(&self.rounds_path, round_id, &ts);
+        let mut guard = match self.active_round.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        if guard.round_id == round_id {
+            return;
+        }
+        // The round this writer was holding is not coming back: close it before the
+        // slot is reused, exactly as a first stamped entry of another round would.
+        if let Some(closed) = guard.forced_closure(&ts)
+            && let Err(e) = crate::rounds::append_record(&self.rounds_path, &closed)
+        {
+            tracing::warn!(
+                path = %self.rounds_path.display(),
+                round_id = %closed.round_id,
+                error = %e,
+                "rounds index: forced closure append failed while announcing"
+            );
+        }
+        // Resume what the index already recorded — but only an **open** round. A
+// terminal record is the round's final word (D5): a re-delivered id must not
+// inherit its status, and the new turn's own rows/`end_round` describe what
+// this attempt did.
+        let resumed = known.as_ref().filter(|rec| !rec.terminal);
+        *guard = crate::rounds::ActiveRound {
+            round_id: round_id.to_string(),
+            // With nothing to resume the first user row this turn writes supplies the
+            // coordinate; until then the round is recorded with none, which the
+            // projection answers as "open, nothing yet".
+            user: resumed.and_then(|rec| rec.user),
+            answer: resumed.and_then(|rec| rec.answer),
+            status: resumed.and_then(|rec| rec.status.clone()),
+            card: resumed.and_then(|rec| rec.card.clone()),
+        };
+    }
+
     /// Run the writer loop. Blocks until Shutdown is received.
     fn run(mut self) {
         while let Some(cmd) = self.receiver.blocking_recv() {
@@ -547,6 +615,12 @@ impl ConversationWriter {
                     // `recv`), which we treat as benign.
                     let _ = done.send(());
                 }
+                // ADR-106 D3/D4: announce before the Chat references the round.
+                // Always reply, so a caller waiting on `done` cannot deadlock.
+                WriterCommand::AnnounceRound { round_id, done } => {
+                    self.announce_round(&round_id);
+                    let _ = done.send(());
+                }
                 WriterCommand::RoundSnapshot {
                     round_id,
                     terminal,
@@ -555,7 +629,13 @@ impl ConversationWriter {
                 } => {
                     let rec = match self.active_round.lock() {
                         Ok(mut guard) => {
-                            if guard.round_id != round_id || guard.user.is_none() {
+                            // The round must be the one the writer holds — but it need not
+                            // have a coordinate yet: a round is announced before its first
+                            // row is written (see `rounds::announce_round`), and a turn that
+                            // dies before writing its opener still owes the Chat its real
+                            // outcome. Refusing that snapshot is what left such a round
+                            // recorded-but-forever-open, i.e. a block that never settles.
+                            if guard.round_id != round_id {
                                 tracing::warn!(
                                     round_id = %round_id,
                                     tracked = %guard.round_id,
@@ -1872,6 +1952,47 @@ impl ConversationSession {
         }
         if let Ok(mut stamp) = self.round_stamp.lock() {
             *stamp = Some(round_id.to_string());
+        }
+    }
+
+    /// Record a round in the side table before anything can reference it (ADR-106
+    /// D3/D4).
+    ///
+    /// Must be called **before** the Chat's `execution_round` row for this round is
+    /// written: that row is what makes the block visible, and the block's read is
+    /// triggered by it, so index-then-reference is the only order in which a reader
+    /// can never see a round the projection cannot answer. A read of an announced but
+    /// empty round says `pending` (D9), which the surface re-reads — the alternative,
+    /// `not found`, is cached as the block's permanent content (D5) and reported a
+    /// finished run as "no longer available".
+    ///
+    /// Blocking on the writer's reply is deliberate: "visible only if answerable" is a
+    /// durability claim about the line, not about the enqueue. The cost is one fold of
+    /// a small side table plus one append per turn.
+    pub fn announce_round(&self, round_id: &str) {
+        if round_id.is_empty() {
+            return;
+        }
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        if let Err(e) = self.sender.send(WriterCommand::AnnounceRound {
+            round_id: round_id.to_string(),
+            done: done_tx,
+        }) {
+            tracing::warn!(
+                round_id = %round_id,
+                error = %e,
+                "rounds index: writer gone, round not announced (block may read as a hole until the first row lands)"
+            );
+            return;
+        }
+        // The writer always replies, even when the append fails, so this cannot
+        // deadlock. Blocking a std channel from an async task is safe (the same
+        // handshake `append_compaction_event` uses).
+        if done_rx.recv().is_err() {
+            tracing::warn!(
+                round_id = %round_id,
+                "rounds index: writer dropped its announce reply"
+            );
         }
     }
 
@@ -4470,7 +4591,7 @@ mod tests {
             &crate::rounds::rounds_path(conv, sid),
             &crate::rounds::RoundRecord {
                 round_id: format!("r:{sid}"),
-                user: 1,
+                user: Some(1),
                 answer: Some(1),
                 card: None,
                 terminal: true,
@@ -8576,7 +8697,7 @@ mod tests {
         let rec = crate::rounds::read_record(session.rounds_index_path(), "r:round-1")
             .unwrap()
             .expect("the round the turn produced");
-        assert_eq!((rec.user, rec.answer), (0, Some(1)));
+        assert_eq!((rec.user, rec.answer), (Some(0), Some(1)));
         assert!(rec.terminal);
         assert_eq!(rec.status.as_deref(), Some("completed"));
         assert_eq!(rec.card.as_ref().unwrap()["request_id"], "q1");
@@ -8588,6 +8709,96 @@ mod tests {
         assert_eq!(p.user.as_ref().unwrap().body, "hello");
         assert_eq!(p.answer.as_ref().unwrap().body, "the answer");
         assert_eq!(fold_round_count(session.rounds_index_path()), 1);
+    }
+
+    /// A round must be answerable by the projection read the moment its Chat
+    /// reference row is visible — that row is what triggers the block's read, so
+    /// index-then-reference is the only order in which the first read cannot see a
+    /// round the index has never heard of (which the chat then caches as the block's
+    /// permanent "this run is no longer available"). This drives the real funnel:
+    /// announce, project, then close a round that never wrote a row.
+    #[tokio::test]
+    async fn an_announced_round_is_answerable_before_its_first_row() {
+        let session = make_test_session();
+        session.announce_round("r:m-9");
+
+        let rec = crate::rounds::read_record(session.rounds_index_path(), "r:m-9")
+            .unwrap()
+            .expect("the round is in the index before any row exists");
+        assert_eq!(rec.user, None, "no coordinate: the opener is not written yet");
+        assert!(!rec.terminal);
+        assert_eq!(
+            session.active_round_id().as_deref(),
+            Some("r:m-9"),
+            "the writer tracks the announced round, so its outcome can still land"
+        );
+
+        let p = crate::rounds::project(session.session_path(), &rec)
+            .unwrap()
+            .expect("an announced round is not a hole");
+        assert!(p.user.is_none() && p.answer.is_none());
+        assert!(!p.terminal, "open ⇒ the surface reads it as pending and re-reads");
+        assert_eq!(p.status, crate::rounds::STATUS_IN_PROGRESS);
+
+        // A turn that dies before writing its opener still owes the Chat the outcome.
+        // The snapshot used to be refused as "for a round the writer does not hold",
+        // which left the round open forever.
+        session.begin_round("r:m-9");
+        session.end_round("failed", None);
+        session.flush_pending().await.unwrap();
+
+        let rec = crate::rounds::read_record(session.rounds_index_path(), "r:m-9")
+            .unwrap()
+            .unwrap();
+        assert!(rec.terminal, "the round settles even with no rows");
+        assert_eq!(rec.status.as_deref(), Some("failed"));
+        let p = crate::rounds::project(session.session_path(), &rec)
+            .unwrap()
+            .expect("a recorded round is never a hole");
+        assert!(p.user.is_none());
+        assert_eq!(p.status, "failed");
+    }
+
+    /// A re-delivery announces a round the transcript already wrote: the coordinate
+    /// must survive untouched, or the block would lose the message it already shows.
+    #[tokio::test]
+    async fn announcing_a_known_round_keeps_its_coordinate() {
+        let session = make_test_session();
+        session.begin_round("r:m-1");
+        session.append_message("user", "hello", None);
+        session.end_round("completed", None);
+        session.flush_pending().await.unwrap();
+        let rounds_before = fold_round_count(session.rounds_index_path());
+
+        session.announce_round("r:m-1");
+
+        let rec = crate::rounds::read_record(session.rounds_index_path(), "r:m-1")
+            .unwrap()
+            .unwrap();
+        assert_eq!(rec.user, Some(0), "the recorded opener survives the re-delivery");
+        assert!(rec.terminal);
+        assert_eq!(
+            fold_round_count(session.rounds_index_path()),
+            rounds_before,
+            "no second record for the same round"
+        );
+    }
+
+    /// An announced round that a later round pre-empts is closed as interrupted
+    /// rather than left open: a block that can never settle is its own lie.
+    #[tokio::test]
+    async fn a_pre_empted_announcement_is_closed_not_left_open() {
+        let session = make_test_session();
+        session.announce_round("r:a");
+        session.announce_round("r:b");
+
+        let a = crate::rounds::read_record(session.rounds_index_path(), "r:a")
+            .unwrap()
+            .unwrap();
+        assert!(a.terminal);
+        assert_eq!(a.status.as_deref(), Some(crate::rounds::STATUS_INTERRUPTED));
+        assert_eq!(a.user, None);
+        assert_eq!(session.active_round_id().as_deref(), Some("r:b"));
     }
 
     /// A second round must not rewrite the first one's outcome: the writer forgets
@@ -8612,7 +8823,7 @@ mod tests {
         let second = crate::rounds::read_record(session.rounds_index_path(), "r:round-2")
             .unwrap()
             .unwrap();
-        assert_eq!((second.user, second.status), (1, Some("aborted".to_string())));
+        assert_eq!((second.user, second.status), (Some(1), Some("aborted".to_string())));
         assert_eq!(fold_round_count(session.rounds_index_path()), 2);
     }
 
@@ -8656,7 +8867,7 @@ mod tests {
             .expect("the round survives its own answer");
         assert!(rec.terminal);
         assert_eq!(rec.status.as_deref(), Some("completed"));
-        assert_eq!(rec.user, 0, "the block keeps the user row it opened on");
+        assert_eq!(rec.user, Some(0), "the block keeps the user row it opened on");
         assert_eq!(rec.answer, Some(3), "a round's answer is its latest assistant row");
         assert_eq!(rec.card, None, "a closed round must not come back asking");
         assert_eq!(fold_round_count(session.rounds_index_path()), 1, "one round, not two");

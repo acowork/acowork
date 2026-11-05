@@ -144,8 +144,15 @@ pub fn rounds_path(conversations_dir: &Path, session_id: &str) -> PathBuf {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoundRecord {
     pub round_id: String,
-    /// Data index of the round's user entry.
-    pub user: u64,
+    /// Data index of the round's user entry, once the transcript has one.
+    ///
+    /// `None` means the round is **recorded but has written nothing yet**: it was
+    /// announced at the turn boundary the moment its Chat reference row was about
+    /// to become visible (see [`announce_round`]), and a turn can also die before
+    /// writing its opener. The distinction matters because a coordinate is a claim
+    /// about a row, and a round with no row has no claim to make — not a false one.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub user: Option<u64>,
     /// Data index of the round's latest assistant entry, once there is one.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub answer: Option<u64>,
@@ -229,8 +236,14 @@ impl ActiveRound {
     /// *interrupted*, it was abandoned while waiting, and `waiting` plus its card is
     /// the honest rendering. Only a round that never published anything — one cut off
     /// mid-flight — gets the `interrupted` terminal.
+    ///
+    /// A round with no recorded coordinate is closed the same way: announcing a round
+    /// (see [`announce_round`]) can precede its first row, so "abandoned before it
+    /// wrote anything" is a real state and must not stay open forever — an open
+    /// record is what the projection reports as `pending`, and a pending block that
+    /// can never finish is a different lie from the hole it replaced.
     pub fn forced_closure(&self, ts: &str) -> Option<RoundRecord> {
-        if self.round_id.is_empty() || self.user.is_none() {
+        if self.round_id.is_empty() {
             return None;
         }
         let status = Some(match self.status.as_deref() {
@@ -261,7 +274,7 @@ impl ActiveRound {
         };
         RoundRecord {
             round_id: self.round_id.clone(),
-            user: self.user.unwrap_or_default(),
+            user: self.user,
             answer: self.answer,
             card,
             terminal,
@@ -327,6 +340,72 @@ pub fn fold(path: &Path) -> std::io::Result<BTreeMap<String, RoundRecord>> {
         }
     }
     Ok(map)
+}
+
+/// Make a round addressable in the index before anything can reference it.
+///
+/// D3 makes the Chat's `execution_round` reference row the gate a round must pass
+/// through, and that row is written *before* the round runs. The index, by contrast,
+/// only gained a record once the round's first stamped row was **committed** — so
+/// between the two there was a window (tens of milliseconds) in which a reader that
+/// could already see the reference got `not found` for the round it names. That is
+/// not a harmless transient: D4's reader is triggered by exactly that reference row,
+/// and D5 caches the hole as the block's permanent content, so the block said "this
+/// run is no longer available" for a run that completed moments later.
+///
+/// Announcing the round at the turn boundary closes the window: once this returns,
+/// every round the Chat can see is in the index, and a projection read answers
+/// "open, nothing yet" (`terminal: false`, no coordinates) instead of a hole. The
+/// surface re-reads that (D9), so the block fills in as the turn produces its rows.
+///
+/// Idempotent and non-destructive by construction: a round already recorded keeps its
+/// coordinates untouched, which is what makes it safe to call for a continuation, and
+/// a redelivery of the same round must never erase what the transcript already says.
+/// Best-effort like the rest of the index (ADR-097 disposability): a disk fault costs
+/// the block a transient hole, never the turn its content.
+pub fn announce_round(path: &Path, round_id: &str, ts: &str) -> Option<RoundRecord> {
+    if round_id.is_empty() {
+        return None;
+    }
+    // A fold failure means the index cannot be trusted this moment; announcing on top
+    // of it could shadow a coordinate that is still there. Leave it to the read path's
+    // rebuild instead of writing a record we cannot confirm is new.
+    let known = match fold(path) {
+        Ok(map) => map,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                round_id = %round_id,
+                error = %e,
+                "rounds index: cannot announce a round over an unreadable index"
+            );
+            return None;
+        }
+    };
+    if let Some(existing) = known.get(round_id) {
+        return Some(existing.clone());
+    }
+    // No `status`: whether the round is running, waiting or finished is a fact of the
+    // turn, not of the index. The marker only says the round exists.
+    let record = RoundRecord {
+        round_id: round_id.to_string(),
+        user: None,
+        answer: None,
+        card: None,
+        terminal: false,
+        status: None,
+        ts: ts.to_string(),
+    };
+    if let Err(e) = append_record(path, &record) {
+        tracing::warn!(
+            path = %path.display(),
+            round_id = %round_id,
+            error = %e,
+            "rounds index: announce failed (the round itself is unaffected)"
+        );
+        return None;
+    }
+    Some(record)
 }
 
 /// Rebuild the side table from the transcript's `round_id` stamps.
@@ -396,7 +475,7 @@ fn rebuild_from_log(jsonl: &Path) -> Result<Vec<RoundRecord>> {
             let (user, answer) = states.get(round_id)?;
             Some(RoundRecord {
                 round_id: round_id.clone(),
-                user: *user,
+                user: Some(*user),
                 answer: *answer,
                 card: None,
                 terminal: true,
@@ -569,6 +648,10 @@ pub struct RoundAnswerRow {
 /// the one outcome this function may not produce, because a terminal projection is
 /// cached with no invalidation path (D5) — a wrong row would then be a permanent one.
 /// A genuine read failure stays `Err`, so `unreachable` and "no content" stay distinct.
+///
+/// A round that is *recorded but has no coordinate* is not a hole: it was announced
+/// when its Chat reference became visible, and the turn has not written its opener
+/// yet (or died before it could). It projects as an empty, non-terminal round.
 pub fn project(jsonl: &Path, rec: &RoundRecord) -> Result<Option<RoundProjection>> {
     // Pruned or never-copied transcript: the content is not on this host. Not a server
     // fault, and not something a retry fixes — an explicit hole is.
@@ -580,11 +663,24 @@ pub fn project(jsonl: &Path, rec: &RoundRecord) -> Result<Option<RoundProjection
         );
         return Ok(None);
     }
-    let Some(user) = read_entry_at(jsonl, rec.user)? else {
+    let Some(user_index) = rec.user else {
+        // Nothing has been written under this round yet. Answering "not found" here is
+        // what made a live block say its run was gone: the reader is triggered by the
+        // reference row that announcing precedes, and D5 caches the hole forever.
+        return Ok(Some(RoundProjection {
+            round_id: rec.round_id.clone(),
+            user: None,
+            answer: None,
+            card: rec.card.clone(),
+            terminal: rec.terminal,
+            status: projection_status(rec),
+        }));
+    };
+    let Some(user) = read_entry_at(jsonl, user_index)? else {
         tracing::warn!(
             transcript = %jsonl.display(),
             round_id = %rec.round_id,
-            user = rec.user,
+            user = user_index,
             "round projection: user coordinate past the end of the transcript"
         );
         return Ok(None);
@@ -592,13 +688,13 @@ pub fn project(jsonl: &Path, rec: &RoundRecord) -> Result<Option<RoundProjection
     if !row_is_the_rounds(&user, "user", &rec.round_id) {
         tracing::warn!(
             round_id = %rec.round_id,
-            user = rec.user,
+            user = user_index,
             found_role = %user.role,
             "round projection: coordinate drifted to another entry — rendering a hole"
         );
         return Ok(None);
     }
-    let attachments = fold_attachments(jsonl, rec)?;
+    let attachments = fold_attachments(jsonl, user_index, rec.answer, &rec.round_id)?;
     let answer = match rec.answer {
         Some(idx) => {
             let Some(entry) = read_entry_at(jsonl, idx)? else {
@@ -624,13 +720,6 @@ pub fn project(jsonl: &Path, rec: &RoundRecord) -> Result<Option<RoundProjection
         }
         None => None,
     };
-    let status = rec.status.clone().unwrap_or_else(|| {
-        if rec.terminal {
-            STATUS_INTERRUPTED.to_string()
-        } else {
-            STATUS_IN_PROGRESS.to_string()
-        }
-    });
 
     Ok(Some(RoundProjection {
         round_id: rec.round_id.clone(),
@@ -645,8 +734,23 @@ pub fn project(jsonl: &Path, rec: &RoundRecord) -> Result<Option<RoundProjection
         }),
         card: rec.card.clone(),
         terminal: rec.terminal,
-        status,
+        status: projection_status(rec),
     }))
+}
+
+/// The state a recorded round projects to when it published no status of its own.
+///
+/// A terminal record without a status can only come from an abandoned round (a crash
+/// repaired at open, or a pre-empted turn that never published), so `interrupted` is
+/// the fact; a non-terminal one is the live round the Chat is watching.
+fn projection_status(rec: &RoundRecord) -> String {
+    rec.status.clone().unwrap_or_else(|| {
+        if rec.terminal {
+            STATUS_INTERRUPTED.to_string()
+        } else {
+            STATUS_IN_PROGRESS.to_string()
+        }
+    })
 }
 
 /// Does the entry sitting at a recorded coordinate actually belong to this round?
@@ -670,9 +774,14 @@ fn row_is_the_rounds(entry: &ConversationEntry, role: &str, round_id: &str) -> b
 ///
 /// The window is bounded twice over: by [`ATTACHMENT_WINDOW`] and by the round's own
 /// answer position, so a long round never turns this into a range scan.
-fn fold_attachments(jsonl: &Path, rec: &RoundRecord) -> Result<Vec<Value>> {
-    let span = match rec.answer {
-        Some(answer) if answer > rec.user => answer - rec.user - 1,
+fn fold_attachments(
+    jsonl: &Path,
+    user: u64,
+    answer: Option<u64>,
+    round_id: &str,
+) -> Result<Vec<Value>> {
+    let span = match answer {
+        Some(answer) if answer > user => answer - user - 1,
         Some(_) => 0,
         None => u64::from(ATTACHMENT_WINDOW),
     };
@@ -680,7 +789,7 @@ fn fold_attachments(jsonl: &Path, rec: &RoundRecord) -> Result<Vec<Value>> {
     if span == 0 {
         return Ok(Vec::new());
     }
-    let page = read_messages_paginated(jsonl, rec.user + 1, span as u32, false)?;
+    let page = read_messages_paginated(jsonl, user + 1, span as u32, false)?;
     Ok(page
         .messages
         .iter()
@@ -691,7 +800,7 @@ fn fold_attachments(jsonl: &Path, rec: &RoundRecord) -> Result<Vec<Value>> {
         // next round. Stamping the window rows the same way as the two named rows
         // (D2) keeps the block from inheriting another round's attachments — and from
         // caching that as immutable content (D5).
-        .filter(|e| row_is_the_rounds(e, "system", &rec.round_id))
+        .filter(|e| row_is_the_rounds(e, "system", round_id))
         .map(|e| {
             serde_json::json!({
                 "type": e.metadata.as_ref().and_then(|m| m.get("type")).and_then(|v| v.as_str()),
@@ -752,7 +861,7 @@ mod tests {
     fn rec(round_id: &str, user: u64, terminal: bool) -> RoundRecord {
         RoundRecord {
             round_id: round_id.to_string(),
-            user,
+            user: Some(user),
             answer: None,
             card: None,
             terminal,
@@ -850,6 +959,74 @@ mod tests {
         assert!(read_record(&path, "r:missing").unwrap().is_none());
     }
 
+    /// Announcing is what closes the window between "the Chat can see this round" and
+    /// "the index knows it". The announced record projects as *open and empty*, never
+    /// as a hole: a hole is what the chat caches as the block's content (D5), and it
+    /// is how a running block came to say its run was gone.
+    #[test]
+    fn an_announced_round_projects_as_open_instead_of_a_hole() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = write_jsonl(&dir, &[]);
+        let path = dir.path().join("s.jsonl.rounds");
+
+        let rec = announce_round(&path, "r:fresh", "2026-11-05T00:00:00.000Z")
+            .expect("announcing a fresh round succeeds");
+        assert_eq!(rec.user, None, "the opener has not been written yet");
+        assert!(!rec.terminal);
+
+        let p = project(&jsonl, &rec)
+            .unwrap()
+            .expect("an announced round is not a hole");
+        assert!(p.user.is_none(), "no row is invented for a round that has none");
+        assert!(p.answer.is_none());
+        assert!(!p.terminal);
+        assert_eq!(p.status, STATUS_IN_PROGRESS);
+    }
+
+    /// A re-delivery announces the round the transcript already produced: the
+    /// coordinate the index holds must survive, so this can never be a rewrite.
+    #[test]
+    fn announcing_a_known_round_keeps_its_coordinate() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("s.jsonl.rounds");
+        append_record(&path, &rec("r:1", 3, true)).unwrap();
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        let known = announce_round(&path, "r:1", "2026-11-05T00:00:00.000Z").unwrap();
+        assert_eq!(known.user, Some(3), "the recorded coordinate wins");
+        assert!(known.terminal);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "announcing a known round appends nothing"
+        );
+    }
+
+    /// A round abandoned before it wrote anything is closed as interrupted, not left
+    /// open forever: a permanently `pending` block is a different lie from the hole.
+    #[test]
+    fn a_round_closed_before_its_opener_is_not_a_hole() {
+        let active = ActiveRound {
+            round_id: "r:1".to_string(),
+            ..Default::default()
+        };
+        let closed = active
+            .forced_closure("2026-11-05T00:00:01.000Z")
+            .expect("an abandoned round is closed");
+        assert!(closed.terminal);
+        assert_eq!(closed.user, None, "no coordinate to invent");
+        assert_eq!(closed.status.as_deref(), Some(STATUS_INTERRUPTED));
+
+        let dir = TempDir::new().unwrap();
+        let jsonl = write_jsonl(&dir, &[]);
+        let p = project(&jsonl, &closed)
+            .unwrap()
+            .expect("a recorded round is never a hole");
+        assert!(p.user.is_none());
+        assert!(p.terminal);
+        assert_eq!(p.status, STATUS_INTERRUPTED);
+    }
+
     #[test]
     fn pre_emption_closes_the_previous_round_as_interrupted() {
         // D2 counter-example 2: a queued message pre-empts and opens a new round
@@ -865,7 +1042,7 @@ mod tests {
         assert!(recs[0].terminal);
         assert_eq!(recs[0].status.as_deref(), Some(STATUS_INTERRUPTED));
         assert_eq!(recs[1].round_id, "r:2");
-        assert_eq!(recs[1].user, 5);
+        assert_eq!(recs[1].user, Some(5));
         assert!(!recs[1].terminal);
     }
 
@@ -923,11 +1100,11 @@ mod tests {
         );
 
         let r1 = read_record(&rounds, "r:1").unwrap().unwrap();
-        assert_eq!((r1.user, r1.answer), (0, Some(1)));
+        assert_eq!((r1.user, r1.answer), (Some(0), Some(1)));
         assert!(r1.terminal, "a rebuilt round cannot still be in progress");
         assert_eq!(r1.status.as_deref(), Some(STATUS_UNKNOWN));
         let r2 = read_record(&rounds, "r:2").unwrap().unwrap();
-        assert_eq!(r2.user, 2);
+        assert_eq!(r2.user, Some(2));
         assert_eq!(r2.status.as_deref(), Some(STATUS_INTERRUPTED), "no answer row");
 
         // A second open must not rebuild, and must not add records.

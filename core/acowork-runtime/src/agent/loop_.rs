@@ -909,14 +909,25 @@ impl AgentLoop {
             .unwrap_or_else(|| self.turn_surface.round_id.clone())
     }
 
-    /// Arm a round only once the Chat row that references it is durable.
+    /// Arm a round once the Chat can see it — and make sure the index can answer it
+    /// before the Chat can.
     ///
     /// The single caller of `begin_round` in the Runtime, so "a round exists only
     /// where the Chat can see it" is a property of the code rather than something
     /// every entry point has to remember: a second site that stamped rows without
     /// publishing their reference would produce exactly the invisible round D3
     /// exists to prevent.
+    ///
+    /// Order matters and is `announce → reference → stamp`: the reference row is what
+    /// makes the block render, and the block's projection read is triggered by that
+    /// row, so a round that is visible but not yet in the index is read as "not
+    /// found" — a hole the chat caches forever (D5) for a run that completes moments
+    /// later. Announcing first costs one side-table line per turn and closes that
+    /// window by construction.
     async fn open_round(&self, round_id: &str) -> crate::error::Result<()> {
+        if let Some(conv) = &self.session.conversation {
+            conv.announce_round(round_id);
+        }
         self.publish_round_reference(round_id).await?;
         if let Some(conv) = &self.session.conversation {
             conv.begin_round(round_id);

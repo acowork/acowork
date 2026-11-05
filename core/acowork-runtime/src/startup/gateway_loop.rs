@@ -2235,7 +2235,7 @@ A: hi")).unwrap();
             &crate::rounds::rounds_path(&conv, "sess-a"),
             &crate::rounds::RoundRecord {
                 round_id: "r:m-2".into(),
-                user: 0,
+                user: Some(0),
                 answer: Some(1),
                 card: None,
                 terminal: true,
