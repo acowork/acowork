@@ -14,14 +14,21 @@
  * the human, so it collapses to one line whose buttons open a sheet (§6.5), and
  * once the question has a round the buttons go quiet rather than vanishing —
  * disappearing on click would erase the record of what was decided, and a
- * re-click would deliver the same words twice (D6).
+ * re-click would deliver the same words twice (D6). Its options and its
+ * answered-ness come from the service's projection (`row.delivery.question`,
+ * design 31 §6), which is what these cases feed it.
  */
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ChatNoticeRow } from '../components/ChatNoticeRow'
 import type { ChatMessageRow } from '../lib/types'
 
-function notice(noticeType: string, meta: ChatMessageRow['meta'] = {}, body = ''): ChatMessageRow {
+function notice(
+  noticeType: string,
+  meta: ChatMessageRow['meta'] = {},
+  body = '',
+  delivery?: ChatMessageRow['delivery'],
+): ChatMessageRow {
   return {
     seq: 1,
     ts: 1,
@@ -30,7 +37,21 @@ function notice(noticeType: string, meta: ChatMessageRow['meta'] = {}, body = ''
     body,
     to: 'u1',
     meta: { message_id: `n-${noticeType}`, notice_type: noticeType, ...meta },
+    ...(delivery ? { delivery } : {}),
   } as ChatMessageRow
+}
+
+/** What the service projects onto a card (design 31 §6). The surface reads
+ *  this and nothing else: `meta.options` is the durable payload, not the
+ *  surface's input. */
+function card(
+  options = OPTIONS,
+  { answered = false, allowNewTask = true }: { answered?: boolean; allowNewTask?: boolean } = {},
+): ChatMessageRow['delivery'] {
+  return {
+    answered: false,
+    question: { answered, options, ...(allowNewTask ? { allow_new_task: true } : {}) },
+  }
 }
 
 function render(row: ChatMessageRow, props: Partial<Parameters<typeof ChatNoticeRow>[0]> = {}): string {
@@ -59,7 +80,7 @@ describe('addressing questions (D6 levels 3 and 5)', () => {
   const choose = () => {}
 
   it('a session_choice offers the pick and names the question', () => {
-    const html = render(notice('session_choice', { options: OPTIONS, allow_new_task: true }), {
+    const html = render(notice('session_choice', {}, '', card()), {
       onChoose: choose,
     })
     expect(html).toContain('data-testid="chat-card-options"')
@@ -68,14 +89,17 @@ describe('addressing questions (D6 levels 3 and 5)', () => {
   })
 
   it('a confirm_continue asks about the one session it proposes', () => {
-    const html = render(notice('confirm_continue', { options: [OPTIONS[0]!] }), { onChoose: choose })
+    const html = render(notice('confirm_continue', {}, '', card([OPTIONS[0]!])), {
+      onChoose: choose,
+    })
     expect(html).toContain('继续这个任务吗？')
   })
 
   it('an answered question goes quiet instead of disappearing', () => {
-    const html = render(notice('session_choice', { options: OPTIONS, allow_new_task: true }), {
+    // The service says the question is settled (`question.answered`); the
+    // surface used to look for a reference row pointing at the asked message.
+    const html = render(notice('session_choice', {}, '', card(OPTIONS, { answered: true })), {
       onChoose: choose,
-      answered: true,
     })
     expect(html).toContain('已回复')
     expect(html).toContain('disabled')
@@ -83,14 +107,14 @@ describe('addressing questions (D6 levels 3 and 5)', () => {
   })
 
   it('a bystander gets the question without the action (D10)', () => {
-    const html = render(notice('session_choice', { options: OPTIONS, allow_new_task: true }))
+    const html = render(notice('session_choice', {}, '', card()))
     expect(html).not.toContain('data-testid="chat-card-options"')
     expect(html).toContain('chat-notice-pill')
     expect(html).toContain('你指的是哪一个任务？')
   })
 
   it('a question with nothing to offer stays a plain line', () => {
-    const html = render(notice('session_choice', { options: [] }), { onChoose: choose })
+    const html = render(notice('session_choice', {}, '', card([])), { onChoose: choose })
     expect(html).not.toContain('data-testid="chat-card-options"')
   })
 })

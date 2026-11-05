@@ -28,14 +28,12 @@
  */
 
 import type { ChatMessageRow } from "../stores/chatSessionStore";
-import { RETIRED_NOTICES } from "./retiredNotices";
 
 /** One send this device made and has not seen an outcome for. */
 export interface InflightTurn {
   /**
    * The durable `message_id` the Gateway assigned to the human's row, taken
-   * from the send's own response. This is what every outcome row threads
-   * itself to under `meta.in_reply_to`, so it is the only key that can close
+   * from the send's own response. It addresses the row whose `delivery` closes
    * the claim — a locally invented id would wait for a row that cannot exist.
    */
   messageId: string;
@@ -52,32 +50,24 @@ export interface InflightTurn {
 export const TURN_INFLIGHT_DEADLINE_MS = 300_000;
 
 /**
- * The three ways a turn leaves a mark in its own Chat, all of them written by
- * the backend with `meta.in_reply_to` set to the human's row id:
- * - `execution_round` — the Runtime opened a round for it, and must publish that
- *   reference row before spending a single token (it is `open_round`'s
- *   precondition), so its presence means the turn was picked up;
- * - `agent_message` — the Chat Router answered in its own words and opened
- *   nothing (ADR-106 D12);
- * - `system_notice` — a receipt or an addressing question (ADR-105 delivery
- *   failure, §6.5 budget, ADR-106 D6 addressing): either way something visible
- *   took the turn's place.
+ * Did anything answer the human's row? The service says so: every served row
+ * carries `delivery.answered`, computed from the log's `in_reply_to` reverse
+ * edge (design 31 §6). This module used to answer the question itself by
+ * scanning rows for an outcome kind — that scan had to re-know which kinds
+ * count (and which retired milestones do not, ADR-106 D14), and a row whose
+ * reference was empty (the card bug) could never close it.
+ *
+ * A row with no `delivery` is one this device inserted optimistically before
+ * the write's response came back: not projected yet, so the claim stands.
  */
-const OUTCOME_KINDS = new Set(["execution_round", "agent_message", "system_notice"]);
-
-/** Did anything in this transcript already answer the human's row? */
 export function turnSettled(
   rows: readonly ChatMessageRow[],
   turn?: InflightTurn,
 ): boolean {
   if (!turn) return true;
-  return rows.some(
-    (r) =>
-      OUTCOME_KINDS.has(r.kind) &&
-      !(r.kind === "system_notice" &&
-        RETIRED_NOTICES.has(r.meta?.notice_type ?? "")) &&
-      r.meta?.in_reply_to === turn.messageId,
-  );
+  const row = rows.find((r) => r.meta?.message_id === turn.messageId);
+  if (!row?.delivery) return false;
+  return row.delivery.answered;
 }
 
 /**

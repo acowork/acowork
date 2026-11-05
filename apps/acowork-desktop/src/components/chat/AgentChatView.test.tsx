@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentChatView } from "./AgentChatView";
-import type { ChatMessageRow } from "../../stores/chatSessionStore";
+import type { ChatDeliveryView, ChatMessageRow } from "../../stores/chatSessionStore";
 import type { RunBlock } from "./chatTranscriptGroups";
 
 const AGENT = "agent-1";
@@ -203,7 +203,11 @@ function roundRow(
   };
 }
 
-function notice(seq: number, meta: Record<string, unknown>): ChatMessageRow {
+function notice(
+  seq: number,
+  meta: Record<string, unknown>,
+  delivery?: ChatDeliveryView,
+): ChatMessageRow {
   return {
     seq,
     ts: seq,
@@ -212,6 +216,22 @@ function notice(seq: number, meta: Record<string, unknown>): ChatMessageRow {
     body: "",
     to: "user",
     meta: { message_id: `n${seq}`, ...meta },
+    ...(delivery ? { delivery } : {}),
+  };
+}
+
+/** What the service projects onto an addressing card (design 31 §6): the
+ *  answers it offers and whether a round already answered the message it asked
+ *  about. The surface renders this verbatim — the raw `meta.options` are no
+ *  longer read by any component. */
+function cardDelivery(
+  options: Array<{ session_id: string; label?: string; status?: string; origin?: string; why?: string }>,
+  answered = false,
+  allowNewTask = true,
+): ChatDeliveryView {
+  return {
+    answered: false,
+    question: { answered, options, ...(allowNewTask ? { allow_new_task: true } : {}) },
   };
 }
 
@@ -433,7 +453,23 @@ describe("AgentChatView event-log wiring", () => {
   it("the round's reference row settles the claim: line gone, composer live", () => {
     // From here the block narrates the run (D3/D9), so a follow-up is allowed —
     // the execution side has a queue for it, the Chat does not need one.
-    windows = windowOf(userRow(1, "hello there"), roundRow(2, "exec-9", "r2", "u1"));
+    // The service answered the human's row with a round: that is the fact the
+    // wait line ends on, projected onto the row itself (design 31 §6).
+    windows = windowOf(
+      {
+        ...userRow(1, "hello there"),
+        delivery: {
+          answered: true,
+          answered_by: { message_id: "round:exec-9|r2", kind: "execution_round" },
+          target: {
+            agent_instance_id: AGENT,
+            agent_session_id: "exec-9",
+            round_id: "r2",
+          },
+        },
+      },
+      roundRow(2, "exec-9", "r2", "u1"),
+    );
     inflightMap = { [SESSION]: { messageId: "u1", at: 1 } };
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     expect(screen.queryByRole("status")).toBeNull();
@@ -445,7 +481,13 @@ describe("AgentChatView event-log wiring", () => {
 
   it("a delivery receipt settles the claim too — it is the answer the human sees", () => {
     windows = windowOf(
-      userRow(1, "hello there"),
+      {
+        ...userRow(1, "hello there"),
+        delivery: {
+          answered: true,
+          answered_by: { message_id: "n2", kind: "system_notice" },
+        },
+      },
       notice(2, { notice_type: "delivery_failed", in_reply_to: "u1" }),
     );
     inflightMap = { [SESSION]: { messageId: "u1", at: 1 } };
@@ -472,14 +514,13 @@ describe("AgentChatView event-log wiring", () => {
   it("an addressing question asks in centered chrome and offers its answers (D7)", () => {
     windows = windowOf(
       userRow(1, "which one"),
-      notice(2, {
-        notice_type: "session_choice",
-        in_reply_to: "u1",
-        options: [
+      notice(
+        2,
+        { notice_type: "session_choice", in_reply_to: "u1" },
+        cardDelivery([
           { session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing", why: "same task" },
-        ],
-        allow_new_task: true,
-      }),
+        ]),
+      ),
     );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     const card = screen.getByTestId("chat-card-options");
@@ -496,12 +537,11 @@ describe("AgentChatView event-log wiring", () => {
   it("answering the card re-delivers the human's own words with the chosen address (D6)", async () => {
     windows = windowOf(
       { ...userRow(1, "which one"), attachment_ids: ["f1"] },
-      notice(2, {
-        notice_type: "session_choice",
-        in_reply_to: "u1",
-        options: [{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }],
-        allow_new_task: true,
-      }),
+      notice(
+        2,
+        { notice_type: "session_choice", in_reply_to: "u1" },
+        cardDelivery([{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }]),
+      ),
     );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     fireEvent.click(screen.getByRole("button", { name: "Fix the bug" }));
@@ -515,17 +555,21 @@ describe("AgentChatView event-log wiring", () => {
   });
 
   it("an answered card goes quiet rather than offering the same words twice", () => {
-    // The round IS the answer (D3): a reference row pointing at the message the
-    // card asked about. The buttons stay visible — the record of what was
-    // offered must not vanish — but they refuse a second delivery.
+    // The round IS the answer (D3), and the SERVICE says so: the card's
+    // projection carries `question.answered`. The surface no longer looks for a
+    // reference row pointing at the message the card asked about. The buttons
+    // stay visible — the record of what was offered must not vanish — but they
+    // refuse a second delivery.
     windows = windowOf(
       userRow(1, "which one"),
-      notice(2, {
-        notice_type: "session_choice",
-        in_reply_to: "u1",
-        options: [{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }],
-        allow_new_task: true,
-      }),
+      notice(
+        2,
+        { notice_type: "session_choice", in_reply_to: "u1" },
+        cardDelivery(
+          [{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }],
+          true,
+        ),
+      ),
       roundRow(3),
     );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);

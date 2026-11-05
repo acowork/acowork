@@ -251,11 +251,6 @@ interface RowProps {
    *  utterance it asks about, now addressed. Undefined for a read-only viewer
    *  (D10): deciding where someone else's words go is not a bystander's call. */
   onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void;
-  /** The card's question has already been answered — a round exists for the
-   *  message it asked about. The buttons stay on screen and go quiet: the
-   *  transcript must keep showing what was decided, and a second click would
-   *  deliver the same utterance again. */
-  cardAnswered?: boolean;
   /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
    *  picker's "去续投") to locate that run's block in the transcript. A
    *  navigation, not an address — it never changes what a message carries. */
@@ -329,7 +324,6 @@ const GroupRowView = memo(function GroupRowView({
   triggerFrom,
   onMentionContextMenu,
   onChooseCard,
-  cardAnswered,
   onLocateRef,
 }: RowProps) {
   const { t } = useTranslation();
@@ -376,7 +370,6 @@ const GroupRowView = memo(function GroupRowView({
         className="px-4"
         name={failedTarget}
         onChoose={choose}
-        answered={cardAnswered}
       />
     );
   }
@@ -966,18 +959,6 @@ export function GroupChatPanel() {
     return m;
   }, [win]);
   const hasMoreOlder = win ? win.firstPos > 0 : false;
-  // Which messages already have a round. An addressing card is answered exactly
-  // when one exists for the message it asked about (the re-delivery leaves that
-  // reference row, ADR-106 D3), so the transcript itself says the question is
-  // settled — there is no chat-side "answered" flag to keep in sync (D12).
-  const roundTriggers = useMemo(() => {
-    const s = new Set<string>();
-    for (const r of rows) {
-      if (r.kind === "execution_round" && r.meta?.in_reply_to)
-        s.add(r.meta.in_reply_to);
-    }
-    return s;
-  }, [rows]);
   const hasMoreNewer = win ? win.lastPos < win.total - 1 : false;
   // Auto-pagination: scrolling into the top band fires the next older page;
   // reaching the bottom band (only after a locate parks the window mid-history)
@@ -1676,10 +1657,6 @@ export function GroupChatPanel() {
                   readOnly={!canPost}
                   onMentionContextMenu={handleMentionContextMenu}
                   onChooseCard={canPost ? answerCard : undefined}
-                  cardAnswered={
-                    !!row?.meta?.in_reply_to &&
-                    roundTriggers.has(row.meta.in_reply_to)
-                  }
                   onLocateRef={handleLocateRef}
                   focusBlockSessionId={focusBlockSessionId ?? undefined}
                 />

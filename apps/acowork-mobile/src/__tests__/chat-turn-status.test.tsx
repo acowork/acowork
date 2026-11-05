@@ -43,6 +43,22 @@ function row(over: Partial<ChatMessageRow>): ChatMessageRow {
 }
 
 const HUMAN = row({})
+/** The same row after the service answered it: `delivery` is the projection the
+ *  wait line ends on (design 31 §6) — the surface no longer looks for a row
+ *  whose `in_reply_to` matches. */
+const ANSWERED_HUMAN = row({
+  delivery: {
+    answered: true,
+    answered_by: { message_id: 'round:exec|r1', kind: 'execution_round' },
+    target: { agent_instance_id: AGENT, agent_session_id: 'exec', round_id: 'r1' },
+  },
+})
+const RECEIPT_ANSWERED_HUMAN = row({
+  delivery: {
+    answered: true,
+    answered_by: { message_id: 'dlv-failed:m-1:ag', kind: 'system_notice' },
+  },
+})
 const ROUND = row({
   seq: 2,
   from: AGENT,
@@ -122,7 +138,7 @@ describe('AgentChatScreen in-flight turn claim', () => {
     // the execution side has a queue for it; the Chat does not need one. And the
     // screen hands the claim back rather than carrying an id the transcript has
     // already answered.
-    seed([HUMAN, ROUND], { [SESSION]: { messageId: 'm-1', at: 1 } })
+    seed([ANSWERED_HUMAN, ROUND], { [SESSION]: { messageId: 'm-1', at: 1 } })
     mount()
     expect(statusLine()).toBeNull()
     expect(composer().disabled).toBe(false)
@@ -130,7 +146,7 @@ describe('AgentChatScreen in-flight turn claim', () => {
   })
 
   it('a receipt settles it too — the human has an answer on screen', () => {
-    seed([HUMAN, RECEIPT], { [SESSION]: { messageId: 'm-1', at: 1 } })
+    seed([RECEIPT_ANSWERED_HUMAN, RECEIPT], { [SESSION]: { messageId: 'm-1', at: 1 } })
     mount()
     expect(statusLine()).toBeNull()
     expect(composer().disabled).toBe(false)

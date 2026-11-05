@@ -139,10 +139,6 @@ interface RowProps {
    *  utterance it asks about, now addressed. The parent hands it only to the
    *  person the card asked (D10) — `undefined` for anyone else. */
   onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void;
-  /** The card's question is already answered (a round exists for the message it
-   *  asked about), so its buttons go quiet instead of offering a second
-   *  delivery of the same words. */
-  cardAnswered?: boolean;
   /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
    *  picker's "去续投") to locate that run's block in the transcript. A
    *  navigation, not an address — it never changes what a message carries. */
@@ -166,7 +162,6 @@ const RowView = memo(function RowView({
   chatSessionId,
   showHeader,
   onChooseCard,
-  cardAnswered,
   onLocateRef,
 }: RowProps) {
   const { t } = useTranslation();
@@ -200,12 +195,7 @@ const RowView = memo(function RowView({
         ? (choice: CardChoice) => onChooseCard(row, choice)
         : undefined;
     return (
-      <ChatNoticeEventRow
-        row={row}
-        className="px-4"
-        onChoose={choose}
-        answered={cardAnswered}
-      />
+      <ChatNoticeEventRow row={row} className="px-4" onChoose={choose} />
     );
   }
 
@@ -605,17 +595,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     if (!inflightTurn || turnInflight(rows, inflightTurn)) return;
     settleTurn(sessionId, inflightTurn.messageId);
   }, [rows, inflightTurn, sessionId, settleTurn]);
-  // Which messages already have a round: that is what makes an addressing card
-  // answered (the re-delivery leaves the reference row, ADR-106 D3), so the
-  // transcript itself carries the answer — no chat-side flag to keep in sync.
-  const roundTriggers = useMemo(() => {
-    const s = new Set<string>();
-    for (const r of rows) {
-      if (r.kind === "execution_round" && r.meta?.in_reply_to)
-        s.add(r.meta.in_reply_to);
-    }
-    return s;
-  }, [rows]);
   // Virtualization adapters (render-perf L2): keys, estimates, per-item
   // attributes and the seq→item index shared with the group panel.
   const {
@@ -1155,11 +1134,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                   item.kind === "row" && mayAnswerCard(item.row, me)
                     ? answerCard
                     : undefined
-                }
-                cardAnswered={
-                  item.kind === "row" &&
-                  !!item.row.meta?.in_reply_to &&
-                  roundTriggers.has(item.row.meta.in_reply_to)
                 }
                 onLocateRef={handleLocateRef}
                 focusBlockSessionId={focusBlockSessionId ?? undefined}

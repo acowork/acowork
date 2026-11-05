@@ -158,17 +158,6 @@ export function AgentChatScreen() {
   // that `ItemView`'s memo needs.
   const layout = useMemo(() => buildTranscriptItems(rows, rowKeyOf), [rows])
   const items = layout.items
-  // Which messages already have a round: that is what makes an addressing card
-  // answered (the re-delivery leaves the reference row, ADR-106 D3), so the
-  // transcript itself carries the answer — no chat-side flag to keep in sync.
-  const roundTriggers = useMemo(() => {
-    const s = new Set<string>()
-    for (const r of rows) {
-      if (r.kind === 'execution_round' && r.meta?.in_reply_to) s.add(r.meta.in_reply_to)
-    }
-    return s
-  }, [rows])
-
   const { ref: scrollRef, stickNow, atBottom } = useStickToBottom([rows.length, sessionId], sessionId, () => {
     if (sessionId) void useChatSessionStore.getState().loadOlder(sessionId)
   })
@@ -372,11 +361,6 @@ export function AgentChatScreen() {
                       ? answerCard
                       : undefined
                   }
-                  cardAnswered={
-                    item.kind === 'row' &&
-                    !!item.row.meta?.in_reply_to &&
-                    roundTriggers.has(item.row.meta.in_reply_to)
-                  }
                   onOpenAttachment={setViewing}
                   onLocateRef={handleLocateRef}
                   focusBlockSessionId={focusBlockSessionId ?? undefined}
@@ -574,9 +558,6 @@ export interface RowProps {
    *  utterance it asks about, now addressed. Handed only to the person the card
    *  asked (D10) — `undefined` for anyone else. */
   onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void
-  /** The card's question already has a round, so its buttons go quiet instead of
-   *  offering a second delivery of the same words. */
-  cardAnswered?: boolean
   /** A tap on an uploaded file's capsule. The parent owns the viewer so one
    *  overlay serves every row in the list (and outlives re-renders of it). */
   onOpenAttachment: (attachment: ChatAttachment) => void
@@ -600,7 +581,6 @@ export function RowView(props: RowProps) {
     agentAvatar,
     agentName,
     onChooseCard,
-    cardAnswered,
     onOpenAttachment,
     onLocateRef,
   } = props
@@ -623,7 +603,7 @@ export function RowView(props: RowProps) {
       (noticeType === 'session_choice' || noticeType === 'confirm_continue') && onChooseCard
         ? (choice: CardChoice) => onChooseCard(row, choice)
         : undefined
-    return <ChatNoticeRow row={row} onChoose={choose} answered={cardAnswered} />
+    return <ChatNoticeRow row={row} onChoose={choose} />
   }
 
   if (row.kind === 'interaction_request') {

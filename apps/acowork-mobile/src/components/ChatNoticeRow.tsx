@@ -35,13 +35,9 @@ interface ChatNoticeRowProps {
    *  spoke may decide where their words go). The choice becomes a re-delivery of
    *  the human's own utterance (see `chatCardAnswer`, D6). */
   onChoose?: (choice: CardChoice) => void
-  /** The question already has a round: the buttons go quiet rather than
-   *  disappearing, because a card that vanished on click would erase the record
-   *  of what was decided — and a re-click would deliver the words twice. */
-  answered?: boolean
 }
 
-export function ChatNoticeRow({ row, onChoose, answered }: ChatNoticeRowProps) {
+export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
   const [sheet, setSheet] = useState(false)
   const noticeType = row.meta?.notice_type ?? ''
 
@@ -50,7 +46,13 @@ export function ChatNoticeRow({ row, onChoose, answered }: ChatNoticeRowProps) {
   if (noticeType === 'session_choice' || noticeType === 'confirm_continue') {
     const confirm = noticeType === 'confirm_continue'
     const question = confirm ? '继续这个任务吗？' : '你指的是哪一个任务？'
-    const options = row.meta?.options ?? []
+    // The service's projection (design 31 §6): the options the question offers
+    // and whether a round already answered it. `meta.options` is no longer read
+    // by any surface — a card whose payload never reached the client rendered as
+    // a sentence with no buttons, and nothing could tell that it was a bug.
+    const card = row.delivery?.question
+    const options = card?.options ?? []
+    const answered = card?.answered === true
     // Nothing to offer, or nobody allowed to offer it: the question is still a
     // fact about the transcript, so it stays as the plain line.
     if (!onChoose || options.length === 0) {
@@ -76,7 +78,7 @@ export function ChatNoticeRow({ row, onChoose, answered }: ChatNoticeRowProps) {
             question={question}
             confirm={confirm}
             options={options}
-            allowNewTask={row.meta?.allow_new_task === true}
+            allowNewTask={card?.allow_new_task === true}
             onClose={() => setSheet(false)}
             onChoose={(choice) => {
               setSheet(false)

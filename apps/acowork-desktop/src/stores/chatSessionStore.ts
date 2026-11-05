@@ -68,6 +68,58 @@ export interface ExecAttachmentLabel {
 }
 
 /** One durable chat row. Mirrors `chat_sessions_api::MessageRow`. */
+/**
+ * What happened to one row, as the service computed it (design 31 §6).
+ *
+ * The Chat service projects this onto every row it serves, so no surface has to
+ * work it out. A surface that scans the transcript for a row whose
+ * `meta.in_reply_to` matches an id is deriving business state — that scan is
+ * what kept a send claiming "working on it" for 300 s after a card landed with
+ * an empty coordinate, and it existed in four places with three different
+ * rules. Render this verbatim instead.
+ */
+export interface ChatAnswerRef {
+  message_id: string;
+  kind: string;
+}
+
+/** Where a turn went: coordinates only. The round's content is read from the
+ *  execution session, never copied here (design 31 §3.2 R3). */
+export interface ChatRoundTarget {
+  agent_instance_id: string;
+  agent_session_id: string;
+  round_id: string;
+  /** `true` = this turn opened the session, `false` = it carried on, absent =
+   *  the delivery never said (ADR-106 D3 forbids faking it). */
+  opened_new?: boolean;
+}
+
+/** An addressing card's own state: the answers it offers and whether the human
+ *  has already taken one. */
+export interface ChatQuestionState {
+  /** A round now answers the message this card asked about — the re-delivery
+   *  leaves the reference row, so the answer is the round's existence. */
+  answered: boolean;
+  options: Array<{
+    session_id: string;
+    label?: string;
+    status?: string;
+    origin?: string;
+    why?: string;
+  }>;
+  allow_new_task?: boolean;
+}
+
+export interface ChatDeliveryView {
+  /** True when a row answers this one — the fact the surfaces used to compute
+   *  by scanning. Absent delivery means "not projected yet" (an optimistic row
+   *  this device inserted before the service answered), never "unanswered". */
+  answered: boolean;
+  answered_by?: ChatAnswerRef;
+  target?: ChatRoundTarget;
+  question?: ChatQuestionState;
+}
+
 export interface ChatMessageRow {
   seq: number;
   ts: number;
@@ -145,6 +197,10 @@ export interface ChatMessageRow {
     }>;
   };
   attachment_ids?: string[];
+  /** The service's projection for this row (design 31 §6). Present on every row
+   *  served by the read endpoint; absent on a row this device inserted
+   *  optimistically before the write's response came back. */
+  delivery?: ChatDeliveryView;
   /** Files attached to this row. `thumb` is the upload-time sidecar token
    *  (`"jpg"` / `"txt"`); absent when the service produced no preview, so the
    *  row falls back to the plain filename capsule. */

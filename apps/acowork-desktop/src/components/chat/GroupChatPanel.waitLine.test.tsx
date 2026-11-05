@@ -193,8 +193,22 @@ describe("GroupChatPanel in-flight turn claim", () => {
   });
 
   it("the round's reference row settles the claim: line gone, composer live", () => {
+    // The service answered the human's row with a round; that fact is projected
+    // onto the row as `delivery.answered` (design 31 §6), which is what the
+    // wait line ends on.
     tail = [
-      row(1, { body: "fix the pagination" }),
+      row(1, {
+        body: "fix the pagination",
+        delivery: {
+          answered: true,
+          answered_by: { message_id: "round:exec-1|r1", kind: "execution_round" },
+          target: {
+            agent_instance_id: AGENT_A,
+            agent_session_id: "exec-1",
+            round_id: "r1",
+          },
+        },
+      }),
       row(2, {
         from: AGENT_A,
         kind: "execution_round",
@@ -213,7 +227,13 @@ describe("GroupChatPanel in-flight turn claim", () => {
 
   it("a delivery receipt settles it too — the human has an answer on screen", () => {
     tail = [
-      row(1, { body: "fix the pagination" }),
+      row(1, {
+        body: "fix the pagination",
+        delivery: {
+          answered: true,
+          answered_by: { message_id: "dlv-failed:m1:agent-a", kind: "system_notice" },
+        },
+      }),
       row(2, {
         from: AGENT_A,
         kind: "system_notice",

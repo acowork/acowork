@@ -9,8 +9,10 @@
  *   server-side English sentence with an error code in it (ADR-105).
  * - `budget_exhausted` / `truncated` / `unavailable`: a limit the round hit.
  * - `session_choice` / `confirm_continue`: an addressing question (D6 levels 3
- *   and 5). Empty-bodied with `meta.options`; the surfaces render the options as
- *   buttons (see the picker), which is why they are NOT silent here.
+ *   and 5). Empty-bodied: its options and its answered-ness arrive as the
+ *   service's projection (`row.delivery.question`, design 31 §6), and the
+ *   surfaces render that verbatim instead of reading `meta` and re-deriving
+ *   whether the question is still open.
  *
  * Everything the runtime used to write as progress (dispatch / round-open
  * milestones, the router-fallback receipt, the card-resolution receipt) is gone
@@ -40,11 +42,6 @@ interface ChatNoticeEventRowProps {
    *  the answer, not decoration. The choice is turned into a re-delivery of the
    *  human's own utterance by `chatCardAnswer` (D6). */
   onChoose?: (choice: CardChoice) => void;
-  /** The question was already answered: a round exists for the message the card
-   *  asked about. The buttons stay visible and go quiet — a card that vanished
-   *  on click would erase the record of what was decided, and a re-click would
-   *  deliver the same utterance a second time. */
-  answered?: boolean;
 }
 
 export function ChatNoticeEventRow({
@@ -52,7 +49,6 @@ export function ChatNoticeEventRow({
   className,
   name,
   onChoose,
-  answered,
 }: ChatNoticeEventRowProps) {
   const { t } = useTranslation();
   const noticeType = row.meta?.notice_type ?? "";
@@ -68,7 +64,13 @@ export function ChatNoticeEventRow({
         ? "chatView.block.chooseSession"
         : "chatView.block.confirmSession",
     );
-    const options = row.meta?.options ?? [];
+    // The service's projection: the options the question offers and whether a
+    // round already answered it. A card that reached the transcript without
+    // options has none to project — that is an unanswerable line, which is what
+    // the plain sentence below reports.
+    const card = row.delivery?.question;
+    const options = card?.options ?? [];
+    const answered = card?.answered === true;
     // Nothing to offer, or nobody allowed to offer it: the question is still a
     // fact about the transcript, so it stays as the plain line.
     if (!onChoose || options.length === 0) {
@@ -104,7 +106,7 @@ export function ChatNoticeEventRow({
           ))}
           {/* D6's cheap escape: a question must be answerable in one click, and
               "new task" sits beside every suggestion rather than below a fold. */}
-          {row.meta?.allow_new_task && (
+          {card?.allow_new_task && (
             <button
               type="button"
               disabled={answered}
