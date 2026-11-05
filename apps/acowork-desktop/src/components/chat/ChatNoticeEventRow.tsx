@@ -23,7 +23,7 @@
  */
 
 import { ChevronRight, CornerDownRight, CornerUpRight, ListTree, Plus } from "lucide-react";
-import { ChatEventText } from "./ChatEventText";
+import { ChatEventText, type EventTone } from "./ChatEventText";
 import { useTranslation } from "../../i18n/useTranslation";
 import { RETIRED_NOTICES } from "../../lib/retiredNotices";
 import { cn } from "../../lib/utils";
@@ -221,10 +221,10 @@ export function ChatNoticeEventRow({
   // sent", the column says whose message it is. Both only when the surface could
   // place the row — an unplaceable receipt stays a centered channel fact rather
   // than claiming an owner it cannot name.
-  const note = (text: string, danger = false) => (
+  const note = (text: string, tone?: EventTone) => (
     <ChatEventText
       text={text}
-      danger={danger}
+      tone={tone}
       align={anchor === "self" ? "end" : anchor === "peer" ? "start" : "center"}
       leading={
         anchor ? <CornerUpRight className="h-3 w-3 shrink-0 opacity-70" /> : undefined
@@ -234,12 +234,13 @@ export function ChatNoticeEventRow({
   );
 
   if (noticeType === "delivery_failed") {
-    // A send this Chat owed and could not make: a failure, so it is stated as
-    // one — quiet gray made the one receipt that exists to be noticed the
-    // quietest thing on screen.
+    // A send this Chat owed and could not make. `warn`, not `danger`: the
+    // receipt is retry-able and nothing in the run broke. Quiet gray made the
+    // one receipt that exists to be noticed the quietest thing on screen; red
+    // made it the loudest, and left no headroom for a run that really failed.
     return note(
       name ? t("chatView.deliveryFailed", { name }) : t("chatView.deliveryFailedNoTarget"),
-      true,
+      "warn",
     );
   }
 

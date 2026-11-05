@@ -18,7 +18,7 @@
  * `ChatEventText` docblock is the rule, this file is one caller of it.
  */
 
-import { ChatEventText } from "./ChatEventText";
+import { ChatEventText, type EventTone } from "./ChatEventText";
 
 interface ChatTurnStatusLineProps {
   /** Already-localized status text. */
@@ -27,9 +27,9 @@ interface ChatTurnStatusLineProps {
    *  as the execution view's "running a tool" line, so "the agent is busy"
    *  reads the same everywhere. A settled outcome is quiet. */
   live?: boolean;
-  /** `failed` / `timeout` paint as an error. `aborted` must NOT: a stop is a
-   *  user action, not a fault of the run. */
-  danger?: boolean;
+  /** `failed` / `timeout` are `danger`. `aborted` must NOT be: a stop is a user
+   *  action, not a fault of the run. */
+  tone?: EventTone;
   /** Surface column gutter so the line lines up with the stream. */
   className?: string;
 }
@@ -37,15 +37,10 @@ interface ChatTurnStatusLineProps {
 export function ChatTurnStatusLine({
   text,
   live,
-  danger,
+  tone,
   className,
 }: ChatTurnStatusLineProps) {
   return (
-    <ChatEventText
-      text={text}
-      live={live}
-      danger={danger}
-      className={className}
-    />
+    <ChatEventText text={text} live={live} tone={tone} className={className} />
   );
 }

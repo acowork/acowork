@@ -350,7 +350,6 @@ const GroupRowView = memo(function GroupRowView({
       <ChatTurnStatusLine
         className="px-4"
         text={t("chatView.block.notFound")}
-        danger={false}
       />
     );
   }

@@ -185,7 +185,6 @@ const RowView = memo(function RowView({
       <ChatTurnStatusLine
         className="px-4"
         text={t("chatView.block.notFound")}
-        danger={false}
       />
     );
   }
