@@ -1,10 +1,11 @@
 # Session 双层数据模型设计（持久化终态 + 运行时超集）
 
-> 版本：v1.4 | 更新日期：2026-11-08
+> 版本：v1.5 | 更新日期：2026-11-09
 >
 > 状态：模型基线（评审中）。本文只定"事实归哪一层、由谁拥有、谁可以推导"，不定 API 与实现形状。
 >
 > 修订记录
+> - v1.5（P4 落地）：**卡片的"回答"也归服务端**。`session_choice` / `confirm_continue` 的回答是"人类自己那句话、换了个地址重投"，以前两个前端各写一份 `buildCardAnswer`，靠自己的已加载窗口找原行——窗口外的卡片因此成了**活按钮、点了没反应**（`if (!answer) return` 静默返回）。现在 `acowork-user` 新增 `chat_card::answer`（按坐标取原行、校验卡未答、校验操作者就是被问的那个人），`GET /api/chat-sessions/{id}/messages/{message_id}/answer` 下发"这句话 + 附件 + 已钉住的 `refs` + 原行 id"，前端只把点击（投给哪个 session / 开新活）折进去。同时修掉上一轮遗留的两处形状缺陷：`delivery.target` 改 `targets`（群 `@` 扇出一个目标一条 round，`find` 只取第一条把"投给谁"讲漏了）、sidecar 追加路径补写 `#v2` 头（首次写入不带头的文件每次重启都被判 v1 而全量重扫）。
 > - v1.4（P3 落地）：红线进 CI——`dev/ci.sh run_chat_projection_redline` 查四件事：写入口（注册表兜底 + 唯一写入口内的契约校验）没被拆掉、公共页仍走投影而 Agent 侧页仍是裸行（两者方向都查，避免有人"统一"成一种）、surface 不得对 `in_reply_to` 做聚合推导（`some/filter/every/new Set/includes`；按坐标 `.find` 取一条已知行仍允许——§6 末段留给展示层的正是这个）、写者发出的 `notice_type` 必须已在 `chat_kinds` 注册。落地时发现词汇表缺一类：`budget_exhausted` / `truncated` / `unavailable` 报告的是**通道极限**，所指的请求从未成为行，因此不可能有坐标——新增 `LIMIT_NOTICES` 把它显式化（`delivery_failed` 不在此列，它欠的消息存在）。同时用 `chat_notice_write_classes_are_disjoint` 钉住"写契约"轴上的互斥，并记录 `RETIRED_NOTICES` 是另一条正交的轴（管渲染与结算）。
 > - v1.3（P2 落地）：唯一推导点已实现——`acowork-user` 新增 `chat_view` 读模型，公共 `GET /api/chat-sessions/{id}/messages` 下发的每一行都带 `delivery`（`answered` / `answered_by` / `target` / `question`），两份前端的全部状态推导被删除。实现中确认三处边界，写进 §6.1：①推导必须能"只读被问的那几行"，因此存储层新增 `in_reply_to` 反向边（sidecar 升 v2，可按字节跨度取答复行，不做全量扫描）；②`question.answered` 的判据是"该消息出现了 round 引用行"，卡片自身不是答案（否则卡片一落盘就自我宣告已答）；③面向 Agent 的 `chat_history_read` 仍返回裸行——它把行喂给模型、按行计字节预算，派生状态在那里既无人渲染也挤占预算。另修一处升级缺陷（由测试逼出）：旧 v1 sidecar 被丢弃后，对账走的是"增量追加"分支，于是新写的行没有格式标记，进程每次启动都得全量重扫；现在"侧车不可信"会强制走"全量重扫 + 重写文件"。
 > - v1.2（P1 落地）：写入口契约已实现——`IntentMeta` 成为 payload 注册表（`options` / `allow_new_task` / `refs` / `error_code`），未注册键用 `serde(flatten)` 兜住（读侧原样保留、不再二次丢弃），写侧在唯一写入口 `check_write_contract` 拒绝并返回 422；回复类行的线程坐标（`agent_message` / `interaction_request` / 线程型 notice）由写入口强制，卡片另需 `options` 与 `allow_new_task`。落地时按事实修正一处：`execution_round` **不是**回复类行——它是"回答行或起源行"，从 PM 任务 / 群 `@` 扇出 / 执行界面对话发起的 turn 在 chat 里没有上文，空坐标即该事实，强行要求坐标会把 block 挂到幻影消息下。实测另发现两个同类字段丢失：`refs`（ADR-106 修订的四元组，写入方一直在写，存储一直在丢，chips 因此不显示）与 `error_code`（`delivery_failed` 回执的原因码），已一并注册。
@@ -120,7 +121,7 @@
 |---|---|---|
 | `delivery.answered` | 有一行回答了本行 | `user_message`（显式 `false`：等待是状态，不是缺字段） |
 | `delivery.answered_by` | 回答本行的那一行（日志序第一个） | 已答的 `user_message` |
-| `delivery.target` | 本 turn 落到哪个执行会话（`agent_instance_id` / `agent_session_id` / `round_id` / `opened_new`）——只有坐标，没有 round 内容 | 已有 round 的 `user_message` |
+| `delivery.targets` | 本 turn 落到的每个执行会话（`agent_instance_id` / `agent_session_id` / `round_id` / `opened_new`）——只有坐标，没有 round 内容。是列表：群 `@` 扇出一个目标一条 round | 已有 round 的 `user_message` |
 | `delivery.question.answered` | 该卡片所问的消息现在有 round 了 → 问题已答 | 卡片（`session_choice` / `confirm_continue`） |
 | `delivery.question.options` / `allow_new_task` | 卡片自己的答案与出口（payload 原样透出） | 卡片 |
 
@@ -141,6 +142,7 @@
 | P1 写入契约 **（已落地）** | 每条回答/回执行线程到被答复行（问句行亦同）；payload 按注册表原样持久化，未注册键报错。列出并改完 §5.2 的 6 个调用点 | 任何一条回复类行都无法在"没有坐标"的情况下写成功；payload 字段不再丢失 |
 | P2 唯一推导点 **（已落地）** | 投影下发投递终态与开着的问句；前端删除全部推导 | 前端零推导；重启后仍能答"答没答、投给哪个 session" |
 | P3 红线 **（已落地）** | 禁推导 / 未注册键与未注册通知类型进 CI（照既有红线脚本的做法） | 新出现的跨行匹配、未注册通知类型、被拆掉的写入口被 CI 拦下（id 前缀解析改由类型系统挡，见 §7.3 末段） |
+| P4 卡片回答 **（已落地）** | 卡片的"回答"由服务端解析（原行内容 + 附件 + 已钉住的 refs），前端只折进点击 | 两个前端的 `buildCardAnswer` 与其窗口查找被删除；窗口外的卡片也能答 |
 
 ### 7.1 P1 的落地位置
 
@@ -176,6 +178,18 @@
 
 未做：**id 前缀解析**没有单独的红线。P2 删掉的那批（`kind` 从 `message_id` 前缀还原）已无残留，而"禁止某个字符串出现在任何地方"这类规则的误报率远高于收益；若要防它复发，正确做法是把 `ChatRowView` 的类型收窄到无前缀可解析（`kind` 必填），让类型系统而不是 grep 来拒绝。
 
+### 7.4 P4 的落地位置
+
+| 约束 | 落地 | 测试 |
+|---|---|---|
+| 回答的内容归服务端 | `chat_card::answer`（按 `in_reply_to` 取原行 → 校验卡类、未答、操作者是被问的人 → 组装 `text` / `attachment_ids` / `refs`）；`GET /api/chat-sessions/{id}/messages/{message_id}/answer` | `chat_card` 单测（原样回传、已答拒绝、旁观者拒绝、原行不存在、附件携带）、`a_card_is_answered_from_the_log_not_the_loaded_window`（HTTP：200 / 404 隐藏 / 422 非卡 / 409 已答） |
+| 地址仍是点击 | 前端 `answerWithChoice(facts, choice)` 只把"投给哪个 session / 开新活"折进去；`directCardAddress` / `groupCardAddress` 不变 | `chatCardAnswer.test`（desktop / mobile）、`AgentChatView.test`（D6 重投断言） |
+| 状态码即语义 | 409 = 卡片已被 round 结算（刷新即可，不报错）；404 / 422 = 这张卡再也不可能答（要说给人类听） | `chatSessionStore.cardAnswer.test`（desktop） |
+| 群扇出多目标 | `DeliveryView.targets: Vec<RoundTarget>`（一个目标一条 round，各占一个 slot） | `chat_sessions_api` 端到端断言 + 前端类型 |
+| 侧车出生即带版本 | `sidecar_append` 首次写入先写 `#v2` 头；`load_sidecar` 容忍撕裂的末行 | `a_sidecar_created_by_an_append_carries_the_marker` |
+
+**仍然留给展示层的那一条**：按坐标取"一条已知行"仍允许（如 `chatTranscriptGroups` 用 `in_reply_to` 定位 trigger 行来分组、乐观标题用原行 body 播种）——它们只读一行、不判状态，且都有权威来源兜底。**状态**（答没答、投给谁、卡片开不开）一律只从 `delivery` 读。
+
 ## 8. 非目标
 
 - 不新增持久实体、侧车或数据库：`turn` / `question` 是派生视图（§4）。
@@ -189,5 +203,5 @@
 1. payload 注册表的边界：注册的键集合、拒绝语义（422 还是 warn+拒绝写入）、以及是否区分"存储必需"与"仅展示"两类键。
 2. chat 卡片是否需要"过期"语义（现状：无过期，卡片永久可答）。若要，则它成为**第一个不可推导的终态**，需要一个结算记录（写入新的事件行，而不是侧车）。
 3. 投递失败时"人类预期地址"未留痕（因为地址由 `round_ref` 承载，失败则无该行）。是否需要在回执行补一个"预期地址"字段，留待产品确认。
-4. 投影里 `delivery` 是否要带"投给谁但还没开 round"（当前只有 round 存在后才有 `target`）：这关系到"投递成功但执行未起"的可视化，产品语义未定，暂由 `answered=false` + 等待态覆盖。
+4. 投影里 `delivery` 是否要带"投给谁但还没开 round"（当前只有 round 存在后才有 `targets`）：这关系到"投递成功但执行未起"的可视化，产品语义未定，暂由 `answered=false` + 等待态覆盖。
 5. `system_notice` 的归位：建议收敛为"无状态提示"（回执、限额），有状态的问询在展示层单列一类；是否合并 kind 待实现期定。
