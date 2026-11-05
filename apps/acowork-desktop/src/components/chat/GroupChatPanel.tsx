@@ -70,6 +70,11 @@ import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import {
+  indexByMessageId,
+  noticeAnchorOf,
+  type NoticeAnchor,
+} from "../../lib/chatNoticeAnchor";
+import {
   answerWithChoice,
   groupCardAddress,
   mayAnswerCard,
@@ -248,6 +253,10 @@ interface RowProps {
   /** Right-click on a participant's avatar / name → the panel's "@name"
    *  menu. Undefined when the panel has no mention target for that row. */
   onMentionContextMenu?: (e: ReactMouseEvent, id: string) => void;
+  /** Column a channel receipt belongs in (a failed send is about ONE
+   *  participant's message). Absent for non-notices and for a receipt whose
+   *  subject is outside the loaded window. */
+  noticeAnchor?: NoticeAnchor;
   /** Answer an addressing card (ADR-106 D6 levels 3 and 5) by re-delivering the
    *  utterance it asks about, now addressed. Undefined for a read-only viewer
    *  (D10): deciding where someone else's words go is not a bystander's call. */
@@ -326,6 +335,7 @@ const GroupRowView = memo(function GroupRowView({
   onMentionContextMenu,
   onChooseCard,
   onLocateRef,
+  noticeAnchor,
 }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
@@ -370,6 +380,7 @@ const GroupRowView = memo(function GroupRowView({
         row={row}
         className="px-4"
         name={failedTarget}
+        anchor={noticeAnchor}
         onChoose={choose}
       />
     );
@@ -952,6 +963,10 @@ export function GroupChatPanel() {
   );
   // message_id → sender index, so a reply with an empty `to` can name the
   // counterparty from the message it answers (`in_reply_to`'s `from`).
+  // message_id → row, for the receipts that name the message they are about:
+  // a channel failure is placed in that message's column instead of floating
+  // center (design 31 §6 leaves this join to the presentation layer).
+  const rowByMessageId = useMemo(() => indexByMessageId(rows), [rows]);
   const fromById = useMemo(() => {
     const m = new Map<string, string>();
     for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
@@ -1666,6 +1681,11 @@ export function GroupChatPanel() {
                   triggerFrom={
                     row?.meta?.in_reply_to
                       ? fromById.get(row.meta.in_reply_to)
+                      : undefined
+                  }
+                  noticeAnchor={
+                    row?.kind === "system_notice"
+                      ? noticeAnchorOf(row, rowByMessageId, me)
                       : undefined
                   }
                   readOnly={!canPost}

@@ -197,6 +197,33 @@ describe("ChatNoticeEventRow", () => {
     expect(container.textContent).toBe("chatView.deliveryFailed:Architect");
   });
 
+  it("sits in the sender's own column when the receipt can name its subject", () => {
+    // A failed send is about ONE message — the reader's. Centering it made it
+    // read as a fact about the conversation, attached to nothing.
+    const { container } = render(
+      <ChatNoticeEventRow row={noticeRow("delivery_failed")} anchor="self" />,
+    );
+    const line = container.querySelector("[data-event-text]");
+    expect(line?.getAttribute("data-align")).toBe("end");
+  });
+
+  it("sits in the peer's column when someone else's message failed", () => {
+    const { container } = render(
+      <ChatNoticeEventRow row={noticeRow("delivery_failed")} anchor="peer" />,
+    );
+    expect(
+      container.querySelector("[data-event-text]")?.getAttribute("data-align"),
+    ).toBe("start");
+  });
+
+  it("stays centered when the subject is not in the window", () => {
+    // A fact with no visible subject must not claim an owner it cannot name.
+    const { container } = render(<ChatNoticeEventRow row={noticeRow("delivery_failed")} />);
+    expect(
+      container.querySelector("[data-event-text]")?.getAttribute("data-align"),
+    ).toBe("center");
+  });
+
   it("falls back to the unnamed wording when the surface cannot resolve the target", () => {
     const { container } = render(<ChatNoticeEventRow row={noticeRow("delivery_failed")} />);
     expect(container.textContent).toBe("chatView.deliveryFailedNoTarget");

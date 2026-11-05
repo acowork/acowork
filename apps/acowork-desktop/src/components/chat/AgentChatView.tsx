@@ -100,6 +100,7 @@ import {
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { turnInflight } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
+import { indexByMessageId, noticeAnchorOf, type NoticeAnchor } from "../../lib/chatNoticeAnchor";
 import {
   fetchCardAnswer,
   useChatSessionStore,
@@ -147,6 +148,10 @@ interface RowProps {
   /** Which execution session the picker just asked to continue: the matching
    *  block reveals + focuses its in-place reply box. */
   focusBlockSessionId?: string;
+  /** The column a channel receipt belongs in (a failed send is about MY
+   *  message). Absent for every row that is not a notice, and for a notice whose
+   *  subject is not in the loaded window. */
+  noticeAnchor?: NoticeAnchor;
 }
 
 /**
@@ -164,6 +169,7 @@ const RowView = memo(function RowView({
   showHeader,
   onChooseCard,
   onLocateRef,
+  noticeAnchor,
 }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
@@ -196,7 +202,12 @@ const RowView = memo(function RowView({
         ? (choice: CardChoice) => onChooseCard(row, choice)
         : undefined;
     return (
-      <ChatNoticeEventRow row={row} className="px-4" onChoose={choose} />
+      <ChatNoticeEventRow
+        row={row}
+        className="px-4"
+        anchor={noticeAnchor}
+        onChoose={choose}
+      />
     );
   }
 
@@ -607,6 +618,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     virtualAttrs,
     seqsByItem,
   } = useTranscriptLayout(rows, sessionId);
+  // Channel receipts point back at the message they are about: one index per
+  // window, so each notice resolves its subject by coordinate instead of
+  // scanning (design 31 §6's presentation join).
+  const rowByMessageId = useMemo(() => indexByMessageId(rows), [rows]);
   const isBubble = (item: TranscriptItem | undefined) =>
     item?.kind === "row" && item.row.kind === "agent_message";
   // Optimistic exec-session title seed (ADR-099). A Router-created execute
@@ -1147,6 +1162,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 onChooseCard={
                   item.kind === "row" && mayAnswerCard(item.row, me)
                     ? answerCard
+                    : undefined
+                }
+                noticeAnchor={
+                  item.kind === "row" && item.row.kind === "system_notice"
+                    ? noticeAnchorOf(item.row, rowByMessageId, me)
                     : undefined
                 }
                 onLocateRef={handleLocateRef}

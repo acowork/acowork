@@ -7,13 +7,12 @@
  *
  * ## The grammar
  *
- * The line belongs to **no single utterance**: it speaks for the transcript, so
- * it is **centered** and **icon-less**. Anything a participant said wears a
- * bubble; anything about one round of work lives inside that round's block
- * (ADR-106 D3/D8). The row-anchored note this component used to paint — "a card
- * closed with nobody answering it" — retired with the chat-side card row, and
- * with it the second tier: there is no longer a row-shaped fact to attach a
- * glyph to.
+ * A line with **no subject** speaks for the transcript, so it is centered and
+ * icon-less. A line that names a row — a failed send, a delivery the channel
+ * refused — is NOT ownerless: it belongs in the column of the message it is
+ * about, pointing back at it (see `align`). Centering those made a fact about
+ * one message read as a fact about the conversation, floating with nothing to
+ * attach it to.
  *
  * ## Why it is one component
  *
@@ -40,6 +39,15 @@ interface ChatEventTextProps {
   danger?: boolean;
   /** Trailing affordance — the retry on a block that could not be read. */
   trailing?: React.ReactNode;
+  /** Leading glyph — the "this refers back to that message" arrow a row-anchored
+   *  note wears. */
+  leading?: React.ReactNode;
+  /**
+   * Which column the line sits in. `center` (default) is for a fact about the
+   * transcript; `end` / `start` are for a fact about ONE message, placed in the
+   * sender's own column so ownership is visible, not inferred.
+   */
+  align?: "center" | "start" | "end";
   /** Surface column gutter so the line lines up with the stream. */
   className?: string;
 }
@@ -49,6 +57,8 @@ export function ChatEventText({
   live,
   danger,
   trailing,
+  leading,
+  align = "center",
   className,
 }: ChatEventTextProps) {
   // `data-event-text` is the axis made greppable: the regression tests assert
@@ -57,9 +67,17 @@ export function ChatEventText({
   return (
     <div
       data-event-text="turn"
-      className={cn("flex items-center justify-center gap-1.5 py-1", className)}
+      data-align={align}
+      className={cn(
+        "flex items-center gap-1.5 py-1",
+        align === "center" && "justify-center",
+        align === "start" && "justify-start",
+        align === "end" && "justify-end text-right",
+        className,
+      )}
       role={live ? "status" : undefined}
     >
+      {leading}
       <span
         className={cn(
           "text-10 text-text-tertiary",

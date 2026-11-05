@@ -22,7 +22,7 @@
  * row at all (D8) — its answer is an execution-side fact shown inside the block.
  */
 
-import { ChevronRight, CornerDownRight, ListTree, Plus } from "lucide-react";
+import { ChevronRight, CornerDownRight, CornerUpRight, ListTree, Plus } from "lucide-react";
 import { ChatEventText } from "./ChatEventText";
 import { useTranslation } from "../../i18n/useTranslation";
 import { RETIRED_NOTICES } from "../../lib/retiredNotices";
@@ -50,6 +50,12 @@ interface ChatNoticeEventRowProps {
   row: ChatMessageRow;
   /** Surface column gutter so the line lines up with the stream. */
   className?: string;
+  /** Which column this row belongs in: `self` / `peer` when the row names a
+   *  message the surface can place (a failed send names the human's row), absent
+   *  when it names nothing this surface can resolve. A receipt about ONE message
+   *  must sit in that message's column — centering it made it read as a fact
+   *  about the whole conversation, attached to nothing. */
+  anchor?: "self" | "peer";
   /** Display name of the party this row is about, when the surface knows it
    *  (the group panels resolve it from the roster). Only the `delivery_failed`
    *  receipt uses it: "the message never reached <name>" is actionable, while a
@@ -66,6 +72,7 @@ interface ChatNoticeEventRowProps {
 export function ChatNoticeEventRow({
   row,
   className,
+  anchor,
   name,
   onChoose,
 }: ChatNoticeEventRowProps) {
@@ -210,16 +217,33 @@ export function ChatNoticeEventRow({
   // server-side English plus an internal error code), so the surfaces own the
   // wording. It MUST paint — this receipt exists precisely because the failure
   // used to be invisible.
+  // A row-anchored note: the arrow says "this refers back to what was just
+  // sent", the column says whose message it is. Both only when the surface could
+  // place the row — an unplaceable receipt stays a centered channel fact rather
+  // than claiming an owner it cannot name.
+  const note = (text: string, danger = false) => (
+    <ChatEventText
+      text={text}
+      danger={danger}
+      align={anchor === "self" ? "end" : anchor === "peer" ? "start" : "center"}
+      leading={
+        anchor ? <CornerUpRight className="h-3 w-3 shrink-0 opacity-70" /> : undefined
+      }
+      className={className}
+    />
+  );
+
   if (noticeType === "delivery_failed") {
-    return (
-      <ChatEventText
-        text={name ? t("chatView.deliveryFailed", { name }) : t("chatView.deliveryFailedNoTarget")}
-        className={className}
-      />
+    // A send this Chat owed and could not make: a failure, so it is stated as
+    // one — quiet gray made the one receipt that exists to be noticed the
+    // quietest thing on screen.
+    return note(
+      name ? t("chatView.deliveryFailed", { name }) : t("chatView.deliveryFailedNoTarget"),
+      true,
     );
   }
 
   const text = row.body || row.meta?.status || "";
   if (!text) return null;
-  return <ChatEventText text={text} className={className} />;
+  return note(text);
 }
