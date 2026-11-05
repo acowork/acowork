@@ -25,11 +25,17 @@
 import { useState } from 'react'
 import { Sheet } from './ui'
 import type { CardChoice } from '../lib/chatCardAnswer'
+import type { NoticeAnchor } from '../lib/chatNoticeAnchor'
 import type { ChatCandidateOption, ChatMessageRow } from '../lib/types'
 import { RETIRED_NOTICES } from '../lib/retiredNotices'
 
 interface ChatNoticeRowProps {
   row: ChatMessageRow
+  /** Which column this row belongs in: `self` / `peer` when the row names a
+   *  message the surface can place, absent when it names nothing. A receipt
+   *  about ONE message must sit in that message's column — centering it made it
+   *  read as a fact about the whole conversation. */
+  anchor?: NoticeAnchor
   /** Answering an addressing card. Absent means the row is not answerable here:
    *  a read-only viewer never gets the action (ADR-106 D10 — only the person who
    *  spoke may decide where their words go). The choice becomes a re-delivery of
@@ -37,7 +43,7 @@ interface ChatNoticeRowProps {
   onChoose?: (choice: CardChoice) => void
 }
 
-export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
+export function ChatNoticeRow({ row, anchor, onChoose }: ChatNoticeRowProps) {
   const [sheet, setSheet] = useState(false)
   const noticeType = row.meta?.notice_type ?? ''
 
@@ -107,8 +113,11 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
   }
 
   if (noticeType === 'delivery_failed') {
+    // A send this Chat owed and could not make. It sits in the column of the
+    // message it is about (a failed send is always the reader's own), because a
+    // centered pill about one bubble is a fact with no subject attached.
     return (
-      <div className="chat-notice">
+      <div className={noticeClass(anchor)}>
         <span className="chat-notice-pill">消息未能送达，请重试</span>
       </div>
     )
@@ -121,6 +130,14 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
       <span className="chat-notice-pill">{text}</span>
     </div>
   )
+}
+
+/** The column: centered for a fact about the transcript, the sender's edge for
+ *  a fact about one message. */
+function noticeClass(anchor?: NoticeAnchor): string {
+  if (anchor === 'self') return 'chat-notice chat-notice-end'
+  if (anchor === 'peer') return 'chat-notice chat-notice-start'
+  return 'chat-notice'
 }
 
 /** The sheet's one option row: a candidate session, or D6's always-offered

@@ -2374,6 +2374,17 @@
   color: var(--color-text-dim, #888);
   font-size: 12px;
 }
+/* A receipt about ONE message sits in that message's column (a failed send is
+   always the reader's own), so ownership is visible instead of inferred. A
+   receipt with no resolvable subject keeps the centered default. */
+.chat-notice-end {
+  justify-content: flex-end;
+  padding-right: 4px;
+}
+.chat-notice-start {
+  justify-content: flex-start;
+  padding-left: 4px;
+}
 
 /* A turn's STATE line (ADR-100 revision): centered and chrome-free, because a
    bubble belongs to something a participant said — "interrupted" is the
