@@ -62,6 +62,14 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
         </div>
       )
     }
+    // `confirm_continue` proposes exactly ONE session, so the collapsed row has
+    // to name it: "继续这个任务吗？" over an anonymous "去选择" asked the human to
+    // continue a task they could not identify without opening the sheet. The
+    // multi-candidate question keeps its name in the sheet, where the picks are.
+    const only = options.length === 1 ? options[0] : undefined
+    const proposed = confirm
+      ? only?.label?.trim() || only?.session_id.slice(0, 8) || ''
+      : ''
     return (
       <div className="chat-notice-card" data-testid="chat-card-options">
         <button
@@ -70,13 +78,15 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
           disabled={answered}
           onClick={() => setSheet(true)}
         >
-          <span className="chat-notice-card-question">{question}</span>
+          <span className="chat-notice-card-main">
+            <span className="chat-notice-card-question">{question}</span>
+            {proposed ? <span className="chat-notice-card-proposal">{proposed}</span> : null}
+          </span>
           <span className="chat-notice-card-go">{answered ? '已回复' : '去选择'}</span>
         </button>
         {sheet ? (
           <ChooseSessionSheet
             question={question}
-            confirm={confirm}
             options={options}
             allowNewTask={card?.allow_new_task === true}
             onClose={() => setSheet(false)}
@@ -113,14 +123,12 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
  *  into the machine's guess. */
 function ChooseSessionSheet({
   question,
-  confirm,
   options,
   allowNewTask,
   onClose,
   onChoose,
 }: {
   question: string
-  confirm: boolean
   options: ChatCandidateOption[]
   allowNewTask: boolean
   onClose: () => void
@@ -133,17 +141,27 @@ function ChooseSessionSheet({
           开新任务
         </button>
       ) : null}
-      {(options ?? []).map((option) => (
-        <button
-          key={option.session_id}
-          type="button"
-          className="chat-sheet-option"
-          title={option.why || option.label || option.session_id}
-          onClick={() => onChoose({ sessionId: option.session_id })}
-        >
-          {confirm ? '就继续这个' : option.label || option.session_id.slice(0, 8)}
-        </button>
-      ))}
+      {(options ?? []).map((option) => {
+        // An answer must NAME what it continues. `confirm` used to paint a fixed
+        // "就继续这个", so the sheet presented one anonymous task and the human
+        // had to pick it blind — the payload carries the candidate's own title
+        // (and, for `confirm_continue`, the router's reason); this is where they
+        // belong. The fixed wording survives only as the no-label fallback.
+        const label = option.label?.trim() || option.session_id.slice(0, 8)
+        const why = option.why?.trim()
+        return (
+          <button
+            key={option.session_id}
+            type="button"
+            className="chat-sheet-option"
+            title={why ? `${label} — ${why}` : label}
+            onClick={() => onChoose({ sessionId: option.session_id })}
+          >
+            <span className="chat-sheet-option-label">{label}</span>
+            {why ? <span className="chat-sheet-option-why">{why}</span> : null}
+          </button>
+        )
+      })}
     </Sheet>
   )
 }

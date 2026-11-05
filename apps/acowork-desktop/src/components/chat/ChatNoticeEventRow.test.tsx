@@ -71,6 +71,51 @@ describe("ChatNoticeEventRow", () => {
     const { container: confirm } = render(<ChatNoticeEventRow row={noticeRow("confirm_continue")} />);
     expect(confirm.textContent).toBe("chatView.block.confirmSession");
   });
+  it("names the session a `confirm_continue` card would continue (D6 level 5)", () => {
+    // The card offers exactly one candidate, so the button IS the answer. It used
+    // to read a fixed "Continue this one" and drop the candidate's title and the
+    // router's reason (both of which the payload carries) — the human was asked
+    // to pick a task they could not identify.
+    const row = noticeRow("confirm_continue");
+    row.delivery = {
+      answered: false,
+      question: {
+        answered: false,
+        options: [
+          {
+            session_id: "exec-7",
+            label: "发了个用户消息给SSE.kevin的chat session",
+            why: "这是最近活跃的执行 session（4 分钟前刚收尾）",
+          },
+        ],
+        allow_new_task: true,
+      },
+    };
+    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    expect(screen.getByText("发了个用户消息给SSE.kevin的chat session")).toBeTruthy();
+    expect(screen.getByText("这是最近活跃的执行 session（4 分钟前刚收尾）")).toBeTruthy();
+    // The blind wording is gone from the labelled case.
+    expect(screen.queryByText("chatView.block.chooseThis")).toBeNull();
+  });
+
+  it("falls back to the generic wording only when the option carries no label", () => {
+    // An option that arrived without a title still has to be clickable and
+    // nameable: the short session id is the last honest handle, and the fixed
+    // wording stands in when even that is absent.
+    const row = noticeRow("confirm_continue");
+    row.delivery = {
+      answered: false,
+      question: {
+        answered: false,
+        options: [{ session_id: "exec-7" }],
+        allow_new_task: false,
+      },
+    };
+    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    // The session id is the last honest handle before the generic wording.
+    expect(screen.getByText("exec-7")).toBeTruthy();
+  });
+
   it("paints a delivery_failed receipt even though the row is bodyless (ADR-105)", () => {
     // The Gateway writes no body — the prose would be server-side English plus
     // an internal error code — so the surface owns the wording. It MUST paint:

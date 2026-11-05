@@ -2322,9 +2322,25 @@
 .chat-notice-card-btn:disabled {
   opacity: 0.6;
 }
-.chat-notice-card-question {
+.chat-notice-card-main {
   flex: 1;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chat-notice-card-question {
+  min-width: 0;
+}
+/* The one session a `confirm_continue` proposes — the row must name it, or the
+   human is asked to continue a task they cannot identify. */
+.chat-notice-card-proposal {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 12px;
+  color: var(--color-text-dim, #888);
 }
 .chat-notice-card-go {
   flex: none;
@@ -2476,6 +2492,18 @@
   display: block;
   margin-top: 2px;
   font-size: 11px;
+  color: var(--color-label-secondary);
+}
+/* A candidate's reason for being offered (the router's `why`): wrapped to two
+   lines, because "which task is this" is answered by a sentence, not a label. */
+.chat-sheet-option-why {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
+  margin-top: 2px;
+  font-size: 12px;
+  line-height: 1.35;
   color: var(--color-label-secondary);
 }
 .chat-sheet-hint {

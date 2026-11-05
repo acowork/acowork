@@ -21,7 +21,7 @@
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ChatNoticeRow } from '../components/ChatNoticeRow'
-import type { ChatMessageRow } from '../lib/types'
+import type { ChatCandidateOption, ChatMessageRow } from '../lib/types'
 
 function notice(
   noticeType: string,
@@ -45,7 +45,7 @@ function notice(
  *  this and nothing else: `meta.options` is the durable payload, not the
  *  surface's input. */
 function card(
-  options = OPTIONS,
+  options: ChatCandidateOption[] = OPTIONS,
   { answered = false, allowNewTask = true }: { answered?: boolean; allowNewTask?: boolean } = {},
 ): ChatMessageRow['delivery'] {
   return {
@@ -93,6 +93,41 @@ describe('addressing questions (D6 levels 3 and 5)', () => {
       onChoose: choose,
     })
     expect(html).toContain('继续这个任务吗？')
+  })
+
+  it('the card names the one session a confirm_continue would continue', () => {
+    // The card proposes exactly ONE session, so the collapsed row has to name it:
+    // "继续这个任务吗？ / 去选择" over an anonymous proposal asked the human to
+    // continue a task they could not identify without opening the sheet. The
+    // payload carries the candidate's own title — it belongs on the row.
+    const html = render(
+      notice(
+        'confirm_continue',
+        {},
+        '',
+        card([{ session_id: 's-9', label: '发了个用户消息给SSE.kevin的chat session' }]),
+      ),
+      { onChoose: choose },
+    )
+    expect(html).toContain('继续这个任务吗？')
+    expect(html).toContain('发了个用户消息给SSE.kevin的chat session')
+  })
+
+  it('names an untitled proposal by its session id rather than nothing', () => {
+    const html = render(
+      notice('confirm_continue', {}, '', card([{ session_id: 's-abcdef12' }])),
+      { onChoose: choose },
+    )
+    expect(html).toContain('s-abcdef')
+  })
+
+  it('a multi-candidate question keeps its names in the sheet, not the row', () => {
+    // `session_choice` offers several sessions; putting all titles on a 390pt
+    // row is where a mis-tap sends a turn into the wrong task, so the row stays
+    // the question and the sheet carries the labelled picks.
+    const html = render(notice('session_choice', {}, '', card()), { onChoose: choose })
+    expect(html).toContain('你指的是哪一个任务？')
+    expect(html).not.toContain('整理季度报表')
   })
 
   it('an answered question goes quiet instead of disappearing', () => {

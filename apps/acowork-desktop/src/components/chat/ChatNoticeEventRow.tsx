@@ -85,25 +85,39 @@ export function ChatNoticeEventRow({
       >
         <span className="text-10 text-text-tertiary">{question}</span>
         <div className="flex flex-wrap items-center justify-center gap-1.5">
-          {options.map((option) => (
-            <button
-              key={option.session_id}
-              type="button"
-              disabled={answered}
-              onClick={() => onChoose({ sessionId: option.session_id })}
-              title={option.why || option.label || option.session_id}
-              className={cn(
-                "rounded-md border border-border-outer px-2 py-1 text-xs",
-                answered
-                  ? "text-text-disabled"
-                  : "text-text-secondary hover:bg-nav-item-hover hover:text-text",
-              )}
-            >
-              {noticeType === "confirm_continue"
-                ? t("chatView.block.chooseThis")
-                : option.label || option.session_id.slice(0, 8)}
-            </button>
-          ))}
+          {options.map((option) => {
+            // An answer must NAME what it continues. The payload carries the
+            // candidate's own title (the session's), and `confirm_continue` also
+            // carries the router's reason for proposing it — a card that said
+            // only "Continue this one" made the human pick a task blind. The
+            // generic wording survives only as the fallback for an option that
+            // arrived with no label at all, where there is nothing better to say.
+            const label =
+              option.label?.trim() ||
+              option.session_id?.trim().slice(0, 8) ||
+              t("chatView.block.chooseThis");
+            const why = option.why?.trim();
+            return (
+              <button
+                key={option.session_id}
+                type="button"
+                disabled={answered}
+                onClick={() => onChoose({ sessionId: option.session_id })}
+                title={why ? `${label} — ${why}` : label}
+                className={cn(
+                  "flex max-w-[26rem] flex-col items-center gap-0.5 rounded-md border border-border-outer px-2 py-1 text-xs",
+                  answered
+                    ? "text-text-disabled"
+                    : "text-text-secondary hover:bg-nav-item-hover hover:text-text",
+                )}
+              >
+                <span className="max-w-full truncate">{label}</span>
+                {why && (
+                  <span className="max-w-full truncate text-10 opacity-70">{why}</span>
+                )}
+              </button>
+            );
+          })}
           {/* D6's cheap escape: a question must be answerable in one click, and
               "new task" sits beside every suggestion rather than below a fold. */}
           {card?.allow_new_task && (
