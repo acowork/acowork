@@ -1,7 +1,7 @@
 # ADR-106：chat 与 execute 的边界重划——引用而非副本
 
 - **编号**：ADR-106
-- **状态**：提议（待架构评审）——**已全部落地**：P1（`round_id` 铸造 + 轮次侧表 + 区间闭合）、P2（投影读接口）、P3（`rounds.sqlite` 缓存 + `GET /api/chat-blocks`）、P4（chat 写侧切换为引用行）、P5（寻址阶梯与两级 `@`）、P6（卡片归块与回答直投，块渲染器落在 Desktop 两视图与 Mobile）。本 ADR 列出的各"废止 / 退役"项目已从代码里删除；Desktop 与 Mobile 的转录形状已统一（四类词表 + 引用行 + 块投影）。**修订（2026-11-03·等待行）**：D9 的等待行判据窗口由"本地在途的 POST"延长为"本设备自己那次发送的 claim"（见文末修订章节与设计 27 v3.1.2）。**修订（2026-11-03·轮次门铃）**：新增轮次门铃事件 `round_state`（`SessionMessage` 字段 34），补回 D3 零写删掉的通知面，pending 重读由一次性 `setTimeout` 改为周期兜底（见文末修订章节与设计 27 v3.1.3）。**修订（2026-11-04·呈现分叉与 act 族更名）**：呈现契约的折叠规则按 `opened_new` 分叉（新开会话的触发行保留为独立气泡）；D6 的 act 空间更名 `exec_session_*` 族并新增只读 `exec_session_read_round`（见文末修订章节与设计 29 §11）。**修订（2026-11-04·引用重划）**：`@` 执行会话定死为引用语义——阶梯级别 2 的投递退役（`target_sessions` 从人 `@` 路径退役、由 `meta.refs` 材料坐标取代，寻址卡应答保留该通道），续投改由执行块就地输入框承担，交付物化取 ADR-107 参照 part 通道（见文末修订章节）。**修订（2026-11-04·引用部件）**：D3 派发链路上"router 简报"与用户原话不再拼成一个字符串——`exec_session_create` 的入参改为 `background`，其内容作为引用部件（`context_ref`）随行在 `user` 行之后，`user` 行只留原话；本 ADR 的"引用而非副本"边界因此也适用于 chat→execute 的那一条消息（见 [ADR-107](./ADR-107-message-ref-part.md)）。
+- **状态**：提议（待架构评审）——**已全部落地**：P1（`round_id` 铸造 + 轮次侧表 + 区间闭合）、P2（投影读接口）、P3（`rounds.sqlite` 缓存 + `GET /api/chat-blocks`）、P4（chat 写侧切换为引用行）、P5（寻址阶梯与两级 `@`）、P6（卡片归块与回答直投，块渲染器落在 Desktop 两视图与 Mobile）。本 ADR 列出的各"废止 / 退役"项目已从代码里删除；Desktop 与 Mobile 的转录形状已统一（四类词表 + 引用行 + 块投影）。**修订（2026-11-03·等待行）**：D9 的等待行判据窗口由"本地在途的 POST"延长为"本设备自己那次发送的 claim"（见文末修订章节与设计 27 v3.1.2）。**修订（2026-11-03·轮次门铃）**：新增轮次门铃事件 `round_state`（`SessionMessage` 字段 34），补回 D3 零写删掉的通知面，pending 重读由一次性 `setTimeout` 改为周期兜底（见文末修订章节与设计 27 v3.1.3）。**修订（2026-11-04·呈现分叉与 act 族更名）**：呈现契约的折叠规则按 `opened_new` 分叉（新开会话的触发行保留为独立气泡）；D6 的 act 空间更名 `exec_session_*` 族并新增只读 `exec_session_read_round`（见文末修订章节与设计 29 §11）。**修订（2026-11-04·引用重划）**：`@` 执行会话定死为引用语义——阶梯级别 2 的投递退役（`target_sessions` 从人 `@` 路径退役、由 `meta.refs` 材料坐标取代，寻址卡应答保留该通道），续投改由执行块就地输入框承担，交付物化取 ADR-107 参照 part 通道（见文末修订章节）。**修订（2026-11-04·引用部件）**：D3 派发链路上"router 简报"与用户原话不再拼成一个字符串——`exec_session_create` 的入参改为 `background`，其内容作为引用部件（`context_ref`）随行在 `user` 行之后，`user` 行只留原话；本 ADR 的"引用而非副本"边界因此也适用于 chat→execute 的那一条消息（见 [ADR-107](./ADR-107-message-ref-part.md)）。**修订（2026-11-05·索引先于引用）**：新增"引用可见即可答"的次序不变量——轮边界先把该轮 `announce` 进侧表、再写 chat 引用行；`RoundRecord.user` 变为可缺省，已登记但暂无内容的轮投影为 `pending`（按 D9 重读）而非空洞，空洞自此只留给"转录不在本机"与"坐标漂移"两类事实（见文末修订章节）。
 - **日期**：2026-11-02
 - **决策者**：ACowork 架构组
 - **关联**：ADR-100（本 ADR 废止其 D2/D8/D9/D10/D11/D12，重述 D1/D3 的边界）、ADR-099（收缩其 `dispatch` 权力）、ADR-105（废止其 D4/D5 的镜像判据）、ADR-097（可弃侧表模式的直接先例）、ADR-096（写时派生 / 禁止全量读）、ADR-092（per-session 单写者与有界读取）、ADR-084（chat 存储归属 acowork-user）、ADR-055（跨机可达性是本设计的支柱）、ADR-076（单发起人）、ADR-046（附件判别联合；§2.1 与 ADR-107 共同判废了"拼接进投递文本"的物化路径）、ADR-102（TurnOrigin 策略表仍生效）、ADR-107（参照 part：引用重划的交付物化走它的 `context_refs` 通道）
@@ -343,6 +343,27 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 **决策三：窗口外会话不再有直达投递——公开取舍**。级别 2 原先兜着"寻址集合大于转录窗口"：D7 那句"翻不到某条会话时它仍在转录里，靠回复它的块抵达"的前提是块总能翻到，而块锚点只存在于已加载窗口，长历史要分页。引用重划后，给一条已翻出窗口的旧会话续投只剩"翻到它的块"一条路。本修订公开采纳两步方案：其一，接受之（长命会话的块靠 recency 锚点通常可达；实在找不到，说明人本来也该先靠转录/`exec_session_read_round` 找回目标）；其二，picker 二级列表每行两个动作**「引用 / 去续投」**——后者不投递，只 locate 到该会话的块锚点（定位机制现成）再聚焦块输入框，把缺口变成两步而不是新开通道。被否决的第三种：保留 `target_sessions` 作投递通道、`refs` 另做新增——等于回到双通道，违背本次重划的初衷。
 
 落点：Gateway 的 `POST /api/intents/mentions` / `chat-message` wire（`target_sessions` 从 @ 路径退役、仅寻址卡应答保留；`refs` 新增 + 400 校验 + 发送时钉轮）、Runtime 的 `rounds?latest` 读端点、prompt 段与漂移守卫、Block C 装配、交付物化（ADR-107 `referenced_round` 参照 part）、两级 `@` picker 的引用模式，Desktop 与 Mobile 的块输入框组件（reveal/focus-trap 纪律、claim、D10 禁用态）与转录 chips 呈现。同批同步：本 ADR 的 D6 阶梯表与 D7 第二级条目注记、设计文档 27 的呈现段、设计文档 29 §11 的引用材料装配规则、[HTTP 协议](../../protocols/zh/http.md) 的 mentions 契约。
+
+## 修订（2026-11-05）：索引先于引用——"引用可见即可答"，空轮读作 pending 而非空洞
+
+**动机**。真实故障：人在执行块底部的就地输入框里发了一条消息，消息确实进了执行会话、agent 也正常回复，但 chat 里的这个块显示"本轮执行已不可用"（`chatView.block.notFound`）。经日志与落盘数据核对，D3/D4 之间存在一个**顺序缺口**：
+
+- 01:48:43.095 网关受理 `chat-message`，Runtime 在轮边界按 D3 写 chat 的 `execution_round` 引用行；
+- 01:48:43.113 桌面端对 `refs=…|r:42590fc9…` 发起块投影读（**正是引用行出现触发的**）；
+- 01:48:43.151 读返回 `found:false`；
+- 01:48:43.170 该轮的侧表第一条记录才落盘（`{"round_id":"r:42590fc9…","user":309,"terminal":false}`），同毫秒 Runtime 日志 `Idle→LlmAwaitingFirstChunk`；
+- 01:48:47.160 该轮 `terminal:true, status:"completed"`——回复正常到达；
+- 此后该 ref **再未被请求过**（全日志仅一次）。
+
+机制：侧表的记录原先要等该轮**第一条带 `round_id` stamp 的行提交后**才产生（`ActiveRound::snapshot()` 用 `self.user.unwrap_or_default()`，因此 writer 在 `user.is_none()` 时直接拒绝快照），而引用行在这之前就已可见。于是读请求落在约 60ms 的窗口内被判成 `Hole`，前端按 D5 的"终态不重读"把它当成块的永久内容——一个已经完成的轮被判了死刑。这不是偶发：D4 的读者恰恰由引用行触发，所以读必然落在窗口内。
+
+**决策一：轮次索引先于引用行（`announce`）**。轮边界在写引用行**之前**先把该轮登记进侧表（`rounds::announce_round`，经写者线程的同步命令 `WriterCommand::AnnounceRound` 落盘并 flush 后才返回）。于是获得新的不变量：**Chat 能看见的轮，索引一定能答**。登记条目不带坐标（`user` 缺省）、不带 `status`：本轮的运行态是回合的事实，不是索引的事实；登记只陈述"这一轮存在"。已有记录时登记是空操作且绝不改写坐标（重投递或续跑不得擦掉转录已经写下的东西）。
+
+**决策二：`RoundRecord.user` 可缺省，记录过的轮永不判空洞**。D4 的记录形状修订为 `{round_id, user?, answer?, card?, terminal, status?, ts}`——`user` 缺省表示"已登记、尚未写 opener"。`project()` 对此返回 `{user:null, answer:null, terminal, status}`，即 `terminal=false` 的进行中投影（Gateway 侧为 `pending`，呈现层照 D9 重读，块随之填入内容），而不是空洞。空洞自此专属于两类事实：转录不在本机，或坐标已漂移、不再指向本轮的行走（D2 的 stamp 校验不变）。同时收紧反向边界：writer 不再需要坐标即可以写终态快照（`RoundSnapshot` 只校验轮次身份），因此"回合在写 opener 之前就失败"也能落 `terminal:true, status:"failed"`；被后来的轮抢占的无内容轮则按 `interrupted` 收口（`forced_closure` 不再要求坐标），不会永远停在 pending——永远 pending 的块是另一种谎。
+
+**不做的事（边界）**。不给前端加"not_found 重读"：那等于承认服务端可以产出假空洞，把不变量放在错误的层。缓存语义不变（D5：终态不可变、无失效路径），改动只在"终态"这一判断的事实来源上。
+
+落点：`core/acowork-runtime/src/rounds.rs`（`RoundRecord.user: Option<u64>`、`announce_round`、`project` 的无线索分支、`forced_closure`、`fold_attachments` 签名）、`core/acowork-runtime/src/conversation.rs`（`WriterCommand::AnnounceRound` 同步命令、`ConversationSession::announce_round`、`RoundSnapshot` 守卫放宽、writer 侧 `announce_round` 的跟踪器交接）、`core/acowork-runtime/src/agent/loop_.rs`（`open_round` 次序 `announce → 引用行 → stamp`）。验收以测试固定：`an_announced_round_projects_as_open_instead_of_a_hole`、`announcing_a_known_round_keeps_its_coordinate`、`a_round_closed_before_its_opener_is_not_a_hole`、`an_announced_round_reads_as_open_not_as_a_hole`、`an_announced_round_is_answerable_before_its_first_row`、`a_pre_empted_announcement_is_closed_not_left_open`。Desktop 与 Mobile 的块渲染器无需改动（`projection.user` 两侧本就可空，空 user 走既有的"无提问 / 进行中"回退）。
 
 ## 参考
 
