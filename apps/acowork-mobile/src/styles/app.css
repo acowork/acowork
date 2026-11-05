@@ -2377,6 +2377,11 @@
 /* A receipt about ONE message sits in that message's column (a failed send is
    always the reader's own), so ownership is visible instead of inferred. A
    receipt with no resolvable subject keeps the centered default. */
+/* A receipt the reader may act on, not a fault: the quiet warning token, so it
+   is noticed once per failed send instead of shouting under every bubble. */
+.chat-notice-pill-failed {
+  color: var(--color-warning-quiet, #b45309);
+}
 .chat-notice-end {
   justify-content: flex-end;
   padding-right: 4px;

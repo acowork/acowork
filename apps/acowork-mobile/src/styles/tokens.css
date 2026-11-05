@@ -35,6 +35,11 @@
   --color-destructive: #ff3b30;
   --color-success: #34c759;
   --color-warning: #ff9500;
+  /* The warning you read rather than the one you heed — the desktop
+   * `--color-warning-quiet` pairing. A retry-able receipt in the transcript
+   * sits under the reader's own bubble and is seen every turn, so it must not
+   * glare like a destructive action. */
+  --color-warning-quiet: #b45309;
   --color-bubble-peer: #ffffff;
 
   --space-1: 4px;
@@ -150,6 +155,8 @@
    * surfaces. Raw #07c160 is only ~2.4:1 against white. */
   --color-tint-strong: #04783c;
   --color-destructive: #fa5151;
+  /* Dimmed for the dark bg, same reason as the light value above. */
+  --color-warning-quiet: #c98a1e;
   --color-bubble-peer: #2a2a2a;
   color-scheme: dark;
 }

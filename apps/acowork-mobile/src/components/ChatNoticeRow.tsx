@@ -118,7 +118,7 @@ export function ChatNoticeRow({ row, anchor, onChoose }: ChatNoticeRowProps) {
     // centered pill about one bubble is a fact with no subject attached.
     return (
       <div className={noticeClass(anchor)}>
-        <span className="chat-notice-pill">消息未能送达，请重试</span>
+        <span className="chat-notice-pill chat-notice-pill-failed">消息未能送达，请重试</span>
       </div>
     )
   }
