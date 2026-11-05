@@ -352,8 +352,15 @@ fn title_of(meta: &SessionMeta) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("untitled");
     let mut out = String::with_capacity(raw.len().min(TITLE_MAX_BYTES));
+    // The cut is at a character boundary, never inside one, so the string stays
+    // valid UTF-8 — but a title that simply stops mid-word reads to a human as
+    // broken text ("...一直没有创建执行sessi"), and this string is not only the
+    // router's input any more: the choice card renders it as the option a human
+    // clicks. The marker says "there was more", not "the title ends here".
+    let mut truncated = false;
     for ch in raw.chars() {
         if out.len() + ch.len_utf8() > TITLE_MAX_BYTES {
+            truncated = true;
             break;
         }
         out.push(if ch.is_control() { ' ' } else { ch });
@@ -361,6 +368,8 @@ fn title_of(meta: &SessionMeta) -> String {
     let cleaned = out.trim();
     if cleaned.is_empty() {
         "untitled".to_string()
+    } else if truncated {
+        format!("{cleaned}…")
     } else {
         cleaned.to_string()
     }
@@ -451,6 +460,21 @@ mod tests {
             terminal_session_ids: terminal,
             max,
         }
+    }
+
+    /// The title is shown to a human as the card option's label, so a byte cut
+    /// has to be marked and must never split a character.
+    #[test]
+    fn an_overlong_title_is_cut_on_a_char_boundary_and_marked() {
+        let long = "整理".repeat(60); // 360 bytes of 3-byte characters
+        let cut = title_of(&meta("s", &long, "2026-10-21T10:00:00+00:00", None, Some(ALICE)));
+        assert!(cut.ends_with('…'), "a truncated title must be marked: {cut}");
+        let body = cut.trim_end_matches('…');
+        assert!(body.len() <= TITLE_MAX_BYTES, "kept {body_len} bytes", body_len = body.len());
+        assert!(body.chars().all(|c| c == '整' || c == '理'), "no partial character survived");
+        // A title that fits is returned verbatim, marker and all absent.
+        let short = title_of(&meta("s", "整理报表", "2026-10-21T10:00:00+00:00", None, Some(ALICE)));
+        assert_eq!(short, "整理报表");
     }
 
     fn ids(candidates: &[SessionCandidate]) -> Vec<&str> {
