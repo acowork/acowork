@@ -46,20 +46,11 @@ function notice(
  *  surface's input. */
 function card(
   options: ChatCandidateOption[] = OPTIONS,
-  {
-    answered = false,
-    allowNewTask = true,
-    answeredSession,
-  }: { answered?: boolean; allowNewTask?: boolean; answeredSession?: string } = {},
+  { answered = false, allowNewTask = true }: { answered?: boolean; allowNewTask?: boolean } = {},
 ): ChatMessageRow['delivery'] {
   return {
     answered: false,
-    question: {
-      answered,
-      ...(answeredSession ? { answered_session: answeredSession } : {}),
-      options,
-      ...(allowNewTask ? { allow_new_task: true } : {}),
-    },
+    question: { answered, options, ...(allowNewTask ? { allow_new_task: true } : {}) },
   }
 }
 
@@ -143,31 +134,16 @@ describe('addressing questions (D6 levels 3 and 5)', () => {
     expect(html).not.toContain('整理季度报表')
   })
 
-  it('an answered question settles into a receipt naming where it went', () => {
-    // The service says the question is settled AND which session ran the answer
-    // (`question.answered_session`). The record survives, but as one line: the
-    // human's question after clicking is "did it go where I meant", and a dead
-    // button answers that with nothing.
-    const html = render(
-      notice('session_choice', {}, '', card(OPTIONS, { answered: true, answeredSession: 's-2' })),
-      { onChoose: choose },
-    )
-    expect(html).toContain('data-testid="chat-card-answered"')
-    expect(html).toContain('已交给 核对发票')
-    expect(html).not.toContain('chat-notice-card-go')
-  })
-
-  it('says a new task was started when the answer names no candidate', () => {
-    const html = render(
-      notice(
-        'confirm_continue',
-        {},
-        '',
-        card([OPTIONS[0]!], { answered: true, answeredSession: 's-new' }),
-      ),
-      { onChoose: choose },
-    )
-    expect(html).toContain('已开新任务')
+  it('an answered question paints nothing', () => {
+    // A card is a question; once a round answers it, the question is an
+    // intermediate state of that turn (ADR-106 D14: keep the row on disk, hide it
+    // at render time). The round's block already says which session took the
+    // words — a receipt or a dead button here would be the same fact again.
+    expect(
+      render(notice('session_choice', {}, '', card(OPTIONS, { answered: true })), {
+        onChoose: choose,
+      }),
+    ).toBe('')
   })
 
   it('a bystander gets the question and the reason it is not theirs (D10)', () => {

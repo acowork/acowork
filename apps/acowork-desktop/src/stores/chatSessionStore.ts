@@ -100,12 +100,6 @@ export interface ChatQuestionState {
   /** A round now answers the message this card asked about — the re-delivery
    *  leaves the reference row, so the answer is the round's existence. */
   answered: boolean;
-  /** The execution session that took the answer (the answering round's
-   *  `agent_session_id`). A settled card paints a receipt, and the receipt's
-   *  whole job is to name where the words went — a bare "answered" would leave
-   *  the human unable to check the one thing they clicked for. Absent when a
-   *  round answered without saying which session ran it. */
-  answered_session?: string;
   options: Array<{
     session_id: string;
     label?: string;

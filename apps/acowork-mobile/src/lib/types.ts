@@ -339,10 +339,6 @@ export interface ChatRoundTarget {
  *  has already taken one. */
 export interface ChatQuestionState {
   answered: boolean
-  /** The execution session that took the answer (the answering round's
-   *  `agent_session_id`). The settled receipt names it — "answered" alone leaves
-   *  the human unable to check where their words went. */
-  answered_session?: string
   options: ChatCandidateOption[]
   allow_new_task?: boolean
 }

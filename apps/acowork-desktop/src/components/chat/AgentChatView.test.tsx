@@ -583,11 +583,12 @@ describe("AgentChatView event-log wiring", () => {
     });
   });
 
-  it("an answered card settles into a receipt naming where the words went", () => {
-    // The round IS the answer (D3) and the SERVICE says which session ran it, so
-    // the card stops asking and states: "handed to <task>". A row of disabled
-    // buttons recorded the offer but left the human unable to check the one
-    // thing they clicked for.
+  it("an answered card leaves the transcript to the round's block", () => {
+    // The round IS the answer (D3), and the SERVICE says so through
+    // `question.answered`. The card then paints nothing: it was a question, and
+    // the block below already names the session, its rounds and a way in. A
+    // disabled row of buttons kept the offer on screen; a receipt line repeated
+    // the block. Neither is a record of the conversation.
     windows = windowOf(
       userRow(1, "which one"),
       notice(
@@ -597,7 +598,6 @@ describe("AgentChatView event-log wiring", () => {
           answered: false,
           question: {
             answered: true,
-            answered_session: "exec-9",
             options: [
               { session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" },
             ],
@@ -608,8 +608,8 @@ describe("AgentChatView event-log wiring", () => {
       roundRow(3),
     );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-    expect(screen.getByTestId("chat-card-answered").textContent).toContain("Fix the bug");
-    // Nothing left to press: the question is closed.
+    expect(screen.queryByTestId("chat-card-options")).toBeNull();
+    expect(screen.queryByTestId("chat-card-answered")).toBeNull();
     expect(screen.queryByRole("button", { name: /Fix the bug/ })).toBeNull();
     expect(sendTextMock).not.toHaveBeenCalled();
   });

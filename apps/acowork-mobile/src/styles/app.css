@@ -2361,32 +2361,6 @@
   transform: scale(0.98);
 }
 
-/* A settled question: a receipt, not a card. It names where the words went, so
-   the line is readable on its own and carries no action — nothing here is left
-   to decide. */
-.chat-notice-receipt {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  width: fit-content;
-  max-width: 100%;
-  margin: 8px 0;
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: var(--color-surface, rgba(128, 128, 128, 0.1));
-  font-size: 12px;
-  color: var(--color-text-dim, #888);
-}
-.chat-notice-receipt-check {
-  flex: none;
-  color: #10b981;
-}
-.chat-notice-receipt-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
 
 .chat-notice {
   display: flex;

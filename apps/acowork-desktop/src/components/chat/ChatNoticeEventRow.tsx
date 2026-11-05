@@ -22,7 +22,7 @@
  * row at all (D8) — its answer is an execution-side fact shown inside the block.
  */
 
-import { Check, ChevronRight, CornerDownRight, ListTree, Plus } from "lucide-react";
+import { ChevronRight, CornerDownRight, ListTree, Plus } from "lucide-react";
 import { ChatEventText } from "./ChatEventText";
 import { useTranslation } from "../../i18n/useTranslation";
 import { RETIRED_NOTICES } from "../../lib/retiredNotices";
@@ -105,29 +105,13 @@ export function ChatNoticeEventRow({
       option.session_id?.trim().slice(0, 8) ||
       t("chatView.block.chooseThis");
 
-    if (answered) {
-      // Settled: a receipt, not a row of disabled buttons. The one thing a human
-      // checks after clicking is *where the words went*, so the line names the
-      // session the projection reports — and says "new task" when the click was
-      // the escape instead of a candidate.
-      const taken = options.find((o) => o.session_id === card?.answered_session);
-      const receipt = taken
-        ? t("chatView.block.answeredTo", { label: labelOf(taken) })
-        : card?.answered_session
-          ? t("chatView.block.answeredNewTask")
-          : t("chatView.block.answered");
-      return (
-        <div
-          className={cn("ml-12 my-1.5 w-fit max-w-[32rem]", className)}
-          data-testid="chat-card-answered"
-        >
-          <div className="flex min-w-0 items-center gap-1.5 rounded-md border border-border-outer bg-chat-title px-2.5 py-1.5 text-11 text-text-secondary">
-            <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-500" />
-            <span className="min-w-0 truncate">{receipt}</span>
-          </div>
-        </div>
-      );
-    }
+    // Settled: paint nothing. A card is a question, and an answered question is
+    // an intermediate state of that turn, not a record of the conversation —
+    // ADR-106 D14 keeps history on disk and hides it at render time, and where
+    // the words went is already told by the round's block. Leaving a receipt
+    // here stated the same fact a second time, one identical line per test
+    // message, floating with no subject of its own.
+    if (answered) return null;
 
     return (
       <div

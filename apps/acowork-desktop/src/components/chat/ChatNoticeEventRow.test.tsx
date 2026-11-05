@@ -72,16 +72,17 @@ describe("ChatNoticeEventRow", () => {
     expect(choice.innerHTML).toBe("");
   });
 
-  it("settles into a receipt that names the session the answer went to", () => {
-    // After the click the card owes the human one fact: which task took the
-    // words. A disabled row of buttons answers nothing and still looks like a
-    // question.
+  it("paints nothing once the question has been answered", () => {
+    // A card is a question, and an answered question is an intermediate state of
+    // that turn — ADR-106 D14 keeps it on disk and hides it at render time. What
+    // a receipt would repeat ("handed to <task>"), the round's block already
+    // says with more: rounds, state, and a way in. Three test messages used to
+    // stack three identical receipt lines here.
     const row = noticeRow("confirm_continue");
     row.delivery = {
       answered: false,
       question: {
         answered: true,
-        answered_session: "exec-7",
         options: [
           { session_id: "exec-7", label: "整理报表", why: "最近活跃" },
           { session_id: "exec-8", label: "另一条线索" },
@@ -89,32 +90,8 @@ describe("ChatNoticeEventRow", () => {
         allow_new_task: true,
       },
     };
-    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
-    expect(screen.getByTestId("chat-card-answered").textContent).toBe(
-      "chatView.block.answeredTo:整理报表",
-    );
-    // A settled card offers no buttons at all.
-    expect(screen.queryByRole("button")).toBeNull();
-  });
-
-  it("says a new task was started when the answer names no candidate", () => {
-    // The escape (`forceNew`) re-delivers into a session the card never listed,
-    // so the receipt cannot borrow an option's title — but it can still say what
-    // happened instead of falling back to "answered".
-    const row = noticeRow("confirm_continue");
-    row.delivery = {
-      answered: false,
-      question: {
-        answered: true,
-        answered_session: "exec-new",
-        options: [{ session_id: "exec-7", label: "整理报表" }],
-        allow_new_task: true,
-      },
-    };
-    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
-    expect(screen.getByTestId("chat-card-answered").textContent).toBe(
-      "chatView.block.answeredNewTask",
-    );
+    const { container } = render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    expect(container.innerHTML).toBe("");
   });
 
   it("shows a viewer who may not answer the options without the buttons (D10)", () => {

@@ -62,24 +62,10 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
     const labelOf = (option: ChatCandidateOption) =>
       option.label?.trim() || option.session_id.slice(0, 8)
 
-    // Settled: a receipt naming where the words went, not a disabled row that
-    // still asks the human to decide something already decided.
-    if (answered) {
-      const taken = options.find((o) => o.session_id === card?.answered_session)
-      const receipt = taken
-        ? `已交给 ${labelOf(taken)}`
-        : card?.answered_session
-          ? '已开新任务'
-          : '已回答'
-      return (
-        <div className="chat-notice-receipt" data-testid="chat-card-answered">
-          <span className="chat-notice-receipt-check" aria-hidden="true">
-            ✓
-          </span>
-          <span className="chat-notice-receipt-label">{receipt}</span>
-        </div>
-      )
-    }
+    // Settled: paint nothing (ADR-106 D14). A card is a question; once a round
+    // answers it, the question is an intermediate state of that turn and the
+    // round's block already says which session took the words.
+    if (answered) return null
 
     // `confirm_continue` proposes exactly ONE session, so the collapsed row has
     // to name it: "继续这个任务吗？" over an anonymous "去选择" asked the human to
