@@ -35,7 +35,43 @@ rust-version = "1.95"
 # An earlier optimization (PERF-001, `opt-level = 2` in dev) was reverted after
 # the runtime CPU issue was confirmed to be unrelated to compilation flags —
 # so there is no longer a reason to deviate from the standard dev profile.
+#
+# Two exceptions, both about the edit/test loop rather than generated-code
+# quality (owner: build latency; measured on a 16-core Windows box):
+# - `debug = 1` (line tables only) instead of full debuginfo. The PDBs are the
+#   expensive half of linking, and a test binary that links in 6 s instead of
+#   20 s is worth losing local-variable inspection. Our own crates keep line
+#   numbers, so a panic still points at a file and line. `debug = 0` was also
+#   measured: it buys ~4% (within run-to-run noise) and costs every backtrace
+#   its line numbers, so it is not worth it.
+# - dependencies carry no debuginfo at all. Nobody steps through `serde` in a
+#   local test run, and their rlibs are what every test binary links.
+# Release is untouched: CI still gets full optimization and its own timings.
 [profile.dev]
+debug = 1
+
+[profile.dev.package."*"]
+debug = false
+
+# `test` inherits `dev`; stated explicitly so a future edit to `dev` cannot
+# silently regress the profile the test binaries are actually built with.
+[profile.test]
+debug = 1
+
+[profile.test.package."*"]
+debug = false
+
+# Argon2 in an unoptimized build costs seconds per hash, and the password cost
+# parameters are production ones on purpose (m=64 MiB, t=3): a test that creates
+# an account and logs in pays three of those, which is why a single HTTP test
+# measured 11 s and a crate's suite ran for minutes. Optimising this one
+# dependency keeps the production parameters under test (the thing a weak-params
+# test profile would silently stop covering) and buys back the wall clock.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.test.package.argon2]
+opt-level = 3
 
 [workspace.dependencies]
 # Async runtime
