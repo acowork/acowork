@@ -159,6 +159,14 @@ pub fn chat_session_routes() -> Router<AppState> {
             "/internal/chat-sessions/messages",
             post(system_append_message),
         )
+        // ADR-105 D5 (revision 2026-11-06): a failed delivery is a fact about
+        // the moment, not a transcript row. The Gateway records it here and it
+        // is served as `delivery.alert` on the human's row until it expires —
+        // no append, no history, and a restart takes it with it.
+        .route(
+            "/internal/chat-sessions/{session_id}/alerts",
+            post(system_record_alert),
+        )
         .route("/internal/chat-sessions/pair", post(system_ensure_pair))
         .route("/internal/chat-sessions/group", post(system_ensure_group))
         // Design 27 §8.3: PM member add / remove re-syncs the group's
@@ -619,8 +627,17 @@ async fn list_messages(
         // An admin may read a project group they never joined (the
         // read-only half of the `GET /api/chat-sessions` admin list).
         let admin_inspection = ctx.is_admin();
+        let alerts = state.alerts.clone();
         offload(move || {
-            read_messages_guarded(&dir, &session_id, &who, admin_inspection, q.offset, limit)
+            read_messages_guarded(
+                &dir,
+                &session_id,
+                &who,
+                admin_inspection,
+                q.offset,
+                limit,
+                &alerts,
+            )
         })
         .await?
     };
@@ -1406,6 +1423,65 @@ async fn system_append_message(
     Ok((StatusCode::CREATED, Json(message)))
 }
 
+/// Body of `POST /internal/chat-sessions/{session_id}/alerts`.
+#[derive(Debug, Deserialize)]
+pub struct SystemAlertRequest {
+    /// The human message row this delivery owed (`delivery.alert` lands there).
+    pub in_reply_to: String,
+    /// The agent that did not receive it.
+    pub target: String,
+    /// Machine token from the delivery result (`target_not_installed`,
+    /// `not_authorized`, a publish error code, `no_response`).
+    pub error_code: String,
+}
+
+/// `POST /internal/chat-sessions/{session_id}/alerts` — record a **live**
+/// delivery failure (ADR-105 D5, revision 2026-11-06).
+///
+/// This is not a write to the conversation: nothing is appended, and the answer
+/// is `204`. The Gateway reports a failure it already knows (it is holding the
+/// delivery result, or the sweeper timed the request out), and this only makes
+/// it *readable* — through the message page's `delivery.alert` — for as long as
+/// it is true. The row that used to be written here was never retracted: a send
+/// that failed and then succeeded still carried a permanent "not delivered" line
+/// in the transcript, and the yellow receipt outlived the problem by weeks.
+///
+/// Participation is checked like every other chat route; the ring on the way out
+/// is the existing content-agnostic `user_chat_changed` doorbell, so a surface
+/// already showing this chat re-reads the page it has and finds the alert on the
+/// row it belongs to.
+async fn system_record_alert(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<SystemAlertRequest>,
+) -> Result<StatusCode, ApiError> {
+    if req.in_reply_to.trim().is_empty() || req.target.trim().is_empty() {
+        return Err(ApiError::unprocessable_entity(
+            "in_reply_to and target are required",
+        ));
+    }
+    let dir = data_dir_any(&state).await;
+    let participants = {
+        let (dir, sid) = (dir, session_id.clone());
+        offload(move || {
+            chat_sessions::load(&dir, &sid)
+                .map(|s| s.participants.into_iter().map(|p| p.id).collect::<Vec<_>>())
+        })
+        .await?
+    };
+    state.alerts.record(crate::chat_alerts::ChatAlert {
+        session_id: session_id.clone(),
+        in_reply_to: req.in_reply_to,
+        target: req.target,
+        error_code: req.error_code,
+        created: now_unix().max(0) as u64,
+    });
+    for id in participants {
+        crate::mqtt_publisher::notify_chat_changed(&id);
+    }
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SystemPairRequest {
     pub a: String,
@@ -1887,6 +1963,7 @@ fn parse_kind(s: &str) -> Result<SessionKind, ApiError> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn read_messages_guarded(
     dir: &std::path::Path,
     session_id: &str,
@@ -1894,6 +1971,7 @@ fn read_messages_guarded(
     admin_inspection: bool,
     offset: usize,
     limit: usize,
+    alerts: &crate::chat_alerts::AlertStore,
 ) -> Result<(Vec<chat_view::ChatRowView>, u64), String> {
     let session = chat_sessions::load(dir, session_id)?;
     if !session.participants.iter().any(|p| p.id == who) {
@@ -1904,7 +1982,7 @@ fn read_messages_guarded(
             return Err("not_a_participant".to_string());
         }
     }
-    chat_view::read_page(dir, session_id, offset, limit)
+    chat_view::read_page(dir, session_id, offset, limit, alerts)
 }
 
 /// The single backend write entry as reached from HTTP: participation is

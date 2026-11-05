@@ -484,17 +484,19 @@ describe("AgentChatView event-log wiring", () => {
     expect(settleTurnMock).toHaveBeenCalledWith(SESSION, "u1");
   });
 
-  it("a delivery receipt settles the claim too — it is the answer the human sees", () => {
-    windows = windowOf(
-      {
-        ...userRow(1, "hello there"),
-        delivery: {
-          answered: true,
-          answered_by: { message_id: "n2", kind: "system_notice" },
-        },
+  it("a live delivery alert settles the claim too — it is the outcome the human sees", () => {
+    // ADR-105 D5 rev. 2026-11-06: a failed send is no longer a receipt ROW, so
+    // nothing in the transcript answers the human's message. The failure is
+    // served live on that row (`delivery.alert`) and it IS the answer: the send
+    // bounced, and leaving the composer locked on it would read as still in
+    // flight.
+    windows = windowOf({
+      ...userRow(1, "hello there"),
+      delivery: {
+        answered: false,
+        alert: { target: AGENT, error_code: "target_not_installed", expires_in: 600 },
       },
-      notice(2, { notice_type: "delivery_failed", in_reply_to: "u1" }),
-    );
+    });
     inflightMap = { [SESSION]: { messageId: "u1", at: 1 } };
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     expect(screen.queryByRole("status")).toBeNull();

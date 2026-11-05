@@ -19,7 +19,9 @@
  *   gave the human's row), never from a shape read off the newest rows;
  * - it ends at the first row that answers that id — the round's reference row
  *   (from then on the block narrates the run, ADR-106 D3/D9), the router's own
- *   reply, or a receipt (ADR-105 delivery failure, §6.5 budget, §5.5.1 fallback);
+ *   reply, or a receipt (§6.5 budget), or at a **live** delivery alert on that
+ *   row (ADR-105 D5 revision 2026-11-06: a failed send is no longer a row of its
+ *   own, so nothing would ever close the claim if the alert did not);
  * - and it ends on a deadline, so a client that never sees any of those rows
  *   stops asserting the turn is in flight instead of locking the composer for
  *   good. `TURN_INFLIGHT_DEADLINE_MS` is deliberately the same order as the
@@ -67,7 +69,11 @@ export function turnSettled(
   if (!turn) return true;
   const row = rows.find((r) => r.meta?.message_id === turn.messageId);
   if (!row?.delivery) return false;
-  return row.delivery.answered;
+  // A live alert IS an outcome: the send did not land, and saying so is what the
+  // line was waiting for. Without this the composer would stay locked on a
+  // delivery that already failed, which is how a bounced send used to read as a
+  // turn still in flight.
+  return row.delivery.answered || Boolean(row.delivery.alert);
 }
 
 /**

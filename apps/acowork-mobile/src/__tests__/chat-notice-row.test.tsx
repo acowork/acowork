@@ -167,27 +167,6 @@ describe('addressing questions (D6 levels 3 and 5)', () => {
 })
 
 describe('the facts about the channel', () => {
-  it('a failed delivery is worded by the surface, not read off the wire', () => {
-    const html = render(notice('delivery_failed'))
-    expect(html).toContain('消息未能送达，请重试')
-    expect(html).toContain('chat-notice-pill')
-  })
-
-  it('a failed send sits in its message\'s column, not in the middle of the stream', () => {
-    // A receipt about ONE message belongs to that message. Centering it made it
-    // read as a fact about the whole conversation, attached to nothing.
-    expect(render(notice('delivery_failed'), { anchor: 'self' })).toContain('chat-notice-end')
-    expect(render(notice('delivery_failed'), { anchor: 'peer' })).toContain('chat-notice-start')
-  })
-
-  it('a receipt whose subject is not in the window stays centered', () => {
-    // The window is a window: no visible subject, no claimed column.
-    const html = render(notice('delivery_failed'))
-    expect(html).toContain('chat-notice-pill')
-    expect(html).not.toContain('chat-notice-end')
-    expect(html).not.toContain('chat-notice-start')
-  })
-
   it('a limit notice carries its own text, and an empty one paints nothing', () => {
     expect(render(notice('budget_exhausted', {}, '上下文预算已用尽'))).toContain('上下文预算已用尽')
     expect(render(notice('unknown_type'))).toBe('')

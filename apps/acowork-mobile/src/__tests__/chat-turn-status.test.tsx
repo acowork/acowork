@@ -53,10 +53,12 @@ const ANSWERED_HUMAN = row({
     targets: [{ agent_instance_id: AGENT, agent_session_id: 'exec', round_id: 'r1' }],
   },
 })
-const RECEIPT_ANSWERED_HUMAN = row({
+const ALERT_HUMAN = row({
+  // ADR-105 D5 rev. 2026-11-06: the failure is not a stored receipt any more, it
+  // is served live on the human's own row.
   delivery: {
-    answered: true,
-    answered_by: { message_id: 'dlv-failed:m-1:ag', kind: 'system_notice' },
+    answered: false,
+    alert: { target: AGENT, error_code: 'target_not_installed', expires_in: 600 },
   },
 })
 const ROUND = row({
@@ -67,15 +69,6 @@ const ROUND = row({
   to: 'u1',
   meta: { message_id: 'round:exec|r1', round_id: 'r1', agent_instance_id: AGENT, agent_session_id: 'exec', in_reply_to: 'm-1' },
 })
-const RECEIPT = row({
-  seq: 2,
-  from: AGENT,
-  kind: 'system_notice',
-  body: '',
-  to: 'u1',
-  meta: { message_id: 'dlv-failed:m-1:ag', notice_type: 'delivery_failed', in_reply_to: 'm-1' },
-})
-
 let container: HTMLDivElement
 let root: Root
 
@@ -145,8 +138,11 @@ describe('AgentChatScreen in-flight turn claim', () => {
     expect(useChatSessionStore.getState().inflight[SESSION]).toBeUndefined()
   })
 
-  it('a receipt settles it too — the human has an answer on screen', () => {
-    seed([RECEIPT_ANSWERED_HUMAN, RECEIPT], { [SESSION]: { messageId: 'm-1', at: 1 } })
+  it('a live delivery alert settles it too — the human has an answer on screen', () => {
+    // The send bounced. Holding the claim would lock the composer on a delivery
+    // that already failed, which is how a bounced send used to read as a turn
+    // still in flight.
+    seed([ALERT_HUMAN], { [SESSION]: { messageId: 'm-1', at: 1 } })
     mount()
     expect(statusLine()).toBeNull()
     expect(composer().disabled).toBe(false)

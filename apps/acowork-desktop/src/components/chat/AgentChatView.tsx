@@ -95,12 +95,12 @@ import {
   answerWithChoice,
   directCardAddress,
   mayAnswerCard,
+  type CardAnswerHandler,
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { turnInflight } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
-import { indexByMessageId, noticeAnchorOf, type NoticeAnchor } from "../../lib/chatNoticeAnchor";
 import {
   fetchCardAnswer,
   useChatSessionStore,
@@ -109,6 +109,7 @@ import {
   type ChatAttachmentMeta,
   type ChatAddress,
 } from "../../stores/chatSessionStore";
+import { DeliveryAlertLine } from "./DeliveryAlertLine";
 import { useChatStore } from "../../stores/chatStore";
 import type { WorkspaceRef } from "../../lib/types";
 import { useAgentStore } from "../../stores/agentStore";
@@ -140,7 +141,7 @@ interface RowProps {
   /** Answer an addressing card (D6 levels 3 and 5) by re-delivering the
    *  utterance it asks about, now addressed. The parent hands it only to the
    *  person the card asked (D10) — `undefined` for anyone else. */
-  onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void;
+  onChooseCard?: CardAnswerHandler;
   /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
    *  picker's "去续投") to locate that run's block in the transcript. A
    *  navigation, not an address — it never changes what a message carries. */
@@ -148,10 +149,6 @@ interface RowProps {
   /** Which execution session the picker just asked to continue: the matching
    *  block reveals + focuses its in-place reply box. */
   focusBlockSessionId?: string;
-  /** The column a channel receipt belongs in (a failed send is about MY
-   *  message). Absent for every row that is not a notice, and for a notice whose
-   *  subject is not in the loaded window. */
-  noticeAnchor?: NoticeAnchor;
 }
 
 /**
@@ -169,7 +166,6 @@ const RowView = memo(function RowView({
   showHeader,
   onChooseCard,
   onLocateRef,
-  noticeAnchor,
 }: RowProps) {
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
@@ -201,12 +197,7 @@ const RowView = memo(function RowView({
         ? (choice: CardChoice) => onChooseCard(row, choice)
         : undefined;
     return (
-      <ChatNoticeEventRow
-        row={row}
-        className="px-4"
-        anchor={noticeAnchor}
-        onChoose={choose}
-      />
+      <ChatNoticeEventRow row={row} className="px-4" onChoose={choose} />
     );
   }
 
@@ -389,6 +380,12 @@ const RowView = memo(function RowView({
                 ))}
               </div>
             )}
+            {/* A send that failed, while it is still news (ADR-105 D5 rev.
+                2026-11-06): served live on this row, never a transcript row, and
+                gone on its own clock. */}
+            {row.delivery?.alert ? (
+              <DeliveryAlertLine alert={row.delivery.alert} align="end" className="mt-0.5" />
+            ) : null}
             <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
             </span>
@@ -621,10 +618,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     virtualAttrs,
     seqsByItem,
   } = useTranscriptLayout(rows, sessionId);
-  // Channel receipts point back at the message they are about: one index per
-  // window, so each notice resolves its subject by coordinate instead of
-  // scanning (design 31 §6's presentation join).
-  const rowByMessageId = useMemo(() => indexByMessageId(rows), [rows]);
   const isBubble = (item: TranscriptItem | undefined) =>
     item?.kind === "row" && item.row.kind === "agent_message";
   // Optimistic exec-session title seed (ADR-099). A Router-created execute
@@ -777,10 +770,14 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // the card asks about may be far outside the loaded window, and looking it up
   // here is what made an old card's buttons dead (design 31 §6). The click
   // (which session, or new work) is still ours — it is what the human chose.
+  //
+  // Answers `true` when the click became a delivery — the card then holds its
+  // busy state until the projection closes it — and `false` when it did not, so
+  // the card re-opens instead of leaving a decision that never moved.
   const answerCard = useCallback(
-    async (card: ChatMessageRow, choice: CardChoice) => {
+    async (card: ChatMessageRow, choice: CardChoice): Promise<boolean> => {
       const cardId = card.meta?.message_id;
-      if (!cardId) return;
+      if (!cardId) return false;
       const lookup = await fetchCardAnswer(sessionId, cardId);
       if (!lookup.ok) {
         // `already_answered` needs no message: a round settled the question and
@@ -789,10 +786,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         if (lookup.reason === "gone") {
           showToast({ type: "error", message: t("chatView.cardAnswerGone") });
         }
-        return;
+        return false;
       }
       const answer = answerWithChoice(lookup.facts, choice);
-      if (!answer) return;
+      if (!answer) return false;
       void sendText(
         sessionId,
         answer.text,
@@ -801,6 +798,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         answer.attachmentIds,
         directCardAddress(answer),
       );
+      return true;
     },
     [sendText, sessionId, t],
   );
@@ -1165,11 +1163,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 onChooseCard={
                   item.kind === "row" && mayAnswerCard(item.row, me)
                     ? answerCard
-                    : undefined
-                }
-                noticeAnchor={
-                  item.kind === "row" && item.row.kind === "system_notice"
-                    ? noticeAnchorOf(item.row, rowByMessageId, me)
                     : undefined
                 }
                 onLocateRef={handleLocateRef}

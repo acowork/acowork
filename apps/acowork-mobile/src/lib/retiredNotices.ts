@@ -27,4 +27,9 @@ export const RETIRED_NOTICES: ReadonlySet<string> = new Set([
   'turn_routed',
   'router_fallback',
   'interaction_resolved',
+  // Same class as the milestones: a receipt nobody retracts. The persisted
+  // `delivery_failed` line told every reader that a message was not delivered,
+  // long after a retry made that false. A live alert on the human's row replaced
+  // it (ADR-105 D5, revision 2026-11-06).
+  'delivery_failed',
 ])

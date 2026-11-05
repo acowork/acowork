@@ -225,20 +225,18 @@ describe("GroupChatPanel in-flight turn claim", () => {
     expect(settleTurnMock).toHaveBeenCalledWith(GROUP, "m1");
   });
 
-  it("a delivery receipt settles it too — the human has an answer on screen", () => {
+  it("a live delivery alert settles it too — the human has an answer on screen", () => {
+    // ADR-105 D5 rev. 2026-11-06: the failure no longer lands as a receipt row,
+    // so the projection reports it on the human's own row. That IS the outcome
+    // the wait line was waiting for — holding the claim would lock the composer
+    // on a send that already bounced.
     tail = [
       row(1, {
         body: "fix the pagination",
         delivery: {
-          answered: true,
-          answered_by: { message_id: "dlv-failed:m1:agent-a", kind: "system_notice" },
+          answered: false,
+          alert: { target: AGENT_A, error_code: "target_not_installed", expires_in: 600 },
         },
-      }),
-      row(2, {
-        from: AGENT_A,
-        kind: "system_notice",
-        body: "",
-        meta: { message_id: "dlv-failed:m1:agent-a", notice_type: "delivery_failed", in_reply_to: "m1" },
       }),
     ];
     inflightMap = { [GROUP]: { messageId: "m1", at: 1 } };

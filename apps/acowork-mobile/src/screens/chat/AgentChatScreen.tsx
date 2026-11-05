@@ -57,12 +57,12 @@ import { AttachmentViewer } from '../../components/AttachmentViewer'
 import { ChatAttachmentCapsule } from '../../components/ChatAttachmentCapsule'
 import { ChatExecutionBlock } from '../../components/ChatExecutionBlock'
 import { ChatNoticeRow } from '../../components/ChatNoticeRow'
+import { DeliveryAlertLine } from '../../components/DeliveryAlertLine'
 import { ChatAddressSheet, type AddressPick } from '../../components/ChatAddressSheet'
 import { answerWithChoice, directCardAddress, mayAnswerCard, type CardChoice } from '../../lib/chatCardAnswer'
 import { fetchCardAnswer } from '../../lib/api'
 import { turnInflight } from '../../lib/chatTurnInflight'
 import { buildTranscriptItems, type TranscriptItem } from '../../lib/chatTranscriptGroups'
-import { indexByMessageId, noticeAnchorOf, type NoticeAnchor } from '../../lib/chatNoticeAnchor'
 import { renderMarkdown } from '../../lib/markdown'
 import type { ChatAttachment } from '../../lib/chatAttachment'
 import type { ChatMessageRow } from '../../lib/types'
@@ -142,10 +142,6 @@ export function AgentChatScreen() {
   }, [agentId])
 
   const rows = useMemo(() => (win ? [...win.older, ...win.tail] : []), [win])
-  // message_id → row, for the receipts that name the message they are about: a
-  // delivery failure is placed in that message's column instead of floating
-  // center (design 31 §6 leaves this join to the presentation layer).
-  const rowByMessageId = useMemo(() => indexByMessageId(rows), [rows])
   const turnLive = turnInflight(rows, inflightTurn)
   // ONE state drives the line and the lock: a wait line with an unlocked
   // composer invites the second send this Chat cannot absorb, and a locked
@@ -379,11 +375,6 @@ export function AgentChatScreen() {
                   onOpenAttachment={setViewing}
                   onLocateRef={handleLocateRef}
                   focusBlockSessionId={focusBlockSessionId ?? undefined}
-                  noticeAnchor={
-                    item.kind === 'row' && item.row.kind === 'system_notice'
-                      ? noticeAnchorOf(item.row, rowByMessageId, me?.user_id ?? '')
-                      : undefined
-                  }
                   onReplyInPlace={handleReplyInPlace}
                 />
               </Fragment>
@@ -588,10 +579,6 @@ export interface RowProps {
   /** Which execution session the sheet just asked to continue: the matching
    *  block opens + focuses its in-place reply row. */
   focusBlockSessionId?: string
-  /** Column a channel receipt belongs in (see `lib/chatNoticeAnchor`). Absent
-   *  for every non-notice row and for a receipt whose subject is not in the
-   *  loaded window. */
-  noticeAnchor?: NoticeAnchor
   /** The block's in-place reply sends straight down the level-1 branch. */
   onReplyInPlace?: (rowId: string, text: string) => void
 }
@@ -607,7 +594,6 @@ export function RowView(props: RowProps) {
     onChooseCard,
     onOpenAttachment,
     onLocateRef,
-    noticeAnchor,
   } = props
 
   if (row.kind === 'execution_round') {
@@ -628,7 +614,7 @@ export function RowView(props: RowProps) {
       (noticeType === 'session_choice' || noticeType === 'confirm_continue') && onChooseCard
         ? (choice: CardChoice) => onChooseCard(row, choice)
         : undefined
-    return <ChatNoticeRow row={row} anchor={noticeAnchor} onChoose={choose} />
+    return <ChatNoticeRow row={row} onChoose={choose} />
   }
 
   if (row.kind === 'interaction_request') {
@@ -711,6 +697,13 @@ export function RowView(props: RowProps) {
                   </button>
                 ))}
               </div>
+            ) : null}
+            {/* A send that failed, while it is still news (ADR-105 D5 rev.
+                2026-11-06): served live on this row, never a transcript row, and
+                gone on its own clock — a phone left open must not keep a dead
+                receipt on screen either. */}
+            {row.delivery?.alert ? (
+              <DeliveryAlertLine alert={row.delivery.alert} align={isSelf ? 'end' : 'start'} />
             ) : null}
           </div>
         </div>

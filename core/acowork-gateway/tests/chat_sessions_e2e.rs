@@ -723,9 +723,10 @@ fn group_mention_fans_out_with_explicit_per_target_status() {
 /// * `targets: []` is a *positive* instruction ("you decide"), not a malformed
 ///   mention: the human row is still written once, with `mentions: []` and the
 ///   decision in `auto_routed_to`;
-/// * an uninstalled responder fails *loudly* — a `delivery_failed` notice row
-///   lands in the transcript, which is the whole point of the change (the old
-///   silence is the bug);
+/// * an uninstalled responder fails *loudly* — the human row it owed carries a
+///   live `delivery.alert`, which is the whole point of the change (the old
+///   silence is the bug), and no receipt row is stored (ADR-105 D5 rev.
+///   2026-11-06: a failure is news, not history);
 /// * clearing the role restores archive-only, so a group of humans never gets
 ///   an agent butting in.
 #[test]
@@ -780,6 +781,9 @@ fn unaddressed_group_message_reaches_the_default_responder() {
     assert_eq!(v["results"][0]["status"].as_str(), Some("failed"), "uninstalled agent is loud: {body}");
     let page = messages(http, &token, &gsid2);
     let rows = page["messages"].as_array().unwrap();
+    // The failure is news, not history (ADR-105 D5, revision 2026-11-06): no
+    // receipt row is appended, so nothing has to be retracted later.
+    assert_eq!(rows.len(), 1, "one human row, no durable receipt: {rows:?}");
     let human = rows.iter().find(|r| r["kind"].as_str() == Some("user_message")).expect("human row");
     assert_eq!(human["meta"]["mentions"].as_array().unwrap().len(), 0, "the human named nobody");
     assert_eq!(
@@ -787,12 +791,14 @@ fn unaddressed_group_message_reaches_the_default_responder() {
         Some(agent_uuid),
         "the decision is recorded on the utterance it decided"
     );
-    let notice = rows
-        .iter()
-        .find(|r| r["meta"]["notice_type"].as_str() == Some("delivery_failed"))
-        .expect("a failed delivery leaves a durable receipt");
-    assert_eq!(notice["kind"].as_str(), Some("system_notice"));
-    assert_eq!(notice["meta"]["in_reply_to"], human["meta"]["message_id"], "threaded to its trigger");
+    // …it is served live on the row it owed instead, and it names who missed it.
+    let alert = &human["delivery"]["alert"];
+    assert_eq!(alert["target"].as_str(), Some(agent_uuid), "the alert names the target: {human:?}");
+    assert_eq!(alert["error_code"].as_str(), Some("target_not_installed"));
+    assert!(
+        alert["expires_in"].as_i64().unwrap_or(0) > 0,
+        "a live alert still has life left when it is read: {alert:?}"
+    );
 
     // Clearing the role goes back to archive-only (a group of humans must be
     // able to stop the agent from answering).

@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
@@ -52,6 +52,10 @@ describe("ChatNoticeEventRow", () => {
       "turn_routed",
       "router_fallback",
       "interaction_resolved",
+      // ADR-105 D5 rev. 2026-11-06: the failed-send receipt is not stored any
+      // more — it is a live `delivery.alert`. The rows history holds are the
+      // retracted kind, so they must disappear with the rest of the milestones.
+      "delivery_failed",
     ]) {
       const { container, unmount } = render(
         <ChatNoticeEventRow row={noticeRow(noticeType, "Routed to a new task")} />,
@@ -187,48 +191,6 @@ describe("ChatNoticeEventRow", () => {
     expect(screen.getByText("exec-7")).toBeTruthy();
   });
 
-  it("paints a delivery_failed receipt even though the row is bodyless (ADR-105)", () => {
-    // The Gateway writes no body — the prose would be server-side English plus
-    // an internal error code — so the surface owns the wording. It MUST paint:
-    // the whole point of the row is that the failure stops being invisible.
-    const { container } = render(
-      <ChatNoticeEventRow row={noticeRow("delivery_failed")} name="Architect" />,
-    );
-    expect(container.textContent).toBe("chatView.deliveryFailed:Architect");
-  });
-
-  it("sits in the sender's own column when the receipt can name its subject", () => {
-    // A failed send is about ONE message — the reader's. Centering it made it
-    // read as a fact about the conversation, attached to nothing.
-    const { container } = render(
-      <ChatNoticeEventRow row={noticeRow("delivery_failed")} anchor="self" />,
-    );
-    const line = container.querySelector("[data-event-text]");
-    expect(line?.getAttribute("data-align")).toBe("end");
-  });
-
-  it("sits in the peer's column when someone else's message failed", () => {
-    const { container } = render(
-      <ChatNoticeEventRow row={noticeRow("delivery_failed")} anchor="peer" />,
-    );
-    expect(
-      container.querySelector("[data-event-text]")?.getAttribute("data-align"),
-    ).toBe("start");
-  });
-
-  it("stays centered when the subject is not in the window", () => {
-    // A fact with no visible subject must not claim an owner it cannot name.
-    const { container } = render(<ChatNoticeEventRow row={noticeRow("delivery_failed")} />);
-    expect(
-      container.querySelector("[data-event-text]")?.getAttribute("data-align"),
-    ).toBe("center");
-  });
-
-  it("falls back to the unnamed wording when the surface cannot resolve the target", () => {
-    const { container } = render(<ChatNoticeEventRow row={noticeRow("delivery_failed")} />);
-    expect(container.textContent).toBe("chatView.deliveryFailedNoTarget");
-  });
-
   it("folds a retired card-resolution receipt into nothing (the block paints it)", () => {
     // ADR-106 D12: no writer for this notice is left, and an old transcript must
     // not narrate a card that is now shown inside the round's block.
@@ -251,5 +213,102 @@ describe("ChatNoticeEventRow", () => {
   it("paints no hole when there is neither text nor status", () => {
     const { container } = render(<ChatNoticeEventRow row={noticeRow("")} />);
     expect(container.innerHTML).toBe("");
+  });
+
+  // ── The card wears the agent's identity ─────────────────────────────
+
+  /** A `confirm_continue` card with one candidate and the "new task" escape. */
+  function answerableCard(noticeType = "confirm_continue"): ChatMessageRow {
+    const row = noticeRow(noticeType);
+    row.delivery = {
+      answered: false,
+      question: {
+        answered: false,
+        options: [{ session_id: "exec-7", label: "整理报表", why: "最近活跃" }],
+        allow_new_task: true,
+      },
+    };
+    return row;
+  }
+
+  it("speaks as the agent: avatar, name and role above the question", () => {
+    // The card is the agent's own question about its own runs, not a channel
+    // receipt, so it is painted as that agent's message — same header, same
+    // offsets as the execution block that replaces it once the human picks.
+    // Anything else made the answer arrive under a name that had never spoken.
+    const { container } = render(
+      <ChatNoticeEventRow row={answerableCard()} authorName="SSE" onChoose={() => {}} />,
+    );
+    expect(screen.getByText("SSE")).toBeTruthy();
+    // An avatar, in the header, before the card.
+    const avatar = container.querySelector("img, span.rounded-lg, div[style*='40px']");
+    expect(avatar).toBeTruthy();
+    const card = screen.getByTestId("chat-card-options");
+    // The card sits in the same 40px gutter the agent bubble and the execution
+    // block use, so the question and the run that follows start on one line.
+    expect(card.querySelector(".w-10")).toBeTruthy();
+    // The author is the row's `from` — the agent instance the projection named.
+    expect(container.textContent).toContain("SSE");
+  });
+
+  it("keeps the card busy from the click until the answer lands", async () => {
+    // "Click did nothing" was the complaint that a fire-and-forget click
+    // produced: no state change, no visible reaction. The card now holds the
+    // decision open — the pressed row spins, every other row and the escape go
+    // dead — and leaves only when the projection says the question was answered.
+    const row = answerableCard();
+    let release: (v: boolean) => void = () => {};
+    const onChoose = vi.fn(() => new Promise<boolean>((r) => (release = r)));
+    render(<ChatNoticeEventRow row={row} onChoose={onChoose} />);
+
+    const buttons = screen.getAllByRole("button");
+    fireEvent.click(buttons[0]);
+    expect(onChoose).toHaveBeenCalledWith({ sessionId: "exec-7" });
+    // In flight: everything disabled, and the header says what is happening.
+    for (const b of screen.getAllByRole("button")) {
+      expect((b as HTMLButtonElement).disabled).toBe(true);
+    }
+    expect(screen.getByText("chatView.block.choosing")).toBeTruthy();
+
+    // A landed delivery does NOT release the buttons: the card is answered away
+    // by the projection, and a live question under the human's pointer after
+    // they already decided is the flash this holds down.
+    release(true);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(screen.getByText("chatView.block.choosing")).toBeTruthy();
+  });
+
+  it("re-opens the card when the click delivered nothing", async () => {
+    // A refused click (a card that is already gone, a send the Gateway would not
+    // take) must not leave a dead question behind: `false` is the surface saying
+    // "nothing was delivered", and the buttons come back.
+    const row = answerableCard();
+    const onChoose = vi.fn(async () => false);
+    render(<ChatNoticeEventRow row={row} onChoose={onChoose} />);
+    fireEvent.click(screen.getAllByRole("button")[1]); // the "new task" escape
+    expect(onChoose).toHaveBeenCalledWith({ forceNew: true });
+    await waitFor(() => {
+      for (const b of screen.getAllByRole("button")) {
+        expect((b as HTMLButtonElement).disabled).toBe(false);
+      }
+    });
+    expect(screen.getByText("chatView.block.unanswered")).toBeTruthy();
+  });
+
+  it("re-opens the card when the click throws", async () => {
+    const row = answerableCard();
+    render(
+      <ChatNoticeEventRow
+        row={row}
+        onChoose={() => Promise.reject(new Error("gateway down"))}
+      />,
+    );
+    fireEvent.click(screen.getAllByRole("button")[0]);
+    await waitFor(() => {
+      expect(
+        (screen.getAllByRole("button")[0] as HTMLButtonElement).disabled,
+      ).toBe(false);
+    });
   });
 });

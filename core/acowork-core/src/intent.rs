@@ -186,6 +186,21 @@ pub fn is_task_routing_key(key: &str) -> bool {
     key.starts_with(TASK_ROUTING_KEY_PREFIX)
 }
 
+/// Machine tokens for a **live** delivery alert (ADR-105 D5, revision
+/// 2026-11-06).
+///
+/// One spelling for both ends of the internal alert call: the Gateway reports
+/// the code, the user service stores and serves it, and the surfaces decide the
+/// wording. Only the codes the Gateway itself invents live here — the rest are
+/// the delivery entry's own `error_code`s (`target_not_installed`,
+/// `not_authorized`, a publish failure's code), passed through verbatim.
+pub mod chat_alert_codes {
+    /// The addressee accepted the delivery and then produced nothing before the
+    /// response deadline: the answer never came (design 27 §5.5.1). Formerly the
+    /// sweeper's `fallback-<message_id>` receipt.
+    pub const NO_RESPONSE: &str = "no_response";
+}
+
 /// The Chat content vocabulary (ADR-106 D1).
 ///
 /// Exactly four kinds may exist in a Chat transcript, and three processes touch
@@ -240,6 +255,10 @@ pub mod chat_kinds {
     /// `budget_exhausted` / `truncated` / `unavailable` are deliberately absent:
     /// they report a limit of the channel, and the request they name never
     /// became a row (design 31 §9 pending 3 tracks that evidence gap).
+    /// `delivery_failed` has **no live writer** since the 2026-11-06 revision of
+    /// ADR-105 D5 (a failed send is an in-memory alert, not a row) but stays
+    /// listed: the type is still what the rows already in old transcripts are,
+    /// and a vocabulary that forgets it would make those rows unreadable.
     pub const THREADED_NOTICES: &[&str] = &[
         "delivery_failed",
         "interaction_resolved",
@@ -281,12 +300,18 @@ pub mod chat_kinds {
     /// [`is_answer_row`] must not count one as the outcome that settled a turn —
     /// a row nobody can see cannot be the fact that made a message visibly
     /// handled.
+    /// `delivery_failed` joined the set with the 2026-11-06 revision of ADR-105
+    /// D5: the yellow receipt is no longer written (the failure is a live alert
+    /// on the human's row), so the rows history holds are the retracted kind —
+    /// the same "not delivered" line that stayed on screen long after a retry
+    /// succeeded. Hiding them at read time is what stops that.
     pub const RETIRED_NOTICES: &[&str] = &[
         "turn_dispatched",
         "turn_started",
         "turn_routed",
         "router_fallback",
         "interaction_resolved",
+        "delivery_failed",
     ];
 
     /// True when a row of this kind settles the row it threads to (ADR-106 D9):

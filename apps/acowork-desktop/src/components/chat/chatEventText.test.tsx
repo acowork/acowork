@@ -1,9 +1,8 @@
 import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { ChatEventText } from "./ChatEventText";
-import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
+import { DeliveryAlertLine } from "./DeliveryAlertLine";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
-import type { ChatMessageRow } from "../../stores/chatSessionStore";
 
 vi.mock("../../i18n/useTranslation", () => ({
   useTranslation: () => ({
@@ -73,26 +72,24 @@ describe("event-text grammar at the call sites", () => {
     expect(el.className).toContain("justify-center");
   });
 
-  it("a channel receipt naming no row is a centered, warning-toned line", () => {
-    const row: ChatMessageRow = {
-      seq: 9,
-      ts: 1,
-      from: "sys",
-      kind: "system_notice",
-      // ADR-105: the Gateway writes this receipt bodyless and every surface
-      // owns the wording, so the line paints from the notice type alone (a
-      // legacy body-bearing row is re-worded rather than quoted verbatim).
-      body: "",
-      to: "u",
-      meta: { notice_type: "delivery_failed" },
-    };
-    render(<ChatNoticeEventRow row={row} className="px-4" />);
+  it("a live delivery alert is a warn-toned note in the sender's column", () => {
+    // ADR-105 D5 rev. 2026-11-06: a failed send is no longer a stored receipt
+    // row, so this call site — not `ChatNoticeEventRow` — is what paints it. The
+    // grammar is unchanged: one axis (the column of the message it owes) and one
+    // loudness (warn: retry-able, nothing broke).
+    render(
+      <DeliveryAlertLine
+        alert={{ target: "agent-a", error_code: "target_not_installed", expires_in: 600 }}
+        align="end"
+        className="px-4"
+      />,
+    );
     const el = document.querySelector('[data-event-text="turn"]') as HTMLElement;
-    expect(el.className).toContain("justify-center");
+    expect(el.className).toContain("justify-end");
     expect(el.className).toContain("px-4"); // the surface gutter survives
-    expect(el.textContent).toContain("chatView.deliveryFailed");
-    // ADR-105's receipt is warn, not danger: it is retry-able and the run broke
-    // nothing, so it must not wear the colour a failed run wears.
+    expect(el.textContent).toContain("chatView.deliveryFailedNoTarget");
+    // Not danger: the receipt is retry-able and the run broke nothing, so it must
+    // not wear the colour a failed run wears.
     expect(el.getAttribute("data-tone")).toBe("warn");
   });
 });

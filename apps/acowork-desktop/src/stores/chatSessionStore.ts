@@ -130,6 +130,24 @@ export interface ChatDeliveryView {
    *  value would report the first target and lose the rest. */
   targets?: ChatRoundTarget[];
   question?: ChatQuestionState;
+  /** A send this row owed that failed — served **live**, never stored
+   *  (ADR-105 D5, revision 2026-11-06). The service keeps it in memory for
+   *  `expires_in` seconds and then stops reporting it; the transcript keeps no
+   *  trace, which is the point: the yellow receipt used to outlive the problem by
+   *  weeks, including after a retry succeeded. */
+  alert?: ChatDeliveryAlert;
+}
+
+/** A live delivery failure (`delivery.alert`). */
+export interface ChatDeliveryAlert {
+  /** Who did not receive it. */
+  target: string;
+  /** Machine token: `target_not_installed` / `not_authorized` / `no_response` /
+   *  a publish error code. Wording belongs to the surface — it owns the copy. */
+  error_code: string;
+  /** Seconds of life left when this page was read. The surface schedules its own
+   *  removal from it instead of comparing clocks with the service. */
+  expires_in: number;
 }
 
 export interface ChatMessageRow {

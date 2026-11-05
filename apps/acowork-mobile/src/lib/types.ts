@@ -353,6 +353,17 @@ export interface ChatDeliveryView {
    *  value would report the first target and lose the rest. */
   targets?: ChatRoundTarget[]
   question?: ChatQuestionState
+  /** A send this row owed that failed — served **live**, never stored
+   *  (ADR-105 D5, revision 2026-11-06). Gone after `expires_in` seconds. */
+  alert?: ChatDeliveryAlert
+}
+
+/** A live delivery failure (`delivery.alert`): the machine token plus how long
+ *  it is still worth painting. The wording belongs to the surface. */
+export interface ChatDeliveryAlert {
+  target: string
+  error_code: string
+  expires_in: number
 }
 
 export interface ChatMessageRow {

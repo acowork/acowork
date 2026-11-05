@@ -75,7 +75,7 @@ impl SessionInfo {
     ///
     /// (An uninstalled-but-still-a-member agent passes this check on purpose:
     /// the delivery then fails loudly with `target_not_installed`, and that
-    /// failure is surfaced as a `delivery_failed` row instead of being hidden.)
+    /// failure is surfaced as a live delivery alert instead of being hidden.)
     pub fn live_default_responder(&self) -> Option<&str> {
         let responder = self
             .default_responder
@@ -284,6 +284,45 @@ pub async fn append_message(
         }
     };
     Ok(attachment_meta_from_row(&stored))
+}
+
+/// Record a **live** delivery failure (ADR-105 D5, revision 2026-11-06).
+///
+/// A failed send is news while it is news: the human needs to see "this did not
+/// go out" now, and nobody needs to read it in the transcript next week. So the
+/// failure is not a row — it is an in-memory alert on the user service, served as
+/// `delivery.alert` on the human's message row and gone after ten minutes (or a
+/// restart). This call only reports the fact; the ring that makes an open
+/// surface re-read its page is fired by the service on the way out.
+///
+/// Best-effort by contract, like every chat-side call here: an alert that cannot
+/// be recorded costs the receipt, never the send (the human's row is already
+/// durable, and the caller is responding with the same failure in its body).
+pub async fn record_delivery_alert(
+    port: u16,
+    session_id: &str,
+    in_reply_to: &str,
+    target: &str,
+    error_code: &str,
+) -> Result<(), String> {
+    let resp = client()
+        .post(format!(
+            "http://127.0.0.1:{port}/internal/chat-sessions/{session_id}/alerts"
+        ))
+        .json(&serde_json::json!({
+            "in_reply_to": in_reply_to,
+            "target": target,
+            "error_code": error_code,
+        }))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("chat alert {status}: {body}"));
+    }
+    Ok(())
 }
 
 /// Project a stored row's `attachments` onto the shared router-side shape.

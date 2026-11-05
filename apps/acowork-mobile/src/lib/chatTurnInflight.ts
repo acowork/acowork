@@ -68,7 +68,10 @@ export function turnSettled(rows: readonly ChatMessageRow[], turn?: InflightTurn
   if (!turn) return true
   const row = rows.find((r) => r.meta?.message_id === turn.messageId)
   if (!row?.delivery) return false
-  return row.delivery.answered
+  // A live delivery alert is an outcome too: the send did not land, and that is
+  // what the line was waiting to say (ADR-105 D5 revision 2026-11-06 — the alert
+  // replaced the persisted receipt that used to close this claim).
+  return row.delivery.answered || Boolean(row.delivery.alert)
 }
 
 /**

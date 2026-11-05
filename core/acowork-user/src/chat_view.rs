@@ -24,6 +24,7 @@ use std::path::Path;
 
 use serde::Serialize;
 
+use crate::chat_alerts::AlertView;
 use crate::chat_sessions::{KIND_SYSTEM_NOTICE, KIND_USER_MESSAGE, SessionMessage};
 use acowork_core::intent::chat_kinds;
 
@@ -63,6 +64,13 @@ pub struct DeliveryView {
     /// been answered yet (design 31 §4, `question`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub question: Option<QuestionState>,
+    /// A delivery failure that is still worth showing (`crate::chat_alerts`).
+    ///
+    /// Not a row, not history: a send that failed is a fact about the moment,
+    /// and it is served here only while it is live. A surface paints it against
+    /// the human's row and drops it when `expires_in` runs out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alert: Option<AlertView>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -125,6 +133,7 @@ pub fn read_page(
     session_id: &str,
     offset: usize,
     limit: usize,
+    alerts: &crate::chat_alerts::AlertStore,
 ) -> Result<(Vec<ChatRowView>, u64), String> {
     let (rows, total) = crate::chat_sessions::read_messages(data_dir, session_id, offset, limit)?;
     // Each row asks about itself (a message: what happened to it) or about the
@@ -135,8 +144,23 @@ pub fn read_page(
         ids.push(row.meta.in_reply_to.clone());
     }
     let answers = crate::chat_sessions::answering_rows(data_dir, session_id, &ids)?;
+    // Live failures only for rows this page actually shows: the alert table is
+    // read with the window's own ids, so a page never pays for the whole chat.
+    let live = alerts.live(
+        session_id,
+        &rows
+            .iter()
+            .map(|r| r.meta.message_id.clone())
+            .collect::<Vec<_>>(),
+        crate::auth::issuer::now_unix().max(0) as u64,
+    );
     Ok((
-        rows.into_iter().map(|row| view(row, &answers)).collect(),
+        rows.into_iter()
+            .map(|row| {
+                let alert = live.get(&row.meta.message_id).cloned();
+                view(row, &answers, alert)
+            })
+            .collect(),
         total,
     ))
 }
@@ -148,14 +172,16 @@ pub fn read_page(
 pub fn view(
     row: SessionMessage,
     answers: &HashMap<String, Vec<SessionMessage>>,
+    alert: Option<AlertView>,
 ) -> ChatRowView {
-    let delivery = delivery_of(&row, answers);
+    let delivery = delivery_of(&row, answers, alert);
     ChatRowView { row, delivery }
 }
 
 fn delivery_of(
     row: &SessionMessage,
     answers: &HashMap<String, Vec<SessionMessage>>,
+    alert: Option<AlertView>,
 ) -> Option<DeliveryView> {
     let is_card = row.kind == KIND_SYSTEM_NOTICE
         && chat_kinds::is_card_notice(row.meta.notice_type.as_str());
@@ -177,6 +203,7 @@ fn delivery_of(
                 options: row.meta.options.clone(),
                 allow_new_task: row.meta.allow_new_task,
             }),
+            alert: None,
         });
     }
 
@@ -193,8 +220,13 @@ fn delivery_of(
         .find(|r| chat_kinds::is_answer_row(r.kind.as_str(), r.meta.notice_type.as_str()));
     let Some(first) = first else {
         // No answer yet. Reported explicitly rather than as an absent field: a
-        // message that is still waiting is a state, not a missing value.
-        return Some(DeliveryView::default());
+        // message that is still waiting is a state, not a missing value — and a
+        // live failure rides on it, because "the send did not land" is exactly
+        // the case where nothing will ever answer that row.
+        return Some(DeliveryView {
+            alert,
+            ..DeliveryView::default()
+        });
     };
     // One entry per answering round, in log order. Duplicates by coordinates
     // are impossible: a round is written once per (turn, target), and the store
@@ -217,6 +249,8 @@ fn delivery_of(
         }),
         targets,
         question: None,
+        // An answered row is not a failed one: the answer supersedes the alert.
+        alert: None,
     })
 }
 
@@ -281,7 +315,7 @@ mod tests {
         let m = human("m-1");
         let target = round_ref("round-ref", "m-1", "s-9");
         let map = answers(&[("m-1", target)]);
-        let view = view(m, &map);
+        let view = view(m, &map, None);
         let delivery = view.delivery.expect("a human row always carries delivery");
         assert!(delivery.answered);
         assert_eq!(delivery.answered_by.as_ref().map(|a| a.kind.as_str()), Some("execution_round"));
@@ -302,7 +336,7 @@ mod tests {
             ("m-1", round_ref("round-a", "m-1", "exec-a")),
             ("m-1", round_ref("round-b", "m-1", "exec-b")),
         ]);
-        let view = view(human("m-1"), &map);
+        let view = view(human("m-1"), &map, None);
         let delivery = view.delivery.unwrap();
         assert!(delivery.answered);
         // Log order, both targets, nothing collapsed.
@@ -322,8 +356,45 @@ mod tests {
     /// Waiting is a state, not a missing field: the composer lock reads it.
     #[test]
     fn an_unanswered_message_says_so_instead_of_omitting_the_field() {
-        let view = view(human("m-1"), &answers(&[]));
+        let view = view(human("m-1"), &answers(&[]), None);
         assert_eq!(view.delivery, Some(DeliveryView::default()));
+    }
+
+    /// A live delivery failure rides on the human's row, and only there.
+    ///
+    /// It is not a row of its own any more (ADR-105 D5 revision 2026-11-06): the
+    /// yellow receipt used to be appended to the transcript and never retracted,
+    /// so a failure that later succeeded stayed on screen forever. The alert is a
+    /// decoration of the row the send owed, served while it is live.
+    #[test]
+    fn a_live_failure_is_a_decoration_of_the_row_it_concerns() {
+        let alert = AlertView {
+            target: "agent-a".into(),
+            error_code: "target_not_installed".into(),
+            expires_in: 600,
+        };
+        let failed = view(human("m-1"), &answers(&[]), Some(alert.clone()));
+        let delivery = failed.delivery.expect("a human row carries delivery");
+        assert_eq!(delivery.alert, Some(alert));
+        assert!(!delivery.answered, "a failed send answered nothing");
+
+        // A card never wears one: it asks, it does not owe a delivery.
+        let asked_card = view(card("c-1", "m-1"), &answers(&[]), Some(AlertView {
+            target: "agent-a".into(),
+            error_code: "no_response".into(),
+            expires_in: 5,
+        }));
+        assert_eq!(asked_card.delivery.unwrap().alert, None);
+
+        // Once a round answers the row, the answer is the fact — a leftover
+        // alert must not contradict it.
+        let asked = answers(&[("m-1", round_ref("round-ref", "m-1", "s-9"))]);
+        let answered = view(human("m-1"), &asked, Some(AlertView {
+            target: "agent-a".into(),
+            error_code: "target_not_installed".into(),
+            expires_in: 600,
+        }));
+        assert_eq!(answered.delivery.unwrap().alert, None);
     }
 
     /// A retired milestone is not an outcome (ADR-106 D14): a row nobody can see
@@ -332,7 +403,7 @@ mod tests {
     fn a_retired_notice_does_not_answer() {
         let mut notice = row(KIND_SYSTEM_NOTICE, "n-1", "m-1");
         notice.meta.notice_type = "turn_dispatched".into();
-        let view = view(human("m-1"), &answers(&[("m-1", notice)]));
+        let view = view(human("m-1"), &answers(&[("m-1", notice)]), None);
         assert!(!view.delivery.unwrap().answered);
     }
 
@@ -340,14 +411,14 @@ mod tests {
     /// row is a question, and nothing threads to it.
     #[test]
     fn a_card_reports_whether_it_has_been_answered() {
-        let open = view(card("c-1", "m-1"), &answers(&[]));
+        let open = view(card("c-1", "m-1"), &answers(&[]), None);
         let question = open.delivery.expect("a card carries delivery").question.expect("question state");
         assert!(!question.answered);
         assert_eq!(question.options.len(), 1);
         assert_eq!(question.allow_new_task, Some(true));
 
         let asked = answers(&[("m-1", round_ref("round-ref", "m-1", "s-9"))]);
-        let done = view(card("c-1", "m-1"), &asked);
+        let done = view(card("c-1", "m-1"), &asked, None);
         assert!(done.delivery.unwrap().question.unwrap().answered);
     }
 }

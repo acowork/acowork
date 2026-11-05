@@ -69,15 +69,12 @@ import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
-import {
-  indexByMessageId,
-  noticeAnchorOf,
-  type NoticeAnchor,
-} from "../../lib/chatNoticeAnchor";
+import { DeliveryAlertLine } from "./DeliveryAlertLine";
 import {
   answerWithChoice,
   groupCardAddress,
   mayAnswerCard,
+  type CardAnswerHandler,
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
@@ -253,14 +250,10 @@ interface RowProps {
   /** Right-click on a participant's avatar / name → the panel's "@name"
    *  menu. Undefined when the panel has no mention target for that row. */
   onMentionContextMenu?: (e: ReactMouseEvent, id: string) => void;
-  /** Column a channel receipt belongs in (a failed send is about ONE
-   *  participant's message). Absent for non-notices and for a receipt whose
-   *  subject is outside the loaded window. */
-  noticeAnchor?: NoticeAnchor;
   /** Answer an addressing card (ADR-106 D6 levels 3 and 5) by re-delivering the
    *  utterance it asks about, now addressed. Undefined for a read-only viewer
    *  (D10): deciding where someone else's words go is not a bystander's call. */
-  onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void;
+  onChooseCard?: CardAnswerHandler;
   /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
    *  picker's "去续投") to locate that run's block in the transcript. A
    *  navigation, not an address — it never changes what a message carries. */
@@ -335,7 +328,6 @@ const GroupRowView = memo(function GroupRowView({
   onMentionContextMenu,
   onChooseCard,
   onLocateRef,
-  noticeAnchor,
 }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
@@ -356,14 +348,8 @@ const GroupRowView = memo(function GroupRowView({
 
   if (row.kind === "system_notice") {
     // A notice is a fact about the channel, not an utterance, so it never wears
-    // an avatar. `name` is used by one receipt: the `delivery_failed` row of
-    // ADR-105 says which agent a message never reached, resolved from the roster
-    // like every other participant reference here (`from` = `to` = that agent on
-    // the Gateway's write). Every other receipt ignores the prop.
-    const failedTarget =
-      row.meta?.notice_type === "delivery_failed"
-        ? nameOf(row.to || row.from).name
-        : undefined;
+    // an avatar. (A failed send is not one of these rows any more: it is a live
+    // alert rendered on the human's own row, see `DeliveryAlertLine`.)
     const noticeType = row.meta?.notice_type;
     // The card asks the person who spoke — `to` is them — so a viewer who is
     // not that person gets the question without the answer (D10).
@@ -378,9 +364,8 @@ const GroupRowView = memo(function GroupRowView({
       <ChatNoticeEventRow
         row={row}
         className="px-4"
-        name={failedTarget}
-        anchor={noticeAnchor}
         onChoose={choose}
+        authorName={nameOf(row.from).name}
       />
     );
   }
@@ -604,6 +589,19 @@ const GroupRowView = memo(function GroupRowView({
               ))}
             </div>
           )}
+          {/* A send that failed, while it is still news (ADR-105 D5 rev.
+              2026-11-06). It rides on the human's row, not the transcript, and
+              it expires on its own — the yellow receipt used to be a row that
+              nothing ever removed. `alert.target` names the agent, so a group
+              says which member the message never reached. */}
+          {row.delivery?.alert ? (
+            <DeliveryAlertLine
+              alert={row.delivery.alert}
+              name={nameOf(row.delivery.alert.target).name}
+              align={own ? "end" : "start"}
+              className="mt-0.5"
+            />
+          ) : null}
           <div className="mt-1 flex items-center gap-2">
             <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
@@ -967,10 +965,6 @@ export function GroupChatPanel() {
   );
   // message_id → sender index, so a reply with an empty `to` can name the
   // counterparty from the message it answers (`in_reply_to`'s `from`).
-  // message_id → row, for the receipts that name the message they are about:
-  // a channel failure is placed in that message's column instead of floating
-  // center (design 31 §6 leaves this join to the presentation layer).
-  const rowByMessageId = useMemo(() => indexByMessageId(rows), [rows]);
   const fromById = useMemo(() => {
     const m = new Map<string, string>();
     for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
@@ -1226,10 +1220,10 @@ export function GroupChatPanel() {
   // window lookup returned silently when it missed (design 31 §6). Only the
   // click — which agent session, or new work — is the surface's.
   const answerCard = useCallback(
-    async (card: ChatMessageRow, choice: CardChoice) => {
-      if (!activeGroupId) return;
+    async (card: ChatMessageRow, choice: CardChoice): Promise<boolean> => {
+      if (!activeGroupId) return false;
       const cardId = card.meta?.message_id;
-      if (!cardId) return;
+      if (!cardId) return false;
       const lookup = await fetchCardAnswer(activeGroupId, cardId);
       if (!lookup.ok) {
         // A round already settled the question (`already_answered`) settles
@@ -1238,10 +1232,10 @@ export function GroupChatPanel() {
         if (lookup.reason === "gone") {
           showToast({ type: "error", message: t("chatView.cardAnswerGone") });
         }
-        return;
+        return false;
       }
       const answer = answerWithChoice(lookup.facts, choice);
-      if (!answer) return;
+      if (!answer) return false;
       const mentioned = resolveMentions(answer.text, agentParticipants);
       // The card came from one agent, so the answer must reach that one: the
       // original message may have named nobody (the group's default responder
@@ -1260,6 +1254,7 @@ export function GroupChatPanel() {
           answer.attachmentIds,
           groupCardAddress(answer),
         );
+      return true;
     },
     [activeGroupId, agentParticipants, t],
   );
@@ -1685,11 +1680,6 @@ export function GroupChatPanel() {
                   triggerFrom={
                     row?.meta?.in_reply_to
                       ? fromById.get(row.meta.in_reply_to)
-                      : undefined
-                  }
-                  noticeAnchor={
-                    row?.kind === "system_notice"
-                      ? noticeAnchorOf(row, rowByMessageId, me)
                       : undefined
                   }
                   readOnly={!canPost}
