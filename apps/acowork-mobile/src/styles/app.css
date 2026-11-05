@@ -2296,31 +2296,24 @@
   cursor: pointer;
 }
 
-/* An addressing question (D6 levels 3 and 5): one line, and the option buttons
+/* An addressing question (D6 levels 3 and 5): one card, and the option buttons
    live in a bottom sheet — on a 390pt screen a strip of small buttons next to a
-   transcript is where a mis-tap sends a turn into the wrong task. */
+   transcript is where a mis-tap sends a turn into the wrong task.
+   The shell is the desktop card's: hairline border, a header that names the
+   question, the proposed session under it, and ONE trailing action. A bordered
+   box that holds only text reads as a disabled field, so the action sits in its
+   own column, aligned right, and the row is a button. */
 .chat-notice-card {
-  display: flex;
-  justify-content: center;
-  margin: 8px 0;
-}
-.chat-notice-card-btn {
   display: flex;
   align-items: center;
   gap: 8px;
-  width: 100%;
-  max-width: 420px;
+  /* The transcript scroll already pads 12px; the card must not pad twice or it
+     strands itself away from the bubble column. */
+  margin: 8px 0;
   padding: 10px 12px;
   border: 1px solid var(--color-border, rgba(128, 128, 128, 0.25));
   border-radius: 12px;
   background: var(--color-surface, rgba(128, 128, 128, 0.06));
-  color: inherit;
-  font-size: 13px;
-  text-align: left;
-  cursor: pointer;
-}
-.chat-notice-card-btn:disabled {
-  opacity: 0.6;
 }
 .chat-notice-card-main {
   flex: 1;
@@ -2331,6 +2324,7 @@
 }
 .chat-notice-card-question {
   min-width: 0;
+  font-size: 13px;
 }
 /* The one session a `confirm_continue` proposes — the row must name it, or the
    human is asked to continue a task they cannot identify. */
@@ -2342,10 +2336,56 @@
   font-size: 12px;
   color: var(--color-text-dim, #888);
 }
+/* The viewer may see the question but not answer it (D10) — say why once,
+   rather than showing a dead button. */
+.chat-notice-card-hint {
+  font-size: 11px;
+  color: var(--color-text-dim, #888);
+}
+/* The row's action: a real button with its own hit area, never a label. */
 .chat-notice-card-go {
   flex: none;
-  font-size: 11px;
-  color: var(--color-accent, #0ea5e9);
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 5px 12px;
+  border: none;
+  border-radius: 999px;
+  background: var(--color-tint-strong);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.chat-notice-card-go:active {
+  transform: scale(0.98);
+}
+
+/* A settled question: a receipt, not a card. It names where the words went, so
+   the line is readable on its own and carries no action — nothing here is left
+   to decide. */
+.chat-notice-receipt {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--color-surface, rgba(128, 128, 128, 0.1));
+  font-size: 12px;
+  color: var(--color-text-dim, #888);
+}
+.chat-notice-receipt-check {
+  flex: none;
+  color: #10b981;
+}
+.chat-notice-receipt-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .chat-notice {
@@ -2433,7 +2473,9 @@
   word-break: break-word;
 }
 .chat-sheet-option {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 8px;
   width: 100%;
   margin-bottom: 8px;
   padding: 12px 14px;
@@ -2443,6 +2485,39 @@
   color: inherit;
   font-size: 15px;
   text-align: left;
+}
+.chat-sheet-option-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.chat-sheet-option-go {
+  flex: none;
+  font-size: 16px;
+  color: var(--color-text-dim, #888);
+}
+/* The candidate's own state, so "this one is busy" is visible before the tap.
+   An option that arrived without a status keeps the neutral dot: a card must
+   not claim what it was not told. */
+.chat-sheet-option-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 999px;
+  background: var(--color-text-dim, #888);
+  vertical-align: middle;
+}
+.chat-sheet-option-dot.is-idle {
+  background: #10b981;
+}
+.chat-sheet-option-dot.is-working {
+  background: #f59e0b;
+}
+.chat-sheet-option-dot.is-errored {
+  background: #ef4444;
 }
 .chat-sheet-option:active {
   background: rgba(245, 158, 11, 0.12);

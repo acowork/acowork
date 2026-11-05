@@ -46,45 +46,65 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
   if (noticeType === 'session_choice' || noticeType === 'confirm_continue') {
     const confirm = noticeType === 'confirm_continue'
     const question = confirm ? '继续这个任务吗？' : '你指的是哪一个任务？'
-    // The service's projection (design 31 §6): the options the question offers
-    // and whether a round already answered it. `meta.options` is no longer read
-    // by any surface — a card whose payload never reached the client rendered as
-    // a sentence with no buttons, and nothing could tell that it was a bug.
+    // The service's projection (design 31 §6): the options the question offers,
+    // whether a round already answered it, and which session took the answer.
+    // `meta.options` is no longer read by any surface — a card whose payload
+    // never reached the client rendered as a sentence with no buttons, and
+    // nothing could tell that it was a bug.
     const card = row.delivery?.question
     const options = card?.options ?? []
     const answered = card?.answered === true
-    // Nothing to offer, or nobody allowed to offer it: the question is still a
-    // fact about the transcript, so it stays as the plain line.
-    if (!onChoose || options.length === 0) {
+    // A card with nothing to offer is retired chrome, not a question: the rows
+    // that reach a surface like this are pre-projection leftovers, and a pill
+    // asking "继续这个任务吗？" with nothing to tap is noise in the transcript.
+    if (options.length === 0) return null
+
+    const labelOf = (option: ChatCandidateOption) =>
+      option.label?.trim() || option.session_id.slice(0, 8)
+
+    // Settled: a receipt naming where the words went, not a disabled row that
+    // still asks the human to decide something already decided.
+    if (answered) {
+      const taken = options.find((o) => o.session_id === card?.answered_session)
+      const receipt = taken
+        ? `已交给 ${labelOf(taken)}`
+        : card?.answered_session
+          ? '已开新任务'
+          : '已回答'
       return (
-        <div className="chat-notice">
-          <span className="chat-notice-pill">{question}</span>
+        <div className="chat-notice-receipt" data-testid="chat-card-answered">
+          <span className="chat-notice-receipt-check" aria-hidden="true">
+            ✓
+          </span>
+          <span className="chat-notice-receipt-label">{receipt}</span>
         </div>
       )
     }
+
     // `confirm_continue` proposes exactly ONE session, so the collapsed row has
     // to name it: "继续这个任务吗？" over an anonymous "去选择" asked the human to
     // continue a task they could not identify without opening the sheet. The
-    // multi-candidate question keeps its name in the sheet, where the picks are.
+    // multi-candidate question keeps its names in the sheet, where the picks are.
     const only = options.length === 1 ? options[0] : undefined
-    const proposed = confirm
-      ? only?.label?.trim() || only?.session_id.slice(0, 8) || ''
-      : ''
+    const proposed = confirm && only ? labelOf(only) : ''
     return (
       <div className="chat-notice-card" data-testid="chat-card-options">
-        <button
-          type="button"
-          className="chat-notice-card-btn"
-          disabled={answered}
-          onClick={() => setSheet(true)}
-        >
-          <span className="chat-notice-card-main">
-            <span className="chat-notice-card-question">{question}</span>
-            {proposed ? <span className="chat-notice-card-proposal">{proposed}</span> : null}
-          </span>
-          <span className="chat-notice-card-go">{answered ? '已回复' : '去选择'}</span>
-        </button>
-        {sheet ? (
+        <div className="chat-notice-card-main">
+          <span className="chat-notice-card-question">{question}</span>
+          {proposed ? <span className="chat-notice-card-proposal">{proposed}</span> : null}
+          {!onChoose ? <span className="chat-notice-card-hint">只有发话的人可以回答</span> : null}
+        </div>
+        {onChoose ? (
+          <button
+            type="button"
+            className="chat-notice-card-go"
+            onClick={() => setSheet(true)}
+          >
+            {options.length === 1 ? '确认' : '选择'}
+            <span aria-hidden="true">›</span>
+          </button>
+        ) : null}
+        {sheet && onChoose ? (
           <ChooseSessionSheet
             question={question}
             options={options}
@@ -157,8 +177,16 @@ function ChooseSessionSheet({
             title={why ? `${label} — ${why}` : label}
             onClick={() => onChoose({ sessionId: option.session_id })}
           >
-            <span className="chat-sheet-option-label">{label}</span>
-            {why ? <span className="chat-sheet-option-why">{why}</span> : null}
+            <span className="chat-sheet-option-body">
+              <span className="chat-sheet-option-label">
+                <span className={`chat-sheet-option-dot is-${option.status ?? 'unknown'}`} aria-hidden="true" />
+                {label}
+              </span>
+              {why ? <span className="chat-sheet-option-why">{why}</span> : null}
+            </span>
+            <span className="chat-sheet-option-go" aria-hidden="true">
+              ›
+            </span>
           </button>
         )
       })}
