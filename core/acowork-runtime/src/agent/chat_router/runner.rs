@@ -547,16 +547,42 @@ async fn run_turn(
     let now_secs = chrono::Utc::now().timestamp();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // ADR-106 D6's cheap escape reaches the router too, and it is the whole
+    // ladder's fact, not level 3's: "new task" means NO session may be
+    // continued on this turn. It used to gate only the deterministic
+    // sole-candidate shortcut, so a turn that actually got here was routed with
+    // the ordinary candidate list and the model proposed the very continuation
+    // the human had just refused — measured: six consecutive
+    // `exec_session_propose_continue` decisions for one `force_new` message.
+    // Re-asking wrote a card under the same idempotency key
+    // (`confirm_continue:<message_id>`), so nothing was appended, nothing was
+    // delivered, and the click looked dead.
+    //
+    // The refusal is therefore turned into DATA, not a prompt hint: no rows are
+    // scanned, no candidates are offered, and the alias table below stays
+    // empty — a `exec_session_propose_continue` call then has no alias it could
+    // name, so the act cannot be honoured even if the model tries. Reading the
+    // sessions we may not continue would also be work for nothing.
+    let continuation_refused = force_new(envelope);
+
     // ── Candidate rows: off disk, before the lock ────────────────────
     // The meta scan is the slowest step of this turn's setup and needs nothing
     // from `SessionManager` but the work dir, which `RouterDeps` already
     // snapshotted. Under the global lock it would make `POST /sessions` and
     // every other session operation queue behind a filesystem walk.
-    let candidate_rows = chat_candidates::scan_rows(&deps.work_dir);
+    let candidate_rows = if continuation_refused {
+        Vec::new()
+    } else {
+        chat_candidates::scan_rows(&deps.work_dir)
+    };
     // Same read-as-you-can discipline: the intent bindings are another disk
     // scan (ADR-106 D11 — they live on the session rows now), so they are
     // collected outside the lock and handed to `resolve_candidates` as data.
-    let candidate_bindings = chat_candidates::scan_bindings(&deps.work_dir);
+    let candidate_bindings = if continuation_refused {
+        Vec::new()
+    } else {
+        chat_candidates::scan_bindings(&deps.work_dir)
+    };
 
     // ── Short lock: prompt + candidates + router model ──────────────────
     let prepared = {
@@ -583,14 +609,22 @@ async fn run_turn(
             &chat_kind,
             guard.identity_context(),
         );
-        let candidates = guard.resolve_candidates(
-            &candidate_rows,
-            &candidate_bindings,
-            &chat_id,
-            Some(envelope.from.as_str()).filter(|s| !s.is_empty()),
-            candidate_surface(&chat_kind),
-            cfg.max_candidates(),
-        );
+        let candidates = if continuation_refused {
+            // No rows were scanned, so this is already empty; stating it here
+            // keeps the router's invariant ("a turn that refused continuation
+            // is offered nothing to continue") local to the router instead of
+            // depending on the candidate builder's internal defaults.
+            Vec::new()
+        } else {
+            guard.resolve_candidates(
+                &candidate_rows,
+                &candidate_bindings,
+                &chat_id,
+                Some(envelope.from.as_str()).filter(|s| !s.is_empty()),
+                candidate_surface(&chat_kind),
+                cfg.max_candidates(),
+            )
+        };
         let (provider, model) = router_llm(&core, cfg);
         // The router only ever runs the two read-only lookups, resolved by
         // name off the enabled dispatch list. A disabled or missing tool is
@@ -674,8 +708,7 @@ async fn run_turn(
             origin: candidate.origin.label().to_string(),
             title: candidate.title.clone(),
         });
-    }
-    let draft = draft_label(&envelope.session_config_json);
+    }    let draft = draft_label(&envelope.session_config_json);
     let task = task_label(&envelope.conversation_id);
     let attachments = turn_attachments(envelope);
     let refs = turn_refs(envelope);
@@ -698,6 +731,7 @@ async fn run_turn(
         now: &now,
         draft: Some(draft.as_str()).filter(|d| !d.is_empty()),
         candidates: &lines,
+        continuation_refused,
         task: task.as_deref(),
         history_available,
         user_message: text,
@@ -756,6 +790,7 @@ async fn run_turn(
         attachments: attachments.len(),
         refs: refs.len(),
         attachment_only: super::context::is_attachment_only(text, &attachments, &refs),
+        continuation_refused,
         started,
         info_rounds: 0,
     };
@@ -959,6 +994,12 @@ async fn run_turn(
             // session is addressing, and addressing belongs to the human
             // (ADR-106 D6). The card names the candidate, the router's reason
             // for proposing it, and the "new task" escape beside it.
+            //
+            // A turn whose human refused continuation (`force_new`) never gets
+            // here: it was offered no candidates, so its alias table is empty
+            // and `parse_exec_session_propose_continue` refuses every target as
+            // an unknown alias — the action degrades to a fresh session instead
+            // of re-asking the question the human already answered.
             //
             // The label is this turn's own candidate title, looked up by the id
             // the alias resolved to — a card naming a session the human cannot
@@ -1691,6 +1732,9 @@ struct TurnTrace<'a> {
     /// The turn had attachments and no text (see
     /// [`context::is_attachment_only`]), i.e. Block C rendered the placeholder.
     attachment_only: bool,
+    /// The human refused continuation, so this turn had no candidates to offer
+    /// and no alias to name — see [`DecisionRecord::continuation_refused`].
+    continuation_refused: bool,
     started: Instant,
     /// Information-tool rounds this turn ran before deciding (audit
     /// surface for "the router looked things up instead of routing").
@@ -1726,6 +1770,7 @@ impl TurnTrace<'_> {
             attachments: self.attachments,
             refs: self.refs,
             attachment_only: self.attachment_only,
+            continuation_refused: self.continuation_refused,
             info_rounds: (self.info_rounds > 0).then_some(self.info_rounds),
             prompt_tokens: usage.map(|u| u.0),
             completion_tokens: usage.map(|u| u.1),
@@ -2085,6 +2130,7 @@ mod tests {
             attachments: &attachments,
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(
@@ -2139,6 +2185,7 @@ mod tests {
             attachments: &[],
             refs: &refs,
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(
@@ -2247,6 +2294,7 @@ mod tests {
             attachments: &uploads,
             refs: &refs,
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(rendered.contains("[attachments] spec.pdf (application/pdf, 12KB)"));
@@ -2412,6 +2460,32 @@ mod tests {
         assert_eq!(call_label(&call), "exec_session_create");
     }
 
+    /// The measured defect, at the act boundary: the human answered an
+    /// addressing card with "new task" (`force_new`), the router was handed the
+    /// ordinary candidate list, the model proposed the same continuation again
+    /// and the card was re-written under the same idempotency key — so the
+    /// transcript gained nothing and the click looked dead.
+    ///
+    /// A refused turn now has no candidates, hence no alias, hence no way to
+    /// name a session. A model that calls the proposal anyway is refused here
+    /// (one validation retry, then `degrade` → a fresh session), which is the
+    /// human's instruction either way.
+    #[test]
+    fn a_proposal_cannot_name_a_session_on_a_forced_new_turn() {
+        let call = ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: acowork_core::providers::traits::FunctionCall {
+                name: super::super::tool::EXEC_SESSION_PROPOSE_CONTINUE_TOOL.into(),
+                arguments: r#"{"target":"S1","why":"same login bug"}"#.into(),
+            },
+        };
+        assert_eq!(
+            parse_act(&call, &AliasTable::new()),
+            Err(ActError::UnknownAlias("S1".into()))
+        );
+    }
+
     /// Fixtures for the read tool: a transcript whose rows carry their round
     /// stamp plus its side table, exactly as the runtime writer leaves them.
     fn round_entry(role: &str, content: &str, round_id: &str) -> crate::conversation::ConversationEntry {
@@ -2535,6 +2609,7 @@ mod tests {
             attachments: &[],
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(rendered.contains("S1"));

@@ -551,6 +551,42 @@ mod tests {
         );
     }
 
+    /// ADR-106 D6's "new task" is a fact the ladder must honour at every level,
+    /// not only at the deterministic sole-candidate shortcut.
+    ///
+    /// The measured defect this pins: the human answered an addressing card with
+    /// "new task", the turn reached the router with `force_new`, and the router
+    /// was given the ordinary candidate list anyway — so the model proposed the
+    /// very continuation that had just been refused, six turns in a row, each
+    /// write landing on the same idempotency key (`confirm_continue:<message>`).
+    /// Nothing was appended, nothing was delivered, and the click looked dead.
+    ///
+    /// With no candidates there is no alias, so a proposal cannot name a session
+    /// at all — the model's only remaining acts are `exec_session_create` and a
+    /// plain reply.
+    #[test]
+    fn a_refused_continuation_offers_no_candidate_to_name() {
+        // The alias table of a forced-new turn is empty because the turn was
+        // offered no candidates, so every target is an unknown alias.
+        for target in ["S1", "S2", "s3"] {
+            assert_eq!(
+                parse_exec_session_propose_continue(
+                    &json!({ "target": target, "why": "same login bug" }),
+                    &AliasTable::new(),
+                ),
+                Err(ActError::UnknownAlias(target.into())),
+                "a forced-new turn must not be able to produce a continuation card"
+            );
+        }
+        // The read tool is refused the same way: there is no session this turn
+        // may look at, so there is nothing to read back either.
+        assert!(parse_exec_session_read_round(
+            &json!({ "target": "S1" }),
+            &AliasTable::new()
+        )
+        .is_err());
+    }
+
     /// The read tool shares the proposal's alias discipline — it can name no
     /// session the candidate filter did not admit — and clamps `rounds` rather
     /// than rejecting it: the honest repair for an oversized read is fewer

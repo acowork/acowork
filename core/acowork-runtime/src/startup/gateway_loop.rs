@@ -1534,7 +1534,14 @@ async fn resolve_legacy_route(
         let mut guard = session_manager.lock().await;
         // `fresh` is the degraded-router case: the router read the conversation
         // and failed to decide, so nothing here may continue old work.
-        let continuation = if fresh {
+        //
+        // `force_new` is ADR-106 D6's cheap escape, and it belongs to the whole
+        // ladder rather than to the router's level 3: when the human answered
+        // the addressing card with "new task", a chat with exactly one bound
+        // session still may not continue it — that is the same rule that makes
+        // the router offer no candidates, applied to the deterministic route
+        // (this is the path a Chat turn takes with the router switched off).
+        let continuation = if fresh || crate::agent::chat_router::runner::force_new(env) {
             None
         } else {
             guard.chat_continuation(
