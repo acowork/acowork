@@ -28,6 +28,28 @@ export interface CardChoice {
   forceNew?: boolean;
 }
 
+/** What delivering a click reports back to the card.
+ *
+ *  `false` is the only value with a meaning the card acts on: it says "nothing
+ *  was delivered", so the question re-opens instead of staying busy on a click
+ *  that never moved. Everything else (`true`, `void`) means the click became a
+ *  delivery, and the card then holds its busy state until the projection answers
+ *  it away — a surface that cannot tell does not get to promise a retry. */
+export type CardChooseResult = void | boolean;
+
+/** One click on a card's option. The card awaits it; see
+ *  [`CardChooseResult`] for what the answer changes. */
+export type CardChooseHandler = (
+  choice: CardChoice,
+) => CardChooseResult | Promise<CardChooseResult>;
+
+/** A surface's card-answer handler: the click plus the row it belongs to (the
+ *  row names the message the answer is re-delivered under). */
+export type CardAnswerHandler = (
+  card: ChatMessageRow,
+  choice: CardChoice,
+) => CardChooseResult | Promise<CardChooseResult>;
+
 /** The facts a re-delivery needs. The address shape is the surface's own: the
  *  group channel names a session per agent, the 1:1 channel names one. */
 export interface CardAnswer {

@@ -49,6 +49,13 @@ pub const STATUS_INTERRUPTED: &str = "interrupted";
 /// Status of an open round that is not waiting on a human.
 pub const STATUS_IN_PROGRESS: &str = "in_progress";
 
+/// Status of a round parked on a card the human can still answer (ADR-106 D8).
+///
+/// The only terminal status that keeps its `card` (see [`ActiveRound::forced_closure`]):
+/// a round abandoned while its question was open is *waiting*, not interrupted, and
+/// the answer path still exists.
+pub const STATUS_WAITING: &str = "waiting";
+
 /// Status a rebuilt round carries when the transcript proves the round is over but
 /// not *how* it ended. A rebuilt side table has no terminal records to read, so
 /// `unknown` is the honest label — the projected content (user row, answer row)
@@ -242,6 +249,14 @@ impl ActiveRound {
     /// wrote anything" is a real state and must not stay open forever — an open
     /// record is what the projection reports as `pending`, and a pending block that
     /// can never finish is a different lie from the hole it replaced.
+    ///
+    /// The card survives only a [`STATUS_WAITING`] park. Any other terminal status
+    /// means the interaction that owned the card is gone, and a terminal record that
+    /// still carries a question freezes a dead card into the block: a terminal
+    /// projection is cached with no invalidation path (D5), so the surface would keep
+    /// painting an answerable question nobody can answer any more. `waiting` is
+    /// exempt because that card is still live — a `pause` is answered through the
+    /// composer, against the reference row, not against the request id.
     pub fn forced_closure(&self, ts: &str) -> Option<RoundRecord> {
         if self.round_id.is_empty() {
             return None;
@@ -250,7 +265,12 @@ impl ActiveRound {
             Some(s) if !s.is_empty() => s.to_string(),
             _ => STATUS_INTERRUPTED.to_string(),
         });
-        Some(self.snapshot(true, None, status, ts))
+        let card = if status.as_deref() == Some(STATUS_WAITING) {
+            None
+        } else {
+            Some(Value::Null)
+        };
+        Some(self.snapshot(true, card, status, ts))
     }
 
     /// Build the snapshot line for the tracked round.
@@ -541,6 +561,13 @@ pub fn repair_on_open(path: &Path, jsonl: &Path) -> usize {
         let mut repaired = rec.clone();
         repaired.terminal = true;
         repaired.status = Some(STATUS_INTERRUPTED.to_string());
+        // The interaction died with the process that held it: the request id in a
+        // crash-repaired round can no longer be answered by anybody, so the card
+        // must not survive into the terminal record. This is the one repair that
+        // used to leave `terminal: true` + a live-looking question on disk, which
+        // the projection cache then kept forever (D5) — the Chat's projected card
+        // was clickable, did nothing, and never went away.
+        repaired.card = None;
         repaired.ts = ts.clone();
         if let Err(e) = append_record(path, &repaired) {
             tracing::warn!(path = %path.display(), error = %e, "rounds index: crash repair append failed");
@@ -919,6 +946,71 @@ mod tests {
         assert!(closed.terminal);
         assert_eq!(closed.status.as_deref(), Some("waiting"));
         assert_eq!(closed.card.unwrap()["request_id"], "q1");
+    }
+
+    /// A terminal record may carry a card only for a `waiting` park.
+    ///
+    /// Regression (2026-11-06): a round pre-empted, or closed by crash repair, kept
+    /// its `ask_question` card into the terminal record. The block projection then
+    /// served `terminal: true` + a question, the Gateway cached it as `ok` with no
+    /// invalidation path (D5), and the Chat's projected card was clickable, did
+    /// nothing (the request id was dead) and never went away until the window
+    /// changed. The card must die with the interaction.
+    #[test]
+    fn a_terminal_round_drops_a_card_nobody_can_answer_any_more() {
+        let mut active = ActiveRound {
+            round_id: "r:1".to_string(),
+            status: Some(STATUS_IN_PROGRESS.to_string()),
+            card: Some(serde_json::json!({ "kind": "ask_question", "request_id": "q1" })),
+            ..Default::default()
+        };
+        active.user = Some(0);
+        let closed = active.forced_closure("t2").unwrap();
+        assert!(closed.terminal);
+        assert_eq!(closed.status.as_deref(), Some(STATUS_IN_PROGRESS));
+        assert!(
+            closed.card.is_none(),
+            "a dead question must not survive into the terminal record"
+        );
+
+        // No published status at all is the same fact: interrupted, no card.
+        let abandoned = ActiveRound {
+            round_id: "r:2".to_string(),
+            card: Some(serde_json::json!({ "kind": "ask_question", "request_id": "q2" })),
+            ..Default::default()
+        };
+        let closed = abandoned.forced_closure("t3").unwrap();
+        assert_eq!(closed.status.as_deref(), Some(STATUS_INTERRUPTED));
+        assert!(closed.card.is_none());
+    }
+
+    /// Crash repair closes what the dead process left open — and with it the card
+    /// whose request id died with the process.
+    #[test]
+    fn crash_repair_drops_the_card_of_the_open_round() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = write_jsonl(&dir, &[entry("user", "u1", Some("r:1"))]);
+        let rounds = dir.path().join("s.jsonl.rounds");
+        let mut open = RoundRecord {
+            round_id: "r:1".to_string(),
+            user: Some(0),
+            answer: None,
+            card: Some(serde_json::json!({ "kind": "ask_question", "request_id": "q1" })),
+            terminal: false,
+            status: Some(STATUS_WAITING.to_string()),
+            ts: "t1".to_string(),
+        };
+        append_record(&rounds, &open).unwrap();
+
+        assert_eq!(repair_on_open(&rounds, &jsonl), 1);
+
+        open = read_record(&rounds, "r:1").unwrap().unwrap();
+        assert!(open.terminal);
+        assert_eq!(open.status.as_deref(), Some(STATUS_INTERRUPTED));
+        assert!(
+            open.card.is_none(),
+            "the repaired round must not keep a question nobody can answer"
+        );
     }
 
     #[test]

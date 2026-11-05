@@ -514,7 +514,14 @@ function RoundItem({
     summarize(round.roundRow.meta?.assignment_brief ?? "") ||
     t("chatView.block.noQuestion");
   const pending = entry?.status === "pending";
-  const card = projection?.card ?? null;
+  // Only a round that can still take an answer wears a card: an open one, or a
+  // `waiting` park the human has not replied to yet. The server strips the rest
+  // (`chat_blocks::sanitize_card`); this is the same rule where the pixels are,
+  // because a stale entry may have been read from an older server or cache.
+  const card =
+    projection?.card && (pending || projection.status === "waiting")
+      ? projection.card
+      : null;
   // A row parked on a card is waiting for the human, not executing — the same
   // rule the header follows, because a row that says "running" over the card it
   // is waiting on is the block contradicting its own buttons.
@@ -608,6 +615,7 @@ function RoundItem({
               canAnswer={canAnswer}
               instanceId={instanceId}
               execSid={execSid}
+              reloadRound={() => reload(chatSessionId, [round.ref])}
               rowId={round.roundRow.meta?.message_id ?? ""}
               onReplyToRound={onReplyToRound}
             />
@@ -709,6 +717,8 @@ interface BlockCardActionsProps {
   canAnswer: boolean;
   instanceId: string;
   execSid: string;
+  /** Re-read this round after an answer, whatever the answer's status says. */
+  reloadRound: () => void;
   /** The reference row's own id — the coordinate a continuation addresses (D6
    *  level 1). */
   rowId: string;
@@ -725,6 +735,7 @@ function BlockCardActions({
   canAnswer,
   instanceId,
   execSid,
+  reloadRound,
   rowId,
   onReplyToRound,
 }: BlockCardActionsProps) {
@@ -761,6 +772,13 @@ function BlockCardActions({
       setFailed(true);
     } finally {
       setBusy(false);
+      // Re-read the round in both outcomes. `POST /answer` queues the message
+      // and answers `202` — it does not, and cannot, tell a live request from
+      // one whose timeout already fired (the turn then drops the answer). So
+      // the click's own status is not evidence about the card: the projection
+      // is. Dropping a card only locally meant a dead question stayed on screen
+      // looking clickable until a newer row pushed it out of view.
+      reloadRound();
     }
   };
 
@@ -813,9 +831,15 @@ function BlockCardActions({
       {!canAnswer ? (
         <p className="text-text-tertiary">{t("chatView.block.answeredByOwner")}</p>
       ) : (
-        <div className="flex flex-wrap items-center gap-1.5">
+        /* One control per line. The options of an `ask_question` are sentences a
+           model wrote, not labels: laid out in a wrapping row they turned into
+           ragged columns that broke mid-phrase as soon as the text outgrew the
+           bubble — and the block is narrow by design. A column also makes the
+           pair of approval buttons the only horizontal row, which is what they
+           are: two sides of one decision. */
+        <div className="flex flex-col items-stretch gap-1.5">
           {kind === "approval" ? (
-            <>
+            <span className="flex items-center gap-1.5">
               <button
                 type="button"
                 disabled={busy}
@@ -847,14 +871,16 @@ function BlockCardActions({
               >
                 {t("chatView.cardApprove")}
               </button>
-            </>
+            </span>
           ) : (
             options.map((opt, i) => (
               <button
                 key={opt}
                 type="button"
                 disabled={busy}
-                className={i === 0 ? allowBtn : denyBtn}
+                /* `text-left` + wrapping: an option may be a full sentence, and a
+                   centered label that wraps reads as two options. */
+                className={`${i === 0 ? allowBtn : denyBtn} text-left whitespace-normal break-words`}
                 style={
                   i === 0
                     ? { backgroundColor: "var(--color-accent-strong)" }

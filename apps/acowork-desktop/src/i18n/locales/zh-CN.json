@@ -292,6 +292,7 @@
       "confirmSession": "继续这个任务吗？",
       "newTask": "开新任务",
       "unanswered": "待选择",
+      "choosing": "处理中…",
       "replyPlaceholder": "回复以继续这个运行…",
       "send": "发送",
       "chooseThis": "就继续这个",

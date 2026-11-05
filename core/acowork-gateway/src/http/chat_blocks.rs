@@ -59,6 +59,12 @@ const MAX_REFS: usize = 200;
 /// several requests rather than one rejection.
 const RUNTIME_BATCH_MAX: usize = 64;
 
+/// The one round status that keeps its card through the terminal transition
+/// (ADR-106 D8): a park the human can still answer. Spelled here rather than
+/// imported because the Gateway reads the Runtime's wire vocabulary, never its
+/// types.
+const STATUS_WAITING: &str = "waiting";
+
 /// Longest accepted id segment. Instance ids are UUIDv4, session ids are
 /// `YYYYMMDD_HHMMSS_xxxx`, round ids are `r:{message_id}` — all far under this.
 const MAX_ID_BYTES: usize = 128;
@@ -335,6 +341,45 @@ fn bound_to(projection: &Value, chat_id: &str) -> bool {
     }
 }
 
+/// The projection as a surface may see it: sanitized, never aliased.
+///
+/// Serving is the one edge every block passes through — cached or live — so the
+/// terminal-card rule is applied here even though the writer enforces it too.
+/// `Cached` rows are the reason it has to be here as well: an earlier binary
+/// could store `terminal: true` with a live question, and D5 gives a terminal
+/// projection **no** invalidation path, so nothing would ever re-read that round
+/// to fix it.
+fn served_projection(p: &Value) -> Value {
+    let mut out = p.clone();
+    sanitize_card(&mut out);
+    out
+}
+
+/// A terminal round may carry a card only for a `waiting` park (ADR-106 D8).
+///
+/// The writer enforces this (`rounds::ActiveRound::forced_closure` and
+/// `rounds::repair_on_open` drop the card whenever the round did not end
+/// *waiting*), but the read boundary has to as well, for a second reason that
+/// does not go away on its own: a card names a `request_id` that only the
+/// *live* interaction can accept. Once the interaction is gone the answer
+/// endpoint still replies `202` (it queues the message; the loop then drops it),
+/// so a surface cannot tell "answered" from "that question died twenty minutes
+/// ago" — it paints a clickable card that does nothing and never disappears.
+///
+/// Dropping the field is the honest rendering: the round is over, there is
+/// nothing left to answer.
+fn sanitize_card(projection: &mut Value) {
+    if projection.get("terminal").and_then(|v| v.as_bool()) != Some(true) {
+        return;
+    }
+    if projection.get("status").and_then(|v| v.as_str()) == Some(STATUS_WAITING) {
+        return;
+    }
+    if let Some(map) = projection.as_object_mut() {
+        map.remove("card");
+    }
+}
+
 /// Classify one entry of the Runtime's batch response.
 ///
 /// Four refusals live here because they are four different facts: the session says
@@ -433,7 +478,11 @@ fn assemble(order: &[RefSlot], resolutions: &HashMap<String, Resolution>) -> Vec
                     Some(Resolution::Cached(p)) => json!({
                         "status": "ok",
                         "source": "cache",
-                        "projection": p,
+                        // Enforced again at the serving edge: a cache row written
+                        // before the writer invariant existed is terminal and will
+                        // never be re-read (D5), so this is the only place its dead
+                        // card can still be caught.
+                        "projection": served_projection(p),
                     }),
                     Some(Resolution::Live(p)) => {
                         let terminal = p
@@ -443,7 +492,7 @@ fn assemble(order: &[RefSlot], resolutions: &HashMap<String, Resolution>) -> Vec
                         json!({
                             "status": if terminal { "ok" } else { "pending" },
                             "source": "runtime",
-                            "projection": p,
+                            "projection": served_projection(p),
                         })
                     }
                     Some(Resolution::Hole) => json!({ "status": "not_found" }),
@@ -772,6 +821,67 @@ mod tests {
 
     fn keys_of(refs: &[BlockRef]) -> Vec<String> {
         refs.iter().map(|r| r.key()).collect()
+    }
+
+    /// Regression (2026-11-06): the Chat's projected card outlived its question.
+    ///
+    /// A round pre-empted mid-question (or crash-repaired) used to keep its card
+    /// into the terminal record, and the projection was then cached as `ok` with
+    /// no invalidation path. The surface painted a clickable card whose request
+    /// id no longer existed: clicking answered `202` and nothing happened, and
+    /// the card only left the screen when a newer row pushed it out of view.
+    #[test]
+    fn a_terminal_round_never_serves_a_card() {
+        let mut closed = projection("r:1", Some(CHAT), true);
+        closed["status"] = json!("completed");
+        closed["card"] = json!({ "kind": "ask_question", "request_id": "q1", "options": ["a"] });
+        sanitize_card(&mut closed);
+        assert!(
+            closed.get("card").is_none(),
+            "a finished round has nothing to answer: {closed}"
+        );
+
+        let mut interrupted = projection("r:2", Some(CHAT), true);
+        interrupted["status"] = json!("interrupted");
+        interrupted["card"] = json!({ "kind": "ask_question", "request_id": "q2" });
+        sanitize_card(&mut interrupted);
+        assert!(interrupted.get("card").is_none());
+
+        // A `waiting` park is the one terminal state whose card is still live:
+        // the question was abandoned, not answered, and a `pause` is answered
+        // through the composer against the reference row.
+        let mut waiting = projection("r:3", Some(CHAT), true);
+        waiting["status"] = json!(STATUS_WAITING);
+        waiting["card"] = json!({ "kind": "pause", "request_id": "q3" });
+        sanitize_card(&mut waiting);
+        assert!(waiting.get("card").is_some(), "a pause stays answerable");
+
+        // An open round keeps its card: that is the whole point of the field.
+        let mut running = projection("r:4", Some(CHAT), false);
+        running["card"] = json!({ "kind": "ask_question", "request_id": "q4" });
+        sanitize_card(&mut running);
+        assert!(running.get("card").is_some());
+    }
+
+    /// The served answer is sanitized for cached rows too — the ones an earlier
+    /// binary wrote and that no re-read will ever replace (D5).
+    #[test]
+    fn a_cached_terminal_card_is_not_served() {
+        let mut cached = projection("r:1", Some(CHAT), true);
+        cached["status"] = json!("interrupted");
+        cached["card"] = json!({ "kind": "ask_question", "request_id": "q1" });
+        let resolutions = HashMap::from([(
+            REF_1.to_string(),
+            Resolution::Cached(cached.clone()),
+        )]);
+        let order = vec![RefSlot::Valid(brf(REF_1))];
+        let out = assemble(&order, &resolutions);
+        assert_eq!(out.len(), 1);
+        assert!(
+            out[0]["projection"].get("card").is_none(),
+            "a cache row is sanitized on the way out: {}",
+            out[0]
+        );
     }
 
     fn slot_keys(slots: &[RefSlot]) -> Vec<String> {

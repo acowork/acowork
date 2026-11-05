@@ -344,6 +344,97 @@ describe("ChatExecutionBlock", () => {
     );
   });
 
+  /** Regression (2026-11-06): the projected card outlived its question.
+   *
+   * A round that timed out (or was closed by a crash repair) used to keep its
+   * `ask_question` into the terminal record, so the block painted a card whose
+   * request id no longer existed: the click answered `202`, the loop dropped it,
+   * and the card stayed until a newer row covered it. The card must be gone the
+   * moment the round is not answerable, and the answer must force a re-read
+   * instead of trusting the click's own status.
+   */
+  it("a round that can no longer take an answer wears no card", () => {
+    renderBlock({
+      [REF1]: entryOf({
+        status: "ok",
+        projection: {
+          round_id: "r1",
+          terminal: true,
+          status: "interrupted",
+          card: { kind: "ask_question", request_id: "q1", prompt: "Pick one", options: ["A"] },
+        },
+      }),
+    });
+    expect(screen.queryByText("Pick one")).toBeNull();
+    expect(screen.queryByText("A")).toBeNull();
+  });
+
+  it("a waiting park still shows its card: the question was abandoned, not answered", () => {
+    renderBlock(
+      {
+        [REF1]: entryOf({
+          status: "ok",
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "waiting",
+            card: { kind: "pause", request_id: "p1", prompt: "Blocked on you" },
+          },
+        }),
+      },
+      { onReplyToRound: vi.fn() },
+    );
+    expect(screen.getByText("Blocked on you")).toBeTruthy();
+    expect(screen.getByText("chatView.cardContinue")).toBeTruthy();
+  });
+
+  it("answering re-reads the round, whatever the POST said", async () => {
+    renderBlock({
+      [REF1]: entryOf({
+        status: "pending",
+        projection: {
+          round_id: "r1",
+          terminal: false,
+          status: "waiting",
+          card: { kind: "ask_question", request_id: "q1", prompt: "Pick one", options: ["A"] },
+        },
+      }),
+    });
+    fireEvent.click(screen.getByText("A"));
+    await waitFor(() => expect(sendAnswer).toHaveBeenCalled());
+    // The projection is the only thing that knows whether the question was still
+    // open; `/answer` queues and answers 202 either way.
+    await waitFor(() => expect(reload).toHaveBeenCalledWith("c1", [REF1]));
+  });
+
+  it("options are a column, so a long label wraps instead of breaking the layout", () => {
+    renderBlock({
+      [REF1]: entryOf({
+        status: "pending",
+        projection: {
+          round_id: "r1",
+          terminal: false,
+          status: "waiting",
+          card: {
+            kind: "ask_question",
+            request_id: "q1",
+            prompt: "Pick one",
+            options: ["按方案执行，TTL 10 分钟，桌面+手机同批", "先只做不再持久化"],
+          },
+        },
+      }),
+    });
+    const first = screen.getByText("按方案执行，TTL 10 分钟，桌面+手机同批");
+    const second = screen.getByText("先只做不再持久化");
+    const column = first.parentElement!;
+    expect(column.className).toContain("flex-col");
+    expect(column).toBe(second.parentElement);
+    // Sentence-shaped options align left and wrap; a centered wrapped label
+    // reads as two options.
+    expect(first.className).toContain("text-left");
+    expect(first.className).toContain("whitespace-normal");
+  });
+
   it("a viewer who is not the answerer sees the question and no buttons (D10)", () => {
     renderBlock(
       {

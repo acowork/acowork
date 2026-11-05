@@ -198,6 +198,7 @@
       "confirmSession": "Continue this task?",
       "newTask": "Start a new task",
       "unanswered": "Awaiting your pick",
+      "choosing": "Starting…",
       "replyPlaceholder": "Reply to continue this run…",
       "send": "Send",
       "chooseThis": "Continue this one",
