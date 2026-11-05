@@ -175,3 +175,19 @@ B2 的原始论据是「写 `/data/data/<pkg>` 与写 `/system` 不是一回事�
 为什么只有这张表能这么办：Q1/Q2/Q3 三项都有可复核的落地物（规则、类型、门控分支），沉默的成本是继续跑现状，不会跑出一个未实现的东西；而 B2 那一行**没有默认值**，到期也不会被"默认"掉——它是真的需要有人写一张表。那一行按 §9 的证据单独升级，不混在本节的沉默机制里。
 
 答复人：ADR-AND-001 §7.1 字面修订的作者（Q1/Q2/Q3），以及 ADR-087 D2/D7 的裁定者（Q3 的无主语义）。
+
+## 11. 一条前提错误：本移植实现的 `ExecutionBackend` 在上游不存在（2026-11-02 核查）
+
+移植侧的待办里记着"node 侧 `ReversibleBackend` 组装点"，隐含假设是上游有一个执行后端接口等着被实现。核查结果不支持这个假设：
+
+- `ExecutionBackend` 定义在**本移植仓库自己的** `crates/acowork-platform-contract/src/exec.rs:245`；
+- 上游 `core/` 全仓对 `ExecutionBackend` / `acowork-platform-contract` / `acowork-android` 的引用数为 **0**；
+- 上游的执行抽象是 `core/acowork-core/src/tools/traits.rs:75` 的 `pub trait Tool: Send + Sync`，配套 `ToolInput`/`ToolOutput`；而 `core/acowork-runtime/src/tools/wasm/wasi_mapper.rs:11` 把 `shell` 明确列为 "No WASI mapping (host-controlled)"。
+
+于是"接线"不是一个可以单方面完成的编码任务：要么上游采纳这份契约（§7.1 的执行点裁定才有落点），要么本移植实现上游的 `Tool`。这是第四个问题，它阻塞的不是某个函数调用，而是整个交付形态。
+
+**默认值**：本端口继续按自己的契约跑——`acowork-host` 二进制已能在真机上端到端执行 probe→assemble→load→chain→exec→restore，不依赖任何上游接口即可验证。两种收敛方向的成本都只是一个 adapter，所以本条不抢跑。
+
+**截止日期同 §10（2026-11-16）**；到期无答复即继续，并把这条并入 B4 的形态讨论一起回答——形态问题（APK 设置界面归谁）和接口问题（宿主后端归谁）其实是同一个问题的两面。
+
+答复人：`Tool` 接口的维护方（acowork-core tools），以及 ADR-AND-001 §7.1 的作者。
