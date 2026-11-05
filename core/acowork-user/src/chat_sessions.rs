@@ -2196,7 +2196,33 @@ fn load_sidecar(dir: &Path, idx: &mut LineIndex) {
     let Ok(raw) = fs::read_to_string(line_index_path(dir)) else {
         return; // pre-index data dir: the reconcile below rebuilds once
     };
-    let mut lines = raw.lines();
+    // A crash between the log write and the sidecar write leaves a final line
+    // without its newline. Drop that torn tail instead of refusing the whole
+    // file: appends are one `writeln!` each, so at most the newest row is
+    // affected, and the reconcile re-scans it from the log's own length delta.
+    // Without this, one crash costs a full re-read of the session's log.
+    let complete_len = match raw.rfind('\n') {
+        Some(end) => end + 1,
+        // Not even the marker line survived: nothing here can be trusted, and
+        // appending to a file nobody can load is what this whole marker exists
+        // to prevent.
+        None => {
+            let _ = fs::remove_file(line_index_path(dir));
+            idx.sidecar_untrusted = true;
+            return;
+        }
+    };
+    if complete_len < raw.len() {
+        // Repair the file, don't just ignore the bytes in memory: the next
+        // `sidecar_append` appends at the end, so a torn tail left in place
+        // would merge with the new row and corrupt the line after it. The
+        // sidecar is disposable, so truncating to the last complete row costs
+        // nothing the reconcile cannot rebuild.
+        if let Ok(f) = OpenOptions::new().write(true).open(line_index_path(dir)) {
+            let _ = f.set_len(complete_len as u64);
+        }
+    }
+    let mut lines = raw[..complete_len].lines();
     if lines.next() != Some(SIDECAR_HEADER) {
         // A v1 sidecar (no thread column): drop it and let the reconcile
         // re-scan the log once. Keeping it would index every row with no
@@ -2341,6 +2367,21 @@ fn sidecar_append(
         .append(true)
         .open(&path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
+    // The first commit of a session creates this file, so this is the only
+    // place the marker can be written on the incremental path. Without it the
+    // next process cannot tell the file from a v1 sidecar: it deletes it and
+    // re-reads the session's whole log — the cost the marker exists to avoid,
+    // paid once per session, invisibly. `rewrite_sidecar` writes it for the
+    // full-pass path; both writers must agree or the cheaper one silently
+    // defeats the file.
+    let empty = f
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len()
+        == 0;
+    if empty {
+        writeln!(f, "{SIDECAR_HEADER}").map_err(|e| format!("{}: {e}", path.display()))?;
+    }
     writeln!(f, "{}\t{}\t{}\t{}", span.offset, span.len, id, in_reply_to)
         .map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -6092,6 +6133,105 @@ mod tests {
         lock(&LINE_INDEXES).remove(&sess);
         let again = answering_rows(&dir, &g.session_id, &["m-1".into()]).unwrap();
         assert_eq!(again["m-1"].len(), 2);
+    }
+
+    /// A sidecar created by the *append* path must carry the format marker.
+    ///
+    /// `sidecar_append` creates `lines.index` on the first commit of a new
+    /// session. Without the marker the file is indistinguishable from a v1
+    /// sidecar, so the next process start deletes it and re-reads the whole log
+    /// — exactly the restart cost the marker exists to avoid, paid once per
+    /// session with no test able to see it.
+    #[test]
+    fn a_sidecar_created_by_an_append_carries_the_marker() {
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "r",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "one", "m-1"), 2)
+            .unwrap();
+        let mut reply = msg("ag", KIND_AGENT_MESSAGE, "answered", "a-1");
+        reply.meta.in_reply_to = "m-1".into();
+        reply.to = "u1".into();
+        append_message(&dir, &g.session_id, &reply, 3).unwrap();
+
+        let sess = session_dir(&dir, &g.session_id);
+        let raw = fs::read_to_string(line_index_path(&sess)).unwrap();
+        assert!(
+            raw.starts_with(SIDECAR_HEADER),
+            "the append path must write the version marker, got: {raw:?}"
+        );
+        // The marker is not decoration: the next process must be able to load
+        // what the append wrote, marker line included.
+        lock(&LINE_INDEXES).remove(&sess);
+        let hits = answering_rows(&dir, &g.session_id, &["m-1".into()]).unwrap();
+        assert_eq!(hits["m-1"].len(), 1, "the appended sidecar must load");
+        assert_eq!(hits["m-1"][0].meta.message_id, "a-1");
+        // …and the file it just read stays as it was (no rewrite on a clean
+        // load): the marker line is one header, not one per row.
+        let after = fs::read_to_string(line_index_path(&sess)).unwrap();
+        assert_eq!(after, raw, "a clean load must not rewrite the sidecar");
+    }
+
+    #[test]
+    fn a_torn_sidecar_tail_is_repaired_instead_of_refusing_the_file() {
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "r",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "one", "m-1"), 2)
+            .unwrap();
+        let mut reply = msg("ag", KIND_AGENT_MESSAGE, "answered", "a-1");
+        reply.meta.in_reply_to = "m-1".into();
+        reply.to = "u1".into();
+        append_message(&dir, &g.session_id, &reply, 3).unwrap();
+
+        // Simulate a crash inside the second `writeln!`: the log has both rows,
+        // the sidecar has the first plus half of the second, no newline.
+        let sess = session_dir(&dir, &g.session_id);
+        let path = line_index_path(&sess);
+        let raw = fs::read_to_string(&path).unwrap();
+        let keep: String = raw.split_inclusive('\n').take(2).collect();
+        let torn: String = raw.split_inclusive('\n').nth(2).unwrap().chars().take(6).collect();
+        fs::write(&path, format!("{keep}{torn}")).unwrap();
+        lock(&LINE_INDEXES).remove(&sess);
+
+        // The file still loads: the complete row is used, the torn one is
+        // re-read from the log's own bytes.
+        let hits = answering_rows(&dir, &g.session_id, &["m-1".into()]).unwrap();
+        assert_eq!(hits["m-1"].len(), 1, "the torn row's edge must come back");
+        assert_eq!(hits["m-1"][0].meta.message_id, "a-1");
+
+        // And it is repaired rather than merely ignored: every line is whole,
+        // so the next append cannot merge with the torn bytes.
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with(SIDECAR_HEADER), "{after:?}");
+        assert!(after.ends_with('\n'), "the torn tail was truncated: {after:?}");
+        assert_eq!(
+            after.lines().count(),
+            3,
+            "marker + two rows, nothing torn left behind: {after:?}"
+        );
     }
 
     #[test]
