@@ -156,14 +156,14 @@ auto_inject min_score=None    → 1 result, score 0.6437
 - D1（Dormant 排除）是当初关闭 auto_inject 的核心原因（"垃圾进上下文"），现已关闭该漏洞。
 - D2（min_score 0.3→0.0）防御性修复已随 M2 落地，消除了未来 vector 索引启用后误杀全部结果的风险。
 
-**触发策略（方案 A：首次触发，与 [ADR-060 §6.3](../adr/zh/ADR-060-prompt-cache-friendly-context-block-reorg.md#63-auto_inject_enabled-触发策略未来开启时) 一致）**：
+**触发策略（方案 A：首次触发，与 [ADR-060 §6.3](./ADR-060-prompt-cache-friendly-context-block-reorg.md#63-auto_inject_enabled-触发策略未来开启时) 一致）**：
 
-- **每 session 最多触发一次**——在 session 第一条 user message 时执行 `retrieve_and_inject_memories()`，成功后置 `AgentLoop.memory_retrieved_for_session = true`；后续轮次通过该标记在 [loop_memory.rs:93](core/acowork-runtime/src/agent/loop_memory.rs#L93) 早返回。
+- **每 session 最多触发一次**——在 session 第一条 user message 时执行 `retrieve_and_inject_memories()`，成功后置 `AgentLoop.memory_retrieved_for_session = true`；后续轮次通过该标记在 `loop_memory.rs:93` 早返回。
 - **不采用每轮触发**（方案 B）：每轮注入到 Block A 会让 Open 128-token hash 链与 Anthropic prefix cache 全失效（ADR-060 §3.2 已否决）；每轮触发还需先把注入位置从 Block A 挪到 append/Block C-style 路径（ADR-060 §11 #2 未做），属独立工作项。
 - **不采用首次+显著变化重触发**（方案 C）：场景概率低——auto_inject 是会话开始的"热身上下文"，session 中段新增 memory 通常已经被后续 `memory_recall` 工具调用或下一 session 覆盖，追加重触发收益有限；事件通道（consolidation_bg → AgentLoop）目前未实现（ADR-060 §11 #4）。
 - **per-agent 差异**：触发模式（`FirstTurn` / `FirstTurnPlusChange`）未来做成 manifest 配置项（M5 默认 `FirstTurn`），不同 agent 类型可按需覆盖。
 
-**M5 默认值变更**：`MemoryManagerConfig.auto_inject_enabled: false → true`（[manager.rs:172](core/acowork-memory/src/manager.rs#L172)）。零配置 = 首次触发；agent 在 manifest `[memory.quality]` 显式设 `auto_inject_enabled: false` 可关闭。
+**M5 默认值变更**：`MemoryManagerConfig.auto_inject_enabled: false → true`（[manager.rs:172](../../../core/acowork-memory/src/manager.rs)）。零配置 = 首次触发；agent 在 manifest `[memory.quality]` 显式设 `auto_inject_enabled: false` 可关闭。
 
 > ⚠️ **后续回退（2026-09）**：该默认值已回退为 `false`（per-agent opt-in，经 manifest `[memory.quality].auto_inject_enabled = true` 显式开启，开启后首轮触发一次）。原因：与 LLM 自主 `memory_recall` 双路径召回重复——两条路径同以 user 消息为 query（auto_inject：全 4 labels / limit=5 / expand_hops=0 / hint=Identity；deep_recall：全 4 labels / limit=10 / expand_hops=2 / hint=Semantic），核心节点必然重叠。配套措施：`memory_recall` 工具描述已加防重复召回提示（"do NOT re-run the same query"），是否去重交由 LLM 判断。
 
@@ -173,9 +173,9 @@ auto_inject min_score=None    → 1 result, score 0.6437
 
 **事实基线**：
 
-- 关键词当前仅以 `metadata["keywords"]` JSON 数组持久化（[instant.rs:229-245](core/acowork-grafeo/src/consolidation/instant.rs#L229-L245)），不参与任何 BM25 索引。
-- BM25 索引字段白名单固定（[grafeo.rs:200-221](core/acowork-grafeo/src/grafeo.rs#L200-L221)）：Knowledge 的 "content"（由 subject/predicate/object 派生）、Procedural/Autobiographical 的 "content"、以及 KNOWLEDGE_TEXT_FIELDS 列出的具体字段。
-- `MemoryQualityConfig.keyword_index: bool` 已定义（[quality.rs:163](core/acowork-memory/src/quality.rs#L163)），默认 `false`、manifest 镜像同步（[manifest.rs:389](core/acowork-core/src/manifest.rs#L389)），零落地实现。
+- 关键词当前仅以 `metadata["keywords"]` JSON 数组持久化（[instant.rs:229-245](../../../core/acowork-memory/src/consolidation/distiller.rs)），不参与任何 BM25 索引。
+- BM25 索引字段白名单固定（[grafeo.rs:200-221](../../../core/acowork-memory/src/sqlite/provider.rs)）：Knowledge 的 "content"（由 subject/predicate/object 派生）、Procedural/Autobiographical 的 "content"、以及 KNOWLEDGE_TEXT_FIELDS 列出的具体字段。
+- `MemoryQualityConfig.keyword_index: bool` 已定义（[quality.rs:163](../../../core/acowork-memory/src/quality.rs)），默认 `false`、manifest 镜像同步（[manifest.rs:389](../../../core/acowork-core/src/manifest.rs#L389)），零落地实现。
 
 **方案 Y 决策**：
 
@@ -195,7 +195,7 @@ auto_inject min_score=None    → 1 result, score 0.6437
 
 ### 6.2.1 Keyword 质量门（M5 必做前置）
 
-**问题**：当前 keyword 唯一来源是 LLM（`memory_store` 工具调用参数，[memory_store.rs:271-276](core/acowork-runtime/src/tools/builtin/memory_store.rs#L271-L276)），零清洗/限长/去重/停用词过滤。[05-memory.md §3.3](../design/zh/05-memory.md) 原本设计 Runtime 从 `memory_hint.e` 提取作为**确定性主源** + LLM 可选补充（"LLM 甚至可以不填"），但 v3.10 简化（[05-memory.md:144,1151](../design/zh/05-memory.md#L1151)）把 Runtime 链路删了，**未同步更新设计文档**——这是 §6.2 直接折入 `object` 的潜在放大风险（garbage keywords → 放大进 BM25 → 检索污染；与 ADR-062 §1 已对 `confidence`/`importance` 警告的同类 LLM 锚定问题）。
+**问题**：当前 keyword 唯一来源是 LLM（`memory_store` 工具调用参数，`memory_store.rs:271-276`），零清洗/限长/去重/停用词过滤。[05-memory.md §3.3](../../design/zh/05-memory.md) 原本设计 Runtime 从 `memory_hint.e` 提取作为**确定性主源** + LLM 可选补充（"LLM 甚至可以不填"），但 v3.10 简化（[05-memory.md:144,1151](../../design/zh/05-memory.md#L1151)）把 Runtime 链路删了，**未同步更新设计文档**——这是 §6.2 直接折入 `object` 的潜在放大风险（garbage keywords → 放大进 BM25 → 检索污染；与 ADR-062 §1 已对 `confidence`/`importance` 警告的同类 LLM 锚定问题）。
 
 **决策（轻量写时门，Option A）**：在写入路径增加确定性清洗，**无论 `keyword_index` 是否打开都生效**（保证 `metadata["keywords"]` 自身也干净，不分裂）。
 
@@ -224,9 +224,9 @@ auto_inject min_score=None    → 1 result, score 0.6437
 
 | 步骤 | 改动文件 | 验证手段 |
 |---|---|---|
-| 1. `auto_inject_enabled` 默认值改 true | [manager.rs](core/acowork-memory/src/manager.rs) | 单元测试（默认值断言）+ benchmark harness 验证命中率 |
-| 2a. **keyword 写时质量门**（§6.2.1 前置） | `acowork-memory/src/keyword.rs`（新模块）+ [memory_store.rs](core/acowork-runtime/src/tools/builtin/memory_store.rs) + [instant.rs](core/acowork-grafeo/src/consolidation/instant.rs) 双向调用 | 单元测试覆盖 6 条规则边界 + 工具描述更新 + 现有 e2e 回归 |
-| 2b. keyword_index 写时拼入 `object`（依赖 2a） | [instant.rs](core/acowork-grafeo/src/consolidation/instant.rs) | 单元测试（清洗后 BM25 命中）+ benchmark |
+| 1. `auto_inject_enabled` 默认值改 true | [manager.rs](../../../core/acowork-memory/src/manager.rs) | 单元测试（默认值断言）+ benchmark harness 验证命中率 |
+| 2a. **keyword 写时质量门**（§6.2.1 前置） | `acowork-memory/src/keyword.rs`（新模块）+ `memory_store.rs` + [instant.rs](../../../core/acowork-memory/src/consolidation/distiller.rs) 双向调用 | 单元测试覆盖 6 条规则边界 + 工具描述更新 + 现有 e2e 回归 |
+| 2b. keyword_index 写时拼入 `object`（依赖 2a） | [instant.rs](../../../core/acowork-memory/src/consolidation/distiller.rs) | 单元测试（清洗后 BM25 命中）+ benchmark |
 | 3. manifest `[memory.quality].keyword_index` / `auto_inject_enabled` 反序列化已就位（无需改动） | — | harness 显式设值覆盖验证 |
 | 4. 扩展 benchmark：keyword 专项查询集 + auto_inject 状态扫描 | [memory_m4_bench.rs](../../../core/acowork-memory/tests/memory_m4_bench.rs) | 重命名为 `memory_m5_bench` 或追加 keyword 配置开关 |
 | 5. 跑 before/after 对比 | — | 输出表格（Precision@5 / Recall@5 / MRR / Dormant / auto_inject hit / keyword hit） |
@@ -247,7 +247,7 @@ auto_inject min_score=None    → 1 result, score 0.6437
 |---|---|---|---|
 | **P1** | `compute_pagerank` 非确定性修复（`compute_pagerank_fallback` HashMap/HashSet → 按 NodeId 排序） | M4 §5.4 | 小（局部修改 + 回归测试） |
 | **P1** | 验证生产 vector 索引填充路径（`rebuild_embeddings` / 启动迁移）是否在写入链后自动执行 | M4 §4.3 | 中（生产环境实证） |
-| **P2** | 删除 hint_weights 空转代码（`_text_weight`/`_vector_weight`/`_graph_weight` 在 [manager.rs:318](core/acowork-memory/src/manager.rs#L318) 空转） | ADR-062 §4.2 / M4 报告 §6.3 | 小 |
+| **P2** | 删除 hint_weights 空转代码（`_text_weight`/`_vector_weight`/`_graph_weight` 在 [manager.rs:318](../../../core/acowork-memory/src/manager.rs) 空转） | ADR-062 §4.2 / M4 报告 §6.3 | 小 |
 | **P2** | `RRF k` 参数化（grafeo-engine 需支持） | ADR-062 §4.2 | 中（依赖上游版本） |
 | **P2** | 泛化路径 0.8 vs 离线 0.7 阈值统一决策（M3.6 阈值校准延伸） | ADR-062 §4.2 | 中 |
 | **P3** | auto_inject 注入从 Block A 挪到 Block C append（解锁方案 B） | ADR-060 §11 #2 | 大（需 Provider cache_control 改造） |
@@ -279,7 +279,7 @@ cargo test -p acowork-runtime --test memory_m4_probe    -- --nocapture   # 分�
 
 | 步骤 | 改动 | 验证 |
 |---|---|---|
-| 1 | `MemoryManagerConfig.auto_inject_enabled` 默认 `false → true`（[manager.rs](core/acowork-memory/src/manager.rs)），首轮触发逻辑（`loop_memory.rs` `memory_retrieved_for_session`）已存在 | 默认值断言更新 |
+| 1 | `MemoryManagerConfig.auto_inject_enabled` 默认 `false → true`（[manager.rs](../../../core/acowork-memory/src/manager.rs)），首轮触发逻辑（`loop_memory.rs` `memory_retrieved_for_session`）已存在 | 默认值断言更新 |
 | 2a | 新增 `acowork-memory/src/keyword.rs`（`sanitize`/`sanitize_with_stats`，6 条规则 + 30 停用词 + cap 8）；`memory_store.rs` LLM 边界与 `instant.rs` 持久边界双向调用（幂等）；工具描述更新；`memory_write_keyword_gate` 埋点 | 10 个规则边界单测 + e2e 回归 |
 | 2b | `instant.rs`：`quality.keyword_index=true` 时清洗后 keywords 拼入 BM25 `object` 字段（Plan Y） | 单测（off 时 object 干净 / on 时含 `Keywords: …`）+ bench |
 | 3 | manifest `[memory.quality].auto_inject_enabled` 新增（草案与 §6.5 声称"已就位"均不实）+ `agent_core::init_memory_manager` 注入；`keyword_index` 镜像已有 | core manifest 测试 |

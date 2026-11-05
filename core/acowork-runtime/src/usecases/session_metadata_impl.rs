@@ -13,13 +13,17 @@ use crate::conversation::{self, SessionScope};
 use crate::error::{Result, RuntimeError};
 use crate::usecases::agent_token::AgentTokenService;
 use crate::usecases::session_metadata::{
-    MessagesResponse, SessionDetail, SessionMetadataService, SessionSummary, SessionsListResponse,
-    TokenStatsResponse,
+    ChatListingScope, MessagesResponse, SessionDetail, SessionMetadataService, SessionSummary,
+    SessionsListResponse, TokenStatsResponse,
 };
 
 pub struct RuntimeSessionMetadataService {
     work_dir: PathBuf,
     agent_token: Arc<dyn AgentTokenService>,
+    /// Chat Router token ledger — its totals join the disk scan in the
+    /// ADR-066 merge so router spend survives a process restart in the
+    /// agent counters exactly like session spend.
+    chat_usage: Arc<dyn crate::usecases::ChatUsageService>,
     session_snapshots: SharedSessionSnapshots,
     latest_session: SharedLatestSession,
 }
@@ -28,12 +32,14 @@ impl RuntimeSessionMetadataService {
     pub fn new(
         work_dir: PathBuf,
         agent_token: Arc<dyn AgentTokenService>,
+        chat_usage: Arc<dyn crate::usecases::ChatUsageService>,
         session_snapshots: SharedSessionSnapshots,
         latest_session: SharedLatestSession,
     ) -> Self {
         Self {
             work_dir,
             agent_token,
+            chat_usage,
             session_snapshots,
             latest_session,
         }
@@ -48,6 +54,7 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         size: u32,
         scope: &SessionScope,
         active_only: bool,
+        chat: Option<&ChatListingScope>,
     ) -> Result<SessionsListResponse> {
         // Read the snapshot keys once, before the scan: Active = present in
         // the in-memory map (ADR-038 lifecycle; close_session removes the
@@ -60,6 +67,30 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             .unwrap_or_default();
 
         let conversations = self.work_dir.join("conversations");
+        // ADR-106 D7: the Chat-scoped read rule, handed to the scan as a row
+        // predicate so the page slice and `total_*` describe only what this chat
+        // may address. Its terminal exclusions come off the intent-binding
+        // index — the same small second metadata read the router's candidate
+        // pass makes, read here rather than passed in so no caller has to know
+        // that finished PM chains are part of the rule. The rule itself lives in
+        // `chat_candidates`, which is the only place it may be written.
+        let meta_filter = chat.map(|chat| {
+            use crate::agent::session::chat_candidates::{ChatScopeRule, scan_bindings};
+            let terminal_session_ids = scan_bindings(&self.work_dir.to_string_lossy())
+                .into_iter()
+                .filter(|binding| binding.closed)
+                .map(|binding| binding.session_id)
+                .collect();
+            let rule = ChatScopeRule {
+                chat_session_id: chat.chat_session_id.clone(),
+                owner_user_id: chat.owner_user_id.clone(),
+                surface: chat.surface,
+                terminal_session_ids,
+            };
+            let keep: conversation::MetaFilter =
+                Box::new(move |meta: &conversation::SessionMeta| rule.allows(meta));
+            keep
+        });
         let join = conversation::scan_sessions_async_filtered(
             conversations.clone(),
             Some(page),
@@ -73,6 +104,7 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             } else {
                 None
             },
+            meta_filter,
         );
         // ADR-066: scan_sessions_async returns a 4-tuple
         // (input, output, cache_read, cache_write) — feed all four into
@@ -89,11 +121,18 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         // are intentionally NOT echoed into the HTTP response —
         // agent totals belong on the live `context_usage` push path
         // only (regression t-83afab47).
+        //
+        // The Chat ledger rides the same scan: router spend is persisted
+        // in `chat_token_usage`, not in the session metas the join reads,
+        // so without this term a restart would drop every chat token the
+        // pre-restart counters held (the live counter starts at zero;
+        // `merge_token_totals` can only recover what the scan sees).
+        let (chat_in, chat_out, chat_cr, chat_cw) = self.chat_usage.ledger_totals();
         self.agent_token.merge_token_totals((
-            Some(disk_in),
-            Some(disk_out),
-            Some(disk_cache_read),
-            Some(disk_cache_write),
+            Some(disk_in.saturating_add(chat_in)),
+            Some(disk_out.saturating_add(chat_out)),
+            Some(disk_cache_read.saturating_add(chat_cr)),
+            Some(disk_cache_write.saturating_add(chat_cw)),
         ));
 
         let page_sessions: Vec<SessionSummary> = sessions

@@ -1526,6 +1526,15 @@ export interface EventClearedEvent {
 
 // ── Session types ─────────────────────────────────────────────────────
 
+/**
+ * Which conversation a chat-scoped listing is read *for* (ADR-106 D7): the
+ * Runtime narrows the addressable-session list by it, so it is part of the
+ * request's meaning, not a client-side label. Lives with the other wire types
+ * because both the store and the picker that renders the answer must spell it
+ * the same way.
+ */
+export type ChatSurface = "direct" | "group";
+
 /** Session summary from Gateway */
 export interface SessionInfo {
   session_id: string;

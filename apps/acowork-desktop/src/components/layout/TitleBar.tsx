@@ -6,6 +6,7 @@ import { useLayoutStore } from "../../stores/layoutStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { Tooltip } from "../common/Tooltip";
 import { GatewaySwitcherMenu } from "./GatewaySwitcherMenu";
+import { AppearanceMenu } from "./AppearanceMenu";
 
 /**
  * Right-panel toggle — VS Code's "layout panel" glyph: one outer frame with
@@ -134,6 +135,10 @@ export function TitleBar({
         onMouseDown={(e) => e.stopPropagation()}
       >
         <GatewaySwitcherMenu onOpenGatewaySettings={onOpenGatewaySettings} />
+        {/* Appearance quick-settings — theme mode + accent color, next to
+            the Gateway switcher so the two popovers share one visual
+            language in the title bar's right cluster. */}
+        <AppearanceMenu />
         <Tooltip content={t("titleBar.globalSearch")} position="bottom">
           <button
             className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"

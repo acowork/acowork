@@ -255,8 +255,71 @@ pub mod constants {
     /// (was `DEFAULT_INTENT_TIMEOUT_SECS = 30`).
     pub const INTENT_DEFAULT: Duration = Duration::from_secs(30);
 
+    /// How long a **task dispatch** waits for the target Runtime's
+    /// acceptance receipt (`POST /api/intents/{id}/accept`) after the
+    /// Gateway has published the Intent.
+    ///
+    /// Publishing only proves the broker took the bytes. Without the
+    /// receipt a Runtime that could not route the message — the incident
+    /// was `no such column: intent_key` in its session-meta store — looks
+    /// exactly like a healthy one at the Gateway, so the dispatch is
+    /// stamped delivered and the task is stranded: the sender has no
+    /// error to retry on and no fact to reconcile against later.
+    ///
+    /// Accepting is a local decision (one session-meta read, maybe one
+    /// session create), so the success path returns in milliseconds. The
+    /// bound is eaten whole by a wedged Runtime — **and by a peer built
+    /// before this protocol**, which never answers at all: a mixed-version
+    /// fleet pays it on every dispatch (design 27 §5.7). Reaching it
+    /// degrades to the pre-receipt behaviour (trust the publish), which is
+    /// why it is generous enough not to trip on a loaded machine.
+    /// Callers must budget the whole dispatch path, not this leg alone:
+    /// a task dispatch may spend up to `INTENT_DEFAULT` waking the target
+    /// plus this wait before it answers.
+    pub const INTENT_ACCEPT: Duration = Duration::from_secs(5);
+
     /// MCP receive timeout for init / list (was `RECV_TIMEOUT_SECS = 30`).
     pub const MCP_RECV: Duration = Duration::from_secs(30);
+
+    /// How long an MCP probe may stay **silent** before it is considered
+    /// stalled (stdout/stderr of the spawned server reset the clock).
+    ///
+    /// The bound on a first launch is not "the whole download takes too long"
+    /// — a package manager can legitimately spend minutes — it is "the server
+    /// produced no output for a long time", which is what a hang looks like.
+    /// Same semantic as `INSTALL_IDLE_TIMEOUT` for install commands.
+    pub const MCP_PROBE_IDLE: Duration = Duration::from_secs(30);
+
+    /// Silence budget for a probe that runs a lazy package resolver
+    /// (`npx` / `uvx` / `bunx` / `pnpx`).
+    ///
+    /// A *backstop*, not a stall judgement: for these kinds silence proves
+    /// nothing. Measured on this platform (2026-11): `uv` prints one line when
+    /// a package starts and one when it finishes, 39s apart for a 35MiB
+    /// download — a 900MB wheel is minutes of silence; `npx` under a piped
+    /// stderr printed nothing at all for a whole 11s first-run install. A real
+    /// failure (process died) closes the pipe and fails the handshake on its
+    /// own, so the only thing left to catch is a wedged-but-alive process, and
+    /// it is worth waiting an hour before declaring that.
+    pub const MCP_PROBE_IDLE_LAZY: Duration = Duration::from_secs(60 * 60);
+
+    /// While a probe waits, remind the log this often that silence is not a
+    /// verdict — otherwise a quiet large download looks identical to a hang.
+    pub const MCP_PROBE_SILENCE_NOTICE: Duration = Duration::from_secs(60);
+
+    /// Handshake bound for a **bounded** connect to a lazily resolved package
+    /// (`npx` / `uvx` / `bunx` / `pnpx`) — i.e. the steady path, not the probe.
+    ///
+    /// The probe must not use this (it passes `None` and watches output
+    /// instead): this is the answer to "how long may a launch take before we
+    /// call it dead". Measured on this platform (2026-11): `uvx docling-mcp`
+    /// answers the handshake in 11.4s warm with 21 tools — a heavy preset.
+    /// Cold, the same launch runs the first import of the ML stack and can
+    /// exceed 30s silently, which is why the protocol default is too tight
+    /// here. 300s is thus ~26x the warm measurement, while still bounded: a
+    /// Runtime restart connects without a probe in front of it, and something
+    /// has to eventually report an error instead of waiting forever.
+    pub const MCP_LAZY_START: Duration = Duration::from_secs(300);
 
     /// MCP default per-tool call timeout (was `DEFAULT_TOOL_TIMEOUT_SECS = 180`).
     pub const MCP_DEFAULT_TOOL: Duration = Duration::from_secs(180);
@@ -509,7 +572,12 @@ mod tests {
         assert_eq!(APPROVAL, Duration::from_secs(300));
         assert_eq!(SESSION_IPC, Duration::from_secs(10));
         assert_eq!(INTENT_DEFAULT, Duration::from_secs(30));
+        assert_eq!(INTENT_ACCEPT, Duration::from_secs(5));
         assert_eq!(MCP_RECV, Duration::from_secs(30));
+        assert_eq!(MCP_PROBE_IDLE, Duration::from_secs(30));
+        assert_eq!(MCP_PROBE_IDLE_LAZY, Duration::from_secs(60 * 60));
+        assert_eq!(MCP_PROBE_SILENCE_NOTICE, Duration::from_secs(60));
+        assert_eq!(MCP_LAZY_START, Duration::from_secs(300));
         assert_eq!(MCP_DEFAULT_TOOL, Duration::from_secs(180));
         assert_eq!(MCP_MAX_TOOL, Duration::from_secs(600));
         assert_eq!(LSP_REQUEST, Duration::from_secs(30));

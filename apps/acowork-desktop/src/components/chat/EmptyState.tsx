@@ -15,11 +15,13 @@ import brandMarkGray from "../../../../../assets/brand-mark-gray.svg";
  * unreadable gray smudge. Logo still leads the eye; tagline earns its
  * legibility budget.
  *
- * Uses the grayscale brand mark (brand-mark-gray.svg), which is itself
- * theme-aware via an inline <style> + prefers-color-scheme query, so this
- * component needs no React-side theme handling. The tagline relies on
- * `text-text-tertiary/40` (Tailwind opacity modifier) so it inherits the
- * surrounding surface tone in both light and dark modes.
+ * Uses the grayscale brand mark (brand-mark-gray.svg). That asset carries a
+ * single dark-toned palette (chip #3A→#2A, "A" #E8/#C8/#A8, wordmark #A8/#C8/#7A)
+ * picked to stay readable on both the light and the dark chat surface, so it no
+ * longer switches palette itself and this component needs no React-side theme
+ * handling. The tagline relies on `text-text-tertiary/40` (Tailwind opacity
+ * modifier) so it inherits the surrounding surface tone in both light and dark
+ * modes.
  */
 export function EmptyState(): React.ReactElement {
   return (
@@ -32,7 +34,10 @@ export function EmptyState(): React.ReactElement {
       <img
         src={brandMarkGray}
         alt=""
-        width={180}
+        // 166 × 96/364.25 ≈ 43.7 tall: the asset's frame is now the artwork plus
+        // a uniform 6px gutter (it used to carry ~30px of dead space on the right),
+        // so the width is scaled down to keep the mark at the documented ~44px.
+        width={166}
         height={44}
         // Don't announce the decorative mark to screen readers — the
         // surrounding chat surface already exposes the app context.

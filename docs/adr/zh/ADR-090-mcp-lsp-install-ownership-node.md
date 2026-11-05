@@ -204,6 +204,30 @@ fn ensure_usable(name, pkg, spawn, env):
 - **重试 = 重开开关**：不缓存失败态；用户再次打开开关即重跑整套流程（大概率仍失败，故错误信息质量是关键）。
 - npm/uvx 类 `derive_install_command` 返回 `None`（`npx -y`/`uvx` 懒解析）→ 跳过步骤 2，直接靠步骤 1 的 health_check（首次 spawn 会触发 npx 下载）。
 - 并发（D7）：不加锁，靠包管理器自带锁 + 一次性窗口。
+- **实施补充（2026-10）：ensure 状态携带有界日志**。`GET /agents/{id}/mcp-ensure/{name}` 的载荷在原状态机字段上新增 `logs: [...]`，每行按来源加前缀，三条来源覆盖了"等待"的全部时段：
+  - `[progress]`——ensure 各阶段提示（探测 → 安装 → 复探）；
+  - `[stdout]` / `[stderr]`——安装子进程输出，由 `run_install_with_output` 逐行转发（`acowork-mcp/src/install.rs`）；
+  - `[server]`——MCP server **自身**的 stderr，由 `health_check_with_output` 经 stdio transport 的 `ServerOutputSink` 逐行送进 Runtime。npx/uvx 懒解析类的下载就发生在这个 spawn 里，此前只进 `tracing`（`mcp::stderr`），用户面对的是静默转圈——这是补 `[server]` 的唯一理由。
+  定性不变：ensure 状态仍是**进程内 in-flight 事实**，日志是它的附加视图，不落盘、不过 Gateway、不新增路由（Gateway 仍是纯反代）；单 server 上限 500 行 / 64 KiB，环形截断，每次新尝试（重开开关）清空。长连接的连接池后续重连不观察——只在 ensure/复探这两处 spawn 上挂观察者，因为那是用户等待发生的地方。
+- **实施补充（2026-11）：ensure 覆盖自建 stdio server，且探测窗口按命令类型区分**。上线后的事实：用户最常首次下载的恰恰是自建条目（如 `chrome-devtools`，`command = npx -y chrome-devtools-mcp@latest`、**无 install spec**）——旧守卫「无 spec 就不 ensure」让这类服务器完全没有 ensure 尝试，`GET .../mcp-ensure/{name}` 恒为 404，UI 只剩一个不可点的转圈。因此：
+  - `spawn_ensure` 的守卫为 **transport = stdio 且命令非空**；无 spec 只意味着「没有安装步骤」，不意味着「不需要探测」。探测失败且命令确实不存在时，仍返回原来的「未找到命令且未声明安装方式」错误并回弹开关。命令为空（catalog 同步残留）不登记尝试，也不动用户的选择。
+  - **失败一律回弹开关**，不区分有无 install spec：`Failed` 的含义是「这台机器上现在用不了」，装了个空、装完仍不应答、自建服务器探测不通都属于此列。开关停在「开」而工具列表为空是对用户的误导——他无法判断是还在跑还是已经死了。重试仍是重新打开开关（D6），错误与日志负责解释原因。
+  - 探测/复探的时限是**静默超时，不是全程超时**。首次 spawn 可能就是几分钟的下载（docling + `uvx`），任何"总共只许等 N 秒"的判定都会把健康的下载判成失败——上线后实际发生过：日志一直在刷，界面却因为固定窗口到点而显示失败。现在的判定是：握手等待本身不设上限（`connect_with_timeout(None)`），只看 **spawn 出来的进程是否还在产出输出**，每一行 stderr 都重新计时（`ActivityClock`），与安装命令的 `INSTALL_IDLE_TIMEOUT` 同一语义。
+
+**静默本身不是失败证据**（2026-11 实测，本机 uv 0.12.9 / npm）：`uv` 对每个包只在开始下载和下载完成各打一行——35 MiB 的 scipy 中间静默 **39s**，900MB 级的 wheel 意味着十几分钟静默；`npx` 在 stderr 被管道接走时整场首次安装 **一行都不输出**（实测 11.5s 全程无声）。因此预算按命令类型分两档语义：
+
+- 本地二进制（`MCP_PROBE_IDLE` 30s）：已经装好了，握手应在毫秒级完成，静默 30s 就是卡死，判失败。
+- 懒解析器（`MCP_PROBE_IDLE_LAZY` 60min）：这只是**兜底**，不是卡死判据。真正的失败信号是子进程退出——管道随之 EOF，握手自己会报错。所以只剩下"活着但永不回握手"这一类才需要兜底，值得等一小时再下结论。
+- 等待期间每 `MCP_PROBE_SILENCE_NOTICE`(60s) 往日志写一条 `[progress]`（"No output for Ns — package downloads can be quiet…"），让"安静地在大文件传输"与"卡死"在界面上可区分。
+
+残余风险（已知并接受）：一直输出但永不完成握手的服务器不会被杀掉——用户能看到日志，可自行关掉开关。
+
+- **时限的归属在调用方，不在 transport**（2026-11 修复）。上面这条"握手不设上限"上线后，同一个失败仍出现过一次：日志停在 `Installed 65 packages`，紧接着 `MCP probe failed: timeout waiting for MCP response: deadline has elapsed`。根因不在探测器的预算，而在 `StdioTransport::send_and_recv` 里写死的 30s 往返时限（`constants::MCP_RECV`）——它与调用方传入的 `None` 无关，自己先到点。`uvx` 装完包之后还要启动 server（docling 首次启动要 import 整个 ML 栈），这段时间 **stdout/stderr 一个字节都不出**，正好落在 30s 窗口上。因此：
+  - `recv_timeout` 变成 stdio transport 的**构造参数**（`create_transport_with(config, sink, recv_timeout)`）：`None` = 不设往返上限，交由调用方判定（探测的 `ActivityClock`）。只有一个主人，外层的 `timeout` 包装随之取消，不再和它抢同一个截止点。
+  - 常规连接（`McpClient::connect` / `connect_all`）按**命令类型**取上限（`handshake_bound_for`）：本地二进制 30s（`MCP_RECV`）；懒解析器 300s（`MCP_LAZY_START`——本机实测 `uvx docling-mcp` 热启动 11.4s、21 个工具，冷启动要跑首次 import，远超 30s）。300s 是"启动多久算死"的界限，不是下载窗口：Runtime 重启后的连接前面没有探测，总得有个上限把错误报出来。
+  - 探测路径仍传 `None`：它不需要往返上限，只需要"静默多久算卡住"。
+  - `PUT /agents/{id}/mcp-servers` 回执的 `ensuring` 现在只列**真正登记了尝试**的服务器（非 stdio 不列），客户端因此不会去轮询一个必然 404 的地址。
+  - 客户端侧：「首次轮询即 `failed`」也要执行回弹（重载 `active_names` + 通知配置刷新）——命令缺失这类失败在 2s 定时器建立之前就结束了，早退会让开关停在打开态。
 
 ### 5.5 UI（D10）
 
@@ -211,6 +235,7 @@ fn ensure_usable(name, pkg, spawn, env):
 - 设置页为**单一列表、两类行**：preset 行常驻（未添加 → 「添加」，已添加 → 「已添加」，**无 Remove**——内置模板的注册表副本不是用户可删对象）；custom 行（不属于任何 preset 的 catalog 条目）带 Remove。两类行都**无 Test 按钮**（见 §5.6，运行时探测不属于 Gateway）。
 - 右侧工具面板 MCP 列表每项显示 health_check 驱动的状态：`探测中 / 本机可用 / 需安装 / 失败(详细原因)`。措辞用「**本机可用**」而非「本 Agent 已安装」——binary 是全机共享事实，避免误导。
 - 失败态展示详细错误（运行时缺失/依赖/install stderr 摘要），并提供「重试」（= 重新打开开关）。
+- `探测中 / 安装中` 的转圈指示器**可点击**，弹出该 server 的 ensure 日志（`logs` 逐行显示 + 自动滚到底）；失败态的「查看日志」按钮同理。首次安装的 server 尚无工具列表、行本身不可展开，因此弹窗必须挂在行容器之外（desktop 用 `createPortal` 到 `document.body`），否则会被折叠容器吞掉。
 - 「需要哪些 key」的展示仍可用前端 preset（`requiredEnv`），但**过滤判定的真相在 catalog**（D4 `required_secrets`），二者需对齐。
 
 ### 5.6 删除项（D12）

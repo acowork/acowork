@@ -34,9 +34,9 @@ vi.mock('../lib/api', async (importOriginal) => ({
 
 const api = await import('../lib/api')
 
-const PNG: ChatAttachment = { id: 'att-1', name: 'shot.png', mime: 'image/png', size: 348_160 }
-const LOG: ChatAttachment = { id: 'att-2', name: 'build.log', mime: 'text/plain', size: 2_048 }
-const PDF: ChatAttachment = { id: 'att-3', name: 'report.pdf', mime: 'application/pdf', size: 12_288 }
+const PNG: ChatAttachment = { id: 'att-1', filename: 'shot.png', mime: 'image/png', size: 348_160 }
+const LOG: ChatAttachment = { id: 'att-2', filename: 'build.log', mime: 'text/plain', size: 2_048 }
+const PDF: ChatAttachment = { id: 'att-3', filename: 'report.pdf', mime: 'application/pdf', size: 12_288 }
 
 describe('attachment classification', () => {
   it('classifies by mime, never by filename', () => {
@@ -124,17 +124,14 @@ describe('chat row wiring', () => {
   function propsWith(row: ChatMessageRow, onOpenAttachment: (a: ChatAttachment) => void): RowProps {
     return {
       row,
+      chatSessionId: 'cs-1',
       isSelf: true,
       selfAvatar: 'me',
       selfName: 'me',
       agentAvatar: 'ag',
       agentName: 'agent',
-      closed: false,
-      answered: false,
-      answeredCards: new Set<string>(),
-      chatAnswered: new Set<string>(),
-      onOpenExec: () => {},
-      onAnswerCard: () => {},
+      onJumpToExec: () => {},
+      onReplyToRound: () => {},
       onOpenAttachment,
     }
   }
@@ -152,7 +149,7 @@ describe('chat row wiring', () => {
 
     act(() => capsules[1]!.click())
     expect(opened).toHaveLength(1)
-    expect(opened[0]!.name).toBe('build.log')
+    expect(opened[0]!.filename).toBe('build.log')
   })
 
   it('keeps an execution surface label inert (ADR-100 D12)', () => {

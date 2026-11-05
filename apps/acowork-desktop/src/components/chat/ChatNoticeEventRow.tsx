@@ -1,82 +1,128 @@
 /**
- * ChatNoticeEventRow — the shared renderer for the LEGACY `system_notice` rows
- * a chat window may still contain.
+ * ChatNoticeEventRow — the shared renderer for `system_notice` chat rows.
  *
- * ADR-100 revision: the chat log records conversation, not progress. The
- * runtime no longer writes the dispatch / round-open milestones or the router
- * fallback receipt, so a notice row can only come from a transcript recorded
- * before the revision. Those rows are deliberately invisible now — history says
- * nothing about "queued" or "a round opened", and the live surface derives its
- * own waiting state from the transcript itself (see `chatTurnState`).
+ * A notice is a fact about the channel, never an utterance, so it paints as a
+ * quiet centered line and carries no avatar. Three things still write one
+ * (ADR-106 D12, after the reference-row consolidation):
+ * - `delivery_failed`: a send this Chat owed the human and could not make. The
+ *   Gateway writes it bodyless — the wording belongs to the surface, not to a
+ *   server-side English sentence with an error code in it (ADR-105).
+ * - `budget_exhausted` / `truncated` / `unavailable`: a limit the round hit.
+ * - `session_choice` / `confirm_continue`: an addressing question (D6 levels 3
+ *   and 5). Empty-bodied with `meta.options`; the surfaces render the options as
+ *   buttons (see the picker), which is why they are NOT silent here.
  *
- * What remains renderable: a receipt whose body is a genuine channel fact
- * (`budget_exhausted`, …), the bodyless `delivery_failed` receipt ADR-105 has
- * the Gateway write (its wording belongs to the surface, like
- * `router_fallback`), and the `interaction_resolved` notice of a decision made
- * on the execution surface — the only chat-visible record of that answer (see
- * the branches below).
+ * Everything the runtime used to write as progress (dispatch / round-open
+ * milestones, the router-fallback receipt, the card-resolution receipt) is gone
+ * from the stream: the log records conversation, and a card is no longer a chat
+ * row at all (D8) — its answer is an execution-side fact shown inside the block.
  */
 
 import { ChatEventText } from "./ChatEventText";
 import { useTranslation } from "../../i18n/useTranslation";
+import { RETIRED_NOTICES } from "../../lib/retiredNotices";
+import { cn } from "../../lib/utils";
+import type { CardChoice } from "../../lib/chatCardAnswer";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
-
-/** Notice types the runtime stopped writing in the ADR-100 revision. They must
- *  not paint even when an old transcript still carries them. (`router_fallback`
- *  is written again — the degraded route posts a receipt the human can see —
- *  so it is NOT retired here.) */
-const RETIRED_NOTICES = new Set(["turn_dispatched", "turn_started"]);
 
 interface ChatNoticeEventRowProps {
   row: ChatMessageRow;
   /** Surface column gutter so the line lines up with the stream. */
   className?: string;
-  /** Cards a human answered on either surface (the `humanAnsweredCardIds`
-   *  projection). Paired with `chatAnswered` below, this is what tells an
-   *  exec-surface decision from a nobody-answered closure. */
-  answered?: Set<string>;
-  /** Cards answered on THIS surface (the `chatAnsweredCardIds` projection):
-   *  their answer row already states the outcome, so the Runtime's duplicate
-   *  resolution notice must stay silent. */
-  chatAnswered?: Set<string>;
   /** Display name of the party this row is about, when the surface knows it
    *  (the group panels resolve it from the roster). Only the `delivery_failed`
    *  receipt uses it: "the message never reached <name>" is actionable, while a
    *  generic "not delivered" leaves the human guessing which agent to re-@. */
   name?: string;
+  /** Answering an addressing card. Absent means the row is not answerable here:
+   *  a read-only viewer never gets the action (ADR-106 D10 — only the person who
+   *  spoke may decide where their words go), and the option buttons are part of
+   *  the answer, not decoration. The choice is turned into a re-delivery of the
+   *  human's own utterance by `chatCardAnswer` (D6). */
+  onChoose?: (choice: CardChoice) => void;
+  /** The question was already answered: a round exists for the message the card
+   *  asked about. The buttons stay visible and go quiet — a card that vanished
+   *  on click would erase the record of what was decided, and a re-click would
+   *  deliver the same utterance a second time. */
+  answered?: boolean;
 }
 
 export function ChatNoticeEventRow({
   row,
   className,
-  answered,
-  chatAnswered,
   name,
+  onChoose,
+  answered,
 }: ChatNoticeEventRowProps) {
   const { t } = useTranslation();
   const noticeType = row.meta?.notice_type ?? "";
 
-  // The card's closure. A nobody-answered close leaves its note in the CARD's
-  // slot (see `InlineInteractionCard`), so this row stays silent for it. A
-  // human decision made on the EXECUTION surface never arrives here as a
-  // message row — this notice is the transcript's only record of it, and it
-  // says so as a row-tier event line, not a bubble (a card interaction is a
-  // step of the run, not an utterance).
-  if (noticeType === "interaction_resolved") {
-    const cardId = row.meta?.in_reply_to ?? "";
-    if (cardId && answered?.has(cardId) && !chatAnswered?.has(cardId)) {
-      return (
-        <ChatEventText
-          anchor="turn"
-          text={t("chatView.cardAnsweredInExec")}
-          className={className}
-        />
-      );
-    }
-    return null;
-  }
   // Retired milestones: history only.
   if (RETIRED_NOTICES.has(noticeType)) return null;
+  // An addressing question (ADR-106 D6 levels 3 and 5). Its text is the option
+  // list, which the surfaces paint as buttons — the line below is only the
+  // question they ask in common, localized here rather than server-side.
+  if (noticeType === "session_choice" || noticeType === "confirm_continue") {
+    const question = t(
+      noticeType === "session_choice"
+        ? "chatView.block.chooseSession"
+        : "chatView.block.confirmSession",
+    );
+    const options = row.meta?.options ?? [];
+    // Nothing to offer, or nobody allowed to offer it: the question is still a
+    // fact about the transcript, so it stays as the plain line.
+    if (!onChoose || options.length === 0) {
+      return <ChatEventText text={question} className={className} />;
+    }
+    // The card's own row is a question, so it reads as one: the line above, the
+    // answers below, all centered like every other transcript chrome.
+    return (
+      <div
+        className={cn("flex flex-col items-center gap-1.5 py-1", className)}
+        data-testid="chat-card-options"
+      >
+        <span className="text-10 text-text-tertiary">{question}</span>
+        <div className="flex flex-wrap items-center justify-center gap-1.5">
+          {options.map((option) => (
+            <button
+              key={option.session_id}
+              type="button"
+              disabled={answered}
+              onClick={() => onChoose({ sessionId: option.session_id })}
+              title={option.why || option.label || option.session_id}
+              className={cn(
+                "rounded-md border border-border-outer px-2 py-1 text-xs",
+                answered
+                  ? "text-text-disabled"
+                  : "text-text-secondary hover:bg-nav-item-hover hover:text-text",
+              )}
+            >
+              {noticeType === "confirm_continue"
+                ? t("chatView.block.chooseThis")
+                : option.label || option.session_id.slice(0, 8)}
+            </button>
+          ))}
+          {/* D6's cheap escape: a question must be answerable in one click, and
+              "new task" sits beside every suggestion rather than below a fold. */}
+          {row.meta?.allow_new_task && (
+            <button
+              type="button"
+              disabled={answered}
+              onClick={() => onChoose({ forceNew: true })}
+              className={cn(
+                "rounded-md border border-border-outer px-2 py-1 text-xs",
+                answered
+                  ? "text-text-disabled"
+                  : "text-text-secondary hover:bg-nav-item-hover hover:text-text",
+              )}
+            >
+              {t("chatView.block.newTask")}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
   // A delivery that never reached its agent (ADR-105). Also keyed by
   // notice_type: the Gateway writes a bodyless row (its prose would be
   // server-side English plus an internal error code), so the surfaces own the
@@ -85,22 +131,7 @@ export function ChatNoticeEventRow({
   if (noticeType === "delivery_failed") {
     return (
       <ChatEventText
-        anchor="turn"
         text={name ? t("chatView.deliveryFailed", { name }) : t("chatView.deliveryFailedNoTarget")}
-        className={className}
-      />
-    );
-  }
-  // The router-fallback receipt is keyed by notice_type, not body: the
-  // runtime writes a bodyless row and every surface owns the wording.
-  // Both branches below are channel receipts — a fact about the channel, not
-  // about any one row — so they wear the transcript's `turn` tier of the shared
-  // event-text grammar (see `ChatEventText`): centered and icon-less.
-  if (noticeType === "router_fallback") {
-    return (
-      <ChatEventText
-        anchor="turn"
-        text={t("chatView.routerFallback")}
         className={className}
       />
     );
@@ -108,20 +139,5 @@ export function ChatNoticeEventRow({
 
   const text = row.body || row.meta?.status || "";
   if (!text) return null;
-  return (
-    <ChatEventText
-      anchor="turn"
-      text={text === "routerFallback" ? t("chatView.routerFallback") : text}
-      className={className}
-    />
-  );
-}
-
-/** Bound a raw trigger body used as a task-name fallback so a long first
- *  message cannot wrap a status line. Collapses whitespace and clips with an
- *  ellipsis, mirroring how the pending-queue preview bounds its text. */
-export function truncateTaskName(body: string | undefined): string {
-  const collapsed = (body ?? "").trim().replace(/\s+/g, " ");
-  if (!collapsed) return "";
-  return collapsed.length > 40 ? `${collapsed.slice(0, 40)}…` : collapsed;
+  return <ChatEventText text={text} className={className} />;
 }

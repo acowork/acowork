@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 96 / 96 documents translated.
+**Coverage**: 98 / 98 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -19,6 +19,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | How the control plane and the data plane are split | [ADR-034](./ADR-034-mqtt-http-boundary.md) |
 | How context is compressed and summarised | [ADR-010](./ADR-010-context-compression-simplification.md) → [ADR-011](./ADR-011-compaction-as-distillation.md) → [ADR-032](./ADR-032-context-recall.md) |
 | How sessions are stored, filtered and rendered | [ADR-024](./ADR-024-merge-metadata-into-index.md), [ADR-021](./ADR-021-unified-session-data-loading.md), [ADR-050](./ADR-050-chat-list-data-driven-refactor.md) |
+| Where the chat surface ends and the execution surface begins | [ADR-099](./ADR-099-chat-session-llm-router.md) → [ADR-100](./ADR-100-chat-event-log.md) → [ADR-106](./ADR-106-chat-execution-reference-projection.md) → [ADR-107](./ADR-107-message-ref-part.md) |
 | Who may see what and do what | [ADR-042](./ADR-042-mqtt-user-identity-delivery.md), [ADR-073](./ADR-073-agent-instance-identity-decomposition.md), [ADR-076](./ADR-076-multi-user-account-system.md), [ADR-084](./ADR-084-user-standalone-process.md) |
 | The agent lifecycle contract | [ADR-085](./ADR-085-agent-lifecycle-state-machine.md) |
 
@@ -117,13 +118,15 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 89 | [ADR-096](./ADR-096-no-full-session-reads.md) | No Full Session-File Reads on Request Paths — Write-Time Derived State and Bounded Reads | Accepted | [zh](../zh/ADR-096-no-full-session-reads.md) |
 | 90 | [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md) | In-Conversation History Search — Per-Session Disposable Search Index | Accepted | [zh](../zh/ADR-097-in-conversation-history-search-disposable-index.md) |
 | 91 | [ADR-098](./ADR-098-unified-standard-group-model.md) | Unified Standard Group Model — Every Chat Surface Converges on `kind`-Typed `chat_sessions` | Accepted | [zh](../zh/ADR-098-unified-standard-group-model.md) |
-| 92 | [ADR-099](./ADR-099-chat-session-llm-router.md) | LLM Semantic Routing for Chat Sessions (Chat Router) | Accepted | [zh](../zh/ADR-099-chat-session-llm-router.md) |
-| 93 | [ADR-100](./ADR-100-chat-event-log.md) | Chat Event Log — Remove the Execution Status Card, Land In-flight Turns as Point-in-Time Event Rows | Accepted | [zh](../zh/ADR-100-chat-event-log.md) |
+| 92 | [ADR-099](./ADR-099-chat-session-llm-router.md) | LLM Semantic Routing for Chat Sessions (Chat Router) | Accepted, partially superseded by ADR-106 (D3's silent-delivery right) | [zh](../zh/ADR-099-chat-session-llm-router.md) |
+| 93 | [ADR-100](./ADR-100-chat-event-log.md) | Chat Event Log — Remove the Execution Status Card, Land In-flight Turns as Point-in-Time Event Rows | Accepted, partially superseded by ADR-106 (D2, D8–D12) | [zh](../zh/ADR-100-chat-event-log.md) |
 | 94 | [ADR-101](./ADR-101-memory-standalone-mcp-service.md) | Extracting the Memory Module from the Runtime into a Replaceable Standalone Service acowork-memory (MCP Integration) | Proposed (pending architecture review) | [zh](../zh/ADR-101-memory-standalone-mcp-service.md) |
 | 95 | [ADR-102](./ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain.md) | TurnOrigin Vocabulary and PM Dispatch Chain Governance | Accepted | [zh](../zh/ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain.md) |
 | 96 | [ADR-103](./ADR-103-openai-responses-provider-shape.md) | Supporting the OpenAI Responses API as a Provider Shape | Accepted (decided 2026-11-XX; not yet implemented) | [zh](../zh/ADR-103-openai-responses-provider-shape.md) |
 | 97 | [ADR-104](./ADR-104-agent-manifest-declaration-surface.md) | Restructuring the Manifest Declaration Surface — `[config]`, `[[mcp_servers]]`, capability↔skill, `labels` | Implemented (P1–P5) | [zh](../zh/ADR-104-agent-manifest-declaration-surface.md) |
-| 98 | [ADR-105](./ADR-105-group-default-responder.md) | Group Default Responder — an Un-@'d Group Message Goes to One Declared Agent | Accepted (implemented) | [zh](../zh/ADR-105-group-default-responder.md) |
+| 98 | [ADR-105](./ADR-105-group-default-responder.md) | Group Default Responder — an Un-@'d Group Message Goes to One Declared Agent | Accepted (implemented); D4 / D5's chat-row shape superseded by ADR-106 | [zh](../zh/ADR-105-group-default-responder.md) |
+| 99 | [ADR-106](./ADR-106-chat-execution-reference-projection.md) | Redrawing the chat / execute Boundary — References, Not Copies | Proposed (pending architecture review); fully landed P1–P6 | [zh](../zh/ADR-106-chat-execution-reference-projection.md) |
+| 100 | [ADR-107](./ADR-107-message-ref-part.md) | Reference Parts — the Chat Background Rides Alongside, the `user` Row Keeps Only the Words | Proposed (pending architecture review); landed | [zh](../zh/ADR-107-message-ref-part.md) |
 
 ---
 

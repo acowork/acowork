@@ -38,6 +38,7 @@ pub mod cli;
 pub mod config;
 pub mod error;
 pub mod health;
+pub mod limit;
 pub mod mcp;
 pub mod mqtt_publisher;
 pub mod path;

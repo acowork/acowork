@@ -73,6 +73,7 @@ pub mod logging;
 pub mod lsp;
 pub mod manifest;
 pub mod memory;
+pub mod message_ref;
 pub mod node;
 pub mod operation;
 pub mod packaging;
@@ -105,6 +106,7 @@ pub use manifest::{
     McpServerDecl, McpSourceKind, ProviderConfig, RagToolConfig, RoutingConfig, SkillDecl, SkillMode,
     SkillsConfig, ToolDeclaration,
 };
+pub use message_ref::{MessageRef, REF_KIND_CHAT_BACKGROUND, REF_KIND_REFERENCED_ROUND};
 pub use protocol::{
     ConversationEntryDto, GatewayRequest, GatewayResponse, ModelCapabilitiesInfo, ModelCostInfo,
     ModelModalities, ProtocolType, SessionInfoDto, SessionStatusDto,
@@ -121,7 +123,10 @@ pub use packaging::{
 };
 pub use path_utils::{is_absolute, resolve};
 pub use permission::{Permission, ShellApprovalThreshold};
-pub use process::{IdleTimeoutError, ProcessOutput, run_command_with_idle_timeout};
+pub use process::{
+    IdleTimeoutError, OutputStream, ProcessOutput, run_command_with_idle_timeout,
+    run_command_with_idle_timeout_with_output,
+};
 pub use providers::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, ImageUrlPart, Provider, ProviderError,
     ProviderErrorType, StreamEvent,

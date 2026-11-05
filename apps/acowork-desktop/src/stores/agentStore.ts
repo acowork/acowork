@@ -1,7 +1,7 @@
 import { create } from "zustand";
 import { invoke } from "@tauri-apps/api/core";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
-import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus, NodeInfo, AgentLifecycleState, LatestSessionResult } from "../lib/types";
+import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus, NodeInfo, AgentLifecycleState, LatestSessionResult, ChatSurface } from "../lib/types";
 import { instanceIdOf, isProcessing } from "../lib/types";
 import { getGatewayUrl } from "../lib/config";
 import { fetchNodes as fetchNodesApi } from "../lib/gateway-api";
@@ -75,9 +75,6 @@ export interface AgentProfileSettings {
    *  Empty string from the dropdown also means "no opinion" and is
    *  cleared on save. */
   sessionLanguage?: string | null;
-  /** ADR-099: Chat Router kill switch (`chat_router.enabled`).
-   *  Undefined = design default (enabled). */
-  chatRouterEnabled?: boolean;
   /** ADR-099: explicit router model id (`chat_router.model`).
    *  Undefined / empty = the agent's compact-model chain — the router
    *  deliberately does NOT follow the session's chat-model selection. */
@@ -180,11 +177,14 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
       s.compressionRatioThreshold <= 0.95
         ? s.compressionRatioThreshold
         : undefined,
-    // ADR-099 Chat Router knobs. `chatRouterModel` / `chatRouterProvider`
-    // keep non-empty strings only — "" is the UI "auto" marker and
-    // normalizes to undefined (same display, same server semantics).
-    chatRouterEnabled:
-      typeof s.chatRouterEnabled === "boolean" ? s.chatRouterEnabled : undefined,
+    // ADR-099 Chat Session Router knobs. `chatRouterModel` /
+    // `chatRouterProvider` keep non-empty strings only — "" is the UI
+    // "auto" marker and normalizes to undefined (same display, same
+    // server semantics). The router's kill switch
+    // (`chat_router.enabled`) is deliberately NOT part of the profile:
+    // the router is always on, so there is no user-facing setting to
+    // hold, and a stale local copy could only ever contradict the
+    // runtime.
     chatRouterModel:
       typeof s.chatRouterModel === "string" && s.chatRouterModel
         ? s.chatRouterModel
@@ -257,7 +257,13 @@ export interface AgentStorage {
   accessDenied: boolean | undefined;
 }
 
+/** The agent's whole session history, as the sidebar pages it. */
 const DEFAULT_PAGINATION = { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 20 };
+
+/** The `@` address picker's page: shorter than the sidebar's, because the picker
+ *  is a tap-away overlay that shows a handful of addresses above the composer,
+ *  not a browsable history. */
+const CHAT_LIST_PAGE_SIZE = 10;
 
 function createStorage(meta: AgentInfo, profile: AgentProfileSettings): AgentStorage {
   return {
@@ -342,6 +348,47 @@ function patchAgent<S extends Partial<AgentStorage>>(
 
 let fetchSessionReqId = 0;
 
+/** One chat's listing, keyed by agent + surface + chat: two chats of the same
+ *  agent must not share a page cursor, and `surface` changes which rows the
+ *  Runtime admits, so it is part of the identity, not a label. Exported because
+ *  readers must spell the key exactly as the writer does. */
+export function chatListKey(
+  agentId: string,
+  surface: ChatSurface,
+  chatSessionId: string,
+): string {
+  return `${agentId}|${surface}|${chatSessionId}`;
+}
+
+/** The paging state of one chat-scoped listing.
+ *
+ *  A separate slice from `agents[agentId].sessions` on purpose: the sidebar
+ *  pages the agent's whole history, the `@` picker pages one chat's legal
+ *  addresses. One list cannot serve both — the picker would be offering
+ *  sessions the router could not be delivered to, and opening it would move the
+ *  sidebar's rows under whoever was looking at them. */
+export interface ChatSessionList {
+  sessions: SessionInfo[];
+  pagination: typeof DEFAULT_PAGINATION;
+  isLoading: boolean;
+  /** The last read **failed**, as opposed to "this chat has nothing yet".
+   *  Without it a failed first read paints the empty state, which claims the
+   *  chat has no tasks — and the picker would keep claiming it, because the
+   *  listing is fetched once per chat key. */
+  error: boolean;
+}
+
+const EMPTY_CHAT_LIST: ChatSessionList = {
+  sessions: [],
+  pagination: { ...DEFAULT_PAGINATION },
+  isLoading: false,
+  error: false,
+};
+
+/** Per-key request ids: the pager is a tap-away from being tapped twice, and a
+ *  late answer for the older page must not repaint the newer one. */
+const chatListReqId = new Map<string, number>();
+
 // ══════════════════════════════════════════════════════════════════════════
 // Store interface
 // ══════════════════════════════════════════════════════════════════════════
@@ -352,6 +399,8 @@ interface AgentStoreState {
   /** Unified per-agent storage: agentId → AgentStorage.
    *  Switching agents does NOT mutate this map — UI reads by `selectedAgentId`. */
   agents: Record<string, AgentStorage>;
+  /** ADR-106 D7: the per-chat session listings (`chatListKey` → page). */
+  chatSessionLists: Record<string, ChatSessionList>;
   /** Currently selected agent ID — the "pointer" that UI uses to read agents[selectedAgentId]. */
   selectedAgentId: string | null;
   /** Loading flag for the master agent list */
@@ -397,7 +446,11 @@ interface AgentStoreState {
    *  showing a dead node as online. */
   markNodesOffline: () => void;
   selectAgent: (id: string | null) => void;
-  installAgent: (packagePath: string, nodeId?: string) => Promise<void>;
+  /** Installs a local `.agent` package and refreshes the inventory.
+   *  Resolves with the INSTANCE key the Gateway acked (ADR-073) so the
+   *  caller can select what it just created; `null` only if a Gateway
+   *  predates the ack field, in which case the selection is left alone. */
+  installAgent: (packagePath: string, nodeId?: string) => Promise<string | null>;
   uninstallAgent: (agentId: string) => Promise<void>;
   startAgent: (agentId: string, devMode?: boolean) => Promise<void>;
   stopAgent: (agentId: string) => Promise<void>;
@@ -424,6 +477,17 @@ interface AgentStoreState {
   // ── Session actions (write to agents[agentId].*) ──
 
   fetchSessions: (agentId: string, page?: number) => Promise<void>;
+  /** ADR-106 D7: one Chat's addressable execution sessions — the second `@`
+   *  level's list — through the same `GET …/sessions` paging path, narrowed by
+   *  `chat_session_id` / `surface`. The narrowing is the Runtime's permission
+   *  filter, not a client-side guess, and it runs before pagination, so
+   *  `total_pages` counts only what this chat may address. */
+  fetchChatSessions: (
+    agentId: string,
+    chatSessionId: string,
+    surface: ChatSurface,
+    page?: number,
+  ) => Promise<void>;
   /** Fetch the latest session (by last_active_at desc) without a full disk scan.
    *  The Runtime caches this during startup. Persists the returned title into
    *  `agents[agentId].sessionTitle` so the AgentList sidebar reflects it
@@ -541,6 +605,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   // ── Initial state ──
 
   agents: {},
+  chatSessionLists: {},
   selectedAgentId: null,
   loading: false,
   error: null,
@@ -840,8 +905,13 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   installAgent: async (packagePath, nodeId) => {
     try {
-      await invoke("install_agent", { packagePath, devMode: true, nodeId: nodeId ?? null });
+      const ack = await invoke<{ instance_id?: string }>("install_agent", {
+        packagePath,
+        devMode: true,
+        nodeId: nodeId ?? null,
+      });
       await get().fetchAgents();
+      return ack.instance_id ?? null;
     } catch (e) {
       set({ error: String(e) });
       throw e;
@@ -1156,6 +1226,87 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // transient failure cannot erase the sidebar or invite a
       // duplicate createSession.
       set((state) => patchAgent(state, agentId, { isLoading: false }));
+    }
+  },
+
+  /** ADR-106 D7: one Chat's addressable execution sessions.
+   *
+   *  Same endpoint, same paging as `fetchSessions`, with `chat_session_id` /
+   *  `surface` added — there is no candidate endpoint to keep in sync, because
+   *  one list with one filter is the same question asked once. Two differences
+   *  from the sidebar fetch are deliberate:
+   *  - the rows keep the Runtime's order (most recently active first), which is
+   *    what the router's own candidate list orders by; re-sorting by creation
+   *    would disagree with the address the turn is being delivered to.
+   *  - no tab-strip / workspace sync: this is a page of *another* surface's
+   *    view of the agent, and only the full listing owns those projections. */
+  fetchChatSessions: async (
+    agentId: string,
+    chatSessionId: string,
+    surface: ChatSurface,
+    page = 1,
+  ): Promise<void> => {
+    const key = chatListKey(agentId, surface, chatSessionId);
+    const requestId = (chatListReqId.get(key) ?? 0) + 1;
+    chatListReqId.set(key, requestId);
+    const size = CHAT_LIST_PAGE_SIZE;
+    const patch = (next: Partial<ChatSessionList>) =>
+      set((state) => ({
+        chatSessionLists: {
+          ...state.chatSessionLists,
+          [key]: { ...EMPTY_CHAT_LIST, ...state.chatSessionLists[key], ...next },
+        },
+      }));
+    patch({ isLoading: true, error: false });
+    try {
+      // ADR-076 §决策 5: an admin inspecting another user rides `?as_user=`,
+      // honored by the Gateway on GET only.
+      const viewAs = useAuthStore.getState().viewAsUserId;
+      const params = new URLSearchParams({
+        page: String(page),
+        size: String(size),
+        chat_session_id: chatSessionId,
+        surface,
+      });
+      if (viewAs) params.set("as_user", viewAs);
+      const resp = await with503Retry(
+        () => fetch(`${getGatewayUrl()}/api/agents/${agentId}/sessions?${params.toString()}`),
+        {
+          tag: `AgentStore.fetchChatSessions(${agentId},${chatSessionId})`,
+          logger: log,
+        },
+      );
+      if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+      const data = (await resp.json()) as {
+        sessions: SessionInfo[];
+        total_count: number;
+        total_pages: number;
+      };
+      if (chatListReqId.get(key) !== requestId) return; // a newer page won
+      set((state) => ({
+        chatSessionLists: {
+          ...state.chatSessionLists,
+          [key]: {
+            sessions: data.sessions ?? [],
+            pagination: {
+              currentPage: page,
+              totalPages: data.total_pages ?? 1,
+              totalCount: data.total_count ?? 0,
+              pageSize: size,
+            },
+            isLoading: false,
+            error: false,
+          },
+        },
+      }));
+    } catch (e) {
+      if (chatListReqId.get(key) !== requestId) return;
+      log.error("[AgentStore] Failed to fetch chat-scoped sessions:", e);
+      // ADR-085: a failed read is not "nothing to continue" — keep the rows the
+      // human was already looking at rather than emptying the picker, and say
+      // that the read failed so the picker offers a retry instead of claiming
+      // the chat has no tasks.
+      patch({ isLoading: false, error: true });
     }
   },
 

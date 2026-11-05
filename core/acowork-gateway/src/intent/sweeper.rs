@@ -147,7 +147,8 @@ async fn emit_fallback_receipt(
     // failure (append ok, mark_answered failed) with no second receipt.
     let receipt_id = format!("fallback-{}", req.message_id);
 
-    // 1. The durable answer: the `intent_response` chat row.
+    // 1. The durable answer: a `delivery_failed` notice on the chat the
+    //    delivery owed its outcome to.
     if !req.source_chat_session_id.is_empty() {
         let Some(port) = user_port else {
             tracing::debug!(request_id = %req.message_id, "fallback receipt deferred: user service down");
@@ -156,9 +157,8 @@ async fn emit_fallback_receipt(
         let meta = serde_json::json!({
             "message_id": receipt_id,
             "conversation_id": req.conversation_id,
+            "notice_type": "delivery_failed",
             "in_reply_to": req.message_id,
-            "status": "failed",
-            "fallback": true,
         });
         if let Err(e) = chat_client::append_message(
             port,
@@ -166,11 +166,11 @@ async fn emit_fallback_receipt(
             &chat_client::AppendMessage {
                 from: req.to_instance.clone(),
                 to: req.from_instance.clone(),
-                // Wave 2B (§4.2): the fallback receipt is a terminal
-                // `agent_message` with `status=failed` — the same shape a
-                // real write-back takes, written on the responder's
-                // behalf because its Runtime never produced one (§5.5.1).
-                kind: "agent_message".to_string(),
+                // ADR-106 D1: a delivery the chat owed and could not make is a
+                // channel fact, not agent speech — the responder never produced
+                // a round to reference, so there is no block to hang this on
+                // (§5.5.1).
+                kind: acowork_core::intent::chat_kinds::SYSTEM_NOTICE.to_string(),
                 body: body.to_string(),
                 meta,
                 attachment_ids: Vec::new(),

@@ -1,6 +1,12 @@
 # Chat Session 上下文编排设计（Chat Router）
 
-> 版本：v1.0 | 更新日期：2026-10-21
+> 版本：v1.3 | 更新日期：2026-11-04
+>
+> v1.1：按 [ADR-106](../../adr/zh/ADR-106-chat-execution-reference-projection.md) 同步 chat kind 词表——`execution_round` 引用行不进 Router 上下文，`interaction_request` / `turn_started` / `router_fallback` 只为历史行保留投影（P4 / P6 后不再新增）。
+>
+> v1.2：act 族更名 `exec_session_create` / `exec_session_propose_continue`，新增只读 `exec_session_read_round`，候选列删 `current` 表述，并写明上下文缓存硬约束（见 §11）。
+>
+> v1.3：`exec_session_create` 的入参由 `message`（整段简报）改为 `background`（只补背景，人的原话由 Runtime 原样投递），背景以引用部件（`params.context_refs` → `context_ref` 条目）随行在执行会话的 `user` 行之后，见 [ADR-107](../../adr/zh/ADR-107-message-ref-part.md)。
 >
 > 关联：[ADR-099](../../adr/zh/ADR-099-chat-session-llm-router.md)（Chat Router 决策）、[ADR-060](../../adr/zh/ADR-060-prompt-cache-friendly-context-block-reorg.md)（稳定前缀 + 末尾追加）、[ADR-063](../../adr/zh/ADR-063-package-level-prompt-override.md)（包级 Prompt 覆盖）、[ADR-066](../../adr/zh/ADR-066-llm-provider-cache-tokens.md)（Cache Token 统计）、设计 27（Intent 消息与群聊）
 
@@ -52,7 +58,7 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
                                  // 只有 {{agent_name}} 被替换
 — 无覆盖时为内置默认 —
 [CHAT_ROUTER_BASE_PROMPT]        // Runtime 常量（acowork_core::chat_prompt）
-                                 // 角色边界 / dispatch 契约 / 决策规则 / 安全规则
+                                 // 角色边界 / exec_session_* act 契约（含 exec_session_read_round）/ 决策规则 / 安全规则
 ## Persona                       // manifest 回退
 <persona text>
 ## Scenario                      // 1:1 或 group，两个稳定变体
@@ -69,11 +75,11 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
 基座由 Runtime 维护，包含：
 
 1. 角色边界：你是 `<agent display_name>` 的对话前台，只能回答、查一个信息、路由或新建执行会话；
-2. 工具契约：路由工具只有 `dispatch`（参数语义与别名规则）；另有两个只读信息工具 `memory_recall` / `http_request`（GET-only），轮数由提示词软约束（"通常零次，最多一两次"），不用代码硬上限；
-3. 决策规则：回答 / 转交 / 新建 / 澄清的判据（与 ADR-099「路由行为准则」一致，核心是 dispatch 代价不对称：错发远比漏发贵，不确定就问）；
+2. 工具契约：路由 act 只有 `exec_session_create(background)`（无 `target`，只能新开；`background` 只补背景、不复述人的原话——原话由 Runtime 原样投递，背景作为引用部件跟在 `user` 行之后，ADR-107；原 `new_task`）与 `exec_session_propose_continue(target, why)`（只提案不投递，`why` 必须给——一张不写理由的卡等于把路由工作推回给人类；原 `propose_existing`）；另有只读信息工具 `memory_recall` / `http_request`（GET-only，按启用状态拼接）与恒常暴露的 `exec_session_read_round(target, rounds)`（2026-11-04 增设，见 §11），轮数由提示词软约束（"通常零次，最多一两次"），不用代码硬上限；
+3. 决策规则：回答 / 转交 / 新建 / 澄清的判据（与 ADR-099「路由行为准则」一致，核心是路由代价不对称：错发远比漏发贵，不确定就问）；
 4. 安全规则：只使用候选清单中的信息；不复述其他 chat 的内容；不承诺执行细节；不代人类 @ 其他 agent。
 
-`chat.md` 存在且非空白时**整段替换**内置 chat prompt 正文（基座 + Persona + 场景段），只替换 `{{agent_name}}`；缺省时使用内置默认。有两部分不是该文件能删掉的。其一，`# Safety` 不变量是一段不可裁剪的尾块，Runtime 每轮都会重新追加到正文末尾（`chat_prompt::with_chat_prompt_tail`），从 `chat.md` 里删掉它对模型实际看到的内容没有影响。其二，安全边界由结构而非提示词字面量保证：router 只有 `dispatch` 与两个只读工具，改写提示词不会给它新的能力（ADR-099 D6）。此外，群聊的 `chat.md` **仅群主或管理员可写**（ADR-098 治理），任何成员可读，因此单个成员无法注入一段去操控他人 agent 的提示词。群聊右侧设置面板只编辑正文——`# Safety` 尾块不在面板中显示（`chat-md` 接口返回的是剥掉尾块后的正文），保存时由存储与 Runtime 重新追加，因此不会把成员改不动的内容摆进可编辑框再静默还原。
+`chat.md` 存在且非空白时**整段替换**内置 chat prompt 正文（基座 + Persona + 场景段），只替换 `{{agent_name}}`；缺省时使用内置默认。有两部分不是该文件能删掉的。其一，`# Safety` 不变量是一段不可裁剪的尾块，Runtime 每轮都会重新追加到正文末尾（`chat_prompt::with_chat_prompt_tail`），从 `chat.md` 里删掉它对模型实际看到的内容没有影响。其二，安全边界由结构而非提示词字面量保证：router 只持有 `exec_session_create` / `exec_session_propose_continue` 与只读工具，改写提示词不会给它新的能力（ADR-099 D6）。此外，群聊的 `chat.md` **仅群主或管理员可写**（ADR-098 治理），任何成员可读，因此单个成员无法注入一段去操控他人 agent 的提示词。群聊右侧设置面板只编辑正文——`# Safety` 尾块不在面板中显示（`chat-md` 接口返回的是剥掉尾块后的正文），保存时由存储与 Runtime 重新追加，因此不会把成员改不动的内容摆进可编辑框再静默还原。
 
 ### 3.3 Persona 与 chat.md 来源优先级
 
@@ -132,8 +138,9 @@ router **不加载**：
 |---|---|---|
 | `user_message` | user | `[user:<from>] <body>` |
 | `agent_message` | assistant | `[agent:<from>] <body>` |
-| `interaction_request` | user | `[card] <title>` + 选项（固定格式） |
+| `interaction_request` | user | `[card] <title>` + 选项（固定格式）。**P6 后不再新增**，仅为旧转录保留投影（ADR-106 D8 / D14） |
 | `system_notice` | user | `[system] <固定文案>`（见 §4.3） |
+| `execution_round` | —— | **不进上下文**：它是空正文指针，不是可读的一句话；本轮的内容在引用行下方的 `user_message` 里，Router 读那一条（ADR-106 D3） |
 
 附件不内联字节，只在正文末尾追加固定格式的元数据：
 
@@ -169,6 +176,8 @@ router **不加载**：
 | `truncated` | `[system] Response truncated` |
 | `unavailable` | `[system] Agent unavailable` |
 | `router_fallback` | `[system] Routed automatically` |
+
+`turn_started` / `router_fallback` 两行与上表的 `interaction_request` 同理：**P4 / P6 后不再有生产者**，投影留着只为了让旧历史逐字节读起来不变（§4.2 确实定性与 ADR-106 D14：呈现层隐藏，上下文不隐藏）。今天仍在写入的寻址类 `notice_type` 是 `session_choice` / `confirm_continue`（ADR-106 D6），它们进上下文，因为那就是摆在人类面前的一个问题——但走的是 `notice_text` 的兜底臂 `[system] Notice: {notice_type}`，不是上表里的固定文案；上表列的是遗留臂与仍有专属文案的通道事实。
 
 `<sid8>` 来自消息 meta，写入后不再变化，因此投影稳定。
 
@@ -229,14 +238,14 @@ Gateway 先落库再投递，因此当前用户消息已在 chat 历史末尾。
 
 ```
 [candidates]
-S1  current  working  2m   chat   Fix login redirect
-S2           idle     3h   task   Review ADR-098
-S3           closed   2d   chat   Refactor auth middleware
+S1  working   2m    chat   Fix login redirect
+S2  idle      3h    task   Review ADR-098
+S3  closed    2d    chat   Refactor auth middleware
 ```
 
-列：别名、`current` 标记、状态、最近活动（相对时间，仅此处允许）、来源（chat/task）、title。不含 session id、owner、model——减少 token 与泄漏面；router 需要时通过 dispatch 别名间接操作。
+列：别名、状态、最近活动（相对时间，仅此处允许）、来源（chat/task）、title。不含 session id、owner、model——减少 token 与泄漏面；router 只能把别名用在 `exec_session_propose_continue` 与只读的 `exec_session_read_round` 里，不能凭它直接投递。
 
-排序：`current` 优先，其余按 `last_active_at` 倒序。排序稳定（同时间戳按 title 字典序），保证同一候选集每轮顺序一致。
+排序：按 `last_active_at` 倒序。排序稳定（同时间戳按 title 字典序），保证同一候选集每轮顺序一致。（原 `current` 标记列已随 ADR-106 P5 退役——候选纯按 recency 排序，内核提示词不再教这一列。）
 
 ### 5.3 与当前消息的合并
 
@@ -249,8 +258,8 @@ speaker: alice
 now: 2026-10-21T14:03:00+08:00
 draft: (none)
 [candidates]
-S1  current  working  2m  chat  Fix login redirect
-S2           idle     3h  task  Review ADR-098
+S1  working   2m    chat   Fix login redirect
+S2  idle      3h    task   Review ADR-098
 
 [user message]
 这个登录跳转的问题继续弄一下，顺便看下 ADR-098 的评审意见
@@ -279,8 +288,8 @@ S2           idle     3h  task  Review ADR-098
 跨轮必须逐字节一致：
 
 - `model` / `provider`（来自 `chat_router` 配置，不随消息变化）；
-- `temperature`（默认 0）、`max_tokens`（默认 2048，保证一轮 `assistant → tool_call → tool_result → assistant` 的 think + 工具参数 + 终稿不被截断）；
-- `tools` 数组：`dispatch` + 按启用状态拼接的只读信息工具（`memory_recall`、GET-only `http_request`），schema 用固定字面量序列化，字段顺序固定，对固定的（二进制版本，启用集合）逐字节稳定；
+- `temperature`（默认 0）、`max_tokens`（默认 8192，`chat_router.max_output_tokens`，clamp 1024–32768，Config 文件可配、不上 UI wire）。这个上限必须同时容纳一次信息轮的 think + 工具参数 + 终稿**和**一份 `exec_session_create` 简报——旧值 2048 容不下后者，被截断的响应里工具调用 JSON 是不完整的，`act_call()` 找不到 act，于是整轮降级成一句聊天回复：用户看到一条 agent 消息，执行会话根本没建。`finish_reason == "length"`（Anthropic 的 `max_tokens` 在 provider 层已归一化为 `length`）现在被显式检查，按截断降级而不是当作决策，日志里也不会再伪装成 `reply` / `empty reply`；
+- `tools` 数组：`exec_session_create` + `exec_session_propose_continue` + 按启用状态拼接的只读信息工具（`memory_recall`、GET-only `http_request`）+ 恒在末尾的只读 `exec_session_read_round`，schema 用固定字面量序列化，字段顺序固定，对固定的（二进制版本，启用集合）逐字节稳定；提示词里教到的动作名与这里下发的集合由单测钉死（`tool.rs::the_prompt_teaches_exactly_the_tools_the_wire_offers`），两者漂移过一次就够；
 - `tool_choice`：默认 `auto`，不随轮次变化；
 - 信息轮次产生的 `assistant(tool_calls)` / `tool` 消息只存在于本轮 request 内，不写回 chat 历史，不进入 Block B。
 
@@ -354,3 +363,13 @@ S2           idle     3h  task  Review ADR-098
 | ADR-066 | 复用 cache token 的统计与命中率口径 |
 | ADR-096 | 候选与历史都通过有界读取获取，不读 JSONL 正文 |
 | 设计 27 | 消息词汇与写回通道不变，本设计只决定「送进模型的内容」 |
+
+## 11. 修订（2026-11-04）：act 族更名、`exec_session_read_round` 与缓存硬约束
+
+**act 族更名**。Router 的两个 act 从历史昵称 `new_task` / `propose_existing` 更名为与只读工具同族的 `exec_session_create` / `exec_session_propose_continue`：名字描述的是操作对象（执行会话），不是模型的主观判断（"是不是新任务"）。旧名进 `RETIRED_ACT_NAMES` 漂移守卫，内核 prompt 与 wire 工具名/参数名由既有单测双向钉住；`allow_new_task` 是确认卡的 wire 协议字段，不在本次更名范围。改名与字面量变化会让 provider 前缀缓存 miss 一次，属预期，落地后即稳定。
+
+**新增只读 act：`exec_session_read_round`**。回答"那个任务结果如何"此前没有合法信息源：`execution_round` 引用行无正文（D1），Block B 也不投影轮次内容（D4 的写时派生只管执行侧），Safety tail 又禁止模型声称执行会话做了什么——三者叠加后模型只能拒答。新工具走 info-tool 同一条循环（受同一轮 model-call 超时预算约束）：`target` 取本轮别名表里的候选别名（权限过滤后的集合，不新增授权面），`rounds` 钳 1–3；实现在 Runtime 进程内直接复用 D4 轮次投影读（侧表 fold + 两行有界读 + 附件窗背书），disk-only 故 Closed 会话照样可读；答案体过 2KB 截断、问题摘要过 512B 截断，整体再过 `truncate_info_result` 的 8KB 上限。一切失败（别名不合法、读不到、坐标漂移）都是 tool_result 文本里的显式空洞，绝不整轮 degrade。不提供 `exec_session_send_msg`：寻址归人，维持 ADR-106 D6 的静默投递禁令。Safety tail 相应放宽为"只可转述本轮 `exec_session_read_round` 读回的内容，不得声称执行会话进行中或将要做什么"。
+
+**上下文缓存的硬约束**（防止呈现层改动被误读成上下文重排）：块锚点沉底只发生在呈现层，Block B 按 seq 的确定性投影不受影响，转录的视觉顺序与送进模型的顺序从来不是同一个函数。任何执行会话的信息要进入 router 上下文，只允许两条路：Block C 动态区（每轮重建，不进缓存前缀），或 Block B 按 seq 的确定性投影。执行块的视觉重排（含本修订配套的呈现契约折叠分叉，见 ADR-106 修订章节）永不反馈到投影顺序。`execution_round` 引用行本身暂不投影进 Block B——"知道派过单且结果如何"的诉求由 `exec_session_read_round` 覆盖，不必为它支付前缀不稳定的代价。
+
+**引用材料的装配（2026-11-04 修订二并入）**。带 `@session` 引用的 turn，其材料由单一读者 `pinned_chat_refs`（读 `params.chat_refs` 里钉好的四元组 `{agent_instance_id, session_id, round_id, terminal}`）取得——级别 3 抑制检查、Block C 段、投递的 `referenced_round` parts 都走这一个读者，所以"本轮是否引用了材料"只有一个答案。渲染只有**一个生产者** `render_pinned_rounds`：每条 ref 复用 `read_round_result` 为 `exec_session_read_round` 画的同款行（问题 / 答案 / 卡片，沿用 per-field 钳——答案 2KB、问题 512B），前置源坐标与非终态标记（`(was still running)`）；disk-only（`fold_or_rebuild` + `project`），`Closed` 会话照样可读，任何失败形状都是显式空洞、绝不吞掉一条 ref。段总预算 `REFS_TOTAL_MAX_BYTES = 8 KiB`：五条满尺寸引用会盖过人的原话，所以超预算的后续 ref 折叠成一行 `dropped: reference budget exhausted` 并停止——读者知道材料被裁过，从不知道它悄悄消失了。装配结果**同时**进入两处：Block C 动态区的 `[referenced rounds]` 段（每轮重建、绝不进缓存前缀，符合 §1 的稳定前缀原则），以及若该 turn 被投递则原样成为执行侧的 `referenced_round` 参照 part（ADR-107，`params.context_refs` → `context_ref` 系统行）——同一批字节，router 所见与执行会话所受不可能漂移。级别 3 续投分支对带 refs 的 turn 不触发（引用已是明确材料，不再让模型猜归属）。

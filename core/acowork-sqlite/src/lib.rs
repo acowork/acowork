@@ -19,12 +19,14 @@
 //! `acowork_sqlite::SqliteStore` unchanged.
 
 pub mod conversation;
+mod chat_usage;
 mod session_meta;
 
 pub use acowork_memory::sqlite::{
     Error, Result, SqliteStore, SCHEMA_SQL, SCHEMA_VERSION, TRIGRAM_MIN, has_sqlite_magic,
     schema_version,
 };
+pub use chat_usage::{ChatUsageCall, ChatUsageRow, SqliteChatUsageStore};
 pub use conversation::{ConversationHit, ConversationStore};
 pub use session_meta::SqliteSessionMetaStore;
 

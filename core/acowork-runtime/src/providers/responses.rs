@@ -104,7 +104,7 @@ impl ResponsesProvider {
 
 // ── D5: request mapping (domain → Responses wire) ─────────────────────
 
-/// One `input_text` / `input_image` / `output_text` content block.
+/// One `input_text` / `input_image` / `input_file` / `output_text` content block.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 struct ContentItem {
     #[serde(rename = "type")]
@@ -117,6 +117,14 @@ struct ContentItem {
     image_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     detail: Option<String>,
+    /// `input_file` only: the name the model sees, and the file's bytes as
+    /// **bare** base64 — the one provider field that must not carry a `data:`
+    /// prefix, which is why the domain part stores them bare in the first
+    /// place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+    #[serde(rename = "file_data", skip_serializing_if = "Option::is_none")]
+    file_data: Option<String>,
 }
 
 /// A `message` input item.
@@ -256,10 +264,11 @@ fn flatten_tool(tool: &serde_json::Value) -> FlatTool {
 
 /// Turn one domain message's content into Responses content blocks.
 ///
-/// `assistant` images are dropped with a warn (D5 MUST — DeepSeek returns
-/// 400 for images on `system`/`assistant`); `user` images map to
-/// `input_image` with the URL/data-URI verbatim. A `data:` URI that does
-/// not parse is skipped with a warn instead of being sent malformed.
+/// `assistant` images and documents are dropped with a warn (D5 MUST —
+/// DeepSeek returns 400 for images on `system`/`assistant`); `user` images map
+/// to `input_image` with the URL/data-URI verbatim and `user` documents to
+/// `input_file`. A `data:` URI that does not parse is skipped with a warn
+/// instead of being sent malformed.
 fn content_blocks(msg: &ChatMessage, role: &str) -> Vec<ContentItem> {
     let mut blocks = Vec::new();
     let is_assistant = role == "assistant";
@@ -301,6 +310,29 @@ fn content_blocks(msg: &ChatMessage, role: &str) -> Vec<ContentItem> {
                             text: None,
                             image_url: Some(image_url.url.clone()),
                             detail: image_url.detail.clone().or_else(|| Some("auto".to_string())),
+                            filename: None,
+                            file_data: None,
+                        });
+                    }
+                    ContentPart::Document { document } => {
+                        // Same role rule as images, same reason: a file block
+                        // on an assistant turn is a request this API shape does
+                        // not have. Nothing is lost by dropping it — a document
+                        // only ever arrives on the current user turn (see the
+                        // context filter), so this is a guard, not a path.
+                        if is_assistant {
+                            tracing::warn!(
+                                "Responses map_request: dropping document from assistant message (D5: providers reject file input on assistant role)"
+                            );
+                            continue;
+                        }
+                        blocks.push(ContentItem {
+                            kind: "input_file".to_string(),
+                            text: None,
+                            image_url: None,
+                            detail: None,
+                            filename: Some(document.filename.clone()),
+                            file_data: Some(document.data.clone()),
                         });
                     }
                 }
@@ -320,6 +352,8 @@ fn text_block(role: &str, text: &str) -> ContentItem {
         text: Some(text.to_string()),
         image_url: None,
         detail: None,
+        filename: None,
+        file_data: None,
     }
 }
 
@@ -1472,6 +1506,50 @@ mod tests {
             panic!("expected message")
         };
         assert_eq!(msg.content.len(), 1, "image dropped");
+        assert_eq!(msg.content[0].kind, "output_text");
+    }
+
+    /// The Responses wire wants the bytes bare: a `data:` prefix in
+    /// `file_data` is the one way this block can be malformed quietly.
+    #[test]
+    fn user_document_maps_to_input_file_with_bare_base64() {
+        let mut m = ChatMessage::user("summaries?".to_string());
+        m.content_parts = Some(vec![ContentPart::document(
+            "JVBERi0=".to_string(),
+            "report.pdf".to_string(),
+            Some(4),
+        )]);
+        let native = map_request(&req(vec![m])).unwrap();
+        let InputItem::Message(msg) = &native.input[0] else {
+            panic!("expected message item")
+        };
+        assert_eq!(msg.content.len(), 2);
+        assert_eq!(msg.content[0].kind, "input_text");
+        assert_eq!(msg.content[1].kind, "input_file");
+        assert_eq!(msg.content[1].filename.as_deref(), Some("report.pdf"));
+        assert_eq!(msg.content[1].file_data.as_deref(), Some("JVBERi0="));
+        assert_eq!(msg.content[1].image_url, None, "a file is not an image");
+        // The skipped-if-none fields must not appear at all — a serialized
+        // `"detail": null` inside the block is enough for a strict endpoint.
+        let json = serde_json::to_value(&msg.content[1]).unwrap();
+        assert!(json.get("image_url").is_none());
+        assert!(json.get("detail").is_none());
+    }
+
+    /// Same role rule as images, asserted the same way.
+    #[test]
+    fn assistant_documents_are_dropped_with_warn() {
+        let mut m = ChatMessage::assistant("noted".to_string());
+        m.content_parts = Some(vec![ContentPart::document(
+            "JVBERi0=".to_string(),
+            "report.pdf".to_string(),
+            None,
+        )]);
+        let native = map_request(&req(vec![ChatMessage::user("q"), m])).unwrap();
+        let InputItem::Message(msg) = &native.input[1] else {
+            panic!("expected message")
+        };
+        assert_eq!(msg.content.len(), 1, "document dropped");
         assert_eq!(msg.content[0].kind, "output_text");
     }
 

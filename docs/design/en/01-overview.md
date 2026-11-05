@@ -16,10 +16,12 @@ Design a decentralized, high-security, scalable AI Agent runtime platform. The c
 | APK (DEX + resources) | .agent package (config + prompts + skills) | Declarative, no custom code |
 | APK Signature | .agent Signing Block | Package signing, verifies integrity and origin |
 | ActivityManagerService | Gateway | Lifecycle management |
-| Binder IPC | Gateway Service API | Inter-process communication (transport layer implemented by platform) |
-| ContentProvider | Gateway UserProfile | User identity and preference management |
+| Binder IPC | MQTT pub/sub + HTTP reverse proxy | Inter-process communication (ADR-033) |
+| ContentProvider | `acowork-user` user domain | User identity and preference management |
 | PackageManagerService | Package Manager | Install/uninstall |
 | AndroidManifest.xml | manifest.toml | Permission declarations |
+
+> **v3.5 change**: the IPC channel moved from gRPC bidirectional streams to **MQTT pub/sub + HTTP reverse proxy** (ADR-033); the user domain was split out of the Gateway into the standalone `acowork-user` service (ADR-084), and memory is owned by `acowork-memory` (ADR-101). See [`06-communication.md`](./06-communication.md).
 
 ## 2. Core Features
 
@@ -27,9 +29,10 @@ Design a decentralized, high-security, scalable AI Agent runtime platform. The c
 - **Unified Execution Engine**: Agent Runtime is the platform's single binary, responsible for loading .agent packages and executing Agent logic (LLM interaction, tool dispatch, memory read/write).
 - **Process-Level Isolation**: Each Agent runs as an independent Agent Runtime process managed by Gateway, with its own workspace, private SQLite memory layer database, filesystem isolation, and optional resource limits (cgroups/containers).
 - **Agent Autonomy**: Agent processes connect directly to LLM APIs, execute tools autonomously, and manage permission checks without relying on Gateway to proxy business logic.
-- **Biomimetic Memory System**: Each Agent has an embedded private SQLite, using a three-tier five-type biomimetic hierarchy (Transient / Experiential / Consolidated), including forgetting mechanisms (three-factor decay), privacy levels (PrivacyLevel), associative diffusion retrieval, and memory lifecycle (Retrieve/Inject/Record/Consolidate/Decay/Compact) with content-classified compression. Gateway manages user identity and preferences directly via UserProfile, pushing deltas to Agents through the handshake protocol. Cloud sync transmits all Zones in plaintext; platform-hosted (PrivacyLevel only controls whether data is stripped during package sharing, decoupled from sync strategy).
+- **Biomimetic Memory System**: Memory is owned by the standalone memory service `acowork-memory` (ADR-101), one SQLite database per Agent instance (`$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`). The storage backend is SQLite (ADR-082): vectors live in a `vectors` table, lexical search runs on an FTS5 trigram index, and retrieval is a vector + lexical hybrid. The layers map onto four persisted labels (Episodic / Knowledge / Procedural / Autobiographical); the transient layer is the LLM context window and is never persisted. It includes forgetting mechanisms (three-factor decay), privacy levels (PrivacyLevel), and the memory lifecycle (Retrieve/Inject/Record/Consolidate/Decay/Compact).
+  > Associative diffusion retrieval (§6) is a design goal, not implemented — ADR-082 D4 removed inter-layer graph traversal and creates no `edges` table.
 - **Permission Declaration and Authorization**: Agents declare required permissions (network, filesystem, cross-Agent calls, etc.) in their manifest; Gateway configures sandboxes at startup; Agents perform runtime self-checks.
-- **Cross-Platform Support**: .agent package format and Gateway Service API contract are unified across platforms; per-platform runtime mechanisms (process model, transport layer, sandbox) adapt to platform characteristics.
+- **Cross-Platform Support**: .agent package format and the MQTT + HTTP protocol contract are unified across platforms; per-platform runtime mechanisms (process model, transport layer, sandbox) adapt to platform characteristics.
 
 ## 3. Overall Architecture
 
@@ -48,7 +51,8 @@ Design a decentralized, high-security, scalable AI Agent runtime platform. The c
 │  └────────────┘ └───────────┘             └───────────┘   │
 │                                                              │
 └──────────────────────────┬───────────────────────────────────┘
-                           │ Gateway Service API
+                           │ MQTT pub/sub + HTTP proxy
+                           │ (ADR-033)
                            │ (Transport: Unix Socket / Named Pipe / Local TCP)
        ┌───────────────────┼───────────────────┐
        │                   │                   │
@@ -92,14 +96,14 @@ Design a decentralized, high-security, scalable AI Agent runtime platform. The c
 |----------------|-------------------|--------|
 | LLM calls | Agent process | Direct connection, no RPC overhead, streaming natural, Agent autonomy |
 | Tool execution | Agent process | Autonomous permission checks, low latency |
-| Private memory read/write | Agent process (embedded SQLite memory layer) | Zero latency, data isolation |
+| Private memory read/write | Memory service `acowork-memory` | Tool call (ADR-101), no business logic in the Runtime |
 | API Key storage | Gateway Vault | Centralized secure management |
 | API Key distribution | One-time at startup to Agent | Agent needs direct LLM access |
 | Budget tracking | Gateway (receives reports) | Cross-Agent statistics |
 | Budget enforcement | Agent (local pre-check) | Low latency, autonomous |
 | Budget hard limit | Gateway (over-limit signal) | Safety net |
 | Rate limiting | Gateway (token allocation) | Shared resource coordination |
-| User identity and preferences | Gateway (UserProfile) | Centralized identity management, injected via handshake |
+| User identity and preferences | `acowork-user` user domain | Centralized identity management (ADR-084) |
 | Intent routing | Gateway | Cross-process scheduling |
 | Sandbox configuration | Gateway (at startup) | System-level permissions |
 
@@ -130,9 +134,8 @@ In the long run, LLM capabilities will continue to improve (lower hallucination 
 > - [03-agent-runtime.md](./03-agent-runtime.md) — Agent Runtime internal structure and main loop
 > - [04-gateway.md](./04-gateway.md) — Gateway component detailed design
 > - [05-memory.md](./05-memory.md) — Memory layered architecture
-> - [06-communication.md](./06-communication.md) — Communication protocols (Gateway Service API + Intent mechanism)
+> - [06-communication.md](./06-communication.md) — Communication protocols (MQTT pub/sub + HTTP reverse proxy + Intent mechanism)
 > - [08-security.md](./08-security.md) — Security design
-> - [09-roadmap-and-scenarios.md](./09-roadmap-and-scenarios.md) — Implementation roadmap and usage scenarios
 > - [10-debug-protocol.md](./10-debug-protocol.md) — Debug protocol (DevMode, breakpoints, record/replay)
 > - [12-tool-system.md](./12-tool-system.md) — Tool system (Built-in / WASM / Gateway)
 > - [13-skill-system.md](./13-skill-system.md) — Skill system (SKILL.md + SQLite memory layer experience layer)

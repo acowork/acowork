@@ -13,10 +13,11 @@ import { cn } from "../../lib/utils";
 import { reasoningLevelsFor } from "../../lib/reasoningEfforts";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
-import { blobToBase64, extensionForMime } from "./clipboardImageExt";
+import { isFileDropClaimed } from "../../lib/fileDropClaim";
+import { blobToBase64, extensionForFile } from "./clipboardImageExt";
 import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
 import { detectPaste } from "./pasteDetect";
-import { listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
+import { composerChip, listRowHover, menuItemHover, menuItemSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
@@ -752,6 +753,12 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // OS-drop handler), so we accept every drop and refocus the textarea
   // so the user sees where the pending chips will land.
   //
+  // That changed with the Agent library dialog, which accepts dropped
+  // `.agent` files itself. `desktop://file-drop` is window-level, so a drop
+  // onto the dialog would reach both surfaces and land the package as a chat
+  // attachment as well. A modal that handles drops claims the channel while
+  // it is mounted (lib/fileDropClaim.ts); we yield while any claim is held.
+  //
   // Effect lifetime: set up once on mount, torn down on unmount. The
   // upload handler is read via a ref so the listener closure stays
   // stable (avoids re-subscribing on every render).
@@ -776,6 +783,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     (async () => {
       try {
         const fn = await listen<string[]>("desktop://file-drop", (event) => {
+          // A mounted modal owns the drop — see the comment above.
+          if (isFileDropClaimed()) return;
           const paths = event.payload ?? [];
           if (paths.length === 0) return;
           const key = paths.join("\n");
@@ -1674,14 +1683,18 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   /**
    * Workspace panel → composer bridge (see `lib/chatComposerBridge.ts`).
    *
-   * The image preview on the right fires this when the user sends a cursor
-   * coordinate or a dragged region. Text lands at the caret, exactly like a
-   * paste; the region's PNG takes the SAME route as a clipboard screenshot —
-   * `save_clipboard_blob` writes the bytes to a temp file, and the existing
-   * path-based pipeline uploads it — because this composer's upload path is
-   * filesystem-based. The `File` is turned back into base64 here rather than
-   * serialised across the IPC as a byte array, for the reason spelled out in
-   * `handlePaste`.
+   * The preview on the right fires this when the user sends a cursor
+   * coordinate, a cropped region of an image or a PDF page, or a whole PDF.
+   * Text lands at the caret, exactly like a paste; a file takes the SAME route
+   * as a clipboard screenshot — `save_clipboard_blob` writes the bytes to a
+   * temp file, and the existing path-based pipeline uploads it — because this
+   * composer's upload path is filesystem-based. The `File` is turned back into
+   * base64 here rather than serialised across the IPC as a byte array, for the
+   * reason spelled out in `handlePaste`.
+   *
+   * The temp file's extension comes from the file's own NAME, not its MIME:
+   * the runtime classifies an attachment by extension, and a document sent
+   * from the PDF viewer has to arrive as a document.
    */
   useChatComposerBridge((request) => {
     if (request.kind === "text") {
@@ -1692,12 +1705,18 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
       try {
         const path = await invoke<string>("save_clipboard_blob", {
           dataBase64: await blobToBase64(request.file),
-          extension: extensionForMime(request.file.type || "image/png"),
+          extension: extensionForFile(request.file),
         });
         void uploadFileAtPath(path);
       } catch (err) {
-        log.error("[ChatPanel] workspace image bridge failed", err);
-        addToast({ type: "error", message: t("fileEditor.imageViewer.captureFailed") });
+        log.error("[ChatPanel] workspace file bridge failed", err);
+        addToast({
+          type: "error",
+          message:
+            request.kind === "file"
+              ? t("documentChip.uploadFailed")
+              : t("fileEditor.imageViewer.captureFailed"),
+        });
       }
     })();
   });
@@ -2554,7 +2573,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           {/* Active skill badge */}
           {activeSkill && (
             <div className="flex items-center gap-1 px-3 pt-2">
-              <span className="inline-flex items-center gap-1 rounded bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium border border-border-outer text-text-tertiary">
+              <span className={composerChip}>
                 /{activeSkill.name}
                 <button
                   type="button"

@@ -164,6 +164,23 @@ describe("TitleBar layout shape", () => {
     expect(search).toBeLessThan(panel);
     expect(panel).toBeLessThan(chrome);
   });
+
+  it("puts the appearance icon right after the gateway icon", () => {
+    // The appearance menu is the Gateway menu's neighbour, not a
+    // separate island: the two popovers must read as one cluster. Its
+    // position is between the Gateway trigger and the search toggle.
+    const { container } = render(<TitleBar />);
+    const right = container.firstElementChild!.children[1];
+    const labels = Array.from(right.querySelectorAll("button")).map(
+      (b) => b.getAttribute("aria-label") ?? "",
+    );
+    const idx = (re: RegExp) => labels.findIndex((l) => re.test(l));
+    const gw = idx(/Gateway|网关|閘道|ゲートウェイ|게이트웨이/);
+    const appearance = idx(/Appearance|外观|外觀|外観|외관/);
+    const search = idx(/Ctrl\+Shift\+F|全局搜索|全域搜尋|グローバル検索|전역 검색/);
+    expect(appearance).toBeGreaterThan(gw);
+    expect(appearance).toBeLessThan(search);
+  });
 });
 
 describe("TitleBar Gateway outage pill", () => {

@@ -38,7 +38,7 @@ UI 形态（任务 t-3e36c812）：
 | 文档 | 用户级全局 | doc 进程 `~/.acowork/acowork-doc/` | ✅ `GET /search`（线性子串 + 标题加权，**非向量**） | 向量化可选；命中定位 |
 | 项目 | 用户级全局 | pm 进程目录树（`task.json`） | ❌ 无搜索端点；有内存二级索引（by_id/by_assignee/by_status） | 新增搜索端点 |
 | 对话 | agent 私有 | Runtime 会话 JSONL | ✅ `GET /sessions`、`GET /sessions/{sid}/messages` | **无搜索端点**；需向量索引 |
-| 记忆 | agent 私有 | Runtime Grafeo（HNSW 向量库） | ✅ `GET /memory/nodes`（keyword）；**底层已有 vector_search / hybrid / MMR**（[grafeo/retrieval.rs](../../../core/acowork-grafeo/src/retrieval.rs)）；memory_recall 工具已用向量 | HTTP 层未暴露语义检索参数 |
+| 记忆 | agent 私有 | Runtime Grafeo（HNSW 向量库） | ✅ `GET /memory/nodes`（keyword）；**底层已有 vector_search / hybrid / MMR**（[grafeo/retrieval.rs](../../../core/acowork-memory/src/sqlite/retrieval.rs)）；memory_recall 工具已用向量 | HTTP 层未暴露语义检索参数 |
 | git 历史 | agent 私有（workspace） | Runtime git 仓库 | ✅ **已有 commit 搜索**：`CommitPicker` client-side 过滤（subject/author/hash，[CommitPicker.tsx:138](../../../apps/acowork-desktop/src/components/editor/CommitPicker.tsx#L138)）+ `GitVirtualNav` 虚拟 log 视图 + `GET /git/log` 分页 | 无（直接复用；全局 git tab 接入同一后端即可） |
 
 关键架构事实：
@@ -94,7 +94,7 @@ graph TD
 ### D3 快捷键：全局接管 Ctrl+Shift+F
 
 - 应用级 `Ctrl+Shift+F` 打开全局搜索 dialog（挂 `AppLayout` 或全局 keydown，优先于编辑器内 Monaco action）。
-- 编辑器内 `GlobalSearchPanel` **并入**全局搜索的"文件"tab（同一 ripgrep 后端），移除原编辑器内入口，避免两套入口混淆；文件 tab 命中后定位逻辑复用 `openFile(agentId, workspaceId, file, line)`（[GlobalSearchPanel.tsx:263](../../../apps/acowork-desktop/src/components/editor/GlobalSearchPanel.tsx#L263)）。
+- 编辑器内 `GlobalSearchPanel` **并入**全局搜索的"文件"tab（同一 ripgrep 后端），移除原编辑器内入口，避免两套入口混淆；文件 tab 命中后定位逻辑复用 `openFile(agentId, workspaceId, file, line)`（[GlobalSearchDialog.tsx:981](../../../apps/acowork-desktop/src/components/search/GlobalSearchDialog.tsx#L981)）。
 
 ### D4 统一结果契约：SearchHit
 

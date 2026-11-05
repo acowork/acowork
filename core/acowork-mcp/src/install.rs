@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
-use acowork_core::process::run_command_with_idle_timeout;
+use acowork_core::process::{OutputStream, run_command_with_idle_timeout_with_output};
 use acowork_core::protocol::{
     ExecOverride, McpPackageSpec, McpServerConfigDef, McpTransportDef, PackageKind, PypiRunner,
 };
@@ -300,6 +300,19 @@ pub fn ensure_runtime(pkg: &McpPackageSpec) -> Result<(), DependencyStatus> {
 
 /// Run the derived install command with idle-timeout monitoring.
 pub async fn run_install(pkg: &McpPackageSpec) -> Result<InstallOutput, String> {
+    run_install_with_output(pkg, &mut |_, _| {}).await
+}
+
+/// Run the install command and forward each captured output line to the caller
+/// as it is produced, so a caller that surfaces progress can show what the
+/// package manager is doing while it runs.
+pub async fn run_install_with_output<F>(
+    pkg: &McpPackageSpec,
+    on_output: &mut F,
+) -> Result<InstallOutput, String>
+where
+    F: FnMut(OutputStream, &str),
+{
     let Some(cmd) = derive_install_command(pkg) else {
         // No explicit install step (npx/uvx lazy resolve; binary by presence).
         return Ok(InstallOutput {
@@ -314,9 +327,10 @@ pub async fn run_install(pkg: &McpPackageSpec) -> Result<InstallOutput, String> 
     command.args(&cmd[1..]);
     command.envs(build_spawn_env(&HashMap::new()));
 
-    let output = run_command_with_idle_timeout(&mut command, INSTALL_IDLE_TIMEOUT)
-        .await
-        .map_err(|e| {
+    let output =
+        run_command_with_idle_timeout_with_output(&mut command, INSTALL_IDLE_TIMEOUT, on_output)
+            .await
+            .map_err(|e| {
             format!(
                 "install command `{}` failed: {}",
                 cmd.join(" "),
@@ -338,7 +352,55 @@ pub async fn run_install(pkg: &McpPackageSpec) -> Result<InstallOutput, String> 
 /// Perform the MCP initialize + tools/list handshake against a derived spawn
 /// config. This is the single health check for all kinds (ADR-072 decision 4).
 pub async fn health_check(spawn: &McpServerConfigDef) -> Result<usize, String> {
-    let client = crate::client::McpClient::connect(spawn.clone())
+    health_check_with_output(spawn, None, Some(handshake_bound_for(&spawn.command))).await
+}
+
+/// Handshake bound for a **bounded** connect, picked by the command's kind.
+///
+/// A lazily resolved package launches through a package manager, so its
+/// handshake includes resolving and importing the package — `uvx docling-mcp`
+/// measured 11.4s warm here, and cold it can exceed the protocol default
+/// silently. A plain local binary answers in milliseconds, so it keeps the
+/// tight default and a hang still surfaces in 30s.
+///
+/// The probe does NOT use this: it passes `None` and judges silence instead
+/// (`constants::MCP_PROBE_IDLE_LAZY`, ADR-090 §5.4).
+pub fn handshake_bound_for(command: &str) -> std::time::Duration {
+    if resolves_lazily(command) {
+        acowork_core::timeout_config::constants::MCP_LAZY_START
+    } else {
+        acowork_core::timeout_config::constants::MCP_RECV
+    }
+}
+
+/// Package resolvers that download on first spawn, i.e. whose handshake window
+/// must not be the protocol default (`constants::MCP_RECV`).
+///
+/// The classification is about the *command*, not the package spec: a custom
+/// server may point straight at `npx` with no install spec at all (ADR-090
+/// §5.4), and it downloads exactly the same way.
+pub fn resolves_lazily(command: &str) -> bool {
+    let program = std::path::Path::new(command)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(command)
+        .to_ascii_lowercase();
+    matches!(program.as_str(), "npx" | "pnpx" | "bunx" | "uvx")
+}
+
+/// Same handshake, forwarding the server process's stderr to `sink`, with the
+/// handshake bound chosen by the caller (`None` = unbounded).
+///
+/// For lazily resolved packages this handshake *is* the install: `npx -y pkg`
+/// downloads while the client waits, so this is the only way a caller can show
+/// what a long first launch is doing — and the reason the bound is a parameter
+/// rather than a constant.
+pub async fn health_check_with_output(
+    spawn: &McpServerConfigDef,
+    sink: Option<crate::transport::ServerOutputSink>,
+    recv_timeout: Option<Duration>,
+) -> Result<usize, String> {
+    let client = crate::client::McpClient::connect_with_timeout(spawn.clone(), sink, recv_timeout)
         .await
         .map_err(|e| format!("{:#}", e))?;
     let tools = client.tools();
@@ -349,6 +411,36 @@ pub async fn health_check(spawn: &McpServerConfigDef) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lazy_resolvers_are_classified_by_program_name() {
+        // The `npx`/`uvx` cases are what the longer probe silence budget exists
+        // for: the first spawn downloads, and its output is the only progress.
+        assert!(resolves_lazily("npx"));
+        assert!(resolves_lazily("npx.cmd"));
+        assert!(resolves_lazily(r"C:\Program Files\nodejs\npx.cmd"));
+        assert!(resolves_lazily("uvx"));
+        assert!(resolves_lazily("bunx"));
+        assert!(resolves_lazily("pnpx"));
+        // A real binary answers in milliseconds — it keeps the 30s window.
+        assert!(!resolves_lazily("docling-mcp-server"));
+        assert!(!resolves_lazily("uv"));
+        assert!(!resolves_lazily("pnpm"));
+        assert!(!resolves_lazily("pnpm.exe"));
+    }
+
+    #[test]
+    fn handshake_bound_follows_the_command_kind() {
+        use acowork_core::timeout_config::constants::{MCP_LAZY_START, MCP_RECV};
+        // A launch through a package manager includes resolving and importing
+        // the package: `uvx docling-mcp` measured 11.4s warm here, and cold it
+        // can exceed the protocol default without printing anything.
+        assert_eq!(handshake_bound_for("uvx"), MCP_LAZY_START);
+        assert_eq!(handshake_bound_for(r"C:\tools\npx.cmd"), MCP_LAZY_START);
+        // A plain binary answers in milliseconds; its hang must surface fast.
+        assert_eq!(handshake_bound_for("docling-mcp-server"), MCP_RECV);
+        assert_eq!(handshake_bound_for("python"), MCP_RECV);
+    }
 
     /// Build a Vec<String> from string literals for assert_eq.
     fn s(v: &[&str]) -> Vec<String> {

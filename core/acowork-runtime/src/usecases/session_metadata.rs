@@ -78,6 +78,22 @@ pub struct SessionsListResponse {
     pub size: u32,
 }
 
+/// ADR-106 D7: which Chat surface a session listing is being read for.
+///
+/// A *description*, not an authority: the caller states the chat and the
+/// surface, and [`crate::agent::session::chat_candidates::ChatScopeRule`]
+/// answers which rows that admits. The identity is never read from the query
+/// string — `owner_user_id` is the caller's own uid as the Gateway's scope
+/// headers established it, and the chat-membership wall is checked by the HTTP
+/// layer before this reaches the scan.
+#[derive(Debug, Clone)]
+pub struct ChatListingScope {
+    pub chat_session_id: String,
+    pub surface: crate::agent::session::chat_candidates::CandidateSurface,
+    /// `None` = local mode, where no account exists to be the initiator.
+    pub owner_user_id: Option<String>,
+}
+
 /// Detail view of a single session (panel-4 endpoint).
 ///
 /// ADR-047: config fields (model, provider, workspace_id,
@@ -142,12 +158,19 @@ pub trait SessionMetadataService: Send + Sync {
     /// restart — the *set* of open sessions is Runtime truth, so the client
     /// derives it instead of remembering it. Also pre-pagination: `total_*`
     /// describe the resident set.
+    ///
+    /// ADR-106 D7: `chat` narrows the set to the execution sessions one Chat
+    /// surface is allowed to address — the second `@` level's list, the
+    /// session-history picker's suggestions, and nothing else. Same placement
+    /// argument: a page sliced off the unfiltered set would leak how much work
+    /// this chat cannot see. `None` is the ordinary listing.
     async fn list_sessions(
         &self,
         page: u32,
         size: u32,
         scope: &SessionScope,
         active_only: bool,
+        chat: Option<&ChatListingScope>,
     ) -> Result<SessionsListResponse>;
 
     /// Return the most recently active session, if any.

@@ -4,7 +4,7 @@
  *
  * Rule: an agent block displays the header iff the nearest prior block in
  * display order is a user-anchored block.  Compaction and pure system
- * markers between them are skipped.  A `user_with_attachments` block is
+ * markers between them are skipped.  A `user_with_parts` block is
  * treated as a user-anchored block — see ADR-FIX (avatar-after-attachments).
  *
  * Extracted from VirtualMessageList.tsx so the rule can be unit-tested
@@ -16,7 +16,7 @@ import type { MessageBlock } from "./messageFolder";
 /** Block types that count as a user-anchored block in the backward scan. */
 const USER_ANCHOR_TYPES: ReadonlySet<MessageBlock["type"]> = new Set([
   "user",
-  "user_with_attachments",
+  "user_with_parts",
 ]);
 
 /**
@@ -49,7 +49,7 @@ export function isAgentBlock(block: MessageBlock): boolean {
   if (block.type === "explore_group") return true;
   return !(
     block.type === "user" ||
-    block.type === "user_with_attachments" ||
+    block.type === "user_with_parts" ||
     block.type === "system" ||
     block.type === "compaction"
   );
@@ -61,11 +61,11 @@ export function isAgentBlock(block: MessageBlock): boolean {
  * The header is shown when:
  *  1. `current` is itself an agent block (see isAgentBlock), AND
  *  2. The most-recent non-skip block before `current` in `blocks` is a
- *     user-anchored block (`user` or `user_with_attachments`).
+ *     user-anchored block (`user` or `user_with_parts`).
  *
  * Skip blocks are compaction and pure system markers; user-anchored
  * blocks are user messages, including those folded with attachment system
- * entries into a `user_with_attachments` block.
+ * entries into a `user_with_parts` block.
  *
  * The avatar anchors to the FIRST agent reply after the user — never to
  * subsequent agent blocks.  Once the avatar has been shown above the

@@ -13,7 +13,7 @@ import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { RadioGroup } from "../common/RadioGroup";
 import { Switch } from "../common/Switch";
 import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
-import { ACCENT_PRESETS } from "../../lib/accentPresets";
+import { AccentSwatches } from "../common/AccentSwatches";
 import { Bug, HelpCircle, Monitor, User, SlidersHorizontal, Palette, Globe } from "lucide-react";
 import { inputReadonly } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
@@ -309,9 +309,23 @@ export function GatewayTab() {
                   language as the gw-id row, not as a paragraph under the
                   toggle. Hand-rolled because a <button> must not sit
                   inside the Switch's <label>: clicking the hint would
-                  also flip the switch. */}
+                  also flip the switch.
+
+                  Type step: `text-xs`, no color/weight override — this is
+                  an operable control's label, so it must read at the same
+                  scale and contrast as the mode radios right above it
+                  (both inherit `--color-text`). The row used to carry
+                  `text-10 font-medium text-text-tertiary`, copied
+                  verbatim from Switch's internal label slot; that is a
+                  component default for dense inline labels, NOT a
+                  caller-facing design token, and at 10px it rendered
+                  ~17% smaller than every other label in this card
+                  (`--text-10` = 0.714em vs `--text-xs` = 0.857em). Do not
+                  restore a `--text-9/10/11` step or a dimming color here:
+                  micro steps are the meta-line scale (URL, device id),
+                  never the control-label scale. */}
               <div className="flex items-center justify-between gap-2">
-                <span className="flex flex-1 items-center gap-1.5 text-10 font-medium text-text-tertiary">
+                <span className="flex flex-1 items-center gap-1.5 text-xs">
                   {t("settings.autoStartLocalNode")}
                   <HelpHint content={t("settings.autoStartLocalNodeHelp")} />
                 </span>
@@ -335,7 +349,7 @@ export function GatewayTab() {
               {t("settings.relayGwId")}:{" "}
               <span className="font-mono">{relayGwId ?? "—"}</span>
             </span>
-            <GatewayGwIdHelp gwId={relayGwId} gatewayUrl={gatewayUrl} />
+            <GatewayGwIdHelp gwId={relayGwId} />
           </div>
         </ExpandableRow>
       </ListBox>
@@ -634,13 +648,14 @@ function HelpHint({ content, label }: { content: string; label?: string }) {
  *  `gatewayUrl` is passed rather than re-read from the store so the command
  *  points at the Gateway this row was fetched from.
  *
- *  320px, not the 200px default: the pairing address and the curl command are
- *  both long, and a 200px box would shred them into an unreadable column. */
-function GatewayGwIdHelp({ gwId, gatewayUrl }: { gwId: string | null; gatewayUrl: string }) {
+ *  320px, not the 200px default: the pairing address and the config snippet
+ *  are both long, and a 200px box would shred them into an unreadable
+ *  column. */
+function GatewayGwIdHelp({ gwId }: { gwId: string | null }) {
   const { t } = useTranslation();
   const content = gwId
     ? t("settings.relayGwIdHelp", { gwId })
-    : t("settings.relayGwIdHowTo", { gatewayUrl });
+    : t("settings.relayGwIdHowTo");
   return <HelpHint content={content} label={t("settings.relayGwIdHelpLabel")} />;
 }
 
@@ -990,7 +1005,7 @@ function RuntimeRow({ agent, padding }: { agent: AgentListResponse; padding?: "d
 /** Appearance settings */
 function AppearanceTab() {
   const { t } = useTranslation();
-  const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity, accentColor, setAccentColor } = useSettingsStore();
+  const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity, accentColor, customAccent, setAccentColor } = useSettingsStore();
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   // Tools-tab style level-1 collapsible cards (default open)
   const [themeOpen, setThemeOpen] = useState(true);
@@ -1052,27 +1067,7 @@ function AppearanceTab() {
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <p className="mb-3 text-xs text-text-tertiary">{t("settings.accentColor")}</p>
-          <div className="flex flex-wrap gap-[14px]">
-            {ACCENT_PRESETS.map((c) => (
-              <Tooltip content={c.label} variant="plain" key={c.id}>
-                <button
-                  onClick={() => setAccentColor(c.hex)}
-                  aria-label={c.label}
-                  data-accent-id={c.id}
-                  className={cn(
-                    "flex h-9 w-9 items-center justify-center rounded-full transition-transform",
-                    accentColor.toLowerCase() === c.hex.toLowerCase()
-                      ? "scale-110 ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
-                      : "hover:scale-105",
-                  )}
-                  style={{
-                    backgroundColor: c.hex,
-                    "--tw-ring-color": c.hex,
-                  } as React.CSSProperties}
-                />
-              </Tooltip>
-            ))}
-          </div>
+          <AccentSwatches value={accentColor} customColor={customAccent} onChange={setAccentColor} />
         </ExpandableRow>
       </ListBox>
 

@@ -1,10 +1,12 @@
 # ADR-105: Group Default Responder — an un-@'d group message goes to one declared agent
 
 - **Number**: ADR-105
-- **Status**: Accepted
+- **Status**: Accepted, **partially superseded by ADR-106** (the evidence slot of D4 and the chat-row shape of D5)
 - **Date**: 2026-11-01
 - **Deciders**: ACowork architecture group
 - **Related**: ADR-098 (unified standard group model), ADR-099 (chat-session LLM router), ADR-100 (chat event log); design 27 §5.3.1 / §5.4.1 / §5.5
+
+> **Supersession notice (2026-11-03)**: [ADR-106](./ADR-106-chat-execution-reference-projection.md) D14 supersedes this ADR's **D4** (`auto_routed_to` as the pending-row evidence slot) and the **chat-row shape of D5** (the absence-inference behind the wait line is deleted; `delivery_failed` survives as a channel fact). D1 / D2 / D3 / D6 / D7 — the default responder itself, the four write gates, the lifecycle, and not introducing a group-level LLM router — remain fully in force: the default responder still works on the `mentions` delivery path today, only the trace it leaves no longer decides how a surface paints a wait line.
 
 ## Summary
 
@@ -51,6 +53,8 @@ The delivered row is still a broadcast row (`to: ""`); `meta.mentions` keeps mea
 
 Rationale: `mentions` renders as @ chips, so folding an automatic target in would put a name in the sender's mouth. Meanwhile the wait line ("working on it") is keyed on "did this human row wake an agent", and it needs that evidence slot — `auto_routed_to` is it. The storage layer must declare the field explicitly or it is dropped at the serialization boundary (the same trap as `meta.task_id`).
 
+> **Overturned by ADR-106 D9 / D14**: keying the wait line on `auto_routed_to` reads "cannot see it" as "still running" — a restart, an offline agent or a failed projection each leaves a permanent wait line. The field is still written (it records where the message went) but drives no rendering. The wait line was then shrunk to "this surface's own POST that has not returned yet" (`sending`), and that version was too short as well: a POST answers in about 150 ms while that round's first row can land a minute later. The rule in force is in [ADR-106, Revision (2026-11-03)](./ADR-106-chat-execution-reference-projection.md): a claim on this device's own send, keyed by the row id its response carried, settled by the first row that answers it, with a 300 s deadline as the backstop.
+
 ### D5 — A failed delivery must be visible
 
 When `wake_and_deliver` fails, the Gateway appends a `system_notice`: `notice_type: "delivery_failed"`, `in_reply_to` naming the original `user_message`, `error_code` carrying the reason, and an **empty body**. Wording belongs to each surface (the same convention as `router_fallback`: the producer writes the row, the surface owns the prose). A failure to write the notice itself is a warn only and never affects the response.
@@ -59,6 +63,8 @@ Two frontend rules:
 
 - `ChatNoticeEventRow` renders the row by `notice_type` — it must paint even with an empty body, since the row exists precisely so that the failure stops being silent;
 - `chatTurnState.answeredAfter` treats a `delivery_failed` notice bound to the same trigger as the end of the turn: the receipt is the outcome, and keeping the wait line up would be a louder version of the same lie.
+
+> **Status after ADR-106 D14**: the semantics ("a failure must be visible") and the `delivery_failed` channel row are kept — the first rule still holds. The host of the second rule, `chatTurnState.answeredAfter`, was deleted with P6. As of 2026-11-03 the receipt takes back a smaller and more honest role: it is not an inference-closing signal but the **settlement row** for this device's send claim — on the group surface a failed delivery is visible and ends the wait at the same time, because those are one rule (a 1:1 failure arms no claim, so there is nothing to settle).
 
 ### D6 — Lifecycle: the role leaves with its member
 

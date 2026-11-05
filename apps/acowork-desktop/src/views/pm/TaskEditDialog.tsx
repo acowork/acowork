@@ -11,8 +11,15 @@
  *
  * Gating is a server fact, not a layout preference: attachments upload to
  * `POST /tasks/{tid}/attachments` (core/acowork-pm/src/api/routes.rs:106) and
- * children need a parent id, so 附件 / 子任务 / 删除 only exist once the row is
- * persisted.
+ * children need a parent id, so 文件上传 / 子任务 / 删除 only exist once the row
+ * is persisted.
+ *
+ * The body is TABS (基本信息 / 关联任务 / 文件上传 / 提交记录), on the same
+ * shell as GlobalSearchDialog: a fixed-height strip under the title and one
+ * body region that scrolls. Stacking four unrelated kinds of content in one
+ * column produced a very long scroll in which the thing the reader came for —
+ * what the agent actually handed in — sat below a file grid. Tabs are a
+ * partition of that column, not a second copy of the fields.
  *
  * Saving is "submit, then close": the request goes out first, the box closes
  * only after the server confirms the row, and a failed save keeps the box open
@@ -21,9 +28,13 @@
  * successful save and the user never has to click twice to be done.
  *
  * Height is FIXED (`h-[560px]`, capped by `max-h-[86vh]`) with the body
- * scrolling. Sections appearing after the first save, or jumping to a child
- * row, must not resize the dialog — that resize was the "跳来跳去" the old
- * tab shell produced.
+ * scrolling. Sections appearing after the first save, jumping to a child row,
+ * or switching tabs must not resize the dialog — that resize was the "跳来跳去"
+ * the retired detail shell produced.
+ *
+ * Leaving a dirty form is guarded exactly once (`requestLeave`); the confirm's
+ * own button exits directly (`leave`). Calling back into the guard from the
+ * confirm re-armed the same dialog, which is why 放弃修改 used to do nothing.
  *
  * Status transitions live in the board (drag between columns) and on the task
  * card's 批准/拒绝 buttons, both of which call the same `boardStore.moveTask`.
@@ -50,8 +61,14 @@ import { attachmentUrl, deleteTask } from "../../lib/pm-api";
 import { useActorLabel } from "./pmMembers";
 import { TaskActivitySection } from "./TaskActivity";
 import { formatBytes, formatDateTime } from "./taskFormatters";
-import { useTaskForm } from "./useTaskForm";
-import type { PmAttachmentMeta, TaskStatus } from "../../lib/pm-types";
+import { useTaskForm, type TaskForm } from "./useTaskForm";
+import {
+  resolveTaskTab,
+  TASK_EDIT_TAB_I18N,
+  visibleTaskTabs,
+  type TaskEditTab,
+} from "./taskEditTabs";
+import type { PmAttachmentMeta, PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 
 const TASK_TYPES = ["task", "feature", "bug", "chore", "checkpoint", "milestone"] as const;
 const PRIORITIES = ["low", "normal", "high", "urgent"] as const;
@@ -102,7 +119,8 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
   const { t } = useTranslation();
 
   const isCreate = mode === "create";
-  // A persisted row is what unlocks the three server-backed sections.
+  // A persisted row is what unlocks 文件上传 / 提交记录 / 子任务 / 删除 — the two
+  // server-keyed tabs are picked by `visibleTaskTabs`, the rest by `detail`.
   const hasRow = !isCreate && !!detail;
 
   const projectId = storeProjectId ?? detail?.project_id ?? null;
@@ -111,6 +129,11 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
     initial: isCreate ? null : detail,
     defaultParentId: isCreate ? createParentId : null,
   });
+  // `form` is a fresh object every render (the hook returns a literal). Pull out
+  // the one stable member the exit path needs, so `leave` / `requestLeave` do
+  // not change identity on every keystroke and the ESC listener is not
+  // re-subscribed while the user types.
+  const resetForm = form.reset;
 
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -121,45 +144,76 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
   // navigating to another row are all navigations away from a dirty form, and
   // each wants a different destination.
   const [pendingDiscard, setPendingDiscard] = useState<(() => void) | null>(null);
+  // Which tab is open. The strip is the same chrome as GlobalSearchDialog's,
+  // for the same reason: a task carries four kinds of content and stacking all
+  // of them made one very long column.
+  const [tab, setTab] = useState<TaskEditTab>("basic");
 
   const creatorName = useActorLabel(detail?.created_by ?? null);
 
+  // A different row — or a different mode — is a different surface. Land on
+  // 基本信息 and take focus, instead of leaving the reader on 提交记录 of a task
+  // they are no longer looking at. Keyed on the row's IDENTITY, so a store
+  // refresh (same id, new object) never yanks the open tab away.
   useEffect(() => {
+    setTab("basic");
     dialogRef.current?.focus();
   }, [mode, detail?.id]);
+
+  /**
+   * The unconditional exit: the form is on its way out, whoever asked for it.
+   *
+   * Three destinations — jump to another row (`after`), go back to the parent a
+   * subtask form was opened from, or close. `reset()` runs on the closing path
+   * so an abandoned draft cannot resurrect when the same row is opened again
+   * (`useTaskForm` keeps the draft for the row's lifetime); navigation does not
+   * need it, because the form re-keys on the new row.
+   */
+  const leave = useCallback(
+    (after?: () => void) => {
+      if (after) {
+        after();
+        return;
+      }
+      // Cancelling a subtask form goes back to the parent it came from.
+      resetForm();
+      if (isCreate && returnTo) void openTask(returnTo);
+      else onClose();
+    },
+    [resetForm, isCreate, returnTo, openTask, onClose],
+  );
 
   /**
    * Navigate away from the form, asking first when it holds unsaved edits.
    * Without this an accidental ESC or backdrop click ate a half-written task —
    * the old form had no guard at all.
+   *
+   * The guard is consulted exactly ONCE per exit. The confirm's own button
+   * calls `leave()`, never this: routing it back through the guard re-armed the
+   * very dialog the user had just accepted (`dirty` is still true at that
+   * moment, because discarding IS the act of throwing the draft away), so
+   * 放弃修改 did nothing and the only way out was 取消. Acceptance of the
+   * confirm *is* the answer to the guard.
    */
-  const navigate = useCallback(
+  const requestLeave = useCallback(
     (after?: () => void) => {
       if (form.dirty) {
         setPendingDiscard(() => after ?? null);
         setConfirmDiscard(true);
         return;
       }
-      if (after) {
-        after();
-        return;
-      }
-      // Saving a new task lands on the new row so its attachments are one click
-      // away; cancelling a subtask form goes back to the parent it came from.
-      form.reset();
-      if (isCreate && returnTo) void openTask(returnTo);
-      else onClose();
+      leave(after);
     },
-    [form, isCreate, returnTo, openTask, onClose],
+    [form.dirty, leave],
   );
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && !form.saving) navigate();
+      if (e.key === "Escape" && !form.saving) requestLeave();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [navigate, form.saving]);
+  }, [requestLeave, form.saving]);
 
   const handleSave = useCallback(async () => {
     const outcome = await form.save();
@@ -226,7 +280,25 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
     [deleteAttachment, t],
   );
 
-  const titleOf = useTaskTitleResolver();
+  // 给当前行加子任务：开一张新建表单并预设父任务，取消时回到这一行
+  // （`returnTo`）。它是一次"离开脏表单"的导航，所以走同一个守卫。
+  const addSubtask = useCallback(() => {
+    if (!detail) return;
+    requestLeave(() =>
+      openCreate({ projectId: detail.project_id, parentId: detail.id, returnTo: detail.id }),
+    );
+  }, [detail, requestLeave, openCreate]);
+
+  // Which tabs this form can fill (a server fact, see `visibleTaskTabs`), and
+  // where the open tab lands if the strip changes underneath it.
+  const tabs = visibleTaskTabs(hasRow);
+  const activeTab = resolveTaskTab(tab, tabs);
+
+  // The row the panels may speak about. `detail` alone is not it: 新建任务 can be
+  // opened while a row is still cached (the store keeps the last detail), and a
+  // NEW task has no children, no timeline and no audit line — printing the old
+  // row's would be a lie about the row being written.
+  const row = hasRow ? detail : null;
 
   return (
     <>
@@ -234,7 +306,7 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
         {/* House pattern (MemberManagerDialog, ConfirmDialog): a separate
             overlay layer with onClick, so a click that starts inside the panel
             and ends outside does not close the form over the user's draft. */}
-        <div className="absolute inset-0 bg-modal-overlay" onClick={() => navigate()} />
+        <div className="absolute inset-0 bg-modal-overlay" onClick={() => requestLeave()} />
         <div
           ref={dialogRef}
           tabIndex={-1}
@@ -252,7 +324,7 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
             </h3>
             <button
               type="button"
-              onClick={() => navigate()}
+              onClick={() => requestLeave()}
               className="shrink-0 rounded-md px-1.5 py-0.5 text-sm text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
               aria-label={t("common.close")}
             >
@@ -260,9 +332,49 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
             </button>
           </header>
 
-          {/* 表单区 */}
+          {/* Tab strip — the same shell as GlobalSearchDialog's Zone 2: a
+              fixed-height, divider-separated row that never scrolls, directly
+              under the title. 关联任务 / 文件上传 / 提交记录 used to be stacked in
+              one column below the fields, which is what made this box a very
+              long scroll. Height stays fixed (`h-[560px]`), so switching tabs
+              never resizes the dialog. */}
+          <div
+            role="tablist"
+            className="flex shrink-0 items-center justify-center gap-1 border-b border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]"
+          >
+            {tabs.map((key) => (
+              <button
+                key={key}
+                id={`task-tab-${key}`}
+                type="button"
+                role="tab"
+                aria-selected={activeTab === key}
+                aria-controls="task-tabpanel"
+                data-testid={`task-tab-${key}`}
+                onClick={() => setTab(key)}
+                className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
+                  activeTab === key
+                    ? "bg-zinc-200 text-text dark:bg-zinc-700"
+                    : "text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
+                }`}
+              >
+                {t(TASK_EDIT_TAB_I18N[key])}
+              </button>
+            ))}
+          </div>
+
+          {/* 一个标签页的内容区，滚动归它自己 */}
           <OverlayScrollbar fill="flex" className="px-5 py-4">
-            <div className="space-y-3">
+            {/* One panel, swapped by the strip above: `aria-labelledby` points
+                at whichever tab owns the body right now. */}
+            <div
+              id="task-tabpanel"
+              role="tabpanel"
+              aria-labelledby={`task-tab-${activeTab}`}
+              className="space-y-3"
+            >
+              {/* A load failure is a fact about the ROW, not about one tab, so
+                  it sits above the tab body and stays visible on every tab. */}
               {error && (
                 <div className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
                   {error}
@@ -276,193 +388,38 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
                 </div>
               )}
 
-              {/* 审计信息 — 只读，来自服务端，不属于表单字段 */}
-              {hasRow && detail && (
-                <div className="rounded-md bg-zinc-50 px-3 py-2 text-11 text-text-tertiary dark:bg-zinc-800/60">
-                  <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-                    <TaskTypeIcon type={detail.type} className="text-xs" />
-                    <PriorityBadge priority={detail.priority} />
-                    <span>{t(STATUS_I18N[detail.status])}</span>
-                    <span aria-hidden>·</span>
-                    <span>
-                      {t("pm.task.createdBy")} {creatorName ?? "—"}
-                    </span>
-                    <span aria-hidden>·</span>
-                    <span>{formatDateTime(detail.created_at)}</span>
-                    <span aria-hidden>·</span>
-                    <span>
-                      {t("pm.task.updated")} {formatDateTime(detail.updated_at)}
-                    </span>
-                  </div>
-                  {/* A dispatch failure is a durable task fact — surfacing it
-                      here is the only place a stuck row explains itself. */}
-                  {detail.status === "pending" && !detail.dispatched_at && detail.dispatch_error && (
-                    <p className="mt-1.5 rounded bg-amber-100 px-2 py-1 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
-                      {detail.dispatch_attempts >= 5
-                        ? t("pm.task.dispatchAbandoned", { error: detail.dispatch_error })
-                        : t("pm.task.dispatchFailed", {
-                            attempts: detail.dispatch_attempts,
-                            error: detail.dispatch_error,
-                          })}
-                    </p>
-                  )}
-                </div>
+              {activeTab === "basic" && (
+                <BasicInfoTab form={form} row={row} creatorName={creatorName} />
               )}
 
-              <Field label={t("pm.task.title")} required>
-                <StyledInput
-                  value={form.values.title}
-                  onChange={(e) => form.setTitle(e.target.value)}
-                  placeholder={t("pm.taskTitlePlaceholder")}
-                  autoFocus
+              {activeTab === "related" && (
+                <RelatedTasksTab
+                  form={form}
+                  row={row}
+                  onOpenTask={(id) => requestLeave(() => void openTask(id))}
+                  onAddSubtask={addSubtask}
                 />
-              </Field>
+              )}
 
-              {/* 三个下拉一行 — 原来是 2 列网格，负责人被挤到日期那一行 */}
-              <div className="grid grid-cols-3 gap-3">
-                <Field label={t("pm.task.type")}>
-                  <Dropdown
-                    value={form.values.type}
-                    onChange={(v) => form.setType(v as (typeof TASK_TYPES)[number])}
-                    options={TASK_TYPES.map((tt) => ({ value: tt, label: t(TYPE_I18N[tt]) }))}
-                  />
-                </Field>
-                <Field label={t("pm.task.priority")}>
-                  <Dropdown
-                    value={form.values.priority}
-                    onChange={(v) => form.setPriority(v as (typeof PRIORITIES)[number])}
-                    options={PRIORITIES.map((p) => ({ value: p, label: t(PRIORITY_I18N[p]) }))}
-                  />
-                </Field>
-                <Field label={t("pm.task.assignee")}>
-                  {form.hasMembers ? (
-                    <Dropdown
-                      value={form.values.assignee}
-                      onChange={form.setAssignee}
-                      options={form.assigneeOptions}
-                      placeholder={{ value: "", label: t("pm.task.unassigned") }}
-                    />
-                  ) : (
-                    <p className="rounded-md border border-dashed border-zinc-300 px-2 py-1.5 text-11 text-text-tertiary dark:border-zinc-600">
-                      {t("pm.assigneeNoMembersHint")}
-                    </p>
-                  )}
-                </Field>
-              </div>
-
-              {/* 两个时间一行 */}
-              <div className="grid grid-cols-2 gap-3">
-                <Field label={t("pm.task.startDate")}>
-                  <StyledInput
-                    type="date"
-                    value={form.values.startAt}
-                    onChange={(e) => form.setStartAt(e.target.value)}
-                  />
-                </Field>
-                <Field label={t("pm.task.dueDate")}>
-                  <StyledInput
-                    type="date"
-                    value={form.values.dueAt}
-                    onChange={(e) => form.setDueAt(e.target.value)}
-                  />
-                </Field>
-              </div>
-
-              <Field label={t("pm.task.description")}>
-                <StyledTextarea
-                  value={form.values.description}
-                  onChange={(e) => form.setDescription(e.target.value)}
-                  rows={3}
-                  placeholder={t("pm.task.descriptionPlaceholder")}
+              {/* 文件上传 / 提交记录 只对已落盘的行开放（`visibleTaskTabs`
+                  已经把这两个标签从新建表单里摘掉了），`row` 只是空值收窄。 */}
+              {activeTab === "files" && row && (
+                <Attachments
+                  attachments={attachments}
+                  uploading={uploading}
+                  fileInputRef={fileInputRef}
+                  onUpload={handleUpload}
+                  onDelete={(aid) => setConfirmDeleteAtt(aid)}
                 />
-              </Field>
+              )}
 
-              <Field label={t("pm.task.parentTask")}>
-                <Dropdown
-                  value={form.values.parentId}
-                  onChange={form.setParentId}
-                  options={form.parentOptions}
+              {activeTab === "submissions" && row && (
+                <TaskActivitySection
+                  activity={activity}
+                  attachments={attachments}
+                  replying={replying}
+                  onReply={addReply}
                 />
-              </Field>
-
-              <Field label={t("pm.task.dependencies")}>
-                {form.dependencyOptions.length === 0 ? (
-                  <p className="text-xs text-text-tertiary">
-                    {detail && detail.depends_on.length > 0
-                      ? detail.depends_on
-                          .map((d) => `${titleOf(d.task_id) ?? d.task_id}（${d.kind}）`)
-                          .join("、")
-                      : t("pm.task.noCandidates")}
-                  </p>
-                ) : (
-                  <OverlayScrollbar
-                    maxHeight="7rem"
-                    containerClassName="rounded-md border border-border-outer"
-                    className="space-y-1 p-2"
-                  >
-                    {form.dependencyOptions.map((opt) => (
-                      <label
-                        key={opt.value}
-                        className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={form.values.dependsOn.includes(opt.value)}
-                          onChange={() => form.toggleDependency(opt.value)}
-                          className="accent-[var(--color-accent)]"
-                        />
-                        <span className="min-w-0 flex-1 truncate">{opt.label}</span>
-                      </label>
-                    ))}
-                  </OverlayScrollbar>
-                )}
-              </Field>
-
-              {/* ── 以下四段需要已落盘的 task id ── */}
-              {hasRow && detail && (
-                <>
-                  {/* 提交历史排在附件之前：Agent 交上来的正文才是这个界面
-                      此刻唯一要看的东西（缺陷 t-80cf07ec）。 */}
-                  <SectionDivider label={t("pm.activity.title")} />
-                  <TaskActivitySection
-                    activity={activity}
-                    attachments={attachments}
-                    replying={replying}
-                    onReply={addReply}
-                  />
-
-                  <SectionDivider label={t("pm.task.attachments")} />
-                  <Attachments
-                    attachments={attachments}
-                    uploading={uploading}
-                    fileInputRef={fileInputRef}
-                    onUpload={handleUpload}
-                    onDelete={(aid) => setConfirmDeleteAtt(aid)}
-                  />
-
-                  <SectionDivider label={t("pm.task.subtasks")} />
-                  <div>
-                    <SubtaskTree
-                      rootId={detail.id}
-                      onSelect={(id) => navigate(() => void openTask(id))}
-                    />
-                    <button
-                      type="button"
-                      onClick={() =>
-                        navigate(() =>
-                          openCreate({
-                            projectId: detail.project_id,
-                            parentId: detail.id,
-                            returnTo: detail.id,
-                          }),
-                        )
-                      }
-                      className="mt-2 w-full rounded-md border border-dashed border-zinc-300 px-3 py-1.5 text-xs text-text-tertiary hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-zinc-600"
-                    >
-                      + {t("pm.task.addSubtask")}
-                    </button>
-                  </div>
-                </>
               )}
             </div>
           </OverlayScrollbar>
@@ -492,7 +449,7 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
             )}
             <button
               type="button"
-              onClick={() => navigate()}
+              onClick={() => requestLeave()}
               disabled={form.saving}
               className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
             >
@@ -541,17 +498,231 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
         confirmLabel={t("pm.task.discardChangesConfirm")}
         destructive
         onConfirm={() => {
-          setConfirmDiscard(false);
+          // Acceptance IS the answer to the dirty guard: leave directly.
+          // Bouncing back through `requestLeave` re-opened this dialog, because
+          // `dirty` is still true at this instant (discarding is exactly what
+          // makes it false), so 放弃修改 looked like it did nothing.
           const after = pendingDiscard;
+          setConfirmDiscard(false);
           setPendingDiscard(null);
-          if (after) after();
-          else navigate();
+          leave(after ?? undefined);
         }}
         onCancel={() => {
           setConfirmDiscard(false);
           setPendingDiscard(null);
         }}
       />
+    </>
+  );
+}
+
+// ── Tab panels ────────────────────────────────────────────────────────
+
+/**
+ * 基本信息 — the task's own fields, plus the audit block the server owns.
+ *
+ * Read-only server facts (creator, timestamps, a failed dispatch) live with
+ * the editable fields on purpose: they are what the editor needs in front of
+ * them while editing, and a separate 详情 tab would put a row's facts one click
+ * away from the fields they explain.
+ */
+function BasicInfoTab({
+  form,
+  row,
+  creatorName,
+}: {
+  form: TaskForm;
+  row: PmTaskResponse | null;
+  creatorName: string | null;
+}) {
+  const { t } = useTranslation();
+  return (
+    <>
+      {row && (
+        <div className="rounded-md bg-zinc-50 px-3 py-2 text-11 text-text-tertiary dark:bg-zinc-800/60">
+          <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
+            <TaskTypeIcon type={row.type} className="text-xs" />
+            <PriorityBadge priority={row.priority} />
+            <span>{t(STATUS_I18N[row.status])}</span>
+            <span aria-hidden>·</span>
+            <span>
+              {t("pm.task.createdBy")} {creatorName ?? "—"}
+            </span>
+            <span aria-hidden>·</span>
+            <span>{formatDateTime(row.created_at)}</span>
+            <span aria-hidden>·</span>
+            <span>
+              {t("pm.task.updated")} {formatDateTime(row.updated_at)}
+            </span>
+          </div>
+          {/* A dispatch failure is a durable task fact — surfacing it here is
+              the only place a stuck row explains itself. */}
+          {row.status === "pending" && !row.dispatched_at && row.dispatch_error && (
+            <p className="mt-1.5 rounded bg-amber-100 px-2 py-1 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
+              {row.dispatch_attempts >= 5
+                ? t("pm.task.dispatchAbandoned", { error: row.dispatch_error })
+                : t("pm.task.dispatchFailed", {
+                    attempts: row.dispatch_attempts,
+                    error: row.dispatch_error,
+                  })}
+            </p>
+          )}
+        </div>
+      )}
+
+      <Field label={t("pm.task.title")} required>
+        <StyledInput
+          value={form.values.title}
+          onChange={(e) => form.setTitle(e.target.value)}
+          placeholder={t("pm.taskTitlePlaceholder")}
+          autoFocus
+        />
+      </Field>
+
+      {/* 三个下拉一行 — 原来是 2 列网格，负责人被挤到日期那一行 */}
+      <div className="grid grid-cols-3 gap-3">
+        <Field label={t("pm.task.type")}>
+          <Dropdown
+            value={form.values.type}
+            onChange={(v) => form.setType(v as (typeof TASK_TYPES)[number])}
+            options={TASK_TYPES.map((tt) => ({ value: tt, label: t(TYPE_I18N[tt]) }))}
+          />
+        </Field>
+        <Field label={t("pm.task.priority")}>
+          <Dropdown
+            value={form.values.priority}
+            onChange={(v) => form.setPriority(v as (typeof PRIORITIES)[number])}
+            options={PRIORITIES.map((p) => ({ value: p, label: t(PRIORITY_I18N[p]) }))}
+          />
+        </Field>
+        <Field label={t("pm.task.assignee")}>
+          {form.hasMembers ? (
+            <Dropdown
+              value={form.values.assignee}
+              onChange={form.setAssignee}
+              options={form.assigneeOptions}
+              placeholder={{ value: "", label: t("pm.task.unassigned") }}
+            />
+          ) : (
+            <p className="rounded-md border border-dashed border-zinc-300 px-2 py-1.5 text-11 text-text-tertiary dark:border-zinc-600">
+              {t("pm.assigneeNoMembersHint")}
+            </p>
+          )}
+        </Field>
+      </div>
+
+      {/* 两个时间一行 */}
+      <div className="grid grid-cols-2 gap-3">
+        <Field label={t("pm.task.startDate")}>
+          <StyledInput
+            type="date"
+            value={form.values.startAt}
+            onChange={(e) => form.setStartAt(e.target.value)}
+          />
+        </Field>
+        <Field label={t("pm.task.dueDate")}>
+          <StyledInput
+            type="date"
+            value={form.values.dueAt}
+            onChange={(e) => form.setDueAt(e.target.value)}
+          />
+        </Field>
+      </div>
+
+      <Field label={t("pm.task.description")}>
+        <StyledTextarea
+          value={form.values.description}
+          onChange={(e) => form.setDescription(e.target.value)}
+          rows={5}
+          placeholder={t("pm.task.descriptionPlaceholder")}
+        />
+      </Field>
+    </>
+  );
+}
+
+/**
+ * 关联任务 — everything on this tab is "another task": the parent this row
+ * hangs from, the tasks it depends on, and the children hanging from it.
+ *
+ * 依赖 lives here rather than on 基本信息 because it is a relation, not a field
+ * of this row, and because it is the one section that grows without bound (a
+ * checkbox per candidate task) — exactly what made the single column unusable.
+ */
+function RelatedTasksTab({
+  form,
+  row,
+  onOpenTask,
+  onAddSubtask,
+}: {
+  form: TaskForm;
+  row: PmTaskResponse | null;
+  onOpenTask: (id: string) => void;
+  onAddSubtask: () => void;
+}) {
+  const { t } = useTranslation();
+  const titleOf = useTaskTitleResolver();
+  return (
+    <>
+      <Field label={t("pm.task.parentTask")}>
+        <Dropdown
+          value={form.values.parentId}
+          onChange={form.setParentId}
+          options={form.parentOptions}
+        />
+      </Field>
+
+      <Field label={t("pm.task.dependencies")}>
+        {form.dependencyOptions.length === 0 ? (
+          <p className="text-xs text-text-tertiary">
+            {row && row.depends_on.length > 0
+              ? row.depends_on
+                  .map((d) => `${titleOf(d.task_id) ?? d.task_id}（${d.kind}）`)
+                  .join("、")
+              : t("pm.task.noCandidates")}
+          </p>
+        ) : (
+          <OverlayScrollbar
+            maxHeight="9rem"
+            containerClassName="rounded-md border border-border-outer"
+            className="space-y-1 p-2"
+          >
+            {form.dependencyOptions.map((opt) => (
+              <label
+                key={opt.value}
+                className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary"
+              >
+                <input
+                  type="checkbox"
+                  checked={form.values.dependsOn.includes(opt.value)}
+                  onChange={() => form.toggleDependency(opt.value)}
+                  className="accent-[var(--color-accent)]"
+                />
+                <span className="min-w-0 flex-1 truncate">{opt.label}</span>
+              </label>
+            ))}
+          </OverlayScrollbar>
+        )}
+      </Field>
+
+      {/* Children need a parent id, so this is the one block a NEW task cannot
+          fill: the tab stays (parent + dependencies are create-time fields),
+          the list does not. */}
+      {row ? (
+        <div className="pt-1">
+          <SectionDivider label={t("pm.task.subtasks")} />
+          <SubtaskTree rootId={row.id} onSelect={onOpenTask} />
+          <button
+            type="button"
+            onClick={onAddSubtask}
+            className="mt-2 w-full rounded-md border border-dashed border-zinc-300 px-3 py-1.5 text-xs text-text-tertiary hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-zinc-600"
+          >
+            + {t("pm.task.addSubtask")}
+          </button>
+        </div>
+      ) : (
+        <p className="text-xs text-text-tertiary">{t("pm.task.subtasksNeedRow")}</p>
+      )}
     </>
   );
 }

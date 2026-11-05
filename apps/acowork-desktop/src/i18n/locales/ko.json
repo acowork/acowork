@@ -99,7 +99,21 @@
     "globalSearch": "전역 검색 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel",
-    "gatewayDetails": "상세"
+    "gatewayDetails": "상세",
+    "appearance": "외관"
+  },
+  "accentColors": {
+    "blue": "블루",
+    "indigo": "인디고",
+    "violet": "바이올렛",
+    "cyan": "시안",
+    "teal": "틸",
+    "green": "그린",
+    "rose": "로즈",
+    "orange": "오렌지",
+    "amber": "앰버",
+    "pink": "핑크",
+    "custom": "사용자 지정 색상"
   },
   "navBar": {
     "editProfile": "Edit Profile",
@@ -248,6 +262,7 @@
     "notice": {
       "pendingTurn": "{{name}}님이 처리하고 있습니다…",
       "pendingTurnGeneric": "처리하고 있습니다…",
+      "turnInflightTooltip": "이전 메시지가 아직 처리 중입니다",
       "interrupted": "이번 실행이 중단되었습니다",
       "failed": "이번 실행이 실패했습니다",
       "timeout": "이번 실행이 시간 초과되었습니다",
@@ -407,6 +422,9 @@
     "cancel": "취소",
     "windowRangeError": "{{floor}}K~{{ceiling}}K 사이의 값을 입력하세요"
   },
+  "chatUsage": {
+    "usedNotMeasured": "아직 측정되지 않음 — 다음 턴에서 기록됩니다"
+  },
   "agentList": {
     "searchPlaceholder": "Agent 검색...",
     "stopConfirm": "{{agent}}을(를) 중지하시겠습니까？현재 대화 상태는 보존됩니다。",
@@ -431,12 +449,9 @@
     "localNodeAlreadyRunning": "로컬 Node가 이미 실행 중입니다",
     "localNodeStarted": "로컬 Node가 시작되었습니다",
     "errorCreateLocalNode": "로컬 Node 생성 실패: {{error}}",
-    "selectNode": "설치할 노드 선택",
-    "back": "뒤로",
     "filterAgentPackage": "Agent 패키지",
     "agentStarted": "Agent가 시작되었습니다",
     "agentStartedDebug": "Agent가 디버그 모드로 시작되었습니다",
-    "agentInstalled": "Agent가 설치되었습니다",
     "agentStopped": "Agent가 중지되었습니다",
     "agentUninstalled": "Agent가 제거되었습니다",
     "agentCloned": "Agent가 복제되었습니다: {{agentId}}",
@@ -445,7 +460,6 @@
     "titleUninstallAgent": "Agent 제거",
     "noAgentsInstalled": "설치된 Agent가 없습니다",
     "noMatchingAgents": "일치하는 Agent가 없습니다",
-    "errorFailedToInstallAgent": "Agent 설치 실패: {{error}}",
     "errorFailedToStartAgent": "Agent 시작 실패: {{error}}",
     "errorFailedToStartDebugAgent": "디버그 Agent 시작 실패: {{error}}",
     "errorFailedToRestartInDebug": "디버그 재시작 실패: {{error}}",
@@ -526,7 +540,7 @@
     "relayUrlSavedPlainHttp": "저장된 주소가 https:// 가 아닙니다. 릴레이 모드에서는 MQTT에 연결할 수 없습니다. https://<gw-id>.<릴레이 도메인> 로 변경한 뒤 다시 진단하세요.",
     "relayReadFrom": "읽은 위치",
     "relayGwIdHelp": "이 게이트웨이의 원격 접근용 장치 ID입니다. 휴대폰이나 다른 PC를 연결하려면 해당 기기의 릴레이 모드 게이트웨이 주소를 https://{{gwId}}.<릴레이 도메인> 으로 설정하세요.",
-    "relayGwIdHowTo": "아직 장치 ID가 없습니다 — 이 게이트웨이에서 릴레이 터널을 한 번도 활성화하지 않았습니다.\n\n한 번 활성화하면 생성되어 저장됩니다(파일: 게이트웨이 설정 디렉터리의 relay_identity.json):\n\ncurl -X POST {{gatewayUrl}}/api/relay/enable -H 'Content-Type: application/json'",
+    "relayGwIdHowTo": "아직 장치 ID가 없습니다 — 이 게이트웨이에서 릴레이 터널을 한 번도 활성화하지 않았습니다.\n\n게이트웨이의 gateway.toml(게이트웨이 디렉터리의 config/gateway.toml)에서 한 번 활성화하고 게이트웨이를 재시작합니다:\n\n[relay]\nenabled = true\nurl = \"wss://<relay-domain>/tunnel\"\n\n장치 ID는 첫 연결 시 생성되어 relay_identity.json에 저장됩니다.",
     "relayGwIdHelpLabel": "장치 ID는 무엇에 쓰이나요?",
     "localGateway": "로컬 게이트웨이",
     "localModeKeepsUrl": "로컬 모드에서 Desktop은 먼저 이 주소로 프로브하며, 응답이 없을 때만 하위 Gateway를 시작합니다.",
@@ -635,8 +649,7 @@
     "reset": "초기화",
     "compressionRatioThreshold": "압축 비율 임계값",
     "compressionRatioThresholdDesc": "컨텍스트 압축 후 유지 비율. 90%는 10% 남을 때까지 압축. 범위 50%–95%, 기본값 90%.",
-    "sectionChatRouter": "Chat 라우터",
-    "chatRouterEnabled": "Chat 라우터 활성화",
+    "sectionChatRouter": "Chat Session 라우터",
     "chatRouterModel": "라우터 모델",
     "chatRouterModelAuto": "자동(컴팩트 모델 체인)",
     "chatRouterModelDesc": "직접 답변 여부 또는 실행 세션으로의 전달 여부를 결정하는 라우터 LLM 턴에 사용되는 모델입니다. 세션에서 선택한 채팅 모델을 따르지 않습니다. '자동'으로 두면 에이전트의 컴팩트 모델 체인을 사용합니다.",
@@ -644,7 +657,6 @@
     "chatRouterTimeoutMsDesc": "직접 전달로 폴백하기까지 단일 라우터 LLM 호출의 시간 초과. 범위 1000–300000, 기본 60000.",
     "chatRouterHistoryMaxTokens": "Chat 기록 컨텍스트 길이",
     "chatRouterHistoryMaxTokensDesc": "라우팅 판단 전에 라우터가 읽을 수 있는 대화 기록의 길이(토큰). 윈도우는 메시지 개수가 아니라 컨텍스트 크기로 잘립니다. 범위 1000–64000, 기본 8000.",
-    "chatRouterDisabledHint": "Chat 라우터가 꺼져 있습니다. 모든 채팅 메시지는 라우팅 턴 없이 처리됩니다.",
     "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
     "sectionAgentInfo": "Agent 정보",
     "sectionSessionParams": "세션 파라미터",
@@ -654,7 +666,11 @@
     "sessionLanguageFollow": "사용자 설정 따르기",
     "ensureProbing": "검사 중…",
     "ensureInstalling": "설치 중…",
-    "ensureFailed": "설치 실패",
+    "ensureViewLogs": "로그 보기",
+    "ensureLogsTitle": "MCP 시작 로그 — {{name}}",
+    "ensureLogsWaiting": "출력을 기다리는 중…",
+    "ensureLogsHint": "여기에 출력이 없다면 이 서버는 내려받을 것이 없습니다(이미 사용 가능하거나 stdio 전송이 아닙니다).",
+    "ensureFailed": "시작 실패",
     "mcpRecommended": "권장 MCP ({{count}})",
     "mcpRecommendedAllHandled": "모든 제안이 처리되었습니다.",
     "mcpRecommendedShowIgnored": "무시한 {{count}}개 표시",
@@ -1029,6 +1045,53 @@
     "showSource": "소스 보기",
     "previewLoading": "미리보기 로딩 중...",
     "previewDoubleClickHint": "더블클릭하여 에디터에서 열기",
+    "previewLoadFailed": "미리보기 로딩 실패",
+    "previewRetry": "재시도",
+    "docViewer": {
+      "saveAs": "다른 이름으로 저장",
+      "openExternally": "외부 앱에서 열기",
+      "saveFailed": "저장 실패",
+      "openExternalFailed": "외부 앱 열기 실패",
+      "loadFailed": "파일 로딩 실패",
+      "retry": "재시도"
+    },
+    "pdfViewer": {
+      "title": "PDF 미리보기",
+      "selectRegion": "영역을 선택해 대화로 보내기",
+      "regionPickerTitle": "영역 선택",
+      "prevPage": "이전 페이지",
+      "nextPage": "다음 페이지",
+      "pageIndicator": "{{page}} / 전체 {{pages}} 페이지",
+      "addRegion": "선택 영역을 대화로 보내기",
+      "addDocument": "문서 전체를 대화로 보내기",
+      "regionPrompt": "첨부한 이미지는 {{path}}의 {{page}} 페이지에서 선택한 영역입니다. 인쇄할 때와 같은 배치로 표시한 것입니다.",
+      "documentPrompt": "이것은 {{path}}를 인쇄할 때와 같은 배치의 PDF로 첨부한 것입니다. 수정해야 할 파일은 워크스페이스의 {{path}}입니다.",
+      "rasterizeFailed": "이 PDF를 읽을 수 없습니다"
+    },
+    "officePdf": {
+      "converting": "미리보기를 준비하는 중…",
+      "engineMissing": "Office 또는 LibreOffice을 찾을 수 없습니다 — 대략적인 레이아웃 미리보기입니다",
+      "convertFailed": "PDF 변환에 실패했습니다 — 대략적인 레이아웃으로 표시합니다",
+      "installHint": "LibreOffice 또는 Microsoft Office를 설치하면 실제 레이아웃 그대로 미리볼 수 있습니다"
+    },
+    "sheetViewer": {
+      "tooLarge": "시트가 너무 큽니다 — 첫 {{rows}}행만 미리보기",
+      "parseFailed": "스프레드시트 파싱 실패"
+    },
+    "docxViewer": {
+      "renderFailed": "문서 렌더링 실패 — 암호화되었거나 손상되었을 수 있습니다"
+    },
+    "pptxViewer": {
+      "degradedHint": "단순화된 미리보기(텍스트 및 이미지, 원본 재현 아님)",
+      "jumpPlaceholder": "슬라이드 번호",
+      "jump": "이동",
+      "page": "슬라이드 {{page}}",
+      "parseFailed": "프레젠테이션 파싱 실패"
+    },
+    "unsupported": {
+      "formatHint": "앱에서 {{name}} 미리보기를 지원하지 않습니다",
+      "useExternal": "외부 앱에서 열기를 사용하거나 먼저 사본을 저장하세요"
+    },
     "imageViewer": {
       "zoomIn": "확대",
       "zoomOut": "축소",
@@ -1411,6 +1474,10 @@
     "model": "모델: {{model}}",
     "level": "압축 레벨 {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "messageRef": {
+"chatBackground": "이 작업을 시작한 채팅의 배경 정보",
+"generic": "참조"
   },
   "chatError": {
     "contextOverflow": "컨텍스트 오버플로우: 모델 기능 정보가 없어 컨텍스트 사용량을 정확히 계산할 수 없습니다. 모델 이름이 정확한지(대소문자 구분) 확인하세요."
@@ -1810,13 +1877,19 @@
       "overview": "개요",
       "dependencies": "의존성",
       "attachments": "첨부 파일",
-      "tabs": "작업 상세",
+      "tabs": {
+        "basic": "기본 정보",
+        "related": "관련 작업",
+        "files": "파일",
+        "submissions": "제출 기록"
+      },
       "expand": "펼치기",
       "collapse": "접기",
       "createdBy": "작성자",
       "noDependencies": "의존성 없음",
       "noAttachments": "첨부 파일 없음",
       "addSubtask": "하위 작업 추가",
+      "subtasksNeedRow": "하위 작업은 저장 후 표시됩니다",
       "moveTo": "이동",
       "approve": "승인",
       "restart": "다시 시작",

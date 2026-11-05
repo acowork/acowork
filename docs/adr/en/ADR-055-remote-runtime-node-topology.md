@@ -399,7 +399,6 @@ Target:   Desktop ──HTTP──▶ Gateway proxy ──HTTP──▶ {node_en
 (a) Gateway → Node: cross-network HTTP, the endpoint comes from `RuntimeHttpRegistry` (reported by the Runtime at registration, whose value is the Node reverse proxy address)
 (b) Node → Runtime: a local loopback reverse proxy (the Node Agent's built-in axum route /agents/{id}/* → 127.0.0.1:{port}/*)
 (c) Runtime: zero changes, still binds 127.0.0.1:0
-```
 
 Key design points:
 

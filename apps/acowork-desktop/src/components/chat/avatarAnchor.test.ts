@@ -3,7 +3,7 @@
  *
  * The bug we're guarding against: when a user message carries two
  * attachments, the fold algorithm consolidates them into a single
- * `user_with_attachments` block.  The original avatar-anchor rule only
+ * `user_with_parts` block.  The original avatar-anchor rule only
  * recognised `user` blocks, so the agent avatar header disappeared for
  * every reply that followed such a block.  These tests pin both halves
  * of the fix: the fold produces the right block type, and the anchor
@@ -78,7 +78,7 @@ function systemMsg(timestamp: number, content = "sys"): ChatMessage {
 // ── foldMessages: user + multiple attachments ─────────────────────────────
 
 describe("foldMessages: user + multiple attachments", () => {
-  it("folds user + two attached_file system entries into a single user_with_attachments block", () => {
+  it("folds user + two attached_file system entries into a single user_with_parts block", () => {
     // Mirrors the conversation file the bug was reported from.
     const messages: ChatMessage[] = [
       userMsg(1785482337194, "两个问题：…", "msg-8758d4c0"),
@@ -99,7 +99,7 @@ describe("foldMessages: user + multiple attachments", () => {
     const blocks = foldMessages(messages);
 
     expect(blocks).toHaveLength(2);
-    expect(blocks[0].type).toBe("user_with_attachments");
+    expect(blocks[0].type).toBe("user_with_parts");
     expect(blocks[0].rawCount).toBe(3);
     expect(blocks[0].items.map((m) => m.id)).toEqual([
       "msg-8758d4c0",
@@ -120,7 +120,7 @@ describe("foldMessages: user + multiple attachments", () => {
 
     const blocks = foldMessages(messages);
     expect(blocks).toHaveLength(2);
-    expect(blocks[0].type).toBe("user_with_attachments");
+    expect(blocks[0].type).toBe("user_with_parts");
     expect(blocks[0].rawCount).toBe(3);
   });
 
@@ -152,7 +152,7 @@ describe("foldMessages: user + multiple attachments", () => {
     expect(blocks[2].type).toBe("assistant");
   });
 
-  it("preserves the content-derived blockId for the user_with_attachments block", () => {
+  it("preserves the content-derived blockId for the user_with_parts block", () => {
     const userId = "msg-abc";
     const messages: ChatMessage[] = [
       userMsg(1000, "x", userId),
@@ -167,7 +167,7 @@ describe("foldMessages: user + multiple attachments", () => {
 // ── isAgentBlock ─────────────────────────────────────────────────────────
 
 describe("isAgentBlock", () => {
-  function block(type: ChatMessage["type"] | "explore_group" | "user_with_attachments") {
+  function block(type: ChatMessage["type"] | "explore_group" | "user_with_parts") {
     return {
       blockId: "x",
       type,
@@ -191,9 +191,9 @@ describe("isAgentBlock", () => {
     expect(isAgentBlock(block("error"))).toBe(true);
   });
 
-  it("treats user / user_with_attachments / system / compaction as non-agent", () => {
+  it("treats user / user_with_parts / system / compaction as non-agent", () => {
     expect(isAgentBlock(block("user"))).toBe(false);
-    expect(isAgentBlock(block("user_with_attachments"))).toBe(false);
+    expect(isAgentBlock(block("user_with_parts"))).toBe(false);
     expect(isAgentBlock(block("system"))).toBe(false);
     expect(isAgentBlock(block("compaction"))).toBe(false);
   });
@@ -201,10 +201,10 @@ describe("isAgentBlock", () => {
 
 // ── shouldShowAgentAvatar: the regression ─────────────────────────────────
 
-describe("shouldShowAgentAvatar — user_with_attachments regression", () => {
-  it("shows the avatar when an agent block follows a user_with_attachments block (the reported bug)", () => {
+describe("shouldShowAgentAvatar — user_with_parts regression", () => {
+  it("shows the avatar when an agent block follows a user_with_parts block (the reported bug)", () => {
     // The exact sequence from the reported conversation:
-    //   [user_with_attachments (user + 2 attached_file), explore_group, assistant]
+    //   [user_with_parts (user + 2 attached_file), explore_group, assistant]
     const messages: ChatMessage[] = [
       userMsg(1785482337194, "q"),
       attachedFileMsg(1785482337197, "useScrollController.ts"),
@@ -215,7 +215,7 @@ describe("shouldShowAgentAvatar — user_with_attachments regression", () => {
     ];
     const blocks = foldMessages(messages);
     expect(blocks.map((b) => b.type)).toEqual([
-      "user_with_attachments",
+      "user_with_parts",
       "explore_group",
       "assistant",
     ]);
@@ -319,7 +319,7 @@ describe("shouldShowAgentAvatar — user_with_attachments regression", () => {
     expect(shouldShowAgentAvatar(blocks, 4)).toBe(true);
   });
 
-  it("treats back-to-back user_with_attachments blocks correctly: only the most recent anchors", () => {
+  it("treats back-to-back user_with_parts blocks correctly: only the most recent anchors", () => {
     const messages: ChatMessage[] = [
       userMsg(1000, "first", "u1"),
       attachedFileMsg(1001, "a.ts"),
@@ -330,11 +330,11 @@ describe("shouldShowAgentAvatar — user_with_attachments regression", () => {
     ];
     const blocks = foldMessages(messages);
     expect(blocks.map((b) => b.type)).toEqual([
-      "user_with_attachments",
-      "user_with_attachments",
+      "user_with_parts",
+      "user_with_parts",
       "assistant",
     ]);
-    // The assistant at index 2 should anchor to the second user_with_attachments.
+    // The assistant at index 2 should anchor to the second user_with_parts.
     expect(shouldShowAgentAvatar(blocks, 2)).toBe(true);
   });
 });
@@ -475,13 +475,13 @@ describe("shouldShowTrailingAgentHeader", () => {
     expect(shouldShowTrailingAgentHeader(blocks, 0)).toBe(true);
   });
 
-  it("returns true when the last block is a user_with_attachments block", () => {
+  it("returns true when the last block is a user_with_parts block", () => {
     const messages: ChatMessage[] = [
       userMsg(1000),
       attachedFileMsg(1001, "a.ts"),
     ];
     const blocks = foldMessages(messages);
-    expect(blocks[0].type).toBe("user_with_attachments");
+    expect(blocks[0].type).toBe("user_with_parts");
     expect(shouldShowTrailingAgentHeader(blocks, 0)).toBe(true);
   });
 

@@ -92,7 +92,7 @@ async function bootGateway(): Promise<void> {
 
     // 3) ADR-077: System Agent is a regular bundled agent. Installation
     //    happens through the standard flow (onboarding wizard / agentStore
-    //    `installAgent` → `POST /api/agents/ensure`), not a dedicated Tauri
+    //    `installAgent` → `POST /api/agents/install`), not a dedicated Tauri
     //    command. No per-boot System-Agent step needed here.
     //
     // 4) Register the frontend event listeners UNCONDITIONALLY and BEFORE
@@ -611,10 +611,12 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                 className={`relative z-10 flex flex-col items-center gap-10 transition-all duration-700 ${fadeIn ? "translate-y-0 opacity-100" : "translate-y-4 opacity-0"
                     }`}
             >
-                {/* Title — ACowork brand mark (shared SVG with README) */}
+                {/* Title — ACowork brand mark (shared SVG with README).
+                    331 keeps the mark at the size it had before the asset was
+                    re-framed to artwork + a uniform 6px gutter (396 → 364.25 wide). */}
                 <div className="flex flex-col items-center gap-5">
                     <h1 className="leading-none">
-                        <img src={brandMark} alt={t("splashScreen.altLogo")} width="360" />
+                        <img src={brandMark} alt={t("splashScreen.altLogo")} width="331" />
                     </h1>
                     <p className="text-sm font-medium uppercase tracking-[0.25em] text-text-tertiary ">
                         Collaborate with your colleagues and AI agents

@@ -114,6 +114,26 @@ enum OutputLine {
 
 // ── Public API ────────────────────────────────────────────────────────────
 
+/// Which of a child's two output streams a captured line came from.
+///
+/// Typed rather than a `&str` label: the set is a fact about the process, and a
+/// caller that mixed the two up would mislabel its own logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputStream {
+    Stdout,
+    Stderr,
+}
+
+impl OutputStream {
+    /// Lower-case label for log formatting (`[stdout] ...`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OutputStream::Stdout => "stdout",
+            OutputStream::Stderr => "stderr",
+        }
+    }
+}
+
 /// Run an already-spawned [`Child`] process with idle-timeout monitoring.
 ///
 /// Crate-internal: the only supported public entry point is
@@ -140,10 +160,27 @@ enum OutputLine {
 /// # Panics
 ///
 /// Panics if `child.stdout` or `child.stderr` is `None` (i.e. not piped).
+///
+/// Test-only: the containment regression tests spawn the child themselves so
+/// they can inspect its process tree, and must not re-derive the monitoring
+/// loop to do it. Production callers go through
+/// [`run_command_with_idle_timeout`] or its output-forwarding variant.
+#[cfg(test)]
 pub(crate) async fn run_with_idle_timeout(
-    mut child: Child,
+    child: Child,
     idle_timeout: Duration,
 ) -> Result<ProcessOutput, IdleTimeoutError> {
+    run_with_idle_timeout_callback(child, idle_timeout, &mut |_, _| {}).await
+}
+
+async fn run_with_idle_timeout_callback<F>(
+    mut child: Child,
+    idle_timeout: Duration,
+    on_output: &mut F,
+) -> Result<ProcessOutput, IdleTimeoutError>
+where
+    F: FnMut(OutputStream, &str),
+{
     // Contain the process tree so the timeout kill reaches descendants
     // too — surviving grandchildren keep the stdio pipes open and
     // block runtime teardown (see `process/tree.rs`).
@@ -190,10 +227,12 @@ pub(crate) async fn run_with_idle_timeout(
         match tokio::time::timeout(idle_timeout, rx.recv()).await {
             // A line arrived before the timeout — reset happens on next iteration.
             Ok(Some(OutputLine::Stdout(line))) => {
+                on_output(OutputStream::Stdout, &line);
                 stdout_buf.push_str(&line);
                 stdout_buf.push('\n');
             }
             Ok(Some(OutputLine::Stderr(line))) => {
+                on_output(OutputStream::Stderr, &line);
                 stderr_buf.push_str(&line);
                 stderr_buf.push('\n');
             }
@@ -280,6 +319,24 @@ pub async fn run_command_with_idle_timeout(
     cmd: &mut Command,
     idle_timeout: Duration,
 ) -> Result<ProcessOutput, IdleTimeoutError> {
+    run_command_with_idle_timeout_with_output(cmd, idle_timeout, &mut |_, _| {}).await
+}
+
+/// Run a command with idle-timeout monitoring and receive each output line as
+/// it is captured.
+///
+/// Same contract as [`run_command_with_idle_timeout`], plus a per-line sink.
+/// This is what lets a long-running installer be *observed* while it runs
+/// (minutes of package-manager output) instead of only after it exits. The sink
+/// runs on the monitoring task, so it must not block.
+pub async fn run_command_with_idle_timeout_with_output<F>(
+    cmd: &mut Command,
+    idle_timeout: Duration,
+    on_output: &mut F,
+) -> Result<ProcessOutput, IdleTimeoutError>
+where
+    F: FnMut(OutputStream, &str),
+{
     // Unix: make the child a process-group leader BEFORE spawn so the
     // timeout kill can signal the whole group (Windows containment is
     // attached post-spawn inside run_with_idle_timeout).
@@ -295,7 +352,7 @@ pub async fn run_command_with_idle_timeout(
         stderr: format!("Failed to spawn process: {e}"),
     })?;
 
-    run_with_idle_timeout(child, idle_timeout).await
+    run_with_idle_timeout_callback(child, idle_timeout, on_output).await
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────
@@ -465,6 +522,36 @@ mod tests {
             // `1>&2` redirects stdout to stderr.
             format!("echo({text}) 1>&2")
         }
+    }
+
+    // ── Output forwarding ──────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_output_callback_receives_stdout_and_stderr() {
+        let mut cmd = bash_cmd(&format!(
+            "{}{}{}",
+            echo_line("callback-out"),
+            SHELL_SEP,
+            echo_stderr("callback-err")
+        ));
+        let mut lines: Vec<(OutputStream, String)> = Vec::new();
+        let output =
+            run_command_with_idle_timeout_with_output(&mut cmd, TEST_IDLE, &mut |stream, line| {
+                lines.push((stream, line.to_string()));
+            })
+            .await
+            .expect("command should complete");
+
+        // The callback must see the same lines the buffers end up with — a
+        // sink that only fires at exit would not be progress.
+        assert_eq!(output.exit_code, Some(0));
+        assert!(lines.iter().any(|(stream, line)| *stream == OutputStream::Stdout
+            && line.starts_with("callback-out")));
+        assert!(lines.iter().any(|(stream, line)| *stream == OutputStream::Stderr
+            && line.contains("callback-err")));
+        assert!(lines.iter().all(|(stream, _)| {
+            *stream == OutputStream::Stdout || *stream == OutputStream::Stderr
+        }));
     }
 
     // ── Normal exit ────────────────────────────────────────────────────

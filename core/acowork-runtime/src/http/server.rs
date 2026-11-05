@@ -61,7 +61,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
     routing::{get, post, put},
 };
@@ -632,12 +632,34 @@ impl RuntimeHttpServer {
             // `/sessions/{sid}` param route, so it never shadows a real
             // session id.
             .route("/sessions/token-stats", get(get_token_stats))
+            // Chat Router token ledger (design 27 §4.4, plan §4.6 phase two):
+            // GET reads one chat's cumulative row for the per-chat usage
+            // view; DELETE is the Gateway's fan-out of a chat deletion, so
+            // the ledger's spend leaves the `token_stats` aggregate together
+            // with the chat history — the same delete-side symmetry session
+            // rows have. Idempotent 204: an agent that never routed this
+            // chat simply has nothing to drop.
+            .route(
+                "/chat-usage/{chat_id}",
+                get(get_chat_usage).delete(forget_chat_usage),
+            )
             // NEW: panel-4 endpoint, merges meta.json + live state snapshot.
             .route(
                 "/sessions/{sid}",
                 get(get_session).delete(crate::http::session_control::delete_session),
             )
             .route("/sessions/{sid}/messages", get(get_messages).post(crate::http::session_control::post_send_message))
+            // ADR-106 D4: the round projection read. One round by id, or a bounded
+            // batch — the reads a Chat block is rendered from. Both resolve off disk,
+            // so a `Closed` (not resident) session projects exactly like a live one.
+            .route(
+                "/sessions/{sid}/rounds",
+                get(crate::http::rounds::list_session_rounds),
+            )
+            .route(
+                "/sessions/{sid}/rounds/{round_id}",
+                get(crate::http::rounds::get_session_round),
+            )
             // ADR-076 §决策 4 (second wave): user-triggered session actions.
             // These carried no ownership decision, but they carried no
             // *identity* either, so over MQTT they could be replayed into
@@ -958,6 +980,20 @@ struct ListSessionsQuery {
     /// instead of persisting it. Default `false` = the ordinary history list.
     #[serde(default)]
     active: Option<bool>,
+    /// ADR-106 D7: narrow the listing to the execution sessions this Chat
+    /// surface may address (the second `@` level). Absent = the ordinary
+    /// listing. Part of the address, not a convenience filter: a caller who is
+    /// not a participant of that chat is refused, and the rule that admits the
+    /// rows lives in [`crate::agent::session::chat_candidates`] because that is
+    /// the node which owns the sessions.
+    #[serde(default)]
+    chat_session_id: Option<String>,
+    /// `group` marks a group chat; anything else — absent included — is a 1:1.
+    /// The two surfaces have different rules (a group lists only work bound to
+    /// it, a 1:1 also lists the human's own hand-started sessions), so guessing
+    /// one from the other would answer a different question than was asked.
+    #[serde(default)]
+    surface: Option<String>,
 }
 
 /// `GET /sessions` — full session list.
@@ -980,6 +1016,11 @@ struct ListSessionsQuery {
 /// This is the backend for `GET /api/agents/{id}/sessions` via the
 /// Gateway reverse proxy.
 ///
+/// ADR-106 D7: `chat_session_id` (+ `surface`) narrow the listing to one
+/// Chat's addressable executions. There is deliberately no separate candidate
+/// endpoint any more — the same permission filter, the same paging, one row
+/// shape; a second endpoint for one list is a second thing to keep in sync.
+///
 /// ADR-085 D4: an unfilled `session_metadata` slot is answered with
 /// `503 {"error":"session_not_ready"}` + `Retry-After: 2` — the
 /// startup window must be protocol-level distinguishable from "this
@@ -995,17 +1036,61 @@ async fn list_sessions(
     let size = query.size.unwrap_or(20).clamp(1, 200);
     let active_only = query.active.unwrap_or(false);
     let scope = crate::http::session_control::scope_from_headers(&headers);
+    let chat = chat_listing_scope(&scope, &query)?;
 
     // ADR-040: usecase trait is the sole implementation path.
     let svc = state.session_metadata.lock().await;
     let svc = svc.as_ref().ok_or_else(session_not_ready)?;
     let resp = svc
-        .list_sessions(page, size, &scope, active_only)
+        .list_sessions(page, size, &scope, active_only, chat.as_ref())
         .await
         .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?;
     Ok(Json(
         serde_json::to_value(resp).map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?,
     ))
+}
+
+/// ADR-106 D7: the Chat-scoped listing this request asks for, if any.
+///
+/// The chat-membership wall is checked here, before the scan, and answered with
+/// the same 404 body as "this agent has no such session": distinguishing
+/// "you are not in that chat" from "that chat does not exist" would make this
+/// endpoint an oracle over other people's chats. An empty-but-present
+/// `chat_session_id` is a caller bug, not a request for the unfiltered listing
+/// — answering it as one would silently widen a call that meant to be scoped.
+fn chat_listing_scope(
+    scope: &crate::conversation::SessionScope,
+    query: &ListSessionsQuery,
+) -> Result<Option<crate::usecases::ChatListingScope>, SessionHttpError> {
+    let Some(raw) = query.chat_session_id.as_deref() else {
+        return Ok(None);
+    };
+    let chat = raw.trim();
+    if chat.is_empty() {
+        return Err(session_http_error(StatusCode::BAD_REQUEST));
+    }
+    if !scope.sees_chat(chat) {
+        return Err(SessionHttpError::NoSession);
+    }
+    let surface = if query.surface.as_deref() == Some("group") {
+        crate::agent::session::chat_candidates::CandidateSurface::Group
+    } else {
+        crate::agent::session::chat_candidates::CandidateSurface::Direct
+    };
+    Ok(Some(crate::usecases::ChatListingScope {
+        chat_session_id: chat.to_string(),
+        surface,
+        // The reader's identity is the header's, never a query argument: a
+        // listing that let the caller name whose sessions to show would be a
+        // permission check written by the party it is checking. An empty uid is
+        // not an account either, so it must not become "the sessions owned by
+        // `""`" — matching on it would hand an unauthenticated scope whatever
+        // rows a stray empty initiator carries.
+        owner_user_id: scope
+            .caller_uid()
+            .filter(|uid| !uid.is_empty())
+            .map(str::to_string),
+    }))
 }
 
 /// Error for the session read endpoints, rendered as a status + optional
@@ -1214,6 +1299,65 @@ async fn get_token_stats(
         serde_json::to_value(resp)
             .map_err(|_| session_http_error(StatusCode::INTERNAL_SERVER_ERROR))?,
     ))
+}
+
+/// `GET /chat-usage/{chat_id}` — one Chat session's ledger row (cumulative
+/// tokens, call count, per-`(provider, model)` breakdown), read straight
+/// off this agent's private ledger (plan §4.6 phase two; backend for the
+/// Gateway-proxied `GET /api/agents/{id}/chat-usage/{chat_id}`).
+///
+/// `404` when this agent never recorded a router call for the chat — a
+/// legitimate empty answer (human-only traffic), which the per-chat view
+/// renders as "no spend attributed here". The read is pure statistics:
+/// the loopback surface is Gateway-facing only, same trust model as
+/// [`forget_chat_usage`].
+async fn get_chat_usage(
+    State(state): State<HttpState>,
+    Path(chat_id): Path<String>,
+) -> Result<Json<acowork_sqlite::ChatUsageRow>, StatusCode> {
+    // Same shape guard as the delete arm (server-side ids are UUIDs).
+    if chat_id.trim().is_empty() || chat_id.len() > 128 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let Some(core) = state.agent_core.read().ok().and_then(|g| g.clone()) else {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    };
+    let svc: Arc<dyn crate::usecases::ChatUsageService> =
+        crate::usecases::chat_usage_impl::RuntimeChatUsageService::new(core);
+    svc.get_chat(&chat_id)
+        .map(Json)
+        .ok_or(StatusCode::NOT_FOUND)
+}
+
+/// `DELETE /chat-usage/{chat_id}` — drop one Chat session's ledger row and
+/// net its breakdown out of `token_stats` (`SqliteChatUsageStore::forget`).
+///
+/// The chat domain (user service) owns the deletion decision; the Gateway
+/// only relays it to the agent participants of the deleted session (design
+/// 27 §4.4). Nothing here re-checks membership: the Runtime's loopback HTTP
+/// surface is Gateway-facing only, and the ledger is pure statistics — the
+/// worst a forged call buys is an under-counted chat, never lost history.
+///
+/// `204` on every successful attempt, row existed or not (idempotent — a
+/// replayed delete must not flip the Gateway's fan-out to a failure).
+async fn forget_chat_usage(
+    State(state): State<HttpState>,
+    Path(chat_id): Path<String>,
+) -> StatusCode {
+    // Server-side ids are UUIDs; a pathological path segment is a client
+    // bug, not a miss to swallow.
+    if chat_id.trim().is_empty() || chat_id.len() > 128 {
+        return StatusCode::BAD_REQUEST;
+    }
+    let Some(core) = state.agent_core.read().ok().and_then(|g| g.clone()) else {
+        return StatusCode::SERVICE_UNAVAILABLE;
+    };
+    // Same funnel the router records through: one Arc clone, the ledger
+    // store resolves off the core's open SQLite handle.
+    let svc: Arc<dyn crate::usecases::ChatUsageService> =
+        crate::usecases::chat_usage_impl::RuntimeChatUsageService::new(core);
+    svc.forget_chat(&chat_id);
+    StatusCode::NO_CONTENT
 }
 
 /// Query parameters for `GET /sessions/{sid}/messages`.
@@ -1528,10 +1672,15 @@ async fn read_workspace_file(
 /// HTML-preview endpoints here instead of reading the workspace
 /// filesystem itself. Returns `Content-Type` + verbatim bytes so the
 /// preview iframe's `<img>` / `<link>` / `<script>` sub-resources resolve.
+///
+/// The body is a **stream** (never buffered in the Runtime) and the
+/// response carries `ETag` + `Content-Length`; `If-None-Match` (forwarded
+/// verbatim by both reverse-proxy hops) short-circuits to 304.
 async fn read_workspace_raw(
     State(state): State<HttpState>,
     Path(file_rel_path): Path<String>,
     Query(q): Query<crate::usecases::workspace_query::RawFileQuery>,
+    headers: HeaderMap,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
     let svc = state.workspace_query.lock().await;
     let svc = svc.as_ref().ok_or((
@@ -1542,15 +1691,31 @@ async fn read_workspace_raw(
         workspace_id: q.workspace_id,
         path: file_rel_path,
     };
+    let inm = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|v| v.to_str().ok());
     let dto = svc
-        .read_file_raw(&params)
+        .read_file_raw(&params, inm)
         .await
         .map_err(workspace_error_to_response)?;
-    Ok((
-        StatusCode::OK,
-        [(header::CONTENT_TYPE, dto.mime_type)],
-        dto.bytes,
-    ))
+
+    let mut resp_headers = HeaderMap::new();
+    resp_headers.insert(header::ETAG, dto.etag.parse().unwrap_or_else(|_| HeaderValue::from_static("\"\"")));
+    if let Some(lm) = dto.last_modified
+        && let Ok(v) = HeaderValue::from_str(&lm)
+    {
+        resp_headers.insert(header::LAST_MODIFIED, v);
+    }
+    // 304: no body, no Content-Type/Length (RFC 9110 §15.4.5).
+    if dto.body.is_none() {
+        return Ok((StatusCode::NOT_MODIFIED, resp_headers).into_response());
+    }
+    resp_headers.insert(header::CONTENT_TYPE, dto.mime_type.parse().unwrap_or(HeaderValue::from_static("application/octet-stream")));
+    if let Ok(v) = HeaderValue::from_str(&dto.size.to_string()) {
+        resp_headers.insert(header::CONTENT_LENGTH, v);
+    }
+    let body = axum::body::Body::from_stream(dto.body.expect("checked above"));
+    Ok((StatusCode::OK, resp_headers, body).into_response())
 }
 
 /// `GET /workspaces/find` — fuzzy filename search (Ctrl+P-style palette).
@@ -3072,17 +3237,22 @@ async fn put_agent_mcp_servers(
             // ADR-090 D5: first-enable ensure runs in the Agent process —
             // the machine the Runtime actually spawns on. Fire-and-forget;
             // progress is polled via GET /agents/{id}/mcp-ensure/{name}.
-            if !newly_enabled.is_empty() {
+            // The ack lists only what is actually watchable: a server whose
+            // transport is not stdio gets no ensure attempt, so echoing it
+            // would make the client poll a route that always 404s.
+            let ensuring = if newly_enabled.is_empty() {
+                Vec::new()
+            } else {
                 crate::mcp_ensure::ensure_newly_enabled(
                     std::path::Path::new(&state.work_dir),
                     &newly_enabled,
                     state.mcp_notifier.clone(),
-                );
-            }
+                )
+            };
             Ok(Json(serde_json::json!({
                 "agent_id": resp.agent_id,
                 "active_servers": resp.active_servers,
-                "ensuring": newly_enabled,
+                "ensuring": ensuring,
             })))
         }
         Err(crate::usecases::AgentToolsError::UnknownServers(unknown)) => Err((
@@ -3857,6 +4027,97 @@ mod tests {
         assert!(!empty_cache_is_definitive(S::Failed as u8, true));
     }
 
+    /// ADR-106 D7: the chat-scoped listing is an address, not a convenience
+    /// filter. A blank id is a caller bug (400) rather than a request for
+    /// everything; a chat the caller is not in is refused exactly like a chat
+    /// that does not exist (one 404 body, so the endpoint is not an existence
+    /// oracle); the reader comes from the scope headers, never the query string.
+    #[test]
+    fn chat_scoped_listing_is_an_address_not_a_filter() {
+        use crate::agent::session::chat_candidates::CandidateSurface;
+        use acowork_core::session_meta::SessionScope;
+
+        // The error type is only ever rendered, so it carries no `Debug`; the
+        // test reads the status it would answer with instead.
+        fn status_of(err: SessionHttpError) -> StatusCode {
+            err.into_response().status()
+        }
+        let accept = |result: Result<
+            Option<crate::usecases::ChatListingScope>,
+            SessionHttpError,
+        >| match result {
+            Ok(Some(scope)) => scope,
+            Ok(None) => panic!("expected a scoped listing, got the unfiltered one"),
+            Err(err) => panic!("expected acceptance, got {}", status_of(err)),
+        };
+        let query = |chat: Option<&str>, surface: Option<&str>| ListSessionsQuery {
+            page: None,
+            size: None,
+            active: None,
+            chat_session_id: chat.map(str::to_string),
+            surface: surface.map(str::to_string),
+        };
+        let member = SessionScope::User {
+            uid: "u-1".to_string(),
+            chats: vec!["chat-1".to_string()],
+        };
+
+        // No parameter at all = the ordinary listing, unmodified.
+        assert!(matches!(
+            chat_listing_scope(&member, &query(None, None)),
+            Ok(None)
+        ));
+
+        // The membership wall: another chat's id, and an account in no chat, both
+        // answer with the variant this endpoint already uses for "there is no
+        // session here" — one shape for both facts, so it is not an oracle.
+        assert!(matches!(
+            chat_listing_scope(&member, &query(Some("chat-2"), None)).err(),
+            Some(SessionHttpError::NoSession)
+        ));
+        assert!(matches!(
+            chat_listing_scope(&SessionScope::user("u-2"), &query(Some("chat-1"), None)).err(),
+            Some(SessionHttpError::NoSession)
+        ));
+
+        // Present but blank is a caller bug, not a widening of the request.
+        assert_eq!(
+            chat_listing_scope(&member, &query(Some("   "), None))
+                .err()
+                .map(status_of),
+            Some(StatusCode::BAD_REQUEST)
+        );
+
+        // What the scan is handed: the trimmed id, the surface vocabulary that
+        // recognises only `group`, and the reader's own uid.
+        let scoped = accept(chat_listing_scope(
+            &member,
+            &query(Some(" chat-1 "), Some("group")),
+        ));
+        assert_eq!(scoped.chat_session_id, "chat-1");
+        assert_eq!(scoped.surface, CandidateSurface::Group);
+        assert_eq!(scoped.owner_user_id.as_deref(), Some("u-1"));
+        let scoped = accept(chat_listing_scope(
+            &member,
+            &query(Some("chat-1"), Some("GROUP")),
+        ));
+        assert_eq!(scoped.surface, CandidateSurface::Direct, "only the exact token is a group");
+
+        // Local mode has no accounts to attribute a session to, and an empty uid
+        // is not an account either.
+        let scoped = accept(chat_listing_scope(
+            &SessionScope::Unfiltered,
+            &query(Some("chat-1"), None),
+        ));
+        assert_eq!(scoped.owner_user_id, None, "local mode names no reader");
+        let empty_uid = SessionScope::User {
+            uid: String::new(),
+            chats: vec!["chat-1".to_string()],
+        };
+        let scoped = accept(chat_listing_scope(&empty_uid, &query(Some("chat-1"), None)));
+        assert_eq!(scoped.owner_user_id, None, "an empty uid must not match sessions owned by `\"\"`");
+    }
+
     /// Stable instance identity used by all in-process HTTP tests.
     /// Pre-ADR-073 these tests used the package id `com.test.agent`
     /// as both agent_id and URL path; ADR-073 requires the URL path
@@ -3872,6 +4133,7 @@ mod tests {
         Arc::new(crate::usecases::RuntimeSessionMetadataService::new(
             work_dir.to_path_buf(),
             Arc::new(crate::usecases::agent_token_impl::NoopAgentTokenService),
+            Arc::new(crate::usecases::chat_usage_impl::NoopChatUsageService),
             snapshots,
             latest,
         ))

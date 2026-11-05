@@ -75,6 +75,10 @@ pub struct ProviderWiring {
     pub compat_cache: Option<Arc<crate::providers::compat::CompatCache>>,
     pub responses_compat_cache:
         Option<Arc<crate::providers::responses_compat::ResponsesCompatCache>>,
+    /// `Messages` API parameter-trim cache (temperature / thinking shape).
+    /// Its own file and payload type, for the same D7.3 reason.
+    pub anthropic_compat_cache:
+        Option<Arc<crate::providers::anthropic_compat::AnthropicCompatCache>>,
 }
 
 /// Create a provider based on protocol type.
@@ -140,6 +144,8 @@ pub fn create_provider_with_wiring(
                     t.stream_read_timeout,
                 )
             };
+            let mut provider = provider;
+            install_anthropic_wiring(&mut provider, &wiring);
             Arc::new(provider)
         }
 
@@ -320,6 +326,18 @@ fn install_wiring(provider: &mut OpenAIProvider, wiring: &ProviderWiring) {
     }
 }
 
+/// Install the provider id (cache namespace) and the Messages-API trim cache
+/// on an Anthropic provider. Without this it still corrects rejected parameters
+/// but forgets them.
+fn install_anthropic_wiring(provider: &mut AnthropicProvider, wiring: &ProviderWiring) {
+    if let Some(id) = wiring.provider_id.clone() {
+        provider.set_provider_id(id);
+    }
+    if let Some(cache) = wiring.anthropic_compat_cache.clone() {
+        provider.set_compat_cache(cache);
+    }
+}
+
 /// Infer protocol type from provider name for standalone mode.
 ///
 /// In standalone mode (no Gateway), there is no offline metadata to
@@ -487,6 +505,7 @@ mod adr103_router_tests {
             provider_id: Some("p".into()),
             compat_cache: None,
             responses_compat_cache: None,
+            anthropic_compat_cache: None,
         };
         let p = create_provider_with_wiring(
             "openai",

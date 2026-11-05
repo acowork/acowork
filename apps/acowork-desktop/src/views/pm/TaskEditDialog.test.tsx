@@ -170,6 +170,14 @@ vi.mock("../../i18n/useTranslation", () => ({
 }));
 
 import { TaskEditDialog } from "./TaskEditDialog";
+import type { TaskEditTab } from "./taskEditTabs";
+
+/** Click a tab and prove it opened — every tab's content is one click in. */
+function openTab(tab: TaskEditTab) {
+  const button = screen.getByTestId(`task-tab-${tab}`);
+  fireEvent.click(button);
+  expect(button.getAttribute("aria-selected")).toBe("true");
+}
 
 function row(over: Partial<PmTaskResponse> = {}): PmTaskResponse {
   return {
@@ -248,9 +256,52 @@ describe("chrome — the box the user asked to keep", () => {
     expect(panel?.parentElement?.className).toContain("items-center");
   });
 
-  it("has no tab strip at all", () => {
+  // 信息量太大堆一屏是这次要修的问题（缺陷 t-f23fd817）。标签栏是 GlobalSearchDialog
+  // 那套外壳：标题行下面一条固定高的分隔行，正文滚动。
+  it("carries a tab strip under the title", () => {
+    const { container } = render(<TaskEditDialog onClose={() => {}} />);
+    const strip = screen.getByRole("tablist");
+    const header = container.querySelector('[role="dialog"] > header');
+    // Directly under the header, and never part of the scrolling body.
+    expect(header?.nextElementSibling).toBe(strip);
+    expect(strip.className).toContain("border-b");
+    expect(strip.className).toContain("min-h-[var(--ui-dialog-zone-h)]");
+    // A separate zone below it carries the open tab; the strip never scrolls
+    // with the body.
+    const body = strip.nextElementSibling as HTMLElement | null;
+    expect(body).not.toBeNull();
+    expect(body!.contains(strip)).toBe(false);
+    expect(body!.textContent).toContain("pm.task.title");
+  });
+
+  it("opens on 基本信息 and only 基本信息", () => {
     render(<TaskEditDialog onClose={() => {}} />);
-    expect(screen.queryByRole("tablist")).toBeNull();
+    expect(screen.getByTestId("task-tab-basic").getAttribute("aria-selected")).toBe("true");
+    expect(screen.getByText("pm.task.title")).toBeTruthy();
+    // The other tabs' bodies are not merely hidden — they are not rendered.
+    expect(screen.queryByTestId("activity-section")).toBeNull();
+    expect(screen.queryByTestId("subtask-tree")).toBeNull();
+  });
+
+  it("a persisted row reaches all four tabs, in order", () => {
+    render(<TaskEditDialog onClose={() => {}} />);
+    const labels = screen.getAllByRole("tab").map((el) => el.textContent);
+    expect(labels).toEqual([
+      "pm.task.tabs.basic",
+      "pm.task.tabs.related",
+      "pm.task.tabs.files",
+      "pm.task.tabs.submissions",
+    ]);
+  });
+
+  it("a new task only gets the two tabs it can fill", () => {
+    // 文件上传 posts to /tasks/{tid}/attachments and 提交记录 reads
+    // /tasks/{tid}/activity — no id, no tab.
+    mocks.mode = "create";
+    mocks.detail = null;
+    render(<TaskEditDialog onClose={() => {}} />);
+    const labels = screen.getAllByRole("tab").map((el) => el.textContent);
+    expect(labels).toEqual(["pm.task.tabs.basic", "pm.task.tabs.related"]);
   });
 
   it("type / priority / assignee share one row", () => {
@@ -289,16 +340,21 @@ describe("the three carried-over capabilities", () => {
       { id: "act-2", kind: "comment", actor: "human", actor_kind: "user", text: "ok", attachment_ids: [], created_at: "2026-10-30T08:41:00Z" },
     ] as PmTaskActivity[];
     render(<TaskEditDialog onClose={() => {}} />);
+    openTab("submissions");
     const section = screen.getByTestId("activity-section");
     expect(section.getAttribute("data-count")).toBe("2");
-    expect(screen.getByText("pm.activity.title")).toBeTruthy();
   });
 
   it("a persisted row offers attachments, subtasks and delete", () => {
     render(<TaskEditDialog onClose={() => {}} />);
-    expect(screen.getByText("pm.task.attachments")).toBeTruthy();
+    // Each tab owns one kind of content — 文件上传 does not carry the timeline.
+    openTab("files");
+    expect(screen.queryByTestId("activity-section")).toBeNull();
     expect(screen.getByText("pm.task.uploadAttachment")).toBeTruthy();
+    openTab("related");
     expect(screen.getByTestId("subtask-tree")).toBeTruthy();
+    expect(screen.getByText("+ pm.task.addSubtask")).toBeTruthy();
+    // Delete is chrome, not content: it stays in the footer on every tab.
     expect(screen.getByText("pm.task.delete")).toBeTruthy();
   });
 
@@ -323,8 +379,23 @@ describe("the three carried-over capabilities", () => {
     expect(screen.queryByText("pm.task.uploadAttachment")).toBeNull();
   });
 
+  it("a new task speaks about no row — not even a cached one", () => {
+    // Same trap on the tabs: the store keeps the last detail, so "detail exists"
+    // is not "this form is about that row". A create form must not print the
+    // previous row's audit line or its children.
+    mocks.mode = "create";
+    render(<TaskEditDialog onClose={() => {}} />);
+    expect(screen.queryByText("pm.task.createdBy")).toBeNull();
+    openTab("related");
+    expect(screen.queryByTestId("subtask-tree")).toBeNull();
+    expect(screen.getByText("pm.task.subtasksNeedRow")).toBeTruthy();
+    // The parent / dependency pickers are create-time fields, so they stay.
+    expect(screen.getByText("pm.task.parentTask")).toBeTruthy();
+  });
+
   it("uploading hands the picked file to the store", async () => {
     render(<TaskEditDialog onClose={() => {}} />);
+    openTab("files");
     const input = screen.getByLabelText("pm.task.uploadAttachment") as HTMLInputElement;
     const file = new File(["data"], "shot.png", { type: "image/png" });
     fireEvent.change(input, { target: { files: [file] } });
@@ -334,6 +405,7 @@ describe("the three carried-over capabilities", () => {
   it("deleting an attachment asks first", () => {
     mocks.attachments = [att()];
     render(<TaskEditDialog onClose={() => {}} />);
+    openTab("files");
     fireEvent.click(screen.getAllByLabelText("pm.task.deleteAttachment")[0]);
     expect(mocks.deleteAttachment).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("pm.task.deleteAttachmentTitle"));
@@ -344,6 +416,7 @@ describe("the three carried-over capabilities", () => {
 
   it("添加子任务 opens a create form that knows where it came from", () => {
     render(<TaskEditDialog onClose={() => {}} />);
+    openTab("related");
     fireEvent.click(screen.getByText("+ pm.task.addSubtask"));
     expect(mocks.openCreate).toHaveBeenCalledWith({
       projectId: "p-1",
@@ -354,6 +427,7 @@ describe("the three carried-over capabilities", () => {
 
   it("clicking a child row re-opens this box on that row", () => {
     render(<TaskEditDialog onClose={() => {}} />);
+    openTab("related");
     fireEvent.click(screen.getByText("child-row"));
     expect(mocks.openTask).toHaveBeenCalledWith("t-child");
   });
@@ -468,6 +542,32 @@ describe("leaving a dirty form", () => {
     expect(screen.getByText("pm.task.discardChangesTitle")).toBeTruthy();
   });
 
+  // 用户报的 bug：点 取消 → 弹出放弃确认 → 点「放弃修改」没反应，只有点
+  // 「取消」才关得掉。根因是确认回调又走了一次带 dirty 守卫的导航，守卫把
+  // 刚关掉的确认框重新装回去了。
+  it("discarding actually leaves — the confirm must not re-arm itself", () => {
+    mocks.dirty = true;
+    const onClose = vi.fn();
+    render(<TaskEditDialog onClose={onClose} />);
+    fireEvent.click(screen.getByText("common.cancel"));
+    fireEvent.click(screen.getByText("pm.task.discardChangesConfirm"));
+
+    expect(mocks.reset).toHaveBeenCalledTimes(1);
+    expect(onClose).toHaveBeenCalledTimes(1);
+    // …and the confirm is gone, not re-opened over the (now discarded) form.
+    expect(screen.queryByText("pm.task.discardChangesTitle")).toBeNull();
+  });
+
+  it("discarding from ESC or the backdrop leaves too", () => {
+    mocks.dirty = true;
+    const onClose = vi.fn();
+    const { container } = render(<TaskEditDialog onClose={onClose} />);
+    fireEvent.click(container.querySelector(".absolute.inset-0")!);
+    fireEvent.click(screen.getByText("pm.task.discardChangesConfirm"));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("pm.task.discardChangesTitle")).toBeNull();
+  });
+
   it("ESC goes through the guard rather than closing over the draft", () => {
     mocks.dirty = true;
     render(<TaskEditDialog onClose={() => {}} />);
@@ -492,6 +592,7 @@ describe("leaving a dirty form", () => {
   it("navigating to a child asks too, and discarding runs the navigation", () => {
     mocks.dirty = true;
     render(<TaskEditDialog onClose={() => {}} />);
+    openTab("related");
     fireEvent.click(screen.getByText("child-row"));
     expect(mocks.openTask).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("pm.task.discardChangesConfirm"));

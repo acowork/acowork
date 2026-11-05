@@ -310,6 +310,24 @@ pub enum ChunkEvent {
     SessionStateChanged {
         state: acowork_core::mqtt_proto::SessionState,
     },
+    /// ADR-106 revision (2026-11-03): a round changed state — it reached a
+    /// terminal outcome, or it parked on a card a human must answer.
+    ///
+    /// This is the notification face that D3's `exec → chat` zero-write removed
+    /// and never replaced: with no mirror row to update, a Chat surface that
+    /// does not re-read has no way to learn that a round it is showing as
+    /// in-flight has ended. Published at QoS 1, non-retained, on the execution
+    /// session's `messages/round_state` topic — the block content itself still
+    /// comes from the projection read (D4), because this event fires at the turn
+    /// boundary while the round's terminal record is appended by the session's
+    /// single writer (ADR-092). The event therefore means "worth re-reading
+    /// now", not "here is the final content".
+    RoundState {
+        round_id: String,
+        /// The Chat this round answers to, so the subscriber can confirm the
+        /// D10 binding instead of trusting the topic it received on.
+        chat_session_id: String,
+    },
 }
 
 /// Unified control signal returned by `poll_control()`.
@@ -480,13 +498,37 @@ pub struct AgentLoop {
     /// left a turn paused waiting for a human echoed as `aborted`.
     pub(crate) turn_outcome: crate::agent::intent_turn::TurnOutcome,
 
-    /// Design 27 §5.5.4: the Chat-session cards this session wrote and has
-    /// not yet closed. Unlike the turn-scoped fields above, this list
-    /// deliberately survives the turn — a `pause` card is answered by the
-    /// NEXT turn, and the turn-end flush needs the remaining entries after
-    /// [`Self::chat_writeback`] has already been taken. Each entry carries
-    /// its own row coordinates for that reason.
-    pub(crate) open_chat_cards: Vec<crate::agent::loop_interaction::OpenChatCard>,
+    /// Design 27 §5.5.4: the interactions this turn has opened and not yet
+    /// resolved. Unlike the turn-scoped fields above, this list deliberately
+    /// survives the turn — a `pause` is answered by the NEXT turn, and the
+    /// round snapshot taken at turn end needs the entry that is still open.
+    ///
+    /// ADR-106 D8: this is bookkeeping, not a Chat write. The card used to be an
+    /// `interaction_request` row in the Chat session, which made the Chat the
+    /// store of an execution fact and gave it a second copy to keep closed; the
+    /// round's `card` in the projection is the record now, and this list is what
+    /// supplies it.
+    pub(crate) open_interactions: Vec<crate::agent::loop_interaction::OpenInteraction>,
+
+    /// ADR-106 D3: the Chat-reference facts the delivering transport holds and
+    /// the loop cannot derive (which Chat row this turn answers, whether the
+    /// routing opened a new session, the dispatch brief). Set per turn beside
+    /// [`Self::turn_surface`] by the arm that dequeued the message; reset to
+    /// "nothing to reference" by `end_turn_obligations` so a turn cannot inherit
+    /// another's task name.
+    pub(crate) turn_reference: crate::agent::intent_turn::TurnReference,
+
+    /// ADR-107: the **reference parts** of this turn's inbound message —
+    /// context the Runtime supplies and the human did not type (today: the
+    /// Chat Router's `exec_session_create(background)`).
+    ///
+    /// Set per turn by the arm that dequeued the message, consumed exactly once
+    /// at the top of [`Self::run_inner`]: the model-facing message takes them
+    /// through `intent_turn::render_user_turn`, and the JSONL keeps them as
+    /// `context_ref` rows beside the `user` row — never inside it. Cleared at
+    /// turn end so a turn that never reaches its user-row write (a replay, an
+    /// early failure) cannot leave a reference to be attached to the next one.
+    pub(crate) turn_message_refs: Vec<acowork_core::MessageRef>,
 }
 
 impl AgentLoop {
@@ -557,7 +599,9 @@ impl AgentLoop {
             pending_intent: None,
             chat_writeback: None,
             turn_surface: Default::default(),
-            open_chat_cards: Vec::new(),
+            open_interactions: Vec::new(),
+            turn_reference: Default::default(),
+            turn_message_refs: Vec::new(),
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -630,7 +674,9 @@ impl AgentLoop {
             pending_intent: None,
             chat_writeback: None,
             turn_surface: Default::default(),
-            open_chat_cards: Vec::new(),
+            open_interactions: Vec::new(),
+            turn_reference: Default::default(),
+            turn_message_refs: Vec::new(),
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -785,16 +831,216 @@ impl AgentLoop {
         raw_user_message: Option<&str>,
         attached_items: Option<&[acowork_core::protocol::AttachedItem]>,
     ) -> Result<String> {
-        self.run_inner(
-            user_message,
-            context_builder,
-            false,
-            content_parts,
-            message_id,
-            raw_user_message,
-            attached_items,
+        // ADR-106 D2: the round boundary. `run` is the one funnel every inbound turn
+        // passes through, so this is where a round is opened and closed, and the id
+        // is derived from the inbound message id rather than minted fresh — a
+        // redelivery of the same message then lands in the same round instead of
+        // opening a second one, and no protocol field is needed to carry it.
+        //
+        // A turn that follows a `waiting` one continues the round it was parked on.
+        // §5.5.4 already declares the next turn in that Chat to be the card's answer
+        // (`supersede_pause_cards`), so minting here would split one logical
+        // execution across two blocks. After a restart the writer holds no round and
+        // the answer degrades into a new one — a fresh block, not a corrupt one.
+        let conversation = self.session.conversation.clone();
+        let continuing =
+            self.turn_outcome == crate::agent::intent_turn::TurnOutcome::Waiting;
+        if let Some(conv) = &conversation {
+            let inbound = message_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let round_id = match (continuing, conv.active_round_id(), inbound) {
+                (true, Some(id), _) => Some(id),
+                (_, _, Some(raw)) => Some(crate::rounds::mint_round_id(raw)),
+                // A turn with no inbound id and no round to continue has nothing
+                // to be named after. `mint_round_id` would fall back to a random
+                // UUID; a round nobody can re-address (and no chat row can ever
+                // reference) is worse than no round at all, so the turn runs
+                // unstamped. Every transport supplies an id, so this is the
+                // degenerate path, not the fallback.
+                _ => None,
+            };
+            if let Some(round_id) = round_id {
+                // ADR-106 D3: the Chat's reference row for this round, written
+                // before the round opens. This is the one place that can name the
+                // round correctly — a turn answering a parked card continues that
+                // card's round, so the id is not a function of this turn's
+                // inbound message — and it is the whole of the `exec → chat`
+                // write path: nothing after this point touches the Chat
+                // transcript.
+                //
+                // A precondition, not a courtesy: a round the human cannot see
+                // must not run, so a failed write ends the turn before its first
+                // token is spent and before the user row is appended. The natural
+                // key (`round:{round_id}`) makes a redelivery of the same round a
+                // no-op.
+                self.open_round(&round_id).await?;
+            }
+        }
+
+        let outcome = self
+            .run_inner(
+                user_message,
+                context_builder,
+                false,
+                content_parts,
+                message_id,
+                raw_user_message,
+                attached_items,
+            )
+            .await;
+
+        self.close_turn_round(outcome)
+    }
+
+    /// The round this turn is running under, as the writer sees it (ADR-106 D2).
+    ///
+    /// The turn's own view comes first because a continuation is named after the
+    /// round it resumed, not after the message that resumed it — a card written
+    /// under the wrong round id would be answered against a round that never
+    /// existed. Falls back to the surface's derived round for a session with no
+    /// conversation writer (the in-memory loop of a unit test).
+    pub(crate) fn current_round_id(&self) -> String {
+        self.session
+            .conversation
+            .as_ref()
+            .and_then(|conv| conv.active_round_id())
+            .unwrap_or_else(|| self.turn_surface.round_id.clone())
+    }
+
+    /// Arm a round once the Chat can see it — and make sure the index can answer it
+    /// before the Chat can.
+    ///
+    /// The single caller of `begin_round` in the Runtime, so "a round exists only
+    /// where the Chat can see it" is a property of the code rather than something
+    /// every entry point has to remember: a second site that stamped rows without
+    /// publishing their reference would produce exactly the invisible round D3
+    /// exists to prevent.
+    ///
+    /// Order matters and is `announce → reference → stamp`: the reference row is what
+    /// makes the block render, and the block's projection read is triggered by that
+    /// row, so a round that is visible but not yet in the index is read as "not
+    /// found" — a hole the chat caches forever (D5) for a run that completes moments
+    /// later. Announcing first costs one side-table line per turn and closes that
+    /// window by construction.
+    async fn open_round(&self, round_id: &str) -> crate::error::Result<()> {
+        if let Some(conv) = &self.session.conversation {
+            conv.announce_round(round_id);
+        }
+        self.publish_round_reference(round_id).await?;
+        if let Some(conv) = &self.session.conversation {
+            conv.begin_round(round_id);
+        }
+        Ok(())
+    }
+
+    /// Write this round's `execution_round` reference row into the Chat it
+    /// belongs to (ADR-106 D3). No-op when the turn has no Chat accountable
+    /// to it.
+    ///
+    /// The row carries no content by construction (the body is empty and the
+    /// store refuses a non-empty one); everything the block shows is read from
+    /// the projection this round id names.
+    async fn publish_round_reference(&self, round_id: &str) -> crate::error::Result<()> {
+        let Some(chat_session_id) = self.turn_surface.echo_chat() else {
+            return Ok(());
+        };
+        let Some(session_id) = self.session_core.session_id.clone() else {
+            // Without a session coordinate the reference would name a round no
+            // reader can resolve; refusing is the honest outcome — the row is
+            // required to carry `agent_session_id`.
+            return Err(crate::error::RuntimeError::Ipc(
+                "cannot reference a round from a session with no session id".to_string(),
+            ));
+        };
+        let instance_id = self.core.config.agent_instance_id.clone();
+        let gateway_host = self
+            .core
+            .config
+            .gateway_host
+            .clone()
+            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let node_token = self.core.config.mqtt_password.clone().unwrap_or_default();
+        let meta = crate::agent::intent_turn::execution_round_meta(
+            round_id,
+            &self.turn_reference,
+            &session_id,
+            &instance_id,
+        );
+        crate::agent::intent_turn::append_chat_row(
+            &instance_id,
+            &gateway_host,
+            &node_token,
+            chat_session_id,
+            crate::agent::intent_turn::KIND_EXECUTION_ROUND,
+            self.turn_surface.answerable_by.as_deref().unwrap_or(""),
+            "",
+            meta,
         )
         .await
+        .map_err(crate::error::RuntimeError::Ipc)
+    }
+
+    /// Close the round opened by [`Self::run`] / [`Self::replay`] (ADR-106 D2).
+    ///
+    /// Runs on every exit path, errors included: a turn that returned `Err` ended, and
+    /// a round left open is what made the old mirror show a run that had already died
+    /// as one still in progress.
+    fn close_turn_round(&self, outcome: Result<String>) -> Result<String> {
+        // ADR-106 revision (2026-11-03): the round id is read *before* the
+        // closure, because closing a round clears the writer's active round —
+        // asking afterwards would return the next turn's id, or none at all.
+        let round_id = self.current_round_id();
+        if let Some(conv) = &self.session.conversation {
+            match &outcome {
+                Err(_) => conv.end_round("failed", None),
+                Ok(_) if self.turn_outcome == crate::agent::intent_turn::TurnOutcome::Waiting => {
+                    conv.snapshot_round("waiting", self.open_pause_card());
+                }
+                Ok(_) => conv.end_round(self.turn_outcome.as_str(), None),
+            }
+        }
+        // The doorbell is published for both shapes of the closure above — a
+        // terminal outcome and a round parked on a card are the same notification
+        // hole — and it names the round only: the word a reader sees comes from
+        // the projection read it triggers (D4), not from this event.
+        self.publish_round_state(&round_id);
+        outcome
+    }
+
+    /// Ring the round doorbell (ADR-106 revision 2026-11-03).
+    ///
+    /// Routed through the chunk channel like every other session event, which is
+    /// what keeps the relay's call order equal to the broker's enqueue order —
+    /// the Chat must never be told to re-read before the turn's own final events
+    /// have been handed to the publisher.
+    ///
+    /// A no-op when there is no round to name: a turn that never opened one (no
+    /// conversation writer, or the degenerate path where the transport supplied
+    /// no round coordinate) has nothing for a Chat block to re-read.
+    fn publish_round_state(&self, round_id: &str) {
+        if round_id.is_empty() {
+            return;
+        }
+        let chat_session_id = self
+            .session
+            .conversation
+            .as_ref()
+            .and_then(|conv| conv.chat_session_id())
+            .unwrap_or_default();
+        if !self.session_core.try_send_chunk(ChunkEvent::RoundState {
+            round_id: round_id.to_string(),
+            chat_session_id,
+        }) {
+            // No session id / no chunk channel / channel full: the interval
+            // backstop is the only remaining path, and saying so here is
+            // cheaper than pretending success.
+            tracing::debug!(
+                round_id = %round_id,
+                "round_state: chunk channel unavailable, dropping round doorbell"
+            );
+        }
     }
 
     /// Re-run the agent loop after a debug resume (user message already in history).
@@ -805,17 +1051,55 @@ impl AgentLoop {
         user_message: &str,
         context_builder: &mut ContextBuilder,
         content_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
+        message_id: Option<String>,
     ) -> Result<String> {
-        self.run_inner(
-            user_message,
-            context_builder,
-            true,
-            content_parts,
-            None,
-            None,
-            None,
-        )
-        .await
+        // ADR-106 D2: a replay is not a new round. The rows it writes belong to the
+        // round the original message opened, and without that stamp they would carry no
+        // round at all (`note_entry` ignores unstamped rows): the round's recorded
+        // answer would stay frozen on the row written before the pause, and — since
+        // that round is already terminal — the chat block would show the pre-pause
+        // answer forever with nothing to heal it.
+        //
+        // The writer's own view comes first because it survives the continuation case
+        // (a round that reopened on a card answer is not named after this message id),
+        // and the id is the fallback because a restarted writer holds no round. A
+        // resumed round is armed through [`Self::open_round`] like any other: the
+        // reference row it would write is already durable under the same natural key
+        // (the turn that produced these rows could not have run without it), so the
+        // publish is a no-op — and the one case where it is not a no-op is the case
+        // where the Chat cannot see the round being resumed, which is not a state to
+        // resume into.
+        let resumed = match self.session.conversation.as_ref() {
+            Some(conv) => match conv.active_round_id().or_else(|| {
+                message_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(crate::rounds::mint_round_id)
+            }) {
+                Some(id) => {
+                    self.open_round(&id).await?;
+                    true
+                }
+                None => false,
+            },
+            None => false,
+        };
+        let outcome = self
+            .run_inner(
+                user_message,
+                context_builder,
+                true,
+                content_parts,
+                message_id,
+                None,
+                None,
+            )
+            .await;
+        if resumed {
+            return self.close_turn_round(outcome);
+        }
+        outcome
     }
 
     /// Core agent loop shared by [`run`] and [`replay`].
@@ -857,6 +1141,12 @@ impl AgentLoop {
         // abort from the previous turn must not leak into this one.
         self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Completed;
 
+        // ADR-107: this turn's reference parts, consumed exactly once. Taken
+        // here (not in the `!replay` branch) so a replay turn also drops them —
+        // they belong to a message that is already in history, and a lease that
+        // outlived its turn would land on the next one.
+        let message_refs = std::mem::take(&mut self.turn_message_refs);
+
         // Replay is a debug path over existing history; the staged turn
         // message from the live run is not re-embedded (memory tools fall
         // back to keyword-only recall).
@@ -875,6 +1165,20 @@ impl AgentLoop {
             // Add user message to history
             // ADR-011: reset compaction flag — new user input means new content since last compaction
             self.session.is_compacted = false;
+            // A document part is only ever for the round that attached it, and
+            // this is the boundary where that round ends. Dropping the previous
+            // rounds' parts here is what keeps their base64 out of memory, out
+            // of the token projection, and out of the per-build clone — the
+            // request-side filter in `context.rs` only governs what is sent.
+            // `doc_reader` still reaches the file: the blob is on disk and the
+            // hint line in the message text names it.
+            let stale_documents = self.session.history.drop_documents_from_previous_rounds();
+            if stale_documents > 0 {
+                tracing::debug!(
+                    stale_documents,
+                    "Expired previous rounds' inlined documents at the round boundary"
+                );
+            }
             // Per-turn text for ToolContext (kept for the WHOLE turn).
             // Lives on this per-session loop, never on agent-shared tool
             // instances.
@@ -911,6 +1215,15 @@ impl AgentLoop {
                     None,
                     message_id,
                 );
+            }
+
+            // ADR-107: the turn's reference parts, written AFTER the user row
+            // for the same reason (and by the same fold contract) as the
+            // attachments below: they are rows of their own, and the human's
+            // row keeps their words untouched. Before the attachments, so the
+            // transcript reads words → background → files.
+            if !message_refs.is_empty() {
+                self.write_message_refs(&message_refs);
             }
 
             // ADR-046: Persist attachment records AFTER the user message so
@@ -1151,19 +1464,15 @@ impl AgentLoop {
                 if self.turn_surface.card_target().is_some()
                     && self.turn_surface.has_human == Some(true)
                 {
-                    self.write_interaction_card(
-                        serde_json::json!({
-                            "kind": "pause",
-                            "request_id": self.turn_surface.trigger_message_id,
-                            "question": pause_message,
-                        }),
-                        &pause_message,
-                    )
-                    .await;
+                    self.track_interaction(serde_json::json!({
+                        "kind": "pause",
+                        "request_id": self.current_round_id(),
+                        "question": pause_message,
+                    }));
                     self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Waiting;
                     tracing::warn!(
                         iteration,
-                        "Chat turn hit iteration limit — card written, ending waiting"
+                        "Chat turn hit iteration limit — round parked on the pause card, ending waiting"
                     );
                     self.transition_status(SessionStatus::Idle);
                     return Ok(format!("[waiting] {pause_message}"));
@@ -1172,7 +1481,7 @@ impl AgentLoop {
                     self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Aborted;
                     tracing::warn!(
                         iteration,
-                        request_id = %self.turn_surface.trigger_message_id,
+                        round_id = %self.current_round_id(),
                         "Intent responder hit iteration limit — aborting with receipt"
                     );
                     self.transition_status(SessionStatus::Idle);
@@ -1346,18 +1655,14 @@ impl AgentLoop {
                         if self.turn_surface.card_target().is_some()
                             && self.turn_surface.has_human == Some(true)
                         {
-                            self.write_interaction_card(
-                                serde_json::json!({
-                                    "kind": "pause",
-                                    "request_id": self.turn_surface.trigger_message_id,
-                                    "question": loop_summary,
-                                }),
-                                &loop_summary,
-                            )
-                            .await;
+                            self.track_interaction(serde_json::json!({
+                                "kind": "pause",
+                                "request_id": self.current_round_id(),
+                                "question": loop_summary,
+                            }));
                             self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Waiting;
                             tracing::warn!(
-                                "Chat turn hit loop detection — card written, ending waiting"
+                                "Chat turn hit loop detection — round parked on the pause card, ending waiting"
                             );
                             self.transition_status(SessionStatus::Idle);
                             return Ok(format!("[waiting] {loop_summary}"));
@@ -1367,7 +1672,7 @@ impl AgentLoop {
                         {
                             self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Aborted;
                             tracing::warn!(
-                                request_id = %self.turn_surface.trigger_message_id,
+                                round_id = %self.current_round_id(),
                                 "Intent responder hit loop detection — aborting with receipt"
                             );
                             self.transition_status(SessionStatus::Idle);
@@ -2356,6 +2661,110 @@ mod tests {
         assert_eq!(result.unwrap(), "Final response");
         // Verify usage was tracked (budget guard should have been updated)
         assert!(agent_loop.history().estimate_total_tokens() > 0);
+    }
+
+    /// The round boundary is where an inlined PDF expires — not the request
+    /// filter alone. Otherwise the base64 of the whole file sits in the session
+    /// for the rest of its life, is deep-copied into every `build()`, and keeps
+    /// being priced at pages × 1500 by every `recalibrate_tokens()` (the one
+    /// compaction runs after replacing the middle) even though no later request
+    /// carries it.
+    #[tokio::test]
+    async fn test_next_round_drops_the_previous_rounds_document_payload() {
+        use acowork_core::providers::traits::ContentPart;
+
+        // Responses without a usage report: `calibrate_from_usage` would
+        // otherwise overwrite the estimate with the API's own prompt size and
+        // the local projection — the thing under test — would never be visible.
+        let provider = Arc::new(MockProvider::new(vec![
+            MockResponse::Raw(Box::new(ChatResponse {
+                content: "Final response".to_string(),
+                ..Default::default()
+            })),
+            MockResponse::Raw(Box::new(ChatResponse {
+                content: "Second response".to_string(),
+                ..Default::default()
+            })),
+        ]));
+        let (mut agent_loop, _) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            provider,
+            entries(vec![]),
+            test_budget(),
+            None,
+            None,
+        );
+        let mut context_builder = ContextBuilder::new("System".to_string());
+        agent_loop
+            .run(
+                "read the attached pdf",
+                &mut context_builder,
+                Some(vec![ContentPart::document(
+                    "JVBERi0xLjQ=".repeat(400),
+                    "a.pdf",
+                    Some(30),
+                )]),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let attaching_idx = agent_loop
+            .history()
+            .messages()
+            .iter()
+            .position(|m| m.content == "read the attached pdf")
+            .expect("first turn's message is in history");
+        assert!(
+            matches!(
+                agent_loop.history().messages()[attaching_idx]
+                    .content_parts
+                    .as_deref(),
+                Some([ContentPart::Document { .. }])
+            ),
+            "turn 1 must have put the document into history"
+        );
+        let first_turn_tokens = agent_loop.history().token_count();
+        let first_turn_bytes = agent_loop.history().messages_json_bytes();
+        assert!(
+            first_turn_tokens >= 30 * crate::token::counter::TOKENS_PER_PDF_PAGE,
+            "turn 1's projection priced the document, got {first_turn_tokens}"
+        );
+
+        agent_loop
+            .run(
+                "and now the next question",
+                &mut context_builder,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+
+        let attaching = &agent_loop.history().messages()[attaching_idx];
+        // The words stay; the bytes do not. Reaching the file again is
+        // `doc_reader`'s job, off the hint path in the text.
+        assert_eq!(attaching.role, MessageRole::User);
+        assert!(
+            attaching.content_parts.is_none(),
+            "got {:?}",
+            attaching.content_parts
+        );
+        assert!(
+            agent_loop.history().token_count() + 20 < first_turn_tokens,
+            "the projection must stop carrying the payload too: turn 1 = {first_turn_tokens}, \
+             turn 2 = {}",
+            agent_loop.history().token_count()
+        );
+        assert!(
+            agent_loop.history().messages_json_bytes() < first_turn_bytes,
+            "and so must the byte accounting the usage report reads"
+        );
     }
 
     // ── Token ratio calibration end-to-end ────────────────────────────
@@ -4081,6 +4490,131 @@ mod tests {
         );
     }
 
+    /// ADR-107: the turn's reference parts become `context_ref` rows of their
+    /// own, immediately after the `user` row — the `user` row keeps the
+    /// human's words alone.
+    ///
+    /// This is the durable half of the title fix. The auto-title is written
+    /// from the first `user` row (`read_first_user_message`), so as long as the
+    /// router's background could only enter the session as a reference, a
+    /// dispatched session's title describes what the person asked instead of
+    /// the router's fixed opening sentence.
+    #[tokio::test]
+    async fn test_run_persists_reference_parts_beside_the_user_row() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let work_dir = dir.path();
+        let session_id = "test-reference-parts";
+        let committed = Arc::new(AtomicUsize::new(0));
+        let config = crate::conversation::SessionConfig {
+            agent_id: "com.test.loop".to_string(),
+            workspace_id: None,
+            model: None,
+            provider: None,
+        };
+        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
+            work_dir, session_id, config, 0, // max_sessions
+            committed,
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            Arc::new(MockProvider::single_text("ok")),
+            entries(vec![]),
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+
+        // What the Chat Router hands over: the human's words as the message,
+        // the router's framing as a reference part.
+        let words = "提交一下本地修改";
+        let background = "只改测试，别动实现；上一个会话已经跑过 clippy。";
+        agent_loop.turn_message_refs =
+            vec![acowork_core::MessageRef::chat_background(background)];
+        let llm_message = crate::agent::intent_turn::render_user_turn(
+            words,
+            &agent_loop.turn_message_refs,
+        );
+
+        let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
+        let result = agent_loop
+            .run(
+                &llm_message,
+                &mut context_builder,
+                None,
+                Some("msg-ref-1".to_string()),
+                Some(words),
+                None,
+            )
+            .await;
+        assert!(result.is_ok(), "run() should succeed: {result:?}");
+        conversation
+            .flush_pending()
+            .await
+            .expect("flush should succeed");
+
+        let jsonl_path = work_dir
+            .join("conversations")
+            .join(format!("{session_id}.jsonl"));
+        let mut raw = String::new();
+        std::fs::File::open(&jsonl_path)
+            .unwrap()
+            .read_to_string(&mut raw)
+            .unwrap();
+        let lines: Vec<&str> = raw.lines().collect();
+
+        let user_idx = lines
+            .iter()
+            .position(|l| l.contains(r#""id":"msg-ref-1""#))
+            .expect("the user row is written");
+        let user_line = lines[user_idx];
+        assert!(user_line.contains(r#""role":"user""#), "{user_line}");
+        assert!(
+            user_line.contains(words),
+            "the user row keeps the human's words: {user_line}"
+        );
+        assert!(
+            !user_line.contains(background),
+            "the router's framing must never enter the user row — that row is what              auto-title is written from: {user_line}"
+        );
+
+        // The reference is its own row, directly after the user row so the
+        // transcript folds it into the same visual block (ADR-046's rule).
+        let ref_line = lines
+            .get(user_idx + 1)
+            .expect("a reference row follows the user row");
+        assert!(ref_line.contains(r#""role":"system""#), "{ref_line}");
+        assert!(ref_line.contains(background), "{ref_line}");
+        assert!(
+            ref_line.contains(r#""type":"context_ref""#),
+            "the row is discriminated by metadata.type: {ref_line}"
+        );
+        assert!(
+            ref_line.contains(r#""kind":"chat_background""#),
+            "the row states what kind of reference it is: {ref_line}"
+        );
+
+        // The title reader sees the words, and only the words.
+        assert_eq!(
+            crate::conversation::read_first_user_message(&jsonl_path).as_deref(),
+            Some(words),
+            "auto-title input is the human's first message"
+        );
+
+        // Consumed once: a later turn cannot inherit this turn's references.
+        assert!(
+            agent_loop.turn_message_refs.is_empty(),
+            "the reference lease is taken by the turn that ran"
+        );
+    }
+
     /// When `raw_user_message` is None (legacy callers), `run()` falls back
     /// to `user_message` for JSONL persistence — backward-compatible.
     #[tokio::test]
@@ -4348,6 +4882,7 @@ mod tests {
             Some(MessageRole::Assistant)
         ));
     }
+
 }
 
 

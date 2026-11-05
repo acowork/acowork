@@ -2,6 +2,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentChatView } from "./AgentChatView";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
+import type { RunBlock } from "./chatTranscriptGroups";
 
 const AGENT = "agent-1";
 const SESSION = "chat-1";
@@ -9,15 +10,22 @@ const SESSION = "chat-1";
 // Drill collaborators — the 查看执行 path asserts against these.
 let setModeMock: ReturnType<typeof vi.fn>;
 let openSessionMock: ReturnType<typeof vi.fn>;
+let seedTitleMock: ReturnType<typeof vi.fn>;
 
 // ── chat-session store ────────────────────────────────────────────────
 // `windows` / `sending` / `draft` are read through the hook; the composer
-// actions through `getState`. The pure read projections (`closedCardIds`,
-// `humanAnsweredCardIds`, …) are kept REAL via importOriginal so the view's
-// event-row + inline-card wiring is exercised against the actual rules.
+// actions through `getState`. The transcript no longer derives any card/turn
+// state client-side (ADR-106 D8/D9), so what is left to pin here is routing:
+// which row becomes a block, and what the surface hands it.
 let windows: Record<string, unknown>;
 // `sending` is the in-flight HTTP window; the view reads one flag per session.
 let sendingMap: Record<string, unknown> = {};
+// The turn this device sent and has not seen an outcome for (ADR-106 D9). The
+// real store writes it from the send's response and clears it on the deadline;
+// here it is set directly, because the claim's SHAPE is the store's contract and
+// what this file pins is what the surface does with it.
+let inflightMap: Record<string, unknown> = {};
+let settleTurnMock: ReturnType<typeof vi.fn> = vi.fn();
 let drafts: Record<string, unknown> = {};
 let availableModels: unknown[] = [];
 let sendTextMock: ReturnType<typeof vi.fn> = vi.fn();
@@ -28,7 +36,13 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
     ...actual,
     useChatSessionStore: Object.assign(
       (selector: (state: unknown) => unknown) =>
-        selector({ windows, sending: sendingMap, draft: drafts, attachedContext: {} }),
+        selector({
+          windows,
+          sending: sendingMap,
+          inflight: inflightMap,
+          draft: drafts,
+          attachedContext: {},
+        }),
       {
         getState: () => ({
           sendText: (...a: unknown[]) => sendTextMock(...(a as [])),
@@ -37,6 +51,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
           clearLocate: vi.fn(),
           setMode: (...a: unknown[]) => setModeMock(...(a as [])),
           saveDraft: vi.fn().mockResolvedValue(undefined),
+          settleTurn: (...a: unknown[]) => settleTurnMock(...(a as [])),
           upload: vi.fn().mockResolvedValue({ id: "a1", filename: "f", mime: "image/png", size: 1 }),
         }),
       },
@@ -54,7 +69,7 @@ vi.mock("../../stores/chatStore", () => ({
         // Optimistic-title seed (ADR-099): the event-row effect calls this once
         // per resolved exec session; stubbed here — the store's own suite
         // (chatStore.sessionTitle.test.ts) covers its real behaviour.
-        seedOptimisticTitle: vi.fn(),
+        seedOptimisticTitle: (...a: unknown[]) => seedTitleMock(...(a as [])),
         resolveQuestion: vi.fn(),
       }),
     },
@@ -105,10 +120,112 @@ vi.mock("../common/AgentAvatar", () => ({ AgentAvatar: () => <div /> }));
 vi.mock("../common/Tooltip", () => ({
   Tooltip: ({ children }: { children?: React.ReactNode }) => <>{children}</>,
 }));
+// The task list reads the agent store's paging state; its own behaviour is
+// pinned in ChatAddressPicker.test.tsx. Here it is a marker so the cases below
+// stay about one thing: does the gesture open it.
+vi.mock("./ChatAddressPicker", () => ({
+  ChatAddressPicker: () => <div data-testid="address-picker" />,
+}));
 vi.mock("../editor/markdownLinkResolver", () => ({
   handleChatMarkdownLinkClick: vi.fn(),
   markdownUrlTransform: (x: string) => x,
 }));
+
+// ADR-106 D3/D8: what a round contains, whether it is still running, and what it
+// is parked on are the BLOCK's concern — pinned in ChatExecutionBlock.test.tsx.
+// Here it is a stub that records its wiring, so these cases stay about the
+// transcript's routing: which rows fold into which block, and what the surface
+// hands it. The stub echoes the block's own inputs back as attributes, and
+// renders the folded question lines so a case can prove the transcript is not
+// holding the same sentence twice.
+vi.mock("./ChatExecutionBlock", () => ({
+  ChatExecutionBlock: (props: {
+    block: RunBlock;
+    chatSessionId: string;
+    showHeader?: boolean;
+    onJumpToExec?: (agentInstanceId: string, execSid: string) => void;
+    onReplyToRound?: (rowId: string, quote: string) => void;
+  }) => (
+    <div
+      data-testid="exec-block"
+      data-chat={props.chatSessionId}
+      data-session={`${props.block.instanceId}|${props.block.execSessionId}`}
+      data-row={props.block.anchorRow.meta?.message_id}
+      data-refs={props.block.rounds.map((r) => r.ref).join(",")}
+      data-header={props.showHeader ? "yes" : "no"}
+    >
+      {props.block.rounds.map((r) => (
+        <span key={r.ref} data-testid="block-question">
+          {r.showUserLine ? (r.triggerRow?.body ?? "") : ""}
+        </span>
+      ))}
+      <button
+        data-testid="block-drill"
+        onClick={() =>
+          props.onJumpToExec?.(props.block.instanceId, props.block.execSessionId)
+        }
+      >
+        drill
+      </button>
+      <button
+        data-testid="block-reply"
+        onClick={() =>
+          props.onReplyToRound?.(props.block.anchorRow.meta?.message_id ?? "", "round quote")
+        }
+      >
+        reply
+      </button>
+    </div>
+  ),
+}));
+
+/** The one row shape a round leaves in the chat: a bodyless pointer (D3). */
+function roundRow(
+  seq: number,
+  execSid = "exec-9",
+  round = `r${seq}`,
+  inReplyTo = "u1",
+): ChatMessageRow {
+  return {
+    seq,
+    ts: seq,
+    from: "agent",
+    kind: "execution_round",
+    body: "",
+    to: "user",
+    meta: {
+      message_id: `round:${execSid}|${round}`,
+      agent_instance_id: AGENT,
+      agent_session_id: execSid,
+      round_id: round,
+      in_reply_to: inReplyTo,
+    },
+  };
+}
+
+function notice(seq: number, meta: Record<string, unknown>): ChatMessageRow {
+  return {
+    seq,
+    ts: seq,
+    from: "agent",
+    kind: "system_notice",
+    body: "",
+    to: "user",
+    meta: { message_id: `n${seq}`, ...meta },
+  };
+}
+
+function windowOf(...rows: ChatMessageRow[]) {
+  return {
+    [SESSION]: {
+      older: [],
+      tail: rows,
+      tailLoaded: rows.length,
+      total: rows.length,
+      loadingOlder: false,
+    },
+  };
+}
 
 function userRow(seq: number, body: string, extra?: Record<string, unknown>): ChatMessageRow {
   return {
@@ -123,32 +240,47 @@ function userRow(seq: number, body: string, extra?: Record<string, unknown>): Ch
 }
 
 function askCardRow(seq: number): ChatMessageRow {
-  return {
+  const row: ChatMessageRow = {
     seq,
     ts: seq,
     from: "agent",
+    // The retired kind: a pre-ADR-106 transcript held the decision card as its
+    // own chat row.
     kind: "interaction_request",
     body: "",
     to: "user",
-    meta: {
-      message_id: `card${seq}`,
-      agent_session_id: "exec-9",
-      interaction: {
-        kind: "ask_question",
-        request_id: "q1",
-        question: "Pick one",
-        options: ["A", "B"],
-      },
-    },
+    meta: { message_id: `card${seq}`, agent_session_id: "exec-9" },
   };
+  // The card payload rode `meta.interaction`, which the wire type no longer
+  // names — so the legacy row is assembled the way the store used to deliver it.
+  (row.meta as Record<string, unknown>).interaction = {
+    kind: "ask_question",
+    request_id: "q1",
+    question: "Pick one",
+    options: ["A", "B"],
+  };
+  return row;
+}
+
+/** The composer's send button, disabled or not. No `@testing-library/jest-dom`
+ *  in this project, so the `disabled` property is read directly (the idiom
+ *  `SplashScreen.candidate.test.tsx` uses too). */
+function sendDisabled(): boolean {
+  return (
+    screen.getByRole("button", {
+      name: "chatPanel.sendMessage",
+    }) as HTMLButtonElement
+  ).disabled;
 }
 
 describe("AgentChatView event-log wiring", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     sendingMap = {};
+    inflightMap = {};
     setModeMock = vi.fn();
     openSessionMock = vi.fn().mockResolvedValue(undefined);
+    seedTitleMock = vi.fn();
     sendTextMock = vi.fn().mockResolvedValue(undefined);
     vi.stubGlobal(
       "fetch",
@@ -156,362 +288,320 @@ describe("AgentChatView event-log wiring", () => {
     );
   });
 
-  it("renders an unanswered ask_question as an inline card that answers in place", () => {
-    windows = {
-      [SESSION]: {
-        older: [],
-        tail: [userRow(1, "hello there"), askCardRow(2)],
-        tailLoaded: 2,
-        total: 2,
-        loadingOlder: false,
-      },
-    };
+  it("renders an execution_round row as the block that owns it, addressed to this chat (D3/D10)", () => {
+    windows = windowOf(userRow(1, "hello there"), roundRow(2));
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
 
-    // The durable user_message paints as a normal bubble.
-    expect(screen.getByText("hello there")).toBeTruthy();
-
-    // The interaction_request row is a durable, actionable card: its question
-    // and option list render in the stream.
-    expect(screen.getByText("Pick one")).toBeTruthy();
-
-    // Select an option radio then submit to answer through the chat channel,
-    // bound to the card id (the answer channel's in_reply_to target).
-    fireEvent.click(screen.getByText("A"));
-    fireEvent.click(screen.getByText("askQuestionCard.submit"));
-    expect(sendTextMock).toHaveBeenCalledWith(SESSION, "A", "card2");
+    // The pointer becomes exactly one block carrying the chat it must be
+    // participation-checked against, the session it belongs to, and the round
+    // triple it names — D10 makes the chat part of the address, not a filter.
+    const block = screen.getByTestId("exec-block");
+    expect(block.getAttribute("data-chat")).toBe(SESSION);
+    expect(block.getAttribute("data-session")).toBe(`${AGENT}|exec-9`);
+    expect(block.getAttribute("data-refs")).toBe(`${AGENT}|exec-9|r2`);
+    // The human's row is the round's question line, so it renders exactly once —
+    // inside the block, not as a bubble standing next to it. One sentence twice
+    // is the failure mode D6's re-delivery rule already forbids.
+    expect(screen.getAllByText("hello there")).toHaveLength(1);
+    expect(
+      screen.getByText("hello there").closest('[data-testid="exec-block"]'),
+    ).toBeTruthy();
   });
 
-  it("renders a chat-surface answer as an event line, not a bubble", () => {
-    windows = {
-      [SESSION]: {
-        older: [],
-        tail: [
-          userRow(1, "hello there"),
-          askCardRow(2),
-          userRow(3, "B", { in_reply_to: "card2" }),
-        ],
-        tailLoaded: 3,
-        total: 3,
-        loadingOlder: false,
-      },
-    };
+  it("the rounds of ONE execution session fold into a single block (ADR-106 D3/D4)", () => {
+    // A long-lived run leaves a reference row per round in the chat. Those rows
+    // are one session's work, so they are one block: a card per row stacked
+    // near-identical boxes down the transcript, which is neither the chat's nor
+    // the execution surface's grammar.
+    windows = windowOf(
+      userRow(1, "first ask"),
+      roundRow(2, "exec-9", "r2", "u1"),
+      userRow(3, "second ask"),
+      roundRow(4, "exec-9", "r4", "u3"),
+    );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
 
-    // No live card once the human answered.
-    expect(screen.queryByText("chatView.freeAnswer")).toBeNull();
-    // No receipt either — it repeated the question without saying who answered
-    // or what they said. The slot is empty now. (The negative lookahead keeps
-    // this about the removed `cardAnswered` receipt key, not the new
-    // `cardAnsweredNote` / `cardAnsweredInExec` event lines.)
-    expect(screen.queryByText(/chatView\.cardAnswered(?!Note|InExec)/)).toBeNull();
-    // And the slot must not fall through to the unanswered note either: an
-    // answered card that reads "Unanswered: …" is worse than the receipt was.
-    expect(screen.queryByText(/chatView.cardUnanswered/)).toBeNull();
-    // The answer is a step of the run, not an utterance: a row-tier event
-    // line naming the choice — no bubble, no avatar, no quote of the question
-    // (the question was just read in the open card above).
-    expect(screen.getByText("chatView.cardAnsweredNote|B")).toBeTruthy();
+    const blocks = screen.getAllByTestId("exec-block");
+    expect(blocks).toHaveLength(1);
+    // Both rounds are in it, oldest first, and the block sits where the session's
+    // newest work is.
+    expect(blocks[0]!.getAttribute("data-refs")).toBe(
+      `${AGENT}|exec-9|r2,${AGENT}|exec-9|r4`,
+    );
+    expect(blocks[0]!.getAttribute("data-row")).toBe(`round:exec-9|r4`);
+    expect(screen.getAllByTestId("block-question")).toHaveLength(2);
+    expect(screen.getAllByText("first ask")).toHaveLength(1);
+    expect(screen.getAllByText("second ask")).toHaveLength(1);
+  });
+
+  it("two execution sessions in one chat stay two blocks, not one merged run", () => {
+    // Folding is per SESSION, not per surface: two execution sessions in one chat
+    // are two runs and must not merge into one header.
+    windows = windowOf(
+      userRow(1, "to the bug"),
+      roundRow(2, "exec-9", "r2", "u1"),
+      userRow(3, "to the docs"),
+      roundRow(4, "exec-10", "r2", "u3"),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    const blocks = screen.getAllByTestId("exec-block");
+    expect(blocks).toHaveLength(2);
+    expect(blocks.map((b) => b.getAttribute("data-session"))).toEqual([
+      `${AGENT}|exec-9`,
+      `${AGENT}|exec-10`,
+    ]);
+  });
+
+  it("a block reply addresses the composer to the reference row (D6 level 1)", () => {
+    windows = windowOf(userRow(1, "hello there"), roundRow(2));
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    fireEvent.click(screen.getByTestId("block-reply"));
+    // The chip names what is being answered; the send itself stays with the
+    // composer, so continuing a round is an ordinary turn with an address.
+    expect(screen.getByText(/round quote/)).toBeTruthy();
+  });
+
+  it("no chat row paints a decision card or a resolution receipt any more (D8/D12)", () => {
+    windows = windowOf(
+      userRow(1, "hello there"),
+      askCardRow(2),
+      userRow(3, "B", { in_reply_to: "card2" }),
+      notice(4, { notice_type: "interaction_resolved", in_reply_to: "card2", resolution: "answered" }),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    // The card was the round's state, and D8 moved it into the block. A legacy
+    // transcript must not resurrect an actionable card, a quote of the question,
+    // or the two receipts that used to narrate the answer.
     expect(screen.queryByText("Pick one")).toBeNull();
-    expect(document.querySelector('[data-event-text="turn"]')).toBeTruthy();
+    expect(screen.queryByText(/chatView\.(cardAnswered|cardUnanswered)/)).toBeNull();
+    expect(document.querySelectorAll('[data-testid="exec-block"]')).toHaveLength(0);
+    // The answer row is a plain human turn — a bubble, not an event line.
+    expect(screen.getByText("B")).toBeTruthy();
   });
 
-  it("renders an exec-surface answer as one event line and dedups the notice", () => {
-    const resolvedNotice = (extra: Record<string, unknown>): ChatMessageRow => ({
-      seq: 9,
-      ts: 9,
-      from: "agent",
-      kind: "system_notice",
-      body: "",
-      to: "user",
-      meta: {
-        message_id: "ir:card2",
-        notice_type: "interaction_resolved",
-        in_reply_to: "card2",
-        ...extra,
-      },
-    });
-    windows = {
-      [SESSION]: {
-        older: [],
-        tail: [
-          userRow(1, "hello there"),
-          askCardRow(2),
-          resolvedNotice({ resolution: "answered" }),
-        ],
-        tailLoaded: 3,
-        total: 3,
-        loadingOlder: false,
-      },
-    };
+  it("retired milestones stay history: no line, no bubble, no invented wait (D9/D12)", () => {
+    windows = windowOf(
+      userRow(1, "hello there"),
+      notice(2, { notice_type: "turn_dispatched", in_reply_to: "u1", agent_session_id: "exec-9" }),
+      notice(3, { notice_type: "turn_started", in_reply_to: "u1", agent_session_id: "exec-9" }),
+      notice(4, {
+        notice_type: "turn_routed",
+        in_reply_to: "u1",
+        agent_session_id: "exec-9",
+        turn_mode: "new",
+      }),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    expect(screen.queryAllByText(/chatView\.notice\./)).toHaveLength(0);
+    // The routing reaction used to be synthesized into an attributed bubble —
+    // a milestone is not speech, so nothing re-attributes and no line appears.
+    expect(document.querySelector('[data-event-text="turn"]')).toBeNull();
+    // D9: an unanswered human row is not evidence that the agent is busy.
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("the wait line rides this device's in-flight send and nothing else (D9)", () => {
+    windows = windowOf(userRow(1, "hello there"), roundRow(2));
+    sendingMap = {};
     const { unmount } = render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-    // The decision happened on the execution surface — the chat says so, once,
-    // as an event line; the card paints nothing and never claims "unanswered".
-    expect(screen.getAllByText("chatView.cardAnsweredInExec")).toHaveLength(1);
-    expect(screen.queryByText(/chatView.cardUnanswered/)).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
     unmount();
 
-    // Answered on the chat surface instead: the answer row states the fact,
-    // and the Runtime's duplicate notice stays silent.
-    windows = {
-      [SESSION]: {
-        older: [],
-        tail: [
-          userRow(1, "hello there"),
-          askCardRow(2),
-          userRow(3, "B", { in_reply_to: "card2" }),
-          resolvedNotice({ resolution: "answered" }),
-        ],
-        tailLoaded: 4,
-        total: 4,
-        loadingOlder: false,
-      },
-    };
-    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-    expect(screen.getByText("chatView.cardAnsweredNote|B")).toBeTruthy();
-    expect(screen.queryByText("chatView.cardAnsweredInExec")).toBeNull();
-  });
-
-  it("drops a retired milestone from an old transcript and derives the wait line", () => {
-    windows = {
-      [SESSION]: {
-        older: [],
-        tail: [
-          userRow(1, "hello there"),
-          {
-            seq: 2,
-            ts: 2,
-            from: "agent",
-            kind: "system_notice",
-            body: "",
-            to: "user",
-            meta: {
-              message_id: "td:u1",
-              notice_type: "turn_dispatched",
-              in_reply_to: "u1",
-              agent_session_id: "exec-9",
-            },
-          },
-        ],
-        tailLoaded: 2,
-        total: 2,
-        loadingOlder: false,
-      },
-    };
-    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-
-    // The milestone is runtime state now (ADR-100 revision): a transcript that
-    // still carries the old row must not paint it back.
-    expect(screen.queryByText("chatView.notice.turnDispatched")).toBeNull();
-    // The reader gets one derived line instead: the newest human message has
-    // no answer yet, so the agent is still working on it.
-    expect(screen.getByText("chatView.notice.pendingTurn|Agent A")).toBeTruthy();
-  });
-
-  it("renders the routing reaction as an attributed bubble and keeps the wait", () => {
-    // ADR-100 D11: "启动新任务：xxx" is the agent's own conversational answer
-    // to the user message — avatar + name + bubble, never a centered line —
-    // while the live line below it keeps covering the run in flight.
-    windows = {
-      [SESSION]: {
-        older: [],
-        tail: [
-          userRow(1, "review the repo"),
-          {
-            seq: 2,
-            ts: 2,
-            from: "agent",
-            kind: "system_notice",
-            body: "",
-            to: "user",
-            meta: {
-              message_id: "tr:u1",
-              notice_type: "turn_routed",
-              in_reply_to: "u1",
-              agent_session_id: "exec-9",
-              turn_mode: "new",
-            },
-          },
-        ],
-        tailLoaded: 2,
-        total: 2,
-        loadingOlder: false,
-      },
-    };
-    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-
-    // The bubble names the task off the trigger body (no title exists yet).
-    expect(screen.getByText("chatView.notice.turnRoutedNew|review the repo")).toBeTruthy();
-    // Attributed: the agent's name header rides with it.
-    expect(screen.getByText("Agent A")).toBeTruthy();
-    // The run is still in flight — the derived wait line stays.
-    expect(screen.getByText("chatView.notice.pendingTurn|Agent A")).toBeTruthy();
-  });
-
-  it("keeps the avatar header on the reply after an empty terminal row", () => {
-    // The header predicate folded the avatar off any `agent_message` whose
-    // predecessor was ALSO an `agent_message` — but an empty terminal row
-    // paints as a centered status line, not a bubble, so the attributed reply
-    // under it lost its avatar and stood "孤零零" in the stream.
-    windows = {
-      [SESSION]: {
-        older: [],
-        tail: [
-          userRow(1, "do the thing"),
-          {
-            seq: 2,
-            ts: 2,
-            from: "agent",
-            kind: "agent_message",
-            body: "",
-            to: "user",
-            meta: { message_id: "a2", in_reply_to: "u1", status: "aborted", sender_session_id: "exec-8" },
-          },
-          {
-            seq: 3,
-            ts: 3,
-            from: "agent",
-            kind: "agent_message",
-            body: "late answer",
-            to: "user",
-            meta: { message_id: "a3", in_reply_to: "u1", status: "completed", sender_session_id: "exec-9" },
-          },
-        ],
-        tailLoaded: 3,
-        total: 3,
-        loadingOlder: false,
-      },
-    };
-    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-
-    expect(screen.getByText("late answer")).toBeTruthy();
-    // The centered line owns no header, so the reply re-attributes.
-    expect(screen.getByText("Agent A")).toBeTruthy();
-  });
-
-  it("ends the wait line at the terminal reply — one bubble, one drill", () => {
-    windows = {
-      [SESSION]: {
-        older: [],
-        tail: [
-          userRow(1, "fix this bug"),
-          {
-            seq: 2,
-            ts: 2,
-            from: "agent",
-            kind: "system_notice",
-            body: "",
-            to: "user",
-            meta: {
-              message_id: "ts:u1",
-              notice_type: "turn_started",
-              in_reply_to: "u1",
-              agent_session_id: "exec-9",
-            },
-          },
-          {
-            seq: 3,
-            ts: 3,
-            from: "agent",
-            kind: "agent_message",
-            body: "on it, done",
-            to: "user",
-            meta: {
-              message_id: "a3",
-              in_reply_to: "u1",
-              status: "completed",
-              agent_session_id: "exec-9",
-            },
-          },
-        ],
-        tailLoaded: 3,
-        total: 3,
-        loadingOlder: false,
-      },
-    };
-    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-
-    expect(screen.getByText("on it, done")).toBeTruthy();
-    // Neither milestone reached the stream, and the wait line is gone now that
-    // a terminal row answers the turn.
-    expect(screen.queryByText("chatView.notice.turnStarted")).toBeNull();
-    expect(screen.queryByText(/chatView\.notice\.pendingTurn/)).toBeNull();
-    // One run to drill into, so the 查看执行 affordance appears exactly once.
-    expect(screen.getAllByText("chatView.viewRun")).toHaveLength(1);
-  });
-
-  it("paints an empty terminal row as a centered outcome, not an agent bubble", () => {
-    windows = {
-      [SESSION]: {
-        older: [],
-        tail: [
-          userRow(1, "fix this bug"),
-          {
-            seq: 2,
-            ts: 2,
-            from: "agent",
-            kind: "agent_message",
-            body: "",
-            to: "user",
-            meta: {
-              message_id: "a2",
-              in_reply_to: "u1",
-              status: "aborted",
-              sender_session_id: "exec-9",
-            },
-          },
-        ],
-        tailLoaded: 2,
-        total: 2,
-        loadingOlder: false,
-      },
-    };
-    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-
-    // The outcome IS the message: centered, with the drill into the run.
-    expect(screen.getByText("chatView.notice.interrupted")).toBeTruthy();
-    expect(screen.getByText("chatView.viewRun")).toBeTruthy();
-    // The empty-bubble placeholder must not stand in for a real reply.
-    expect(screen.queryByText("chatView.emptyAnswer")).toBeNull();
-    // A terminal row answers the turn, so the wait line is gone.
-    expect(screen.queryByText(/chatView\.notice\.pendingTurn/)).toBeNull();
-  });
-
-  it("shows the generic wait line while the send round trip is in flight", () => {
-    windows = {
-      [SESSION]: { older: [], tail: [], tailLoaded: 0, total: 0, loadingOlder: false },
-    };
     sendingMap = { [SESSION]: true };
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-
-    // The transcript has no human row yet — the line is still owed to the user.
     expect(screen.getByRole("status")).toBeTruthy();
+    // 1:1 names the agent the human is talking to (ADR-100 Rev.2's wording);
+    // only the group surface has to stay generic.
     expect(screen.getByText("chatView.notice.pendingTurn|Agent A")).toBeTruthy();
+  });
+
+  it("the claim outliving the POST keeps the line up AND locks the composer (D9)", () => {
+    // The window this exists for: the send has returned, the router is still
+    // deciding, the Runtime has written nothing. Nothing in the transcript says
+    // "busy" — only this device's own send does — and a second send here would
+    // race the first turn with no Chat-side queue to absorb it.
+    windows = windowOf(userRow(1, "hello there"));
+    inflightMap = { [SESSION]: { messageId: "u1", at: 1 } };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.getByRole("status")).toBeTruthy();
+    expect(sendDisabled()).toBe(true);
+  });
+
+  it("the round's reference row settles the claim: line gone, composer live", () => {
+    // From here the block narrates the run (D3/D9), so a follow-up is allowed —
+    // the execution side has a queue for it, the Chat does not need one.
+    windows = windowOf(userRow(1, "hello there"), roundRow(2, "exec-9", "r2", "u1"));
+    inflightMap = { [SESSION]: { messageId: "u1", at: 1 } };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(sendDisabled()).toBe(false);
+    // The surface hands the claim back rather than carrying an id the transcript
+    // has already answered.
+    expect(settleTurnMock).toHaveBeenCalledWith(SESSION, "u1");
+  });
+
+  it("a delivery receipt settles the claim too — it is the answer the human sees", () => {
+    windows = windowOf(
+      userRow(1, "hello there"),
+      notice(2, { notice_type: "delivery_failed", in_reply_to: "u1" }),
+    );
+    inflightMap = { [SESSION]: { messageId: "u1", at: 1 } };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(sendDisabled()).toBe(false);
+  });
+
+  it("a turn whose outcome never lands stops being claimed (deadline)", () => {
+    // The store's deadline is what unlocks the composer when a Runtime died
+    // between delivery and round open; by then the surface has no claim left,
+    // so it must show neither the line nor the lock (pinned store-side in
+    // chatSessionStore.test.ts).
+    windows = windowOf(userRow(1, "hello there"));
+    inflightMap = { [SESSION]: { messageId: "u1", at: 1 } };
+    const { rerender } = render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.getByRole("status")).toBeTruthy();
+    inflightMap = {};
+    rerender(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(sendDisabled()).toBe(false);
+  });
+
+  it("an addressing question asks in centered chrome and offers its answers (D7)", () => {
+    windows = windowOf(
+      userRow(1, "which one"),
+      notice(2, {
+        notice_type: "session_choice",
+        in_reply_to: "u1",
+        options: [
+          { session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing", why: "same task" },
+        ],
+        allow_new_task: true,
+      }),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const card = screen.getByTestId("chat-card-options");
+    expect(card.textContent).toContain("chatView.block.chooseSession");
+    // Transcript chrome, not speech: it is centered like every other notice and
+    // never wears the agent's identity, because a question about addressing is
+    // not the agent talking to the human.
+    expect(card.className).toContain("items-center");
+    expect(screen.queryByText("Agent A")).toBeNull();
+    // D6's cheap escape rides beside the suggestion, never below a fold.
+    expect(screen.getByRole("button", { name: "chatView.block.newTask" })).toBeTruthy();
+  });
+
+  it("answering the card re-delivers the human's own words with the chosen address (D6)", async () => {
+    windows = windowOf(
+      { ...userRow(1, "which one"), attachment_ids: ["f1"] },
+      notice(2, {
+        notice_type: "session_choice",
+        in_reply_to: "u1",
+        options: [{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }],
+        allow_new_task: true,
+      }),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    fireEvent.click(screen.getByRole("button", { name: "Fix the bug" }));
+    await waitFor(() => expect(sendTextMock).toHaveBeenCalled());
+    // One message, not two: the re-delivery carries the ORIGINAL row id, so the
+    // store dedupes it instead of narrating the decision as a new utterance.
+    expect(sendTextMock).toHaveBeenCalledWith(SESSION, "which one", undefined, undefined, ["f1"], {
+      targetSession: "exec-9",
+      messageId: "u1",
+    });
+  });
+
+  it("an answered card goes quiet rather than offering the same words twice", () => {
+    // The round IS the answer (D3): a reference row pointing at the message the
+    // card asked about. The buttons stay visible — the record of what was
+    // offered must not vanish — but they refuse a second delivery.
+    windows = windowOf(
+      userRow(1, "which one"),
+      notice(2, {
+        notice_type: "session_choice",
+        in_reply_to: "u1",
+        options: [{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }],
+        allow_new_task: true,
+      }),
+      roundRow(3),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect((screen.getByRole("button", { name: "Fix the bug" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(sendTextMock).not.toHaveBeenCalled();
+  });
+
+  it("the Router's own answer is an attributed bubble (D12)", () => {
+    // Only a reply that opened no run is written as `agent_message` now, so it
+    // is the agent's speech: avatar, name, bubble.
+    windows = windowOf(
+      userRow(1, "do the thing"),
+      {
+        seq: 2,
+        ts: 2,
+        from: "agent",
+        kind: "agent_message",
+        body: "here you go",
+        to: "user",
+        meta: { message_id: "a2", in_reply_to: "u1" },
+      },
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    expect(screen.getByText("here you go")).toBeTruthy();
+    expect(screen.getByText("Agent A")).toBeTruthy();
+    expect(screen.queryAllByTestId("exec-block")).toHaveLength(0);
+  });
+
+  it("a bodyless Router answer still states something, not a blank bubble", () => {
+    windows = windowOf(
+      userRow(1, "do the thing"),
+      {
+        seq: 2,
+        ts: 2,
+        from: "agent",
+        kind: "agent_message",
+        body: "",
+        to: "user",
+        meta: { message_id: "a2", in_reply_to: "u1" },
+      },
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.getByText("chatView.emptyAnswer")).toBeTruthy();
+  });
+
+  it("a round is exactly one block — its content, outcome and drill all live there (D3/D8)", () => {
+    windows = windowOf(
+      userRow(1, "fix this bug"),
+      notice(2, { notice_type: "turn_started", in_reply_to: "u1", agent_session_id: "exec-9" }),
+      roundRow(3),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+
+    // The answer is not a chat row any more: it is read off the projection and
+    // drawn inside the block, so the transcript carries one pointer and one
+    // drill, and no milestone line beside them.
+    expect(screen.getAllByTestId("exec-block")).toHaveLength(1);
+    expect(screen.getAllByTestId("block-drill")).toHaveLength(1);
+    expect(screen.queryByText("chatView.notice.turnStarted")).toBeNull();
+    expect(screen.queryByRole("status")).toBeNull();
+  });
+
+  it("seeds the optimistic exec title off the round's trigger row (ADR-099)", async () => {
+    // The reference row is the first durable place the exec session id appears,
+    // and its `in_reply_to` names the human message that opened the run.
+    windows = windowOf(userRow(1, "fix this bug"), roundRow(2));
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    await waitFor(() =>
+      expect(seedTitleMock).toHaveBeenCalledWith(AGENT, "exec-9", "fix this bug"),
+    );
   });
 
   describe("查看执行 drill", () => {
-    function agentRow(seq: number, body: string, extra?: Record<string, unknown>): ChatMessageRow {
-      return {
-        seq,
-        ts: seq,
-        from: "agent",
-        kind: "agent_message",
-        body,
-        to: "user",
-        meta: { message_id: `a${seq}`, ...(extra ?? {}) },
-      };
-    }
-
     beforeEach(() => {
-      windows = {
-        [SESSION]: {
-          older: [],
-          tail: [userRow(1, "ping"), agentRow(2, "pong", { sender_session_id: "exec-7" })],
-          tailLoaded: 2,
-          total: 2,
-          loadingOlder: false,
-        },
-      };
+      windows = windowOf(userRow(1, "ping"), roundRow(2, "exec-7"));
     });
 
     it("toasts instead of jumping when the existence probe answers 404", async () => {
@@ -524,7 +614,7 @@ describe("AgentChatView event-log wiring", () => {
       window.addEventListener("acowork:toast", listener);
       try {
         render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-        fireEvent.click(screen.getByText("chatView.viewRun"));
+        fireEvent.click(screen.getByTestId("block-drill"));
         await waitFor(() => expect(toasts.length).toBe(1));
         expect(openSessionMock).not.toHaveBeenCalled();
         expect(setModeMock).not.toHaveBeenCalled();
@@ -540,7 +630,7 @@ describe("AgentChatView event-log wiring", () => {
       // existing best-effort open — a probe hiccup never blocks a live session.
       vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
       render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-      fireEvent.click(screen.getByText("chatView.viewRun"));
+      fireEvent.click(screen.getByTestId("block-drill"));
       await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith(AGENT, "exec-7", { prepend: true }));
       await waitFor(() => expect(setModeMock).toHaveBeenCalledWith(AGENT, "exec"));
     });
@@ -582,5 +672,94 @@ describe("AgentChatView reasoning-effort toggle", () => {
     availableModels = [{ name: "qwen3.8-flash", provider: "custom-loostone", reasoning: false }];
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     expect(screen.queryByTestId("effort-menu")).toBeNull();
+  });
+});
+
+// The `@` gesture on the 1:1 composer (ADR-106 D7). It used to advertise
+// "Enter to send, Shift+Enter for a new line" — mechanics every IM user already
+// knows — while the one thing this surface actually offers (name the task the
+// message continues) was reachable only through an unlabeled toolbar glyph.
+describe("AgentChatView `@` composer gesture", () => {
+  beforeEach(() => {
+    windows = {};
+    drafts = {};
+    availableModels = [];
+    setModeMock = vi.fn();
+    openSessionMock = vi.fn().mockResolvedValue(undefined);
+    sendTextMock = vi.fn().mockResolvedValue(undefined);
+    vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
+  });
+
+  const composer = () =>
+    screen.getByPlaceholderText("chatView.address.composerHint") as HTMLTextAreaElement;
+
+  it("advertises the `@` gesture where the Enter hint used to be", () => {
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(composer()).toBeTruthy();
+  });
+
+  it("typing `@` opens the task list and writes nothing into the draft", () => {
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const ta = composer();
+    expect(screen.queryByTestId("address-picker")).toBeNull();
+    // `fireEvent` returns false once a handler cancels the default action —
+    // here that cancellation IS the contract: the `@` must not land in the body,
+    // because the address rides the chip above the composer instead.
+    expect(fireEvent.keyDown(ta, { key: "@" })).toBe(false);
+    expect(screen.getByTestId("address-picker")).toBeTruthy();
+    expect(ta.value).toBe("");
+  });
+
+  it("leaves a mid-word `@` alone, so an email address stays an email", () => {
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const ta = composer();
+    fireEvent.change(ta, { target: { value: "mail me at nick" } });
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    expect(fireEvent.keyDown(ta, { key: "@" })).toBe(true);
+    expect(screen.queryByTestId("address-picker")).toBeNull();
+
+    // Same key after a space is a word opening, so it is the gesture again.
+    fireEvent.change(ta, { target: { value: "mail me at " } });
+    ta.setSelectionRange(ta.value.length, ta.value.length);
+    expect(fireEvent.keyDown(ta, { key: "@" })).toBe(false);
+    expect(screen.getByTestId("address-picker")).toBeTruthy();
+  });
+
+  it("does not hijack `@` while an IME is still composing it", () => {
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const ta = composer();
+    expect(
+      fireEvent.keyDown(ta, { key: "@", isComposing: true }),
+    ).toBe(true);
+    expect(screen.queryByTestId("address-picker")).toBeNull();
+  });
+
+  it("the toolbar `@` still toggles the same list", () => {
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const btn = screen.getByLabelText("chatView.address.pick");
+    fireEvent.click(btn);
+    expect(screen.getByTestId("address-picker")).toBeTruthy();
+    fireEvent.click(btn);
+    expect(screen.queryByTestId("address-picker")).toBeNull();
+  });
+
+  it("anchors the list to whichever gesture opened it", () => {
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const btn = screen.getByLabelText("chatView.address.pick");
+    // Clicked: the popup hangs off the toolbar button it came from.
+    fireEvent.click(btn);
+    expect(
+      screen
+        .getByTestId("address-picker")
+        .closest('[data-toolbar-cluster="right"]'),
+    ).not.toBeNull();
+    fireEvent.click(btn);
+    // Typed: it belongs above the composer, not under the toolbar.
+    fireEvent.keyDown(screen.getByRole("textbox"), {
+      key: "@",
+      target: { selectionStart: 0 },
+    });
+    const typed = screen.getByTestId("address-picker");
+    expect(typed.closest('[data-toolbar-cluster="right"]')).toBeNull();
   });
 });

@@ -27,6 +27,7 @@
   - [4.11 Debug & Developer Tools](#411-debug--developer-tools)
   - [4.12 Remote File System Browsing](#412-remote-file-system-browsing)
   - [4.13 Global Resource Snapshot (Runtime active pull entry)](#413-global-resource-snapshot-runtime-active-pull-entry)
+  - [4.17 Chat execution-block projection read (ADR-106 D5/D9/D10)](#417-chat-execution-block-projection-read-adr-106-d5d9d10)
 - [5. Gateway → Runtime Reverse Proxy (requires Runtime online)](#5-gateway--runtime-reverse-proxy-requires-runtime-online)
   - [5.1 Agent Runtime Configuration](#51-agent-runtime-configuration)
   - [5.2 Session Read-Only Queries](#52-session-read-only-queries)
@@ -37,6 +38,7 @@
   - [5.4 Memory](#54-memory)
     - [5.4.1 Service-direct prefix `/api/memory/*` (ADR-101)](#541-service-direct-prefix-apimemoryadr-100)
   - [5.5 Workspace](#55-workspace)
+  - [5.7 Round Projection Read (ADR-106 D4)](#57-round-projection-read-adr-106-d4)
 - [6. Static File Service (direct streaming of raw bytes)](#6-static-file-service-direct-streaming-of-raw-bytes)
 - [7. Migrated to MQTT (HTTP endpoints removed)](#7-migrated-to-mqtt-http-endpoints-removed)
 - [8. Common Error Codes](#8-common-error-codes)
@@ -114,7 +116,7 @@ Source mapping:
 
 | Category | Gateway implementation modules |
 |---|---|
-| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs), [`global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs), [`intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs) |
+| A | [`agents.rs`](../../../core/acowork-gateway/src/http/agents.rs), [`provider_api.rs`](../../../core/acowork-gateway/src/http/provider_api.rs), [`models_api.rs`](../../../core/acowork-gateway/src/http/models_api.rs), [`mcp_catalog_api.rs`](../../../core/acowork-gateway/src/http/mcp_catalog_api.rs), [`embedding_api.rs`](../../../core/acowork-gateway/src/http/embedding_api.rs), [`users_api.rs`](../../../core/acowork-gateway/src/http/users_api.rs), [`cron_api.rs`](../../../core/acowork-gateway/src/http/cron_api.rs), [`skills_api.rs`](../../../core/acowork-gateway/src/http/skills_api.rs), [`config_api.rs`](../../../core/acowork-gateway/src/http/config_api.rs), [`fs_browse.rs`](../../../core/acowork-gateway/src/http/fs_browse.rs), [`debug_mqtt.rs`](../../../core/acowork-gateway/src/http/debug_mqtt.rs), [`publish_api.rs`](../../../core/acowork-gateway/src/http/publish_api.rs), [`global_resources_api.rs`](../../../core/acowork-gateway/src/http/global_resources_api.rs), [`intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs), [`chat_blocks.rs`](../../../core/acowork-gateway/src/http/chat_blocks.rs) (no Runtime dependency on a cache hit; only misses go to the source — see §4.17) |
 | B | [`proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs) (ADR-033 Phase 2 + ADR-034 Phase 3) |
 | C | [`workspaces.rs`](../../../core/acowork-gateway/src/http/workspaces.rs) (static resource part only) |
 
@@ -397,13 +399,15 @@ Runtime consumption rule: `503` **does not update local cache**, backs off per `
 
 ---
 
-### 4.16 Internal service-to-service endpoints (acowork-pm → Gateway, Intent dispatch surface)
+### 4.16 Internal service-to-service endpoints (acowork-pm / acowork-runtime → Gateway, Intent dispatch surface)
 
 > **Implementation**: [`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs).
-> This section covers only the two endpoints acowork-pm calls; the rest of `/api/intents/*` is the
-> Gateway↔Runtime / frontend chat surface whose contract is owned by Design 27 §4.5's field table and is
-> not duplicated here. Auth is the internal-service boundary (same as `/api/intents/project-group`): PM
-> acts as the project owner from its own domain data; the Gateway does not re-validate `owner`.
+> This section covers the endpoints acowork-pm calls (§4.16.1–§4.16.3) and the acceptance receipt acowork-runtime
+> calls (§4.16.4); the rest of `/api/intents/*` is the Gateway↔Runtime / frontend chat surface whose contract is
+> owned by Design 27 §4.5's field table and is not duplicated here. Auth is the internal-service boundary (node
+> token, same as `/api/intents/project-group`): in §4.16.1–§4.16.3 PM acts as the project owner from its own
+> domain data and the Gateway does not re-validate `owner`; the §4.16.4 reporter is verified per D4 attribution,
+> and only the mailbox's recorded target may speak for a message.
 
 #### 4.16.1 `POST /api/intents/task-dispatch`
 
@@ -425,8 +429,21 @@ The envelope `kind` is always stamped `pm_task` (human input, keyed routing, Cha
 ```json
 { "message_id": "…", "status": "delivered | failed",
   "conversation_id": "task:…", "chat_session_id": "…",
-  "error_code": "target_not_installed | not_authorized | conversation_limit_exceeded | chat_log_unavailable | …", "error": "…" }
+  "error_code": "target_not_installed | not_authorized | conversation_limit_exceeded | chat_log_unavailable | intent_rejected | …", "error": "…" }
 ```
+
+`intent_rejected` is an **explicit refusal by the target Runtime** (§4.16.4): a successful MQTT publish only means the
+broker took the bytes, while routing into an execution session can still fail (the incident: the target Runtime's
+session-meta store lacked the `intent_key` column, answered `no such column`, and dropped the message). This endpoint
+therefore **waits for the receipt, bounded** by `INTENT_ACCEPT` (5s, `acowork_core::timeout_config`): `accepted` →
+`delivered`; `rejected` → `status=failed`, `error_code=intent_rejected`, `error` carrying the Runtime's verbatim text
+(PM records it in `dispatch_error` and its existing backoff retry takes over); no receipt (a pre-receipt Runtime, or a
+timeout) → the old publish-means-delivered semantics, no regression — noting that a pre-receipt Runtime eats the full 5s
+by construction, so a mixed-version fleet pays it on every dispatch. Caller budget: the worst-case latency is the wake
+bound `INTENT_DEFAULT` (30s) plus `INTENT_ACCEPT`, and the PM client gives `dispatch_task` its own 40s request timeout —
+a shorter default would abort while the first publish is still completing server-side and make the same-id retry
+re-deliver the Intent. This is the *only* caller that waits: the generic
+`/api/intents` surface records the fact without blocking, so agent-to-agent delivery pays nothing for it.
 
 #### 4.16.2 `POST /api/intents/task-close`
 
@@ -435,6 +452,89 @@ Ends the target agent's logical execution context for a task when it reaches a t
 #### 4.16.3 New PM task resource field (acowork-pm REST; source of truth: Design 27 §5.4.2)
 
 `Task.dispatch_message_id: string | null` — the dispatch generation identity: persisted before the first attempt, reused across retries, cleared on state transitions (reopen / reassignment); passed through in the task JSON, read-only for clients.
+
+#### 4.16.4 `POST /api/intents/{message_id}/accept` (Runtime → Gateway acceptance receipt)
+
+> **Implementation**: [`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs),
+> [`core/acowork-gateway/src/intent/accept.rs`](../../../core/acowork-gateway/src/intent/accept.rs), Runtime side
+> [`core/acowork-runtime/src/agent/intent_accept.rs`](../../../core/acowork-runtime/src/agent/intent_accept.rs).
+> Semantics and rationale: Design 27 §5.7 "Receiver acceptance receipt".
+
+A receiving Runtime reports the routing outcome of an **inbound request** (`kind != "response"` with a non-empty
+`message_id`). Request body:
+
+| Field | Required | Description |
+|---|---|---|
+| `sender` | yes | The reporting instance id. Verified per D4 (node-token attribution + online) and compared against the mailbox `to_instance` — **only the recorded target may accept or reject**; anything else is 403 |
+| `accepted` | yes | `true` = handed to an execution session (queued counts); `false` = routing refused |
+| `error` | no | The refusal reason, verbatim (ignored and cleared when `accepted=true`). It is the only description of the breakage the dispatcher receives, so it is never normalized |
+
+Response `{ "message_id": "…", "status": "recorded", "accepted": true|false }`; unknown `message_id` → 404,
+mailbox not initialised → 500. A receipt **writes a fact only**: it delivers nothing, and on success it immediately
+wakes the dispatch waiting on that `message_id` (in-process oneshot, event-driven, no polling). The mailbox then
+exposes `accepted` (`null` = no receipt, which is **not** a refusal), `accepted_at` and `accept_error` on
+`GET /api/intents/{id}`; `delivered_at` is untouched (the two facts are allowed to disagree — that is the whole
+point of the receipt). A receipt is a **per-attempt** verdict: re-dispatching the same `message_id` clears the
+previous verdict, while `delivered_at` stays as historical fact.
+
+---
+
+### 4.17 Chat execution-block projection read (ADR-106 D5/D9/D10)
+
+> **Implementation**: [`core/acowork-gateway/src/http/chat_blocks.rs`](../../../core/acowork-gateway/src/http/chat_blocks.rs).
+> A Chat transcript holds *references* to rounds of execution sessions — `{agent_instance_id, agent_session_id, round_id}` — never copies of their content (ADR-106 D1/D2), so rendering one block necessarily needs a second read, and what is being read lives on whichever node hosts that execution session. The Gateway is the only process that can reach every Runtime, so the orchestration sits there: ① ask acowork-user for the projections this chat already caches → ② fetch only what missed, one batched request per execution session → ③ write the terminal ones back. **The first render fetches and persists to disk; every later render is a local disk read** — the only reason this cache exists (see [ADR-106](../../adr/en/ADR-106-chat-execution-reference-projection.md) D5).
+
+| Method | Path | Purpose | Permission |
+|---|---|---|---|
+| GET | `/api/chat-blocks/{chat_id}?refs=` | Resolve block projections by reference (cache first, missing refs fetched and written back) | chat participant (identity from the token) |
+
+`refs` is **required**: a comma-separated list of three-part `instance|session|r:round` refs. "Every block of this chat" has no bound and does not belong on a request path, and only the client knows which rows it is rendering. Limits: ≤ 200 refs per request (above that → 422); deduplicated keeping first-seen order; each segment restricted to `[A-Za-z0-9_.-]` (the `round` segment additionally admits `:` and `.`), **no segment may start with `.` or carry an inner `..`**, and `round` must start with `r:` and carry a body — D2 mints `r:{inbound_message_id}`, so a bare `r:` means a client truncated one. The shape check is not fastidiousness: these three segments go into a URL path, a query string and a SQL bind next. **This layer's predicate must be a subset of the downstream ones**: the minting predicate (Runtime `is_addressable`) and the cache-key predicate (acowork-user `rounds_cache::valid_id`) refuse `..` too, a cache read answers any single bad token with a 422 over the whole page, and this endpoint reads a non-2xx as "cache unreadable ⇒ every ref missed" — so a token waved through here but rejected there would permanently disable the cache for that page and make every render pay a full cross-host refetch. **The 422 is reserved for request-level errors** (nothing asked for, over the cap): a token that fails the shape check does **not** reject the request — it is answered in its own `blocks` entry as `status: not_found`, echoing the token verbatim (`detail: "malformed block ref"`). One broken transcript row must not make every other block around it unreadable, and silently dropping the token would let the surface invent a row for it.
+
+Response (**in request order**, exactly one entry per ref):
+
+```json
+{ "chat_session_id": "…",
+  "blocks": [ {
+      "ref": "…|…|r:…", "agent_instance_id": "…", "agent_session_id": "…", "round_id": "r:…",
+      "status": "ok", "source": "cache",
+      "projection": { "round_id": "r:…", "user": { "body": "…", "attachments": [] },
+                       "answer": { "body": "…" }, "card": null,
+                       "terminal": true, "chat_session_id": "…" } } ] }
+```
+
+**Four states** (ADR-106 D9; a ref is **never silently dropped** — a dropped ref lets the surface invent a row for it):
+
+| `status` | Meaning | How the surface renders it | Extra fields |
+|---|---|---|---|
+| `ok` | terminal projection | the full block | `source` = `cache` \| `runtime` |
+| `pending` | round still running, from the **live projection** | in progress, re-read later | `source` is always `runtime` |
+| `not_found` | no such round, the projection is bound to a *different* chat, the upstream transcript can no longer vouch for that coordinate, or the token was never a ref at all | explicit hole (retrying cannot yield content) | `detail` only when the token is malformed |
+| `unreachable` | the hosting Runtime could not be consulted, or the round exists but its rows could not be read (a batch item carrying `error`, [§5.7](#57-round-projection-read-adr-106-d4)) | "temporarily unreachable" + retry affordance | `detail` |
+
+Conventions:
+
+- **`unreachable` ≠ in progress.** Rendering an outage as "still running" lets a node that has stopped rewrite what happened. The only durable test for "in progress" is a live projection reporting `terminal=false`; a cache can never hold `terminal=false` (see below).
+- **Three permission walls**: ① whether the reference row is visible at all = chat participation, decided by acowork-user with the same hidden-404 rule as the transcript (non-participant → this endpoint answers 404, not 403, and does not fetch around the denial); ② the source fetch uses the same scope injection as the agent proxy (`x-user-id` plus the chat membership set derived server-side from the token — **never a chat scope from a request header**), and the Runtime still runs `authorize_read` ([§5.7](#57-round-projection-read-adr-106-d4)); ③ **the binding guard** — the Runtime stamps every projection with that execution session's own `chat_session_id` (read from the session meta on disk, unaffected by request headers), and the Gateway serves and caches only projections bound to *the* chat being read. Without the third wall, a member of both chats A and B could pour B's execution content into A's cache and have it survive as history.
+- **Degrade, never outage**: an unreadable cache reads as "every ref missed"; an unreachable Runtime makes those blocks `unreachable` while the rest are served; one broken ref (a malformed token, a lost coordinate) spoils only its own slot; a failed write-back is a `warn` whose only cost is that the next render re-pays this fetch. A momentary read fault and a permanent hole stay in different boxes: a batch item's `found: false` **plus** `error` is an outage (`unreachable`, retryable), never `not_found` — rendering a disk hiccup as "this round never happened" leaves the surface with no reason to retry, and the cache has no invalidation path to rescue it. Only the chat relation itself may fail the request (user service not ready → 503; a malformed `chat_id` → 404, same discipline as the hidden 404).
+- **Not routed through `/api/agents/*`**, so to the [ADR-087](../../adr/en/ADR-087-node-agent-owner-permissions.md) path classifier it is `Target::None` — the handler proves its own permission, like the `/lsp` proxies. It must be a new top-level prefix: `/api/chat-sessions/*` is already wildcard-forwarded by `user_proxy`, so reusing it would make this a passthrough request rather than an orchestrated one.
+
+#### 4.17.1 Cache-side loopback endpoints (Gateway → acowork-user)
+
+> **Implementation**: [`core/acowork-user/src/http/chat_sessions_api.rs`](../../../core/acowork-user/src/http/chat_sessions_api.rs) (routes) + [`core/acowork-user/src/rounds_cache.rs`](../../../core/acowork-user/src/rounds_cache.rs) (storage). Ownership rationale: the cache has to die with the chat directory, and only the side that owns the chat can be "free together with the chat". Storage is `{data_dir}/chat-sessions/{sid}/rounds.sqlite`, keyed by `(agent_instance_id, agent_session_id, round_id)`. Part of the `/internal/chat-sessions/*` system surface: loopback-only, the caller is the local Gateway, but every call names **which user it acts for** (`who`) and participation is checked like any other chat read (ADR-084 §decision 4b/7).
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/internal/chat-sessions/{sid}/rounds?who=&refs=` | Read cached projections, returned in request order as `{"rounds": [ {agent_instance_id, agent_session_id, round_id, projection, terminal, fetched_at} ]}` |
+| PUT | `/internal/chat-sessions/{sid}/rounds` | Store what was just fetched, body `{"who": "…", "rounds": [ {same as above, without fetched_at} ]}` → `{"stored": n}` |
+
+Conventions:
+
+- An empty `refs` is a legal no-op (asks for nothing); a malformed shape → 422; a non-participant → hidden 404; ≤ 200 rows per call.
+- **`fetched_at` is stamped by the server clock**, so a caller cannot age a row. It is used **for eviction only** (≤ 4000 rows per chat, oldest dropped first) and is never a TTL — terminal rounds are immutable, which is what removes invalidation from this design.
+- One projection payload ≤ 256 KiB; larger ones are **skipped, not stored**: a block is one round's user row plus its answer row, and anything that size is not a block. So `stored` may be smaller than what was submitted — that is not an error.
+- **The cache layer enforces terminal-only itself**: the write entry point `warn`s and skips any `terminal=false` row rather than relying on the orchestrator to filter. The read side does not trust its own rows either — a non-terminal row, or one whose payload is not an object, is treated as a miss (for a disposable cache, the right answer to a lying row is "fetch again", never "believe the side table"). A corrupt `rounds.sqlite` is deleted and reopened: the worst case this cache can suffer is being empty.
+- Before deleting a chat directory its SQLite handle MUST be released (on Windows SQLite files are not opened with `FILE_SHARE_DELETE`, so a live handle turns "a disposable side table" into "a chat that cannot be deleted"), and the cache read and write MUST happen **inside** the per-chat `session_lock` — the same lock `delete_session` takes — because `connect()` does `create_dir_all(parent)`, so an open landing outside the lock resurrects a chat that is mid-deletion and strands a live handle behind it. That is not only a stuck delete; it is a privacy leak.
+- These two endpoints deliberately use **different** error semantics from the transcript surface: a cache that cannot be opened is a server fault (500), not a 422 — the Gateway's block endpoint reads "not 2xx and not 404" as "degrade to a full miss", so a 422 would file an outage silently as a miss — while 404 is reserved for "this is not your chat" (an unknown chat and a non-participant share the same hidden 404).
 
 ---
 
@@ -475,6 +575,7 @@ Gateway does not parse the Runtime response body; all reads and writes are verba
 |---|---|---|---|
 | GET | `/api/agents/{id}/sessions` | Session list (Runtime perspective, token stats merged) | `/sessions` |
 | GET | `/api/agents/{id}/sessions?active=true` | **Only currently-active sessions** (ADR-038 `Active` = resident in Runtime memory; the Desktop rebuilds its tab strip from this after a restart) | `/sessions?active=true` |
+| GET | `/api/agents/{id}/sessions?chat_session_id=&surface=` | the same session list, **narrowed to the execution sessions this chat may address** (the second `@` level; rule and pagination order: [§5.8](#58-level-two--addressable-session-read-adr-106-d7)) | `/sessions?chat_session_id=&surface=` |
 | GET | `/api/agents/{id}/latest-session` | Latest session (quick startup lookup) | `/sessions/latest` |
 | GET | `/api/agents/{id}/conversations/latest` | Latest session messages (the only conversations endpoint retained per ADR-034) | `/sessions/latest` |
 | GET | `/api/agents/{id}/sessions/{sid}` | Single session full state (meta + state merged) | `/sessions/{sid}` |
@@ -645,6 +746,123 @@ Mapping and gating rules:
 | DELETE | `/api/agents/{id}/workspaces/dir` | Delete directory | `/workspaces/dir` |
 | POST | `/api/agents/{id}/workspaces/copy` | Copy file/directory | `/workspaces/copy` |
 | POST | `/api/agents/{id}/workspaces/rename` | Atomic rename file/dir | `/workspaces/rename` |
+
+### 5.7 Round Projection Read (ADR-106 D4)
+
+> **Implementation**: [`core/acowork-runtime/src/http/rounds.rs`](../../../core/acowork-runtime/src/http/rounds.rs) (routes and authorization) + [`core/acowork-runtime/src/rounds.rs`](../../../core/acowork-runtime/src/rounds.rs) (round side table and projection assembly).
+> "What a round is" is defined by the **execution session**, never by the chat — that is why the projection lives in the Runtime (ADR-106 D1). The side table is `<work_dir>/conversations/{sid}.jsonl.rounds` (append-only, folded on read, rebuilt on first touch — by the **read path** as much as by the writer — with a crash-repair `interrupted` terminal), and each line stores nothing but ADR-050 data-index coordinates. The name is a suffix on the transcript's own name: inside that directory the `.jsonl` extension *is* session identity, so the side table must not claim it.
+
+| Method | Runtime path | Purpose | Permission |
+|---|---|---|---|
+| GET | `/sessions/{sid}/rounds/{round_id}` | One round's projection | `authorize_read` (same scope as [§5.2](#52-session-read-only-queries)) |
+| GET | `/sessions/{sid}/rounds?ids=a,b` | The same projections, one request, ≤ 64 round ids | same as above |
+| GET | `/sessions/{sid}/rounds?latest=1` | **Pinning read**: the session's newest TERMINAL round coordinate (falling back to the newest running round when nothing has terminated, then to `latest: null` on an empty table); the Gateway calls it to resolve `round_id` when a human's message attaches `@session` references (ADR-106 revision 2026-11-04 · reference redrawing) | same as above |
+
+Response shape (single; the batch wraps each item in `{"session_id": "…", "rounds": [ … ]}` and adds `found`):
+
+```json
+{ "round_id": "r:…", "found": true, "terminal": true, "status": "completed",
+  "user":   { "body": "…", "ts": "…", "attachments": [ … ] },
+  "answer": { "body": "…", "ts": "…" },
+  "card": null, "chat_session_id": "…" }
+```
+
+`latest=1` is a **coordinate lookup, not a listing**: one round per request, shaped `{ "session_id": "…",
+"latest": { "round_id": "r:…", "terminal": bool, "ts": "ISO-8601" } | null, "chat_session_id": "…" }`.
+The newest *terminal* round wins because a terminal round is immutable, so the coordinate pinned into
+`meta.refs` cannot rot under it; only when there is no terminal round at all does it answer the running
+round (`terminal: false`, "progress as of then"), and an empty side table answers `latest: null` — an
+explicit hole, not an empty list. Neither `ids` nor `latest` present → 400 (an unbounded "all rounds"
+read has no place on a request path).
+
+Error codes: `400` malformed round id on the single read / empty `ids` / more than 64 ids; `404` malformed session id, session does not exist or is not readable, no such round, or its recorded coordinates no longer resolve to it (single shape); `500` projection assembly failed (single shape; the batch records the failure on that item as `found: false` plus `error`). A malformed `round_id` inside a batch does **not** reject the request — it answers `found: false` in its own entry, because one bad ref must not turn the rest of the chunk into something unreadable. `found: false` and `found: false` + `error` are two different facts: the first is a permanent hole, the second says "the round exists but its rows could not be read", which [§4.17](#417-chat-execution-block-projection-read-adr-106-d5d9d10) maps to `unreachable`, not `not_found`.
+
+Conventions:
+
+- **Not routed through `/api/agents/*`.** These two are the source reads behind [§4.17](#417-chat-execution-block-projection-read-adr-106-d5d9d10): the Gateway hits the random port straight out of `RuntimeHttpRegistry` (MQTT retained `acowork/agents/{id}/http_port`) and injects `X-ACowork-Node-Token` per ADR-055 Phase 5a. They get no public prefix because rendering one block is two reads, and the frontend should not be the one sequencing them.
+- **Reads disk, not in-memory state**: a `Closed` (non-resident) session projects exactly like a live one, so a chat block still renders hours after its run ended — and it needs **no** `POST …/open`, which is a write-authorized lifecycle activation (ADR-076 §decision 4).
+- **Bounded** (ADR-096): one projection is exactly the two referenced rows plus a window of ≤ 32 rows after the user row (further truncated by the round's own answer position) — never a range scan of the transcript. A batch folds the side table once rather than re-reading that small file per id.
+- **A hole does not lie**: `found: false` must stay distinguishable from "not asked" — a round that was asked about and did not come back becomes an explicit hole by the caller, not an absent key (an absent key lets a caller mistake "no such round" for "not asked").
+- **404 is not an existence oracle** (ADR-076 §decision 4): the single shape shares one 404 across "no such session", "not readable by this scope" and "no such round".
+- **A coordinate is trusted only while the row vouches for it**: the two rows a projection fetches must have the right role *and* their own `metadata.round_id` equal to the round asked for. A missing transcript, an out-of-range coordinate and a coordinate landing on another round's row are all an explicit hole — never the message that happens to sit at that position, because the downstream projection cache ([§4.17](#417-chat-execution-block-projection-read-adr-106-d5d9d10)) has **no invalidation path** and a wrong row served as content would be frozen permanently. Only a genuine read failure returns an error (`500`, or `error` on that batch item), so a caller can still tell a retryable outage apart from a permanent hole. **Rows inside the attachment window need the same vouching**: a window is a *range*, and a round with no `answer` coordinate (crash, interrupt) has nothing to close it, so an unchecked window would fold the next round's uploads into this block. On the writer's path an attachment row goes through the same funnel as the user row and already carries the stamp, so the check costs no real attachment.
+- **`chat_session_id` is a binding, not an optional field**: the Runtime stamps it from the session meta on disk, unaffected by request headers. It is what the Gateway's binding guard checks before serving or storing anything (ADR-106 D10); without it, cross-chat poisoning would work.
+- **`round_id` is minted deterministically**: `r:{inbound_message_id}`, a pure function — an MQTT redelivery and an HTTP retry map to the same round, which is also why the chat-side reference row is idempotent by construction; an id that is oversized (past 128 bytes) **or outside the addressable character set** (anything but `[A-Za-z0-9_:.-]`, a leading `.`, or an inner `..`) is hash-folded to `r:{digest}-{len}` — minting and addressing must test the same predicate or a round is born unreadable; the fold uses a **stable digest** (SHA-256, first 8 bytes), not a standard-library hasher whose algorithm is an implementation detail, because this string is persisted and becomes the reference row's idempotency key, so a toolchain upgrade must not change it; an empty `message_id` mints a UUID.
+- **First-touch rebuild is capped**: a transcript above 20,000 entries is not rebuilt, and projections on it degrade to an explicit hole — the open path never pays for an unbounded read.
+
+### 5.8 Level-Two `@` Addressable Session Read (ADR-106 D7)
+
+> **Implementation**: the rule itself lives in
+> [`core/acowork-runtime/src/agent/session/chat_candidates.rs`](../../../core/acowork-runtime/src/agent/session/chat_candidates.rs)
+> (`ChatScopeRule::allows` → `is_visible`, the very function the router's candidate pass uses), the path
+> that wires it into the listing is
+> [`core/acowork-runtime/src/usecases/session_metadata_impl.rs`](../../../core/acowork-runtime/src/usecases/session_metadata_impl.rs)
+> plus [`core/acowork-runtime/src/conversation.rs`](../../../core/acowork-runtime/src/conversation.rs)
+> (`MetaFilter`, evaluated per row **before** the page slice), the query parameters are in
+> [`core/acowork-runtime/src/http/server.rs`](../../../core/acowork-runtime/src/http/server.rs), and the
+> Gateway side is still the transparent proxy in
+> [`core/acowork-gateway/src/http/proxy.rs`](../../../core/acowork-gateway/src/http/proxy.rs).
+> **There is no separate endpoint**: the second `@` level answers "which execution sessions may this
+> person address inside this chat", which is the same question as "this agent's session list" asked with a
+> scope — a second endpoint would only produce two answers that can drift apart.
+
+| Method | Runtime path | Purpose | Permission |
+|---|---|---|---|
+| GET | `/sessions?chat_session_id=&surface=` (public prefix `/api/agents/{id}/sessions`) | narrow [§5.2](#52-session-read-only-queries)' listing to what this chat may address | chat participant (identity from the Gateway's injected scope headers) |
+
+The response is §5.2's paging envelope: `{"sessions": [SessionSummary…], "total_count", "total_pages", "page", "size"}`.
+
+Conventions:
+
+- **The filter IS the permission**: the permission set is the router's own candidate rule (1:1 lists
+  sessions bound to this chat plus sessions the human started by hand; a group lists only sessions *I*
+  initiated; kinds never mix; a session an agent started carries an instance UUID as its `initiator`, which
+  never equals a human account id, so agent↔agent runs never reach a human's list). Letting the picker
+  recompute it would have a surface offer sessions the router would have refused.
+- **The filter runs BEFORE pagination**: `total_count` / `total_pages` count only the rows this chat may
+  address, so **the paging is the window** — the 20-row cap and the 7-day freshness test that lived on the
+  old candidate endpoint are gone with it, and a human pages back as far as they want. Ordering stays
+  most-recently-active first (the same order the session-history list uses).
+- **The initiator is an identity, not a parameter**: the "I" of the visible set comes from the caller
+  resolved out of `x-user-id`, never from the query string — otherwise anybody could name somebody else's
+  visible set.
+- **No existence oracle**: a caller who is not a participant of this chat gets the same 404 as a chat that
+  does not exist (`SessionScope::sees_chat`, fail-closed). Local mode (`SessionScope::Unfiltered`) has no
+  account system, so the boundary stays the loopback bind itself, as on every other Runtime surface.
+- **The Gateway does not interpret these two parameters**: forwarded verbatim like `page` / `size` /
+  `active`. The permission lives on the node that owns the execution sessions, which the proxy can neither
+  read nor should (ADR-009 §5).
+- **A `Closed` session is still addressable**: non-residency is not "the human archived it" — the dispatcher
+  reopens it, so the listing does not drop rows by residency. The only exclusions are sessions whose PM task
+  already reached a terminal state: reviving a finished chain is not a legal continuation target.
+- **The disk scans happen outside the lock** (design 29 §5): the bindings and meta walks complete before
+  `SessionManager`'s global lock is taken, otherwise opening a picker once would queue `POST /sessions`
+  behind a filesystem scan.
+- An empty `chat_session_id` → 400; `surface` recognises only `group`, anything else (including absent) is
+  `direct`. This is a read-only surface and opens no write entry on an execution session: delivering to a
+  chosen session still goes through `POST /api/intents/mentions` (§4.5).
+
+### 5.9 `@session` Reference Material: Pinning and Persistence (ADR-106 revision 2026-11-04 · reference redrawing)
+
+> **Implementation**: [`core/acowork-gateway/src/http/intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs) (`validate_refs` / `pin_reference_rounds`); the pinning read is [`§5.7`](#57-round-projection-read-adr-106-d4)'s `rounds?latest=1`. **The full intent field table is owned by design 27 §4.5**; only the communication discipline is pinned here.
+
+`POST /api/intents/mentions` (and the 1:1 `POST /api/intents/chat-message`) body gains an optional `refs`: a message quotes several execution-session rounds as **material**, not as a delivery target — the `@` picker no longer produces `target_sessions` (narrowly retired; only the addressing-card answer keeps it). Each array item:
+
+| Field | Required | Notes |
+|---|---|---|
+| `agent_instance_id` | yes | Must be one of this message's delivery targets (material travels to the agent the human named, never to a bystander) |
+| `session_id` | yes | The execution-session id as the picker's candidate list offered it; re-checked server-side against the Runtime charset (`[A-Za-z0-9_-]`, ≤ 128 bytes) |
+| `round_id` | no | Only echoed back by an addressing-card re-delivery (its row was already pinned); absent = the Gateway pins it now. **An echo with a `round_id` may ride beside the card answer's `target_sessions`** — it is a fact of an already-written sentence, not a new delivery instruction |
+| `terminal` | no | Echoed with `round_id`, marks whether the pinned round had reached terminal |
+
+- **Pinning (before the row exists)**: for **every** ref (echo included), the Gateway first performs one scoped read through `rounds?latest=1` — this read is also the **authorization gate**: it runs the Runtime's `authorize_read` against the caller's user + chat scope, so a `session_id` that does not belong to this Chat / is not readable answers 404 here rather than letting a forged echo coordinate inject another session's material (ADR-106 revision · S-1). For a **fresh** ref (no `round_id`) this same read **also pins** the coordinate, resolving "the newest terminal round at that moment" (falling back to the newest running round), yielding the full quadruple `{agent_instance_id, session_id, round_id, terminal}`. For a pre-pinned echo (with `round_id`+`terminal`) the read **only proves readability and never rewrites the coordinate** — the client's coordinates are passed through verbatim and **never re-resolved** (a re-delivery is the same sentence, and re-guessing the round of an already-written utterance is exactly what this endpoint exists to prevent).
+- **Persistence**: the pinned coordinate array is written to the `user_message` row's `meta["refs"]` (**coordinates only, never content**); `build_chat_params` gains a `chat_refs` key (each target carries only its own instance's refs).
+
+Discipline (**the row is not written first**):
+
+- more than 5 refs (`MAX_CHAT_REFS`) → 400; a ref naming an agent this message does not deliver to, a blank or path-shaped `session_id`, a blank `round_id`, a **fresh** ref whose agent both receives a `target_sessions` delivery and carries `refs`, or a duplicate `(agent, session)` → 400. **The delivery-vs-quote contradiction is judged only for a fresh ref**: a pre-pinned echo (with `round_id`, i.e. the card answer's re-delivery) may ride beside `target_sessions`, because it is a fact of an already-written sentence, not a new delivery instruction. `force_new_for` + `refs` is **not** a contradiction: "new task" plus "quote this round while you do it" is one coherent instruction (unlike an address, a reference never decides where the sentence goes).
+- A pinning read that fails: **the row is not written**, the surface keeps the draft. A Runtime `404` (no such session / not readable) → `400`; Runtime / node unreachable and every other failure → `502`; an empty side table `latest: null` (no round to quote) → `400`.
+- **A message carrying `refs` skips the level-3 continuation branch** (a reference is already explicit material, so the model is not left to guess the target).
+- **Naming caveat**: `meta.refs` (chat material coordinates, this section), `context_refs` (the ADR-107 reference-part channel) and the chat-block `refs` (the `instance|session|r:round` triple of a D4 block projection read) are three different layers and must never be conflated in code or docs.
 
 ---
 

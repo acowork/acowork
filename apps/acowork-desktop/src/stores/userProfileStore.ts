@@ -2,8 +2,14 @@ import { create } from "zustand";
 import type { AvatarType, BoringAvatarVariant, ColorPalette, UserProfile } from "../lib/types";
 import { COLOR_PALETTES } from "../lib/types";
 import { pickRandomBuiltinIconId } from "../lib/avatar";
+import { readPref, writePref, onScopeChange } from "../lib/prefsScope";
 import i18n from "../i18n";
 
+/** Logical key, not the final localStorage name: the avatar presentation
+ *  choices (variant / palette / icon) are user-level, so `prefsScope`
+ *  namespaces them per account. The identity fields are overwritten from the
+ *  backend account on every resolve (`authStore.app`), but these are
+ *  client-only and used to be shared by every account on the machine. */
 const STORAGE_KEY = "acowork-user-profile";
 
 // ── Defaults ───────────────────────────────────────────────────────────
@@ -24,7 +30,7 @@ const DEFAULT_PROFILE: UserProfile = {
 
 function loadProfile(): UserProfile {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
+    const raw = readPref(STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Partial<UserProfile>;
       return {
@@ -53,11 +59,7 @@ function loadProfile(): UserProfile {
 }
 
 function saveProfile(profile: UserProfile) {
-  try {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(profile));
-  } catch {
-    // silently ignore persistence failures
-  }
+  writePref(STORAGE_KEY, JSON.stringify(profile));
 }
 
 function validateAvatarType(v?: unknown): AvatarType {
@@ -127,3 +129,8 @@ export const useUserProfileStore = create<UserProfileState>((set, get) => ({
     set({ profile: next });
   },
 }));
+
+// A login that does not reload the page leaves this store holding the
+// previous scope's avatar presentation. `authStore.app` then overwrites the
+// identity fields from the account, so only the client-only choices need this.
+onScopeChange(() => useUserProfileStore.setState({ profile: loadProfile() }));

@@ -64,6 +64,12 @@ pub enum WorkspaceError {
     #[error("invalid UTF-8 in file: {0}")]
     InvalidUtf8(String),
 
+    /// The file exceeds the raw-preview size cap. Maps to HTTP 413 —
+    /// the desktop preview surface never streams multi-GB blobs, and
+    /// an unbounded read over a WAN proxy path is a resource attack.
+    #[error("file too large: {0}")]
+    TooLarge(String),
+
     /// A custom error already includes an HTTP status + message (e.g.
     /// search regex parsing). Maps to the embedded status code.
     #[error("{message}")]
@@ -93,6 +99,7 @@ impl WorkspaceError {
             WorkspaceError::NotFound(_) => 404,
             WorkspaceError::InvalidPath(_) => 400,
             WorkspaceError::InvalidUtf8(_) => 422,
+            WorkspaceError::TooLarge(_) => 413,
             WorkspaceError::BadRequest { status, .. } => *status,
             WorkspaceError::Io(_) | WorkspaceError::Json(_) | WorkspaceError::Persist(_) => 500,
         }
@@ -192,17 +199,45 @@ pub struct RawFileQuery {
     pub workspace_id: Option<String>,
 }
 
-/// Response for `read_file_raw` — raw bytes + MIME type (ADR-055 L2-7).
+/// Response for `read_file_raw` — verbatim byte stream + cache metadata
+/// (ADR-055 L2-7).
 ///
 /// Unlike [`WorkspaceFileDto`] (the JSON envelope of `read_file`), this
 /// is served **verbatim** so the HTML preview iframe's `<img>` / `<link>`
 /// / `<script>` sub-resources resolve correctly. The bytes are not
 /// base64-encoded and there is no JSON wrapper.
-#[derive(Debug, Clone)]
+///
+/// The body is a **stream**, not a `Vec<u8>`: preview-sized files (tens
+/// of MB of PDF across a remote node) must never be fully buffered in the
+/// Runtime process. `body` is `None` for the 304 short-circuit (the
+/// caller's `If-None-Match` hit our `etag`) — headers only, no body.
+/// (`Debug` is hand-written below: the boxed stream is opaque.)
 pub struct RawFileDto {
-    pub bytes: Vec<u8>,
+    pub body: Option<RawFileStream>,
     pub mime_type: String,
     pub size: u64,
+    /// Weak entity tag `W/"{size:x}-{mtime_secs:x}"` — weak because the
+    /// value pairs size+mtime, not content bytes.
+    pub etag: String,
+    /// RFC 3339 `Last-Modified` (from file mtime), for proxies and
+    /// debuggability; cache revalidation rides on [`Self::etag`].
+    pub last_modified: Option<String>,
+}
+
+/// The raw byte stream behind [`RawFileDto::body`].
+pub type RawFileStream =
+    std::pin::Pin<Box<dyn futures_util::Stream<Item = Result<bytes::Bytes, std::io::Error>> + Send>>;
+
+impl std::fmt::Debug for RawFileDto {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RawFileDto")
+            .field("body", &self.body.as_ref().map(|_| "<stream>"))
+            .field("mime_type", &self.mime_type)
+            .field("size", &self.size)
+            .field("etag", &self.etag)
+            .field("last_modified", &self.last_modified)
+            .finish()
+    }
 }
 
 /// Querystring for `find_files` (filename fuzzy search).
@@ -372,7 +407,16 @@ pub trait WorkspaceQueryService: Send + Sync {
     /// `GET /workspaces/raw/{path}` — read a file's raw bytes (ADR-055
     /// L2-7). Served verbatim for the HTML preview iframe, with the same
     /// `resolve_within` path-traversal guard as [`Self::read_file`].
-    async fn read_file_raw(&self, params: &ReadFileParams) -> Result<RawFileDto, WorkspaceError>;
+    ///
+    /// `if_none_match` is the request's `If-None-Match` header value
+    /// (forwarded by the reverse proxies): a hit returns metadata with
+    /// `body: None` so the handler answers 304 without touching disk
+    /// content.
+    async fn read_file_raw(
+        &self,
+        params: &ReadFileParams,
+        if_none_match: Option<&str>,
+    ) -> Result<RawFileDto, WorkspaceError>;
 
     /// `GET /workspaces/find` — fuzzy-search file/dir names.
     ///

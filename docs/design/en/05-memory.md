@@ -8,7 +8,7 @@
 
 > **v3.9 Change (2026-05-28)**: Experience layer write sources simplified — see [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md). Core changes: remove per-round conversation real-time write to SQLite; experience layer only written via Compaction summary and Session close distillation. Compaction and Distillation unified as single Compact Model call ("summary is distillation").
 
-> **v4.0 Change**: Memory layer switched to SQLite (single database + WAL + FTS5 + sqlite-vss vectors; consolidated layer graph relations handled by application-level `MemoryNode.edges` table, no longer relying on storage engine native LPG/GQL; see [ADR-082](../../adr/zh/ADR-082-sqlite-memory-cutover.md)). The `acowork-grafeo` crate has been deleted; memory engine code (`EpisodicDistiller` / `RetrievalMetrics`) migrated to `core/acowork-memory/`.
+> **v4.0 Change**: Memory layer switched to SQLite (single database + WAL + FTS5 + a vectors table; see [ADR-082](../../adr/zh/ADR-082-memory-storage-sqlite-vector-fts.md)). The `acowork-grafeo` crate has been deleted; memory engine code (`EpisodicDistiller` / `RetrievalMetrics`) migrated to `core/acowork-memory/`.
 
 > **v4.1 Change (implemented, 2026-10-23)**: the memory module has been extracted from the Runtime into a Gateway-hosted standalone process `acowork-memory`; Agents call its tools over MCP (registered as `mcp_memory__memory_store` / `mcp_memory__memory_recall`, with per-tool opt-in in `agent_mcp_tools.json`, ADR-069) and the panel reaches it through the Gateway reverse proxy; auto-inject is removed, the `memory:read` / `memory:write` permission entries are deleted, and the Runtime is left with zero memory business code — see [ADR-101](../../adr/en/ADR-101-memory-standalone-mcp-service.md). **The rest of this document is still written against the pre-extraction (built-in) shape**; the layered data model (transient / experiential / consolidated) and the distillation and forgetting pipeline semantics are unchanged — what changed is process ownership and the access channel.
 
@@ -29,9 +29,9 @@ Memory uses **biomimetic layered** design, with human cognitive science as refer
 ├─────────────────────────────────────────────────────────┤
 │  Experiential Layer                                    │
 │  ───                                                   │
-│  Episodic memory — SQLite memory layer episodic                      │
+│  Episodic memory — `nodes` table (`label = 'Episodic'`)   │
 │  Interaction fragments, conversation snapshots, perceptual raw records │
-│  SQLite-native HNSW vector index + BM25 full-text search │
+│  In-memory vector cache + brute-force scan (recall 100%) + SQLite FTS5 full-text search │
 │  Lifecycle: days → weeks, promotes to consolidated layer after consolidation │
 │  Biomimetic correspondence: hippocampus temporary encoding │
 ├─────────────────────────────────────────────────────────┤
@@ -69,7 +69,7 @@ The old three-tier (working memory / private memory / cloud sync) confused two d
 | Transient → Experiential | Summary write | Compaction triggers (80% token usage) or Session close, LLM summary asynchronously writes to SQLite. No longer per-round write, avoiding redundancy with JSONL |
 | Experiential → Consolidated | Consolidation pipeline | Instant extraction (LLM autonomous tool call) + offline replay (dedicated call when idle) |
 | Consolidated → Transient | Retrieval injection | When user input arrives, retrieve related memory and inject into context. **Default OFF since 2026-09-12** (`MemoryManagerConfig::auto_inject_enabled = false`): different Agents have different recall needs, SQLite memory layer triple/preference memory is incomplete, raw user message as query has low hit rate. Recovery method: set `auto_inject_enabled` to `true` (can be per-agent configured). Explicit `memory_recall` tool not affected |
-| Intra Consolidated/Experiential flow | Associative diffusion | Retrieval extends 1-2 hops along graph edges |
+| Intra Consolidated/Experiential flow | Associative diffusion | **Not implemented** (ADR-082 D4 removed graph traversal; no `edges` table — §6 is retained as a design goal) |
 | Consolidated → Dormant | Forgetting decay | Background periodically calculates decay_score |
 
 **Irreversible one-way gate**: Experiential → Consolidated is information refinement process (raw fragments → structured knowledge), naturally one-way. But Consolidated → Experiential can be implemented through "recall" mechanism — when user or Agent actively triggers, extract related knowledge from consolidated layer as new episodic context injected into transient layer.
@@ -79,10 +79,12 @@ The old three-tier (working memory / private memory / cloud sync) confused two d
 | Cognitive Layer | Content | SQLite memory layer Storage | Description |
 |----------------|---------|----------------|-------------|
 | Transient | Working memory | Not in SQLite memory layer | LLM context window, pure process memory |
-| Experiential | Episodic memory | `Episodic` Label | SQLite-native HNSW + BM25 + metadata |
-| Consolidated | Semantic/Procedural/Autobiographical/Skill experience | `Knowledge` / `Procedural` / `Autobiographical` Label + Edge | LPG knowledge graph |
+| Experiential | Episodic memory | `nodes` (`label = 'Episodic'`) + `vectors` + `fts_episodic` | Vectors in a `vectors` table (f32 BLOB); lexical search via an FTS5 trigram virtual table |
+| Consolidated | Semantic/Procedural/Autobiographical/Skill experience | `nodes` (`label` ∈ {Knowledge, Procedural, Autobiographical}) + their `vectors` / `fts_*` | One FTS5 virtual table per label; no `edges` table |
 
-There is no ambiguity like "experiential layer nodes exist in semantic memory" — cognitive layering and `nodes.label` are one-to-one mapping, storage format is `memory/private.sqlite` single file.
+There is no ambiguity like "experiential layer nodes exist in semantic memory" — cognitive layering and `nodes.label` are one-to-one mapping. The storage format is a single SQLite file (ADR-082 D1, rusqlite bundled), one per Agent instance.
+
+> **v4.1 change**: the `episodes` / `episodes_vec` / `episodes_fts` table layout, the sqlite-vss HNSW index, and the `edges` table described by the previous version of this table no longer exist. ADR-082 D2 dropped HNSW (in-memory cache + brute-force scan, recall = 100%), D3 moved text search to FTS5, and D4 removed inter-layer graph traversal (no `edges` table, no simulated graph walks). The storage path moved with ADR-101 to `$HOME/.acowork/acowork-memory/instances/{instance_id}/memory.db`.
 
 ## 0.1 LLM-First Principle
 
@@ -189,9 +191,9 @@ SQLite `episodes` row
 
 **Retrieval Capability (based on SQLite (rusqlite) native API)**:
 
-- **Semantic retrieval**: `db.vector_search()` — SQLite-native HNSW vector index, supports cosine/Euclidean/dot product distance, SIMD acceleration
-- **Keyword retrieval**: `db.text_search()` — SQLite-native BM25 full-text index, built-in Unicode tokenizer
-- **Hybrid retrieval**: `db.hybrid_search()` — SQLite-native RRF fusion ranking, supports `topology_boost` graph connectivity reranking
+- **Semantic retrieval**: `vector_search` — vectors are lazily loaded per label into an in-memory cache and scanned brute-force (exact, recall = 100%; ADR-082 D2 dropped HNSW)
+- **Keyword retrieval**: `text_search` — SQLite FTS5 full-text index, `trigram` tokenizer (ADR-082 D3, matches CJK substrings; queries under 3 characters fall back to LIKE)
+- **Hybrid retrieval**: application-level RRF fusion ranking (vector + text scores weighted by `1/(k+rank)`, each source gating on its own and unioned)
 - **MMR deduplication**: `db.mmr_search()` — Maximal Marginal Relevance, ensures result diversity, avoids duplicate semantics
 - **Time filter**: Narrow retrieval space by time range
 - **Dual-source query split (memory_recall, 2026-10)**: `MemoryQuery.embedding_text` carries the current turn's full user message to drive the vector source (full-sentence embeddings vastly outperform keyword bags), while `query_text` carries LLM-extracted keywords driving the BM25 lexical source; falls back to `query_text` alone when `embedding_text` is unset or blank. The user message and session id are injected per call via `ToolContext` (`execute_with_context`), resolved by the loop from per-session state — they must NEVER live on the agent-shared `MemorySessionHandle` or tool instances (last-writer-wins race under concurrent sessions, fixed 2026-10).
@@ -568,7 +570,7 @@ This is a comprehensive architecture document covering memory layers, retrieval 
 - **Compaction = Distillation** (ADR-011): single LLM call for both memory replacement and experience layer writing
 - **Privacy levels** (Public/Personal/Sensitive) for package sharing
 - **Forgetting mechanisms** with three-factor decay and Dormant→Purge lifecycle
-- **SQLite-native** HNSW + BM25 + RRF hybrid retrieval, with a dual-source query split (`embedding_text` = user message → vector, `query_text` = LLM keywords → BM25)
+- **SQLite-native** FTS5 + brute-force vector + RRF hybrid retrieval, with a dual-source query split (`embedding_text` = user message → vector, `query_text` = LLM keywords → lexical)
 - **Associative diffusion**: design goal only — never implemented; the `expand_hops` field was removed as dead code (backend is SQLite since ADR-082, no graph traversal)
 
 For full details on sections 4.2 (Offline Consolidation), 4.3 (Conflict Detection), 4.4 (Pending → Active Promotion), 4.5 (LLM Judge), 4.6 (Embedding Update), and chapters 5-11 (Quality Framework, Self-Evaluation, etc.), see the Chinese source document `docs/design/zh/05-memory.md`.

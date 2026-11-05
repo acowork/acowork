@@ -18,8 +18,9 @@ One-off probes, debug helpers, and ad-hoc experiments do not belong here — see
 | Python 3 + `pillow` | frontend smoke tests, store logos |
 | PowerShell 7 (`pwsh`) | the `.ps1` scripts on Windows |
 
-ONNX Runtime is **not** a manual prerequisite — `setup_ort.*` installs it into
-`.ort/`, and `ort_env.js` makes Tauri auto-detect it on every platform.
+ONNX Runtime is **not** a manual prerequisite — `build_core.*` probes `.ort/` and offers to
+run `setup_ort.*` in place when it is missing, and `ort_env.js` makes Tauri auto-detect it
+on every platform.
 
 ## Layout
 
@@ -36,9 +37,6 @@ Scripts are grouped by **scope**, not by file type:
 ## First build
 
 ```bash
-./dev/common/setup_ort.sh           # Linux only (macOS: skip — build_core.sh
-                                    # downloads ORT itself via cargo download-ort)
-./dev/common/setup_ort.ps1          # Windows
 ./dev/common/build_core.sh          # or build_core.ps1 on Windows
 ```
 
@@ -46,7 +44,30 @@ Scripts are grouped by **scope**, not by file type:
 profile. `-Debug` / `--debug` switches to the debug profile and auto-raises
 `ACOWORK_GATEWAY_LOG_LEVEL` to `debug` for every process it spawns.
 
+ONNX Runtime is handled by the same script — there is no separate setup step.
+It probes `.ort/` for a local install and, when one is missing, offers to run
+`setup_ort.*` in place (interactive terminals only; CI and piped stdin keep
+the hard-exit behaviour and never block on input). On macOS the embedding
+runtime is built with `--features download-ort[,coreml]` instead, so
+`setup_ort.sh` is not needed there at all. To install ORT up front, run
+`setup_ort.sh` (Linux) or `setup_ort.ps1` (Windows) yourself.
+
 ## Build and run
+
+The desktop and mobile apps shell out to the core binaries, so those come
+first. The desktop app drives the core build from its own npm scripts:
+
+| Command | Where | What it does |
+|---|---|---|
+| `npm run core:build:debug` | `apps/acowork-desktop` | Builds the nine core binaries the app shells out to (gateway / runtime / embed / doc / lsp-relay / node / pm / user / memory) in the debug profile. ONNX Runtime is discovered by `dev/ort_env.js` — no separate setup step. |
+| `npm run tauri dev` | `apps/acowork-desktop` | Native window with the HMR frontend. Run `core:build:debug` first. |
+| `npm run tauri build` | `apps/acowork-desktop` | Release installer. `beforeBuildCommand` auto-runs `core:build:release` + `npm build` + the Tauri bundle — you do not need to build the core twice. |
+| `npm run dev` | `apps/acowork-desktop` · `apps/acowork-mobile` | Browser-only Vite dev server (desktop :5173, mobile :19877). No native window. |
+
+The mobile app bundles no core binaries of its own — it talks to a Gateway
+over the network, so there is nothing extra to compile. `npm run tauri:dev`
+in `apps/acowork-mobile` is enough (see
+[apps/acowork-mobile/README.md](../apps/acowork-mobile/README.md)).
 
 | Script | What it does |
 |---|---|
@@ -119,7 +140,9 @@ Tests that live outside the Cargo test harness:
 | [`acowork-relay.service`](deploy/relay/acowork-relay.service) | systemd unit. Add `--log-level debug` when diagnosing a wedged device tunnel: yamux logs its stream lifecycle and ping/pong RTT at debug, and that is the only evidence a stalled pipe leaves behind (design doc 24 §5.2). |
 | [`certbot-wildcard.sh`](deploy/relay/certbot-wildcard.sh) | Wildcard certificate for `*.<relay-domain>` — the relay serves every device from its own subdomain, so one wildcard cert covers all of them. |
 
-See the root [README § Relay server](../README.md) for the deployment walkthrough.
+Deployment walkthrough: [`docs/runbooks/relay-ecs-cloudflare-deploy.md`](../docs/runbooks/relay-ecs-cloudflare-deploy.md)
+(Cloudflare DNS + Aliyun ECS) · [`docs/runbooks/relay-selfhost-cn-deploy.md`](../docs/runbooks/relay-selfhost-cn-deploy.md)
+(self-host in mainland China, ICP filing). Design: [design doc 24 §3](../docs/design/zh/24-cloud-relay-remote-access.md).
 
 ## What is deliberately absent
 

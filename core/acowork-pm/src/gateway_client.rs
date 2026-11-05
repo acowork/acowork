@@ -16,6 +16,21 @@
 
 use std::time::Duration;
 
+use acowork_core::timeout_config::constants::{INTENT_ACCEPT, INTENT_DEFAULT};
+
+/// Request budget for [`GatewayClient::dispatch_task`]. The Gateway path is
+/// bounded by design at `wake_and_deliver` (up to `INTENT_DEFAULT` — a cold
+/// target may spend it all in `wait_online`) plus the acceptance wait
+/// (`INTENT_ACCEPT`): 35s before the answer. The client-side default (10s)
+/// MUST NOT cut under that: aborting while the first publish is still
+/// completing server-side makes the retry — same `message_id`, target
+/// already routing — re-deliver the Intent, which is exactly the failure
+/// the receipt protocol exists to prevent. The margin covers connection
+/// setup and response transfer.
+fn dispatch_timeout() -> Duration {
+    INTENT_DEFAULT + INTENT_ACCEPT + Duration::from_secs(5)
+}
+
 /// Talks to the Gateway's project-group endpoint.
 #[derive(Clone)]
 pub struct GatewayClient {
@@ -150,6 +165,53 @@ impl GatewayClient {
         tracing::info!(project_id, "project group participants synced");
     }
 
+    /// Tell the chat domain that the project was archived, so its group chat
+    /// is now deletable by its owner (design 27 §4.4). The chat channel is
+    /// **not** deleted here — the history stays until a human removes it, and
+    /// only a project with nothing left to re-create the channel may be
+    /// deleted at all; that precondition lives in the user service and this
+    /// push is what satisfies it.
+    ///
+    /// Returns whether the Gateway accepted the stamp. The caller retries on
+    /// `false` ([`crate::api::projects::mark_group_deleted`]): unlike
+    /// provisioning, a lost stamp is not a missing convenience but a hard
+    /// gate — the group chat stays undeletable for every account (the
+    /// project-alive check is identity-blind), and no live project will
+    /// ever push the mark again.
+    pub async fn mark_group_deleted(&self, project_id: &str) -> bool {
+        let mut req = self.client.post(format!(
+            "{}/api/intents/project-group/deleted",
+            self.gateway_url
+        ));
+        if let Some(token) = &self.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = match req
+            .json(&serde_json::json!({ "project_id": project_id }))
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(error = %e, project_id, "project group delete-mark unreachable");
+                return false;
+            }
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            tracing::warn!(
+                project_id,
+                %status,
+                body = %body,
+                "project group delete-mark rejected by Gateway"
+            );
+            return false;
+        }
+        tracing::info!(project_id, "project group marked deletable");
+        true
+    }
+
     /// Dispatch a PM task as a group-chat Intent (design 27 §5.4.2 / §9):
     /// the Gateway keys the execution context on
     /// `task:{project_id}:{task_id}`, writes the `intent_request` row into
@@ -168,6 +230,11 @@ impl GatewayClient {
     /// so a failing delivery can neither pile up rows nor burn the
     /// conversation's request budget. An empty string lets the Gateway
     /// mint one (pre-idempotency behavior).
+    ///
+    /// Carries its own request timeout ([`dispatch_timeout`]): this call
+    /// blocks on the target's wake *and* its acceptance receipt, so the
+    /// client default would abort a still-healthy dispatch and provoke a
+    /// duplicate delivery on retry.
     #[allow(clippy::too_many_arguments)]
     pub async fn dispatch_task(
         &self,
@@ -179,10 +246,10 @@ impl GatewayClient {
         assignment_brief: &str,
         message_id: &str,
     ) -> Result<String, String> {
-        let mut req = self.client.post(format!(
-            "{}/api/intents/task-dispatch",
-            self.gateway_url
-        ));
+        let mut req = self
+            .client
+            .post(format!("{}/api/intents/task-dispatch", self.gateway_url))
+            .timeout(dispatch_timeout());
         if let Some(token) = &self.auth_token {
             req = req.bearer_auth(token);
         }
@@ -224,7 +291,17 @@ impl GatewayClient {
                 .get("error_code")
                 .and_then(|v| v.as_str())
                 .unwrap_or("unknown");
-            return Err(format!("gateway rejected ({status}): {code}"));
+            // The Gateway relays the receiving Runtime's own refusal text
+            // (`intent_rejected` carries e.g. `no such column: intent_key`).
+            // It is the only description of the breakage the operator will
+            // ever see — it lands in `task.dispatch_error` — so it is kept,
+            // not collapsed into the code.
+            let detail = body.get("error").and_then(|v| v.as_str()).unwrap_or("");
+            return Err(if detail.is_empty() {
+                format!("gateway rejected ({status}): {code}")
+            } else {
+                format!("gateway rejected ({status}): {code}: {detail}")
+            });
         }
         let mid = body
             .get("message_id")

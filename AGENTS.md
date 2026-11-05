@@ -4,6 +4,12 @@
 
 ACowork is a decentralized, high-security, scalable AI Agent runtime platform. Each Agent is a declarative `.agent` package (config + prompts + skills, no binary), loaded by a universal Runtime binary and managed by a Gateway.
 
+> **Contributing?** This file is the architecture and conventions reference. The
+> contribution contract — build, test, red-line gates, commit format, review process —
+> lives in [`CONTRIBUTING.md`](CONTRIBUTING.md). Security reports:
+> [`SECURITY.md`](SECURITY.md). Community expectations:
+> [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
+
 ## Build & Test
 
 ### Core (Rust workspace)

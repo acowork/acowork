@@ -104,7 +104,7 @@ describe("buildProfilePatchFromServerConfig", () => {
   });
 
   it("syncs the ADR-099 chat_router sub-fields from the nested block", () => {
-    // The Setup "Chat Router" card reads these back after a PUT /
+    // The Setup "Chat Session Router" card reads these back after a PUT /
     // refresh. A concrete on-disk value must reach the profile.
     const data: ServerConfigEnvelope = {
       config: {
@@ -118,12 +118,21 @@ describe("buildProfilePatchFromServerConfig", () => {
       },
     };
     expect(buildProfilePatchFromServerConfig(data)).toEqual({
-      chatRouterEnabled: false,
       chatRouterModel: "deepseek-flash",
       chatRouterProvider: "deepseek",
       chatRouterTimeoutMs: 12000,
       chatRouterHistoryMaxTokens: 6000,
     });
+  });
+
+  it("ignores the chat_router kill switch — the router is always on", () => {
+    // `enabled` is not a product control: the panel has no switch, so
+    // there is no profile field for it. Reading it back would put a
+    // value in the store that nothing renders and nothing writes.
+    const p = buildProfilePatchFromServerConfig({
+      config: { chat_router: { enabled: false } },
+    });
+    expect(p).toEqual({});
   });
 
   it("treats empty / absent chat_router sub-fields as 'no opinion'", () => {
@@ -133,7 +142,7 @@ describe("buildProfilePatchFromServerConfig", () => {
     const p = buildProfilePatchFromServerConfig({
       config: { chat_router: { enabled: true, model: "", provider: "" } },
     });
-    expect(p).toEqual({ chatRouterEnabled: true });
+    expect(p).toEqual({});
     expect(p.chatRouterModel).toBeUndefined();
     expect(p.chatRouterProvider).toBeUndefined();
     // A cleared token budget (`null` on disk → absent on the wire) keeps the

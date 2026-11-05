@@ -567,8 +567,6 @@ pub fn truncate_body(body: &str, max: usize) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateLine {
     pub alias: String,
-    /// The session currently bound to this chat.
-    pub current: bool,
     /// `working` / `idle` / `errored` / `closed` (ADR-099 §5.2 vocabulary —
     /// coarser than `SessionStatus` on purpose).
     pub status: String,
@@ -582,9 +580,8 @@ pub struct CandidateLine {
 impl CandidateLine {
     fn render(&self) -> String {
         format!(
-            "{:<3}  {:<7}  {:<8}  {:<4}  {:<5}  {}",
+            "{:<3}  {:<8}  {:<4}  {:<5}  {}",
             self.alias,
-            if self.current { "current" } else { "" },
             self.status,
             self.age,
             self.origin,
@@ -634,6 +631,13 @@ pub struct TurnContext<'a> {
     /// composer sent). Rendered through the same function Block B uses, so the
     /// turn being routed and the same turn once it is history cannot disagree.
     pub refs: &'a [AttachmentLabel],
+    /// Pinned `@session` material (ADR-106 revision 2026-11-04): one rendered
+    /// body per quoted round, produced by the runner's single renderer — the
+    /// identical strings the delivery ships as `referenced_round` parts. The
+    /// segment budget already ran when these were built, so the renderer here
+    /// only places them; they belong to Block C's dynamic area, never to the
+    /// cached prefix.
+    pub referenced_rounds: &'a [String],
 }
 
 impl TurnContext<'_> {
@@ -667,6 +671,19 @@ impl TurnContext<'_> {
             out.push_str("[task]\n");
             out.push_str(task);
             out.push('\n');
+        }
+        // The quoted rounds the human attached via the second level of the `@`
+        // — material, not addressing. Only rendered when the turn carries any:
+        // an empty `[referenced rounds]` section would teach the model that
+        // quoted material is missing when none was ever attached.
+        if !self.referenced_rounds.is_empty() {
+            out.push_str("[referenced rounds]\n");
+            for entry in self.referenced_rounds {
+                out.push_str(entry);
+                if !entry.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
         }
         out.push_str("\n[user message]\n");
         // An attachment-only turn is a normal turn, not an empty one: the human
@@ -1030,6 +1047,7 @@ mod tests {
             user_message: "look at this",
             attachments: &row.attachments,
             refs: &[],
+            referenced_rounds: &[],
         };
         let rendered = ctx.render();
         let turn_line = rendered.lines().last().expect("block c renders");
@@ -1068,6 +1086,7 @@ mod tests {
             user_message: "你先看看这个",
             attachments: &row.attachments,
             refs: &row.meta.exec_attachments,
+            referenced_rounds: &[],
         }
         .render();
         let turn_line = turn_line.lines().last().expect("block c renders");
@@ -1093,6 +1112,7 @@ mod tests {
             user_message: "   ",
             attachments: &attachments,
             refs: &[],
+            referenced_rounds: &[],
         }
         .render();
 
@@ -1115,11 +1135,72 @@ mod tests {
             user_message: "hello",
             attachments: &[],
             refs: &[],
+            referenced_rounds: &[],
         }
         .render();
         assert!(rendered.ends_with("\n[user message]\nhello"));
         assert!(!rendered.contains("[attachments]"));
         assert!(!rendered.contains(ATTACHMENT_ONLY_PLACEHOLDER));
+    }
+
+    /// ADR-106 revision 2026-11-04: the quoted `@session` material is a
+    /// Block C section, placed with the turn's own view (never in the cached
+    /// prefix), and the name is the literal the kernel prompt teaches — a
+    /// rename here must trip the drift guard in `chat_prompt` too.
+    #[test]
+    fn block_c_renders_referenced_rounds_and_stays_silent_without() {
+        let material = vec![
+            "session s1 · round r:1 · completed\nquestion: q\nanswer: done\n".to_string(),
+            "session s2 · round r:2 · working (was still running)\nanswer: (none yet)\n".to_string(),
+        ];
+        let rendered = TurnContext {
+            surface: "dm",
+            speaker: "u1",
+            now: "2026-11-04T14:03:00+08:00",
+            draft: None,
+            candidates: &[],
+            task: None,
+            history_available: true,
+            user_message: "汇总一下",
+            attachments: &[],
+            refs: &[],
+            referenced_rounds: &material,
+        }
+        .render();
+        assert!(
+            rendered.contains(
+                "[referenced rounds]\nsession s1 · round r:1 · completed\nquestion: q\nanswer: done\nsession s2"
+            ),
+            "{rendered}"
+        );
+        // The material sits before the message — the human's ask still leads.
+        assert!(
+            rendered.find("[referenced rounds]").unwrap()
+                < rendered.find("[user message]").unwrap(),
+            "{rendered}"
+        );
+        // The section lives in the dynamic tail: the runtime-context header,
+        // the candidates block and the user message keep their fixed shapes.
+        assert!(rendered.starts_with("[runtime context]\nsurface: dm\n"));
+        assert!(rendered.ends_with("\n[user message]\n汇总一下"));
+
+        // No material, no section: an empty `[referenced rounds]` heading
+        // would teach the model a hole where nothing was ever attached.
+        let plain = TurnContext {
+            surface: "dm",
+            speaker: "u1",
+            now: "2026-11-04T14:03:00+08:00",
+            draft: None,
+            candidates: &[],
+            task: None,
+            history_available: true,
+            user_message: "hello",
+            attachments: &[],
+            refs: &[],
+            referenced_rounds: &[],
+        }
+        .render();
+        assert!(!plain.contains("[referenced rounds]"));
     }
 
     #[test]
@@ -1148,7 +1229,6 @@ mod tests {
         let candidates = vec![
             CandidateLine {
                 alias: "S1".into(),
-                current: true,
                 status: "working".into(),
                 age: "2m".into(),
                 origin: "chat".into(),
@@ -1156,7 +1236,6 @@ mod tests {
             },
             CandidateLine {
                 alias: "S2".into(),
-                current: false,
                 status: "idle".into(),
                 age: "3h".into(),
                 origin: "task".into(),
@@ -1174,6 +1253,7 @@ mod tests {
             user_message: "继续弄一下登录",
             attachments: &[],
             refs: &[],
+            referenced_rounds: &[],
         };
         let text = ctx.render();
         assert!(text.starts_with("[runtime context]\nsurface: group\nspeaker: alice\n"));
@@ -1186,11 +1266,10 @@ mod tests {
             .take_while(|l| !l.is_empty())
             .collect();
         assert_eq!(candidate_lines.len(), 2);
+        // No `current` column: a chat has no single active session anymore
+        // (ADR-106 D11) — continuity lives in the transcript's reference rows.
         let s1: Vec<&str> = candidate_lines[0].split_whitespace().collect();
-        assert_eq!(
-            s1,
-            vec!["S1", "current", "working", "2m", "chat", "Fix", "login", "redirect"]
-        );
+        assert_eq!(s1, vec!["S1", "working", "2m", "chat", "Fix", "login", "redirect"]);
         let s2: Vec<&str> = candidate_lines[1].split_whitespace().collect();
         assert_eq!(s2, vec!["S2", "idle", "3h", "task", "Review", "ADR-098"]);
         assert!(text.ends_with("\n[user message]\n继续弄一下登录"));
@@ -1210,6 +1289,7 @@ mod tests {
             user_message: "hi",
             attachments: &[],
             refs: &[],
+            referenced_rounds: &[],
         };
         let text = ctx.render();
         assert!(text.contains("draft: model=claude-sonnet, workspace=ws-1"));

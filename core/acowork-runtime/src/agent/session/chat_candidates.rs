@@ -19,9 +19,11 @@
 //!   message into their conversation. A 1:1 chat's session must never list in
 //!   a group, and a group's sessions must never list in a 1:1 chat.
 //!
-//! Ordering is `current` first, then most recently active, then title, then
-//! session id — fully determined. Block C is re-rendered every turn, so an
-//! unstable order would churn the cached tail for no reason.
+//! Ordering is most recently active first, then title, then session id — fully
+//! determined. Block C is re-rendered every turn, so an unstable order would
+//! churn the cached tail for no reason. There is no "current" session any more
+//! (ADR-106 D11): nothing maps a Chat to one execution session, so recency is
+//! the honest statement of what this chat last worked on.
 //!
 //! Only metadata is read (ADR-096): title, activity stamp, binding, origin.
 //! The session JSONL is never touched here.
@@ -98,6 +100,28 @@ pub fn scan_rows(work_dir: &str) -> Vec<(String, SessionMeta)> {
     )
 }
 
+/// Read the intent-routing index (ADR-106 D11): which sessions own an intent
+/// context, and which of those contexts are over.
+///
+/// A second tiny metadata read next to [`scan_rows`], deliberately outside the
+/// `SessionManager` lock for the same reason. An unavailable store reads as "no
+/// bindings": the candidate list loses its `task` origin marks and its terminal
+/// exclusions, which costs a turn one stale candidate — never a wrong route.
+pub fn scan_bindings(work_dir: &str) -> Vec<acowork_core::session_meta::IntentBinding> {
+    match crate::conversation::session_meta_store(
+        &std::path::Path::new(work_dir).join("conversations"),
+    ) {
+        Ok(store) => store.intent_bindings().unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "intent bindings unavailable — candidate list built without them");
+            Vec::new()
+        }),
+        Err(e) => {
+            tracing::warn!(error = %e, "intent bindings unreadable — candidate list built without them");
+            Vec::new()
+        }
+    }
+}
+
 /// Where the execution session came from, as far as the router may know.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CandidateOrigin {
@@ -126,8 +150,24 @@ pub struct SessionCandidate {
     pub origin: CandidateOrigin,
     /// `meta.last_active_at` as epoch seconds (0 when unparseable).
     pub last_active_secs: i64,
-    /// The session the Chat session is currently mapped to.
-    pub current: bool,
+}
+
+impl SessionCandidate {
+    /// The option row a Chat choice card shows for this candidate (ADR-106 D6
+    /// levels 3 and 5).
+    ///
+    /// Shaped here rather than at each card writer because the card's promise is
+    /// "these are the sessions you may continue": the id a human clicks is the
+    /// same id the permission filter admitted, and a writer that renamed or
+    /// dropped a field would be handing back an address nothing can resolve.
+    pub fn choice_option(&self) -> serde_json::Value {
+        serde_json::json!({
+            "session_id": self.session_id,
+            "label": self.title,
+            "status": self.status.label(),
+            "origin": self.origin.label(),
+        })
+    }
 }
 
 /// Everything the filter needs besides the meta rows.
@@ -137,8 +177,6 @@ pub struct CandidateQuery<'a> {
     /// only ever offers their own sessions — on every surface.
     pub owner_user_id: Option<&'a str>,
     pub surface: CandidateSurface,
-    /// The session the chat is currently mapped to (marked `current`).
-    pub current_session_id: Option<&'a str>,
     /// Session ids reachable through a `conv:task:` mapping.
     pub task_session_ids: &'a HashSet<String>,
     /// Sessions whose PM task already reached a terminal state. Never
@@ -169,19 +207,96 @@ pub fn build_candidates(
                 CandidateOrigin::Chat
             },
             last_active_secs: active_secs(meta),
-            current: query.current_session_id == Some(sid.as_str()),
         })
         .collect();
 
     out.sort_by(|a, b| {
-        b.current
-            .cmp(&a.current)
-            .then_with(|| b.last_active_secs.cmp(&a.last_active_secs))
+        b.last_active_secs
+            .cmp(&a.last_active_secs)
             .then_with(|| a.title.cmp(&b.title))
             .then_with(|| a.session_id.cmp(&b.session_id))
     });
     out.truncate(query.max.max(1));
     out
+}
+
+/// The routable sessions of one chat (ADR-106 D6 level 3).
+///
+/// Exactly the candidate filter — visibility, initiator ownership, terminal
+/// exclusion — without the live-status pass: a session that exists only on disk
+/// is still addressable, the dispatcher reopens it. `SessionManager::chat_continuation`
+/// asks this so the deterministic route can say "there is one session here and no
+/// decision to make" instead of keeping a pointer to "the last one", and the
+/// level-3 choice card asks it for the options to show when there are several —
+/// which is why the candidates come back whole, not as ids.
+///
+/// `task_session_ids` is only an origin label, so an empty set is harmless and
+/// `max` is left unbounded — the caller needs the true count, not a truncated
+/// one.
+pub fn deliverable_candidates(
+    rows: &[(String, SessionMeta)],
+    chat_session_id: &str,
+    owner_user_id: Option<&str>,
+    surface: CandidateSurface,
+    terminal_session_ids: &HashSet<String>,
+) -> Vec<SessionCandidate> {
+    let task_session_ids = HashSet::new();
+    let query = CandidateQuery {
+        chat_session_id,
+        owner_user_id,
+        surface,
+        task_session_ids: &task_session_ids,
+        terminal_session_ids,
+        max: usize::MAX,
+    };
+    build_candidates(rows, &HashMap::new(), &query)
+}
+
+/// The same read rule as an owned value, for a caller that filters rows outside
+/// the router (ADR-106 D7: `GET /sessions?chat_session_id=&surface=`).
+///
+/// [`CandidateQuery`] is the router's shape — it borrows the sets it needs and
+/// carries the PM-origin labels a listing never renders. This owns its inputs so
+/// the session scan can move it into a blocking task as a row predicate without
+/// borrowing the HTTP request or a lock. The rule itself stays `is_visible`:
+/// one implementation for both entry points, because a second copy of a
+/// permission filter is how the two drift apart.
+#[derive(Debug, Clone)]
+pub struct ChatScopeRule {
+    pub chat_session_id: String,
+    /// The reading human, taken from the Gateway-injected scope headers — never
+    /// from the query string. `None` = local mode (no accounts to attribute).
+    pub owner_user_id: Option<String>,
+    pub surface: CandidateSurface,
+    /// Sessions whose PM task already reached a terminal state: not addressable
+    /// again, so not listable either.
+    pub terminal_session_ids: HashSet<String>,
+}
+
+impl ChatScopeRule {
+    /// May this session be listed for this chat, to this reader?
+    ///
+    /// Exactly the candidate filter — terminal exclusion, chat binding, initiator
+    /// ownership — with no display policy on top. Ordering, paging, and how far
+    /// back to look are the listing's business; this only says what is legal.
+    pub fn allows(&self, meta: &SessionMeta) -> bool {
+        if self.terminal_session_ids.contains(&meta.session_id) {
+            return false;
+        }
+        // The PM-origin set is a label, never a gate, so an empty one is
+        // harmless here — and `HashSet::new` allocates nothing until inserted
+        // into, which is the point of building it per call.
+        let task_session_ids = HashSet::new();
+        let query = CandidateQuery {
+            chat_session_id: &self.chat_session_id,
+            owner_user_id: self.owner_user_id.as_deref(),
+            surface: self.surface,
+            task_session_ids: &task_session_ids,
+            terminal_session_ids: &self.terminal_session_ids,
+            max: usize::MAX,
+        };
+        is_visible(meta, &query)
+    }
 }
 
 /// The two visibility rules (module docs). A session bound to another chat is
@@ -324,7 +439,6 @@ mod tests {
 
     fn query<'a>(
         surface: CandidateSurface,
-        current: Option<&'a str>,
         tasks: &'a HashSet<String>,
         terminal: &'a HashSet<String>,
         max: usize,
@@ -333,7 +447,6 @@ mod tests {
             chat_session_id: CHAT,
             owner_user_id: Some(ALICE),
             surface,
-            current_session_id: current,
             task_session_ids: tasks,
             terminal_session_ids: terminal,
             max,
@@ -362,11 +475,9 @@ mod tests {
         let out = build_candidates(
             &rows,
             &HashMap::new(),
-            &query(CandidateSurface::Direct, Some("s-cur"), &tasks, &terminal, 10),
+            &query(CandidateSurface::Direct, &tasks, &terminal, 10),
         );
         assert_eq!(ids(&out), vec!["s-cur", "s-old", "s-manual"]);
-        assert!(out[0].current);
-        assert!(!out[1].current);
     }
 
     #[test]
@@ -381,7 +492,7 @@ mod tests {
         ];
         let tasks: HashSet<String> = ["g-task".to_string()].into_iter().collect();
         let terminal = empty_set();
-        let mut q = query(CandidateSurface::Group, None, &tasks, &terminal, 10);
+        let mut q = query(CandidateSurface::Group, &tasks, &terminal, 10);
         q.chat_session_id = "group-1";
         let out = build_candidates(&rows, &HashMap::new(), &q);
         assert_eq!(ids(&out), vec!["g-cur", "g-task"]);
@@ -400,7 +511,7 @@ mod tests {
         let out = build_candidates(
             &rows,
             &HashMap::new(),
-            &query(CandidateSurface::Direct, None, &tasks, &terminal, 10),
+            &query(CandidateSurface::Direct, &tasks, &terminal, 10),
         );
         assert_eq!(ids(&out), vec!["live"]);
     }
@@ -422,7 +533,7 @@ mod tests {
         let out = build_candidates(
             &rows,
             &HashMap::new(),
-            &query(CandidateSurface::Group, None, &tasks, &terminal, 10),
+            &query(CandidateSurface::Group, &tasks, &terminal, 10),
         );
         assert_eq!(ids(&out), vec!["g-alice", "g-legacy"]);
     }
@@ -439,29 +550,30 @@ mod tests {
         ];
         let tasks = empty_set();
         let terminal = empty_set();
-        let mut q = query(CandidateSurface::Group, None, &tasks, &terminal, 10);
+        let mut q = query(CandidateSurface::Group, &tasks, &terminal, 10);
         q.owner_user_id = None;
         let out = build_candidates(&rows, &HashMap::new(), &q);
         assert_eq!(ids(&out), vec!["g-legacy"]);
     }
 
+    /// Recency is the only ordering claim left (ADR-106 D11 retired the
+    /// "current" mapping), and equal timestamps break on title, then id.
     #[test]
-    fn current_first_then_recency_then_title() {
+    fn most_recently_active_first_then_title() {
         let rows = vec![
             ("s-a".to_string(), meta("s-a", "Alpha", "2026-10-21T09:00:00+00:00", Some(CHAT), Some(ALICE))),
             ("s-b".to_string(), meta("s-b", "Beta", "2026-10-21T12:00:00+00:00", Some(CHAT), Some(ALICE))),
             ("s-c".to_string(), meta("s-c", "Gamma", "2026-10-21T12:00:00+00:00", Some(CHAT), Some(ALICE))),
-            ("s-cur".to_string(), meta("s-cur", "Zeta", "2026-10-01T00:00:00+00:00", Some(CHAT), Some(ALICE))),
+            ("s-old".to_string(), meta("s-old", "Zeta", "2026-10-01T00:00:00+00:00", Some(CHAT), Some(ALICE))),
         ];
         let tasks = empty_set();
         let terminal = empty_set();
         let out = build_candidates(
             &rows,
             &HashMap::new(),
-            &query(CandidateSurface::Direct, Some("s-cur"), &tasks, &terminal, 10),
+            &query(CandidateSurface::Direct, &tasks, &terminal, 10),
         );
-        // current wins over recency; the equal timestamps break on title.
-        assert_eq!(ids(&out), vec!["s-cur", "s-b", "s-c", "s-a"]);
+        assert_eq!(ids(&out), vec!["s-b", "s-c", "s-a", "s-old"]);
     }
 
     #[test]
@@ -482,7 +594,7 @@ mod tests {
         let out = build_candidates(
             &rows,
             &live,
-            &query(CandidateSurface::Direct, None, &tasks, &terminal, 10),
+            &query(CandidateSurface::Direct, &tasks, &terminal, 10),
         );
         assert_eq!(out[0].status.label(), "working");
         assert_eq!(out[1].status.label(), "idle");
@@ -509,7 +621,7 @@ mod tests {
         let out = build_candidates(
             &rows,
             &HashMap::new(),
-            &query(CandidateSurface::Direct, None, &tasks, &terminal, 2),
+            &query(CandidateSurface::Direct, &tasks, &terminal, 2),
         );
         assert_eq!(out.len(), 2);
         assert_eq!(out[0].session_id, "s4");
@@ -527,8 +639,78 @@ mod tests {
         let out = build_candidates(
             &rows,
             &HashMap::new(),
-            &query(CandidateSurface::Direct, None, &tasks, &terminal, 10),
+            &query(CandidateSurface::Direct, &tasks, &terminal, 10),
         );
         assert_eq!(out[0].title, "untitled");
+    }
+
+    fn rule(surface: CandidateSurface, terminal: &[&str]) -> ChatScopeRule {
+        ChatScopeRule {
+            chat_session_id: CHAT.to_string(),
+            owner_user_id: Some(ALICE.to_string()),
+            surface,
+            terminal_session_ids: terminal.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// ADR-106 D7: `GET /sessions?chat_session_id=` filters through
+    /// [`ChatScopeRule`], so it must agree with the router's own filter row for
+    /// row. A listing that admits one extra session is a picker offering an
+    /// address the router would refuse; one that drops a session hides work the
+    /// human may legally continue.
+    #[test]
+    fn chat_scope_rule_admits_exactly_what_the_candidate_filter_does() {
+        let rows = vec![
+            ("s-cur".to_string(), meta("s-cur", "Current", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+            ("s-old".to_string(), meta("s-old", "Predecessor", "2026-10-20T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+            ("s-manual".to_string(), meta("s-manual", "Manual", "2026-10-19T10:00:00+00:00", None, Some(ALICE))),
+            ("s-other-chat".to_string(), meta("s-other-chat", "Elsewhere", "2026-10-21T11:00:00+00:00", Some("chat-2"), Some(ALICE))),
+            ("s-bob".to_string(), meta("s-bob", "Bob", "2026-10-21T11:00:00+00:00", None, Some("bob"))),
+            ("s-agent".to_string(), meta("s-agent", "Agent", "2026-10-21T11:00:00+00:00", None, None)),
+        ];
+        for surface in [CandidateSurface::Direct, CandidateSurface::Group] {
+            for terminal in [&[][..], &["s-old"][..]] {
+                let tasks = empty_set();
+                let terminal_set: HashSet<String> =
+                    terminal.iter().map(|s| s.to_string()).collect();
+                let through_query_rows = build_candidates(
+                    &rows,
+                    &HashMap::new(),
+                    &CandidateQuery {
+                        chat_session_id: CHAT,
+                        owner_user_id: Some(ALICE),
+                        surface,
+                        task_session_ids: &tasks,
+                        terminal_session_ids: &terminal_set,
+                        max: 10,
+                    },
+                );
+                let mut through_query = ids(&through_query_rows);
+                let rule = rule(surface, terminal);
+                let mut through_rule: Vec<&str> = rows
+                    .iter()
+                    .filter(|(_, meta)| rule.allows(meta))
+                    .map(|(sid, _)| sid.as_str())
+                    .collect();
+                through_query.sort();
+                through_rule.sort();
+                assert_eq!(through_rule, through_query, "surface={surface:?} terminal={terminal:?}");
+            }
+        }
+    }
+
+    /// The rule is the permission, so the two answers it must never give are
+    /// "somebody else's run" and "work that is already over".
+    #[test]
+    fn chat_scope_rule_keeps_other_people_and_finished_work_out() {
+        let rows = [
+            ("mine".to_string(), meta("mine", "Mine", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+            ("bobs".to_string(), meta("bobs", "Bob", "2026-10-21T10:00:00+00:00", Some(CHAT), Some("bob"))),
+            ("finished".to_string(), meta("finished", "Done", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE))),
+        ];
+        let rule = rule(CandidateSurface::Direct, &["finished"]);
+        assert!(rule.allows(&rows[0].1));
+        assert!(!rule.allows(&rows[1].1));
+        assert!(!rule.allows(&rows[2].1));
     }
 }

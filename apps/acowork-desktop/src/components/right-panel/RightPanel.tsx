@@ -39,7 +39,9 @@ import { CAPSULE_PANE_CN } from "../common/capsule";
 import { Switch } from "../common/Switch";
 import { getGatewayUrl } from "../../lib/config";
 import { ModelTokenDonut } from "./ModelTokenDonut";
-import { fetchAgentTokenStats, computeAgentTotals } from "../../lib/tokenStats";
+import { fetchAgentTokenStats, computeAgentTotals, formatTokenStatCost } from "../../lib/tokenStats";
+import { fetchChatUsage, type ChatUsageSummary } from "../../lib/chatUsage";
+import { useChatSessionStore } from "../../stores/chatSessionStore";
 import type { TokenStatsResponse } from "../../lib/types";
 
 interface RightPanelProps {
@@ -93,6 +95,35 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
     if (!agent?.activeSessionId) return null;
     return agent.sessionStates[agent.activeSessionId]?.sessionStatus ?? null;
   });
+  // Per-chat ledger view for the Chat surface (plan §4.6 phase two): the
+  // router's spend belongs to the Chat session, not to any execution
+  // session, so `contextUsage` above never carries it. The card shows
+  // only while the pinned chat tab is the foreground surface; the
+  // window's `total` is the invalidation signal — the doorbell refreshes
+  // the window on new activity and the ledger re-pulls behind it.
+  const chatForegroundId = useChatSessionStore((s) => {
+    if (!selectedAgentId) return null;
+    const st = s.byAgent[selectedAgentId];
+    return st?.mode === "chat" ? st.chatSessionId ?? null : null;
+  });
+  const chatWindowTotal = useChatSessionStore((s) =>
+    chatForegroundId ? s.windows[chatForegroundId]?.total ?? 0 : 0,
+  );
+  const [chatUsage, setChatUsage] = useState<ChatUsageSummary | null>(null);
+  const [chatUsageOpen, setChatUsageOpen] = useState(true);
+  useEffect(() => {
+    if (!chatForegroundId || !selectedAgentId) {
+      setChatUsage(null);
+      return;
+    }
+    let alive = true;
+    void fetchChatUsage([selectedAgentId], chatForegroundId).then((s) => {
+      if (alive) setChatUsage(s);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [chatForegroundId, selectedAgentId, chatWindowTotal]);
   const sessionModel = useChatStore((s) => {
     if (!selectedAgentId) return null;
     const agent = s.agentStates[selectedAgentId];
@@ -835,6 +866,61 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
       {/* ── Status tab content ───────────────────────────────────── */}
       {activeTab === "status" && (
         <OverlayScrollbar dataTabScroll className="flex-1 bg-right-panel p-3">
+          {/* Chat usage — same card grammar as Session Status below (the
+              two surfaces are mutually exclusive foregrounds, so the
+              chat card sits on top when the chat tab owns the pane).
+              Renders only when the ledger has rows: an agent that never
+              routed this chat has nothing to show, and "—" rows next to
+              an all-zero donut would read as a bug.
+
+              Scope is THIS agent (`fetchChatUsage([selectedAgentId], …)`),
+              unlike the composer's `ChatUsageIcon`, which merges the whole
+              roster — hence the distinct title: a group chat must not show
+              the same label for two different numbers. */}
+          {chatForegroundId && chatUsage && chatUsage.llmCallCount > 0 && (
+            <div className="mb-2">
+              <ListBox dividers={false}>
+                <ExpandableRow
+                  open={chatUsageOpen}
+                  onToggle={() => setChatUsageOpen((v) => !v)}
+                  title={t("chatUsage.titleAgent")}
+                  ariaLabel={t("chatUsage.titleAgent")}
+                  bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-2 text-xs"
+                >
+                  <StatRow
+                    label={t("chatUsage.llmCalls")}
+                    value={String(chatUsage.llmCallCount)}
+                  />
+                  <StatRow
+                    label={t("chatUsage.totalInput")}
+                    value={chatUsage.totalInput.toLocaleString()}
+                  />
+                  <StatRow
+                    label={t("chatUsage.totalOutput")}
+                    value={chatUsage.totalOutput.toLocaleString()}
+                  />
+                  {chatUsage.totalCacheRead > 0 && (
+                    <StatRow
+                      label={t("chatUsage.cacheRead")}
+                      value={chatUsage.totalCacheRead.toLocaleString()}
+                    />
+                  )}
+                  {chatUsage.totalCacheWrite > 0 && (
+                    <StatRow
+                      label={t("chatUsage.cacheWrite")}
+                      value={chatUsage.totalCacheWrite.toLocaleString()}
+                    />
+                  )}
+                  <StatRow
+                    label={t("chatUsage.estCost")}
+                    value={formatTokenStatCost(chatUsage.totalCost)}
+                  />
+                  <div className="border-t border-border-divider mb-2 mt-1" />
+                  <ModelTokenDonut items={chatUsage.modelItems} consistent />
+                </ExpandableRow>
+              </ListBox>
+            </div>
+          )}
           {/* Session Status — level-1 collapsible card matching the
               Tools-tab "Builtin Tools" grammar: the clickable header
               row (chevron + title) toggles the whole stats body, which

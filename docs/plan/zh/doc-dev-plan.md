@@ -8,6 +8,14 @@
 > 关联 ADR：[`ADR-064`](../../adr/zh/ADR-064-pm-standalone-process.md)（PM 独立进程）、[`ADR-055`](../../adr/zh/ADR-055-remote-runtime-node-topology.md)（远程节点）
 >
 > **一句话**：把 acowork-doc 在线文档模块落到可排期的子任务，按 D0→D4 五个里程碑交付，预估总工期 **13-19 人日**（单人全职 3-4 周）。
+>
+> **⚠️ 2026-11 修订（工具面重构）**：D3/D4 阶段落地的 `doc_add` /
+> `doc_submit_update` / `doc_pull` 三个动词已按文件系统语义重构为
+> `doc_write`（`mode=create|overwrite|append` + `if_version`）/ `doc_stat` /
+> `doc_move` / `doc_remove`，审核改为正交策略（命中即返回
+> `pending_review`），并删除全部兼容代码。本文档中出现的旧动词仅作历史
+> 记录，**当前契约以[设计 §6](../../design/zh/20-doc-online-document.md)
+> 与 `core/acowork-doc/src/mcp/manifest.rs` 为准**。
 
 ---
 

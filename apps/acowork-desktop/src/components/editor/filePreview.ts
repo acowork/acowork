@@ -16,6 +16,10 @@
 // Rule (workspace-panel convention):
 //   - Raster images (jpg / jpeg / png / gif / webp) → image viewer.
 //   - SVG, Markdown, HTML / HTM                    → previewable renderer.
+//   - PDF / Office documents (docx / doc / xlsx / xls / csv / pptx / ppt)
+//     → document viewers (remote file preview plan). The first six get
+//     real in-app renderers; .doc / .ppt land on the "open externally"
+//     card — previewable enough to open a tab, not editable in Monaco.
 //   - Everything else (JSON, source code, configs) → Monaco source editor.
 //
 // NB: this is the **workspace-panel** rule. The chat-side rule lives in
@@ -25,7 +29,7 @@
 
 /** Extensions that the workspace panel treats as previewable. */
 export const WORKSPACE_PREVIEW_EXT_RE =
-    /\.(?:jpg|jpeg|png|gif|webp|svg|md|html?)$/i;
+    /\.(?:jpg|jpeg|png|gif|webp|svg|md|html?|pdf|docx|doc|xlsx|xls|csv|pptx|ppt)$/i;
 
 /**
  * Decide whether `name` (a basename or relative path) should open in preview

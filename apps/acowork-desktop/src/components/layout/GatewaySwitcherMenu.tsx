@@ -8,6 +8,7 @@ import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
 import { Dropdown } from "../common/Dropdown";
+import { titleBarMenuPanel, titleBarMenuTrigger, useDismissMenu } from "./titleBarMenu";
 import type { GatewayMode } from "../../lib/types";
 
 /** Probe verdict for one row. Derived from the raw `ProbeResult` rather
@@ -128,22 +129,9 @@ export function GatewaySwitcherMenu({
   const [probeRun, setProbeRun] = useState(0);
 
   // Close on outside click / Escape — the popover must never trap pointer
-  // events over the app behind it.
-  useEffect(() => {
-    if (!open) return;
-    const onDocDown = (e: MouseEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) setOpen(false);
-    };
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("mousedown", onDocDown);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onDocDown);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  // events over the app behind it. The rule lives in the shared title-bar
+  // menu shell so every popover here dismisses identically.
+  useDismissMenu(wrapRef, open, () => setOpen(false));
 
   // Remote/relay browse the recorded history; local is pinned to one
   // address (there is no second address to discover on the loopback).
@@ -257,12 +245,7 @@ export function GatewaySwitcherMenu({
             aria-expanded={open}
             aria-label={t("titleBar.gateway")}
             onClick={toggle}
-            className={cn(
-              "flex h-8 w-8 items-center justify-center rounded transition-colors",
-              open
-                ? "bg-zinc-300 text-text-primary dark:bg-zinc-700"
-                : "text-text-secondary hover:bg-zinc-300 dark:hover:bg-zinc-700",
-            )}
+            className={titleBarMenuTrigger(open)}
           >
             <Globe className="h-3.5 w-3.5" />
           </button>
@@ -270,7 +253,7 @@ export function GatewaySwitcherMenu({
       )}
 
       {open && (
-        <div className="absolute right-0 z-30 mt-1 w-80 rounded-lg border border-border-outer bg-page-bg p-2 shadow-lg">
+        <div className={titleBarMenuPanel}>
           {/* Outage banner — only while unreachable. It replaces the old
               chip popover's candidate block wholesale: the address list
               below already IS the candidate list, and it is better —

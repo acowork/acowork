@@ -76,3 +76,11 @@ dev/tmp/
 
 # Local-only test output (e.g. `vitest run > vt.log`)
 *.log
+
+# Signing keys — generated per machine by `acowork-keygen` (dev/common/build-agent.*).
+# Never commit: the developer key signs local dev packages, and the whole
+# directory is reproducible from `acowork-keygen --type developer`.
+examples/.signing-keys/
+
+# Local scratch at the repo root (probe/debug scripts)
+dev-tmp/

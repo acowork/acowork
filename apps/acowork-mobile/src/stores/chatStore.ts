@@ -116,6 +116,17 @@ interface ChatStore {
 
   /** Answer an AskQuestion card (WS channel only, §8.3). */
   answerQuestion: (agentId: string, sessionId: string, requestId: string, answer: string) => Promise<boolean>
+
+  /**
+   * Dismiss the execution-side card a CHAT block just answered (ADR-106 D8).
+   *
+   * Narrower than `decideApproval` / `answerQuestion`, which clear the agent's
+   * pending card once the POST lands: a block can answer a session the
+   * execution view is not showing, and wiping THAT agent's card would hide a
+   * live question. Only the request that was actually answered is dismissed,
+   * and only while its own session is the active one.
+   */
+  dismissAnsweredCard: (agentId: string, sessionId: string, requestId: string) => void
 }
 
 /** Exported for window-model tests (see chat-window.test.ts) — same shape. */
@@ -389,6 +400,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     } catch {
       return false
     }
+  },
+
+  dismissAnsweredCard: (agentId, sessionId, requestId) => {
+    set((s) => {
+      const view = s.agentStates[agentId] ?? emptyView()
+      if (view.activeSessionId !== sessionId) return s
+      const question = view.question?.requestId === requestId ? null : view.question
+      const approvalDetail = view.approvalDetail?.requestId === requestId ? null : view.approvalDetail
+      // Identity-preserving: a card that is not the one answered must not wake
+      // every subscriber of this agent's view with a fresh object.
+      if (question === view.question && approvalDetail === view.approvalDetail) return s
+      return {
+        agentStates: { ...s.agentStates, [agentId]: { ...view, question, approvalDetail } },
+      }
+    })
   },
 
   loadEarlier: async (agentId) => {

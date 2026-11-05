@@ -46,6 +46,7 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
             [GROUP]: { older: [], tail: groupTail, tailLoaded: groupTail.length, total: groupTail.length, loadingOlder: false },
           },
           sending: {},
+          inflight: {},
           draft: {},
           attachedContext: {},
         }),

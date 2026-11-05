@@ -11,10 +11,12 @@
 
 import { fetchChatAttachmentBlob } from './api'
 
-/** One row attachment as the chat store receives it (user service vocabulary). */
+/** One row attachment as the chat store receives it (user service vocabulary:
+ *  the wire field is `filename`, written server-side at upload — a client never
+ *  sends a name, so naming this field anything else reads as always empty). */
 export interface ChatAttachment {
   id: string
-  name: string
+  filename: string
   mime: string
   size: number
 }

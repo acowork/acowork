@@ -1668,6 +1668,21 @@ fn session_message_to_flat(
             m.insert("timeout_ms".into(), serde_json::json!(p.timeout_ms));
             Some(serde_json::Value::Object(m))
         }
+        session_message::Event::RoundState(p) => {
+            // ADR-106 revision (2026-11-03): the round doorbell. Pure signal —
+            // `session_id` here is the EXECUTION session (topic-derived), and
+            // `chat_session_id` names the Chat that owes a re-read. Carries no
+            // block content and no outcome word: both are what the projection
+            // read (D4) returns.
+            let mut m = base.as_object().unwrap().clone();
+            m.insert("type".into(), serde_json::Value::String("round_state".into()));
+            m.insert("round_id".into(), serde_json::Value::String(p.round_id.clone()));
+            m.insert(
+                "chat_session_id".into(),
+                serde_json::Value::String(p.chat_session_id.clone()),
+            );
+            Some(serde_json::Value::Object(m))
+        }
     }
 }
 

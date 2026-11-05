@@ -1,6 +1,7 @@
 //! Provider module
 
 pub mod anthropic;
+pub mod anthropic_compat;
 pub mod compat;
 pub mod ollama;
 pub mod openai;
@@ -10,6 +11,8 @@ pub mod responses;
 pub mod responses_compat;
 pub mod router;
 
+#[cfg(test)]
+mod anthropic_e2e;
 #[cfg(test)]
 mod compat_e2e;
 

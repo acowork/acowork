@@ -317,6 +317,9 @@ acowork/agents/{agent_id}/
             │                         #   payload = { session_id, reason: "user"|"timeout"|"failed" }
             ├── context_usage         # 上下文用量
             ├── memory_updated        # 预留（proto field 16）：无发布者——ADR-101 之后记忆不在 Runtime
+            ├── round_state           # ADR-106 修订 2026-11-03「轮次门铃」：本轮已达终态，或停在需人回答的卡片上
+            │                         #   payload = { round_id, chat_session_id }（只有坐标；终态词由重读返回）
+            │                         #   QoS 1、非 retained；只说"值得重读投影"，不带正文（ADR-106 D3 / D4）
             └── skill_executed        # 技能执行完毕
 └── memory/                           # 【预留命名空间，始终无发布者】
     └── nodes/                        # node 级别增量事件（未实现）

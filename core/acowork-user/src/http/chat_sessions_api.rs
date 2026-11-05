@@ -153,6 +153,12 @@ pub fn chat_session_routes() -> Router<AppState> {
         // Design 27 §8.3: PM member add / remove re-syncs the group's
         // participant set to exactly the project's current members.
         .route("/internal/chat-sessions/group/sync", post(system_sync_group))
+        // Design 27 §4.4: PM archived the project — stamp its group chat so
+        // the owner may delete the channel now that nothing would re-create it.
+        .route(
+            "/internal/chat-sessions/group/deleted",
+            post(system_mark_project_deleted),
+        )
         .route("/internal/chat-sessions/repo", post(system_set_repo))
         // Design 27 §8.2/§8.3: the Gateway's scope-injection read (session
         // ids for a participant) and the participant-relation mutations
@@ -174,6 +180,17 @@ pub fn chat_session_routes() -> Router<AppState> {
         .route(
             "/internal/chat-sessions/{session_id}/messages/by-message-id/{message_id}",
             get(system_message_by_id),
+        )
+        // ADR-106 D5: the round-projection cache. The Gateway owns fetching
+        // (it is the only process that can reach every Runtime); this service
+        // owns storage, because a chat's cached execution content has to die
+        // with the chat directory — which is only free on the side that owns
+        // the chat. `GET` answers what is already here, `PUT` stores what was
+        // just fetched; both are participation-checked like every other chat
+        // read, and neither can fail a chat render (the cache is disposable).
+        .route(
+            "/internal/chat-sessions/{session_id}/rounds",
+            get(system_rounds_read).put(system_rounds_write),
         )
         .route(
             "/internal/chat-sessions/{session_id}/files/{attachment_id}/{message_id}/{target}",
@@ -664,8 +681,12 @@ fn search_messages_guarded(
     )
 }
 
-/// Plan 5.2: delete a non-default Chat session. Guards (default pair
-/// session, project group, non-participant) live in the storage layer.
+/// Plan 5.2: delete a Chat session. Guards live in the storage layer
+/// ([`chat_sessions::delete_session`]): participation (hidden 404),
+/// owner-or-admin for a **group** (403), a `project_group` only once its
+/// project is deleted (422), and never the default pair session (422).
+/// On success every human participant gets a doorbell so their sidebar drops
+/// the row — the session they were reading is gone, not just renamed.
 async fn delete_session_route(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
@@ -673,9 +694,17 @@ async fn delete_session_route(
 ) -> Result<StatusCode, ApiError> {
     let dir = data_dir(&state)?;
     let who = ctx.effective_user_id().to_string();
-    offload(move || chat_sessions::delete_session(&dir, &session_id, &who))
-        .await
-        .map(|()| StatusCode::NO_CONTENT)
+    let is_admin = ctx.is_admin();
+    let session =
+        offload(move || chat_sessions::delete_session(&dir, &session_id, &who, is_admin)).await?;
+    for p in session
+        .participants
+        .iter()
+        .filter(|p| p.identity != Some(ParticipantIdentity::Agent))
+    {
+        crate::mqtt_publisher::notify_chat_changed(&p.id);
+    }
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// P1 (design 27 §8.3, the user-managed half): invite members to a
@@ -1427,6 +1456,45 @@ async fn system_sync_group(
 }
 
 #[derive(Debug, Deserialize)]
+pub struct SystemProjectDeletedRequest {
+    pub project_id: String,
+}
+
+/// `POST /internal/chat-sessions/group/deleted` — PM archived the project, so
+/// its group chat is now deletable by its owner (design 27 §4.4). Stamps
+/// `project_deleted_at`; `null` when the project never had a group chat.
+///
+/// This is the one project fact the chat domain cannot derive on its own:
+/// `delete_session` refuses a `project_group` while the project lives, and
+/// nothing else in this process can see PM's project tree.
+async fn system_mark_project_deleted(
+    State(state): State<AppState>,
+    Json(req): Json<SystemProjectDeletedRequest>,
+) -> Result<Json<Option<ChatSession>>, ApiError> {
+    if req.project_id.trim().is_empty() {
+        return Err(ApiError::unprocessable_entity("project_id is required"));
+    }
+    let dir = data_dir_any(&state).await;
+    let session = offload(move || {
+        chat_sessions::mark_project_deleted(&dir, &req.project_id, now_unix())
+    })
+    .await?;
+    // Doorbell the members: the stamp is what makes the panel's delete button
+    // appear, and the sidebar only re-reads on a signal. Same fire-and-forget
+    // rule as `sync_group` (agents have no listener, so they are skipped).
+    if let Some(s) = &session {
+        for p in s
+            .participants
+            .iter()
+            .filter(|p| p.identity != Some(ParticipantIdentity::Agent))
+        {
+            crate::mqtt_publisher::notify_chat_changed(&p.id);
+        }
+    }
+    Ok(Json(session))
+}
+
+#[derive(Debug, Deserialize)]
 pub struct SystemRepoRequest {
     pub session_id: String,
     /// `None` / absent clears the binding.
@@ -1616,6 +1684,123 @@ struct MessageIdQuery {
     who: Option<String>,
 }
 
+/// `GET /internal/chat-sessions/{session_id}/rounds?who=&refs=` — ADR-106 D5.
+///
+/// `refs` is a comma-separated list of `agent_instance_id|agent_session_id|round_id`
+/// (the `|` is deliberate: a round id legitimately carries `:`, and an instance
+/// id `.` and `-`). Only rows already cached come back; a ref that is absent is
+/// the caller's signal to fetch it, so an empty result is a normal answer, not
+/// an error.
+async fn system_rounds_read(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Query(q): Query<RoundsQuery>,
+) -> Result<Json<RoundsPage>, ApiError> {
+    let who = require_who(q.who.as_deref())?;
+    let keys = crate::rounds_cache::RoundKey::parse_list(q.refs.as_deref().unwrap_or_default())
+        .map_err(|e| ApiError::unprocessable_entity(&e))?;
+    let dir = data_dir_any(&state).await;
+    let rounds = offload_rounds(move || {
+        let hits = chat_sessions::rounds_read(&dir, &session_id, &who, &keys)?;
+        // Answer in request order: the caller renders blocks in transcript
+        // order, and a map would shuffle them.
+        Ok(keys
+            .iter()
+            .filter_map(|key| hits.get(key).cloned())
+            .collect::<Vec<crate::rounds_cache::CachedRound>>())
+    })
+    .await?;
+    Ok(Json(RoundsPage { rounds }))
+}
+
+/// One round of a write-back batch. `fetched_at` is deliberately not part of
+/// the contract: the server stamps the clock, so a caller cannot age a row.
+#[derive(Debug, Deserialize)]
+struct CachedRoundPut {
+    agent_instance_id: String,
+    agent_session_id: String,
+    round_id: String,
+    projection: serde_json::Value,
+    terminal: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct RoundsWriteRequest {
+    who: Option<String>,
+    rounds: Vec<CachedRoundPut>,
+}
+
+/// `PUT /internal/chat-sessions/{session_id}/rounds` — store what the Gateway
+/// just fetched.
+///
+/// The batch ceiling and the id shapes are checked before anything touches the
+/// store, and an open round is refused by the cache layer itself (ADR-106 D5:
+/// terminal-only is the property that removes invalidation from this design).
+async fn system_rounds_write(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(req): Json<RoundsWriteRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let who = require_who(req.who.as_deref())?;
+    if req.rounds.len() > crate::rounds_cache::MAX_REFS {
+        return Err(ApiError::unprocessable_entity(&format!(
+            "too many rounds (max {})",
+            crate::rounds_cache::MAX_REFS
+        )));
+    }
+    let rows: Vec<crate::rounds_cache::CachedRound> = req
+        .rounds
+        .into_iter()
+        .map(|r| {
+            use crate::rounds_cache::RoundKey;
+            if !crate::rounds_cache::valid_id(&r.agent_instance_id)
+                || !crate::rounds_cache::valid_id(&r.agent_session_id)
+                || !crate::rounds_cache::valid_id(&r.round_id)
+            {
+                return Err(ApiError::unprocessable_entity(
+                    "malformed round ref (agent_instance_id / agent_session_id / round_id)",
+                ));
+            }
+            Ok(crate::rounds_cache::CachedRound {
+                key: RoundKey {
+                    agent_instance_id: r.agent_instance_id,
+                    agent_session_id: r.agent_session_id,
+                    round_id: r.round_id,
+                },
+                projection: r.projection,
+                terminal: r.terminal,
+                fetched_at: now_unix(),
+            })
+        })
+        .collect::<Result<Vec<_>, ApiError>>()?;
+    let dir = data_dir_any(&state).await;
+    let stored = offload_rounds(move || chat_sessions::rounds_write(&dir, &session_id, &who, &rows))
+        .await?;
+    Ok(Json(serde_json::json!({ "stored": stored })))
+}
+
+#[derive(Debug, Deserialize)]
+struct RoundsQuery {
+    who: Option<String>,
+    /// Comma-separated encoded refs; empty asks nothing (a valid no-op).
+    #[serde(default)]
+    refs: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct RoundsPage {
+    rounds: Vec<crate::rounds_cache::CachedRound>,
+}
+
+/// The system surface's identity rule: every call names the human it is on
+/// behalf of, so participation can be checked (`/internal` is loopback-only,
+/// but it is not unauthenticated-by-design — ADR-084 §决策 7).
+fn require_who(who: Option<&str>) -> Result<String, ApiError> {
+    who.filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| ApiError::unprocessable_entity("who is required"))
+}
+
 // ── Helpers ───────────────────────────────────────────────────────────
 
 fn parse_kind(s: &str) -> Result<SessionKind, ApiError> {
@@ -1714,6 +1899,40 @@ where
                 // owner is owner-or-admin only, ADR-098). Distinct from the
                 // hidden 404: the caller IS a participant, just not the owner.
                 ApiError::forbidden("you are not allowed to perform this action")
+            } else {
+                ApiError::unprocessable_entity(&m)
+            }
+        })
+}
+
+/// The round-projection cache's own error mapping (ADR-106 D5).
+///
+/// [`offload`] is right for the chat's own rows and wrong for this cache, because the
+/// two surfaces' callers read the status differently: the block endpoint fails the
+/// request on 404 ("not your chat") and *degrades* on anything else that is not 2xx
+/// ("the cache is broken, fetch from the source of truth"). So a cache that cannot be
+/// opened must not answer 422 — that would be silently filed as a miss for every ref,
+/// hiding an outage — and must not answer 404 either, because the chat behind the
+/// cache is perfectly readable.
+///
+/// The access itself lives in `chat_sessions::rounds_read` / `rounds_write`, under the
+/// per-session lock `delete_session` holds: opening the cache outside that lock can
+/// resurrect a chat mid-deletion and strand a live SQLite handle on Windows.
+async fn offload_rounds<T, F>(f: F) -> Result<T, ApiError>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| ApiError::internal(&format!("chat session task failed: {e}")))?
+        .map_err(|m| {
+            if m == "not_a_participant" || m.contains("chat session not found") {
+                // Same hidden 404 as the transcript (§5.3): a non-participant does not
+                // learn that this chat exists.
+                ApiError::not_found("chat session not found")
+            } else if m.starts_with("round cache ") {
+                ApiError::internal(&m)
             } else {
                 ApiError::unprocessable_entity(&m)
             }
@@ -1842,6 +2061,178 @@ mod tests {
         let page = json(resp).await;
         assert_eq!(page["total"].as_u64(), Some(1));
         assert_eq!(page["messages"][0]["body"].as_str(), Some("hello team"));
+    }
+
+    /// The delete route's whole gate, end to end: a plain member is refused
+    /// (403, the ADR-098 owner-or-admin rule), the owner's delete lands (204)
+    /// and the row is gone for every member afterwards.
+    #[tokio::test]
+    async fn delete_group_route_is_owner_or_admin_gated() {
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, bob_token) = make_user(&app, &admin, "bob").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // A member that is not the owner: refused, and the group survives.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{bob}"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let listed = json(resp).await;
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s["session_id"].as_str() == Some(&session_id)),
+            "the refused delete must not remove the group"
+        );
+
+        // The owner: deleted, and gone from the listing.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{alice}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let listed = json(resp).await;
+        assert!(
+            listed
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|s| s["session_id"].as_str() != Some(&session_id)),
+            "a deleted session must leave the sidebar"
+        );
+    }
+
+    /// `POST /internal/chat-sessions/group/deleted` — PM's project-archived
+    /// stamp. Answers `null` for a project without a group chat, and the
+    /// stamped row otherwise; the row is what makes the owner's delete legal.
+    #[tokio::test]
+    async fn internal_project_deleted_stamps_the_group() {
+        let dir = test_support::temp_dir("chatsessapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/group",
+                Some(&format!(
+                    r#"{{"project_id":"p-1","title":"proj","participants":["{alice}"],"owner":"{alice}"}}"#
+                )),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // Live project: the owner cannot delete it yet.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Unknown project: no-op, null body.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/group/deleted",
+                Some(r#"{"project_id":"p-unknown"}"#),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(json(resp).await.is_null());
+
+        // PM archived the project → stamped, and now the delete lands.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/group/deleted",
+                Some(r#"{"project_id":"p-1"}"#),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(json(resp).await["project_deleted_at"].is_number());
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "DELETE",
+                &format!("/api/chat-sessions/{session_id}"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
     }
 
     #[tokio::test]
@@ -3824,5 +4215,207 @@ mod tests {
         };
         let resp = app.clone().oneshot(req("GET", &pair_uri, None, Some(&alice_token))).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    }
+
+    /// ADR-106 D5: the round-projection cache surface. The three properties the
+    /// chat render depends on are pinned here — an open round never lands, the
+    /// server (not the caller) stamps the age, and a non-participant cannot
+    /// read another chat's cached execution content.
+    #[tokio::test]
+    async fn round_cache_stores_terminal_rounds_and_gates_on_participation() {
+        let dir = test_support::temp_dir("roundsapi");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (bob, _bob_token) = make_user(&app, &admin, "bob").await;
+        let (carol, _carol_token) = make_user(&app, &admin, "carol").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"],"title":"team"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let sid = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        let inst = "7a7a7a7a-1111-4bbb-8ccc-000000000009";
+        let rounds_uri = format!("/internal/chat-sessions/{sid}/rounds");
+        let body = format!(
+            r#"{{"who":"{alice}","rounds":[
+                {{"agent_instance_id":"{inst}","agent_session_id":"s-exec","round_id":"r:m-1","terminal":true,
+                 "projection":{{"round_id":"r:m-1","terminal":true,"answer":{{"body":"done"}}}}}},
+                {{"agent_instance_id":"{inst}","agent_session_id":"s-exec","round_id":"r:m-2","terminal":false,
+                 "projection":{{"round_id":"r:m-2"}}}}
+            ]}}"#
+        );
+        let resp = app
+            .clone()
+            .oneshot(req("PUT", &rounds_uri, Some(&body), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(json(resp).await["stored"], 1, "the open round is refused");
+
+        let refs = format!("{inst}%7Cs-exec%7Cr:m-1,{inst}%7Cs-exec%7Cr:m-2");
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/internal/chat-sessions/{sid}/rounds?who={alice}&refs={refs}"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let page = json(resp).await;
+        let rounds = page["rounds"].as_array().unwrap();
+        assert_eq!(rounds.len(), 1, "only the terminal ref is a hit");
+        assert_eq!(rounds[0]["round_id"], "r:m-1");
+        assert_eq!(rounds[0]["agent_session_id"], "s-exec");
+        assert_eq!(rounds[0]["terminal"], true);
+        assert_eq!(rounds[0]["projection"]["answer"]["body"], "done");
+        assert!(
+            rounds[0]["fetched_at"].as_i64().unwrap() > 0,
+            "the server stamps the clock, so a caller cannot age a row"
+        );
+
+        // A non-participant gets the hidden 404 on both verbs: the cached copy
+        // is execution content, so it is gated exactly like the chat's rows.
+        let stranger_refs = format!("{inst}%7Cs-exec%7Cr:m-1");
+        let resp = app
+            .clone()
+            .oneshot(
+                req(
+                    "GET",
+                    &format!("/internal/chat-sessions/{sid}/rounds?who={carol}&refs={stranger_refs}"),
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        // The same body, presented as a non-member: hidden 404, and nothing
+        // stored.
+        let outsider = body.replace(
+            &format!("\"who\":\"{alice}\""),
+            &format!("\"who\":\"{carol}\""),
+        );
+        let resp = app
+            .clone()
+            .oneshot(req("PUT", &rounds_uri, Some(&outsider), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "a non-member writes nothing");
+        // ...and the row it tried to write stayed out.
+        let resp = app
+            .clone()
+            .oneshot(
+                req(
+                    "GET",
+                    &format!("/internal/chat-sessions/{sid}/rounds?who={alice}&refs={stranger_refs}"),
+                    None,
+                    None,
+                ),
+            )
+            .await
+            .unwrap();
+        assert_eq!(json(resp).await["rounds"].as_array().unwrap().len(), 1, "only alice's earlier write is there");
+
+        // An unknown session is the same 404 — no existence oracle. The id is
+        // well-formed on purpose: a malformed one is a client error (422),
+        // which is a different answer than "this chat is not yours".
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                "/internal/chat-sessions/00000000-0000-4000-8000-0000000000ff/rounds?who=carol",
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// A ref is three ids and nothing else: the parts reach a SQL bind and a
+    /// cache key, so the shape is checked at the boundary rather than stored
+    /// and lost.
+    #[tokio::test]
+    async fn round_cache_refuses_malformed_refs() {
+        let dir = test_support::temp_dir("roundsapi-bad");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(r#"{{"kind":"user_agent","participants":["{alice}","a-1"]}}"#)),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let sid = json(resp).await["session_id"].as_str().unwrap().to_string();
+        let rounds_uri = format!("/internal/chat-sessions/{sid}/rounds");
+
+        // A ref that is not the three-part form is a client error, not a miss:
+        // silently reading it as "nothing cached" would hide a broken caller.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("{rounds_uri}?who={alice}&refs=not-a-triple"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("{rounds_uri}?refs=a%7Cb%7Cc"),
+                None,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "who is required");
+
+        let resp = app
+            .clone()
+            .oneshot(req("PUT", &rounds_uri, Some(
+                r#"{"who":"x","rounds":[{"agent_instance_id":"..","agent_session_id":"s","round_id":"r:1","terminal":true,"projection":{}}]}"#,
+            ), None))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "a malformed id is a client error"
+        );
+
+        let resp = app
+            .clone()
+            .oneshot(req("PUT", &rounds_uri, Some(
+                r#"{"who":"not-a-member","rounds":[{"agent_instance_id":"a-1","agent_session_id":"s","round_id":"r:1","terminal":true,"projection":{}}]}"#,
+            ), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "and participation still hides the chat");
     }
 }

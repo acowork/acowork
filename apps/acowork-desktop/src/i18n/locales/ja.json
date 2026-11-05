@@ -99,7 +99,21 @@
     "globalSearch": "グローバル検索 (Ctrl+Shift+F)",
     "collapseRightPanel": "Collapse Right Panel",
     "expandRightPanel": "Expand Right Panel",
-    "gatewayDetails": "詳細"
+    "gatewayDetails": "詳細",
+    "appearance": "外観"
+  },
+  "accentColors": {
+    "blue": "ブルー",
+    "indigo": "インディゴ",
+    "violet": "バイオレット",
+    "cyan": "シアン",
+    "teal": "ティール",
+    "green": "グリーン",
+    "rose": "ローズ",
+    "orange": "オレンジ",
+    "amber": "アンバー",
+    "pink": "ピンク",
+    "custom": "カスタムカラー"
   },
   "navBar": {
     "editProfile": "Edit Profile",
@@ -248,6 +262,7 @@
     "notice": {
       "pendingTurn": "{{name}}が処理中です…",
       "pendingTurnGeneric": "処理中です…",
+      "turnInflightTooltip": "前のメッセージはまだ処理中です",
       "interrupted": "この実行は中断されました",
       "failed": "この実行は失敗しました",
       "timeout": "この実行はタイムアウトしました",
@@ -408,6 +423,9 @@
     "cancel": "キャンセル",
     "windowRangeError": "{{floor}}K〜{{ceiling}}K の範囲で入力してください"
   },
+  "chatUsage": {
+    "usedNotMeasured": "まだ計測されていません — 次回のターンで履歴サイズが記録されます"
+  },
   "agentList": {
     "searchPlaceholder": "Agentを検索...",
     "stopConfirm": "{{agent}} を停止しますか？現在の会話状態は保持されます。",
@@ -432,12 +450,9 @@
     "localNodeAlreadyRunning": "ローカル Node は既に実行中です",
     "localNodeStarted": "ローカル Node を起動しました",
     "errorCreateLocalNode": "ローカル Node の作成に失敗：{{error}}",
-    "selectNode": "インストール先ノードを選択",
-    "back": "戻る",
     "filterAgentPackage": "Agent パッケージ",
     "agentStarted": "Agent を起動しました",
     "agentStartedDebug": "Agent をデバッグモードで起動しました",
-    "agentInstalled": "Agent をインストールしました",
     "agentStopped": "Agent を停止しました",
     "agentUninstalled": "Agent をアンインストールしました",
     "agentCloned": "Agent をクローンしました：{{agentId}}",
@@ -446,7 +461,6 @@
     "titleUninstallAgent": "Agent をアンインストール",
     "noAgentsInstalled": "Agent がインストールされていません",
     "noMatchingAgents": "一致する Agent がありません",
-    "errorFailedToInstallAgent": "Agent のインストールに失敗しました：{{error}}",
     "errorFailedToStartAgent": "Agent の起動に失敗しました：{{error}}",
     "errorFailedToStartDebugAgent": "デバッグモードでの Agent 起動に失敗しました：{{error}}",
     "errorFailedToRestartInDebug": "デバッグ再起動に失敗しました：{{error}}",
@@ -527,7 +541,7 @@
     "relayUrlSavedPlainHttp": "保存されているアドレスが https:// ではありません。リレーモードでは MQTT に接続できません。https://<gw-id>.<リレードメイン> に変更して再診断してください。",
     "relayReadFrom": "取得元",
     "relayGwIdHelp": "このゲートウェイのリモートアクセス用デバイス ID。スマートフォンや別の PC を接続するには、それらのリレーモードのゲートウェイ URL を https://{{gwId}}.<リレードメイン> に設定してください。",
-    "relayGwIdHowTo": "デバイス ID はまだありません——このゲートウェイではリレットンネルが一度も有効になっていません。\n\n一度有効にすると生成され保存されます（ファイル: ゲートウェイ設定ディレクトリの relay_identity.json）：\n\ncurl -X POST {{gatewayUrl}}/api/relay/enable -H 'Content-Type: application/json'",
+    "relayGwIdHowTo": "デバイス ID はまだありません——このゲートウェイではリレートンネルが一度も有効になっていません。\n\nゲートウェイの gateway.toml（ゲートウェイディレクトリの config/gateway.toml）で一度有効にして、ゲートウェイを再起動します：\n\n[relay]\nenabled = true\nurl = \"wss://<relay-domain>/tunnel\"\n\nデバイス ID は最初の接続時に生成され、relay_identity.json に保存されます。",
     "relayGwIdHelpLabel": "デバイス ID は何に使いますか？",
     "localGateway": "ローカルゲートウェイ",
     "localModeKeepsUrl": "ローカルモードでは、Desktop はまずこのアドレスをプローブし、応答がない場合のみ子 Gateway を起動します。",
@@ -635,8 +649,7 @@
     "reset": "リセット",
     "compressionRatioThreshold": "圧縮率しきい値",
     "compressionRatioThresholdDesc": "コンテキスト圧縮後の保持率。90% は 10% 残すまで圧縮。範囲 50%–95%、デフォルト 90%。",
-    "sectionChatRouter": "Chat ルーター",
-    "chatRouterEnabled": "Chat ルーターを有効化",
+    "sectionChatRouter": "Chat Session ルーター",
     "chatRouterModel": "ルーターモデル",
     "chatRouterModelAuto": "自動（コンパクトモデルチェーン）",
     "chatRouterModelDesc": "直接応答か実行セッションへの転送かを判断するルーター LLM ターンで使用されるモデルです。セッションで選択したチャットモデルには追随しません。「自動」のままにするとエージェントのコンパクトモデルチェーンを使用します。",
@@ -644,7 +657,6 @@
     "chatRouterTimeoutMsDesc": "直接転送にフォールバックするまでの単一のルーター LLM 呼び出しのタイムアウト。範囲 1000–300000、デフォルト 60000。",
     "chatRouterHistoryMaxTokens": "Chat 履歴のコンテキスト長",
     "chatRouterHistoryMaxTokensDesc": "ルーティング判断の前にルーターが読み取れる会話履歴の長さ（トークン）。ウィンドウはメッセージ件数ではなくコンテキストサイズで切り詰められます。範囲 1000–64000、デフォルト 8000。",
-    "chatRouterDisabledHint": "Chat ルーターが無効です。すべてのチャットメッセージはルーティングターンを経ずに処理されます。",
     "sectionAgentInfo": "Agent情報",
     "sectionSessionParams": "セッションパラメータ",
     "sectionModelParams": "モデルパラメータ",
@@ -653,7 +665,11 @@
     "sessionLanguageFollow": "ユーザー設定に従う",
     "ensureProbing": "確認中…",
     "ensureInstalling": "インストール中…",
-    "ensureFailed": "インストール失敗",
+    "ensureViewLogs": "ログを表示",
+    "ensureLogsTitle": "MCP 起動ログ — {{name}}",
+    "ensureLogsWaiting": "出力を待っています…",
+    "ensureLogsHint": "ここに出力が無い場合、このサーバーはダウンロード不要です（すでに利用可能か、stdio 以外のトランスポートです）。",
+    "ensureFailed": "起動に失敗",
     "mcpRecommended": "推奨 MCP（{{count}}）",
     "mcpRecommendedAllHandled": "提案はすべて処理済みです。",
     "mcpRecommendedShowIgnored": "無視した {{count}} 件を表示",
@@ -1028,6 +1044,53 @@
     "showSource": "ソースを表示",
     "previewLoading": "プレビューを読み込み中...",
     "previewDoubleClickHint": "ダブルクリックでエディタを開く",
+    "previewLoadFailed": "プレビューの読み込みに失敗しました",
+    "previewRetry": "再試行",
+    "docViewer": {
+      "saveAs": "名前を付けて保存",
+      "openExternally": "外部アプリで開く",
+      "saveFailed": "保存に失敗しました",
+      "openExternalFailed": "外部アプリで開けませんでした",
+      "loadFailed": "ファイルの読み込みに失敗しました",
+      "retry": "再試行"
+    },
+    "pdfViewer": {
+      "title": "PDF プレビュー",
+      "selectRegion": "範囲を選んで会話に送信",
+      "regionPickerTitle": "範囲を選択",
+      "prevPage": "前のページ",
+      "nextPage": "次のページ",
+      "pageIndicator": "{{page}} / {{pages}} ページ",
+      "addRegion": "選択範囲を会話に送信",
+      "addDocument": "文書全体を会話に送信",
+      "regionPrompt": "添付した画像は {{path}} の {{page}} ページで選択した範囲です。印刷時と同じ並びで表示しています。",
+      "documentPrompt": "これは {{path}} を印刷時と同じ並びの PDF として添付したものです。修正対象はあくまでワークスペース内の {{path}} です。",
+      "rasterizeFailed": "この PDF を読み込めませんでした"
+    },
+    "officePdf": {
+      "converting": "プレビューの準備中…",
+      "engineMissing": "Office / LibreOffice が見つかりません—近似レイアウトのプレビューです",
+      "convertFailed": "PDF への変換に失敗しました—近似レイアウトで表示しています",
+      "installHint": "LibreOffice または Microsoft Office をインストールすると、実際のレイアウトでプレビューできます"
+    },
+    "sheetViewer": {
+      "tooLarge": "シートが大きすぎます—最初の {{rows}} 行のみプレビュー表示",
+      "parseFailed": "スプレッドシートの解析に失敗しました"
+    },
+    "docxViewer": {
+      "renderFailed": "文書の描画に失敗しました—暗号化または破損している可能性があります"
+    },
+    "pptxViewer": {
+      "degradedHint": "簡易プレビュー（テキストと画像、完全な再現ではありません）",
+      "jumpPlaceholder": "スライド番号",
+      "jump": "移動",
+      "page": "スライド {{page}}",
+      "parseFailed": "プレゼンの解析に失敗しました"
+    },
+    "unsupported": {
+      "formatHint": "アプリ内で {{name}} をプレビューできません",
+      "useExternal": "外部アプリで開くか、まずコピーを保存してください"
+    },
     "imageViewer": {
       "zoomIn": "拡大",
       "zoomOut": "縮小",
@@ -1410,6 +1473,10 @@
     "model": "モデル: {{model}}",
     "level": "圧縮レベル {{level}}",
     "tokens": "tokens: {{before}} → {{after}}"
+  },
+  "messageRef": {
+"chatBackground": "このタスクを開始したチャットの背景情報",
+"generic": "参照"
   },
   "chatError": {
     "contextOverflow": "コンテキストオーバーフロー：モデル能力情報が見つからないため、コンテキスト使用量を正確に計算できません。モデル名が正確であるか（大文字小文字を区別）を確認してください。"
@@ -1809,13 +1876,19 @@
       "overview": "概要",
       "dependencies": "依存関係",
       "attachments": "添付ファイル",
-      "tabs": "タスク詳細",
+      "tabs": {
+        "basic": "基本情報",
+        "related": "関連タスク",
+        "files": "ファイル",
+        "submissions": "提出履歴"
+      },
       "expand": "展開",
       "collapse": "折りたたむ",
       "createdBy": "作成者",
       "noDependencies": "依存関係なし",
       "noAttachments": "添付ファイルなし",
       "addSubtask": "サブタスクを追加",
+      "subtasksNeedRow": "サブタスクは保存後に表示されます",
       "moveTo": "移動",
       "approve": "承認",
       "restart": "再開",

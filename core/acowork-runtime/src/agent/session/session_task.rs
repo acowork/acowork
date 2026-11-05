@@ -25,13 +25,12 @@ use crate::usecases::attachment::on_disk_name;
 
 /// ADR-100 follow-up: the turn-end obligations BOTH transports share, in one
 /// place. A turn that ends without this leaks its Chat facts into the next one
-/// (the surface would still point at the previous trigger row, so a card
-/// written later answers the wrong question) and leaves an unanswered card
-/// rendering as a live button forever.
+/// (the surface would still point at the previous round, so a card written later
+/// belongs to the wrong one) and leaves a resolved interaction recorded as open.
 ///
 /// Returns the §7.1 response context the turn owed (if any) and how the turn
-/// ended, for the arm's own terminal writer. Cards are closed BEFORE the
-/// surface is cleared, since the closure needs to know which Chat they live in.
+/// ended, for the arm's own terminal writer. Interactions are dropped BEFORE the
+/// surface is cleared, since the round snapshot already published what was open.
 async fn end_turn_obligations(
     agent_loop: &mut crate::agent::loop_::AgentLoop,
 ) -> (
@@ -41,17 +40,18 @@ async fn end_turn_obligations(
     agent_loop.pending_intent = None;
     let ctx = agent_loop.chat_writeback.take();
     let outcome = agent_loop.turn_outcome;
-    // §5.5.4 safety net: an approval / ask_question card still open now
-    // belongs to a finished turn and can never be answered — close it so the
-    // Chat surface drops the card instead of offering a dead button forever.
-    // (`pause` cards are intentionally kept: they outlive the turn by design
-    // and are closed by the answering turn.)
-    if let Some(chat) = agent_loop.turn_surface.echo_chat().map(str::to_string) {
-        agent_loop
-            .close_chat_cards_of_kind(&["approval", "ask_question"], Some(&chat), "turn_ended")
-            .await;
-    }
+    // §5.5.4 safety net: an approval / ask_question still open now belongs to a
+    // finished turn and can never be answered — drop it so no later snapshot
+    // publishes a dead button onto a new round. (`pause` is intentionally kept:
+    // it outlives the turn by design and is dropped by the answering turn.)
+    // ADR-106 D8: this is bookkeeping, not a Chat write — there is no card row
+    // left in the Chat session to close.
+    agent_loop.forget_interactions_of_kind(&["approval", "ask_question"]);
     agent_loop.turn_surface = Default::default();
+    agent_loop.turn_reference = Default::default();
+    // ADR-107: a turn that ended without persisting its parts (an abort before
+    // the user-row write) must not hand them to the next turn.
+    agent_loop.turn_message_refs.clear();
     (ctx, outcome)
 }
 
@@ -254,6 +254,27 @@ pub enum SessionMessage {
         /// never written to a Chat surface, never persisted with the
         /// conversation. Empty for every other origin.
         assignment_brief: String,
+        /// The PM task this delivery's conversation names (`task:{project}:{task}`),
+        /// empty for every other conversation. ADR-106 D13: the round's reference
+        /// row renders it as the block's task chip, since a Chat may not read the
+        /// projection to paint a list. Parsed off the Gateway's routing contract by
+        /// the transport — never off a peer's params.
+        task_id: String,
+        /// Whether this delivery opened the execution session it landed in, or
+        /// reused one already mapped to the Chat. `None` when the transport did
+        /// not resolve it (a parked-card answer, a PM dispatch that re-enters an
+        /// existing session). ADR-106 D3: written verbatim onto the round's
+        /// reference row — the only place a reader learns that a Chat message
+        /// started new work rather than continuing it.
+        opened_new: Option<bool>,
+        /// ADR-107: reference parts the sender attached to this turn — context
+        /// the Runtime supplies and the human did not type, today the Chat
+        /// Router's `exec_session_create(background)`. NEVER folded into
+        /// `content`: the model sees them after the human's words
+        /// (`intent_turn::render_user_turn`) and the JSONL keeps them as
+        /// `context_ref` rows beside the `user` row. Empty for every origin
+        /// that has no such context.
+        context_refs: Vec<acowork_core::MessageRef>,
     },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
     // streaming, the front/back suppression mechanism is gone.
@@ -280,7 +301,7 @@ impl std::fmt::Debug for SessionMessage {
                 )
                 .field("has_content_parts", &content_parts.is_some())
                 .field("chat", &surface.chat_session_id)
-                .field("has_chat_trigger", &!surface.trigger_message_id.is_empty())
+                .field("round", &surface.round_id)
                 .finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
             SessionMessage::UpdateRuntimeConfig(overrides) => f
@@ -621,6 +642,7 @@ impl SessionTask {
                     provider_key_vault: &core_mut.provider_key_vault,
                     compat_cache: core_mut.compat_cache.as_ref(),
                     responses_compat_cache: core_mut.responses_compat_cache.as_ref(),
+                    anthropic_compat_cache: core_mut.anthropic_compat_cache.as_ref(),
                 },
             )
         {
@@ -922,8 +944,13 @@ impl SessionTask {
                                     &mut context_builder,
                                 ).await;
                                 // Use replay() to avoid appending a duplicate user message
-                                // to history (the original is already there).
-                                match agent_loop.replay(content, &mut context_builder, None).await {
+                                // to history (the original is already there). The message
+                                // id travels so the replayed rows stay under the round that
+                                // message opened (ADR-106 D2).
+                                match agent_loop
+                                    .replay(content, &mut context_builder, None, Some(msg_id.clone()))
+                                    .await
+                                {
                                     Ok(response) => {
                                         tracing::info!(
                                             session_id = %session_id,
@@ -1024,9 +1051,9 @@ impl SessionTask {
                     // `agent_loop.run()` (loop_.rs) AFTER the user message, so
                     // their timestamps are slightly later than the user entry.
                     // This ensures the frontend's `foldMessages` (which looks
-                    // for attachment entries *after* the user message by
+                    // for part entries *after* the user message by
                     // timestamp) can fold them into a single
-                    // `user_with_attachments` block.
+                    // `user_with_parts` block.
 
                     // Save the raw user message before any prompt assembly.
                     // Used by AgentLoop for session title generation and
@@ -1143,40 +1170,36 @@ impl SessionTask {
                     // loop run (safety net for idle sessions).
                     agent_loop.core.debug_observer.check_pending_injection();
 
-                    // ── ADR-046: synthesise image content parts from attached_items ──
+                    // ── ADR-046: synthesise multimodal content parts from attached_items ──
                     //
                     // Pre-ADR-046, the frontend inlined base64 image payloads in
                     // `params.content_parts`. ADR-046 moved attachment metadata
                     // into `attached_items` (the `image_upload` variant carries
                     // document_id / format / dimensions only — never raw bytes).
                     //
-                    // The Runtime now reads each image blob from the
-                    // `AttachmentService` slot populated in Phase B and emits
-                    // `ContentPart::ImageUrl` entries; any legacy `content_parts`
-                    // sent by the frontend are preserved (text first) and the
-                    // derived images are appended. If `attached_items` is
-                    // None/empty, `content_parts` is forwarded unchanged — the
-                    // legacy pre-046 path stays bit-compatible.
+                    // The Runtime now reads each blob from the `AttachmentService`
+                    // slot populated in Phase B and emits `ContentPart::ImageUrl`
+                    // for images plus `ContentPart::Document` for PDFs a
+                    // document-capable model accepts (see
+                    // [`crate::agent::attachment_to_document`] for why that one
+                    // is gated and the image path is not). Any legacy
+                    // `content_parts` sent by the frontend are preserved (text
+                    // first) and the derived parts are appended. If
+                    // `attached_items` is None/empty, `content_parts` is
+                    // forwarded unchanged — the legacy pre-046 path stays
+                    // bit-compatible.
                     //
                     // Read errors are not silently dropped — they short-circuit
                     // the chat turn with the same `ChunkEvent::Error` shape used
                     // by `agent_loop.run` failures below, so the frontend sees a
                     // consistent error surface regardless of which stage failed.
-                    // ADR-100: the Chat surface this turn owes a terminal row
-                    // to, resolved once before the loop runs so every exit —
-                    // success, empty answer, abort, attachment failure, loop
-                    // error — can close the human's `user_message`. Own value, not
-                    // a borrow: the agent loop takes `&mut` below.
                     // ADR-100 follow-up: the Chat this turn is accountable to.
                     // A turn the Chat surface asked for says so itself; a turn
                     // composed in the execution view has no row of its own but
-                    // may still sit in a chat-bound session, whose terminal
-                    // echo lands there (D9) and whose interactive cards land
-                    // there too (Rev. 6): the binding supplies the chat, the
-                    // write endpoint's verified caller supplies who can answer,
-                    // and only the trigger *row* is missing — a card without a
-                    // thread still answers, so it is written standalone rather
-                    // than dropped.
+                    // may still sit in a chat-bound session, whose reference row
+                    // and interactive cards land there (ADR-106 D2 keeps the
+                    // Rev. 6 backfill: the binding supplies the chat, the write
+                    // endpoint's verified caller supplies who can answer).
                     let mut surface = surface;
                     if surface.chat_session_id.is_empty()
                         && let Some(bound) = agent_loop
@@ -1188,61 +1211,67 @@ impl SessionTask {
                     {
                         surface.chat_session_id = bound;
                     }
-                    let echo_chat_id = surface.echo_chat().map(str::to_string);
-                    let echo_trigger = if surface.trigger_message_id.is_empty() {
-                        None
-                    } else {
-                        Some(surface.trigger_message_id.clone())
-                    };
+                    // ADR-106 D3: a turn composed against the execution surface
+                    // answers no Chat row — the human's words are not in the
+                    // transcript (Rev. 8: execution-surface messages never enter
+                    // the Chat channel) — so its reference row is written
+                    // unthreaded, and the routing did not open anything.
+                    agent_loop.turn_reference =
+                        crate::agent::intent_turn::TurnReference::default();
 
                     let final_content_parts: Option<
                         Vec<acowork_core::providers::traits::ContentPart>,
                     > = match attached_items.as_deref() {
                         Some(items) if !items.is_empty() => {
-                            match crate::agent::attachment_to_image::derive_image_parts(
-                                agent_loop.core.attachment_service(),
-                                items,
-                            )
-                            .await
-                            {
-                                Ok(derived) => {
-                                    crate::agent::attachment_to_image::merge_content_parts(
-                                        content_parts,
-                                        derived,
-                                    )
+                            // Document parts need the model this turn will
+                            // actually talk to, so the capability is resolved
+                            // here rather than inside the derivation: a model
+                            // switch mid-session changes what may be inlined.
+                            let caps = agent_loop
+                                .session
+                                .model
+                                .as_deref()
+                                .and_then(|m| agent_loop.get_model_capabilities(m));
+                            // Two derivations, one failure surface: an
+                            // attachment the runtime cannot read stops the turn
+                            // whichever channel it belonged to.
+                            let derived: Result<
+                                Option<Vec<acowork_core::providers::traits::ContentPart>>,
+                                crate::error::RuntimeError,
+                            > = match (
+                                crate::agent::attachment_to_document::derive_document_parts(
+                                    agent_loop.core.attachment_service(),
+                                    items,
+                                    caps.as_ref(),
+                                )
+                                .await,
+                                crate::agent::attachment_to_image::derive_image_parts(
+                                    agent_loop.core.attachment_service(),
+                                    items,
+                                )
+                                .await,
+                            ) {
+                                (Ok(documents), Ok(images)) => {
+                                    Ok(merge_turn_parts(content_parts, documents, images))
                                 }
+                                (Err(e), _) | (_, Err(e)) => Err(e),
+                            };
+                            match derived {
+                                Ok(parts) => parts,
                                 Err(e) => {
                                     tracing::error!(
                                         session_id = %session_id,
                                         error = %e,
-                                        "Failed to derive image content_parts from attached_items"
+                                        "Failed to derive attachment content_parts from attached_items"
                                     );
                                     let (user_message, detail, error_type) = e.error_info();
-                                    // A chat-surface turn already has its
-                                    // question in the transcript; saying nothing
-                                    // here would leave that round open with no way
-                                    // to close it. A turn composed in the
-                                    // execution view has no row to answer, so it
-                                    // stays as silent as it always was. The body is the
-                                    // human-readable line only — detail and
-                                    // error_type never enter a transcript.
-                                    if let (Some(chat_id), Some(trigger)) = (
-                                        echo_chat_id.as_deref(),
-                                        echo_trigger.as_deref(),
-                                    ) {
-                                        echo_terminal_row(
-                                            &agent_loop.core.config.agent_instance_id,
-                                            agent_loop.core.config.gateway_host.as_deref(),
-                                            agent_loop.core.config.mqtt_password.as_deref(),
-                                            chat_id,
-                                            &message_id,
-                                            &session_id,
-                                            "failed",
-                                            &user_message,
-                                            Some(trigger),
-                                        )
-                                        .await;
-                                    }
+                                    // ADR-106: nothing is written to the Chat
+                                    // here. The round never opened (the loop has
+                                    // not run yet), so there is no block to close
+                                    // and no row to answer — the error event below
+                                    // is the whole surface consequence, and the
+                                    // human's own words stay in the Chat
+                                    // transcript where they were written.
                                     if let Some(ref tx) = chunk_tx {
                                         let event = SessionChunkEvent {
                                             session_id: session_id.clone(),
@@ -1288,14 +1317,6 @@ impl SessionTask {
                                 response_len = response.len(),
                                 "SessionTask processed chat message"
                             );
-                            // ADR-100 D9: a locally-composed turn in a
-                            // chat-bound session still owes that chat a result.
-                            // Capture the coordinates before the Done event
-                            // consumes `response` / `message_id`; the echo is
-                            // sent after the event so it never delays the UI's
-                            // completion signal.
-                            let echo_message_id = message_id.clone();
-                            let echo_body = response.clone();
                             if let Some(ref tx) = chunk_tx {
                                 let event = SessionChunkEvent {
                                     session_id: session_id.clone(),
@@ -1321,56 +1342,15 @@ impl SessionTask {
                             // streaming (loop_llm.rs) serve real-time streaming UX;
                             // this one guarantees a signal after full persistence.
                             agent_loop.session_core.notify_new_data_available();
-                            // ADR-100 D9: echo this locally-composed turn's
-                            // final output back to the Chat session the
-                            // execution session was started from. Chat-routed
-                            // turns already write back through their request
-                            // context (the Intent arm); this turn has none — the
-                            // user typed it here, usually to continue after
-                            // stopping a chat turn — so without this the chat
-                            // would stop at the abort and never learn the task
-                            // finished. A standalone `agent_message` keyed
-                            // `exec:{message_id}` (idempotent), drillable via
-                            // `sender_session_id`. Best-effort: a failed echo
-                            // costs a surface row, never the turn.
-                            //
-                            // A stopped turn is echoed too (`aborted`, empty
-                            // body): the terminal row is the ONLY thing that
-                            // can tell the chat its message was interrupted,
-                            // and without it every stop/continue cycle after
-                            // the first is invisible in the transcript. An
-                            // ordinary empty answer leaves no row.
-                            let outcome = agent_loop.turn_outcome;
-                            let echo_text = crate::agent::intent_turn::truncate_response_body(
-                                &echo_body,
-                                64 * 1024,
-                            );
-                            // D9 deliberately left an ordinary empty answer with
-                            // no row: a turn composed straight against the
-                            // execution surface has no Chat question to close.
-                            // A chat-surface turn does, so it owes a terminal row
-                            // even when the model had nothing to say — otherwise
-                            // the conversation stays "in progress" over a run that
-                            // finished.
-                            let owes_a_row = outcome != crate::agent::intent_turn::TurnOutcome::Completed
-                                || !echo_text.trim().is_empty()
-                                || echo_trigger.is_some();
-                            if let Some(chat_id) = echo_chat_id.as_deref()
-                                && owes_a_row
-                            {
-                                echo_terminal_row(
-                                    &agent_loop.core.config.agent_instance_id,
-                                    agent_loop.core.config.gateway_host.as_deref(),
-                                    agent_loop.core.config.mqtt_password.as_deref(),
-                                    chat_id,
-                                    &echo_message_id,
-                                    &session_id,
-                                    outcome.as_str(),
-                                    &echo_text,
-                                    echo_trigger.as_deref(),
-                                )
-                                .await;
-                            }
+                            // ADR-106 D3/D5: nothing is echoed to the Chat here.
+                            // The round `run()` opened already carries its
+                            // terminal status in the side-table projection, and
+                            // the Chat block reads the answer from that round —
+                            // a copied `agent_message` row would be a second,
+                            // staler source of the same sentence. `run()` closed
+                            // the round on every exit path, including the stopped
+                            // and empty-answer ones, so the block never sticks on
+                            // "in progress".
                         }
                         Err(e) => {
                             tracing::error!(
@@ -1379,28 +1359,11 @@ impl SessionTask {
                                 "SessionTask agent loop error"
                             );
                             let (user_message, detail, error_type) = e.error_info();
-                            // A failed chat-surface turn still closes the
-                            // round it was asked in — the Intent arm has always
-                            // written a `status=failed` terminal row, and now that
-                            // the human's own row sits in the chat, silence here
-                            // means an in-progress round that never resolves.
-                            if let (Some(chat_id), Some(trigger)) = (
-                                echo_chat_id.as_deref(),
-                                echo_trigger.as_deref(),
-                            ) {
-                                echo_terminal_row(
-                                    &agent_loop.core.config.agent_instance_id,
-                                    agent_loop.core.config.gateway_host.as_deref(),
-                                    agent_loop.core.config.mqtt_password.as_deref(),
-                                    chat_id,
-                                    &message_id,
-                                    &session_id,
-                                    "failed",
-                                    &user_message,
-                                    Some(trigger),
-                                )
-                                .await;
-                            }
+                            // ADR-106: no terminal row is written here either —
+                            // `run()` already closed the round it opened with
+                            // `failed`, and the Chat block renders that state
+                            // from the projection. The error event below is the
+                            // execution surface's consequence.
                             if let Some(ref tx) = chunk_tx {
                                 let event = SessionChunkEvent {
                                     session_id: session_id.clone(),
@@ -1440,6 +1403,9 @@ impl SessionTask {
                     attached_items,
                     in_reply_to,
                     assignment_brief,
+                    task_id,
+                    opened_new,
+                    context_refs,
                 }) => {
                     // A PM dispatch's playbook joins Block A for this
                     // session's remaining requests: constant per task, so
@@ -1501,18 +1467,67 @@ impl SessionTask {
                     // Intent transport used to hand over only the
                     // answerability half of this and keep the rest in fields
                     // the card writer could not see.
+                    // ADR-106 D3: the two facts about this delivery the loop
+                    // cannot derive for itself — which Chat row started the
+                    // round, and whether the routing opened a new session —
+                    // handed over before the turn runs, so the single reference
+                    // row `run()` writes can state them. The trigger follows the
+                    // attachment-pull convention below: a group @ fan-out's
+                    // per-target id matches no durable row, so the shared
+                    // `user_message` id is the one worth threading under. A turn
+                    // that owes no write-back (`response`) has no such row and
+                    // stays unthreaded rather than pointing at its own intent id.
+                    agent_loop.turn_reference = crate::agent::intent_turn::TurnReference {
+                        trigger_message_id: if write_back {
+                            if in_reply_to.is_empty() {
+                                message_id.clone()
+                            } else {
+                                in_reply_to.clone()
+                            }
+                        } else {
+                            String::new()
+                        },
+                        opened_new,
+                        // D13: the PM dispatch's one-line task name, written once
+                        // with the reference and never rewritten. Origin-gated by
+                        // the same call that feeds the system block.
+                        assignment_brief: if brief.is_empty() {
+                            None
+                        } else {
+                            Some(brief.to_string())
+                        },
+                        // D13: the chip's coordinate, stated once with the row. The
+                        // transport parsed it off the conversation key, so an empty
+                        // string here means "not a task conversation" — a task id no
+                        // peer could invent.
+                        task_id: if task_id.is_empty() {
+                            None
+                        } else {
+                            Some(task_id)
+                        },
+                    };
                     agent_loop.turn_surface = surface;
                     // §5.5.4: this turn is the answer to any pause card still
-                    // showing in the same Chat session — close it before the
-                    // new turn's own rows land, so the read-side projection
-                    // never sees "continue?" alongside a running round.
-                    if !chat_id.is_empty() {
-                        agent_loop.supersede_pause_cards(&chat_id).await;
-                    }
+                    // showing — drop it from the loop's bookkeeping before this
+                    // turn's own interactions open, so the round snapshot never
+                    // publishes "continue?" alongside a running round.
+                    agent_loop.supersede_pause_cards();
                     // The model-facing message starts as the user's verbatim
                     // text; the auto-title and the JSONL `user` entry stay
                     // clean (ADR-046).
-                    let mut llm_message = content.clone();
+                    //
+                    // ADR-107: the turn's reference parts are handed to the
+                    // loop for the user-row write, and rendered AFTER the words
+                    // for the model — the ask leads, the framing follows. This
+                    // is the whole fix for "every chat-dispatched session opens
+                    // with the same sentence": the persisted row (and with it
+                    // the auto-title) is the human's message, not the router's
+                    // paraphrase of it.
+                    agent_loop.turn_message_refs = context_refs;
+                    let mut llm_message = crate::agent::intent_turn::render_user_turn(
+                        &content,
+                        &agent_loop.turn_message_refs,
+                    );
                     // Design 27 §4.2.1 chat attachments: the Intent carries
                     // ids only — the bytes are pulled over node-auth HTTP
                     // through the Gateway (never the MQTT envelope) and
@@ -1593,28 +1608,38 @@ impl SessionTask {
                             if items.is_empty() {
                                 None
                             } else {
-                                // Images flow to the LLM multimodally, same
-                                // as the execution surface; a derive failure
-                                // only drops the image parts (the file hint
+                                // Images and documents flow to the LLM the same
+                                // way they do on the execution surface; a derive
+                                // failure only drops the parts (the file hint
                                 // below already stands). The hint itself is
                                 // built once, after the workspace references
                                 // join this turn's attachment list.
-                                match crate::agent::attachment_to_image::derive_image_parts(
-                                    agent_loop.core.attachment_service(),
-                                    &items,
-                                )
-                                .await
-                                {
-                                    Ok(derived) => {
+                                let caps = agent_loop
+                                    .session
+                                    .model
+                                    .as_deref()
+                                    .and_then(|m| agent_loop.get_model_capabilities(m));
+                                match (
+                                    crate::agent::attachment_to_document::derive_document_parts(
+                                        agent_loop.core.attachment_service(),
+                                        &items,
+                                        caps.as_ref(),
+                                    )
+                                    .await,
+                                    crate::agent::attachment_to_image::derive_image_parts(
+                                        agent_loop.core.attachment_service(),
+                                        &items,
+                                    )
+                                    .await,
+                                ) {
+                                    (Ok(documents), Ok(images)) => {
                                         intent_content_parts =
-                                            crate::agent::attachment_to_image::merge_content_parts(
-                                                None, derived,
-                                            )
+                                            merge_turn_parts(None, documents, images)
                                     }
-                                    Err(e) => tracing::warn!(
+                                    (Err(e), _) | (_, Err(e)) => tracing::warn!(
                                         session_id = %session_id,
                                         error = %e,
-                                        "chat attachment image parts unavailable, documents only"
+                                        "chat attachment content parts unavailable, hint only"
                                     ),
                                 }
                                 Some(items)
@@ -2220,6 +2245,10 @@ fn refresh_builtin_tools_dependents(core: &mut AgentCore, context_builder: &mut 
 //   workspace file   → - file: `<abs_path>`
 //   workspace sel    → - file: `<abs_path>` (L10-L25)  (range collapsed when same line)
 //   file_upload      → - file: `<filename>` (id=<doc_id>, format=<fmt>, path=<abs_path>)
+//                        A `pdf` additionally flows as `ContentPart::Document`
+//                        when the model declares that input — the hint is sent
+//                        either way, because it is what the `doc_reader`
+//                        fallback reads the file by.
 //   image_upload     → (no hint — flows via multimodal ContentPart::ImageUrl)
 //   attached_folder  → (no hint — no single-tool way to enumerate a folder)
 //
@@ -2319,64 +2348,6 @@ async fn materialize_pulled_attachments(
     out
 }
 
-/// ADR-100 D9: write the terminal `agent_message` a chat-bound turn owes
-/// the Chat surface, through the Gateway relay.
-///
-/// Extracted because the turn has more than one way to end — a finished answer,
-/// a stopped one, an attachment that could not be read, an agent loop that
-/// returned an error — and D12 made every one of them accountable to a
-/// `user_message` row that is already sitting in the chat waiting for a reply.
-/// Before that, only the first two wrote a row, so a failed turn left the
-/// conversation displaying an in-progress round forever.
-///
-/// `trigger` is the Chat row this turn answers: `Some` threads the echo under it
-/// (a chat-surface turn — the question is in the transcript), `None` keeps the
-/// standalone `exec:` shape a turn composed straight against the execution
-/// surface has always had. Idempotent by `meta.message_id`.
-///
-/// Best-effort by contract: a failed echo costs a surface row, never the turn.
-#[allow(clippy::too_many_arguments)] // positional row shape; a struct here is boilerplate
-async fn echo_terminal_row(
-    agent_instance_id: &str,
-    gateway_host: Option<&str>,
-    node_token: Option<&str>,
-    chat_id: &str,
-    echo_message_id: &str,
-    session_id: &str,
-    status: &str,
-    body: &str,
-    trigger: Option<&str>,
-) {
-    let host = gateway_host
-        .map(str::trim)
-        .filter(|h| !h.is_empty())
-        .unwrap_or("127.0.0.1");
-    if let Err(e) = crate::agent::intent_turn::append_chat_row(
-        agent_instance_id,
-        host,
-        node_token.unwrap_or_default(),
-        chat_id,
-        "agent_message",
-        "",
-        body,
-        crate::agent::intent_turn::exec_echo_meta(
-            echo_message_id,
-            session_id,
-            status,
-            trigger,
-        ),
-    )
-    .await
-    {
-        tracing::warn!(
-            session_id = %session_id,
-            chat_id = %chat_id,
-            error = %e,
-            "terminal echo to chat failed — non-fatal"
-        );
-    }
-}
-
 /// Merge the two arms a routed Chat turn can arrive with into the one list the
 /// turn sees (ADR-100). They are independent — uploads are pulled by Chat
 /// attachment id, workspace references arrive already parsed — so either one
@@ -2394,6 +2365,46 @@ fn merge_intent_attachments(
     Some(merged)
 }
 
+/// Assemble one turn's part list: the caller's own parts first, then whole
+/// documents, then images.
+///
+/// The order is a reading order, not a technical necessity — every provider
+/// takes the list as it comes. Text first because it is what the human typed;
+/// documents before images because a document is "this file" while an image
+/// is "these pictures", and the large object reads more naturally first when
+/// both arrived in the same message.
+///
+/// `None` when everything is empty: a multimodal message with no parts is
+/// rejected by some providers, and a plain `ChatMessage::user(text)` is what
+/// the caller falls back to (the same contract
+/// [`crate::agent::attachment_to_image`] has always kept).
+fn merge_turn_parts(
+    frontend_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
+    documents: Vec<acowork_core::providers::traits::ContentPart>,
+    images: Vec<acowork_core::providers::traits::ContentPart>,
+) -> Option<Vec<acowork_core::providers::traits::ContentPart>> {
+    let mut all: Vec<acowork_core::providers::traits::ContentPart> = frontend_parts
+        .unwrap_or_default();
+    if all.is_empty() && documents.is_empty() && images.is_empty() {
+        return None;
+    }
+    all.extend(documents);
+    all.extend(images);
+    Some(all)
+}
+
+/// Append the attachment block a turn's prompt carries, one line per
+/// attachable item:
+/// - `attached_file` / `attached_selection` / `attached_folder` — the workspace path
+/// - `image_upload` — no line; its bytes travel as a `ContentPart::ImageUrl`
+/// - `file_upload` — the on-disk path, **and** a PDF additionally travels as a
+///   `ContentPart::Document` when the model declares pdf input
+///
+/// The hint is emitted whether or not the bytes were inlined, and it is never
+/// stripped by the inlining: on the degraded paths (no pdf capability, over
+/// budget, a mid-session model switch that drops the part) this line is the
+/// only pointer the agent has left to the file. See
+/// [`crate::agent::attachment_to_document`] for the gate.
 fn build_attachment_hint(
     user_content: &str,
     items: Option<&[acowork_core::protocol::AttachedItem]>,
@@ -2593,6 +2604,31 @@ mod tests {
         let both = merge_intent_attachments(Some(vec![upload.clone()]), vec![reference()]).unwrap();
         assert_eq!(both.len(), 2);
         assert_eq!(both[0], upload, "the pulled upload keeps its slot ahead of the reference");
+    }
+
+    /// The turn's part list reads text, then whole documents, then images, and
+    /// an empty assembly is `None` rather than an empty array — some providers
+    /// reject a multimodal message with no parts.
+    #[test]
+    fn test_merge_turn_parts_reads_text_then_documents_then_images() {
+        use super::merge_turn_parts;
+        use acowork_core::providers::traits::ContentPart;
+
+        let text = || ContentPart::text("look at these");
+        let document = || ContentPart::document("JVBERi0=", "report.pdf", Some(1));
+        let image = || ContentPart::image_url("data:image/png;base64,AAAA");
+
+        assert!(merge_turn_parts(None, Vec::new(), Vec::new()).is_none());
+        let merged = merge_turn_parts(Some(vec![text()]), vec![document()], vec![image()]).unwrap();
+        assert!(matches!(&merged[0], ContentPart::Text { .. }));
+        assert!(
+            matches!(&merged[1], ContentPart::Document { .. }),
+            "the document is the larger object and reads first"
+        );
+        assert!(matches!(&merged[2], ContentPart::ImageUrl { .. }));
+        // A documents-only turn (the common PDF case) still gets its parts.
+        let docs_only = merge_turn_parts(None, vec![document()], Vec::new()).unwrap();
+        assert_eq!(docs_only.len(), 1);
     }
 
     // -----------------------------------------------------------------

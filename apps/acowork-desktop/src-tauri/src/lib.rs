@@ -20,11 +20,14 @@
 //! 4. If mode = remote, frontend skips spawn and just polls `/health`
 //!    on the user-configured URL.
 //! 5. After the gateway is reachable, frontend onboarding / agentStore
-//!    installs agents via the standard `POST /api/agents/ensure` endpoint;
-//!    no special "ensure System Agent" Tauri command is needed (ADR-077).
+//!    installs agents via the standard `POST /api/agents/install` endpoint
+//!    (one instance per call — ADR-073); no special "ensure System Agent"
+//!    Tauri command is needed (ADR-077). The idempotent
+//!    `POST /api/agents/ensure` path is used by the Agent library dialog.
 
 mod commands;
 mod gateway_client;
+mod hub_client;
 mod mqtt_client;
 mod navigation_guard;
 mod process_stop;
@@ -631,6 +634,9 @@ pub fn run() {
             commands::agent::get_agent_detail,
             commands::agent::install_agent,
             commands::agent::install_bundled_agent,
+            commands::hub::fetch_hub_index,
+            commands::hub::inspect_local_package,
+            commands::hub::install_from_hub,
             commands::agent::wait_agent_installed,
             commands::agent::uninstall_agent,
             commands::agent::start_agent,
@@ -699,6 +705,15 @@ pub fn run() {
             // performs the transfer (never the webview — see the module
             // docs for why bytes must not travel over IPC).
             commands::save_attachment::download_attachment,
+            // Document viewers' "open externally": authenticated download
+            // into the temp preview folder + OS default-app launch.
+            commands::save_attachment::open_file_externally,
+            // Office → PDF high-fidelity preview: probe the local
+            // conversion engine (LibreOffice / MS Office COM) and run
+            // one conversion, returning the PDF bytes over raw IPC.
+            // See commands::doc_convert.
+            commands::doc_convert::detect_doc_convert_engine,
+            commands::doc_convert::convert_workspace_file_to_pdf,
             // OS clipboard file-path fallback for paste/upload. Returns
             // the absolute paths of any files on the clipboard so the
             // chat panel can upload files copied from the OS file manager

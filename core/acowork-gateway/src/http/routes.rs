@@ -301,6 +301,11 @@ pub fn build_router(state: AppState) -> Router {
         // the Gateway's only Intent ingress; Runtimes POST here instead
         // of publishing to the control topic.
         .merge(crate::http::intent_api::intent_routes())
+        // ADR-106 D5/D9: the Chat surface's execution-block read. Gateway-owned
+        // rather than proxied, because serving one block means composing two
+        // reads (this chat's projection cache + the hosting Runtime) and neither
+        // of those is something the Desktop should have to sequence.
+        .merge(crate::http::chat_blocks::chat_block_routes())
         .merge(crate::http::models_api::models_routes())
         .merge(crate::http::memory_api::memory_routes())
         .merge(crate::http::skills_api::skills_routes())
@@ -770,6 +775,20 @@ impl ApiError {
         Self {
             error: msg.to_string(),
             code: 503,
+            structured: None,
+        }
+    }
+
+    /// 502 Bad Gateway — a Gateway-side read of a downstream Runtime
+    /// answered unreachable/broken (e.g. pinning an `@session` reference
+    /// round before a chat row is written, ADR-106 revision 2026-11-04).
+    /// Distinct from 503 so the surface can say "the node did not give us
+    /// the coordinate" — and therefore did not write the row — rather than
+    /// "this Gateway is not ready".
+    pub fn bad_gateway(msg: &str) -> Self {
+        Self {
+            error: msg.to_string(),
+            code: 502,
             structured: None,
         }
     }

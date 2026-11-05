@@ -57,8 +57,20 @@ pub struct DocConfig {
     pub max_doc_size_bytes: usize,
 }
 
-/// Default data directory: `$HOME/.acowork/acowork-doc/`.
+/// Default data directory: `$ACOWORK_DOC_DATA_DIR`, else
+/// `$HOME/.acowork/acowork-doc/`.
+///
+/// The env override is what makes the process testable and what lets the
+/// Gateway relocate the library without a TOML file. It used to be
+/// documented in [`DocConfig::data_dir`] without being read here — a knob
+/// that silently did nothing, which meant a "throwaway" instance wrote
+/// straight into the user's real library.
 pub fn default_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ACOWORK_DOC_DATA_DIR")
+        && !dir.trim().is_empty()
+    {
+        return PathBuf::from(dir);
+    }
     std::env::var("HOME")
         .or_else(|_| std::env::var("USERPROFILE"))
         .map(|h| PathBuf::from(h).join(".acowork").join("acowork-doc"))

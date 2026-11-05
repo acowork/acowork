@@ -26,7 +26,7 @@ const INSTALL_BOOTSTRAP_WAIT_SECS: u64 = 30;
 /// the Node's retained `InstalledAgentInfo` aggregates (ADR-059 §6), so
 /// the command should outlive typical Node-side install latency
 /// (download + signature verify + extract + retained publish).
-const INSTALL_WAIT_SECS: u64 = 180;
+pub(crate) const INSTALL_WAIT_SECS: u64 = 180;
 
 /// Extract the `agent_id` from a `.agent` package's embedded
 /// `manifest.toml`. We do not trust the filename — OnboardingFlow §725
@@ -36,7 +36,7 @@ const INSTALL_WAIT_SECS: u64 = 180;
 /// filename here. A non-MVP path: install the package from anywhere
 /// (including a renamed `.agent`) and `wait_agent_installed` still
 /// polls the right id.
-fn read_agent_id_from_package(package_bytes: &[u8]) -> Result<String, String> {
+pub(crate) fn read_agent_id_from_package(package_bytes: &[u8]) -> Result<String, String> {
     let reader = std::io::Cursor::new(package_bytes);
     let mut archive = zip::ZipArchive::new(reader)
         .map_err(|e| format!("Failed to read .agent package as ZIP: {}", e))?;
@@ -120,18 +120,23 @@ async fn wait_bootstrap_ready(
     ))
 }
 
-/// Shared retry wrapper for the Gateway install POST. Returns the first
-/// non-retryable error or the final result after `INSTALL_MAX_ATTEMPTS`
-/// attempts. On `dependency_not_ready` the retry waits for bootstrap
-/// phase READY first (ADR-059 §6.3) instead of a blind sleep.
-async fn install_with_retry<F, Fut>(
+/// Shared retry wrapper for a Gateway install / ensure POST. Returns the
+/// first non-retryable error or the final result after
+/// `INSTALL_MAX_ATTEMPTS` attempts. On `dependency_not_ready` the retry
+/// waits for bootstrap phase READY first (ADR-059 §6.3) instead of a blind
+/// sleep.
+///
+/// Generic over the ack type because the two submission endpoints answer
+/// different bodies (`OperationAck` for `/install`, `EnsureAck` for
+/// `/ensure`) while the retry semantics are identical.
+pub(crate) async fn submit_with_retry<F, Fut, T>(
     state: &AppState,
     label: &str,
     mut op: F,
-) -> Result<OperationAck, String>
+) -> Result<T, String>
 where
     F: FnMut() -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<OperationAck>>,
+    Fut: std::future::Future<Output = anyhow::Result<T>>,
 {
     let mut attempt: usize = 0;
     loop {
@@ -140,7 +145,7 @@ where
             Ok(ack) => {
                 if attempt > 1 {
                     tracing::info!(
-                        "[{}] Install accepted on attempt {}/{}",
+                        "[{}] Submit accepted on attempt {}/{}",
                         label,
                         attempt,
                         INSTALL_MAX_ATTEMPTS
@@ -223,7 +228,7 @@ pub async fn install_agent(
     // Clone the captured Tauri `State` outside the closure so the retry
     // wrapper can borrow `state` while the `move` closure owns its copy.
     let state_for_op = state.clone();
-    let ack = install_with_retry(&state, "INSTALL_AGENT", move || {
+    let ack = submit_with_retry(&state, "INSTALL_AGENT", move || {
         let state = state_for_op.clone();
         let package_bytes = package_bytes.clone();
         let node_id = node_id.clone();
@@ -313,9 +318,9 @@ pub async fn install_bundled_agent(
     );
 
     let state_for_op = state.clone();
-    let ack = install_with_retry(&state, "INSTALL_BUNDLED", move || {
+    let ack = submit_with_retry(&state, "INSTALL_BUNDLED", move || {
         // See INSTALL_AGENT — the retry wrapper borrows `state` while this
-        // closure owns its pre-cloned copy. `install_with_retry` is `FnMut`,
+        // closure owns its pre-cloned copy. `submit_with_retry` is `FnMut`,
         // so we re-clone the bytes on every attempt instead of moving.
         let state = state_for_op.clone();
         let package_bytes = package_bytes.clone();

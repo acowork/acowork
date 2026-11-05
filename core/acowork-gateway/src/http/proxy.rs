@@ -187,9 +187,30 @@ pub fn proxy_routes() -> Router<AppState> {
         )
         .route("/api/agents/{id}/latest-session", get(proxy_latest_session))
         .route("/api/agents/{id}/token-stats", get(proxy_token_stats))
+        // Per-chat token ledger read (plan §4.6 phase two): the desktop
+        // usage view fans this out per agent participant of a chat. Pure
+        // statistics, Runtime-side store, transparent proxy like
+        // `token-stats` — no Gateway-side filesystem access (redline).
+        .route(
+            "/api/agents/{id}/chat-usage/{chat_id}",
+            get(proxy_chat_usage),
+        )
         .route(
             "/api/agents/{id}/sessions/{sid}/messages",
             get(proxy_get_messages).post(proxy_post_message),
+        )
+        // ADR-106 D4: the round projection read. A Chat block is a reference to
+        // one round of an execution session, and this is the only way anything on
+        // the chat side can resolve that reference — the Gateway never reads a
+        // session transcript off disk (ADR-009 §5). Transparent proxies, like
+        // `messages`: every decision about what a round *is* lives in the Runtime.
+        .route(
+            "/api/agents/{id}/sessions/{sid}/rounds",
+            get(proxy_list_rounds),
+        )
+        .route(
+            "/api/agents/{id}/sessions/{sid}/rounds/{round_id}",
+            get(proxy_get_round),
         )
         // ADR-076 §决策 4 (second wave): user-triggered session actions.
         // The Runtime authorizes each one against the session's owner, which
@@ -635,6 +656,13 @@ async fn proxy_git_revert(
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions` to Runtime's `GET /sessions`.
+///
+/// ADR-106 D7: `chat_session_id` / `surface` ride the same transparent forward
+/// as `page` / `size` / `active`. The Gateway must not interpret them — which
+/// execution sessions a Chat may address is decided on the node that owns those
+/// sessions (ADR-009 §5), and a second copy of that filter here would be a
+/// second thing to keep honest. The membership header the Runtime needs to
+/// check them is injected by the auth middleware for every `/api/agents/` hop.
 async fn proxy_list_sessions(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -827,6 +855,22 @@ async fn proxy_token_stats(
     proxy_to_runtime(&state, &id, "/sessions/token-stats", "", &headers).await
 }
 
+/// Reverse-proxy `GET /api/agents/{id}/chat-usage/{chat_id}` to Runtime's
+/// `GET /chat-usage/{chat_id}` (one chat's ledger row on that agent).
+///
+/// The chat id rides to the agent that is a participant of exactly that
+/// chat — the same privacy discipline as the delete fan-out (design 27
+/// §4.4): a lookup is only meaningful to someone who already holds the
+/// session id, and the row carries spend totals, no content.
+async fn proxy_chat_usage(
+    State(state): State<AppState>,
+    Path((id, chat_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/chat-usage/{chat_id}");
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
 /// Reverse-proxy `GET /api/agents/{id}/health` to Runtime's `GET /health`.
 ///
 /// Used by the frontend as an HTTP double-check on MQTT disconnection: if the
@@ -850,6 +894,35 @@ async fn proxy_get_messages(
     let path = format!("/sessions/{}/messages", sid);
     let query = build_query_string(&params);
     proxy_to_runtime(&state, &id, &path, &query, &headers).await
+}
+
+/// Reverse-proxy `GET .../sessions/{sid}/rounds?ids=a,b` — ADR-106 D4.
+///
+/// Transparent like `messages`: the Gateway adds no round semantics, it only
+/// carries the request to the node that owns the session. The batch form is
+/// what the chat side hits on a first render — one cross-host round trip for
+/// every block on screen, not one per block.
+async fn proxy_list_rounds(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    Query(params): Query<HashMap<String, String>>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/sessions/{}/rounds", sid);
+    let query = build_query_string(&params);
+    proxy_to_runtime(&state, &id, &path, &query, &headers).await
+}
+
+/// Reverse-proxy `GET .../sessions/{sid}/rounds/{round_id}` — ADR-106 D4.
+async fn proxy_get_round(
+    State(state): State<AppState>,
+    Path((id, sid, round_id)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    // A round id is `r:{message_id}` and may legitimately carry `:`; percent-encode
+    // the segment so a weirder id cannot forge a second path segment upstream.
+    let path = format!("/sessions/{}/rounds/{}", sid, urlencoding(&round_id));
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
 /// Reverse-proxy a POST session action to the Runtime.
@@ -2655,6 +2728,88 @@ pub(crate) fn runtime_http_client() -> &'static reqwest::Client {
     })
 }
 
+/// Gateway-internal JSON `GET` against an agent's Runtime HTTP server.
+///
+/// Same addressing as the reverse proxy (registry endpoint lookup, local
+/// or node-routed, plus the `X-ACowork-Node-Token` attachment) — but it
+/// returns parsed JSON instead of a verbatim `Response`, because the
+/// caller is Gateway code, not a browser: the `@session` reference
+/// pinning read (ADR-106 revision 2026-11-04) asks
+/// `GET /sessions/{sid}/rounds?latest=1` before a chat row is written.
+///
+/// Scope is passed as `extra_headers` (the caller composes the same
+/// `x-user-id` / `x-acowork-chat-scope` pair the auth middleware injects
+/// for proxied reads; omitting both in local mode yields the
+/// `Unfiltered` scope, mirroring the middleware's local-mode behaviour).
+///
+/// Every failure shape — registry absent, agent unknown, transport error,
+/// non-2xx, unparseable body — comes back as `Err((status, message))`
+/// with the Runtime's own status preserved when there was one, so the
+/// caller can tell "the coordinate does not resolve" (404) from "the node
+/// is unreachable" and refuse the write either way.
+pub(crate) async fn runtime_json_get(
+    state: &AppState,
+    agent_id: &str,
+    path: &str,
+    query: &str,
+    extra_headers: &HeaderMap,
+) -> Result<serde_json::Value, (StatusCode, String)> {
+    let registry = match &state.runtime_http_registry {
+        Some(r) => r.clone(),
+        None => {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Runtime HTTP proxy registry not initialized".to_string(),
+            ));
+        }
+    };
+    let endpoint = {
+        let reg = registry.read().await;
+        reg.get_endpoint(agent_id)
+    };
+    let Some(endpoint) = endpoint else {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!("agent_not_running: no Runtime endpoint for {agent_id}"),
+        ));
+    };
+    let target_url = if query.is_empty() {
+        format!("{endpoint}{path}")
+    } else {
+        format!("{endpoint}{path}?{query}")
+    };
+    let client = runtime_http_client();
+    let mut request = client.get(&target_url);
+    for (name, value) in extra_headers {
+        if !is_hop_by_hop_header(name) {
+            request = request.header(name, value);
+        }
+    }
+    if let Some(node_token) = resolve_node_token(state, agent_id).await {
+        request = request.header("X-ACowork-Node-Token", node_token);
+    }
+    match request.send().await {
+        Ok(response) => {
+            let status = StatusCode::from_u16(response.status().as_u16())
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            let body = response.bytes().await.map_err(|e| {
+                (StatusCode::BAD_GATEWAY, format!("runtime body read failed: {e}"))
+            })?;
+            if !status.is_success() {
+                let message: String =
+                    String::from_utf8_lossy(&body).chars().take(512).collect();
+                return Err((status, format!("runtime answered {status}: {message}")));
+            }
+            serde_json::from_slice(&body)
+                .map_err(|e| (StatusCode::BAD_GATEWAY, format!("runtime JSON parse failed: {e}")))
+        }
+        Err(e) => Err((
+            StatusCode::BAD_GATEWAY,
+            format!("runtime unreachable at {target_url}: {e}"),
+        )),
+    }
+}
+
 /// Forward a request to the Runtime's HTTP endpoint (ADR-055 D3).
 ///
 /// This is used by the proxy handlers when the Runtime's HTTP endpoint
@@ -2971,6 +3126,113 @@ mod tests {
             "PUT body must be forwarded verbatim; got: {}",
             got[1]
         );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `runtime_json_get` — the Gateway-internal JSON GET behind the
+    /// `@session` reference pinning (ADR-106 revision 2026-11-04). Same
+    /// addressing as the reverse proxy (registry endpoint), but it answers
+    /// parsed JSON and turns every failure shape into `(status, message)`:
+    /// a Runtime 404 must stay distinguishable from an unregistered agent,
+    /// because the pinning caller maps the first to a 400 refusal and the
+    /// second to a 502 — both refuse the write, neither degrades.
+    #[tokio::test]
+    async fn runtime_json_get_reads_through_the_proxy_addressing() {
+        use axum::response::IntoResponse;
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let runtime_app = axum::Router::new().route(
+            "/sessions/{sid}/rounds",
+            axum::routing::get(
+                |uri: axum::http::Uri, headers: axum::http::HeaderMap| async move {
+                    let query = uri.query().unwrap_or_default().to_string();
+                    let user = headers
+                        .get("x-user-id")
+                        .and_then(|v| v.to_str().ok())
+                        .unwrap_or_default()
+                        .to_string();
+                    if uri.path().contains("missing") {
+                        return (axum::http::StatusCode::NOT_FOUND, "session not found").into_response();
+                    }
+                    axum::Json(serde_json::json!({
+                        "latest": { "round_id": "r:m-9", "terminal": true, "ts": "2026-01-01T00:00:00Z" },
+                        "seen_query": query,
+                        "seen_user": user,
+                    }))
+                    .into_response()
+                },
+            ),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            axum::serve(listener, runtime_app).await.unwrap();
+        });
+
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-json-get-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        let mut state = crate::http::routes::AppState::new(
+            Arc::new(RwLock::new(gw_state)),
+            Arc::new(crate::http::auth::HttpAuth::new(false)),
+        );
+        let registry = crate::http::proxy::new_shared_registry();
+        registry
+            .write()
+            .await
+            .register("agent-pin", &format!("http://127.0.0.1:{port}"));
+        state.runtime_http_registry = Some(registry);
+
+        let mut scope = axum::http::HeaderMap::new();
+        scope.insert(
+            "x-user-id",
+            axum::http::HeaderValue::from_static("u-alice"),
+        );
+
+        // Happy read: query and scope headers arrive, JSON comes back parsed.
+        let body = super::runtime_json_get(
+            &state,
+            "agent-pin",
+            "/sessions/s-1/rounds",
+            "latest=1",
+            &scope,
+        )
+        .await
+        .expect("registered agent answers the pinning read");
+        assert_eq!(body["latest"]["round_id"], "r:m-9");
+        assert_eq!(body["seen_query"], "latest=1", "query string carried");
+        assert_eq!(body["seen_user"], "u-alice", "scope header carried");
+
+        // Runtime-side 404: preserved, not flattened — the caller turns it into
+        // the 400 that says "your picker's list was stale".
+        let (status, _) = super::runtime_json_get(
+            &state,
+            "agent-pin",
+            "/sessions/missing/rounds",
+            "latest=1",
+            &scope,
+        )
+        .await
+        .expect_err("404 is an error for an internal reader");
+        assert_eq!(status, axum::http::StatusCode::NOT_FOUND);
+
+        // Unregistered agent: 503 from the Gateway's own registry, no transport.
+        let (status, _) = super::runtime_json_get(
+            &state,
+            "agent-nowhere",
+            "/sessions/s-1/rounds",
+            "latest=1",
+            &scope,
+        )
+        .await
+        .expect_err("unknown agent never reaches a Runtime");
+        assert_eq!(status, axum::http::StatusCode::SERVICE_UNAVAILABLE);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

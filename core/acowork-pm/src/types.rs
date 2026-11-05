@@ -705,7 +705,9 @@ pub struct TaskFilter {
     /// 设为 `true` 仅返回被依赖阻塞的任务。
     #[serde(default)]
     pub only_blocked: bool,
-    /// 排序字段（默认 `created_at`）。
+    /// Sort field (default `created_at`). Time-based sorts (`CreatedAt`,
+    /// `UpdatedAt`) return newest first; `DueAt`/`Priority` return the
+    /// queue-first order (soonest / highest).
     #[serde(default)]
     pub sort: Option<TaskSort>,
 }

@@ -34,6 +34,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use crate::error::{AcoworkError, Result};
+use crate::providers::traits::UsageInfo;
 
 /// Default maximum pruned-after-pick when pruning is disabled.
 pub const PRUNE_DISABLED: usize = 0;
@@ -121,6 +122,113 @@ pub struct SessionTokens {
     pub last_cache_write: u64,
     pub total_cache_read: u64,
     pub total_cache_write: u64,
+}
+
+// ── Fold primitives (ADR-027 / ADR-066) ─────────────────────────────────
+//
+// The single owner of the rules that fold one LLM call's provider-reported
+// `usage` into cumulative counters. The session totals (`SessionTokens`),
+// the per-model breakdown (`ModelUsageEntry` map), and the Chat usage
+// ledger (`chat_token_usage`) all fold through these functions — the
+// "Σ detail == totals" invariant holds because there is exactly one gate
+// implementation, not three copies that can drift apart.
+
+/// Gated deltas of one call: `(input, output, cache_read, cache_write)`.
+///
+/// ADR-027 zero-skip: `prompt_tokens == 0` means the provider did not
+/// report a reliable input count (fallback path); the input side then
+/// contributes 0 instead of polluting the running total. ADR-066:
+/// `cache_read` shares that gate (when input is unreliable the cache
+/// breakdown is unreliable too); `output` and `cache_write` always
+/// accumulate — a zero completion is usually a true zero (aborted
+/// stream), and an Anthropic cache write with zero regular input is
+/// still a real, billable event.
+pub fn gated_call_deltas(usage: &UsageInfo) -> (u64, u64, u64, u64) {
+    let (d_in, d_cr) = if usage.prompt_tokens > 0 {
+        (usage.prompt_tokens, usage.cache_read_tokens)
+    } else {
+        (0, 0)
+    };
+    (d_in, usage.completion_tokens, d_cr, usage.cache_write_tokens)
+}
+
+impl SessionTokens {
+    /// Fold one call into the running totals and overwrite the `last_*`
+    /// snapshot with the raw Provider values, including zeros — the
+    /// snapshot honestly reflects what the Provider returned (ADR-027).
+    pub fn folded_with_call(&self, usage: &UsageInfo) -> SessionTokens {
+        let (d_in, d_out, d_cr, d_cw) = gated_call_deltas(usage);
+        SessionTokens {
+            last_input: usage.prompt_tokens,
+            last_output: usage.completion_tokens,
+            total_input: self.total_input.saturating_add(d_in),
+            total_output: self.total_output.saturating_add(d_out),
+            last_cache_read: usage.cache_read_tokens,
+            last_cache_write: usage.cache_write_tokens,
+            total_cache_read: self.total_cache_read.saturating_add(d_cr),
+            total_cache_write: self.total_cache_write.saturating_add(d_cw),
+        }
+    }
+
+    /// Fold the totals only, preserving the `last_*` snapshot. For meta
+    /// calls (compaction, title generation): their prompt size is
+    /// unrepresentative of the session's next turn, so overwriting
+    /// `last_input` would inflate the displayed context usage until the
+    /// next dialog call recalibrates it.
+    pub fn folded_totals_preserving_last(&self, usage: &UsageInfo) -> SessionTokens {
+        let mut next = self.folded_with_call(usage);
+        next.last_input = self.last_input;
+        next.last_output = self.last_output;
+        next.last_cache_read = self.last_cache_read;
+        next.last_cache_write = self.last_cache_write;
+        next
+    }
+}
+
+/// Fold one call into the per-model detail map under `key` (built by
+/// [`model_usage_key`]).
+///
+/// Mirrors [`gated_call_deltas`] exactly, so Σ detail entries == the
+/// cumulative totals at every persist point — the store's upsert diff
+/// maintains the agent-level `token_stats` aggregate against that
+/// invariant. Cost folds poison-on-unknown: a fresh bucket takes the
+/// call's `cost_delta` (which may be `None`), an existing bucket only
+/// keeps a running cost while both sides are known; the first `None`
+/// contribution flips the bucket's cost to `None` permanently (until
+/// `rebuild_token_stats` or a corrected attribution — "宁可 miss 也不估计").
+pub fn fold_model_usage_entry(
+    map: &mut std::collections::BTreeMap<String, ModelUsageEntry>,
+    key: &str,
+    usage: &UsageInfo,
+    cost_delta: Option<f64>,
+) {
+    let (d_in, d_out, d_cr, d_cw) = gated_call_deltas(usage);
+    if d_in == 0 && d_out == 0 && d_cr == 0 && d_cw == 0 && cost_delta.is_none() {
+        return;
+    }
+    use std::collections::btree_map::Entry;
+    match map.entry(key.to_string()) {
+        Entry::Vacant(v) => {
+            v.insert(ModelUsageEntry {
+                input: d_in,
+                output: d_out,
+                cache_read: d_cr,
+                cache_write: d_cw,
+                cost: cost_delta,
+            });
+        }
+        Entry::Occupied(mut o) => {
+            let e = o.get_mut();
+            e.input = e.input.saturating_add(d_in);
+            e.output = e.output.saturating_add(d_out);
+            e.cache_read = e.cache_read.saturating_add(d_cr);
+            e.cache_write = e.cache_write.saturating_add(d_cw);
+            e.cost = match (e.cost, cost_delta) {
+                (Some(prev), Some(delta)) => Some(prev + delta),
+                _ => None,
+            };
+        }
+    }
 }
 
 /// Per-session LLM performance accumulator (speed / responsiveness).
@@ -434,6 +542,24 @@ impl SessionScope {
             Self::Admin { chats, .. } | Self::User { chats, .. } => chats,
         }
     }
+
+    /// May this caller act **inside** `chat_session_id`?
+    ///
+    /// ADR-106 D7's first wall: a Chat-scoped read must not be served to
+    /// somebody who is not a participant of that Chat, even when the ADR-076
+    /// row-level rules (`is_readable_by`) would let them read the sessions it
+    /// binds. Local mode has no membership table — one human owns everything
+    /// there, so it sees every chat; an account sees only the chats the
+    /// Gateway injected for it. A missing header therefore yields an empty
+    /// membership and denies: fail closed, never fail open.
+    pub fn sees_chat(&self, chat_session_id: &str) -> bool {
+        match self {
+            Self::Unfiltered => true,
+            Self::Admin { chats, .. } | Self::User { chats, .. } => {
+                chats.iter().any(|c| c == chat_session_id)
+            }
+        }
+    }
 }
 
 /// One persisted session, mapped 1:1 onto the `sessions` row.
@@ -717,6 +843,54 @@ pub trait SessionMetaStore: Send + Sync {
             "token_stats not supported by this backend".to_string(),
         ))
     }
+
+    // ── intent routing (ADR-106 D11) ──────────────────────────────────
+    //
+    // Which execution session owns which intent context, and which of those
+    // contexts have ended. This used to live in `intent-sessions.json` and
+    // `terminal-sessions.json` inside the agent's work dir — a second durable
+    // statement of facts the session row already carries, which could (and
+    // did) disagree with the binding after a half-completed routing. The row is
+    // the truth; these are the only writes that touch `intent_key` /
+    // `intent_closed`, and the session's own meta upsert never lists those two
+    // columns, so a `write_meta()` can not erase a routing decision and a
+    // routing decision can not erase a title.
+
+    /// The **open** session owning this intent context, newest first. `None`
+    /// means nothing owns it (never bound, or every holder closed).
+    fn intent_lookup(&self, key: &str) -> Result<Option<String>>;
+
+    /// Bind a session to an intent context. Writing-once-by-convention: a
+    /// session's context is decided when it is created, and rebinding one that
+    /// already answers another context is the bug D11 exists to kill.
+    fn intent_bind(&self, session_id: &str, key: &str) -> Result<()>;
+
+    /// Mark every open binding of `key` closed, returning the session ids it
+    /// changed so the caller can end their execution contexts. Idempotent: a
+    /// second close changes nothing and reports nothing.
+    fn intent_close(&self, key: &str) -> Result<Vec<String>>;
+
+    /// Re-open a session's context mark after its task was reopened: the
+    /// session is live again, so it is routable again.
+    fn intent_reopen(&self, session_id: &str) -> Result<()>;
+
+    /// Every binding, for the Chat Router's candidate filter (the derived index
+    /// D11 replaces the mapping file with). Metadata only, never a transcript.
+    fn intent_bindings(&self) -> Result<Vec<IntentBinding>>;
+}
+
+/// One session's intent-routing binding (ADR-106 D11).
+///
+/// The routing facts a session must state about itself: which intent context it
+/// owns (`conv:task:{project}:{task}` for a PM task, `conv:{conversation_id}`
+/// for an agent-to-agent conversation), and whether that context has ended. A
+/// closed binding is never offered as a routing candidate — routing a follow-up
+/// into a finished task answers into a conversation nobody reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntentBinding {
+    pub session_id: String,
+    pub intent_key: String,
+    pub closed: bool,
 }
 
 /// Converts `last_active_at` (RFC3339 string) to the epoch-ms `i64` the
@@ -844,6 +1018,34 @@ mod perf_tests {
         assert!(perf.is_empty());
         assert_eq!(perf.avg_tps(), None);
         assert_eq!(perf.avg_ttft_ms(), None);
+    }
+}
+
+#[cfg(test)]
+mod chat_scope_tests {
+    use super::SessionScope;
+
+    /// ADR-106 D7's first wall. Local mode has no membership table, so one
+    /// human owns every chat; an account is limited to what the Gateway
+    /// injected — and an absent header means nothing is injected, which must
+    /// deny rather than admit everything.
+    #[test]
+    fn chat_membership_is_fail_closed() {
+        assert!(SessionScope::Unfiltered.sees_chat("chat-1"));
+
+        let member = SessionScope::from_headers(Some("alice"), None, Some("chat-1, chat-2"));
+        assert!(member.sees_chat("chat-1"));
+        assert!(member.sees_chat("chat-2"));
+        assert!(!member.sees_chat("chat-3"));
+
+        let no_header = SessionScope::from_headers(Some("alice"), None, None);
+        assert!(!no_header.sees_chat("chat-1"));
+
+        // An administrator may read every *session*, which is a different
+        // question from being a participant of a *chat*.
+        let admin = SessionScope::from_headers(Some("*"), Some("root"), Some("chat-1"));
+        assert!(admin.sees_chat("chat-1"));
+        assert!(!admin.sees_chat("chat-2"));
     }
 }
 

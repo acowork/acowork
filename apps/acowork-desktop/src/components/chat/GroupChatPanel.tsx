@@ -4,15 +4,20 @@
  * `useProjectGroupStore.activeGroupId` is set.
  *
  * It is deliberately a thin twin of `AgentChatView`: same rows, same
- * bubble visuals, same card answering — but multi-party. The message
+ * bubble visuals, same execution blocks — but multi-party. The message
  * window lives in `chatSessionStore.windows[sessionId]` (the doorbell
  * keeps it fresh); this component only renders and sends.
  *
- * Send channels (§5.3):
- * - plain text  -> archive-only `user_message` row (agents stay quiet);
- * - `@Agent`    -> `/api/intents/mentions` fan-out (one row + turns);
- * - card answer -> `/api/intents/chat-message` with `in_reply_to`
- *   (the Gateway resolves the card's own agent — groups accepted).
+ * Send channels (§5.3, ADR-106 D6/D7):
+ * - plain text  -> `/api/intents/mentions` with no targets: the Gateway
+ *   delivers to the group's default responder, or archives the row;
+ * - `@Agent`    -> the same entry with `targets` (one row + one turn each);
+ * - `@Agent@session` / "new task" -> the same entry plus `target_sessions`
+ *   / `force_new`, the second-level address;
+ * - reply to a block -> `/api/intents/chat-message` with `in_reply_to`, which
+ *   the Gateway resolves into that round's agent and session (level 1).
+ * A card is answered inside its block, against the execution session (D8) —
+ * it is not a chat row and never travels through this composer.
  *
  * `ponytail:` ceilings vs the 1:1 surface — no model/workspace seed
  * toolbar (group turns are seeded by the mentioned agent's defaults),
@@ -30,6 +35,7 @@ import {
   memo,
   useRef,
   useState,
+  Fragment,
   type UIEvent,
   type MouseEvent as ReactMouseEvent,
 } from "react";
@@ -40,14 +46,15 @@ import {
   Loader2,
   ChevronDown,
   ChevronsDown,
-  ClipboardList,
   ArrowRight,
+  AtSign,
+  Quote,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { Components } from "react-markdown";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { cn } from "../../lib/utils";
-import { toolbarIconButton } from "../../lib/ui-styles";
+import { composerChip, listRowSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { getGatewayUrl } from "../../lib/config";
 import { fetchDirectory } from "../../lib/auth-api";
 import type { DirectoryUser } from "../../lib/types";
@@ -55,26 +62,25 @@ import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
-import { ViewRunButton } from "./ViewRunButton";
-import { useSessionTitle } from "../../lib/useSessionTitle";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
+import { ChatUsageIcon } from "./ChatUsageIcon";
 import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
-import { ReplyQuote, truncateQuote } from "./ReplyQuote";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
-import { ChatNoticeEventRow, truncateTaskName } from "./ChatNoticeEventRow";
-import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import {
-  isFailureStatus,
-  isEmptyTerminalReply,
-  isSystemFallback,
-  isTurnRoutedNotice,
-  pendingTurn,
-  terminalNoticeKey,
-} from "./chatTurnState";
-import { InlineInteractionCard } from "./InlineInteractionCard";
-import { ChatEventText } from "./ChatEventText";
+  buildCardAnswer,
+  groupCardAddress,
+  mayAnswerCard,
+  type CardChoice,
+} from "../../lib/chatCardAnswer";
+import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { turnInflight } from "../../lib/chatTurnInflight";
+import { ChatExecutionBlock } from "./ChatExecutionBlock";
+import type { TranscriptItem } from "./chatTranscriptGroups";
+import { useTranscriptLayout } from "./useTranscriptLayout";
+import { ChatAddressPicker, type AddressPick } from "./ChatAddressPicker";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
 import {
@@ -87,11 +93,10 @@ import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import {
   useChatSessionStore,
-  closedCardIds,
-  humanAnsweredCardIds,
-  chatAnsweredCardIds,
   type ChatMessageRow,
   type ChatAttachmentMeta,
+  type ChatAddress,
+  type ChatRefPick,
 } from "../../stores/chatSessionStore";
 import { useChatStore } from "../../stores/chatStore";
 import { sessionExists } from "../../lib/session-control";
@@ -208,88 +213,56 @@ interface ParticipantWho {
 
 // ── Row renderer ──────────────────────────────────────────────────────
 
+/** What the composer is currently addressed to (ADR-106 D6 level 1): one
+ *  round's reference row. `id` is sent as `in_reply_to`, which the Gateway
+ *  resolves into the round's agent and execution session — so "continue that
+ *  run" never reaches a model as a guess. `quote` is the one-line reminder
+ *  shown above the input. */
+interface ReplyTarget {
+  id: string;
+  quote: string;
+}
+
 interface RowProps {
   row: ChatMessageRow;
   me: string;
   /** Chat session the row belongs to — attachment thumbnails are addressed
-   *  through it (the `files/` dir is session-scoped, §4.2.1). */
+   *  through it (the `files/` dir is session-scoped, §4.2.1), and the
+   *  execution block's read is participation-checked against it (ADR-106 D10). */
   chatSessionId: string;
   nameOf: (id: string) => ParticipantWho;
-  /** Cards that can no longer be answered (§5.5.4). */
-  closed: Set<string>;
-  /** The subset the human actually replied to — the line says "Answered",
-   *  anything else that closed (turn ended, timeout, stop) says "Closed". */
-  answered: Set<string>;
-  onAnswer: (row: ChatMessageRow, text: string, immediate: boolean) => void;
-  /** Drill into the exec session that produced an agent reply — jumps to that
-   *  agent's 1:1 page and opens the exec tab (mirrors AgentChatView.jumpToExec). */
+  /** Drill into the exec session that owns a round — jumps to that agent's 1:1
+   *  page and opens the exec tab (mirrors AgentChatView.jumpToExec). */
   onJumpToExec: (agentId: string, execSid: string) => void;
-  /** Admin viewing a group they never joined: cards are shown, never
+  /** Address the composer to one round (ADR-106 D6 level 1) — how a `pause`
+   *  card is continued and how a finished round gets a follow-up. */
+  onReplyToRound: (rowId: string, quote: string) => void;
+  /** Admin viewing a group they never joined: runs are shown, never
    *  answered — posting into someone else's project stays forbidden. */
   readOnly?: boolean;
-  /** Body of the message that triggered this row's turn (`meta.in_reply_to`).
-   *  Names the run in the drill-down tooltip while the exec session still has
-   *  no title. Resolved by the parent through its message_id → body index. */
-  triggerBody?: string;
   /** Sender of the message this row answers (`in_reply_to`'s `from`) — the
-   *  counterparty of an execution-session echo row whose own `to` is empty.
+   *  counterparty of a reply whose own `to` is empty.
    *  Resolved by the parent through its message_id → from index. */
   triggerFrom?: string;
-  /** Question text of the `interaction_request` card this row answers, when it
-   *  answers one — the one-line quote above the answer bubble. Card-only by
-   *  construction: the parent resolves it through a card-only index. */
-  replyQuote?: string;
-  /** Kind of the `interaction_request` card this row answers, when it answers
-   *  one. ask_question/approval answers render as an event line (a step of
-   *  the run, not an utterance); a PAUSE answer stays a bubble — that text
-   *  IS the new turn's prompt. */
-  answeredCardKind?: string;
-  /** Cards answered on THIS surface — lets the notice row suppress its
-   *  duplicate resolution receipt. */
-  chatAnswered: Set<string>;
   /** Right-click on a participant's avatar / name → the panel's "@name"
    *  menu. Undefined when the panel has no mention target for that row. */
   onMentionContextMenu?: (e: ReactMouseEvent, id: string) => void;
-}
-
-/**
- * A PM task dispatch chip: the task id as a compact, copyable pill shown
- * above the human-readable dispatch text. The claim/submit playbook that
- * wakes the agent is model-facing only (injected into the execution
- * session's system block, never on this row) — the chip is the sole
- * machine coordinate the human surface needs. `project_id` is deliberately
- * absent: the row already lives in that project's own group chat.
- */
-function TaskChip({ taskId }: { taskId: string }) {
-  const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
-  const onCopy = useCallback(async () => {
-    try {
-      await navigator.clipboard.writeText(taskId);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      /* clipboard unavailable — the id is still visible as the label */
-    }
-  }, [taskId]);
-  return (
-    <button
-      type="button"
-      onClick={onCopy}
-      title={copied ? undefined : t("groupChat.taskChipCopy")}
-      className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-10 font-medium transition-colors",
-        "border-border-outer bg-[var(--color-accent)]/10 text-text-secondary",
-        "hover:bg-[var(--color-accent)]/20",
-      )}
-    >
-      <ClipboardList className="h-3 w-3 shrink-0" aria-hidden />
-      <span className="max-w-[14rem] truncate">
-        {t("groupChat.taskChip", { id: taskId })}
-      </span>
-      {copied && <span aria-hidden>✓</span>}
-    </button>
-  );
+  /** Answer an addressing card (ADR-106 D6 levels 3 and 5) by re-delivering the
+   *  utterance it asks about, now addressed. Undefined for a read-only viewer
+   *  (D10): deciding where someone else's words go is not a bystander's call. */
+  onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void;
+  /** The card's question has already been answered — a round exists for the
+   *  message it asked about. The buttons stay on screen and go quiet: the
+   *  transcript must keep showing what was decided, and a second click would
+   *  deliver the same utterance again. */
+  cardAnswered?: boolean;
+  /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
+   *  picker's "去续投") to locate that run's block in the transcript. A
+   *  navigation, not an address — it never changes what a message carries. */
+  onLocateRef?: (sessionId: string) => void;
+  /** Which execution session the picker just asked to continue: the matching
+   *  block reveals + focuses its in-place reply box. */
+  focusBlockSessionId?: string;
 }
 
 /**
@@ -345,94 +318,65 @@ function ToChip({ name }: { name: string }) {
  * the composer re-renders this host on every keystroke, and the host re-runs
  * `rows.map` — without memo that re-parses every markdown body in the window
  * (chat-transcript render-perf plan L1). Every prop is reference-stable while
- * the window is unchanged: `nameOf` is a `useCallback`, `closed`/`answered`
- * are per-window memos, `onAnswer`/`onJumpToExec` are host-level callbacks.
+ * the window is unchanged: `nameOf` is a `useCallback` and the handlers are
+ * host-level callbacks.
  */
 const GroupRowView = memo(function GroupRowView({
   row,
   me,
   chatSessionId,
   nameOf,
-  closed,
-  answered,
-  onAnswer,
-  onJumpToExec,
-  readOnly,
-  triggerBody,
   triggerFrom,
-  replyQuote,
-  answeredCardKind,
-  chatAnswered,
   onMentionContextMenu,
+  onChooseCard,
+  cardAnswered,
+  onLocateRef,
 }: RowProps) {
   const { t } = useTranslation();
   const profile = useUserProfileStore((s) => s.profile);
   const agentsMap = useAgentStore((s) => s.agents);
 
-  // The exec session behind this row and the agent that owns it (`row.from`).
-  // Its name feeds the "view run" tooltip. Read before the kind branches so
-  // the store hook stays unconditional. The routing reaction row (ADR-100
-  // D11) names the task in its bubble, so it resolves through the same hook.
-  const routed = isTurnRoutedNotice(row);
-  const drillSid =
-    row.kind === "agent_message" || routed
-      ? row.meta?.agent_session_id || row.meta?.sender_session_id || ""
-      : undefined;
-  const execRunName = useSessionTitle(row.from, drillSid);
-
-  if (row.kind === "system_notice") {
-    if (routed) {
-      // ADR-100 D11: the routing reaction — runtime-written, but it speaks as
-      // the agent, so it is synthesized into the ordinary agent-bubble path
-      // (avatar + name + bubble), never a centered system line. A user
-      // message must always be followed by an agent message: that exchange IS
-      // the chat.
-      const taskName =
-        execRunName?.trim() || truncateTaskName(triggerBody) || "";
-      row = {
-        ...row,
-        kind: "agent_message",
-        body: t(
-          row.meta?.turn_mode === "new"
-            ? "chatView.notice.turnRoutedNew"
-            : "chatView.notice.turnRoutedContinue",
-          { task: taskName },
-        ),
-      };
-    } else {
-      // Legacy receipts only — the milestones and the router-fallback receipt
-      // are gone from the stream (ADR-100 revision). Whatever survived paints
-      // as a quiet centered line, never on an agent's side.
-      //
-      // `name` feeds one receipt: the `delivery_failed` row of ADR-105 says
-      // which agent a message never reached, resolved from the roster like
-      // every other participant reference here (`from` = `to` = that agent on
-      // the Gateway's write). Every other receipt ignores the prop.
-      const failedTarget =
-        row.meta?.notice_type === "delivery_failed" ? nameOf(row.to || row.from).name : undefined;
-      return (
-        <ChatNoticeEventRow
-          row={row}
-          className="px-4"
-          answered={answered}
-          chatAnswered={chatAnswered}
-          name={failedTarget}
-        />
-      );
-    }
+  if (row.kind === "execution_round") {
+    // A reference row that names no round (a missing coordinate) addresses
+    // nothing, so it has no block to fold into and keeps its own explicit hole
+    // (ADR-106 D3). Every row that DOES name a round is drawn by the session's
+    // `ChatExecutionBlock` and reaches it as a `run` item — not as a row.
+    return (
+      <ChatTurnStatusLine
+        className="px-4"
+        text={t("chatView.block.notFound")}
+        danger={false}
+      />
+    );
   }
 
-  if (row.kind === "interaction_request") {
-    // The shared inline card — same grammar, affordances and answered/closed
-    // receipt as the 1:1 surface (design 27 §5.5.4).
+  if (row.kind === "system_notice") {
+    // A notice is a fact about the channel, not an utterance, so it never wears
+    // an avatar. `name` is used by one receipt: the `delivery_failed` row of
+    // ADR-105 says which agent a message never reached, resolved from the roster
+    // like every other participant reference here (`from` = `to` = that agent on
+    // the Gateway's write). Every other receipt ignores the prop.
+    const failedTarget =
+      row.meta?.notice_type === "delivery_failed"
+        ? nameOf(row.to || row.from).name
+        : undefined;
+    const noticeType = row.meta?.notice_type;
+    // The card asks the person who spoke — `to` is them — so a viewer who is
+    // not that person gets the question without the answer (D10).
+    const choose =
+      (noticeType === "session_choice" ||
+        noticeType === "confirm_continue") &&
+      onChooseCard &&
+      mayAnswerCard(row, me)
+        ? (choice: CardChoice) => onChooseCard(row, choice)
+        : undefined;
     return (
-      <InlineInteractionCard
+      <ChatNoticeEventRow
         row={row}
-        closed={closed}
-        answered={answered}
-        askerName={nameOf(row.from).name}
-        readOnly={readOnly}
-        onAnswer={onAnswer}
+        className="px-4"
+        name={failedTarget}
+        onChoose={choose}
+        answered={cardAnswered}
       />
     );
   }
@@ -448,77 +392,11 @@ const GroupRowView = memo(function GroupRowView({
     row.from !== me
       ? (e: ReactMouseEvent) => onMentionContextMenu?.(e, row.from)
       : undefined;
-  const failed = isFailureStatus(row.meta?.status);
   const agentMeta = who.isAgent ? agentsMap[row.from]?.meta : undefined;
   // Who this row is addressed to (see `rowToTargets`). Resolved outside the
   // kind branches so the hook order stays unconditional; empty means the row
   // carries no address and no chip is painted.
   const toTargets = rowToTargets(row, triggerFrom);
-  // The exec session behind an agent reply — a group / routed reply carries
-  // `sender_session_id` (the answering agent's own session). Same formula as
-  // AgentChatView, so finished / failed / empty-bodied replies are all
-  // drillable.
-  const execSid =
-    row.meta?.agent_session_id || row.meta?.sender_session_id || "";
-  // "View run" rides the same header chip row as the TO capsule — one row
-  // above the bubble instead of split across top and bottom.
-  const showRunChip =
-    row.kind === "agent_message" && who.isAgent && !!execSid;
-
-  // §5.5.1: the sweeper's fallback receipt is a terminal `agent_message` the
-  // Gateway wrote ON the answering agent's behalf, so it carries the fixed
-  // wording as a body — `isEmptyTerminalReply` cannot catch it, and it would
-  // otherwise render as a bubble in that agent's voice reporting a crash it
-  // never reported. Keyed on the sweeper's own `fallback` stamp, which a real
-  // failure does not carry, rather than on `status`, which both do.
-  if (row.kind === "agent_message" && isSystemFallback(row)) {
-    return (
-      <ChatTurnStatusLine
-        className="px-4"
-        text={t("chatView.notice.systemFallback", { name: who.name })}
-        danger={false}
-      />
-    );
-  }
-
-  // A terminal reply with nothing in it IS its outcome ("interrupted",
-  // "failed"): paint the centered status line with the drill into the run,
-  // never a bubble speaking in the agent's voice.
-  if (row.kind === "agent_message" && isEmptyTerminalReply(row)) {
-    return (
-      <ChatTurnStatusLine
-        className="px-4"
-        text={t(terminalNoticeKey(row.meta?.status))}
-        danger={failed}
-        onJump={execSid ? () => onJumpToExec(row.from, execSid) : undefined}
-        runName={
-          execRunName?.trim() || truncateTaskName(triggerBody) || undefined
-        }
-      />
-    );
-  }
-
-  // A decision answered on THIS surface (any human's). The card interaction
-  // is a step of the run, not an utterance — so it states itself as a
-  // centered event line ("Answered: <choice>"), the sibling of the
-  // unanswered note the card leaves behind. PAUSE answers are excluded:
-  // that text IS the new turn's prompt and must read as a message.
-  if (
-    row.kind === "user_message" &&
-    answeredCardKind &&
-    answeredCardKind !== "pause" &&
-    !row.attachments?.length
-  ) {
-    const answer = truncateQuote(row.body);
-    return (
-      <ChatEventText
-        anchor="turn"
-        text={t("chatView.cardAnsweredNote", { answer })}
-        title={row.body}
-        className="px-4"
-      />
-    );
-  }
 
   // Avatar is a 40px side column (left for others, right for own) — the same
   // primitive the user↔user inbox (`MessageRow`) and user↔agent thread
@@ -599,14 +477,11 @@ const GroupRowView = memo(function GroupRowView({
             bubbleMetaAnchor(own ? "own" : "peer"),
           )}
         >
-          {/* Header chips, one horizontal row: who the message is addressed
-              to (TO), the PM task coordinate, and the agent reply's run
-              drill-down — so a row reads at a glance instead of stacking
-              chips vertically. One TO capsule per target: an @-fan-out row
-              wakes several agents and shows them all. */}
-          {(toTargets.length > 0 ||
-            (row.kind === "user_message" && row.meta?.task_id) ||
-            showRunChip) && (
+          {/* Header chips: who the message is addressed to. One TO capsule per
+              target — an @-fan-out row wakes several agents and shows them all.
+              The run's own coordinates (task id, drill-down) belong to the
+              execution block now (ADR-106 D3/D13), not to the utterance. */}
+          {toTargets.length > 0 && (
             <div
               className={cn(
                 "mb-1 flex flex-wrap items-center gap-1.5",
@@ -616,19 +491,6 @@ const GroupRowView = memo(function GroupRowView({
               {toTargets.map((id) => (
                 <ToChip key={id} name={nameOf(id).name} />
               ))}
-              {row.kind === "user_message" && row.meta?.task_id && (
-                <TaskChip taskId={row.meta.task_id} />
-              )}
-              {showRunChip && (
-                <ViewRunButton
-                  runName={
-                    execRunName?.trim() ||
-                    truncateTaskName(triggerBody) ||
-                    undefined
-                  }
-                  onJump={() => onJumpToExec(row.from, execSid)}
-                />
-              )}
             </div>
           )}
           {/* Attachment chips above the bubble, on the speaker's side — same
@@ -662,13 +524,6 @@ const GroupRowView = memo(function GroupRowView({
             labels={row.meta?.exec_attachments}
             align={own ? "end" : "start"}
           />
-          {/* What this answer answers. The answered card no longer paints a
-              receipt, so the §5.5.4 `in_reply_to` link surfaces here instead —
-              above the bubble, where the highlight-filled bubble cannot swallow
-              a gray quote line. */}
-          {row.kind === "user_message" && (
-            <ReplyQuote quote={replyQuote} align={own ? "end" : "start"} />
-          )}
           {/* The group column is an `items-start` flex column, so the bubble is
              shrink-to-fit too: without the clamp, content that cannot be
              squeezed (a mermaid SVG's natural width, an unwrapped table, one
@@ -687,11 +542,6 @@ const GroupRowView = memo(function GroupRowView({
                   : "rounded-bl-sm bg-chat-bubble text-text-primary",
               )}
             >
-              {failed && (
-                <div className="mb-1 rounded bg-red-50 px-2 py-0.5 text-10 text-red-500 dark:bg-red-900/20">
-                  {row.meta?.status}
-                </div>
-              )}
               {/* Human input is literal text, markdown is agent speech — the
                 same renderer split the user↔agent thread (`AgentChatView`)
                 and the execution surface (`UserWithAttachmentsBubble`) apply
@@ -720,6 +570,31 @@ const GroupRowView = memo(function GroupRowView({
               )}
             </div>
           )}
+          {/* ADR-106 revision 2026-11-04: the `@session` material attached to
+              this utterance, read off the row's pinned `meta.refs` (no new
+              read). Source chips on the speaker's side under the bubble — one
+              click jumps to that run's block. */}
+          {row.meta?.refs && row.meta.refs.length > 0 && (
+            <div
+              className={cn(
+                "mb-0.5 mt-1 flex flex-wrap gap-1",
+                own ? "justify-end self-end" : "justify-start self-start",
+              )}
+            >
+              {row.meta.refs.map((r) => (
+                <button
+                  key={`${r.agent_instance_id}|${r.session_id}|${r.round_id}`}
+                  type="button"
+                  onClick={() => onLocateRef?.(r.session_id)}
+                  className="inline-flex max-w-[12rem] items-center gap-1 rounded bg-chat-bubble px-1.5 py-0.5 text-10 text-text-tertiary hover:text-text-secondary"
+                  title={r.session_id}
+                >
+                  <Quote className="h-3 w-3 shrink-0" />
+                  <span className="truncate">{r.session_id}</span>
+                </button>
+              ))}
+            </div>
+          )}
           <div className="mt-1 flex items-center gap-2">
             <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
@@ -730,6 +605,66 @@ const GroupRowView = memo(function GroupRowView({
       {own && avatar}
     </div>
   );
+});
+
+interface GroupItemProps extends Omit<RowProps, "row"> {
+  item: TranscriptItem;
+  /** Something follows this item in the transcript — `ExploreBlock`'s
+   *  `hasFollowUpReply`, the one condition that auto-collapses a settled run. */
+  hasFollowUp: boolean;
+}
+
+/**
+ * One item of the folded transcript: an execution session's block, or a row.
+ *
+ * This is where the session-level fold (ADR-106's presentation contract) becomes
+ * a component on the group surface; `GroupRowView` stays the per-row renderer it
+ * always was. The memo boundary sits on the item the list keys on, so a composer
+ * keystroke re-paints nothing (render-perf plan L1) — the same reason `RowView`
+ * is memoized.
+ *
+ * The block's author menu is wrapped HERE rather than passed through: the
+ * wrapper closes over the block's own agent id, and building it inside the memo
+ * keeps the host's per-keystroke renders from producing a new function identity
+ * for a block that did not change.
+ */
+const GroupItemView = memo(function GroupItemView({
+  item,
+  hasFollowUp,
+  ...rowProps
+}: GroupItemProps) {
+  if (item.kind === "run") {
+    const {
+      onMentionContextMenu,
+      nameOf,
+      chatSessionId,
+      readOnly,
+      focusBlockSessionId,
+    } = rowProps;
+    return (
+      <ChatExecutionBlock
+        block={item}
+        chatSessionId={chatSessionId}
+        // A block always starts a new turn on this surface, which shows an
+        // avatar and name above every utterance — so the run wears one too.
+        showHeader
+        hasFollowUp={hasFollowUp}
+        authorName={nameOf(item.anchorRow.from).name}
+        canAnswer={!readOnly}
+        onJumpToExec={rowProps.onJumpToExec}
+        onReplyToRound={rowProps.onReplyToRound}
+        focusInput={
+          !!focusBlockSessionId && item.execSessionId === focusBlockSessionId
+        }
+        onAuthorContextMenu={
+          onMentionContextMenu
+            ? (e) => onMentionContextMenu(e, item.instanceId)
+            : undefined
+        }
+      />
+    );
+  }
+  return <GroupRowView {...rowProps} row={item.row} />;
 });
 
 // ── Mention resolution ────────────────────────────────────────────────
@@ -797,6 +732,41 @@ export function applyMention(
   return { value: next, caret: mentionStart + inserted.length };
 }
 
+/**
+ * Turn the composer's address picks into the wire address (ADR-106 D6/D7,
+ * redrawn by the 2026-11-04 revision).
+ *
+ * A typed `@session` is MATERIAL now, not a delivery: the picker hands back
+ * `refs` (the runs attached as quoted context), which ride the send as the flat
+ * `ChatAddress.refs` the Gateway pins per round. `target_sessions` is no longer
+ * produced here — it survives only on the addressing-card answer path
+ * (`chatCardAnswer`), where the human is genuinely choosing a delivery.
+ * "new task" is still a per-agent `force_new_for` refusal to continue.
+ *
+ * An address rides ONLY the targets this message actually mentions: a chip
+ * whose `@` the human later deleted must never reach the body. `undefined`
+ * (nothing chosen, or nothing still mentioned) is not an empty object — the
+ * absence of an address is what keeps the turn on the ladder's lower levels.
+ */
+export function buildChatAddress(
+  targets: string[],
+  addresses: Record<string, AddressPick>,
+): ChatAddress | undefined {
+  const refs: ChatRefPick[] = [];
+  const forceNewFor: string[] = [];
+  for (const target of targets) {
+    const pick = addresses[target];
+    if (!pick) continue;
+    if (pick.refs?.length) refs.push(...pick.refs);
+    else if (pick.forceNew) forceNewFor.push(target);
+  }
+  if (refs.length === 0 && forceNewFor.length === 0) return undefined;
+  return {
+    ...(refs.length > 0 ? { refs } : {}),
+    ...(forceNewFor.length > 0 ? { forceNewFor } : {}),
+  };
+}
+
 // ── View ──────────────────────────────────────────────────────────────
 
 export function GroupChatPanel() {
@@ -817,6 +787,11 @@ export function GroupChatPanel() {
   const sending = useChatSessionStore((s) =>
     activeGroupId ? s.sending[activeGroupId] : false,
   );
+  // The turn this device sent here and has not seen an outcome for (ADR-106
+  // D9's claim, keyed by the id the send's response carried).
+  const inflightTurn = useChatSessionStore((s) =>
+    activeGroupId ? s.inflight[activeGroupId] : undefined,
+  );
   const pendingLocateSeq = useChatSessionStore((s) =>
     activeGroupId ? (s.windows[activeGroupId]?.pendingLocateSeq ?? null) : null,
   );
@@ -827,6 +802,9 @@ export function GroupChatPanel() {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
   const [draft, setDraft] = useState("");
+  // The round the composer is answering, when it is answering one (the chip
+  // above the input names it; see `ReplyTarget`).
+  const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);
   const [directory, setDirectory] = useState<DirectoryUser[]>([]);
   const nameOf = useParticipantNamer(directory);
   const agentsMap = useAgentStore((s) => s.agents);
@@ -850,7 +828,26 @@ export function GroupChatPanel() {
     start: number;
   } | null>(null);
   const [mentionActive, setMentionActive] = useState(0);
+  /** Which gesture opened the popup, so it can hang off the right thing. */
+  const [mentionAnchor, setMentionAnchor] = useState<"button" | "typed">("typed");
   const pickerRef = useRef<HTMLDivElement>(null);
+  // Second level of the `@` (ADR-106 D7): the agent whose task list is open.
+  // It is a stage, not a choice — choosing is `addresses`.
+  const [addressStage, setAddressStage] = useState<{
+    instanceId: string;
+    name: string;
+  } | null>(null);
+  // Reference picks the human has made for this draft, per agent instance. They
+  // ride the send as `refs` (material) / `force_new_for` (a refusal to
+  // continue), which is the one fact the Router is never allowed to re-decide
+  // (D6: an address is an instruction).
+  const [addresses, setAddresses] = useState<Record<string, AddressPick>>({});
+  // ADR-106 revision 2026-11-04: the run whose block the `@` picker's "去续投"
+  // just located — that block reveals + focuses its in-place reply box. Cleared
+  // on the next commit so a stale focus never re-fires.
+  const [focusBlockSessionId, setFocusBlockSessionId] = useState<string | null>(
+    null,
+  );
 
   // Virtualized transcript handle (see the adapters below). Declared before the
   // follow hook: the hook delegates bottom-positioning to the list's
@@ -894,29 +891,6 @@ export function GroupChatPanel() {
     [scrollRef],
   );
 
-  // Locate-and-flash for history jumps (ADR-097) — declared AFTER the follow
-  // hook so the center-scroll wins over follow-to-bottom on the jump commit.
-  const highlightSeq = useLocateMessage(
-    () => containerRef.current,
-    pendingLocateSeq,
-    () =>
-      activeGroupId &&
-      useChatSessionStore.getState().clearLocate(activeGroupId),
-    // Virtualization fallback: the row is in the window but not in the DOM.
-    (seq) => {
-      const idx = rowsRef.current.findIndex((r) => r.seq === seq);
-      if (idx < 0) return false;
-      return (
-        listRef.current?.scrollToKey(`${activeGroupId}:${seq}`, "center") ??
-        false
-      );
-    },
-    // A locate parks the reader mid-history on purpose: take them out of
-    // the follow, or the persistent anchor rides the next commit back to
-    // the tail (a downward jump carries no scroll-event signal to do it).
-    () => unpin(),
-  );
-
   // Directory for human sender names — best-effort, once per mount.
   useEffect(() => {
     const token = useAuthStore.getState().accessToken;
@@ -933,31 +907,56 @@ export function GroupChatPanel() {
     () => [...(win?.older ?? []), ...(win?.tail ?? [])],
     [win],
   );
-  // Virtualization adapters (render-perf L2) — see AgentChatView for the
-  // full rationale. Session-qualified keys, rows ref for the locate
-  // fallback, coarse body-length estimate corrected by measurement.
-  const rowKeyOf = useCallback(
-    (r: ChatMessageRow) => `${activeGroupId}:${r.seq}`,
-    [activeGroupId],
+  // D9's claim read against this transcript: the send is owed its first visible
+  // outcome until a row answers its id. `sending` alone only covers the POST, so
+  // the wait between delivery and the round's reference row showed nothing — and
+  // left the send button live next to a message still being decided, with no
+  // Chat-side queue to absorb the second send.
+  const turnLive = turnInflight(rows, inflightTurn);
+  const composerLocked = sending || turnLive;
+  // Release the claim once a row answers it, so the surface stops asserting a
+  // turn the transcript has already settled.
+  useEffect(() => {
+    if (!activeGroupId || !inflightTurn) return;
+    if (turnInflight(rows, inflightTurn)) return;
+    useChatSessionStore
+      .getState()
+      .settleTurn(activeGroupId, inflightTurn.messageId);
+  }, [rows, inflightTurn, activeGroupId]);
+  // Virtualization adapters (render-perf L2): the same keys, estimates and
+  // seq→item index the 1:1 view uses, scoped to this group.
+  const {
+    items,
+    rowsRef,
+    keyOfSeqRef,
+    virtualKeyOf,
+    virtualEstimate,
+    virtualAttrs,
+    seqsByItem,
+  } = useTranscriptLayout(rows, activeGroupId ?? "");
+
+  // Locate-and-flash for history jumps (ADR-097) — declared AFTER the follow
+  // hook so the center-scroll wins over follow-to-bottom on the jump commit.
+  const highlightSeq = useLocateMessage(
+    () => containerRef.current,
+    pendingLocateSeq,
+    () =>
+      activeGroupId &&
+      useChatSessionStore.getState().clearLocate(activeGroupId),
+    // Virtualization fallback: the row is in the window but not in the DOM. A
+    // folded row is not an item of its own either, so its seq resolves through
+    // the layout's `keyOfSeq` to the block that holds it (ADR-097).
+    (seq) => {
+      const key = keyOfSeqRef.current.get(seq);
+      if (!key) return false;
+      return listRef.current?.scrollToKey(key, "center") ?? false;
+    },
+    // A locate parks the reader mid-history on purpose: take them out of
+    // the follow, or the persistent anchor rides the next commit back to
+    // the tail (a downward jump carries no scroll-event signal to do it).
+    () => unpin(),
   );
-  const rowsRef = useRef(rows);
-  rowsRef.current = rows;
-  const estimateRow = useCallback((r: ChatMessageRow) => {
-    const body = r.body ?? "";
-    const lines = Math.max(1, Math.ceil(body.length / 70));
-    return Math.min(480, 32 + lines * 22);
-  }, []);
-  // message_id → body index over the raw window, so a reply (whose trigger is
-  // only an `in_reply_to` id) can name the task in its drill-down tooltip when
-  // the run has no title yet.
-  const bodyById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
-      if (r.meta?.message_id) m.set(r.meta.message_id, r.body);
-    }
-    return m;
-  }, [win]);
-  // message_id → sender index, so an echo row with an empty `to` can name the
+  // message_id → sender index, so a reply with an empty `to` can name the
   // counterparty from the message it answers (`in_reply_to`'s `from`).
   const fromById = useMemo(() => {
     const m = new Map<string, string>();
@@ -966,30 +965,19 @@ export function GroupChatPanel() {
     }
     return m;
   }, [win]);
-  // Card rows only, so an answer can quote the question it answers. Separate
-  // from `bodyById` on purpose: `in_reply_to` also points at plain messages,
-  // and quoting one of those would paint a decision quote where none exists.
-  // Question-first, the same way the card renders its own text — the row body
-  // is only a summary (an approval's reads "Tool approval: bash").
-  const cardQuoteById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
-      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
-      m.set(r.meta.message_id, r.meta.interaction?.question || r.body);
-    }
-    return m;
-  }, [win]);
-  // Same index, kind instead of question: an answer row needs the card's kind
-  // to decide between event line (ask_question / approval) and bubble (pause).
-  const cardKindById = useMemo(() => {
-    const m = new Map<string, string>();
-    for (const r of [...(win?.older ?? []), ...(win?.tail ?? [])]) {
-      if (r.kind !== "interaction_request" || !r.meta?.message_id) continue;
-      m.set(r.meta.message_id, r.meta.interaction?.kind ?? "ask_question");
-    }
-    return m;
-  }, [win]);
   const hasMoreOlder = win ? win.firstPos > 0 : false;
+  // Which messages already have a round. An addressing card is answered exactly
+  // when one exists for the message it asked about (the re-delivery leaves that
+  // reference row, ADR-106 D3), so the transcript itself says the question is
+  // settled — there is no chat-side "answered" flag to keep in sync (D12).
+  const roundTriggers = useMemo(() => {
+    const s = new Set<string>();
+    for (const r of rows) {
+      if (r.kind === "execution_round" && r.meta?.in_reply_to)
+        s.add(r.meta.in_reply_to);
+    }
+    return s;
+  }, [rows]);
   const hasMoreNewer = win ? win.lastPos < win.total - 1 : false;
   // Auto-pagination: scrolling into the top band fires the next older page;
   // reaching the bottom band (only after a locate parks the window mid-history)
@@ -1009,18 +997,6 @@ export function GroupChatPanel() {
       void useChatSessionStore.getState().loadNewer(activeGroupId);
     }
   };
-  const closed = useMemo(
-    () => (win?.tail ? closedCardIds(win.tail) : new Set<string>()),
-    [win],
-  );
-  const answered = useMemo(
-    () => (win?.tail ? humanAnsweredCardIds(win.tail) : new Set<string>()),
-    [win],
-  );
-  const chatAnswered = useMemo(
-    () => (win?.tail ? chatAnsweredCardIds(win.tail) : new Set<string>()),
-    [win],
-  );
   const agentParticipants = useMemo(() => {
     if (!group?.participants) return [];
     return group.participants
@@ -1028,20 +1004,6 @@ export function GroupChatPanel() {
       .map((p) => ({ id: p.id, name: nameOf(p.id).name }))
       .filter((p) => nameOf(p.id).isAgent);
   }, [group, me, nameOf]);
-
-  // Is the newest message still waiting for an answering agent? Derived, never
-  // stored (`chatTurnState`). Suppressed while a locate has the window parked
-  // mid-history (no newest message is rendered there).
-  //
-  // `agentParticipants.length > 0` is the chat-side fact that makes the line
-  // meaningful at all: a `user_user` DM has no agent, so it must never claim
-  // somebody is working — not even while the send is in flight. Rows are
-  // filtered the same way inside `pendingTurn`, so an un-@'d group remark
-  // opens no wait either (it woke nobody), while a turn an agent is still
-  // chewing on keeps its line even if a plain remark landed after it.
-  const waiting =
-    !hasMoreNewer &&
-    pendingTurn(rows, sending, closed, agentParticipants.length > 0);
 
   // Everything the @ picker lists. Design 27 §5.3.1: @-ing an Agent wakes it,
   // @-ing a person is a mention that triggers nothing — but both are pickable,
@@ -1091,13 +1053,56 @@ export function GroupChatPanel() {
       ?.scrollIntoView({ block: "nearest" });
   }, [mentionActive, mention, mentionCandidates.length]);
 
+  // Typing: the popup follows the text and the caret, hanging off the composer.
   const syncMention = useCallback((value: string, caret: number) => {
+    setMentionAnchor("typed");
     setMention(detectMention(value, caret));
     setMentionActive(0);
   }, []);
 
+  // A caret move. React dispatches `onSelect` on focus, so this also runs when
+  // the button's own popup takes the focus: a caret still sitting where the
+  // button opened the picker is that dispatch, not a human gesture, and
+  // re-deriving the popup there would move it off the button and out from under
+  // the click that was about to land on it.
+  const syncCaret = useCallback(
+    (value: string, caret: number) => {
+      if (mentionAnchor === "button" && mention && caret === mention.start) {
+        return;
+      }
+      syncMention(value, caret);
+    },
+    [mentionAnchor, mention, syncMention],
+  );
+
+  // The toolbar's `@` — the same picker typing `@` opens, reachable without
+  // knowing the shortcut (ADR-106 D7's ladder is one gesture, not two grammars).
+  // The draft is untouched either way: the button opens the picker, and picking
+  // a name is what writes `@name ` into the text.
+  const openMentionPicker = useCallback(() => {
+    // A second click on the button closes what it opened: it advertises its own
+    // state through `aria-expanded`, so it must be able to take it back.
+    if (mention && mentionAnchor === "button") {
+      setMention(null);
+      return;
+    }
+    setMentionAnchor("button");
+    const ta = textareaRef.current;
+    const caret = ta?.selectionStart ?? draft.length;
+    // Nothing is typed: the button is a door, not a keystroke. The popup opens
+    // over the caret, and picking a name is the one gesture that writes one —
+    // an `@` dropped into the draft would be a character the human never typed
+    // (and one they then have to delete).
+    setMention(detectMention(draft, caret) ?? { query: "", start: caret });
+    setMentionActive(0);
+    // Focus only, no `setSelectionRange`: a caret move here fires `select`,
+    // which re-syncs the popup against the text and re-anchors it to the
+    // composer — the button's popup would leap away from the button.
+    ta?.focus();
+  }, [draft, mention, mentionAnchor]);
+
   const pickMention = useCallback(
-    (name: string) => {
+    (candidate: { id: string; name: string; isAgent: boolean }) => {
       const ta = textareaRef.current;
       if (!ta || !mention) return;
       const caret = ta.selectionStart ?? draft.length;
@@ -1105,35 +1110,199 @@ export function GroupChatPanel() {
         draft,
         caret,
         mention.start,
-        name,
+        candidate.name,
       );
       setDraft(value);
       setMention(null);
+      // Every path leaves the caret just past the token, before anything else
+      // renders. The WebView fires `select` when a focused textarea's value
+      // changes under it, and a caret still sitting inside the old `@` makes the
+      // picker re-open on top of the second level — the same question, asked
+      // twice, with the answer already given.
       requestAnimationFrame(() => {
         ta.focus();
         ta.setSelectionRange(nextCaret, nextCaret);
       });
+      // Only an agent has a second level: a person is a mention that triggers
+      // nothing, so asking "which of their tasks" would offer a delivery that
+      // cannot happen — and the popup would be the surface promising it.
+      if (candidate.isAgent) {
+        setAddressStage({ instanceId: candidate.id, name: candidate.name });
+      }
     },
     [draft, mention],
   );
 
+  // The second level's answer. "Nothing chosen" is an answer (D7 keeps the
+  // ladder's lower levels reachable), and it clears the chip rather than storing
+  // an empty address — an empty address is the absence, not a decision.
+  const applyAddress = useCallback(
+    (pick: AddressPick) => {
+      const stage = addressStage;
+      if (stage) {
+        setAddresses((prev) => {
+          const next = { ...prev };
+          if (pick.refs?.length || pick.forceNew) {
+            next[stage.instanceId] = pick;
+          } else {
+            delete next[stage.instanceId];
+          }
+          return next;
+        });
+      }
+      setAddressStage(null);
+      const ta = textareaRef.current;
+      requestAnimationFrame(() => ta?.focus());
+    },
+    [addressStage],
+  );
+
+  const clearAddress = useCallback((instanceId: string) => {
+    setAddresses((prev) => {
+      const next = { ...prev };
+      delete next[instanceId];
+      return next;
+    });
+  }, []);
+
+  // Remove ONE reference from an agent's pick. Dropping the last one clears the
+  // chip entirely (unless a `forceNew` refusal still stands) — swallowing a
+  // picked reference would make it indistinguishable from one never given.
+  const removeRef = useCallback((instanceId: string, key: string) => {
+    setAddresses((prev) => {
+      const pick = prev[instanceId];
+      if (!pick) return prev;
+      const refs = (pick.refs ?? []).filter(
+        (x) => `${x.agentInstanceId}|${x.sessionId}` !== key,
+      );
+      const labels = { ...pick.labels };
+      delete labels[key];
+      const next = { ...prev };
+      if (refs.length === 0 && !pick.forceNew) delete next[instanceId];
+      else next[instanceId] = { ...pick, refs, labels };
+      return next;
+    });
+  }, []);
+
+  // ADR-106 revision 2026-11-04: "去续投" / a source-chip click locate the run's
+  // block. The block is the newest `execution_round` row whose session matches;
+  // its seq resolves through the layout's `keyOfSeq` to the virtual item, which
+  // the list scrolls to. A run with no block in the loaded window answers with a
+  // toast and no auto-paging (v1) — the navigation is best-effort, the reference
+  // it was pointing at is already on the row regardless.
+  const handleLocateRef = useCallback(
+    (sessionId: string) => {
+      setAddressStage(null);
+      const rows = rowsRef.current;
+      let seq: number | null = null;
+      for (const r of rows) {
+        if (
+          r.kind === "execution_round" &&
+          r.meta?.agent_session_id === sessionId
+        ) {
+          seq = r.seq;
+        }
+      }
+      if (seq === null) {
+        showToast({
+          type: "info",
+          message: t("chatView.address.blockNotLoaded"),
+        });
+        return;
+      }
+      const key = keyOfSeqRef.current.get(seq);
+      if (key) listRef.current?.scrollToKey(key, "center");
+      setFocusBlockSessionId(sessionId);
+    },
+    [t],
+  );
+
+  // Answering an addressing card (ADR-106 D6): re-send the human's OWN words
+  // with the address they just chose, keyed by the original row's id so the
+  // transcript keeps one message instead of narrating the decision twice.
+  const answerCard = useCallback(
+    (card: ChatMessageRow, choice: CardChoice) => {
+      if (!activeGroupId) return;
+      const original = rowsRef.current.find(
+        (r) => r.meta?.message_id === card.meta?.in_reply_to,
+      );
+      const answer = buildCardAnswer(card, original, choice);
+      if (!answer) return;
+      const mentioned = resolveMentions(answer.text, agentParticipants);
+      // The card came from one agent, so the answer must reach that one: the
+      // original message may have named nobody (the group's default responder
+      // took it, ADR-105), and an address that is not a target of this send is
+      // refused by the Gateway rather than dropped.
+      const targets = mentioned.includes(answer.agentId)
+        ? mentioned
+        : [...mentioned, answer.agentId];
+      void useChatSessionStore
+        .getState()
+        .sendGroupText(
+          activeGroupId,
+          answer.text,
+          targets,
+          undefined,
+          answer.attachmentIds,
+          groupCardAddress(answer),
+        );
+    },
+    [activeGroupId, agentParticipants],
+  );
+
+  // Chips follow the draft: an address whose `@` the human deleted stops being
+  // an instruction for this message, so it stops being shown (and, via
+  // `buildChatAddress`, stops being sent).
+  const addressRows = useMemo(() => {
+    const mentioned = new Set(resolveMentions(draft, agentParticipants));
+    return Object.entries(addresses)
+      .filter(([id]) => mentioned.has(id))
+      .map(([id, pick]) => ({ instanceId: id, name: nameOf(id).name, pick }));
+  }, [addresses, draft, agentParticipants, nameOf]);
+
   const submit = useCallback(async () => {
     const body = draft.trim();
     const attachmentIds = pendingAttachments.map((a) => a.id);
-    if ((!body && attachmentIds.length === 0) || !activeGroupId || uploading)
+    // The lock is checked here too, not only on the button: Enter in the
+    // textarea and every other call path reach the send through this function.
+    if (
+      (!body && attachmentIds.length === 0) ||
+      !activeGroupId ||
+      uploading ||
+      composerLocked
+    )
       return;
     setDraft("");
     const sentAttachments = pendingAttachments;
+    const sentReplyTo = replyTarget?.id;
+    const sentAddresses = addresses;
     setPendingAttachments([]);
+    setAddresses({});
+    setFocusBlockSessionId(null);
     stickNow();
     const targets = resolveMentions(body, agentParticipants);
+    // A reply to a block is already level 1 — the round it points at names its
+    // own session, so a second-level address must not ride the same send.
+    const address = sentReplyTo
+      ? undefined
+      : buildChatAddress(targets, sentAddresses);
     const ok = await useChatSessionStore
       .getState()
-      .sendGroupText(activeGroupId, body, targets, undefined, attachmentIds);
-    // Refund the composer on failure so nothing typed or attached is lost.
+      .sendGroupText(
+        activeGroupId,
+        body,
+        targets,
+        sentReplyTo,
+        attachmentIds,
+        address,
+      );
+    if (ok) setReplyTarget(null);
+    // Refund the composer on failure so nothing typed, attached or addressed is
+    // lost — an address is as much the human's input as the text is.
     if (!ok) {
       setDraft(body);
       setPendingAttachments(sentAttachments);
+      setAddresses(sentAddresses);
     }
   }, [
     draft,
@@ -1141,7 +1310,10 @@ export function GroupChatPanel() {
     agentParticipants,
     stickNow,
     pendingAttachments,
+    replyTarget,
+    addresses,
     uploading,
+    composerLocked,
   ]);
 
   // Upload each chosen file into the group's `files/` dir and stack a chip.
@@ -1246,22 +1418,14 @@ export function GroupChatPanel() {
   const removeAttachment = (id: string) =>
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
 
-  const onAnswer = useCallback(
-    (row: ChatMessageRow, text: string, _immediate: boolean) => {
-      if (!activeGroupId) return;
-      stickNow();
-      void useChatSessionStore
-        .getState()
-        .sendGroupText(activeGroupId, text, [], row.meta?.message_id);
-      // Optimistically dismiss the card in the execute session view
-      const execSid = row.meta?.agent_session_id;
-      const reqId = row.meta?.interaction?.request_id;
-      if (execSid && reqId && row.from) {
-        useChatStore.getState().resolveQuestion(row.from, reqId, execSid);
-      }
-    },
-    [activeGroupId, stickNow],
-  );
+  // Address the composer to one round (ADR-106 D6 level 1). This is how a
+  // `pause` card inside a block is continued and how a finished round gets a
+  // follow-up: the human's next message carries the reference row's id, so the
+  // delivery names the session without asking a model what the round was about.
+  const handleReplyToRound = useCallback((rowId: string, quote: string) => {
+    setReplyTarget({ id: rowId, quote });
+    textareaRef.current?.focus();
+  }, []);
 
   // Jump to the exec session behind a group agent reply: select that agent
   // (closes the group in the middle pane, same as picking it in the sidebar),
@@ -1315,15 +1479,24 @@ export function GroupChatPanel() {
   // the same text the picker inserts, so the fan-out resolves it (see
   // `resolveMentions`). No icon: the label already reads `@<name>`, and an
   // @-icon next to it doubles the glyph.
+  //
+  // Right-clicking a participant is the same intent as picking it from the `@`
+  // popup, so it opens the second level too — otherwise the two entry points
+  // would deliver different routing for one gesture's worth of words.
   const mentionMenuItems = useMemo<ContextMenuItem<{ id: string }>[]>(() => {
     const id = mentionMenu.payload?.id;
     if (!id) return [];
-    const name = nameOf(id).name;
+    const who = nameOf(id);
     return [
       {
         key: "mention",
-        label: t("groupChat.mentionMenu", { name }),
-        onClick: () => insertTextAtCaret(`@${name} `),
+        label: t("groupChat.mentionMenu", { name: who.name }),
+        onClick: () => {
+          insertTextAtCaret(`@${who.name} `);
+          if (who.isAgent) {
+            setAddressStage({ instanceId: id, name: who.name });
+          }
+        },
       },
     ];
   }, [insertTextAtCaret, mentionMenu.payload, nameOf, t]);
@@ -1340,6 +1513,74 @@ export function GroupChatPanel() {
       ? nameOf(peerId).name
       : activeGroupId.slice(0, 8)
     : group?.title || activeGroupId.slice(0, 8);
+
+  // One popup, two anchors: the toolbar button opens it under its own icon,
+  // a typed `@` opens it above the composer, where the character was typed.
+  const mentionPopup = mention && mentionCandidates.length > 0 && (
+            <div
+              onMouseDown={(e) => e.preventDefault()}
+              className="w-64 overflow-hidden rounded-lg border border-border-outer bg-modal-surface shadow-xl"
+            >
+              <OverlayScrollbar
+                ref={pickerRef}
+                role="listbox"
+                aria-label={t("groupChat.mentionLabel")}
+                /** Inset from the shell so the cursor row's wash floats
+                 *  inside the hairline — same popup grammar as the second
+                 *  level (`ChatAddressPicker`), which the two levels must
+                 *  match to read as one interaction. */
+                className="px-1 py-1"
+                maxHeight={224}
+              >
+                {mentionCandidates.map((c, i) => {
+                  const meta = c.isAgent ? agentsMap[c.id]?.meta : undefined;
+                  const avatar = c.isAgent ? (
+                    <AgentAvatar
+                      agentId={c.id}
+                      displayName={c.name}
+                      avatarUrl={meta?.avatar ?? null}
+                      builtinAvatarId={meta?.builtin_avatar ?? null}
+                      size={20}
+                      className="shrink-0"
+                    />
+                  ) : (
+                    <UserAvatar
+                      displayName={c.name}
+                      avatarUrl={c.avatarUrl}
+                      builtinAvatarId={c.builtinAvatarId}
+                      size={20}
+                      className="shrink-0"
+                    />
+                  );
+                  return (
+                    <button
+                      key={c.id}
+                      type="button"
+                      role="option"
+                      data-mention-index={i}
+                      aria-selected={i === mentionActive}
+                      onClick={() => pickMention(c)}
+                      onMouseEnter={() => setMentionActive(i)}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded px-3 py-1.5 text-left text-xs",
+                        // The app-wide accent tint for the cursor row, not the
+                        // neutral `--color-nav-item-hover` (icon controls only).
+                        i === mentionActive
+                          ? `${listRowSelected} text-text`
+                          : "text-text-secondary",
+                      )}
+                    >
+                      {avatar}
+                      <span className="min-w-0 flex-1 truncate">
+                        {c.name}
+                      </span>
+                    </button>
+                  );
+                })}
+              </OverlayScrollbar>
+            </div>
+  );
+
 
   return (
     <div className="flex min-w-0 flex-1 flex-col overflow-hidden rounded-xl border border-border-outer bg-chat-body">
@@ -1392,7 +1633,7 @@ export function GroupChatPanel() {
               )}
             </div>
           )}
-          {rows.length === 0 && (
+          {items.length === 0 && (
             <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
               {t("groupChat.empty")}
             </div>
@@ -1402,59 +1643,60 @@ export function GroupChatPanel() {
           <VirtualRowList
             key={activeGroupId}
             ref={listRef}
-            items={rows}
-            keyOf={rowKeyOf}
+            items={items}
+            keyOf={virtualKeyOf}
             scrollContainerRef={containerRef}
             followBottom={atBottom}
-            estimateSize={estimateRow}
-            rowAttrs={(row) => ({ "data-seq": row.seq })}
-            rowClassName={(row) =>
+            estimateSize={virtualEstimate}
+            rowAttrs={virtualAttrs}
+            rowClassName={(item) =>
               cn(
                 "scroll-mt-2 transition-colors",
-                highlightSeq === row.seq && "bg-[var(--color-accent)]/10",
+                highlightSeq !== null &&
+                  seqsByItem.get(virtualKeyOf(item))?.has(highlightSeq) &&
+                  "bg-[var(--color-accent)]/10",
               )
             }
-            renderItem={(row) => (
-              <GroupRowView
-                row={row}
-                me={me}
-                chatSessionId={activeGroupId}
-                nameOf={nameOf}
-                closed={closed}
-                answered={answered}
-                onAnswer={onAnswer}
-                onJumpToExec={handleJumpToExec}
-                triggerBody={
-                  row.meta?.in_reply_to
-                    ? bodyById.get(row.meta.in_reply_to)
-                    : undefined
-                }
-                triggerFrom={
-                  row.meta?.in_reply_to
-                    ? fromById.get(row.meta.in_reply_to)
-                    : undefined
-                }
-                replyQuote={
-                  row.meta?.in_reply_to
-                    ? cardQuoteById.get(row.meta.in_reply_to)
-                    : undefined
-                }
-                answeredCardKind={
-                  row.meta?.in_reply_to
-                    ? cardKindById.get(row.meta.in_reply_to)
-                    : undefined
-                }
-                chatAnswered={chatAnswered}
-                readOnly={!canPost}
-                onMentionContextMenu={handleMentionContextMenu}
-              />
-            )}
+            renderItem={(item, i) => {
+              const row = item.kind === "row" ? item.row : null;
+              return (
+                <GroupItemView
+                  item={item}
+                  hasFollowUp={i < items.length - 1}
+                  me={me}
+                  chatSessionId={activeGroupId}
+                  nameOf={nameOf}
+                  onJumpToExec={handleJumpToExec}
+                  onReplyToRound={handleReplyToRound}
+                  triggerFrom={
+                    row?.meta?.in_reply_to
+                      ? fromById.get(row.meta.in_reply_to)
+                      : undefined
+                  }
+                  readOnly={!canPost}
+                  onMentionContextMenu={handleMentionContextMenu}
+                  onChooseCard={canPost ? answerCard : undefined}
+                  cardAnswered={
+                    !!row?.meta?.in_reply_to &&
+                    roundTriggers.has(row.meta.in_reply_to)
+                  }
+                  onLocateRef={handleLocateRef}
+                  focusBlockSessionId={focusBlockSessionId ?? undefined}
+                />
+              );
+            }}
           />
-          {/* One aggregated "an agent has your message" line, derived from the
-            newest unanswered row — the group twin of the 1:1 waiting line. No
-            agent is named: a fan-out can wake more than one, and the reply
-            bubbles say who answered. */}
-          {waiting && (
+          {/* The one "still working" line this surface may add for itself: a
+            send THIS device made has not been answered yet. The claim starts at
+            that send's response id and ends at the first row answering it (the
+            round's reference row, an agent's own reply, a receipt) or on a
+            deadline — never at a shape read off the transcript, which is how a
+            dead node used to look alive, and never longer than the turn it
+            speaks for. Whether an agent is chewing on a round is a fact about
+            the ROUND, and the round speaks for itself inside its block
+            (ADR-106 D9). Generic wording: one utterance fans out to several
+            agents, so naming one of them would be a guess. */}
+          {composerLocked && (
             <ChatTurnStatusLine
               className="px-4"
               live
@@ -1487,7 +1729,7 @@ export function GroupChatPanel() {
         {/* Back-to-bottom arrow — visible only while the reader has scrolled
             up off the tail (and there is content). Same treatment as the
             execute-session button: default-reduced opacity, full on hover. */}
-        {atBottom === false && rows.length > 0 && (
+        {atBottom === false && items.length > 0 && (
           <button
             onClick={stickNow}
             className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
@@ -1518,6 +1760,67 @@ export function GroupChatPanel() {
               className="hidden"
               onChange={handleFilesChosen}
             />
+            {/* The round this message answers (ADR-106 D6 level 1) — the same
+                chip grammar the 1:1 thread uses, so a continuation reads the
+                same on both surfaces. */}
+            {replyTarget && (
+              <div className="flex items-center gap-1 px-3 pt-2">
+                <span className={composerChip}>
+                  {t("chatView.replyingTo")} {replyTarget.quote.slice(0, 30)}
+                  <button
+                    type="button"
+                    onClick={() => setReplyTarget(null)}
+                    className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                    aria-label={t("chatView.cancelReply")}
+                  >
+                    ×
+                  </button>
+                </span>
+              </div>
+            )}
+            {/* Second-level references the human attached (ADR-106 D7, revision
+                2026-11-04). Each is its own chip because a reference is an
+                instruction, and an instruction the surface swallowed would be
+                indistinguishable from one never given. */}
+            {addressRows.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 px-3 pt-2">
+                {addressRows.map(({ instanceId, name, pick }) => (
+                  <Fragment key={instanceId}>
+                    {pick.forceNew && (
+                      <span className={composerChip}>
+                        @{name} · {t("chatView.block.newTask")}
+                        <button
+                          type="button"
+                          onClick={() => clearAddress(instanceId)}
+                          className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                          aria-label={t("chatView.address.clear")}
+                        >
+                          ×
+                        </button>
+                      </span>
+                    )}
+                    {(pick.refs ?? []).map((r) => {
+                      const key = `${r.agentInstanceId}|${r.sessionId}`;
+                      return (
+                        <span key={key} className={composerChip}>
+                          @{name} ·{" "}
+                          <Quote className="h-3 w-3 shrink-0" />{" "}
+                          {pick.labels?.[key] || r.sessionId}
+                          <button
+                            type="button"
+                            onClick={() => removeRef(instanceId, key)}
+                            className="ml-0.5 inline-flex items-center justify-center rounded-sm hover:bg-[var(--color-accent)]/15"
+                            aria-label={t("chatView.address.clear")}
+                          >
+                            ×
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </Fragment>
+                ))}
+              </div>
+            )}
             {/* Pending-attachment tray — chips with a remove affordance,
                 same grammar as the 1:1 chat composer. */}
             {pendingAttachments.length > 0 && (
@@ -1533,65 +1836,29 @@ export function GroupChatPanel() {
                 ))}
               </div>
             )}
-            {/* @-mention picker — floats above the composer card (standard IM
-                behavior). `onMouseDown preventDefault` keeps the textarea
-                focused so selecting a row does not blur it first. */}
-            {mention && mentionCandidates.length > 0 && (
-              <div
-                onMouseDown={(e) => e.preventDefault()}
-                className="absolute bottom-full left-3 z-20 mb-2 w-64 overflow-hidden rounded-lg border border-border-outer bg-modal-surface shadow-xl"
-              >
-                <OverlayScrollbar
-                  ref={pickerRef}
-                  role="listbox"
-                  aria-label={t("groupChat.mentionLabel")}
-                  className="py-1"
-                  maxHeight={224}
-                >
-                  {mentionCandidates.map((c, i) => {
-                    const meta = c.isAgent ? agentsMap[c.id]?.meta : undefined;
-                    const avatar = c.isAgent ? (
-                      <AgentAvatar
-                        agentId={c.id}
-                        displayName={c.name}
-                        avatarUrl={meta?.avatar ?? null}
-                        builtinAvatarId={meta?.builtin_avatar ?? null}
-                        size={20}
-                        className="shrink-0"
-                      />
-                    ) : (
-                      <UserAvatar
-                        displayName={c.name}
-                        avatarUrl={c.avatarUrl}
-                        builtinAvatarId={c.builtinAvatarId}
-                        size={20}
-                        className="shrink-0"
-                      />
-                    );
-                    return (
-                      <button
-                        key={c.id}
-                        type="button"
-                        role="option"
-                        data-mention-index={i}
-                        aria-selected={i === mentionActive}
-                        onClick={() => pickMention(c.name)}
-                        onMouseEnter={() => setMentionActive(i)}
-                        className={cn(
-                          "flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs",
-                          i === mentionActive
-                            ? "bg-nav-item-hover text-text"
-                            : "text-text-secondary",
-                        )}
-                      >
-                        {avatar}
-                        <span className="min-w-0 flex-1 truncate">
-                          {c.name}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </OverlayScrollbar>
+            {mentionAnchor !== "button" && (
+              <div className="absolute bottom-full left-3 z-20 mb-2">
+                {mentionPopup}
+              </div>
+            )}
+            {/* Second level of the `@` (ADR-106 D7) — the agent's task list,
+                opened by picking the agent. Same anchor as the first level, so
+                the two read as one interaction. Unlike the first level, this
+                shell must NOT cancel `mousedown`: the picker carries a search
+                box, and a cancelled mousedown is a focus the input never gets. */}
+            {addressStage && activeGroupId && (
+              <div className="absolute bottom-full left-3 z-20 mb-2">
+                <ChatAddressPicker
+                  instanceId={addressStage.instanceId}
+                  /** Multi-party surface, addressed from this group: the Runtime
+                   *  admits only work bound to this chat that I started. */
+                  chatSessionId={activeGroupId}
+                  surface="group"
+                  agentName={addressStage.name}
+                  onPick={applyAddress}
+                  onLocate={(sid) => handleLocateRef(sid)}
+                  onClose={() => setAddressStage(null)}
+                />
               </div>
             )}
             <div className="flex items-end gap-2 px-3 pb-2 pt-1">
@@ -1605,9 +1872,20 @@ export function GroupChatPanel() {
                 }}
                 onSelect={(e) => {
                   const ta = e.currentTarget;
-                  syncMention(ta.value, ta.selectionStart ?? ta.value.length);
+                  syncCaret(ta.value, ta.selectionStart ?? ta.value.length);
                 }}
                 onKeyDown={(e) => {
+                  // A second level left open is a question on the screen: Enter
+                  // closes it instead of sending, or the send would go out
+                  // un-addressed while the human believed they were naming a
+                  // session.
+                  if (addressStage) {
+                    if (e.key === "Enter" && !e.shiftKey) {
+                      e.preventDefault();
+                      setAddressStage(null);
+                    }
+                    return;
+                  }
                   // While the picker is open it owns Enter / arrows / Tab / Esc
                   // — Enter picks the highlighted member instead of sending.
                   if (mention && mentionCandidates.length > 0) {
@@ -1632,7 +1910,7 @@ export function GroupChatPanel() {
                       const pick =
                         mentionCandidates[mentionActive] ??
                         mentionCandidates[0];
-                      if (pick) pickMention(pick.name);
+                      if (pick) pickMention(pick);
                       return;
                     }
                     if (e.key === "Escape") {
@@ -1652,7 +1930,7 @@ export function GroupChatPanel() {
                     : t("groupChat.placeholder")
                 }
                 aria-label={t("groupChat.send")}
-                disabled={sending}
+                disabled={composerLocked}
                 onPaste={handlePaste}
                 className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"
                 style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
@@ -1668,6 +1946,43 @@ export function GroupChatPanel() {
                 data-toolbar-cluster="right"
                 className="flex shrink-0 items-center gap-1"
               >
+                {/* `@` — the first level of the group address (agents and
+                    people, design 27 §5.3.1). Hidden where there is nobody to
+                    mention: a human-only DM has no picker to open. */}
+                {mentionParticipants.length > 0 && (
+                  <div className="relative">
+                  <Tooltip
+                    content={t("groupChat.mentionLabel")}
+                    variant="plain"
+                  >
+                    <button
+                      className={cn(
+                        toolbarIconButton,
+                        mention && "bg-nav-item-hover",
+                      )}
+                      onClick={openMentionPicker}
+                      disabled={sending}
+                      aria-label={t("groupChat.mentionLabel")}
+                      aria-expanded={!!mention}
+                    >
+                      <AtSign size={16} />
+                    </button>
+                  </Tooltip>
+                    {mentionAnchor === "button" && (
+                      <div className="absolute bottom-full right-0 z-20 mb-2">
+                        {mentionPopup}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {/* Per-chat ledger read (plan §4.6 phase two): one row per
+                    agent participant, merged client-side. A human-only DM
+                    has no agent roster and the button hides itself. */}
+                <ChatUsageIcon
+                  agentIds={agentParticipants.map((p) => p.id)}
+                  chatSessionId={activeGroupId ?? ""}
+                  resolveName={(id) => nameOf(id).name}
+                />
                 <Tooltip content={t("chatPanel.attach")} variant="plain">
                   <button
                     className={cn(toolbarIconButton, uploading && "opacity-50")}
@@ -1683,11 +1998,15 @@ export function GroupChatPanel() {
                   onClick={() => void submit()}
                   disabled={
                     (!draft.trim() && pendingAttachments.length === 0) ||
-                    sending ||
+                    composerLocked ||
                     uploading
                   }
                   aria-label={t("groupChat.send")}
-                  title={t("groupChat.send")}
+                  title={
+                    turnLive
+                      ? t("chatView.notice.turnInflightTooltip")
+                      : t("groupChat.send")
+                  }
                   className="rounded-md p-1.5 text-text-tertiary hover:bg-zinc-200 disabled:opacity-50 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
                 >
                   <Send size={16} />

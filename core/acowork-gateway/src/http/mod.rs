@@ -9,6 +9,9 @@ pub mod agents;
 pub mod auth;
 pub mod auth_middleware;
 pub mod bootstrap_api;
+// ADR-106 D5/D9: the Chat surface's execution-block read (cache + Runtime
+// projection orchestration) — the only place that composes the two.
+pub mod chat_blocks;
 pub mod config_api;
 pub mod cron_api;
 pub mod debug_mqtt;

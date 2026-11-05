@@ -1,6 +1,7 @@
 //! Agent module
 
 pub mod agent_core;
+pub mod attachment_to_document;
 pub mod attachment_to_image;
 pub mod bootstrap_autobio;
 pub mod budget_guard;
@@ -13,6 +14,7 @@ mod e2e_prompt_cache;
 pub mod git_nudge;
 pub mod history;
 pub mod inbound;
+pub mod intent_accept;
 pub mod intent_turn;
 pub mod llm_availability;
 pub mod loop_;

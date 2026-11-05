@@ -282,18 +282,18 @@ pub struct Episode {
 
 | Location | Current | Reason for deletion |
 |---|---|---|
-| [`instant.rs:181-182`](../../../core/acowork-memory/src/consolidation/distiller.rs#L181) | `if let Some(ref autobio) = input.autobiographical { return process_autobiographical(...); }` | The LLM no longer passes autobiographical |
-| [`instant.rs:185-187`](../../../core/acowork-memory/src/consolidation/distiller.rs#L185) | `if matches!(input.sub_type, KnowledgeSubType::Procedure) { return process_procedure(...); }` | Procedural is no longer written directly by the LLM |
-| [`instant.rs:152-200`](../../../core/acowork-memory/src/consolidation/distiller.rs#L152) the entire `process_memory_store` block | LLM write → semantic layer full pipeline | Delete the whole block; the LLM entry only calls `store_episode` |
-| [`instant.rs:340-440`](../../../core/acowork-memory/src/consolidation/distiller.rs#L340) `process_procedure` | ProceduralNode creation | Delete; `EpisodicDistiller` calls `store_procedural` instead |
-| [`instant.rs:448-525`](../../../core/acowork-memory/src/consolidation/distiller.rs#L448) `process_autobiographical` | autobiographical write | Delete; called instead by `EpisodicDistiller` + manifest bootstrap |
-| [`instant.rs:79-91`](../../../core/acowork-memory/src/consolidation/distiller.rs#L79) the History nanos branch of `derive_autobiographical_key` | append-only milestone key | Delete; History is entirely determined by the offline inducer |
-| [`offline.rs:225`](../../../core/acowork-memory/src/consolidation/distiller.rs#L225) `compress_history_nodes` | automatic merging of 10 History nodes | Delete; the old facility goes offline |
-| [`offline.rs:718-810`](../../../core/acowork-memory/src/consolidation/distiller.rs#L718) related unit tests | History merge tests | Delete |
-| [`memory_store.rs:18-26`](../../../core/acowork-runtime/src/tools/builtin/memory_store.rs#L18) the `AUTOBIO_DEFAULT_CONFIDENCE` constant | autobiographical default 0.85 | Delete |
-| [`memory_store.rs:214-256`](../../../core/acowork-runtime/src/tools/builtin/memory_store.rs#L214) autobiographical input assembly | autobiographical parameter parsing | Delete |
-| [`memory_store.rs:855-1057`](../../../core/acowork-runtime/src/tools/builtin/memory_store.rs#L855) 4 autobiographical unit tests | schema behaviour tests | Delete |
-| [`distill.rs:5-12`](../../../core/acowork-memory/src/consolidation/distiller.rs#L5) comments | "knowledge updates now flow through memory_store tool / procedural creation paths" | **Rewrite**: make explicit that "the LLM entry writes Episodic only, and the semantic layer is produced offline by EpisodicDistiller" |
+| [`instant.rs:181-182`](../../../core/acowork-memory/src/consolidation/distiller.rs) | `if let Some(ref autobio) = input.autobiographical { return process_autobiographical(...); }` | The LLM no longer passes autobiographical |
+| [`instant.rs:185-187`](../../../core/acowork-memory/src/consolidation/distiller.rs) | `if matches!(input.sub_type, KnowledgeSubType::Procedure) { return process_procedure(...); }` | Procedural is no longer written directly by the LLM |
+| [`instant.rs:152-200`](../../../core/acowork-memory/src/consolidation/distiller.rs) the entire `process_memory_store` block | LLM write → semantic layer full pipeline | Delete the whole block; the LLM entry only calls `store_episode` |
+| [`instant.rs:340-440`](../../../core/acowork-memory/src/consolidation/distiller.rs) `process_procedure` | ProceduralNode creation | Delete; `EpisodicDistiller` calls `store_procedural` instead |
+| [`instant.rs:448-525`](../../../core/acowork-memory/src/consolidation/distiller.rs) `process_autobiographical` | autobiographical write | Delete; called instead by `EpisodicDistiller` + manifest bootstrap |
+| [`instant.rs:79-91`](../../../core/acowork-memory/src/consolidation/distiller.rs) the History nanos branch of `derive_autobiographical_key` | append-only milestone key | Delete; History is entirely determined by the offline inducer |
+| [`offline.rs:225`](../../../core/acowork-memory/src/consolidation/distiller.rs) `compress_history_nodes` | automatic merging of 10 History nodes | Delete; the old facility goes offline |
+| [`offline.rs:718-810`](../../../core/acowork-memory/src/consolidation/distiller.rs) related unit tests | History merge tests | Delete |
+| [`memory_store.rs:18-26``memory_store.rs:18` the `AUTOBIO_DEFAULT_CONFIDENCE` constant | autobiographical default 0.85 | Delete |
+| [`memory_store.rs:214-256``memory_store.rs:214` autobiographical input assembly | autobiographical parameter parsing | Delete |
+| [`memory_store.rs:855-1057``memory_store.rs:855` 4 autobiographical unit tests | schema behaviour tests | Delete |
+| [`distill.rs:5-12`](../../../core/acowork-memory/src/consolidation/distiller.rs) comments | "knowledge updates now flow through memory_store tool / procedural creation paths" | **Rewrite**: make explicit that "the LLM entry writes Episodic only, and the semantic layer is produced offline by EpisodicDistiller" |
 | the scanning input in `generalization.rs::generalize_patterns_with_config` | used to extract from episodic + (action, tool_calls) tuples | **Offline** (2026-09 revision) — the function has no production calls now; `(trigger_condition, action_pattern)` extraction is done by `EpisodicDistiller::promote_procedures` scanning `Episode.knowledge_subtype=Procedure` + the server-side LLM, see §3.4.4 |
 
 ### 3.4 `EpisodicDistiller` design (the core of this ADR)
@@ -301,7 +301,7 @@ pub struct Episode {
 #### 3.4.1 Component location and interface
 
 ```
-core/acowork-grafeo/src/consolidation/distiller.rs   (new file)
+core/acowork-memory/src/consolidation/distiller.rs   (new file)
 core/acowork-memory/src/consolidation.rs              (adds the DistillerConfig / DistillerResult types)
 ```
 
@@ -354,7 +354,7 @@ pub enum PromotionDecision {
 ```
 
 ```rust
-// core/acowork-grafeo/src/consolidation/distiller.rs
+// core/acowork-memory/src/consolidation/distiller.rs
 pub trait EpisodicDistiller: Send + Sync {
     async fn run(
         &self,
@@ -746,7 +746,7 @@ The `get_canonical_predicates()` method originally planned for Step 2a LLM predi
 ### 3.6 The `source_episode_ids` extension of semantic-layer nodes
 
 ```rust
-// core/acowork-grafeo/src/types.rs:171
+// core/acowork-memory/src/types.rs:171
 pub struct KnowledgeNode {
     // ... existing fields ...
     pub source_episode_id: Option<NodeId>,         // single value (compatible with old data)

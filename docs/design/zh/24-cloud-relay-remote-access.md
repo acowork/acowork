@@ -327,9 +327,9 @@ sequenceDiagram
 | 职责 | 说明 |
 |------|------|
 | 隧道建立与保活 | 出站 WSS 连接中继 `/tunnel`，yamux 多路复用，REGISTER 挑战-响应，断线指数退避重连（1s→60s 封顶，加抖动） |
-| 设备密钥管理 | Ed25519 密钥对首次启用时生成，存 acowork-vault；支持 ROTATE_KEY 轮换 |
+| 设备密钥管理 | Ed25519 密钥对首次启用时生成，存 Gateway 配置目录明文 `0600` `relay_identity.json`（v0.2.1：不进 vault，见 §7.3）；协议已定义 `ROTATE_KEY` 轮换帧（中继侧已实现），**Gateway 侧尚未发出该帧** |
 | 逻辑流转发 | 中继发起的入站 yamux 流：读首字节 tag → TCP 连 `127.0.0.1:19877`（HTTP，含 `/mqtt` WS 桥）→ 双向拷贝 |
-| 开关与配置 | `[relay]` 配置段：`enabled`（默认 **false**）+ `server_url`；关闭时零开销、零出站连接 |
+| 开关与配置 | `[relay]` 配置段：`enabled`（默认 **false**）+ `url`（中继服务地址，如 `wss://relay.example.com/tunnel`）；关闭时零开销、零出站连接 |
 | 管理 API | `POST /api/relay/enable`（生成/装载密钥 + 启动隧道）、`POST /api/relay/disable`、`GET /api/relay/status`（状态机快照，Desktop 设置面板轮询）；enable 返回连接信息 `{relay_url, gw_id}` |
 | 状态上报 | 隧道状态机（connected/reconnecting/rejected/offline）经 `GET /api/relay/status` 暴露；MQTT 事件通道上报为后续增强 |
 

@@ -92,6 +92,10 @@ export interface TreeEntry {
   type: "file" | "directory";
   size?: number;
   mtime?: number;
+  /** RFC 3339 mtime as the Runtime actually sends it
+   *  (`workspace_query.rs::TreeEntryDto::modified`). Directories carry it
+   *  too; only files pair it with a `size`. */
+  modified?: string;
   children?: TreeEntry[];
 }
 

@@ -12,9 +12,9 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { PKT } from '../lib/mqtt-wire'
-import { decodePresence, wBytes, wStr, wVarint } from '../lib/proto-wire'
+import { decodePresence, wBytes, wStr, wVarint, decodeRoundSignal } from '../lib/proto-wire'
 import {
-  PRESENCE_TOPIC, SESSION_STATE_TOPIC, presenceConnected, setPresenceDeps, startPresence, stopPresence,
+  PRESENCE_TOPIC, SESSION_STATE_TOPIC, ROUND_STATE_TOPIC, presenceConnected, setPresenceDeps, startPresence, stopPresence,
 } from '../lib/presence'
 import type { WebSocketLike } from '../lib/realtime'
 import { setDirectorySource, useAgentStore } from '../stores/agentStore'
@@ -75,8 +75,10 @@ const connackOk = Uint8Array.from([PKT.CONNACK << 4, 2, 0, 0])
 const connackBad = Uint8Array.from([PKT.CONNACK << 4, 2, 0, 5])
 const subackGranted = Uint8Array.from([PKT.SUBACK << 4, 3, 0, 1, 1])
 const subackRefused = Uint8Array.from([PKT.SUBACK << 4, 3, 0, 1, 0x80])
-/** Grant codes for the connection that subscribed both filters — index-based,
- *  so the codes must line up with `[PRESENCE_TOPIC, chatTopic]`. */
+/** Grant codes for the connection that subscribed all filters — index-based,
+ *  so the codes must line up with `[PRESENCE, SESSION_STATE, ROUND_STATE,
+ *  chatTopic]`: the account filter is appended last precisely so a code list
+ *  that stops short of it leaves the three positional filters granted. */
 const suback2 = (codes: number[]) =>
   Uint8Array.from([PKT.SUBACK << 4, 2 + codes.length, 0, 1, ...codes])
 
@@ -115,6 +117,31 @@ function statusPublish(agentId: string, inner: number[], qos1 = true, pkid = 3):
   return Uint8Array.from([(PKT.PUBLISH << 4) | (qos1 ? 0x02 : 0), body.length, ...body])
 }
 
+/** `.../sessions/{s}/messages/round_state` — the round doorbell the Runtime
+ *  publishes at QoS 1, non-retained (ADR-106 revision 2026-11-03). */
+function roundPublish(
+  agentId: string,
+  sessionId: string,
+  roundId: string,
+  chatSessionId: string,
+  opts?: { pkid?: number },
+): Uint8Array {
+  const pkid = opts?.pkid ?? 11
+  const topic = new TextEncoder().encode(
+    `acowork/agents/${agentId}/sessions/${sessionId}/messages/round_state`,
+  )
+  // Two coordinates and nothing else (ADR-106 revision 2026-11-03).
+  const sig = [...wStr(1, roundId), ...wStr(2, chatSessionId)]
+  const payload = Uint8Array.from([
+    ...wVarint(1, 1),
+    ...wBytes(15, [...wBytes(34, sig)]),
+  ])
+  const body = Uint8Array.from([
+    0, topic.length, ...topic, (pkid >> 8) & 0xff, pkid & 0xff, ...payload,
+  ])
+  return Uint8Array.from([(PKT.PUBLISH << 4) | 0x02, body.length, ...body])
+}
+
 const catBytes = (...parts: Uint8Array[]) => {
   const out = new Uint8Array(parts.reduce((a, p) => a + p.length, 0))
   let o = 0
@@ -125,6 +152,7 @@ const catBytes = (...parts: Uint8Array[]) => {
 let sockets: FakeSocket[] = []
 let onUpdate: ReturnType<typeof vi.fn>
 let onSessionState: ReturnType<typeof vi.fn>
+let onRoundState: ReturnType<typeof vi.fn>
 let onChatWake: ReturnType<typeof vi.fn>
 let onChatChannel: ReturnType<typeof vi.fn>
 
@@ -137,6 +165,7 @@ beforeEach(() => {
   sockets = []
   onUpdate = vi.fn()
   onSessionState = vi.fn()
+  onRoundState = vi.fn()
   onChatWake = vi.fn()
   onChatChannel = vi.fn()
   setPresenceDeps({
@@ -144,6 +173,7 @@ beforeEach(() => {
     connectOpts: async () => ({ clientId: 'user:alice:mobile:dev-1-presence', username: 'alice', password: 'tok' }),
     onUpdate,
     onSessionState,
+    onRoundState,
     // No account by default: the presence tests must keep seeing exactly one
     // filter, and the chat half reads the topic per CONNECT like the real app.
     chatTopic: () => null,
@@ -160,7 +190,7 @@ afterEach(() => {
   setPresenceDeps({
     wsUrl: () => null, connectOpts: async () => null, makeWs: undefined,
     chatTopic: undefined, onChatWake: undefined, onChatChannel: undefined,
-    onSessionState: undefined,
+    onSessionState: undefined, onRoundState: undefined,
   })
 })
 
@@ -302,7 +332,7 @@ describe('chat wake-up half of the channel', () => {
     const sock = sockets[0]!
     sock.emitOpen()
     sock.emit(connackOk)
-    sock.emit(suback2([1, 1, 1]))
+    sock.emit(suback2([1, 1, 1, 1]))
     return sock
   }
 
@@ -365,7 +395,7 @@ describe('chat wake-up half of the channel', () => {
     sock.emit(connackOk)
     const text = lastSubscribe(sock)
     expect(text).toContain(CHAT_TOPIC_OTHER)
-    sock.emit(suback2([1, 1, 1]))
+    sock.emit(suback2([1, 1, 1, 1]))
 
     sock.emit(chatPublish(CHAT_TOPIC)) // the stale topic must be ignored now
     expect(onChatWake).toHaveBeenCalledTimes(1)
@@ -383,7 +413,7 @@ describe('chat wake-up half of the channel', () => {
     // filter, not per packet — treating it as one verdict would either stop the
     // fleet dots or leave the inbox thinking push works while nothing arrives.
     sock.emit(connackOk)
-    sock.emit(suback2([1, 1, 0x80]))
+    sock.emit(suback2([1, 1, 1, 0x80]))
 
     expect(onChatChannel).toHaveBeenLastCalledWith(false)
     expect(onChatChannel).toHaveBeenCalledTimes(2)
@@ -399,9 +429,9 @@ describe('chat wake-up half of the channel', () => {
     // The store stops its fallback timer on `true`; a flapping report would
     // stop and re-arm it on every reconnect and the timer would never idle.
     sock.emit(connackOk)
-    sock.emit(suback2([1, 1, 1]))
+    sock.emit(suback2([1, 1, 1, 1]))
     sock.emit(connackOk)
-    sock.emit(suback2([1, 1, 1]))
+    sock.emit(suback2([1, 1, 1, 1]))
     expect(onChatChannel).toHaveBeenCalledTimes(1)
 
     sock.emit(subackRefused)
@@ -422,6 +452,60 @@ describe('chat wake-up half of the channel', () => {
     sock.emit(subackGranted)
     expect(presenceConnected()).toBe(true)
     expect(onChatChannel).not.toHaveBeenCalled()
+  })
+})
+
+/* ---------------- the round doorbell on the same socket ---------------- */
+
+describe('round-state half of the channel (ADR-106 revision 2026-11-03)', () => {
+  it('subscribes the fleet round filter and routes a signal to onRoundState', async () => {
+    startPresence()
+    await flush()
+    const sock = sockets[0]!
+    sock.emitOpen()
+    sock.emit(connackOk)
+    const text = lastSubscribe(sock)
+    expect(text).toContain(ROUND_STATE_TOPIC)
+    sock.emit(subackGranted)
+
+    sock.emit(roundPublish('i-9', 's-9', 'r:abc', 'chat-1'))
+
+    expect(onRoundState).toHaveBeenCalledWith('i-9', 's-9', {
+      roundId: 'r:abc', chatSessionId: 'chat-1',
+    })
+    // A round signal says nothing about lifecycle, so it must not be read as a
+    // presence verdict or a working-status push.
+    expect(onUpdate).not.toHaveBeenCalled()
+    expect(onSessionState).not.toHaveBeenCalled()
+  })
+
+  it('decodes the two coordinates and ignores any other subfield', () => {
+    // The payload is deliberately two fields (ADR-106 revision 2026-11-03): the
+    // outcome word comes from the read this signal triggers. A publisher that
+    // adds a field later must not break the hand-written decoder.
+    expect(decodeRoundSignal(Uint8Array.from([
+      ...wVarint(1, 1),
+      ...wBytes(15, [...wBytes(34, [
+        ...wStr(1, 'r:1'), ...wStr(2, 'chat-1'), ...wVarint(3, 1),
+      ])]),
+    ]))).toEqual({ roundId: 'r:1', chatSessionId: 'chat-1' })
+  })
+
+  it('ignores a round publish with no round id instead of reloading nothing', async () => {
+    startPresence()
+    await flush()
+    const sock = sockets[0]!
+    sock.emitOpen()
+    sock.emit(connackOk)
+    sock.emit(subackGranted)
+
+    // A signal whose coordinates are gone cannot name a block; calling the
+    // handler with an empty ref would be a request the store cannot satisfy.
+    sock.emit(roundPublish('i-9', 's-9', '', 'chat-1'))
+    expect(onRoundState).not.toHaveBeenCalled()
+    expect(decodeRoundSignal(Uint8Array.from([
+      ...wVarint(1, 1), ...wBytes(15, [...wBytes(34, [...wStr(2, 'completed')])]),
+    ]))).toBeNull()
   })
 })
 

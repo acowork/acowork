@@ -82,6 +82,20 @@ export function fitScale(image: ImageSize, viewport: ImageSize): number {
 }
 
 /**
+ * The scale that makes `image` fit `viewport`'s WIDTH, never enlarging past 1:1.
+ *
+ * `fitScale` fits a whole image inside a box; a document column is fitted by
+ * width instead, because its height is the sum of every page and fitting that
+ * would shrink each page into unreadability. The "never enlarge" rule is the
+ * same one `fitScale` documents: a narrow page must not be blown up to fill
+ * the panel.
+ */
+export function fitWidthScale(image: ImageSize, viewport: ImageSize): number {
+    if (!(image.width > 0) || !(viewport.width > 0)) return 1;
+    return clampZoom(Math.min(1, viewport.width / image.width));
+}
+
+/**
  * Convert a client-space point (a pointer event) to an image pixel.
  *
  * `imageOrigin` is the `<img>` element's own `getBoundingClientRect().left/top`

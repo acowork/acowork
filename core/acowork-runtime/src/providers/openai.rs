@@ -405,6 +405,23 @@ fn build_content_value(m: &ChatMessage) -> serde_json::Value {
                         }
                         arr.push(serde_json::json!({ "type": "image_url", "image_url": img }));
                     }
+                    ContentPart::Document { document } => {
+                        // Chat Completions wants a *file* block whose data is a
+                        // data URI — the opposite convention from the domain
+                        // part, which deliberately stores bare base64 so one
+                        // payload can serve every provider. Prefix built here,
+                        // and only here.
+                        arr.push(serde_json::json!({
+                            "type": "file",
+                            "file": {
+                                "filename": document.filename,
+                                "file_data": format!(
+                                    "data:{};base64,{}",
+                                    document.media_type, document.data
+                                )
+                            }
+                        }));
+                    }
                 }
             }
             serde_json::Value::Array(arr)
@@ -1468,6 +1485,36 @@ mod tests {
         assert!(arr.iter().any(|p| p["type"] == "image_url"));
     }
 
+    /// Chat Completions file input is the one block that wants a **data URI**,
+    /// so this test exists mainly to pin the prefix down: bare base64 here is
+    /// accepted by no endpoint.
+    #[test]
+    fn document_part_becomes_a_file_block_with_a_data_uri() {
+        let msg = ChatMessage::user_multimodal(
+            "what does the table on page 3 say",
+            vec![ContentPart::document(
+                "JVBERi0=".to_string(),
+                "report.pdf".to_string(),
+                Some(12),
+            )],
+        );
+        let content = build_content_value(&msg);
+        let arr = content.as_array().unwrap_or_else(|| panic!("not an array: {content}"));
+        let file = arr
+            .iter()
+            .find(|p| p["type"] == "file")
+            .unwrap_or_else(|| panic!("no file block in {arr:?}"));
+        assert_eq!(file["file"]["filename"], "report.pdf");
+        assert_eq!(
+            file["file"]["file_data"],
+            "data:application/pdf;base64,JVBERi0="
+        );
+        assert!(arr
+            .iter()
+            .any(|p| p["type"] == "text" && p["text"] == "what does the table on page 3 say"));
+        assert!(!arr.iter().any(|p| p["type"] == "image_url"));
+    }
+
     #[test]
     fn test_convert_messages_basic() {
         let messages = vec![
@@ -1706,10 +1753,11 @@ mod tests {
         // builds its own tools array and this adapter reads flat top-level
         // fields. A shape drift (e.g. the OpenAI nested wrapper) silently
         // turned every router tool into `name = "unknown"` with an empty
-        // schema — the model could never call `dispatch`. Neither side's
+        // schema — the model could never call an act. Neither side's
         // own unit tests cross this boundary; this one does.
         use crate::agent::chat_router::tool::{
-            memory_recall_tool_name, router_tools, DISPATCH_TOOL, HTTP_REQUEST_TOOL,
+            memory_recall_tool_name, router_tools, EXEC_SESSION_CREATE_TOOL,
+            EXEC_SESSION_PROPOSE_CONTINUE_TOOL, EXEC_SESSION_READ_ROUND_TOOL, HTTP_REQUEST_TOOL,
         };
         let memory_tool = memory_recall_tool_name();
         let tools = router_tools(Some(&memory_tool), true);
@@ -1717,15 +1765,23 @@ mod tests {
         let names: Vec<&str> = native.iter().map(|t| t.function.name.as_str()).collect();
         assert_eq!(
             names,
-            vec![DISPATCH_TOOL, memory_tool.as_str(), HTTP_REQUEST_TOOL]
+            vec![
+                EXEC_SESSION_CREATE_TOOL,
+                EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
+                memory_tool.as_str(),
+                HTTP_REQUEST_TOOL,
+                EXEC_SESSION_READ_ROUND_TOOL
+            ]
         );
-        // Parameters must survive too — `dispatch` with an empty schema is
-        // just as uncallable as a misnamed one.
+        // Parameters must survive too — an act with an empty schema is just as
+        // uncallable as a misnamed one.
+        // ADR-107: the create act carries `background`; the human's own
+        // message is delivered by the runtime, never re-authored by the model.
         assert_eq!(
             native[0].function.parameters["required"],
-            serde_json::json!(["target"])
+            serde_json::json!(["background"])
         );
-        assert!(native[0].function.parameters["properties"]["target"].is_object());
+        assert!(native[0].function.parameters["properties"]["background"].is_object());
         assert!(!native[0].function.description.is_empty());
     }
 }

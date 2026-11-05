@@ -69,12 +69,14 @@ export function LoginView() {
         className="flex w-full max-w-xs flex-col gap-3 rounded-md border border-border-outer bg-modal-surface p-6 shadow-xl"
       >
         {/* Brand mark — same SVG as SplashScreen / README, so the login
-            dialog visually matches the rest of the app's identity. Width
-            matches the max-w-xs (320px) dialog width minus padding. */}
+            dialog visually matches the rest of the app's identity. 177 keeps the
+            ink the size it had at the old 192px width: the asset's frame is now
+            artwork + a uniform 6px gutter, i.e. 364.25/396 of its former width
+            (see assets/brand-mark.svg). */}
         <img
           src={brandMark}
           alt={t("splashScreen.altLogo")}
-          width={192}
+          width={177}
           className="mx-auto"
         />
         <h1 className="text-center text-sm font-semibold text-text">

@@ -51,6 +51,8 @@ const n = (v: number | Uint8Array): number => (typeof v === 'number' ? v : 0)
 
 /* SessionMessage oneof event numbers (mqtt_payload.proto:629). */
 const EV_DONE = 6, EV_ERROR = 7, EV_STOPPED = 8, EV_QUESTION = 9, EV_APPROVAL = 19
+/** ADR-106 revision (2026-11-03): the round doorbell. */
+const EV_ROUND_STATE = 34
 
 export type RealtimeEvent =
   | { kind: 'state'; status: string; messageCount: number }
@@ -132,6 +134,43 @@ export function decodeEnvelope(buf: Uint8Array): RealtimeEvent {
     if (f.no === 18) return decodeSessionState(f.val as Uint8Array)
   }
   return { kind: 'ignore' }
+}
+
+/* ---------------- round doorbell (SessionMessage{round_state = 34}) --------
+ *
+ * A separate reader rather than another arm of `RealtimeEvent`, because the
+ * event belongs to a session this socket is not watching: `realtime.ts` routes
+ * its events into the open conversation's handlers, and a round signal must not
+ * be dressed up as one of those. Two coordinates only — no content and no
+ * outcome word: both are what the projection read (ADR-106 D4) returns, and the
+ * doorbell's job is just "which block, which chat, worth re-reading now".
+ * -------------------------------------------------------------------------- */
+
+export interface RoundSignal {
+  roundId: string
+  /** The Chat accountable for this round; decides which surface re-reads. */
+  chatSessionId: string
+}
+
+/** Decode a `messages/round_state` envelope. `null` when the payload is not a
+ *  round signal — an unknown field on a wildcard filter is noise, not a bug. */
+export function decodeRoundSignal(buf: Uint8Array): RoundSignal | null {
+  let out: RoundSignal | null = null
+  for (const f of readFields(buf)) {
+    if (f.no !== 15) continue // DataEnvelope: only session_message carries it
+    for (const g of readFields(f.val as Uint8Array)) {
+      if (g.no !== EV_ROUND_STATE) continue
+      // Two coordinates, and nothing else: the outcome word is the projection
+      // read's, so there is no third field to decode (ADR-106 revision).
+      const sig = { roundId: '', chatSessionId: '' }
+      for (const h of readFields(g.val as Uint8Array)) {
+        if (h.no === 1) sig.roundId = s(h.val)
+        if (h.no === 2) sig.chatSessionId = s(h.val)
+      }
+      if (sig.roundId) out = sig
+    }
+  }
+  return out
 }
 
 /* ---------------- agent presence (DataEnvelope{agent_status = 9}) ----------------

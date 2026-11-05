@@ -34,7 +34,7 @@ export function ChatAttachmentCapsule({
       className="chat-attachment-chip chat-attachment-tappable"
       // The accessible name carries what the pixels carry: an icon, a name and
       // a size are decoration to a screen reader unless they are spelled out.
-      aria-label={`${attachment.name}，${kindLabel(kind)}，${humanSize(attachment.size)}`}
+      aria-label={`${attachment.filename}，${kindLabel(kind)}，${humanSize(attachment.size)}`}
       onClick={() => onOpen(attachment)}
     >
       <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
@@ -47,7 +47,7 @@ export function ChatAttachmentCapsule({
           strokeLinecap="round"
         />
       </svg>
-      <span className="chat-attachment-name">{attachment.name}</span>
+      <span className="chat-attachment-name">{attachment.filename}</span>
       <span className="chat-attachment-size">{humanSize(attachment.size)}</span>
     </button>
   )

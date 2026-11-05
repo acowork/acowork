@@ -173,7 +173,7 @@ pub struct RetrievedMemory {
     pub score: f64,
     /// Retrieval source: "vector" | "text" | "graph" | "hybrid" | "rag".
     pub source: String,
-    /// Grafeo node ID (for tracing). 0 for RAG results.
+    /// Memory node ID (for tracing). 0 for RAG results.
     pub node_id: u64,
     /// Source URL (for RAG results, describing where the chunk came from).
     pub source_url: Option<String>,

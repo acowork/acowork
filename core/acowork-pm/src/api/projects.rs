@@ -107,6 +107,43 @@ pub(crate) fn sync_group_chat(state: &ApiState, project: &Project) {
     });
 }
 
+/// Push "this project is archived" to the chat domain (design 27 §4.4).
+/// Unlike provisioning this one MUST arrive: the user service's delete gate
+/// reads the stamp as a hard precondition, and a deleted project is never
+/// replayed — `sync_group_chat` only ever runs for live projects, and the
+/// trash has no re-push path. So the push retries on the same bounded
+/// backoff window the group-chat backfill uses (~2 min of Gateway / user
+/// service warm-up covers the realistic miss: the Gateway answers 503 while
+/// the user service is still starting). Still best-effort at the end of the
+/// window: a loss costs a group chat nobody — not even an admin — can
+/// delete (the project-alive gate is identity-blind), never a project that
+/// fails to delete.
+fn mark_group_deleted(state: &ApiState, pid: &ProjectId) {
+    let Some((gw_url, token)) = &state.gateway else {
+        return;
+    };
+    let client = crate::gateway_client::GatewayClient::new(gw_url.clone(), token.clone());
+    let pid_str = pid.as_str().to_string();
+    tokio::spawn(async move {
+        // Retries at ~0/10/20/40/70/110s — the same cumulative ~2min warm-up
+        // window as `spawn_group_chat_backfill`, for the same reason.
+        let backoffs = [0u64, 10, 20, 30, 40];
+        for (attempt, &delay) in backoffs.iter().enumerate() {
+            if delay > 0 {
+                tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
+            }
+            if client.mark_group_deleted(&pid_str).await {
+                return;
+            }
+            tracing::warn!(project_id = %pid_str, attempt, "group delete-mark push failed — retrying within the warm-up window");
+        }
+        tracing::error!(
+            project_id = %pid_str,
+            "group delete-mark never landed — the project's group chat stays owner-undeletable"
+        );
+    });
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // Governance — who may mutate a project
 // ────────────────────────────────────────────────────────────────────────────
@@ -255,6 +292,11 @@ pub async fn delete(
         closing.into_iter().map(|t| (pid.clone(), t)),
     )
     .await;
+    // The project is gone, so its group chat is now deletable by its owner
+    // (design 27 §4.4). Nothing is deleted here — the chat is stamped, and a
+    // human decides when the history goes. Best-effort: a project without its
+    // mark still deleted correctly, the channel just stays undeletable.
+    mark_group_deleted(&state, &pid);
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 

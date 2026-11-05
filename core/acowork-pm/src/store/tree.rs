@@ -34,6 +34,7 @@
 //! - 删除 = `rm -rf` 目录树（子树 + 附件原子级清理）
 //! - Reparent = `mv` 目录（0 文件写），DFS 防环 + 深度限制
 
+use std::cmp::Reverse;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -1159,8 +1160,13 @@ impl PmStore for TreePmStore {
         }
 
         match filter.sort.unwrap_or_default() {
-            TaskSort::CreatedAt => result.sort_by_key(|t| t.created_at),
-            TaskSort::UpdatedAt => result.sort_by_key(|t| t.updated_at),
+            // Time sorts are newest-first (matches the session-list mental
+            // model: page one shows the latest work). `sort_by_key` is stable,
+            // so equal timestamps keep their prior relative order. DueAt/
+            // Priority stay ascending — soonest/highest first is the queue
+            // semantics.
+            TaskSort::CreatedAt => result.sort_by_key(|t| Reverse(t.created_at)),
+            TaskSort::UpdatedAt => result.sort_by_key(|t| Reverse(t.updated_at)),
             TaskSort::DueAt => {
                 result.sort_by_key(|t| t.due_at.unwrap_or(chrono::DateTime::<Utc>::MAX_UTC))
             }
@@ -2917,6 +2923,63 @@ mod tests {
         // 无过滤 → 全部 3 个
         let all = store.find_tasks(&TaskFilter::default()).await.unwrap();
         assert_eq!(all.len(), 3);
+    }
+
+    /// Time sorts (`CreatedAt` default + `UpdatedAt`) return newest first —
+    /// the board's page one shows the latest work (session-list mental
+    /// model). Sub-tree reading order is unaffected: the frontend re-sorts
+    /// children ascending when it builds the tree.
+    #[tokio::test]
+    async fn find_tasks_time_sorts_are_newest_first() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        // Sleeping between creates guarantees strictly increasing timestamps.
+        let t1 = store.create_task(&p.id, create_task_input("t1"), "human").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let t2 = store.create_task(&p.id, create_task_input("t2"), "human").await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        let t3 = store.create_task(&p.id, create_task_input("t3"), "human").await.unwrap();
+
+        // Default sort (CreatedAt) → newest first.
+        let ids: Vec<String> = store
+            .find_tasks(&TaskFilter { project_id: Some(p.id.clone()), ..Default::default() })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id.to_string())
+            .collect();
+        assert_eq!(ids, vec![t3.id.to_string(), t2.id.to_string(), t1.id.to_string()]);
+
+        // PATCH the oldest task → it leads the UpdatedAt ordering.
+        store
+            .update_task(
+                &t1.id,
+                UpdateTask {
+                    title: Some("t1-renamed".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        let ids: Vec<String> = store
+            .find_tasks(&TaskFilter {
+                project_id: Some(p.id.clone()),
+                sort: Some(crate::types::TaskSort::UpdatedAt),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|t| t.id.to_string())
+            .collect();
+        assert_eq!(ids[0], t1.id.to_string(), "freshly updated task must come first");
     }
 
     /// 负路径 7:delete_attachment 反向清理(task.json + 索引 + 物理文件)。

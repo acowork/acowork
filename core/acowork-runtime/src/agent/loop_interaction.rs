@@ -18,92 +18,38 @@ use crate::agent::loop_::{AgentLoop, ChunkEvent};
 use crate::agent::session_state::SessionStatus;
 use crate::tools::builtin::ask_user_question::AskUserQuestionTool;
 
-/// A Chat card the Runtime wrote and has not yet closed.
+/// An interaction this turn has opened and has not yet resolved.
 ///
-/// The row coordinates are captured at write time (not read back from
-/// `chat_writeback`) because the closure frequently runs AFTER the turn
-/// context was taken by the write-back — the turn-end flush in
-/// `session_task` is exactly that case.
+/// ADR-106 D8: this is bookkeeping, not a Chat write. A card used to be an
+/// `interaction_request` row in the Chat session, which made the Chat the store
+/// of an execution fact and gave it a second copy to keep closed. The card is
+/// now the round's `card` in the projection (D4), and this list is what supplies
+/// it at turn end — coordinates plus the payload the block renders.
 #[derive(Debug, Clone)]
-pub(crate) struct OpenChatCard {
-    /// `approval` | `ask_question` | `pause` — the `interaction.kind`.
+pub(crate) struct OpenInteraction {
+    /// `approval` | `ask_question` | `pause` — the interaction's kind.
     kind: String,
-    /// The interaction's own request id (approval / question id, or the
-    /// write-back request id for a `pause` card).
+    /// The interaction's own request id (approval / question id, or the round id
+    /// for a `pause`), which is the coordinate the answer resolves against.
     request_id: String,
-    /// Chat session the card row lives in.
-    chat_session_id: String,
-    /// The human-side participant the card row was addressed `to`.
-    to: String,
-}
-
-/// Classify an `await_question_answer` result for the closure notice.
-///
-/// The await helper reports every non-answer through its returned
-/// tool-result string (`[Timeout: ...]` / `[Cancelled: ...]`), which is the
-/// only signal available at the call site; everything else is a real answer.
-fn question_resolution(answer: &str) -> &'static str {
-    if answer.starts_with("[Timeout") {
-        "timeout"
-    } else if answer.starts_with("[Cancelled") {
-        "cancelled"
-    } else {
-        "answered"
-    }
-}
-
-/// Deterministic Chat-card row id for one interaction (§5.5.4).
-///
-/// Two consequences that the closure protocol depends on:
-/// - a redelivered turn cannot produce a second card (the chat store
-///   dedups on `meta.message_id`), and
-/// - the closure notice derives its own id from the same coordinate
-///   (`ir:{card_id}`), so an answer that arrives on both surfaces — the
-///   chat card AND the exec dialog — stays idempotent.
-pub(crate) fn chat_card_id(kind: &str, request_id: &str) -> String {
-    format!("card:{kind}:{request_id}")
+    /// The projection card payload: `{kind, request_id, prompt, options}`.
+    card: serde_json::Value,
 }
 
 impl AgentLoop {
-    /// Design 27 §5.5.4 (plan 3.1): drop an `interaction_request` card
-    /// into the Chat session that triggered this turn. No-op unless the
-    /// turn's [`crate::agent::intent_turn::TurnSurface`] names both a chat
-    /// and a sender who could answer, AND the chat is not known to be
-    /// human-free (`has_human != Some(false)` — unknown fails open, the
-    /// card is harmless if nobody picks it up, the row is the durable
-    /// record of the question).
+    /// Record the interaction this turn is about to block on (ADR-106 D8).
     ///
-    /// A missing trigger row is not a reason to skip the card: it only
-    /// means the card has no question to thread under (§5.5.4 answers a
-    /// card against its own id), which is exactly the shape of a turn
-    /// composed in the execution view of a chat-bound session (ADR-100
-    /// Rev. 6).
+    /// The gates retired with the Chat row: a card is a fact about the round, so
+    /// it is recorded whether or not this turn is accountable to a Chat, and
+    /// whether or not the Chat is known to be human-free (D8's third bullet).
+    /// Whoever may *answer* it is a separate question, settled at the write
+    /// entry by `answerable_by` (D10) — which is why an unanswerable card parks
+    /// nothing: it is state, not an obligation.
     ///
-    /// Read from the surface, never from `chat_writeback`: the card is a
-    /// Chat obligation, the write-back is an agent-to-agent one, and
-    /// conflating them is what made an execution-surface turn's cards vanish (ADR-100
-    /// follow-up).
-    ///
-    /// The card is recorded in `open_chat_cards` so its resolution can
-    /// close it (see [`AgentLoop::close_chat_card`]): a card that stays
-    /// open forever is what left the Chat surface showing a status card
-    /// for a run that had already ended.
-    ///
-    /// Best-effort: a failed card write logs; the in-flight
-    /// approval/question/pause itself is unaffected.
-    pub(crate) async fn write_interaction_card(
-        &mut self,
-        interaction: serde_json::Value,
-        summary: &str,
-    ) {
-        let Some((chat_session_id, trigger_row, answerable_by)) =
-            self.turn_surface.card_target().map(|(c, t, a)| (c.to_string(), t.to_string(), a.to_string()))
-        else {
-            return;
-        };
-        if self.turn_surface.has_human == Some(false) {
-            return;
-        }
+    /// Callers that need an answerer to exist before the interaction is even
+    /// opened (the `pause` cards, which would hold a round hostage otherwise)
+    /// keep checking `has_human == Some(true)` themselves.
+    pub(crate) fn track_interaction(&mut self, interaction: serde_json::Value) {
         let kind = interaction
             .get("kind")
             .and_then(|v| v.as_str())
@@ -115,147 +61,126 @@ impl AgentLoop {
             .unwrap_or_default()
             .to_string();
         if kind.is_empty() || request_id.is_empty() {
-            tracing::warn!(?interaction, "interaction_request card without kind/request_id, skipping");
+            tracing::warn!(?interaction, "interaction without kind/request_id, not tracked");
             return;
         }
-        let card_id = chat_card_id(&kind, &request_id);
-        let meta = serde_json::json!({
-            "message_id": card_id,
-            "in_reply_to": trigger_row,
-            "agent_session_id": self.session_core.session_id.clone().unwrap_or_default(),
-            "interaction": interaction,
-        });
-        let to = answerable_by;
-        if let Err(e) = crate::agent::intent_turn::append_chat_row(
-            &self.core.config.agent_instance_id,
-            &self
-                .core
-                .config
-                .gateway_host
-                .clone()
-                .unwrap_or_else(|| "127.0.0.1".to_string()),
-            &self.core.config.mqtt_password.clone().unwrap_or_default(),
-            &chat_session_id,
-            "interaction_request",
-            &to,
-            summary,
-            meta,
-        )
-        .await
+        if self
+            .open_interactions
+            .iter()
+            .any(|c| c.kind == kind && c.request_id == request_id)
         {
-            tracing::warn!(error = %e, card_id, "interaction_request card write failed (best-effort)");
             return;
         }
-        // Only a row that actually landed needs a closure.
-        if !self.open_chat_cards.iter().any(|c| c.kind == kind && c.request_id == request_id) {
-            self.open_chat_cards.push(OpenChatCard {
-                kind,
-                request_id,
-                chat_session_id,
-                to,
-            });
+        // The D4 card shape: what the human is being asked, and what they can
+        // answer with. Coordinates only for `pause`, which has no option set.
+        let card = serde_json::json!({
+            "kind": kind,
+            "request_id": request_id,
+            "prompt": interaction
+                .get("question")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default(),
+            "options": interaction
+                .get("options")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Array(Vec::new())),
+        });
+        self.open_interactions.push(OpenInteraction {
+            kind,
+            request_id,
+            card: card.clone(),
+        });
+        // ADR-106 D8, second half: the block becomes visible when the question
+        // opens, not when the turn ends. A round parked inside a live turn is
+        // still non-terminal, so this is never cached (D5) and a reader always
+        // folds the current state — and the stamp stays armed because the round
+        // has rows left to write.
+        self.publish_round_card_state(Some(card));
+    }
+
+    /// State the round's card on the side table without closing the round.
+    ///
+    /// `Some(card)` parks the round on that card (`waiting`); `None` says nothing
+    /// is pending anymore, which is what a resolved mid-turn interaction means
+    /// for the block: the live turn is still working, and offering a button that
+    /// was already answered would be a second, lying copy of the fact.
+    fn publish_round_card_state(&self, card: Option<serde_json::Value>) {
+        let Some(conv) = &self.session.conversation else {
+            return;
+        };
+        match card {
+            Some(c) => conv.note_round_state("waiting", Some(c)),
+            None => conv.note_round_state(
+                crate::rounds::STATUS_IN_PROGRESS,
+                Some(serde_json::Value::Null),
+            ),
         }
     }
 
-    /// Close the Chat card for one interaction (§5.5.4 answer-then-done).
+    /// The card the round is parked on right now, if any.
+    fn current_round_card(&self) -> Option<serde_json::Value> {
+        self.open_interactions.last().map(|c| c.card.clone())
+    }
+
+    /// Drop the record for one resolved interaction.
     ///
-    /// Writes a `system_notice` row whose `in_reply_to` is the card id —
-    /// which is precisely the fact the read-side projection treats as
-    /// "this card is answered" — so the card stops rendering the moment
-    /// the underlying interaction resolves, whichever surface resolved
-    /// it (chat card, exec dialog, timeout, stop, turn end).
-    ///
-    /// A no-op when no card is open for that interaction: an answer that
-    /// already arrived as a chat row, a card that never got written, or
-    /// a second resolve path for the same request must not put a
-    /// redundant row on the wire.
-    pub(crate) async fn close_chat_card(&mut self, kind: &str, request_id: &str, resolution: &str) {
+    /// Idempotent by design: an approval answered through either surface, a
+    /// resolve path that ran twice, or an interaction that was never tracked
+    /// (no Chat this turn was accountable to) must all be no-ops.
+    pub(crate) fn forget_interaction(&mut self, kind: &str, request_id: &str) {
         let Some(idx) = self
-            .open_chat_cards
+            .open_interactions
             .iter()
             .position(|c| c.kind == kind && c.request_id == request_id)
         else {
             return;
         };
-        let card = self.open_chat_cards.remove(idx);
-        let card_id = chat_card_id(kind, request_id);
-        let meta = serde_json::json!({
-            // Deterministic: the same resolution never appends twice, even
-            // across a retry of the turn.
-            "message_id": format!("ir:{card_id}"),
-            "notice_type": "interaction_resolved",
-            "in_reply_to": card_id,
-            "resolution": resolution,
-        });
-        if let Err(e) = crate::agent::intent_turn::append_chat_row(
-            &self.core.config.agent_instance_id,
-            &self
-                .core
-                .config
-                .gateway_host
-                .clone()
-                .unwrap_or_else(|| "127.0.0.1".to_string()),
-            &self.core.config.mqtt_password.clone().unwrap_or_default(),
-            &card.chat_session_id,
-            "system_notice",
-            &card.to,
-            "",
-            meta,
-        )
-        .await
-        {
-            // Keep the card open so a later resolve path retries the
-            // closure — an unclosable card is the bug this function
-            // exists to fix, and swallowing the failure would bring it
-            // straight back.
-            self.open_chat_cards.push(card);
-            tracing::warn!(error = %e, card_id, "interaction_resolved notice write failed (best-effort)");
-        }
+        self.open_interactions.remove(idx);
+        // The answer came in while the turn was live, so the block has to stop
+        // showing the question now (ADR-106 D8).
+        self.publish_round_card_state(self.current_round_card());
     }
 
-    /// Close every open card whose kind is listed in `kinds`, optionally
-    /// restricted to one Chat session (`chat_session_id`).
+    /// Drop every open record whose kind is listed in `kinds`.
     ///
     /// Used at turn end for the safety net: an in-loop interaction
     /// (`approval` / `ask_question`) can only still be open when the turn
-    /// died around it — stop, error, crash — and the run is over, so the
-    /// card is no longer answerable. `pause` cards are deliberately NOT
-    /// included there: §5.5.4 releases the execution slot precisely so a
-    /// pause card survives its own turn, and the human's answer opens a
-    /// new one — which is when [`Self::supersede_pause_cards`] closes it.
-    pub(crate) async fn close_chat_cards_of_kind(
-        &mut self,
-        kinds: &[&str],
-        chat_session_id: Option<&str>,
-        resolution: &str,
-    ) {
-        let targets: Vec<(String, String)> = self
-            .open_chat_cards
-            .iter()
-            .filter(|c| kinds.contains(&c.kind.as_str()))
-            .filter(|c| {
-                chat_session_id.is_none_or(|cs| c.chat_session_id == cs)
-            })
-            .map(|c| (c.kind.clone(), c.request_id.clone()))
-            .collect();
-        for (kind, request_id) in targets {
-            self.close_chat_card(&kind, &request_id, resolution).await;
-        }
+    /// died around it — stop, error, crash — and the run is over, so it is no
+    /// longer answerable. `pause` is deliberately NOT included there: §5.5.4
+    /// releases the execution slot precisely so a pause survives its own turn,
+    /// and the human's answer opens a new one — which is when
+    /// [`Self::supersede_pause_cards`] drops it.
+    pub(crate) fn forget_interactions_of_kind(&mut self, kinds: &[&str]) {
+        self.open_interactions
+            .retain(|c| !kinds.contains(&c.kind.as_str()));
     }
 
-    /// Close the `pause` cards a new turn in the same Chat session replaces.
+    /// Drop the `pause` a new turn in this session replaces.
     ///
-    /// A pause card asks the human to reply to continue; the reply IS the new
-    /// turn, so from that moment the old card can no longer be answered —
-    /// leaving it open shows a stale "continue?" request under a run that has
+    /// A pause asks the human to reply to continue; the reply IS the new turn, so
+    /// from that moment the old pause is no longer answerable. Keeping it would
+    /// have the next snapshot publish a stale "continue?" onto a round that has
     /// already moved past it.
-    pub(crate) async fn supersede_pause_cards(&mut self, chat_session_id: &str) {
-        self.close_chat_cards_of_kind(
-            &["pause"],
-            Some(chat_session_id),
-            "superseded",
-        )
-        .await;
+    pub(crate) fn supersede_pause_cards(&mut self) {
+        self.forget_interactions_of_kind(&["pause"]);
+    }
+
+    /// The card the current round is parked on, as a reference.
+    ///
+    /// ADR-106 D2/D4: a round's `card` is recorded when its turn ends `waiting`, so
+    /// the block the Chat renders can show what it is stalled on. Only `pause`
+    /// qualifies — `approval` and `ask_question` are resolved inside the turn they
+    /// were opened in, so a round that ended with one still open ended by stop or
+    /// error and is not waiting on anybody.
+    ///
+    /// Those two kinds are nevertheless tracked, and not as leftovers of the old
+    /// Chat-row writes: they block *inside* a live turn, so [`Self::track_interaction`]
+    /// publishes the round's `card` the moment they open (a non-terminal snapshot,
+    /// so it is never cached) and [`Self::forget_interaction`] retracts it when they
+    /// are answered. The block and the execution dialog therefore read one fact,
+    /// not two copies.
+    pub(crate) fn open_pause_card(&self) -> Option<serde_json::Value> {
+        Some(self.open_interactions.iter().find(|c| c.kind == "pause")?.card.clone())
     }
 
     /// Mark the turn as user-interrupted (§7.1 `aborted`).
@@ -331,20 +256,18 @@ impl AgentLoop {
             timeout_seconds: Some(effective_timeout_secs),
         });
 
-        // §5.5.4 (plan 3.1): the same question is also a Chat-session card
-        // when the turn was chat-triggered — one question, two answer
-        // surfaces (the live dialog and the chat card), never a replay.
-        self.write_interaction_card(
-            serde_json::json!({
-                "kind": "ask_question",
-                "request_id": request_id.clone(),
-                "question": parsed.question.clone(),
-                "title": parsed.title.clone(),
-                "options": card_options,
-            }),
-            &parsed.question,
-        )
-        .await;
+        // ADR-106 D8: the same question is recorded on the round this turn is
+        // running, so the Chat block can show what its round is stalled on — one
+        // question, two answer surfaces (the live dialog and the block), never a
+        // replay. It is not a Chat row anymore, which is why nothing here has to
+        // keep a Chat copy closed.
+        self.track_interaction(serde_json::json!({
+            "kind": "ask_question",
+            "request_id": request_id.clone(),
+            "question": parsed.question.clone(),
+            "title": parsed.title.clone(),
+            "options": card_options,
+        }));
 
         // Transition to WaitingApproval
         self.transition_status(SessionStatus::WaitingApproval {
@@ -407,10 +330,10 @@ impl AgentLoop {
         let answer = self.await_question_answer(&request_id).await;
 
         // §5.5.4: the question is settled — answered, timed out or cancelled
-        // by a stop — so close its Chat card. Leaving it open is what kept a
-        // status card on the Chat surface for a run that had already ended.
-        self.close_chat_card("ask_question", &request_id, question_resolution(&answer))
-            .await;
+        // by a stop — so it is no longer an open interaction. Leaving it
+        // recorded is what kept a status card on the Chat surface for a run
+        // that had already ended.
+        self.forget_interaction("ask_question", &request_id);
 
         // Abort the heartbeat — answer received (or timeout/cancel).
         // Non-blocking; the task will be dropped at the next await point

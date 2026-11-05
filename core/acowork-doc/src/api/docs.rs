@@ -9,6 +9,9 @@
 use axum::extract::{Path, Query};
 use axum::http::{HeaderMap, StatusCode};
 use axum::Json;
+
+use crate::api::body::DocJson;
+use crate::limit;
 use serde::Deserialize;
 
 use crate::api::dto::{
@@ -29,7 +32,7 @@ pub struct ListQuery {
 pub async fn create_doc(
     state: ApiState,
     headers: HeaderMap,
-    Json(body): Json<CreateDocBody>,
+    DocJson(body): DocJson<CreateDocBody>,
 ) -> ApiResult<(StatusCode, Json<DocMetaDto>)> {
     let actor = actor_from(&headers);
     // Adding a doc is an edit on the hosting directory (design §9).
@@ -37,6 +40,9 @@ pub async fn create_doc(
         .acl
         .check(&actor, AclTarget::Dir(&body.parent_dir_id), AclRole::Edit)
         .await
+        .map_err(ApiError::from)?;
+    // Document ceiling, measured on the decoded content (see `crate::limit`).
+    limit::ensure_document_size(body.content.len(), state.config.max_doc_size_bytes)
         .map_err(ApiError::from)?;
     let meta: DocMeta = state
         .docs
@@ -74,7 +80,7 @@ pub async fn update_doc(
     state: ApiState,
     headers: HeaderMap,
     Path(doc_id): Path<String>,
-    Json(body): Json<UpdateDocBody>,
+    DocJson(body): DocJson<UpdateDocBody>,
 ) -> ApiResult<Json<DocMetaDto>> {
     validate_doc_id(&doc_id)?;
     let actor = actor_from(&headers);
@@ -82,6 +88,8 @@ pub async fn update_doc(
         .acl
         .check(&actor, AclTarget::Doc(&doc_id), AclRole::Edit)
         .await
+        .map_err(ApiError::from)?;
+    limit::ensure_document_size(body.content.len(), state.config.max_doc_size_bytes)
         .map_err(ApiError::from)?;
     let meta = state
         .docs
@@ -143,7 +151,7 @@ pub async fn move_doc(
         .map_err(ApiError::from)?;
     let meta = state
         .docs
-        .move_doc(&doc_id, &body.target_dir_id, body.overwrite)
+        .move_doc(&doc_id, &body.target_dir_id, None, body.overwrite)
         .await
         .map_err(ApiError::from)?;
     Ok(Json(DocMetaDto::from(meta)))

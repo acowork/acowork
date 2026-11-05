@@ -390,6 +390,14 @@ pub(crate) async fn search_summary(
         Ok(Ok(r)) => r,
     };
 
+    // ADR-028: this summary call is real spend on the agent's account. It
+    // belongs to no session and no Chat ledger — the agent-level counter is
+    // its only home. Without this line the panel under-counted every
+    // search-summary the user triggered.
+    if let Some(u) = response.usage.as_ref() {
+        core.accumulate_llm_usage(u);
+    }
+
     // Never fall back to reasoning_content (episode_distill convention):
     // strip thinking blocks, require non-empty output.
     let raw = response.content.trim();

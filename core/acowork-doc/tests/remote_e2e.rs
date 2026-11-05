@@ -14,8 +14,9 @@
 //! 覆盖（对齐开发计划 §3.5 D4-2 / D4-3）：
 //!
 //! 1. **D4-3 远程全链路**：人类 REST 建目录/文档 → 远程 Agent（受信 actor）经
-//!    MCP HTTP 读文档 → `doc_submit_update` → 人类 REST approve 合并 → 远程
-//!    Agent `doc_check_request` 轮询到 approved + 文档 v2 可见。
+//!    MCP HTTP `doc_stat` 取 version → `doc_write(mode=overwrite, if_version)`
+//!    命中「改别人的文档」策略 → `pending_review` → 人类 REST approve 合并 →
+//!    远程 Agent `doc_check_request` 轮询到 approved + 文档 v2 可见。
 //! 2. **D4-2 身份**：匿名经 advertise endpoint 只读通过；匿名写 → JSON-RPC
 //!    Forbidden（-32002）——doc 的信任校验点是 Gateway（doc_proxy 剥离未
 //!    受信 X-MCP-Actor），doc server 侧按「有 actor=受信 / 无 actor=匿名」。
@@ -148,19 +149,25 @@ async fn remote_agent_full_review_loop_over_public_mcp() {
     assert_eq!(v["version"], 1);
     assert!(v["content"].as_str().unwrap().contains("由人类创建"));
 
-    // ── 远程 Agent：doc_pull（拿 base_version）→ submit_update ──
-    let v = ok(&base, Some(REMOTE_AGENT), "doc_pull", json!({ "ref": doc_id })).await;
-    assert_eq!(v["base_version"], 1);
+    // ── 远程 Agent：doc_stat 取 version → doc_write 命中审批策略 ──
+    let v = ok(&base, Some(REMOTE_AGENT), "doc_stat", json!({ "ref": doc_id })).await;
+    assert_eq!(v["version"], 1);
+    assert_eq!(v["path"], "设计/远程方案.md", "path must be human-readable");
 
     let v = ok(
         &base,
         Some(REMOTE_AGENT),
-        "doc_submit_update",
-        json!({ "ref": doc_id, "content": "# v1 由人类创建\n\n远程 Agent 补充 v2", "base_version": 1 }),
+        "doc_write",
+        json!({
+            "ref": doc_id,
+            "mode": "overwrite",
+            "if_version": 1,
+            "content": "# v1 由人类创建\n\n远程 Agent 补充 v2",
+        }),
     )
     .await;
     let request_id = v["request_id"].as_str().unwrap().to_string();
-    assert_eq!(v["status"], "pending");
+    assert_eq!(v["status"], "pending_review");
 
     // ── 人类 REST：pending 队列可见 → approve ──────────────
     let list = rest_get(&base, "/requests?status=pending").await;
@@ -185,7 +192,7 @@ async fn remote_agent_full_review_loop_over_public_mcp() {
     assert!(v["content"].as_str().unwrap().contains("远程 Agent 补充"));
 }
 
-/// D4-3 wire-contract 回归：远程 Agent 走全链路 `doc_add` 后，REST 与
+/// D4-3 wire-contract 回归：远程 Agent 走全链路 `doc_write(mode=create)` 后，REST 与
 /// MCP 两条路径都必须返回 `import.instance_id == REMOTE_AGENT`（即
 /// `X-MCP-Actor` 注入的 runtime instance UUID, ADR-073），且 wire JSON
 /// 不能再含 legacy `agent_id` 字段。
@@ -196,7 +203,7 @@ async fn remote_agent_full_review_loop_over_public_mcp() {
 /// 而不是进程内 `DocService`。覆盖了「header 真的跨进程传过来」这条
 /// 路径，是端到端最后一公里的契约。
 #[tokio::test(flavor = "multi_thread")]
-async fn remote_doc_add_persists_actor_as_instance_id_through_public_mcp() {
+async fn remote_doc_write_persists_actor_as_instance_id_through_public_mcp() {
     let (base, _tmp) = spawn_public().await;
 
     // 人类 REST 建目录（Agent 不可见 dir id 的设计是另一码事；这里
@@ -209,14 +216,14 @@ async fn remote_doc_add_persists_actor_as_instance_id_through_public_mcp() {
     )
     .await;
 
-    // 远程 Agent：add-to-doc 走全链路 MCP HTTP
+    // 远程 Agent：建档走全链路 MCP HTTP（`doc_write(mode=create)`）
     let v = ok(
         &base,
         Some(REMOTE_AGENT),
-        "doc_add",
+        "doc_write",
         json!({
-            "path": "wire-contract",
-            "title": "跨进程 instance_id 落盘验证",
+            "ref": "wire-contract/跨进程 instance_id 落盘验证.md",
+            "mode": "create",
             "content": "由远程 Agent 写入",
             "source_workspace": "ws-remote",
             "source_path": "notes/contract.md",

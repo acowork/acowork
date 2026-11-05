@@ -676,6 +676,9 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     let mut responses_compat_cache: Option<
         Arc<crate::providers::responses_compat::ResponsesCompatCache>,
     > = None;
+    let mut anthropic_compat_cache: Option<
+        Arc<crate::providers::anthropic_compat::AnthropicCompatCache>,
+    > = None;
 
     let (provider, resolved_model, available_models, protocol_type) = {
         // ADR-033: MQTT available_cache is the only provider source (gRPC path removed per ADR-040).
@@ -752,10 +755,18 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         ));
                     responses_compat_cache = Some(responses_cache_arc.clone());
 
+                    // Messages-API parameter trims (temperature / thinking
+                    // shape) — own file again, same reason.
+                    let anthropic_cache_arc = crate::providers::anthropic_compat::load(
+                        std::path::Path::new(&config.work_dir),
+                    );
+                    anthropic_compat_cache = Some(anthropic_cache_arc.clone());
+
                     let wiring = crate::providers::router::ProviderWiring {
                         provider_id: Some(prov.id.clone()),
                         compat_cache: Some(compat_cache_arc),
                         responses_compat_cache: Some(responses_cache_arc),
+                        anthropic_compat_cache: Some(anthropic_cache_arc),
                     };
 
                     let provider = crate::providers::router::create_provider_with_wiring(
@@ -1314,6 +1325,7 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
         gateway_current_provider_id,
         compat_cache,
         responses_compat_cache,
+        anthropic_compat_cache,
         emb_provider,
         active_tools,
         full_tool_specs,

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo, lazy, Suspense } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useFileEditorStore, registerFileDisposer, sourceRelPath, type OpenFile } from "../../stores/fileEditorStore";
 import { useGitStore } from "../../stores/gitStore";
@@ -11,6 +11,7 @@ import { useLayoutStore } from "../../stores/layoutStore";
 import { useEditorStatusStore } from "../../stores/editorStatusStore";
 import { useLspClientPool } from "../../hooks/useLspClientPool";
 import { useReportFilePanelBounds } from "../../hooks/useReportFilePanelBounds";
+import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { getGatewayUrl } from "../../lib/config";
@@ -47,9 +48,13 @@ import { log } from "../../lib/logger";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { useAddToChatTarget, attachWorkspaceRef } from "../../lib/addToChat";
 import {
+    attachFileToChatComposer,
     attachImageToChatComposer,
     insertIntoChatComposer,
 } from "../../lib/chatComposerBridge";
+// Type-only: the viewer component itself stays lazy-loaded (its payload is a
+// PDF engine), but the shape of the hand-off the panel builds is shared.
+import type { PdfChatProps } from "./PdfViewer";
 
 /**
  * Encode a UTF-8 text string to base64 in a way that survives non-ASCII
@@ -81,10 +86,116 @@ function encodeTextToBase64(text: string): string {
  * the same regex via `./filePreview.WORKSPACE_PREVIEW_EXT_RE` so this
  * rule can't drift out of sync. Raster images (png/jpg/gif/webp) are
  * intentionally excluded — their "source" is just a base64 blob, so
- * toggling to a source pane adds no value.
+ * toggling to a source pane adds no value. Document-preview files are
+ * excluded for the same reason with the extra bite that their tab holds
+ * NO content at all (bytes go to the viewer, see DOC_SOURCE_HIDDEN_RE).
  */
 function supportsPreviewToggle(file: OpenFile): boolean {
-    return file.kind === "file" && WORKSPACE_PREVIEW_EXT_RE.test(file.fileName);
+    return (
+        file.kind === "file" &&
+        !DOC_SOURCE_HIDDEN_RE.test(file.fileName) &&
+        WORKSPACE_PREVIEW_EXT_RE.test(file.fileName)
+    );
+}
+
+// ── Document viewers (remote file preview plan) ─────────────────────
+// Lazy: the parser payloads (SheetJS / docx-preview / JSZip) only load
+// when a document tab actually mounts, never in the main bundle.
+const PdfViewer = lazy(() => import("./PdfViewer"));
+const SheetViewer = lazy(() => import("./SheetViewer"));
+const DocxViewer = lazy(() => import("./DocxViewer"));
+const PptxViewer = lazy(() => import("./PptxViewer"));
+const UnsupportedDocViewer = lazy(() => import("./UnsupportedDocViewer"));
+// Office → PDF wrapper: converts with the local LibreOffice / MS Office
+// engine and renders the result natively, falling back to the JS viewer
+// above when the machine cannot convert (see lib/docConvert.ts).
+const OfficePdfViewer = lazy(() => import("./OfficePdfViewer"));
+
+/**
+ * Document extensions with NO Monaco path at all — the tab's `content`
+ * is empty by design (fileEditorStore skips the base64 JSON read for
+ * them), so falling through to the editor would show a blank page.
+ * CSV is deliberately absent: its content loads as text, so edit mode
+ * (and the source toggle) still work; only its PREVIEW goes to the
+ * sheet renderer.
+ */
+const DOC_SOURCE_HIDDEN_RE = /\.(?:pdf|docx|doc|xlsx|xls|pptx|ppt)$/i;
+/** Extensions rendered by the sheet viewer (SheetJS reads csv/xls/xlsx). */
+const SHEET_EXT_RE = /\.(?:xlsx|xls|csv)$/i;
+/** Office formats converted to PDF by the local engine for a faithful,
+ *  print-layout preview. CSV is NOT one of them: a PDF page break is a
+ *  worse table preview than the live grid SheetJS gives. */
+const OFFICE_EXT_RE = /\.(?:docx|doc|pptx|ppt|xlsx|xls)$/i;
+
+/** Whether this tab is (or previews as) a document viewer file. */
+function isDocumentViewerFile(file: OpenFile): boolean {
+    if (file.kind !== "file") return false;
+    return (
+        DOC_SOURCE_HIDDEN_RE.test(file.fileName) ||
+        (file.mode === "preview" && SHEET_EXT_RE.test(file.fileName))
+    );
+}
+
+/**
+ * The "send this document to the agent" hand-off, assembled by the panel and
+ * handed to whichever document viewer is mounted.
+ *
+ * Split this way for the same reason the image viewer's is: the viewer knows
+ * how to produce bytes (crop a page region, read the PDF it is previewing),
+ * and ONLY the panel knows the workspace-relative path the agent's own tools
+ * resolve and whether the live composer can take anything at all. A viewer
+ * that built its own prompt would have to be told the path anyway.
+ *
+ * `Required`: the panel always wires up all three. The viewer declares them
+ * optional, so a surface without a composer to feed (a test, a future
+ * read-only pane) can mount it without pretending to offer a hand-off.
+ */
+type DocChatHandoff = Required<PdfChatProps>;
+
+/** Pick the viewer component for a document tab by extension. */
+function renderDocViewer(file: OpenFile, docChat: DocChatHandoff) {
+    const viewerFile = {
+        agentId: file.agentId,
+        workspaceId: file.workspaceId,
+        relPath: file.relPath,
+        fileName: file.fileName,
+        previewSeq: file.previewSeq,
+    };
+    if (/\.pdf$/i.test(file.fileName)) return <PdfViewer {...viewerFile} {...docChat} />;
+    // CSV keeps the grid (see OFFICE_EXT_RE); every other Office format
+    // tries the print-layout PDF path first and keeps its JS renderer as
+    // the fallback, so a machine without an engine — or one bad file —
+    // still previews exactly as it did before.
+    if (/\.csv$/i.test(file.fileName)) return <SheetViewer {...viewerFile} />;
+    if (OFFICE_EXT_RE.test(file.fileName)) {
+        const ext = file.fileName.toLowerCase().split(".").pop() ?? "";
+        // docx-preview / SheetJS / the pptx card stay reachable — they are
+        // what renders when this machine has no engine, and they are the
+        // only renderers for the intermediate loading-free states.
+        const fallback =
+            ext === "xlsx" || ext === "xls" ? (
+                <SheetViewer {...viewerFile} />
+            ) : ext === "docx" ? (
+                <DocxViewer {...viewerFile} />
+            ) : ext === "pptx" ? (
+                <PptxViewer {...viewerFile} />
+            ) : (
+                // Legacy .doc / .ppt — no in-app renderer by plan; the card
+                // routes the user to save-as / open-externally.
+                <UnsupportedDocViewer {...viewerFile} />
+            );
+        return (
+            <OfficePdfViewer
+                {...viewerFile}
+                {...docChat}
+                fallback={fallback}
+                size={file.previewSize}
+                mtimeMs={file.previewMtimeMs}
+            />
+        );
+    }
+    // Anything else in the document set (nothing today) keeps the card.
+    return <UnsupportedDocViewer {...viewerFile} />;
 }
 
 export function FileEditorPanel({ width }: { width: number }) {
@@ -318,23 +429,44 @@ export function FileEditorPanel({ width }: { width: number }) {
     }, [addToChatDisabledReason, t]);
 
     /**
-     * `data:` URL for the image-preview branch, or `null` while the bytes are
-     * still in flight (an empty `content` would otherwise render as a broken
-     * image first and load on the next tick).
+     * Image src for the preview branch, or `null` while the bytes are
+     * still in flight (an empty `content` would otherwise render as a
+     * broken image first and load on the next tick).
      *
-     * SVG arrives as raw XML text — the Gateway no longer lists it in
-     * `BINARY_EXTENSIONS` (see `workspace_query_impl::BINARY_EXTENSIONS`) — so
-     * it is re-encoded to base64 here, which is robust against the `#`, `<`,
-     * `>` characters that would need fragile percent-encoding in a utf8 data
-     * URI. Raster images already come back base64-encoded.
+     * Raster images come from the blob path (`workspaceFileBlob` via the
+     * Gateway raw-file route) — a `blob:` URL is same-origin for the
+     * viewer's canvas just like the `data:` URL it replaced, and it skips
+     * the base64 round-trip through the JSON content endpoint.
+     *
+     * SVG keeps the text route: it arrives as raw XML (`workspace_query_impl::
+     * BINARY_EXTENSIONS` excludes it), the preview must reflect the EDIT
+     * buffer rather than disk (the source toggle edits it), and base64 is
+     * robust against the `#`, `<`, `>` characters a utf8 data URI would
+     * have to percent-encode.
      */
+    const isRasterImagePreview =
+        !!activeFile &&
+        activeFile.kind === "file" &&
+        !activeFile.loading &&
+        (activeFile.mimeType?.startsWith("image/") ?? false) &&
+        activeFile.mimeType !== "image/svg+xml";
+    const rasterImageBlob = useWorkspaceFileBlob(
+        isRasterImagePreview && activeFile
+            ? {
+                agentId: activeFile.agentId,
+                workspaceId: activeFile.workspaceId,
+                relPath: activeFile.relPath,
+            }
+            : null,
+        { mode: "url", reloadSeq: activeFile?.previewSeq },
+    );
     const activeImageSrc = useMemo<string | null>(() => {
         if (!activeFile || activeFile.kind !== "file") return null;
         if (activeFile.loading || !activeFile.mimeType?.startsWith("image/")) return null;
         return activeFile.mimeType === "image/svg+xml"
             ? `data:${activeFile.mimeType};base64,${encodeTextToBase64(activeFile.content)}`
-            : `data:${activeFile.mimeType};base64,${activeFile.content}`;
-    }, [activeFile]);
+            : rasterImageBlob.blobUrl;
+    }, [activeFile, rasterImageBlob.blobUrl]);
 
     const handleLocateInTree = useCallback(() => {
         if (!activeFile || locateDisabled || !selectedAgentId || !activeSessionId) return;
@@ -1127,6 +1259,57 @@ export function FileEditorPanel({ width }: { width: number }) {
         [activeFile, t],
     );
 
+    /**
+     * A cropped PDF PAGE, attached as the image it is. No pixel coordinates
+     * accompany it — unlike a bitmap, whose pixels ARE the file, a PDF page's
+     * pixels are a product of this one rasterisation and cannot be mapped back
+     * into the source, so quoting them would only mislead the agent. The page
+     * number is the one locator that does survive the round trip.
+     */
+    const handlePdfAddRegionToChat = useCallback(
+        (file: File, info: { page: number }) => {
+            if (!activeFile) return;
+            attachImageToChatComposer(file);
+            insertIntoChatComposer(
+                t("fileEditor.pdfViewer.regionPrompt", {
+                    path: sourceRelPath(activeFile),
+                    page: info.page,
+                }),
+            );
+        },
+        [activeFile, t],
+    );
+
+    /**
+     * The whole document, as the PDF the user was looking at. The prompt names
+     * the SOURCE path twice on purpose: the agent is being handed a rendered
+     * export, and has to know that what it must edit is the file in the
+     * workspace — not the attachment it is reading.
+     */
+    const handlePdfAddDocumentToChat = useCallback(
+        (file: File) => {
+            if (!activeFile) return;
+            attachFileToChatComposer(file);
+            insertIntoChatComposer(
+                t("fileEditor.pdfViewer.documentPrompt", {
+                    path: sourceRelPath(activeFile),
+                }),
+            );
+        },
+        [activeFile, t],
+    );
+
+    /** The one hand-off object every document viewer gets, so the disabled
+     *  rule and the path cannot drift from what the image viewer is told. */
+    const docChat = useMemo<DocChatHandoff>(
+        () => ({
+            addToChatDisabledTitle,
+            onAddRegionToChat: handlePdfAddRegionToChat,
+            onAddDocumentToChat: handlePdfAddDocumentToChat,
+        }),
+        [addToChatDisabledTitle, handlePdfAddRegionToChat, handlePdfAddDocumentToChat],
+    );
+
     const handleEditorChange = useCallback((value: string | undefined) => {
         if (value === undefined) return;
         const currentId = useFileEditorStore.getState().activeFileId;
@@ -1854,19 +2037,49 @@ export function FileEditorPanel({ width }: { width: number }) {
                             padding: { top: 8 },
                         }}
                     />
+                ) : isDocumentViewerFile(activeFile) ? (
+                    // Document preview stack (pdf / xlsx / xls / csv / docx /
+                    // pptx / legacy doc·ppt card). These tabs skip the
+                    // base64 content load entirely — the viewer fetches the
+                    // bytes itself through the blob path, so the chain MUST
+                    // intercept before the image / markdown / Monaco branches,
+                    // which would otherwise render an empty buffer.
+                    <Suspense
+                        fallback={
+                            <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                                {t("fileEditor.previewLoading")}
+                            </div>
+                        }
+                    >
+                        {renderDocViewer(activeFile, docChat)}
+                    </Suspense>
                 ) : activeFile.mode === "preview" && activeFile.mimeType?.startsWith("image/") ? (
-                    // Image preview (raster via the base64 the Gateway returns
-                    // for binary files, or SVG re-encoded from its XML text —
-                    // see `activeImageSrc`). `ImageViewer` owns the zoom /
-                    // coordinate / selection surface; the two chat hand-offs
-                    // below turn its gestures into a composer insertion. Both
-                    // `data:` URLs are same-origin for the canvas, so the
-                    // region crop can read the pixels back.
+                    // Image preview (raster via the blob path, or SVG
+                    // re-encoded from its XML text — see `activeImageSrc`).
+                    // `ImageViewer` owns the zoom / coordinate / selection
+                    // surface; the two chat hand-offs below turn its gestures
+                    // into a composer insertion. Both `blob:` and `data:` URLs
+                    // are same-origin for the canvas, so the region crop can
+                    // read the pixels back.
                     activeImageSrc === null ? (
-                        <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
-                            <Loader2 className="h-4 w-4 animate-spin" />
-                            {t("fileEditor.previewLoading")}
-                        </div>
+                        rasterImageBlob.error ? (
+                            <div className="flex h-full flex-col items-center justify-center gap-2 text-xs text-text-tertiary">
+                                <AlertCircle className="h-4 w-4" />
+                                {t("fileEditor.previewLoadFailed")}
+                                <button
+                                    className="rounded border border-border-default px-2 py-1 hover:bg-hover"
+                                    onClick={rasterImageBlob.retry}
+                                >
+                                    {t("fileEditor.previewRetry")}
+                                </button>
+                            </div>
+                        ) : (
+                            <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
+                                <Loader2 className="h-4 w-4 animate-spin" />
+                                {t("fileEditor.previewLoading")}
+                            </div>
+                        )
                     ) : (
                         <ImageViewer
                             src={activeImageSrc}

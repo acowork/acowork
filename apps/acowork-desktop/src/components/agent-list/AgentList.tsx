@@ -8,6 +8,7 @@ import { ConfirmDialog } from "../common/ConfirmDialog";
 import { AgentDetailDialog } from "./AgentDetailDialog";
 import { CloneDialog } from "./CloneDialog";
 import { PermissionDialog, type PermissionTarget } from "./PermissionDialog";
+import { AgentLibraryDialog } from "./AgentLibraryDialog";
 import { PublishWizard } from "./PublishWizard";
 import { CreateWizard } from "./CreateWizard";
 import { AgentAvatar } from "../common/AgentAvatar";
@@ -18,11 +19,9 @@ import { listRowHover } from "../../lib/ui-styles";
 import { COUNT_BADGE_NEUTRAL_CN } from "../common/sidebarCountBadge";
 import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor, MessagesSquare } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
-import { open } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse, type NodeInfo } from "../../lib/types";
+import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse } from "../../lib/types";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
-import { fetchNodes } from "../../lib/gateway-api";
 import { partitionAgentsByNode, nodeDisplayName } from "./partitionAgentsByNode";
 import { UserList, type UserListHandle } from "../user-list/UserList";
 import { GroupAvatarStack } from "../chat/GroupAvatarStack";
@@ -109,16 +108,19 @@ export function AgentList({ width }: AgentListProps) {
 
   const { addToast } = useToast();
   const agentMenu = useContextMenu<{ agentId: string }>();
-  const [installing, setInstalling] = useState(false);
   const addMenuRef = useRef<HTMLDivElement>(null);
   // Imported for the agent + button → "Create account" menu item. The actual
   // CreateAccountModal stays inside <UserList>; this ref opens it.
   const userListRef = useRef<UserListHandle>(null);
   const [searchQuery, setSearchQuery] = useState("");
   const [addMenuOpen, setAddMenuOpen] = useState(false);
-  // ADR-055 §6.13.3: when installing with >1 online node, the add-menu
-  // switches to a node picker (`NodeInfo[]`); `null` = default menu.
-  const [installNodes, setInstallNodes] = useState<NodeInfo[] | null>(null);
+  // Agent library dialog. Both install entries — the `+` menu and an empty
+  // node group — open the SAME component (PRD REQ-001); the node the empty
+  // group represents is only a pre-selection now, because the target picker
+  // moved into the dialog's footer (PRD D4).
+  const [libraryDialog, setLibraryDialog] = useState<{ open: boolean; nodeId?: string }>({
+    open: false,
+  });
 
   // "Create account" menu item gate. Mirrors the same canInvite logic used
   // by the old user-list banner "+" (see ADR-076 §决策 6): admins always,
@@ -255,59 +257,11 @@ export function AgentList({ width }: AgentListProps) {
     const handler = (e: MouseEvent) => {
       if (addMenuRef.current && !addMenuRef.current.contains(e.target as Node)) {
         setAddMenuOpen(false);
-        setInstallNodes(null);
       }
     };
     document.addEventListener("mousedown", handler);
     return () => document.removeEventListener("mousedown", handler);
   }, []);
-
-  /** Pick a .agent file and install it (optionally to a specific node). */
-  const doInstall = async (nodeId?: string) => {
-    try {
-      const selected = await open({
-        multiple: false,
-        filters: [{ name: t("agentList.filterAgentPackage"), extensions: ["agent"] }],
-      });
-      if (selected) {
-        setInstalling(true);
-        await useAgentStore.getState().installAgent(selected, nodeId);
-        addToast({ type: "success", message: t("agentList.agentInstalled") });
-        // Auto-select the newly installed agent
-        await fetchAgents();
-        const agentsNow = useAgentStore.getState().agents;
-        const ids = Object.keys(agentsNow);
-        if (ids.length > 0) {
-          selectAgent(ids[ids.length - 1]);
-        }
-      }
-    } catch (e) {
-      addToast({ type: "error", message: t("agentList.errorFailedToInstallAgent", { error: String(e) }) });
-    } finally {
-      setInstalling(false);
-    }
-  };
-
-  /**
-   * "Install Agent" menu action (ADR-055 §6.13.3): resolve the online
-   * nodes first. With >1 online node, switch the menu to a node picker;
-   * otherwise install straight to the sole/default node.
-   */
-  const handleInstall = async () => {
-    let onlineNodes: NodeInfo[] = [];
-    try {
-      onlineNodes = (await fetchNodes()).filter((n) => n.online);
-    } catch {
-      // Gateway unreachable — fall through to the default node; the
-      // install itself will surface the connection error.
-    }
-    if (onlineNodes.length > 1) {
-      setInstallNodes(onlineNodes);
-      return;
-    }
-    setAddMenuOpen(false);
-    await doInstall(onlineNodes.length === 1 ? onlineNodes[0].node_id : undefined);
-  };
 
   // ADR-087: "Create local Node" — spawns the bundled acowork-node on this
   // machine, bound to the signed-in account. The enrollment token is minted
@@ -860,8 +814,8 @@ export function AgentList({ width }: AgentListProps) {
                     group.node?.can_manage !== false && (
                       <button
                         type="button"
-                        onClick={() => void doInstall(group.nodeId)}
-                        disabled={!nodeOnline || installing}
+                        onClick={() => setLibraryDialog({ open: true, nodeId: group.nodeId })}
+                        disabled={!nodeOnline}
                         title={t("agentList.installAgent")}
                         data-testid="node-group-install"
                         className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
@@ -995,7 +949,6 @@ export function AgentList({ width }: AgentListProps) {
         <button
           onClick={() => {
             setAddMenuOpen(!addMenuOpen);
-            setInstallNodes(null);
           }}
           className="flex w-full items-center justify-center rounded-md px-0 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-nav-control focus-visible:bg-nav-control "
           aria-label={t("agentList.ariaLabelAddAgent")}
@@ -1004,106 +957,72 @@ export function AgentList({ width }: AgentListProps) {
         </button>
         {addMenuOpen && (
           <div className="absolute bottom-full left-1 z-50 mb-1 w-max rounded-md border border-border-outer bg-modal-surface py-1 shadow-lg">
-            {installNodes !== null ? (
-              <>
-                <div className="px-3 py-1.5 text-10 font-medium uppercase tracking-wide text-text-tertiary">
-                  {t("agentList.selectNode")}
-                </div>
-                {installNodes.map((node) => (
-                  <button
-                    key={node.node_id}
-                    onClick={() => {
-                      setAddMenuOpen(false);
-                      setInstallNodes(null);
-                      void doInstall(node.node_id);
-                    }}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
-                  >
-                    {/* Node install picker only lists online nodes, so the
-                        dot renders solid emerald — same online/offline
-                        badge as the group header (gray when offline). */}
-                    <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                    {node.node_name ?? node.hostname ?? node.node_id}
-                    <span className="ml-auto text-text-tertiary">
-                      {node.os ?? ""} {node.arch ?? ""}
-                    </span>
-                  </button>
-                ))}
+            <>
+              <button
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  setShowCreateWizard(true);
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
+              >
+                <Sparkles className="h-3.5 w-3.5" />
+                {t("agentList.createAgent")}
+              </button>
+              <button
+                onClick={() => {
+                  setAddMenuOpen(false);
+                  setLibraryDialog({ open: true });
+                }}
+                className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                {t("agentList.installAgent")}
+              </button>
+              {/* ADR-087: only meaningful in multi-user mode — in local
+                  mode the Gateway already auto-spawns the local node and
+                  there is no account to bind an owner to. */}
+              {selfAccount && (
                 <button
-                  onClick={() => setInstallNodes(null)}
-                  className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
+                  onClick={() => {
+                    void handleCreateLocalNode();
+                  }}
+                  disabled={creatingNode}
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
                 >
-                  {t("agentList.back")}
+                  <Server className="h-3.5 w-3.5" />
+                  {t("agentList.createLocalNode")}
                 </button>
-              </>
-            ) : (
-              <>
+              )}
+              {canInviteUser && (
                 <button
                   onClick={() => {
                     setAddMenuOpen(false);
-                    setShowCreateWizard(true);
+                    userListRef.current?.openCreate();
                   }}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
-                >
-                  <Sparkles className="h-3.5 w-3.5" />
-                  {t("agentList.createAgent")}
-                </button>
-                <button
-                  onClick={() => {
-                    void handleInstall();
-                  }}
-                  disabled={installing}
-                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
+                  data-testid="add-menu-create-user"
+                  className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
                 >
                   <Plus className="h-3.5 w-3.5" />
-                  {t("agentList.installAgent")}
+                  {t("account.createAccount")}
                 </button>
-                {/* ADR-087: only meaningful in multi-user mode — in local
-                    mode the Gateway already auto-spawns the local node and
-                    there is no account to bind an owner to. */}
-                {selfAccount && (
-                  <button
-                    onClick={() => {
-                      void handleCreateLocalNode();
-                    }}
-                    disabled={creatingNode}
-                    className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
-                  >
-                    <Server className="h-3.5 w-3.5" />
-                    {t("agentList.createLocalNode")}
-                  </button>
-                )}
-                {canInviteUser && (
-                  <button
-                    onClick={() => {
-                      setAddMenuOpen(false);
-                      userListRef.current?.openCreate();
-                    }}
-                    data-testid="add-menu-create-user"
-                    className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                    {t("account.createAccount")}
-                  </button>
-                )}
-                {/* ADR-098 P1: group creation rides the same `+` menu as the
-                    other creations (agent / account). Multi-user only —
-                    local mode has no groups section at all. */}
-                {selfAccount && (
-                  <button
-                    onClick={() => {
-                      setAddMenuOpen(false);
-                      setNewGroupOpen(true);
-                    }}
-                    data-testid="add-menu-new-group"
-                    className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
-                  >
-                    <MessagesSquare className="h-3.5 w-3.5" />
-                    {t("agentList.newGroup")}
-                  </button>
-                )}
-              </>
-            )}
+              )}
+              {/* ADR-098 P1: group creation rides the same `+` menu as the
+                  other creations (agent / account). Multi-user only —
+                  local mode has no groups section at all. */}
+              {selfAccount && (
+                <button
+                  onClick={() => {
+                    setAddMenuOpen(false);
+                    setNewGroupOpen(true);
+                  }}
+                  data-testid="add-menu-new-group"
+                  className="flex w-full items-center gap-2 border-t border-border-divider px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
+                >
+                  <MessagesSquare className="h-3.5 w-3.5" />
+                  {t("agentList.newGroup")}
+                </button>
+              )}
+            </>
           </div>
         )}
       </div>
@@ -1116,6 +1035,14 @@ export function AgentList({ width }: AgentListProps) {
         payload={agentMenu.payload}
         selectionAtOpen={agentMenu.selectionAtOpen}
         onClose={agentMenu.close}
+      />
+
+      {/* Agent library dialog — both install entries land here, so the Hub
+          catalog, the local-file tab and the target-node picker exist once. */}
+      <AgentLibraryDialog
+        open={libraryDialog.open}
+        initialNodeId={libraryDialog.nodeId}
+        onClose={() => setLibraryDialog({ open: false })}
       />
 
       {/* Confirm dialog */}

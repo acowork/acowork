@@ -37,6 +37,10 @@ import { create } from "zustand";
 import { getGatewayUrl } from "../lib/config";
 import { toWireAttachedItems, workspaceRefToAttachedItem } from "../lib/types";
 import type { WorkspaceRef } from "../lib/types";
+import {
+  TURN_INFLIGHT_DEADLINE_MS,
+  type InflightTurn,
+} from "../lib/chatTurnInflight";
 import { useAuthStore } from "./authStore";
 
 // ── Wire types (mirror `chat_sessions_api.rs` responses) ──────────────
@@ -68,7 +72,7 @@ export interface ChatMessageRow {
   seq: number;
   ts: number;
   from: string;
-  /** user_message | agent_message | interaction_request | system_notice */
+  /** user_message | agent_message | execution_round | system_notice */
   kind: string;
   body: string;
   to: string;
@@ -77,58 +81,68 @@ export interface ChatMessageRow {
     conversation_id?: string;
     in_reply_to?: string;
     /** Design 27 §5.3.1: the Agent instances an @-fan-out woke. Only that one
-     *  broadcast `user_message` carries it, and it is what marks the row as an
-     *  opened agent turn (see `chatTurnState.opensAgentTurn`). */
+     *  broadcast `user_message` carries it. ADR-105's default responder is in
+     *  `auto_routed_to`, never here — the human typed no name. */
     mentions?: string[];
     /** ADR-105: the group's default responder that took an UN-addressed
-     *  message. Never rendered as a mention chip (the human typed no name) —
-     *  it is what marks the row as an opened agent turn. */
+     *  message. Never rendered as a mention chip (the human typed no name),
+     *  and no longer an input to any rendering: the wait line claims this
+     *  device's OWN send (`inflight`), keyed by the row id its response
+     *  carried — ADR-106 D9 / D14 superseded ADR-105 D4's evidence slot. */
     auto_routed_to?: string;
     status?: string;
     repo?: string;
-    /** A PM task dispatch (`pm_task` origin): the task id, rendered as a
-     *  chip on the group-chat bubble so the human text stays clean (the
-     *  claim/submit playbook is model-facing only, never on this row). */
+    /** ADR-106 D13: the PM task this round works on, read off the routing
+     *  contract by the Runtime. Rendered as a chip on the block header — the
+     *  claim/submit playbook stays model-facing. */
     task_id?: string;
     notice_type?: string;
-    /** Design 27 §5.5.1: this row is the Gateway sweeper's fallback receipt —
-     *  the SYSTEM closing an unanswered request after the response deadline,
-     *  not the agent reporting its own outcome. Renders as a neutral system
-     *  line, never as an agent bubble claiming "my execution may have
-     *  crashed" in the agent's voice. */
-    fallback?: boolean;
-    /** On an `interaction_resolved` notice: how the card's request ended —
-     *  "answered"/"approved"/"rejected" (a human decided, on either surface)
-     *  vs "timeout"/"cancelled"/"stopped"/"turn_ended"/"unanswerable"/
-     *  "superseded" (nobody answered). */
-    resolution?: string;
-    /** ADR-099: reserved producer label (`chat_router`). No writer emits it
-     *  yet — the router's plain-text answer says "nothing to open" by
-     *  carrying an empty `agent_session_id` (design 29 §7.2), which is what
-     *  the existing drill-down already keys on. */
-    origin?: string;
-    /** Routing-resolved execution session that HANDLED a request — set on
-     *  the `turn_started` pointer and `interaction_request` card. */
+    /** ADR-106 D3: the round this reference row names. With
+     *  `agent_session_id` + `agent_instance_id` it is the block's address. */
+    round_id?: string;
+    /** The instance whose session ran the round (ADR-106 D4). */
+    agent_instance_id?: string;
+    /** The execution session that ran the round — set on an
+     *  `execution_round` reference row. */
     agent_session_id?: string;
-    /** ADR-100: the routing decision stamped on the turn pointer — "new" when
-     *  this turn starts a fresh task, "continue" when it reuses an
-     *  existing one. Drives the two-state `turn_started` reaction copy. */
-    turn_mode?: "new" | "continue";
+    /** ADR-106 D6: the reference row opened a NEW session rather than
+     *  continuing one; absent when the turn could not say. */
+    opened_new?: boolean;
+    /** The router's one-line statement of what the round was asked to do
+     *  (ADR-106 D13), carried on the reference row for the drill tooltip. */
+    assignment_brief?: string;
+    /** On a `session_choice` / `confirm_continue` notice (ADR-106 D6 levels 3
+     *  and 5): the sessions the human may pick, plus the always-offered escape
+     *  (`allow_new_task`). Empty-bodied rows — the surfaces own the wording. */
+    options?: Array<{
+      session_id: string;
+      label?: string;
+      status?: string;
+      origin?: string;
+      why?: string;
+    }>;
+    allow_new_task?: boolean;
     /** The SENDER's execution session (design 27 `source_agent_session_id`) —
-     *  on a 1:1 `agent_message` this is the exec session that produced the
-     *  reply, so every agent message (finished or empty) can drill into it. */
+     *  legacy: pre-ADR-106 rows named the run that produced a reply. */
     sender_session_id?: string;
-    interaction?: {
-      kind: string;
-      request_id: string;
-      question?: string;
-      options?: string[];
-    };
     /** ADR-100: display-only labels of the items the Chat-surface composer
      *  handed to this turn (an execution-view send writes to its own session
      *  instead — Rev. 8 / D14). Present only on the head row; never resolvable
      *  from here (see [`ExecAttachmentLabel`]). */
     exec_attachments?: ExecAttachmentLabel[];
+    /** ADR-106 revision 2026-11-04: the `@session` reference material the
+     *  human attached, pinned to their round by the Gateway at send time.
+     *  One quadruple `{agent_instance_id, session_id, round_id, terminal}`
+     *  per reference — coordinates only, never the body (the block renders
+     *  the material from the execution side). Read to draw the source chips
+     *  under a user bubble, and echoed back verbatim when a card-answer
+     *  re-delivers the same utterance. */
+    refs?: Array<{
+      agent_instance_id: string;
+      session_id: string;
+      round_id: string;
+      terminal: boolean;
+    }>;
   };
   attachment_ids?: string[];
   /** Files attached to this row. `thumb` is the upload-time sidecar token
@@ -159,6 +173,12 @@ export interface ChatSessionInfo {
   /** Group owner for a `user_group` (ADR-098 governance) — the founder is
    *  the first owner; absent for every other kind. */
   owner?: string;
+  /** Unix seconds when the backing PM project was archived. Only a
+   *  `project_group` can carry it, and it is the whole "项目群聊只能在项目
+   *  删除之后删除" precondition: PM stamps it when it deletes the project
+   *  (there is nothing left to re-create the channel), and until then the
+   *  delete is refused server-side. */
+  project_deleted_at?: number;
   /** ADR-105: the agent instance an un-addressed message in this group is
    *  delivered to; absent = such messages stay archive-only (the historical
    *  behaviour, and the default for a group of humans). */
@@ -269,6 +289,93 @@ export interface ChatSessionConfig {
   reasoning_effort?: string;
 }
 
+/** ADR-106 D6/D7's explicit address - the fact the human supplied, which no
+ *  client and no model may re-decide. It is sent only when the composer (or the
+ *  answer to a choice card) actually carries one: an absent address is what puts
+ *  a turn on the ladder's lower levels, and inventing one here would take the
+ *  Router's `answer` act away from a message that needs it. */
+export interface ChatAddress {
+  /** Group form of the second-level `@`: agent instance id -> the session the
+   *  human named for that agent. Keys must be inside `targets`. */
+  targetSessions?: Record<string, string>;
+  /** 1:1 form: the first level is degenerate there, so the pick is a single
+   *  session id. */
+  targetSession?: string;
+  /** D6's cheap escape beside every suggestion: continue nothing, new work.
+   *  1:1 form - there is exactly one recipient, so a flag is enough. */
+  forceNew?: boolean;
+  /** Group form of the same refusal, per agent instance id.
+   *  It cannot be a flag: one utterance fans out to several agents, and refusing
+   *  continuation for the one the human was answering must not quietly start a
+   *  new session for the others (the Gateway drops ids that are not targets of
+   *  this message, and drops any that already carry an address). */
+  forceNewFor?: string[];
+  /** The id of the row being RE-delivered. Answering a `session_choice` /
+   *  `confirm_continue` card re-sends the human's own utterance, now addressed,
+   *  and the backend dedupes on this id - so the transcript keeps one message
+   *  instead of drawing the same sentence twice. */
+  messageId?: string;
+  /** ADR-106 revision 2026-11-04 (reference redrawing): the execution-session
+   *  rounds the human attached as **material** via the second level of the `@`.
+   *  A reference is not a delivery — it never becomes `targetSessions`. Each
+   *  entry carries the coordinates the picker knows (`agentInstanceId` +
+   *  `sessionId`); the round is pinned server-side at send time. A card-answer
+   *  re-delivery instead echoes the ORIGINAL row's already-pinned `meta.refs`
+   *  verbatim, so it fills `roundId`/`terminal` too and the Gateway must not
+   *  re-decide the material of a sentence already written. */
+  refs?: ChatRefPick[];
+}
+
+/** One `@session` reference as the client states it. `roundId`/`terminal` are
+ *  only present on a card-answer echo — a freshly picked reference names just
+ *  the agent and session and lets the Gateway pin the round. */
+export interface ChatRefPick {
+  agentInstanceId: string;
+  sessionId: string;
+  roundId?: string;
+  terminal?: boolean;
+}
+
+/** `POST /api/intents/chat-message` response. `message_id` is the durable id
+ *  the Gateway gave the human's row — the key every outcome row threads itself
+ *  to under `meta.in_reply_to`, which is why a client claim cannot invent one.
+ *  A delivery that failed answers 200 with `status: "failed"`: the row is
+ *  already durable, so only the delivery did not land — and that path writes no
+ *  receipt back into the Chat (the 1:1 arm of `deliver_chat_message`), so no
+ *  claim may wait for a row that will never exist. */
+interface ChatSendResponse {
+  message_id: string;
+  status: string;
+  error_code?: string;
+  error?: string;
+}
+
+/** `POST /api/intents/mentions` response: the ONE `user_message` row's id
+ *  (what every outcome threads to), plus one delivery result per target it
+ *  woke. `routed: "archived"` carries an empty `results` — nobody was asked. */
+interface MentionSendResponse {
+  message_id: string;
+  routed?: string;
+  results?: Array<{ target?: string; message_id?: string; status?: string }>;
+}
+
+/** Map the client's reference picks to the wire `refs` array (snake_case). A
+ *  fresh pick sends `{agent_instance_id, session_id}`; a card-answer echo also
+ *  carries `round_id`/`terminal` so the Gateway passes it through instead of
+ *  re-pinning the material of a sentence already written. Empty is not sent —
+ *  its absence is "the human attached no material" on the wire. */
+function toWireRefs(
+  refs?: ChatRefPick[],
+): Array<Record<string, string | boolean>> | undefined {
+  if (!refs || refs.length === 0) return undefined;
+  return refs.map((r) => ({
+    agent_instance_id: r.agentInstanceId,
+    session_id: r.sessionId,
+    ...(r.roundId ? { round_id: r.roundId } : {}),
+    ...(r.terminal !== undefined ? { terminal: r.terminal } : {}),
+  }));
+}
+
 /** Post one turn into a Chat session. Goes through the intent channel
  *  (`POST /api/intents/chat-message`), NOT the session-scoped write: the
  *  durable row lands before delivery resolves (design 27 §5.1), and only
@@ -290,19 +397,30 @@ function sendChatMessage(
   sessionConfig?: ChatSessionConfig,
   attachmentIds?: string[],
   attachedItems?: unknown[],
-): Promise<void> {
-  return req<void>("POST", "/api/intents/chat-message", {
+  address?: ChatAddress,
+): Promise<ChatSendResponse> {
+  return req<ChatSendResponse>("POST", "/api/intents/chat-message", {
     chat_session_id: chatSessionId,
     from_user: me,
     text,
     in_reply_to: inReplyTo ?? "",
     ...(sessionConfig ? { session_config: sessionConfig } : {}),
     ...(attachmentIds && attachmentIds.length > 0 ? { attachment_ids: attachmentIds } : {}),
+    ...(address?.targetSession ? { target_session: address.targetSession } : {}),
+    ...(address?.forceNew ? { force_new: true } : {}),
+    ...(address?.messageId ? { message_id: address.messageId } : {}),
     // ADR-046 workspace references picked with "Add to Chat". The Gateway
     // forwards them to whichever execution session takes this routed turn
     // (design 27 §4.2.1) — they are paths, not bytes, so nothing is copied
     // into the Chat store.
     ...(attachedItems && attachedItems.length > 0 ? { attached_items: attachedItems } : {}),
+    // ADR-106 revision 2026-11-04: `@session` reference material. The Gateway
+    // pins each round before writing the row, so a bare pick sends only
+    // (agent, session); a card-answer echo arrives pre-pinned.
+    ...(() => {
+      const wireRefs = toWireRefs(address?.refs);
+      return wireRefs ? { refs: wireRefs } : {};
+    })(),
   });
 }
 
@@ -322,13 +440,36 @@ function fanoutMentions(
   text: string,
   targets: string[],
   attachmentIds?: string[],
-): Promise<void> {
-  return req<void>("POST", "/api/intents/mentions", {
+  address?: ChatAddress,
+): Promise<MentionSendResponse> {
+  const targetSessions = address?.targetSessions ?? {};
+  // A refusal to continue is only ever sent for a target with no address: the
+  // two are contradictory instructions, and the Gateway answers the pair with a
+  // 400 rather than picking one.
+  const forceNewFor = [
+    ...new Set([
+      ...(address?.forceNew ? targets : []),
+      ...(address?.forceNewFor ?? []),
+    ]),
+  ].filter((t) => !targetSessions[t]);
+  return req<MentionSendResponse>("POST", "/api/intents/mentions", {
     chat_session_id: chatSessionId,
     from_user: me,
     targets,
     text,
     attachment_ids: attachmentIds ?? [],
+    // An empty map is not sent as `{}`-noise: the field is optional server-side
+    // and its absence is what "the human named no session" means on the wire.
+    ...(Object.keys(targetSessions).length > 0 ? { target_sessions: targetSessions } : {}),
+    ...(forceNewFor.length > 0 ? { force_new_for: forceNewFor } : {}),
+    ...(address?.messageId ? { message_id: address.messageId } : {}),
+    // ADR-106 revision 2026-11-04: `@session` reference material (see the 1:1
+    // entry). A reference is not a delivery, so it never overlaps the (now
+    // answer-only) `target_sessions`.
+    ...(() => {
+      const wireRefs = toWireRefs(address?.refs);
+      return wireRefs ? { refs: wireRefs } : {};
+    })(),
   });
 }
 
@@ -432,99 +573,11 @@ export async function createChatAttachmentObjectUrl(
   return URL.createObjectURL(blob);
 }
 
-// ── Durable card projections (design 27 §5.5.4) ──────────────────────
-// The chat window is a pure event log — there is no read-time turn
-// projection any more. "Still running" is expressed by the next round's own
-// `turn_started` event row, not a live mirror (that was the removed status
-// card, whose two truths could not stay in sync).
-
-/**
- * §5.5.4: the cards that are no longer answerable.
- *
- * A card closes when a later row answers it — a human reply, or the
- * Runtime's `interaction_resolved` notice. It ALSO closes when the turn that
- * produced it has already written its terminal `agent_message`: the run is
- * over, so the request behind the card is dead even if nobody stamped a
- * closure on it. That second rule is not decoration — it is what makes the
- * pre-closure transcripts (and any write-back that died before the notice
- * landed) render correctly, instead of showing a permanent idle status card
- * with a button that can never work.
- *
- * Two facts keep the rule from closing a live card early:
- * - `status: "waiting"` is the outcome the Runtime writes when a turn ends
- *   *because* a card is still open (§5.5.4 pause): it releases the slot and
- *   expects an answer, so such a row does not close anything;
- * - the terminal row must belong to the same execution session as the card
- *   (a group fan-out answers one trigger from several agents — one agent
- *   finishing says nothing about another agent's live request). Missing
- *   session ids fall back to trigger-only matching so older rows still heal.
- */
-export function closedCardIds(rows: ChatMessageRow[]): Set<string> {
-  const closed = new Set(rows.map((r) => r.meta?.in_reply_to).filter((s): s is string => !!s));
-  const terminals = rows
-    .map((r, i) => ({ r, i }))
-    .filter(
-      ({ r }) =>
-        r.kind === "agent_message" &&
-        !!r.meta?.in_reply_to &&
-        (r.meta?.status ?? "completed") !== "waiting",
-    );
-  rows.forEach((card, i) => {
-    if (card.kind !== "interaction_request") return;
-    const mid = card.meta?.message_id;
-    if (!mid || closed.has(mid)) return;
-    const sid = card.meta?.agent_session_id;
-    const finished = terminals.some(
-      ({ r, i: t }) =>
-        // Strictly after the card: a terminal row written *before* it belongs
-        // to an earlier round and cannot speak for this request.
-        t > i &&
-        r.meta?.in_reply_to === card.meta?.in_reply_to &&
-        (!sid || !r.meta?.sender_session_id || r.meta.sender_session_id === sid),
-    );
-    if (finished) closed.add(mid);
-  });
-  return closed;
-}
-
-/** Cards answered on THIS surface — a `user_message` row addressed to the
- *  card. The chat-side subset of [`humanAnsweredCardIds`]: the surface uses
- *  it to suppress the Runtime's duplicate `interaction_resolved` notice, so
- *  a chat-side answer is recorded exactly once (by its own event line). */
-export function chatAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
-  return new Set(
-    rows
-      .filter((r) => r.kind === "user_message")
-      .map((r) => r.meta?.in_reply_to)
-      .filter((s): s is string => !!s),
-  );
-}
-
-/** Cards a human actually answered. Two shapes carry that fact:
- *  - a `user_message` addressed to the card (answered on THIS surface);
- *  - the Runtime's `interaction_resolved` notice with a decision resolution
- *    ("answered"/"approved"/"rejected") — answered on the execution surface,
- *    where the reply never rides the chat answer channel. A non-decision
- *    resolution (timeout / stopped / turn_ended / cancelled / unanswerable /
- *    superseded) means nobody answered, so it stays out.
- *  Narrower than [`closedCardIds`]: it exists so a surface can tell "you
- *  answered this" from "this request is just no longer open". */
-export function humanAnsweredCardIds(rows: ChatMessageRow[]): Set<string> {
-  const answered = chatAnsweredCardIds(rows);
-  for (const r of rows) {
-    const mid = r.meta?.in_reply_to;
-    if (
-      mid &&
-      r.kind === "system_notice" &&
-      r.meta?.notice_type === "interaction_resolved" &&
-      DECISION_RESOLUTIONS.has(r.meta?.resolution ?? "")
-    )
-      answered.add(mid);
-  }
-  return answered;
-}
-
-const DECISION_RESOLUTIONS = new Set(["answered", "approved", "rejected"]);
+// ADR-106 D8: there is no chat-side card state to project. A round's pending
+// decision is the round's own state, read off its projection and answered at
+// the execution session's write entry — so the closed/answered card id sets this
+// module used to export are gone, along with the `interaction_request` rows they
+// indexed.
 
 // ── Store ──────────────────────────────────────────────────────────────
 
@@ -564,7 +617,24 @@ interface Window {
 interface ChatSessionStore {
   byAgent: Record<string, AgentChatState>;
   windows: Record<string, Window>;
+  /** The POST this device has in flight. Deliberately NOT the wait-line / lock
+   *  signal on its own: a POST answers as soon as delivery lands (~150 ms),
+   *  while the turn's first durable row can be a minute behind it — that window
+   *  is `inflight`'s job. */
   sending: Record<string, boolean>;
+  /** The turn this device sent and has not seen an outcome for, per Chat
+   *  session — ADR-106 D9's first-person claim, restored to the whole window
+   *  the old `pendingTurn(rows, …)` used to cover without ever reading the
+   *  transcript's shape. Written from the send's own response (the id the
+   *  Gateway gave the human's row), dropped when the surface sees a row answer
+   *  it (`settleTurn`) or when the deadline passes (`expireTurn`). In-memory
+   *  only: a reload has no send of its own to claim, and so shows no wait line
+   *  — the deliberate D9 boundary. */
+  inflight: Record<string, InflightTurn | undefined>;
+  /** Stop claiming a turn because the transcript already answers it. */
+  settleTurn(chatSessionId: string, messageId: string): void;
+  /** Stop claiming a turn because its outcome rows never arrived. */
+  expireTurn(chatSessionId: string, messageId: string): void;
   /** Cache of the server-side `session_config` draft, keyed by chat
    *  session id. The session row is the source of truth (design 27 §4.5);
    *  this slot is hydrated by `openAgent` and updated by `saveDraft`'s
@@ -590,14 +660,17 @@ interface ChatSessionStore {
    *  row and fans out. `targets` = the agents the human @-ed; an EMPTY list is
    *  a positive instruction since ADR-105 — the Gateway delivers to the group's
    *  default responder, or archives when the group has none. `inReplyTo`
-   *  answers a card (routes through the 1:1 channel, which the backend also
-   *  accepts for group sessions). */
+   *  addresses a round's block (ADR-106 D6 level 1): it rides the 1:1 channel,
+   *  which the backend also accepts for group sessions and resolves to the
+   *  round's own agent and execution session. `address` is the second-level `@`
+   *  (D7) - the session the human named, or the refusal to continue anything. */
   sendGroupText(
     chatSessionId: string,
     text: string,
     targets: string[],
     inReplyTo?: string,
     attachmentIds?: string[],
+    address?: ChatAddress,
   ): Promise<boolean>;
   setMode(agentId: string, mode: "chat" | "exec"): void;
   /** Persist the Chat surface's full seed draft to the session row,
@@ -621,6 +694,7 @@ interface ChatSessionStore {
     inReplyTo?: string,
     sessionConfig?: ChatSessionConfig,
     attachmentIds?: string[],
+    address?: ChatAddress,
   ): Promise<boolean>;
   upload(chatSessionId: string, file: File): Promise<ChatAttachmentMeta>;
   /** The doorbell reaction: re-read every session that could be on screen. */
@@ -675,8 +749,13 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   openGroupIds: {},
   windows: {},
   sending: {},
+  inflight: {},
   draft: {},
   attachedContext: {},
+
+  settleTurn: (chatSessionId, messageId) => dropTurn(chatSessionId, messageId),
+
+  expireTurn: (chatSessionId, messageId) => dropTurn(chatSessionId, messageId),
 
   addAttachedContext: (chatSessionId, ref) => {
     set((s) => {
@@ -740,26 +819,39 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     await get().refresh(chatSessionId, true);
   },
 
-  sendGroupText: async (chatSessionId, text, targets, inReplyTo, attachmentIds) => {
+  sendGroupText: async (chatSessionId, text, targets, inReplyTo, attachmentIds, address) => {
     const me = useAuthStore.getState().account?.user_id;
     if (!me) return false;
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }));
     let ok = false;
     try {
+      // Which row this send owes a claim on, once the response says somebody
+      // took it. `null` for a send nothing was delivered to.
+      let claimed: string | null = null;
       if (inReplyTo) {
-        // Card answer: the intent channel routes it to the card's agent
-        // (the gateway resolves the card row; groups accepted per §5.5.4).
-        // Card replies never carry attachments (mirrors the 1:1 channel).
-        if (attachmentIds?.length) throw new Error("card replies cannot include attachments");
-        await sendChatMessage(me, chatSessionId, text, inReplyTo);
+        // Reply to a round's block: the 1:1 channel resolves the reference row
+        // into its agent and execution session (ADR-106 D6 level 1); group
+        // sessions are accepted for exactly this case (design 27 §5.5.4). A
+        // level-2 address cannot ride this branch - level 1 already named the
+        // session, and the backend drops `force_new` wherever an address exists.
+        const resp = await sendChatMessage(me, chatSessionId, text, inReplyTo, undefined, attachmentIds, undefined, address);
+        if (resp.status === "delivered") claimed = resp.message_id;
       } else {
         // Every group send takes the one entry: `targets` carries the @-ed
         // agents, and an empty list asks the Gateway to apply the group's
         // default responder (ADR-105) or archive. Splitting the two cases
         // client-side is what used to make an un-addressed reply vanish.
-        await fanoutMentions(me, chatSessionId, text, targets, attachmentIds);
+        const resp = await fanoutMentions(me, chatSessionId, text, targets, attachmentIds, address);
+        // One row, N deliveries: the claim is on the ROW's id, and any target
+        // that took the turn owes that row an answer. `archived` (no target)
+        // and an all-failed fan-out owe none — a failed target already wrote its
+        // own receipt server-side, and an archived row is the whole outcome.
+        if ((resp.results ?? []).some((r) => r.status === "delivered")) {
+          claimed = resp.message_id;
+        }
       }
       ok = true;
+      if (claimed) armTurn(chatSessionId, claimed);
     } catch (e) {
       console.warn("[chatSessionStore] group send failed:", e);
     }
@@ -990,25 +1082,27 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     }));
   },
 
-  sendText: async (chatSessionId, text, inReplyTo, sessionConfig, attachmentIds) => {
+  sendText: async (chatSessionId, text, inReplyTo, sessionConfig, attachmentIds, address) => {
     const me = useAuthStore.getState().account?.user_id;
     if (!me) return false;
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }));
     let ok = false;
     try {
-      if (inReplyTo && attachmentIds?.length) throw new Error("card replies cannot include attachments");
-      // Workspace references picked with "Add to Chat" ride this turn as the
-      // ADR-046 union. A card answer continues an existing turn through the
-      // answer channel, which has no attachment arm, so refs are carried on a
-      // plain message only — and cleared only when that message landed, so a
-      // failed send leaves the human's chips where they were.
+      // ADR-106 D6 level 1: a reply to a round's block is an ordinary
+      // `chat-message` turn that also carries an address, so attachments and
+      // workspace refs ride it exactly as they do on a plain message (the card
+      // answers that used to own this branch are gone — D8 moved them to the
+      // execution session's write entry).
       const refs = get().attachedContext[chatSessionId] ?? [];
       const attachedItems =
-        inReplyTo || refs.length === 0
-          ? undefined
-          : toWireAttachedItems(refs.map(workspaceRefToAttachedItem));
-      await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds, attachedItems);
+        refs.length === 0 ? undefined : toWireAttachedItems(refs.map(workspaceRefToAttachedItem));
+      const resp = await sendChatMessage(me, chatSessionId, text, inReplyTo, sessionConfig, attachmentIds, attachedItems, address);
       ok = true;
+      // The claim starts here, from the id the Gateway gave THIS row. A failed
+      // delivery is not claimed: that arm writes no receipt into the Chat, so
+      // a claim would wait for a row that cannot exist and lock the composer
+      // for the whole deadline.
+      if (resp.status === "delivered") armTurn(chatSessionId, resp.message_id);
       if (attachedItems) {
         set((s) => ({ attachedContext: { ...s.attachedContext, [chatSessionId]: [] } }));
       }
@@ -1029,6 +1123,49 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
 
   wake: () => wakeCoalesced(get),
 }));
+
+// ── In-flight turn claims (ADR-106 D9, restored window) ────────────────
+//
+// Module-level rather than per-view on purpose: the claim belongs to the Chat
+// session, so closing the tab must not strand a turn nothing is left to expire.
+// One timer per session — a second send replaces the claim, and the timer names
+// the messageId it may clear so a stale deadline cannot drop a fresher turn's
+// claim. `TURN_INFLIGHT_DEADLINE_MS` is the backstop for the case the surface
+// cannot see: a Runtime that died between delivery and round open writes no
+// outcome row, and without a deadline the composer would stay locked for good.
+
+const turnTimers = new Map<string, ReturnType<typeof setTimeout>>();
+
+/** Claim the turn this device just sent, and arm its deadline. */
+function armTurn(chatSessionId: string, messageId: string): void {
+  if (!messageId) return;
+  useChatSessionStore.setState((s) => ({
+    inflight: { ...s.inflight, [chatSessionId]: { messageId, at: Date.now() } },
+  }));
+  const prev = turnTimers.get(chatSessionId);
+  if (prev !== undefined) clearTimeout(prev);
+  turnTimers.set(
+    chatSessionId,
+    setTimeout(() => {
+      turnTimers.delete(chatSessionId);
+      dropTurn(chatSessionId, messageId);
+    }, TURN_INFLIGHT_DEADLINE_MS),
+  );
+}
+
+/** Release the claim — only if `messageId` is still the one being claimed. */
+function dropTurn(chatSessionId: string, messageId: string): void {
+  const cur = useChatSessionStore.getState().inflight[chatSessionId];
+  if (!cur || cur.messageId !== messageId) return;
+  const timer = turnTimers.get(chatSessionId);
+  if (timer !== undefined) {
+    clearTimeout(timer);
+    turnTimers.delete(chatSessionId);
+  }
+  useChatSessionStore.setState((s) => ({
+    inflight: { ...s.inflight, [chatSessionId]: undefined },
+  }));
+}
 
 // ── Doorbell wake coalescing (render-perf L3) ──────────────────────
 // The doorbell is content-free — it says only "something changed

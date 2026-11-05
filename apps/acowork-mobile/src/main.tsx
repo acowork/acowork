@@ -7,6 +7,8 @@ import { setDirectorySource, useAgentStore } from './stores/agentStore'
 import { httpChatTransport, fetchAgents, fetchNodes, fetchDirectory, tokenClaims, userChatChangedTopic } from './lib/api'
 import { setRealtimeDeps } from './lib/realtime'
 import { setPresenceDeps, startPresence, stopPresence } from './lib/presence'
+import { blockRefOf } from './lib/chatBlocks'
+import { noteRoundState } from './stores/chatBlockStore'
 import { setChatPushChannel, wakeUserChat } from './stores/userChatStore'
 import { wakeAgentChat } from './stores/chatSessionStore'
 import { startSafeAreaSync } from './lib/safeArea'
@@ -74,6 +76,18 @@ setPresenceDeps({
   onUpdate: (agentId, update) => useAgentStore.getState().applyPresence(agentId, update.status),
   onSessionState: (agentId, sessionId, status) =>
     useAgentStore.getState().applySessionState(agentId, sessionId, status),
+  // ADR-106 revision (2026-11-03): a round reached a terminal outcome or parked
+  // on a card. The signal is the notification face ADR-106's `exec → chat`
+  // zero-write left out — it names the round and the Chat, never the content, so
+  // the block store re-reads its projection and nothing else moves.
+  onRoundState: (agentId, sessionId, sig) => {
+    const ref = blockRefOf({
+      agent_instance_id: agentId,
+      agent_session_id: sessionId,
+      round_id: sig.roundId,
+    })
+    if (ref) noteRoundState(sig.chatSessionId, ref)
+  },
   chatTopic: () => {
     const me = useAuthStore.getState().me?.user_id
     return me ? userChatChangedTopic(me) : null

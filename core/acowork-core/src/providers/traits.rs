@@ -474,6 +474,40 @@ pub enum ContentPart {
     /// Image URL (data:image/...;base64,... or https://...)
     #[serde(rename = "image_url")]
     ImageUrl { image_url: ImageUrlPart },
+    /// A whole document handed to a model that reads documents natively
+    /// (Anthropic `document`, OpenAI `file`, Responses `input_file`).
+    ///
+    /// Deliberately not an `ImageUrl` with a `data:application/pdf` URI: the
+    /// two differ in what the model is asked to do with the bytes — an image
+    /// part is rasterised, a document part is parsed, pages and layout
+    /// included — and providers take different fields for it. Keeping them
+    /// apart is what lets the capability filter drop one and keep the other.
+    #[serde(rename = "document")]
+    Document { document: DocumentPart },
+}
+
+/// The only media type [`DocumentPart`] is built for. Anthropic's document
+/// block accepts PDFs and nothing else, and PDF is the one format every
+/// provider that takes file input accepts, so the runtime never proposes
+/// another.
+pub const PDF_MEDIA_TYPE: &str = "application/pdf";
+
+/// Document payload for a ContentPart
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DocumentPart {
+    /// Media type, always [`PDF_MEDIA_TYPE`] for parts the runtime derives.
+    pub media_type: String,
+    /// The file's bytes, base64 — **bare**, no `data:` prefix. Providers that
+    /// want a data URI build it themselves; storing the prefix here would put
+    /// the same string through two different conventions.
+    pub data: String,
+    /// Name the model sees. Carries the `.pdf` extension the upload pipeline
+    /// classified the blob by, and is what a document block labels itself.
+    pub filename: String,
+    /// Page count, when it could be read cheaply (for token estimation).
+    /// Absent means "unknown", never "zero" — see the counter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub page_count: Option<u32>,
 }
 
 /// Image URL details for a ContentPart
@@ -552,6 +586,26 @@ impl ContentPart {
                 detail: Some(detail.into()),
                 width: None,
                 height: None,
+            },
+        }
+    }
+
+    /// Create a document content part from bare base64 bytes.
+    ///
+    /// Takes the payload already encoded rather than `&[u8]`: the encoding
+    /// belongs to the pipeline that reads the blob (it needs the bytes for the
+    /// page count as well), and a part built twice must not encode twice.
+    pub fn document(
+        data: impl Into<String>,
+        filename: impl Into<String>,
+        page_count: Option<u32>,
+    ) -> Self {
+        ContentPart::Document {
+            document: DocumentPart {
+                media_type: PDF_MEDIA_TYPE.to_string(),
+                data: data.into(),
+                filename: filename.into(),
+                page_count,
             },
         }
     }
@@ -1129,6 +1183,38 @@ mod tests {
                 width: None,
                 height: None,
             },
+        }
+    }
+
+    /// The `type` tag is what a provider's serialiser keys on, and a document
+    /// must not read as an image with an odd MIME.
+    #[test]
+    fn document_part_is_tagged_and_carries_bare_bytes() {
+        let json =
+            serde_json::to_value(ContentPart::document("JVBERi0=", "report.pdf", Some(3))).unwrap();
+        assert_eq!(json["type"], "document");
+        assert_eq!(json["document"]["media_type"], "application/pdf");
+        assert_eq!(json["document"]["filename"], "report.pdf");
+        assert_eq!(json["document"]["data"], "JVBERi0=");
+        assert_eq!(json["document"]["page_count"], 3);
+        // An unknown page count is absent, never a claim of zero pages.
+        let unknown =
+            serde_json::to_value(ContentPart::document("JVBERi0=", "x.pdf", None)).unwrap();
+        assert!(unknown["document"].get("page_count").is_none());
+    }
+
+    /// Round-tripping matters because `content_parts` travel through the
+    /// session JSONL and come back as a request.
+    #[test]
+    fn document_part_round_trips_through_json() {
+        let part = ContentPart::document("JVBERi0=", "report.pdf", Some(12));
+        let back: ContentPart = serde_json::from_str(&serde_json::to_string(&part).unwrap()).unwrap();
+        match back {
+            ContentPart::Document { document } => {
+                assert_eq!(document.filename, "report.pdf");
+                assert_eq!(document.page_count, Some(12));
+            }
+            other => panic!("expected a document, got {other:?}"),
         }
     }
 

@@ -90,6 +90,13 @@ pub struct DecisionRecord {
     pub info_rounds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens: Option<u64>,
+    /// Completion tokens of the turn's final model call. Absent on lines
+    /// written before the field existed (`#[serde(default)]`), exactly like
+    /// the other usage fields. The JSONL stays an observability surface —
+    /// the token ledger (`chat_token_usage`) is the accounting source, and
+    /// it records every call of the turn, not just this one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -163,6 +170,7 @@ mod tests {
             attachment_only: false,
             info_rounds: Some(1),
             prompt_tokens: Some(3120),
+            completion_tokens: Some(48),
             cache_read_tokens: Some(2816),
             cache_write_tokens: Some(0),
         }

@@ -112,8 +112,15 @@ export function DocRichEditor({
   }, [editor, contentMd]);
 
   // 只读热切换（对齐 DocFlow setEditable 不重建实例）。
+  //
+  // `emitUpdate=false` 是必须的：Tiptap v3 的 `setEditable(editable,
+  // emitUpdate = true)` 会发出一个 **update 事件**（哪怕 doc 没变），而
+  // 本组件的 `onUpdate` 把"编辑器序列化结果 ≠ 载入时的原始 markdown"当
+  // 成用户编辑。编辑器在载入时会把 markdown 规范化（`* a` → `- a`、
+  // 两空格硬换行 → `\`、脚注节点丢失…），于是"打开即未保存"——
+  // 任何正文含这些构造的文档一点开就是 dirty，切换文档就弹丢弃确认。
   useEffect(() => {
-    if (editor) editor.setEditable(!readOnly);
+    if (editor) editor.setEditable(!readOnly, false);
   }, [editor, readOnly]);
 
   const charCount =

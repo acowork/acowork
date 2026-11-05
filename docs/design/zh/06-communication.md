@@ -364,7 +364,6 @@ struct IntentError {
 - `from` 字段由 Gateway 在收到 Agent 的 IntentSend 请求后自动填充，Agent 不可自行指定。这防止了身份伪造攻击。
 - `id` 由 Gateway 生成（UUID v4），确保全局唯一。Agent 在 IntentSend 请求中无需提供 id。
 - `params` 的大小限制为 64 KB（超过时 Gateway 拒绝转发），防止大 payload 攻击。
-```
 
 ### 2.2 Capability Registry
 

@@ -1,6 +1,21 @@
 <?xml version="1.0" encoding="UTF-8"?>
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 396 96" width="396" height="96" role="img" aria-label="ACowork">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 364.25 96" width="364.25" height="96" role="img" aria-label="ACowork">
   <title>ACowork</title>
+  <!-- Frame = the artwork's ink box + a uniform 6px gutter, so the mark reads
+       centred in whatever frame renders it (workspace preview, login, splash).
+       Ink box (solid geometry, shadow excluded) is x 14..366.25, y 2..86 in the
+       artwork's own coordinates; translate(-8 4) moves its top-left corner to
+       (6, 6), hence viewBox 0 0 364.25 96. Keep them in step:
+         width  = ink width  + 2*6 = 352.25 + 12
+         height = ink height + 2*6 = 84.00 + 12
+       Re-measure rather than estimate: render at 4x on a transparent
+       background and take the alpha bounding box twice: once as shipped,
+       once with the drop-shadow filter dropped from the chip rect.
+       The wordmark is live <text>, and an SVG loaded through <img> cannot use
+       the app's @font-face — it lands on whatever local font matches. textLength
+       pins the advance so the right gutter does not move with the font (Segoe UI /
+       Arial / Liberation / SF differ by up to 8px; Verdana would overflow).
+       lengthAdjust="spacing" adjusts tracking only — glyphs stay undistorted. -->
   <defs>
     <!--
       Monochrome gray mark for empty-chat backgrounds, single palette
@@ -34,6 +49,7 @@
       <circle cx="61.69" cy="56.62" r="5.69" fill="black"/>
     </mask>
   </defs>
+  <g transform="translate(-8 4)">
   <!-- near-black neutral chip -->
   <rect x="14" y="2" width="84" height="84" rx="20" ry="20" fill="url(#bg)" filter="url(#shadow)"/>
   <!-- in-mark A: two strokes + a circle (replaces the crossbar).
@@ -63,7 +79,7 @@
     <circle cx="56" cy="56.62" r="11.38" fill="#C8C8C8" mask="url(#bite)"/>
   </g>
   <!-- wordmark: Co > work in weight to preserve the brand's emphasis order -->
-  <text x="106" y="71"
+  <text textLength="257.53" lengthAdjust="spacing" x="106" y="71"
         font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif"
         font-weight="700"
         font-size="74"
@@ -71,4 +87,5 @@
         letter-spacing="-2.1">
     <tspan fill="#C8C8C8">Co</tspan><tspan fill="#7A7A7A" dx="4">work</tspan>
   </text>
+  </g>
 </svg>

@@ -317,6 +317,21 @@ pub struct ChatRouterConfig {
     /// Router call timeout in ms. `None` = 60,000.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_ms: Option<u64>,
+    /// Output ceiling for one router turn. `None` = 8,192.
+    ///
+    /// This bounds the *generated* side, and it is the one knob a router turn
+    /// needs that the answering agent's own `[config].max_output_tokens` does
+    /// not supply: the router may run a different (cheaper, faster) model than
+    /// the execution session, so inheriting the agent's number would be wrong
+    /// exactly when the two models differ.
+    ///
+    /// Why it exists at all: `exec_session_create` is the only act that asks the
+    /// model for long-form output — a self-contained brief for a session that starts with
+    /// no history. The original hardcoded 2,048 was hit exactly by a brief that
+    /// ran long, the response was truncated mid-tool-call, and the turn fell
+    /// back to a plain chat reply: the user got an "answer" and no session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<u32>,
     /// Token budget for the chat history projected into the router
     /// context (`Block B`). `None` = 8,000.
     ///
@@ -356,6 +371,19 @@ impl ChatRouterConfig {
     /// could not be filled from one page anyway.
     pub const DEFAULT_HISTORY_MAX_TOKENS: usize = 8_000;
     pub const DEFAULT_MAX_CANDIDATES: usize = 10;
+    /// Output ceiling for one router turn, used when the config says nothing.
+    ///
+    /// Sized for `exec_session_create`: the brief is the only long-form output a router
+    /// turn produces, and it has to fit *inside* the same budget as the tool
+    /// call's JSON envelope. 8,192 matches the `max_output_tokens` the shipped
+    /// agent manifests allow their own execution sessions, so the router is no
+    /// longer the narrowest pipe in the agent.
+    pub const DEFAULT_MAX_OUTPUT_TOKENS: u32 = 8_192;
+    /// Floor: below this an `exec_session_create` brief cannot be written at all, so a
+    /// hand-edited config cannot silently reintroduce the truncation bug.
+    pub const MIN_MAX_OUTPUT_TOKENS: u32 = 1_024;
+    /// Ceiling: keeps one router turn affordable regardless of the config.
+    pub const MAX_MAX_OUTPUT_TOKENS: u32 = 32_768;
 
     /// Master switch, defaulting to on.
     pub fn is_enabled(&self) -> bool {
@@ -372,6 +400,18 @@ impl ChatRouterConfig {
         self.timeout_ms
             .unwrap_or(Self::DEFAULT_TIMEOUT_MS)
             .clamp(1_000, 300_000)
+    }
+
+    /// Clamped output ceiling for one router turn. The lower bound keeps an
+    /// `exec_session_create` brief writable; the upper bound keeps a single turn
+    /// affordable no matter what a hand-edited config says.
+    pub fn max_output_tokens(&self) -> u32 {
+        self.max_output_tokens
+            .unwrap_or(Self::DEFAULT_MAX_OUTPUT_TOKENS)
+            .clamp(
+                Self::MIN_MAX_OUTPUT_TOKENS,
+                Self::MAX_MAX_OUTPUT_TOKENS,
+            )
     }
 
     /// Clamped history token budget. The lower bound keeps enough context
@@ -1595,6 +1635,10 @@ mod tests {
             cfg.max_candidates(),
             ChatRouterConfig::DEFAULT_MAX_CANDIDATES
         );
+        assert_eq!(
+            cfg.max_output_tokens(),
+            ChatRouterConfig::DEFAULT_MAX_OUTPUT_TOKENS
+        );
     }
 
     #[test]
@@ -1607,24 +1651,30 @@ mod tests {
             history_max_tokens: Some(1),
             history_window: Some(0),
             max_candidates: Some(0),
+            max_output_tokens: Some(0),
             ..Default::default()
         };
         assert_eq!(cfg.timeout_ms(), 1_000);
         assert_eq!(cfg.history_max_tokens(), 1_000);
         assert_eq!(cfg.history_rows(), Some(1));
         assert_eq!(cfg.max_candidates(), 1);
+        // Floor: a brief cannot be written at all below this, so the truncation
+        // bug cannot be reintroduced by a hand-edited config.
+        assert_eq!(cfg.max_output_tokens(), 1_024);
 
         let cfg = ChatRouterConfig {
             timeout_ms: Some(u64::MAX),
             history_max_tokens: Some(usize::MAX),
             history_window: Some(usize::MAX),
             max_candidates: Some(usize::MAX),
+            max_output_tokens: Some(u32::MAX),
             ..Default::default()
         };
         assert_eq!(cfg.timeout_ms(), 300_000);
         assert_eq!(cfg.history_max_tokens(), 64_000);
         assert_eq!(cfg.history_rows(), Some(500));
         assert_eq!(cfg.max_candidates(), 50);
+        assert_eq!(cfg.max_output_tokens(), 32_768);
     }
 
     #[test]

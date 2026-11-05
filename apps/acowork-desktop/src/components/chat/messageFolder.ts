@@ -11,15 +11,13 @@
  */
 
 import type { ChatMessage } from "../../lib/types";
+import { isUserTurnPart } from "./messageParts";
 
-/** ADR-046 §2.5: 5 attachment metadata types. */
-const ATTACHMENT_META_TYPES = new Set([
-  "file_upload",
-  "image_upload",
-  "attached_file",
-  "attached_selection",
-  "attached_folder",
-]);
+/** The part registry lives in `messageParts` because the JSONL loader needs the
+ *  same definition (it decides which rows keep their `metadata` at all). Keeping
+ *  a private copy here is what let a `context_ref` row reach the folder as a
+ *  metadata-less `system` message and render as a system bubble. */
+export { isAttachmentPart, isMessageRefPart, isUserTurnPart } from "./messageParts";
 
 /** Max timestamp delta (ms) between a user message and its attachment
  *  system entries for them to be folded into a single block. */
@@ -56,7 +54,7 @@ const ATTACHMENT_FOLD_WINDOW_MS = 100;
 export interface MessageBlock {
   /** Content-derived stable ID: `block-${items[0].id}`. Survives prepend/append. */
   blockId: string;
-  type: ChatMessage["type"] | "explore_group" | "user_with_attachments";
+  type: ChatMessage["type"] | "explore_group" | "user_with_parts";
   items: ChatMessage[];
   rawCount: number;
   anchorToLatest: boolean;
@@ -70,22 +68,17 @@ export interface MessageBlock {
   isLive: boolean;
 }
 
-/** Check if a system message is an attachment entry (ADR-046 §2.5). */
-function isAttachmentEntry(msg: ChatMessage): boolean {
-  if (msg.type !== "system") return false;
-  const metaType = msg.metadata?.type as string | undefined;
-  return metaType !== undefined && ATTACHMENT_META_TYPES.has(metaType);
-}
-
 /**
  * Fold raw `ChatMessage[]` into `MessageBlock[]`.
  *
  * Rules:
  *  - Consecutive `tool_call` / `tool_result` / `thought` messages are grouped
  *    into a single `explore_group` block.
- *  - A `user` message followed by attachment system entries (within
- *    `ATTACHMENT_FOLD_WINDOW_MS`) is folded into a single
- *    `user_with_attachments` block.
+ *  - A `user` message followed by message-part system entries — attachments
+ *    (ADR-046) and references (ADR-107) alike, within
+ *    `ATTACHMENT_FOLD_WINDOW_MS` — is folded into a single `user_with_parts`
+ *    block. The parts stay in the block's `items` in log order; the renderer
+ *    decides which slot each one goes to.
  *  - All other message types become individual blocks.
  *  - `blockId` is derived from the first item's `id` (content-derived, stable).
  *  - `anchorToLatest` is set on the block containing the last raw entry.
@@ -133,26 +126,27 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
     } else {
       flushExplore();
 
-      // ── user_with_attachments folding ──────────────────────────────
-      // If this is a user message, look ahead for attachment system
-      // entries that belong to it (same batch, within fold window).
+      // ── user_with_parts folding ──────────────────────────────
+      // If this is a user message, look ahead for the part entries that
+      // belong to it (attachments and references alike, same batch,
+      // within the fold window).
       if (msg.type === "user") {
-        const attachments: ChatMessage[] = [];
+        const parts: ChatMessage[] = [];
         let j = i + 1;
         while (
           j < messages.length &&
-          isAttachmentEntry(messages[j]) &&
+          isUserTurnPart(messages[j]) &&
           messages[j].timestamp - msg.timestamp <= ATTACHMENT_FOLD_WINDOW_MS
         ) {
-          attachments.push(messages[j]);
+          parts.push(messages[j]);
           j++;
         }
-        if (attachments.length > 0) {
-          const items = [msg, ...attachments];
+        if (parts.length > 0) {
+          const items = [msg, ...parts];
           const blockId = `block-${msg.id}`;
           blocks.push({
             blockId,
-            type: "user_with_attachments",
+            type: "user_with_parts",
             items,
             rawCount: items.length,
             anchorToLatest: j - 1 === lastIdx,
@@ -160,7 +154,7 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
             // ADR-050 C3: see note in the explore_group branch above.
             isLive: false,
           });
-          i = j - 1; // skip the consumed attachment entries
+          i = j - 1; // skip the consumed part entries
           continue;
         }
       }

@@ -38,6 +38,31 @@ impl AgentTokenService for NoopTokens {
     }
 }
 
+/// No-op Chat ledger: this test drives session visibility, not token
+/// accounting. The ledger totals read as zero so the merge is a no-op.
+struct NoopChatUsage;
+impl acowork_runtime::usecases::chat_usage::ChatUsageService for NoopChatUsage {
+    fn record_chat_llm_usage(
+        &self,
+        _chat_session_id: &str,
+        _chat_kind: &str,
+        _usage: &UsageInfo,
+        _provider_label: &str,
+        _model_id: &str,
+        _history_tokens: Option<u64>,
+    ) {
+    }
+    fn forget_chat(&self, _chat_session_id: &str) -> bool {
+        false
+    }
+    fn get_chat(&self, _chat_session_id: &str) -> Option<acowork_sqlite::ChatUsageRow> {
+        None
+    }
+    fn ledger_totals(&self) -> (u64, u64, u64, u64) {
+        (0, 0, 0, 0)
+    }
+}
+
 fn meta(sid: &str, owner: &str, visibility: Option<SessionVisibility>, chat: Option<&str>) -> SessionMeta {
     SessionMeta {
         version: 4,
@@ -96,6 +121,7 @@ async fn boot(work_dir: PathBuf) -> (u16, tokio::sync::mpsc::UnboundedReceiver<(
     > = Arc::new(tokio::sync::Mutex::new(Some(Arc::new(RuntimeSessionMetadataService::new(
         work_dir.clone(),
         Arc::new(NoopTokens),
+        Arc::new(NoopChatUsage),
         snapshots.clone(),
         latest.clone(),
     )))));

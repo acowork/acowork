@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { blobToBase64, extensionForMime } from "./clipboardImageExt";
+import { blobToBase64, extensionForFile, extensionForMime } from "./clipboardImageExt";
 
 describe("extensionForMime", () => {
   it("maps known raster MIMEs to lowercase extensions without a dot", () => {
@@ -39,6 +39,43 @@ describe("extensionForMime", () => {
     expect(extensionForMime("not-a-mime")).toBe("png");
     expect(extensionForMime("")).toBe("png");
     expect(extensionForMime("image/")).toBe("png");
+  });
+});
+
+describe("extensionForFile", () => {
+  it("takes the extension off the name, which is what the runtime classifies by", () => {
+    // The bridge hands over a `File` the sender named, and `upload_file` reads
+    // the extension to pick the image vs document path. A PDF sent from the
+    // viewer MUST arrive as a document, whatever its MIME says.
+    expect(extensionForFile(new File(["%PDF"], "report.pdf", { type: "application/pdf" }))).toBe("pdf");
+    expect(extensionForFile(new File([""], "slide-1.PNG", { type: "image/png" }))).toBe("png");
+    // `image/jpeg` would have answered "jpg"; the name the sender chose wins,
+    // because that name is what the transcript chip and the agent both see.
+    expect(extensionForFile(new File([""], "clip.jpeg", { type: "image/jpeg" }))).toBe("jpeg");
+  });
+
+  it("reads the final suffix of a dotted name", () => {
+    // A crop is named after its source, dotted stems included.
+    expect(extensionForFile(new File([""], "logo.v2-region-10x8.png", { type: "image/png" }))).toBe("png");
+    expect(extensionForFile(new File([""], "archive.tar.gz", { type: "application/gzip" }))).toBe("gz");
+    expect(extensionForFile(new File([""], "notes.txt", { type: "text/plain" }))).toBe("txt");
+  });
+
+  it("falls back to the MIME only when the name carries no extension", () => {
+    // A clipboard blob has no name at all — the case `extensionForMime` was
+    // written for, kept reachable rather than replaced.
+    expect(extensionForFile(new File([""], "", { type: "image/webp" }))).toBe("webp");
+    expect(extensionForFile(new File([""], "no-extension", { type: "image/gif" }))).toBe("gif");
+    // An unstructured MIME with no name has nothing better to offer than the
+    // raster default, which is what keeps it on the image branch.
+    expect(extensionForFile(new File([""], "no-extension"))).toBe("png");
+  });
+
+  it("refuses a suffix too long to be an extension", () => {
+    // "report.final.2024notes" is a stem that happens to contain a dot, not a
+    // file type; taking it would invent an extension the runtime cannot
+    // classify. The MIME gets to answer instead.
+    expect(extensionForFile(new File([""], "report.final.2024notes", { type: "image/png" }))).toBe("png");
   });
 });
 

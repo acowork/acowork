@@ -51,18 +51,24 @@ const GATEWAY_PULL_TIMEOUT: Duration = Duration::from_secs(60);
 pub struct TurnSurface {
     /// The Chat session this turn is accountable to. Empty = none.
     pub chat_session_id: String,
-    /// The Chat row that triggered the turn — an interactive card's
-    /// `in_reply_to` and the coordinate an answer resolves against (§5.5.4).
-    /// Empty = the turn has no row to hang a card on.
-    pub trigger_message_id: String,
+    /// The round this turn is (ADR-106 D2): `r:{inbound_message_id}`, derived
+    /// here from the inbound id by the same function the turn boundary uses.
+    ///
+    /// It replaces the trigger-row coordinate the card writer and the terminal
+    /// echo used to read: the chat holds no copy of this turn any more, it holds
+    /// a reference to this round — so the round id, not a chat row id, is what
+    /// everything on the chat side is addressed by. Empty = this transport
+    /// carried no inbound id; callers must NOT mint from the empty string (that
+    /// yields a random id, i.e. a second round for a redelivered message).
+    pub round_id: String,
     /// Who may answer this turn's cards: the sender of the triggering row.
     /// `None` = the transport carried no sender, so a card would be
-    /// unanswerable — it is not written rather than left as a dead button.
+    /// unanswerable — the turn does not park on a human it cannot ask.
     pub answerable_by: Option<String>,
     /// Whether the accountable chat has a human participant, as derived by
     /// the Gateway from the session it bound to (never from the sender).
-    /// `None` = unknown → fail open (interactive tools stay available, no
-    /// card is written). `Some(false)` = agent-to-agent: a turn must not
+    /// `None` = unknown → fail open (interactive tools stay available). 
+    /// `Some(false)` = agent-to-agent: a turn must not
     /// block on a human (the §2.2 availability gate, now transport-agnostic).
     pub has_human: Option<bool>,
 }
@@ -71,13 +77,13 @@ impl TurnSurface {
     /// The single producer: turn-to-chat accountability is decided here,
     /// from the envelope, for every transport (Chat write endpoint, pinned
     /// turn, Intent delivery). A turn bound to a Chat with a known sender
-    /// owes its cards and its terminal echo to that Chat; the kind of the
+    /// owes its card and its reference row to that Chat; the kind of the
     /// turn does not change that — it changes only whether the turn must
     /// *reply* to another agent, which is [`IntentTurnContext`]'s business.
     pub fn from_envelope(env: &IntentEnvelope) -> Self {
         Self::new(
             env.source_chat_session_id.clone(),
-            env.message_id.clone(),
+            &env.message_id,
             &env.from,
             env.has_human,
         )
@@ -86,47 +92,89 @@ impl TurnSurface {
     /// The field-level form of [`Self::from_envelope`], for a caller that has
     /// already destructured the envelope (the deterministic Intent route).
     /// Same rule, one place: a Chat-bound turn with a known sender owes that
-    /// Chat its cards and its terminal echo.
+    /// Chat its card and its reference row.
+    ///
+    /// The round coordinate is derived here so that no transport can hand the
+    /// loop a turn whose round was computed a second way.
     pub fn new(
         chat_session_id: String,
-        trigger_message_id: String,
+        inbound_message_id: &str,
         from: &str,
         has_human: Option<bool>,
     ) -> Self {
         Self {
             chat_session_id,
-            trigger_message_id,
+            // D2: no inbound id means no round to name — an empty id must never
+            // reach `mint_round_id`, which would fall back to a random UUID and
+            // hand the surface a round the loop never opens.
+            round_id: match inbound_message_id.trim() {
+                "" => String::new(),
+                raw => crate::rounds::mint_round_id(raw),
+            },
             answerable_by: (!from.is_empty()).then(|| from.to_string()),
             has_human,
         }
     }
 
-    /// Whether this turn may write an interactive card, and where: the
-    /// `(chat_session_id, trigger_message_id, answerable_by)` triple §5.5.4
-    /// asks for. `None` when the card would be a dead button.
+    /// Whether this turn may park on a human, and where: the
+    /// `(chat_session_id, round_id, answerable_by)` triple §5.5.4 asks for.
+    /// `None` when there is nobody to answer — a run that stops waiting on a
+    /// human nobody can reach is worse than one that ends.
     ///
-    /// The *answerability* is the gate (`chat_session_id` + `answerable_by`);
-    /// the trigger row is only the thread coordinate, never the answer one —
-    /// §5.5.4 resolves an answer against the card's own id. So a turn composed
-    /// inside the execution view of a chat-bound session writes a standalone
-    /// card (empty `trigger_message_id`) rather than nothing at all: such a
-    /// turn has no Chat row of its own to thread under — mirroring it into the
-    /// Chat transcript was what used to supply one, and dropping that mirror
-    /// (ADR-100 Rev. 8 / D14) is what left a group chat blind to the question
-    /// the run had stopped on, had the card been skipped too.
+    /// ADR-106 D8: the card is no longer a Chat row (it is the round's
+    /// `card` in the projection), so the middle term names the **round** the
+    /// card belongs to rather than the row it used to thread under. The gate
+    /// itself is unchanged: a chat this turn is accountable to, and a
+    /// participant who can answer it.
     pub fn card_target(&self) -> Option<(&str, &str, &str)> {
         if self.chat_session_id.is_empty() {
             return None;
         }
         self.answerable_by
             .as_deref()
-            .map(|a| (self.chat_session_id.as_str(), self.trigger_message_id.as_str(), a))
+            .map(|a| (self.chat_session_id.as_str(), self.round_id.as_str(), a))
     }
 
-    /// The Chat this turn's terminal row is echoed to, if any.
+    /// The Chat this turn's reference row belongs to, if any.
     pub fn echo_chat(&self) -> Option<&str> {
         (!self.chat_session_id.is_empty()).then_some(self.chat_session_id.as_str())
     }
+}
+
+/// The facts a turn's Chat reference row needs that the loop cannot derive
+/// (ADR-106 D3).
+///
+/// The row names the **round**, and only the loop knows which round it is about
+/// to open — D2 makes a turn that answers a parked card continue the round it
+/// was parked on, so the round is not a function of this turn's inbound id.
+/// Writing the row where the round is minted is therefore the only placement
+/// that cannot name a round that does not exist; the transport hands the loop
+/// the three facts it has no view on, beside the surface it already sets.
+#[derive(Debug, Clone, Default)]
+pub struct TurnReference {
+    /// The Chat row this turn answers. Empty when the transport's inbound id
+    /// names no Chat row: a turn composed against the execution surface has no
+    /// question there to thread under, and pointing the reference at a row that
+    /// does not exist would render a block under a phantom message. A group `@`
+    /// fan-out is the third case — its per-target id matches no durable row
+    /// either, which is why the Intent arm prefers `in_reply_to`.
+    pub trigger_message_id: String,
+    /// Did this delivery resolve a session that was just created? Only the
+    /// routing decision knows, so a transport that does not route leaves it
+    /// `None` — it must not be faked as `Some(false)`, or every locally composed
+    /// turn would read as "continues an existing task".
+    pub opened_new: Option<bool>,
+    /// The dispatch brief, which names the round in the Chat list and on the
+    /// block header (D13). Written once with the row and never rewritten —
+    /// reading the projection to name a list item is the ADR-096 red line.
+    pub assignment_brief: Option<String>,
+    /// The PM task this round works on, when the delivery came in through a task
+    /// conversation. The block renders it as a task chip (D13), which is why it
+    /// is durable on the reference rather than read back from the projection.
+    /// Derived from the Gateway's routing contract (`task:{project}:{task}`),
+    /// never from a peer's params — a chip naming a task the sender invented
+    /// would be a claim the Chat has no way to check.
+    pub task_id: Option<String>,
 }
 
 /// How a turn ended, in the Chat-facing vocabulary: the status of the
@@ -312,15 +360,18 @@ pub fn render_intent_message(
 }
 
 /// POST a Runtime-owned chat row through the Gateway relay
-/// (`POST /api/intents/chat-append`, plan 3.0): `interaction_request`
-/// cards (§5.5.4) and the terminal `agent_message` echoes a chat-bound
-/// execution session writes back for locally-composed turns (ADR-100 D9).
+/// (`POST /api/intents/chat-append`, plan 3.0).
 /// Same source as the §5.5.1 write-back — the Runtime never speaks to
 /// the user service directly. Idempotent by `meta.message_id`: a
 /// redelivered turn produces no second row of the same kind.
 ///
-/// Best-effort by contract: a lost pointer or card degrades the surface,
-/// it does not lose the conversation; callers log and continue.
+/// Since ADR-106 the only row this writes is the [`KIND_EXECUTION_ROUND`]
+/// reference, and that one is a **precondition** of the delivery (D3): the
+/// caller writes it before handing the message to the execution session and
+/// refuses the delivery when it fails. The row-shape rules (no body, agent
+/// author, required coordinates) are enforced at the storage boundary, so a
+/// malformed call fails loudly rather than writing a row the reader cannot
+/// resolve.
 #[allow(clippy::too_many_arguments)] // positional row shape; a struct here is boilerplate
 pub async fn append_chat_row(
     instance_id: &str,
@@ -358,97 +409,153 @@ pub async fn append_chat_row(
     }
 }
 
-/// The `meta` of a continuation echo — the standalone `agent_message` a
-/// chat-bound execution session writes back for a turn the user composed
-/// there directly (ADR-100 D9).
+/// The one chat kind the Runtime writes (ADR-106 D1/D3).
 ///
-/// A turn composed straight against the execution surface carries no request
-/// context (unlike a routed Chat turn), so it has no `in_reply_to` to thread
-/// under and no response entry to answer. The row is therefore standalone: an
-/// `exec:`-prefixed id (never collides with a request/response row, and the
-/// store's idempotency key so a redelivered turn cannot double the echo),
-/// `sender_session_id` so the surface can drill into the session that produced
-/// it, and `status` so an empty body still reads as a finished run rather than
-/// an unanswered one.
+/// Named here rather than spelled at each call site because the row's shape is
+/// a storage-boundary contract: a site that typo'd the kind would write a row
+/// the reader silently ignores, and the block would be missing with no error.
+pub const KIND_EXECUTION_ROUND: &str = "execution_round";
+
+/// The `meta` of an `execution_round` reference row (ADR-106 D3).
 ///
-/// `in_reply_to` is the exception, and the Chat surface is what created it: a
-/// turn the human asked *in* a chat already has its `user_message` row there,
-/// keyed by `trigger_message_id`. Threading the echo under that row is what
-/// makes the chat read as one round (the question the human asked, the answer
-/// that came back) instead of an orphan result with no head. `None` — a turn
-/// composed in the execution view, which has no row of its own in the chat —
-/// keeps the standalone shape the echo has always had.
+/// This is the only row a turn of work leaves in the Chat, and it carries no
+/// content: the round's user row, its answer and the card it waits on are read
+/// from the execution session's projection (D4). What stays durable here is the
+/// reference — which round, in which session, on which instance — plus the two
+/// presentation hints the Chat may render without a projection read
+/// (`assignment_brief` and `task_id`; D13 forbids reading the projection to
+/// paint a list).
 ///
-/// `status` is the turn's terminal outcome (ADR-100 revision: intermediate
-/// milestones such as dispatch/start are runtime-only and never persisted, so
-/// the echo is the only row a locally-composed turn can leave). A stopped
-/// local turn writes `aborted` with an empty body — the chat can then explain
-/// why its previous message has no answer.
-pub fn exec_echo_meta(
-    local_message_id: &str,
+/// The idempotency key is the round's own natural key, `round:{round_id}`.
+/// `round_id` is a deterministic function of the inbound message id (D2), so a
+/// redelivery dedups by construction — which is why the prefix-key family the
+/// retired mirror rows needed (`exec:` / `tr:` / `card:` / `resp-`) has no
+/// remaining consumer.
+///
+/// The turn-only facts arrive on [`TurnReference`], the struct the transport
+/// fills precisely because the loop cannot derive them — so adding a hint costs
+/// a field there, not a positional argument here.
+///
+/// `opened_new` is `None` when the delivery did not resolve whether a session
+/// was created (an execution-surface turn already had one). It must not be
+/// faked as `Some(false)`: the block header says "new task" only when something
+/// actually opened one.
+pub fn execution_round_meta(
+    round_id: &str,
+    reference: &TurnReference,
     agent_session_id: &str,
-    status: &str,
-    trigger_message_id: Option<&str>,
+    agent_instance_id: &str,
 ) -> serde_json::Value {
     let mut meta = serde_json::json!({
-        "message_id": format!("exec:{local_message_id}"),
-        "sender_session_id": agent_session_id,
-        "status": if status.is_empty() { "completed" } else { status },
+        "message_id": format!("round:{round_id}"),
+        "round_id": round_id,
+        "agent_session_id": agent_session_id,
+        "agent_instance_id": agent_instance_id,
     });
-    if let Some(trigger) = trigger_message_id.filter(|s| !s.is_empty()) {
-        meta["in_reply_to"] = serde_json::Value::String(trigger.to_string());
+    // A turn composed against the execution surface has no Chat row to answer:
+    // the reference still names the round, it just has no thread above it.
+    if !reference.trigger_message_id.is_empty() {
+        meta["in_reply_to"] =
+            serde_json::Value::String(reference.trigger_message_id.clone());
+    }
+    if let Some(new) = reference.opened_new {
+        meta["opened_new"] = serde_json::Value::Bool(new);
+    }
+    if let Some(brief) = reference
+        .assignment_brief
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        meta["assignment_brief"] = serde_json::Value::String(brief.to_string());
+    }
+    if let Some(task) = reference
+        .task_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        meta["task_id"] = serde_json::Value::String(task.to_string());
     }
     meta
 }
 
-/// The `meta` of a routing reaction row (ADR-100 D11).
+/// The `meta` of the Chat Router's own answer row (ADR-106 D12).
 ///
-/// A routed Chat turn owes the chat an immediate in-conversation answer to
-/// "where did my message go": the Runtime appends one `system_notice` with
-/// `notice_type = turn_routed` at the moment the routing target is resolved,
-/// carrying the routing-time verdict as durable data:
+/// A router that replies without routing opened no round, so its answer is
+/// agent speech *inside* the chat channel rather than a projection of an
+/// execution session — which is why `agent_message` stays in the vocabulary at
+/// all. `in_reply_to` is the id of the human row that triggered the turn, and
+/// the Gateway delivers a chat turn under exactly that id, so the relay reads
+/// the row as the answer to the request it is still waiting for.
 ///
-/// - `message_id = "tr:{request_id}"` — idempotent per trigger row, so a
-///   redelivered envelope cannot double the reaction;
-/// - `in_reply_to` — the trigger `user_message`, what threads the reaction
-///   under it and what the surface uses to name the task (fallback: the
-///   trigger body, see design 27 §5.5.5);
-/// - `agent_session_id` — the execution session that will run the turn, the
-///   drill target and the title source;
-/// - `turn_mode` — `"new"` when the routing **created** a physical session,
-///   `"continue"` for every reuse (the same logical task
-///   carries on). It is a one-time routing-time fact, never re-derived.
-///
-/// The body stays empty: the row is rendered from i18n by the surface, in
-/// the executing agent's attribution (avatar + name), never as a centered
-/// system line and never in the agent's model voice.
-pub fn turn_routed_meta(
-    request_id: &str,
-    agent_session_id: &str,
-    opened_new: bool,
-) -> serde_json::Value {
+/// The idempotency key is the request it answers: a redelivered turn leaves no
+/// second answer row beside the first.
+pub fn router_answer_meta(request_message_id: &str) -> serde_json::Value {
     serde_json::json!({
-        "message_id": format!("tr:{request_id}"),
-        "in_reply_to": request_id,
-        "agent_session_id": agent_session_id,
-        "turn_mode": if opened_new { "new" } else { "continue" },
-        "notice_type": "turn_routed",
+        "message_id": format!("reply:{request_message_id}"),
+        "in_reply_to": request_message_id,
     })
 }
 
-/// The `meta` of the router-fallback receipt — the one channel fact a
-/// degraded Chat turn owes the human (design 29 §9): the router could not
-/// decide, so the message was forwarded automatically. Unlike the retired
-/// progress milestones (ADR-100 revision), this notice is still written: the
-/// fallback is a visible difference in behaviour, not a progress detail. The
-/// row carries no body; the surfaces paint the localised pill from
-/// `notice_type` (their `routerFallback` i18n key).
-pub fn router_fallback_meta(request_id: &str) -> serde_json::Value {
+/// The `meta` of a Chat choice card (ADR-106 D6 levels 3 and 5).
+///
+/// A card is the Chat's own question, so it rides the already-appendable
+/// `system_notice` kind with its `meta` doing the talking: no new write entry,
+/// no new kind, no whitelist change. Two notice types share this shape —
+/// `session_choice` (several sessions could continue, which one?) and
+/// `confirm_continue` (the router proposes one, yes or no?) — and both carry
+/// `options` plus `allow_new_task`, because D6 requires the cheap escape to sit
+/// beside every suggestion: "new task" is always offered, so a question can be
+/// answered with one click and never traps the human in a context they did not
+/// choose.
+///
+/// The idempotency key is the notice type plus the inbound message it answers,
+/// so a redelivered turn re-asks one question rather than stacking cards.
+pub fn session_choice_meta(
+    notice_type: &str,
+    in_reply_to: &str,
+    request_message_id: &str,
+    options: Vec<serde_json::Value>,
+) -> serde_json::Value {
     serde_json::json!({
-        "message_id": format!("rf:{request_id}"),
-        "in_reply_to": request_id,
-        "notice_type": "router_fallback",
+        "message_id": format!("{notice_type}:{request_message_id}"),
+        "notice_type": notice_type,
+        "in_reply_to": in_reply_to,
+        "options": options,
+        "allow_new_task": true,
     })
+}
+
+/// POST a Chat choice card (see [`session_choice_meta`]).
+///
+/// Body is empty by contract: the row is a question whose text is the options,
+/// and the surfaces localise `notice_type` rather than rendering a
+/// Runtime-authored sentence into a human transcript.
+#[allow(clippy::too_many_arguments)] // positional row shape; a struct here is boilerplate
+pub async fn emit_session_choice(
+    instance_id: &str,
+    gateway_host: &str,
+    node_token: &str,
+    chat_session_id: &str,
+    to: &str,
+    in_reply_to: &str,
+    request_message_id: &str,
+    notice_type: &str,
+    options: Vec<serde_json::Value>,
+) -> Result<(), String> {
+    let meta = session_choice_meta(notice_type, in_reply_to, request_message_id, options);
+    append_chat_row(
+        instance_id,
+        gateway_host,
+        node_token,
+        chat_session_id,
+        acowork_core::intent::chat_kinds::SYSTEM_NOTICE,
+        to,
+        "",
+        meta,
+    )
+    .await
 }
 
 /// POST the responder's final output back through the Gateway write entry
@@ -527,6 +634,65 @@ pub fn attached_items_from_params(
                 .collect::<Vec<_>>()
         })
         .filter(|v: &Vec<acowork_core::protocol::AttachedItem>| !v.is_empty())
+}
+
+/// Parse the reference parts an Intent envelope carries (ADR-107).
+///
+/// A reference is context the Runtime supplies and the human did not type —
+/// today only the Chat Router's `exec_session_create(background)`, plus the
+/// degraded route's chat tail. It rides `params.context_refs` for the same
+/// reason attachments ride `params.attached_items`: the envelope has one
+/// opaque `params` object, and a second transport field would need a proto
+/// change for data only the Runtime produces and only the Runtime reads.
+///
+/// Empty and unparseable entries are dropped rather than failing the turn —
+/// a producer bug degrades one block, it does not cost the human's message.
+/// The same rule the attachment parse applies, and for the same reason.
+pub fn context_refs_from_params(params: &Value) -> Vec<acowork_core::MessageRef> {
+    params
+        .get("context_refs")
+        .and_then(|v| v.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|d| serde_json::from_value::<acowork_core::MessageRef>(d.clone()).ok())
+                .filter(|r| !r.is_empty() && r.model_header().is_some())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The model-facing message for a turn that carries reference parts: the
+/// human's words FIRST, then one block per reference.
+///
+/// Order is the whole decision (ADR-107). The words lead because they are the
+/// instruction, because a model reads the head of a message as the ask, and
+/// because the router's previous brief-first composition is exactly what made
+/// every chat-dispatched session open with the same sentence. A reference is
+/// framing the Session needs to act — it follows, clearly delimited, and
+/// labelled with [`acowork_core::MessageRef::model_header`] so it can never be
+/// mistaken for something the human said.
+///
+/// `content` is returned untouched when there are no usable references, so a
+/// turn without them keeps byte-identical prompt input to before this change.
+pub fn render_user_turn(content: &str, refs: &[acowork_core::MessageRef]) -> String {
+    let blocks: Vec<String> = refs
+        .iter()
+        .filter(|r| !r.is_empty())
+        .filter_map(|r| r.model_header().map(|h| format!("{h}\n{}", r.content.trim())))
+        .collect();
+    if blocks.is_empty() {
+        return content.to_string();
+    }
+    if content.trim().is_empty() {
+        // A turn that carried no words (the human attached something, or the
+        // router routed an attachment-only message). The blocks are the entire
+        // message, so no empty user line is put in front of them — an empty
+        // first line reads to a model as "the human said nothing", which is
+        // true, but rendering it as a blank the blocks hang off is noise.
+        return blocks.join("\n\n");
+    }
+    format!("{}\n\n{}", content.trim_end(), blocks.join("\n\n"))
 }
 
 /// Pull one Chat attachment pinned to the durable `user_message` row this
@@ -651,7 +817,7 @@ mod tests {
     }
 
     #[test]
-    fn a_surface_without_a_trigger_row_still_has_its_card_target() {
+    fn a_surface_names_the_round_derived_from_its_inbound_message() {
         // The root cause this pins: a turn written straight against the
         // execution surface arrived carrying content + row id only, and the
         // card writer's guard read `chat_writeback` — a field that path never
@@ -659,8 +825,12 @@ mod tests {
         // while the execution dialog worked fine. The surface is produced
         // from the envelope by BOTH transports, so the coordinates survive
         // the conversion.
+        //
+        // ADR-106 D2: the middle term is now the **round**, not the chat row it
+        // threaded under. The chat holds no copy of this turn any more, so
+        // nothing on the chat side is addressed by a row id any more.
         let s = TurnSurface::from_envelope(&env("user-1", "chat-9", Some(true)));
-        assert_eq!(s.card_target(), Some(("chat-9", "m-1", "user-1")));
+        assert_eq!(s.card_target(), Some(("chat-9", "r:m-1", "user-1")));
         assert_eq!(s.echo_chat(), Some("chat-9"));
         assert_eq!(s.has_human, Some(true));
     }
@@ -670,7 +840,7 @@ mod tests {
         // Same producer for the Intent transport: the pair session the
         // Gateway bound (and stamped) is where the card lands.
         let s = TurnSurface::from_envelope(&env("inst-a", "chat-pair", Some(false)));
-        assert_eq!(s.card_target(), Some(("chat-pair", "m-1", "inst-a")));
+        assert_eq!(s.card_target(), Some(("chat-pair", "r:m-1", "inst-a")));
         // A human-free chat is the one fact that must block *blocking*
         // behaviour (§6.5 R3) while the card itself stays writable — the gate
         // reads `has_human`, not the presence of a write-back.
@@ -699,8 +869,13 @@ mod tests {
         // This is the regression that made a group chat blind to a question
         // the run had stopped on: the answer coordinate is the card's own id
         // (§5.5.4), so a missing thread must not suppress the card.
-        let s = TurnSurface::new(String::new(), String::new(), "user-1", None);
+        //
+        // The empty inbound id must NOT mint a round here: `mint_round_id("")`
+        // yields a random id, which would name a second round for a message
+        // that has not been delivered yet.
+        let s = TurnSurface::new(String::new(), "", "user-1", None);
         assert_eq!(s.card_target(), None, "no chat yet — the binding fills it in");
+        assert_eq!(s.round_id, "", "no inbound id — no round");
         // What `session_task` produces for a chat-bound session: the binding
         // supplies the chat, the write endpoint's scope supplies the answerer.
         let s = TurnSurface {
@@ -882,66 +1057,189 @@ mod tests {
         assert!(h(false, None).is_empty());
     }
 
+    /// The transport's hand-over, built from the one or two facts a test cares
+    /// about (the shape `execution_round_meta` reads). `task_id` arrives here
+    /// already parsed out of the delivery's conversation id, which is the
+    /// Gateway's routing contract — not a params value a peer could set.
+    fn reference(
+        trigger: &str,
+        opened_new: Option<bool>,
+        brief: Option<&str>,
+        task_id: Option<&str>,
+    ) -> TurnReference {
+        TurnReference {
+            trigger_message_id: trigger.to_string(),
+            opened_new,
+            assignment_brief: brief.map(str::to_string),
+            task_id: task_id.map(str::to_string),
+        }
+    }
+
     #[test]
-    fn exec_echo_meta_is_a_standalone_agent_message() {
-        // ADR-100 D9: a locally-composed turn in a chat-bound session echoes
-        // its output as a standalone agent_message. There is no request to
-        // thread under, so no in_reply_to; the `exec:` id is the store's
-        // idempotency key (a redelivered turn cannot double the row).
-        // `sender_session_id` is what makes the row drillable back into the
-        // execution session that produced it.
-        let m = exec_echo_meta("local-7", "exec-3", "completed", None);
-        assert_eq!(m["message_id"], "exec:local-7");
-        assert_eq!(m["sender_session_id"], "exec-3");
-        assert_eq!(m["status"], "completed");
-        assert!(m.get("in_reply_to").is_none());
+    fn execution_round_meta_is_a_contentless_reference_keyed_by_the_round() {
+        // ADR-106 D3: the row carries the round's natural key and the
+        // coordinates the block is read with — nothing else. No body, no status,
+        // no mirrored answer text (that would be the old echo back again).
+        let m = execution_round_meta(
+            "r:m-42",
+            &reference("m-42", Some(true), None, None),
+            "20261023_131156_a3bb7d",
+            "inst-a",
+        );
+        assert_eq!(m["message_id"], "round:r:m-42");
+        assert_eq!(m["round_id"], "r:m-42");
+        assert_eq!(m["in_reply_to"], "m-42");
+        assert_eq!(m["agent_session_id"], "20261023_131156_a3bb7d");
+        assert_eq!(m["agent_instance_id"], "inst-a");
+        assert_eq!(m["opened_new"], true);
+        assert!(m.get("body").is_none());
+        assert!(m.get("status").is_none());
 
-        // A stopped local turn still owes the chat a terminal row — it is the
-        // only way the surface can tell an interrupted run from a silent one.
-        let aborted = exec_echo_meta("local-8", "exec-3", "aborted", None);
-        assert_eq!(aborted["message_id"], "exec:local-8");
-        assert_eq!(aborted["status"], "aborted");
-
-        // Empty status degrades to the ordinary completed echo.
+        // A reuse is a fact worth keeping distinct from "unknown": only the
+        // routing decision can say a session was not newly opened.
         assert_eq!(
-            exec_echo_meta("local-9", "exec-3", "", None)["status"],
-            "completed"
+            execution_round_meta("r:m-43", &reference("m-43", Some(false), None, None), "s-1", "inst-a")
+                ["opened_new"],
+            false
+        );
+        // And `None` must not degrade to `false` — the block header only says
+        // "new task" when something actually opened one.
+        assert!(
+            execution_round_meta("r:m-44", &reference("m-44", None, None, None), "s-1", "inst-a")
+                .get("opened_new")
+                .is_none()
         );
     }
 
     #[test]
-    fn exec_echo_meta_threads_an_answer_under_its_chat_row() {
-        // A turn the Chat surface asked for was written there as a real
-        // `user_message` before it reached the agent, so the echo answers that
-        // row. This is what pairs the surfaces into one round — without it the
-        // chat would hold an orphan result with no question above it.
-        let m = exec_echo_meta("row-1", "exec-3", "completed", Some("row-1"));
-        assert_eq!(m["in_reply_to"], "row-1");
-        // The id keeps the `exec:` prefix: idempotency must not depend on the
-        // trigger, or a redelivered turn doubles the answer row.
-        assert_eq!(m["message_id"], "exec:row-1");
+    fn execution_round_meta_omits_the_coordinates_a_delivery_does_not_have() {
+        // An execution-surface turn has no Chat row above it: no thread, rather
+        // than a thread pointing at a row that does not exist.
+        let no_trigger = execution_round_meta("r:msg-7", &reference("", None, None, None), "s-2", "inst-a");
+        assert!(no_trigger.get("in_reply_to").is_none());
 
-        // An empty trigger is not a thread — it degrades to the standalone
-        // shape rather than pointing the answer at a nonexistent row.
-        let blank = exec_echo_meta("row-2", "exec-3", "completed", Some(""));
-        assert!(blank.get("in_reply_to").is_none());
+        // The PM hints are the only presentation the Chat may render without a
+        // projection read (D13); a blank one is absent, not empty — an empty
+        // string would render an empty task name or an empty chip.
+        let with_brief = execution_round_meta(
+            "r:m-45",
+            &reference("m-45", Some(true), Some("  draft the release note  "), Some("t-083")),
+            "s-1",
+            "inst-a",
+        );
+        assert_eq!(with_brief["assignment_brief"], "draft the release note");
+        assert_eq!(with_brief["task_id"], "t-083", "the chip's coordinate");
+        for blank in [Some(""), Some("   "), None] {
+            let m = execution_round_meta("r:m-46", &reference("m-46", None, blank, blank), "s-1", "inst-a");
+            for key in ["assignment_brief", "task_id"] {
+                assert!(
+                    m.get(key).filter(|v| v.as_str() != Some("")).is_none(),
+                    "a blank {key} must not be written as a task name: {m}"
+                );
+            }
+        }
     }
 
     #[test]
-    fn turn_routed_meta_threads_the_reaction_to_its_trigger() {
-        // ADR-100 D11: the routing reaction row is keyed `tr:{request}` — one
-        // per trigger message, so a redelivered envelope cannot double it —
-        // and threaded under that trigger, which is what puts the agent
-        // avatar + bubble immediately after the user's own message.
-        let m = turn_routed_meta("msg-42", "20261023_131156_a3bb7d", true);
-        assert_eq!(m["message_id"], "tr:msg-42");
-        assert_eq!(m["in_reply_to"], "msg-42");
-        assert_eq!(m["agent_session_id"], "20261023_131156_a3bb7d");
-        assert_eq!(m["turn_mode"], "new");
-        assert_eq!(m["notice_type"], "turn_routed");
+    fn the_task_chip_is_read_off_the_routing_contract() {
+        // D13 / D12: the reference row is now the only place a PM dispatch's
+        // task identity reaches the Chat, so the parse of the Gateway's own
+        // conversation key is the trust gate — a peer's `task_id` param is not.
+        assert_eq!(
+            acowork_core::intent::task_id_from_conversation("task:p-1:t-083").as_deref(),
+            Some("t-083")
+        );
+        assert_eq!(acowork_core::intent::task_id_from_conversation("chat-9"), None);
+        assert_eq!(acowork_core::intent::task_id_from_conversation("task:p-1:"), None);
+        assert_eq!(acowork_core::intent::task_id_from_conversation("task:"), None);
+    }
 
-        // Every reuse reads as "continue" — the same logical
-        // task carries on; only physical creation is "new".
-        assert_eq!(turn_routed_meta("msg-43", "s-1", false)["turn_mode"], "continue");
+    // ── ADR-107: reference parts ─────────────────────────────────────
+
+    fn refs(value: serde_json::Value) -> Vec<acowork_core::MessageRef> {
+        context_refs_from_params(&serde_json::json!({ "context_refs": value }))
+    }
+
+    #[test]
+    fn reference_parts_are_parsed_off_the_envelope() {
+        let parsed = refs(serde_json::json!([
+            { "kind": "chat_background", "content": "the user asked to commit" }
+        ]));
+        assert_eq!(
+            parsed,
+            vec![acowork_core::MessageRef::chat_background("the user asked to commit")]
+        );
+        // No key, an empty array, or a non-array all mean "no references" —
+        // the turn must still run.
+        for absent in [
+            serde_json::json!({}),
+            serde_json::json!({ "context_refs": [] }),
+            serde_json::json!({ "context_refs": "nope" }),
+        ] {
+            assert!(context_refs_from_params(&absent).is_empty());
+        }
+    }
+
+    #[test]
+    fn unusable_reference_parts_are_dropped_not_fatal() {
+        // An unreadable entry, an empty body and an unknown kind are all
+        // "nothing this build can render": the good entry still arrives, and
+        // a bad one never makes the human's turn fail.
+        let parsed = refs(serde_json::json!([
+            { "kind": "chat_background", "content": "   " },
+            { "kind": "some_future_kind", "content": "future body" },
+            { "content": "kind missing" },
+            { "kind": "chat_background", "content": "kept" }
+        ]));
+        assert_eq!(
+            parsed,
+            vec![acowork_core::MessageRef::chat_background("kept")]
+        );
+    }
+
+    #[test]
+    fn the_words_lead_and_the_reference_follows() {
+        // The reason this function exists (ADR-107). The old composition was
+        // `{brief}\n\n[user message]\n{words}`: the router's framing came
+        // first, so the first `user` row — and therefore the auto-title —
+        // opened with the same sentence in every dispatched session.
+        let out = render_user_turn(
+            "提交本地修改",
+            &[acowork_core::MessageRef::chat_background(
+                "The user asked to commit the pending work.",
+            )],
+        );
+        assert!(
+            out.starts_with("提交本地修改"),
+            "the human's words must open the message: {out}"
+        );
+        let background = out.find("[background:").expect("the block is labelled");
+        assert!(
+            background > "提交本地修改".len(),
+            "the reference must follow the words: {out}"
+        );
+        assert!(out.contains("The user asked to commit the pending work."));
+    }
+
+    #[test]
+    fn a_turn_without_references_is_byte_identical_to_the_words() {
+        assert_eq!(render_user_turn("hello  ", &[]), "hello  ");
+        assert_eq!(
+            render_user_turn("hello", &[acowork_core::MessageRef::chat_background("  ")]),
+            "hello",
+            "an empty reference must not add a header with nothing under it"
+        );
+    }
+
+    #[test]
+    fn a_wordless_turn_is_the_reference_blocks_alone() {
+        // Attachment-only, or a routed message with no typed text: the blocks
+        // are the message. No empty first line is put in front of them.
+        let out = render_user_turn(
+            "  ",
+            &[acowork_core::MessageRef::chat_background("tail of the chat")],
+        );
+        assert!(out.starts_with("[background:"), "{out}");
+        assert!(out.ends_with("tail of the chat"), "{out}");
     }
 }

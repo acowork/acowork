@@ -30,6 +30,10 @@ acowork-mcp.workspace = true
 indexmap.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
+# Raw workspace-file streaming (ADR-055 L2-7 preview path):
+# tokio_util::io::ReaderStream turns the on-disk File into a byte stream.
+tokio-util.workspace = true
+bytes = "1"
 reqwest = { workspace = true, features = ["blocking"] }
 clap = { workspace = true, features = ["derive", "env"] }
 serde.workspace = true
