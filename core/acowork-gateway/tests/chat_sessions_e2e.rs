@@ -428,7 +428,7 @@ fn default_pair_chat_message_persists_and_agent_writeback_doorbells() {
         let up = user_service_port(&gw.home);
         let append = serde_json::json!({
             "session_id": sid,
-            "message": {"ts": 0, "from": "agent-chain-1", "kind": "agent_message", "body": "sure, on it", "meta": {"message_id": "e2e-agent-row-1"}}
+            "message": {"ts": 0, "from": "agent-chain-1", "kind": "agent_message", "body": "sure, on it", "meta": {"message_id": "e2e-agent-row-1", "in_reply_to": "e2e-human-row-1"}}
         });
         let (code, body, _) = http_post_json(up, "/internal/chat-sessions/messages", &serde_json::to_vec(&append).unwrap());
         assert_eq!(code, 201, "system append; body:\n{body}");
@@ -859,7 +859,7 @@ fn agent_agent_pair_is_one_shared_channel_for_both_sides() {
 
     let append = serde_json::json!({
         "session_id": sid_ab,
-        "message": {"ts": 0, "from": a, "kind": "agent_message", "body": "from A", "meta": {"message_id": "aa-row-1"}}
+        "message": {"ts": 0, "from": a, "kind": "agent_message", "body": "from A", "meta": {"message_id": "aa-row-1", "in_reply_to": "aa-row-0"}}
     });
     let (code, body, _) = http_post_json(up, "/internal/chat-sessions/messages", &serde_json::to_vec(&append).unwrap());
     assert!((200..300).contains(&code), "A writes: {code} {body}");
@@ -883,7 +883,7 @@ fn agent_agent_pair_is_one_shared_channel_for_both_sides() {
     // B cannot mint a row attributed to A (participant check on the write).
     let forged = serde_json::json!({
         "session_id": sid_ab,
-        "message": {"ts": 0, "from": "99999999-9999-4999-8999-999999999999", "kind": "agent_message", "body": "x", "meta": {"message_id": "aa-row-2"}}
+        "message": {"ts": 0, "from": "99999999-9999-4999-8999-999999999999", "kind": "agent_message", "body": "x", "meta": {"message_id": "aa-row-2", "in_reply_to": "aa-row-1"}}
     });
     let (code, _, _) = http_post_json(up, "/internal/chat-sessions/messages", &serde_json::to_vec(&forged).unwrap());
     assert!((400..500).contains(&code), "non-participant write refused ({code})");

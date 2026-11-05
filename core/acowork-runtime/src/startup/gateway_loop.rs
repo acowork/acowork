@@ -1187,7 +1187,9 @@ async fn route_intent_inbound(
         let initiator = Some(env.from.as_str()).filter(|s| !s.is_empty());
         let surface = chat_surface(&env);
         let to = env.from.clone();
-        let in_reply_to = env.in_reply_to.clone();
+        // The card asks about this very message, so its thread coordinate is
+        // the message — never the envelope's own answer-coordinate, which is
+        // empty on a fresh request (design 31 §5.2).
         let message_id = env.message_id.clone();
         let candidates = session_manager
             .lock()
@@ -1205,7 +1207,6 @@ async fn route_intent_inbound(
                         .emit_session_choice(
                             &chat,
                             &to,
-                            &in_reply_to,
                             &message_id,
                             "session_choice",
                             many.iter().map(|c| c.choice_option()).collect(),

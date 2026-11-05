@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::context::AuthContext;
 use crate::auth::issuer::now_unix;
+use crate::chat_view;
 use crate::chat_sessions::{
     self, ChatSession, IntentMeta, Participant, ParticipantIdentity, SeedConfig, SessionKind,
     SessionMessage,
@@ -303,8 +304,26 @@ pub struct SessionConfigRequest {
     pub reasoning_effort: Option<String>,
 }
 
+/// One page of the chat read model (design 31 §6): the durable rows plus the
+/// state each row carries, derived server-side. Surfaces render `delivery`
+/// verbatim instead of scanning the transcript for a row whose `in_reply_to`
+/// matches — the scan is what let a card with an empty coordinate strand a send
+/// in "working on it" for 300 s.
 #[derive(Debug, Serialize)]
 pub struct MessagePage {
+    pub messages: Vec<chat_view::ChatRowView>,
+    pub total: u64,
+}
+
+/// A raw transcript page: durable rows only, no derived state.
+///
+/// The internal read is what `chat_history_read` hands to a model, and its byte
+/// budget is spent per row — derived state would be spent out of that budget to
+/// tell a reader something it does not render. Surfaces get
+/// [`MessagePage`]; a reader that needs state asks the service, it does not
+/// re-derive it from the rows.
+#[derive(Debug, Serialize)]
+pub struct RawMessagePage {
     pub messages: Vec<SessionMessage>,
     pub total: u64,
 }
@@ -1326,6 +1345,14 @@ async fn system_append_message(
     State(state): State<AppState>,
     Json(req): Json<SystemAppendRequest>,
 ) -> Result<(StatusCode, Json<SessionMessage>), ApiError> {
+    // Design 31 §5.2: a writer that breaks the row contract (unregistered
+    // payload key, an answering row with no coordinate, a card with no options)
+    // made a *request* error, not a storage failure — 422 at the boundary, so
+    // the Gateway's relay reports the caller's bug instead of a 500 that reads
+    // like the store is down. `append_message` checks the same contract again
+    // for in-process writers; this call exists for the status code.
+    chat_sessions::check_write_contract(&req.message)
+        .map_err(|e| ApiError::unprocessable_entity(&e))?;
     let dir = data_dir_any(&state).await;
     let message = offload(move || {
         chat_sessions::append_message(&dir, &req.session_id, &req.message, now_unix())
@@ -1627,7 +1654,7 @@ async fn system_read_messages(
     State(state): State<AppState>,
     Path(session_id): Path<String>,
     Query(q): Query<PageQuery>,
-) -> Result<Json<MessagePage>, ApiError> {
+) -> Result<Json<RawMessagePage>, ApiError> {
     let limit = q.limit.unwrap_or(DEFAULT_PAGE).clamp(1, MAX_PAGE);
     let who = q
         .who
@@ -1651,7 +1678,7 @@ async fn system_read_messages(
         let (dir, session_id, who) = (dir.clone(), session_id.clone(), who.clone());
         let _ = offload(move || chat_sessions::mark_read(&dir, &session_id, &who)).await;
     }
-    Ok(Json(MessagePage { messages, total }))
+    Ok(Json(RawMessagePage { messages, total }))
 }
 
 /// `GET /internal/chat-sessions/{session_id}/messages/by-message-id/{message_id}?who=`
@@ -1823,7 +1850,7 @@ fn read_messages_guarded(
     admin_inspection: bool,
     offset: usize,
     limit: usize,
-) -> Result<(Vec<SessionMessage>, u64), String> {
+) -> Result<(Vec<chat_view::ChatRowView>, u64), String> {
     let session = chat_sessions::load(dir, session_id)?;
     if !session.participants.iter().any(|p| p.id == who) {
         // Admin read-only inspection covers project groups only — the
@@ -1833,7 +1860,7 @@ fn read_messages_guarded(
             return Err("not_a_participant".to_string());
         }
     }
-    chat_sessions::read_messages(dir, session_id, offset, limit)
+    chat_view::read_page(dir, session_id, offset, limit)
 }
 
 /// The single backend write entry as reached from HTTP: participation is
@@ -3431,7 +3458,7 @@ mod tests {
         // System append of an agent_message row (Wave 2B vocabulary:
         // the Intent facts are fields on an agent utterance now).
         let body = format!(
-            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-1","kind":"agent_message","body":"what is 2+2","to":"agent-2","meta":{{"message_id":"m-1","conversation_id":"c-1"}}}}}}"#
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-1","kind":"agent_message","body":"what is 2+2","to":"agent-2","meta":{{"message_id":"m-1","conversation_id":"c-1","in_reply_to":"u-1"}}}}}}"#
         );
         let resp = app
             .clone()
@@ -3449,6 +3476,27 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
         assert_eq!(json(resp).await["seq"].as_u64().unwrap(), 1);
+
+        // Design 31 §5.2: a writer that breaks the row contract gets 422 — its
+        // own bug, reported as one, not the 500 a storage failure would be. A
+        // card with no options is the shape that reached the surface as a
+        // sentence with no buttons.
+        let contract = format!(
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-1","kind":"system_notice","body":"","meta":{{"message_id":"c-1","notice_type":"confirm_continue","in_reply_to":"m-1"}}}}}}"#
+        );
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/internal/chat-sessions/messages", Some(&contract), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(
+            json(resp).await["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("meta.options"),
+            "the refusal must name the missing field"
+        );
 
         // A sender that is not a participant is refused (append_message
         // participation rule still applies to system writes).
@@ -3546,6 +3594,135 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+    }
+
+    #[tokio::test]
+    async fn message_page_projects_delivery_state() {
+        // Design 31 §6: the service is the only place a row's state is derived,
+        // and `GET .../messages` hands it to every surface. What this pins is the
+        // wire shape the two apps read — a human row's answered-ness and target,
+        // and a card's own question — because a surface that has to re-derive
+        // any of it is the bug this endpoint exists to end.
+        let dir = test_support::temp_dir("chatsessdelivery");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice_delivery").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_agent","participants":["{alice}","agent-9"]}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // The human speaks. Its row is unanswered: a state, reported as such.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{session_id}/messages"),
+                Some(r#"{"body":"继续这个任务"}"#),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let human_id = json(resp).await["meta"]["message_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let fetch_page = |app: axum::Router, token: String, session_id: String| async move {
+            let resp = app
+                .oneshot(req(
+                    "GET",
+                    &format!("/api/chat-sessions/{session_id}/messages"),
+                    None,
+                    Some(&token),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::OK);
+            json(resp).await
+        };
+        let page = fetch_page(app.clone(), alice_token.clone(), session_id.clone()).await;
+        let row = &page["messages"][0];
+        assert_eq!(row["delivery"]["answered"].as_bool(), Some(false));
+        assert!(row["delivery"]["target"].is_null(), "no round yet: {row:?}");
+
+        // The agent opens a round on it: the reference row is the answer.
+        let round = format!(
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-9","kind":"execution_round","body":"","to":"{alice}","meta":{{"message_id":"round:exec-1|r1","in_reply_to":"{human_id}","agent_instance_id":"agent-9","agent_session_id":"exec-1","round_id":"r1","opened_new":true}}}}}}"#
+        );
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/internal/chat-sessions/messages", Some(&round), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        // An addressing card about the same message. Answering it is a
+        // re-delivery, so the card itself is not the answer to anything.
+        let card = format!(
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-9","kind":"system_notice","body":"","to":"{alice}","meta":{{"message_id":"card-1","notice_type":"confirm_continue","in_reply_to":"{human_id}","options":[{{"session_id":"exec-1","label":"继续整理报表"}}],"allow_new_task":true}}}}}}"#
+        );
+        let resp = app
+            .clone()
+            .oneshot(req("POST", "/internal/chat-sessions/messages", Some(&card), None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let page = fetch_page(app.clone(), alice_token.clone(), session_id.clone()).await;
+        let rows = page["messages"].as_array().unwrap();
+        assert_eq!(rows.len(), 3, "{page:?}");
+
+        // The human row: answered, by the round, with coordinates the surface can
+        // jump to. The card that landed after it did not displace the first
+        // answer — log order decides, so the block stays the narration.
+        let human = &rows[0];
+        assert_eq!(human["delivery"]["answered"].as_bool(), Some(true));
+        assert_eq!(
+            human["delivery"]["answered_by"]["kind"].as_str(),
+            Some("execution_round")
+        );
+        assert_eq!(human["delivery"]["target"]["round_id"].as_str(), Some("r1"));
+        assert_eq!(
+            human["delivery"]["target"]["agent_session_id"].as_str(),
+            Some("exec-1")
+        );
+        assert_eq!(
+            human["delivery"]["target"]["opened_new"].as_bool(),
+            Some(true)
+        );
+
+        // The card: its own question, its own options, and the fact that a round
+        // now answered the message it asked about — the surfaces used to infer
+        // that by scanning for a row pointing at the same coordinate.
+        let card = rows
+            .iter()
+            .find(|r| r["meta"]["notice_type"].as_str() == Some("confirm_continue"))
+            .expect("the card must be on the page");
+        assert_eq!(card["kind"].as_str(), Some("system_notice"));
+        assert_eq!(card["delivery"]["question"]["answered"].as_bool(), Some(true));
+        assert_eq!(
+            card["delivery"]["question"]["options"][0]["session_id"].as_str(),
+            Some("exec-1")
+        );
+        assert_eq!(
+            card["delivery"]["question"]["allow_new_task"].as_bool(),
+            Some(true)
+        );
+        // The card is a question, not someone's answer: it carries no target.
+        assert!(card["delivery"]["target"].is_null(), "{card:?}");
     }
 
     #[tokio::test]

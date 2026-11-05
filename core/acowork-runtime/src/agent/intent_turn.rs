@@ -510,18 +510,26 @@ pub fn router_answer_meta(request_message_id: &str) -> serde_json::Value {
 /// answered with one click and never traps the human in a context they did not
 /// choose.
 ///
+/// **The question is about the inbound message, so `in_reply_to` IS that
+/// message's id** — one coordinate, taken from one argument. The card used to
+/// carry a separate `in_reply_to` parameter, and every caller filled it with the
+/// envelope's own answer-coordinate (`in_reply_to`), which on a fresh request is
+/// the empty string: the card landed in the transcript answering nothing, the
+/// surface could not find the message it asked about, and the send it belonged
+/// to never settled. Two parameters for one fact is how that happened, so there
+/// is now only one.
+///
 /// The idempotency key is the notice type plus the inbound message it answers,
 /// so a redelivered turn re-asks one question rather than stacking cards.
 pub fn session_choice_meta(
     notice_type: &str,
-    in_reply_to: &str,
     request_message_id: &str,
     options: Vec<serde_json::Value>,
 ) -> serde_json::Value {
     serde_json::json!({
         "message_id": format!("{notice_type}:{request_message_id}"),
         "notice_type": notice_type,
-        "in_reply_to": in_reply_to,
+        "in_reply_to": request_message_id,
         "options": options,
         "allow_new_task": true,
     })
@@ -539,12 +547,11 @@ pub async fn emit_session_choice(
     node_token: &str,
     chat_session_id: &str,
     to: &str,
-    in_reply_to: &str,
     request_message_id: &str,
     notice_type: &str,
     options: Vec<serde_json::Value>,
 ) -> Result<(), String> {
-    let meta = session_choice_meta(notice_type, in_reply_to, request_message_id, options);
+    let meta = session_choice_meta(notice_type, request_message_id, options);
     append_chat_row(
         instance_id,
         gateway_host,
@@ -814,6 +821,29 @@ mod tests {
             "has_human": has_human,
         }))
         .unwrap()
+    }
+
+    /// Design 31 §5.2: a card's thread coordinate is the message it asks about.
+    ///
+    /// It used to be a separate parameter, and every caller filled it with the
+    /// envelope's own answer-coordinate — the empty string on a fresh request.
+    /// The card then answered nothing: the surface could not find the message
+    /// the question belonged to, so the send kept waiting ("@X is working on
+    /// it…") long after the question had landed, and the card's re-delivery had
+    /// no row to answer. One fact, one parameter.
+    #[test]
+    fn a_session_choice_card_answers_the_message_it_asks_about() {
+        let meta = session_choice_meta(
+            "confirm_continue",
+            "m-1",
+            vec![serde_json::json!({"session_id": "s-1", "label": "task"})],
+        );
+        assert_eq!(meta["in_reply_to"], "m-1");
+        // The idempotency key still names the notice type plus the message, so
+        // a redelivered turn re-asks one question instead of stacking cards.
+        assert_eq!(meta["message_id"], "confirm_continue:m-1");
+        assert_eq!(meta["allow_new_task"], true);
+        assert_eq!(meta["options"].as_array().map(Vec::len), Some(1));
     }
 
     #[test]

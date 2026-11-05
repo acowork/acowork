@@ -980,7 +980,6 @@ async fn run_turn(
                 &deps.node_token,
                 &chat_id,
                 &envelope.from,
-                &envelope.in_reply_to,
                 &envelope.message_id,
                 "confirm_continue",
                 vec![option],
