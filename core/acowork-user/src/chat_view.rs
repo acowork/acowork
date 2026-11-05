@@ -47,10 +47,18 @@ pub struct DeliveryView {
     /// which is also the one the transcript shows first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answered_by: Option<AnswerRef>,
-    /// The execution round this row's turn opened or continued — absent until a
-    /// round exists, so "delivered, no session yet" is visible as such.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target: Option<RoundTarget>,
+    /// The execution rounds this row's turn opened or continued, in log order —
+    /// empty until a round exists, so "delivered, no session yet" is visible as
+    /// such.
+    ///
+    /// A **list**, because one human message can be answered by several rounds:
+    /// a group `@` fan-out delivers to each mentioned agent against the same
+    /// row (`in_reply_to` = that row's id), and each target's Runtime opens its
+    /// own round. A single field would silently report the first of them and
+    /// leave "where did my message go" unanswerable for group sends — the same
+    /// class of half-answer this projection exists to remove.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub targets: Vec<RoundTarget>,
     /// Present on an addressing card: the question it asks and whether it has
     /// been answered yet (design 31 §4, `question`).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,6 +94,19 @@ pub struct QuestionState {
     pub options: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_new_task: Option<bool>,
+}
+
+/// Has the question this card asks been answered?
+///
+/// The criterion (design 31 §6.1): a **round** now answers the message the card
+/// names. The card itself is not its own answer — nothing threads to a question,
+/// and counting "any answering row" would make a card declare itself answered
+/// the moment it landed.
+///
+/// Exported because the card-answer entry asks the same question: whether a
+/// click would re-deliver words that already went out. One rule, two callers.
+pub fn question_answered(answering: &[SessionMessage]) -> bool {
+    answering.iter().any(|r| r.kind == chat_kinds::EXECUTION_ROUND)
 }
 
 /// A page of the transcript, rows plus their derived state.
@@ -138,17 +159,14 @@ fn delivery_of(
         // A card is a question about the message it names — never about itself:
         // nothing threads to a question. It is answered when a round now
         // answers that message.
-        let asked = answers.get(row.meta.in_reply_to.as_str());
-        let answered = asked
-            .map(|rows| {
-                rows.iter()
-                    .any(|r| r.kind == chat_kinds::EXECUTION_ROUND)
-            })
+        let answered = answers
+            .get(row.meta.in_reply_to.as_str())
+            .map(|rows| question_answered(rows))
             .unwrap_or(false);
         return Some(DeliveryView {
             answered: false,
             answered_by: None,
-            target: None,
+            targets: Vec::new(),
             question: Some(QuestionState {
                 answered,
                 options: row.meta.options.clone(),
@@ -173,22 +191,26 @@ fn delivery_of(
         // message that is still waiting is a state, not a missing value.
         return Some(DeliveryView::default());
     };
-    let target = answering
+    // One entry per answering round, in log order. Duplicates by coordinates
+    // are impossible: a round is written once per (turn, target), and the store
+    // dedups on `message_id`.
+    let targets = answering
         .iter()
-        .find(|r| r.kind == chat_kinds::EXECUTION_ROUND)
+        .filter(|r| r.kind == chat_kinds::EXECUTION_ROUND)
         .map(|r| RoundTarget {
             agent_instance_id: r.meta.agent_instance_id.clone(),
             agent_session_id: r.meta.agent_session_id.clone(),
             round_id: r.meta.round_id.clone(),
             opened_new: r.meta.opened_new,
-        });
+        })
+        .collect();
     Some(DeliveryView {
         answered: true,
         answered_by: Some(AnswerRef {
             message_id: first.meta.message_id.clone(),
             kind: first.kind.clone(),
         }),
-        target,
+        targets,
         question: None,
     })
 }
@@ -258,10 +280,38 @@ mod tests {
         let delivery = view.delivery.expect("a human row always carries delivery");
         assert!(delivery.answered);
         assert_eq!(delivery.answered_by.as_ref().map(|a| a.kind.as_str()), Some("execution_round"));
-        let target = delivery.target.expect("the round coordinates");
+        assert_eq!(delivery.targets.len(), 1);
+        let target = &delivery.targets[0];
         assert_eq!(target.agent_session_id, "s-9");
         assert_eq!(target.round_id, "r:ref");
         assert_eq!(target.opened_new, Some(false));
+    }
+
+    /// A group `@` fan-out answers ONE human row with ONE round per target, so
+    /// "where did my message go" is a set, not a value. A single `target` field
+    /// silently reported the first and left the rest unanswerable — the same
+    /// half-answer shape as the card bug.
+    #[test]
+    fn every_round_that_answers_a_message_is_reported_not_just_the_first() {
+        let map = answers(&[
+            ("m-1", round_ref("round-a", "m-1", "exec-a")),
+            ("m-1", round_ref("round-b", "m-1", "exec-b")),
+        ]);
+        let view = view(human("m-1"), &map);
+        let delivery = view.delivery.unwrap();
+        assert!(delivery.answered);
+        // Log order, both targets, nothing collapsed.
+        let targets: Vec<&str> = delivery
+            .targets
+            .iter()
+            .map(|t| t.agent_session_id.as_str())
+            .collect();
+        assert_eq!(targets, ["exec-a", "exec-b"]);
+        // The *first* answer still names the block the transcript narrates from.
+        assert_eq!(
+            delivery.answered_by.map(|a| a.message_id),
+            Some("round-a".to_string())
+        );
     }
 
     /// Waiting is a state, not a missing field: the composer lock reads it.

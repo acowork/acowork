@@ -116,7 +116,10 @@ export interface ChatDeliveryView {
    *  this device inserted before the service answered), never "unanswered". */
   answered: boolean;
   answered_by?: ChatAnswerRef;
-  target?: ChatRoundTarget;
+  /** Every round that answers this row, in log order. A group `@` fan-out opens
+   *  one round per target against the same message, so this is a list: a single
+   *  value would report the first target and lose the rest. */
+  targets?: ChatRoundTarget[];
   question?: ChatQuestionState;
 }
 

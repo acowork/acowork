@@ -41,7 +41,7 @@ const UNANSWERED: ChatDeliveryView = { answered: false }
 const ANSWERED: ChatDeliveryView = {
   answered: true,
   answered_by: { message_id: 'round:m-1', kind: 'execution_round' },
-  target: { agent_instance_id: 'agent-a', agent_session_id: 's-1', round_id: 'r:m-1' },
+  targets: [{ agent_instance_id: 'agent-a', agent_session_id: 's-1', round_id: 'r:m-1' }],
 }
 
 describe('chatTurnInflight', () => {

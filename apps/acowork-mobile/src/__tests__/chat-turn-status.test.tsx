@@ -50,7 +50,7 @@ const ANSWERED_HUMAN = row({
   delivery: {
     answered: true,
     answered_by: { message_id: 'round:exec|r1', kind: 'execution_round' },
-    target: { agent_instance_id: AGENT, agent_session_id: 'exec', round_id: 'r1' },
+    targets: [{ agent_instance_id: AGENT, agent_session_id: 'exec', round_id: 'r1' }],
   },
 })
 const RECEIPT_ANSWERED_HUMAN = row({

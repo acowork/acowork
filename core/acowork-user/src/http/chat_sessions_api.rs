@@ -3656,7 +3656,10 @@ mod tests {
         let page = fetch_page(app.clone(), alice_token.clone(), session_id.clone()).await;
         let row = &page["messages"][0];
         assert_eq!(row["delivery"]["answered"].as_bool(), Some(false));
-        assert!(row["delivery"]["target"].is_null(), "no round yet: {row:?}");
+        assert!(
+            row["delivery"]["targets"].as_array().map(Vec::is_empty).unwrap_or(true),
+            "no round yet: {row:?}"
+        );
 
         // The agent opens a round on it: the reference row is the answer.
         let round = format!(
@@ -3694,13 +3697,13 @@ mod tests {
             human["delivery"]["answered_by"]["kind"].as_str(),
             Some("execution_round")
         );
-        assert_eq!(human["delivery"]["target"]["round_id"].as_str(), Some("r1"));
+        assert_eq!(human["delivery"]["targets"][0]["round_id"].as_str(), Some("r1"));
         assert_eq!(
-            human["delivery"]["target"]["agent_session_id"].as_str(),
+            human["delivery"]["targets"][0]["agent_session_id"].as_str(),
             Some("exec-1")
         );
         assert_eq!(
-            human["delivery"]["target"]["opened_new"].as_bool(),
+            human["delivery"]["targets"][0]["opened_new"].as_bool(),
             Some(true)
         );
 
@@ -3722,7 +3725,106 @@ mod tests {
             Some(true)
         );
         // The card is a question, not someone's answer: it carries no target.
-        assert!(card["delivery"]["target"].is_null(), "{card:?}");
+        assert!(
+            card["delivery"]["targets"].as_array().map(Vec::is_empty).unwrap_or(true),
+            "{card:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_write_contract_is_a_422_not_a_500() {
+        // Design 31 §5: the contract lives in the store, but its *status code*
+        // is decided here, and that mapping is the half a caller actually acts
+        // on — a writer that breaks the contract has a bug, and calling it a 500
+        // tells the Gateway the store is down. Every branch of
+        // `check_write_contract` is exercised through the endpoint, because the
+        // store's own unit test cannot see this boundary.
+        let dir = test_support::temp_dir("chatsesscontract");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice_contract").await;
+
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_agent","participants":["{alice}","agent-9"]}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        let append = |app: axum::Router, body: String| async move {
+            app.oneshot(req(
+                "POST",
+                "/internal/chat-sessions/messages",
+                Some(&body),
+                None,
+            ))
+            .await
+            .unwrap()
+        };
+
+        // 1. A payload key no reader can resolve. This is the exact shape of the
+        //    bug that started it all: `options` was never registered, so serde
+        //    dropped it and the card reached the surface as a sentence.
+        let unregistered = format!(
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-9","kind":"system_notice","body":"","to":"{alice}","meta":{{"message_id":"n-1","notice_type":"budget_exhausted","cardOptions":[]}}}}}}"#
+        );
+        let resp = append(app.clone(), unregistered).await;
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body = json(resp).await;
+        assert!(
+            body.to_string().contains("cardOptions"),
+            "the error must name the key: {body:?}"
+        );
+
+        // 2. An answering row with no coordinate: an orphan the projection
+        //    cannot resolve, so it must never reach the log.
+        let unthreaded = format!(
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-9","kind":"agent_message","body":"on it","to":"{alice}","meta":{{"message_id":"a-1"}}}}}}"#
+        );
+        assert_eq!(
+            append(app.clone(), unthreaded).await.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        // 3. A card is a question with answers and an exit (ADR-106 D6).
+        let no_options = format!(
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-9","kind":"system_notice","body":"","to":"{alice}","meta":{{"message_id":"c-1","notice_type":"confirm_continue","in_reply_to":"m-0"}}}}}}"#
+        );
+        assert_eq!(
+            append(app.clone(), no_options).await.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+        let no_escape = format!(
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-9","kind":"system_notice","body":"","to":"{alice}","meta":{{"message_id":"c-2","notice_type":"confirm_continue","in_reply_to":"m-0","options":[{{"session_id":"exec-1","label":"继续"}}]}}}}}}"#
+        );
+        assert_eq!(
+            append(app.clone(), no_escape).await.status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+
+        // Nothing was stored by any of them: the refusal happens before the
+        // append, so a rejected write leaves no half-row behind.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/messages"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let page = json(resp).await;
+        assert_eq!(page["total"].as_u64(), Some(0), "no rejected row may land: {page:?}");
     }
 
     #[tokio::test]
