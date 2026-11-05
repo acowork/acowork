@@ -84,25 +84,18 @@ pub struct RoundTarget {
     pub opened_new: Option<bool>,
 }
 
-/// An addressing card's own state: the answers it offers, whether the human has
-/// already taken one, and which session took it.
+/// An addressing card's own state: the answers it offers and whether the human
+/// has already taken one.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct QuestionState {
     /// A round now answers the message this card asked about — the card was
     /// answered (its re-delivery leaves the reference row, ADR-106 D3).
-    pub answered: bool,
-    /// The execution session that took the answer: the answering round's
-    /// `agent_session_id`, in log order.
     ///
-    /// Kept beside `answered` because the receipt a settled card paints has to
-    /// name where the words went ("已交给 <task>"). Without it the surface can
-    /// only say "answered", and the one thing a human checks after clicking —
-    /// *which* task took my message — would have to be re-derived from another
-    /// row's coordinates, which is exactly the scanning this projection exists
-    /// to remove. Absent when a round answered without saying which session ran
-    /// it (ADR-106 D3 forbids inventing one).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub answered_session: Option<String>,
+    /// The surface renders nothing for it: a card is a question, and a question
+    /// that has been answered is an intermediate state of the turn, not a record
+    /// of the conversation (ADR-106 D14). Where the words went is already told
+    /// by the round's block, one fact in one place.
+    pub answered: bool,
     pub options: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_new_task: Option<bool>,
@@ -170,26 +163,17 @@ fn delivery_of(
     if is_card {
         // A card is a question about the message it names — never about itself:
         // nothing threads to a question. It is answered when a round now
-        // answers that message, and the *first* such round names the session
-        // that took it: a group fan-out can answer the same message several
-        // times, and the receipt reports where the click actually landed.
-        let answering = answers
+        // answers that message.
+        let answered = answers
             .get(row.meta.in_reply_to.as_str())
-            .map(Vec::as_slice)
-            .unwrap_or_default();
-        let answered_session = answering
-            .iter()
-            .find(|r| {
-                r.kind == chat_kinds::EXECUTION_ROUND && !r.meta.agent_session_id.trim().is_empty()
-            })
-            .map(|r| r.meta.agent_session_id.clone());
+            .map(|rows| question_answered(rows))
+            .unwrap_or(false);
         return Some(DeliveryView {
             answered: false,
             answered_by: None,
             targets: Vec::new(),
             question: Some(QuestionState {
-                answered: question_answered(answering),
-                answered_session,
+                answered,
                 options: row.meta.options.clone(),
                 allow_new_task: row.meta.allow_new_task,
             }),
@@ -364,27 +348,6 @@ mod tests {
 
         let asked = answers(&[("m-1", round_ref("round-ref", "m-1", "s-9"))]);
         let done = view(card("c-1", "m-1"), &asked);
-        let question = done.delivery.unwrap().question.unwrap();
-        assert!(question.answered);
-        // The settled card names WHERE the answer went: a receipt that only says
-        // "answered" leaves the human unable to check the one thing they clicked
-        // for — which task took my message.
-        assert_eq!(question.answered_session.as_deref(), Some("s-9"));
-    }
-
-    /// A round may answer without naming the session that ran it (ADR-106 D3:
-    /// a delivery that could not say must not be faked). The card is still
-    /// answered — the receipt just cannot name a target.
-    #[test]
-    fn an_answer_that_names_no_session_leaves_the_receipt_targetless() {
-        let mut silent = round_ref("round-ref", "m-1", "");
-        silent.meta.agent_session_id = String::new();
-        let question = view(card("c-1", "m-1"), &answers(&[("m-1", silent)]))
-            .delivery
-            .expect("a card carries delivery")
-            .question
-            .expect("question state");
-        assert!(question.answered);
-        assert_eq!(question.answered_session, None);
+        assert!(done.delivery.unwrap().question.unwrap().answered);
     }
 }
