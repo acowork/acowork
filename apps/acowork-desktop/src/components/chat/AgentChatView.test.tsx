@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentChatView } from "./AgentChatView";
 import type { ChatDeliveryView, ChatMessageRow } from "../../stores/chatSessionStore";
 import type { RunBlock } from "./chatTranscriptGroups";
+import { openAttachedRef } from "../../lib/openWorkspaceRef";
 
 const AGENT = "agent-1";
 const SESSION = "chat-1";
@@ -29,6 +30,10 @@ let settleTurnMock: ReturnType<typeof vi.fn> = vi.fn();
 let drafts: Record<string, unknown> = {};
 let availableModels: unknown[] = [];
 let sendTextMock: ReturnType<typeof vi.fn> = vi.fn();
+
+// The chip's click is the dispatcher under test in the attachment case below;
+// every other case here never clicks one.
+vi.mock("../../lib/openWorkspaceRef", () => ({ openAttachedRef: vi.fn() }));
 
 vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../stores/chatSessionStore")>();
@@ -842,5 +847,26 @@ describe("AgentChatView `@` composer gesture", () => {
     });
     const typed = screen.getByTestId("address-picker");
     expect(typed.closest('[data-toolbar-cluster="right"]')).toBeNull();
+  });
+
+  it("the workspace-ref banner a turn carried opens its file (D12 Rev. 2026-11)", () => {
+    // The reported defect: in the execution session the banner hanging off a
+    // message opened the file, in the Chat session it only painted. Same chip
+    // frame, same glyph, same dispatcher — the difference was that the label
+    // had no path to resolve. It has one now.
+    windows = windowOf(
+      userRow(1, "look at this", {
+        exec_attachments: [
+          { filename: "src/main.rs", kind: "attached_file", absPath: "E:/ws/src/main.rs" },
+        ],
+      }),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    fireEvent.click(screen.getByRole("button", { name: "src/main.rs" }));
+    expect(openAttachedRef).toHaveBeenCalledWith({
+      item: { type: "attached_file", absPath: "E:/ws/src/main.rs", name: "src/main.rs" },
+      agentId: AGENT,
+      currentWorkspaceId: "",
+    });
   });
 });

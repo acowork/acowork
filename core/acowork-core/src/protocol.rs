@@ -610,6 +610,13 @@ pub enum AttachedItem {
 /// decoration a chip renders. That is this type, and it is the only attachment
 /// shape a Chat row or a router prompt may carry.
 ///
+/// The one exception is [`Self::abs_path`], and it is an exception only in the
+/// sense of *who* may use it: a workspace arm's path travels so the desktop can
+/// put the file back on screen when the human clicks the chip (ADR-100 D12
+/// Rev. 2026-11), because a banner that looks like the execution surface's
+/// clickable chip and does nothing is worse than no banner. Nothing on the
+/// server reads it — not the store, not the router prompt, not the model.
+///
 /// The single producer is [`AttachmentLabel::from_item`] — the Gateway calls
 /// it through [`AttachmentLabel::from_value`] when it writes the row label and
 /// the Chat Router calls it when it renders the turn — so the human's screen
@@ -646,6 +653,30 @@ pub struct AttachmentLabel {
     pub start_line: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line: Option<u32>,
+    /// The workspace reference's path, for the **client's click** — never for
+    /// the store, the router or the model.
+    ///
+    /// A workspace arm is the one attachment that is openable from a Chat row:
+    /// it is a live path on the node that hosts the Agent, and the desktop
+    /// resolves it to `(workspaceId, relPath)` through its own workspace
+    /// registry before asking the Gateway for the bytes (`openAttachedRef` →
+    /// `/api/agents/{id}/workspaces/file`) — the same route the execution
+    /// surface's chip takes. Without it the chip is a name with nothing behind
+    /// it, which is what made the Chat transcript's banner look clickable and
+    /// do nothing.
+    ///
+    /// The three rules this field exists under, in the order they matter:
+    ///   1. The upload arms never carry it (their bytes belong to one run, and
+    ///      this type deliberately has no `documentId` either).
+    ///   2. It is **never rendered as text** and never reaches the model: the
+    ///      router's `[attached refs]` line prints `filename` + line range only
+    ///      (`chat_router::context::refs_line`), so a prompt keeps describing
+    ///      the reference the way a remote Node could read it.
+    ///   3. It is not an authority. The client resolves it against its own
+    ///      workspaces; a path that resolves nowhere is a visible "not found",
+    ///      the same failure the composer tray chip already reports.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub abs_path: Option<String>,
 }
 
 impl AttachmentLabel {
@@ -685,6 +716,9 @@ impl AttachmentLabel {
                 size_bytes: Some(*size_bytes),
                 start_line: None,
                 end_line: None,
+                // The upload arms never carry a path: the bytes live under one
+                // run's `files/` dir, and this type has no `documentId` either.
+                abs_path: None,
             },
             AttachedItem::ImageUpload {
                 filename,
@@ -698,6 +732,7 @@ impl AttachmentLabel {
                 size_bytes: Some(*size_bytes),
                 start_line: None,
                 end_line: None,
+                abs_path: None,
             },
             AttachedItem::AttachedFile { abs_path, name, .. } => Self {
                 filename: base(name, abs_path),
@@ -706,6 +741,7 @@ impl AttachmentLabel {
                 size_bytes: None,
                 start_line: None,
                 end_line: None,
+                abs_path: Some(abs_path.clone()),
             },
             AttachedItem::AttachedSelection {
                 abs_path,
@@ -720,6 +756,7 @@ impl AttachmentLabel {
                 size_bytes: None,
                 start_line: Some(*start_line),
                 end_line: Some(*end_line),
+                abs_path: Some(abs_path.clone()),
             },
             AttachedItem::AttachedFolder { abs_path, name, .. } => Self {
                 filename: base(name, abs_path),
@@ -728,6 +765,10 @@ impl AttachmentLabel {
                 size_bytes: None,
                 start_line: None,
                 end_line: None,
+                // A folder has no chip that can open it yet (fileTab has no
+                // folder view), so it ships without a path — the client would
+                // have nothing to do with one.
+                abs_path: None,
             },
         };
         (!label.filename.is_empty()).then_some(label)

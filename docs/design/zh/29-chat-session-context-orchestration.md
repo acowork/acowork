@@ -149,7 +149,7 @@ router **不加载**：
 [attached refs] chat_prompt.rs, src/lib.rs (L12-L25)
 ```
 
-两行是回合携带的两类附件，来自两个不同的参数：`[attachments]` 是上传进本 chat 的文件（`chat_attachments`，Gateway 能从会话 `files/` 读回元数据）；`[attached refs]` 是人从工作区指过来的引用（`attached_items`，node-local 路径 Gateway 读不到，所以只有显示名与行区间——即 `acowork_core::protocol::AttachmentLabel` 这一枚投影，与 chat 行 `meta.exec_attachments`、与桌面芯片同一形状）。
+两行是回合携带的两类附件，来自两个不同的参数：`[attachments]` 是上传进本 chat 的文件（`chat_attachments`，Gateway 能从会话 `files/` 读回元数据）；`[attached refs]` 是人从工作区指过来的引用（`attached_items`，node-local 路径 Gateway 读不到，所以 prompt 里只有显示名与行区间——即 `acowork_core::protocol::AttachmentLabel` 这一枚投影，与 chat 行 `meta.exec_attachments`、与桌面芯片同一形状；工作区臂另带一枚 `absPath` 供芯片点击，prompt 永不渲染它——ADR-100 D12 Rev. 9）。
 
 两行都由 `context::attachment_lines` 渲染，Block B（历史行）与 Block C（当前回合）走同一条路径：**被路由的那一条，必须在它成为历史之后逐字节读起来一样**，否则之后的每一轮都在推理一份从未出现过的记录。行区间统一拼作 `L{start}-L{end}`（单行 `L{start}`），与芯片的 `selectionRange` 一致。
 

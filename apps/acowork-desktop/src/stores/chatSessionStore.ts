@@ -47,11 +47,16 @@ import { useAuthStore } from "./authStore";
 
 /** ADR-100: one display label for something the Chat-surface composer handed
  *  to the task alongside a turn (the execution surface's own sends never reach
- *  this code — Rev. 8 / D14 writes them to their own session, not to chat). Labels only — no path, no id, nothing the chat side could
- *  try to open, because the attachment bytes stay in the execution session
- *  (design 27 §4.2.1). Mirrors `acowork_core::protocol::AttachmentLabel`, the
- *  same projection the Chat Router renders into its prompt: the chip and the
- *  prompt describe one attachment with one shape. */
+ *  this code — Rev. 8 / D14 writes them to their own session, not to chat).
+ *  Mirrors `acowork_core::protocol::AttachmentLabel`, the same projection the
+ *  Chat Router renders into its prompt: the chip and the prompt describe one
+ *  attachment with one shape.
+ *
+ *  `absPath` is the one field that is not display: a workspace arm ships the
+ *  path its chip opens (ADR-100 D12 Rev. 2026-11), and nothing else may use it
+ *  — the router's prompt line still prints the name and line range only. The
+ *  upload arms carry no path and no id, because their bytes stay in the run
+ *  that received them (design 27 §4.2.1). */
 export interface ExecAttachmentLabel {
   filename: string;
   /** The ADR-046 item arm (`attached_file` / `image_upload` / …); absent on a
@@ -65,6 +70,10 @@ export interface ExecAttachmentLabel {
   /** `attached_selection` only. */
   startLine?: number;
   endLine?: number;
+  /** Workspace arms only (`attached_file` / `attached_selection`): the path the
+   *  chip opens. Resolved client-side against the Agent's workspaces; a path
+   *  that resolves nowhere is a visible "file not found", never a silent click. */
+  absPath?: string;
 }
 
 /** One durable chat row. Mirrors `chat_sessions_api::MessageRow`. */

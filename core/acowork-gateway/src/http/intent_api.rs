@@ -3024,13 +3024,17 @@ mod chat_append_tests {
     }
 
     #[test]
-    fn attachment_labels_carry_a_basename_never_a_path() {
+    fn attachment_labels_name_a_file_and_only_a_workspace_arm_carries_a_path() {
         // Both union arms are named: an uploaded blob by `filename`, a
         // workspace reference by its path alone when nothing better was sent.
-        // That path is reduced to its last component — the chat must not
-        // publish a node-local filesystem layout to a surface that cannot read
-        // it, and a Windows path is the case a `/`-only split would silently
-        // miss.
+        // That path is reduced to its last component: a display name is not a
+        // location, and a Windows path is the case a `/`-only split would
+        // silently miss.
+        //
+        // The full path is still published, but only in `absPath` and only for
+        // a workspace arm — it is the desktop's click coordinate (ADR-100 D12
+        // Rev. 2026-11), never text. An upload arm carries none: its bytes
+        // belong to one run, which is also why this type has no `documentId`.
         let items = vec![
             serde_json::json!({"type": "file_upload", "filename": "report.pdf", "documentId": "ab12cd34ef56-1", "format": "pdf", "sizeBytes": 12345}),
             serde_json::json!({"type": "attached_file", "absPath": "C:\\work\\src\\main.rs", "name": ""}),
@@ -3040,19 +3044,28 @@ mod chat_append_tests {
         assert_eq!(labels[0].filename, "report.pdf");
         assert_eq!(labels[0].kind, "file_upload");
         assert_eq!(labels[0].size_bytes, Some(12345));
+        assert_eq!(labels[0].abs_path, None, "an upload arm carries no path");
         assert_eq!(labels[1].filename, "main.rs");
         assert_eq!(labels[1].kind, "attached_file");
-        // Neither the blob id nor the path survived, which is the whole point.
+        assert_eq!(
+            labels[1].abs_path.as_deref(),
+            Some(r"C:\work\src\main.rs"),
+            "the workspace arm keeps the path the client opens"
+        );
+        // The blob id never survives, and the path appears in exactly one
+        // field of exactly one arm.
         let rendered = serde_json::to_string(&labels).unwrap();
         assert!(!rendered.contains("ab12cd34ef56-1"));
-        assert!(!rendered.contains("work"));
+        assert_eq!(rendered.matches("work").count(), 1, "the path rides only in absPath: {rendered}");
+        assert!(!labels[1].filename.contains("work"), "the name is still a name");
     }
 
     #[test]
     fn a_workspace_attachment_is_labelled_by_its_display_name() {
         // The workspace arms carry a `name` the execution view already shows
         // the user — a workspace-relative path, which is display text, not a
-        // node-local layout, so it is quoted whole instead of trimmed.
+        // node-local layout, so it is quoted whole instead of trimmed. The
+        // node-local path rides beside it in its own field, for the click.
         let items = vec![serde_json::json!({
             "type": "attached_selection",
             "name": "src/lib.rs",
@@ -3065,11 +3078,16 @@ mod chat_append_tests {
         assert_eq!(labels[0].filename, "src/lib.rs");
         assert_eq!(labels[0].kind, "attached_selection");
         // The line range rides along: it is the one part of a selection a chip
-        // can show without being able to open anything.
+        // can show without opening anything, and what the click uses to land
+        // on the right line once it does open.
         assert_eq!(labels[0].start_line, Some(12));
         assert_eq!(labels[0].end_line, Some(25));
-        let rendered = serde_json::to_string(&labels).unwrap();
-        assert!(!rendered.contains("work"));
+        assert_eq!(
+            labels[0].abs_path.as_deref(),
+            Some(r"C:\work\project\src\lib.rs"),
+            "a selection opens at a path, so it carries one"
+        );
+        assert!(!labels[0].filename.contains("work"));
     }
 
     #[test]

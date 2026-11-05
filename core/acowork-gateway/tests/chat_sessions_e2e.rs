@@ -1204,14 +1204,29 @@ fn a_chat_send_with_workspace_references_lands_display_only_labels() {
         "the head row speaks as the human, never as the Runtime"
     );
 
-    // Display text only. A node-local path means nothing to the Chat store
-    // (ADR-009 §5) and an unopenable reference is worse than none.
+    // A name for the screen, a path for the click. The workspace arm keeps the
+    // path in `absPath` so the desktop can open the file when the chip is
+    // clicked (ADR-100 D12 Rev. 2026-11); the upload arm keeps neither a path
+    // nor a blob id, because those bytes belong to one run (ADR-009 §5).
     let labels = row["meta"]["exec_attachments"].as_array().cloned().unwrap_or_default();
     let names: Vec<&str> = labels.iter().filter_map(|v| v["filename"].as_str()).collect();
     assert!(names.contains(&"src/main.rs"), "workspace arm keeps its display name: {names:?}");
     assert!(names.contains(&"notes.md"), "upload arm keeps its filename: {names:?}");
-    let raw = serde_json::to_string(&labels).unwrap();
-    assert!(!raw.contains("E:/work/demo") && !raw.contains("absPath"), "no path rides along: {raw}");
+    let workspace = labels
+        .iter()
+        .find(|v| v["filename"].as_str() == Some("src/main.rs"))
+        .expect("the workspace arm files a label");
+    assert_eq!(
+        workspace["absPath"].as_str(),
+        Some("E:/work/demo/src/main.rs"),
+        "the click coordinate survives: {workspace}"
+    );
+    let upload = labels
+        .iter()
+        .find(|v| v["filename"].as_str() == Some("notes.md"))
+        .expect("the upload arm files a label");
+    assert!(upload.get("absPath").is_none(), "an upload arm carries no path: {upload}");
+    assert!(!upload.to_string().contains("documentId"), "{upload}");
 
     // Handing the agent a file with no message is a legitimate send: a label is
     // content, not an empty turn.
@@ -1307,7 +1322,10 @@ fn a_send_with_nothing_to_deliver_is_a_readable_400() {
         .clone();
     let raw = serde_json::to_string(&row["meta"]["exec_attachments"]).unwrap();
     assert!(raw.contains("src/main.rs"), "the routed row keeps the display name: {raw}");
-    assert!(!raw.contains("E:/work/demo") && !raw.contains("absPath"), "no path rides along: {raw}");
+    assert!(
+        raw.contains("\"absPath\":\"E:/work/demo/src/main.rs\""),
+        "the workspace arm keeps what the chip's click opens: {raw}"
+    );
 
     // (b) An entry the Runtime would discard: refused at the boundary on
     // either path instead of becoming a label for a file nobody got.

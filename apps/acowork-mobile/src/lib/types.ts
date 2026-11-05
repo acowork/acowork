@@ -495,8 +495,13 @@ export interface ChatSessionInfo {
 /** ADR-100 D12: one display label for something a composer handed to the task
  *  alongside a turn. Mirrors `acowork_core::protocol::AttachmentLabel` — the
  *  same projection the Chat Router renders into its prompt and the desktop
- *  renders into a chip. Labels only: no path, no id, nothing this side could
- *  open, because the attachment belongs to the execution session (ADR-009 §5). */
+ *  renders into a chip.
+ *
+ *  `absPath` is the workspace arm's click coordinate (D12 Rev. 2026-11). It is
+ *  read on the desktop, which resolves it against the Agent's workspaces; this
+ *  side has no filesystem to open it with, so the chip here stays a plain
+ *  label. The field is mirrored anyway so the two clients describe one shape
+ *  instead of two. */
 export interface ExecAttachmentLabel {
   filename: string
   /** The ADR-046 item arm (`attached_file` / `image_upload` / …); absent on a
@@ -507,6 +512,8 @@ export interface ExecAttachmentLabel {
   sizeBytes?: number
   startLine?: number
   endLine?: number
+  /** Workspace arms only — nothing this client can open (see above). */
+  absPath?: string
 }
 
 export interface ChatMessagesPage {

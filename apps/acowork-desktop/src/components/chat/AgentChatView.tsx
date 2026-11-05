@@ -351,13 +351,17 @@ const RowView = memo(function RowView({
                 ))}
               </div>
             )}
-            {/* ADR-100 D12: this turn was sent from an execution view's
-                composer, so its attached items belong to that run, not to
-                this chat session — labels only, and not clickable. They paint
-                above the text like the chat's own chips, which is also what
-                keeps a file-with-no-words turn from collapsing to a blank
-                row. */}
-            <ExecAttachmentLabels labels={row.meta?.exec_attachments} />
+            {/* ADR-100 D12: a turn sent with attached items paints them as
+                labels above the text — which is also what keeps a
+                file-with-no-words turn from collapsing to a blank row. Since
+                D12 Rev. 2026-11 a workspace arm carries its path, so it opens
+                the file in the fileTab exactly like the execution session's
+                chip does; upload arms and folders stay decorative (their bytes
+                belong to the run / fileTab has no folder view). */}
+            <ExecAttachmentLabels
+              labels={row.meta?.exec_attachments}
+              agentId={agentId}
+            />
             {row.body && (
               <div className="max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
                 <div className="px-4 py-2.5 whitespace-pre-wrap break-words">

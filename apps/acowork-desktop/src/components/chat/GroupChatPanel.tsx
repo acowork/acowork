@@ -520,13 +520,18 @@ const GroupRowView = memo(function GroupRowView({
           )}
           {/* ADR-100 D12: a PM task session is bound to this group's chat, so a
               turn composed in its execution view arrives here as a `user_message`
-              whose attached items are labels only — the file lives in the run,
-              not in this chat session, so the pill is deliberately inert. They
-              also count as content, which is what keeps a file-with-no-words
-              head row from painting the empty-turn placeholder. */}
+              whose attached items are labels. They also count as content, which
+              is what keeps a file-with-no-words head row from painting the
+              empty-turn placeholder. A workspace arm is openable (D12 Rev.
+              2026-11) and resolves against the workspaces of the participant
+              who pointed at it — which is this row's sender when the sender is
+              an Agent. A human's own row stays decorative here: this surface is
+              not bound to one Agent's workspace registry, so there would be
+              nothing honest to resolve against. */}
           <ExecAttachmentLabels
             labels={row.meta?.exec_attachments}
             align={own ? "end" : "start"}
+            agentId={who.isAgent ? row.from : null}
           />
           {/* The group column is an `items-start` flex column, so the bubble is
              shrink-to-fit too: without the clamp, content that cannot be

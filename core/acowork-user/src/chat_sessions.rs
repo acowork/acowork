@@ -5284,6 +5284,11 @@ mod tests {
             AttachmentLabel {
                 filename: "src/main.rs".into(),
                 kind: "attached_file".into(),
+                // ADR-100 D12 Rev. 2026-11: a workspace arm's path is the one
+                // field that must survive the round trip, because it is what
+                // the client's click resolves. Written here so the store's
+                // declared-key contract covers it, not just `filename`.
+                abs_path: Some("E:/work/demo/src/main.rs".into()),
                 ..Default::default()
             },
             AttachmentLabel {
@@ -5301,6 +5306,15 @@ mod tests {
             .expect("the row is readable");
         assert_eq!(row.meta.exec_attachments.len(), 2);
         assert_eq!(row.meta.exec_attachments[0].filename, "src/main.rs");
+        assert_eq!(
+            row.meta.exec_attachments[0].abs_path.as_deref(),
+            Some("E:/work/demo/src/main.rs"),
+            "the workspace arm's open coordinate survives the JSONL round trip"
+        );
+        assert_eq!(
+            row.meta.exec_attachments[1].abs_path, None,
+            "an upload arm never carries a path"
+        );
         // A row that sent none stays clean: the key is skipped rather than
         // written as an empty array, so ordinary transcript rows grow no noise.
         append_message(

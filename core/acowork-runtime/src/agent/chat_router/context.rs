@@ -1065,6 +1065,11 @@ mod tests {
         row.meta.exec_attachments = vec![AttachmentLabel {
             filename: "chat_prompt.rs".into(),
             kind: "attached_file".into(),
+            // The client's open coordinate (ADR-100 D12 Rev. 2026-11). Set
+            // here on purpose: the prompt must keep describing this reference
+            // by display name alone, so this path must NOT show up in either
+            // rendering below.
+            abs_path: Some("E:/projects/demo/chat_prompt.rs".into()),
             ..Default::default()
         }];
         let history_line = project_row(&row, "agent-1")
@@ -1092,6 +1097,10 @@ mod tests {
         let turn_line = turn_line.lines().last().expect("block c renders");
         assert_eq!(turn_line, history_line);
         assert!(turn_line.starts_with("[attached refs] chat_prompt.rs"));
+        assert!(
+            !turn_line.contains("E:/projects/demo"),
+            "the open coordinate never reaches the model: {turn_line}"
+        );
     }
 
     #[test]
