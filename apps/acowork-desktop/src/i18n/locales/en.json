@@ -157,6 +157,7 @@
     "cardAnsweredInExec": "Answered in the execution session",
     "cardAsk": "Agent Question",
     "cardApproval": "Approval Required",
+    "cardAnswerGone": "This card can no longer be answered — the message it asks about is gone",
     "cardPause": "Step Confirmation",
     "cardApprove": "Approve",
     "cardReject": "Reject",

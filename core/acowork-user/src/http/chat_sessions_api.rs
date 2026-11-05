@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::context::AuthContext;
 use crate::auth::issuer::now_unix;
+use crate::chat_card::{self, AnswerError};
 use crate::chat_view;
 use crate::chat_sessions::{
     self, ChatSession, IntentMeta, Participant, ParticipantIdentity, SeedConfig, SessionKind,
@@ -66,6 +67,15 @@ pub fn chat_session_routes() -> Router<AppState> {
         .route(
             "/api/chat-sessions/{session_id}/messages",
             get(list_messages).post(post_message),
+        )
+        // ADR-106 D6: answering a choice card is a re-delivery of the human's
+        // own utterance. The *rule* lives here (design 31 §6 — one derivation
+        // point), because rebuilding it on a surface required the original row
+        // from the loaded window, and a card that had scrolled out of the
+        // window rendered buttons that silently did nothing.
+        .route(
+            "/api/chat-sessions/{session_id}/messages/{message_id}/answer",
+            get(card_answer),
         )
         // WeChat-style in-conversation history search (文本 / 图片 / 文件).
         // Participation is the permission (same §5.3 rule as `messages`);
@@ -933,13 +943,47 @@ async fn post_message(
     Ok((StatusCode::CREATED, Json(message)))
 }
 
+/// `GET /api/chat-sessions/{session_id}/messages/{message_id}/answer` — what
+/// answering an addressing card would send (ADR-106 D6, design 31 §7.2).
+///
+/// A read, not a write: the answer IS the human's own earlier words, and the
+/// re-delivery is performed by the surface, which alone knows what the human
+/// clicked (an existing session, or new work — and the two surfaces spell that
+/// differently). Deriving it here is what makes the button work once the card's
+/// message has scrolled out of the loaded window: the surface used to rebuild
+/// the utterance from its own window and silently did nothing when the row was
+/// gone (design 31 §6 — one derivation point, over the whole log).
+async fn card_answer(
+    State(state): State<AppState>,
+    Extension(ctx): Extension<AuthContext>,
+    Path((session_id, message_id)): Path<(String, String)>,
+) -> Result<Json<chat_card::CardAnswer>, ApiError> {
+    let dir = data_dir(&state)?;
+    let who = ctx.effective_user_id().to_string();
+    let answer = tokio::task::spawn_blocking(move || {
+        chat_card::answer(&dir, &session_id, &who, &message_id)
+    })
+    .await
+    .map_err(|e| ApiError::internal(&format!("chat card task failed: {e}")))?;
+    answer.map(Json).map_err(|e| match e {
+        // Same hidden 404 as the transcript (§5.3): a non-participant — and a
+        // card addressed to somebody else (ADR-106 D10) — learns nothing.
+        AnswerError::NotParticipant => ApiError::not_found("chat session not found"),
+        // A round already answers that message. `409` rather than `422`: the
+        // request was well formed and the card was real, it is simply spent —
+        // the surface refreshes instead of reporting a caller bug.
+        AnswerError::AlreadyAnswered => ApiError::conflict(e.code()),
+        // `not_a_card` / `origin_gone`: the row cannot stand in for an answer.
+        other => ApiError::unprocessable_entity(other.code()),
+    })
+}
+
 async fn patch_session_config(
     State(state): State<AppState>,
     Extension(ctx): Extension<AuthContext>,
     Path(session_id): Path<String>,
     Json(req): Json<SessionConfigRequest>,
-) -> Result<Json<ChatSession>, ApiError> {
-    let who = ctx.effective_user_id().to_string();
+) -> Result<Json<ChatSession>, ApiError> {    let who = ctx.effective_user_id().to_string();
     let dir = data_dir(&state)?;
     let cfg = SeedConfig {
         model: req.model,
@@ -2034,6 +2078,153 @@ mod tests {
         let id = v["account"]["user_id"].as_str().unwrap().to_string();
         let token = login(router, username, "s3cret123").await;
         (id, token)
+    }
+
+    /// Design 31 §7.2 / ADR-106 D6: answering a card is a re-delivery of the
+    /// human's OWN words, resolved from the log. The surface used to rebuild
+    /// them from its loaded window, so a card whose message had scrolled away
+    /// rendered buttons that did nothing.
+    #[tokio::test]
+    async fn a_card_is_answered_from_the_log_not_the_loaded_window() {
+        let dir = test_support::temp_dir("chatsesscard");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "alice").await;
+        let (_bob, bob_token) = make_user(&app, &admin, "bob").await;
+        let agent = "agent-instance-1";
+
+        // A 1:1 human↔agent channel: the only place a card is addressed to a
+        // single person.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_agent","participants":["{alice}","{agent}"],"title":"agent"}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let session_id = json(resp).await["session_id"].as_str().unwrap().to_string();
+
+        // The utterance the card will be about.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                &format!("/api/chat-sessions/{session_id}/messages"),
+                Some(r#"{"body":"run the migration on staging"}"#),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let asked = json(resp).await["meta"]["message_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // The agent's card: a question about that row, addressed to alice.
+        let card_row = format!(
+            r#"{{"ts":2,"from":"{agent}","kind":"system_notice","body":"which run did you mean?","to":"{alice}","meta":{{"notice_type":"session_choice","in_reply_to":"{asked}","options":["sess-a","sess-b"],"allow_new_task":true}}}}"#
+        );
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/messages",
+                Some(&format!(
+                    r#"{{"session_id":"{session_id}","message":{card_row}}}"#
+                )),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let card = json(resp).await["meta"]["message_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // Alice's answer is the words she already wrote, plus the card's own
+        // coordinates — not a paraphrase and not a new row.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/messages/{card}/answer"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let answer = json(resp).await;
+        assert_eq!(answer["text"].as_str(), Some("run the migration on staging"));
+        assert_eq!(answer["agent_id"].as_str(), Some(agent));
+        assert_eq!(answer["message_id"].as_str(), Some(asked.as_str()));
+
+        // A card addressed to alice is not bob's to answer, and the refusal
+        // must not reveal that the session exists (§5.3).
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/messages/{card}/answer"),
+                None,
+                Some(&bob_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // A plain message has no options to answer — a caller error.
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/messages/{asked}/answer"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY);
+
+        // Once a round answers that message the card is spent: re-delivering
+        // would send the same words twice, so the surface is told to refresh
+        // rather than being handed a second copy.
+        let round_row = format!(
+            r#"{{"ts":3,"from":"{agent}","kind":"execution_round","body":"","meta":{{"in_reply_to":"{asked}","round_id":"r-{asked}","agent_session_id":"sess-a","agent_instance_id":"{agent}"}}}}"#
+        );
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/internal/chat-sessions/messages",
+                Some(&format!(
+                    r#"{{"session_id":"{session_id}","message":{round_row}}}"#
+                )),
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/messages/{card}/answer"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert_eq!(json(resp).await["error"].as_str(), Some("already_answered"));
     }
 
     #[tokio::test]

@@ -543,6 +543,30 @@ describe("AgentChatView event-log wiring", () => {
         cardDelivery([{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }]),
       ),
     );
+    // The words and the files come from the SERVICE now (design 31 §6): the
+    // surface no longer rebuilds them from the rows it happens to have loaded,
+    // which is what made a card older than the window unanswerable.
+    vi.stubGlobal(
+      "fetch",
+      // Only the card-answer route answers; everything else keeps the file's
+      // default "no network in test" so an unrelated background read stays
+      // inconclusive rather than parsing a card answer as its own payload.
+      vi.fn().mockImplementation((url: string) =>
+        String(url).endsWith("/answer")
+          ? Promise.resolve({
+              status: 200,
+              ok: true,
+              json: async () => ({
+                agent_id: "agent",
+                message_id: "u1",
+                text: "which one",
+                attachment_ids: ["f1"],
+                refs: [],
+              }),
+            })
+          : Promise.reject(new Error("no network in test")),
+      ),
+    );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     fireEvent.click(screen.getByRole("button", { name: "Fix the bug" }));
     await waitFor(() => expect(sendTextMock).toHaveBeenCalled());

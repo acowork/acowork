@@ -70,7 +70,7 @@ import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import {
-  buildCardAnswer,
+  answerWithChoice,
   groupCardAddress,
   mayAnswerCard,
   type CardChoice,
@@ -92,6 +92,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import {
+  fetchCardAnswer,
   useChatSessionStore,
   type ChatMessageRow,
   type ChatAttachmentMeta,
@@ -1201,13 +1202,26 @@ export function GroupChatPanel() {
   // Answering an addressing card (ADR-106 D6): re-send the human's OWN words
   // with the address they just chose, keyed by the original row's id so the
   // transcript keeps one message instead of narrating the decision twice.
+  // The words being re-sent come from the service, not from `rowsRef`: a card
+  // whose message sits outside the loaded window still has to answer, and the
+  // window lookup returned silently when it missed (design 31 §6). Only the
+  // click — which agent session, or new work — is the surface's.
   const answerCard = useCallback(
-    (card: ChatMessageRow, choice: CardChoice) => {
+    async (card: ChatMessageRow, choice: CardChoice) => {
       if (!activeGroupId) return;
-      const original = rowsRef.current.find(
-        (r) => r.meta?.message_id === card.meta?.in_reply_to,
-      );
-      const answer = buildCardAnswer(card, original, choice);
+      const cardId = card.meta?.message_id;
+      if (!cardId) return;
+      const lookup = await fetchCardAnswer(activeGroupId, cardId);
+      if (!lookup.ok) {
+        // A round already settled the question (`already_answered`) settles
+        // itself on the next projection read; `gone` cannot be re-delivered and
+        // has to be said out loud.
+        if (lookup.reason === "gone") {
+          showToast({ type: "error", message: t("chatView.cardAnswerGone") });
+        }
+        return;
+      }
+      const answer = answerWithChoice(lookup.facts, choice);
       if (!answer) return;
       const mentioned = resolveMentions(answer.text, agentParticipants);
       // The card came from one agent, so the answer must reach that one: the
@@ -1228,7 +1242,7 @@ export function GroupChatPanel() {
           groupCardAddress(answer),
         );
     },
-    [activeGroupId, agentParticipants],
+    [activeGroupId, agentParticipants, t],
   );
 
   // Chips follow the draft: an address whose `@` the human deleted stops being

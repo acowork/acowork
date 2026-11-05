@@ -632,6 +632,90 @@ export async function createChatAttachmentObjectUrl(
   return URL.createObjectURL(blob);
 }
 
+/** The service's answer to "what would answering this card send?" — the
+ *  human's own words, the card's coordinates, and the original row's pinned
+ *  `@session` material (design 31 §7.2, ADR-106 D6). No address: which session
+ *  the words go to is the click, and only the surface knows it. */
+export interface CardAnswerFacts {
+  agentId: string;
+  messageId: string;
+  text: string;
+  attachmentIds: string[];
+  refs: ChatRefPick[];
+}
+
+/** Why a card could not be answered, when it could not be.
+ *
+ *  `already_answered` is not an error to report: a round answers the message
+ *  the card asked about, so the question is spent and the projection's next
+ *  read closes it. `gone` covers the three ways the row stopped being a card
+ *  (a non-card id, an origin row that is no longer readable, a session the
+ *  caller is not in) — the surface says so instead of clicking into nothing. */
+export type CardAnswerLookup =
+  | { ok: true; facts: CardAnswerFacts }
+  | { ok: false; reason: "already_answered" | "gone" };
+
+/**
+ * Resolve a card answer on the server (design 31 §6 — one derivation point).
+ *
+ * Why not derive it here: the answer is a copy of a row that may be far outside
+ * the loaded window, and a surface can only copy what it has loaded. Both
+ * surfaces used to rebuild the utterance from their own window and returned
+ * silently when the row was gone, which made a scrolled-away card's buttons dead.
+ */
+export async function fetchCardAnswer(
+  chatSessionId: string,
+  cardMessageId: string,
+): Promise<CardAnswerLookup> {
+  const token = useAuthStore.getState().accessToken;
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/messages/${encodeURIComponent(cardMessageId)}/answer`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (resp.status === 409) return { ok: false, reason: "already_answered" };
+  // 404 (not a participant / no such session) and 422 (not a card, origin
+  // gone) are the same fact to a surface: this card can no longer be answered.
+  if (resp.status === 404 || resp.status === 422) {
+    return { ok: false, reason: "gone" };
+  }
+  if (!resp.ok) throw new Error(`card answer → ${resp.status}`);
+  const v = (await resp.json()) as {
+    agent_id?: string;
+    message_id?: string;
+    text?: string;
+    attachment_ids?: string[];
+    refs?: Array<{
+      agent_instance_id?: string;
+      session_id?: string;
+      round_id?: string;
+      terminal?: boolean;
+    }>;
+  };
+  return {
+    ok: true,
+    facts: {
+      agentId: v.agent_id ?? "",
+      messageId: v.message_id ?? "",
+      text: v.text ?? "",
+      attachmentIds: v.attachment_ids ?? [],
+      // Echoed back verbatim (the quadruples were pinned when the row was
+      // written); only the names are translated to the picker's spelling.
+      refs: (v.refs ?? []).flatMap((r) =>
+        r.agent_instance_id && r.session_id
+          ? [
+              {
+                agentInstanceId: r.agent_instance_id,
+                sessionId: r.session_id,
+                ...(r.round_id ? { roundId: r.round_id } : {}),
+                ...(r.terminal !== undefined ? { terminal: r.terminal } : {}),
+              },
+            ]
+          : [],
+      ),
+    },
+  };
+}
+
 // ADR-106 D8: there is no chat-side card state to project. A round's pending
 // decision is the round's own state, read off its projection and answered at
 // the execution session's write entry — so the closed/answered card id sets this

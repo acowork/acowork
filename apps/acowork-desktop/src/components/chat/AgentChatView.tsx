@@ -92,7 +92,7 @@ import { type TranscriptItem } from "./chatTranscriptGroups";
 import { useTranscriptLayout } from "./useTranscriptLayout";
 import { ChatAddressPicker, type AddressPick } from "./ChatAddressPicker";
 import {
-  buildCardAnswer,
+  answerWithChoice,
   directCardAddress,
   mayAnswerCard,
   type CardChoice,
@@ -101,6 +101,7 @@ import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { turnInflight } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
 import {
+  fetchCardAnswer,
   useChatSessionStore,
   type ChatMessageRow,
   type ChatSessionConfig,
@@ -754,12 +755,25 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // Answering an addressing card (ADR-106 D6): re-send the human's OWN words
   // with the address they just chose, keyed by the original row's id so the
   // transcript keeps one message instead of narrating the decision twice.
+  // The words being re-sent come from the service, not from `rowsRef`: the row
+  // the card asks about may be far outside the loaded window, and looking it up
+  // here is what made an old card's buttons dead (design 31 §6). The click
+  // (which session, or new work) is still ours — it is what the human chose.
   const answerCard = useCallback(
-    (card: ChatMessageRow, choice: CardChoice) => {
-      const original = rowsRef.current.find(
-        (r) => r.meta?.message_id === card.meta?.in_reply_to,
-      );
-      const answer = buildCardAnswer(card, original, choice);
+    async (card: ChatMessageRow, choice: CardChoice) => {
+      const cardId = card.meta?.message_id;
+      if (!cardId) return;
+      const lookup = await fetchCardAnswer(sessionId, cardId);
+      if (!lookup.ok) {
+        // `already_answered` needs no message: a round settled the question and
+        // the projection's next read closes the card. `gone` is the honest
+        // statement that this card can no longer be re-delivered.
+        if (lookup.reason === "gone") {
+          showToast({ type: "error", message: t("chatView.cardAnswerGone") });
+        }
+        return;
+      }
+      const answer = answerWithChoice(lookup.facts, choice);
       if (!answer) return;
       void sendText(
         sessionId,
@@ -770,7 +784,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         directCardAddress(answer),
       );
     },
-    [sendText, sessionId],
+    [sendText, sessionId, t],
   );
 
   const handleSend = () => {

@@ -16,6 +16,7 @@
  */
 
 import type {
+  CardAnswerFacts,
   ChatAddress,
   ChatMessageRow,
   ChatRefPick,
@@ -46,58 +47,36 @@ export interface CardAnswer {
 }
 
 /**
- * Turn a card row + the human's click into a re-delivery.
+ * Fold the human's click into the service's answer.
  *
- * `original` is the row the card asked about (`meta.in_reply_to`), looked up by
- * the surface in its own window. `null` whenever the answer cannot be a faithful
- * re-delivery — a card pointing at a row that is no longer readable, or a click
- * that named neither a session nor new work. Refusing there is the point: a
- * guessed-at text would put words in the human's mouth.
+ * `facts` is what the service resolved from the log (`fetchCardAnswer`) — the
+ * original words, their attachments and the row's pinned material. This
+ * function adds only the address the human just chose; `null` when the click
+ * named neither a session nor new work, because a delivery with no address is
+ * not a decision the human made.
  */
-export function buildCardAnswer(
-  card: ChatMessageRow,
-  original: ChatMessageRow | undefined,
+export function answerWithChoice(
+  facts: CardAnswerFacts,
   choice: CardChoice,
 ): CardAnswer | null {
-  const messageId = card.meta?.in_reply_to?.trim();
-  if (!messageId || !original) return null;
   // The card's author IS the agent whose runs are on offer (`from` on the
-  // notice write); a card with no author cannot be answered with an address.
-  const agentId = card.from?.trim();
-  if (!agentId) return null;
+  // notice write); a card with no author cannot be addressed at all.
+  const agentId = facts.agentId.trim();
+  if (!agentId || !facts.messageId) return null;
   const sessionId = choice.sessionId?.trim() || undefined;
   const forceNew = choice.forceNew === true;
   if (!sessionId && !forceNew) return null;
-  const text = original.body ?? "";
-  // Resolved attachment meta when the row carries it, otherwise the raw ids —
-  // the re-delivery must not quietly drop the files the original message had.
-  const attachmentIds = original.attachments
-    ? original.attachments.map((a) => a.id)
-    : original.attachment_ids ?? [];
-  // ADR-106 revision 2026-11-04: the original row's reference material belongs
-  // to the same utterance, so the re-delivery carries it back pre-pinned
-  // (round_id + terminal already resolved) — the Gateway passes the echo
-  // through rather than re-pinning a sentence already written. Only this
-  // agent's refs travel: a card answers one agent's question about its runs.
-  const refs = (original.meta?.refs ?? [])
-    .filter((r) => r.agent_instance_id === agentId)
-    .map<ChatRefPick>((r) => ({
-      agentInstanceId: r.agent_instance_id,
-      sessionId: r.session_id,
-      roundId: r.round_id,
-      terminal: r.terminal,
-    }));
   return {
-    text,
-    attachmentIds,
+    text: facts.text,
+    attachmentIds: facts.attachmentIds,
     agentId,
-    messageId,
+    messageId: facts.messageId,
     sessionId,
     forceNew,
     // An empty material list is omitted, not sent as `[]`-noise: "the original
     // row carried no reference" is the absence, and every consumer already
     // reads `refs?.length`.
-    ...(refs.length > 0 ? { refs } : {}),
+    ...(facts.refs.length > 0 ? { refs: facts.refs } : {}),
   };
 }
 

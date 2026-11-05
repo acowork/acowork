@@ -251,6 +251,7 @@
     "cardAnsweredInExec": "已在执行会话应答",
     "cardAsk": "Agent 询问",
     "cardApproval": "需要审批",
+    "cardAnswerGone": "这张卡片已无法回答：它询问的消息已不存在",
     "cardPause": "步骤确认",
     "cardApprove": "批准",
     "cardReject": "拒绝",

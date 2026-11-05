@@ -58,7 +58,8 @@ import { ChatAttachmentCapsule } from '../../components/ChatAttachmentCapsule'
 import { ChatExecutionBlock } from '../../components/ChatExecutionBlock'
 import { ChatNoticeRow } from '../../components/ChatNoticeRow'
 import { ChatAddressSheet, type AddressPick } from '../../components/ChatAddressSheet'
-import { buildCardAnswer, directCardAddress, mayAnswerCard, type CardChoice } from '../../lib/chatCardAnswer'
+import { answerWithChoice, directCardAddress, mayAnswerCard, type CardChoice } from '../../lib/chatCardAnswer'
+import { fetchCardAnswer } from '../../lib/api'
 import { turnInflight } from '../../lib/chatTurnInflight'
 import { buildTranscriptItems, type TranscriptItem } from '../../lib/chatTranscriptGroups'
 import { renderMarkdown } from '../../lib/markdown'
@@ -122,11 +123,11 @@ export function AgentChatScreen() {
    *  (or a source chip) just located — that block opens + focuses its in-place
    *  reply row. Cleared on the next send so a stale focus never re-fires. */
   const [focusBlockSessionId, setFocusBlockSessionId] = useState<string | null>(null)
-  /** A locate that found no block in the loaded window says so once, briefly —
-   *  the navigation is best-effort, the reference it pointed at is already on
-   *  the row regardless. No toast primitive exists on mobile, so it rides a
+  /** A best-effort action that could not be carried out says so once, briefly
+   *  (a locate that found no block in the loaded window; a card that can never
+   *  be answered again). No toast primitive exists on mobile, so it rides a
    *  transient pill above the composer. */
-  const [locateHint, setLocateHint] = useState<string | null>(null)
+  const [transientHint, setTransientHint] = useState<string | null>(null)
   // The scroll container, kept in a ref object alongside the hook's callback
   // ref, so a locate can find a block's DOM node (mobile is not virtualized —
   // every loaded row is in the tree).
@@ -196,9 +197,18 @@ export function AgentChatScreen() {
   /** Answering an addressing card (ADR-106 D6): re-send the human's OWN words
    *  with the address they just chose, keyed by the original row's id so the
    *  transcript keeps one message instead of narrating the decision twice. */
-  const answerCard = (card: ChatMessageRow, choice: CardChoice) => {
-    const original = rows.find((r) => r.meta?.message_id === card.meta?.in_reply_to)
-    const answer = buildCardAnswer(card, original, choice)
+  const answerCard = async (card: ChatMessageRow, choice: CardChoice) => {
+    const cardId = card.meta?.message_id
+    if (!cardId || !sessionId) return
+    const lookup = await fetchCardAnswer(sessionId, cardId)
+    if (!lookup.ok) {
+      // A spent card (`already_answered`) closes itself on the next projection
+      // read; `gone` is the one the human has to be told about, because those
+      // buttons will never work again.
+      if (lookup.reason === 'gone') setTransientHint('这张卡片已无法回答')
+      return
+    }
+    const answer = answerWithChoice(lookup.facts, choice)
     if (!answer) return
     deliver(answer.text, undefined, answer.attachmentIds, directCardAddress(answer))
   }
@@ -219,26 +229,26 @@ export function AgentChatScreen() {
     setAddressStage(false)
     const scope = containerRef.current
     if (!scope || !execSessionId) {
-      setLocateHint('任务块不在已加载历史')
+      setTransientHint('任务块不在已加载历史')
       return
     }
     const el = scope.querySelector<HTMLElement>(
       `[data-session$="|${execSessionId}"]`,
     )
     if (!el) {
-      setLocateHint('任务块不在已加载历史')
+      setTransientHint('任务块不在已加载历史')
       return
     }
     el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     setFocusBlockSessionId(execSessionId)
   }
 
-  // Auto-dismiss a locate hint; the navigation already parked wherever it could.
+  // Auto-dismiss the pill; the action already parked wherever it could.
   useEffect(() => {
-    if (!locateHint) return
-    const id = setTimeout(() => setLocateHint(null), 2600)
+    if (!transientHint) return
+    const id = setTimeout(() => setTransientHint(null), 2600)
     return () => clearTimeout(id)
-  }, [locateHint])
+  }, [transientHint])
 
   /** The block's in-place reply sends straight down the level-1 branch: the
    *  text continues the freshest round the block names, exactly as a card
@@ -472,9 +482,9 @@ export function AgentChatScreen() {
           </div>
         ) : null}
 
-        {locateHint ? (
+        {transientHint ? (
           <div className="composer-locate-hint" role="status">
-            {locateHint}
+            {transientHint}
           </div>
         ) : null}
 
