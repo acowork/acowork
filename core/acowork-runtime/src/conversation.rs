@@ -2032,15 +2032,23 @@ impl ConversationSession {
     /// Non-terminal by construction, so the projection never caches it (D5) and a
     /// reader always folds the live state. Pass `Some(Value::Null)` as the card to
     /// say there is nothing pending anymore.
-    pub fn note_round_state(&self, status: &str, card: Option<serde_json::Value>) {
-        let round_id = match self.round_stamp.lock() {
-            Ok(guard) => match guard.as_ref() {
-                Some(id) => id.clone(),
-                None => return,
-            },
-            Err(_) => return,
-        };
-        self.enqueue_round_snapshot(round_id, status, card, false);
+    ///
+    /// Returns the round the snapshot was written for, so the caller can ring the
+    /// doorbell for exactly that round. `None` means no round was armed and nothing
+    /// was written — there is then nothing for a reader to re-read either. The
+    /// round comes back from the STAMP, not from [`Self::active_round_id`]: the
+    /// stamp is armed synchronously by `begin_round`, while the writer's tracking
+    /// only learns the round when it processes that round's first row, which a
+    /// card opening early in a turn can precede.
+    pub fn note_round_state(
+        &self,
+        status: &str,
+        card: Option<serde_json::Value>,
+    ) -> Option<String> {
+        let guard = self.round_stamp.lock().ok()?;
+        let round_id = guard.as_ref()?.clone();
+        self.enqueue_round_snapshot(round_id.clone(), status, card, false);
+        Some(round_id)
     }
 
     /// The round the session is currently on, if a turn is active.

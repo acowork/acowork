@@ -98,22 +98,45 @@ impl AgentLoop {
         self.publish_round_card_state(Some(card));
     }
 
-    /// State the round's card on the side table without closing the round.
+    /// State the round's card on the side table without closing the round, and
+    /// ring the round doorbell.
     ///
     /// `Some(card)` parks the round on that card (`waiting`); `None` says nothing
     /// is pending anymore, which is what a resolved mid-turn interaction means
     /// for the block: the live turn is still working, and offering a button that
     /// was already answered would be a second, lying copy of the fact.
+    ///
+    /// The doorbell is not optional. A round's card appears and disappears
+    /// **inside** a live turn, so neither end of this transition is a turn
+    /// boundary — and the Chat block's interval backstop is 15 s, which a
+    /// webview that is occluded (the human reading the execution surface) does
+    /// not even honour. Measured on a real ask-question: card recorded 22:22:21,
+    /// resolved 22:23:15, and the only block read in that window was at 22:22:17
+    /// — the question was live for its whole life and the Chat never saw it. The
+    /// same hole swallowed the retraction, which would have left a stale card
+    /// offering a button whose question was already answered. ADR-106's revision
+    /// says a round that "parks on a card a human must answer" rings; this is
+    /// where that round state actually changes.
+    ///
+    /// Ringing after the write, not before: the bell only means "worth
+    /// re-reading", and the reader's bounded 500 ms retry (published path) is
+    /// what covers the writer's few-microsecond lag — the same ordering the
+    /// turn-boundary bell already relies on.
     fn publish_round_card_state(&self, card: Option<serde_json::Value>) {
         let Some(conv) = &self.session.conversation else {
             return;
         };
-        match card {
+        let round_id = match card {
             Some(c) => conv.note_round_state("waiting", Some(c)),
             None => conv.note_round_state(
                 crate::rounds::STATUS_IN_PROGRESS,
                 Some(serde_json::Value::Null),
             ),
+        };
+        // Ring for the round the write named, never for a guess: `None` means no
+        // round was armed, so nothing was staged for a reader either.
+        if let Some(round_id) = round_id {
+            self.publish_round_state(&round_id);
         }
     }
 

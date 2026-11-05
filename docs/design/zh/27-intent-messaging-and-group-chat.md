@@ -342,7 +342,7 @@ Chat session 是用户聊天与 Agent 间消息的持久化会话，由 `acowork
 
 | kind | 写入方 | 语义 | 必需约束 |
 |---|---|---|---|
-| `user_message` | 人类参与者 | 人类发言；带 `mentions` 即 @Agent；`in_reply_to` 指向一条 `execution_round` 引用行即寻址阶梯的**级别 1**（确定性续投该执行会话的下一轮，ADR-106 D6）；回答寻址卡也是本 kind 的一次重投递（`message_id` 取原行 id 做幂等）；在执行视图里敲的消息**不再**走本 kind（v3.0，ADR-100 Rev. 8：执行面消息不进 chat 通道）。`meta.exec_attachments` 服务的是 chat 面 composer 自己的 workspace 引用，只带附件**显示投影**（`acowork_core::protocol::AttachmentLabel`：显示名 + ADR-046 臂名 + 芯片装饰）、不带路径或 documentId，并以不可点芯片呈现（与执行面同一枚 `AttachmentCapsule`、同一张 glyph 表，臂名只驱动图标） | `body` / `attachments` / `meta.exec_attachments` 至少一个非空；`message_id` 必需 |
+| `user_message` | 人类参与者 | 人类发言；带 `mentions` 即 @Agent；`in_reply_to` 指向一条 `execution_round` 引用行即寻址阶梯的**级别 1**（确定性续投该执行会话的下一轮，ADR-106 D6）；回答寻址卡也是本 kind 的一次重投递（`message_id` 取原行 id 做幂等）；在执行视图里敲的消息**不再**走本 kind（v3.0，ADR-100 Rev. 8：执行面消息不进 chat 通道）。`meta.exec_attachments` 服务的是 chat 面 composer 自己的 workspace 引用，带附件**显示投影**（`acowork_core::protocol::AttachmentLabel`：显示名 + ADR-046 臂名 + 芯片装饰，工作区臂另带 `absPath` 作为客户端的点击坐标——ADR-100 D12 Rev. 9）、不带 documentId、上传臂不带路径，与执行面同一枚 `AttachmentCapsule`、同一张 glyph 表（臂名只驱动图标），数据里有什么就打什么：带路径的工作区臂可点开文件，其余仍是装饰胶囊 | `body` / `attachments` / `meta.exec_attachments` 至少一个非空；`message_id` 必需 |
 | `agent_message` | Agent 参与者 | **只剩 Chat Router 的自答**：router 不回人类却自己说了一句，它不是任何执行轮的投影，所以它是 chat 原生行。执行回合的回答与 agent↔agent 的应答**都不再**是本 kind（v3.1：改由 `execution_round` + 投影承载，ADR-106 D3 / D12） | `message_id` 必需；应答时 `in_reply_to` 必需 |
 | `execution_round` | Runtime（全仓唯一 chat 写入口：`AgentLoop::run` 的轮次边界） | 一条**引用行**：不携带内容，只报"这一轮执行存在"，坐标 `round:{instance}|{session}|{round}` 即自然键（幂等），呈现时读执行侧投影得到答案、卡片与状态 | `message_id` 必需且等于自然键；`body` 恒空；meta 携 `agent_instance_id` / `agent_session_id` / `round_id` / `in_reply_to`（触发它的行），可带 `task_id` / `assignment_brief`（仅呈现，ADR-106 D13） |
 | `system_notice` | 系统 | 通道回执，按 `notice_type` 分流：`delivery_failed`、`budget_exhausted`、`truncated`、`unavailable`（ADR-106 D12：预算收据等改为通知，Gateway 不再代写对话行），以及两类寻址问题 `session_choice`（级别 3 多候选）/ `confirm_continue`（级别 5 提议），meta 携 `options[]` + `allow_new_task`，幂等键 `{notice_type}:{message_id}`；旧的 `turn_dispatched` / `turn_started` / `turn_routed` / `router_fallback` / `interaction_resolved` 仅作兼容读取，渲染期隐藏 | `message_id` 必需 |
@@ -990,10 +990,10 @@ chat 侧不读 execution session 的 `live_state`，也不为轮次落任何中�
 
 收尾判据是**投影的 `terminal`**，不是 Runtime 的 `Idle`，也不再是聊天侧的终态行：`Idle` 只说明"执行结束"，不说明"结果已可读"。工具授权、迭代上限 / 环路暂停的 Continue 等 execution 阶段动作在块里就地可答（§5.5.4），要细看过程仍从块上方"查看执行"进入 execution 视图。
 
-**"块什么时候该重读"是 v3.1 零写删掉的通知面**（v3.1.3，ADR-106 修订 2026-11-03）。Runtime 在 `close_turn_round` 后经既有 chunk 通道发一枚门铃：`acowork/agents/{instance_id}/sessions/{sid}/messages/round_state`（`SessionMessage{round_state = 34}`，QoS 1、**非 retained**），载荷只有两个坐标 `round_id` / `chat_session_id`，没有正文、也没有终态词——投影不开新通道，也不因此多出第二块 live 真相（ADR-106「被拒绝的备选」那一条守的是内容，不是信号）。三个约：
+**"块什么时候该重读"是 v3.1 零写删掉的通知面**（v3.1.3，ADR-106 修订 2026-11-03）。Runtime（`close_turn_round` 后，或活回合内卡片开合时）经既有 chunk 通道发一枚门铃：`acowork/agents/{instance_id}/sessions/{sid}/messages/round_state`（`SessionMessage{round_state = 34}`，QoS 1、**非 retained**），载荷只有两个坐标 `round_id` / `chat_session_id`，没有正文、也没有终态词——投影不开新通道，也不因此多出第二块 live 真相（ADR-106「被拒绝的备选」那一条守的是内容，不是信号）。三个约：
 
-- **它是触发，不是内容。** 事件在回合边界触发，而轮次终态记录是会话单写者的另一次 append（ADR-092，实测晚约 8 ms），所以读侧允许一次有界重试（500 ms），并把"读到还是 `pending`"当正常。`round_state` **不**进入内容事件集：它的 `session_id` 是执行会话，不得被当成一个对话会话写进消息窗口。
-- **它也管非终态翻转。** 停在卡片上的轮次与终态走同一条门铃（`close_turn_round` 不区分两者）：块重读后读到 `waiting`，必须把问题画出来并**继续**显示这一轮在进行中——这一支以前同样零通知。
+- **它是触发，不是内容。** 事件在**两个**时点触发：回合边界，以及活回合内卡片打开／收回（v3.1.3 补，ADR-106 修订 2026-11-05）。两种情况下轮次记录都是会话单写者的另一次 append（ADR-092，实测晚约 8 ms），所以读侧允许一次有界重试（500 ms），并把"读到还是 `pending`"当正常。`round_state` **不**进入内容事件集：它的 `session_id` 是执行会话，不得被当成一个对话会话写进消息窗口。
+- **它也管非终态翻转，且两段都要管。** 回合**末尾**停在 `pause` 卡上的轮次走 `close_turn_round` 的那枚铃；`ask_question` / `approval` 则在回合**内部**开合，走 `publish_round_card_state` 那枚铃（实测缺陷：一张活了 54 s 的问题卡在 Chat 侧一次都没被读到，因为两端的时点都不经过回合边界，而 webview 被遮挡时 15 s 兜底会被计时器钳制吃掉）。两种情况块重读后都可能读到 `waiting`，必须把问题画出来并**继续**显示这一轮在进行中；收回那一端同样要打铃，否则块会留着按钮指向一个已经答过的问题。
 - **兜底仍是周期重读，但只是兜底。** 15 s 的 `setInterval` 只负责门铃丢帧时收口（它从 v3.1.3 起才真正会重新装配自己）。订阅面：桌面已有通配 `acowork/agents/+/sessions/+/messages/#`，零新增；移动的门铃走 presence 通道（§6.5）——`realtime.ts` 的单会话精确订阅不变量不为它开口子，而事件非 retained，订阅时不会全量重放。另：15 s 兜底与门铃并存不违反设计 25 §8.0 的"push 与 poll 不得同时驱动重载"——那条管的是消息窗口的 `chat/changed` 门铃，这里说的是块投影的重读，两个对象。
 
 载荷为什么不带终态词：没有订阅方会在不重读的前提下用它（每个订阅方都要拿到正文才画得出块，终态词随重读一起回来），而 proto3 之后要加字段是免费的——现在带上一个投机字段，只是把一个公共契约（以及手写解码器那份不得不跟着维护的诚实）放宽给一个不存在的读者。所以门铃只说"哪一块、哪个 Chat"。
