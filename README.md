@@ -1,15 +1,8 @@
-<h1 align="center">ACowork — AI Agents Collaboration Platform</h1>
-
 <p align="center">
   <img src="assets/brand-mark.svg" alt="ACowork" width="331">
 </p>
 
-<p align="center">
-  🏗️ <strong>Declarative Agent Platform · Decentralized · High-Security · Scalable</strong><br>
-  ⚡️ <strong>Easy to build an agent.</strong><br>
-  ⚡️ <strong>Easy to share an agent.</strong><br>
-  ⚡️ <strong>Easy to deploy agent.</strong>
-</p>
+<h3 align="center">One platform for humans & AI agents to ship work together</h3>
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
@@ -55,13 +48,12 @@ their agents the same way they would alongside a human teammate.
 | 🌐 **Distributed agents, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Agents run on every host that hosts Runtimes (GPU box / workstation / cloud VM) — single-host and multi-host share one protocol path. |
 | 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services; agents read, write, and collaborate on tasks and documents through REST + MCP — including real-time multi-user editing (Yjs CRDT). |
 | 🚀 **Standalone or cluster — same binary** | Start a single host for personal use; flip a flag and the same binary becomes a cluster across your team. No local-vs-remote code branches in Gateway. |
-| 🧩 **Declarative agents** | `.agent` packages contain manifest + prompts + skills — **no executable code**, signed and verified at install time. |
-| ⚙️ **Universal runtime** | A single Rust binary loads any `.agent` package; Agents connect directly to LLM APIs — no Gateway proxy, no extra latency. |
+| 🧩 **Two-stage sessions** | Chat to shape the plan, Execute to run it end-to-end. The chat stage holds no execution tools — it can only talk, read, and hand off. |
+| ⚙️ **Universal protocol** | One contract for runtimes, nodes, and devices. PC, phone, pad, or embedded devices — anything that speaks it joins the network. |
 | 🔒 **Process-level isolation** | Every Agent runs as an independent OS process with its own filesystem, memory database, and sandboxed tool execution. |
 | 🧠 **Biomimetic memory** | Layered memory on a per-Agent SQLite store — episodic / knowledge / procedural / autobiographical, retrieved by vector + FTS5 hybrid search. |
-| 🛡️ **Three-layer security** | Package signing + OS process sandbox + Wasmtime tool sandbox. |
-| 💬 **Intent collaboration** | Agents advertise capabilities in a registry, route requests/observations, sync or async, with the Gateway as broker. |
-| 🛠️ **Full-stack dev loop** | Desktop App (Tauri v2) supports DevMode: conversational debug, skill hot-reload, breakpoints, recording & replay, publishing wizard. |
+| 🛡️ **Multi-tier permission system** | Admin/user roles · per-node, per-agent, and per-session visibility with explicit user grants. Least privilege, by default. |
+| 🛠️ **Full-stack dev loop** | Desktop App (Tauri v2) supports DevMode: conversational debug, skill hot-reload, step & resume, publishing wizard. |
 
 Every Agent is still an independent **"digital being"**: its own runtime process, private memory, workspace, and
 configuration. **Tune prompt, tools, and memory = build an agent.** Personal and sensitive data is
@@ -167,20 +159,6 @@ npm run tauri build           # beforeBuildCommand auto-runs core:build:release 
 ```
 
 Full build, packaging, CI, and deployment guide: [`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
-
----
-
-## 📈 Roadmap
-
-| Phase | Scope                                                                                                                                            | Status         |
-| ----- | ------------------------------------------------------------------------------------------------------------------------------------------------ | -------------- |
-| 1     | Foundation + LLM interaction (MVP): package parsing, signing, Runtime main loop, Gateway basics                                                  | ✅ Done         |
-| 2     | Memory layering + multi-user accounts: biomimetic memory layers, instant extraction; per-user sessions & audit | ✅ Done         |
-| 3     | AI-native PM & Doc: `acowork-pm` and `acowork-doc` standalone services, REST + MCP, multi-user real-time editing (Tiptap + Yjs) | 🚧 In progress |
-| 4     | Distributed runtime: Node Agent enrollment, cluster mode, shared protocol path | 🚧 In progress |
-| 5     | Permissions & sandbox: filesystem isolation, WASM sandbox (Wasmtime), Approval Gate                                                             | 🚧 Partial     |
-| 6     | Desktop App + dev framework: Debug Protocol, Skill hot-reload, recording/replay; MQTT-based IPC                                                | 🚧 In progress |
-| 7     | Ecosystem: remote `.agent` registry, Agent store, Memory Sync across hosts                                                                     | 🔮 Planning    |
 
 ---
 

@@ -1,15 +1,8 @@
-<h1 align="center">ACowork — AI agents协作平台</h1>
-
 <p align="center">
   <img src="assets/brand-mark.svg" alt="ACowork" width="331">
 </p>
 
-<p align="center">
-  🏗️ <strong>声明式 Agent 平台 · 去中心化 · 高安全 · 可扩展</strong><br>
-  ⚡️ <strong>Easy to build an agent colleague.</strong><br>
-  ⚡️ <strong>Easy to share an agent colleague.</strong><br>
-  ⚡️ <strong>Easy to deploy agent colleagues.</strong>
-</p>
+<h3 align="center">人与AI agents的协作平台</h3>
 
 <p align="center">
   <a href="./LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue.svg" alt="License" /></a>
@@ -54,13 +47,12 @@ ACowork 是一个**多用户、分布式、AI 原生的协作平台**。团队�
 | 🌐 **分布式 Agent，一个控制面** | Gateway 负责 MQTT + HTTP 反代；Node Agent 跑在每台需要承载 Runtime 的主机（GPU 机 / 工位 / 云 VM）上——单机与多机走同一条协议路径。 |
 | 🗂️ **AI 原生的项目 & 文档管理** | `acowork-pm` 和 `acowork-doc` 是一等公民服务；Agent 通过 REST + MCP 读写任务与文档，并支持实时多人编辑（Yjs CRDT）。 |
 | 🚀 **Standalone 或集群——同一份二进制** | 单机自用就开 standalone；翻一个开关，同一份二进制成为横跨团队的集群。Gateway 代码里没有「本地 / 远程」分支。 |
-| 🧩 **声明式 Agent** | `.agent` 包只包含 manifest + prompts + skills——**无可执行代码**，签名后在安装时强制验证。 |
-| ⚙️ **统一 Runtime** | 单一 Rust 二进制加载任意 `.agent` 包；Agent 直连 LLM API——不经 Gateway 代理，零额外延迟。 |
+| 🧩 **两阶段会话** | 先在 Chat 阶段把方案理清，再交给 Execute 端到端跑完。Chat 阶段不持有任何执行类工具——只能对话、读取、交接。 |
+| ⚙️ **统一协议** | Runtime、Node 与各类设备共用同一份契约。PC、手机、平板乃至嵌入式设备——只要能说这套协议，就能接入网络。 |
 | 🔒 **进程级隔离** | 每个 Agent 作为独立 OS 进程运行，自带文件系统、记忆数据库与沙箱化的工具执行。 |
 | 🧠 **仿生记忆** | 每个 Agent 拥有私有 SQLite 存储，经历 / 语义 / 程序 / 自传体分层记忆，向量 + FTS5 混合检索。 |
-| 🛡️ **三层安全** | 包签名 + 操作系统进程沙箱 + Wasmtime 工具沙箱。 |
-| 💬 **Intent 协作** | Agent 通过 Capability Registry 声明能力，Gateway 作为 broker 路由请求/订阅，支持同步/异步。 |
-| 🛠️ **全链路开发** | Desktop App（Tauri v2）内置 DevMode：对话调试、Skill 热加载、断点、录制回放、发布向导。 |
+| 🛡️ **多级权限体系** | 管理员 / 普通用户角色 · 按 Node、按 Agent、按会话的可见范围，需用户显式授权。默认最小权限。 |
+| 🛠️ **全链路开发** | Desktop App（Tauri v2）内置 DevMode：对话调试、Skill 热加载、单步执行与恢复运行、发布向导。 |
 
 每个 Agent 依然是独立的**"数字伙伴"**：拥有自己的运行时进程、私有记忆、工作区和配置——
 完全独立的个性化认知。**调优 Prompt、Tools、Memory = 构建 AI agent**。Personal/Sensitive 数据在打包时
@@ -165,20 +157,6 @@ npm run tauri build           # beforeBuildCommand 自动执行 core:build:relea
 ```
 
 完整的编译、打包、CI 与部署说明：[`dev/README.md`](./dev/README.md) · [`AGENTS.md`](./AGENTS.md)
-
----
-
-## 📈 路线图
-
-| 阶段    | 内容                                                                                                                                                                                                                                          | 状态     |
-| ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- |
-| Phase 1 | 基础框架 + LLM 交互（MVP）：包解析、签名验证、Runtime 主循环、Gateway 基础                                                                                                                                                                  | ✅ 已完成 |
-| Phase 2 | Memory 分层 + 多用户账号：仿生记忆分层、即时提取；按用户的会话与审计                                                                                                       | ✅ 已完成 |
-| Phase 3 | AI 原生的项目 & 文档管理：`acowork-pm` 与 `acowork-doc` 独立进程服务，REST + MCP，多人实时编辑（Tiptap + Yjs）                                                                                                                                                | 🚧 进行中 |
-| Phase 4 | 分布式 Runtime：Node Agent 接入、多主机集群模式、共用同一条协议路径                                                                                                                                                                                  | 🚧 进行中 |
-| Phase 5 | 权限与沙箱：文件系统隔离、WASM 沙箱（Wasmtime）、Approval Gate                                                                                                                                                                                 | 🚧 部分实现 |
-| Phase 6 | Desktop App + 开发框架：Debug Protocol、Skill 热加载、录制回放；MQTT 协议栈重构                                                                                                                                                              | 🚧 进行中 |
-| Phase 7 | 生态：远程 `.agent` 仓库、Agent 商店、跨主机 Memory Sync                                                                                                                                                                                       | 🔮 规划中 |
 
 ---
 
