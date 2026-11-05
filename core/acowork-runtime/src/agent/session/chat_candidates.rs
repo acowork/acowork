@@ -170,6 +170,28 @@ impl SessionCandidate {
     }
 }
 
+/// The option row a `confirm_continue` card shows (ADR-106 D6 level 5).
+///
+/// The card proposes exactly one session, and the human's click is a delivery —
+/// so the row has to carry what the decision needs: the candidate's own title
+/// (`alias` is the last-resort handle for a session that is not in this turn's
+/// candidate list), the router's one-line reason, and the state the dot paints
+/// ("this one is mid-round" is a reason to think twice). Absent candidate means
+/// absent status: a card must not claim a state it was not told.
+pub fn proposal_option(
+    session_id: &str,
+    alias: &str,
+    why: &str,
+    candidate: Option<&SessionCandidate>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "label": candidate.map(|c| c.title.clone()).unwrap_or_else(|| alias.to_string()),
+        "status": candidate.map(|c| c.status.label()),
+        "why": why,
+    })
+}
+
 /// Everything the filter needs besides the meta rows.
 pub struct CandidateQuery<'a> {
     pub chat_session_id: &'a str,
@@ -479,6 +501,29 @@ mod tests {
 
     fn ids(candidates: &[SessionCandidate]) -> Vec<&str> {
         candidates.iter().map(|c| c.session_id.as_str()).collect()
+    }
+
+    /// The single-candidate card's row is built in one place, so the title, the
+    /// reason and the status cannot drift apart between the router and the card.
+    #[test]
+    fn a_proposal_row_names_the_candidate_and_its_state() {
+        let rows = vec![(
+            "s-cur".to_string(),
+            meta("s-cur", "整理报表", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE)),
+        )];
+        let live: HashMap<String, CandidateStatus> =
+            [("s-cur".to_string(), CandidateStatus::Working)].into_iter().collect();
+        let built = build_candidates(&rows, &live, &query(CandidateSurface::Direct, &empty_set(), &empty_set(), 5));
+        let option = proposal_option("s-cur", "S1", "最近活跃", built.first());
+        assert_eq!(option["label"], "整理报表");
+        assert_eq!(option["status"], "working");
+        assert_eq!(option["why"], "最近活跃");
+
+        // A session the filter did not admit is named by its alias and claims no
+        // status — the card cannot paint a state it was never told.
+        let orphan = proposal_option("s-gone", "S2", "别名解析所得", None);
+        assert_eq!(orphan["label"], "S2");
+        assert!(orphan["status"].is_null());
     }
 
     #[test]

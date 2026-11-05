@@ -1,10 +1,11 @@
 # Session 双层数据模型设计（持久化终态 + 运行时超集）
 
-> 版本：v1.5 | 更新日期：2026-11-09
+> 版本：v1.6 | 更新日期：2026-11-20
 >
 > 状态：模型基线（评审中）。本文只定"事实归哪一层、由谁拥有、谁可以推导"，不定 API 与实现形状。
 >
 > 修订记录
+> - v1.6（卡片交互收口）：投影补一个字段 `question.answered_session`。已答的卡片在界面上不再是一排禁用按钮，而是一行"已交给 <会话名>"的收据——而"哪个会话接的"这件事，恰好是投递事实里唯一没被投影出来的一半：`answered` 只说"答了"，人类要核对的"我的话去了哪"只能靠别处的坐标再扫一遍。判据仍是"该消息出现 `execution_round` 引用行"，取名取日志序第一条带 `agent_session_id` 的那条；带不出来的（D3 不许编）就留空，收据退化为"已回答"/"已开新任务"。同时把 `confirm_continue` 的单候选行改由 `chat_candidates::proposal_option` 统一构造：标题、路由理由、状态点出自同一处，且会话不在本轮候选列表里时不声明状态（卡片不许声称没被告知的状态）。
 > - v1.5（P4 落地）：**卡片的"回答"也归服务端**。`session_choice` / `confirm_continue` 的回答是"人类自己那句话、换了个地址重投"，以前两个前端各写一份 `buildCardAnswer`，靠自己的已加载窗口找原行——窗口外的卡片因此成了**活按钮、点了没反应**（`if (!answer) return` 静默返回）。现在 `acowork-user` 新增 `chat_card::answer`（按坐标取原行、校验卡未答、校验操作者就是被问的那个人），`GET /api/chat-sessions/{id}/messages/{message_id}/answer` 下发"这句话 + 附件 + 已钉住的 `refs` + 原行 id"，前端只把点击（投给哪个 session / 开新活）折进去。同时修掉上一轮遗留的两处形状缺陷：`delivery.target` 改 `targets`（群 `@` 扇出一个目标一条 round，`find` 只取第一条把"投给谁"讲漏了）、sidecar 追加路径补写 `#v2` 头（首次写入不带头的文件每次重启都被判 v1 而全量重扫）。
 > - v1.4（P3 落地）：红线进 CI——`dev/ci.sh run_chat_projection_redline` 查四件事：写入口（注册表兜底 + 唯一写入口内的契约校验）没被拆掉、公共页仍走投影而 Agent 侧页仍是裸行（两者方向都查，避免有人"统一"成一种）、surface 不得对 `in_reply_to` 做聚合推导（`some/filter/every/new Set/includes`；按坐标 `.find` 取一条已知行仍允许——§6 末段留给展示层的正是这个）、写者发出的 `notice_type` 必须已在 `chat_kinds` 注册。落地时发现词汇表缺一类：`budget_exhausted` / `truncated` / `unavailable` 报告的是**通道极限**，所指的请求从未成为行，因此不可能有坐标——新增 `LIMIT_NOTICES` 把它显式化（`delivery_failed` 不在此列，它欠的消息存在）。同时用 `chat_notice_write_classes_are_disjoint` 钉住"写契约"轴上的互斥，并记录 `RETIRED_NOTICES` 是另一条正交的轴（管渲染与结算）。
 > - v1.3（P2 落地）：唯一推导点已实现——`acowork-user` 新增 `chat_view` 读模型，公共 `GET /api/chat-sessions/{id}/messages` 下发的每一行都带 `delivery`（`answered` / `answered_by` / `target` / `question`），两份前端的全部状态推导被删除。实现中确认三处边界，写进 §6.1：①推导必须能"只读被问的那几行"，因此存储层新增 `in_reply_to` 反向边（sidecar 升 v2，可按字节跨度取答复行，不做全量扫描）；②`question.answered` 的判据是"该消息出现了 round 引用行"，卡片自身不是答案（否则卡片一落盘就自我宣告已答）；③面向 Agent 的 `chat_history_read` 仍返回裸行——它把行喂给模型、按行计字节预算，派生状态在那里既无人渲染也挤占预算。另修一处升级缺陷（由测试逼出）：旧 v1 sidecar 被丢弃后，对账走的是"增量追加"分支，于是新写的行没有格式标记，进程每次启动都得全量重扫；现在"侧车不可信"会强制走"全量重扫 + 重写文件"。
@@ -123,6 +124,7 @@
 | `delivery.answered_by` | 回答本行的那一行（日志序第一个） | 已答的 `user_message` |
 | `delivery.targets` | 本 turn 落到的每个执行会话（`agent_instance_id` / `agent_session_id` / `round_id` / `opened_new`）——只有坐标，没有 round 内容。是列表：群 `@` 扇出一个目标一条 round | 已有 round 的 `user_message` |
 | `delivery.question.answered` | 该卡片所问的消息现在有 round 了 → 问题已答 | 卡片（`session_choice` / `confirm_continue`） |
+| `delivery.question.answered_session` | 作答落地到哪个执行会话（回答行的 `agent_session_id`，日志序第一个）——已答收据靠它说出"已交给 <会话名>" | 已答的卡片 |
 | `delivery.question.options` / `allow_new_task` | 卡片自己的答案与出口（payload 原样透出） | 卡片 |
 
 三条实现约束：

@@ -963,17 +963,20 @@ async fn run_turn(
             // The label is this turn's own candidate title, looked up by the id
             // the alias resolved to — a card naming a session the human cannot
             // see in [candidates] would be a decision made from private state.
-            let title = prepared
+            let candidate = prepared
                 .candidates
                 .iter()
-                .find(|c| c.session_id == proposal.session_id)
-                .map(|c| c.title.clone())
-                .unwrap_or_else(|| proposal.alias.clone());
-            let option = serde_json::json!({
-                "session_id": proposal.session_id,
-                "label": title,
-                "why": proposal.why,
-            });
+                .find(|c| c.session_id == proposal.session_id);
+            // One builder for the row, both acts: `status` rides along with the
+            // title so "this one is idle" and "this one is mid-round" are
+            // visible before the click, in the same vocabulary the multi-
+            // candidate card uses.
+            let option = chat_candidates::proposal_option(
+                &proposal.session_id,
+                &proposal.alias,
+                &proposal.why,
+                candidate,
+            );
             let asked = crate::agent::intent_turn::emit_session_choice(
                 &deps.instance_id,
                 &deps.gateway_host,
