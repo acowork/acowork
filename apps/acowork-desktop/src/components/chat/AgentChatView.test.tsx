@@ -511,7 +511,7 @@ describe("AgentChatView event-log wiring", () => {
     expect(sendDisabled()).toBe(false);
   });
 
-  it("an addressing question asks in centered chrome and offers its answers (D7)", () => {
+  it("an addressing question is a card with a header, buttons and one escape (D7)", () => {
     windows = windowOf(
       userRow(1, "which one"),
       notice(
@@ -524,13 +524,18 @@ describe("AgentChatView event-log wiring", () => {
     );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     const card = screen.getByTestId("chat-card-options");
+    // The question is the card's HEADER, and the candidates below it are
+    // buttons — not a bordered box of two text lines, which reads as a disabled
+    // field and leaves the human unsure what is clickable.
     expect(card.textContent).toContain("chatView.block.chooseSession");
-    // Transcript chrome, not speech: it is centered like every other notice and
-    // never wears the agent's identity, because a question about addressing is
-    // not the agent talking to the human.
-    expect(card.className).toContain("items-center");
+    expect(card.textContent).toContain("chatView.block.unanswered");
+    const option = screen.getByRole("button", { name: /Fix the bug/ });
+    expect(option.textContent).toContain("same task");
+    // Still chrome, never speech: a question about addressing is not the agent
+    // talking to the human, so it wears no identity.
     expect(screen.queryByText("Agent A")).toBeNull();
-    // D6's cheap escape rides beside the suggestion, never below a fold.
+    // D6's cheap escape rides in the same card, as a footer action rather than a
+    // second candidate of equal weight.
     expect(screen.getByRole("button", { name: "chatView.block.newTask" })).toBeTruthy();
   });
 
@@ -578,26 +583,34 @@ describe("AgentChatView event-log wiring", () => {
     });
   });
 
-  it("an answered card goes quiet rather than offering the same words twice", () => {
-    // The round IS the answer (D3), and the SERVICE says so: the card's
-    // projection carries `question.answered`. The surface no longer looks for a
-    // reference row pointing at the message the card asked about. The buttons
-    // stay visible — the record of what was offered must not vanish — but they
-    // refuse a second delivery.
+  it("an answered card settles into a receipt naming where the words went", () => {
+    // The round IS the answer (D3) and the SERVICE says which session ran it, so
+    // the card stops asking and states: "handed to <task>". A row of disabled
+    // buttons recorded the offer but left the human unable to check the one
+    // thing they clicked for.
     windows = windowOf(
       userRow(1, "which one"),
       notice(
         2,
         { notice_type: "session_choice", in_reply_to: "u1" },
-        cardDelivery(
-          [{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }],
-          true,
-        ),
+        {
+          answered: false,
+          question: {
+            answered: true,
+            answered_session: "exec-9",
+            options: [
+              { session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" },
+            ],
+            allow_new_task: true,
+          },
+        },
       ),
       roundRow(3),
     );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-    expect((screen.getByRole("button", { name: "Fix the bug" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.getByTestId("chat-card-answered").textContent).toContain("Fix the bug");
+    // Nothing left to press: the question is closed.
+    expect(screen.queryByRole("button", { name: /Fix the bug/ })).toBeNull();
     expect(sendTextMock).not.toHaveBeenCalled();
   });
 

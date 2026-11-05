@@ -12,7 +12,9 @@
  *   and 5). Empty-bodied: its options and its answered-ness arrive as the
  *   service's projection (`row.delivery.question`, design 31 §6), and the
  *   surfaces render that verbatim instead of reading `meta` and re-deriving
- *   whether the question is still open.
+ *   whether the question is still open. This one is NOT a quiet line: it is a
+ *   card with a header, one button per candidate and a footer escape, because
+ *   the human's click is a delivery (D6) and a decision has to look like one.
  *
  * Everything the runtime used to write as progress (dispatch / round-open
  * milestones, the router-fallback receipt, the card-resolution receipt) is gone
@@ -20,12 +22,29 @@
  * row at all (D8) — its answer is an execution-side fact shown inside the block.
  */
 
+import { Check, ChevronRight, CornerDownRight, ListTree, Plus } from "lucide-react";
 import { ChatEventText } from "./ChatEventText";
 import { useTranslation } from "../../i18n/useTranslation";
 import { RETIRED_NOTICES } from "../../lib/retiredNotices";
 import { cn } from "../../lib/utils";
 import type { CardChoice } from "../../lib/chatCardAnswer";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
+
+/** The candidate's state as a dot on its row (design 29 §5.2 vocabulary). A
+ *  card must not claim a status it was not told: an option that arrived without
+ *  one gets a neutral dot, never "idle". */
+function statusTone(status?: string | null): string {
+  switch (status) {
+    case "working":
+      return "bg-amber-500 animate-pulse";
+    case "idle":
+      return "bg-emerald-500";
+    case "errored":
+      return "bg-red-500";
+    default:
+      return "bg-zinc-400 dark:bg-zinc-600";
+  }
+}
 
 interface ChatNoticeEventRowProps {
   row: ChatMessageRow;
@@ -55,85 +74,148 @@ export function ChatNoticeEventRow({
 
   // Retired milestones: history only.
   if (RETIRED_NOTICES.has(noticeType)) return null;
-  // An addressing question (ADR-106 D6 levels 3 and 5). Its text is the option
-  // list, which the surfaces paint as buttons — the line below is only the
-  // question they ask in common, localized here rather than server-side.
+  // An addressing question (ADR-106 D6 levels 3 and 5) — a decision card, and
+  // it has to look like one: a hairline shell with a header, full-width option
+  // rows that read as buttons (label, the router's reason, a status dot, a
+  // chevron), and one quiet escape. The language is `AskQuestionCard`'s, so the
+  // same question does not change costume between the chat surface and the
+  // execution surface.
   if (noticeType === "session_choice" || noticeType === "confirm_continue") {
+    const confirm = noticeType === "confirm_continue";
     const question = t(
-      noticeType === "session_choice"
-        ? "chatView.block.chooseSession"
-        : "chatView.block.confirmSession",
+      confirm ? "chatView.block.confirmSession" : "chatView.block.chooseSession",
     );
-    // The service's projection: the options the question offers and whether a
-    // round already answered it. A card that reached the transcript without
-    // options has none to project — that is an unanswerable line, which is what
-    // the plain sentence below reports.
+    // The service's projection (design 31 §6): the options the question offers,
+    // whether a round already answered it, and which session took the answer.
     const card = row.delivery?.question;
     const options = card?.options ?? [];
     const answered = card?.answered === true;
-    // Nothing to offer, or nobody allowed to offer it: the question is still a
-    // fact about the transcript, so it stays as the plain line.
-    if (!onChoose || options.length === 0) {
-      return <ChatEventText text={question} className={className} />;
+    // A card with nothing to offer is retired chrome, not a question: the rows
+    // that reach a surface like this are pre-projection leftovers (no options,
+    // nothing to click), and painting them as a centered sentence in the middle
+    // of the transcript made a bare "Continue this task?" look like the agent
+    // saying something it never said.
+    if (options.length === 0) return null;
+
+    // An answer must NAME what it continued. The payload carries the
+    // candidate's own title; the generic wording is only the fallback for an
+    // option that arrived with no label at all.
+    const labelOf = (option: (typeof options)[number]) =>
+      option.label?.trim() ||
+      option.session_id?.trim().slice(0, 8) ||
+      t("chatView.block.chooseThis");
+
+    if (answered) {
+      // Settled: a receipt, not a row of disabled buttons. The one thing a human
+      // checks after clicking is *where the words went*, so the line names the
+      // session the projection reports — and says "new task" when the click was
+      // the escape instead of a candidate.
+      const taken = options.find((o) => o.session_id === card?.answered_session);
+      const receipt = taken
+        ? t("chatView.block.answeredTo", { label: labelOf(taken) })
+        : card?.answered_session
+          ? t("chatView.block.answeredNewTask")
+          : t("chatView.block.answered");
+      return (
+        <div
+          className={cn("ml-12 my-1.5 w-fit max-w-[32rem]", className)}
+          data-testid="chat-card-answered"
+        >
+          <div className="flex min-w-0 items-center gap-1.5 rounded-md border border-border-outer bg-chat-title px-2.5 py-1.5 text-11 text-text-secondary">
+            <Check className="h-3.5 w-3.5 shrink-0 text-emerald-600 dark:text-emerald-500" />
+            <span className="min-w-0 truncate">{receipt}</span>
+          </div>
+        </div>
+      );
     }
-    // The card's own row is a question, so it reads as one: the line above, the
-    // answers below, all centered like every other transcript chrome.
+
     return (
       <div
-        className={cn("flex flex-col items-center gap-1.5 py-1", className)}
+        className={cn("ml-12 my-1.5 w-fit min-w-[18rem] max-w-[32rem]", className)}
         data-testid="chat-card-options"
       >
-        <span className="text-10 text-text-tertiary">{question}</span>
-        <div className="flex flex-wrap items-center justify-center gap-1.5">
-          {options.map((option) => {
-            // An answer must NAME what it continues. The payload carries the
-            // candidate's own title (the session's), and `confirm_continue` also
-            // carries the router's reason for proposing it — a card that said
-            // only "Continue this one" made the human pick a task blind. The
-            // generic wording survives only as the fallback for an option that
-            // arrived with no label at all, where there is nothing better to say.
-            const label =
-              option.label?.trim() ||
-              option.session_id?.trim().slice(0, 8) ||
-              t("chatView.block.chooseThis");
-            const why = option.why?.trim();
-            return (
+        <div className="overflow-hidden rounded-md border border-border-outer">
+          {/* Header: icon + the question + whether it still wants an answer. */}
+          <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-2.5 py-[6px] text-11 font-medium text-text-secondary">
+            {confirm ? (
+              <CornerDownRight className="h-3.5 w-3.5 shrink-0" />
+            ) : (
+              <ListTree className="h-3.5 w-3.5 shrink-0" />
+            )}
+            <span className="flex-1 truncate">{question}</span>
+            {onChoose && (
+              <span className="shrink-0 text-10 font-normal text-text-tertiary">
+                {t("chatView.block.unanswered")}
+              </span>
+            )}
+          </div>
+          {/* One row per candidate. The whole row is the button: a bordered box
+              holding two lines of text reads as a disabled field, not as
+              something to press. */}
+          <div className="divide-y divide-border-divider bg-surface">
+            {options.map((option) => {
+              const label = labelOf(option);
+              const why = option.why?.trim();
+              const row = (
+                <>
+                  <span
+                    className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusTone(option.status))}
+                    aria-hidden="true"
+                  />
+                  <span className="min-w-0 flex-1">
+                    <span className="block truncate text-11 font-medium text-text">{label}</span>
+                    {why && (
+                      <span className="block truncate text-10 text-text-tertiary">{why}</span>
+                    )}
+                  </span>
+                </>
+              );
+              // A viewer who may not decide (ADR-106 D10) sees the options but
+              // not a button: the question is a fact about the channel, the
+              // click is the speaker's.
+              if (!onChoose) {
+                return (
+                  <div
+                    key={option.session_id}
+                    className="flex items-center gap-2 px-2.5 py-1.5"
+                    title={why ? `${label} — ${why}` : label}
+                  >
+                    {row}
+                  </div>
+                );
+              }
+              return (
+                <button
+                  key={option.session_id}
+                  type="button"
+                  onClick={() => onChoose({ sessionId: option.session_id })}
+                  title={why ? `${label} — ${why}` : label}
+                  className="group flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-nav-item-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-accent)]"
+                >
+                  {row}
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform group-hover:translate-x-0.5" />
+                </button>
+              );
+            })}
+          </div>
+          {/* D6's cheap escape, demoted to a footer action: "new task" is the
+              way OUT of the suggestion, never a second candidate. */}
+          {card?.allow_new_task && onChoose && (
+            <div className="border-t border-border-divider bg-surface">
               <button
-                key={option.session_id}
                 type="button"
-                disabled={answered}
-                onClick={() => onChoose({ sessionId: option.session_id })}
-                title={why ? `${label} — ${why}` : label}
-                className={cn(
-                  "flex max-w-[26rem] flex-col items-center gap-0.5 rounded-md border border-border-outer px-2 py-1 text-xs",
-                  answered
-                    ? "text-text-disabled"
-                    : "text-text-secondary hover:bg-nav-item-hover hover:text-text",
-                )}
+                onClick={() => onChoose({ forceNew: true })}
+                className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-text-secondary"
               >
-                <span className="max-w-full truncate">{label}</span>
-                {why && (
-                  <span className="max-w-full truncate text-10 opacity-70">{why}</span>
-                )}
+                <Plus className="h-3.5 w-3.5 shrink-0" />
+                {t("chatView.block.newTask")}
               </button>
-            );
-          })}
-          {/* D6's cheap escape: a question must be answerable in one click, and
-              "new task" sits beside every suggestion rather than below a fold. */}
-          {card?.allow_new_task && (
-            <button
-              type="button"
-              disabled={answered}
-              onClick={() => onChoose({ forceNew: true })}
-              className={cn(
-                "rounded-md border border-border-outer px-2 py-1 text-xs",
-                answered
-                  ? "text-text-disabled"
-                  : "text-text-secondary hover:bg-nav-item-hover hover:text-text",
-              )}
-            >
-              {t("chatView.block.newTask")}
-            </button>
+            </div>
+          )}
+          {!onChoose && (
+            <div className="border-t border-border-divider bg-surface px-2.5 py-1.5 text-10 text-text-tertiary">
+              {t("chatView.block.answeredByOwner")}
+            </div>
           )}
         </div>
       </div>

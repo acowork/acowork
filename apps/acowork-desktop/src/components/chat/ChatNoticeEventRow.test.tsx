@@ -8,7 +8,7 @@ import type { ChatMessageRow } from "../../stores/chatSessionStore";
 vi.mock("../../i18n/useTranslation", () => ({
   useTranslation: () => ({
     t: (key: string, options?: Record<string, unknown>) =>
-      options?.name ? `${key}:${String(options.name)}` : key,
+      options ? `${key}:${Object.values(options).map(String).join(",")}` : key,
   }),
 }));
 
@@ -61,16 +61,110 @@ describe("ChatNoticeEventRow", () => {
     }
   });
 
-  it("paints the addressing question it is asked in common (D6 levels 3 and 5)", () => {
-    // `session_choice` / `confirm_continue` are empty-bodied notices whose real
-    // content is the option list — the picker paints the buttons, and this line
-    // is the question they share, localized on the surface rather than by the
-    // server (ADR-105's rule).
-    const { container } = render(<ChatNoticeEventRow row={noticeRow("session_choice")} />);
-    expect(container.textContent).toBe("chatView.block.chooseSession");
-    const { container: confirm } = render(<ChatNoticeEventRow row={noticeRow("confirm_continue")} />);
-    expect(confirm.textContent).toBe("chatView.block.confirmSession");
+  it("paints nothing for a card with no options to offer", () => {
+    // A card whose projection carries no options is retired chrome: nothing to
+    // choose, nothing chosen. Painting it as a centered "Continue this task?"
+    // put a question into the transcript that the agent never asked and nobody
+    // could answer — the naked line was the most visible thing on the screen.
+    const { container } = render(<ChatNoticeEventRow row={noticeRow("confirm_continue")} />);
+    expect(container.innerHTML).toBe("");
+    const { container: choice } = render(<ChatNoticeEventRow row={noticeRow("session_choice")} />);
+    expect(choice.innerHTML).toBe("");
   });
+
+  it("settles into a receipt that names the session the answer went to", () => {
+    // After the click the card owes the human one fact: which task took the
+    // words. A disabled row of buttons answers nothing and still looks like a
+    // question.
+    const row = noticeRow("confirm_continue");
+    row.delivery = {
+      answered: false,
+      question: {
+        answered: true,
+        answered_session: "exec-7",
+        options: [
+          { session_id: "exec-7", label: "整理报表", why: "最近活跃" },
+          { session_id: "exec-8", label: "另一条线索" },
+        ],
+        allow_new_task: true,
+      },
+    };
+    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    expect(screen.getByTestId("chat-card-answered").textContent).toBe(
+      "chatView.block.answeredTo:整理报表",
+    );
+    // A settled card offers no buttons at all.
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("says a new task was started when the answer names no candidate", () => {
+    // The escape (`forceNew`) re-delivers into a session the card never listed,
+    // so the receipt cannot borrow an option's title — but it can still say what
+    // happened instead of falling back to "answered".
+    const row = noticeRow("confirm_continue");
+    row.delivery = {
+      answered: false,
+      question: {
+        answered: true,
+        answered_session: "exec-new",
+        options: [{ session_id: "exec-7", label: "整理报表" }],
+        allow_new_task: true,
+      },
+    };
+    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    expect(screen.getByTestId("chat-card-answered").textContent).toBe(
+      "chatView.block.answeredNewTask",
+    );
+  });
+
+  it("shows a viewer who may not answer the options without the buttons (D10)", () => {
+    // Only the person who spoke may decide where their words go. A read-only
+    // viewer still gets the question — it is a fact about the channel — and the
+    // reason it is not theirs to answer, rather than a dead button.
+    const row = noticeRow("session_choice");
+    row.delivery = {
+      answered: false,
+      question: {
+        answered: false,
+        options: [
+          { session_id: "exec-7", label: "整理报表", status: "idle" },
+          { session_id: "exec-8", label: "另一条线索", status: "working" },
+        ],
+        allow_new_task: true,
+      },
+    };
+    render(<ChatNoticeEventRow row={row} />);
+    expect(screen.queryByRole("button")).toBeNull();
+    expect(screen.getByText("整理报表")).toBeTruthy();
+    expect(screen.getByText("chatView.block.answeredByOwner")).toBeTruthy();
+  });
+
+  it("makes every candidate row a button and the escape a footer action", () => {
+    // A bordered box holding two lines of text reads as a disabled field: the
+    // row has to BE the button, and "new task" is the way out of the
+    // suggestion — never a second candidate of equal weight.
+    const row = noticeRow("session_choice");
+    row.delivery = {
+      answered: false,
+      question: {
+        answered: false,
+        options: [
+          { session_id: "exec-7", label: "整理报表", why: "你刚说的那个" },
+          { session_id: "exec-8", label: "另一条线索" },
+        ],
+        allow_new_task: true,
+      },
+    };
+    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    const buttons = screen.getAllByRole("button");
+    expect(buttons).toHaveLength(3); // two candidates + the escape
+    expect(buttons[0].textContent).toContain("整理报表");
+    expect(buttons[0].textContent).toContain("你刚说的那个");
+    expect(buttons[2].textContent).toContain("chatView.block.newTask");
+    // The header states that the question still wants an answer.
+    expect(screen.getByText("chatView.block.unanswered")).toBeTruthy();
+  });
+
   it("names the session a `confirm_continue` card would continue (D6 level 5)", () => {
     // The card offers exactly one candidate, so the button IS the answer. It used
     // to read a fixed "Continue this one" and drop the candidate's title and the
