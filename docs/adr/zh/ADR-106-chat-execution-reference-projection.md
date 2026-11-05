@@ -373,6 +373,40 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 
 落点：`core/acowork-runtime/src/rounds.rs`（`RoundRecord.user: Option<u64>`、`announce_round`、`project` 的无线索分支、`forced_closure`、`fold_attachments` 签名）、`core/acowork-runtime/src/conversation.rs`（`WriterCommand::AnnounceRound` 同步命令、`ConversationSession::announce_round`、`RoundSnapshot` 守卫放宽、writer 侧 `announce_round` 的跟踪器交接）、`core/acowork-runtime/src/agent/loop_.rs`（`open_round` 次序 `announce → 引用行 → stamp`）。验收以测试固定：`an_announced_round_projects_as_open_instead_of_a_hole`、`announcing_a_known_round_keeps_its_coordinate`、`a_round_closed_before_its_opener_is_not_a_hole`、`an_announced_round_reads_as_open_not_as_a_hole`、`an_announced_round_is_answerable_before_its_first_row`、`a_pre_empted_announcement_is_closed_not_left_open`。Desktop 与 Mobile 的块渲染器无需改动（`projection.user` 两侧本就可空，空 user 走既有的"无提问 / 进行中"回退）。
 
+## 修订（2026-11-06）：投递失败不再是 chat 行——内存态实时告警（D12 / D14 顺带修订）
+
+**动机**。真实故障：一条消息投递失败后，chat 里留下一条黄色 `system_notice`（`notice_type: "delivery_failed"`），此后**永远在**——重试成功了它在，agent 装好了它在，刷新、换设备、旧备份全都把它刷回来。而且它还顺带被 `acowork_core::intent::chat_kinds::is_answer_row` 算作"这条消息已被回应"，于是一次早已作废的失败至今仍在替那条消息宣布结局。日志该记的是"谁对谁说了什么"，一条链路的瞬时不通不是对话的内容。
+
+**决策**。`delivery_failed` **不再有写者**（ADR-105 D5 修订）：失败改为挂在**读模型**上的内存态告警——`acowork-user` 的 `ChatAlertStore`（`(chat_session_id, row_id) → {target, error_code, inserted_at}`，TTL 600 s，随进程消失，无任何持久化），Gateway 的三处投递失败分支与 sweeper 的超时兜底改为 `POST /internal/chat-sessions/{sid}/alerts`，读侧把它作为 `ChatRowView.delivery.alert`（`{target, error_code, expires_in}`）装饰在欠投递的那条人类行上，各面在自己的时钟上排到期删除。Dashboard 与 Mobile 由 `DeliveryAlertLine` 渲染，`RETIRED_NOTICES` 纳入 `delivery_failed` 让旧行在渲染期消失。
+
+**对 D12 的影响**。D12 的词表结论不变（chat 只记对话），只是"通道事实"一类里少了一个成员：`system_notice` 现存的活写者只剩预算 / 截断 / 不可达三类限制回执与两类寻址问题。`THREADED_NOTICES` 仍保留 `delivery_failed`——不是因为它还有写者，而是因为**旧转录里的行就是它**，词表若忘掉它，那些行就成了无法解释的数据。
+
+**对 D14 的影响**。D14「旧行留盘、渲染期隐藏」的机制原样适用，隐藏集合多了 `delivery_failed`：失败一旦过去就不该再占据版面，这与"里程碑不是历史"是同一条规则。row 级 `delivery.alert` **不参与**结算的样式推断——它是一份有时限的状态，不是收据行。
+
+**边界**。不给 alert 加持久化、也不加"已读"状态：它的全部价值在于"此刻"。进程重启即归零是正确行为——重启之后那份"刚刚失败"已经不新了。
+
+落点：`core/acowork-user/src/chat_alerts.rs`（新）、`core/acowork-user/src/chat_view.rs`、`core/acowork-user/src/http/chat_sessions_api.rs`（内部路由）、`core/acowork-gateway/src/intent/chat_client.rs`、`core/acowork-gateway/src/http/intent_api.rs`、`core/acowork-gateway/src/intent/sweeper.rs`、`core/acowork-core/src/intent.rs`（`RETIRED_NOTICES`）、Desktop 与 Mobile 的 `DeliveryAlertLine` / `ChatNoticeRow` / `chatTurnInflight`。验收以测试固定：`chat_view::tests::a_live_failure_is_a_decoration_of_the_row_it_concerns`、`chat_sessions_e2e::unaddressed_group_message_reaches_the_default_responder`（断言无收据行、行上带 `delivery.alert`）、`DeliveryAlertLine` 两侧的到期自删、`turnInflight` 的 alert 结算。
+
+## 修订（2026-11-06）：终态轮不携带非 waiting 的卡；块卡回答后强制重读
+
+**动机**。真实故障：执行会话弹出的 `ask_question` 卡 300 s 超时后，chat 侧投影的同一张卡**点了没反应、也不消失**，直到新消息把它覆盖；同时在执行会话里点选是正常的。同一个 bug 还带着一个排版问题：chat 侧的选项是横向排开的一行，选项文字一长就挤成一团。
+
+**根因（经日志与 `rounds.sqlite` 核实）**。三层各自留了一个口子：
+
+1. **写侧**：Runtime 300 s 超时后 `forget_interaction` 把该轮的 `card` 置 `Null` 并写 `terminal=true, status=in_progress`，但**被抢占路径**（`forced_closure`）与**崩溃修复**（`repair_on_open`）保留旧的 `card` 值，于是终态快照里仍带着一张不是 `waiting` 的卡。
+2. **读侧**：Gateway 的 `chat_blocks` 缓存 / 直读两条路径把这份投影原样返回，不做任何一致性收敛——缓存一旦写入还永久有效（D5：终态不可变），错值就此固化。
+3. **前端**：`BlockCardActions` 的 POST 成功后只做本地 `resolveQuestion`，不触发块重读；而 `noteRoundState` 的 500 ms 有界重试窗口内块可能仍是 `pending`，之后没有新信号再触发重读，卡片就永久停在投影里。
+
+**决策一（写侧不变量）**：**终态的轮不得携带非 `waiting` 的卡**。`forced_closure` 在轮已带卡且 `status != waiting` 时清空 `card`；`repair_on_open` 对 open 轮同样清空。卡片是"这一轮在等人回答"的证据，一轮既然已经收口，它就必然不再等人。
+
+**决策二（读侧收敛）**：Gateway 在 `assemble` 对 `Cached` 与 `Live` 两条路径都过一遍 `served_projection`——`terminal=true` 且 `status != "waiting"` 时强制 `card: null`。缓存的价值是省一次读，不是替服务端保留一个错误值；写侧不变量是第一道，读侧收敛是第二道，二者不是冗余而是"旧数据/外部写入"的兜底。
+
+**决策三（前端不猜）**：回答卡片的 POST 成功后，除了本地清除，还必须 `useChatBlockStore.getState().reload(chatSessionId, [ref])`——一次回答是一个事实变化，呈现层必须去读服务端的事实，而不是相信自己的乐观状态。测试固定：`answering re-reads the round, whatever the POST said`。
+
+**决策四（排版）**：`ask_question` 的选项在 chat 侧的块里纵向排列（`flex flex-col items-stretch`），审批的两个按钮仍横向——选项是"句子"，长度不可控，横向排布必然在长文案上崩掉。
+
+落点：`core/acowork-runtime/src/rounds.rs`（`forced_closure` / `repair_on_open`）、`core/acowork-gateway/src/http/chat_blocks.rs`（`served_projection`）、`apps/acowork-desktop/src/components/chat/ChatExecutionBlock.tsx`。验收以测试固定：`crash_repair_drops_the_card_of_the_open_round`、`a_waiting_round_keeps_its_state_when_pre_empted`、`a_cached_terminal_card_is_not_served`、`answering re-reads the round, whatever the POST said`。
+
 ## 参考
 
 - [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md)（可弃侧表的完整模式：写时增量、失败只 warn、水位/首触重建、Windows 句柄顺序——本 ADR 的 D5 逐条沿用）

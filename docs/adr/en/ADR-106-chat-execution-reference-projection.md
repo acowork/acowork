@@ -371,6 +371,40 @@ The mechanism: a side-table record used to appear only once the round's **first 
 
 Landing points: `core/acowork-runtime/src/rounds.rs` (`RoundRecord.user: Option<u64>`, `announce_round`, the coordinate-less branch of `project`, `forced_closure`, the `fold_attachments` signature), `core/acowork-runtime/src/conversation.rs` (the synchronous `WriterCommand::AnnounceRound`, `ConversationSession::announce_round`, the relaxed `RoundSnapshot` guard, the writer-side tracker hand-over), `core/acowork-runtime/src/agent/loop_.rs` (`open_round` order: `announce → reference row → stamp`). Acceptance is pinned by tests: `an_announced_round_projects_as_open_instead_of_a_hole`, `announcing_a_known_round_keeps_its_coordinate`, `a_round_closed_before_its_opener_is_not_a_hole`, `an_announced_round_reads_as_open_not_as_a_hole`, `an_announced_round_is_answerable_before_its_first_row`, `a_pre_empted_announcement_is_closed_not_left_open`. Neither the Desktop nor the Mobile block renderer needs a change (`projection.user` is already optional on both sides; an empty user falls back to the existing "no question / in progress" copy).
 
+## Revision (2026-11-06): a failed delivery is no longer a chat row — an in-memory live alert (with a Decision 12 / 14 amendment)
+
+**Motivation**. Real defect: after a failed delivery the chat kept a yellow `system_notice` (`notice_type: "delivery_failed"`) that stayed **forever** — after a successful retry, after the agent was installed, on every reload, on every device, in every old backup. It also counted as "this message has been answered" in `acowork_core::intent::chat_kinds::is_answer_row`, so a long-dead failure went on announcing an outcome for that message. A log records who said what to whom; a momentarily broken link is not conversation content.
+
+**Decision**. `delivery_failed` **has no writer any more** (ADR-105 D5, revised): the failure became an in-memory alert hanging off the **read model** — `acowork-user`'s `ChatAlertStore` (`(chat_session_id, row_id) → {target, error_code, inserted_at}`, 600 s TTL, gone with the process, nothing persisted). The Gateway's three failure branches and the sweeper's timeout fallback post to `POST /internal/chat-sessions/{sid}/alerts`; the read side decorates the human row the delivery owed as `ChatRowView.delivery.alert` (`{target, error_code, expires_in}`), and each surface schedules its own removal. Desktop and Mobile paint it with `DeliveryAlertLine`, and `RETIRED_NOTICES` gained `delivery_failed` so old rows disappear at render time.
+
+**Effect on Decision 12**. The vocabulary conclusion stands (chat records conversation); one member left the "channel fact" class: the live `system_notice` writers that remain are the three limit receipts (budget / truncation / unreachable) and the two addressing questions. `THREADED_NOTICES` keeps `delivery_failed` — not because it still has a writer, but because **the rows in old transcripts are exactly it**; a vocabulary that forgot it would turn those rows into unexplainable data.
+
+**Effect on Decision 14**. The "old rows stay on disk, hidden at render time" mechanism applies unchanged, with one more member in the hidden set: a failure that is over must not keep occupying the page — the same rule as "a milestone is not history". The row-level `delivery.alert` takes **no** part in settling-style inference: it is a time-limited state, not a receipt row.
+
+**Boundary**. No persistence for the alert and no "read" state: its entire value is *now*. Zeroing on restart is correct behaviour — after a restart "it just failed" is no longer new.
+
+Landing: `core/acowork-user/src/chat_alerts.rs` (new), `core/acowork-user/src/chat_view.rs`, `core/acowork-user/src/http/chat_sessions_api.rs` (internal route), `core/acowork-gateway/src/intent/chat_client.rs`, `core/acowork-gateway/src/http/intent_api.rs`, `core/acowork-gateway/src/intent/sweeper.rs`, `core/acowork-core/src/intent.rs` (`RETIRED_NOTICES`), and Desktop/Mobile `DeliveryAlertLine` / `ChatNoticeRow` / `chatTurnInflight`. Pinned by tests: `chat_view::tests::a_live_failure_is_a_decoration_of_the_row_it_concerns`, `chat_sessions_e2e::unaddressed_group_message_reaches_the_default_responder` (asserts no receipt row and a live `delivery.alert` on the row), the self-expiry cases of `DeliveryAlertLine` on both surfaces, and the alert branch of `turnInflight`.
+
+## Revision (2026-11-06): a terminal round carries no non-waiting card; answering a block card forces a re-read
+
+**Motivation**. Real defect: an `ask_question` card popped by an execution session timed out after 300 s, and the same card *projected into the chat* **did nothing when clicked and never disappeared** until a new message covered it, while the same card in the execution session behaved correctly. The same bug came with a layout problem: the chat-side options were one horizontal row, which collapses on long option text.
+
+**Root cause (verified through logs and `rounds.sqlite`)**. Three layers each left a gap:
+
+1. **Writer**: after the 300 s timeout, `forget_interaction` nulls that round's `card` and writes `terminal=true, status=in_progress`, but the **pre-emption path** (`forced_closure`) and **crash repair** (`repair_on_open`) kept the old `card` value, so a terminal snapshot still carried a card that was not `waiting`.
+2. **Reader**: the Gateway's `chat_blocks` paths (cached and live) served that projection verbatim with no consistency pass — and a cached entry never expires (D5: terminal is immutable), so the wrong value was frozen in.
+3. **Client**: after a successful POST, `BlockCardActions` only cleared the card locally (`resolveQuestion`) and never re-read the block; within `noteRoundState`'s bounded 500 ms retry window the block could still be `pending`, and afterwards no signal triggered a re-read, so the card stayed in the projection forever.
+
+**Decision one (writer invariant)**: **a terminal round must not carry a card that is not `waiting`**. `forced_closure` clears the card when the round already has one and `status != waiting`; `repair_on_open` does the same for an open round. A card is the evidence that "this round is waiting for a human"; once a round has closed, it cannot still be waiting.
+
+**Decision two (reader convergence)**: in `assemble`, the Gateway runs both the `Cached` and the `Live` path through `served_projection`, forcing `card: null` when `terminal=true` and `status != "waiting"`. The cache exists to save a read, not to preserve a wrong value on the service's behalf; the writer invariant is the first line and reader convergence the second — not redundancy, but the backstop for old data and outside writers.
+
+**Decision three (the client does not guess)**: after a successful card answer, the surface must call `useChatBlockStore.getState().reload(chatSessionId, [ref])` in addition to its local clear. An answer is a change of fact; the presentation layer has to read the server's fact rather than trust its own optimistic state. Pinned by `answering re-reads the round, whatever the POST said`.
+
+**Decision four (layout)**: `ask_question` options in the chat-side block are stacked vertically (`flex flex-col items-stretch`), while the two approval buttons stay horizontal — options are *sentences* and their length is not ours to control, so a horizontal row is guaranteed to break on long copy.
+
+Landing: `core/acowork-runtime/src/rounds.rs` (`forced_closure` / `repair_on_open`), `core/acowork-gateway/src/http/chat_blocks.rs` (`served_projection`), `apps/acowork-desktop/src/components/chat/ChatExecutionBlock.tsx`. Pinned by `crash_repair_drops_the_card_of_the_open_round`, `a_waiting_round_keeps_its_state_when_pre_empted`, `a_cached_terminal_card_is_not_served`, `answering re-reads the round, whatever the POST said`.
+
 ## References
 
 - [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md) — the complete disposable side-table pattern: write-time incrementals, warn-only failures, watermark/first-touch rebuild, the Windows handle ordering contract. Decision 5 adopts it clause by clause.

@@ -103,7 +103,7 @@
 ## 5. 一致性规则
 
 1. **一条事实一种表示。** 地址只由 `round_ref` 承载；"问的是哪条消息"只由问句行的线程字段承载；不得再引入 id 前缀编码等并行表示。
-2. **写者权限属于模型。** Chat 多写者、执行 Session 单写者。当前 Chat 的写者共 6 处调用点、三类身份：①Gateway 自己的人话语写入口（`deliver_mentions` / `deliver_chat_message`）；②Gateway 的投递回执（`delivery_failed`、`budget_exhausted`）；③Runtime 经 `/api/intents/chat-append` relay 写 `execution_round` / `agent_message` / `system_notice`（含问句行）。准入规则（participant 校验 + kind 白名单）是模型的一部分，不得散落在入口。
+2. **写者权限属于模型。** Chat 多写者、执行 Session 单写者。当前 Chat 的写者共 6 处调用点、三类身份：①Gateway 自己的人话语写入口（`deliver_mentions` / `deliver_chat_message`）；②Gateway 的通道回执（`budget_exhausted`；`delivery_failed` 2026-11-06 起无写者，失败改投内存态告警，见 ADR-105 D5 修订）；③Runtime 经 `/api/intents/chat-append` relay 写 `execution_round` / `agent_message` / `system_notice`（含问句行）。准入规则（participant 校验 + kind 白名单）是模型的一部分，不得散落在入口。
 3. **跨层不产生第二份真相。** 投递层（mailbox）与转录层不是同一事实的两份副本：前者是 liveness，后者是 outcome。转录**不得**复制投递层内部字段（`delivered_at` / `accepted` 等）；投递层**不得**承载会话内容。
 
 ## 6. 读模型：唯一推导点
@@ -124,6 +124,7 @@
 | `delivery.targets` | 本 turn 落到的每个执行会话（`agent_instance_id` / `agent_session_id` / `round_id` / `opened_new`）——只有坐标，没有 round 内容。是列表：群 `@` 扇出一个目标一条 round | 已有 round 的 `user_message` |
 | `delivery.question.answered` | 该卡片所问的消息现在有 round 了 → 问题已答 | 卡片（`session_choice` / `confirm_continue`） |
 | `delivery.question.options` / `allow_new_task` | 卡片自己的答案与出口（payload 原样透出） | 卡片 |
+| `delivery.alert` | 这条行欠的一次投递**此刻**失败着：`{target, error_code, expires_in}`，`expires_in` 是读这一刻的剩余秒数（不是绝对时间戳，各面自己排到期）。来自 `acowork-user` 的内存态告警表，**不落盘**，过期即无 | 欠投递的 `user_message`（ADR-105 D5 修订，2026-11-06） |
 
 三条实现约束：
 
@@ -174,7 +175,7 @@
 | 禁聚合推导 | surface 里 `in_reply_to` 不得与 `some(` / `filter(` / `every(` / `new Set` / `.includes(` 同现（注释行除外） | 原故障：`rows.some(r => r.meta.message_id === x.meta.in_reply_to)` 判"答没答"。按坐标 `.find(` 取一条已知行仍然允许（§6 末段） |
 | 通知类型词汇表封闭 | 写者（runtime / gateway）发出的 `notice_type` 字面量必须出现在 `chat_kinds` 里 | 新造一个通知类型却不进 `THREADED_NOTICES` / `CARD_NOTICES` / `LIMIT_NOTICES`，它就绕过了坐标强制，落成孤儿行 |
 
-第四条要求词汇表有第三类：`LIMIT_NOTICES`（`budget_exhausted` / `truncated` / `unavailable`）——它们报告的是**通道的极限**，所指的请求从未成为行，因此不可能有坐标。`delivery_failed` 不在其中：它欠的那条消息是存在的，所以照常线程。`chat_notice_write_classes_are_disjoint` 钉住这三类在"写契约"这条轴上的互斥（`RETIRED_NOTICES` 是另一条轴：管渲染与结算，与写契约正交，`interaction_resolved` 同时在两条轴上都是正确的）。
+第四条要求词汇表有第三类：`LIMIT_NOTICES`（`budget_exhausted` / `truncated` / `unavailable`）——它们报告的是**通道的极限**，所指的请求从未成为行，因此不可能有坐标。`delivery_failed` 不在其中（它欠的那条消息是存在的，所以历史上照常线程）；该类型自 2026-11-06 起已无写者，保留在 `THREADED_NOTICES` 里只为让旧转录可读，而行上的实时告警 `delivery.alert` 是一份内存态状态、根本不参与线程校验。`chat_notice_write_classes_are_disjoint` 钉住这三类在"写契约"这条轴上的互斥（`RETIRED_NOTICES` 是另一条轴：管渲染与结算，与写契约正交，`interaction_resolved` 同时在两条轴上都是正确的）。
 
 未做：**id 前缀解析**没有单独的红线。P2 删掉的那批（`kind` 从 `message_id` 前缀还原）已无残留，而"禁止某个字符串出现在任何地方"这类规则的误报率远高于收益；若要防它复发，正确做法是把 `ChatRowView` 的类型收窄到无前缀可解析（`kind` 必填），让类型系统而不是 grep 来拒绝。
 

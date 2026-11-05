@@ -116,7 +116,7 @@ D7 的反应是单一"好的，我来处理"，每个轮次读起来都一样，
 D2 / D3 / D6 / D7 / D8 的共同前提是“在途轮次必须落成 durable 行”。实测这个前提在半条链路上是错的：**运行中的反馈需要实时性，而历史阅读不需要进度**。一条消息“已被派发”“这一轮开跑了”是执行面的运行时事实，对几个月后翻聊天记录的人为零信息量；落盘反而是把进度日志混进了对话日志。因此本轮把“实时状态”与“对话历史”彻底拆开：
 
 1. **停写中间状态。**Runtime 不再写 `turn_dispatched` / `turn_started` / `router_fallback` 三类行，并删除 `dispatch_pointer_meta` / `started_pointer_meta` 两个 builder 及其三个写入站点（chat_router drain 派发、`route_intent_legacy` 派发、`session_task` 开轮）；`turn_mode` durable meta（D8）随之废止，不再产生新值。store 仍能反序列化旧行（字段保留），但不再新增。
-2. **历史行渲染期隐藏。**已存在的旧 `turn_dispatched` / `turn_started` / `router_fallback` 行不迁移、不删除，但在 Desktop 两视图与 Mobile 一律不渲染（`ChatNoticeEventRow` 的 `RETIRED_NOTICES`）。刷新、换设备、旧备份都不会再把状态行刷回屏幕。`ChatNoticeEventRow` 随后只负责真正的频道回执（`budget_exhausted` / `delivery_failed` / `truncated` / `unavailable` 等）。
+2. **历史行渲染期隐藏。**已存在的旧 `turn_dispatched` / `turn_started` / `router_fallback` 行不迁移、不删除，但在 Desktop 两视图与 Mobile 一律不渲染（`ChatNoticeEventRow` 的 `RETIRED_NOTICES`）。刷新、换设备、旧备份都不会再把状态行刷回屏幕。`ChatNoticeEventRow` 随后只负责真正的频道回执（`budget_exhausted` / `truncated` / `unavailable` 等；`delivery_failed` 自 2026-11-06 起无写者，见 ADR-105 D5 修订——失败改为内存态实时告警）。
 3. **运行中由前端派生一条聚合等待行（不落盘）。**判据是唯一 durable 的证据：**最新一条已向 agent 发出请求的 `user_message` 尚无终态回答**。"这条人类行是否真的惊动了 agent"同样是 durable 行事实，不是猜测：`/api/intents/chat-message` 落的行 `to` 就是它投递的 agent（1:1、答卡、pinned 执行回合都走这里），§5.3.1 的群 @ 群发只落一条广播行（`to` 空）而把被点名的 agent 放在 `meta.mentions`；除此之外——`user_user` 私聊、群里未 @ 的普通发言——走的是仅归档的 chat 写入口，`to` 为空且没有 mentions，它谁也没唤醒。等待行断言的是"有 agent 在干活"，因此**没唤醒任何 agent 的人类行既不能开启等待、也不作为"更新的人类消息"顶掉前一回合**（一个未 @ 的插话不取消正在跑的任务）；反之，一个没有任何 agent 参与者的 chat（私聊、纯人类群）永不显示等待行，连 `sending` 窗口也不——那里没有任何人会来回话。`pendingTurn(rows, sending, closedCards, agentReachable)`：`agentReachable=false` 直接为假；HTTP 发送窗口（`sending`）短路为真；否则倒序取最新一条**开启 agent 回合的**人类行，若其后出现 answering 的终态 `agent_message`（`in_reply_to` 匹配）、或一张未关闭的 `interaction_request`（球在人类）、或更新的一条同样开启了回合的人类消息，则结束等待。有 agent 名时渲染 `{{name}}正在处理…`（带 shimmer），否则 generic；不区分排队 / 开轮 / 工具执行，不新增 MQTT 通道、不改会话列表 API。窗口被 locate 定位到中段（后面还有更新页）时不渲染。
 4. **终态保留，空终态改居中。**`aborted` / `failed` / `timeout` / `waiting` 的 `agent_message` 继续写、继续存（它们回答的是“为什么没有回复”，正是历史需要的信息）。空 body（且无附件）的终态不再渲染成 agent 气泡——状态词不是 agent 说的话——改为居中状态行（`aborted` 中性、`failed` / `timeout` 红色），并保留“查看执行”；有 body 的终态仍是普通气泡。
 5. **本地回合被 stop 落 `aborted` 终态行（取代 D9 末条）。**一个绑定 chat 的执行会话，其本地回合被 stop 时不再静默：写一条空 body 的 `agent_message`（`exec:{turn_id}` 幂等、`status="aborted"`、`sender_session_id`），让 chat 能解释“这条消息为什么没有回答”。重复 stop 由幂等键去重，不会累积提示。
@@ -201,7 +201,7 @@ D12 把 pinned 回合投成 `SessionMessage::ChatMessage`，转换时只从信�
 7. **反应区分新/继续（D8）**：`turn_started` 反应依 durable `turn_mode` 渲染"启动新任务"或"继续之前的任务"并命名执行会话（标题为空回退触发正文，都无则回退单一条）；`turn_dispatched` 恒为中性"收到，排队中"；`chat_dispatch` / `route_intent_session` 对 reuse 报 `opened_new=false`、仅 fresh-create 报 `true`（builder 单测与 dispatch 单测锁定）。
 8. **续聊回写（D9）**：chat 发起的执行会话中，用户在执行会话 composer 本地发起的回合（含 stop 之后的续做）结束时，其最终输出以 standalone `agent_message` 回写到该 chat（`exec:{message_id}` 幂等、`sender_session_id` 可下钻、广播）；chat 路由回合仍走请求 / 响应回写、不双写；`chat-append` 接受 `agent_message`、仍拒绝 `user_message` 与未知 kind。
 9. **中间状态不落盘**：新建一轮（1:1 / 群聊 @ / PM 派发）并等到终态后，chat 日志不出现 `turn_dispatched` / `turn_started` / `router_fallback` 行；两个 pointer builder 已下线，旧 builder 单测改为断言“不再写入”。
-10. **历史隐藏**：人为构造携带三类旧 notice 的窗口，Desktop 两视图与 Mobile 均不渲染任何文本；真正的频道回执（`budget_exhausted` / `delivery_failed` / `truncated` / `unavailable`）仍渲染。
+10. **历史隐藏**：人为构造携带三类旧 notice 的窗口，Desktop 两视图与 Mobile 均不渲染任何文本；真正的频道回执（`budget_exhausted` / `truncated` / `unavailable`）仍渲染；`delivery_failed` 行属于已退役集合，渲染期隐藏（ADR-105 D5 修订，2026-11-06）。
 11. **等待行**：仅对真正惊动了 agent 的回合显示——`user_user` 私聊（无 agent 参与者）打开即不显示，发送窗口内也不显示；群里未 @ 任何 agent 的普通发言不显示；1:1、群 @（单条广播行 + `meta.mentions`）、pinned 执行回合照常显示。发送窗口内（`sending=true`，且该 chat 有 agent）即使窗口为空也显示 generic 等待行；最新的开启回合人类行未被终态回答时显示 `{{name}}正在处理…`；终态落地、卡片打开、或出现更新的**开启回合的**人类行后消失；一个未 @ 的插话落在进行中的回合之后时等待行仍在；locate 到中段（`lastPos < total - 1`）不显示。
 12. **终态居中**：空 body 的 `aborted` / `failed` / `timeout` / `waiting` 渲染为居中状态行（`aborted` 非红、`failed` / `timeout` 红）并带“查看执行”，不出 agent 气泡；有 body 的终态仍是普通气泡。
 13. **本地 stop**：绑定 chat 的执行会话其本地回合被 stop 后，chat 出现一条 `exec:` 幂等的 `aborted` 空行；重复 stop 不重复。
@@ -225,7 +225,7 @@ D12 把 pinned 回合投成 `SessionMessage::ChatMessage`，转换时只从信�
 
 - **不迁移历史**：旧 `turn_dispatched` / `turn_started` / `router_fallback` 行留在原文件，不删除、不改写，渲染期一律隐藏；`turn_mode`（D8）字段保留可反序列化，不再产生新值。历史未读数不回溯修正。
 - **等待行不需要迁移**：它完全由 durable 行派生——刷新后若最新人类消息仍无终态回答，`pendingTurn` 会重新给出同一行；若已有终态行，它自然消失。
-- **旧回执仍可见**：`budget_exhausted` / `delivery_failed` / `truncated` / `unavailable` 等真正的频道回执不受影响。
+- **旧回执仍可见**：`budget_exhausted` / `truncated` / `unavailable` 等真正的频道回执不受影响；`delivery_failed` 例外——它自 2026-11-06 起进入隐藏集合（ADR-105 D5 修订：失败不再落盘，旧行只是历史残留）。
 
 **Rev. 3（D11）：**
 

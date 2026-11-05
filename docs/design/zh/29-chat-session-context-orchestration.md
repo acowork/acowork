@@ -171,7 +171,7 @@ router **不加载**：
 |---|---|
 | `turn_started` | `[system] A round started in session <sid8>`（`sid8` = meta.agent_session_id 前 8 位） |
 | `interaction_request` | `[card] <title>` + 每个选项一行 |
-| `delivery_failed` | `[system] Delivery failed` |
+| `delivery_failed` | `[system] Delivery failed`（遗留臂：2026-11-06 起无写者，仅供读旧转录，ADR-105 D5 修订） |
 | `budget_exhausted` | `[system] Conversation budget exhausted` |
 | `truncated` | `[system] Response truncated` |
 | `unavailable` | `[system] Agent unavailable` |

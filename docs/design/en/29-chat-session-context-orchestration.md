@@ -171,7 +171,7 @@ The guard test is "two projections of the same input are equal".
 |---|---|
 | `turn_started` | `[system] A round started in session <sid8>` (`sid8` = first 8 chars of meta.agent_session_id) |
 | `interaction_request` | `[card] <title>` + one line per option |
-| `delivery_failed` | `[system] Delivery failed` |
+| `delivery_failed` | `[system] Delivery failed` (legacy arm: no writer since 2026-11-06, read only for old transcripts — ADR-105 D5 revision) |
 | `budget_exhausted` | `[system] Conversation budget exhausted` |
 | `truncated` | `[system] Response truncated` |
 | `unavailable` | `[system] Agent unavailable` |

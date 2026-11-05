@@ -345,7 +345,7 @@ Chat session 是用户聊天与 Agent 间消息的持久化会话，由 `acowork
 | `user_message` | 人类参与者 | 人类发言；带 `mentions` 即 @Agent；`in_reply_to` 指向一条 `execution_round` 引用行即寻址阶梯的**级别 1**（确定性续投该执行会话的下一轮，ADR-106 D6）；回答寻址卡也是本 kind 的一次重投递（`message_id` 取原行 id 做幂等）；在执行视图里敲的消息**不再**走本 kind（v3.0，ADR-100 Rev. 8：执行面消息不进 chat 通道）。`meta.exec_attachments` 服务的是 chat 面 composer 自己的 workspace 引用，带附件**显示投影**（`acowork_core::protocol::AttachmentLabel`：显示名 + ADR-046 臂名 + 芯片装饰，工作区臂另带 `absPath` 作为客户端的点击坐标——ADR-100 D12 Rev. 9）、不带 documentId、上传臂不带路径，与执行面同一枚 `AttachmentCapsule`、同一张 glyph 表（臂名只驱动图标），数据里有什么就打什么：带路径的工作区臂可点开文件，其余仍是装饰胶囊 | `body` / `attachments` / `meta.exec_attachments` 至少一个非空；`message_id` 必需 |
 | `agent_message` | Agent 参与者 | **只剩 Chat Router 的自答**：router 不回人类却自己说了一句，它不是任何执行轮的投影，所以它是 chat 原生行。执行回合的回答与 agent↔agent 的应答**都不再**是本 kind（v3.1：改由 `execution_round` + 投影承载，ADR-106 D3 / D12） | `message_id` 必需；应答时 `in_reply_to` 必需 |
 | `execution_round` | Runtime（全仓唯一 chat 写入口：`AgentLoop::run` 的轮次边界） | 一条**引用行**：不携带内容，只报"这一轮执行存在"，坐标 `round:{instance}|{session}|{round}` 即自然键（幂等），呈现时读执行侧投影得到答案、卡片与状态 | `message_id` 必需且等于自然键；`body` 恒空；meta 携 `agent_instance_id` / `agent_session_id` / `round_id` / `in_reply_to`（触发它的行），可带 `task_id` / `assignment_brief`（仅呈现，ADR-106 D13） |
-| `system_notice` | 系统 | 通道回执，按 `notice_type` 分流：`delivery_failed`、`budget_exhausted`、`truncated`、`unavailable`（ADR-106 D12：预算收据等改为通知，Gateway 不再代写对话行），以及两类寻址问题 `session_choice`（级别 3 多候选）/ `confirm_continue`（级别 5 提议），meta 携 `options[]` + `allow_new_task`，幂等键 `{notice_type}:{message_id}`；旧的 `turn_dispatched` / `turn_started` / `turn_routed` / `router_fallback` / `interaction_resolved` 仅作兼容读取，渲染期隐藏 | `message_id` 必需 |
+| `system_notice` | 系统 | 通道回执，按 `notice_type` 分流：`budget_exhausted`、`truncated`、`unavailable`（ADR-106 D12：预算收据等改为通知，Gateway 不再代写对话行）；`delivery_failed` 自 2026-11-06 起**无写者**——投递失败改为行上的内存态实时告警 `delivery.alert`（ADR-105 D5 修订），旧行仅作兼容读取并在渲染期隐藏，以及两类寻址问题 `session_choice`（级别 3 多候选）/ `confirm_continue`（级别 5 提议），meta 携 `options[]` + `allow_new_task`，幂等键 `{notice_type}:{message_id}`；旧的 `turn_dispatched` / `turn_started` / `turn_routed` / `router_fallback` / `interaction_resolved` 仅作兼容读取，渲染期隐藏 | `message_id` 必需 |
 
 **Intent 不再是消息类型。**`intent_request` / `intent_response` 作为 kind 取消；v3.1 前它们的语义降级为 chat 行上的**字段**（`conversation_id`、`in_reply_to`、`agent_session_id`、`repo`、`status`），v3.1 起 ADR-106 D12 把它们从 chat 里整体拿走了：request / response 的方向语义活在**投递信封**与 Gateway mailbox（预算计数在那儿算），不再需要一行 chat 副本。
 
@@ -625,7 +625,7 @@ sequenceDiagram
 - 未配置 `default_responder` 的群保持原行为：仅归档，响应 `{"routed": "archived", "results": []}`。纯人类群永远不需要配置。
 - 自动路由是行上的独立事实：`meta.mentions` 只记人打的 @ 名单，自动目标写 `meta.auto_routed_to`；@ chip 不因自动路由出现。`auto_routed_to` 只是"这句话去向"的记录，**不再是任何渲染的输入**（v3.1，ADR-106 D9 废止 ADR-105 D4）。等待行只由本设备自己那次发送的 claim 派生——claim 取自发送响应里的 row id，收口于第一条回答它的行（v3.1.2，ADR-106 修订 2026-11-03）。
 - 写入 owner-or-admin，目标必须是当下的 typed agent 参与者；成员被移除或 roster 重新同步时该字段自动清空，投递前再复核一次（`live_default_responder`），因此陈旧 id 只会退化为"未配置"，不会投进虚空。
-- 投递失败落一条 `system_notice`（`notice_type: "delivery_failed"`、`in_reply_to` 指向原人类行、body 为空，措辞由各面本地化），并且该收据正是结算该行 claim 的落点——失败必须可见。
+- 投递失败**不落行**（ADR-105 D5 修订，2026-11-06）：Gateway 把失败报给 user 服务的内存态告警表（`chat_alerts`，TTL 600 s、随进程消失），读模型把它作为 `delivery.alert`（`{target, error_code, expires_in}`）装饰在欠投递的那条人类行上，各面用 `DeliveryAlertLine` 画在那一行的列里、按 `expires_in` 自行消失。它既是“失败必须可见”，也正是结算该行 claim 的落点——两条规则仍是同一条，只是载体从日志行变成有时限的实时状态。
 - 被选中的 agent 仍跑自己的 Chat Router（§5.4.1）：本机制只决定"第一接收人"，不决定进哪个执行会话。
 
 #### 5.3.2 群聊历史
@@ -848,11 +848,11 @@ execution session 中需要人决策的东西——`ask_user_question` 的选项
 
 1. **块**说这个会话的每一轮到哪一步：引用行给坐标，投影给状态词、答案、卡片。投影四态 `pending` / `ok` / `not_found` / `unreachable` 各有一种形状——只有 `pending` 可以说"执行中"，`not_found` 是显式空洞，`unreachable` 是一次带重试的故障（ADR-106 D5 / D9）。
 2. **"进行中"是正证据，不是缺证据。**等待行的判据是本设备自己那次发送的 claim（v3.1.2，ADR-106 修订 2026-11-03）：发送响应给了 row id、且服务端确实接下了这句话，才写 `inflight[chatSessionId] = { messageId, at }`——1:1 看 `status === "delivered"`，群看 `results[]` 里任一 target delivered，claim 记**顶层** row id（一行 N 次投递，欠答案的是那一行）。`routed: "archived"` 与全失败不建 claim：没有接收人的发送不欠转录任何东西，等待它等于伪造一个结局。**为什么不能停在"本地在途的那次 POST"（旧 v3.1 写法）**：POST 约 150 ms 就返回，它只证明投递落地，而该轮第一条 durable 行实测落在 0.008 s – 81.3 s 之后——那段窗口里转录一片空白、composer 立即可再发，用户读到的是"我这条没发成功"，并且能在上一句尚无落点时压入下一句。历史上"最新一条 `user_message` 尚无终态回答"式的反推依旧全部废止：它把"读不到"当成"还在跑"，主机不可达时画出一个永不结束的轮次；`meta.auto_routed_to` 那一类证据位也一并退出（ADR-106 D14 对 ADR-105 D4 的废止）。前端不读 execution session 实时状态、不新增 MQTT 通道、不改会话列表 API。
-3. **结束条件与闸门**：转录里出现第一条 `meta.in_reply_to === claim.messageId` 且 kind ∈ {`execution_round`, `agent_message`, `system_notice`} 的行即释放（呈现层隐藏的 `RETIRED_NOTICES` 不算落点）；结局行永不出现时由 300 s deadline 兜底，释放按 messageId 匹配，因此迟到的结算不会误清后继发送的 claim——"进行中"是一份有到期日的声明，不是一条派生自缺行的事实。发送失败另有一条 `delivery_failed` 通知，它必须可见，也正是该行 claim 的结算行（ADR-105 的"失败必须可见"语义保留，形状改成通知）。**同一个 claim 同时驱动等待行与 composer 闸门**（`turnInflight` ⇒ `composerLocked`）：上一句未确认落点前发不出下一句，按钮禁用并给出原因——锁是诚实的呈现，不是排队的伪装，因为系统里没有队列。`sending` 退回原义（POST 在途），不再是等待行与锁的信号。轮的在途感仍由块自己收，投影转终态即消失：claim 说的是"我这句话有没有落点"，块说的是"那个会话到哪一步"，两个对象。落点一旦出现，人可以立刻发下一句，即使那一轮尚未终态；等待行不宣称任何 agent 在忙，因此纯人类会话里它也无害，刷新或重开后也没有等待行（本设备没有自己的发送可声明）。
+3. **结束条件与闸门**：转录里出现第一条 `meta.in_reply_to === claim.messageId` 且 kind ∈ {`execution_round`, `agent_message`, `system_notice`} 的行即释放（呈现层隐藏的 `RETIRED_NOTICES` 不算落点；`delivery_failed` 自 2026-11-06 起属于隐藏集合，失败经由 `delivery.alert` 结算）；结局行永不出现时由 300 s deadline 兜底，释放按 messageId 匹配，因此迟到的结算不会误清后继发送的 claim——"进行中"是一份有到期日的声明，不是一条派生自缺行的事实。发送失败另有一条 `delivery_failed` 通知，它必须可见，也正是该行 claim 的结算行（ADR-105 的"失败必须可见"语义保留，形状改成通知）。**同一个 claim 同时驱动等待行与 composer 闸门**（`turnInflight` ⇒ `composerLocked`）：上一句未确认落点前发不出下一句，按钮禁用并给出原因——锁是诚实的呈现，不是排队的伪装，因为系统里没有队列。`sending` 退回原义（POST 在途），不再是等待行与锁的信号。轮的在途感仍由块自己收，投影转终态即消失：claim 说的是"我这句话有没有落点"，块说的是"那个会话到哪一步"，两个对象。落点一旦出现，人可以立刻发下一句，即使那一轮尚未终态；等待行不宣称任何 agent 在忙，因此纯人类会话里它也无害，刷新或重开后也没有等待行（本设备没有自己的发送可声明）。
 4. **文案一条，不分态**：不区分排队 / 开轮 / 工具执行——前端无法可靠区分它们，分了就是猜测。群面一律不指名（多 agent 时点名会误导），1:1 面可指名（该面恰好只有一个 agent）。带文字滚动闪烁动画（复用"正在执行工具"的 shimmer），给用户"有人在干活"的实感。
 5. **只在末尾显示**：窗口被 locate 定位到中段（后面还有未加载的新页）时没有"最新消息"可言，不显示。
 
-**历史里留什么。**一轮的执行结果不再是 chat 的 `agent_message`——引用行才是历史的一部分，正文留在执行侧。`agent_message` 只剩一个生产者：Router 的自答（§4.2；v3.1 起 agent↔agent 的回答也不再是 chat 行，ADR-106 D12）。"为什么没有回复"这类通道事实仍是 `system_notice`：`budget_exhausted` / `truncated` / `unavailable` / `delivery_failed`（v3.1：预算收据从 Gateway 代写的对话行改成通知，ADR-106 D12）。旧的 `turn_dispatched` / `turn_started` / `turn_routed` / `router_fallback` / `interaction_resolved` 行不迁移、不删除，但在渲染期一律隐藏（Desktop 两视图 + Mobile 同一套隐藏集合）；历史 `agent_message` echo 仍按普通气泡呈现，历史 `interaction_request` 卡不复活（§5.5.4）。
+**历史里留什么。**一轮的执行结果不再是 chat 的 `agent_message`——引用行才是历史的一部分，正文留在执行侧。`agent_message` 只剩一个生产者：Router 的自答（§4.2；v3.1 起 agent↔agent 的回答也不再是 chat 行，ADR-106 D12）。"为什么没有回复"这类通道事实仍是 `system_notice`：`budget_exhausted` / `truncated` / `unavailable`（v3.1：预算收据从 Gateway 代写的对话行改成通知，ADR-106 D12）。`delivery_failed` 2026-11-06 起退出这一格：它不落盘，作为 `delivery.alert` 画在欠投递的那条行上（ADR-105 D5 修订）。旧的 `turn_dispatched` / `turn_started` / `turn_routed` / `router_fallback` / `interaction_resolved` 行不迁移、不删除，但在渲染期一律隐藏（Desktop 两视图 + Mobile 同一套隐藏集合）；历史 `agent_message` echo 仍按普通气泡呈现，历史 `interaction_request` 卡不复活（§5.5.4）。
 
 **块是"一个执行会话"，不是"一条消息"（v3.1.1 修订，ADR-106 呈现契约）。**存储按轮、渲染按会话：布局层按 `agent_instance_id|agent_session_id` 分组引用行，**一个执行会话在转录里只出现一次、成一个块**；块锚在该会话已加载窗口里的**最新**引用行，所以跨天推进的长命会话把块带往下走，而不是停在第一次出现的位置。被折叠的触发行（引用行 `in_reply_to` 指向的人类消息）不再作为独立气泡出现——一句话只出现在一个地方（D6 重投递是同一规则的既例）。同一窗口里两个会话各自成块，不会合并成一个"看起来在干所有事"的块。
 
@@ -882,7 +882,8 @@ execution session 中需要人决策的东西——`ask_user_question` 的选项
 
 | 档 | 事实归属 | 落点 | 现有个例 |
 |---|---|---|---|
-| **轮次级** `turn` | 不属于任何一行：整轮的结果、在途等待、通道回执 | **居中、不带图标**——它替整段转录说话，没有可依附的行 | 块的加载 / 空洞 / 不可达占位行、派生等待行（仅本设备 claim 未结算）、`delivery_failed` / `budget_exhausted` / `truncated` / `unavailable` 通道回执 |
+| **轮次级** `turn` | 不属于任何一行：整轮的结果、在途等待、通道回执 | **居中、不带图标**——它替整段转录说话，没有可依附的行 | 块的加载 / 空洞 / 不可达占位行、派生等待行（仅本设备 claim 未结算）、`budget_exhausted` / `truncated` / `unavailable` 通道回执 |
+| **行级** `row` | 欠投递的那条人类行 | 贴在该行的列里（自己的行靠右、别人的行靠左），带一个指回上文的箭头 | 投递失败实时告警 `delivery.alert`（`DeliveryAlertLine`，ADR-105 D5 修订；到期自删，不是收据行） |
 | **行级** `row` | 属于**某一行**，占那一行原本的槽位 | 该行的**内容列**（`ml-12`，与气泡正文同一缩进）**并带 kind 图标** | 暂无活跃个例（闭卡的"未获应答…"注记随卡片归块退役，v3.1）；新增行级事实时才用这一档 |
 
 **两档必须一眼可分辨，判据只有一条：有没有图标。**有图标 = "这是关于某一行的事实"；无图标 = "轮次 / 通道在说话"。这条区分不是装饰——同一句"未获应答"会逐张卡片出现在交错的卡片流里，没有这枚图标，读者无法判断它是在说紧邻的这张卡，还是在说整轮；上一版两档的字号颜色完全相同，位置差异于是读不出含义，只读成"放歪了"。
@@ -985,7 +986,8 @@ chat 侧不读 execution session 的 `live_state`，也不为轮次落任何中�
 | 投影读到 `not_found` | 显式空洞（"本轮执行已不可用"） | 坐标失效 / 旧会话无轮次索引，不编内容（D5） |
 | 投影读到 `unreachable` | 故障形状 + "重试" | 主机不可达是一次故障，结对不画成进行中（D9） |
 | 轮次终态 / 停在卡片（`round_state` 门铃） | 命中已挂载的块 ⇒ 立即重读投影（带一次 500 ms 有界重试） | 事件只说"值得现在重读"，正文仍来自投影（D3 / D4）；它不建立 liveness |
-| `system_notice`（`delivery_failed` / 预算 / 截断 / 寻址问题） | 居中通道行；寻址问题带选项，旁观者只见问题 | 通道事实与寻址决定（D10） |
+| `system_notice`（预算 / 截断 / 寻址问题） | 居中通道行；寻址问题带选项，旁观者只见问题 | 通道事实与寻址决定（D10） |
+| `delivery.alert`（行上装饰，不是行） | 该行自己列里的一枚短线，到期消失 | 投递失败这一瞬间的状态（ADR-105 D5 修订） |
 | 旧的 `turn_dispatched` / `turn_started` / `turn_routed` / `router_fallback` / `interaction_request` / `interaction_resolved` 行 | 不渲染（历史 `agent_message` echo 仍按气泡呈现） | 历史里的中间状态一律隐藏，旧卡不复活（§5.5.5） |
 
 收尾判据是**投影的 `terminal`**，不是 Runtime 的 `Idle`，也不再是聊天侧的终态行：`Idle` 只说明"执行结束"，不说明"结果已可读"。工具授权、迭代上限 / 环路暂停的 Continue 等 execution 阶段动作在块里就地可答（§5.5.4），要细看过程仍从块上方"查看执行"进入 execution 视图。
