@@ -339,6 +339,12 @@ export interface ChatRoundTarget {
  *  has already taken one. */
 export interface ChatQuestionState {
   answered: boolean
+  /** Whether an answer could still be *given* (as opposed to whether one was
+   *  taken). A card asks about a row; when that row is not in the conversation
+   *  — a card an older build wrote under a per-target delivery uuid — nothing
+   *  can ever answer it, and the surface renders no card instead of a dead
+   *  question whose tap 422s. Absent means the service did not say. */
+  answerable?: boolean
   options: ChatCandidateOption[]
   allow_new_task?: boolean
 }

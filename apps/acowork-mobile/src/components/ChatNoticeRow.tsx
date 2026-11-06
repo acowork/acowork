@@ -65,7 +65,12 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
     // Settled: paint nothing (ADR-106 D14). A card is a question; once a round
     // answers it, the question is an intermediate state of that turn and the
     // round's block already says which session took the words.
-    if (answered) return null
+    //
+    // `!answerable` leaves by the same door: the card names a row that is not
+    // in the conversation, so no tap can land (`origin_gone`/422) and it is not
+    // a live question at all — rows an older build wrote, dropped at render
+    // time rather than listed as dead options.
+    if (answered || card?.answerable === false) return null
 
     // `confirm_continue` proposes exactly ONE session, so the collapsed row has
     // to name it: "继续这个任务吗？" over an anonymous "去选择" asked the human to
