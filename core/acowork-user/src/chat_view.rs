@@ -104,6 +104,23 @@ pub struct QuestionState {
     /// of the conversation (ADR-106 D14). Where the words went is already told
     /// by the round's block, one fact in one place.
     pub answered: bool,
+    /// The row this card asks about is still in the log, so the question can
+    /// still be answered.
+    ///
+    /// `false` is a durable dead end: the card names a coordinate nothing
+    /// carries, so `GET …/answer` can only ever refuse it (`origin_gone`) and
+    /// the re-delivery it stands for can never happen. Same rendering rule as
+    /// `answered` and for the same reason — a card is a **live** question, and
+    /// one that cannot be asked is not a record of the conversation either
+    /// (ADR-106 D14). A surface treats `answered || !answerable` as "no card".
+    ///
+    /// This is the readable half of the 2026-11-06 defect: a group `@` fan-out
+    /// wrote its card under the per-target delivery uuid instead of the human's
+    /// row, so every one of those cards was born unanswerable while the surface
+    /// still painted clickable options. Rows already on disk cannot be repaired
+    /// (the log is append-only); new ones cannot be written (the write entry
+    /// refuses a card whose subject is absent).
+    pub answerable: bool,
     pub options: Vec<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub allow_new_task: Option<bool>,
@@ -144,6 +161,20 @@ pub fn read_page(
         ids.push(row.meta.in_reply_to.clone());
     }
     let answers = crate::chat_sessions::answering_rows(data_dir, session_id, &ids)?;
+    // The other half of a card's state: whether the row it asks about is still
+    // in the log at all. Resolved for the page's cards only — nothing else needs
+    // it — and through the same index the write path uses, so the answer here and
+    // the answer `GET …/answer` gives cannot disagree.
+    let subjects: Vec<String> = rows
+        .iter()
+        .filter(|r| {
+            r.kind == crate::chat_sessions::KIND_SYSTEM_NOTICE
+                && chat_kinds::is_card_notice(r.meta.notice_type.as_str())
+                && !r.meta.in_reply_to.trim().is_empty()
+        })
+        .map(|r| r.meta.in_reply_to.clone())
+        .collect();
+    let present = crate::chat_sessions::existing_ids(data_dir, session_id, &subjects)?;
     // Live failures only for rows this page actually shows: the alert table is
     // read with the window's own ids, so a page never pays for the whole chat.
     let live = alerts.live(
@@ -158,11 +189,24 @@ pub fn read_page(
         rows.into_iter()
             .map(|row| {
                 let alert = live.get(&row.meta.message_id).cloned();
-                view(row, &answers, alert)
+                let answerable = !is_card(&row)
+                    || (!row.meta.in_reply_to.trim().is_empty()
+                        && present.contains(row.meta.in_reply_to.as_str()));
+                view(row, &answers, alert, answerable)
             })
             .collect(),
         total,
     ))
+}
+
+/// Is this row an addressing card?
+///
+/// The view's own vocabulary, kept next to the state it decorates: a card is the
+/// one row whose question is a *different* row, which is why its liveness is a
+/// resolved fact rather than a property of the row itself.
+fn is_card(row: &SessionMessage) -> bool {
+    row.kind == KIND_SYSTEM_NOTICE
+        && chat_kinds::is_card_notice(row.meta.notice_type.as_str())
 }
 
 /// Project one row.
@@ -173,8 +217,9 @@ pub fn view(
     row: SessionMessage,
     answers: &HashMap<String, Vec<SessionMessage>>,
     alert: Option<AlertView>,
+    answerable: bool,
 ) -> ChatRowView {
-    let delivery = delivery_of(&row, answers, alert);
+    let delivery = delivery_of(&row, answers, alert, answerable);
     ChatRowView { row, delivery }
 }
 
@@ -182,6 +227,7 @@ fn delivery_of(
     row: &SessionMessage,
     answers: &HashMap<String, Vec<SessionMessage>>,
     alert: Option<AlertView>,
+    answerable: bool,
 ) -> Option<DeliveryView> {
     let is_card = row.kind == KIND_SYSTEM_NOTICE
         && chat_kinds::is_card_notice(row.meta.notice_type.as_str());
@@ -200,6 +246,7 @@ fn delivery_of(
             targets: Vec::new(),
             question: Some(QuestionState {
                 answered,
+                answerable,
                 options: row.meta.options.clone(),
                 allow_new_task: row.meta.allow_new_task,
             }),
@@ -315,7 +362,7 @@ mod tests {
         let m = human("m-1");
         let target = round_ref("round-ref", "m-1", "s-9");
         let map = answers(&[("m-1", target)]);
-        let view = view(m, &map, None);
+        let view = view(m, &map, None, true);
         let delivery = view.delivery.expect("a human row always carries delivery");
         assert!(delivery.answered);
         assert_eq!(delivery.answered_by.as_ref().map(|a| a.kind.as_str()), Some("execution_round"));
@@ -336,7 +383,7 @@ mod tests {
             ("m-1", round_ref("round-a", "m-1", "exec-a")),
             ("m-1", round_ref("round-b", "m-1", "exec-b")),
         ]);
-        let view = view(human("m-1"), &map, None);
+        let view = view(human("m-1"), &map, None, true);
         let delivery = view.delivery.unwrap();
         assert!(delivery.answered);
         // Log order, both targets, nothing collapsed.
@@ -356,7 +403,7 @@ mod tests {
     /// Waiting is a state, not a missing field: the composer lock reads it.
     #[test]
     fn an_unanswered_message_says_so_instead_of_omitting_the_field() {
-        let view = view(human("m-1"), &answers(&[]), None);
+        let view = view(human("m-1"), &answers(&[]), None, true);
         assert_eq!(view.delivery, Some(DeliveryView::default()));
     }
 
@@ -373,27 +420,37 @@ mod tests {
             error_code: "target_not_installed".into(),
             expires_in: 600,
         };
-        let failed = view(human("m-1"), &answers(&[]), Some(alert.clone()));
+        let failed = view(human("m-1"), &answers(&[]), Some(alert.clone()), true);
         let delivery = failed.delivery.expect("a human row carries delivery");
         assert_eq!(delivery.alert, Some(alert));
         assert!(!delivery.answered, "a failed send answered nothing");
 
         // A card never wears one: it asks, it does not owe a delivery.
-        let asked_card = view(card("c-1", "m-1"), &answers(&[]), Some(AlertView {
-            target: "agent-a".into(),
-            error_code: "no_response".into(),
-            expires_in: 5,
-        }));
+        let asked_card = view(
+            card("c-1", "m-1"),
+            &answers(&[]),
+            Some(AlertView {
+                target: "agent-a".into(),
+                error_code: "no_response".into(),
+                expires_in: 5,
+            }),
+            true,
+        );
         assert_eq!(asked_card.delivery.unwrap().alert, None);
 
         // Once a round answers the row, the answer is the fact — a leftover
         // alert must not contradict it.
         let asked = answers(&[("m-1", round_ref("round-ref", "m-1", "s-9"))]);
-        let answered = view(human("m-1"), &asked, Some(AlertView {
-            target: "agent-a".into(),
-            error_code: "target_not_installed".into(),
-            expires_in: 600,
-        }));
+        let answered = view(
+            human("m-1"),
+            &asked,
+            Some(AlertView {
+                target: "agent-a".into(),
+                error_code: "target_not_installed".into(),
+                expires_in: 600,
+            }),
+            true,
+        );
         assert_eq!(answered.delivery.unwrap().alert, None);
     }
 
@@ -403,7 +460,7 @@ mod tests {
     fn a_retired_notice_does_not_answer() {
         let mut notice = row(KIND_SYSTEM_NOTICE, "n-1", "m-1");
         notice.meta.notice_type = "turn_dispatched".into();
-        let view = view(human("m-1"), &answers(&[("m-1", notice)]), None);
+        let view = view(human("m-1"), &answers(&[("m-1", notice)]), None, true);
         assert!(!view.delivery.unwrap().answered);
     }
 
@@ -411,14 +468,35 @@ mod tests {
     /// row is a question, and nothing threads to it.
     #[test]
     fn a_card_reports_whether_it_has_been_answered() {
-        let open = view(card("c-1", "m-1"), &answers(&[]), None);
+        let open = view(card("c-1", "m-1"), &answers(&[]), None, true);
         let question = open.delivery.expect("a card carries delivery").question.expect("question state");
         assert!(!question.answered);
         assert_eq!(question.options.len(), 1);
         assert_eq!(question.allow_new_task, Some(true));
 
         let asked = answers(&[("m-1", round_ref("round-ref", "m-1", "s-9"))]);
-        let done = view(card("c-1", "m-1"), &asked, None);
+        let done = view(card("c-1", "m-1"), &asked, None, true);
         assert!(done.delivery.unwrap().question.unwrap().answered);
+    }
+
+    /// A card that asks about a row the chat does not hold is not a question a
+    /// surface may paint.
+    ///
+    /// The project-group case this exists for: a fan-out wrote the card under the
+    /// per-target delivery uuid, so `in_reply_to` named nothing. Every click
+    /// answered `origin_gone` (422), no execution session was ever created, and
+    /// the options stayed on the transcript — a durable affordance that can never
+    /// succeed. `answered` cannot express this (nothing answered it, and nothing
+    /// ever will), so the state the surface needs is its own field.
+    #[test]
+    fn a_card_whose_subject_is_missing_is_not_answerable() {
+        let dangling = view(card("c-1", "vanished-row"), &answers(&[]), None, false);
+        let question = dangling.delivery.expect("a card carries delivery").question.expect("state");
+        assert!(!question.answered, "nothing answered it");
+        assert!(!question.answerable, "nor can anything ever answer it");
+        // The live card on the same shape reports the opposite, so the flag is
+        // the subject's presence and not a constant.
+        let live = view(card("c-1", "m-1"), &answers(&[]), None, true);
+        assert!(live.delivery.unwrap().question.unwrap().answerable);
     }
 }

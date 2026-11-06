@@ -26,11 +26,14 @@ const WINDOW_CEILING = 4_194_304;
 const WINDOW_PRESETS = [200_000, 250_000, 300_000, 500_000];
 
 const CATEGORY_META: Record<ContextUsageCategoryKey, { labelKey: string; color: string }> = {
-  system: { labelKey: "contextUsage.categories.systemPrompt", color: "#ec4899" },
-  tools: { labelKey: "contextUsage.categories.tools", color: "#a855f7" },
-  messages: { labelKey: "contextUsage.categories.messages", color: "#14b8a6" },
-  connectors: { labelKey: "contextUsage.categories.connectors", color: "#f59e0b" },
-  skills: { labelKey: "contextUsage.categories.skills", color: "#6366f1" },
+  // Five accent presets, ordered to maximize hue separation between adjacent
+  // segments (min 54°, vs 14° if the pink/rose and orange/amber pairs sit
+  // next to each other). Hues: violet 258, rose 350, orange 24, amber 38.
+  system: { labelKey: "contextUsage.categories.systemPrompt", color: "#f43f5e" },
+  tools: { labelKey: "contextUsage.categories.tools", color: "#8b5cf6" },
+  messages: { labelKey: "contextUsage.categories.messages", color: "#f97316" },
+  connectors: { labelKey: "contextUsage.categories.connectors", color: "#ec4899" },
+  skills: { labelKey: "contextUsage.categories.skills", color: "#f59e0b" },
 };
 
 

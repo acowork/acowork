@@ -7,6 +7,7 @@
 
 pub mod accept;
 pub mod chat_client;
+pub mod chat_turn;
 pub mod gate;
 pub mod delivery;
 pub mod mailbox;

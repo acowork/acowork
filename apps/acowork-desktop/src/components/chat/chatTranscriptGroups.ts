@@ -211,7 +211,11 @@ export function buildTranscriptItems(
       continue;
     }
     const question = r.delivery?.question;
-    if (!question || question.answered) continue;
+    // A settled question is not folded (the block it would hang on already tells
+    // the story), and neither is a dead one: `answerable === false` names a row
+    // that is not in the conversation, so nothing can ever take that answer. Both
+    // leave the transcript as they are and are painted as nothing (ADR-106 D14).
+    if (!question || question.answered || question.answerable === false) continue;
     const options = question.options ?? [];
     if (options.length !== 1) continue;
     const sessionId = options[0]?.session_id?.trim() ?? "";

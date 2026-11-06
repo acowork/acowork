@@ -63,6 +63,7 @@ use crate::http::proxy::runtime_json_get;
 use crate::http::routes::{ApiError, AppState};
 use crate::intent::accept;
 use crate::intent::chat_client;
+use crate::intent::chat_turn;
 use crate::intent::gate::{
     attribute_sender, permission_denial, validate_repo, validate_session_config,
 };
@@ -349,6 +350,24 @@ fn dispatch_message_id(supplied: Option<&str>) -> String {
     }
 }
 
+/// The meta a dispatch row carries.
+///
+/// The key set is a storage contract: every key must be a declared field on the
+/// user service's `IntentMeta` (undeclared keys are silently dropped at that
+/// boundary — design 27 decision 29). `message_id` is stamped by
+/// [`chat_turn::open`], which is also the coordinate the delivery is keyed to.
+/// `task_id` makes the row the thread's **origin** when the author is an agent
+/// (ADR-106 D15) and is the in-chat search key; the task *chip* renders on the
+/// block header (D13). `project_id` is deliberately absent: the row already
+/// lives in that project's own group chat.
+fn dispatch_turn_meta(task_id: &str, conversation_id: &str, repo: &str) -> serde_json::Value {
+    serde_json::json!({
+        "conversation_id": conversation_id,
+        "task_id": task_id,
+        "repo": repo,
+    })
+}
+
 async fn dispatch_task(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -413,7 +432,7 @@ async fn dispatch_task(
     let session = chat_client::load_session(port, &chat_session_id)
         .await
         .map_err(|e| ApiError::not_found(&format!("chat session not loadable: {e}")))?;
-    let repo = session.repo.unwrap_or_default();
+    let repo = session.repo.clone().unwrap_or_default();
 
     let target_info = {
         let gw = state.gateway_state.read().await;
@@ -473,19 +492,60 @@ async fn dispatch_task(
             "conversation_id": conversation_id,
         })));
     }
+    // A dispatch is a Chat turn before it is an execution turn (ADR-106 D12
+    // rev. 2026-11-06). The project group is where a project's work is read, so
+    // "task t-X goes to this agent" is a sentence of that conversation — what the
+    // transcript shows, what the search index holds, what the unread count
+    // counts — and it is the coordinate the round draws on: the reference row
+    // the receiving Runtime appends names THIS row as its trigger (D3), so the
+    // block hangs under the message that asked for the work instead of standing
+    // alone in the flow.
+    //
+    // D12's earlier text dropped this row on the grounds that "the message is in
+    // the execution session and the projection makes it visible". That held for
+    // text visibility and broke everything else: the reference row's
+    // `in_reply_to` named a mailbox id (`pm-…`) that no chat holds, so the block
+    // had no trigger, the transcript held no sentence, and the projection was
+    // the only place the task survived.
+    //
+    // The voice is `Task::created_by` (`req.owner`) — whoever filed the task is
+    // the one speaking — and the row's kind follows from that identity inside
+    // [`chat_turn::open`]: a human-filed task speaks as the human, a task the PM
+    // agent created speaks as the PM (an *assignment*, ADR-106 D15). `task_id` rides the
+    // row as that thread's origin marker and as the search key; the chip itself
+    // renders on the block header (D13). The wake-up playbook never rides here —
+    // it is the envelope's HIGH-TRUST `assignment_brief` (design 27 §5.4.5).
+    //
+    // Written before the delivery, because the receiving Runtime's reference row
+    // has to name a row that already exists (ADR-106 D15).
+    if let Err(e) = chat_turn::open(
+        port,
+        &session,
+        chat_turn::Turn {
+            session_id: &chat_session_id,
+            from: &req.owner,
+            to: &req.target_agent,
+            message_id: &message_id,
+            body: &req.message,
+            meta: dispatch_turn_meta(&req.task_id, &conversation_id, &repo),
+            attachment_ids: Vec::new(),
+        },
+    )
+    .await
+    {
+        return Ok(Json(serde_json::json!({
+            "message_id": message_id,
+            "status": "failed",
+            "error_code": "chat_log_unavailable",
+            "error": e,
+        })));
+    }
+
     // Registered before the publish, after every early exit above (see the
     // wait below): a warm Runtime can answer within microseconds, and a
     // listener attached afterwards would miss it and degrade a good answer
     // into "no receipt".
     let acceptance_waiter = crate::intent::accept::AcceptanceWaiter::register(&message_id);
-
-    // ADR-106 D12: a PM dispatch writes no Chat row. The dispatch text IS the
-    // first user row of the round it opens, so the block the receiving
-    // Runtime references (D3) already shows it through the projection — a
-    // second copy here would be a fact the Chat had to keep in step with an
-    // execution session it does not own. The task key stays the routing
-    // contract (D6 level 6) and `params.task_id` is what the block renders as
-    // its task chip.
     let dreq = delivery::DeliveryRequest {
         message_id: message_id.clone(),
         conversation_id: conversation_id.clone(),
@@ -514,6 +574,10 @@ async fn dispatch_task(
         // `files/` dir — nothing to pin here (the chat row is written with
         // an empty attachment list too).
         chat_attachment_ids: Vec::new(),
+        // ADR-106 D3/D12 rev.: the dispatch row written above IS the coordinate
+        // — the delivery is made under its id, so the receiving Runtime threads
+        // the round's reference row under the sentence that asked for the work.
+        chat_row_id: message_id.clone(),
     };
     let outcome =
         delivery::wake_and_deliver(&ctx, &dreq, acowork_core::timeout_config::constants::INTENT_DEFAULT)
@@ -1016,7 +1080,7 @@ async fn deliver_intent(
         // A receipt is the only durable trace (the request itself never
         // reaches the mailbox, so a retry with the same coordinates is
         // refused the same way).
-        write_limit_receipt(user_port, &req, &message_id, &conversation_id, max_requests).await;
+        write_limit_receipt(user_port, &req, &conversation_id, max_requests).await;
         return Ok(Json(IntentDeliveryResponse {
             message_id,
             status: "failed".into(),
@@ -1096,6 +1160,11 @@ async fn deliver_intent(
         status: String::new(),
         has_human,
         chat_attachment_ids: Vec::new(),
+        // §5.4.5 R2: a peer request is a private channel between two agents —
+        // it writes no Chat row, so the receiver's turn is an *origin* and its
+        // reference row says so instead of naming a coordinate no transcript
+        // holds.
+        chat_row_id: String::new(),
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -1192,7 +1261,6 @@ async fn close_task_context(
 async fn write_limit_receipt(
     user_port: Option<u16>,
     req: &IntentRequest,
-    message_id: &str,
     conversation_id: &str,
     max_requests: u32,
 ) {
@@ -1202,11 +1270,15 @@ async fn write_limit_receipt(
     if session_id.is_empty() {
         return;
     }
+    // No `in_reply_to`: the refused request is a peer request, and since
+    // ADR-106 D12 it has no row in the source chat — threading the notice to
+    // the request's mailbox id would name a coordinate no transcript holds,
+    // which is the defect the Chat write contract now refuses. The receipt is
+    // an origin: a limit of the channel, reported where the channel is read.
     let meta = serde_json::json!({
         "message_id": uuid::Uuid::new_v4().to_string(),
         "conversation_id": conversation_id,
         "notice_type": "budget_exhausted",
-        "in_reply_to": message_id,
     });
     let body = format!(
         "Delivery refused: this conversation reached its limit of {max_requests} requests (§6.5 R4)."
@@ -1363,6 +1435,10 @@ async fn deliver_response(
         // Same session the request was bound to — reuse its fact.
         has_human: entry.has_human,
         chat_attachment_ids: Vec::new(),
+        // A response answers a mailbox request, not a Chat row: the initiator's
+        // turn owes no write-back (`TurnOrigin::AgentResponse`) and threads
+        // nothing.
+        chat_row_id: String::new(),
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -2034,27 +2110,29 @@ async fn deliver_mentions(
     // the session's `files/` dir by the store) rides along to every mentioned
     // agent, so its Chat Router sees what this turn actually carried. Ids still
     // travel on the envelope; the bytes never travel at all (design 27 §4.2.1).
-    let chat_attachments = match chat_client::append_message(
+    let opened = match chat_turn::open(
         port,
-        &req.chat_session_id,
-        &chat_client::AppendMessage {
-            from: req.from_user.clone(),
-            to: String::new(),
-            kind: "user_message".to_string(),
-            body: req.text.clone(),
+        &session,
+        chat_turn::Turn {
+            session_id: &req.chat_session_id,
+            from: &req.from_user,
+            to: "",
+            message_id: &row_id,
+            body: &req.text,
             meta,
             attachment_ids: req.attachment_ids.clone(),
         },
     )
     .await
     {
-        Ok(stored) => stored,
+        Ok(opened) => opened,
         Err(e) => {
             return Err(ApiError::service_unavailable(&format!(
                 "user_message chat row append failed — mention fan-out refused: {e}"
             )));
         }
     };
+    let chat_attachments = opened.attachments;
 
     // Archive-only: the row is the whole outcome. Reported explicitly so a
     // caller can tell "nobody was asked" from "everybody was and they all
@@ -2206,6 +2284,11 @@ async fn deliver_mentions(
             // Forward the attachment ids so the Runtime pulls the bytes
             // against the shared row (`in_reply_to` = `row_id`).
             chat_attachment_ids: req.attachment_ids.clone(),
+            // ADR-106 D3: the shared `user_message` row this fan-out serves.
+            // `message_id` above is this target's own delivery uuid and names
+            // no row — the declared coordinate is what the Runtime threads the
+            // round's reference row and any card under.
+            chat_row_id: row_id.clone(),
             // Group fan-out stays with the router: which of the mentioned
             // agents owns which execution session is not something the
             // Gateway can attribute to a single id (ADR-100).
@@ -2548,7 +2631,7 @@ async fn deliver_chat_message(
     let addressed_session = addressed
         .filter(|(agent, _)| agent == &target)
         .map(|(_, session)| session);
-    let repo = session.repo.unwrap_or_default();
+    let repo = session.repo.clone().unwrap_or_default();
 
     // ADR-106 revision 2026-11-04: the 1:1 reference material. The single agent
     // is the only legal ref owner, so it stands in for the group's `targets`;
@@ -2609,27 +2692,29 @@ async fn deliver_chat_message(
     // name / mime / size from this session's `files/` dir. Forwarded so the
     // receiving Chat Router can see what the turn carried (its history window
     // shows the same line for every older row, so the current turn must match).
-    let chat_attachments = match chat_client::append_message(
+    let opened = match chat_turn::open(
         port,
-        &req.chat_session_id,
-        &chat_client::AppendMessage {
-            from: req.from_user.clone(),
-            to: target.clone(),
-            kind: "user_message".to_string(),
-            body: req.text.clone(),
+        &session,
+        chat_turn::Turn {
+            session_id: &req.chat_session_id,
+            from: &req.from_user,
+            to: &target,
+            message_id: &message_id,
+            body: &req.text,
             meta,
             attachment_ids: req.attachment_ids.clone(),
         },
     )
     .await
     {
-        Ok(stored) => stored,
+        Ok(opened) => opened,
         Err(e) => {
             return Err(ApiError::service_unavailable(&format!(
                 "user_message chat row append failed — delivery refused: {e}"
             )));
         }
     };
+    let chat_attachments = opened.attachments;
 
     // The human's row is durable and the turn is addressed. ADR-106 D8: there
     // is no card-answer short-circuit any more — a card is a fact of the round
@@ -2692,6 +2777,10 @@ async fn deliver_chat_message(
         status: String::new(),
         has_human: Some(true),
         chat_attachment_ids: req.attachment_ids.clone(),
+        // ADR-106 D3: this delivery is the row it was written for — the
+        // Gateway generated the id, put it in the row and delivers under it, so
+        // the declared coordinate and `message_id` are one value.
+        chat_row_id: message_id.clone(),
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -3118,9 +3207,26 @@ mod chat_append_tests {
         assert_eq!(stripped["nested"]["a"], 1);
     }
 
-    // ADR-106 D12: a PM dispatch writes no Chat row, so the dispatch-row meta
-    // key-set test went with it. The round reference the executing Runtime
-    // writes is pinned in `acowork-runtime::agent::intent_turn`.
+    /// The dispatch row's meta key set is a storage contract two parties read:
+    /// the chat store (an undeclared key is silently dropped at that boundary —
+    /// design 27 decision 29) and the surfaces. The *kind* and the *voice* are
+    /// decided by `chat_turn::open` from the author's identity, and pinned
+    /// there; what this pins is the payload.
+    #[test]
+    fn a_dispatch_row_carries_only_keys_the_store_declares() {
+        let meta = dispatch_turn_meta("t-1", "task:p-1:t-1", "git@example/repo.git");
+        assert_eq!(meta["conversation_id"], "task:p-1:t-1");
+        assert_eq!(meta["task_id"], "t-1", "the row's origin marker and search key");
+        assert_eq!(meta["repo"], "git@example/repo.git");
+        assert!(
+            meta.get("project_id").is_none(),
+            "the row already lives in that project's own group"
+        );
+        assert!(
+            meta.get("assignment_brief").is_none(),
+            "a playbook in the chat log is the defect this row must not reintroduce"
+        );
+    }
 }
 
 #[cfg(test)]

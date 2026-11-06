@@ -1,5 +1,5 @@
 /**
- * TaskStatusMove — 弹框底部的状态流转控件。
+ * TaskStatusMove — 任务弹框「状态」字段里的状态流转控件。
  *
  * 看板拖拽是改状态的主路径，但不是唯一路径：有的视图里卡片不可拖（只读
  * 视图、移动端），而拖卡片本身也是一个需要鼠标精确操作的动作 —— 用户只想
@@ -112,15 +112,18 @@ export function TaskStatusMove({ task, onMoved }: TaskStatusMoveProps) {
 
   return (
     <Dropdown
-      size="small"
+      // 与它同一行的 类型 / 优先级 是 standard 变体：同一个字段行里控件必须同高
+      // 同宽，否则"状态"会读成一行里塞进来的小控件。
+      size="standard"
       value={picked}
       onChange={(v) => void handle(v)}
       options={options}
       // 占位项显示当前状态：控件自己就是"这条任务现在在哪一列"。
       placeholder={{ value: "", label: t(STATUS_I18N[task.status]), selectable: true }}
       disabled={busy}
+      // 可见标签由外层 Field 提供（「状态」），所以不再挂 aria-label ——
+      // 无障碍名必须包含可见标签，否则读屏听到的是「移动到」而眼前写的是「状态」。
       title={t("pm.task.moveTo")}
-      aria-label={t("pm.task.moveTo")}
     />
   );
 }

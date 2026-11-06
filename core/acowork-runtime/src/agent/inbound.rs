@@ -122,6 +122,19 @@ pub struct IntentEnvelope {
     /// Durable Chat attachment ids referenced by this Intent's user_message.
     #[serde(default)]
     pub chat_attachment_ids: Vec<String>,
+    /// The durable Chat row this delivery opens or answers, declared by the
+    /// producer that wrote it (ADR-106 D3, rev. 2026-11-06).
+    ///
+    /// Declared, never derived. The Gateway is the only party that writes Chat
+    /// rows, so it is the only party that knows the coordinate; the Runtime
+    /// used to reconstruct it from `in_reply_to`-or-`message_id`, and every
+    /// case where that reconstruction met a producer it did not expect became a
+    /// dangling coordinate (a card under a per-target fan-out uuid, a round
+    /// under a `pm-` mailbox id). Empty = this delivery has no Chat row (an
+    /// agent-to-agent request, a cron wake): the turn is an *origin* and the
+    /// reference row it writes stays unthreaded, which is the truth.
+    #[serde(default)]
+    pub chat_row_id: String,
     // ADR-100 Rev. 8: the execution-view pin (`for_execution_session`) is gone.
     // A message composed inside an execution session is a session-scoped write
     // (`InboundMessage::ChatMessage` over HTTP), never an Intent envelope, so
@@ -390,6 +403,7 @@ mod tests {
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            chat_row_id: String::new(),
         }));
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
@@ -511,6 +525,7 @@ mod tests {
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            chat_row_id: String::new(),
         }));
         let (msg, truncated) = msg.enforce_size_limit();
         assert!(truncated);

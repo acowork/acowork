@@ -1132,6 +1132,13 @@ message Intent {
   /// reinterpreted as a different field.
   reserved 15;
   reserved "for_execution_session";
+  /// ADR-106 D3 (rev. 2026-11-06): the durable Chat row this delivery opens or
+  /// answers, declared by the producer that wrote it — the Gateway is the only
+  /// party that knows, because it is the only party that writes the row.
+  /// Empty = this delivery has no Chat row (an agent-to-agent request, a cron
+  /// wake): the turn is then an *origin* and the reference row it writes stays
+  /// unthreaded instead of naming a coordinate no transcript holds.
+  string chat_row_id = 16;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

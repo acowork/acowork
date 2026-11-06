@@ -278,3 +278,40 @@ Gateway 反代一行：`/api/agents/{id}/search` → Runtime `/search`（参照�
 - **向量存储不引入新依赖**：对话索引复用 runtime 已依赖的 `grafeo-engine`（HNSW/BM25/混合检索已验证），pm 不引入 DB，doc 向量化 P2 再评估——三进程按需各取，不统一塞 sqlite。
 - 新增仅 2 个核心后端增量：Runtime 对话向量索引 + Runtime `/search` 聚合端点；其余为参数扩展与 Desktop UI。
 - 全链路可增量交付、可回滚，每阶段独立可测。
+
+> **已实现偏差（修订：file scope 的两个半查询分两个检索源）**
+>
+> D2 规定 file scope = "ripgrep 全文 **+** 文件名 fuzzy"。此前 Desktop 让两半共用一个
+> `GET /workspaces/search?match_file_names=true` 请求，于是"廉价的文件名匹配"成了
+> "昂贵的全文扫描"的人质：该端点在一次遍历里读全部文件正文（实测本仓 2.5 s 热缓存 /
+> 13.5 s 冷缓存），而全局搜索跑的检索 deadline 是 8 s 绝对预算 —— 冷缓存下 file source
+> 被 abort，名字命中与内容命中一起丢弃，UI 显示"无匹配"。同一 query 走
+> `GET /workspaces/find`（只遍历不读正文，实测 217 ms）却能立刻返回同一批名字命中，
+> 这就是"右侧面板搜得到、全局搜索搜不到"的成因。
+>
+> 修订：文件名 fuzzy 归为独立检索源 `fileName`，走 `GET /workspaces/find` ——
+> 与右侧工作区搜索框**同一个端点**，语义天然一致；全文半走
+> `GET /workspaces/search?match_file_names=false`。两半各自超时、各自填充，file tab
+> 按"名字命中在前、内容命中在后"合并。`fileName` 是 `file` 的子源，不进入 summary
+> 的 scope 白名单（`timedOutScopes` / `failedScopes` 归一为 `file`）。
+> Runtime 侧参数与语义不变；realtime 契约不变，只改客户端编排。
+
+> **补充修订（同一提交）：`run_search` 改为并行遍历**
+>
+> 上一条修订让文件名半不再被拖死，但内容半自身仍然是串行的：`run_search` 在
+> `spawn_blocking` 里单线程 `WalkBuilder::build()` + 逐文件 `read_to_string` +
+> 逐行 regex。实测本仓（warm cache）一次全文扫描 ≈ 136 ms→改成并行前 ≈ 2.5 s（同一端点日志），
+> 冷缓存 13.5 s —— 冷缓存首次搜索仍会撞上客户端 8 s 预算。
+>
+> 修订：`run_search` 改用 `ignore` 的 `WalkBuilder::build_parallel()`，worker 数 = 核数；
+> 名字半与内容半各自用 `Mutex<Vec<_>>` 收集，收集后统一排序：内容命中按
+> `(file, line, column)` 升序（原先是遍历顺序，并行后无意义），名字命中仍按
+> `find_files` 的 score/路径长度/路径排序。内容预算语义保留（预算满后不再读正文，名字半
+> 仍遍历完整棵树），`total_matches` 与 `truncated` 语义不变。
+>
+> 实测收益（本仓，`q=chat prompt`，`match_file_names=false`，200 max results）：
+> 4 次冷启动首轮 409 ms，随后 136 / 131 ms；对比同端点串行实现的 2.5 s 热缓存日志记录，
+> 约 18 倍。冷缓存（首次）预期从 13.5 s 降到磁盘带宽量级的 1 s 上下。
+>
+> 代价：结果顺序由"遍历顺序"变为"路径顺序"（对内容 tab 更稳定也更可预期）；单文件内行号
+> 仍自上而下。锁竞争实测可忽略（每文件一次加锁 + 每文件一次批量 extend）。

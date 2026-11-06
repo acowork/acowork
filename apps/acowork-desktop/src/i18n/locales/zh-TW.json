@@ -1681,6 +1681,8 @@
     "searching": "搜尋中…",
     "loadingGitHistory": "載入 commit 歷史…",
     "fileNoMatch": "無匹配",
+    "fileNameUnavailable": "檔名匹配暫不可用（已逾時），僅顯示全文匹配結果",
+    "contentStillSearching": "檔名已就緒，仍在檢索檔案內容…",
     "fileEmptyHint": "輸入關鍵字搜尋檔案內容",
     "gitNoMatch": "無匹配 commit",
     "docNoMatch": "無匹配文件",
@@ -1807,6 +1809,13 @@
     "formInstallHint": "安裝提示",
     "formInstallScript": "安裝腳本名"
   },
+  "datePicker": {
+    "placeholder": "選擇日期",
+    "prevMonth": "上個月",
+    "nextMonth": "下個月",
+    "today": "今天",
+    "clear": "清除"
+  },
   "pm": {
     "projects": "專案",
     "emptyTitle": "還沒有專案",
@@ -1865,6 +1874,9 @@
       "description": "描述",
       "parentTask": "父任務",
       "noParent": "無父任務",
+      "change": "更換",
+      "addDependency": "新增依賴",
+      "dependencyCycle": "它依賴此任務",
       "created": "建立於",
       "updated": "更新於",
       "status": "狀態",

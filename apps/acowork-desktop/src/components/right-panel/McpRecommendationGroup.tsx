@@ -32,6 +32,17 @@
 //! click (`installing` / `activating` / `failed`). Those are not lifecycle
 //! states — they are process state and must not be persisted, or a crash
 //! would leave a permanent "installing" row (same reasoning as ADR-091 §5.8).
+//!
+//! ## Why the card is not always open
+//!
+//! The group sits in the Setup panel's single scrolling column, between the
+//! Builtin Tools card and the MCP switch list. A package whose suggestions the
+//! user has already dealt with would otherwise re-open an empty-looking block
+//! on every visit — the exact "recommendation group becoming noise" risk
+//! ADR-104 §8 names. So the card opens by default only while something is
+//! still unhandled, and the default is decided from the loaded list rather
+//! than from whatever the panel happened to hold at mount time (see
+//! `RecommendationCard`).
 
 import { useCallback, useMemo, useState } from "react";
 import { AlertTriangle, Check, Download, Loader2, Play, RotateCcw } from "lucide-react";
@@ -40,6 +51,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { useMcpStore } from "../../stores/mcpStore";
 import { useLayoutStore } from "../../stores/layoutStore";
 import { materializeDeclaration } from "../../lib/mcpPresets";
+import { hasUnhandledRecommendation } from "../../lib/mcpRecommendations";
 import { log } from "../../lib/logger";
 import type { McpRecommendationView, McpRecommendationState } from "../../lib/types";
 
@@ -58,10 +70,60 @@ interface Props {
  *
  * Renders nothing when the package declares none — an empty "recommended"
  * card would be noise on every ordinary agent.
+ *
+ * ## Why a gate component with no hooks, plus a real card inside
+ *
+ * The card's initial expand state is a property of the *data* (see
+ * `RecommendationCard`), and the data arrives asynchronously: the host starts
+ * from an empty list and fills it when `/tools` answers. A `useState`
+ * initializer on a component that mounts alongside that fetch would run on the
+ * empty array and decide wrongly — either a collapsed card that stays
+ * collapsed, or an expanded card that pops open one frame later.
+ *
+ * Mounting the card only once a list exists removes the whole race: this gate
+ * owns no state, so the card's first render already carries real rows. The host
+ * additionally scopes the list to the agent it was fetched for, so a
+ * recommendation-heavy agent cannot decide the default for the next agent while
+ * that agent's own list is still loading.
  */
 export function McpRecommendationGroup({ agentId, recommendations, onReload }: Props) {
+  if (recommendations.length === 0) return null;
+  return (
+    <RecommendationCard
+      agentId={agentId}
+      recommendations={recommendations}
+      onReload={onReload}
+    />
+  );
+}
+
+/**
+ * The card itself — header, rows, ignored disclosure and per-row in-flight
+ * state.
+ *
+ * ## Default expand rule (ADR-104 §8, "the recommendation group becoming
+ * noise")
+ *
+ * Open only while some suggestion still needs a decision (`not_installed` /
+ * `installed_inactive`, see `hasUnhandledRecommendation`). Once every row is
+ * `active` or `dismissed` the card starts collapsed; the header keeps the
+ * count, so the group stays reachable without a click on every panel open.
+ *
+ * The decision is taken **once per mount**, deliberately not derived on every
+ * render:
+ *
+ *   - a user's own toggle must not be re-decided, and
+ *   - acting on the last pending row (activate / ignore) reloads the list,
+ *     which would otherwise shut the card under the user's cursor mid-click.
+ *
+ * A different agent is a different mount (the gate unmounts while the new list
+ * loads), so each agent still gets its own default.
+ */
+function RecommendationCard({ agentId, recommendations, onReload }: Props) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(true);
+  // Mount-time snapshot — see the doc above. `RecommendationCard` is only ever
+  // mounted with a loaded list.
+  const [open, setOpen] = useState(() => hasUnhandledRecommendation(recommendations));
   const [showDismissed, setShowDismissed] = useState(false);
   const [phases, setPhases] = useState<Record<string, RowPhase>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -143,8 +205,13 @@ export function McpRecommendationGroup({ agentId, recommendations, onReload }: P
     [agentId, onReload, putRecommendation, setPhase],
   );
 
-  if (recommendations.length === 0) return null;
-
+  // Invariant: the gate above only mounts this card with a non-empty list, so
+  // an empty `recommendations` never reaches the body (and never renders the
+  // "all handled" empty state by accident).
+  //
+  // `pending` counts only *installable* gaps, for the description line under
+  // the card. The header carries the full declaration count instead, because
+  // ignored rows are still declared by the package.
   const pending = visible.filter((r) => r.state === "not_installed").length;
 
   return (

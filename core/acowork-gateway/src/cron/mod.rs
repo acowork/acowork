@@ -494,6 +494,7 @@ pub async fn run_cron_scheduler(
                 // unknown → the Runtime keeps human-facing tools.
                 has_human: None,
                 chat_attachment_ids: Vec::new(),
+                chat_row_id: String::new(),
             };
 
             let mailbox = {

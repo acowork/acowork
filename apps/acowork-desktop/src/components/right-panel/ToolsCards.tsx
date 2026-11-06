@@ -18,6 +18,12 @@ import { McpRecommendationGroup } from "./McpRecommendationGroup";
 
 const EMPTY_ARRAY: string[] = [];
 
+/** Stable empty recommendation list — see `recommendedList` below. A fresh
+ *  `[]` on every render would hand the recommendation card a new prop identity
+ *  each time for no reason (and a "loading" list and "no suggestions" must
+ *  read the same anyway, which is what the gate needs). */
+const EMPTY_RECOMMENDATIONS: McpRecommendationView[] = [];
+
 // Stable empty-object reference for Zustand selectors (see line ~178 below).
 // Returning a fresh `{}` from a selector on every render trips
 // `useSyncExternalStore`'s Object.is equality check → infinite re-render →
@@ -455,7 +461,27 @@ export function ToolsCards({
   // lifecycle state the Runtime derived. Rendered in its own group above the
   // MCP switch list; `reloadToken` lets that group force the authoritative
   // re-read after its own mutation instead of patching local state.
-  const [recommendations, setRecommendations] = useState<McpRecommendationView[]>([]);
+  //
+  // The list is stamped with the agent it was fetched for, because it arrives
+  // asynchronously while this component survives an agent switch: without the
+  // stamp the previous agent's suggestions would render under the new agent's
+  // name for one round-trip — and, worse, would decide the recommendation
+  // card's default-expand state from the wrong agent's rows. Deriving
+  // `recommendations` below makes "not loaded yet" and "belongs to another
+  // agent" the same value, which is exactly what the card's gate needs.
+  const [recommendedList, setRecommendedList] = useState<{
+    agentId: string;
+    rows: McpRecommendationView[];
+  } | null>(null);
+  const recommendations =
+    recommendedList && recommendedList.agentId === selectedAgentId
+      ? recommendedList.rows
+      : EMPTY_RECOMMENDATIONS;
+  const setRecommendations = useCallback(
+    (agentId: string, rows: McpRecommendationView[]) =>
+      setRecommendedList({ agentId, rows }),
+    [],
+  );
   const [reloadToken, setReloadToken] = useState(0);
   const reloadTools = useCallback(() => setReloadToken((n) => n + 1), []);
 
@@ -499,6 +525,7 @@ export function ToolsCards({
           // sends the key (an empty array when the package declares none);
           // the guard is for older Runtimes that omit it entirely.
           setRecommendations(
+            selectedAgentId,
             Array.isArray(data.recommended)
               ? (data.recommended as McpRecommendationView[])
               : [],
@@ -553,6 +580,7 @@ export function ToolsCards({
           setMcpServerDefs(data.mcp_servers_defs as McpServerView[]);
         }
         setRecommendations(
+          selectedAgentId,
           Array.isArray(data.recommended)
             ? (data.recommended as McpRecommendationView[])
             : [],

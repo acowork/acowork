@@ -148,6 +148,13 @@ pub struct DeliveryRequest {
     pub has_human: Option<bool>,
     /// Chat attachment ids pinned to this user_message row.
     pub chat_attachment_ids: Vec<String>,
+    /// The durable Chat row this delivery opens or answers (ADR-106 D3, rev.
+    /// 2026-11-06). Declared by the producer that wrote the row — it is the only
+    /// party that knows the coordinate; the receiving Runtime threads its round
+    /// reference row and its cards under it instead of reconstructing it from
+    /// `message_id` / `in_reply_to`. Empty = this delivery has no Chat row (an
+    /// agent-to-agent request, a cron wake), and the turn is an *origin*.
+    pub chat_row_id: String,
 }
 
 /// Wake-then-deliver one Intent, recording the delivery fact in the
@@ -261,6 +268,7 @@ async fn deliver_inner(
         status: req.status.clone(),
         has_human_participant: req.has_human,
         chat_attachment_ids: req.chat_attachment_ids.clone(),
+        chat_row_id: req.chat_row_id.clone(),
     };
     let command = mqtt_proto::ControlCommand {
         instance_id: instance_id.clone(),
@@ -363,6 +371,7 @@ mod tests {
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            chat_row_id: String::new(),
         }
     }
 

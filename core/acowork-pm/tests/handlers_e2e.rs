@@ -269,6 +269,33 @@ async fn post_then_list_tasks_in_project() {
 }
 
 #[tokio::test]
+async fn a_non_member_cannot_create_a_task() {
+    // ADR-106 D15: a task's first delivery is its author speaking in the project
+    // chat, so the author has to be a participant — owner or member. A
+    // non-member is read-only here; refusing at creation is what keeps a task
+    // from being filed successfully and then dying in dispatch retries.
+    let app = TestApp::new().await;
+    let router = app.router();
+    let pid = create_project(&app, "P").await; // owner: "unknown" (no x-actor)
+
+    let by_outsider = Request::builder()
+        .method(Method::POST)
+        .uri(format!("/projects/{pid}/tasks"))
+        .header(header::CONTENT_TYPE, "application/json")
+        .header("x-actor", "human-bob")
+        .body(Body::from(serde_json::json!({"title": "not mine"}).to_string()))
+        .unwrap();
+    let (status, body) = body_json(router.clone().oneshot(by_outsider).await.unwrap()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
+    assert_eq!(body["error"]["code"], "author_not_project_member", "{body}");
+
+    // The project owner keeps the right, and the refusal left nothing behind.
+    let by_owner = TestApp::request_no_body(Method::GET, &format!("/projects/{pid}/tasks"));
+    let (_, body) = body_json(router.oneshot(by_owner).await.unwrap()).await;
+    assert_eq!(body.as_array().unwrap().len(), 0, "refused task must not be stored");
+}
+
+#[tokio::test]
 async fn get_task_returns_response_with_derived_fields() {
     let app = TestApp::new().await;
     let router = app.router();

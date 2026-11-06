@@ -312,3 +312,48 @@ requested while the user is typing.
 - **Vector storage introduces no new dependency**: the conversation index reuses the `grafeo-engine` the Runtime already depends on (HNSW/BM25/hybrid retrieval already proven), pm does not introduce a DB, and doc vectorization is deferred to P2 — the three processes each take what they need rather than all being forced onto sqlite.
 - Only 2 core backend increments: the Runtime conversation vector index + the Runtime `/search` aggregate endpoint; everything else is parameter extension and Desktop UI.
 - The whole chain is deliverable and rollback-able incrementally, with each stage independently testable.
+
+> **Implementation deviation (amendment: the two halves of the file scope are two retrieval sources)**
+>
+> D2 defines the file scope as "ripgrep full text **+** filename fuzzy". The Desktop used to
+> send both halves in one `GET /workspaces/search?match_file_names=true` request, which made
+> the cheap filename match a hostage of the expensive full-text scan: that endpoint reads every
+> file body in a single walk (measured on this repo: 2.5 s warm cache / 13.5 s cold), while a
+> global-search run has an absolute 8 s retrieval deadline — on a cold cache the file source was
+> aborted and the name hits were discarded together with the content hits, so the UI reported
+> "no matches". The same query against `GET /workspaces/find` (a directory walk, no bodies read;
+> measured 217 ms) returns that same set of name hits immediately — which is why the workspace
+> panel found the file and the global search did not.
+>
+> Amendment: fuzzy filename matching is its own source, `fileName`, backed by
+> `GET /workspaces/find` — the **same endpoint** the workspace explorer's search box uses, so the
+> two surfaces agree by construction. The content half uses
+> `GET /workspaces/search?match_file_names=false`. Each half carries its own status and fills the
+> tab on its own; the file tab merges them with name hits first. `fileName` is a sub-source of
+> `file` and never enters the summary scope whitelist (`timedOutScopes` / `failedScopes` fold
+> onto `file`). Runtime parameters and semantics are unchanged; only the client's orchestration
+> moved.
+
+> **Follow-up amendment (same commit): `run_search` walks in parallel**
+>
+> The amendment above stopped the filename half from being held hostage, but the content half
+> itself was still serial: `run_search` ran `WalkBuilder::build()` on one thread inside
+> `spawn_blocking`, with a per-file `read_to_string` and a per-line regex. Measured on this
+> repository (warm cache): ~2.5 s for a full content sweep in the old log records, ~13.5 s on a
+> cold cache — the first search of a session still overran the client's 8 s budget.
+>
+> Amendment: `run_search` now uses `ignore`'s `WalkBuilder::build_parallel()`, one worker per
+> core. Both halves collect into `Mutex<Vec<_>>` and are ordered after the walk: content hits by
+> `(file, line, column)` ascending (walk order carries no meaning once the walk is parallel),
+> name hits keep the `find_files` ranking (score / path length / path). The content budget
+> semantics are preserved (no bodies are read once the budget is full, while the name half still
+> covers the whole tree); `total_matches` and `truncated` are unchanged.
+>
+> Measured after the change (same repo, `q=chat prompt`, `match_file_names=false`, 200 max
+> results): 409 ms on the first round from a fresh process, then 136 ms and 131 ms — roughly 18×
+> against the 2.5 s warm-cache serial figure. Cold-cache first search should drop from ~13.5 s to
+> disk-bandwidth territory (~1 s).
+>
+> Cost: result order becomes path order instead of walk order (more stable for the content tab;
+> line numbers inside a file stay top-down). Lock contention measured as negligible (one lock per
+> file plus one batched `extend`).

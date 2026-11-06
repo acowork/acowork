@@ -631,6 +631,24 @@ impl TreePmStore {
             })
         }
     }
+
+    /// 内部辅助：作者身份校验 —— 任务的作者必须能在项目群里说话。
+    ///
+    /// 派单的第一次投递是一句项目群聊里的话，说话人是 `Task::created_by`
+    /// （ADR-106 D15）。作者的判据因此与 `assignee` 同源、同一份名册：
+    /// owner 或成员。放在**创建**处判，而不是留给派单侧的
+    /// `chat_log_unavailable`——那里判等于让任务先建成功、再卡在重试里，
+    /// 一个布局错误的权限应该直接说"你不在这个项目里"。
+    pub(crate) fn ensure_author_has_voice(&self, project: &Project, author: &str) -> Result<()> {
+        if author == project.owner() || project.members.iter().any(|m| m.instance_id == author) {
+            Ok(())
+        } else {
+            Err(PmError::AuthorNotProjectMember {
+                author: author.to_string(),
+                project_id: project.id.to_string(),
+            })
+        }
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -993,8 +1011,9 @@ impl PmStore for TreePmStore {
         created_by: &str,
         created_by_kind: MemberKind,
     ) -> Result<Task> {
-        // 校验项目存在 + 联动指派（assignee 非空必须是项目成员）
+        // 校验项目存在 + 作者有声音（ADR-106 D15）+ 联动指派（assignee 非空必须是项目成员）
         let project = self.read_project(project_id).await?;
+        self.ensure_author_has_voice(&project, created_by)?;
         if let Some(assignee) = &input.assignee {
             self.ensure_assignee_is_member(&project, assignee)?;
         }
@@ -3136,7 +3155,12 @@ mod tests {
             "User-created task needs no review"
         );
 
-        // Agent 创建任务（显式 Agent）→ review_status=Pending。
+        // Agent 创建任务（显式 Agent）→ review_status=Pending。Agent 必须先
+        // 是项目成员：任务的派单是作者在项目群里说的话（ADR-106 D15）。
+        store
+            .add_project_member(&p.id, instance, MemberKind::Agent)
+            .await
+            .unwrap();
         let t_agent = store
             .create_task_as(&p.id, create_task_input("by-agent"), instance, MemberKind::Agent)
             .await
@@ -3324,6 +3348,52 @@ mod tests {
         // 任务状态未被改变
         let after = store.get_task(&t2.id).await.unwrap().unwrap();
         assert_eq!(after.status, TaskStatus::Pending);
+    }
+
+    /// 作者身份：任务的作者必须能在项目群里说话（ADR-106 D15）——owner 或
+    /// 成员。非成员对该项目只读，创建任务不在只读权限里；这条在**创建**处
+    /// 判，而不是留给派单侧的 `chat_log_unavailable`。
+    #[tokio::test]
+    async fn author_must_have_a_voice_in_the_project() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let owner = "human";
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                owner,
+            )
+            .await
+            .unwrap();
+        let member = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let outsider = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, member).await;
+
+        // owner 建任务 → 通过（owner 不在 members 里也算有声音）
+        store
+            .create_task(&p.id, create_task_input("by-owner"), owner)
+            .await
+            .expect("the project owner has a voice");
+
+        // 成员 agent 建任务 → 通过
+        store
+            .create_task_as(&p.id, create_task_input("by-member"), member, MemberKind::Agent)
+            .await
+            .expect("a member has a voice");
+
+        // 非成员建任务 → AuthorNotProjectMember，且不留半成品
+        let err = store
+            .create_task_as(&p.id, create_task_input("by-outsider"), outsider, MemberKind::Agent)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PmError::AuthorNotProjectMember { .. }), "{err:?}");
+        assert_eq!(err.http_status(), 403, "a missing membership is not a bad request");
+        assert_eq!(err.error_code(), "author_not_project_member");
+        let tasks = store.find_tasks(&TaskFilter::default()).await.unwrap();
+        assert!(
+            !tasks.iter().any(|t| t.title == "by-outsider"),
+            "a refused author must not leave a task behind: {:?}",
+            tasks.iter().map(|t| &t.title).collect::<Vec<_>>()
+        );
     }
 
     /// 移除成员时若其名下仍有未完成任务 → 409；任务 done 后可移除。

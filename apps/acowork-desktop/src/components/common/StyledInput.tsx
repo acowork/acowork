@@ -2,6 +2,19 @@ import React from "react";
 import { cn } from "../../lib/utils";
 
 /**
+ * The field surface: border, fill, padding and focus treatment every form
+ * control in the app shares.
+ *
+ * Exported because a control is not always an `<input>` — `DatePicker`'s
+ * trigger is a `<button>` opening a calendar, and it has to sit in the same
+ * row as the text fields without looking like a different family. Copying the
+ * class string into it would be a second source of truth that drifts the first
+ * time this surface changes; composing `FIELD_SURFACE_CLASS` cannot drift.
+ */
+export const FIELD_SURFACE_CLASS =
+  "w-full rounded-md border border-input-border bg-input-bg px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)]";
+
+/**
  * Unified input field component with consistent focus style:
  * thin accent-colored border on focus (no ring / outline).
  *
@@ -23,7 +36,7 @@ export const StyledInput = React.forwardRef<HTMLInputElement, StyledInputProps>(
       <input
         ref={ref}
         className={cn(
-          "w-full rounded-md border border-input-border bg-input-bg px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)]",
+          FIELD_SURFACE_CLASS,
           fontMono && "font-mono",
           className,
         )}
@@ -54,7 +67,8 @@ export const StyledTextarea = React.forwardRef<
     <textarea
       ref={ref}
       className={cn(
-        "w-full resize-y rounded-md border border-input-border bg-input-bg px-3 py-[var(--ui-input-py)] text-xs outline-none transition-colors focus:border-[var(--color-accent)]",
+        FIELD_SURFACE_CLASS,
+        "resize-y",
         fontMono && "font-mono",
         className,
       )}

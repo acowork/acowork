@@ -248,6 +248,13 @@ pub enum SessionMessage {
         /// id is carried here, so attachment pulls fall back to this
         /// coordinate. Never rendered; purely the pull address.
         in_reply_to: String,
+        /// ADR-106 D3 (rev. 2026-11-06): the durable Chat row this turn opens
+        /// or answers, as declared by the Gateway that wrote it. Becomes the
+        /// reference row's `in_reply_to`, so the block hangs under the sentence
+        /// that asked for the work. Empty = an origin turn (agent-to-agent,
+        /// cron) — the reference row stays unthreaded rather than pointing at a
+        /// coordinate no transcript holds.
+        chat_row_id: String,
         /// A `pm_task` dispatch's model-facing wake-up playbook (claim →
         /// work → submit). Injected into the turn's system block via
         /// `ContextBuilder::set_task_brief` — never part of `content`,
@@ -1402,6 +1409,7 @@ impl SessionTask {
                     chat_attachment_ids,
                     attached_items,
                     in_reply_to,
+                    chat_row_id,
                     assignment_brief,
                     task_id,
                     opened_new,
@@ -1479,23 +1487,19 @@ impl SessionTask {
                     // stays unthreaded rather than pointing at its own intent id.
                     agent_loop.turn_reference = crate::agent::intent_turn::TurnReference {
                         trigger_message_id: if write_back {
-                            if in_reply_to.is_empty() {
-                                message_id.clone()
-                            } else {
-                                in_reply_to.clone()
-                            }
+                            chat_row_id.clone()
                         } else {
                             String::new()
                         },
                         opened_new,
-                        // D13: the PM dispatch's one-line task name, written once
-                        // with the reference and never rewritten. Origin-gated by
-                        // the same call that feeds the system block.
-                        assignment_brief: if brief.is_empty() {
-                            None
-                        } else {
-                            Some(brief.to_string())
-                        },
+                        // D13: the round's one-line task name, written once with
+                        // the reference and never rewritten. `brief` is the
+                        // system slot (the PM playbook), so it may name a row
+                        // only when it is NOT the playbook — see
+                        // `reference_brief`.
+                        assignment_brief: crate::agent::intent_turn::reference_brief(
+                            &kind, brief, &content,
+                        ),
                         // D13: the chip's coordinate, stated once with the row. The
                         // transport parsed it off the conversation key, so an empty
                         // string here means "not a task conversation" — a task id no

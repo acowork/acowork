@@ -21,7 +21,6 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createTask, reparentTask, updateTask } from "../../lib/pm-api";
-import { useTranslation } from "../../i18n/useTranslation";
 import { useAgentStore } from "../../stores/agentStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
@@ -95,8 +94,6 @@ export interface TaskForm {
   toggleDependency: (id: string) => void;
   /** Assignee candidates = project members (server enforces the membership). */
   assigneeOptions: Array<{ value: string; label: string }>;
-  parentOptions: Array<{ value: string; label: string }>;
-  dependencyOptions: Array<{ value: string; label: string }>;
   /** False when the project has no members at all — the assignee row says why. */
   hasMembers: boolean;
   saving: boolean;
@@ -115,11 +112,9 @@ export function useTaskForm({
   defaultParentId = null,
 }: UseTaskFormArgs): TaskForm {
   const isEdit = !!initial;
-  const { t } = useTranslation();
 
   const agents = useAgentStore((s) => s.agents);
   const fetchAgents = useAgentStore((s) => s.fetchAgents);
-  const boardTasks = usePmBoardStore((s) => s.tasks);
   const reloadBoard = usePmBoardStore((s) => s.reload);
   // Selector returns the array element (find), never a fresh object — the
   // zustand v5 snapshot contract.
@@ -187,27 +182,10 @@ export function useTaskForm({
     [project?.members, agents, selfAccount, localProfile, directory],
   );
 
-  // Parent candidates: same project, minus the task itself and its direct
-  // children (a task cannot parent its own child — that would cycle).
-  const parentOptions = useMemo(() => {
-    const candidates = isEdit
-      ? boardTasks.filter(
-          (task) => task.id !== initial?.id && task.parent_id !== initial?.id,
-        )
-      : boardTasks;
-    return [
-      { value: "", label: t("pm.task.noParent") },
-      ...candidates.map((task) => ({ value: task.id, label: task.title })),
-    ];
-  }, [boardTasks, isEdit, initial, t]);
-
-  const dependencyOptions = useMemo(
-    () =>
-      boardTasks
-        .filter((task) => task.id !== initial?.id)
-        .map((task) => ({ value: task.id, label: task.title })),
-    [boardTasks, initial],
-  );
+  // 父任务 / 依赖的候选集不再在表单层摊平：候选是一棵树里的一块，排除规则
+  // （自己的子树、传递依赖自己的那些）在 `lib/taskTree`，由选择器直接读
+  // `boardStore.tasks` 自己算。表单只持有值（`parentId` / `dependsOn`），
+  // 不再持有"选项列表"这种派生物。
 
   // Field-by-field compare would need a comparator per type; the values object
   // is flat scalars + one id array, so a structural compare is exact and cheap.
@@ -309,8 +287,6 @@ export function useTaskForm({
           : [...prev.dependsOn, id],
       })),
     assigneeOptions,
-    parentOptions,
-    dependencyOptions,
     hasMembers: (project?.members.length ?? 0) > 0,
     saving,
     dirty,

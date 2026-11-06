@@ -213,6 +213,7 @@ fn control_action_to_inbound(
             status,
             has_human,
             chat_attachment_ids,
+            chat_row_id,
         } => {
             let params: serde_json::Value =
                 serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
@@ -235,6 +236,7 @@ fn control_action_to_inbound(
                     status,
                     has_human,
                     chat_attachment_ids,
+                    chat_row_id,
                 })),
             ))
         }
@@ -1187,10 +1189,14 @@ async fn route_intent_inbound(
         let initiator = Some(env.from.as_str()).filter(|s| !s.is_empty());
         let surface = chat_surface(&env);
         let to = env.from.clone();
-        // The card asks about this very message, so its thread coordinate is
-        // the message — never the envelope's own answer-coordinate, which is
-        // empty on a fresh request (design 31 §5.2).
-        let message_id = env.message_id.clone();
+        // The card asks about the human's own row, so its thread coordinate is
+        // that row — the coordinate the Gateway declared when it wrote it
+        // (ADR-106 D3 rev. 2026-11-06). It is never the envelope's
+        // `message_id`, which on a group `@` fan-out is a per-target delivery
+        // uuid that names no durable row (the 2026-11-06 defect: the card could
+        // not be answered, `GET …/answer` returned 422 `origin_gone`, and the
+        // send stayed parked forever).
+        let message_id = env.chat_row_id.clone();
         let candidates = session_manager
             .lock()
             .await
@@ -1664,6 +1670,7 @@ async fn deliver_intent_turn(
         status,
         has_human,
         chat_attachment_ids,
+        chat_row_id,
     } = *env;
 
     // A PM dispatch's wake-up playbook is model-facing and ephemeral: it
@@ -1757,6 +1764,9 @@ async fn deliver_intent_turn(
             attached_items: crate::agent::intent_turn::attached_items_from_params(&params)
                 .unwrap_or_default(),
             in_reply_to,
+            // ADR-106 D3: the Chat row this delivery opens or answers, as the
+            // Gateway declared it. Empty = an origin turn.
+            chat_row_id,
             assignment_brief,
             task_id,
             // ADR-106 D3: the deterministic route knows whether it created the
@@ -1921,6 +1931,7 @@ A: hi")).unwrap();
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            chat_row_id: String::new(),
         })
         .expect("Intent must map");
         assert_eq!(
@@ -1957,6 +1968,7 @@ A: hi")).unwrap();
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            chat_row_id: String::new(),
         })
         .expect("Intent must still map");
 
@@ -1987,6 +1999,7 @@ A: hi")).unwrap();
             status: String::new(),
             has_human: Some(true),
             chat_attachment_ids: Vec::new(),
+            chat_row_id: "m-1".into(),
         })
     }
 

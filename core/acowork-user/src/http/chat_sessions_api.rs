@@ -3727,7 +3727,7 @@ mod tests {
         // System append of an agent_message row (Wave 2B vocabulary:
         // the Intent facts are fields on an agent utterance now).
         let body = format!(
-            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-1","kind":"agent_message","body":"what is 2+2","to":"agent-2","meta":{{"message_id":"m-1","conversation_id":"c-1","in_reply_to":"u-1"}}}}}}"#
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-1","kind":"agent_message","body":"what is 2+2","to":"agent-2","meta":{{"message_id":"m-1","conversation_id":"c-1","task_id":"t-1"}}}}}}"#
         );
         let resp = app
             .clone()
@@ -3840,11 +3840,15 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::CREATED);
+        let asked = json(resp).await["meta"]["message_id"]
+            .as_str()
+            .expect("the human row carries its message_id")
+            .to_string();
 
         // A human cannot forge an agent response through the system entry
         // (§8.1): the writer's recorded type refuses the kind.
         let bad = format!(
-            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"{alice}","kind":"agent_message","body":"forged","to":"agent-9","meta":{{"message_id":"m-1","in_reply_to":"m-0"}}}}}}"#
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"{alice}","kind":"agent_message","body":"forged","to":"agent-9","meta":{{"message_id":"m-1","in_reply_to":"{asked}"}}}}}}"#
         );
         let resp = app
             .clone()
@@ -3855,7 +3859,7 @@ mod tests {
 
         // The agent side may write its response.
         let ok = format!(
-            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-9","kind":"agent_message","body":"done","to":"{alice}","meta":{{"message_id":"m-2","in_reply_to":"m-0"}}}}}}"#
+            r#"{{"session_id":"{session_id}","message":{{"seq":0,"ts":0,"from":"agent-9","kind":"agent_message","body":"done","to":"{alice}","meta":{{"message_id":"m-2","in_reply_to":"{asked}"}}}}}}"#
         );
         let resp = app
             .clone()

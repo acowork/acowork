@@ -98,6 +98,30 @@ describe("ChatNoticeEventRow", () => {
     expect(container.innerHTML).toBe("");
   });
 
+  it("paints nothing for a card nothing could ever answer", () => {
+    // The 2026-11-06 defect, as a rule: a group `@` fan-out wrote the card under
+    // the per-target delivery uuid instead of the human's row, so the card named
+    // a coordinate the log never holds. It can never be answered — every click
+    // came back `origin_gone`/422 — and a question that cannot be asked is no
+    // more a conversation record than an answered one (ADR-106 D14). The log is
+    // append-only, so those rows stay on disk and leave at render time.
+    const row = noticeRow("session_choice");
+    row.delivery = {
+      answered: false,
+      question: {
+        answered: false,
+        answerable: false,
+        options: [
+          { session_id: "exec-1", label: "优化 chat_prompt 的长度" },
+          { session_id: "exec-2", label: "untitled" },
+        ],
+        allow_new_task: true,
+      },
+    };
+    const { container } = render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    expect(container.innerHTML).toBe("");
+  });
+
   it("shows a viewer who may not answer the options without the buttons (D10)", () => {
     // Only the person who spoke may decide where their words go. A read-only
     // viewer still gets the question — it is a fact about the channel — and the

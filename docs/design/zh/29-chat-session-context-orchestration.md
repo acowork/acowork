@@ -81,6 +81,8 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
 
 `chat.md` 存在且非空白时**整段替换**内置 chat prompt 正文（基座 + Persona + 场景段），只替换 `{{agent_name}}`；缺省时使用内置默认。有两部分不是该文件能删掉的。其一，`# Safety` 不变量是一段不可裁剪的尾块，Runtime 每轮都会重新追加到正文末尾（`chat_prompt::with_chat_prompt_tail`），从 `chat.md` 里删掉它对模型实际看到的内容没有影响。其二，安全边界由结构而非提示词字面量保证：router 只持有 `exec_session_create` / `exec_session_propose_continue` 与只读工具，改写提示词不会给它新的能力（ADR-099 D6）。此外，群聊的 `chat.md` **仅群主或管理员可写**（ADR-098 治理），任何成员可读，因此单个成员无法注入一段去操控他人 agent 的提示词。群聊右侧设置面板只编辑正文——`# Safety` 尾块不在面板中显示（`chat-md` 接口返回的是剥掉尾块后的正文），保存时由存储与 Runtime 重新追加，因此不会把成员改不动的内容摆进可编辑框再静默还原。
 
+基座还是这条链路上**唯一会随每个 agent 的每一轮 chat 一起发送**的文本，因此它带一个字节预算（5 KiB，由 `chat_prompt::tests::kernel_stays_within_its_byte_budget` 断言；算上 Persona、场景段与尾块，整份内置默认约 6 KiB）。预算是上限而非目标：只花在政策与约束上，不花在措辞上。两条规则保证它不被悄悄撑大——一条规则只在一处出现（决策规则不复述场景段和 `# Safety` 尾块已说过的话）；每个工具名、参数名与内联块名（`[candidates]` / `[attachments]` / `[attached refs]` / `[referenced rounds]`）都必须按字面教会，因为基座与 wire schema 是同一份契约的两半（`chat_prompt::tests::compression_kept_every_contract_token`，以及 `acowork-runtime` 的 `the_prompt_teaches_exactly_the_tools_the_wire_offers`）。因此新增一条规则意味着压缩别处，或者有意识地抬高预算。
+
 ### 3.3 Persona 与 chat.md 来源优先级
 
 任一份非空白的 `chat.md` 都整段替换内置 prompt，**不再只替换 Persona 段**。按序查找：

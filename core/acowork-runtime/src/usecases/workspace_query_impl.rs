@@ -17,11 +17,13 @@
 //! async runtime would block LLM streaming on large workspaces.
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use base64::Engine;
 use chrono::DateTime;
-use ignore::WalkBuilder;
+use ignore::{WalkBuilder, WalkState};
 use regex::Regex;
 use tokio::io::AsyncReadExt;
 
@@ -941,116 +943,158 @@ fn run_search(
     pattern: &str,
     case_sensitive: bool,
 ) -> SearchResponse {
-    let mut content_hits: Vec<SearchMatchDto> = Vec::new();
-    let mut name_hits: Vec<(u32, SearchMatchDto)> = Vec::new();
-    let mut total_matches: usize = 0;
-    let mut truncated = false;
+    // Both halves are filled from a *parallel* walk and ordered afterwards,
+    // so the response is deterministic no matter which worker finishes
+    // first. The serial walk spent almost all of its time in
+    // `read_to_string` + per-line regex — measured ~13 s cold on the ACowork
+    // repo, which overran the client's search deadline and threw the whole
+    // file source away. Spreading the files across workers reduces that to
+    // roughly the cost of the slowest core.
+    let content_hits: Mutex<Vec<SearchMatchDto>> = Mutex::new(Vec::new());
+    let name_hits: Mutex<Vec<(u32, SearchMatchDto)>> = Mutex::new(Vec::new());
+    let total_matches = AtomicUsize::new(0);
 
     // Name-matching inputs, mirroring `run_filename_search`. Prepared once
     // per request so the walk does not re-lowercase the query per file.
     let name_query = FileNameQuery::new(pattern, case_sensitive);
 
-    let walker = WalkBuilder::new(workspace_root)
+    // Bind shared references so the per-thread `move` closures copy a
+    // reference instead of trying to move the shared state.
+    let content_hits_ref = &content_hits;
+    let name_hits_ref = &name_hits;
+    let total_matches_ref = &total_matches;
+    let name_query_ref = &name_query;
+
+    WalkBuilder::new(workspace_root)
         .hidden(true)
         .git_ignore(true)
         .git_global(true)
         .git_exclude(true)
-        .build();
-
-    for entry in walker {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
-        }
-
-        let path = entry.path();
-
-        if let Ok(meta) = entry.metadata()
-            && meta.len() > SEARCH_BAILOUT_BYTES
-        {
-            continue;
-        }
-
-        if let Some(glob) = include_glob {
-            let file_name = path
-                .file_name()
-                .map(|n| n.to_string_lossy())
-                .unwrap_or_default();
-            let matched = glob.split(',').any(|g| {
-                let pat = g.trim();
-                if pat.starts_with("*.") {
-                    file_name.ends_with(&pat[1..])
-                } else {
-                    file_name.contains(pat)
+        .build_parallel()
+        .run(|| {
+            Box::new(move |result| {
+                let entry = match result {
+                    Ok(e) => e,
+                    Err(_) => return WalkState::Continue,
+                };
+                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+                    return WalkState::Continue;
                 }
-            });
-            if !matched {
-                continue;
-            }
-        }
 
-        let rel_path = path
-            .strip_prefix(workspace_root)
-            .unwrap_or(path)
-            .to_string_lossy()
-            .replace('\\', "/");
+                let path = entry.path();
 
-        // ── Name half ──────────────────────────────────────────────────
-        // Evaluated before the binary bail-out: a binary file still has a
-        // name the user may be looking for (a `.png` named after the
-        // feature it illustrates), and the name match costs nothing.
-        if match_file_names {
-            let file_name = path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default();
-            if let Some(score) = name_query.score(file_name, &rel_path) {
-                total_matches += 1;
-                name_hits.push((
-                    score,
-                    SearchMatchDto {
-                        file: rel_path.clone(),
-                        line: None,
-                        column: None,
-                        text: file_name.to_string(),
-                        kind: SearchMatchKind::Name,
-                    },
-                ));
-            }
-        }
+                if let Ok(meta) = entry.metadata()
+                    && meta.len() > SEARCH_BAILOUT_BYTES
+                {
+                    return WalkState::Continue;
+                }
 
-        if RuntimeWorkspaceQueryService::is_binary_path(path) {
-            continue;
-        }
+                if let Some(glob) = include_glob {
+                    let file_name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy())
+                        .unwrap_or_default();
+                    let matched = glob.split(',').any(|g| {
+                        let pat = g.trim();
+                        if pat.starts_with("*.") {
+                            file_name.ends_with(&pat[1..])
+                        } else {
+                            file_name.contains(pat)
+                        }
+                    });
+                    if !matched {
+                        return WalkState::Continue;
+                    }
+                }
 
-        // Content budget exhausted — stop reading bodies, but keep
-        // walking so the name half stays complete.
-        if content_hits.len() >= max_results {
-            truncated = true;
-            continue;
-        }
+                let rel_path = path
+                    .strip_prefix(workspace_root)
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/");
 
-        let content = match std::fs::read_to_string(path) {
-            Ok(c) => c,
-            Err(_) => continue,
-        };
+                // ── Name half ──────────────────────────────────────────
+                // Evaluated before the binary bail-out: a binary file still
+                // has a name the user may be looking for (a `.png` named
+                // after the feature it illustrates), and the name match
+                // costs nothing.
+                if match_file_names {
+                    let file_name = path
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or_default();
+                    if let Some(score) = name_query_ref.score(file_name, &rel_path) {
+                        total_matches_ref.fetch_add(1, Ordering::Relaxed);
+                        if let Ok(mut hits) = name_hits_ref.lock() {
+                            hits.push((
+                                score,
+                                SearchMatchDto {
+                                    file: rel_path.clone(),
+                                    line: None,
+                                    column: None,
+                                    text: file_name.to_string(),
+                                    kind: SearchMatchKind::Name,
+                                },
+                            ));
+                        }
+                    }
+                }
 
-        for (line_num, line) in content.lines().enumerate() {
-            if let Some(m) = re.find(line) {
-                total_matches += 1;
-                content_hits.push(SearchMatchDto {
-                    file: rel_path.clone(),
-                    line: Some(line_num + 1),
-                    column: Some(m.start() + 1),
-                    text: line.trim_end().to_string(),
-                    kind: SearchMatchKind::Content,
-                });
-            }
-        }
-    }
+                if RuntimeWorkspaceQueryService::is_binary_path(path) {
+                    return WalkState::Continue;
+                }
+
+                // Content budget exhausted — stop reading bodies. The name
+                // half above keeps running so it stays complete, exactly as
+                // in the serial walk.
+                if content_hits_ref.lock().map(|h| h.len()).unwrap_or(0) >= max_results {
+                    return WalkState::Continue;
+                }
+
+                let content = match std::fs::read_to_string(path) {
+                    Ok(c) => c,
+                    Err(_) => return WalkState::Continue,
+                };
+
+                let mut local: Vec<SearchMatchDto> = Vec::new();
+                for (line_num, line) in content.lines().enumerate() {
+                    if let Some(m) = re.find(line) {
+                        local.push(SearchMatchDto {
+                            file: rel_path.clone(),
+                            line: Some(line_num + 1),
+                            column: Some(m.start() + 1),
+                            text: line.trim_end().to_string(),
+                            kind: SearchMatchKind::Content,
+                        });
+                    }
+                }
+
+                if !local.is_empty() {
+                    total_matches_ref.fetch_add(local.len(), Ordering::Relaxed);
+                    if let Ok(mut hits) = content_hits_ref.lock() {
+                        hits.extend(local);
+                    }
+                }
+
+                WalkState::Continue
+            })
+        });
+
+    let mut name_hits = name_hits.into_inner().unwrap_or_default();
+    let mut content_hits = content_hits.into_inner().unwrap_or_default();
+    let total_matches = total_matches.into_inner();
+    let mut truncated = content_hits.len() > max_results;
+
+    // Content hits are now collected in completion order, which carries no
+    // meaning. Order them as the serial walk presented them: top-down inside
+    // a file, files in path order.
+    content_hits.truncate(max_results);
+    content_hits.sort_by(|a, b| {
+        a.file
+            .cmp(&b.file)
+            .then(a.line.cmp(&b.line))
+            .then(a.column.cmp(&b.column))
+    });
 
     // Rank the name hits: best fuzzy score first, then shortest path, then
     // path — the same order `find_files` uses, so the global search and the
@@ -1762,6 +1806,47 @@ mod tests {
                 .iter()
                 .any(|m| m.file == "src/context_compression.rs"),
             "case-sensitive name matching must match the exact case"
+        );
+    }
+
+    /// Both halves of the file scope must agree with the Ctrl+P palette for
+    /// a **multi-word** query: `find_files("chat prompt")` returns
+    /// `chat_prompt.rs`, so `search_files("chat prompt")` must too. The
+    /// query splits on whitespace into segments and every segment must
+    /// match — a single-word-only implementation silently returns nothing.
+    #[tokio::test]
+    async fn search_files_and_find_files_agree_on_a_multi_word_name_query() {
+        let tmp = tempdir().expect("tempdir");
+        std::fs::create_dir_all(tmp.path().join("src")).unwrap();
+        std::fs::write(tmp.path().join("src/chat_prompt.rs"), "// unrelated body\n").unwrap();
+        let svc =
+            RuntimeWorkspaceQueryService::new(tmp.path().to_path_buf(), "test-agent".to_string());
+
+        let find = svc
+            .find_files(&FindFilesParams {
+                q: Some("chat prompt".to_string()),
+                workspace_id: None,
+                limit: Some(50),
+            })
+            .await
+            .expect("find_files");
+        assert!(
+            find.matches.iter().any(|m| m.rel_path == "src/chat_prompt.rs"),
+            "palette finds the file by fuzzy name: {:?}",
+            find.matches
+        );
+
+        let search = svc
+            .search_files(&SearchFilesParams {
+                q: Some("chat prompt".to_string()),
+                ..Default::default()
+            })
+            .await
+            .expect("search_files");
+        assert!(
+            search.matches.iter().any(|m| m.file == "src/chat_prompt.rs"),
+            "global search must agree with the palette: {:?}",
+            search.matches
         );
     }
 }

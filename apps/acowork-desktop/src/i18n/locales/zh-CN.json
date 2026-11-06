@@ -1902,6 +1902,8 @@
     "searching": "搜索中…",
     "loadingGitHistory": "加载 commit 历史…",
     "fileNoMatch": "无匹配",
+    "fileNameUnavailable": "文件名匹配暂不可用（已超时），仅显示全文匹配结果",
+    "contentStillSearching": "文件名已就绪，仍在检索文件内容…",
     "fileEmptyHint": "输入关键词搜索文件内容",
     "gitNoMatch": "无匹配 commit",
     "docNoMatch": "无匹配文档",
@@ -2028,6 +2030,13 @@
     "formInstallHint": "安装提示",
     "formInstallScript": "安装脚本名"
   },
+  "datePicker": {
+    "placeholder": "选择日期",
+    "prevMonth": "上个月",
+    "nextMonth": "下个月",
+    "today": "今天",
+    "clear": "清除"
+  },
   "pm": {
     "settingsPanel": {
       "title": "项目设置",
@@ -2144,6 +2153,9 @@
       "description": "描述",
       "parentTask": "父任务",
       "noParent": "无父任务",
+      "change": "更换",
+      "addDependency": "添加依赖",
+      "dependencyCycle": "它依赖此任务",
       "created": "创建于",
       "updated": "更新于",
       "status": "状态",

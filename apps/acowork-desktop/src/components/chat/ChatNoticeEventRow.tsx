@@ -148,7 +148,15 @@ export function ChatNoticeEventRow({
     // the round threads back to this message the projection flips `answered`,
     // the card unmounts, and `ChatExecutionBlock` takes the slot directly under
     // the SAME avatar and name.
-    if (answered) return null;
+    //
+    // `!answerable` leaves by the same door and for the same reason: the card
+    // names a row that is not in the conversation, so no click can ever land
+    // (`GET …/answer` answers `origin_gone`/422) and the question is not a live
+    // one. That is a durable fact about rows an older build wrote — the log is
+    // append-only — so the surface drops them at render time instead of showing
+    // a list of dead options, and instead of the toast a click used to raise.
+    // Absent means the service did not say: treat it as answerable.
+    if (answered || card?.answerable === false) return null;
 
     // The card's author IS the agent whose runs are on offer, so the identity is
     // the agent instance on the row — resolved exactly like the execution block

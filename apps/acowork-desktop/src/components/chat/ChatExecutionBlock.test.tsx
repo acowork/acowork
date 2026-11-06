@@ -201,7 +201,7 @@ describe("ChatExecutionBlock", () => {
 
   /** ADR-106 presentation-contract amendment: the opener round's sentence is
    *  already on the transcript as its own bubble, so the block repeats neither
-   *  the panel nor the raw text — its line leads with the router's brief. */
+   *  the panel nor the raw text — its line leads with the reference row's brief. */
   it("an opener round leads with the brief and renders no question panel", () => {
     const base = roundRow(3, "r1");
     const opener: RoundItem = {
@@ -236,6 +236,39 @@ describe("ChatExecutionBlock", () => {
     // The raw sentence is not painted a second time inside the block: no
     // question panel carries the trigger's seq (that row stands on its own).
     expect(container.querySelector('pre[data-seq="1"]')).toBeNull();
+  });
+
+  /** ADR-106 D13 + design 27 §5.4.2: the reference row's `assignment_brief` names
+   *  a round's LINE, never the block's title — a row written before the Runtime
+   *  guarded that field carries the PM wake-up playbook, and a header that fell
+   *  back to it would print the claim/submit instructions as the task's name.
+   *  With no human text to be named by, the block says it has no name and keeps
+   *  the task coordinate instead of borrowing the playbook. */
+  it("never names the block after the reference row's brief", () => {
+    const base = roundRow(3, "r1", "t-1");
+    const opener: RoundItem = {
+      ref: REF1,
+      roundRow: {
+        ...base,
+        meta: {
+          ...base.meta,
+          opened_new: true,
+          assignment_brief:
+            'You are being woken to execute PM task "t-1". Follow this workflow exactly:\n1. Claim it first',
+        },
+      },
+      showUserLine: false,
+      questionOnTranscript: true,
+    };
+    const { container } = renderBlock(
+      { [REF1]: entryOf({}) },
+      {},
+      blockOf([opener]),
+    );
+    expect(headerText(container)).not.toContain("being woken to execute");
+    expect(headerText(container)).toContain("chatView.block.unnamedRun");
+    // The task coordinate still says which piece of work this is (D13's chip).
+    expect(container.textContent).toContain("t-1");
   });
 
   it("states 'in progress' only on positive evidence: a pending read", () => {

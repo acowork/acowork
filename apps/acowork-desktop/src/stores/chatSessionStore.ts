@@ -109,6 +109,13 @@ export interface ChatQuestionState {
   /** A round now answers the message this card asked about — the re-delivery
    *  leaves the reference row, so the answer is the round's existence. */
   answered: boolean;
+  /** Whether an answer could still be *given*, as opposed to whether one was
+   *  taken (`answered`). A card asks about a row; when that row is not in the
+   *  conversation — a card an older build wrote under a per-target delivery
+   *  uuid — nobody can ever answer it, so the surface does not render a card
+   *  at all rather than a dead question with a click that 422s. Absent means
+   *  the service did not say; treat it as answerable. */
+  answerable?: boolean;
   options: Array<{
     session_id: string;
     label?: string;

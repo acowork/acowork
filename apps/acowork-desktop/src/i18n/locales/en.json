@@ -921,6 +921,8 @@
     "searching": "Searching…",
     "loadingGitHistory": "Loading commit history…",
     "fileNoMatch": "No matches",
+    "fileNameUnavailable": "File-name matching is unavailable (timed out) — showing full-text matches only",
+    "contentStillSearching": "Names are in — still scanning file contents…",
     "fileEmptyHint": "Enter a keyword to search file content",
     "gitNoMatch": "No matching commits",
     "docNoMatch": "No matching documents",
@@ -2017,6 +2019,13 @@
     "formInstallHint": "Install hint",
     "formInstallScript": "Install script name"
   },
+  "datePicker": {
+    "placeholder": "Select date",
+    "prevMonth": "Previous month",
+    "nextMonth": "Next month",
+    "today": "Today",
+    "clear": "Clear"
+  },
   "pm": {
     "settingsPanel": {
       "title": "Project Settings",
@@ -2133,6 +2142,9 @@
       "description": "Description",
       "parentTask": "Parent task",
       "noParent": "No parent task",
+      "change": "Change",
+      "addDependency": "Add dependency",
+      "dependencyCycle": "waits for this task",
       "created": "Created",
       "updated": "Updated",
       "status": "Status",
