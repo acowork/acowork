@@ -40,6 +40,28 @@ function drawer(): HTMLElement {
   return el as HTMLElement;
 }
 
+/**
+ * Whether a control wears the accent highlight RIGHT NOW, as opposed to only
+ * when hovered.
+ *
+ * This is the one place the suite reads a class name, and it has to: the
+ * highlight is paint, and jsdom computes no Tailwind. What is asserted is a
+ * single exact token via `classList` — not the class string — so the accent can
+ * be restyled without reddening this file, but a highlight that silently
+ * degrades to `hover:` (i.e. one that dies the moment the pointer leaves the
+ * button for its own drawer) fails.
+ *
+ * `classList.contains` is exact-token, which is what makes this distinction
+ * possible: `hover:text-[var(--color-accent)]` is a different token from
+ * `text-[var(--color-accent)]`.
+ */
+const ACCENT_TEXT = "text-[var(--color-accent)]";
+const ACCENT_BG = "bg-[var(--color-accent)]/12";
+
+function isLit(el: HTMLElement): boolean {
+  return el.classList.contains(ACCENT_TEXT) && el.classList.contains(ACCENT_BG);
+}
+
 function renderRow(props: Partial<React.ComponentProps<typeof RunBlockActionRow>> = {}) {
   return render(
     <RunBlockActionRow
@@ -231,5 +253,45 @@ describe("RunBlockActionRow", () => {
       name: "chatView.block.actionCopy",
     }) as HTMLButtonElement;
     expect(button.disabled).toBe(true);
+  });
+
+  it("lights the message button for as long as its drawer is open", async () => {
+    renderRow();
+    const row = drawer().parentElement as HTMLElement;
+    const reply = () =>
+      screen.getByRole("button", {
+        name: "chatView.block.replyPlaceholder",
+      }) as HTMLButtonElement;
+
+    expect(isLit(reply())).toBe(false);
+    fireEvent.mouseEnter(row);
+    expect(drawer().getAttribute("data-state")).toBe("open");
+    // The drawer hangs off the button, so the button owns the highlight while
+    // the field is open — including once the pointer has left the button itself
+    // to type in the field (the CSS `:hover` the row used to rely on is gone by
+    // then, which is exactly the flicker this locks out).
+    expect(isLit(reply())).toBe(true);
+
+    // Closed means dark again: the tint's lifetime is the drawer's.
+    fireEvent.mouseLeave(row);
+    await waitFor(() =>
+      expect(drawer().getAttribute("data-state")).toBe("closed"),
+    );
+    expect(isLit(reply())).toBe(false);
+  });
+
+  it("keeps the message button lit after a latch lets go of the pointer", async () => {
+    renderRow();
+    fireEvent.click(
+      screen.getByRole("button", { name: "chatView.block.replyPlaceholder" }),
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox")),
+    );
+    const reply = screen.getByRole("button", {
+      name: "chatView.block.replyPlaceholder",
+    });
+    // Latched open with the caret in the field: no pointer involved at all.
+    expect(isLit(reply)).toBe(true);
   });
 });
