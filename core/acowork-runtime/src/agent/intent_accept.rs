@@ -166,6 +166,7 @@ mod tests {
             status: String::new(),
             has_human: None,
             chat_attachment_ids: Vec::new(),
+            chat_row_id: String::new(),
         }
     }
 

@@ -85,6 +85,9 @@ pub enum ControlAction {
         has_human: Option<bool>,
         /// Chat attachment ids from a human message; bytes are pulled over HTTP.
         chat_attachment_ids: Vec<String>,
+        /// The durable Chat row this delivery opens or answers, declared by the
+        /// Gateway that wrote it (ADR-106 D3). Empty = no row: an origin turn.
+        chat_row_id: String,
     },
 }
 
@@ -121,6 +124,7 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             status: intent.status,
             has_human: intent.has_human_participant,
             chat_attachment_ids: intent.chat_attachment_ids,
+            chat_row_id: intent.chat_row_id,
         },
     };
 

@@ -248,6 +248,13 @@ pub enum SessionMessage {
         /// id is carried here, so attachment pulls fall back to this
         /// coordinate. Never rendered; purely the pull address.
         in_reply_to: String,
+        /// ADR-106 D3 (rev. 2026-11-06): the durable Chat row this turn opens
+        /// or answers, as declared by the Gateway that wrote it. Becomes the
+        /// reference row's `in_reply_to`, so the block hangs under the sentence
+        /// that asked for the work. Empty = an origin turn (agent-to-agent,
+        /// cron) — the reference row stays unthreaded rather than pointing at a
+        /// coordinate no transcript holds.
+        chat_row_id: String,
         /// A `pm_task` dispatch's model-facing wake-up playbook (claim →
         /// work → submit). Injected into the turn's system block via
         /// `ContextBuilder::set_task_brief` — never part of `content`,
@@ -1402,6 +1409,7 @@ impl SessionTask {
                     chat_attachment_ids,
                     attached_items,
                     in_reply_to,
+                    chat_row_id,
                     assignment_brief,
                     task_id,
                     opened_new,
@@ -1479,11 +1487,7 @@ impl SessionTask {
                     // stays unthreaded rather than pointing at its own intent id.
                     agent_loop.turn_reference = crate::agent::intent_turn::TurnReference {
                         trigger_message_id: if write_back {
-                            crate::agent::intent_turn::chat_row_id(
-                                &message_id,
-                                &in_reply_to,
-                            )
-                            .to_string()
+                            chat_row_id.clone()
                         } else {
                             String::new()
                         },

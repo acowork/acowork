@@ -393,11 +393,13 @@ mod tests {
             answer(&dir, &sid, "human-1", "c-1"),
             Err(AnswerError::OriginGone)
         );
-        // Not a card at all (a plain notice) has nothing to answer.
+        // Not a card at all (a plain notice) has nothing to answer. Written as
+        // history too: `delivery_failed` is a threaded notice, and the store
+        // refuses a coordinate that resolves to nothing (ADR-106 D14).
         let mut notice = card("c-2", "m-ghost");
         notice.meta.notice_type = "delivery_failed".into();
         notice.meta.options.clear();
-        append_message(&dir, &sid, &notice, 3).unwrap();
+        append_as_history(&dir, &sid, &notice);
         assert_eq!(
             answer(&dir, &sid, "human-1", "c-2"),
             Err(AnswerError::NotACard)

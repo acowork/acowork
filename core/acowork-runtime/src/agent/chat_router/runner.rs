@@ -1047,19 +1047,16 @@ async fn run_turn(
                 candidate,
             );
             // The question points at the human's own row — the same coordinate
-            // the round reference row and the level-3 card use (`chat_row_id`),
-            // never the envelope's per-target delivery id: a card threaded
-            // under an id no row carries can never be answered.
+            // the round reference row and the level-3 card use (the declared
+            // `chat_row_id`), never the envelope's per-target delivery id: a
+            // card threaded under an id no row carries can never be answered.
             let asked = crate::agent::intent_turn::emit_session_choice(
                 &deps.instance_id,
                 &deps.gateway_host,
                 &deps.node_token,
                 &chat_id,
                 &envelope.from,
-                crate::agent::intent_turn::chat_row_id(
-                    &envelope.message_id,
-                    &envelope.in_reply_to,
-                ),
+                &envelope.chat_row_id,
                 "confirm_continue",
                 vec![option],
             )
@@ -1157,6 +1154,11 @@ async fn run_turn(
                                 )
                                 .unwrap_or_default(),
                                 in_reply_to: envelope.in_reply_to.clone(),
+                                // ADR-106 D3: the Chat row this turn answers, as
+                                // declared by the Gateway. A router-bound turn
+                                // always has one (the row it was handed), and it
+                                // is what the block hangs under.
+                                chat_row_id: envelope.chat_row_id.clone(),
                                 // The router only takes Chat-originated
                                 // turns (policy.router_eligible); a PM
                                 // dispatch's brief never arrives here. The task
@@ -2107,6 +2109,9 @@ mod tests {
             status: String::new(),
             has_human: Some(true),
             chat_attachment_ids: Vec::new(),
+            // A router envelope is always a Chat row the Gateway wrote; the
+            // declared coordinate is that row.
+            chat_row_id: "m-1".into(),
         }
     }
 

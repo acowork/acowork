@@ -74,6 +74,7 @@ fn req(target: &str) -> DeliveryRequest {
         status: String::new(),
         has_human: None,
         chat_attachment_ids: Vec::new(),
+        chat_row_id: String::new(),
     }
 }
 
@@ -645,6 +646,7 @@ fn intent_wire_fields_roundtrip() {
         status: String::new(),
         has_human_participant: None,
         chat_attachment_ids: vec!["att-1".into()],
+        chat_row_id: "m-7".into(),
     };
     let cmd = ControlCommand {
         instance_id: TARGET.into(),

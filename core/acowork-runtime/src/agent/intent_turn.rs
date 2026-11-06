@@ -546,37 +546,6 @@ pub fn router_answer_meta(request_message_id: &str) -> serde_json::Value {
     })
 }
 
-/// The **durable Chat row** a delivery answers — one fact, one derivation, three
-/// writers.
-///
-/// Three things the Runtime writes are threaded under the human's row rather
-/// than beside it: the round's `execution_round` reference row (D3), the level-3
-/// `session_choice` card and the level-5 `confirm_continue` card (D6). All three
-/// need the same coordinate, and it is **not** the envelope's `message_id`:
-///
-/// - a 1:1 Chat message is delivered under its own row id, so `message_id` IS
-///   the row and `in_reply_to` is empty;
-/// - a group `@` fan-out delivers one row to N targets, each under its own uuid
-///   (`message_id` — the mailbox and acceptance coordinate), and hands the
-///   shared `user_message` id over as `in_reply_to`. That per-target id names no
-///   row anywhere: a card written under it asks about a message the Chat cannot
-///   find, so `GET …/answer` answers `origin_gone` (422), the re-delivery never
-///   happens, and the transcript keeps a question nothing can answer. That is
-///   the 2026-11-06 defect this function exists to close;
-/// - a `response` and a PM dispatch carry no Chat row at all — their turns owe
-///   no write-back and ask no question on that surface.
-///
-/// One reader is the point: the round reference row already preferred
-/// `in_reply_to`, the card writers did not, and two spellings of one fact is
-/// exactly how the halves drift apart.
-pub fn chat_row_id<'a>(message_id: &'a str, in_reply_to: &'a str) -> &'a str {
-    if in_reply_to.is_empty() {
-        message_id
-    } else {
-        in_reply_to
-    }
-}
-
 /// The `meta` of a Chat choice card (ADR-106 D6 levels 3 and 5).
 ///
 /// A card is the Chat's own question, so it rides the already-appendable
@@ -1178,29 +1147,6 @@ mod tests {
             ""
         );
         assert_eq!(extract_assignment_brief("pm_task", &serde_json::json!({})), "");
-    }
-
-    #[test]
-    fn a_cards_thread_coordinate_is_the_durable_chat_row() {
-        // The 2026-11-06 field defect: in a project group, @Agent with ten
-        // candidate sessions wrote the level-3 choice card under the *per-target
-        // delivery id*. No row carries that id, so `GET …/answer` answered 422
-        // `origin_gone`: the card could not be answered, no execution session
-        // was created, and the send stayed parked on "正在处理…" forever.
-        //
-        // A group `@` fan-out hands the shared `user_message` id over as
-        // `in_reply_to`; the per-target id stays the mailbox coordinate.
-        assert_eq!(
-            chat_row_id("fan-out-uuid", "0309a7b1-row"),
-            "0309a7b1-row",
-            "the multi-target delivery is threaded under the human's one row"
-        );
-        // 1:1: the message IS the row, and there is no second coordinate.
-        assert_eq!(chat_row_id("chat-row-id", ""), "chat-row-id");
-        // A `response` / PM dispatch: no row arrived, so the caller gets the
-        // inbound id back rather than an empty string. Those turns write no
-        // card and owe no write-back, so nothing threads under it.
-        assert_eq!(chat_row_id("pm-t-1-gen1", ""), "pm-t-1-gen1");
     }
 
     #[test]

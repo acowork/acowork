@@ -1048,7 +1048,8 @@ fn validate_session_id(id: &str) -> Result<(), String> {
 ///    `interaction_request` and the threaded notice types
 ///    (`chat_kinds::THREADED_NOTICES`) must carry `meta.in_reply_to`; an
 ///    `execution_round` reference carries it when the turn started in the chat
-///    and has none when it did not (see the note in the body). That
+///    and has none when it did not, and an `agent_message` that carries a
+///    `meta.task_id` is an assignment opening a task thread (ADR-106 D14). That
 ///    coordinate is the only thing that lets the projection answer "was this
 ///    answered", "which block am I in", "is this card open" from the log
 ///    alone; a row without it is an orphan the reader must guess about.
@@ -1082,7 +1083,19 @@ pub fn check_write_contract(msg: &SessionMessage) -> Result<(), String> {
     // `TurnReference::trigger_message_id`), and inventing a coordinate would
     // hang the block under a phantom message. Absence *is* the fact here, which
     // is why it is a legal empty rather than a missing field.
-    let threaded = msg.kind == KIND_AGENT_MESSAGE
+    // An `agent_message` is agent speech in two honest shapes: an **answer**
+    // (threaded under the row that asked it) and an **assignment** (ADR-106 D14:
+    // the row carries `meta.task_id`, so it opens a task thread — no sentence in
+    // this chat asked for that work, and inventing a coordinate for it is what
+    // produced a round block with no sentence above it). Anything else would be
+    // speech claiming to answer something it does not name.
+    let assignment = msg.kind == KIND_AGENT_MESSAGE
+        && msg
+            .meta
+            .task_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty());
+    let threaded = (msg.kind == KIND_AGENT_MESSAGE && !assignment)
         || msg.kind == KIND_INTERACTION_REQUEST
         || (is_notice && acowork_core::intent::chat_kinds::is_threaded_notice(notice_type));
     if threaded && msg.meta.in_reply_to.trim().is_empty() {
@@ -1233,36 +1246,38 @@ pub fn append_message(
         return Ok((existing, false));
     }
 
-    // A card is a question about a **row**, and a question whose row is not in
-    // the log can never be answered: `GET …/answer` can only refuse it, so the
-    // click it offers is a dead end that stays on the transcript forever (the
-    // log is append-only, so nothing later repairs it).
+    // **A coordinate must resolve** (ADR-106 D14). Every row that threads under
+    // another — the round's reference row, the router's answer, a card, a
+    // receipt — names the row it answers, and that row must be in this log: a
+    // coordinate that resolves to nothing is a second kind of lie, because the
+    // transcript then reads as if something was asked that nothing holds. Three
+    // measured defects had exactly this shape — a card under a group fan-out's
+    // per-target delivery uuid, a round under a `pm-` mailbox id, a receipt
+    // under a peer request's id — and each one cost a human-visible hole: a
+    // question nobody could answer (`…/answer` → 422 `origin_gone`), a block
+    // with no sentence above it, a receipt floating in no thread.
     //
-    // This is deliberately the one place the store resolves a reference. Every
-    // other dangling coordinate is legitimate — an `execution_round` for a PM
-    // dispatch names no chat row by design (ADR-106 D12), and a
-    // `budget_exhausted` receipt names a request that never became one. A card
-    // is different in kind: being answerable IS what it is, so "cannot be
-    // answered" must be unrepresentable rather than merely discouraged. The
-    // index is already loaded here for the idempotency lookup, so the check
-    // costs one hash look.
+    // Design 31 §6 used to reserve reference resolution for the projection, so
+    // that storage never vetoed what a reader could merely report. The veto is
+    // right after all, and cheap: the line index is already loaded here for the
+    // idempotency lookup above, so this is one hash probe. The case that
+    // motivated the exception — a `budget_exhausted` receipt naming a request
+    // that never became a row — is fixed at its producer instead: that receipt
+    // is now an **origin** and carries no coordinate at all.
     //
-    // Measured: a group `@` fan-out wrote its card under the per-target delivery
-    // uuid instead of the human's row (`8965a064-…` naming nothing in the chat
-    // it was written to), and every such card was born dead — the send parked,
-    // no execution session was created, and the surface kept painting options
-    // that answered `origin_gone` (422) on every click.
-    if msg.kind == KIND_SYSTEM_NOTICE
-        && acowork_core::intent::chat_kinds::is_card_notice(msg.meta.notice_type.as_str())
-    {
-        let subject = msg.meta.in_reply_to.trim();
-        if !subject.is_empty() && !lock(&index).ids.contains_key(subject) {
-            return Err(format!(
-                "a {} card must ask about a row this chat holds — `in_reply_to` names no \
-                 message: {subject}",
-                msg.meta.notice_type
-            ));
-        }
+    // An empty `in_reply_to` is always legal. That is the *origin* row: the work
+    // was not asked by a sentence in this chat (an agent-to-agent request, a
+    // cron wake, a task assignment the author opened), and absence is the fact.
+    let parent = msg.meta.in_reply_to.trim();
+    if !parent.is_empty() && !lock(&index).ids.contains_key(parent) {
+        return Err(format!(
+            "a {} row names in_reply_to '{parent}', which is not in this chat's log: a coordinate that resolves to nothing cannot be answered, threaded or displayed — write the row it answers first, or leave it empty (an origin row)",
+            if msg.kind == KIND_SYSTEM_NOTICE {
+                msg.meta.notice_type.as_str()
+            } else {
+                msg.kind.as_str()
+            }
+        ));
     }
 
     // §4.2 (Wave 2a.1): every durable row carries a `message_id`. The
@@ -3343,25 +3358,12 @@ mod tests {
         dir
     }
 
-    /// The id every threaded fixture row answers.
-    const HEAD: &str = "head-message";
-
-    /// A row as a producer would write it. Rows that answer something carry the
-    /// coordinate they answer (`HEAD`): the write contract requires it (design
-    /// 31 §5.2), and a fixture without one models a row the store refuses —
-    /// which is [`unthreaded`]'s job.
+    /// A row as a producer would write it, with **no thread coordinate** — the
+    /// origin shape (ADR-106 D14). Most fixtures do not model a conversation, so
+    /// the honest default is "nothing above this row"; a test that needs the
+    /// answering shape threads it explicitly with [`answering`], which the write
+    /// contract only accepts when the named row is really in the log.
     fn msg(from: &str, kind: &str, body: &str, message_id: &str) -> SessionMessage {
-        let mut m = unthreaded(from, kind, body, message_id);
-        if kind == KIND_AGENT_MESSAGE || kind == KIND_EXECUTION_ROUND || kind == KIND_INTERACTION_REQUEST
-        {
-            m.meta.in_reply_to = HEAD.to_string();
-        }
-        m
-    }
-
-    /// The same row with no thread coordinate — for the tests that assert the
-    /// contract itself.
-    fn unthreaded(from: &str, kind: &str, body: &str, message_id: &str) -> SessionMessage {
         SessionMessage {
             seq: 0,
             ts: 0,
@@ -3376,6 +3378,38 @@ mod tests {
             attachment_ids: Vec::new(),
             attachments: Vec::new(),
         }
+    }
+
+    /// Append a row straight into the log, bypassing the write contract — the
+    /// only honest way to model a transcript an older build wrote (its
+    /// coordinates may name rows no current producer would mint).
+    fn append_as_history(dir: &Path, sid: &str, row: &SessionMessage) {
+        use std::io::Write;
+        let path = session_dir(dir, sid).join("messages.jsonl");
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open log");
+        writeln!(f, "{}", serde_json::to_string(row).expect("serialize")).expect("append");
+    }
+
+    /// Write the question a fixture's agent row answers. The write entry refuses
+    /// an `agent_message` that names nothing (ADR-106 D14) — agent speech in a
+    /// chat is an answer or an assignment, so a fixture that models the former
+    /// writes the row it answers first.
+    fn seed_question(dir: &Path, sid: &str, human: &str) -> String {
+        let q = msg(human, KIND_USER_MESSAGE, "where is it", "q-0");
+        append_message(dir, sid, &q, 0).expect("seed question");
+        "q-0".to_string()
+    }
+
+    /// The answering shape: agent speech threaded under the row it answers.
+    /// The parent must be in the log — the write entry refuses a coordinate that
+    /// resolves to nothing, so a caller writes the parent first.
+    fn answering(mut row: SessionMessage, parent: &str) -> SessionMessage {
+        row.meta.in_reply_to = parent.to_string();
+        row
     }
 
     use crate::search_index::Category;
@@ -3703,8 +3737,13 @@ mod tests {
         );
         let dir = temp_dir();
         let s = pair_session(&dir);
-        let (stored, _) = append_message(&dir, &s.session_id, &req.message, 1).unwrap();
-        assert_eq!(stored.meta.resolution.as_deref(), Some("answered"));
+        // A retired writer's row is history, not a new write: its coordinate
+        // names a card id no current producer mints, and the write contract now
+        // refuses a coordinate that resolves to nothing (ADR-106 D14). The row
+        // goes straight into the log, exactly as the old build left it.
+        let refusal = append_message(&dir, &s.session_id, &req.message, 1).unwrap_err();
+        assert!(refusal.contains("in_reply_to"), "{refusal}");
+        append_as_history(&dir, &s.session_id, &req.message);
         let (rows, _) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
         let out = serde_json::to_value(&rows[0]).unwrap();
         assert_eq!(out["meta"]["resolution"], "answered");
@@ -3796,7 +3835,7 @@ mod tests {
         append_message(
             &dir,
             &s.session_id,
-            &msg("agent-1", KIND_AGENT_MESSAGE, "分页已修复", "a-1"),
+            &answering(msg("agent-1", KIND_AGENT_MESSAGE, "分页已修复", "a-1"), "m-1"),
             4,
         )
         .expect("chat-native answer");
@@ -3861,10 +3900,21 @@ mod tests {
         let s = pair_session(&dir);
         let sid = &s.session_id;
         // Text rows (newest appended last → higher line_pos).
-        append_message(&dir, sid, &msg("human-1", KIND_USER_MESSAGE, "hello wide world", ""), 1)
-            .unwrap();
-        append_message(&dir, sid, &msg("agent-1", KIND_AGENT_MESSAGE, "another note here", ""), 2)
-            .unwrap();
+        let asked = append_message(
+            &dir,
+            sid,
+            &msg("human-1", KIND_USER_MESSAGE, "hello wide world", ""),
+            1,
+        )
+        .unwrap()
+        .0;
+        append_message(
+            &dir,
+            sid,
+            &answering(msg("agent-1", KIND_AGENT_MESSAGE, "another note here", ""), &asked.meta.message_id),
+            2,
+        )
+        .unwrap();
         // An image row and a file row (attachments resolved from the dir).
         let img = store_attachment(&dir, sid, "human-1", "shot.png", "image/png", b"fakepng").unwrap();
         let mut im = msg("human-1", KIND_USER_MESSAGE, "see the picture", "");
@@ -4459,7 +4509,11 @@ mod tests {
             1,
         )
         .unwrap();
-        let m = msg("inst-a", KIND_AGENT_MESSAGE, "do it", "mid-1");
+        // An agent-to-agent chat holds no human, so an `agent_message` there can
+        // only be an assignment (ADR-106 D14): it opens a task thread instead of
+        // answering a question this chat never asked.
+        let mut m = msg("inst-a", KIND_AGENT_MESSAGE, "do it", "mid-1");
+        m.meta.task_id = Some("t-1".into());
         let (first, wrote1) = append_message(&dir, &s.session_id, &m, 5).unwrap();
         let (second, wrote2) = append_message(&dir, &s.session_id, &m, 9).unwrap();
         assert!(wrote1 && !wrote2, "redelivery must not double-write");
@@ -4490,12 +4544,13 @@ mod tests {
             1,
         )
         .unwrap();
+        let m1 = seed_question(&dir, &s.session_id, "u");
         let mut dispatched = msg("ag", KIND_SYSTEM_NOTICE, "", "td:m1");
         dispatched.meta.notice_type = "turn_dispatched".into();
-        dispatched.meta.in_reply_to = "m1".into();
+        dispatched.meta.in_reply_to = m1.clone();
         let mut started = msg("ag", KIND_SYSTEM_NOTICE, "", "ts:m1");
         started.meta.notice_type = "turn_started".into();
-        started.meta.in_reply_to = "m1".into();
+        started.meta.in_reply_to = m1.clone();
 
         assert!(append_message(&dir, &s.session_id, &dispatched, 1)
             .unwrap()
@@ -4505,7 +4560,7 @@ mod tests {
             wrote_start,
             "a `ts:` start row must not collapse into the `td:` dispatch row"
         );
-        assert_eq!(start_row.seq, 2, "the two milestones are ordered rows");
+        assert_eq!(start_row.seq, 3, "the question and both milestones are ordered rows");
         // A redelivery of the dispatch milestone is still idempotent.
         assert!(
             !append_message(&dir, &s.session_id, &dispatched, 3)
@@ -4514,7 +4569,10 @@ mod tests {
             "redelivery of the same `td:` id must not double-write"
         );
         let (_, total) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
-        assert_eq!(total, 2, "exactly one dispatch row + one start row");
+        assert_eq!(
+            total, 3,
+            "the question, exactly one dispatch row, exactly one start row"
+        );
     }
 
     #[test]
@@ -4538,9 +4596,10 @@ mod tests {
             1,
         )
         .unwrap();
+        let asked = seed_question(&dir, &s.session_id, "u");
         let mut started = msg("ag", KIND_SYSTEM_NOTICE, "", "ts:m1");
         started.meta.notice_type = "turn_started".into();
-        started.meta.in_reply_to = "m1".into();
+        started.meta.in_reply_to = asked;
         started.meta.agent_session_id = "exec-9".into();
         started.meta.turn_mode = Some("new".into());
         append_message(&dir, &s.session_id, &started, 1).unwrap();
@@ -4579,10 +4638,11 @@ mod tests {
         )
         .unwrap();
         // The agent's reply: the human (not the sender) gains one unread.
+        let q = seed_question(&dir, &s.session_id, "u");
         append_message(
             &dir,
             &s.session_id,
-            &msg("ag", KIND_AGENT_MESSAGE, "a reply", "a-1"),
+            &answering(msg("ag", KIND_AGENT_MESSAGE, "a reply", "a-1"), &q),
             1,
         )
         .unwrap();
@@ -4592,12 +4652,15 @@ mod tests {
         );
 
         // Both pointer rows land (distinct ids, not deduped) but move no unread.
+        // They are threaded to the message they point at, so that message is in
+        // the log: a coordinate must resolve (ADR-106 D14).
+        let pointed_at = seed_question(&dir, &s.session_id, "u");
         let mut dispatched = msg("ag", KIND_SYSTEM_NOTICE, "", "td:m1");
         dispatched.meta.notice_type = "turn_dispatched".into();
-        dispatched.meta.in_reply_to = "m1".into();
+        dispatched.meta.in_reply_to = pointed_at.clone();
         let mut started = msg("ag", KIND_SYSTEM_NOTICE, "", "ts:m1");
         started.meta.notice_type = "turn_started".into();
-        started.meta.in_reply_to = "m1".into();
+        started.meta.in_reply_to = pointed_at.clone();
         assert!(append_message(&dir, &s.session_id, &dispatched, 2)
             .unwrap()
             .1);
@@ -4633,13 +4696,17 @@ mod tests {
         // The four writable kinds.
         assert!(append_message(&dir, &s.session_id, &msg("u", KIND_USER_MESSAGE, "hi", ""), 1)
             .is_ok());
-        assert!(
-            append_message(&dir, &s.session_id, &msg("ag", KIND_AGENT_MESSAGE, "yo", ""), 2)
-                .is_ok()
-        );
+        let q = seed_question(&dir, &s.session_id, "u");
+        assert!(append_message(
+            &dir,
+            &s.session_id,
+            &answering(msg("ag", KIND_AGENT_MESSAGE, "yo", ""), &q),
+            2
+        )
+        .is_ok());
         // A well-formed card: `interaction` payload + answerable target
         // (the §5.5.4 shape checks reject a bare row).
-        let mut ir = msg("ag", KIND_INTERACTION_REQUEST, "pick one", "ir-1");
+        let mut ir = answering(msg("ag", KIND_INTERACTION_REQUEST, "pick one", "ir-1"), &q);
         ir.to = "u".into();
         ir.meta.interaction = Some(InteractionPayload {
             kind: "ask_question".into(),
@@ -4695,7 +4762,7 @@ mod tests {
         // 1. An unregistered payload key. The error names the key: a silently
         //    dropped `options` is exactly how a card reached the surface as a
         //    sentence with no buttons.
-        let mut stray = unthreaded("u", KIND_USER_MESSAGE, "hi", "m-1");
+        let mut stray = msg("u", KIND_USER_MESSAGE, "hi", "m-1");
         stray
             .meta
             .unregistered
@@ -4708,7 +4775,7 @@ mod tests {
         let err = append_message(
             &dir,
             &s.session_id,
-            &unthreaded("ag", KIND_AGENT_MESSAGE, "on it", "m-2"),
+            &msg("ag", KIND_AGENT_MESSAGE, "on it", "m-2"),
             2,
         )
         .unwrap_err();
@@ -4717,7 +4784,7 @@ mod tests {
         // orphan: a turn dispatched from a task or the execution surface has no
         // chat question to answer, and pointing at a phantom row would hang the
         // block under a message nobody wrote (design 31 §5.2).
-        let mut round = unthreaded("ag", KIND_EXECUTION_ROUND, "", "m-3");
+        let mut round = msg("ag", KIND_EXECUTION_ROUND, "", "m-3");
         round.meta.round_id = "r:m-1".into();
         round.meta.agent_session_id = "s-1".into();
         append_message(&dir, &s.session_id, &round, 3).expect("an origin reference row");
@@ -4725,7 +4792,7 @@ mod tests {
         // 3. A card is a question with answers and an exit (ADR-106 D6): no
         //    options = unclickable, no `allow_new_task` = no escape, and no row
         //    above it = a question nothing can ever answer.
-        let mut card = unthreaded("ag", KIND_SYSTEM_NOTICE, "", "c-1");
+        let mut card = msg("ag", KIND_SYSTEM_NOTICE, "", "c-1");
         card.meta.notice_type = "confirm_continue".into();
         card.meta.in_reply_to = "m-1".into();
         let err = append_message(&dir, &s.session_id, &card, 4).unwrap_err();
@@ -4760,7 +4827,7 @@ mod tests {
 
         // 4. A channel-scoped notice answers no row and is still legal: the
         //    request it names never became a durable one (design 31 §9-3).
-        let mut limit = unthreaded("ag", KIND_SYSTEM_NOTICE, "", "n-1");
+        let mut limit = msg("ag", KIND_SYSTEM_NOTICE, "", "n-1");
         limit.meta.notice_type = "budget_exhausted".into();
         append_message(&dir, &s.session_id, &limit, 9).expect("a channel fact needs no thread");
     }
@@ -5025,15 +5092,14 @@ mod tests {
             append_message(&dir, &s.session_id, &msg("ag", KIND_USER_MESSAGE, "hi", ""), 2).is_err()
         );
         // A human cannot forge an agent response.
-        let mut r = msg("u", KIND_AGENT_MESSAGE, "x", "mid-9");
-        r.meta.in_reply_to = "mid-8".into();
+        let r = answering(msg("u", KIND_AGENT_MESSAGE, "x", "mid-9"), "mid-8");
         assert!(append_message(&dir, &s.session_id, &r, 2).is_err());
         // The honest directions work.
         assert!(
-            append_message(&dir, &s.session_id, &msg("u", KIND_USER_MESSAGE, "hi", ""), 2).is_ok()
+            append_message(&dir, &s.session_id, &msg("u", KIND_USER_MESSAGE, "hi", "mid-8"), 2)
+                .is_ok()
         );
-        let mut ok_r = msg("ag", KIND_AGENT_MESSAGE, "done", "mid-10");
-        ok_r.meta.in_reply_to = "mid-8".into();
+        let ok_r = answering(msg("ag", KIND_AGENT_MESSAGE, "done", "mid-10"), "mid-8");
         assert!(append_message(&dir, &s.session_id, &ok_r, 2).is_ok());
     }
 
@@ -5167,7 +5233,11 @@ mod tests {
             1,
         )
         .unwrap();
-        let mut card = msg("a1", KIND_INTERACTION_REQUEST, "Approve `bash`?", "card-1");
+        let asked = seed_question(&dir, &s.session_id, "u1");
+        let mut card = answering(
+            msg("a1", KIND_INTERACTION_REQUEST, "Approve `bash`?", "card-1"),
+            &asked,
+        );
         card.to = "u1".into();
         card.meta.notice_type = String::new();
         card.meta.interaction = Some(InteractionPayload {
@@ -5230,7 +5300,7 @@ mod tests {
         append_message(
             &dir,
             &g.session_id,
-            &msg("ag", KIND_AGENT_MESSAGE, "  latest tail  ", "m2"),
+            &answering(msg("ag", KIND_AGENT_MESSAGE, "  latest tail  ", "m2"), "m1"),
             3,
         )
         .unwrap();
@@ -5387,7 +5457,7 @@ mod tests {
         append_message(
             &dir,
             &s.session_id,
-            &msg("ag", KIND_AGENT_MESSAGE, "a reply", "plain-1"),
+            &answering(msg("ag", KIND_AGENT_MESSAGE, "a reply", "plain-1"), "pinned-1"),
             3,
         )
         .unwrap();
@@ -5426,8 +5496,24 @@ mod tests {
     fn unread_increments_for_others_and_clears_on_read() {
         let dir = temp_dir();
         let s = ua_session(&dir);
-        append_message(&dir, &s.session_id, &msg("u1", KIND_USER_MESSAGE, "hi", ""), 2).unwrap();
-        append_message(&dir, &s.session_id, &msg("ag", KIND_AGENT_MESSAGE, "yo", ""), 3).unwrap();
+        let asked = append_message(
+            &dir,
+            &s.session_id,
+            &msg("u1", KIND_USER_MESSAGE, "hi", ""),
+            2,
+        )
+        .unwrap()
+        .0;
+        append_message(
+            &dir,
+            &s.session_id,
+            &answering(
+                msg("ag", KIND_AGENT_MESSAGE, "yo", ""),
+                &asked.meta.message_id,
+            ),
+            3,
+        )
+        .unwrap();
         let s = load(&dir, &s.session_id).unwrap();
         assert_eq!(s.unread.get("ag").copied(), Some(1));
         assert_eq!(s.unread.get("u1").copied(), Some(1));
@@ -5674,7 +5760,10 @@ mod tests {
                             to: String::new(),
                             meta: IntentMeta {
                                 message_id: format!("w{i}-m{j}"),
-                                in_reply_to: HEAD.to_string(),
+                                // An all-agent group has no human to ask, so
+                                // agent speech here is an assignment (ADR-106
+                                // D14), never a reply.
+                                task_id: Some("t-1".into()),
                                 ..Default::default()
                             },
                             attachment_ids: Vec::new(),
@@ -6432,7 +6521,7 @@ mod tests {
         append_message(
             &dir,
             &g.session_id,
-            &msg("ag", KIND_AGENT_MESSAGE, "second tail", "h-2"),
+            &answering(msg("ag", KIND_AGENT_MESSAGE, "second tail", "h-2"), "h-1"),
             3,
         )
         .unwrap();
