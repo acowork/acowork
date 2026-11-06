@@ -31,6 +31,10 @@
  *   the one failure this pattern is famous for;
  * - the pointer-leave close is deferred a beat, so a cursor crossing the row
  *   does not strobe the field;
+ * - the button's accent tint lasts exactly as long as the drawer (`open`), not
+ *   as long as the pointer is on the button: crossing from the button into its
+ *   own field is the gesture the drawer exists for, and a tint that dropped
+ *   there split the two halves of one object apart. See `ACTION_BUTTON_ACTIVE`;
  * - `focusSignal` (the `@` picker's "去续投" locate) opens the drawer and moves
  *   the caret into it, so the human lands ready to type instead of hunting;
  * - the field is reachable by keyboard: the message button opens and focuses it
@@ -52,9 +56,31 @@ import { OutlineBrainIcon } from "../common/BrainIcon";
 /** One 24×24 hover circle shared by all four controls. Deliberately NOT
  *  `toolbarIconButton` (`h-7 w-7 rounded-md`, sized for the composer's cluster):
  *  these sit next to a 22px block header and read as one quiet row, so they are
- *  a size down and fully round. */
+ *  a size down and fully round.
+ *
+ *  `focus-visible:` mirrors `hover:`: an icon-only control has no label to
+ *  announce that it is the one the keyboard is on, so the same tint stands in
+ *  for the pointer's. */
 const ACTION_BUTTON =
-  "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/12 hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-tertiary";
+  "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-full text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/12 hover:text-[var(--color-accent)] focus-visible:bg-[var(--color-accent)]/12 focus-visible:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-text-tertiary";
+
+/** The tint of an icon that currently OWNS something open — today only the
+ *  message button, while its drawer is out.
+ *
+ *  Why it is not just `hover:`. The drawer is an extension of the button, so
+ *  the human reads the pair as one object and the button has to keep its tint
+ *  for exactly as long as the drawer is visible — including the whole time the
+ *  pointer is in the field, which is where it goes to type. A `hover:` tint
+ *  dies at that boundary and the object appears to fall apart mid-gesture
+ *  (measured: the field stayed open, only the paint dropped). Binding the tint
+ *  to the same `open` flag that sizes the capsule gives the two one lifetime:
+ *  they light and go out together, by construction, whatever the pointer, the
+ *  caret or a latched draft is doing.
+ *
+ *  Appended in the same `cn()` call as `ACTION_BUTTON`, so tailwind-merge drops
+ *  the resting colour outright (verified: `text-text-tertiary` does not survive)
+ *  — no reliance on stylesheet order. */
+const ACTION_BUTTON_ACTIVE = "bg-[var(--color-accent)]/12 text-[var(--color-accent)]";
 
 /**
  * The drawer's open width: the field (300px) + send + the icon's own 24px.
@@ -251,7 +277,7 @@ export function RunBlockActionRow({
             title={replyLabel}
             aria-label={replyLabel}
             aria-expanded={open}
-            className={ACTION_BUTTON}
+            className={cn(ACTION_BUTTON, open && ACTION_BUTTON_ACTIVE)}
           >
             <MessageSquare className={ICON} strokeWidth={1.75} />
           </button>

@@ -50,6 +50,8 @@ const mocks = vi.hoisted(() => ({
   deleteTask: vi.fn(async () => ({})),
   save: vi.fn(async () => ({ ok: true, taskId: "t-new" })),
   reset: vi.fn(),
+  setStartAt: vi.fn(),
+  setDueAt: vi.fn(),
 }));
 
 function detailState() {
@@ -148,8 +150,8 @@ vi.mock("./useTaskForm", () => ({
     setPriority: vi.fn(),
     setDescription: vi.fn(),
     setAssignee: vi.fn(),
-    setDueAt: vi.fn(),
-    setStartAt: vi.fn(),
+    setDueAt: mocks.setDueAt,
+    setStartAt: mocks.setStartAt,
     setParentId: vi.fn(),
     toggleDependency: vi.fn(),
     assigneeOptions: [],
@@ -166,7 +168,9 @@ vi.mock("./useTaskForm", () => ({
 }));
 
 vi.mock("../../i18n/useTranslation", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  // The hook's real shape: `DatePicker` reads the language for its weekday
+  // initials, so a `{ t }`-only mock is a lie that only shows up at runtime.
+  useTranslation: () => ({ t: (key: string) => key, i18n: { language: "en" } }),
 }));
 
 import { TaskEditDialog } from "./TaskEditDialog";
@@ -236,7 +240,13 @@ beforeEach(() => {
   // leak that failure into the next test.
   mocks.save = vi.fn(async () => ({ ok: true, taskId: "t-new" }));
   mocks.reset.mockClear();
+  mocks.setStartAt.mockClear();
+  mocks.setDueAt.mockClear();
 });
+
+// 删除按钮现在有可见文字（安静的行内红字），所以按无障碍名取，而不是 aria-label。
+const deleteButton = () => screen.getByRole("button", { name: "pm.task.delete" });
+const queryDeleteButton = () => screen.queryByRole("button", { name: "pm.task.delete" });
 
 describe("chrome — the box the user asked to keep", () => {
   it("is a fixed-height box, so nothing resizes it when sections appear", () => {
@@ -304,20 +314,55 @@ describe("chrome — the box the user asked to keep", () => {
     expect(labels).toEqual(["pm.task.tabs.basic", "pm.task.tabs.related"]);
   });
 
-  it("type / priority / assignee share one row", () => {
-    const { container } = render(<TaskEditDialog onClose={() => {}} />);
-    const cells = Array.from(container.querySelector(".grid.grid-cols-3")?.children ?? []);
-    expect(cells).toHaveLength(3);
-    const first = cells.map((c) => (c.querySelector("span")?.textContent ?? "").trim());
-    expect(first).toEqual(["pm.task.type", "pm.task.priority", "pm.task.assignee"]);
+  // 一行要么排满，要么它就是半行空档。类型 / 优先级 / 状态 一行，指派给 + 两个
+  // 日期 一行 —— 3 + 3，两行都排到最后一列。
+  it("type / priority / status fill one row", () => {
+    render(<TaskEditDialog onClose={() => {}} />);
+    const cells = Array.from(screen.getByTestId("row-what").children);
+    const labels = cells.map((c) => (c.querySelector("span")?.textContent ?? "").trim());
+    expect(labels).toEqual(["pm.task.type", "pm.task.priority", "pm.task.status"]);
   });
 
-  it("the two dates share one row", () => {
+  it("assignee and the two dates fill one row to its last column", () => {
+    render(<TaskEditDialog onClose={() => {}} />);
+    const cells = Array.from(screen.getByTestId("row-when").children);
+    const labels = cells.map((c) => (c.querySelector("span")?.textContent ?? "").trim());
+    expect(labels).toEqual(["pm.task.assignee", "pm.task.startDate", "pm.task.dueDate"]);
+  });
+
+  // 原生 `<input type="date">` 的弹层是 WebView2 自己画的（不在页面 DOM 里），
+  // 箭头尺寸和底部按钮的底色都改不动 —— 那正是"看着业余"的根因。所以日期字段
+  // 必须是组件库的 DatePicker，且它写回表单的值仍是本地日历日 `YYYY-MM-DD`。
+  it("the date fields are the design-system picker, not a native date input", () => {
+    mocks.values = { startAt: "2026-11-06" };
     const { container } = render(<TaskEditDialog onClose={() => {}} />);
-    const cells = Array.from(container.querySelector(".grid.grid-cols-2")?.children ?? []);
-    expect(cells).toHaveLength(2);
-    const first = cells.map((c) => (c.querySelector("span")?.textContent ?? "").trim());
-    expect(first).toEqual(["pm.task.startDate", "pm.task.dueDate"]);
+    expect(container.querySelector('input[type="date"]')).toBeNull();
+    const triggers = screen.getAllByTestId("date-picker-trigger");
+    expect(triggers).toHaveLength(2);
+    expect(triggers[0].textContent).toContain("2026-11-06");
+    // 空字段读占位符，不再是一个空白原生控件
+    expect(triggers[1].textContent).toContain("datePicker.placeholder");
+  });
+
+  it("picking a day writes the local calendar day back into the form", () => {
+    mocks.values = { startAt: "2026-11-06" };
+    render(<TaskEditDialog onClose={() => {}} />);
+    fireEvent.click(screen.getAllByTestId("date-picker-trigger")[0]);
+    fireEvent.click(screen.getByRole("button", { name: "2026-11-20" }));
+    expect(mocks.setStartAt).toHaveBeenCalledWith("2026-11-20");
+    expect(mocks.setDueAt).not.toHaveBeenCalled();
+  });
+
+  it("dismissing the calendar with Escape leaves the task form open", () => {
+    // 对话框自己在 window 上监听 Escape 来关闭整张表单；日历必须吞掉这个键 ——
+    // 关掉日历不等于丢弃草稿。
+    mocks.values = { startAt: "2026-11-06" };
+    const onClose = vi.fn();
+    render(<TaskEditDialog onClose={onClose} />);
+    fireEvent.click(screen.getAllByTestId("date-picker-trigger")[0]);
+    fireEvent.keyDown(screen.getByRole("button", { name: "2026-11-06" }), { key: "Escape" });
+    expect(screen.queryByTestId("date-picker-popup")).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
   });
 
   it("the title spans the full width", () => {
@@ -325,8 +370,100 @@ describe("chrome — the box the user asked to keep", () => {
     const cell = Array.from(container.querySelectorAll("label")).find((el) =>
       (el.querySelector("span")?.textContent ?? "").trim().startsWith("pm.task.title"),
     );
-    // Its wrapper is the plain stack, not one of the multi-column grids.
-    expect(cell?.parentElement?.className).toContain("space-y-3");
+    // Its wrapper is the plain column, not one of the multi-column grids.
+    const column = cell?.parentElement?.className ?? "";
+    expect(column).toContain("flex-col");
+    expect(column).not.toContain("grid-cols");
+  });
+});
+
+describe("the box is three zones — identity, fields, commit", () => {
+  // 标题栏 = 对话框的身份（标题 + 关闭）；正文 = 这一行的字段（状态也是"这条
+  // 任务现在是什么"，所以它跟类型 / 优先级 同一行）；底栏 = 表单提交，删除停在
+  // 最左角，离 保存 最远。
+  it("the footer parks 删除 at the far left and the form's commit at the right", () => {
+    render(<TaskEditDialog onClose={() => {}} />);
+    const footer = screen.getByRole("dialog").querySelector("footer");
+    expect(footer).toBeTruthy();
+    const labels = Array.from(footer!.querySelectorAll("button")).map((b) =>
+      (b.textContent ?? "").trim(),
+    );
+    expect(labels).toEqual(["pm.task.delete", "common.cancel", "pm.task.save"]);
+    // 一块 flex-1 撑开中间：危险动作与提交路径不相邻
+    expect(footer!.querySelector(".flex-1")).toBeTruthy();
+  });
+
+  it("the header carries only the identity — title and close", () => {
+    render(<TaskEditDialog onClose={() => {}} />);
+    const header = screen.getByRole("dialog").querySelector("header") as HTMLElement;
+    const labels = Array.from(header.querySelectorAll("button")).map(
+      (b) => b.getAttribute("aria-label") ?? (b.textContent ?? "").trim(),
+    );
+    expect(labels).toEqual(["common.close"]);
+    // 标题栏不再挂任何行级动作
+    expect(header.contains(screen.getByLabelText("pm.task.status"))).toBe(false);
+    expect(header.contains(deleteButton())).toBe(false);
+  });
+
+  it("状态 is a field of 基本信息, not chrome on every tab", () => {
+    render(<TaskEditDialog onClose={() => {}} />);
+    const status = screen.getByLabelText("pm.task.status");
+    // 它坐在 类型 / 优先级 那一行的第三格
+    expect(screen.getByTestId("row-what").contains(status)).toBe(true);
+    expect(screen.getByTestId("task-audit").contains(status)).toBe(false);
+    // 换到别的标签页就没有（那些页讲的是内容，不是这一行的属性）
+    openTab("files");
+    expect(screen.queryByLabelText("pm.task.moveTo")).toBeNull();
+  });
+
+  it("a new task has neither — there is no row to move or delete", () => {
+    mocks.mode = "create";
+    mocks.detail = null;
+    render(<TaskEditDialog onClose={() => {}} />);
+    expect(screen.queryByLabelText("pm.task.moveTo")).toBeNull();
+    expect(queryDeleteButton()).toBeNull();
+    // 少一格就少一列：两格仍要排满整行，不留半行空档
+    const cells = Array.from(screen.getByTestId("row-what").children);
+    expect(cells.map((c) => (c.querySelector("span")?.textContent ?? "").trim())).toEqual([
+      "pm.task.type",
+      "pm.task.priority",
+    ]);
+  });
+
+  it("the audit line prints only the facts you cannot edit", () => {
+    // 类型 / 优先级 的正下方就是它们的可编辑下拉框，状态的可编辑控件在头部。
+    // 再只读印一遍，屏幕上就有了两个"当前值"。
+    render(<TaskEditDialog onClose={() => {}} />);
+    const audit = screen.getByTestId("task-audit");
+    expect(audit.textContent).toContain("pm.task.createdBy");
+    expect(audit.textContent).toContain("pm.task.updated");
+    expect(audit.textContent).not.toContain("pm.board.");
+  });
+
+  it("the date fields sit in a full row instead of half a row each", () => {
+    render(<TaskEditDialog onClose={() => {}} />);
+    const [start, due] = screen.getAllByTestId("date-picker-trigger");
+    // 每个日期只坐一行的 1/3：靠列结构变窄，不靠 `w-40` 把半栏填成半栏空。
+    expect(start.parentElement?.parentElement?.className).toContain("grid-cols-3");
+    expect(due.parentElement?.parentElement).toBe(start.parentElement?.parentElement);
+    for (const trigger of [start, due]) {
+      const tokens = trigger.className.split(/\s+/);
+      expect(tokens).toContain("w-full");
+      expect(tokens).not.toContain("w-40");
+    }
+  });
+
+  it("描述 absorbs the height the fixed box has left over", () => {
+    // 标题行 → 三下拉 → 两日期 之后，固定 560px 的盒子里还剩 ≈30px（编辑）/
+    // ≈75px（创建）的死空间。jsdom 没有排版，所以这条契约就是类名本身。
+    render(<TaskEditDialog onClose={() => {}} />);
+    const textarea = document.querySelector("textarea") as HTMLTextAreaElement;
+    expect(textarea).toBeTruthy();
+    expect(textarea.className).toContain("flex-1");
+    expect(textarea.className).toContain("min-h-[7.5rem]");
+    const field = textarea.closest("label") as HTMLElement;
+    expect(field.className).toContain("flex-1");
+    expect(field.className).toContain("flex-col");
   });
 });
 
@@ -354,8 +491,9 @@ describe("the three carried-over capabilities", () => {
     openTab("related");
     expect(screen.getByTestId("subtask-tree")).toBeTruthy();
     expect(screen.getByText("+ pm.task.addSubtask")).toBeTruthy();
-    // Delete is chrome, not content: it stays in the footer on every tab.
-    expect(screen.getByText("pm.task.delete")).toBeTruthy();
+    // Delete is footer chrome again: outside the tab body, so it stays
+    // reachable on every tab.
+    expect(deleteButton()).toBeTruthy();
   });
 
   it("create mode offers none of them — there is no task id to attach to", () => {
@@ -365,7 +503,7 @@ describe("the three carried-over capabilities", () => {
     expect(screen.queryByText("pm.task.uploadAttachment")).toBeNull();
     expect(screen.queryByTestId("activity-section")).toBeNull();
     expect(screen.queryByTestId("subtask-tree")).toBeNull();
-    expect(screen.queryByText("pm.task.delete")).toBeNull();
+    expect(queryDeleteButton()).toBeNull();
     // but the form itself is the same form
     expect(screen.getByText("pm.task.title")).toBeTruthy();
   });
@@ -412,6 +550,23 @@ describe("the three carried-over capabilities", () => {
     expect(mocks.deleteAttachment).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("common.delete"));
     expect(mocks.deleteAttachment).toHaveBeenCalledWith("att-1");
+  });
+
+  // 关联任务的两个候选集都是一棵树里的一块，不是一袋条目：换成树下钻之后，
+  // 这一页不该再出现"把整个项目拍平"的控件（下拉 / 一次性挂满的复选列表）。
+  it("offers a tree to drill into, not a flat dropdown or checkbox wall", () => {
+    render(<TaskEditDialog onClose={() => {}} />);
+    openTab("related");
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByTestId("parent-current")).toBeTruthy();
+    expect(screen.getByText("pm.task.change")).toBeTruthy();
+    expect(screen.getByText("+ pm.task.addDependency")).toBeTruthy();
+    // 没选依赖时没有 chips —— 引用区只在有引用时存在
+    expect(screen.queryByTestId("dependency-chips")).toBeNull();
+    // 点开才长出树
+    expect(screen.queryByTestId("task-tree")).toBeNull();
+    fireEvent.click(screen.getByText("pm.task.change"));
+    expect(screen.getByTestId("task-tree")).toBeTruthy();
   });
 
   it("添加子任务 opens a create form that knows where it came from", () => {
@@ -478,7 +633,7 @@ describe("where saving and deleting land", () => {
     mocks.detail = row({ parent_id: "t-root" });
     const onClose = vi.fn();
     render(<TaskEditDialog onClose={onClose} />);
-    fireEvent.click(screen.getByText("pm.task.delete"));
+    fireEvent.click(deleteButton());
     fireEvent.click(screen.getByText("common.delete"));
     await waitFor(() => expect(mocks.removeTask).toHaveBeenCalledWith("t-1"));
     expect(mocks.openTask).toHaveBeenCalledWith("t-root");
@@ -488,14 +643,14 @@ describe("where saving and deleting land", () => {
   it("deleting a top-level task closes the box", async () => {
     const onClose = vi.fn();
     render(<TaskEditDialog onClose={onClose} />);
-    fireEvent.click(screen.getByText("pm.task.delete"));
+    fireEvent.click(deleteButton());
     fireEvent.click(screen.getByText("common.delete"));
     await waitFor(() => expect(onClose).toHaveBeenCalledTimes(1));
   });
 
   it("the delete goes to the server, cascade included", async () => {
     render(<TaskEditDialog onClose={() => {}} />);
-    fireEvent.click(screen.getByText("pm.task.delete"));
+    fireEvent.click(deleteButton());
     fireEvent.click(screen.getByText("common.delete"));
     await waitFor(() => expect(mocks.deleteTask).toHaveBeenCalledWith("t-1", { cascade: true }));
   });
@@ -505,28 +660,34 @@ describe("where saving and deleting land", () => {
       throw new Error("409");
     });
     render(<TaskEditDialog onClose={() => {}} />);
-    fireEvent.click(screen.getByText("pm.task.delete"));
+    fireEvent.click(deleteButton());
     fireEvent.click(screen.getByText("common.delete"));
     await waitFor(() => expect(mocks.deleteTask).toHaveBeenCalled());
     // removeTask is the local mirror of a server delete — it must not run first.
     expect(mocks.removeTask).not.toHaveBeenCalled();
   });
 
-  it("delete is the visibly dangerous button, like the memory panel's", () => {
-    // A bare red text link next to two solid buttons reads as a third neutral
-    // action. The memory panel's Delete Node (MemoryNodeDetail.tsx) is the
-    // reference: bordered, tinted, iconed.
+  it("delete is the bordered destructive button in the footer, not a bare link", () => {
+    // 它紧挨着 取消 / 保存，所以要比一块安静的红字更"有分量"：带边框、带底色的
+    // 破坏性按钮（和 memory 面板的 Delete Node 同一套）。裸红字会被读成第三个
+    // 中性动作，那是最糟的误读。
     render(<TaskEditDialog onClose={() => {}} />);
-    const cls = screen.getByText("pm.task.delete").closest("button")?.className ?? "";
-    expect(cls).toContain("border-red-200");
-    expect(cls).toContain("bg-red-50");
-    expect(cls).toContain("text-red-700");
-    expect(cls).toContain("hover:bg-red-100");
+    const button = deleteButton();
+    expect(button.tagName).toBe("BUTTON");
+    expect(button.textContent).toContain("pm.task.delete");
+    const tokens = button.className.split(/\s+/);
+    expect(tokens).toContain("border-red-200");
+    expect(tokens).toContain("bg-red-50");
+    expect(tokens).toContain("text-red-700");
+    // 位置：底栏最左，且与 保存 之间隔着那块 flex-1
+    const footer = screen.getByRole("dialog").querySelector("footer") as HTMLElement;
+    expect(footer.contains(button)).toBe(true);
+    expect(footer.firstElementChild).toBe(button);
   });
 
   it("delete needs confirming — one click does not remove a row", () => {
     render(<TaskEditDialog onClose={() => {}} />);
-    fireEvent.click(screen.getByText("pm.task.delete"));
+    fireEvent.click(deleteButton());
     expect(mocks.removeTask).not.toHaveBeenCalled();
     expect(screen.getByText("pm.task.deleteTaskTitle")).toBeTruthy();
   });
@@ -637,7 +798,7 @@ describe("audit line", () => {
     render(<TaskEditDialog onClose={() => {}} />);
     // The footer door to `boardStore.moveTask`: not every view lets the user
     // drag a card, and dragging is a precise act.
-    expect(screen.getByLabelText("pm.task.moveTo")).toBeTruthy();
+    expect(screen.getByLabelText("pm.task.status")).toBeTruthy();
   });
 
   it("has no status control on a task that does not exist yet", () => {

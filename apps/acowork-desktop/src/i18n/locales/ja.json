@@ -1818,6 +1818,13 @@
     "formInstallHint": "インストールの手がかり",
     "formInstallScript": "インストールスクリプト名"
   },
+  "datePicker": {
+    "placeholder": "日付を選択",
+    "prevMonth": "前の月",
+    "nextMonth": "次の月",
+    "today": "今日",
+    "clear": "クリア"
+  },
   "pm": {
     "projects": "プロジェクト",
     "emptyTitle": "プロジェクトがまだありません",
@@ -1876,6 +1883,9 @@
       "description": "説明",
       "parentTask": "親タスク",
       "noParent": "親タスクなし",
+      "change": "変更",
+      "addDependency": "依存関係を追加",
+      "dependencyCycle": "このタスクに依存しています",
       "created": "作成",
       "updated": "更新",
       "status": "ステータス",

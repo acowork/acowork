@@ -67,7 +67,7 @@ function row(over: Partial<PmTaskResponse> = {}): PmTaskResponse {
 /** The control is a native <select>; its options are the legal targets. */
 function options(): string[] {
   return Array.from(
-    screen.getByLabelText("pm.task.moveTo").querySelectorAll("option"),
+    screen.getByRole("combobox").querySelectorAll("option"),
   ).map((o) => (o as HTMLOptionElement).value);
 }
 
@@ -130,7 +130,7 @@ describe("the approval gate", () => {
         onMoved={onMoved}
       />,
     );
-    fireEvent.change(screen.getByLabelText("pm.task.moveTo"), {
+    fireEvent.change(screen.getByRole("combobox"), {
       target: { value: "__approve__" },
     });
     await waitFor(() => expect(mocks.reviewTask).toHaveBeenCalledWith("t-1", true));
@@ -143,7 +143,7 @@ describe("moving", () => {
   it("writes the new status and re-reads the row", async () => {
     const onMoved = vi.fn();
     render(<TaskStatusMove task={row()} onMoved={onMoved} />);
-    fireEvent.change(screen.getByLabelText("pm.task.moveTo"), {
+    fireEvent.change(screen.getByRole("combobox"), {
       target: { value: "in_progress" },
     });
     await waitFor(() => expect(mocks.moveTask).toHaveBeenCalledWith("t-1", "in_progress"));
@@ -155,7 +155,7 @@ describe("moving", () => {
     mocks.moveTask.mockResolvedValue(false);
     const onMoved = vi.fn();
     render(<TaskStatusMove task={row()} onMoved={onMoved} />);
-    fireEvent.change(screen.getByLabelText("pm.task.moveTo"), {
+    fireEvent.change(screen.getByRole("combobox"), {
       target: { value: "in_progress" },
     });
     await waitFor(() => expect(mocks.moveTask).toHaveBeenCalled());
@@ -165,7 +165,7 @@ describe("moving", () => {
 
   it("re-picking the current status does nothing", async () => {
     render(<TaskStatusMove task={row()} onMoved={() => {}} />);
-    fireEvent.change(screen.getByLabelText("pm.task.moveTo"), { target: { value: "" } });
+    fireEvent.change(screen.getByRole("combobox"), { target: { value: "" } });
     await waitFor(() => expect(mocks.moveTask).not.toHaveBeenCalled());
   });
 });

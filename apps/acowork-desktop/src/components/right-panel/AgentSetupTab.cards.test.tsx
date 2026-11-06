@@ -23,7 +23,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import i18n from "../../i18n";
 import { useAgentStore, type AgentStorage } from "../../stores/agentStore";
-import type { AgentInfo } from "../../lib/types";
+import type { AgentInfo, McpRecommendationView } from "../../lib/types";
 import { AgentSetupTab } from "./AgentSetupTab";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => ({})) }));
@@ -44,6 +44,22 @@ const AGENT = "agent-1";
 
 /** Builtin tools the stubbed `/tools` endpoint reports. */
 let builtinToolNames: string[] = ["load_skill"];
+
+/** ADR-104 recommendations the stubbed `/tools` endpoint reports. */
+let recommendedRows: McpRecommendationView[] = [];
+
+function recommended(state: McpRecommendationView["state"]): McpRecommendationView {
+  return {
+    key: "brave-search",
+    source: "preset",
+    preset: "brave-search",
+    tools: ["brave_web_search"],
+    required_secrets: [],
+    required: false,
+    why: "web research",
+    state,
+  };
+}
 
 function meta(over: Partial<AgentInfo> = {}): AgentInfo {
   return {
@@ -82,13 +98,21 @@ function stubFetch() {
           tools: builtinToolNames.map((name) => ({ name, enabled: true })),
           mcp_servers: [],
           mcp_servers_defs: [],
-          recommended: [],
+          recommended: recommendedRows,
         });
       }
       if (url.endsWith("/config")) return json({});
       return Promise.resolve({ ok: false, status: 404, json: () => Promise.resolve({}) });
     }),
   );
+}
+
+/** The recommendation group's header (ADR-104) — present only while the
+ *  package declares suggestions. */
+function recommendationHeader(): HTMLElement {
+  return screen.getByRole("button", {
+    name: i18n.t("agentSetup.mcpRecommended", { count: recommendedRows.length }),
+  });
 }
 
 /** Every level-1 card header in the panel, top to bottom. */
@@ -99,6 +123,7 @@ function cardHeaders(): HTMLElement[] {
 describe("AgentSetupTab card composition", () => {
   beforeEach(() => {
     builtinToolNames = ["load_skill"];
+    recommendedRows = [];
     seedAgent();
     stubFetch();
   });
@@ -163,6 +188,34 @@ describe("AgentSetupTab card composition", () => {
     const panelViewport = header.closest(".overlay-scrollbar-viewport");
     expect(panelViewport).toBeTruthy();
     expect(screen.getByLabelText("tool_1").closest(".overlay-scrollbar-viewport")).toBe(panelViewport);
+  });
+
+  // ── ADR-104 recommendation card: default expand state ────────────────
+  //
+  // The rule itself lives in `lib/mcpRecommendations.ts`; what only an
+  // integration test can prove is the TIMING — the panel starts with an empty
+  // recommendation list and fills it when `/tools` answers, and the card must
+  // not be painted in a state it will immediately contradict.
+
+  it("does not paint the recommendation card before its list has loaded", async () => {
+    recommendedRows = [recommended("active")];
+    render(<AgentSetupTab />);
+
+    // First frame: `/tools` has not answered, so there is nothing to be wrong
+    // about — the group is absent rather than expanded-then-collapsed.
+    expect(cardHeaders().length).toBe(7);
+
+    await waitFor(() => expect(cardHeaders().length).toBe(8));
+    // ...and the card appears already collapsed (every suggestion handled).
+    expect(recommendationHeader().getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("opens the recommendation card when a suggestion is still unhandled", async () => {
+    recommendedRows = [recommended("installed_inactive")];
+    render(<AgentSetupTab />);
+
+    await waitFor(() => expect(cardHeaders().length).toBe(8));
+    expect(recommendationHeader().getAttribute("aria-expanded")).toBe("true");
   });
 
   it("renders exactly one Prompts & Skills card (no duplicate after the move)", async () => {

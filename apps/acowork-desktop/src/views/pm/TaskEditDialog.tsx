@@ -30,7 +30,12 @@
  * Height is FIXED (`h-[560px]`, capped by `max-h-[86vh]`) with the body
  * scrolling. Sections appearing after the first save, jumping to a child row,
  * or switching tabs must not resize the dialog — that resize was the "跳来跳去"
- * the retired detail shell produced.
+ * the retired detail shell produced. Inside that fixed height the zones follow
+ * one rule: the header is the dialog's identity (title + close), the body is
+ * the row's fields (状态 included — it is one more "what is this task now"),
+ * and the footer is the FORM's commit path with 删除 parked at the far left,
+ * away from 保存. 描述 absorbs whatever height the column has left over instead
+ * of the form ending in a dead strip above the footer.
  *
  * Leaving a dirty form is guarded exactly once (`requestLeave`); the confirm's
  * own button exits directly (`leave`). Calling back into the guard from the
@@ -38,23 +43,24 @@
  *
  * Status transitions live in the board (drag between columns) and on the task
  * card's 批准/拒绝 buttons, both of which call the same `boardStore.moveTask`.
- * The footer carries a third door to the same write (`TaskStatusMove`): not
- * every view lets the user drag a card, and dragging is a precise act that
- * not every user can perform. The dialog is the one task surface, so it must
- * be able to move a task too.
+ * The 基本信息 tab carries a third door to the same write (`TaskStatusMove`):
+ * not every view lets the user drag a card, and dragging is a precise act that
+ * not every user can perform. It writes the server immediately — it does not
+ * pass through 保存 — which is why it is not wired into `useTaskForm`.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Trash2 } from "lucide-react";
 import { usePmTaskDetailStore } from "../../stores/pm/taskDetailStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { useTranslation } from "../../i18n/useTranslation";
-import { PriorityBadge } from "./PriorityBadge";
-import { TaskTypeIcon } from "./TaskTypeIcon";
+import { cn } from "../../lib/utils";
 import { SubtaskTree } from "./SubtaskTree";
 import { TaskStatusMove } from "./TaskStatusMove";
+import { DependencyPicker, ParentTaskPicker } from "./TaskTreePicker";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { StyledInput, StyledTextarea } from "../../components/common/StyledInput";
+import { DatePicker } from "../../components/common/DatePicker";
 import { Dropdown } from "../../components/common/Dropdown";
 import { showToast } from "../../components/common/ToastProvider";
 import { attachmentUrl, deleteTask } from "../../lib/pm-api";
@@ -68,7 +74,7 @@ import {
   visibleTaskTabs,
   type TaskEditTab,
 } from "./taskEditTabs";
-import type { PmAttachmentMeta, PmTaskResponse, TaskStatus } from "../../lib/pm-types";
+import type { PmAttachmentMeta, PmTaskResponse } from "../../lib/pm-types";
 
 const TASK_TYPES = ["task", "feature", "bug", "chore", "checkpoint", "milestone"] as const;
 const PRIORITIES = ["low", "normal", "high", "urgent"] as const;
@@ -87,15 +93,6 @@ const PRIORITY_I18N: Record<string, string> = {
   normal: "pm.priority.normal",
   high: "pm.priority.high",
   urgent: "pm.priority.urgent",
-};
-
-const STATUS_I18N: Record<TaskStatus, string> = {
-  pending: "pm.board.pending",
-  in_progress: "pm.board.inProgress",
-  submitted: "pm.board.submitted",
-  done: "pm.board.done",
-  rejected: "pm.board.rejected",
-  cancelled: "pm.board.cancelled",
 };
 
 export function TaskEditDialog({ onClose }: { onClose: () => void }) {
@@ -317,15 +314,16 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
           // the reader jumps to a child row.
           className="relative z-10 flex h-[560px] max-h-[86vh] w-full max-w-[640px] flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl outline-none"
         >
-          {/* 头部 */}
-          <header className="flex shrink-0 items-center justify-between border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
+          {/* 头部只有身份 + 关闭。行级动作（状态流转 / 删除）是这一行的属性，
+              归 基本信息 的元信息条，见 `BasicInfoTab`。 */}
+          <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
             <h3 id="pm-edit-task-title" className="min-w-0 truncate text-sm font-semibold">
               {isCreate ? t("pm.newTask") : t("pm.task.edit")}
             </h3>
             <button
               type="button"
               onClick={() => requestLeave()}
-              className="shrink-0 rounded-md px-1.5 py-0.5 text-sm text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-sm text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
               aria-label={t("common.close")}
             >
               ×
@@ -367,11 +365,15 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
           <OverlayScrollbar fill="flex" className="px-5 py-4">
             {/* One panel, swapped by the strip above: `aria-labelledby` points
                 at whichever tab owns the body right now. */}
+            {/* gap-3 instead of space-y-3, plus min-h-full: the panel is the
+                column 基本信息 fills, so its 描述 field can absorb the height the
+                fixed box has left over. Other tabs keep their natural height
+                (children do not grow without `flex-1`). */}
             <div
               id="task-tabpanel"
               role="tabpanel"
               aria-labelledby={`task-tab-${activeTab}`}
-              className="space-y-3"
+              className="flex min-h-full flex-col gap-3"
             >
               {/* A load failure is a fact about the ROW, not about one tab, so
                   it sits above the tab body and stays visible on every tab. */}
@@ -389,7 +391,12 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
               )}
 
               {activeTab === "basic" && (
-                <BasicInfoTab form={form} row={row} creatorName={creatorName} />
+                <BasicInfoTab
+                  form={form}
+                  row={row}
+                  creatorName={creatorName}
+                  onMoved={() => void refresh()}
+                />
               )}
 
               {activeTab === "related" && (
@@ -424,7 +431,9 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
             </div>
           </OverlayScrollbar>
 
-          {/* 底部操作 — 删除居左，与保存物理隔离 */}
+          {/* 底部：危险动作在最左（远离 保存），表单提交在右。
+              状态流转是这一行的属性，落在 基本信息 的「状态」字段里；删除是整个
+              对话框里唯一能毁掉这一行的动作，所以它留在最远的一角。 */}
           <footer className="flex shrink-0 items-center gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
             {hasRow && (
               // Same destructive treatment as the memory panel's Delete Node
@@ -441,12 +450,6 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
               </button>
             )}
             <div className="flex-1" />
-            {/* 状态流转：看板拖拽不是唯一路径（看板只读 / 不想拖卡片时，
-                这里就是那条路）。它写的是服务端那一列，不是表单字段 ——
-                所以它不经过 useTaskForm 的保存路径。 */}
-            {hasRow && detail && (
-              <TaskStatusMove task={detail} onMoved={() => void refresh()} />
-            )}
             <button
               type="button"
               onClick={() => requestLeave()}
@@ -530,21 +533,29 @@ function BasicInfoTab({
   form,
   row,
   creatorName,
+  onMoved,
 }: {
   form: TaskForm;
   row: PmTaskResponse | null;
   creatorName: string | null;
+  /** 状态流转写的是服务端那一行，不走表单的保存路径。 */
+  onMoved: () => void;
 }) {
   const { t } = useTranslation();
+  // A column, not a stack of margins: 描述 takes whatever height is left in the
+  // fixed-height box (≈30px slack when editing, ≈75px when creating), so the
+  // form ends at the footer instead of leaving a dead strip above it.
   return (
-    <>
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
       {row && (
-        <div className="rounded-md bg-zinc-50 px-3 py-2 text-11 text-text-tertiary dark:bg-zinc-800/60">
+        // 只印"改不了的服务端事实"（创建人/时间、派发失败原因）。类型 / 优先级
+        // / 状态 的可编辑控件就在下面的字段行里，同一件事印两遍只会让人疑惑
+        // 哪一处才是当前值。
+        <div
+          data-testid="task-audit"
+          className="rounded-md bg-zinc-50 px-3 py-2 text-11 text-text-tertiary dark:bg-zinc-800/60"
+        >
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
-            <TaskTypeIcon type={row.type} className="text-xs" />
-            <PriorityBadge priority={row.priority} />
-            <span>{t(STATUS_I18N[row.status])}</span>
-            <span aria-hidden>·</span>
             <span>
               {t("pm.task.createdBy")} {creatorName ?? "—"}
             </span>
@@ -579,8 +590,15 @@ function BasicInfoTab({
         />
       </Field>
 
-      {/* 三个下拉一行 — 原来是 2 列网格，负责人被挤到日期那一行 */}
-      <div className="grid grid-cols-3 gap-3">
+      {/* 分类三件一行（满行），负责人 + 两个日期一行（满行）。
+          不留半行空档、也不靠"把日期拉宽"来填空：日期只有 10 个字符，拉宽
+          只是把空白从行尾挪进输入框里。
+          状态流转坐进这一行：它跟类型 / 优先级一样是"这条任务现在是什么"，
+          而且 3 + 3 正好两行排满。新建时还没有行，就只剩两个格子。 */}
+      <div
+        data-testid="row-what"
+        className={cn("grid gap-3", row ? "grid-cols-3" : "grid-cols-2")}
+      >
         <Field label={t("pm.task.type")}>
           <Dropdown
             value={form.values.type}
@@ -595,6 +613,18 @@ function BasicInfoTab({
             options={PRIORITIES.map((p) => ({ value: p, label: t(PRIORITY_I18N[p]) }))}
           />
         </Field>
+
+        {/* 状态：立刻写服务端那一行（看板拖拽不是唯一路径）。它长得像表单字段，
+            但不经过 保存 —— 选完就落定。终态（已取消）自己没有合法流转，
+            TaskStatusMove 会返回 null，这一格留空。 */}
+        {row && (
+          <Field label={t("pm.task.status")}>
+            <TaskStatusMove task={row} onMoved={onMoved} />
+          </Field>
+        )}
+      </div>
+
+      <div data-testid="row-when" className="grid grid-cols-3 gap-3">
         <Field label={t("pm.task.assignee")}>
           {form.hasMembers ? (
             <Dropdown
@@ -609,35 +639,29 @@ function BasicInfoTab({
             </p>
           )}
         </Field>
-      </div>
 
-      {/* 两个时间一行 */}
-      <div className="grid grid-cols-2 gap-3">
+        {/* 用组件库的 DatePicker，不用原生 `<input type="date">`：原生弹层由
+            WebView2 自己绘制（不属页面 DOM，CSS 管不到），箭头尺寸和底部按钮的
+            底色都失控，也正是"看着业余"的来源。宽度跟这一行的其他格子对齐。 */}
         <Field label={t("pm.task.startDate")}>
-          <StyledInput
-            type="date"
-            value={form.values.startAt}
-            onChange={(e) => form.setStartAt(e.target.value)}
-          />
+          <DatePicker value={form.values.startAt} onChange={form.setStartAt} />
         </Field>
         <Field label={t("pm.task.dueDate")}>
-          <StyledInput
-            type="date"
-            value={form.values.dueAt}
-            onChange={(e) => form.setDueAt(e.target.value)}
-          />
+          <DatePicker value={form.values.dueAt} onChange={form.setDueAt} />
         </Field>
       </div>
 
-      <Field label={t("pm.task.description")}>
+      <Field label={t("pm.task.description")} className="flex min-h-0 flex-1 flex-col">
         <StyledTextarea
           value={form.values.description}
           onChange={(e) => form.setDescription(e.target.value)}
           rows={5}
           placeholder={t("pm.task.descriptionPlaceholder")}
+          // 撑满这一列剩下的高度：死空间变成书写区，5 行作保底。
+          className="min-h-[7.5rem] flex-1 resize-none"
         />
       </Field>
-    </>
+    </div>
   );
 }
 
@@ -661,48 +685,28 @@ function RelatedTasksTab({
   onAddSubtask: () => void;
 }) {
   const { t } = useTranslation();
-  const titleOf = useTaskTitleResolver();
+  // 候选集是这一棵树里的一块，不是一袋条目 —— 直接读看板那一份数组（和
+  // SubtaskTree 同源，不额外发请求），排除规则在 `lib/taskTree` 里。
+  const tasks = usePmBoardStore((s) => s.tasks);
+  const selfId = row?.id ?? null;
   return (
     <>
       <Field label={t("pm.task.parentTask")}>
-        <Dropdown
+        <ParentTaskPicker
+          tasks={tasks}
+          selfId={selfId}
           value={form.values.parentId}
           onChange={form.setParentId}
-          options={form.parentOptions}
         />
       </Field>
 
       <Field label={t("pm.task.dependencies")}>
-        {form.dependencyOptions.length === 0 ? (
-          <p className="text-xs text-text-tertiary">
-            {row && row.depends_on.length > 0
-              ? row.depends_on
-                  .map((d) => `${titleOf(d.task_id) ?? d.task_id}（${d.kind}）`)
-                  .join("、")
-              : t("pm.task.noCandidates")}
-          </p>
-        ) : (
-          <OverlayScrollbar
-            maxHeight="9rem"
-            containerClassName="rounded-md border border-border-outer"
-            className="space-y-1 p-2"
-          >
-            {form.dependencyOptions.map((opt) => (
-              <label
-                key={opt.value}
-                className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary"
-              >
-                <input
-                  type="checkbox"
-                  checked={form.values.dependsOn.includes(opt.value)}
-                  onChange={() => form.toggleDependency(opt.value)}
-                  className="accent-[var(--color-accent)]"
-                />
-                <span className="min-w-0 flex-1 truncate">{opt.label}</span>
-              </label>
-            ))}
-          </OverlayScrollbar>
-        )}
+        <DependencyPicker
+          tasks={tasks}
+          selfId={selfId}
+          selected={form.values.dependsOn}
+          onToggle={form.toggleDependency}
+        />
       </Field>
 
       {/* Children need a parent id, so this is the one block a NEW task cannot
@@ -827,26 +831,20 @@ function Attachments({
   );
 }
 
-/** Board-derived task id -> title, for parent / dependency labels. */
-function useTaskTitleResolver() {
-  const tasks = usePmBoardStore((s) => s.tasks);
-  return useCallback(
-    (id?: string | null) => (id ? tasks.find((t) => t.id === id)?.title ?? null : null),
-    [tasks],
-  );
-}
-
 function Field({
   label,
   required,
   children,
+  className,
 }: {
   label: string;
   required?: boolean;
   children: React.ReactNode;
+  /** Extra classes on the wrapper — 描述 uses it to become the growing row. */
+  className?: string;
 }) {
   return (
-    <label className="block">
+    <label className={cn("block", className)}>
       <span className="mb-1 block text-11 font-medium text-text-tertiary">
         {label}
         {required && <span className="ml-0.5 text-red-500">*</span>}

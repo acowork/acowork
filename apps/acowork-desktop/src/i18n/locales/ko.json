@@ -1819,6 +1819,13 @@
     "formInstallHint": "설치 힌트",
     "formInstallScript": "설치 스크립트 이름"
   },
+  "datePicker": {
+    "placeholder": "날짜 선택",
+    "prevMonth": "이전 달",
+    "nextMonth": "다음 달",
+    "today": "오늘",
+    "clear": "지우기"
+  },
   "pm": {
     "projects": "프로젝트",
     "emptyTitle": "아직 프로젝트가 없습니다",
@@ -1877,6 +1884,9 @@
       "description": "설명",
       "parentTask": "상위 작업",
       "noParent": "상위 작업 없음",
+      "change": "변경",
+      "addDependency": "의존성 추가",
+      "dependencyCycle": "이 작업에 의존함",
       "created": "생성일",
       "updated": "수정일",
       "status": "상태",
