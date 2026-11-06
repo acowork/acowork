@@ -1,5 +1,7 @@
 # ADR-090: MCP Install Moves to the Agent's First Enable — Gateway Keeps the Global Registry and Key Vault
 
+> **Panel-location revision (2026-11-06, [ADR-108](./ADR-108-right-panel-consolidation.md))**: the right-rail Tools panel no longer exists — every reference below to "the Tools panel" / "the Builtin Tools card" / "the MCP card" now means the **Setup panel** (`AgentSetupTab`); the rail entry and its tab are gone. Endpoints, stores, permissions and switch semantics are unchanged; see ADR-108 for the scope.
+
 **Status**: Accepted (implemented 2026-10-10)
 **Date**: 2026-10-09
 **Decision makers**: Nicholas (plan confirmed)

@@ -1,5 +1,7 @@
 # ADR-094: Per-Agent Skills Auto-Load (Progressive Default) + `load_skill` Built-in Tool
 
+> **Panel-location revision (2026-11-06, [ADR-108](./ADR-108-right-panel-consolidation.md))**: the right-rail Tools panel no longer exists — every reference below to "the Tools panel" / "the Builtin Tools card" / "the MCP card" now means the **Setup panel** (`AgentSetupTab`); the rail entry and its tab are gone. Endpoints, stores, permissions and switch semantics are unchanged; see ADR-108 for the scope.
+
 - **Number**: ADR-094
 - **Status**: Accepted (revised 2026-10: load_skill is the sole toggle; summary and per-turn skill slots separated — see D7.1)
 - **Date**: 2026-（original）

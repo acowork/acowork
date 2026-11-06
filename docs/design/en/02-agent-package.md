@@ -342,7 +342,8 @@ score_threshold = 0.7
 
 # ADR-104: recommended MCP servers. Recommendation != installation - these land
 # in agent_mcp.json's `recommended` list; the user confirms install/activation
-# in the Tools panel (ADR-090).
+# in the Setup panel's MCP card (ADR-090; the former Tools panel was folded into
+# Setup — ADR-108).
 # The three forms are mutually exclusive: preset / hosted / transport+url.
 # Inline stdio is banned.
 
@@ -351,7 +352,7 @@ preset = "brave-search"                 # platform preset id (Gateway registry)
 why = "fresh weather data from the web" # shown to the user verbatim
 required_secrets = ["BRAVE_API_KEY"]    # named on the card when missing
 tools = ["brave_web_search"]            # subset; the initial enabled set
-required = false                        # soft: never blocks; the gap shows in the Tools panel (row badged "required", missing key named)
+required = false                        # soft: never blocks; the gap shows in the Setup panel's MCP card (row badged "required", missing key named)
 
 [[mcp_servers]]
 hosted = "memory"                       # Gateway-hosted service (pm / doc / memory)
