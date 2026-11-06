@@ -252,6 +252,25 @@ mod tests {
         }
     }
 
+    /// Write a row the way a producer of an older build did: straight into the
+    /// log, behind the write entry.
+    ///
+    /// The write entry now refuses a card whose subject is absent (a card is a
+    /// question and an unanswerable question must not become durable), but the
+    /// rows such a build already wrote are still on disk — and every read of them
+    /// has to stay honest rather than pretend the question is live. That is what
+    /// this fixture models.
+    fn append_as_history(dir: &Path, sid: &str, row: &SessionMessage) {
+        use std::io::Write;
+        let path = crate::chat_sessions::session_dir(dir, sid).join("messages.jsonl");
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .expect("open log");
+        writeln!(f, "{}", serde_json::to_string(row).expect("serialize")).expect("append");
+    }
+
     fn round(id: &str, asks: &str) -> SessionMessage {
         SessionMessage {
             seq: 0,
@@ -364,7 +383,12 @@ mod tests {
     fn a_card_without_its_message_says_so() {
         let dir = temp_dir();
         let sid = session(&dir);
-        append_message(&dir, &sid, &card("c-1", "m-ghost"), 2).unwrap();
+        // The write entry refuses to create one...
+        let err = append_message(&dir, &sid, &card("c-1", "m-ghost"), 2).unwrap_err();
+        assert!(err.contains("in_reply_to"), "{err}");
+        // ...but a row an older build wrote is still on disk, and the answer
+        // still names why it cannot be given.
+        append_as_history(&dir, &sid, &card("c-1", "m-ghost"));
         assert_eq!(
             answer(&dir, &sid, "human-1", "c-1"),
             Err(AnswerError::OriginGone)

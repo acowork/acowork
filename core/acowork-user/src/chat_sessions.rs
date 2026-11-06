@@ -1233,6 +1233,38 @@ pub fn append_message(
         return Ok((existing, false));
     }
 
+    // A card is a question about a **row**, and a question whose row is not in
+    // the log can never be answered: `GET …/answer` can only refuse it, so the
+    // click it offers is a dead end that stays on the transcript forever (the
+    // log is append-only, so nothing later repairs it).
+    //
+    // This is deliberately the one place the store resolves a reference. Every
+    // other dangling coordinate is legitimate — an `execution_round` for a PM
+    // dispatch names no chat row by design (ADR-106 D12), and a
+    // `budget_exhausted` receipt names a request that never became one. A card
+    // is different in kind: being answerable IS what it is, so "cannot be
+    // answered" must be unrepresentable rather than merely discouraged. The
+    // index is already loaded here for the idempotency lookup, so the check
+    // costs one hash look.
+    //
+    // Measured: a group `@` fan-out wrote its card under the per-target delivery
+    // uuid instead of the human's row (`8965a064-…` naming nothing in the chat
+    // it was written to), and every such card was born dead — the send parked,
+    // no execution session was created, and the surface kept painting options
+    // that answered `origin_gone` (422) on every click.
+    if msg.kind == KIND_SYSTEM_NOTICE
+        && acowork_core::intent::chat_kinds::is_card_notice(msg.meta.notice_type.as_str())
+    {
+        let subject = msg.meta.in_reply_to.trim();
+        if !subject.is_empty() && !lock(&index).ids.contains_key(subject) {
+            return Err(format!(
+                "a {} card must ask about a row this chat holds — `in_reply_to` names no \
+                 message: {subject}",
+                msg.meta.notice_type
+            ));
+        }
+    }
+
     // §4.2 (Wave 2a.1): every durable row carries a `message_id`. The
     // client may submit one (the Gateway's delivery id — the idempotency
     // and correlation key); when it does not, the write entry assigns a
@@ -2043,6 +2075,30 @@ fn write_index(
     fs::write(&tmp, &json).map_err(|e| format!("{}: {e}", tmp.display()))?;
     fs::rename(&tmp, &path)
         .map_err(|e| format!("{}: {e}", path.display()))
+}
+
+/// Which of `ids` name a durable row in this session — the batched twin of
+/// [`message_by_id`], resolved through the line index.
+///
+/// One lock and one index pass for a whole page, because a projection asks the
+/// question per row and must not pay a lock per row. Unknown ids are simply
+/// absent from the result; that absence is the fact callers act on.
+pub fn existing_ids(
+    data_dir: &Path,
+    session_id: &str,
+    ids: &[String],
+) -> Result<std::collections::HashSet<String>, String> {
+    validate_session_id(session_id)?;
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let index = ensure_index(&dir)?;
+    let idx = lock(&index);
+    Ok(ids
+        .iter()
+        .filter(|id| !id.is_empty() && idx.ids.contains_key(id.as_str()))
+        .cloned()
+        .collect())
 }
 
 /// Fetch one durable row by its stable `message_id` (design 27 §5.5.4 answer
@@ -4667,7 +4723,8 @@ mod tests {
         append_message(&dir, &s.session_id, &round, 3).expect("an origin reference row");
 
         // 3. A card is a question with answers and an exit (ADR-106 D6): no
-        //    options = unclickable, no `allow_new_task` = no escape.
+        //    options = unclickable, no `allow_new_task` = no escape, and no row
+        //    above it = a question nothing can ever answer.
         let mut card = unthreaded("ag", KIND_SYSTEM_NOTICE, "", "c-1");
         card.meta.notice_type = "confirm_continue".into();
         card.meta.in_reply_to = "m-1".into();
@@ -4677,7 +4734,17 @@ mod tests {
         let err = append_message(&dir, &s.session_id, &card, 5).unwrap_err();
         assert!(err.contains("allow_new_task"), "{err}");
         card.meta.allow_new_task = Some(true);
-        append_message(&dir, &s.session_id, &card, 6).expect("a complete card");
+        // The human's row `m-1` was refused above, so the card names nothing:
+        // a card whose subject is absent is refused too. Answerability is what a
+        // card IS, so the dead end must be unrepresentable rather than merely
+        // discouraged (a group fan-out wrote one under its per-target delivery
+        // uuid and every click answered `origin_gone`).
+        let err = append_message(&dir, &s.session_id, &card, 6).unwrap_err();
+        assert!(err.contains("in_reply_to"), "{err}");
+        // With its subject in the log it is a complete card.
+        append_message(&dir, &s.session_id, &msg("u", KIND_USER_MESSAGE, "hi", "m-1"), 7)
+            .expect("the row the card asks about");
+        append_message(&dir, &s.session_id, &card, 8).expect("a complete card");
 
         // The card survives the round trip: question, answers, escape and the
         // row it asks about. This is the regression the contract exists for.
@@ -4695,7 +4762,7 @@ mod tests {
         //    request it names never became a durable one (design 31 §9-3).
         let mut limit = unthreaded("ag", KIND_SYSTEM_NOTICE, "", "n-1");
         limit.meta.notice_type = "budget_exhausted".into();
-        append_message(&dir, &s.session_id, &limit, 7).expect("a channel fact needs no thread");
+        append_message(&dir, &s.session_id, &limit, 9).expect("a channel fact needs no thread");
     }
 
     /// History is unknown-but-legal: a line written by a producer this store has
