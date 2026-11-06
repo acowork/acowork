@@ -395,7 +395,7 @@ mod tests {
         );
         // Not a card at all (a plain notice) has nothing to answer. Written as
         // history too: `delivery_failed` is a threaded notice, and the store
-        // refuses a coordinate that resolves to nothing (ADR-106 D14).
+        // refuses a coordinate that resolves to nothing (ADR-106 D15).
         let mut notice = card("c-2", "m-ghost");
         notice.meta.notice_type = "delivery_failed".into();
         notice.meta.options.clear();

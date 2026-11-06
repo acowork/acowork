@@ -673,4 +673,9 @@ fn intent_wire_fields_roundtrip() {
     assert_eq!(back.repo, "https://github.com/o/p");
     assert_eq!(back.session_config_json, r#"{"model":"m1"}"#);
     assert_eq!(back.chat_attachment_ids, vec!["att-1".to_string()]);
+    // ADR-106 D15: the coordinate a producer declares travels on the wire — the
+    // Runtime threads the round under it instead of deriving it. A field that
+    // silently failed to encode would push every receiver back onto the
+    // derivation this revision removed.
+    assert_eq!(back.chat_row_id, "m-7");
 }

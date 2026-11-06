@@ -1049,7 +1049,7 @@ fn validate_session_id(id: &str) -> Result<(), String> {
 ///    (`chat_kinds::THREADED_NOTICES`) must carry `meta.in_reply_to`; an
 ///    `execution_round` reference carries it when the turn started in the chat
 ///    and has none when it did not, and an `agent_message` that carries a
-///    `meta.task_id` is an assignment opening a task thread (ADR-106 D14). That
+///    `meta.task_id` is an assignment opening a task thread (ADR-106 D15). That
 ///    coordinate is the only thing that lets the projection answer "was this
 ///    answered", "which block am I in", "is this card open" from the log
 ///    alone; a row without it is an orphan the reader must guess about.
@@ -1077,14 +1077,17 @@ pub fn check_write_contract(msg: &SessionMessage) -> Result<(), String> {
     let notice_type = msg.meta.notice_type.as_str();
     // `execution_round` is deliberately absent: a reference row **answers** a
     // chat question when the turn started there (`in_reply_to` set) and is an
-    // **origin** row when the work was dispatched from elsewhere — a PM task, a
-    // group fan-out's per-target id, a turn composed against the execution
-    // surface. Those have no chat row above them by design (design 31 §5.2,
+    // **origin** row when the work was dispatched from elsewhere — a cron wake, a
+    // turn composed against the execution surface, an agent's own assignment.
+    // Those have no chat row above them (design 31 §5.2,
     // `TurnReference::trigger_message_id`), and inventing a coordinate would
     // hang the block under a phantom message. Absence *is* the fact here, which
-    // is why it is a legal empty rather than a missing field.
+    // is why it is a legal empty rather than a missing field. A group `@`
+    // fan-out is no longer in this list: since ADR-106 D15 it threads under the
+    // shared `user_message` row it wrote (its per-target delivery uuid named no
+    // row, and a block under it had no sentence above).
     // An `agent_message` is agent speech in two honest shapes: an **answer**
-    // (threaded under the row that asked it) and an **assignment** (ADR-106 D14:
+    // (threaded under the row that asked it) and an **assignment** (ADR-106 D15:
     // the row carries `meta.task_id`, so it opens a task thread — no sentence in
     // this chat asked for that work, and inventing a coordinate for it is what
     // produced a round block with no sentence above it). Anything else would be
@@ -1246,7 +1249,7 @@ pub fn append_message(
         return Ok((existing, false));
     }
 
-    // **A coordinate must resolve** (ADR-106 D14). Every row that threads under
+    // **A coordinate must resolve** (ADR-106 D15). Every row that threads under
     // another — the round's reference row, the router's answer, a card, a
     // receipt — names the row it answers, and that row must be in this log: a
     // coordinate that resolves to nothing is a second kind of lie, because the
@@ -3359,7 +3362,7 @@ mod tests {
     }
 
     /// A row as a producer would write it, with **no thread coordinate** — the
-    /// origin shape (ADR-106 D14). Most fixtures do not model a conversation, so
+    /// origin shape (ADR-106 D15). Most fixtures do not model a conversation, so
     /// the honest default is "nothing above this row"; a test that needs the
     /// answering shape threads it explicitly with [`answering`], which the write
     /// contract only accepts when the named row is really in the log.
@@ -3395,7 +3398,7 @@ mod tests {
     }
 
     /// Write the question a fixture's agent row answers. The write entry refuses
-    /// an `agent_message` that names nothing (ADR-106 D14) — agent speech in a
+    /// an `agent_message` that names nothing (ADR-106 D15) — agent speech in a
     /// chat is an answer or an assignment, so a fixture that models the former
     /// writes the row it answers first.
     fn seed_question(dir: &Path, sid: &str, human: &str) -> String {
@@ -3739,7 +3742,7 @@ mod tests {
         let s = pair_session(&dir);
         // A retired writer's row is history, not a new write: its coordinate
         // names a card id no current producer mints, and the write contract now
-        // refuses a coordinate that resolves to nothing (ADR-106 D14). The row
+        // refuses a coordinate that resolves to nothing (ADR-106 D15). The row
         // goes straight into the log, exactly as the old build left it.
         let refusal = append_message(&dir, &s.session_id, &req.message, 1).unwrap_err();
         assert!(refusal.contains("in_reply_to"), "{refusal}");
@@ -4510,7 +4513,7 @@ mod tests {
         )
         .unwrap();
         // An agent-to-agent chat holds no human, so an `agent_message` there can
-        // only be an assignment (ADR-106 D14): it opens a task thread instead of
+        // only be an assignment (ADR-106 D15): it opens a task thread instead of
         // answering a question this chat never asked.
         let mut m = msg("inst-a", KIND_AGENT_MESSAGE, "do it", "mid-1");
         m.meta.task_id = Some("t-1".into());
@@ -4653,7 +4656,7 @@ mod tests {
 
         // Both pointer rows land (distinct ids, not deduped) but move no unread.
         // They are threaded to the message they point at, so that message is in
-        // the log: a coordinate must resolve (ADR-106 D14).
+        // the log: a coordinate must resolve (ADR-106 D15).
         let pointed_at = seed_question(&dir, &s.session_id, "u");
         let mut dispatched = msg("ag", KIND_SYSTEM_NOTICE, "", "td:m1");
         dispatched.meta.notice_type = "turn_dispatched".into();
@@ -5762,7 +5765,7 @@ mod tests {
                                 message_id: format!("w{i}-m{j}"),
                                 // An all-agent group has no human to ask, so
                                 // agent speech here is an assignment (ADR-106
-                                // D14), never a reply.
+                                // D15), never a reply.
                                 task_id: Some("t-1".into()),
                                 ..Default::default()
                             },

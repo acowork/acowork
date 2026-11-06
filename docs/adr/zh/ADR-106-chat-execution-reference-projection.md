@@ -215,6 +215,14 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 | **保留** | ADR-100 D1（重述边界，见背景 §4）、D3（执行细节不进 chat/投影）、D4（"查看执行"跳转）、D5（卡片就地可答——落点改为块内）、D6（发送侧瞬态占位）、D7（turn 指针按 agent 归属化反应呈现——现由块承担）、Rev.3 头像不变量、Rev.8 的"执行面消息不进 chat 通道"不变量；ADR-099 D1/D2/D4/D5/D6/D8；ADR-102 TurnOrigin 策略表；ADR-105 D1/D2/D3/D6/D7（默认接收方本身、写入四道门、生命周期、不引入群级 LLM 路由） |
 | **改写** | ADR-097 的搜索范围表述（D13）；ADR-096 的"写时派生"清单里新增轮次索引（D4） |
 
+### D15 — 写契约的三条硬规则（Rev. 2026-11-06）
+
+前两条是把"成对的提问 + 执行"从**约定**变成**类型**；第三条让坐标不再靠推测。它们全部落在唯一写入口（[chat_sessions.rs](../../../core/acowork-user/src/chat_sessions.rs) 的 `append_message` 与 [chat_turn.rs](../../../core/acowork-gateway/src/intent/chat_turn.rs) 的 `open`），而不是读侧兜底——读侧兜底只会让"这条行指着一句不存在的话"在转录里继续显示成事实。
+
+- **坐标必须可解析。** 任何带非空 `in_reply_to` 的行，被指向的行必须**已经在本会话日志里**；空 = **origin 行**（这一轮不是本会话里的某句话问出来的：agent↔agent 请求、cron 唤醒、作者自己开的派单），合法且是事实。同一形状的缺陷实测三次，每次都让人类看见一个洞：卡片指向群 `@` 扇出的 **per-target 投递 uuid**（提问永远答不了，`…/answer` 恒 422 `origin_gone`）、块指向 PM 信箱 id `pm-…`、限额回执指向对端请求 id。生产者要么先写被指向的行，要么声明自己是 origin。
+- **派单以作者身份发言。** 一条 `task-dispatch` 先是一句 chat 话，再是一轮执行：行的声音是 `Task::created_by`——人创建的任务由人说（`user_message`），agent 创建的任务由该 agent 说（`agent_message` + `meta.task_id`，即 **assignment**：本会话里没有哪句话要求过这份工作，所以它**不需要** `in_reply_to`，这正是 D12 早期文本想表达的"origin"）。于是派单要求作者是本群参与者；没有声音的作者不能派单（Gateway 返回 `chat_log_unavailable`，PM 把原因记在任务上并按既有退避重试）——反过来说，**允许某人在项目里创建任务，就等于允许他在项目群里说话**，这两件事的判据必须一致。
+- **坐标由生产者声明，不由接收方推导。** 投递在信封上显式携带 `chat_row_id`（`mqtt_payload.proto` 的 `Intent.chat_row_id`），它就是 Gateway 刚写下的行 id；Runtime 直接采用，不再从 `message_id` / `in_reply_to` 反推——反推在群扇出与信箱 id 两种情形下都推错过，是本 ADR 三个缺陷的共同机制。
+
 ## 呈现契约（块 = 执行会话的 explore 块的对话版）
 
 执行会话里的 explore 块折叠了一次"多工具调用 + 思考"的过程；chat 里的块折叠的是**一个执行会话**的"多轮提问 + 回复 + 等待中的卡片"。语法照抄 explore 块，唯一发明是行的载荷：`user`/`assistant` 取代 `tool_call`/`tool_result`。

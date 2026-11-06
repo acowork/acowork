@@ -357,7 +357,7 @@ fn dispatch_message_id(supplied: Option<&str>) -> String {
 /// boundary — design 27 decision 29). `message_id` is stamped by
 /// [`chat_turn::open`], which is also the coordinate the delivery is keyed to.
 /// `task_id` makes the row the thread's **origin** when the author is an agent
-/// (ADR-106 D14) and is the in-chat search key; the task *chip* renders on the
+/// (ADR-106 D15) and is the in-chat search key; the task *chip* renders on the
 /// block header (D13). `project_id` is deliberately absent: the row already
 /// lives in that project's own group chat.
 fn dispatch_turn_meta(task_id: &str, conversation_id: &str, repo: &str) -> serde_json::Value {
@@ -511,13 +511,13 @@ async fn dispatch_task(
     // The voice is `Task::created_by` (`req.owner`) — whoever filed the task is
     // the one speaking — and the row's kind follows from that identity inside
     // [`chat_turn::open`]: a human-filed task speaks as the human, a task the PM
-    // agent created speaks as the PM (an *assignment*, D14). `task_id` rides the
+    // agent created speaks as the PM (an *assignment*, ADR-106 D15). `task_id` rides the
     // row as that thread's origin marker and as the search key; the chip itself
     // renders on the block header (D13). The wake-up playbook never rides here —
     // it is the envelope's HIGH-TRUST `assignment_brief` (design 27 §5.4.5).
     //
     // Written before the delivery, because the receiving Runtime's reference row
-    // has to name a row that already exists (D14).
+    // has to name a row that already exists (ADR-106 D15).
     if let Err(e) = chat_turn::open(
         port,
         &session,
