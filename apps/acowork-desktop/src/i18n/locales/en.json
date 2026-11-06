@@ -199,6 +199,11 @@
       "newTask": "Start a new task",
       "unanswered": "Awaiting your pick",
       "choosing": "Starting…",
+      "actionReference": "Reference this run",
+      "actionCopy": "Copy this run",
+      "copied": "Copied",
+      "copyQuestionPrefix": "Q: ",
+      "copyUnreadable": "(this round could not be read)",
       "replyPlaceholder": "Reply to continue this run…",
       "send": "Send",
       "chooseThis": "Continue this one",
@@ -242,7 +247,8 @@
       "goContinue": "Go continue",
       "refCount": "{{count}} / {{max}} referenced",
       "done": "Done",
-      "blockNotLoaded": "That task block is not in the loaded history"
+      "blockNotLoaded": "That task block is not in the loaded history",
+      "refLimit": "A message can reference up to {{max}} runs"
     },
     "execSessionGone": "This execution session has been deleted"
   },

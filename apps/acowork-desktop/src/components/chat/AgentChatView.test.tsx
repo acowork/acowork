@@ -348,12 +348,13 @@ describe("AgentChatView event-log wiring", () => {
 
     const blocks = screen.getAllByTestId("exec-block");
     expect(blocks).toHaveLength(1);
-    // Both rounds are in it, oldest first, and the block sits where the session's
-    // newest work is.
+    // Both rounds are in it, oldest first, and the block sits where the session
+    // FIRST appeared: a continuation adds a round without moving the block, so
+    // the exchange keeps reading as question-then-answer.
     expect(blocks[0]!.getAttribute("data-refs")).toBe(
       `${AGENT}|exec-9|r2,${AGENT}|exec-9|r4`,
     );
-    expect(blocks[0]!.getAttribute("data-row")).toBe(`round:exec-9|r4`);
+    expect(blocks[0]!.getAttribute("data-row")).toBe(`round:exec-9|r2`);
     expect(screen.getAllByTestId("block-question")).toHaveLength(2);
     expect(screen.getAllByText("first ask")).toHaveLength(1);
     expect(screen.getAllByText("second ask")).toHaveLength(1);
