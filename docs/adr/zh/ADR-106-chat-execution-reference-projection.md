@@ -198,7 +198,7 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 ### D12 — agent↔agent 与 PM 派单归一为同一种引用
 
 - agent↔agent 的 intent 不再往 chat 写 `agent_message` 请求行/响应行（`resp-`），而是**在目标会话绑定的 chat 上落一条 `execution_round` 引用行**——它本来就是一轮工作。`ensure_pair(agent_agent)` 保留（pair chat 仍是转录容器），但它不再承载内容。
-- PM `task-dispatch` 不再写 `user_message` 行（那条消息在执行会话里，投影自然可见），改写引用行。task 键路由保留（D6 级别 6）。
+- **Rev. 2026-11-06**：PM `task-dispatch` **仍然写一条 `user_message` 行**，引用行随后落在它下面（`in_reply_to` = 该行 `message_id`）——与单聊同构：一条人类输入 + 它那一轮执行会话，**成对持久化**，也**成对进入 chat 会话上下文**（`chat_history_read` 与 Chat Router 的 Block B 把这条行读成 `[user:<created_by>] …`；引用行按 D3 无正文，不进上下文——与单聊里那对的形式完全一致，chat 会话因此能从上下文里读出"谁让谁做了什么"的脉络）。原判词"那条消息在执行会话里，投影自然可见"只对**正文可见性**成立：它让引用行的 `in_reply_to` 指向信箱 id（`pm-…`）而非一条 chat 行，于是块没有触发行、转录里没有这句话（未读、chat 内搜索、列表预览都拿不到它）、块只能靠投影兜底命名——与"卡片指向 per-target 投递 uuid"是同一类悬空坐标缺陷。行的声音是 `Task::created_by`：人创建的任务由人说，PM agent 创建的任务由 PM agent 说；正文只取 `build_dispatch_message`（任务标题 + 描述），唤醒 playbook 仍只走信封的 `assignment_brief`、不上任何 chat 面（D13 Rev.、设计 27 §5.4.5）。task 键路由保留（D6 级别 6）。
 - 于是"谁往 chat 写东西"只剩两个生产者：**Gateway（人类 `user_message`）** 与 **Runtime（`execution_round` / `agent_message` / `system_notice`）**，且 exec→chat 方向没有任何生产者。
 
 ### D13 — 搜索、预览、未读、标题的重新归属
