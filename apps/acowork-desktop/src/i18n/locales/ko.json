@@ -1691,6 +1691,8 @@
     "searching": "검색 중…",
     "loadingGitHistory": "커밋 기록을 불러오는 중…",
     "fileNoMatch": "일치 항목 없음",
+    "fileNameUnavailable": "파일 이름 일치를 사용할 수 없습니다(시간 초과). 전체 텍스트 일치만 표시합니다",
+    "contentStillSearching": "파일 이름은 준비됨. 본문을 계속 검색 중…",
     "fileEmptyHint": "키워드를 입력하여 파일 내용을 검색",
     "gitNoMatch": "일치하는 커밋 없음",
     "docNoMatch": "일치하는 문서 없음",

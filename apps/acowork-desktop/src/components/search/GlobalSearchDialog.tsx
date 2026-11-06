@@ -67,6 +67,7 @@ import {
     requestSearchSummary,
     parseSummarySegments,
     SEARCH_SOURCES,
+    canonicalScopes,
     SUMMARY_DEADLINE_MS,
     type SearchSource,
     type CandidateSet,
@@ -253,6 +254,38 @@ export function memorySearchUrl(
     return `${baseUrl}/api/memory/search?${params}`;
 }
 
+/**
+ * `GET /api/agents/{id}/workspaces/search` — the **content** half of the
+ * file scope.
+ *
+ * `match_file_names=false` is a contract, not an optimisation: the fuzzy
+ * name half is answered by `/workspaces/find` in its own source (see
+ * `toFileNameHits`), and asking the scan to score names as well would
+ * (a) duplicate the palette's work and (b) make the tab's name rows
+ * depend on the full-text scan finishing inside the run deadline — the
+ * exact coupling that hid every filename hit on a cold cache.
+ */
+export function fileContentSearchUrl(
+    baseUrl: string,
+    agentId: string,
+    q: string,
+    opts: {
+        workspaceId?: string;
+        caseSensitive?: boolean;
+        wholeWord?: boolean;
+        maxResults?: number;
+    } = {},
+): string {
+    const params = new URLSearchParams();
+    params.set("q", q);
+    if (opts.workspaceId) params.set("workspace_id", opts.workspaceId);
+    if (opts.caseSensitive) params.set("case_sensitive", "true");
+    if (opts.wholeWord) params.set("whole_word", "true");
+    params.set("max_results", String(opts.maxResults ?? FILE_MAX_RESULTS));
+    params.set("match_file_names", "false");
+    return `${baseUrl}/api/agents/${agentId}/workspaces/search?${params}`;
+}
+
 /* ─── Pure helpers (unit-tested) ────────────────────────────────────── */
 
 /** Case-insensitive keyword highlighting for result rows (ADR-081 4.5). */
@@ -296,7 +329,7 @@ function Highlight({ text, query }: { text: string; query: string }) {
 /**
  * Enter key disambiguation: search, or open the focused row?
  *
- * Search is explicit (ADR-093 amendment — a run costs six HTTP requests plus
+ * Search is explicit (ADR-093 amendment — a run costs seven HTTP requests plus
  * an LLM call, far too much to fire per keystroke), but Enter has always been
  * "open the focused row". So it does both, in order:
  *
@@ -356,6 +389,50 @@ export function toFileHits(agentId: string, workspaceId: string | undefined, mat
             kind,
         };
     });
+}
+
+/** Shape of one `/workspaces/find` palette hit (`FindMatchDto`). */
+export interface FileFindMatch {
+    name: string;
+    relPath: string;
+}
+
+/**
+ * Map `/workspaces/find` hits (the workspace explorer's search box) to
+ * file-tab rows.
+ *
+ * The name half of the file scope is answered by the **palette endpoint**,
+ * not by the full-text one, so "search by file name" has exactly one
+ * implementation and the two surfaces cannot disagree: whatever the
+ * explorer's box returns for a query is what the dialog's file tab shows.
+ * Routed through [`toFileHits`] so a name hit renders and opens identically
+ * whichever endpoint produced it (ADR-081 D2).
+ */
+export function toFileNameHits(
+    agentId: string,
+    workspaceId: string | undefined,
+    matches: FileFindMatch[],
+): FileHit[] {
+    return toFileHits(
+        agentId,
+        workspaceId,
+        matches.map((m) => ({ file: m.relPath, text: m.name, kind: "name" as const })),
+    );
+}
+
+/**
+ * Merge the two halves of the file scope into the file tab's list: name
+ * hits first (a user who typed a file name wants the file), content hits
+ * after — the order the Runtime used to produce in one pass.
+ *
+ * Returns the input array unchanged when the other half is empty, so the
+ * common single-half case does not churn a new array identity through the
+ * row list on every re-merge.
+ */
+export function mergeFileHits(nameHits: FileHit[], contentHits: FileHit[]): FileHit[] {
+    if (nameHits.length === 0) return contentHits;
+    if (contentHits.length === 0) return nameHits;
+    return [...nameHits, ...contentHits];
 }
 
 function toGitHits(commits: GitCommitDto[]): SearchHit[] {
@@ -474,6 +551,10 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     const [fileTotal, setFileTotal] = useState(0);
     const [loading, setLoading] = useState(false);
     const [error, setError] = useState<string | null>(null);
+    /* The name half of the file scope could not answer (deadline / error).
+     * The tab reports that instead of looking like "no file matched" — the
+     * exact failure mode the split into two sources exists to remove. */
+    const [fileNameDegraded, setFileNameDegraded] = useState(false);
 
     const [commits, setCommits] = useState<GitCommitDto[]>([]);
     const [gitLoaded, setGitLoaded] = useState(false);
@@ -497,7 +578,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
 
     /* ── ADR-093 run/summary state machine (design 27 §4.6) ─────────── */
     // idle → searching → summarizing → done | error | cancelled.
-    // "searching" covers the six-source fan-out (8 s deadline); the summary
+    // "searching" covers the seven-source fan-out (8 s deadline); the summary
     // stage (20 s deadline) is a separate phase so cancel/regenerate apply
     // to it alone.
     const [phase, setPhase] = useState<SummaryPhase>("idle");
@@ -530,8 +611,10 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     } | null>(null);
     // Landed rows per source, kept in a ref so citation clicks resolve the
     // exact row that fed the summary even before React state settles.
+    // `file` holds the **merged** file-tab list (name hits then content
+    // hits) — a citation's row index is an index into that list.
     const rowsRef = useRef<Record<SearchSource, RowHit[]>>({
-        file: [], git: [], doc: [], project: [], memory: [], conversation: [],
+        file: [], fileName: [], git: [], doc: [], project: [], memory: [], conversation: [],
     });
 
     const [focusedIdx, setFocusedIdx] = useState(0);
@@ -593,6 +676,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             setFileHits([]);
             setFileTotal(0);
             setError(null);
+            setFileNameDegraded(false);
             setGitLoaded(false);
             setCommits([]);
             setGitError(null);
@@ -613,7 +697,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             setSummaryMeta(null);
             candidateRef.current = null;
             lastSummaryReqRef.current = null;
-            rowsRef.current = { file: [], git: [], doc: [], project: [], memory: [], conversation: [] };
+            rowsRef.current = { file: [], fileName: [], git: [], doc: [], project: [], memory: [], conversation: [] };
             userChoseTabRef.current = false;
             requestAnimationFrame(() => inputRef.current?.focus());
         } else {
@@ -623,7 +707,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         }
     }, [open]);
 
-    /* ── ADR-093: one run fans out to all six sources ───────────────── */
+    /* ── ADR-093: one run fans out to all seven sources ─────────────── */
     // Design doc 27 §4.1/§5: each debounced query starts a new generation;
     // the previous generation's parent AbortController tears down every
     // in-flight request, and the seq check drops late results. Each source
@@ -703,9 +787,10 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
         setSummaryError(null);
         setSummaryMeta(null);
         candidateRef.current = null;
-        rowsRef.current = { file: [], git: [], doc: [], project: [], memory: [], conversation: [] };
+        rowsRef.current = { file: [], fileName: [], git: [], doc: [], project: [], memory: [], conversation: [] };
         setFileHits([]);
         setFileTotal(0);
+        setFileNameDegraded(false);
         setDocHits([]);
         setProjHits([]);
         setMemoryHits([]);
@@ -731,6 +816,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             setMemoryLoading(true);
             setConversationLoading(true);
             setError(null);
+            setFileNameDegraded(false);
             setGitError(null);
             setDocError(null);
             setProjError(null);
@@ -744,8 +830,22 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             // stale adapter must not write `fileTotal`/`commits` behind the
             // new run's back. onSource runs synchronously after the
             // adapter's promise settles, so these are safe per-run locals.
-            let runFileTotal: number | undefined;
             let runGitCommits: GitCommitDto[] | undefined;
+
+            /* The file scope's two halves. They arrive independently —
+             * the palette in ~200 ms, the full-text scan in seconds — so
+             * the tab list (and the summary's `file` rows) is re-merged
+             * whenever either lands. `rowsRef.current.file` always holds
+             * the merged list: a citation's row index is an index into it. */
+            let runFileNameRows: FileHit[] = [];
+            let runContentRows: FileHit[] = [];
+            let runContentTotal = 0;
+            const syncFileRows = () => {
+                const merged = mergeFileHits(runFileNameRows, runContentRows);
+                setFileHits(merged);
+                rowsRef.current.file = merged;
+                setFileTotal(runFileNameRows.length + runContentTotal);
+            };
 
             const conversationSearch = async (signal: AbortSignal): Promise<RowHit[]> => {
                 const params = new URLSearchParams();
@@ -775,23 +875,54 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
             const results = await runSearchSources<RowHit[]>({
                 parentSignal: ctrl.signal,
                 adapters: {
+                    /* ── Name half (ADR-081 D2) ──────────────────────────
+                     * `/workspaces/find` — the *same* endpoint the workspace
+                     * explorer's search box uses, so both surfaces answer a
+                     * filename query identically by construction. One
+                     * directory walk, no file bodies read: this half cannot
+                     * be starved by a slow full-text scan, and a dialog
+                     * timeout on the content half no longer throws the name
+                     * hits away with it. */
+                    fileName: async (signal) => {
+                        const resp = await useWorkspaceStore
+                            .getState()
+                            .findFiles(
+                                agentId,
+                                workspaceId ?? "__agent_home__",
+                                q,
+                                FILE_MAX_RESULTS,
+                                signal,
+                            );
+                        if (!resp) {
+                            // `findFiles` folds 404 / abort / network into
+                            // null. Re-throwing keeps the distinction: an
+                            // aborted call still reads as a timeout upstream
+                            // (`signal.aborted`), a real failure as an error
+                            // the tab reports instead of silently showing
+                            // content hits only.
+                            throw new Error("filename search unavailable");
+                        }
+                        runFileNameRows = toFileNameHits(agentId, workspaceId, resp.matches);
+                        return runFileNameRows;
+                    },
+                    /* ── Content half ────────────────────────────────────
+                     * `match_file_names=false`: the fuzzy name half lives in
+                     * the source above now. Asking the scan to also score
+                     * names would duplicate that work and, worse, make the
+                     * tab's name rows depend on the scan finishing. */
                     file: async (signal) => {
-                        const params = new URLSearchParams();
-                        params.set("q", q);
-                        if (workspaceId) params.set("workspace_id", workspaceId);
-                        if (caseSensitive) params.set("case_sensitive", "true");
-                        if (wholeWord) params.set("whole_word", "true");
-                        params.set("max_results", String(FILE_MAX_RESULTS));
-                        // ADR-081 D2: the file scope is "ripgrep full text
-                        // **+** filename fuzzy" — both halves answer the
-                        // same query, so a file whose name matches is
-                        // reachable even when no file body mentions it.
-                        params.set("match_file_names", "true");
-                        const resp = await fetch(`${baseUrl}/api/agents/${agentId}/workspaces/search?${params}`, { signal });
+                        const url = fileContentSearchUrl(baseUrl, agentId, q, {
+                            workspaceId,
+                            caseSensitive,
+                            wholeWord,
+                            maxResults: FILE_MAX_RESULTS,
+                        });
+                        const resp = await fetch(url, { signal });
                         if (!resp.ok) throw new Error(`status ${resp.status}`);
                         const data = (await resp.json()) as SearchResponse;
-                        runFileTotal = data.totalMatches;
-                        return toFileHits(agentId, workspaceId, data.matches);
+                        runContentRows = toFileHits(agentId, workspaceId, data.matches);
+                        runContentTotal = data.totalMatches;
+                        return runContentRows;
                     },
                     git: async (signal) => {
                         // Repo-wide history (empty path = no `-- <path>`
@@ -819,12 +950,15 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                     const rows = r.data ?? [];
                     rowsRef.current[source] = rows;
                     switch (source) {
+                        case "fileName":
+                            // The row list is re-merged below; a failure here
+                            // must not read as "no file matched" (that is the
+                            // bug this source exists to fix) — it is reported
+                            // as a degraded file tab.
+                            if (r.status !== "ok") setFileNameDegraded(true);
+                            break;
                         case "file":
-                            setFileHits(rows as FileHit[]);
                             setLoading(false);
-                            if (r.status === "ok" && runFileTotal !== undefined) {
-                                setFileTotal(runFileTotal);
-                            }
                             if (r.status !== "ok") setError(t("globalSearch.errorFileFailed"));
                             break;
                         case "git":
@@ -860,17 +994,30 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             break;
                     }
                     setSourcesDone((n) => n + 1);
+                    // Both halves of the file scope write the same list: the
+                    // `rowsRef.current[source] = rows` above just overwrote
+                    // `rowsRef.current.file` with one half, so the merged list
+                    // is rebuilt here (and only here — one merge per landing).
+                    if (source === "file" || source === "fileName") syncFileRows();
                 },
             });
 
             if (gen !== seqRef.current || ctrl.signal.aborted) return;
 
             // ── Summary stage (design 27 §4.4): bounded candidates from
-            // the six landed lists. `partial` when any source is missing;
+            // the landed lists. `partial` when any source is missing;
             // timeouts and errors are listed separately so the model is
             // told what actually happened (Runtime search_summary.rs).
-            const timedOutScopes = SEARCH_SOURCES.filter((s) => results[s].status === "timeout");
-            const failedScopes = SEARCH_SOURCES.filter((s) => results[s].status === "error");
+            // `canonicalScopes` folds the file scope's two sources back onto
+            // their one scope: a half that timed out makes the file scope
+            // partial, and `fileName` is a source name the Runtime does not
+            // know.
+            const timedOutScopes = canonicalScopes(
+                SEARCH_SOURCES.filter((s) => results[s].status === "timeout"),
+            );
+            const failedScopes = canonicalScopes(
+                SEARCH_SOURCES.filter((s) => results[s].status === "error"),
+            );
             const partial = timedOutScopes.length > 0 || failedScopes.length > 0;
             // RowHit carries title/snippet — directly the candidate shape.
             const set = selectSummaryCandidates(rowsRef.current);
@@ -897,7 +1044,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
     /* ── Explicit submit: commit the typed query to a new run ─────────── */
     /* Enter (or the re-run button) is the only trigger. Nothing searches
        while the user is still typing, so a long query costs exactly one
-       six-source fan-out plus at most one summary call. */
+       seven-source fan-out plus at most one summary call. */
     const submitSearch = useCallback(() => {
         const q = query.trim();
         if (!q || !agentId) return;
@@ -952,7 +1099,8 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
 
     /* ── Explicit submit (Enter / re-run button) ────────────────────── */
     /* ADR-093 amendment: the run is no longer debounce-on-keystroke. Each
-       keystroke used to fan out six HTTP requests plus an LLM call; typing a
+       keystroke used to fan out six HTTP requests plus an LLM call (seven
+       since the file scope split into name + content); typing a
        9-character query cost ~9 runs. Search is now explicit — the dialog
        shows the typed query and the user commits it with Enter (or the
        re-run button). Empty query still resets immediately.
@@ -1167,6 +1315,8 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             setGitLoaded(false);
                             setCommits([]);
                             setFileHits([]);
+                            setFileTotal(0);
+                            setFileNameDegraded(false);
                             setMemoryHits([]);
                             setConversationHits([]);
                         }}
@@ -1266,16 +1416,33 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                     </div>
 
                     <div className="flex-1 overflow-y-auto">
-                        {tab === "file" && loading && <RowInfo>{t("globalSearch.searching")}</RowInfo>}
-                        {tab === "file" && error && !loading && <RowInfo>{error}</RowInfo>}
+                        {/* Progressive file tab: the name half lands in
+                            ~200 ms and the content half can take seconds, so
+                            the rows that are already in are rendered at once
+                            and the still-running half is reported as a status
+                            line, never as a full-tab block. */}
+                        {tab === "file" && loading && hits.length === 0 && (
+                            <RowInfo>{t("globalSearch.searching")}</RowInfo>
+                        )}
+                        {tab === "file" && error && <RowInfo>{error}</RowInfo>}
+                        {/* The name half could not answer: say so instead of
+                            letting the tab read as "this file does not
+                            exist". Shown for a name-only failure too, where
+                            `error` (the content half's status) is null. */}
+                        {tab === "file" && fileNameDegraded && (
+                            <RowInfo>{t("globalSearch.fileNameUnavailable")}</RowInfo>
+                        )}
                         {tab === "file" && !loading && !error && ranQuery && hits.length === 0 && (
                             <RowInfo>{t("globalSearch.fileNoMatch")}</RowInfo>
                         )}
                         {tab === "file" && !ranQuery && <RowInfo>{t("globalSearch.fileEmptyHint")}</RowInfo>}
-                        {tab === "file" && fileTotal > 0 && !loading && (
+                        {tab === "file" && fileTotal > 0 && (
                             <div className="px-3 pt-1 text-11 text-text-tertiary">
                                 {t("globalSearch.matchCount", { total: fileTotal, shown: hits.length })}
                             </div>
+                        )}
+                        {tab === "file" && loading && hits.length > 0 && (
+                            <RowInfo>{t("globalSearch.contentStillSearching")}</RowInfo>
                         )}
 
                         {tab === "git" && gitError && <RowInfo>{gitError}</RowInfo>}
@@ -1485,7 +1652,7 @@ function RowInfo({ children, "data-testid": testId }: { children: React.ReactNod
  *
  *   idle        → hint, no button (nothing has been searched yet)
  *   searching   → retrieval progress, button present but DISABLED: the
- *                 candidate snapshot is only frozen when the six-source
+ *                 candidate snapshot is only frozen when the seven-source
  *                 fan-out settles, so a click mid-flight would summarize
  *                 an incomplete set.
  *   done        → body + footer. Button reads "Summarize" when there is

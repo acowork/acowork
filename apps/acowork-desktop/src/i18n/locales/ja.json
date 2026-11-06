@@ -1690,6 +1690,8 @@
     "searching": "検索中…",
     "loadingGitHistory": "コミット履歴を読み込み中…",
     "fileNoMatch": "一致なし",
+    "fileNameUnavailable": "ファイル名の一致は利用できません（タイムアウト）。全文一致のみ表示しています",
+    "contentStillSearching": "ファイル名は取得済み。本文を検索中…",
     "fileEmptyHint": "キーワードを入力してファイル内容を検索",
     "gitNoMatch": "一致するコミットなし",
     "docNoMatch": "一致するドキュメントなし",

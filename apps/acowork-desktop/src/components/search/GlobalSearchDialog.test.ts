@@ -18,6 +18,9 @@ import {
     enterShouldSearch,
     filterGitCommits,
     toFileHits,
+    toFileNameHits,
+    mergeFileHits,
+    fileContentSearchUrl,
     toMemoryHits,
     toConversationHits,
     pickFirstResultTab,
@@ -151,6 +154,91 @@ describe("toFileHits", () => {
         ]);
         expect(hits).toHaveLength(2);
         expect(hits[0].id).not.toBe(hits[1].id);
+    });
+});
+
+describe("fileContentSearchUrl", () => {
+    // The wire contract of the content half. `match_file_names=false` is
+    // what keeps the file scope's two sources from overlapping: the name
+    // half belongs to `/workspaces/find` (its own source), so a regression
+    // here would silently rebuild the coupling that made a filename query
+    // return nothing whenever the full-text scan outlived the deadline.
+    it("never asks the full-text scan to also match file names", () => {
+        const url = fileContentSearchUrl("http://gw", "agent-1", "chat prompt");
+        const params = new URL(url).searchParams;
+        expect(params.get("match_file_names")).toBe("false");
+        expect(params.get("q")).toBe("chat prompt");
+        expect(params.get("workspace_id")).toBeNull();
+        expect(params.get("max_results")).toBe("50");
+    });
+
+    it("forwards the scope and the match toggles", () => {
+        const url = fileContentSearchUrl("http://gw", "agent-1", "needle", {
+            workspaceId: "ws-49616826fcfc",
+            caseSensitive: true,
+            wholeWord: true,
+            maxResults: 20,
+        });
+        const params = new URL(url).searchParams;
+        expect(params.get("workspace_id")).toBe("ws-49616826fcfc");
+        expect(params.get("case_sensitive")).toBe("true");
+        expect(params.get("whole_word")).toBe("true");
+        expect(params.get("max_results")).toBe("20");
+        expect(url.startsWith("http://gw/api/agents/agent-1/workspaces/search?")).toBe(true);
+    });
+});
+
+describe("toFileNameHits", () => {
+    // The name half is answered by `/workspaces/find` — the very endpoint
+    // the workspace explorer's search box uses — so the two surfaces cannot
+    // drift. The mapping goes through `toFileHits`, which means a palette
+    // hit renders exactly like a name hit the full-text endpoint used to
+    // report (title = file name, no line, `kind: "name"`).
+    it("maps a palette hit to the same row shape the name half used to produce", () => {
+        const hits = toFileNameHits("agent-1", "ws-1", [
+            { name: "chat_prompt.rs", relPath: "core/acowork-core/src/chat_prompt.rs" },
+        ]);
+        expect(hits).toHaveLength(1);
+        expect(hits[0]).toMatchObject({
+            type: "file",
+            id: "core/acowork-core/src/chat_prompt.rs:name",
+            title: "chat_prompt.rs",
+            snippet: "chat_prompt.rs",
+            sub: "core/acowork-core/src/chat_prompt.rs",
+            path: "core/acowork-core/src/chat_prompt.rs",
+            agentId: "agent-1",
+            workspaceId: "ws-1",
+            kind: "name",
+        });
+        expect(hits[0].line).toBeUndefined();
+    });
+});
+
+describe("mergeFileHits", () => {
+    const nameHit = toFileHits("a", "w", [
+        { file: "src/chat_prompt.rs", text: "chat_prompt.rs", kind: "name" },
+    ])[0];
+    const contentHit = toFileHits("a", "w", [
+        { file: "docs/notes.md", line: 3, column: 1, text: "chat prompt", kind: "content" },
+    ])[0];
+
+    it("puts the palette's name hits ahead of the full-text rows", () => {
+        // The order the single-pass Runtime search used to produce, kept
+        // across two sources: a user who typed a file name wants the file.
+        const merged = mergeFileHits([nameHit], [contentHit]);
+        expect(merged.map((h) => h.title)).toEqual(["chat_prompt.rs", "notes.md"]);
+        expect(merged[0].kind).toBe("name");
+        expect(merged[1].kind).toBe("content");
+    });
+
+    it("returns the arriving half untouched when the other is still pending", () => {
+        // Identity matters: the tab re-merges once per landing, and a fresh
+        // array for the single-half case would churn the whole row list.
+        const content = [contentHit];
+        expect(mergeFileHits([], content)).toBe(content);
+        const names = [nameHit];
+        expect(mergeFileHits(names, [])).toBe(names);
+        expect(mergeFileHits([], [])).toEqual([]);
     });
 });
 

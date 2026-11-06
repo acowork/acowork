@@ -7,7 +7,10 @@ import {
     runSearchSources,
     selectSummaryCandidates,
     parseSummarySegments,
+    canonicalScopes,
+    summaryScope,
     SEARCH_SOURCES,
+    SUMMARY_SOURCES,
     type CandidateInput,
     type SearchSource,
     type SourceResult,
@@ -33,7 +36,7 @@ describe("runSearchSources", () => {
             onSource: (s, r) => seen.push([s, r]),
             deadlineMs: 1000,
         });
-        expect(seen).toHaveLength(6);
+        expect(seen).toHaveLength(SEARCH_SOURCES.length);
         for (const s of SEARCH_SOURCES) {
             expect(results[s]).toEqual({ status: "ok", data: "hits" });
         }
@@ -250,5 +253,42 @@ describe("parseSummarySegments", () => {
         const segs = parseSummarySegments("[[bad id]] [[r1]]", new Set(["r1"]));
         expect(segs[0]).toEqual({ kind: "text", text: "[[bad id]] " });
         expect(segs[1]).toEqual({ kind: "citation", id: "r1" });
+    });
+});
+
+describe("file scope split into two sources (ADR-081 D2)", () => {
+    it("runs the name half as its own source, before the content half", () => {
+        // Order matters: the tab list and the summary both read `file`
+        // first, and the merged list puts name hits ahead of content hits.
+        expect(SEARCH_SOURCES.indexOf("fileName")).toBe(SEARCH_SOURCES.indexOf("file") + 1);
+    });
+
+    it("reports one scope per result tab, so `fileName` never reaches the wire", () => {
+        expect(SUMMARY_SOURCES).not.toContain("fileName");
+        expect(SUMMARY_SOURCES).toHaveLength(SEARCH_SOURCES.length - 1);
+        for (const s of SUMMARY_SOURCES) expect(s).toBe(summaryScope(s));
+        expect(summaryScope("fileName")).toBe("file");
+    });
+
+    it("folds a half-timeout onto its scope exactly once", () => {
+        // A run where BOTH halves of the file scope timed out must still
+        // name the scope once — the Runtime's summary gets one `file`.
+        expect(canonicalScopes(["fileName", "file", "git"])).toEqual(["file", "git"]);
+        expect(canonicalScopes(["fileName"])).toEqual(["file"]);
+        expect(canonicalScopes([])).toEqual([]);
+    });
+
+    it("never selects a `fileName`-scoped candidate", () => {
+        // The dialog merges both halves into `file` before calling this;
+        // a `fileName` candidate would be a scope the Runtime rejects.
+        const hits = {
+            file: [{ title: "chat_prompt.rs", snippet: "" }],
+            fileName: [{ title: "palette-only", snippet: "" }],
+            git: [], doc: [], project: [], memory: [], conversation: [],
+        } as Record<SearchSource, CandidateInput[]>;
+        const set = selectSummaryCandidates(hits);
+        expect(set.candidates).toHaveLength(1);
+        expect(set.candidates[0].scope).toBe("file");
+        expect(set.candidates[0].title).toBe("chat_prompt.rs");
     });
 });

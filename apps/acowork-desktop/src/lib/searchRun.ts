@@ -1,12 +1,23 @@
 /**
  * searchRun — ADR-093 global-search run coordinator (pure logic, unit-tested).
  *
- * One "search run" fans the query out to all six sources in parallel,
- * reports each source as it lands (tabs fill progressively), and then
- * feeds a bounded candidate list to the Runtime's `POST /search/summary`
- * LLM endpoint. Cancellation is generation-scoped: a new query (or the
- * ⟲ re-run button) aborts the parent signal, which tears down every
- * in-flight child request and the summary request together.
+ * One "search run" fans the query out to all seven retrieval sources in
+ * parallel, reports each source as it lands (tabs fill progressively), and
+ * then feeds a bounded candidate list to the Runtime's
+ * `POST /search/summary` LLM endpoint. Cancellation is generation-scoped: a
+ * new query (or the ⟲ re-run button) aborts the parent signal, which tears
+ * down every in-flight child request and the summary request together.
+ *
+ * Seven sources, six scopes: the file scope answers through **two** sources
+ * because its two halves have different costs (ADR-081 D2).
+ *  - `fileName` — `/workspaces/find`, the fuzzy name search the workspace
+ *    explorer's box uses: one directory walk, ~200 ms.
+ *  - `file` — `/workspaces/search` full text: the same walk plus reading
+ *    every file body, seconds on a large workspace.
+ * Sharing one source made the cheap half a hostage of the expensive one:
+ * when the full-text scan outlived the run deadline, the name hits were
+ * discarded with it and a filename that the palette finds instantly looked
+ * "not found". The two now carry their own status, and the tab merges them.
  *
  * Design doc 27 §4.1/§4.4/§5. This module holds no React state — the
  * dialog owns state; this owns the mechanics (deadline arithmetic,
@@ -19,16 +30,55 @@
 import { with503Retry } from "./httpRetry";
 import { log } from "./logger";
 
-export type SearchSource = "file" | "git" | "doc" | "project" | "memory" | "conversation";
+export type SearchSource =
+    | "file"
+    | "fileName"
+    | "git"
+    | "doc"
+    | "project"
+    | "memory"
+    | "conversation";
 
 export const SEARCH_SOURCES: readonly SearchSource[] = [
     "file",
+    "fileName",
     "git",
     "doc",
     "project",
     "memory",
     "conversation",
 ] as const;
+
+/** The scopes a summary candidate may name — one per result tab.
+ *
+ *  `fileName` is a **sub-source** of `file`: its rows are merged into the
+ *  file tab (name hits first) before candidates are selected, so the
+ *  summary never sees a `fileName` scope the Runtime would reject. */
+export type SummarySource = Exclude<SearchSource, "fileName">;
+
+/** The sources that own a summary scope, in candidate order. */
+export const SUMMARY_SOURCES: readonly SummarySource[] = SEARCH_SOURCES.filter(
+    (s): s is SummarySource => s !== "fileName",
+);
+
+/** The summary scope a source's rows belong to. `fileName` rows are file
+ *  rows — that is the whole point of splitting the source out. */
+export function summaryScope(source: SearchSource): SummarySource {
+    return source === "fileName" ? "file" : source;
+}
+
+/** Map a set of sources onto the scopes the Runtime accepts, deduped and
+ *  in first-seen order. Used for `timedOutScopes` / `failedScopes`: when
+ *  only the name half times out, the wire must say the file scope was
+ *  partial once, not `fileName` (a scope the Runtime does not know). */
+export function canonicalScopes(sources: readonly SearchSource[]): SummarySource[] {
+    const out: SummarySource[] = [];
+    for (const s of sources) {
+        const c = summaryScope(s);
+        if (!out.includes(c)) out.push(c);
+    }
+    return out;
+}
 
 export type SourceStatus = "ok" | "error" | "timeout";
 
@@ -53,7 +103,7 @@ export interface RunSearchOptions<T> {
 }
 
 /**
- * Run all six source adapters concurrently under one absolute deadline.
+ * Run all seven source adapters concurrently under one absolute deadline.
  *
  * Semantics (design 27 §5):
  *  - a source that lands before the deadline reports "ok" immediately via
@@ -148,8 +198,11 @@ export interface CandidateInput {
 
 export interface CandidateSet {
     candidates: SummaryCandidate[];
-    /** Citation id → the hit it stands for, for the click dispatcher. */
-    byId: Record<string, SearchSource>;
+    /** Citation id → the **scope** the hit stands for, for the click
+     *  dispatcher. Always a scope, never a sub-source: a `fileName`
+     *  citation resolves through the merged file list (the dialog keys
+     *  `rowsRef.current.file` on that same merged array). */
+    byId: Record<string, SummarySource>;
     /** Per-source ordinal of each candidate, so a click can map back to
      *  the row index in that source's hit list (rN order is deterministic). */
     indexOf: Record<string, number>;
@@ -167,7 +220,7 @@ const FUSED_SOURCES: readonly SearchSource[] = ["memory", "conversation"];
 export const MAX_CANDIDATES_PER_DEDUP_KEY = 2;
 
 /**
- * Budget the six hit lists into the summary candidate payload.
+ * Budget the per-scope hit lists into the summary candidate payload.
  *
  * Deterministic and threshold-free by design (ADR-095 D5): the ordering keys
  * are the *in-source rank* the engine already computed and the evidence
@@ -193,10 +246,10 @@ export function selectSummaryCandidates(
     hitsBySource: Record<SearchSource, CandidateInput[]>,
 ): CandidateSet {
     const candidates: SummaryCandidate[] = [];
-    const byId: Record<string, SearchSource> = {};
+    const byId: Record<string, SummarySource> = {};
     const indexOf: Record<string, number> = {};
 
-    const push = (source: SearchSource, rowIndex: number, input: CandidateInput) => {
+    const push = (source: SummarySource, rowIndex: number, input: CandidateInput) => {
         const id = `r${candidates.length + 1}`;
         const c: SummaryCandidate = {
             scope: source,
@@ -216,7 +269,10 @@ export function selectSummaryCandidates(
         indexOf[id] = rowIndex;
     };
 
-    for (const source of SEARCH_SOURCES) {
+    // Scopes only: `fileName` rows are already inside `hitsBySource.file`
+    // (the dialog merges the two halves before calling this), and the
+    // Runtime rejects a candidate whose scope is not one of the six.
+    for (const source of SUMMARY_SOURCES) {
         if (candidates.length >= MAX_CANDIDATES_TOTAL) break;
         const hits = hitsBySource[source] ?? [];
 

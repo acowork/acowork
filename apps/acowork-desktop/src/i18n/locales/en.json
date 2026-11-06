@@ -921,6 +921,8 @@
     "searching": "Searching…",
     "loadingGitHistory": "Loading commit history…",
     "fileNoMatch": "No matches",
+    "fileNameUnavailable": "File-name matching is unavailable (timed out) — showing full-text matches only",
+    "contentStillSearching": "Names are in — still scanning file contents…",
     "fileEmptyHint": "Enter a keyword to search file content",
     "gitNoMatch": "No matching commits",
     "docNoMatch": "No matching documents",

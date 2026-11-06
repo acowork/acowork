@@ -1902,6 +1902,8 @@
     "searching": "搜索中…",
     "loadingGitHistory": "加载 commit 历史…",
     "fileNoMatch": "无匹配",
+    "fileNameUnavailable": "文件名匹配暂不可用（已超时），仅显示全文匹配结果",
+    "contentStillSearching": "文件名已就绪，仍在检索文件内容…",
     "fileEmptyHint": "输入关键词搜索文件内容",
     "gitNoMatch": "无匹配 commit",
     "docNoMatch": "无匹配文档",

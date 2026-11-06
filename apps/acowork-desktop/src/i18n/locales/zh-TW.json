@@ -1681,6 +1681,8 @@
     "searching": "搜尋中…",
     "loadingGitHistory": "載入 commit 歷史…",
     "fileNoMatch": "無匹配",
+    "fileNameUnavailable": "檔名匹配暫不可用（已逾時），僅顯示全文匹配結果",
+    "contentStillSearching": "檔名已就緒，仍在檢索檔案內容…",
     "fileEmptyHint": "輸入關鍵字搜尋檔案內容",
     "gitNoMatch": "無匹配 commit",
     "docNoMatch": "無匹配文件",
