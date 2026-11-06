@@ -404,9 +404,13 @@ The Setup tab is the single entry point for agent-level configuration — seven 
 | 4 | Chat Session Router | Router model / timeout / history budget (ADR‑099) |
 | 5 | Prompts & Skills | Browse and edit the package's `prompts/` + `skills/`, plus reload (was the top card of the Debug tab, ADR‑063 §3.7) |
 | 6 | Builtin Tools | Builtin tool switches (ADR‑029, including ADR‑094's `load_skill`) |
-| 7 | MCP Servers | The package's recommended MCP group (ADR‑104) + per‑server switches (ADR‑069 / ADR‑090) |
+| 7 | MCP Servers | Per‑server switches (ADR‑069 / ADR‑090); each server expands to its tool list |
+
+One more, **conditionally rendered**, card sits between 6 and 7: **MCP servers recommended by the package** (`McpRecommendationGroup`, ADR‑104). It appears only when the package's `manifest.toml` declares `[[mcp_servers]]` recommendations, and installing one drops that row into the switch list below — the two have to be on screen together. It is not one of the seven and takes no part in the "first 3" position rule.
 
 Only the **first 3** cards start expanded; the rest start collapsed (order and defaults are defined once in `agentSetupCards.ts`). Expand state is component‑local, not persisted.
+
+**Known exception**: the recommendation card starts **expanded** (its own component‑local initial value, outside the rule). It only renders when recommendations exist, and then it is the notice that "this agent is still missing something" — collapsing it would reduce that notice to a title bar. The cost is that the panel is then no longer strictly "only the first 3 expanded". Rationale and the future unification: ADR‑108 D3.
 
 ### 4.5 File Editor (`FileEditorPanel.tsx`, optional)
 

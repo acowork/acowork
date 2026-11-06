@@ -11,7 +11,7 @@
 
 ## Summary
 
-**In one sentence**: the right rail shrinks from six tabs to **five** (Workspace / Status / Memory / Debug / Setup). The Tools tab is retired: its two cards — builtin tools, MCP servers (including the recommendation group) — move into the Setup tab, and the Debug tab's Prompts & Skills card moves there as well. The Debug tab keeps only the debug switch (with the iteration / phase / token readout), the context snapshots and the compression history. Setup therefore grows from four cards to seven, so **only the first three start expanded** and the rest start collapsed.
+**In one sentence**: the right rail shrinks from six tabs to **five** (Workspace / Status / Memory / Debug / Setup). The Tools tab is retired: its two cards — builtin tools, MCP servers (with the recommendation group as a conditional card between them) — move into the Setup tab, and the Debug tab's Prompts & Skills card moves there as well. The Debug tab keeps only the debug switch (with the iteration / phase / token readout), the context snapshots and the compression history. Setup therefore grows from four cards to seven, so **only the first three start expanded** and the rest start collapsed.
 
 **In one sentence (why)**: a tab only earns its place if it matches the **ownership of the data** behind it. The two cards in the Tools tab write **this agent's own configuration** (`agent_tools.json` / `agent_mcp.json`) — the same object, the same permission gate and the same write path as the cards in Setup that write `agent_config.json`. Splitting them across two tabs forces the user to remember "which switch lives in which tab", and the visual grouping that memory cost buys does not exist — there were only two cards in that tab. The same holds for Prompts & Skills (ADR-063 §3.7): it edits files inside the package, has nothing to do with debugging, and sat at the top of the Debug tab only because that tab used to be empty.
 
@@ -49,6 +49,8 @@ Card order is the order of `AGENT_SETUP_CARDS` ([agentSetupCards.ts](../../../ap
 
 The three migrated cards sit after the original four so existing muscle memory is not disturbed.
 
+**One card lives outside the registry.** The "MCP servers recommended by the package" group (`McpRecommendationGroup`, ADR-104) is not one of these seven: it renders only when the package's `manifest.toml` declares `[[mcp_servers]]` recommendations, its position is fixed **between** `builtinTools` and `mcpServers`, and `ToolsCards` renders it without going through `AGENT_SETUP_CARDS`. Having no position, it gets no "first three" verdict — see the exception clause in D3.
+
 ### D3 — Only the first three start expanded; the rule is defined once and not persisted
 
 `DEFAULT_EXPANDED_CARD_COUNT = 3`, and `defaultOpenForCard(id)` derives the initial value from a card's **position** in the registry. The panel drives every `ExpandableRow` from one `Record<cardId, boolean>`; the migrated cards receive their initial value through a `defaultOpen` prop.
@@ -57,6 +59,13 @@ Two deliberate trade-offs:
 
 - **The rule lives in the registry, not in the cards.** Seven scattered `useState(true)` calls look equivalent, but inserting a card then silently changes what "the first three" means, and nothing fails.
 - **No persistence.** Expand state stays component-local, exactly as before the merge: switching tabs unmounts the panel and the rule re-seeds it. Adding a storage layer for seven booleans would demote the one rule we have ("the first three expand") into "whatever the user touched last".
+
+**Known exception: the recommendation card starts expanded.** `McpRecommendationGroup` still initialises from its own `useState(true)` and is not part of the `Record<cardId, boolean>`, so the "first three" rule does not reach it. The behaviour predates the merge (the old Tools panel held two cards and opened both) and is **kept deliberately**:
+
+- It appears only when the package really declares a recommendation, and then it *is* the notice that "this agent is still missing something". Starting collapsed would reduce that notice to a title bar — and since most agents never render it at all, the user has no positional memory of where to look for it.
+- It has no stable position (it may not render), so folding it into the seven-card position table would make "the first three" mean different things per package.
+
+The cost is explicit: for an agent that declares recommendations, the panel reads "1–3 expanded, 4–6 collapsed, one expanded recommendation card, a collapsed MCP card" — not what "only the first three expand" says. Unifying it properly means adding `mcpRecommended` to the registry (between `builtinTools` and `mcpServers`) and passing it a `defaultOpen`; that is out of scope here and is recorded so it is not mistaken for an oversight.
 
 ### D4 — The host owns scrolling; the cards own none
 
@@ -74,7 +83,7 @@ The Debug tab keeps: the debug switch block (Enter/Exit Debug + session controls
 ### D6 — Invariants
 
 - **Endpoints / stores / permissions / write paths are untouched**: `GET/PUT /tools`, `/mcp-tools`, `/prompts/reload`, the `agent_mcp.json` enablement path and ADR-087's read-only verdict all stay as they were. Only the render host and the entry point changed.
-- **ADR-104's causal adjacency is unchanged**: the recommendation group still sits directly above the MCP switch list, inside the same card cell.
+- **ADR-104's causal adjacency is unchanged**: the recommendation group still sits directly above the MCP switch list (it *is* the conditional card between Builtin Tools and MCP Servers), so "install one and watch the row appear below" stays on screen.
 - **ADR-029 / ADR-094 switch semantics are unchanged**: a builtin row's switch is still `PUT /agents/{id}/builtin-tools`; `load_skill` is still the only skill-mode control.
 - **ADR-101's memory gate is unchanged**: the Memory tab still needs "agent running + memory service ready".
 
@@ -84,8 +93,8 @@ The Debug tab keeps: the debug switch block (Enter/Exit Debug + session controls
 
 - **Users**: one fewer tab to search (six → five); Setup's first screen shows three expanded cards with the rest visible by title, one click away.
 - **Code**: `ToolsTab.tsx` → `ToolsCards.tsx` (no panel chrome, no empty state); `PromptsSkillsCard`'s initial expand state is injected by its host (`defaultOpen`); `RightNavBar`'s generic icon slot is gone.
-- **Tests**: `agentSetupCards` (the rule itself), `AgentSetupTab.cards` (seven cards in order, first three expanded, builtin list without an inner scroll host).
-- **Docs**: the PRD §4.4 tab table is updated and a new §4.4.3 documents Setup's seven cards; the "…in the Tools panel" / "…at the top of the Debug tab" location statements in ADR-029 / ADR-034 §7.6.5 / ADR-063 §3.7 / ADR-069 / ADR-090 / ADR-094 / ADR-104 carry a pointer to this ADR without rewriting their historical conclusions.
+- **Tests**: `agentSetupCards` (the rule itself), `AgentSetupTab.cards` (seven cards in order, first three expanded, builtin list without an inner scroll host). The recommendation card's initial expand state is not covered (the D3 exception).
+- **Docs**: the PRD §4.4 tab table is updated and a new §4.4.3 documents Setup's seven permanent cards plus the one conditional recommendation card; the "…in the Tools panel" / "…at the top of the Debug tab" location statements in ADR-029 / ADR-034 §7.6.5 / ADR-063 §3.7 / ADR-069 / ADR-090 / ADR-094 / ADR-104 carry a pointer to this ADR without rewriting their historical conclusions.
 
 ---
 
@@ -95,6 +104,7 @@ The Debug tab keeps: the debug switch block (Enter/Exit Debug + session controls
 - **No sub-tabs inside Setup**: that would swap "six panels" for "one panel with six sub-panels" — the same burden plus a level.
 - **No capability is removed**: the state readout and the compression history stay in the Debug tab; nothing was cut on the grounds that the panel should be shorter.
 - **No change to the recommendation group's position**: inserting it between `promptsSkills` and `builtinTools` would break ADR-104's "install it, then watch it join the list below".
+- **The recommendation card is not brought under the expand rule this time** (the D3 exception): it still starts from the component's own `useState(true)`.
 
 ---
 
