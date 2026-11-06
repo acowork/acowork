@@ -2017,6 +2017,13 @@
     "formInstallHint": "Install hint",
     "formInstallScript": "Install script name"
   },
+  "datePicker": {
+    "placeholder": "Select date",
+    "prevMonth": "Previous month",
+    "nextMonth": "Next month",
+    "today": "Today",
+    "clear": "Clear"
+  },
   "pm": {
     "settingsPanel": {
       "title": "Project Settings",

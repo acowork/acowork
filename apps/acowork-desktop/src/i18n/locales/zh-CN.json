@@ -2028,6 +2028,13 @@
     "formInstallHint": "安装提示",
     "formInstallScript": "安装脚本名"
   },
+  "datePicker": {
+    "placeholder": "选择日期",
+    "prevMonth": "上个月",
+    "nextMonth": "下个月",
+    "today": "今天",
+    "clear": "清除"
+  },
   "pm": {
     "settingsPanel": {
       "title": "项目设置",

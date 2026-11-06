@@ -1816,6 +1816,13 @@
     "formInstallHint": "インストールの手がかり",
     "formInstallScript": "インストールスクリプト名"
   },
+  "datePicker": {
+    "placeholder": "日付を選択",
+    "prevMonth": "前の月",
+    "nextMonth": "次の月",
+    "today": "今日",
+    "clear": "クリア"
+  },
   "pm": {
     "projects": "プロジェクト",
     "emptyTitle": "プロジェクトがまだありません",

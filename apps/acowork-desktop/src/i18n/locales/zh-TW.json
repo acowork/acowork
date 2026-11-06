@@ -1807,6 +1807,13 @@
     "formInstallHint": "安裝提示",
     "formInstallScript": "安裝腳本名"
   },
+  "datePicker": {
+    "placeholder": "選擇日期",
+    "prevMonth": "上個月",
+    "nextMonth": "下個月",
+    "today": "今天",
+    "clear": "清除"
+  },
   "pm": {
     "projects": "專案",
     "emptyTitle": "還沒有專案",
