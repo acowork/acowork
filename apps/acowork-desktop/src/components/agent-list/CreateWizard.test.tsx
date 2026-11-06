@@ -27,6 +27,16 @@ vi.mock("../../lib/mcpPresets", async () => {
   return { ...actual, fetchMcpPresets };
 });
 
+// The step-3 second-level tool list probes the hosted server's live
+// `tools/list`. Mocked at the module boundary: the wizard must be tested
+// against a *fixed* advertised tool set, not against whatever the local
+// Gateway happens to serve.
+const fetchHostedMcpTools = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/hostedMcpTools", async () => {
+  const actual = await vi.importActual<typeof import("../../lib/hostedMcpTools")>("../../lib/hostedMcpTools");
+  return { ...actual, fetchHostedMcpTools };
+});
+
 import { CreateWizard } from "./CreateWizard";
 import type { McpPreset } from "../../lib/mcpPresets";
 
@@ -54,6 +64,13 @@ const PRESET: McpPreset = {
 const BUILTIN_TOOLS = [
   { name: "bash", description: "Run shell commands" },
   { name: "file_read", description: "Read a file" },
+];
+
+/** What the mocked `pm` server advertises on `tools/list`. */
+const PM_TOOLS = [
+  { name: "pm_list_projects", description: "List all projects." },
+  { name: "pm_create_task", description: "Create a task." },
+  { name: "pm_claim_task", description: "Claim a task." },
 ];
 
 /** Route `invoke` by command name; anything unmocked fails loudly. */
@@ -101,6 +118,8 @@ beforeEach(async () => {
   invoke.mockReset();
   fetchMcpPresets.mockReset();
   fetchMcpPresets.mockResolvedValue([PRESET]);
+  fetchHostedMcpTools.mockReset();
+  fetchHostedMcpTools.mockResolvedValue(PM_TOOLS);
   onCreated = vi.fn();
   onClose = vi.fn();
   wireInvoke();
@@ -307,6 +326,162 @@ describe("CreateWizard — step 3: tools and MCP", () => {
     await waitFor(() => expect(screen.getByText("gateway down")).toBeTruthy());
     // Platform-hosted servers need no catalog, so the step still works.
     expect(screen.getByLabelText("pm")).toBeTruthy();
+  });
+
+  it("expands a hosted pick into per-tool switches and carries the whitelist", async () => {
+    renderWizard();
+    await fillBasics();
+    fireEvent.click(next());
+    fireEvent.click(next());
+    fireEvent.click(screen.getByLabelText("pm"));
+
+    // Second level: the pick card is expandable, and expanding probes the
+    // server's live `tools/list` (same contract as the Tools panel).
+    fireEvent.click(screen.getByRole("button", { name: "pm tools" }));
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: "pm_claim_task" })).toBeTruthy(),
+    );
+    // Default permission: everything on, nothing written to the manifest.
+    expect((screen.getByRole("switch", { name: "pm_claim_task" }) as HTMLInputElement).checked).toBe(true);
+
+    fireEvent.click(screen.getByRole("switch", { name: "pm_claim_task" }));
+
+    fireEvent.click(next());
+    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+
+    await waitFor(() => {
+      const servers = lastDraftFor("preview_manifest").mcp_servers as Record<string, unknown>[];
+      expect(servers[0]).toEqual({
+        hosted: "pm",
+        required_secrets: [],
+        // The whitelist is the advertised list minus the flipped-off tool,
+        // in the server's own order.
+        tools: ["pm_list_projects", "pm_create_task"],
+        required: false,
+      });
+    });
+  });
+
+  it("refuses the last enabled switch (an empty whitelist would mean all-on)", async () => {
+    renderWizard();
+    await fillBasics();
+    fireEvent.click(next());
+    fireEvent.click(next());
+    fireEvent.click(screen.getByLabelText("pm"));
+    fireEvent.click(screen.getByRole("button", { name: "pm tools" }));
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: "pm_claim_task" })).toBeTruthy(),
+    );
+
+    fireEvent.click(screen.getByRole("switch", { name: "pm_list_projects" }));
+    fireEvent.click(screen.getByRole("switch", { name: "pm_create_task" }));
+
+    const last = screen.getByRole("switch", { name: "pm_claim_task" }) as HTMLInputElement;
+    expect(last.checked).toBe(true);
+    expect(last.disabled).toBe(true);
+    // And flipping the two back on re-enables it.
+    fireEvent.click(screen.getByRole("switch", { name: "pm_list_projects" }));
+    expect((screen.getByRole("switch", { name: "pm_claim_task" }) as HTMLInputElement).disabled).toBe(false);
+  });
+
+  it("falls back to all-enabled default when the probe fails, and still creates", async () => {
+    fetchHostedMcpTools.mockRejectedValue(new Error("gateway down"));
+    renderWizard();
+    await fillBasics();
+    fireEvent.click(next());
+    fireEvent.click(next());
+    fireEvent.click(screen.getByLabelText("pm"));
+    fireEvent.click(screen.getByRole("button", { name: "pm tools" }));
+
+    // The failure is explained, not thrown — and the pick stays at "no
+    // opinion", so the draft must not carry a guessed whitelist.
+    await waitFor(() => expect(screen.getByText(/Tool list unavailable/)).toBeTruthy());
+    fireEvent.click(next());
+    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    await waitFor(() =>
+      expect((lastDraftFor("preview_manifest").mcp_servers as Record<string, unknown>[])[0].tools).toEqual([]),
+    );
+  });
+
+  it("retries a failed probe on re-expand and shows the list once it succeeds", async () => {
+    // A sticky failure flag used to keep rendering "unavailable" even after a
+    // successful retry, which reads as "the wizard cannot show tools for this
+    // server" forever.
+    fetchHostedMcpTools
+      .mockRejectedValueOnce(new Error("gateway down"))
+      .mockResolvedValueOnce(PM_TOOLS);
+    renderWizard();
+    await fillBasics();
+    fireEvent.click(next());
+    fireEvent.click(next());
+    fireEvent.click(screen.getByLabelText("pm"));
+
+    const header = () => screen.getByRole("button", { name: "pm tools" });
+    fireEvent.click(header());
+    await waitFor(() => expect(screen.getByText(/Tool list unavailable/)).toBeTruthy());
+
+    // Collapse, expand again -> second attempt succeeds.
+    fireEvent.click(header());
+    fireEvent.click(header());
+    await waitFor(() =>
+      expect(screen.getByRole("switch", { name: "pm_claim_task" })).toBeTruthy(),
+    );
+    expect(screen.queryByText(/Tool list unavailable/)).toBeNull();
+  });
+
+  it("does not offer a second level for presets (their server is not connected)", async () => {
+    renderWizard();
+    await fillBasics();
+    fireEvent.click(next());
+    fireEvent.click(next());
+    await waitFor(() => expect(screen.getByLabelText("Brave Search")).toBeTruthy());
+    fireEvent.click(screen.getByLabelText("Brave Search"));
+
+    expect(screen.queryByRole("button", { name: "brave-search tools" })).toBeNull();
+  });
+});
+
+describe("CreateWizard — step 3: builtin tool defaults", () => {
+  /** A catalog the way `acowork-core` now ships it: `default_enabled` per tool. */
+  const CATALOG_WITH_DEFAULTS = [
+    { name: "file_write", description: "Create or overwrite files", default_enabled: true },
+    { name: "file_read", description: "Read a file", default_enabled: false },
+    { name: "todo_write", description: "Maintain a todo list", default_enabled: true },
+  ];
+
+  it("pre-selects the platform defaults and declares them in the draft", async () => {
+    // ADR-029 keeps the Runtime opt-in: a tool the wizard does not select is
+    // disabled in the new agent, so "pre-selected" has to reach `[[tools]]`.
+    wireInvoke({ list_builtin_tools: () => CATALOG_WITH_DEFAULTS });
+    renderWizard();
+    await fillBasics();
+    fireEvent.click(next());
+    fireEvent.click(next());
+
+    await waitFor(() =>
+      expect((screen.getByLabelText("file_write") as HTMLInputElement).checked).toBe(true),
+    );
+    expect((screen.getByLabelText("todo_write") as HTMLInputElement).checked).toBe(true);
+    expect((screen.getByLabelText("file_read") as HTMLInputElement).checked).toBe(false);
+
+    // Deselecting a default is still allowed and wins.
+    fireEvent.click(screen.getByLabelText("todo_write"));
+
+    fireEvent.click(next());
+    while (!screen.queryByText("Review your agent")) fireEvent.click(next());
+    await waitFor(() => expect(lastDraftFor("preview_manifest").tools).toEqual(["file_write"]));
+  });
+
+  it("starts from an empty selection when the catalog carries no defaults", async () => {
+    // A backend that predates the flag must not make the wizard invent a list.
+    renderWizard();
+    await fillBasics();
+    fireEvent.click(next());
+    fireEvent.click(next());
+    await waitFor(() => expect(screen.getByLabelText("bash")).toBeTruthy());
+
+    expect((screen.getByLabelText("bash") as HTMLInputElement).checked).toBe(false);
+    expect((screen.getByLabelText("file_read") as HTMLInputElement).checked).toBe(false);
   });
 });
 

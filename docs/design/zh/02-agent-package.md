@@ -338,7 +338,8 @@ max_results = 5
 score_threshold = 0.7
 
 # ADR-104：推荐 MCP 服务器。推荐 ≠ 安装 —— 落地到 agent_mcp.json 的
-# recommended 列表，由用户在工具面板确认安装与启用（ADR-090）。
+# recommended 列表，由用户在设置面板的 MCP 卡片确认安装与启用（ADR-090；
+# 原「工具面板」已并入设置面板，见 ADR-108）。
 # 三种形态互斥：preset / hosted / transport+url；禁止内联 stdio。
 
 [[mcp_servers]]
@@ -346,7 +347,7 @@ preset = "brave-search"                 # 平台预设 id（Gateway 注册表）
 why = "联网检索最新天气资料"              # 展示给用户看，原样渲染
 required_secrets = ["BRAVE_API_KEY"]     # 缺密钥时该卡片点名提示
 tools = ["brave_web_search"]             # 工具子集；启用后成为初始勾选集
-required = false                         # 软必需：不阻断；缺口在工具面板可见（该行标"必需"，缺密钥点名提示）
+required = false                         # 软必需：不阻断；缺口在设置面板的 MCP 卡片可见（该行标"必需"，缺密钥点名提示）
 
 [[mcp_servers]]
 hosted = "memory"                        # Gateway 托管服务（pm / doc / memory）

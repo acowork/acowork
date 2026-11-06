@@ -1,7 +1,7 @@
 # ADR-106：chat 与 execute 的边界重划——引用而非副本
 
 - **编号**：ADR-106
-- **状态**：提议（待架构评审）——**已全部落地**：P1（`round_id` 铸造 + 轮次侧表 + 区间闭合）、P2（投影读接口）、P3（`rounds.sqlite` 缓存 + `GET /api/chat-blocks`）、P4（chat 写侧切换为引用行）、P5（寻址阶梯与两级 `@`）、P6（卡片归块与回答直投，块渲染器落在 Desktop 两视图与 Mobile）。本 ADR 列出的各"废止 / 退役"项目已从代码里删除；Desktop 与 Mobile 的转录形状已统一（四类词表 + 引用行 + 块投影）。**修订（2026-11-03·等待行）**：D9 的等待行判据窗口由"本地在途的 POST"延长为"本设备自己那次发送的 claim"（见文末修订章节与设计 27 v3.1.2）。**修订（2026-11-03·轮次门铃）**：新增轮次门铃事件 `round_state`（`SessionMessage` 字段 34），补回 D3 零写删掉的通知面，pending 重读由一次性 `setTimeout` 改为周期兜底（见文末修订章节与设计 27 v3.1.3）。**修订（2026-11-04·呈现分叉与 act 族更名）**：呈现契约的折叠规则按 `opened_new` 分叉（新开会话的触发行保留为独立气泡）；D6 的 act 空间更名 `exec_session_*` 族并新增只读 `exec_session_read_round`（见文末修订章节与设计 29 §11）。**修订（2026-11-04·引用重划）**：`@` 执行会话定死为引用语义——阶梯级别 2 的投递退役（`target_sessions` 从人 `@` 路径退役、由 `meta.refs` 材料坐标取代，寻址卡应答保留该通道），续投改由执行块就地输入框承担，交付物化取 ADR-107 参照 part 通道（见文末修订章节）。**修订（2026-11-04·引用部件）**：D3 派发链路上"router 简报"与用户原话不再拼成一个字符串——`exec_session_create` 的入参改为 `background`，其内容作为引用部件（`context_ref`）随行在 `user` 行之后，`user` 行只留原话；本 ADR 的"引用而非副本"边界因此也适用于 chat→execute 的那一条消息（见 [ADR-107](./ADR-107-message-ref-part.md)）。**修订（2026-11-05·索引先于引用）**：新增"引用可见即可答"的次序不变量——轮边界先把该轮 `announce` 进侧表、再写 chat 引用行；`RoundRecord.user` 变为可缺省，已登记但暂无内容的轮投影为 `pending`（按 D9 重读）而非空洞，空洞自此只留给"转录不在本机"与"坐标漂移"两类事实（见文末修订章节）。
+- **状态**：提议（待架构评审）——**已全部落地**：P1（`round_id` 铸造 + 轮次侧表 + 区间闭合）、P2（投影读接口）、P3（`rounds.sqlite` 缓存 + `GET /api/chat-blocks`）、P4（chat 写侧切换为引用行）、P5（寻址阶梯与两级 `@`）、P6（卡片归块与回答直投，块渲染器落在 Desktop 两视图与 Mobile）。本 ADR 列出的各"废止 / 退役"项目已从代码里删除；Desktop 与 Mobile 的转录形状已统一（四类词表 + 引用行 + 块投影）。**修订（2026-11-03·等待行）**：D9 的等待行判据窗口由"本地在途的 POST"延长为"本设备自己那次发送的 claim"（见文末修订章节与设计 27 v3.1.2）。**修订（2026-11-03·轮次门铃）**：新增轮次门铃事件 `round_state`（`SessionMessage` 字段 34），补回 D3 零写删掉的通知面，pending 重读由一次性 `setTimeout` 改为周期兜底（见文末修订章节与设计 27 v3.1.3）。**修订（2026-11-04·呈现分叉与 act 族更名）**：呈现契约的折叠规则按 `opened_new` 分叉（新开会话的触发行保留为独立气泡）；D6 的 act 空间更名 `exec_session_*` 族并新增只读 `exec_session_read_round`（见文末修订章节与设计 29 §11）。**修订（2026-11-04·引用重划）**：`@` 执行会话定死为引用语义——阶梯级别 2 的投递退役（`target_sessions` 从人 `@` 路径退役、由 `meta.refs` 材料坐标取代，寻址卡应答保留该通道），续投改由执行块就地输入框承担，交付物化取 ADR-107 参照 part 通道（见文末修订章节）。**修订（2026-11-04·引用部件）**：D3 派发链路上"router 简报"与用户原话不再拼成一个字符串——`exec_session_create` 的入参改为 `background`，其内容作为引用部件（`context_ref`）随行在 `user` 行之后，`user` 行只留原话；本 ADR 的"引用而非副本"边界因此也适用于 chat→execute 的那一条消息（见 [ADR-107](./ADR-107-message-ref-part.md)）。**修订（2026-11-05·门铃第二触发点）**：`round_state` 的触发点从"回合边界"扩到"活回合内卡片开关"——`ask_question` / `approval` 在回合**内部**打开与收口，此前两端都不发门铃，实测一张活了 54 s 的问题卡在 Chat 侧一次都没被读到（见文末修订章节）。**修订（2026-11-05·索引先于引用）**：新增"引用可见即可答"的次序不变量——轮边界先把该轮 `announce` 进侧表、再写 chat 引用行；`RoundRecord.user` 变为可缺省，已登记但暂无内容的轮投影为 `pending`（按 D9 重读）而非空洞，空洞自此只留给"转录不在本机"与"坐标漂移"两类事实（见文末修订章节）。**修订（2026-11-06·动作行）**：块的就地续投输入行从块底移到块头上方的动作行，与“查看执行 / `@` 引用 / 复制整块”并排成一行纯图标；续投改为 hover / 焦点 / 草稿展开的抽屉，`@` 复用引用材料通道，复制为整块的 Markdown 导出（见文末修订章节）。
 - **日期**：2026-11-02
 - **决策者**：ACowork 架构组
 - **关联**：ADR-100（本 ADR 废止其 D2/D8/D9/D10/D11/D12，重述 D1/D3 的边界）、ADR-099（收缩其 `dispatch` 权力）、ADR-105（废止其 D4/D5 的镜像判据）、ADR-097（可弃侧表模式的直接先例）、ADR-096（写时派生 / 禁止全量读）、ADR-092（per-session 单写者与有界读取）、ADR-084（chat 存储归属 acowork-user）、ADR-055（跨机可达性是本设计的支柱）、ADR-076（单发起人）、ADR-046（附件判别联合；§2.1 与 ADR-107 共同判废了"拼接进投递文本"的物化路径）、ADR-102（TurnOrigin 策略表仍生效）、ADR-107（参照 part：引用重划的交付物化走它的 `context_refs` 通道）
@@ -248,7 +248,7 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 
 - **数据**：exec 侧新增 `round_id` metadata + `{sid}.jsonl.rounds` 可重建侧表（**随会话一起消亡**：`delete_session` 删掉它，`prune_excess_sessions` 把它转录一起归档，不留孤儿索引）；chat 侧新增 `execution_round` kind + `rounds.sqlite` 可弃侧表；`intent-sessions.json` / `terminal-sessions.json` 退役（**P5 已删除**：唯一真相是 `sessions` 表的 `intent_key` / `intent_closed` 两列（SCHEMA_VERSION 10）加上执行会话 meta 的 `chat_session_id`；两列不进 `SessionMeta` 结构体，因此 `build_meta()` 的全量 upsert 擦不掉路由决策，`upsert_row` 的显式列清单保证两个写入者互不干扰）。**不考虑兼容**：旧行按现状渲染（历史 `agent_message` echo 仍走普通 `agent_message` 话泡；历史 `interaction_request` 行与 `interaction_resolved` 回执留在盘上但呈现层**隐藏**——P6 定下的就是这一支：旧转录不得复活一张可点的卡，因为答案的写入口已不存在），不做迁移。旧会话无 `round_id` ⇒ 无轮次索引 ⇒ 投影 404 ⇒ 块降级为空洞（而非谎言）。
 - **协议**：新增 `GET /sessions/{sid}/rounds/{round_id}`（Runtime）、`GET /api/chat-blocks/{chat_id}`（Gateway，**新顶层前缀**）、`GET`/`PUT /internal/chat-sessions/{id}/rounds`（user internal）、`GET /sessions?chat_session_id=&surface=`（Runtime——第二级 `@` 复用同一份会话列表读，只加两个查询参数；`/chat-candidates` 与其 Gateway 代理已删除）；`/api/intents/chat-append` 的 kind 白名单从 `interaction_request|system_notice|agent_message` 改为 `execution_round|system_notice|agent_message`（P4 当时仍含 agent↔agent 回答行；P6 落 D12 后 `agent_message` 只剩 Chat Router 的自答）；`mentions` 新增 `target_sessions`（agent → session 的第二级 `@`）与 **`force_new_for`（按 target 的列表，不是旗标——见 D7）**。三级寻址事实以 delivery `params` 键跨越 Gateway→Runtime（`target_session_id` / `explicit_mention` / `force_new`，两枚旗标只在为真时写入），因此阶梯的前三级零 proto 变更；`force_new` 是 **per-target 投递参数**，请求体的列表只在装配时扇出。Router 的提问卡走 `system_notice`：`notice_type` 为 `session_choice`（级别 3 多候选）与 `confirm_continue`（级别 5 提议），meta 携 `options[]` + `allow_new_task: true`，幂等键 `{notice_type}:{message_id}`——复用白名单已允许的 kind，写入口不新增。**答卡不新增协议形状**：它是一次普通重投递，只是 `message_id` 取原行 id（幂等去重）+ 地址字段。`round_id` 不需要 proto 变更（D2 的确定性派生以入站 `message_id` 为唯一输入）；`Intent.for_execution_session` 的删除仍按 Rev.8 已做的形状；`trigger_message_id` 作为 `TurnSurface` 字段与镜像幂等键在 P4 退役，但同一事实作为引用行的 `in_reply_to` 保留（由 `TurnReference` 供应，见 D2/D3）。
-- **删除**：Runtime 的 `exec_echo_meta` / `turn_routed_meta` / `router_fallback_meta` / 三站点 `echo_terminal_row` / `write_interaction_card` / `close_chat_card*` / surface 补齐补丁（**P4 已全部落地**：Runtime 侧 chat 写入口只剩引用行一处）；Gateway 的 `resolve_card_answer` / `mark_answered` / 答案行写入 / sweeper 的 chat 失败行（改为通知）与前端整个 `chatTurnState.ts`（含其 `closedCards` 簿记）、`InlineInteractionCard`、`ReplyQuote`、`ChatNoticeEventRow` 的 `interaction_resolved` / `answered` 卡片闭合链（**P6 已删**——卡片归块与回答直投同批才有可答路径；Desktop 两面（1:1 + 群）与 Mobile 1:1 面的块渲染器、两级 `@` 的第二级选址同批接入）。**明确保留**：`ChatNoticeEventRow`（Desktop）与 `ChatNoticeRow`（Mobile）的渲染期隐藏集合 `RETIRED_NOTICES`——它不是镜像簿记，而是 D14「旧行留盘、渲染期隐藏」的唯一实现点，删掉它等于把历史里的中间状态重新画给今天的读者。
+- **删除**：Runtime 的 `exec_echo_meta` / `turn_routed_meta` / `router_fallback_meta` / 三站点 `echo_terminal_row` / `write_interaction_card` / `close_chat_card*` / surface 补齐补丁（**P4 已全部落地**：Runtime 侧 chat 写入口只剩引用行一处）；Gateway 的 `resolve_card_answer` / `mark_answered` / 答案行写入 / sweeper 的 chat 失败行（改为通知）与前端整个 `chatTurnState.ts`（含其 `closedCards` 簿记）、`InlineInteractionCard`、`ReplyQuote`、`ChatNoticeEventRow` 的 `interaction_resolved` / `answered` 卡片闭合链（**P6 已删**——卡片归块与回答直投同批才有可答路径；Desktop 两面（1:1 + 群）与 Mobile 1:1 面的块渲染器、两级 `@` 的第二级选址同批接入）。**明确保留**：`ChatNoticeEventRow`（Desktop）与 `ChatNoticeRow`（Mobile）的渲染期隐藏集合 `RETIRED_NOTICES`——它不是镜像簿记，而是 D14「旧行留盘、渲染期隐藏」的唯一实现点，删掉它等于把历史里的中间状态重新画给今天的读者。**同一规则按行生效的部分**（隐藏集合只能按 `notice_type` 归类，而行级判断要读投影）：寻址卡一旦被 round 回答就属于中间状态，渲染期整行不画——问句是那一轮的中间态，不是对话的记录；"话去了哪个执行会话"这块事实由 round 的块给出，且只说一次（一个事实一个位置）。在此之前它先退化为一排禁用按钮、再退化为一枚"已交给 <会话名>"收据，两种都是同一事实的第二份表示，后者还会按消息条数堆成一列一模一样的行。**另一处按行生效**：留在盘上的通知行若带着行的坐标（`in_reply_to` 指向一条还在窗口里的消息），它就是**那条消息**的回执，渲染在这个人的那一列，并带指向回上文的箭头；只有无坐标、或所指消息已被翻出窗口时，才回到居中的通道事实。居中的失败回执读起来像「关于整段对话」的陈述、和谁都不相连——而 `delivery_failed` 的语义恰恰是「某人这条消息没送出去」。列的归属只由坐标读出来：送达与否仍然是 `row.delivery`，呈现层只决定列，不推导状态。
 - **性能**：exec→chat 方向的跨进程 HTTP 写从"每回合 1–3 次（含超时 15 s 预算）"降到 **0**；首屏读一次 `GET /api/chat-blocks`（批量 refs），命中即本地；跨机读只在 miss 时发生。列表/搜索路径仍零投影读（ADR-096 守住）。
 - **隐私与保留**：`rounds.sqlite` 是执行会话正文的一份派生拷贝，必须与 chat 主存同等加密/保留策略，并随 chat 删除一并删除（目录级）。这一点必须写进 module-design 的存储清单。
 - **回滚**：本 ADR 不提供平滑层（四端 + Runtime 协议同批变更）。回滚 = 恢复镜像写入与 pin 机制。
@@ -318,9 +318,17 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 
 **订阅落点的选择**：Desktop 的通配订阅 `acowork/agents/+/sessions/+/messages/#` 已覆盖该 topic，零新增订阅。Mobile 的 `realtime.ts` 是设计 25 §8.0 的**单会话精确订阅**不变量，给它加伴生订阅会破坏这个形状；门铃因此落在 `presence.ts`——它本就通配订阅 `agents/+/status` 与 `agents/+/sessions/+/state`，且事件非 retained，订阅时不会全量重放。被否决的第三种写法是由执行会话把事件也发到 chat 的 topic 树下：它依赖 broker 的 permissive ACL，并且破坏了"topic 归属等于会话归属"这条纪律。
 
+**决策三（2026-11-05 补）：门铃的第二个触发点——活回合内的卡片开关。** 缺陷形状：执行会话弹出 `ask_question` 卡片并阻塞等人回答，Chat 里对应的执行块却不弹卡。实测证据（同一轮，磁盘侧表 + Gateway 请求日志）：卡片 22:22:21 写入 `card` + `status=waiting`，22:23:15 被回答后收回，而该 ref 的块读请求只有 22:22:17 与 22:23:37 两次——**卡片活着的整段时间里 Chat 没有读过一次**。原因不是投影缺字段，而是通知面缺触发点：`publish_round_state` 只在 `close_turn_round` 调用，而这两类卡片在回合内部开合，两端的发生与消失都不经过回合边界；15 s 的周期兜底又被"窗口被遮挡时 webview 计时器被钳制"吃掉了（日志里前一段就有一次 28 s 的丢帧可作旁证）。
+
+修法：把 `publish_round_card_state`（`track_interaction` 打开卡片、`forget_interaction` 收回卡片共同经过的唯一一点）改为"写侧表 + 打门铃"。三个细节是刻意的：
+
+- **与写同一顺序**：先 `note_round_state` 再打铃。铃只表示"值得现在重读"，写者侧表 flush 晚几微秒的竞态由读侧已存在的 500 ms 有界重试吸收——与回合边界那条铃依赖的是同一个机制，不新增协议。
+- **铃名的是写入命中的那一轮**：`Conversation::note_round_state` 因此返回它写下的 `round_id`（无轮可写时返回 `None`，此时也不打铃）。不能用 `active_round_id()`：它读的是写者侧跟踪，只有在写者处理过本轮第一条行之后才认识这一轮，而"回合刚开、问答先到"恰好早于它。
+- **收回也要打铃**：否则 Chat 会留着按钮指向一个已经答过的问题——一个事实的第二份、而且是错的表示。
+
 **D9 的纪律不变**：门铃不建立 liveness，也不作为"进行中"的证据位——它只触发一次读，读回来的 `terminal = false` 才是判据。这条区分必须写明，否则本事件会被读成它刚刚废掉的东西。
 
-落点：[mqtt_payload.proto](../../../core/acowork-core/proto/mqtt_payload.proto)（字段 34）、[loop_.rs](../../../core/acowork-runtime/src/agent/loop_.rs)（`RoundState` / `close_turn_round` / `publish_round_state`）、[subsystems.rs](../../../core/acowork-runtime/src/startup/subsystems.rs)（relay 分支）、[client.rs](../../../core/acowork-runtime/src/mqtt/client.rs)（发布 + 线格式单测）、Desktop 的 [chat_mqtt.rs](../../../apps/acowork-desktop/src-tauri/src/commands/chat_mqtt.rs) → [chatStore.ts](../../../apps/acowork-desktop/src/stores/chatStore.ts) → [chatBlockStore.ts](../../../apps/acowork-desktop/src/stores/chatBlockStore.ts)，Mobile 的 [proto-wire.ts](../../../apps/acowork-mobile/src/lib/proto-wire.ts) → [presence.ts](../../../apps/acowork-mobile/src/lib/presence.ts) → [chatBlockStore.ts](../../../apps/acowork-mobile/src/stores/chatBlockStore.ts)。一个刻意的设计：`round_state` **不**进 Desktop 的 `CONTENT_EVENT_TYPES`——它的 `session_id` 是执行会话，不得被当成一个对话会话写进消息窗口。同批同步：设计文档 27 的呈现契约 §6.2（门铃与三个约）与 §6.5（Mobile 的门铃不走 `realtime.ts`），以及 MQTT 协议主题树 [protocols/zh/mqtt.md](../../protocols/zh/mqtt.md)。
+落点：[mqtt_payload.proto](../../../core/acowork-core/proto/mqtt_payload.proto)（字段 34）、[loop_.rs](../../../core/acowork-runtime/src/agent/loop_.rs)（`RoundState` / `close_turn_round` / `publish_round_state`）、[loop_interaction.rs](../../../core/acowork-runtime/src/agent/loop_interaction.rs)（`publish_round_card_state`——活回合内卡片开关的第二个触发点）、[subsystems.rs](../../../core/acowork-runtime/src/startup/subsystems.rs)（relay 分支）、[client.rs](../../../core/acowork-runtime/src/mqtt/client.rs)（发布 + 线格式单测）、Desktop 的 [chat_mqtt.rs](../../../apps/acowork-desktop/src-tauri/src/commands/chat_mqtt.rs) → [chatStore.ts](../../../apps/acowork-desktop/src/stores/chatStore.ts) → [chatBlockStore.ts](../../../apps/acowork-desktop/src/stores/chatBlockStore.ts)，Mobile 的 [proto-wire.ts](../../../apps/acowork-mobile/src/lib/proto-wire.ts) → [presence.ts](../../../apps/acowork-mobile/src/lib/presence.ts) → [chatBlockStore.ts](../../../apps/acowork-mobile/src/stores/chatBlockStore.ts)。一个刻意的设计：`round_state` **不**进 Desktop 的 `CONTENT_EVENT_TYPES`——它的 `session_id` 是执行会话，不得被当成一个对话会话写进消息窗口。同批同步：设计文档 27 的呈现契约 §6.2（门铃与三个约）与 §6.5（Mobile 的门铃不走 `realtime.ts`），以及 MQTT 协议主题树 [protocols/zh/mqtt.md](../../protocols/zh/mqtt.md)。
 
 ## 修订（2026-11-04）：呈现契约按 `opened_new` 分叉；act 空间更名 `exec_session_*` 族并新增只读 `exec_session_read_round`
 
@@ -364,6 +372,70 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 **不做的事（边界）**。不给前端加"not_found 重读"：那等于承认服务端可以产出假空洞，把不变量放在错误的层。缓存语义不变（D5：终态不可变、无失效路径），改动只在"终态"这一判断的事实来源上。
 
 落点：`core/acowork-runtime/src/rounds.rs`（`RoundRecord.user: Option<u64>`、`announce_round`、`project` 的无线索分支、`forced_closure`、`fold_attachments` 签名）、`core/acowork-runtime/src/conversation.rs`（`WriterCommand::AnnounceRound` 同步命令、`ConversationSession::announce_round`、`RoundSnapshot` 守卫放宽、writer 侧 `announce_round` 的跟踪器交接）、`core/acowork-runtime/src/agent/loop_.rs`（`open_round` 次序 `announce → 引用行 → stamp`）。验收以测试固定：`an_announced_round_projects_as_open_instead_of_a_hole`、`announcing_a_known_round_keeps_its_coordinate`、`a_round_closed_before_its_opener_is_not_a_hole`、`an_announced_round_reads_as_open_not_as_a_hole`、`an_announced_round_is_answerable_before_its_first_row`、`a_pre_empted_announcement_is_closed_not_left_open`。Desktop 与 Mobile 的块渲染器无需改动（`projection.user` 两侧本就可空，空 user 走既有的"无提问 / 进行中"回退）。
+
+## 修订（2026-11-06）：投递失败不再是 chat 行——内存态实时告警（D12 / D14 顺带修订）
+
+**动机**。真实故障：一条消息投递失败后，chat 里留下一条黄色 `system_notice`（`notice_type: "delivery_failed"`），此后**永远在**——重试成功了它在，agent 装好了它在，刷新、换设备、旧备份全都把它刷回来。而且它还顺带被 `acowork_core::intent::chat_kinds::is_answer_row` 算作"这条消息已被回应"，于是一次早已作废的失败至今仍在替那条消息宣布结局。日志该记的是"谁对谁说了什么"，一条链路的瞬时不通不是对话的内容。
+
+**决策**。`delivery_failed` **不再有写者**（ADR-105 D5 修订）：失败改为挂在**读模型**上的内存态告警——`acowork-user` 的 `ChatAlertStore`（`(chat_session_id, row_id) → {target, error_code, inserted_at}`，TTL 600 s，随进程消失，无任何持久化），Gateway 的三处投递失败分支与 sweeper 的超时兜底改为 `POST /internal/chat-sessions/{sid}/alerts`，读侧把它作为 `ChatRowView.delivery.alert`（`{target, error_code, expires_in}`）装饰在欠投递的那条人类行上，各面在自己的时钟上排到期删除。Dashboard 与 Mobile 由 `DeliveryAlertLine` 渲染，`RETIRED_NOTICES` 纳入 `delivery_failed` 让旧行在渲染期消失。
+
+**对 D12 的影响**。D12 的词表结论不变（chat 只记对话），只是"通道事实"一类里少了一个成员：`system_notice` 现存的活写者只剩预算 / 截断 / 不可达三类限制回执与两类寻址问题。`THREADED_NOTICES` 仍保留 `delivery_failed`——不是因为它还有写者，而是因为**旧转录里的行就是它**，词表若忘掉它，那些行就成了无法解释的数据。
+
+**对 D14 的影响**。D14「旧行留盘、渲染期隐藏」的机制原样适用，隐藏集合多了 `delivery_failed`：失败一旦过去就不该再占据版面，这与"里程碑不是历史"是同一条规则。row 级 `delivery.alert` **不参与**结算的样式推断——它是一份有时限的状态，不是收据行。
+
+**边界**。不给 alert 加持久化、也不加"已读"状态：它的全部价值在于"此刻"。进程重启即归零是正确行为——重启之后那份"刚刚失败"已经不新了。
+
+落点：`core/acowork-user/src/chat_alerts.rs`（新）、`core/acowork-user/src/chat_view.rs`、`core/acowork-user/src/http/chat_sessions_api.rs`（内部路由）、`core/acowork-gateway/src/intent/chat_client.rs`、`core/acowork-gateway/src/http/intent_api.rs`、`core/acowork-gateway/src/intent/sweeper.rs`、`core/acowork-core/src/intent.rs`（`RETIRED_NOTICES`）、Desktop 与 Mobile 的 `DeliveryAlertLine` / `ChatNoticeRow` / `chatTurnInflight`。验收以测试固定：`chat_view::tests::a_live_failure_is_a_decoration_of_the_row_it_concerns`、`chat_sessions_e2e::unaddressed_group_message_reaches_the_default_responder`（断言无收据行、行上带 `delivery.alert`）、`DeliveryAlertLine` 两侧的到期自删、`turnInflight` 的 alert 结算。
+
+## 修订（2026-11-06）：终态轮不携带非 waiting 的卡；块卡回答后强制重读
+
+**动机**。真实故障：执行会话弹出的 `ask_question` 卡 300 s 超时后，chat 侧投影的同一张卡**点了没反应、也不消失**，直到新消息把它覆盖；同时在执行会话里点选是正常的。同一个 bug 还带着一个排版问题：chat 侧的选项是横向排开的一行，选项文字一长就挤成一团。
+
+**根因（经日志与 `rounds.sqlite` 核实）**。三层各自留了一个口子：
+
+1. **写侧**：Runtime 300 s 超时后 `forget_interaction` 把该轮的 `card` 置 `Null` 并写 `terminal=true, status=in_progress`，但**被抢占路径**（`forced_closure`）与**崩溃修复**（`repair_on_open`）保留旧的 `card` 值，于是终态快照里仍带着一张不是 `waiting` 的卡。
+2. **读侧**：Gateway 的 `chat_blocks` 缓存 / 直读两条路径把这份投影原样返回，不做任何一致性收敛——缓存一旦写入还永久有效（D5：终态不可变），错值就此固化。
+3. **前端**：`BlockCardActions` 的 POST 成功后只做本地 `resolveQuestion`，不触发块重读；而 `noteRoundState` 的 500 ms 有界重试窗口内块可能仍是 `pending`，之后没有新信号再触发重读，卡片就永久停在投影里。
+
+**决策一（写侧不变量）**：**终态的轮不得携带非 `waiting` 的卡**。`forced_closure` 在轮已带卡且 `status != waiting` 时清空 `card`；`repair_on_open` 对 open 轮同样清空。卡片是"这一轮在等人回答"的证据，一轮既然已经收口，它就必然不再等人。
+
+**决策二（读侧收敛）**：Gateway 在 `assemble` 对 `Cached` 与 `Live` 两条路径都过一遍 `served_projection`——`terminal=true` 且 `status != "waiting"` 时强制 `card: null`。缓存的价值是省一次读，不是替服务端保留一个错误值；写侧不变量是第一道，读侧收敛是第二道，二者不是冗余而是"旧数据/外部写入"的兜底。
+
+**决策三（前端不猜）**：回答卡片的 POST 成功后，除了本地清除，还必须 `useChatBlockStore.getState().reload(chatSessionId, [ref])`——一次回答是一个事实变化，呈现层必须去读服务端的事实，而不是相信自己的乐观状态。测试固定：`answering re-reads the round, whatever the POST said`。
+
+**决策四（排版）**：`ask_question` 的选项在 chat 侧的块里纵向排列（`flex flex-col items-stretch`），审批的两个按钮仍横向——选项是"句子"，长度不可控，横向排布必然在长文案上崩掉。
+
+落点：`core/acowork-runtime/src/rounds.rs`（`forced_closure` / `repair_on_open`）、`core/acowork-gateway/src/http/chat_blocks.rs`（`served_projection`）、`apps/acowork-desktop/src/components/chat/ChatExecutionBlock.tsx`。验收以测试固定：`crash_repair_drops_the_card_of_the_open_round`、`a_waiting_round_keeps_its_state_when_pre_empted`、`a_cached_terminal_card_is_not_served`、`answering re-reads the round, whatever the POST said`。
+
+## 修订（2026-11-06）：执行块动作行与续投抽屉（呈现层）
+
+**动机**。v3.2 修订把续投放到了块的**底部**，而"查看执行"仍留在块**上方**的 pill——一个对象两端各挂一个交互带，读起来像两个东西；并且底部输入行即使一次都不用，也一直占着高度把后续转录往下推。对照消息动作行的通行做法后确认：动作应当贴着它作用的对象排成一行，输入只在被使用时展开。
+
+**决策一：四个动作收成块上方一行图标**——查看执行（跳该执行会话）/ `@` 引用 / 复制整块 / 续投。纯图标是为了不让动作行比块头还宽；代价是可发现性，所以每个控件保留 `aria-label` + `title`，且"查看执行"的 tooltip 带该执行会话名（沿用"固定标签重复图标等于没说"的既有规则）。动作行常驻，不做 hover 才出现——只靠指针才能找到的控件等于没有。
+
+**决策二：续投抽屉**。发消息按钮自成胶囊：hover / 聚焦 / 草稿非空 / locate 上升沿任一成立即向右展开输入框，图标留在胶囊左端，视觉上"输入框把按钮包住"。三条机械约束不可省：① 行高固定（`h-6`），只有 `max-width` 过渡——抽屉开合不许推动下方转录；② 胶囊内的输入框宽度固定、由胶囊裁剪——动画期间子元素重排正是 CSS 抽屉抖动的来源；③ 收起态 `inert`，被裁掉的输入框不得留在 Tab 序列里。收起条件是"指针离开 + 无焦点 + 草稿为空"，指针离开后再延迟约 100 ms（跨行扫过不许频闪）。`@` picker 的"去续投"与来源 chip 的 locate 仍走同一上升沿：先展开、下一帧再聚焦（0 宽元素直接聚焦会先横向滚动一帧）。
+
+**决策三：`@` 引用复用引用材料通道**。块上的 `@` 不新造语义：它把 `{agent_instance_id, session_id}` 推进主 composer 已有的地址状态（`ChatRefPick` → 可删 chip），上限仍是服务端的 1–5（第 6 条给提示而非静默丢弃），重复引用幂等。因为级别 1 的回复自带会话坐标，点击 `@` 先释放回复目标——两道指令不能同乘一次发送（发送侧本就拒绝，呈现层不该先让它看起来能发）。
+
+**决策四：复制是 Markdown 导出**。内容 = 会话名 + 每轮的"问 / 答"，**含块内折叠的轮次**（按钮说的是"这个执行会话"，少导几轮会让文档读起来像从第六轮开始）；不可读的轮次写一行"无法读取"，绝不编造答案（D3 / D5）；答案正文原样粘贴，保住它自己的代码块与表格。成功反馈是图标短暂变对勾（`CodeBlock` 的既有做法），失败绝不报成功。
+
+**范围**。Desktop 两个聊天主面（1:1 `AgentChatView`、群聊 `GroupChatPanel`）共用同一个动作行组件；只读会话（`canAnswer=false`）不显示 `@` 与续投，复制仍可用（读动作）。Mobile 无 hover，保持块内底部输入行不变，本修订不涉及。
+
+## 修订（2026-11-06）：块锚定首次出现处；寻址卡落在块尾（呈现层，D4 呈现契约）
+
+**动机**。D4 的呈现契约要求"一个执行会话在转录里只出现一次"，v3.1.1 落成"锚在该会话已加载窗口里的**最新**引用行"。这条锚点与它的初衷（最新答复贴着最新问题）在真实交互下相反：一个会话比打开它的那一轮活得久，人在这个 Chat 里每续投一次就多一条引用行，块于是被拖着跨过中间所有行——几次往来之后，人的消息全堆在上面、回答它们的块掉到最下面，做成对的"一来一回"彻底消失。而它换来的"最新可见"本来就由块内窗口提供（默认展开最近 2 轮）。
+
+**决策一：锚定该会话在本窗口里最早的引用行。**位置属于这次往来，不属于它最新那一轮；续投只增加块内轮次与轮数，块不动。不损失可读性：块内展开最近 2 轮且本身是滚动容器，`keyOfSeq` 仍把每个被折叠的 seq 映射到块（locate 一条新轮次照样落在块上），虚拟列表的 item 身份也从"最新行"变成"首行"，块在会话生命周期内不再重建（旧实现每轮换 key，连高度缓存一起丢）。
+
+**决策二：映射先算，再出行。**旧布局在遍历行的过程中边走边写 `keyOfSeq`，被折叠的行若排在它所属块之后，会把块自身的映射覆盖成该行的 key，locate 于是指向一个不在 DOM 里的行——只因块总在最新行（即最后）才侥幸成立。锚点前移暴露了它。改为遍历前先算好"哪些 seq 由哪一块画"，遍历只负责产出条目。顺序是布局选择，映射不许继承它。
+
+**决策三：`confirm_continue` 落在它所指会话的块尾。**router 的提议卡问的是**这一个**会话（`options` 只有一个目标），把它画在转录最新处，等于让人回答一个看不见主语的问题，而锚点固定后这个距离只会变大。改为挂到该块的尾部（`options` 恰有一个目标、且该块在本窗口唯一时才挂；`session_choice` 多候选没有唯一目标，留在原位），块收起时同样可见（D8：藏在折叠后的可答项不可答），可答性沿用既有判定（谁发起这一轮，`mayAnswerCard`）。
+
+**决策四：更新靠移动视口，不靠移动块。**卡片落位的那一帧，surface 把视口带到该块——仅在块不在视口时、只做一次、居中对齐，复用既有 `scrollToKey` 通道；挂载时已经存在的卡片是历史而非新闻，不触发移动（不与"打开即到底部"打架）。**不做常驻角标、不做闪烁、不发 toast**：滚动本身是反馈，读者被直接带到问题面前并就地回答。原先那种"弹框问要不要续投"的模态路径不再需要。
+
+**决策五：执行面输入不切块。**一个被执行会话的轮次有两种来源，二者在布局里都必须并入同一个块：Chat 起源的轮（引用行带 `in_reply_to`，被折叠进块）和执行面起源的轮（`session_task` 把绑定 chat 回填进 `TurnSurface`，但 `TurnReference` 为空，因此引用行不 thread 到任何 chat 行）。后者在 chat 转录里没有人类消息，切块无从谈起，也印证"块 = 一个会话"仍然成立。
+
+**范围**。Desktop 两主面 + Mobile 1:1 面同批接入锚点与映射修订（Mobile 的寻址卡仍以独立行呈现，块尾挂载与视口带位在其卡片渲染器上另行落地）。不做历史迁移：位置是读时计算的，旧转录同样受益。
 
 ## 参考
 

@@ -428,7 +428,7 @@ fn default_pair_chat_message_persists_and_agent_writeback_doorbells() {
         let up = user_service_port(&gw.home);
         let append = serde_json::json!({
             "session_id": sid,
-            "message": {"ts": 0, "from": "agent-chain-1", "kind": "agent_message", "body": "sure, on it", "meta": {"message_id": "e2e-agent-row-1"}}
+            "message": {"ts": 0, "from": "agent-chain-1", "kind": "agent_message", "body": "sure, on it", "meta": {"message_id": "e2e-agent-row-1", "in_reply_to": "e2e-human-row-1"}}
         });
         let (code, body, _) = http_post_json(up, "/internal/chat-sessions/messages", &serde_json::to_vec(&append).unwrap());
         assert_eq!(code, 201, "system append; body:\n{body}");
@@ -723,9 +723,10 @@ fn group_mention_fans_out_with_explicit_per_target_status() {
 /// * `targets: []` is a *positive* instruction ("you decide"), not a malformed
 ///   mention: the human row is still written once, with `mentions: []` and the
 ///   decision in `auto_routed_to`;
-/// * an uninstalled responder fails *loudly* — a `delivery_failed` notice row
-///   lands in the transcript, which is the whole point of the change (the old
-///   silence is the bug);
+/// * an uninstalled responder fails *loudly* — the human row it owed carries a
+///   live `delivery.alert`, which is the whole point of the change (the old
+///   silence is the bug), and no receipt row is stored (ADR-105 D5 rev.
+///   2026-11-06: a failure is news, not history);
 /// * clearing the role restores archive-only, so a group of humans never gets
 ///   an agent butting in.
 #[test]
@@ -780,6 +781,9 @@ fn unaddressed_group_message_reaches_the_default_responder() {
     assert_eq!(v["results"][0]["status"].as_str(), Some("failed"), "uninstalled agent is loud: {body}");
     let page = messages(http, &token, &gsid2);
     let rows = page["messages"].as_array().unwrap();
+    // The failure is news, not history (ADR-105 D5, revision 2026-11-06): no
+    // receipt row is appended, so nothing has to be retracted later.
+    assert_eq!(rows.len(), 1, "one human row, no durable receipt: {rows:?}");
     let human = rows.iter().find(|r| r["kind"].as_str() == Some("user_message")).expect("human row");
     assert_eq!(human["meta"]["mentions"].as_array().unwrap().len(), 0, "the human named nobody");
     assert_eq!(
@@ -787,12 +791,14 @@ fn unaddressed_group_message_reaches_the_default_responder() {
         Some(agent_uuid),
         "the decision is recorded on the utterance it decided"
     );
-    let notice = rows
-        .iter()
-        .find(|r| r["meta"]["notice_type"].as_str() == Some("delivery_failed"))
-        .expect("a failed delivery leaves a durable receipt");
-    assert_eq!(notice["kind"].as_str(), Some("system_notice"));
-    assert_eq!(notice["meta"]["in_reply_to"], human["meta"]["message_id"], "threaded to its trigger");
+    // …it is served live on the row it owed instead, and it names who missed it.
+    let alert = &human["delivery"]["alert"];
+    assert_eq!(alert["target"].as_str(), Some(agent_uuid), "the alert names the target: {human:?}");
+    assert_eq!(alert["error_code"].as_str(), Some("target_not_installed"));
+    assert!(
+        alert["expires_in"].as_i64().unwrap_or(0) > 0,
+        "a live alert still has life left when it is read: {alert:?}"
+    );
 
     // Clearing the role goes back to archive-only (a group of humans must be
     // able to stop the agent from answering).
@@ -859,7 +865,7 @@ fn agent_agent_pair_is_one_shared_channel_for_both_sides() {
 
     let append = serde_json::json!({
         "session_id": sid_ab,
-        "message": {"ts": 0, "from": a, "kind": "agent_message", "body": "from A", "meta": {"message_id": "aa-row-1"}}
+        "message": {"ts": 0, "from": a, "kind": "agent_message", "body": "from A", "meta": {"message_id": "aa-row-1", "in_reply_to": "aa-row-0"}}
     });
     let (code, body, _) = http_post_json(up, "/internal/chat-sessions/messages", &serde_json::to_vec(&append).unwrap());
     assert!((200..300).contains(&code), "A writes: {code} {body}");
@@ -883,7 +889,7 @@ fn agent_agent_pair_is_one_shared_channel_for_both_sides() {
     // B cannot mint a row attributed to A (participant check on the write).
     let forged = serde_json::json!({
         "session_id": sid_ab,
-        "message": {"ts": 0, "from": "99999999-9999-4999-8999-999999999999", "kind": "agent_message", "body": "x", "meta": {"message_id": "aa-row-2"}}
+        "message": {"ts": 0, "from": "99999999-9999-4999-8999-999999999999", "kind": "agent_message", "body": "x", "meta": {"message_id": "aa-row-2", "in_reply_to": "aa-row-1"}}
     });
     let (code, _, _) = http_post_json(up, "/internal/chat-sessions/messages", &serde_json::to_vec(&forged).unwrap());
     assert!((400..500).contains(&code), "non-participant write refused ({code})");
@@ -1204,14 +1210,29 @@ fn a_chat_send_with_workspace_references_lands_display_only_labels() {
         "the head row speaks as the human, never as the Runtime"
     );
 
-    // Display text only. A node-local path means nothing to the Chat store
-    // (ADR-009 §5) and an unopenable reference is worse than none.
+    // A name for the screen, a path for the click. The workspace arm keeps the
+    // path in `absPath` so the desktop can open the file when the chip is
+    // clicked (ADR-100 D12 Rev. 2026-11); the upload arm keeps neither a path
+    // nor a blob id, because those bytes belong to one run (ADR-009 §5).
     let labels = row["meta"]["exec_attachments"].as_array().cloned().unwrap_or_default();
     let names: Vec<&str> = labels.iter().filter_map(|v| v["filename"].as_str()).collect();
     assert!(names.contains(&"src/main.rs"), "workspace arm keeps its display name: {names:?}");
     assert!(names.contains(&"notes.md"), "upload arm keeps its filename: {names:?}");
-    let raw = serde_json::to_string(&labels).unwrap();
-    assert!(!raw.contains("E:/work/demo") && !raw.contains("absPath"), "no path rides along: {raw}");
+    let workspace = labels
+        .iter()
+        .find(|v| v["filename"].as_str() == Some("src/main.rs"))
+        .expect("the workspace arm files a label");
+    assert_eq!(
+        workspace["absPath"].as_str(),
+        Some("E:/work/demo/src/main.rs"),
+        "the click coordinate survives: {workspace}"
+    );
+    let upload = labels
+        .iter()
+        .find(|v| v["filename"].as_str() == Some("notes.md"))
+        .expect("the upload arm files a label");
+    assert!(upload.get("absPath").is_none(), "an upload arm carries no path: {upload}");
+    assert!(!upload.to_string().contains("documentId"), "{upload}");
 
     // Handing the agent a file with no message is a legitimate send: a label is
     // content, not an empty turn.
@@ -1307,7 +1328,10 @@ fn a_send_with_nothing_to_deliver_is_a_readable_400() {
         .clone();
     let raw = serde_json::to_string(&row["meta"]["exec_attachments"]).unwrap();
     assert!(raw.contains("src/main.rs"), "the routed row keeps the display name: {raw}");
-    assert!(!raw.contains("E:/work/demo") && !raw.contains("absPath"), "no path rides along: {raw}");
+    assert!(
+        raw.contains("\"absPath\":\"E:/work/demo/src/main.rs\""),
+        "the workspace arm keeps what the chip's click opens: {raw}"
+    );
 
     // (b) An entry the Runtime would discard: refused at the boundary on
     // either path instead of becoming a label for a file nobody got.

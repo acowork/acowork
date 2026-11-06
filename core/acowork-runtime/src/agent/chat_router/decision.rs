@@ -101,6 +101,15 @@ pub struct DecisionRecord {
     pub cache_read_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_write_tokens: Option<u64>,
+    /// The human refused continuation (ADR-106 D6's "new task"), so this turn was
+    /// offered no candidates at all. Additive and `false` by default: every line
+    /// written before the field existed was an ordinary turn, and a reader can
+    /// still tell them apart — a `force_new` message that got a
+    /// `*_propose_continue` decision is exactly the defect this field makes
+    /// visible, six identical cards for one click and nothing in the log saying
+    /// why.
+    #[serde(default)]
+    pub continuation_refused: bool,
 }
 
 impl DecisionRecord {
@@ -113,14 +122,19 @@ impl DecisionRecord {
             .map(|s| format!(" -> {s}"))
             .unwrap_or_default();
         format!(
-            "chat={} decision={}{} att={} ref={} latency={}ms outcome={}",
+            "chat={} decision={}{} att={} ref={} latency={}ms outcome={}{}",
             self.chat_id,
             self.decision,
             target,
             self.attachments,
             self.refs,
             self.latency_ms,
-            self.outcome
+            self.outcome,
+            if self.continuation_refused {
+                " continuation=refused"
+            } else {
+                ""
+            }
         )
     }
 }
@@ -168,6 +182,7 @@ mod tests {
             attachments: 0,
             refs: 0,
             attachment_only: false,
+            continuation_refused: false,
             info_rounds: Some(1),
             prompt_tokens: Some(3120),
             completion_tokens: Some(48),

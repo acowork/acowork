@@ -311,6 +311,61 @@ export interface UserChatMessage {
  * projection (`GET /api/chat-blocks/{chatId}`). The transcript therefore carries
  * no card row any more (D8): a pending decision lives inside the block.
  */
+/**
+ * What happened to one row, as the service computed it (design 31 §6).
+ *
+ * The Chat service projects this onto every row it serves, so no surface has to
+ * work it out — Desktop and Mobile read the same field. A surface that scans
+ * the transcript for a row whose `meta.in_reply_to` matches an id is deriving
+ * business state, and there were once four of those scans with three different
+ * rules: a send could sit in "working on it" for 300 s after a card landed with
+ * an empty coordinate.
+ */
+export interface ChatAnswerRef {
+  message_id: string
+  kind: string
+}
+
+/** Where a turn went: coordinates only. The round's content is read from the
+ *  execution side, never copied here (design 31 §3.2 R3). */
+export interface ChatRoundTarget {
+  agent_instance_id: string
+  agent_session_id: string
+  round_id: string
+  opened_new?: boolean
+}
+
+/** An addressing card's own state: the answers it offers and whether the human
+ *  has already taken one. */
+export interface ChatQuestionState {
+  answered: boolean
+  options: ChatCandidateOption[]
+  allow_new_task?: boolean
+}
+
+export interface ChatDeliveryView {
+  /** A row answers this one. Absent delivery means "not projected yet" (an
+   *  optimistic row this device inserted), never "unanswered". */
+  answered: boolean
+  answered_by?: ChatAnswerRef
+  /** Every round that answers this row, in log order. A group `@` fan-out opens
+   *  one round per target against the same message, so this is a list: a single
+   *  value would report the first target and lose the rest. */
+  targets?: ChatRoundTarget[]
+  question?: ChatQuestionState
+  /** A send this row owed that failed — served **live**, never stored
+   *  (ADR-105 D5, revision 2026-11-06). Gone after `expires_in` seconds. */
+  alert?: ChatDeliveryAlert
+}
+
+/** A live delivery failure (`delivery.alert`): the machine token plus how long
+ *  it is still worth painting. The wording belongs to the surface. */
+export interface ChatDeliveryAlert {
+  target: string
+  error_code: string
+  expires_in: number
+}
+
 export interface ChatMessageRow {
   seq: number
   ts: number
@@ -368,6 +423,10 @@ export interface ChatMessageRow {
       terminal: boolean
     }>
   }
+  /** The service's projection for this row (design 31 §6). Present on every row
+   *  the read endpoint serves; absent on a row this device inserted
+   *  optimistically before the write's response came back. */
+  delivery?: ChatDeliveryView
   attachment_ids?: string[]
   attachments?: Array<{ id: string; filename: string; mime: string; size: number }>
 }
@@ -447,8 +506,13 @@ export interface ChatSessionInfo {
 /** ADR-100 D12: one display label for something a composer handed to the task
  *  alongside a turn. Mirrors `acowork_core::protocol::AttachmentLabel` — the
  *  same projection the Chat Router renders into its prompt and the desktop
- *  renders into a chip. Labels only: no path, no id, nothing this side could
- *  open, because the attachment belongs to the execution session (ADR-009 §5). */
+ *  renders into a chip.
+ *
+ *  `absPath` is the workspace arm's click coordinate (D12 Rev. 2026-11). It is
+ *  read on the desktop, which resolves it against the Agent's workspaces; this
+ *  side has no filesystem to open it with, so the chip here stays a plain
+ *  label. The field is mirrored anyway so the two clients describe one shape
+ *  instead of two. */
 export interface ExecAttachmentLabel {
   filename: string
   /** The ADR-046 item arm (`attached_file` / `image_upload` / …); absent on a
@@ -459,6 +523,8 @@ export interface ExecAttachmentLabel {
   sizeBytes?: number
   startLine?: number
   endLine?: number
+  /** Workspace arms only — nothing this client can open (see above). */
+  absPath?: string
 }
 
 export interface ChatMessagesPage {

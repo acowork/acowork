@@ -40,6 +40,7 @@ docs/
 | MQTT 事件总线 | [`protocols/zh/mqtt.md`](./protocols/zh/mqtt.md) |
 | RAG 集成协议 | [`protocols/zh/RAG-protocol-guide.md`](./protocols/zh/RAG-protocol-guide.md) |
 | MCP Server 集成 | [`mcp-server-research/en/mcp-server-research.md`](./mcp-server-research/en/mcp-server-research.md) |
+| Session 数据模型（持久化终态 + 运行时超集） | [`design/zh/31-session-data-model.md`](./design/zh/31-session-data-model.md) |
 | 远程访问：Cloud Hub（托管档，应用层消息中枢） | [`design/zh/26-cloud-sync-hub.md`](./design/zh/26-cloud-sync-hub.md) |
 | 远程访问：瘦中继（自托管 BYO 档，协议冻结） | [`design/zh/24-cloud-relay-remote-access.md`](./design/zh/24-cloud-relay-remote-access.md) |
 | 架构决策记录 | [`adr/zh/`](./adr/zh/) |

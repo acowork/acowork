@@ -1,22 +1,31 @@
 // @vitest-environment jsdom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen } from "@testing-library/react";
 
+vi.mock("../../lib/openWorkspaceRef", () => ({ openAttachedRef: vi.fn() }));
+
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
+import { openAttachedRef } from "../../lib/openWorkspaceRef";
 
 /**
  * ADR-100 D12: an execution view's composer sends its run's attached items as
- * labels only. The chat must show them (a turn that was a file and nothing
- * else still has to paint a head row) and must never imply they can be opened.
+ * labels, and the chat must show them (a turn that was a file and nothing else
+ * still has to paint a head row).
  *
- * These chips are the Chat surface's half of one grammar with the execution
- * session: the frame comes from `AttachmentCapsule` and the glyph from
- * `attachmentGlyph`, the same two pieces `AttachmentChipRow` draws with. What
- * the pin below guards is the one thing that must never come back — printing
- * the ADR-046 discriminant at the user. A row used to read
- * "ATTACHED_FILE chat_prompt.rs", which is a wire tag wearing a chip.
+ * Interactivity is decided by the data, not by the surface. Since D12 Rev.
+ * 2026-11 a workspace arm carries `absPath`, so its chip opens the file through
+ * the same dispatcher the execution session and the composer tray use
+ * (`openAttachedRef`). The banner used to look exactly like the execution
+ * session's clickable chip and do nothing — that is the regression these cases
+ * pin. What must never come back: printing the ADR-046 discriminant at the user
+ * (a row once read "ATTACHED_FILE chat_prompt.rs"), and opening something that
+ * has nothing behind it (the upload arms, whose bytes belong to the run).
  */
 describe("ExecAttachmentLabels", () => {
+  beforeEach(() => {
+    vi.mocked(openAttachedRef).mockClear();
+  });
+
   it("paints one label per attached item", () => {
     render(
       <ExecAttachmentLabels
@@ -30,10 +39,86 @@ describe("ExecAttachmentLabels", () => {
     expect(screen.getByText("notes.md")).toBeTruthy();
   });
 
-  it("is inert — no button, no link, nothing to resolve", () => {
-    render(<ExecAttachmentLabels labels={[{ filename: "diff.patch" }]} />);
+  it("is inert when the row has no path to open", () => {
+    render(
+      <ExecAttachmentLabels
+        agentId="com.test.Agent"
+        labels={[{ filename: "diff.patch", kind: "attached_file" }]}
+      />,
+    );
     expect(screen.queryByRole("button")).toBeNull();
-    expect(screen.queryByRole("link")).toBeNull();
+    expect(openAttachedRef).not.toHaveBeenCalled();
+  });
+
+  it("opens a workspace arm through the one dispatcher the exec surface uses", () => {
+    render(
+      <ExecAttachmentLabels
+        agentId="com.test.Agent"
+        labels={[
+          { filename: "src/main.rs", kind: "attached_file", absPath: "E:/ws/src/main.rs" },
+        ]}
+      />,
+    );
+    screen.getByRole("button", { name: "src/main.rs" }).click();
+    expect(openAttachedRef).toHaveBeenCalledWith({
+      item: { type: "attached_file", absPath: "E:/ws/src/main.rs", name: "src/main.rs" },
+      agentId: "com.test.Agent",
+      // The chat surface has no execution session of its own, so there is no
+      // priority root: the resolver searches every workspace of the Agent.
+      currentWorkspaceId: "",
+    });
+  });
+
+  it("lands a selection on its first line, not at the top of the file", () => {
+    render(
+      <ExecAttachmentLabels
+        agentId="com.test.Agent"
+        labels={[
+          {
+            filename: "src/lib.rs",
+            kind: "attached_selection",
+            absPath: "E:/ws/src/lib.rs",
+            startLine: 12,
+            endLine: 25,
+          },
+        ]}
+      />,
+    );
+    screen.getByRole("button", { name: "src/lib.rs" }).click();
+    expect(openAttachedRef).toHaveBeenCalledWith({
+      item: {
+        type: "attached_selection",
+        absPath: "E:/ws/src/lib.rs",
+        name: "src/lib.rs",
+        startLine: 12,
+        endLine: 25,
+      },
+      agentId: "com.test.Agent",
+      currentWorkspaceId: "",
+    });
+  });
+
+  it("leaves an upload arm decorative even if a path rode along", () => {
+    // Defence in depth: the Gateway never puts a path on an upload arm (its
+    // bytes belong to the run), and a row that somehow carries one must still
+    // not offer a click that would open a stranger's file.
+    render(
+      <ExecAttachmentLabels
+        agentId="com.test.Agent"
+        labels={[{ filename: "report.pdf", kind: "file_upload", absPath: "E:/ws/report.pdf" }]}
+      />,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("leaves a folder decorative — fileTab has no folder view", () => {
+    render(
+      <ExecAttachmentLabels
+        agentId="com.test.Agent"
+        labels={[{ filename: "src", kind: "attached_folder", absPath: "E:/ws/src" }]}
+      />,
+    );
+    expect(screen.queryByRole("button")).toBeNull();
   });
 
   it("draws a glyph for the arm instead of spelling its name out", () => {

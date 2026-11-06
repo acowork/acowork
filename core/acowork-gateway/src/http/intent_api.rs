@@ -727,8 +727,8 @@ struct ChatAppendRequest {
 /// `execution_round` is the reference row a round of execution work opens in the
 /// chat — the only `exec → chat` write that remains — `agent_message` is a
 /// chat-native answer (the router replying itself), and `system_notice` is a
-/// channel fact (`delivery_failed` / `budget_exhausted` / `truncated` /
-/// `unavailable`). Decision cards, the terminal echo of an execution turn and
+/// channel fact (`budget_exhausted` / `truncated` / `unavailable`; a failed
+/// delivery is a live alert since 2026-11-06, not a row). Decision cards, the terminal echo of an execution turn and
 /// the agent-to-agent exchange are no longer chat rows at all: their content
 /// lives in the round's projection, so copying them here would put a second,
 /// staler answer in the transcript. `user_message` is never a
@@ -2091,7 +2091,7 @@ async fn deliver_mentions(
                 "target": target, "status": "failed",
                 "error_code": "target_not_installed",
             }));
-            append_delivery_failed_notice(
+            report_delivery_alert(
                 port,
                 &req.chat_session_id,
                 target,
@@ -2122,7 +2122,7 @@ async fn deliver_mentions(
                 "target": target, "status": "failed",
                 "error_code": "not_authorized",
             }));
-            append_delivery_failed_notice(
+            report_delivery_alert(
                 port,
                 &req.chat_session_id,
                 target,
@@ -2230,7 +2230,7 @@ async fn deliver_mentions(
             }),
         });
         if let Some((code, _)) = failed {
-            append_delivery_failed_notice(port, &req.chat_session_id, target, &row_id, code).await;
+            report_delivery_alert(port, &req.chat_session_id, target, &row_id, code).await;
         }
     }
 
@@ -2241,58 +2241,38 @@ async fn deliver_mentions(
     })))
 }
 
-/// Record a failed delivery in the transcript (ADR-105).
+/// Report a failed delivery **live** (ADR-105 D5, revision 2026-11-06).
 ///
 /// A surface may read this fan-out's `results` to decide whether its OWN send is
-/// worth claiming as in flight (ADR-106 D9), but a response is seen by the
-/// posting device alone: before this notice, a delivery that failed left *no*
-/// trace at all for anybody else — the message was addressed (by @ or by the
-/// group's responder), nobody answered, and the transcript looked exactly like a
-/// message nobody had picked up. That is the same defect ADR-105 removes on the
-/// routing side, so it gets the same treatment here: a durable `system_notice`
-/// threaded to the human row, which is also the row that settles the sender's
-/// claim.
+/// worth claiming as in flight (ADR-106 D9), but that response is seen by the
+/// posting device alone. So the failure has to reach the Chat — but as news, not
+/// as history: the receipt used to be a durable `system_notice` row, written on
+/// the **target's** behalf, and nothing ever retracted it. A send that failed and
+/// was then retried successfully still carried "the message wasn't delivered" in
+/// the transcript weeks later, and every reload painted it again.
 ///
-/// The row is written on the **target's** behalf (it is the party that did not
-/// receive the message). `system_notice` carries no writer-identity constraint
-/// beyond membership, so an uninstalled agent — still a session participant —
-/// is a legitimate author for its own receipt, and no new privileged writer
-/// identity is introduced.
+/// What replaces it is an in-memory alert on the user service, attached to the
+/// human row this delivery owed and served as `delivery.alert` until it expires
+/// (`acowork_user::chat_alerts`). Nothing is appended, so nothing has to be
+/// cleaned up later: the receipt stops existing exactly when it stops being true.
 ///
-/// Best-effort: a notice that cannot be written costs the receipt, never the
+/// Best-effort: an alert that cannot be recorded costs the receipt, never the
 /// send (the human row is already durable).
-async fn append_delivery_failed_notice(
+async fn report_delivery_alert(
     port: u16,
     chat_session_id: &str,
     target: &str,
     row_id: &str,
     error_code: &str,
 ) {
-    let notice_meta = serde_json::json!({
-        "message_id": format!("dlv-failed:{row_id}:{target}"),
-        "notice_type": "delivery_failed",
-        "in_reply_to": row_id,
-        "error_code": error_code,
-    });
-    if let Err(e) = chat_client::append_message(
-        port,
-        chat_session_id,
-        &chat_client::AppendMessage {
-            from: target.to_string(),
-            to: target.to_string(),
-            kind: "system_notice".to_string(),
-            body: String::new(),
-            meta: notice_meta,
-            attachment_ids: Vec::new(),
-        },
-    )
-    .await
+    if let Err(e) =
+        chat_client::record_delivery_alert(port, chat_session_id, row_id, target, error_code).await
     {
         tracing::warn!(
             chat_id = %chat_session_id,
             target = %target,
             error = %e,
-            "delivery_failed notice row failed — non-fatal"
+            "delivery_failed alert not recorded — non-fatal"
         );
     }
 }
@@ -3024,13 +3004,17 @@ mod chat_append_tests {
     }
 
     #[test]
-    fn attachment_labels_carry_a_basename_never_a_path() {
+    fn attachment_labels_name_a_file_and_only_a_workspace_arm_carries_a_path() {
         // Both union arms are named: an uploaded blob by `filename`, a
         // workspace reference by its path alone when nothing better was sent.
-        // That path is reduced to its last component — the chat must not
-        // publish a node-local filesystem layout to a surface that cannot read
-        // it, and a Windows path is the case a `/`-only split would silently
-        // miss.
+        // That path is reduced to its last component: a display name is not a
+        // location, and a Windows path is the case a `/`-only split would
+        // silently miss.
+        //
+        // The full path is still published, but only in `absPath` and only for
+        // a workspace arm — it is the desktop's click coordinate (ADR-100 D12
+        // Rev. 2026-11), never text. An upload arm carries none: its bytes
+        // belong to one run, which is also why this type has no `documentId`.
         let items = vec![
             serde_json::json!({"type": "file_upload", "filename": "report.pdf", "documentId": "ab12cd34ef56-1", "format": "pdf", "sizeBytes": 12345}),
             serde_json::json!({"type": "attached_file", "absPath": "C:\\work\\src\\main.rs", "name": ""}),
@@ -3040,19 +3024,28 @@ mod chat_append_tests {
         assert_eq!(labels[0].filename, "report.pdf");
         assert_eq!(labels[0].kind, "file_upload");
         assert_eq!(labels[0].size_bytes, Some(12345));
+        assert_eq!(labels[0].abs_path, None, "an upload arm carries no path");
         assert_eq!(labels[1].filename, "main.rs");
         assert_eq!(labels[1].kind, "attached_file");
-        // Neither the blob id nor the path survived, which is the whole point.
+        assert_eq!(
+            labels[1].abs_path.as_deref(),
+            Some(r"C:\work\src\main.rs"),
+            "the workspace arm keeps the path the client opens"
+        );
+        // The blob id never survives, and the path appears in exactly one
+        // field of exactly one arm.
         let rendered = serde_json::to_string(&labels).unwrap();
         assert!(!rendered.contains("ab12cd34ef56-1"));
-        assert!(!rendered.contains("work"));
+        assert_eq!(rendered.matches("work").count(), 1, "the path rides only in absPath: {rendered}");
+        assert!(!labels[1].filename.contains("work"), "the name is still a name");
     }
 
     #[test]
     fn a_workspace_attachment_is_labelled_by_its_display_name() {
         // The workspace arms carry a `name` the execution view already shows
         // the user — a workspace-relative path, which is display text, not a
-        // node-local layout, so it is quoted whole instead of trimmed.
+        // node-local layout, so it is quoted whole instead of trimmed. The
+        // node-local path rides beside it in its own field, for the click.
         let items = vec![serde_json::json!({
             "type": "attached_selection",
             "name": "src/lib.rs",
@@ -3065,11 +3058,16 @@ mod chat_append_tests {
         assert_eq!(labels[0].filename, "src/lib.rs");
         assert_eq!(labels[0].kind, "attached_selection");
         // The line range rides along: it is the one part of a selection a chip
-        // can show without being able to open anything.
+        // can show without opening anything, and what the click uses to land
+        // on the right line once it does open.
         assert_eq!(labels[0].start_line, Some(12));
         assert_eq!(labels[0].end_line, Some(25));
-        let rendered = serde_json::to_string(&labels).unwrap();
-        assert!(!rendered.contains("work"));
+        assert_eq!(
+            labels[0].abs_path.as_deref(),
+            Some(r"C:\work\project\src\lib.rs"),
+            "a selection opens at a path, so it carries one"
+        );
+        assert!(!labels[0].filename.contains("work"));
     }
 
     #[test]

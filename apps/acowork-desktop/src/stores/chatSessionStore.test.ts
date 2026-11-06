@@ -576,8 +576,9 @@ describe("the in-flight turn claim (ADR-106 D9)", () => {
   });
 
   it("a fan-out where every target failed claims nothing", async () => {
-    // Each failure already wrote its own `delivery_failed` receipt against the
-    // row, so the human has an answer on screen before the POST returns.
+    // Every target failed, so the human has an answer on screen before the POST
+    // returns: the failure is served live on the row (`delivery.alert`, ADR-105
+    // D5 rev. 2026-11-06) instead of as a stored receipt.
     respondTo("/api/intents/mentions", {
       message_id: "row-1",
       routed: "mentions",

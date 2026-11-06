@@ -1,5 +1,7 @@
 # ADR-034: Control Plane / Data Plane Layering — MQTT / HTTP Responsibility Boundary Specification
 
+> **Panel-location revision (2026-11-06, [ADR-108](./ADR-108-right-panel-consolidation.md))**: the right-rail Tools panel no longer exists — every reference below to "the Tools panel" / "the Builtin Tools card" / "the MCP card" now means the **Setup panel** (`AgentSetupTab`); the rail entry and its tab are gone. Endpoints, stores, permissions and switch semantics are unchanged; see ADR-108 for the scope.
+
 **Status**: Draft v10.0 (Phase 2 ~ Phase 10 all complete, 2026-07-14)
 **Date**: 2026-07-14
 **Deciders**: 大鱼

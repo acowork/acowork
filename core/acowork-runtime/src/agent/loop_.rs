@@ -1011,6 +1011,12 @@ impl AgentLoop {
 
     /// Ring the round doorbell (ADR-106 revision 2026-11-03).
     ///
+    /// Two states of a round are worth a bell, and both are round state changes:
+    /// the turn boundary (a terminal outcome, or a round parked on a `pause`), and
+    /// a card opening or closing **inside** a live turn
+    /// ([`Self::publish_round_card_state`]) — a question the agent is blocked on
+    /// must not have to wait for the Chat's poll interval to appear.
+    ///
     /// Routed through the chunk channel like every other session event, which is
     /// what keeps the relay's call order equal to the broker's enqueue order —
     /// the Chat must never be told to re-read before the turn's own final events
@@ -1019,7 +1025,7 @@ impl AgentLoop {
     /// A no-op when there is no round to name: a turn that never opened one (no
     /// conversation writer, or the degenerate path where the transport supplied
     /// no round coordinate) has nothing for a Chat block to re-read.
-    fn publish_round_state(&self, round_id: &str) {
+    pub(crate) fn publish_round_state(&self, round_id: &str) {
         if round_id.is_empty() {
             return;
         }
@@ -2600,6 +2606,138 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), "Hello from standalone!");
+    }
+
+    // ── The round doorbell's second trigger (ADR-106 revision) ─────────
+
+    /// A loop whose conversation writes a real side table, plus the chunk
+    /// receiver its doorbell lands on.
+    fn card_test_loop(
+        work_dir: &std::path::Path,
+        bound_chat: &str,
+    ) -> (
+        AgentLoop,
+        tokio::sync::mpsc::Receiver<SessionChunkEvent>,
+        Arc<crate::conversation::ConversationSession>,
+    ) {
+        use crate::conversation::{ConversationSession, SessionConfig};
+        let (conv, _cfg_rx, _state_rx) = ConversationSession::new(
+            work_dir,
+            "s-card",
+            SessionConfig {
+                agent_id: "com.test.loop".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+        .unwrap();
+        conv.set_chat_binding(bound_chat);
+        let conv = Arc::new(conv);
+        let (chunk_tx, chunk_rx) = mpsc::channel(64);
+        let (agent_loop, _inbound) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            Arc::new(MockProvider::single_text("ok")),
+            entries(vec![]),
+            test_budget(),
+            Some(chunk_tx),
+            Some(conv.clone()),
+        );
+        (agent_loop, chunk_rx, conv)
+    }
+
+    /// The side table's record for one round, once the writer has flushed it.
+    ///
+    /// The snapshot rides the writer channel (ADR-092), so this polls rather
+    /// than sleeping a fixed amount: the assertion is about the record, not
+    /// about how long a writer thread takes on the machine running the test.
+    fn round_record(
+        conv: &crate::conversation::ConversationSession,
+        round_id: &str,
+        until: impl Fn(&crate::rounds::RoundRecord) -> bool,
+    ) -> crate::rounds::RoundRecord {
+        let path = conv.rounds_index_path().to_path_buf();
+        for _ in 0..100 {
+            if let Ok(Some(rec)) = crate::rounds::read_record(&path, round_id)
+                && until(&rec)
+            {
+                return rec;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        panic!("round {round_id} never reached the expected state on the side table");
+    }
+
+    /// A question opening **inside** a live turn is a round state change, and it
+    /// must ring the doorbell.
+    ///
+    /// Measured failure this pins: the card was recorded on disk and resolved 54 s
+    /// later, while the Chat's block read never happened inside that window —
+    /// the only doorbell was the turn boundary, so the Chat showed a run that was
+    /// silently blocked on a question the human could not see.
+    #[test]
+    fn opening_a_card_rings_the_round_doorbell() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut agent_loop, mut chunk_rx, conv) = card_test_loop(dir.path(), "chat-1");
+        // A round the writer holds: armed, then one row, which is what makes the
+        // writer accept a mid-turn snapshot for it.
+        conv.begin_round("r:1");
+        conv.append_message("user", "do the thing", None);
+
+        agent_loop.track_interaction(serde_json::json!({
+            "kind": "ask_question",
+            "request_id": "q-1",
+            "question": "which file?",
+            "options": ["a.md", "b.md"],
+        }));
+
+        let bell = chunk_rx.try_recv().expect("the card opening rings");
+        assert!(
+            matches!(&bell.event, ChunkEvent::RoundState { round_id, chat_session_id }
+                if round_id == "r:1" && chat_session_id == "chat-1"),
+            "the bell must name the round and the Chat that owes it, got {:?}",
+            bell.event
+        );
+
+        let rec = round_record(&conv, "r:1", |r| r.card.is_some());
+        assert_eq!(rec.status.as_deref(), Some("waiting"));
+        assert_eq!(rec.card.unwrap()["request_id"], "q-1");
+        assert!(!rec.terminal, "a blocked round is not history (D5)");
+    }
+
+    /// …and so must the answer arriving, or the Chat keeps showing a button for a
+    /// question that is already answered.
+    #[test]
+    fn resolving_a_card_rings_the_doorbell_and_retracts_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut agent_loop, mut chunk_rx, conv) = card_test_loop(dir.path(), "chat-1");
+        conv.begin_round("r:1");
+        conv.append_message("user", "do the thing", None);
+
+        agent_loop.track_interaction(serde_json::json!({
+            "kind": "ask_question",
+            "request_id": "q-1",
+            "question": "which file?",
+            "options": ["a.md"],
+        }));
+        round_record(&conv, "r:1", |r| r.card.is_some());
+        let _ = chunk_rx.try_recv().expect("opening rang");
+
+        agent_loop.forget_interaction("ask_question", "q-1");
+
+        let bell = chunk_rx.try_recv().expect("resolving rings too");
+        assert!(
+            matches!(&bell.event, ChunkEvent::RoundState { round_id, .. } if round_id == "r:1"),
+            "got {:?}",
+            bell.event
+        );
+        let rec = round_record(&conv, "r:1", |r| {
+            r.card.is_none() && r.status.as_deref() == Some("in_progress")
+        });
+        assert!(!rec.terminal, "the turn is still running");
     }
 
     // ── S1.5: Streaming tests ─────────────────────────────────────────

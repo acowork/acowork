@@ -99,6 +99,14 @@ pub struct WorkspaceResolver {
     agent_home: String,
     /// All allowed dirs from agent_workspaces.json + fallbacks
     allowed_dirs: Vec<WorkspaceDir>,
+    /// `id → alias`, the human's own label for a workspace.
+    ///
+    /// Kept beside [`Self::allowed_dirs`] rather than on [`WorkspaceDir`]
+    /// because it is **display data, not access data**: nothing that enforces
+    /// a boundary (path validation, search roots, prompt files) has any
+    /// business reading it, while everything that renders a workspace at a
+    /// human does (`display_name`). Separate field, separate audience.
+    aliases: std::collections::HashMap<String, String>,
 }
 
 impl WorkspaceResolver {
@@ -108,9 +116,11 @@ impl WorkspaceResolver {
     /// user-configured workspace directories.
     pub fn new(work_dir: &str) -> Self {
         let allowed_dirs = load_workspace_dirs(work_dir);
+        let aliases = load_workspace_aliases(work_dir);
         Self {
             agent_home: work_dir.to_string(),
             allowed_dirs,
+            aliases,
         }
     }
 
@@ -152,6 +162,39 @@ impl WorkspaceResolver {
             "WorkspaceResolver::find_by_id"
         );
         result
+    }
+
+    /// The workspace as a human should read it: the alias the user gave it,
+    /// else the directory's own last segment, else `None`.
+    ///
+    /// This is the single home of the ID→name rule for every surface that
+    /// puts a workspace in front of a person or in front of a model that
+    /// writes for a person. `ws-49616826fcfc` is an address, not a name: a
+    /// reader who is shown it learns nothing, and a chat background that said
+    /// "工作区 ws-49616826fcfc" is exactly the reported defect. Desktop and
+    /// mobile already apply the same rule (`workspaceDisplayName` in
+    /// `WorkspaceSelector.tsx`, the `alias || tail(path)` label in
+    /// `AgentDrawer.tsx`) — this is its runtime counterpart.
+    ///
+    /// `None` means "nothing better than the id exists" and the caller keeps
+    /// showing the id. Never returns an empty string: an alias of blanks is
+    /// the same as no alias.
+    pub fn display_name(&self, id: &str) -> Option<String> {
+        if id == "__agent_home__" {
+            return Some("agent home".to_string());
+        }
+        if let Some(alias) = self.aliases.get(id) {
+            let alias = alias.trim();
+            if !alias.is_empty() {
+                return Some(alias.to_string());
+            }
+        }
+        let path = &self.find_by_id(id)?.path;
+        let name = Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .filter(|n| !n.trim().is_empty())?;
+        Some(name)
     }
 
     /// All searchable directories (for content_search / glob_search).
@@ -197,8 +240,52 @@ impl WorkspaceResolver {
         Self {
             agent_home: "/tmp/agent-home".to_string(),
             allowed_dirs,
+            aliases: std::collections::HashMap::new(),
         }
     }
+}
+
+/// Load `id → alias` from `agent_workspaces.json`.
+///
+/// A second pass over the same file `load_workspace_dirs` reads, on purpose:
+/// the two consumers want different things from the entry (enforcement vs
+/// display), and threading an alias through `WorkspaceDir` would make every
+/// synthetic `WorkspaceDir` literal — the package root, the agent home, and
+/// every test fixture — carry a field it can never fill. A missing or
+/// unreadable file simply yields no aliases; `display_name` then falls back to
+/// the directory name.
+fn load_workspace_aliases(work_dir: &str) -> std::collections::HashMap<String, String> {
+    #[derive(Deserialize)]
+    struct WorkspaceConfig {
+        #[serde(default)]
+        additional_dirs: Vec<AliasEntry>,
+    }
+
+    #[derive(Deserialize)]
+    struct AliasEntry {
+        id: String,
+        #[serde(default)]
+        alias: Option<String>,
+    }
+
+    let path = Path::new(work_dir)
+        .join("config")
+        .join("agent_workspaces.json");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return std::collections::HashMap::new();
+    };
+    let Ok(config) = serde_json::from_str::<WorkspaceConfig>(&content) else {
+        return std::collections::HashMap::new();
+    };
+    config
+        .additional_dirs
+        .into_iter()
+        .filter_map(|e| {
+            let alias = e.alias?;
+            let alias = alias.trim();
+            (!alias.is_empty()).then(|| (e.id, alias.to_string()))
+        })
+        .collect()
 }
 
 /// Load workspace directories from `agent_workspaces.json`.
@@ -390,7 +477,7 @@ pub fn format_workspace_context_for_session(
             match resolver.find_by_id(current_ws_id) {
                 Some(dir) => (
                     dir.path.clone(),
-                    None, // alias not stored in WorkspaceDir
+                    resolver.display_name(current_ws_id),
                     Some(dir.access.clone()),
                     false,
                 ),
@@ -532,6 +619,54 @@ mod tests {
         let search = resolver.search_dirs();
         assert!(search.iter().any(|d| d.contains("my-project")));
         assert!(search.iter().any(|d| d.contains("other")));
+    }
+
+    /// Contract: a workspace shown to a human is shown by its **name** — alias
+    /// first, directory name second, nothing invented third.
+    ///
+    /// Reported defect (2026-11-06): a chat background read "工作区
+    /// ws-49616826fcfc". The rule already existed on both clients
+    /// (`workspaceDisplayName` / `alias || tail(path)`); this pins the runtime
+    /// half of it so the router cannot be the one surface that has no name.
+    #[test]
+    fn display_name_prefers_alias_then_directory_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = r#"{
+            "version": "1.0.0",
+            "additional_dirs": [
+                { "id": "ws-1", "path": "D:/projects/my-project", "alias": "ACoworkDev",
+                  "access": "read-write", "added_at": "2026-05-01T00:00:00Z" },
+                { "id": "ws-2", "path": "D:/projects/no-alias",
+                  "access": "read-write", "added_at": "2026-05-01T00:00:00Z" },
+                { "id": "ws-3", "path": "D:/projects/blank-alias", "alias": "   ",
+                  "access": "read-write", "added_at": "2026-05-01T00:00:00Z" }
+            ]
+        }"#;
+        std::fs::create_dir_all(dir.path().join("config")).unwrap();
+        std::fs::write(
+            dir.path().join("config").join("agent_workspaces.json"),
+            config,
+        )
+        .unwrap();
+        let resolver = WorkspaceResolver::new(dir.path().to_str().unwrap());
+
+        assert_eq!(resolver.display_name("ws-1").as_deref(), Some("ACoworkDev"));
+        // No alias → the directory's own last segment, which is what a human
+        // recognises when the path row says nothing.
+        assert_eq!(resolver.display_name("ws-2").as_deref(), Some("no-alias"));
+        // Blank alias is the same as no alias — never an empty name.
+        assert_eq!(
+            resolver.display_name("ws-3").as_deref(),
+            Some("blank-alias")
+        );
+        // A workspace the registry no longer has gets no name at all: the
+        // caller falls back to the id, which is honest.
+        assert_eq!(resolver.display_name("ws-gone"), None);
+        // The synthetic id the composer uses is not a name either.
+        assert_eq!(
+            resolver.display_name("__agent_home__").as_deref(),
+            Some("agent home")
+        );
     }
 
     #[test]

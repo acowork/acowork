@@ -11,17 +11,24 @@
  *      to the round's block.
  *
  * An addressing question is the exception worth pinning: it is a question FOR
- * the human, so it collapses to one line whose buttons open a sheet (§6.5), and
- * once the question has a round the buttons go quiet rather than vanishing —
- * disappearing on click would erase the record of what was decided, and a
- * re-click would deliver the same words twice (D6).
+ * the human, so it collapses to one card whose picks open a sheet (§6.5). Once
+ * the question has a round it settles into a receipt naming the session that
+ * took the answer — the record survives, nothing is left to press, and a second
+ * click cannot deliver the same words twice (D6). Its options, its answered-ness
+ * and the session that answered come from the service's projection
+ * (`row.delivery.question`, design 31 §6), which is what these cases feed it.
  */
 import { describe, expect, it } from 'vitest'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { ChatNoticeRow } from '../components/ChatNoticeRow'
-import type { ChatMessageRow } from '../lib/types'
+import type { ChatCandidateOption, ChatMessageRow } from '../lib/types'
 
-function notice(noticeType: string, meta: ChatMessageRow['meta'] = {}, body = ''): ChatMessageRow {
+function notice(
+  noticeType: string,
+  meta: ChatMessageRow['meta'] = {},
+  body = '',
+  delivery?: ChatMessageRow['delivery'],
+): ChatMessageRow {
   return {
     seq: 1,
     ts: 1,
@@ -30,7 +37,21 @@ function notice(noticeType: string, meta: ChatMessageRow['meta'] = {}, body = ''
     body,
     to: 'u1',
     meta: { message_id: `n-${noticeType}`, notice_type: noticeType, ...meta },
+    ...(delivery ? { delivery } : {}),
   } as ChatMessageRow
+}
+
+/** What the service projects onto a card (design 31 §6). The surface reads
+ *  this and nothing else: `meta.options` is the durable payload, not the
+ *  surface's input. */
+function card(
+  options: ChatCandidateOption[] = OPTIONS,
+  { answered = false, allowNewTask = true }: { answered?: boolean; allowNewTask?: boolean } = {},
+): ChatMessageRow['delivery'] {
+  return {
+    answered: false,
+    question: { answered, options, ...(allowNewTask ? { allow_new_task: true } : {}) },
+  }
 }
 
 function render(row: ChatMessageRow, props: Partial<Parameters<typeof ChatNoticeRow>[0]> = {}): string {
@@ -59,49 +80,93 @@ describe('addressing questions (D6 levels 3 and 5)', () => {
   const choose = () => {}
 
   it('a session_choice offers the pick and names the question', () => {
-    const html = render(notice('session_choice', { options: OPTIONS, allow_new_task: true }), {
+    const html = render(notice('session_choice', {}, '', card()), {
       onChoose: choose,
     })
     expect(html).toContain('data-testid="chat-card-options"')
     expect(html).toContain('你指的是哪一个任务？')
-    expect(html).toContain('去选择')
+    // Several candidates: the row asks, the sheet carries the labelled picks, and
+    // the action is a button with its own hit area — a box that only holds text
+    // reads as a disabled field.
+    expect(html).toContain('选择')
+    expect(html).toContain('chat-notice-card-go')
   })
 
   it('a confirm_continue asks about the one session it proposes', () => {
-    const html = render(notice('confirm_continue', { options: [OPTIONS[0]!] }), { onChoose: choose })
+    const html = render(notice('confirm_continue', {}, '', card([OPTIONS[0]!])), {
+      onChoose: choose,
+    })
     expect(html).toContain('继续这个任务吗？')
   })
 
-  it('an answered question goes quiet instead of disappearing', () => {
-    const html = render(notice('session_choice', { options: OPTIONS, allow_new_task: true }), {
-      onChoose: choose,
-      answered: true,
-    })
-    expect(html).toContain('已回复')
-    expect(html).toContain('disabled')
-    expect(html).toContain('你指的是哪一个任务？')
+  it('the card names the one session a confirm_continue would continue', () => {
+    // The card proposes exactly ONE session, so the collapsed row has to name it:
+    // "继续这个任务吗？ / 去选择" over an anonymous proposal asked the human to
+    // continue a task they could not identify without opening the sheet. The
+    // payload carries the candidate's own title — it belongs on the row.
+    const html = render(
+      notice(
+        'confirm_continue',
+        {},
+        '',
+        card([{ session_id: 's-9', label: '发了个用户消息给SSE.kevin的chat session' }]),
+      ),
+      { onChoose: choose },
+    )
+    expect(html).toContain('继续这个任务吗？')
+    expect(html).toContain('发了个用户消息给SSE.kevin的chat session')
   })
 
-  it('a bystander gets the question without the action (D10)', () => {
-    const html = render(notice('session_choice', { options: OPTIONS, allow_new_task: true }))
-    expect(html).not.toContain('data-testid="chat-card-options"')
-    expect(html).toContain('chat-notice-pill')
-    expect(html).toContain('你指的是哪一个任务？')
+  it('names an untitled proposal by its session id rather than nothing', () => {
+    const html = render(
+      notice('confirm_continue', {}, '', card([{ session_id: 's-abcdef12' }])),
+      { onChoose: choose },
+    )
+    expect(html).toContain('s-abcdef')
   })
 
-  it('a question with nothing to offer stays a plain line', () => {
-    const html = render(notice('session_choice', { options: [] }), { onChoose: choose })
-    expect(html).not.toContain('data-testid="chat-card-options"')
+  it('a multi-candidate question keeps its names in the sheet, not the row', () => {
+    // `session_choice` offers several sessions; putting all titles on a 390pt
+    // row is where a mis-tap sends a turn into the wrong task, so the row stays
+    // the question and the sheet carries the labelled picks.
+    const html = render(notice('session_choice', {}, '', card()), { onChoose: choose })
+    expect(html).toContain('你指的是哪一个任务？')
+    expect(html).not.toContain('整理季度报表')
+  })
+
+  it('an answered question paints nothing', () => {
+    // A card is a question; once a round answers it, the question is an
+    // intermediate state of that turn (ADR-106 D14: keep the row on disk, hide it
+    // at render time). The round's block already says which session took the
+    // words — a receipt or a dead button here would be the same fact again.
+    expect(
+      render(notice('session_choice', {}, '', card(OPTIONS, { answered: true })), {
+        onChoose: choose,
+      }),
+    ).toBe('')
+  })
+
+  it('a bystander gets the question and the reason it is not theirs (D10)', () => {
+    // The question is a fact about the channel, the click is the speaker's. So a
+    // read-only viewer sees the card — and a line saying why it offers no action,
+    // rather than a dead button or a bare sentence with no buttons at all.
+    const html = render(notice('session_choice', {}, '', card()))
+    expect(html).toContain('data-testid="chat-card-options"')
+    expect(html).toContain('你指的是哪一个任务？')
+    expect(html).toContain('只有发话的人可以回答')
+    expect(html).not.toContain('chat-notice-card-go')
+  })
+
+  it('a question with nothing to offer paints nothing', () => {
+    // Pre-projection leftovers carry no options: nothing to choose, nothing
+    // chosen. A pill asking "你指的是哪一个任务？" with no way to answer reads as
+    // the agent talking to itself in the middle of the transcript.
+    expect(render(notice('session_choice', {}, '', card([])), { onChoose: choose })).toBe('')
+    expect(render(notice('confirm_continue'))).toBe('')
   })
 })
 
 describe('the facts about the channel', () => {
-  it('a failed delivery is worded by the surface, not read off the wire', () => {
-    const html = render(notice('delivery_failed'))
-    expect(html).toContain('消息未能送达，请重试')
-    expect(html).toContain('chat-notice-pill')
-  })
-
   it('a limit notice carries its own text, and an empty one paints nothing', () => {
     expect(render(notice('budget_exhausted', {}, '上下文预算已用尽'))).toContain('上下文预算已用尽')
     expect(render(notice('unknown_type'))).toBe('')

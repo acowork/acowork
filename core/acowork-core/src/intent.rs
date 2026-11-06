@@ -186,6 +186,21 @@ pub fn is_task_routing_key(key: &str) -> bool {
     key.starts_with(TASK_ROUTING_KEY_PREFIX)
 }
 
+/// Machine tokens for a **live** delivery alert (ADR-105 D5, revision
+/// 2026-11-06).
+///
+/// One spelling for both ends of the internal alert call: the Gateway reports
+/// the code, the user service stores and serves it, and the surfaces decide the
+/// wording. Only the codes the Gateway itself invents live here — the rest are
+/// the delivery entry's own `error_code`s (`target_not_installed`,
+/// `not_authorized`, a publish failure's code), passed through verbatim.
+pub mod chat_alert_codes {
+    /// The addressee accepted the delivery and then produced nothing before the
+    /// response deadline: the answer never came (design 27 §5.5.1). Formerly the
+    /// sweeper's `fallback-<message_id>` receipt.
+    pub const NO_RESPONSE: &str = "no_response";
+}
+
 /// The Chat content vocabulary (ADR-106 D1).
 ///
 /// Exactly four kinds may exist in a Chat transcript, and three processes touch
@@ -224,11 +239,156 @@ pub mod chat_kinds {
     pub fn is_appendable(kind: &str) -> bool {
         matches!(kind, EXECUTION_ROUND | SYSTEM_NOTICE | AGENT_MESSAGE)
     }
+
+    /// Notice types that answer a row already in the transcript, and therefore
+    /// MUST carry `meta.in_reply_to` = that row's `message_id`.
+    ///
+    /// The coordinate is not decoration: it is what makes every projected state
+    /// ("was this message answered", "is this card still open", "which block
+    /// does this reply belong to") recomputable from the log alone (design 31
+    /// §4, hard constraint 3). A receipt that cannot be threaded is a receipt a
+    /// reader has to guess at, so the write entry refuses it instead of storing
+    /// an orphan — the failure this list exists to prevent was a card whose
+    /// `in_reply_to` was the (empty) answer-coordinate of a fresh request rather
+    /// than the request itself.
+    ///
+    /// `budget_exhausted` / `truncated` / `unavailable` are deliberately absent:
+    /// they report a limit of the channel, and the request they name never
+    /// became a row (design 31 §9 pending 3 tracks that evidence gap).
+    /// `delivery_failed` has **no live writer** since the 2026-11-06 revision of
+    /// ADR-105 D5 (a failed send is an in-memory alert, not a row) but stays
+    /// listed: the type is still what the rows already in old transcripts are,
+    /// and a vocabulary that forgets it would make those rows unreadable.
+    pub const THREADED_NOTICES: &[&str] = &[
+        "delivery_failed",
+        "interaction_resolved",
+        "session_choice",
+        "confirm_continue",
+    ];
+
+    /// ADR-106 D6 levels 3 and 5: an addressing question to the human. Card
+    /// rows are empty-bodied — the options ARE the question — so a card without
+    /// `meta.options` is not a card but an unanswerable line, and the surfaces
+    /// render exactly that: a localized sentence and no buttons.
+    pub const CARD_NOTICES: &[&str] = &["session_choice", "confirm_continue"];
+
+    /// The `system_notice` types that report a **limit of the channel** rather
+    /// than an outcome of a row: the request they name never became a
+    /// transcript row, so there is no `message_id` they could thread to and
+    /// they are deliberately absent from [`THREADED_NOTICES`] (design 31 §9-3
+    /// tracks the resulting evidence gap). They still settle a turn — the human
+    /// was told something happened — which is why [`is_answer_row`] counts them.
+    ///
+    /// `delivery_failed` is NOT here even though it reports a failure: the row
+    /// it owed does exist, so it carries `in_reply_to` like any other receipt
+    /// and belongs to [`THREADED_NOTICES`].
+    ///
+    /// This list exists so the write contract's vocabulary is closed: every
+    /// notice type a live writer can emit is threaded (a card is a threaded
+    /// question) or a limit. `dev/ci.sh run_chat_projection_redline` fails on a
+    /// notice literal that appears in neither, which is the only way a new one
+    /// gets to skip the threading contract by accident.
+    pub const LIMIT_NOTICES: &[&str] = &["budget_exhausted", "truncated", "unavailable"];
+
+    /// The `system_notice` types the transcript renders as **nothing**
+    /// (ADR-106 D14, design 27 §5.5.5). v3.1 removed the writers, not the rows:
+    /// old transcripts still carry routing milestones and card-resolution
+    /// receipts, and hiding them at read time is what keeps history readable
+    /// without narrating a decision the reference row now owns.
+    ///
+    /// One spelling, three readers: the two surfaces paint them as nothing, and
+    /// [`is_answer_row`] must not count one as the outcome that settled a turn —
+    /// a row nobody can see cannot be the fact that made a message visibly
+    /// handled.
+    /// `delivery_failed` joined the set with the 2026-11-06 revision of ADR-105
+    /// D5: the yellow receipt is no longer written (the failure is a live alert
+    /// on the human's row), so the rows history holds are the retracted kind —
+    /// the same "not delivered" line that stayed on screen long after a retry
+    /// succeeded. Hiding them at read time is what stops that.
+    pub const RETIRED_NOTICES: &[&str] = &[
+        "turn_dispatched",
+        "turn_started",
+        "turn_routed",
+        "router_fallback",
+        "interaction_resolved",
+        "delivery_failed",
+    ];
+
+    /// True when a row of this kind settles the row it threads to (ADR-106 D9):
+    /// the round reference (the turn was picked up), the router's own answer, or
+    /// a live receipt / addressing card. This is the answer to "did anything
+    /// happen to that message" and it is asked in exactly one place — the chat
+    /// read model (`acowork-user`) — never by a surface.
+    pub fn is_answer_row(kind: &str, notice_type: &str) -> bool {
+        match kind {
+            EXECUTION_ROUND | AGENT_MESSAGE => true,
+            SYSTEM_NOTICE => !RETIRED_NOTICES.contains(&notice_type),
+            _ => false,
+        }
+    }
+
+    /// True when this notice answers a specific row (see [`THREADED_NOTICES`]).
+    pub fn is_threaded_notice(notice_type: &str) -> bool {
+        THREADED_NOTICES.contains(&notice_type)
+    }
+
+    /// True when this notice is an addressing card (see [`CARD_NOTICES`]).
+    pub fn is_card_notice(notice_type: &str) -> bool {
+        CARD_NOTICES.contains(&notice_type)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Design 31 §5.2: the notice classes the chat write entry enforces are
+    /// vocabulary, not a store-local list — three crates have to agree on which
+    /// notice answers a row and which one is only a channel fact.
+    #[test]
+    fn chat_notice_classes_are_registered_once() {
+        assert!(chat_kinds::is_card_notice("session_choice"));
+        assert!(chat_kinds::is_card_notice("confirm_continue"));
+        assert!(chat_kinds::is_threaded_notice("delivery_failed"));
+        assert!(chat_kinds::is_threaded_notice("interaction_resolved"));
+        // A card is a question about a row, so it is threaded by definition.
+        for card in chat_kinds::CARD_NOTICES {
+            assert!(chat_kinds::is_threaded_notice(card), "{card} must be threaded");
+        }
+        // A limit is a fact about the channel: the request it names never
+        // became a row, so it cannot be threaded (design 31 §9-3).
+        assert!(!chat_kinds::is_threaded_notice("budget_exhausted"));
+        assert!(!chat_kinds::is_card_notice("delivery_failed"));
+    }
+
+    /// Design 31 §7 P3: the write-contract classes are exhaustive and
+    /// disjoint on the axis they describe, so
+    /// `run_chat_projection_redline` can decide "registered or not" by asking
+    /// whether a writer's notice literal appears in one of them.
+    ///
+    /// Two axes, not one: `THREADED_NOTICES` / `LIMIT_NOTICES` say **what the
+    /// write entry must enforce**, while [`RETIRED_NOTICES`] says **how the
+    /// transcript renders and settles** a row. They overlap on purpose —
+    /// `interaction_resolved` is retired as a live writer and rendering yet
+    /// still threaded, because a row of that type that does get written must
+    /// stay resolvable. Asserting them as one partition would force a false
+    /// choice between two true statements.
+    #[test]
+    fn chat_notice_write_classes_are_disjoint() {
+        let threaded = chat_kinds::THREADED_NOTICES;
+        let cards = chat_kinds::CARD_NOTICES;
+        let limits = chat_kinds::LIMIT_NOTICES;
+        for card in cards {
+            assert!(threaded.contains(card), "{card} is a card, so it is threaded");
+        }
+        for limit in limits {
+            assert!(
+                !threaded.contains(limit),
+                "{limit} reports a channel limit; its referent is not a row, so it cannot be threaded",
+            );
+            assert!(!cards.contains(limit), "{limit} is both a card and a limit");
+        }
+    }
 
     #[test]
     fn pm_task_is_a_human_turn_on_a_keyed_route() {

@@ -23,17 +23,11 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { AgentSetupTab } from "./AgentSetupTab";
-import { ToolsTab } from "./ToolsTab";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { MemoryPanel } from "../memory/MemoryPanel";
 import { WorkspaceExplorer } from "../workspace/WorkspaceExplorer";
 import { ControlButton, StateLabel, SnapshotNode } from "../debug/DebugPanel";
 import { CompressionHistoryCard } from "../debug/CompressionHistoryCard";
-// ADR-063 §3.7 — prompts / skills browser. Always rendered at
-// the TOP of the Debug tab regardless of DevMode state (operators can
-// prepare overrides before clicking "Enter Debug"; the reload button
-// stays reachable once DevMode is on).
-import { PromptsSkillsCard } from "../debug/PromptsSkillsCard";
 import { ListBox, ExpandableRow } from "../common/list";
 import { CAPSULE_PANE_CN } from "../common/capsule";
 import { Switch } from "../common/Switch";
@@ -48,8 +42,8 @@ interface RightPanelProps {
   onCollapse: () => void;
   isDebugMode?: boolean;
   onResizeStart?: (e: React.MouseEvent) => void;
-  activeTab: "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
-  onTabChange: (tab: "debug" | "status" | "setup" | "tools" | "memory" | "workspace") => void;
+  activeTab: "debug" | "status" | "setup" | "memory" | "workspace";
+  onTabChange: (tab: "debug" | "status" | "setup" | "memory" | "workspace") => void;
 }
 
 // Stable empty array reference to avoid Zustand selector infinite loop
@@ -432,10 +426,11 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
   }, [selectedAgentId, selectedAgent?.alive, selectedAgent?.lifecycle]);
 
   // Context-snapshots level-1 collapse (whole card body toggles from the
-  // card header — same interaction as the PROMPT card). Default open.
+  // card header — the grammar every panel card uses). Default open: it is
+  // one of only two cards left in this tab, and the tab exists to show it.
   const [snapshotsOpen, setSnapshotsOpen] = useState(true);
   // Status-tab level-1 collapsible cards (Session Status / Agent
-  // Status) — same grammar as the Tools-tab "Builtin Tools" list:
+  // Status) — same grammar as the Setup-panel "Builtin Tools" list:
   // the header row toggles the whole body; default open.
   const [sessionStatusOpen, setSessionStatusOpen] = useState(true);
   const [agentStatusOpen, setAgentStatusOpen] = useState(true);
@@ -542,30 +537,15 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
             4. running, DevMode on, local,
                not connected                → "debug connection lost"
             5. running, DevMode on, local,
-               connected                    → state + snapshots + package files
-                                              + compression history */}
+               connected                    → state + snapshots
+                                              + compression history
+
+          The package prompt / skill editor is NOT here any more: it moved
+          to the Setup panel (ADR-063 §3.7), where it sits with the rest of
+          the agent's own settings. The Debug tab is the debug switch plus
+          the context snapshots it produces. */}
       {activeTab === "debug" && (
         <OverlayScrollbar dataTabScroll className="min-h-0 flex flex-1 flex-col bg-right-panel">
-          {/* ADR-063 §3.7 — package prompt override editor. Always
-              visible at the TOP of the Debug tab, BEFORE the
-              "no agent running" placeholder, the action block, and
-              the debug-only state/snapshots/compression cards.
-              Operators must be able to browse and prepare overrides
-              regardless of agent running state or DevMode.
-
-              Padding matches the action block below (`p-3`) so the card
-              left edge aligns with the rest of the tab's content column,
-              and it renders on the unified `ListBox` box-card grammar —
-              the same card the Settings and Status panels use. */}
-          <div className="p-3 pb-0">
-            <PromptsSkillsCard />
-          </div>
-
-          {/* Divider — full panel-width hairline separating the prompts &
-              skills card (above) from the debug controls (below). Matches
-              the workspace/memory panel divider style. */}
-          <div className="my-2 border-t border-border-divider" />
-
           {!selectedAgent?.alive ? (
             <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-sm text-text-tertiary ">
               <Bug className="h-5 w-5" />
@@ -581,13 +561,14 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                   once DevMode is on.
 
                   Height contract — must render at the same total pixel
-                  height as the PROMPT card header immediately above and
-                  the level-1 collapsible cards below. Tailwind defaults
-                  to `box-sizing: border-box`, so a banner that owns its
-                  own border cannot use `min-h-[36px]` and expect to match
+                  height as the level-1 collapsible cards below (the context
+                  snapshots card; the prompt card that used to sit above it
+                  moved to the Setup panel). Tailwind defaults to
+                  `box-sizing: border-box`, so a banner that owns its own
+                  border cannot use `min-h-[36px]` and expect to match
                   ExpandableRow's `min-h-[36px]` header — the border eats
                   2px and the banner ends up 2px shorter than every other
-                  horizontal bar in the tab. The PROMPT card is
+                  horizontal bar in the tab. Those cards are
                   `ListBox (1+1 border) + ExpandableRow header (36px) =
                   38px` total, so this banner targets 38px to match.
 
@@ -717,9 +698,9 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
               </div>
 
               {/* Below action block — only when in debug mode. The
-                  lower cards (state, snapshots, package files, compression
-                  history) are intentionally hidden until the operator
-                  commits to a debug session. */}
+                  lower cards (state, snapshots, compression history) are
+                  intentionally hidden until the operator commits to a debug
+                  session. */}
               {selectedAgent?.debug_state === "enabled" && (
                 !connected ? (
                   <div className="flex flex-col items-center justify-center gap-3 p-6 text-sm text-text-tertiary ">
@@ -744,8 +725,8 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       </div>
                     </div>
                     {/* Context snapshots card — level-1 collapsible list:
-                        the header toggles the whole snapshot list (same
-                        interaction as the PROMPT card, default open);
+                        the header toggles the whole snapshot list (the same
+                        interaction as every panel card, default open);
                         snapshot rows are separated by the unified hairline
                         so each iteration reads as a clear list row. When
                         there is more than one page, the empty right side of
@@ -922,7 +903,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
             </div>
           )}
           {/* Session Status — level-1 collapsible card matching the
-              Tools-tab "Builtin Tools" grammar: the clickable header
+              Setup-panel "Builtin Tools" grammar: the clickable header
               row (chevron + title) toggles the whole stats body, which
               sits on the inset surface below a hairline. Default open. */}
           <ListBox dividers={false}>
@@ -1227,9 +1208,6 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
           <AgentSetupTab />
         </div>
       )}
-
-      {/* ── Tools tab content ─────────────────────────────────────── */}
-      {activeTab === "tools" && <ToolsTab />}
 
       {/* ── Workspace tab content ─────────────────────────────────── */}
       <div

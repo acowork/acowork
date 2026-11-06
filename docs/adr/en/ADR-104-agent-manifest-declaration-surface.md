@@ -1,5 +1,7 @@
 # ADR-104: Restructuring the Manifest Declaration Surface — `[config]` Defaults, `[[mcp_servers]]` Recommendations, the capability↔skill Relation, and `labels`
 
+> **Panel-location revision (2026-11-06, [ADR-108](./ADR-108-right-panel-consolidation.md))**: the right-rail Tools panel no longer exists — every reference below to "the Tools panel" / "the Builtin Tools card" / "the MCP card" now means the **Setup panel** (`AgentSetupTab`); the rail entry and its tab are gone. Endpoints, stores, permissions and switch semantics are unchanged; see ADR-108 for the scope.
+
 **Status**: Implemented (P1–P5 landed in full)
 **Date**: 2026-10-30
 **Deciders**: ACowork architecture group
@@ -246,10 +248,11 @@ Shown only when a `required = true` entry has a state ∉ {`active`, `dismissed`
 | 4 Skills & capabilities | skill ZIPs + `[capabilities.*]` (action / description / skills / optional JSON schema) | every ZIP parsed, action names valid and unique, JSON valid |
 | 5 Preview | — | the backend reports no error |
 
-Two structural constraints:
+Three structural constraints:
 
 - **The preview is no longer hand-built.** The old `buildPreviewText()` assembled TOML in the frontend and began with a `[package]` table that does not exist in `AgentManifest` (serde silently drops unknown fields, so a manifest built that way would have lost everything the preview promised). The preview now calls `preview_manifest(draft)`, sharing `ManifestDraft::build` with `create_agent(draft)` — **drift is impossible by construction**.
-- **`[[mcp_servers]].tools` is not collected in the wizard.** The server is not connected, so `tools/list` is unavailable; asking the user to type tool names would only produce fake declarations. The subset is picked in the Tools panel after installation.
+- **`[[mcp_servers]].tools` is collected in the wizard for platform-hosted servers only.** A hosted service's `tools/list` is readable before the agent exists (it is a Gateway reverse-proxy route: `POST /api/{pm,doc,memory}/mcp`; `tools/list` does not require `X-MCP-Actor`), so the wizard expands the pick into per-tool switches and the resulting whitelist is written into the declaration. A failed probe degrades to "empty = everything enabled" and says so on screen. **Third-party presets are still not connected** while authoring; their subset is picked in the Tools panel after installation — asking the user to type tool names there would only produce fake declarations.
+- **Step 3 pre-selects the platform's default builtin-tool set.** ADR-029 is an opt-in model: a builtin tool the manifest does not declare starts with `enabled = false` in `agent_tools.json`, so "not ticked in the wizard" really means "the new agent cannot call it". The baseline capability (file write/edit, shell, inter-agent messaging, bind-session history, asking the user, todo, on-demand skill loading) is marked by `default_enabled` on `acowork_core::tools::BUILTIN_TOOLS`; the wizard pre-selects it and the user can override. The fact lives in the Rust catalog rather than a frontend constant — the same single-source-of-truth rule as `[[mcp_servers]]`; adding or removing a default is forced to be a deliberate act by core's pin test.
 
 ### 5.5 Skill vs capability (stated in the UI)
 
@@ -302,7 +305,7 @@ Rollback: `[config]`, `labels` and `skills` are all **optional** fields that old
 
 ## 9. Open / deferred
 
-1. Collecting `[[mcp_servers]].tools` **inside the wizard** (needs a connected server — the chicken-and-egg of "declare after install").
+1. Collecting `[[mcp_servers]].tools` **inside the wizard** for **third-party presets** — platform-hosted servers are done (§5.4); a stdio preset can only be probed after it is installed and connected, the chicken-and-egg of "declare after install".
 2. **Cross-client consistency** of the recommendation group (the mobile form was not designed together with this ADR).
 3. Whether `[config]` should extend to **platform policy** fields such as `search` / `chat_router`. Currently judged user/platform domain; revisit if a concrete need appears.
 

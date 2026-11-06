@@ -1,12 +1,14 @@
 # ADR-105：群级默认接收方——未 @ 的群消息交给一个声明的 agent
 
 - **编号**：ADR-105
-- **状态**：已接受，**部分被 ADR-106 取代**（D4 的证据位与 D5 的 chat 行形态）
+- **状态**：已接受，**D4 与 D5 的行形态被 ADR-106 取代**；D5 自身于 2026-11-06 修订（失败改为内存态实时告警）
 - **日期**：2026-11-01
 - **决策者**：ACowork 架构组
 - **关联**：ADR-098（统一标准群组模型）、ADR-099（Chat session LLM router）、ADR-100（chat 事件日志化）；设计文档 27 §5.3.1 / §5.4.1 / §5.5
 
-> **取代说明（2026-11-03）**：[ADR-106](./ADR-106-chat-execution-reference-projection.md) D14 废止了本 ADR 的 **D4**（`auto_routed_to` 作为等待行的证据位）与 **D5 的 chat 行形态**（等待行反推机制删除，`delivery_failed` 作为通道事实保留）。D1 / D2 / D3 / D6 / D7（默认接收方本身、写入四道门、生命周期、不引入群级 LLM 路由）仍完全生效——默认接收方如今依旧在 `mentions` 投递路径上工作，只是它留下的痕迹不再决定前端怎么渲染等待行。
+> **取代说明（2026-11-03）**：[ADR-106](./ADR-106-chat-execution-reference-projection.md) D14 废止了本 ADR 的 **D4**（`auto_routed_to` 作为等待行的证据位）与 **D5 的 chat 行形态**（等待行反推机制删除）。D1 / D2 / D3 / D6 / D7（默认接收方本身、写入四道门、生命周期、不引入群级 LLM 路由）仍完全生效——默认接收方如今依旧在 `mentions` 投递路径上工作，只是它留下的痕迹不再决定前端怎么渲染等待行。
+>
+> **D5 修订（2026-11-06）**：投递失败不再**落行**。它既不是通道事实（不是对谁说了什么），也不是历史（一次失败被后续重试成功后仍留在转录里，永远不会被撤回）——它是**当下一刻的状态**。现行为：Gateway 把失败报给 user 服务的内存态告警表，读模型把它作为 `delivery.alert` 装饰在欠投递的那条人类行上，到期即消失。原「失败必须可见」的语义**完整保留**，只是载体从一行日志变成一条有时限的实时状态。详见 D5 本体。
 
 ## 摘要
 
@@ -55,16 +57,27 @@
 
 > **已被 ADR-106 D9 / D14 推翻的部分**：把 `auto_routed_to` 当等待行判据，等于把"读不到"当成"还在跑"——跳机、离线、投影失败都会产生永久等待。字段仍然写入（它是"这句话去了哪里"的记录），但不再驱动渲染。等待行后来被收缩成"本地在途、尚未返回的那次 `sending`"，那一版也太短（POST 约 150 ms 就返回，而该轮第一条行可在一分钟后落地）；现行规则见 [ADR-106 修订（2026-11-03）](./ADR-106-chat-execution-reference-projection.md)：本设备自己那次发送的 claim，键为响应里的 row id，收口于第一条回答它的行，300 s deadline 兜底。
 
-### D5 — 投递失败必须可见
+### D5 — 投递失败必须可见（2026-11-06 修订：实时告警，不落盘）
 
-`wake_and_deliver` 失败时，Gateway 追加一条 `system_notice`：`notice_type: "delivery_failed"`、`in_reply_to` 指向原 `user_message`、`error_code` 记录失败原因，**body 为空**。措辞由各个面本地化（与 `router_fallback` 同一约定：行由 producer 写、措辞由 surface 拥有），写入失败本身只记 warn、不影响响应。
+**规则一（不变）**：一次本该投出去而没有投出去的发送，必须**立刻**让人看见。失败不许静默——静默就是这个 ADR 要修的那个 bug。
 
-前端两条规则：
+**规则二（2026-11-06 重写）**：这条事实**不是转录的一部分**，所以它**不落盘**。
 
-- `ChatNoticeEventRow` 按 `notice_type` 渲染该行（body 为空也必须画）——这条行存在的前提就是"失败不再静默"；
-- `chatTurnState.answeredAfter` 见到绑定同一 trigger 的 `delivery_failed` 就结束等待：收据就是结局，继续显示等待等于更响的谎言。
+原实现是 Gateway 追加一条 `system_notice`（`notice_type: "delivery_failed"`、`in_reply_to` 指向原 `user_message`、`error_code` 记录原因、body 为空、措辞由各面本地化）。它有两个事实层面的错误：
 
-> **ADR-106 D14 后的现状**："失败必须可见"的语义与 `delivery_failed` 通道行保留（第一条规则仍成立）；第二条规则的宿主 `chatTurnState.answeredAfter` 已随 P6 删除。2026-11-03 后回执重新承担一个更小、也更真实的角色：它不是"反推的关闭信号"，而是本设备那次发送的 claim 的**结算行**——群面上失败回执可见，也同时结束等待，两条规则是同一条（1:1 的失败不建 claim，因此无需结算）。
+1. **不可撤回**。失败之后重试成功、或那个 agent 被装好了，那条黄行仍然在——刷新、换设备、旧备份都把它刷回屏幕。日志该记的是"谁对谁说了什么"，不是"某一刻某条链路不通"。
+2. **它会残留成假证据**。这条行同时被当作"该消息已被回应"的证据（`chat_kinds::is_answer_row`），于是一次早已作废的失败至今还在替那条消息宣布结局。
+
+现行实现（写侧在三处投递路径，读侧在 user 服务的读模型）：
+
+- **内存态告警表**（[`core/acowork-user/src/chat_alerts.rs`](../../../core/acowork-user/src/chat_alerts.rs)）：`(chat_session_id, row_id) → {target, error_code, inserted_at}`，TTL 默认 600 s，随进程消失。**没有任何持久化**——进程重启即真相归零，这正确：重启之后那份"刚刚失败"已经不是新闻了。
+- **写入口**：Gateway 在 `target_not_installed` / `not_authorized` / 投递错误码三条分支上调用 `POST /internal/chat-sessions/{sid}/alerts`（[`intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs)），sweeper 的超时兜底同样改投告警（[`sweeper.rs`](../../../core/acowork-gateway/src/intent/sweeper.rs)）。告警写失败只记 warn，绝不影响发送本身——人类那条行早已落盘。
+- **读侧装饰**：`ChatRowView.delivery.alert`（`{target, error_code, expires_in}`，`expires_in` 是**读这一刻的剩余秒数**，不是绝对时间戳：各面自己排到期，不与服务端对时钟）。行本身不变，谁都没写历史。
+- **各面渲染**：Desktop `DeliveryAlertLine` / Mobile `DeliveryAlertLine` 把它画在**欠投递的那条行**的列里（自己的行靠右，旁观者看到别人的行靠左），用 `--color-warning-quiet`（可重试，不是故障，更不是红），`expires_in` 到点自行消失，不需要任何 re-read 触发。
+- **它仍然结算本设备那次发送的 claim**（~ADR-106 D9~「本设备自己那次发送的 claim」）：`delivery.alert` 非空即"这句话有结局了"。规则一与"失败结束等待"由此仍是同一条规则，只是证据从一行日志变成行上的实时状态。
+- **历史行**：旧转录里的 `delivery_failed` 行不迁移、不删除，但在渲染期一律隐藏（`RETIRED_NOTICES`，ADR-100 D2 的同一机制）——它们记的是一次早已过去的失败，而失败一旦过去就不该再占据版面。
+
+**被否决的备选**：新增一条 MQTT 通知主题，让各面订阅投递失败。否决理由有两条：内嵌 broker 没有订阅 ACL，"通知主题"等于把所有会话的失败广播给所有连接；且 doorbell 主题按设计只带坐标、不带内容，塞进失败语义等于给它开口子。内存态告警挂在**读模型**上，读它的人本来就已经被鉴权过。
 
 ### D6 — 生命周期：成员走了，角色跟着走
 
@@ -72,7 +85,7 @@
 - `sync_group`（PM 同步成员）：`default_responder` 不在新 roster 中时清空；
 - 投递前复核：`SessionInfo::live_default_responder()` 每次读都要求目标仍在 `participants` 中且是 agent；不满足则视为"未配置"。
 
-已卸载但仍在成员表里的 agent **故意通过**复核：投递会以 `target_not_installed` 明确失败，并落 `delivery_failed` 行（D5），而不是被静默降级成归档。
+已卸载但仍在成员表里的 agent **故意通过**复核：投递会以 `target_not_installed` 明确失败，并在那条人类行上报一条实时告警（D5，2026-11-06 修订），而不是被静默降级成归档。
 
 ### D7 — 本 ADR 不引入 LLM 路由（阶段二不做）
 

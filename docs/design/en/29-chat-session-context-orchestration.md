@@ -149,7 +149,7 @@ Attachments are never inlined; only fixed-format metadata is appended:
 [attached refs] chat_prompt.rs, src/lib.rs (L12-L25)
 ```
 
-The two lines are the two kinds of thing a turn can carry, arriving on two different params: `[attachments]` is files uploaded into this chat (`chat_attachments`, whose metadata the Gateway reads back from the session's `files/` dir); `[attached refs]` is workspace references the human pointed at (`attached_items`, node-local paths the Gateway cannot read, so only a display name and a line range travel — the `acowork_core::protocol::AttachmentLabel` projection, the same shape the chat row's `meta.exec_attachments` and the desktop chip carry).
+The two lines are the two kinds of thing a turn can carry, arriving on two different params: `[attachments]` is files uploaded into this chat (`chat_attachments`, whose metadata the Gateway reads back from the session's `files/` dir); `[attached refs]` is workspace references the human pointed at (`attached_items`, node-local paths the Gateway cannot read, so the prompt carries only a display name and a line range — the `acowork_core::protocol::AttachmentLabel` projection, the same shape the chat row's `meta.exec_attachments` and the desktop chip carry; a workspace arm also carries `absPath` for the chip's click, which this line never renders — ADR-100 D12 Rev. 9).
 
 Both lines come from `context::attachment_lines`, and Block B (history rows) and Block C (the current turn) go through it: **the message the router decided on must read byte-for-byte the same once it is history**, or every later turn reasons over a transcript that never existed. A line range is spelled `L{start}-L{end}` (`L{start}` when single), matching the chips' `selectionRange`.
 
@@ -171,7 +171,7 @@ The guard test is "two projections of the same input are equal".
 |---|---|
 | `turn_started` | `[system] A round started in session <sid8>` (`sid8` = first 8 chars of meta.agent_session_id) |
 | `interaction_request` | `[card] <title>` + one line per option |
-| `delivery_failed` | `[system] Delivery failed` |
+| `delivery_failed` | `[system] Delivery failed` (legacy arm: no writer since 2026-11-06, read only for old transcripts — ADR-105 D5 revision) |
 | `budget_exhausted` | `[system] Conversation budget exhausted` |
 | `truncated` | `[system] Response truncated` |
 | `unavailable` | `[system] Agent unavailable` |

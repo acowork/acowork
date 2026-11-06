@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 98 / 98 documents translated.
+**Coverage**: 101 / 101 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -22,6 +22,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | Where the chat surface ends and the execution surface begins | [ADR-099](./ADR-099-chat-session-llm-router.md) → [ADR-100](./ADR-100-chat-event-log.md) → [ADR-106](./ADR-106-chat-execution-reference-projection.md) → [ADR-107](./ADR-107-message-ref-part.md) |
 | Who may see what and do what | [ADR-042](./ADR-042-mqtt-user-identity-delivery.md), [ADR-073](./ADR-073-agent-instance-identity-decomposition.md), [ADR-076](./ADR-076-multi-user-account-system.md), [ADR-084](./ADR-084-user-standalone-process.md) |
 | The agent lifecycle contract | [ADR-085](./ADR-085-agent-lifecycle-state-machine.md) |
+| Where a desktop right-rail control lives, and why there are five panels | [ADR-108](./ADR-108-right-panel-consolidation.md) |
 
 ## Index
 
@@ -127,6 +128,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 98 | [ADR-105](./ADR-105-group-default-responder.md) | Group Default Responder — an Un-@'d Group Message Goes to One Declared Agent | Accepted (implemented); D4 / D5's chat-row shape superseded by ADR-106 | [zh](../zh/ADR-105-group-default-responder.md) |
 | 99 | [ADR-106](./ADR-106-chat-execution-reference-projection.md) | Redrawing the chat / execute Boundary — References, Not Copies | Proposed (pending architecture review); fully landed P1–P6 | [zh](../zh/ADR-106-chat-execution-reference-projection.md) |
 | 100 | [ADR-107](./ADR-107-message-ref-part.md) | Reference Parts — the Chat Background Rides Alongside, the `user` Row Keeps Only the Words | Proposed (pending architecture review); landed | [zh](../zh/ADR-107-message-ref-part.md) |
+| 108 | [ADR-108](./ADR-108-right-panel-consolidation.md) | Consolidating the Right Rail — the Tools Panel Retires, Its Cards Move into Setup | Implemented | [zh](../zh/ADR-108-right-panel-consolidation.md) |
 
 ---
 

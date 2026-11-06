@@ -367,7 +367,7 @@ labels = ["project-management", "agile", "requirements"]
 
 每步 `canNext` 都是"必填满足 + 该步校验通过"。第 2 步每个输入右侧显示平台兜底值（"默认 200000"），避免"空"的含义不明。
 
-关于 `[[mcp_servers]].tools` 白名单：创建时服务器未连接，拿不到 `tools/list`，所以这一步**不收集工具名**（留空 = 启用后由 §7.2 的建议行让用户勾）。声明工具子集的能力保留在 manifest 里，但 wizard 不做输入 —— 这是刻意的取舍，避免让用户凭空填工具名。
+关于 `[[mcp_servers]].tools` 白名单：创建时**平台托管**服务器（`pm`/`doc`/`memory`）的 `tools/list` 可经 Gateway 反代读取，向导选中后展开二阶列表逐个开关，白名单随声明写入（见 ADR-104 §5.4）；**第三方预设**未连接，这一步不收集其工具名（留空 = 启用后由 §7.2 的建议行让用户勾），声明工具子集的能力保留在 manifest 里，避免让用户凭空填工具名。
 
 capability 的可选输入/输出 schema：wizard v1 只收 `description`（+ 可选 `skills`），schema 用「高级（JSON）」折叠区手填，保持 `[capabilities.*]` 的完整性而不把 wizard 做成 JSON 编辑器。
 
@@ -475,7 +475,7 @@ Phase 1 与 Phase 2 各自独立可交付、可回滚：Phase 1 只加字段与�
 - **R3 `recommended` 被误当 `local`**：任何"安装期顺手写 `local`"的实现都破坏 ADR-090 的用户确认语义。缓解：类型上分开（`Vec<RecommendedMcpServer>` ≠ `Vec<McpServerConfigDef>`），编译期就不能混用。
 - **R4 老包 capability 语义漂移**：加了 `skills` 链接后，前端若沿用"capability = skill"的推断会显示错。缓解：Phase 4b 同步改 CreateWizard 与展示，并在 design 文档中标注。
 - **R5 推荐变成骚扰**：每次打开面板都提醒同一个不想装的服务器。缓解：`dismissed` + 「已忽略 (n)」折叠组，默认不再提示。
-- **R6 wizard 扩容变成表单地狱**：5 步、每步都塞满可选字段会让创建变慢。缓解：`[config]` 全部可空且显示平台兜底值；MCP 步骤只选服务器不填工具名；`[capabilities]` 的 schema 收在"高级"折叠区。
+- **R6 wizard 扩容变成表单地狱**：5 步、每步都塞满可选字段会让创建变慢。缓解：`[config]` 全部可空且显示平台兜底值；MCP 步骤默认只选服务器，平台托管服务器的工具清单收在二阶展开里（不展开 = 全部启用）；`[capabilities]` 的 schema 收在"高级"折叠区。
 
 ---
 

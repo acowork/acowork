@@ -6,10 +6,8 @@ import { OutlineGaugeIcon, FilledGaugeIcon } from "../common/GaugeIcon";
 import { OutlineBugIcon, FilledBugIcon } from "../common/BugIcon";
 import { useTranslation } from "../../i18n/useTranslation";
 import { memoryTabAvailable } from "./rightPanelGate";
-import { Wrench } from "lucide-react";
-import type { ComponentType } from "react";
 
-type PanelTab = "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
+type PanelTab = "debug" | "status" | "setup" | "memory" | "workspace";
 
 interface RightNavBarProps {
   activeTab: PanelTab;
@@ -24,11 +22,16 @@ interface RightNavBarProps {
 
 interface NavItem {
   tab: PanelTab;
-  /** Lucide icon component. Omitted for tabs that render a custom icon (e.g. setup). */
-  icon?: ComponentType<{ className?: string; fill?: string; strokeWidth?: number }>;
   i18nKey: string;
   show: boolean;
 }
+
+// Every tab paints its own icon below (a shared Outline/Filled pair whose
+// `fill="currentColor"` state is masked so the glyph keeps its internal
+// lines). There is deliberately no generic `icon` slot: the last one — lucide
+// `Wrench` for the removed `tools` tab — was the only tab that used it, and a
+// fill-only lucide glyph cannot express the active state consistently with
+// the rest of the rail.
 
 export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, memoryServiceReady }: RightNavBarProps) {
   const { t } = useTranslation();
@@ -59,7 +62,6 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, m
       i18nKey: "rightPanel.memory",
       show: memoryTabAvailable({ agentRunning, memoryServiceReady }),
     },
-    { tab: "tools", icon: Wrench, i18nKey: "rightPanel.tools", show: agentRunning },
     // debug uses the shared FilledBugIcon/OutlineBugIcon so the filled
     // state preserves the central spine line via SVG mask. Without the
     // mask, the spine (M12 20v-9, fully inside the body) would be
@@ -83,7 +85,7 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, m
     <nav className="flex w-10 shrink-0 flex-col items-center gap-2 py-2 dark:border-zinc-800">
       {items
         .filter((item) => item.show)
-        .map(({ tab, icon: Icon, i18nKey }, index) => {
+        .map(({ tab, i18nKey }, index) => {
           const isActive = !collapsed && activeTab === tab;
           return (
             <NavButton
@@ -151,12 +153,6 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, m
                 ) : (
                   <OutlineBugIcon className="h-5 w-5" />
                 )
-              ) : Icon ? (
-                <Icon
-                  className="h-5 w-5"
-                  fill={isActive ? "currentColor" : "none"}
-                  strokeWidth={isActive ? 1.5 : 1.75}
-                />
               ) : null}
             </NavButton>
           );

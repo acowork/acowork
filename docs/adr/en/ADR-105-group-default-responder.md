@@ -1,12 +1,14 @@
 # ADR-105: Group Default Responder — an un-@'d group message goes to one declared agent
 
 - **Number**: ADR-105
-- **Status**: Accepted, **partially superseded by ADR-106** (the evidence slot of D4 and the chat-row shape of D5)
+- **Status**: Accepted, **D4 and the row shape of D5 superseded by ADR-106**; D5 itself revised 2026-11-06 (a failure became an in-memory live alert)
 - **Date**: 2026-11-01
 - **Deciders**: ACowork architecture group
 - **Related**: ADR-098 (unified standard group model), ADR-099 (chat-session LLM router), ADR-100 (chat event log); design 27 §5.3.1 / §5.4.1 / §5.5
 
 > **Supersession notice (2026-11-03)**: [ADR-106](./ADR-106-chat-execution-reference-projection.md) D14 supersedes this ADR's **D4** (`auto_routed_to` as the pending-row evidence slot) and the **chat-row shape of D5** (the absence-inference behind the wait line is deleted; `delivery_failed` survives as a channel fact). D1 / D2 / D3 / D6 / D7 — the default responder itself, the four write gates, the lifecycle, and not introducing a group-level LLM router — remain fully in force: the default responder still works on the `mentions` delivery path today, only the trace it leaves no longer decides how a surface paints a wait line.
+>
+> **D5 revision (2026-11-06)**: a failed delivery is no longer **stored**. It is neither a channel fact (it is not someone saying something) nor history (a failure that a later retry made irrelevant stayed in the transcript forever, unretracted) — it is the state of the moment. Current behaviour: the Gateway reports the failure to the user service's in-memory alert table, the read model decorates the human row the delivery owed with it as `delivery.alert`, and it disappears when its life runs out. The original semantics ("a failure must be visible") is **fully preserved**; only the carrier changed, from a log row to a time-limited live state. See D5 itself.
 
 ## Summary
 
@@ -55,16 +57,27 @@ Rationale: `mentions` renders as @ chips, so folding an automatic target in woul
 
 > **Overturned by ADR-106 D9 / D14**: keying the wait line on `auto_routed_to` reads "cannot see it" as "still running" — a restart, an offline agent or a failed projection each leaves a permanent wait line. The field is still written (it records where the message went) but drives no rendering. The wait line was then shrunk to "this surface's own POST that has not returned yet" (`sending`), and that version was too short as well: a POST answers in about 150 ms while that round's first row can land a minute later. The rule in force is in [ADR-106, Revision (2026-11-03)](./ADR-106-chat-execution-reference-projection.md): a claim on this device's own send, keyed by the row id its response carried, settled by the first row that answers it, with a 300 s deadline as the backstop.
 
-### D5 — A failed delivery must be visible
+### D5 — A failed delivery must be visible (revised 2026-11-06: a live alert, nothing stored)
 
-When `wake_and_deliver` fails, the Gateway appends a `system_notice`: `notice_type: "delivery_failed"`, `in_reply_to` naming the original `user_message`, `error_code` carrying the reason, and an **empty body**. Wording belongs to each surface (the same convention as `router_fallback`: the producer writes the row, the surface owns the prose). A failure to write the notice itself is a warn only and never affects the response.
+**Rule one (unchanged)**: a send that was owed and did not go out must be visible **immediately**. A failure may not be silent — that silence is the bug this ADR exists to fix.
 
-Two frontend rules:
+**Rule two (rewritten 2026-11-06)**: that fact is **not part of the transcript**, so it is **not stored**.
 
-- `ChatNoticeEventRow` renders the row by `notice_type` — it must paint even with an empty body, since the row exists precisely so that the failure stops being silent;
-- `chatTurnState.answeredAfter` treats a `delivery_failed` notice bound to the same trigger as the end of the turn: the receipt is the outcome, and keeping the wait line up would be a louder version of the same lie.
+The original implementation had the Gateway append a `system_notice` (`notice_type: "delivery_failed"`, `in_reply_to` naming the original `user_message`, `error_code` carrying the reason, an empty body, wording owned by each surface). It got two facts wrong:
 
-> **Status after ADR-106 D14**: the semantics ("a failure must be visible") and the `delivery_failed` channel row are kept — the first rule still holds. The host of the second rule, `chatTurnState.answeredAfter`, was deleted with P6. As of 2026-11-03 the receipt takes back a smaller and more honest role: it is not an inference-closing signal but the **settlement row** for this device's send claim — on the group surface a failed delivery is visible and ends the wait at the same time, because those are one rule (a 1:1 failure arms no claim, so there is nothing to settle).
+1. **It cannot be retracted.** After the send was retried successfully, or the agent was installed, the yellow line was still there — on every reload, on every device, in every old backup. A log records who said what to whom, not "some link was down at that moment".
+2. **It lingered as false evidence.** The same row also counted as "this message has been answered" (`chat_kinds::is_answer_row`), so a long-dead failure kept on announcing an outcome for that message.
+
+The implementation in force (three writers on the delivery paths, one reader in the user service's read model):
+
+- **In-memory alert table** ([`core/acowork-user/src/chat_alerts.rs`](../../../core/acowork-user/src/chat_alerts.rs)): `(chat_session_id, row_id) → {target, error_code, inserted_at}`, TTL 600 s by default, gone with the process. **Nothing is persisted** — a restart zeroes the truth, which is correct: after a restart "it just failed" is no longer news.
+- **Write entry**: the Gateway calls `POST /internal/chat-sessions/{sid}/alerts` on the three branches `target_not_installed` / `not_authorized` / a delivery error code ([`intent_api.rs`](../../../core/acowork-gateway/src/http/intent_api.rs)), and the sweeper's timeout fallback posts an alert instead of a row ([`sweeper.rs`](../../../core/acowork-gateway/src/intent/sweeper.rs)). A failed alert write is a warn that never touches the send itself — the human's row is already durable.
+- **Read-side decoration**: `ChatRowView.delivery.alert` (`{target, error_code, expires_in}`, where `expires_in` is the seconds left **at the moment of the read**, not an absolute timestamp: each surface schedules its own removal instead of comparing clocks with the service). The row is untouched; nobody wrote history.
+- **Surfaces**: Desktop `DeliveryAlertLine` / Mobile `DeliveryAlertLine` paint it in the column of **the row the send owed** (the reader's own row on the right, someone else's row on the left for a bystander), in `--color-warning-quiet` (retry-able, not a fault, and certainly not red), and it removes itself when `expires_in` runs out — no re-read has to trigger that.
+- **It still settles this device's send claim** (~ADR-106 D9~ "the claim on this device's own send"): a non-empty `delivery.alert` means "this sentence has an outcome". Rule one and "a failure ends the wait" therefore remain one rule; only the evidence moved from a log row to live state on the row.
+- **Historical rows**: `delivery_failed` rows in old transcripts are not migrated and not deleted, but they are hidden at render time (`RETIRED_NOTICES`, the same mechanism as ADR-100 D2) — they record a failure that is long over, and a failure that is over must not keep occupying the page.
+
+**Rejected alternative**: adding an MQTT notification topic and having surfaces subscribe to delivery failures. Two reasons: the embedded broker has no subscription ACL, so a "notification topic" would broadcast every session's failures to every connection; and the doorbell topics deliberately carry coordinates only, never content, so putting failure semantics in one would breach that. An in-memory alert hangs off the **read model**, and whoever reads it has already been authenticated.
 
 ### D6 — Lifecycle: the role leaves with its member
 
@@ -72,7 +85,7 @@ Two frontend rules:
 - `sync_group` (PM roster sync): if `default_responder` is absent from the new roster, the field is cleared;
 - pre-delivery re-validation: `SessionInfo::live_default_responder()` requires, on every read, that the target is still in `participants` and is an agent; otherwise the group reads as "no responder".
 
-An uninstalled agent that is still a member **deliberately passes** re-validation: the delivery then fails loudly with `target_not_installed` and writes the `delivery_failed` row (D5) instead of being silently downgraded to archive-only.
+An uninstalled agent that is still a member **deliberately passes** re-validation: the delivery then fails loudly with `target_not_installed` and reports a live alert on that human row (D5, revised 2026-11-06) instead of being silently downgraded to archive-only.
 
 ### D7 — No LLM routing in this ADR (phase two is out of scope)
 

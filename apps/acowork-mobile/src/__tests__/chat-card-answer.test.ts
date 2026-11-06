@@ -5,19 +5,20 @@
  * The rule these hold is the one the decision was written for: the answer to
  * "which task did you mean?" is the human's OWN message, sent again with the
  * address they just chose. So a surface must refuse to build an answer out of
- * anything else — a card whose original row is unreadable, or a click that named
- * neither a session nor new work, would put words in the human's mouth or deliver
- * an unaddressed turn as if it were answered.
+ * anything else — a click that named neither a session nor new work would
+ * deliver an unaddressed turn as if it were answered.
+ *
+ * Where the words come FROM moved out of this module (design 31 §6): the
+ * service resolves them from the whole log, so a card whose message sits
+ * outside the loaded window still answers. `lib/api#fetchCardAnswer` carries
+ * that half; here we only fold in the click.
  *
  * Mobile is 1:1 (design 27 §5.4.4), so the address takes the single-session form
  * and the group's per-agent shape does not exist here.
  */
 import { describe, expect, it } from 'vitest'
-import {
-  buildCardAnswer,
-  directCardAddress,
-  mayAnswerCard,
-} from '../lib/chatCardAnswer'
+import { answerWithChoice, directCardAddress, mayAnswerCard } from '../lib/chatCardAnswer'
+import type { CardAnswerFacts } from '../lib/api'
 import type { ChatMessageRow } from '../lib/types'
 
 function card(meta: ChatMessageRow['meta'] = {}, from = 'ag-1'): ChatMessageRow {
@@ -32,22 +33,21 @@ function card(meta: ChatMessageRow['meta'] = {}, from = 'ag-1'): ChatMessageRow 
   } as ChatMessageRow
 }
 
-function original(over: Partial<ChatMessageRow> = {}): ChatMessageRow {
+/** What `fetchCardAnswer` returns for a card about `m-1`. */
+function facts(over: Partial<CardAnswerFacts> = {}): CardAnswerFacts {
   return {
-    seq: 1,
-    ts: 1,
-    from: 'u1',
-    kind: 'user_message',
-    body: '把季度报表整理一下',
-    to: 'ag-1',
-    meta: { message_id: 'm-1' },
+    agentId: 'ag-1',
+    messageId: 'm-1',
+    text: '把季度报表整理一下',
+    attachmentIds: [],
+    refs: [],
     ...over,
-  } as ChatMessageRow
+  }
 }
 
-describe('buildCardAnswer', () => {
+describe('answerWithChoice', () => {
   it('re-delivers the original words, addressed, keyed by the original row id', () => {
-    const answer = buildCardAnswer(card(), original(), { sessionId: 's-9' })
+    const answer = answerWithChoice(facts(), { sessionId: 's-9' })
     expect(answer).toEqual({
       text: '把季度报表整理一下',
       attachmentIds: [],
@@ -58,105 +58,58 @@ describe('buildCardAnswer', () => {
     })
   })
 
-  it('keeps the files the original message had — resolved meta first', () => {
-    const withMeta = original({
-      attachments: [
-        { id: 'a-1', filename: 'shot.png', mime: 'image/png', size: 1 },
-        { id: 'a-2', filename: 'log.txt', mime: 'text/plain', size: 2 },
-      ],
-    } as Partial<ChatMessageRow>)
-    expect(buildCardAnswer(card(), withMeta, { forceNew: true })?.attachmentIds).toEqual(['a-1', 'a-2'])
-
-    const withIds = original({ attachment_ids: ['a-3'] } as Partial<ChatMessageRow>)
-    expect(buildCardAnswer(card(), withIds, { forceNew: true })?.attachmentIds).toEqual(['a-3'])
+  it('keeps the files the original message had', () => {
+    // The ids are resolved where the log is read (`chat_card::attachment_ids_of`),
+    // so a re-delivery cannot quietly drop them.
+    expect(answerWithChoice(facts({ attachmentIds: ['a-1', 'a-2'] }), { forceNew: true })?.attachmentIds).toEqual([
+      'a-1',
+      'a-2',
+    ])
   })
 
-  it('refuses when the question is not a faithful re-delivery', () => {
-    // The card points at nothing the surface can read.
-    expect(buildCardAnswer(card(), undefined, { sessionId: 's-9' })).toBeNull()
-    // A card with no message behind it (a hand-written notice, an old row).
-    expect(buildCardAnswer(card({ in_reply_to: undefined }), original(), { sessionId: 's-9' })).toBeNull()
-    // A question with no author: whose runs are on offer is unknown.
-    expect(buildCardAnswer(card({}, ''), original(), { sessionId: 's-9' })).toBeNull()
-    // A click that named neither a session nor new work.
-    expect(buildCardAnswer(card(), original(), {})).toBeNull()
+  it('refuses a question with no author — whose runs are on offer would be unknown', () => {
+    expect(answerWithChoice(facts({ agentId: '' }), { sessionId: 's-9' })).toBeNull()
+  })
+
+  it('refuses a click that named neither a session nor new work', () => {
+    expect(answerWithChoice(facts(), {})).toBeNull()
   })
 
   it('treats a blank session id as no session named', () => {
-    expect(buildCardAnswer(card(), original(), { sessionId: '  ' })).toBeNull()
-    expect(buildCardAnswer(card(), original(), { sessionId: '  ', forceNew: true })?.forceNew).toBe(true)
+    expect(answerWithChoice(facts(), { sessionId: '  ' })).toBeNull()
+    expect(answerWithChoice(facts(), { sessionId: '  ', forceNew: true })?.forceNew).toBe(true)
   })
 
   it('re-delivers the ORIGINAL message quoted material, pinned coords included (ADR-106 rev 2)', () => {
     // A card answer is the same sentence, so the reference it first carried must
     // ride back verbatim — the pre-pinned {round, terminal} are NOT re-resolved
-    // here (the Gateway passes an already-pinned ref straight through).
-    const withRefs = original({
-      meta: {
-        message_id: 'm-1',
-        refs: [
-          {
-            agent_instance_id: 'ag-1',
-            session_id: 's-7',
-            round_id: 'r-3',
-            terminal: true,
-          },
-        ],
-      },
-    } as Partial<ChatMessageRow>)
-    const answer = buildCardAnswer(card(), withRefs, { sessionId: 's-9' })!
-    expect(answer.refs).toEqual([
-      { agentInstanceId: 'ag-1', sessionId: 's-7', roundId: 'r-3', terminal: true },
-    ])
+    // here (the Gateway passes an already-pinned ref straight through). Which
+    // refs are this agent's own is decided where the log is read.
+    const refs = [{ agentInstanceId: 'ag-1', sessionId: 's-7', roundId: 'r-3', terminal: true }]
+    const answer = answerWithChoice(facts({ refs }), { sessionId: 's-9' })!
+    expect(answer.refs).toEqual(refs)
   })
 
-  it('drops references that belong to another agent, and omits the key when nothing survives', () => {
-    const foreign = original({
-      meta: {
-        message_id: 'm-1',
-        refs: [
-          {
-            agent_instance_id: 'ag-OTHER',
-            session_id: 's-7',
-            round_id: 'r-3',
-            terminal: true,
-          },
-        ],
-      },
-    } as Partial<ChatMessageRow>)
-    // The answering card was authored by ag-1; another instance's material is
-    // not this re-delivery's to carry.
-    expect(buildCardAnswer(card(), foreign, { sessionId: 's-9' })).not.toHaveProperty('refs')
+  it('omits the refs key when the original utterance carried no material', () => {
+    expect(answerWithChoice(facts(), { sessionId: 's-9' })).not.toHaveProperty('refs')
   })
 })
 
 describe('directCardAddress', () => {
   it('names the session when one was picked, and carries the dedup id either way', () => {
-    const answer = buildCardAnswer(card(), original(), { sessionId: 's-9' })!
+    const answer = answerWithChoice(facts(), { sessionId: 's-9' })!
     expect(directCardAddress(answer)).toEqual({ targetSession: 's-9', messageId: 'm-1' })
-    const fresh = buildCardAnswer(card(), original(), { forceNew: true })!
+    const fresh = answerWithChoice(facts(), { forceNew: true })!
     expect(directCardAddress(fresh)).toEqual({ forceNew: true, messageId: 'm-1' })
   })
 
   it('carries the echoed references onto the address so the send wires them (ADR-106 rev 2)', () => {
-    const withRefs = original({
-      meta: {
-        message_id: 'm-1',
-        refs: [
-          {
-            agent_instance_id: 'ag-1',
-            session_id: 's-7',
-            round_id: 'r-3',
-            terminal: true,
-          },
-        ],
-      },
-    } as Partial<ChatMessageRow>)
-    const answer = buildCardAnswer(card(), withRefs, { sessionId: 's-9' })!
+    const refs = [{ agentInstanceId: 'ag-1', sessionId: 's-7', roundId: 'r-3', terminal: true }]
+    const answer = answerWithChoice(facts({ refs }), { sessionId: 's-9' })!
     expect(directCardAddress(answer)).toEqual({
       targetSession: 's-9',
       messageId: 'm-1',
-      refs: [{ agentInstanceId: 'ag-1', sessionId: 's-7', roundId: 'r-3', terminal: true }],
+      refs,
     })
   })
 })

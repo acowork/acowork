@@ -6,19 +6,24 @@
  * answer" — which is how a dead node went on looking busy forever after a
  * reload; or it can be dropped as soon as the POST returns, which is how the
  * surface showed nothing at all for the seconds (measured: up to 81) between
- * delivery and the row the turn actually produces. Both are pinned here, in the
- * direction the fix has to keep: the claim is about this device's own send and
- * dies at the first row that answers that send's id.
+ * delivery and the row the turn actually produces.
+ *
+ * What changed with design 31 §6: the surface no longer decides which rows
+ * count as an answer. The service projects `delivery.answered` onto every row
+ * it serves, so this module asks one question — was my row answered? — and the
+ * policy (round, router reply, live receipt, addressing card; retired
+ * milestones never) lives in `acowork-user`'s read model, where Desktop reads
+ * the same field.
  */
 import { describe, expect, it } from 'vitest'
 import { turnInflight, turnSettled, type InflightTurn } from '../lib/chatTurnInflight'
-import type { ChatMessageRow } from '../lib/types'
+import type { ChatDeliveryView, ChatMessageRow } from '../lib/types'
 
-/** The send this device made. `messageId` is the id the Gateway gave it — every
- *  outcome row in the Chat threads itself to that id under `in_reply_to`. */
+/** The send this device made. `messageId` is the id the Gateway gave it: it
+ *  addresses the row whose `delivery` closes the claim. */
 const TURN: InflightTurn = { messageId: 'm-1', at: 1 }
 
-function row(over: Partial<ChatMessageRow>): ChatMessageRow {
+function row(delivery?: ChatDeliveryView, over: Partial<ChatMessageRow> = {}): ChatMessageRow {
   return {
     seq: 2,
     ts: 1,
@@ -27,125 +32,52 @@ function row(over: Partial<ChatMessageRow>): ChatMessageRow {
     body: '把分页修一下',
     to: 'agent-a',
     meta: { message_id: 'm-1' },
+    ...(delivery ? { delivery } : {}),
     ...over,
   } as ChatMessageRow
 }
 
-const HUMAN = row({})
+const UNANSWERED: ChatDeliveryView = { answered: false }
+const ANSWERED: ChatDeliveryView = {
+  answered: true,
+  answered_by: { message_id: 'round:m-1', kind: 'execution_round' },
+  targets: [{ agent_instance_id: 'agent-a', agent_session_id: 's-1', round_id: 'r:m-1' }],
+}
 
 describe('chatTurnInflight', () => {
-  it('waits from the send until the round’s reference row lands (D3/D9)', () => {
-    // The POST has returned and the human's row is durable — the only two facts
-    // the surface actually owns. A router still deciding, or a Runtime still
-    // starting, has written nothing yet: this is the window that used to be
-    // blank, so it MUST read as in flight.
-    expect(turnInflight([HUMAN], TURN)).toBe(true)
-    // The Runtime publishes this row before spending a token on the round, so
-    // its arrival is positive evidence the turn was picked up — and from here
-    // the block narrates the run, not a line under the transcript.
-    expect(
-      turnInflight(
-        [
-          HUMAN,
-          row({
-            seq: 3,
-            kind: 'execution_round',
-            body: '',
-            from: 'agent-a',
-            meta: { round_id: 'r:m-1', in_reply_to: 'm-1' },
-          }),
-        ],
-        TURN,
-      ),
-    ).toBe(false)
+  it('waits while the service still says the row is unanswered (D9)', () => {
+    // The POST returned and the row is durable, but nothing has answered it:
+    // the window that used to be blank, so it MUST read as in flight.
+    expect(turnInflight([row(UNANSWERED)], TURN)).toBe(true)
+    expect(turnSettled([row(UNANSWERED)], TURN)).toBe(false)
   })
 
-  it('the router’s own answer settles the turn: no round was opened (D12)', () => {
-    const reply = row({
-      seq: 3,
-      kind: 'agent_message',
-      from: 'agent-a',
-      body: '发布说明已经在 `docs/` 里了。',
-      meta: { message_id: 'reply:m-1', in_reply_to: 'm-1' },
-    })
-    expect(turnSettled([HUMAN, reply], TURN)).toBe(true)
+  it('a row the service has not projected yet keeps the claim', () => {
+    // The optimistic row this device inserted before the write's response came
+    // back carries no `delivery`. Absent is NOT "answered": the send is still
+    // owed an outcome, and the deadline is what bounds the wait.
+    expect(turnInflight([row(undefined)], TURN)).toBe(true)
   })
 
-  it('a receipt settles the turn — it is the answer the human gets to see', () => {
-    const receipt = row({
-      seq: 3,
-      kind: 'system_notice',
-      from: 'agent-a',
-      body: '',
-      meta: {
-        message_id: 'dlv-failed:m-1:agent-a',
-        notice_type: 'delivery_failed',
-        in_reply_to: 'm-1',
-      },
-    })
-    expect(turnInflight([HUMAN, receipt], TURN)).toBe(false)
+  it('the service’s verdict ends the turn, whatever produced the answer', () => {
+    // A round, the router's own reply, a receipt and an addressing question are
+    // the same fact here: `answered`. Which kinds count is the read model's
+    // rule, not a second copy of it in this app.
+    expect(turnInflight([row(ANSWERED)], TURN)).toBe(false)
+    expect(turnSettled([row(ANSWERED)], TURN)).toBe(true)
   })
 
-  it('an addressing question settles it too, because the human has to act', () => {
-    // A `session_choice` is a `system_notice` answering the same row. Treating
-    // it as unresolved would lock the composer on the one turn whose whole
-    // point is that the human should now choose.
-    const card = row({
-      seq: 3,
-      kind: 'system_notice',
-      from: 'agent-a',
-      body: '',
-      meta: { message_id: 'session_choice:m-1', notice_type: 'session_choice', in_reply_to: 'm-1' },
-    })
-    expect(turnInflight([HUMAN, card], TURN)).toBe(false)
-  })
-
-  it('a milestone the transcript hides settles nothing (Rev.2)', () => {
-    // `ChatNoticeRow`'s retired set renders as nothing — including the ones the
-    // mobile surface hides and the desktop still shows. An old row of that shape
-    // would leave the human staring at a blank stream while the surface believed
-    // it had an answer.
-    for (const noticeType of ['turn_started', 'turn_routed', 'router_fallback']) {
-      const hidden = row({
-        seq: 3,
-        kind: 'system_notice',
-        from: 'agent-a',
-        body: '',
-        meta: { message_id: `h:${noticeType}`, notice_type: noticeType, in_reply_to: 'm-1' },
-      })
-      expect(turnInflight([HUMAN, hidden], TURN)).toBe(true)
-    }
-  })
-
-  it('counts rows only for THIS send', () => {
-    // Somebody else's turn settling is not this device's turn settling, and a
-    // round belonging to an older message must not unlock the composer while a
-    // fresh send is still unanswered.
-    const otherRound = row({
-      seq: 3,
-      kind: 'execution_round',
-      from: 'agent-a',
-      body: '',
-      meta: { round_id: 'r:m-0', in_reply_to: 'm-0' },
-    })
-    expect(turnInflight([otherRound, HUMAN], TURN)).toBe(true)
-  })
-
-  it('ignores a later human row that merely quotes a round', () => {
-    // A `user_message` carries `in_reply_to` when it addresses a block; it is
-    // speech, not an outcome, and must never settle the turn above it.
-    const quoted = row({
-      seq: 4,
-      body: '继续',
-      meta: { message_id: 'm-2', in_reply_to: 'm-1' },
-    })
-    expect(turnInflight([HUMAN, quoted], TURN)).toBe(true)
+  it('another row’s answer never settles this send', () => {
+    // Two sends in the same chat: the claim is keyed by this device's own id,
+    // so the other turn's projection is not evidence about this one.
+    const otherRound = row(ANSWERED, { seq: 1, meta: { message_id: 'm-0' } })
+    expect(turnInflight([otherRound, row(UNANSWERED)], TURN)).toBe(true)
   })
 
   it('with no send of our own there is no claim to make', () => {
-    // This is the reload case: a newest human row with no answer is NOT
+    // This is the reload case: a transcript full of unanswered rows is NOT
     // evidence of liveness (D9) — a dead node would look busy forever.
-    expect(turnInflight([HUMAN], undefined)).toBe(false)
-    expect(turnSettled([HUMAN], undefined)).toBe(true)
+    expect(turnInflight([row(UNANSWERED)], undefined)).toBe(false)
+    expect(turnSettled([row(UNANSWERED)], undefined)).toBe(true)
   })
 })

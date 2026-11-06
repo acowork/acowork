@@ -89,24 +89,32 @@ import { ChatUsageIcon } from "./ChatUsageIcon";
 import { AttachedContextChips } from "./AttachedContextChips";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
 import { type TranscriptItem } from "./chatTranscriptGroups";
+import { useRevealPendingAsk } from "./useRevealPendingAsk";
 import { useTranscriptLayout } from "./useTranscriptLayout";
-import { ChatAddressPicker, type AddressPick } from "./ChatAddressPicker";
 import {
-  buildCardAnswer,
+  ChatAddressPicker,
+  MAX_PICK_REFS,
+  type AddressPick,
+} from "./ChatAddressPicker";
+import {
+  answerWithChoice,
   directCardAddress,
   mayAnswerCard,
+  type CardAnswerHandler,
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { turnInflight } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
 import {
+  fetchCardAnswer,
   useChatSessionStore,
   type ChatMessageRow,
   type ChatSessionConfig,
   type ChatAttachmentMeta,
   type ChatAddress,
 } from "../../stores/chatSessionStore";
+import { DeliveryAlertLine } from "./DeliveryAlertLine";
 import { useChatStore } from "../../stores/chatStore";
 import type { WorkspaceRef } from "../../lib/types";
 import { useAgentStore } from "../../stores/agentStore";
@@ -135,14 +143,18 @@ interface RowProps {
    *  `pause` card's continue button, and any follow-up on a finished round,
    *  ride. `quote` is the question the human is answering. */
   onReplyToRound: (rowId: string, quote: string) => void;
+  /** Attach one execution session to this draft as a reference (design 27
+   *  §5.5.5) — the block's `@` action, riding the same address state the `@`
+   *  picker commits to. */
+  onReferenceRun?: (payload: {
+    instanceId: string;
+    execSessionId: string;
+    name: string;
+  }) => void;
   /** Answer an addressing card (D6 levels 3 and 5) by re-delivering the
    *  utterance it asks about, now addressed. The parent hands it only to the
    *  person the card asked (D10) — `undefined` for anyone else. */
-  onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void;
-  /** The card's question is already answered (a round exists for the message it
-   *  asked about), so its buttons go quiet instead of offering a second
-   *  delivery of the same words. */
-  cardAnswered?: boolean;
+  onChooseCard?: CardAnswerHandler;
   /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
    *  picker's "去续投") to locate that run's block in the transcript. A
    *  navigation, not an address — it never changes what a message carries. */
@@ -166,7 +178,6 @@ const RowView = memo(function RowView({
   chatSessionId,
   showHeader,
   onChooseCard,
-  cardAnswered,
   onLocateRef,
 }: RowProps) {
   const { t } = useTranslation();
@@ -183,7 +194,6 @@ const RowView = memo(function RowView({
       <ChatTurnStatusLine
         className="px-4"
         text={t("chatView.block.notFound")}
-        danger={false}
       />
     );
   }
@@ -200,12 +210,7 @@ const RowView = memo(function RowView({
         ? (choice: CardChoice) => onChooseCard(row, choice)
         : undefined;
     return (
-      <ChatNoticeEventRow
-        row={row}
-        className="px-4"
-        onChoose={choose}
-        answered={cardAnswered}
-      />
+      <ChatNoticeEventRow row={row} className="px-4" onChoose={choose} />
     );
   }
 
@@ -350,13 +355,17 @@ const RowView = memo(function RowView({
                 ))}
               </div>
             )}
-            {/* ADR-100 D12: this turn was sent from an execution view's
-                composer, so its attached items belong to that run, not to
-                this chat session — labels only, and not clickable. They paint
-                above the text like the chat's own chips, which is also what
-                keeps a file-with-no-words turn from collapsing to a blank
-                row. */}
-            <ExecAttachmentLabels labels={row.meta?.exec_attachments} />
+            {/* ADR-100 D12: a turn sent with attached items paints them as
+                labels above the text — which is also what keeps a
+                file-with-no-words turn from collapsing to a blank row. Since
+                D12 Rev. 2026-11 a workspace arm carries its path, so it opens
+                the file in the fileTab exactly like the execution session's
+                chip does; upload arms and folders stay decorative (their bytes
+                belong to the run / fileTab has no folder view). */}
+            <ExecAttachmentLabels
+              labels={row.meta?.exec_attachments}
+              agentId={agentId}
+            />
             {row.body && (
               <div className="max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
                 <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
@@ -384,6 +393,12 @@ const RowView = memo(function RowView({
                 ))}
               </div>
             )}
+            {/* A send that failed, while it is still news (ADR-105 D5 rev.
+                2026-11-06): served live on this row, never a transcript row, and
+                gone on its own clock. */}
+            {row.delivery?.alert ? (
+              <DeliveryAlertLine alert={row.delivery.alert} align="end" className="mt-0.5" />
+            ) : null}
             <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
             </span>
@@ -431,6 +446,8 @@ const ItemView = memo(function ItemView({
         hasFollowUp={hasFollowUp}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
+        onReferenceRun={rowProps.onReferenceRun}
+        onChooseCard={rowProps.onChooseCard}
         focusInput={
           !!rowProps.focusBlockSessionId &&
           item.execSessionId === rowProps.focusBlockSessionId
@@ -605,17 +622,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     if (!inflightTurn || turnInflight(rows, inflightTurn)) return;
     settleTurn(sessionId, inflightTurn.messageId);
   }, [rows, inflightTurn, sessionId, settleTurn]);
-  // Which messages already have a round: that is what makes an addressing card
-  // answered (the re-delivery leaves the reference row, ADR-106 D3), so the
-  // transcript itself carries the answer — no chat-side flag to keep in sync.
-  const roundTriggers = useMemo(() => {
-    const s = new Set<string>();
-    for (const r of rows) {
-      if (r.kind === "execution_round" && r.meta?.in_reply_to)
-        s.add(r.meta.in_reply_to);
-    }
-    return s;
-  }, [rows]);
   // Virtualization adapters (render-perf L2): keys, estimates, per-item
   // attributes and the seq→item index shared with the group panel.
   const {
@@ -713,6 +719,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
 
   // Locate-and-flash for history jumps (ADR-097): declared AFTER the follow
   // hook so the center-scroll wins over follow-to-bottom on the jump commit.
+  // A question the router asks about a run is drawn at that run's block, which
+  // stays where the exchange began — this is what brings the reader there.
+  // Declared AFTER the follow hook, the same rule `useLocateMessage` follows
+  // below: the card lands as a new row, and follow-to-bottom would otherwise
+  // write the viewport back to the tail in the same commit and hide it.
+  useRevealPendingAsk(items, keyOfSeqRef.current, listRef);
   const highlightSeq = useLocateMessage(
     () => containerRef.current,
     pendingLocateSeq,
@@ -775,13 +787,30 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // Answering an addressing card (ADR-106 D6): re-send the human's OWN words
   // with the address they just chose, keyed by the original row's id so the
   // transcript keeps one message instead of narrating the decision twice.
+  // The words being re-sent come from the service, not from `rowsRef`: the row
+  // the card asks about may be far outside the loaded window, and looking it up
+  // here is what made an old card's buttons dead (design 31 §6). The click
+  // (which session, or new work) is still ours — it is what the human chose.
+  //
+  // Answers `true` when the click became a delivery — the card then holds its
+  // busy state until the projection closes it — and `false` when it did not, so
+  // the card re-opens instead of leaving a decision that never moved.
   const answerCard = useCallback(
-    (card: ChatMessageRow, choice: CardChoice) => {
-      const original = rowsRef.current.find(
-        (r) => r.meta?.message_id === card.meta?.in_reply_to,
-      );
-      const answer = buildCardAnswer(card, original, choice);
-      if (!answer) return;
+    async (card: ChatMessageRow, choice: CardChoice): Promise<boolean> => {
+      const cardId = card.meta?.message_id;
+      if (!cardId) return false;
+      const lookup = await fetchCardAnswer(sessionId, cardId);
+      if (!lookup.ok) {
+        // `already_answered` needs no message: a round settled the question and
+        // the projection's next read closes the card. `gone` is the honest
+        // statement that this card can no longer be re-delivered.
+        if (lookup.reason === "gone") {
+          showToast({ type: "error", message: t("chatView.cardAnswerGone") });
+        }
+        return false;
+      }
+      const answer = answerWithChoice(lookup.facts, choice);
+      if (!answer) return false;
       void sendText(
         sessionId,
         answer.text,
@@ -790,8 +819,9 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         answer.attachmentIds,
         directCardAddress(answer),
       );
+      return true;
     },
-    [sendText, sessionId],
+    [sendText, sessionId, t],
   );
 
   const handleSend = () => {
@@ -1003,6 +1033,60 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     [jumpToExec],
   );
 
+  /**
+   * The block's `@` action (design 27 §5.5.5): attach THAT run to this draft.
+   *
+   * It commits through the same `address` state the `@` picker's "引用" commits
+   * to, so this surface has one kind of reference — a removable chip carrying the
+   * coordinates the Gateway pins at send time — instead of a second, parallel
+   * way to say "use this run".
+   *
+   * Two rules it inherits rather than invents:
+   * - a level-1 reply already names its session, and the send path refuses to
+   *   carry both (see `send`). So the reply target is cleared first: the human
+   *   just asked for THIS reference, and the chip row must not be hidden behind
+   *   a reply chip they had forgotten about.
+   * - the fifth reference is the server's ceiling (`MAX_PICK_REFS`). Hitting it
+   *   says so instead of silently dropping the click.
+   */
+  const handleReferenceRun = useCallback(
+    ({
+      instanceId,
+      execSessionId,
+      name,
+    }: {
+      instanceId: string;
+      execSessionId: string;
+      name: string;
+    }) => {
+      setReplyTarget(null);
+      setAddress((prev) => {
+        const key = `${instanceId}|${execSessionId}`;
+        const refs = prev?.refs ?? [];
+        // Re-clicking a run already attached is a no-op, not a second chip for
+        // the same session.
+        if (refs.some((r) => `${r.agentInstanceId}|${r.sessionId}` === key)) {
+          return prev;
+        }
+        if (refs.length >= MAX_PICK_REFS) {
+          showToast({
+            type: "info",
+            message: t("chatView.address.refLimit", { max: MAX_PICK_REFS }),
+          });
+          return prev;
+        }
+        return {
+          refs: [...refs, { agentInstanceId: instanceId, sessionId: execSessionId }],
+          labels: { ...(prev?.labels ?? {}), [key]: name },
+          forceNew: prev?.forceNew,
+        };
+      });
+      // Land the human where the reference is going to be used.
+      textareaRef.current?.focus();
+    },
+    [t],
+  );
+
   const hasMoreOlder = win ? win.firstPos > 0 : false;
   // A locate can park the window mid-history; `!atTail` then opens the
   // downward path back to the newest page.
@@ -1151,15 +1235,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 }
                 onJumpToExec={handleBlockJump}
                 onReplyToRound={handleReplyToRound}
+                onReferenceRun={handleReferenceRun}
                 onChooseCard={
                   item.kind === "row" && mayAnswerCard(item.row, me)
                     ? answerCard
                     : undefined
-                }
-                cardAnswered={
-                  item.kind === "row" &&
-                  !!item.row.meta?.in_reply_to &&
-                  roundTriggers.has(item.row.meta.in_reply_to)
                 }
                 onLocateRef={handleLocateRef}
                 focusBlockSessionId={focusBlockSessionId ?? undefined}

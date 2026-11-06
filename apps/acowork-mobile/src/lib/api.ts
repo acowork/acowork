@@ -19,7 +19,7 @@
 
 import { newId } from './id'
 import type { ChatTransport } from '../stores/chatStore'
-import type { ChatAddress } from '../stores/chatSessionStore'
+import type { ChatAddress, ChatRefPick } from '../stores/chatSessionStore'
 import type {
   AccountMe,
   AgentRow,
@@ -619,6 +619,81 @@ export async function fetchChatMessages(
     'GET',
     `/api/chat-sessions/${encodeURIComponent(chatSessionId)}/messages?offset=${offset}&limit=${limit}`,
   )
+}
+
+/** What answering a card would send, resolved by the service (design 31 §7.2,
+ *  ADR-106 D6). Names match the wire; the store maps them to the picker's. */
+export interface CardAnswerFacts {
+  agentId: string
+  messageId: string
+  text: string
+  attachmentIds: string[]
+  refs: ChatRefPick[]
+}
+
+/** `gone` = the row can never stand in for an answer any more (not a card, its
+ *  origin unreadable, or a session the caller is not in); `already_answered` =
+ *  a round settled the question, so the card is merely spent. */
+export type CardAnswerLookup =
+  | { ok: true; facts: CardAnswerFacts }
+  | { ok: false; reason: 'already_answered' | 'gone' }
+
+/**
+ * `GET /api/chat-sessions/{id}/messages/{card_id}/answer` — the words the human
+ * already wrote, plus the card's coordinates.
+ *
+ * Why the service and not the loaded window: the row the card asks about can be
+ * far outside it, and mobile is not virtualized — a surface that rebuilt the
+ * utterance from what it had rendered made an old card's buttons dead. Uses
+ * `authedFetch` (not `req`) because the status IS the answer here: `409` and
+ * `404`/`422` are outcomes, not failures.
+ */
+export async function fetchCardAnswer(
+  chatSessionId: string,
+  cardMessageId: string,
+): Promise<CardAnswerLookup> {
+  const res = await authedFetch(
+    `/api/chat-sessions/${encodeURIComponent(chatSessionId)}/messages/${encodeURIComponent(cardMessageId)}/answer`,
+    { headers: { Accept: 'application/json' } },
+  )
+  if (res.status === 409) return { ok: false, reason: 'already_answered' }
+  if (res.status === 404 || res.status === 422) return { ok: false, reason: 'gone' }
+  if (!res.ok) throw new GatewayError(res.status, await res.text().catch(() => ''))
+  const v = (await res.json()) as {
+    agent_id?: string
+    message_id?: string
+    text?: string
+    attachment_ids?: string[]
+    refs?: Array<{
+      agent_instance_id?: string
+      session_id?: string
+      round_id?: string
+      terminal?: boolean
+    }>
+  }
+  return {
+    ok: true,
+    facts: {
+      agentId: v.agent_id ?? '',
+      messageId: v.message_id ?? '',
+      text: v.text ?? '',
+      attachmentIds: v.attachment_ids ?? [],
+      // The quadruples were pinned when the row was written; only the names
+      // are translated to the picker's spelling.
+      refs: (v.refs ?? []).flatMap((r) =>
+        r.agent_instance_id && r.session_id
+          ? [
+              {
+                agentInstanceId: r.agent_instance_id,
+                sessionId: r.session_id,
+                ...(r.round_id ? { roundId: r.round_id } : {}),
+                ...(r.terminal !== undefined ? { terminal: r.terminal } : {}),
+              },
+            ]
+          : [],
+      ),
+    },
+  }
 }
 
 /**

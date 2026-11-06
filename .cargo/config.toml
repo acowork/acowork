@@ -1,3 +1,15 @@
 [build]
 target-dir = "target"
-incremental = false
+# Incremental compilation is deliberately NOT disabled here. It used to be, for
+# reproducible CI timings, but that made the everyday loop pay for a full crate
+# recompile on every edit (measured: 27 s to rebuild one crate's test binary
+# after a one-line change; 7 s with incremental on). Profile defaults already
+# give the right answer per profile — `dev`/`test` incremental, `release` not —
+# so CI reproducibility is preserved by the release build it actually runs.
+incremental = true
+
+# No `linker = "rust-lld.exe"` here on purpose: it was tried and measured
+# SLOWER on the case that matters. lld has no incremental linking, so every
+# link is a full one; with the MSVC linker a small relink is cheap. Measured on
+# a 16-core Windows box, rebuilding all workspace test binaries after touching
+# `acowork-core`: 1m30 (link.exe) vs 1m36 (rust-lld).

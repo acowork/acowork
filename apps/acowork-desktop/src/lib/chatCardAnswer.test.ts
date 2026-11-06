@@ -7,15 +7,19 @@
  * only to the agent that asked. The last one is the failure this file exists to
  * keep: a fan-out that refuses continuation for two agents because the human
  * answered one of them is the same silent re-routing D6 was written to remove.
+ *
+ * WHERE the words come from is the other half: the service resolves them from
+ * the log (design 31 §6), so a card whose message has scrolled out of the
+ * loaded window still answers. This module only folds in the click.
  */
 import { describe, expect, it } from "vitest";
 import {
-  buildCardAnswer,
+  answerWithChoice,
   directCardAddress,
   groupCardAddress,
   mayAnswerCard,
 } from "./chatCardAnswer";
-import type { ChatMessageRow } from "../stores/chatSessionStore";
+import type { CardAnswerFacts, ChatMessageRow } from "../stores/chatSessionStore";
 
 function row(over: Partial<ChatMessageRow>): ChatMessageRow {
   return {
@@ -48,11 +52,21 @@ function card(over: Partial<ChatMessageRow> = {}): ChatMessageRow {
   });
 }
 
-const original = row({ meta: { message_id: "m-1" } });
+/** What `fetchCardAnswer` returns for a card about `m-1`. */
+function facts(over: Partial<CardAnswerFacts> = {}): CardAnswerFacts {
+  return {
+    agentId: "agent-a",
+    messageId: "m-1",
+    text: "go on with the release note",
+    attachmentIds: [],
+    refs: [],
+    ...over,
+  };
+}
 
-describe("buildCardAnswer", () => {
-  it("re-delivers the human's own words against the row they wrote", () => {
-    const answer = buildCardAnswer(card(), original, { sessionId: "s-1" });
+describe("answerWithChoice", () => {
+  it("keeps the human's own words and the row they wrote", () => {
+    const answer = answerWithChoice(facts(), { sessionId: "s-1" });
     expect(answer).toEqual({
       text: "go on with the release note",
       attachmentIds: [],
@@ -63,25 +77,15 @@ describe("buildCardAnswer", () => {
     });
   });
 
-  it("refuses to invent words when the asked-about row is not readable", () => {
-    // A card whose original row is outside the window (or was never written)
-    // cannot be answered with a paraphrase — that would be putting sentences in
-    // the human's mouth.
-    expect(buildCardAnswer(card(), undefined, { sessionId: "s-1" })).toBeNull();
-    const orphan = card({ meta: { ...card().meta, in_reply_to: undefined } });
-    expect(buildCardAnswer(orphan, original, { sessionId: "s-1" })).toBeNull();
-  });
-
   it("refuses a click that names neither a session nor new work", () => {
-    expect(buildCardAnswer(card(), original, {})).toBeNull();
+    expect(answerWithChoice(facts(), {})).toBeNull();
   });
 
   it("carries the attachments the original message had", () => {
-    const withFiles = row({
-      meta: { message_id: "m-1" },
-      attachments: [{ id: "att-1", filename: "a.png", mime: "image/png", size: 1 }],
-    });
-    const answer = buildCardAnswer(card(), withFiles, { forceNew: true });
+    const answer = answerWithChoice(
+      facts({ attachmentIds: ["att-1"] }),
+      { forceNew: true },
+    );
     expect(answer?.attachmentIds).toEqual(["att-1"]);
   });
 
@@ -89,71 +93,47 @@ describe("buildCardAnswer", () => {
     // ADR-106 revision 2026-11-04: a re-delivery is the SAME utterance, so the
     // `@session` material it carried travels with its RESOLVED coordinates —
     // the Gateway passes the echo through rather than re-pinning a sentence
-    // already written. And only the answering agent's own refs may ride: a
-    // card is that agent's question about ITS runs.
-    const quoted = row({
-      meta: {
-        message_id: "m-1",
-        refs: [
-          {
-            agent_instance_id: "agent-a",
-            session_id: "s-9",
-            round_id: "r-1",
-            terminal: true,
-          },
-          {
-            agent_instance_id: "agent-b",
-            session_id: "s-8",
-            round_id: "r-2",
-            terminal: false,
-          },
-        ],
-      },
-    });
-    const answer = buildCardAnswer(card(), quoted, { sessionId: "s-1" })!;
-    expect(answer.refs).toEqual([
+    // already written. Which refs are "the answering agent's own" is decided
+    // where the log is read (`chat_card::refs_for`), not here.
+    const pinned = [
       {
         agentInstanceId: "agent-a",
         sessionId: "s-9",
         roundId: "r-1",
         terminal: true,
       },
-    ]);
+    ];
+    const answer = answerWithChoice(facts({ refs: pinned }), {
+      sessionId: "s-1",
+    })!;
+    expect(answer.refs).toEqual(pinned);
     expect(groupCardAddress(answer)).toEqual({
       targetSessions: { "agent-a": "s-1" },
       messageId: "m-1",
-      refs: [
-        {
-          agentInstanceId: "agent-a",
-          sessionId: "s-9",
-          roundId: "r-1",
-          terminal: true,
-        },
-      ],
+      refs: pinned,
     });
     expect(directCardAddress(answer)).toEqual({
       targetSession: "s-1",
       messageId: "m-1",
-      refs: [
-        {
-          agentInstanceId: "agent-a",
-          sessionId: "s-9",
-          roundId: "r-1",
-          terminal: true,
-        },
-      ],
+      refs: pinned,
     });
   });
 
   it("omits an empty material list — absence is not `[]`-noise", () => {
-    const answer = buildCardAnswer(card(), original, { sessionId: "s-1" })!;
+    const answer = answerWithChoice(facts(), { sessionId: "s-1" })!;
     expect("refs" in answer).toBe(false);
+  });
+
+  it("refuses an answer the service could not attribute to an agent", () => {
+    // The card's author IS the agent whose runs are on offer; without it there
+    // is no address to name, so a re-delivery would be a message to nobody.
+    expect(answerWithChoice(facts({ agentId: "" }), { sessionId: "s-1" })).toBeNull();
   });
 });
 
 describe("the answer's address, per surface", () => {
   it("names the asking agent alone on the group channel", () => {
-    const answer = buildCardAnswer(card(), original, { sessionId: "s-1" })!;
+    const answer = answerWithChoice(facts(), { sessionId: "s-1" })!;
     expect(groupCardAddress(answer)).toEqual({
       targetSessions: { "agent-a": "s-1" },
       messageId: "m-1",
@@ -163,20 +143,20 @@ describe("the answer's address, per surface", () => {
   it("and refuses continuation for that agent alone", () => {
     // The leak this pins: a blanket flag would make `@A @B` start a new session
     // for B because the human answered A's question.
-    const answer = buildCardAnswer(card(), original, { forceNew: true })!;
+    const answer = answerWithChoice(facts(), { forceNew: true })!;
     expect(groupCardAddress(answer)).toEqual({
       forceNewFor: ["agent-a"],
       messageId: "m-1",
     });
   });
 
-  it("collapses to the single-session form on the 1:1 channel", () => {
-    const picked = buildCardAnswer(card(), original, { sessionId: "s-1" })!;
+  it("is the degenerate one-session form on the 1:1 channel", () => {
+    const picked = answerWithChoice(facts(), { sessionId: "s-1" })!;
     expect(directCardAddress(picked)).toEqual({
       targetSession: "s-1",
       messageId: "m-1",
     });
-    const fresh = buildCardAnswer(card(), original, { forceNew: true })!;
+    const fresh = answerWithChoice(facts(), { forceNew: true })!;
     expect(directCardAddress(fresh)).toEqual({
       forceNew: true,
       messageId: "m-1",
@@ -186,10 +166,7 @@ describe("the answer's address, per surface", () => {
   it("is a `confirm_continue` card answered the same way", () => {
     // Same re-delivery, different question wording — the address shape must not
     // drift between the two notice types that share it.
-    const ask = card({
-      meta: { ...card().meta, notice_type: "confirm_continue" },
-    });
-    const answer = buildCardAnswer(ask, original, { sessionId: "s-2" })!;
+    const answer = answerWithChoice(facts(), { sessionId: "s-2" })!;
     expect(groupCardAddress(answer).targetSessions).toEqual({ "agent-a": "s-2" });
   });
 });
@@ -200,10 +177,8 @@ describe("mayAnswerCard", () => {
     expect(mayAnswerCard(card(), "someone-else")).toBe(false);
   });
 
-  it("allows it in local mode, where the surface has no id to compare", () => {
-    // One person exists; refusing because their id is unresolvable would hide
-    // the only answerable card in the app.
+  it("stays visible in local mode, where no id can be resolved", () => {
+    expect(mayAnswerCard(card({ to: "" }), "")).toBe(true);
     expect(mayAnswerCard(card(), "")).toBe(true);
-    expect(mayAnswerCard(card({ to: "" }), "u1")).toBe(true);
   });
 });

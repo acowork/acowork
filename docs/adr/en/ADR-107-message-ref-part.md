@@ -99,6 +99,14 @@ The user was explicit: user messages are **not** rendered as markdown; only the 
 
 `degraded_brief` → `degraded_background`: no more string composition; it produces `Some(MessageRef::chat_background(...))` whose body opens with "the router was unavailable, here is the conversation tail" (that sentence matters to the model's judgement and stays), filled into `params.context_refs`. `params.message` is left untouched. Both routes therefore have an identical shape in the frontend and on disk.
 
+### D8　The reference body carries no machine identifiers: give the model the name *and* the id
+
+A reference body is model-written prose (D3/D4) that a human reads **verbatim**. The context handed to the model therefore cannot name a workspace by address alone: `ws-49616826fcfc` means nothing to a person, yet it was the only description the model had, so it copied the id into the prose (defect reported 2026-11-06: an execution session's background card read "工作区 ws-49616826fcfc").
+
+Block C's `draft:` line now carries **both**: `workspace="ACoworkDev" (id ws-49616826fcfc)`. The name comes from the rule both clients already apply — `agent_workspaces.json`'s `alias`, else the directory's last segment (`WorkspaceResolver::display_name`). The id stays because `session_config.workspace` is validated against the registry by id, which is why the schema says "the id, not the name". With no resolvable name only the id remains: no invented name, no blank.
+
+Not doing: **a frontend id→name regex over the body**. Model behaviour cannot be predicted, only guided; betting "this reads fine to a human" on a render-time string patch breaks with the next model or the next phrasing, and would make the same body read differently per client. The rule belongs in the model's input, not in the user's output.
+
 ## Rejected alternatives
 
 | Alternative | Why rejected |

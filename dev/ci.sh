@@ -333,6 +333,107 @@ run_user_chat_path_redline() {
     echo "Chat-path ownership red line: OK"
 }
 
+# Design 31 (session data model) §7 P3: the two bugs that produced that design
+# are shape bugs, not typos, so they are guarded by shape:
+#
+#   1. A chat row was stored with its payload silently trimmed (`options`,
+#      `allow_new_task`, `refs`, `error_code` were never declared on
+#      `IntentMeta`, so serde dropped them), which downgraded an addressing card
+#      to a sentence with no buttons. The write door must stay bolted: the
+#      registry fallback and the contract check must both still be there, and
+#      `append_message` is the only place that calls the check.
+#   2. Surfaces derived business state by matching rows against `in_reply_to`
+#      (`rows.some(r => r.meta.message_id === x.meta.in_reply_to)`), so a card
+#      that nobody could parse also froze the composer. Aggregate predicates are
+#      the shape that derivation takes; a by-id *lookup* of a row the log names
+#      is the presentation join design 31 §6 explicitly leaves to surfaces.
+#      Hence: `some(` / `filter(` / `every(` / `new Set` over `in_reply_to` is
+#      refused, `.find(` / `.get(` is not.
+#
+# Plus the vocabulary ceiling: a writer may not invent a notice type that no
+# class in `acowork_core::intent::chat_kinds` knows about, because an
+# unclassified notice skips the threading contract and lands as an orphan.
+run_chat_projection_redline() {
+    echo "Checking design-31 chat projection red lines..."
+    local failed=0
+    local store="$SCRIPT_DIR/../core/acowork-user/src/chat_sessions.rs"
+    local api="$SCRIPT_DIR/../core/acowork-user/src/http/chat_sessions_api.rs"
+    local vocab="$SCRIPT_DIR/../core/acowork-core/src/intent.rs"
+
+    # (1) The write door. Both halves are load-bearing: `unregistered` is the
+    # reader that keeps unknown keys alive, `check_write_contract` is the writer
+    # that refuses them.
+    if ! grep -q 'pub unregistered' "$store"; then
+        echo "ERROR: IntentMeta lost its \`unregistered\` registry fallback;"
+        echo "       payload keys are being dropped at the read boundary again (design 31 §5)."
+        failed=1
+    fi
+    if ! grep -q 'fn check_write_contract' "$store" \
+        || ! grep -q 'check_write_contract(msg)' "$store"; then
+        echo "ERROR: the chat write contract is no longer enforced inside append_message;"
+        echo "       unthreaded replies and empty cards can be stored again (design 31 §5)."
+        failed=1
+    fi
+
+    # (2) One derivation point, and the two pages stay distinct: the public page
+    # projects `delivery`, the agent-facing page stays raw (it is budgeted per
+    # row and nothing renders a derived field there).
+    if ! grep -q 'Vec<chat_view::ChatRowView>' "$api"; then
+        echo "ERROR: the public chat message page no longer projects \`delivery\` (design 31 §6)."
+        echo "       Surfaces would have to derive state from the transcript again."
+        failed=1
+    fi
+    if ! grep -q 'RawMessagePage' "$api"; then
+        echo "ERROR: the agent-facing (internal) message page changed shape."
+        echo "       It must stay raw: that page is fed to a model and budgeted per row."
+        failed=1
+    fi
+
+    # (3) No aggregate predicate over the thread coordinate in a surface.
+    local derivations
+    derivations=$(grep -rn 'in_reply_to' \
+        --include='*.ts' --include='*.tsx' \
+        "$SCRIPT_DIR/../apps/acowork-desktop/src" \
+        "$SCRIPT_DIR/../apps/acowork-mobile/src" \
+        | grep -v '\.test\.' \
+        | grep -v '__tests__' \
+        | grep -vE ':[0-9]+:[[:space:]]*(//|\*|/\*)' \
+        | grep -E 'some\(|filter\(|every\(|new Set|\.includes\(' \
+        || true)
+    if [ -n "$derivations" ]; then
+        echo "ERROR: a surface builds an aggregate predicate over \`in_reply_to\` (design 31 §6):"
+        echo "$derivations"
+        echo "Business state ('answered', 'open', 'delivered') comes from \`delivery\` on the"
+        echo "row. Looking up the one row a coordinate names is allowed; deciding a state by"
+        echo "scanning for matches is not."
+        failed=1
+    fi
+
+    # (4) Closed notice vocabulary: every literal a writer emits is classified.
+    local literals
+    literals=$(grep -rhoE '(notice_type"?: *"[a-z_]+"|notice_type = "[a-z_]+")' \
+        --include='*.rs' \
+        "$SCRIPT_DIR/../core/acowork-runtime/src" \
+        "$SCRIPT_DIR/../core/acowork-gateway/src" \
+        | grep -oE '"[a-z_]+"' | tr -d '"' | sort -u || true)
+    local notice
+    for notice in $literals; do
+        if ! grep -q "\"$notice\"" "$vocab"; then
+            echo "ERROR: notice type '$notice' is written but not registered in"
+            echo "       acowork_core::intent::chat_kinds — add it to THREADED_NOTICES,"
+            echo "       CARD_NOTICES or LIMIT_NOTICES (design 31 §5)."
+            failed=1
+        fi
+    done
+
+    if [ "$failed" -ne 0 ]; then
+        echo ""
+        echo "Design 31: the backend owns the state, the surface renders what it is handed."
+        exit 1
+    fi
+    echo "Design-31 chat projection red lines: OK"
+}
+
 # ADR-084 §决策 1/3 suggested ceilings:
 #   - `acowork-user` code must not reach into the Gateway's data directory
 #     (the mirror of the fs red line above): all user data lives under the
@@ -649,6 +750,7 @@ case "$MODE" in
         run_gateway_auth_scope_redline
         run_user_auth_mode_redline
         run_user_chat_path_redline
+        run_chat_projection_redline
         run_permission_route_redline
         run_lsp_registry_redline
         run_ort_api_redline
@@ -676,6 +778,7 @@ case "$MODE" in
         run_gateway_auth_scope_redline
         run_user_auth_mode_redline
         run_user_chat_path_redline
+        run_chat_projection_redline
         run_permission_route_redline
         run_lsp_registry_redline
         run_ort_api_redline

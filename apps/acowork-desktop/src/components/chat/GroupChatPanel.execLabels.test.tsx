@@ -1,10 +1,12 @@
 /**
  * ADR-100 D12: a PM task session is bound to this group's Chat session, so a
  * turn composed in its execution view arrives as a `user_message` whose
- * attached items are labels only (the file belongs to the run, not to the chat
- * — design 27 §4.2.1). Two things must hold on the group surface: the labels
- * paint, and they count as content, because the empty-turn placeholder is what
- * a "here's a file, go" message would otherwise degrade to.
+ * attached items are labels (the file belongs to the run, not to the chat —
+ * design 27 §4.2.1). Three things must hold on the group surface: the labels
+ * paint, they count as content (the empty-turn placeholder is what a "here's a
+ * file, go" message would otherwise degrade to), and — since D12 Rev. 2026-11
+ * — a workspace arm sent by an Agent is openable against **that Agent's**
+ * workspaces.
  *
  * Mock harness mirrors `GroupChatPanel.exec.test.tsx`.
  */
@@ -12,6 +14,9 @@ import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { GroupChatPanel } from "./GroupChatPanel";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
+import { openAttachedRef } from "../../lib/openWorkspaceRef";
+
+vi.mock("../../lib/openWorkspaceRef", () => ({ openAttachedRef: vi.fn() }));
 
 const AGENT = "agent-1";
 const ME = "user-me";
@@ -115,12 +120,13 @@ vi.mock("../editor/markdownLinkResolver", () => ({
 function pinnedRow(
   seq: number,
   body: string,
-  labels: Array<{ filename: string; kind?: string }>,
+  labels: Array<{ filename: string; kind?: string; absPath?: string }>,
+  from: string = ME,
 ): ChatMessageRow {
   return {
     seq,
     ts: seq,
-    from: ME,
+    from,
     kind: "user_message",
     body,
     to: "",
@@ -152,5 +158,41 @@ describe("GroupChatPanel execution-attachment labels", () => {
     tail = [pinnedRow(1, "", [])];
     render(<GroupChatPanel />);
     expect(screen.getByText("groupChat.emptyTurn")).toBeTruthy();
+  });
+
+  it("opens a workspace arm against the Agent that pointed at it", () => {
+    // The path resolves in the sender's own workspace registry — which on this
+    // surface is the Agent participant's, not "whichever agent happens to be
+    // selected elsewhere".
+    tail = [
+      pinnedRow(
+        1,
+        "look at this",
+        [{ filename: "src/main.rs", kind: "attached_file", absPath: "E:/ws/src/main.rs" }],
+        AGENT,
+      ),
+    ];
+    render(<GroupChatPanel />);
+    screen.getByRole("button", { name: "src/main.rs" }).click();
+    expect(openAttachedRef).toHaveBeenCalledWith({
+      item: { type: "attached_file", absPath: "E:/ws/src/main.rs", name: "src/main.rs" },
+      agentId: AGENT,
+      currentWorkspaceId: "",
+    });
+  });
+
+  it("leaves a human's own workspace arm decorative", () => {
+    // This surface is not bound to one Agent's workspace registry, so there is
+    // nothing honest to resolve a person's path against — a click that guesses
+    // would open the wrong tree. The chip paints, and does not pretend.
+    tail = [
+      pinnedRow(1, "look at this", [
+        { filename: "src/main.rs", kind: "attached_file", absPath: "E:/ws/src/main.rs" },
+      ]),
+    ];
+    render(<GroupChatPanel />);
+    expect(screen.getByText("src/main.rs")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "src/main.rs" })).toBeNull();
+    expect(openAttachedRef).not.toHaveBeenCalled();
   });
 });

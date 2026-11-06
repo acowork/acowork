@@ -75,6 +75,14 @@ pub struct RouterDeps {
     pub gateway_host: String,
     pub node_token: String,
     pub work_dir: String,
+    /// The agent's shared workspace registry, when it has one (it is set in
+    /// Phase B of session init, so a very early turn may not have it).
+    ///
+    /// Read here for one reason: the router writes prose a human reads
+    /// (ADR-107's `chat_background`), so it must be told what a workspace is
+    /// *called*, not only what it is *addressed by*. See
+    /// [`RouterDeps::workspace_display_name`].
+    pub resolver: Option<crate::tools::workspace_resolver::SharedResolver>,
     /// Token ledger for this router's own LLM spend (design 29 follow-up).
     /// Every successful model call of a turn is recorded here — the router
     /// is the only LLM consumer in the Runtime outside a session, and an
@@ -89,13 +97,18 @@ impl std::fmt::Debug for RouterDeps {
             .field("gateway_host", &self.gateway_host)
             .field("node_token", &"[redacted]")
             .field("work_dir", &self.work_dir)
+            .field("resolver", &self.resolver.is_some())
             .field("chat_usage", &"<ChatUsageService>")
             .finish()
     }
 }
 
 impl RouterDeps {
-    pub fn from_core(core: &Arc<AgentCore>, node_token: &str) -> Self {
+    pub fn from_core(
+        core: &Arc<AgentCore>,
+        resolver: Option<crate::tools::workspace_resolver::SharedResolver>,
+        node_token: &str,
+    ) -> Self {
         let cfg = &core.config;
         let token = if node_token.trim().is_empty() {
             cfg.mqtt_password.clone().unwrap_or_default()
@@ -112,10 +125,22 @@ impl RouterDeps {
                 .unwrap_or_else(|| "127.0.0.1".to_string()),
             node_token: token,
             work_dir: cfg.work_dir.clone(),
+            resolver,
             chat_usage: crate::usecases::chat_usage_impl::RuntimeChatUsageService::new(
                 core.clone(),
             ),
         }
+    }
+
+    /// What this workspace is called, for prose a human will read.
+    ///
+    /// `None` (no resolver yet, or an id that no longer exists) keeps the
+    /// caller showing the id: an empty or invented name would be worse than an
+    /// opaque one, because it would look like a real workspace.
+    fn workspace_display_name(&self, id: &str) -> Option<String> {
+        let resolver = self.resolver.as_ref()?;
+        let guard = resolver.read().ok()?;
+        guard.display_name(id)
     }
 }
 
@@ -157,7 +182,7 @@ pub async fn handle_intent(
     // ── Short lock: snapshot what this agent runs on ─────────────────
     let deps = {
         let guard = session_manager.lock().await;
-        RouterDeps::from_core(&guard.core(), node_token)
+        RouterDeps::from_core(&guard.core(), guard.resolver(), node_token)
     };
     let cfg = router_config(&deps.work_dir);
     if !cfg.is_enabled() {
@@ -547,16 +572,42 @@ async fn run_turn(
     let now_secs = chrono::Utc::now().timestamp();
     let now = chrono::Utc::now().to_rfc3339();
 
+    // ADR-106 D6's cheap escape reaches the router too, and it is the whole
+    // ladder's fact, not level 3's: "new task" means NO session may be
+    // continued on this turn. It used to gate only the deterministic
+    // sole-candidate shortcut, so a turn that actually got here was routed with
+    // the ordinary candidate list and the model proposed the very continuation
+    // the human had just refused — measured: six consecutive
+    // `exec_session_propose_continue` decisions for one `force_new` message.
+    // Re-asking wrote a card under the same idempotency key
+    // (`confirm_continue:<message_id>`), so nothing was appended, nothing was
+    // delivered, and the click looked dead.
+    //
+    // The refusal is therefore turned into DATA, not a prompt hint: no rows are
+    // scanned, no candidates are offered, and the alias table below stays
+    // empty — a `exec_session_propose_continue` call then has no alias it could
+    // name, so the act cannot be honoured even if the model tries. Reading the
+    // sessions we may not continue would also be work for nothing.
+    let continuation_refused = force_new(envelope);
+
     // ── Candidate rows: off disk, before the lock ────────────────────
     // The meta scan is the slowest step of this turn's setup and needs nothing
     // from `SessionManager` but the work dir, which `RouterDeps` already
     // snapshotted. Under the global lock it would make `POST /sessions` and
     // every other session operation queue behind a filesystem walk.
-    let candidate_rows = chat_candidates::scan_rows(&deps.work_dir);
+    let candidate_rows = if continuation_refused {
+        Vec::new()
+    } else {
+        chat_candidates::scan_rows(&deps.work_dir)
+    };
     // Same read-as-you-can discipline: the intent bindings are another disk
     // scan (ADR-106 D11 — they live on the session rows now), so they are
     // collected outside the lock and handed to `resolve_candidates` as data.
-    let candidate_bindings = chat_candidates::scan_bindings(&deps.work_dir);
+    let candidate_bindings = if continuation_refused {
+        Vec::new()
+    } else {
+        chat_candidates::scan_bindings(&deps.work_dir)
+    };
 
     // ── Short lock: prompt + candidates + router model ──────────────────
     let prepared = {
@@ -583,14 +634,22 @@ async fn run_turn(
             &chat_kind,
             guard.identity_context(),
         );
-        let candidates = guard.resolve_candidates(
-            &candidate_rows,
-            &candidate_bindings,
-            &chat_id,
-            Some(envelope.from.as_str()).filter(|s| !s.is_empty()),
-            candidate_surface(&chat_kind),
-            cfg.max_candidates(),
-        );
+        let candidates = if continuation_refused {
+            // No rows were scanned, so this is already empty; stating it here
+            // keeps the router's invariant ("a turn that refused continuation
+            // is offered nothing to continue") local to the router instead of
+            // depending on the candidate builder's internal defaults.
+            Vec::new()
+        } else {
+            guard.resolve_candidates(
+                &candidate_rows,
+                &candidate_bindings,
+                &chat_id,
+                Some(envelope.from.as_str()).filter(|s| !s.is_empty()),
+                candidate_surface(&chat_kind),
+                cfg.max_candidates(),
+            )
+        };
         let (provider, model) = router_llm(&core, cfg);
         // The router only ever runs the two read-only lookups, resolved by
         // name off the enabled dispatch list. A disabled or missing tool is
@@ -675,7 +734,9 @@ async fn run_turn(
             title: candidate.title.clone(),
         });
     }
-    let draft = draft_label(&envelope.session_config_json);
+    let draft = draft_label(&envelope.session_config_json, |id| {
+        deps.workspace_display_name(id)
+    });
     let task = task_label(&envelope.conversation_id);
     let attachments = turn_attachments(envelope);
     let refs = turn_refs(envelope);
@@ -698,6 +759,7 @@ async fn run_turn(
         now: &now,
         draft: Some(draft.as_str()).filter(|d| !d.is_empty()),
         candidates: &lines,
+        continuation_refused,
         task: task.as_deref(),
         history_available,
         user_message: text,
@@ -756,6 +818,7 @@ async fn run_turn(
         attachments: attachments.len(),
         refs: refs.len(),
         attachment_only: super::context::is_attachment_only(text, &attachments, &refs),
+        continuation_refused,
         started,
         info_rounds: 0,
     };
@@ -960,27 +1023,35 @@ async fn run_turn(
             // (ADR-106 D6). The card names the candidate, the router's reason
             // for proposing it, and the "new task" escape beside it.
             //
+            // A turn whose human refused continuation (`force_new`) never gets
+            // here: it was offered no candidates, so its alias table is empty
+            // and `parse_exec_session_propose_continue` refuses every target as
+            // an unknown alias — the action degrades to a fresh session instead
+            // of re-asking the question the human already answered.
+            //
             // The label is this turn's own candidate title, looked up by the id
             // the alias resolved to — a card naming a session the human cannot
             // see in [candidates] would be a decision made from private state.
-            let title = prepared
+            let candidate = prepared
                 .candidates
                 .iter()
-                .find(|c| c.session_id == proposal.session_id)
-                .map(|c| c.title.clone())
-                .unwrap_or_else(|| proposal.alias.clone());
-            let option = serde_json::json!({
-                "session_id": proposal.session_id,
-                "label": title,
-                "why": proposal.why,
-            });
+                .find(|c| c.session_id == proposal.session_id);
+            // One builder for the row, both acts: `status` rides along with the
+            // title so "this one is idle" and "this one is mid-round" are
+            // visible before the click, in the same vocabulary the multi-
+            // candidate card uses.
+            let option = chat_candidates::proposal_option(
+                &proposal.session_id,
+                &proposal.alias,
+                &proposal.why,
+                candidate,
+            );
             let asked = crate::agent::intent_turn::emit_session_choice(
                 &deps.instance_id,
                 &deps.gateway_host,
                 &deps.node_token,
                 &chat_id,
                 &envelope.from,
-                &envelope.in_reply_to,
                 &envelope.message_id,
                 "confirm_continue",
                 vec![option],
@@ -1546,7 +1617,17 @@ fn call_label(call: &ToolCall) -> String {
 
 /// Rendered draft configuration for Block C (`model=…, workspace=…`).
 /// Empty when the user has not touched anything.
-fn draft_label(raw: &str) -> String {
+///
+/// **The workspace carries its name as well as its id**, and that is the whole
+/// point of `name_of`: everything the router writes into `background` is shown
+/// to the human verbatim (ADR-107), so a workspace described only as
+/// `ws-49616826fcfc` is an address the human cannot read — and a model that has
+/// only the id will put the id in the prose (reported defect). Handing over
+/// `name="ACoworkDev" id` lets the model write the name; the id stays because
+/// `session_config.workspace` is validated against the registry by id, so it
+/// cannot be dropped either. When no name resolves, the id stands alone — the
+/// same fallback the desktop surfaces use.
+fn draft_label(raw: &str, name_of: impl Fn(&str) -> Option<String>) -> String {
     let Some(seed) = SessionSeed::from_json(raw) else {
         return String::new();
     };
@@ -1558,7 +1639,11 @@ fn draft_label(raw: &str) -> String {
         parts.push(format!("provider={v}"));
     }
     if let Some(v) = &seed.workspace {
-        parts.push(format!("workspace={v}"));
+        let id = v.trim();
+        parts.push(match name_of(id) {
+            Some(name) => format!("workspace=\"{name}\" (id {id})"),
+            None => format!("workspace={id}"),
+        });
     }
     if let Some(v) = &seed.reasoning_effort {
         parts.push(format!("effort={v}"));
@@ -1689,6 +1774,9 @@ struct TurnTrace<'a> {
     /// The turn had attachments and no text (see
     /// [`context::is_attachment_only`]), i.e. Block C rendered the placeholder.
     attachment_only: bool,
+    /// The human refused continuation, so this turn had no candidates to offer
+    /// and no alias to name — see [`DecisionRecord::continuation_refused`].
+    continuation_refused: bool,
     started: Instant,
     /// Information-tool rounds this turn ran before deciding (audit
     /// surface for "the router looked things up instead of routing").
@@ -1724,6 +1812,7 @@ impl TurnTrace<'_> {
             attachments: self.attachments,
             refs: self.refs,
             attachment_only: self.attachment_only,
+            continuation_refused: self.continuation_refused,
             info_rounds: (self.info_rounds > 0).then_some(self.info_rounds),
             prompt_tokens: usage.map(|u| u.0),
             completion_tokens: usage.map(|u| u.1),
@@ -2083,6 +2172,7 @@ mod tests {
             attachments: &attachments,
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(
@@ -2137,6 +2227,7 @@ mod tests {
             attachments: &[],
             refs: &refs,
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(
@@ -2245,6 +2336,7 @@ mod tests {
             attachments: &uploads,
             refs: &refs,
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(rendered.contains("[attachments] spec.pdf (application/pdf, 12KB)"));
@@ -2331,15 +2423,39 @@ mod tests {
 
     #[test]
     fn draft_label_lists_only_the_fields_the_user_set() {
-        assert_eq!(draft_label(""), "");
-        assert_eq!(draft_label("not json"), "");
+        let unnamed = |_: &str| None;
+        assert_eq!(draft_label("", unnamed), "");
+        assert_eq!(draft_label("not json", unnamed), "");
         assert_eq!(
-            draft_label(r#"{"model":"m1","workspace":"ws-1"}"#),
+            draft_label(r#"{"model":"m1","workspace":"ws-1"}"#, unnamed),
             "model=m1, workspace=ws-1"
         );
         // A provider without a model cannot pin anything and is dropped by
         // the seed parser, so the label must not claim it either.
-        assert_eq!(draft_label(r#"{"provider":"p1"}"#), "");
+        assert_eq!(draft_label(r#"{"provider":"p1"}"#, unnamed), "");
+    }
+
+    /// Regression (reported 2026-11-06): the router wrote "工作区 ws-49616826fcfc"
+    /// into a chat background a human reads, because the draft line named the
+    /// workspace only by id. The label now carries the name **and** the id —
+    /// the name for the prose, the id for `session_config.workspace`, which is
+    /// validated against the registry by id.
+    #[test]
+    fn draft_label_names_a_workspace_it_can_resolve() {
+        let named = |id: &str| match id {
+            "ws-49616826fcfc" => Some("ACoworkDev".to_string()),
+            _ => None,
+        };
+        assert_eq!(
+            draft_label(r#"{"workspace":"ws-49616826fcfc"}"#, named),
+            "workspace=\"ACoworkDev\" (id ws-49616826fcfc)"
+        );
+        // An id the registry no longer knows keeps its id rather than getting
+        // an invented name: a wrong name is worse than an opaque one.
+        assert_eq!(
+            draft_label(r#"{"workspace":"ws-gone"}"#, named),
+            "workspace=ws-gone"
+        );
     }
 
     #[test]
@@ -2408,6 +2524,32 @@ mod tests {
         };
         assert_eq!(parse_act(&call, &AliasTable::new()), Err(ActError::MissingBackground));
         assert_eq!(call_label(&call), "exec_session_create");
+    }
+
+    /// The measured defect, at the act boundary: the human answered an
+    /// addressing card with "new task" (`force_new`), the router was handed the
+    /// ordinary candidate list, the model proposed the same continuation again
+    /// and the card was re-written under the same idempotency key — so the
+    /// transcript gained nothing and the click looked dead.
+    ///
+    /// A refused turn now has no candidates, hence no alias, hence no way to
+    /// name a session. A model that calls the proposal anyway is refused here
+    /// (one validation retry, then `degrade` → a fresh session), which is the
+    /// human's instruction either way.
+    #[test]
+    fn a_proposal_cannot_name_a_session_on_a_forced_new_turn() {
+        let call = ToolCall {
+            id: "call-1".into(),
+            call_type: "function".into(),
+            function: acowork_core::providers::traits::FunctionCall {
+                name: super::super::tool::EXEC_SESSION_PROPOSE_CONTINUE_TOOL.into(),
+                arguments: r#"{"target":"S1","why":"same login bug"}"#.into(),
+            },
+        };
+        assert_eq!(
+            parse_act(&call, &AliasTable::new()),
+            Err(ActError::UnknownAlias("S1".into()))
+        );
     }
 
     /// Fixtures for the read tool: a transcript whose rows carry their round
@@ -2533,6 +2675,7 @@ mod tests {
             attachments: &[],
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(rendered.contains("S1"));
@@ -2772,6 +2915,7 @@ mod tests {
             gateway_host: "127.0.0.1".into(),
             node_token: String::new(),
             work_dir: ".".into(),
+            resolver: None,
             chat_usage: Arc::new(crate::usecases::chat_usage_impl::NoopChatUsageService),
         }
     }

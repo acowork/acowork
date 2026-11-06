@@ -15,43 +15,9 @@ import type {
   McpRecommendationView,
 } from "../../lib/types";
 import { McpRecommendationGroup } from "./McpRecommendationGroup";
-import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 const EMPTY_ARRAY: string[] = [];
 
-/** Scroll cap for the builtin-tools list — nine rows tall.
- *
- *  Every number here was MEASURED in Chrome headless against the built
- *  stylesheet at all five font steps (S/M/L/XL/XXL), not derived from
- *  the CSS source. Measured row heights: 33 / 34 / 37 / 40 / 43px.
- *
- *  A row is:
- *    - its content box = the taller of
- *        · the row's strut: the `ListRow` middle column inherits the
- *          BASE font size, and Tailwind's preflight sets
- *          `line-height: 1.5` on <html> → base × 1.5;
- *        · the `size="sm"` Switch's label inline box (20px) — at the S
- *          step the strut (18px) is shorter than this, so the SWITCH
- *          decides the row height there, not the text;
- *    - plus `py-1.5` (0.75rem, a FIXED length — the padding does not
- *      follow the font knob);
- *    - plus the 1px hairline `divide-y` paints on the row's top edge
- *      (the border belongs to the row's own box, so it is part of the
- *      row height — NOT an extra per-gap addition).
- *
- *  Nine rows therefore need 9 × R, where R = max(base×1.5, 20px) + 12px
- *  + 1px. Verified totals: S 297 / M 306 / L 333 / XL 360 / XXL 387px.
- *
- *  WHY NOT `text-11`: the tool name renders at `text-11` (0.786em), but
- *  the row height comes from the strut and the switch, not the 11px
- *  label. Sizing from the label yields ~28.5px rows and the list then
- *  shows one row fewer than intended.
- *
- *  Bound to `--ui-font-size` rather than a frozen px, following
- *  `ProviderPicker`'s GROUP_BODY_MAX_HEIGHT: a frozen cap shows fewer
- *  than nine rows at the XXL font step and more than nine at S. */
-const BUILTIN_TOOLS_MAX_HEIGHT =
-  "calc((max(var(--ui-font-size, 0.875rem) * 1.5, 20px) + 0.75rem + 1px) * 9)";
 // Stable empty-object reference for Zustand selectors (see line ~178 below).
 // Returning a fresh `{}` from a selector on every render trips
 // `useSyncExternalStore`'s Object.is equality check → infinite re-render →
@@ -395,10 +361,36 @@ export function EnsureLogsDialog({ serverName, logs, hint, onClose }: EnsureLogs
 
 // ── Component ───────────────────────────────────────────────────────────
 
-export function ToolsTab() {
+/**
+ * The two agent-scoped tool cards — "Builtin Tools" and "MCP Servers", plus
+ * the package's MCP recommendations group that sits between them (ADR-104:
+ * installing a recommendation moves a row *into* the switch list, so cause and
+ * effect have to be on screen together).
+ *
+ * They used to be the whole of a standalone `Tools` rail tab. That tab is gone
+ * — the same two cards now render inside the Setup panel, one level-1 card
+ * among the others — so this component deliberately owns NO panel chrome: no
+ * scroll root, no tab padding, no empty state. The host panel provides all
+ * three (Setup renders inside its own `OverlayScrollbar` + `p-3` column and
+ * already refuses to render without a selected agent). The section dividers
+ * below are therefore `-mx-3`-based, exactly like the Setup panel's own
+ * inter-card hairlines, so the block reads as part of that column.
+ *
+ * `builtinDefaultOpen` / `mcpDefaultOpen` exist because the initial expand
+ * state is a property of *where the card sits in the host panel*, not of the
+ * card itself: see `agentSetupCards.ts`, where only the first three Setup
+ * cards start expanded and these two (positions 6 and 7) start collapsed.
+ * Anything else hosting them keeps the historical default-open behaviour.
+ */
+export function ToolsCards({
+  builtinDefaultOpen = true,
+  mcpDefaultOpen = true,
+}: {
+  builtinDefaultOpen?: boolean;
+  mcpDefaultOpen?: boolean;
+} = {}) {
   const { t } = useTranslation();
   const { selectedAgentId } = useAgentStore();
-  const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
 
   // MCP server activation — per-agent selectors.
   // The toggle list is rendered from the per-agent merged MCP list
@@ -453,11 +445,11 @@ export function ToolsTab() {
   const [mcpToolsSaving, setMcpToolsSaving] = useState(false);
 
   // Group-level collapse state for the two tool cards (Builtin Tools /
-  // MCP). Each card mirrors the Debug-panel "Context Snapshots" level-1
-  // collapsible style; default open so the previous always-visible
-  // behavior is preserved on first mount.
-  const [builtinOpen, setBuiltinOpen] = useState(true);
-  const [mcpOpen, setMcpOpen] = useState(true);
+  // MCP). Each card keeps the level-1 collapsible grammar of every other
+  // panel card; the initial value comes from the host panel (see the
+  // component doc above) and the user owns it from then on.
+  const [builtinOpen, setBuiltinOpen] = useState(builtinDefaultOpen);
+  const [mcpOpen, setMcpOpen] = useState(mcpDefaultOpen);
 
   // ADR-104: the package's `[[mcp_servers]]` recommendations, with the
   // lifecycle state the Runtime derived. Rendered in its own group above the
@@ -483,7 +475,7 @@ export function ToolsTab() {
       try {
         const resp = await with503Retry(
           () => fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/tools`),
-          { tag: `ToolsTab.fetchTools(${selectedAgentId})`, logger: log },
+          { tag: `ToolsCards.fetchTools(${selectedAgentId})`, logger: log },
         );
         if (resp.ok && !cancelled) {
           const data = await resp.json();
@@ -522,7 +514,7 @@ export function ToolsTab() {
         try {
           const mcpToolsResp = await with503Retry(
             () => fetch(`${getGatewayUrl()}/api/agents/${selectedAgentId}/mcp-tools`),
-            { tag: `ToolsTab.fetchMcpTools(${selectedAgentId})`, logger: log },
+            { tag: `ToolsCards.fetchMcpTools(${selectedAgentId})`, logger: log },
           );
           if (mcpToolsResp.ok && !cancelled) {
             const mcpToolsData = await mcpToolsResp.json();
@@ -694,19 +686,17 @@ export function ToolsTab() {
     saveMcpToolsConfig(next);
   };
 
-  if (!selectedAgentId || !selectedAgent) {
-    return (
-      <div className="flex flex-1 items-center justify-center bg-right-panel p-6">
-        <span className="text-xs text-text-tertiary ">{t("agentSetup.noAgentSelected")}</span>
-      </div>
-    );
-  }
+  // No agent → nothing to configure. The host panel (Setup) already renders
+  // its own "no agent selected" empty state, so this is not a placeholder:
+  // rendering nothing keeps the host column from showing a second, centered
+  // copy of the same message.
+  if (!selectedAgentId) return null;
 
   return (
-    <OverlayScrollbar dataTabScroll className="flex-1 bg-right-panel p-3">
+    <>
       {/* ── Builtin Tools card ─────────────────────────────────────
           Level-1 collapsible card in the same language as the
-          Debug-panel "Context Snapshots" list: chevron on the left,
+          other panel cards: chevron on the left,
           title + count Badge on the right of it, click to expand the
           tool rows (ADR-029). Row contract: name + activation Switch. */}
       <div>
@@ -721,29 +711,32 @@ export function ToolsTab() {
             {builtinToolsAll.length === 0 ? (
               <EmptyState message={t("agentSetup.noBuiltinTools")} />
             ) : (
-              <OverlayScrollbar maxHeight={BUILTIN_TOOLS_MAX_HEIGHT} containerClassName="flex-none w-full">
-                <ListBox variant="plain">
-                  {builtinToolsAll.map((entry) => (
-                    <ListRow
-                      key={entry.name}
-                      surface="inset"
-                      trailing={
-                        <Switch
-                          checked={entry.enabled}
-                          onChange={() => toggleBuiltinTool(entry.name)}
-                          disabled={builtinSaving || !selectedAgentId}
-                          size="sm"
-                          aria-label={entry.name}
-                        />
-                      }
-                    >
-                      <span className="truncate text-11 font-medium text-text-secondary ">
-                        {entry.name}
-                      </span>
-                    </ListRow>
-                  ))}
-                </ListBox>
-              </OverlayScrollbar>
+              /* Every tool is listed in full — no inner scroll cap. This list
+                 used to be a nine-row scroll box because it owned the whole
+                 Tools tab; in the Setup panel the card is one block in a single
+                 scrolling column, so a nested scrollbar would only hide rows
+                 behind a second scroll position. */
+              <ListBox variant="plain">
+                {builtinToolsAll.map((entry) => (
+                  <ListRow
+                    key={entry.name}
+                    surface="inset"
+                    trailing={
+                      <Switch
+                        checked={entry.enabled}
+                        onChange={() => toggleBuiltinTool(entry.name)}
+                        disabled={builtinSaving || !selectedAgentId}
+                        size="sm"
+                        aria-label={entry.name}
+                      />
+                    }
+                  >
+                    <span className="truncate text-11 font-medium text-text-secondary ">
+                      {entry.name}
+                    </span>
+                  </ListRow>
+                ))}
+              </ListBox>
             )}
           </ExpandableRow>
         </ListBox>
@@ -753,8 +746,9 @@ export function ToolsTab() {
       </div>
 
       {/* Divider — full panel-width hairline separating the functional
-          blocks (Builtin Tools / MCP). Matches the
-          workspace/memory panel divider style. */}
+          blocks (Builtin Tools / MCP). Same `-mx-3` hairline the host
+          panel draws between its own cards, so the tools block reads as
+          one more part of that column. */}
       <div className="-mx-3 my-2 border-t border-border-divider" />
 
       {/* ADR-104: the package's MCP recommendations. Sits directly above the
@@ -772,7 +766,7 @@ export function ToolsTab() {
       )}
 
       {/* MCP Servers card — the group is a level-1 collapsible card
-          like the Debug-panel snapshot list; each server renders as a
+          like every other panel card; each server renders as a
           collapsible row inside the card body, and each server row
           expands to its per-tool list (ADR-068 UX / ADR-069 data). */}
       <div>
@@ -850,6 +844,6 @@ export function ToolsTab() {
           </div>
         )}
       </div>
-    </OverlayScrollbar>
+    </>
   );
 }

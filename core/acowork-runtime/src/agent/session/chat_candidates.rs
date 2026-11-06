@@ -170,6 +170,28 @@ impl SessionCandidate {
     }
 }
 
+/// The option row a `confirm_continue` card shows (ADR-106 D6 level 5).
+///
+/// The card proposes exactly one session, and the human's click is a delivery —
+/// so the row has to carry what the decision needs: the candidate's own title
+/// (`alias` is the last-resort handle for a session that is not in this turn's
+/// candidate list), the router's one-line reason, and the state the dot paints
+/// ("this one is mid-round" is a reason to think twice). Absent candidate means
+/// absent status: a card must not claim a state it was not told.
+pub fn proposal_option(
+    session_id: &str,
+    alias: &str,
+    why: &str,
+    candidate: Option<&SessionCandidate>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session_id,
+        "label": candidate.map(|c| c.title.clone()).unwrap_or_else(|| alias.to_string()),
+        "status": candidate.map(|c| c.status.label()),
+        "why": why,
+    })
+}
+
 /// Everything the filter needs besides the meta rows.
 pub struct CandidateQuery<'a> {
     pub chat_session_id: &'a str,
@@ -352,8 +374,15 @@ fn title_of(meta: &SessionMeta) -> String {
         .filter(|s| !s.is_empty())
         .unwrap_or("untitled");
     let mut out = String::with_capacity(raw.len().min(TITLE_MAX_BYTES));
+    // The cut is at a character boundary, never inside one, so the string stays
+    // valid UTF-8 — but a title that simply stops mid-word reads to a human as
+    // broken text ("...一直没有创建执行sessi"), and this string is not only the
+    // router's input any more: the choice card renders it as the option a human
+    // clicks. The marker says "there was more", not "the title ends here".
+    let mut truncated = false;
     for ch in raw.chars() {
         if out.len() + ch.len_utf8() > TITLE_MAX_BYTES {
+            truncated = true;
             break;
         }
         out.push(if ch.is_control() { ' ' } else { ch });
@@ -361,6 +390,8 @@ fn title_of(meta: &SessionMeta) -> String {
     let cleaned = out.trim();
     if cleaned.is_empty() {
         "untitled".to_string()
+    } else if truncated {
+        format!("{cleaned}…")
     } else {
         cleaned.to_string()
     }
@@ -453,8 +484,46 @@ mod tests {
         }
     }
 
+    /// The title is shown to a human as the card option's label, so a byte cut
+    /// has to be marked and must never split a character.
+    #[test]
+    fn an_overlong_title_is_cut_on_a_char_boundary_and_marked() {
+        let long = "整理".repeat(60); // 360 bytes of 3-byte characters
+        let cut = title_of(&meta("s", &long, "2026-10-21T10:00:00+00:00", None, Some(ALICE)));
+        assert!(cut.ends_with('…'), "a truncated title must be marked: {cut}");
+        let body = cut.trim_end_matches('…');
+        assert!(body.len() <= TITLE_MAX_BYTES, "kept {body_len} bytes", body_len = body.len());
+        assert!(body.chars().all(|c| c == '整' || c == '理'), "no partial character survived");
+        // A title that fits is returned verbatim, marker and all absent.
+        let short = title_of(&meta("s", "整理报表", "2026-10-21T10:00:00+00:00", None, Some(ALICE)));
+        assert_eq!(short, "整理报表");
+    }
+
     fn ids(candidates: &[SessionCandidate]) -> Vec<&str> {
         candidates.iter().map(|c| c.session_id.as_str()).collect()
+    }
+
+    /// The single-candidate card's row is built in one place, so the title, the
+    /// reason and the status cannot drift apart between the router and the card.
+    #[test]
+    fn a_proposal_row_names_the_candidate_and_its_state() {
+        let rows = vec![(
+            "s-cur".to_string(),
+            meta("s-cur", "整理报表", "2026-10-21T10:00:00+00:00", Some(CHAT), Some(ALICE)),
+        )];
+        let live: HashMap<String, CandidateStatus> =
+            [("s-cur".to_string(), CandidateStatus::Working)].into_iter().collect();
+        let built = build_candidates(&rows, &live, &query(CandidateSurface::Direct, &empty_set(), &empty_set(), 5));
+        let option = proposal_option("s-cur", "S1", "最近活跃", built.first());
+        assert_eq!(option["label"], "整理报表");
+        assert_eq!(option["status"], "working");
+        assert_eq!(option["why"], "最近活跃");
+
+        // A session the filter did not admit is named by its alias and claims no
+        // status — the card cannot paint a state it was never told.
+        let orphan = proposal_option("s-gone", "S2", "别名解析所得", None);
+        assert_eq!(orphan["label"], "S2");
+        assert!(orphan["status"].is_null());
     }
 
     #[test]

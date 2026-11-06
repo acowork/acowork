@@ -57,8 +57,10 @@ import { AttachmentViewer } from '../../components/AttachmentViewer'
 import { ChatAttachmentCapsule } from '../../components/ChatAttachmentCapsule'
 import { ChatExecutionBlock } from '../../components/ChatExecutionBlock'
 import { ChatNoticeRow } from '../../components/ChatNoticeRow'
+import { DeliveryAlertLine } from '../../components/DeliveryAlertLine'
 import { ChatAddressSheet, type AddressPick } from '../../components/ChatAddressSheet'
-import { buildCardAnswer, directCardAddress, mayAnswerCard, type CardChoice } from '../../lib/chatCardAnswer'
+import { answerWithChoice, directCardAddress, mayAnswerCard, type CardChoice } from '../../lib/chatCardAnswer'
+import { fetchCardAnswer } from '../../lib/api'
 import { turnInflight } from '../../lib/chatTurnInflight'
 import { buildTranscriptItems, type TranscriptItem } from '../../lib/chatTranscriptGroups'
 import { renderMarkdown } from '../../lib/markdown'
@@ -122,11 +124,11 @@ export function AgentChatScreen() {
    *  (or a source chip) just located — that block opens + focuses its in-place
    *  reply row. Cleared on the next send so a stale focus never re-fires. */
   const [focusBlockSessionId, setFocusBlockSessionId] = useState<string | null>(null)
-  /** A locate that found no block in the loaded window says so once, briefly —
-   *  the navigation is best-effort, the reference it pointed at is already on
-   *  the row regardless. No toast primitive exists on mobile, so it rides a
+  /** A best-effort action that could not be carried out says so once, briefly
+   *  (a locate that found no block in the loaded window; a card that can never
+   *  be answered again). No toast primitive exists on mobile, so it rides a
    *  transient pill above the composer. */
-  const [locateHint, setLocateHint] = useState<string | null>(null)
+  const [transientHint, setTransientHint] = useState<string | null>(null)
   // The scroll container, kept in a ref object alongside the hook's callback
   // ref, so a locate can find a block's DOM node (mobile is not virtualized —
   // every loaded row is in the tree).
@@ -158,17 +160,6 @@ export function AgentChatScreen() {
   // that `ItemView`'s memo needs.
   const layout = useMemo(() => buildTranscriptItems(rows, rowKeyOf), [rows])
   const items = layout.items
-  // Which messages already have a round: that is what makes an addressing card
-  // answered (the re-delivery leaves the reference row, ADR-106 D3), so the
-  // transcript itself carries the answer — no chat-side flag to keep in sync.
-  const roundTriggers = useMemo(() => {
-    const s = new Set<string>()
-    for (const r of rows) {
-      if (r.kind === 'execution_round' && r.meta?.in_reply_to) s.add(r.meta.in_reply_to)
-    }
-    return s
-  }, [rows])
-
   const { ref: scrollRef, stickNow, atBottom } = useStickToBottom([rows.length, sessionId], sessionId, () => {
     if (sessionId) void useChatSessionStore.getState().loadOlder(sessionId)
   })
@@ -207,9 +198,18 @@ export function AgentChatScreen() {
   /** Answering an addressing card (ADR-106 D6): re-send the human's OWN words
    *  with the address they just chose, keyed by the original row's id so the
    *  transcript keeps one message instead of narrating the decision twice. */
-  const answerCard = (card: ChatMessageRow, choice: CardChoice) => {
-    const original = rows.find((r) => r.meta?.message_id === card.meta?.in_reply_to)
-    const answer = buildCardAnswer(card, original, choice)
+  const answerCard = async (card: ChatMessageRow, choice: CardChoice) => {
+    const cardId = card.meta?.message_id
+    if (!cardId || !sessionId) return
+    const lookup = await fetchCardAnswer(sessionId, cardId)
+    if (!lookup.ok) {
+      // A spent card (`already_answered`) closes itself on the next projection
+      // read; `gone` is the one the human has to be told about, because those
+      // buttons will never work again.
+      if (lookup.reason === 'gone') setTransientHint('这张卡片已无法回答')
+      return
+    }
+    const answer = answerWithChoice(lookup.facts, choice)
     if (!answer) return
     deliver(answer.text, undefined, answer.attachmentIds, directCardAddress(answer))
   }
@@ -230,26 +230,26 @@ export function AgentChatScreen() {
     setAddressStage(false)
     const scope = containerRef.current
     if (!scope || !execSessionId) {
-      setLocateHint('任务块不在已加载历史')
+      setTransientHint('任务块不在已加载历史')
       return
     }
     const el = scope.querySelector<HTMLElement>(
       `[data-session$="|${execSessionId}"]`,
     )
     if (!el) {
-      setLocateHint('任务块不在已加载历史')
+      setTransientHint('任务块不在已加载历史')
       return
     }
     el.scrollIntoView({ behavior: 'smooth', block: 'center' })
     setFocusBlockSessionId(execSessionId)
   }
 
-  // Auto-dismiss a locate hint; the navigation already parked wherever it could.
+  // Auto-dismiss the pill; the action already parked wherever it could.
   useEffect(() => {
-    if (!locateHint) return
-    const id = setTimeout(() => setLocateHint(null), 2600)
+    if (!transientHint) return
+    const id = setTimeout(() => setTransientHint(null), 2600)
     return () => clearTimeout(id)
-  }, [locateHint])
+  }, [transientHint])
 
   /** The block's in-place reply sends straight down the level-1 branch: the
    *  text continues the freshest round the block names, exactly as a card
@@ -372,11 +372,6 @@ export function AgentChatScreen() {
                       ? answerCard
                       : undefined
                   }
-                  cardAnswered={
-                    item.kind === 'row' &&
-                    !!item.row.meta?.in_reply_to &&
-                    roundTriggers.has(item.row.meta.in_reply_to)
-                  }
                   onOpenAttachment={setViewing}
                   onLocateRef={handleLocateRef}
                   focusBlockSessionId={focusBlockSessionId ?? undefined}
@@ -488,9 +483,9 @@ export function AgentChatScreen() {
           </div>
         ) : null}
 
-        {locateHint ? (
+        {transientHint ? (
           <div className="composer-locate-hint" role="status">
-            {locateHint}
+            {transientHint}
           </div>
         ) : null}
 
@@ -574,9 +569,6 @@ export interface RowProps {
    *  utterance it asks about, now addressed. Handed only to the person the card
    *  asked (D10) — `undefined` for anyone else. */
   onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void
-  /** The card's question already has a round, so its buttons go quiet instead of
-   *  offering a second delivery of the same words. */
-  cardAnswered?: boolean
   /** A tap on an uploaded file's capsule. The parent owns the viewer so one
    *  overlay serves every row in the list (and outlives re-renders of it). */
   onOpenAttachment: (attachment: ChatAttachment) => void
@@ -600,7 +592,6 @@ export function RowView(props: RowProps) {
     agentAvatar,
     agentName,
     onChooseCard,
-    cardAnswered,
     onOpenAttachment,
     onLocateRef,
   } = props
@@ -623,7 +614,7 @@ export function RowView(props: RowProps) {
       (noticeType === 'session_choice' || noticeType === 'confirm_continue') && onChooseCard
         ? (choice: CardChoice) => onChooseCard(row, choice)
         : undefined
-    return <ChatNoticeRow row={row} onChoose={choose} answered={cardAnswered} />
+    return <ChatNoticeRow row={row} onChoose={choose} />
   }
 
   if (row.kind === 'interaction_request') {
@@ -706,6 +697,13 @@ export function RowView(props: RowProps) {
                   </button>
                 ))}
               </div>
+            ) : null}
+            {/* A send that failed, while it is still news (ADR-105 D5 rev.
+                2026-11-06): served live on this row, never a transcript row, and
+                gone on its own clock — a phone left open must not keep a dead
+                receipt on screen either. */}
+            {row.delivery?.alert ? (
+              <DeliveryAlertLine alert={row.delivery.alert} align={isSelf ? 'end' : 'start'} />
             ) : null}
           </div>
         </div>

@@ -47,11 +47,16 @@ import { useAuthStore } from "./authStore";
 
 /** ADR-100: one display label for something the Chat-surface composer handed
  *  to the task alongside a turn (the execution surface's own sends never reach
- *  this code — Rev. 8 / D14 writes them to their own session, not to chat). Labels only — no path, no id, nothing the chat side could
- *  try to open, because the attachment bytes stay in the execution session
- *  (design 27 §4.2.1). Mirrors `acowork_core::protocol::AttachmentLabel`, the
- *  same projection the Chat Router renders into its prompt: the chip and the
- *  prompt describe one attachment with one shape. */
+ *  this code — Rev. 8 / D14 writes them to their own session, not to chat).
+ *  Mirrors `acowork_core::protocol::AttachmentLabel`, the same projection the
+ *  Chat Router renders into its prompt: the chip and the prompt describe one
+ *  attachment with one shape.
+ *
+ *  `absPath` is the one field that is not display: a workspace arm ships the
+ *  path its chip opens (ADR-100 D12 Rev. 2026-11), and nothing else may use it
+ *  — the router's prompt line still prints the name and line range only. The
+ *  upload arms carry no path and no id, because their bytes stay in the run
+ *  that received them (design 27 §4.2.1). */
 export interface ExecAttachmentLabel {
   filename: string;
   /** The ADR-046 item arm (`attached_file` / `image_upload` / …); absent on a
@@ -65,9 +70,86 @@ export interface ExecAttachmentLabel {
   /** `attached_selection` only. */
   startLine?: number;
   endLine?: number;
+  /** Workspace arms only (`attached_file` / `attached_selection`): the path the
+   *  chip opens. Resolved client-side against the Agent's workspaces; a path
+   *  that resolves nowhere is a visible "file not found", never a silent click. */
+  absPath?: string;
 }
 
 /** One durable chat row. Mirrors `chat_sessions_api::MessageRow`. */
+/**
+ * What happened to one row, as the service computed it (design 31 §6).
+ *
+ * The Chat service projects this onto every row it serves, so no surface has to
+ * work it out. A surface that scans the transcript for a row whose
+ * `meta.in_reply_to` matches an id is deriving business state — that scan is
+ * what kept a send claiming "working on it" for 300 s after a card landed with
+ * an empty coordinate, and it existed in four places with three different
+ * rules. Render this verbatim instead.
+ */
+export interface ChatAnswerRef {
+  message_id: string;
+  kind: string;
+}
+
+/** Where a turn went: coordinates only. The round's content is read from the
+ *  execution session, never copied here (design 31 §3.2 R3). */
+export interface ChatRoundTarget {
+  agent_instance_id: string;
+  agent_session_id: string;
+  round_id: string;
+  /** `true` = this turn opened the session, `false` = it carried on, absent =
+   *  the delivery never said (ADR-106 D3 forbids faking it). */
+  opened_new?: boolean;
+}
+
+/** An addressing card's own state: the answers it offers and whether the human
+ *  has already taken one. */
+export interface ChatQuestionState {
+  /** A round now answers the message this card asked about — the re-delivery
+   *  leaves the reference row, so the answer is the round's existence. */
+  answered: boolean;
+  options: Array<{
+    session_id: string;
+    label?: string;
+    status?: string;
+    origin?: string;
+    why?: string;
+  }>;
+  allow_new_task?: boolean;
+}
+
+export interface ChatDeliveryView {
+  /** True when a row answers this one — the fact the surfaces used to compute
+   *  by scanning. Absent delivery means "not projected yet" (an optimistic row
+   *  this device inserted before the service answered), never "unanswered". */
+  answered: boolean;
+  answered_by?: ChatAnswerRef;
+  /** Every round that answers this row, in log order. A group `@` fan-out opens
+   *  one round per target against the same message, so this is a list: a single
+   *  value would report the first target and lose the rest. */
+  targets?: ChatRoundTarget[];
+  question?: ChatQuestionState;
+  /** A send this row owed that failed — served **live**, never stored
+   *  (ADR-105 D5, revision 2026-11-06). The service keeps it in memory for
+   *  `expires_in` seconds and then stops reporting it; the transcript keeps no
+   *  trace, which is the point: the yellow receipt used to outlive the problem by
+   *  weeks, including after a retry succeeded. */
+  alert?: ChatDeliveryAlert;
+}
+
+/** A live delivery failure (`delivery.alert`). */
+export interface ChatDeliveryAlert {
+  /** Who did not receive it. */
+  target: string;
+  /** Machine token: `target_not_installed` / `not_authorized` / `no_response` /
+   *  a publish error code. Wording belongs to the surface — it owns the copy. */
+  error_code: string;
+  /** Seconds of life left when this page was read. The surface schedules its own
+   *  removal from it instead of comparing clocks with the service. */
+  expires_in: number;
+}
+
 export interface ChatMessageRow {
   seq: number;
   ts: number;
@@ -145,6 +227,10 @@ export interface ChatMessageRow {
     }>;
   };
   attachment_ids?: string[];
+  /** The service's projection for this row (design 31 §6). Present on every row
+   *  served by the read endpoint; absent on a row this device inserted
+   *  optimistically before the write's response came back. */
+  delivery?: ChatDeliveryView;
   /** Files attached to this row. `thumb` is the upload-time sidecar token
    *  (`"jpg"` / `"txt"`); absent when the service produced no preview, so the
    *  row falls back to the plain filename capsule. */
@@ -571,6 +657,90 @@ export async function createChatAttachmentObjectUrl(
 ): Promise<string> {
   const blob = await fetchChatAttachmentBlob(chatSessionId, attachmentId, opts);
   return URL.createObjectURL(blob);
+}
+
+/** The service's answer to "what would answering this card send?" — the
+ *  human's own words, the card's coordinates, and the original row's pinned
+ *  `@session` material (design 31 §7.2, ADR-106 D6). No address: which session
+ *  the words go to is the click, and only the surface knows it. */
+export interface CardAnswerFacts {
+  agentId: string;
+  messageId: string;
+  text: string;
+  attachmentIds: string[];
+  refs: ChatRefPick[];
+}
+
+/** Why a card could not be answered, when it could not be.
+ *
+ *  `already_answered` is not an error to report: a round answers the message
+ *  the card asked about, so the question is spent and the projection's next
+ *  read closes it. `gone` covers the three ways the row stopped being a card
+ *  (a non-card id, an origin row that is no longer readable, a session the
+ *  caller is not in) — the surface says so instead of clicking into nothing. */
+export type CardAnswerLookup =
+  | { ok: true; facts: CardAnswerFacts }
+  | { ok: false; reason: "already_answered" | "gone" };
+
+/**
+ * Resolve a card answer on the server (design 31 §6 — one derivation point).
+ *
+ * Why not derive it here: the answer is a copy of a row that may be far outside
+ * the loaded window, and a surface can only copy what it has loaded. Both
+ * surfaces used to rebuild the utterance from their own window and returned
+ * silently when the row was gone, which made a scrolled-away card's buttons dead.
+ */
+export async function fetchCardAnswer(
+  chatSessionId: string,
+  cardMessageId: string,
+): Promise<CardAnswerLookup> {
+  const token = useAuthStore.getState().accessToken;
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/chat-sessions/${encodeURIComponent(chatSessionId)}/messages/${encodeURIComponent(cardMessageId)}/answer`,
+    { headers: token ? { Authorization: `Bearer ${token}` } : {} },
+  );
+  if (resp.status === 409) return { ok: false, reason: "already_answered" };
+  // 404 (not a participant / no such session) and 422 (not a card, origin
+  // gone) are the same fact to a surface: this card can no longer be answered.
+  if (resp.status === 404 || resp.status === 422) {
+    return { ok: false, reason: "gone" };
+  }
+  if (!resp.ok) throw new Error(`card answer → ${resp.status}`);
+  const v = (await resp.json()) as {
+    agent_id?: string;
+    message_id?: string;
+    text?: string;
+    attachment_ids?: string[];
+    refs?: Array<{
+      agent_instance_id?: string;
+      session_id?: string;
+      round_id?: string;
+      terminal?: boolean;
+    }>;
+  };
+  return {
+    ok: true,
+    facts: {
+      agentId: v.agent_id ?? "",
+      messageId: v.message_id ?? "",
+      text: v.text ?? "",
+      attachmentIds: v.attachment_ids ?? [],
+      // Echoed back verbatim (the quadruples were pinned when the row was
+      // written); only the names are translated to the picker's spelling.
+      refs: (v.refs ?? []).flatMap((r) =>
+        r.agent_instance_id && r.session_id
+          ? [
+              {
+                agentInstanceId: r.agent_instance_id,
+                sessionId: r.session_id,
+                ...(r.round_id ? { roundId: r.round_id } : {}),
+                ...(r.terminal !== undefined ? { terminal: r.terminal } : {}),
+              },
+            ]
+          : [],
+      ),
+    },
+  };
 }
 
 // ADR-106 D8: there is no chat-side card state to project. A round's pending

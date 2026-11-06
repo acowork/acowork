@@ -614,7 +614,10 @@ pub struct TurnContext<'a> {
     pub speaker: &'a str,
     /// RFC3339, produced by the caller once.
     pub now: &'a str,
-    /// Rendered draft config (`model=…, workspace=…`), `None` = untouched.
+    /// Rendered draft config (`model=…, workspace="ACoworkDev" (id ws-…)`),
+    /// `None` = untouched. The workspace carries both its name and its id: the
+    /// name is what a human-readable background must say, the id is what
+    /// `session_config.workspace` is validated by.
     pub draft: Option<&'a str>,
     pub candidates: &'a [CandidateLine],
     /// `project=… task=…` when the turn is a PM follow-up.
@@ -638,6 +641,14 @@ pub struct TurnContext<'a> {
     /// only places them; they belong to Block C's dynamic area, never to the
     /// cached prefix.
     pub referenced_rounds: &'a [String],
+    /// The human answered the addressing question with "new task" (ADR-106 D6's
+    /// cheap escape). It is stated as a fact of the turn, next to `surface` /
+    /// `speaker`, because it explains the `(none)` below: without it the model
+    /// reads an empty candidate list as "this chat has never run anything" and
+    /// answers with a question instead of opening the session the human asked
+    /// for. `false` renders nothing — a per-turn line that is usually absent
+    /// stays out of the tail it would otherwise churn.
+    pub continuation_refused: bool,
 }
 
 impl TurnContext<'_> {
@@ -657,6 +668,13 @@ impl TurnContext<'_> {
         ));
         if !self.history_available {
             out.push_str("history: unavailable (the read failed; do not assume what was said before)\n");
+        }
+        // "New task" is a fact of this turn, and it is what makes the empty
+        // candidate list below readable: the human was asked which run to
+        // continue and chose new work (ADR-106 D6). Written only when true, so
+        // an ordinary turn carries no extra tail line.
+        if self.continuation_refused {
+            out.push_str("continuation: refused by the human (\"new task\")\n");
         }
         out.push_str("[candidates]\n");
         if self.candidates.is_empty() {
@@ -1048,6 +1066,7 @@ mod tests {
             attachments: &row.attachments,
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         };
         let rendered = ctx.render();
         let turn_line = rendered.lines().last().expect("block c renders");
@@ -1065,6 +1084,11 @@ mod tests {
         row.meta.exec_attachments = vec![AttachmentLabel {
             filename: "chat_prompt.rs".into(),
             kind: "attached_file".into(),
+            // The client's open coordinate (ADR-100 D12 Rev. 2026-11). Set
+            // here on purpose: the prompt must keep describing this reference
+            // by display name alone, so this path must NOT show up in either
+            // rendering below.
+            abs_path: Some("E:/projects/demo/chat_prompt.rs".into()),
             ..Default::default()
         }];
         let history_line = project_row(&row, "agent-1")
@@ -1087,11 +1111,16 @@ mod tests {
             attachments: &row.attachments,
             refs: &row.meta.exec_attachments,
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         let turn_line = turn_line.lines().last().expect("block c renders");
         assert_eq!(turn_line, history_line);
         assert!(turn_line.starts_with("[attached refs] chat_prompt.rs"));
+        assert!(
+            !turn_line.contains("E:/projects/demo"),
+            "the open coordinate never reaches the model: {turn_line}"
+        );
     }
 
     #[test]
@@ -1113,6 +1142,7 @@ mod tests {
             attachments: &attachments,
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
 
@@ -1136,6 +1166,7 @@ mod tests {
             attachments: &[],
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(rendered.ends_with("\n[user message]\nhello"));
@@ -1165,6 +1196,7 @@ mod tests {
             attachments: &[],
             refs: &[],
             referenced_rounds: &material,
+            continuation_refused: false,
         }
         .render();
         assert!(
@@ -1198,6 +1230,7 @@ mod tests {
             attachments: &[],
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         }
         .render();
         assert!(!plain.contains("[referenced rounds]"));
@@ -1254,6 +1287,7 @@ mod tests {
             attachments: &[],
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         };
         let text = ctx.render();
         assert!(text.starts_with("[runtime context]\nsurface: group\nspeaker: alice\n"));
@@ -1290,12 +1324,50 @@ mod tests {
             attachments: &[],
             refs: &[],
             referenced_rounds: &[],
+            continuation_refused: false,
         };
         let text = ctx.render();
         assert!(text.contains("draft: model=claude-sonnet, workspace=ws-1"));
         assert!(text.contains("history: unavailable"));
         assert!(text.contains("[candidates]\n(none)\n"));
         assert!(text.contains("[task]\nproject=proj task=T-12\n"));
+    }
+
+    /// The empty candidate list needs a reason, or the model reads it as "this
+    /// chat has never run anything" and answers with a clarifying question
+    /// instead of opening the session the human just asked for.
+    ///
+    /// Only a refused turn carries the line: an ordinary turn's tail stays
+    /// byte-identical, which is what keeps the provider prefix cache warm.
+    #[test]
+    fn a_refused_continuation_says_so_beside_its_empty_candidate_list() {
+        let render = |continuation_refused: bool| {
+            TurnContext {
+                surface: "dm",
+                speaker: "alice",
+                now: "2026-10-21T14:03:00+08:00",
+                draft: None,
+                candidates: &[],
+                task: None,
+                history_available: true,
+                user_message: "另外开一个",
+                attachments: &[],
+                refs: &[],
+                referenced_rounds: &[],
+                continuation_refused,
+            }
+            .render()
+        };
+
+        let refused = render(true);
+        assert!(refused.contains("continuation: refused by the human"));
+        // The fact sits with the other turn facts, above the candidate block.
+        let continuation_at = refused.find("continuation: refused").unwrap();
+        let candidates_at = refused.find("[candidates]").unwrap();
+        assert!(continuation_at < candidates_at);
+        assert!(refused.contains("[candidates]\n(none)\n"));
+
+        assert!(!render(false).contains("continuation:"));
     }
 
     #[test]

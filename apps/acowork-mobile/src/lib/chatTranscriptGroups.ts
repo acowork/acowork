@@ -12,7 +12,8 @@
  * screen it is worse than ugly, it pushes the conversation off the device.
  *
  * So this module folds a session's reference rows into ONE item anchored at the
- * session's newest row in the loaded window, and takes with it the chat's own
+ * session's OLDEST row in the loaded window (a continuation adds a round without
+ * moving the block), and takes with it the chat's own
  * `user_message` rows those rounds were built from: the block renders the
  * question as the round's own line, so the transcript must not hold the same
  * sentence twice (D6's re-delivery rule is the precedent).
@@ -60,8 +61,10 @@ export interface RunBlock {
   kind: 'run'
   instanceId: string
   execSessionId: string
-  /** Chronological. The newest is the block's anchor row. */
+  /** Chronological. The newest is what the block opens to. */
   rounds: RoundItem[]
+  /** The block's position in the transcript: the session's OLDEST row here.
+   *  Continuations add rounds without moving it. */
   anchorRow: ChatMessageRow
 }
 
@@ -149,17 +152,34 @@ export function buildTranscriptItems(
     })
   }
 
-  // A group's anchor is its newest row: the block sits where the session's most
-  // recent work is, so the freshest answer stays next to the freshest question
-  // instead of stranded at the session's first appearance.
+  // A group's anchor is its OLDEST row: the block sits where the session first
+  // appeared and stays there for the session's whole life (the desktop surface
+  // fixed the same defect — a newest-row anchor dragged the block past every row
+  // written in between on each continuation, so the questions ended up at the
+  // top and the block answering them at the bottom).
   const anchorOf = new Map<string, ChatMessageRow>()
   for (const [key, group] of groups) {
-    anchorOf.set(key, group.rounds[group.rounds.length - 1]!.roundRow)
+    anchorOf.set(key, group.rounds[0]!.roundRow)
   }
 
   const items: TranscriptItem[] = []
   const keyOfSeq = new Map<number, string>()
-  const emitted = new Set<string>()
+
+  // Which seqs a block draws, computed BEFORE the walk: resolving this inside it
+  // made the mapping depend on whether a block was emitted before or after the
+  // rows it folded — a folded row written later overwrote the block's own
+  // mapping with the row's key, and a locate then pointed at a row that is not in
+  // the DOM. It only worked while the block sat at the newest row (i.e. last).
+  const foldedInto = new Map<number, ChatMessageRow>()
+  for (const [key, group] of groups) {
+    const anchor = anchorOf.get(key)!
+    for (const round of group.rounds) {
+      if (round.roundRow !== anchor) foldedInto.set(round.roundRow.seq, anchor)
+      if (round.triggerRow && round.showUserLine) {
+        foldedInto.set(round.triggerRow.seq, anchor)
+      }
+    }
+  }
 
   for (const r of rows) {
     const coord = r.kind === 'execution_round' ? sessionOf(r) : null
@@ -170,39 +190,24 @@ export function buildTranscriptItems(
       // Folded rows still resolve to the block's key, so a locate lands on the
       // block that holds them.
       if (r !== anchor) {
-        keyOfSeq.set(r.seq, keyOf(anchor))
+        keyOfSeq.set(r.seq, keyOf(foldedInto.get(r.seq) ?? anchor))
         continue
       }
-      const triggerSeqs = group.rounds
-        // Only the block that OWNS the question row folds it: a fan-out trigger
-        // claimed by an earlier session's block is not rendered here, and mapping
-        // its seq here would point a locate at a block that does not show it.
-        .filter((round) => round.showUserLine)
-        .map((round) => round.triggerRow)
-        .filter(Boolean)
-        .map((row) => row!.seq)
-      // The block owns its question rows too: they are the same sentence the
-      // round's line shows.
-      const skip = new Set(triggerSeqs)
-      for (const round of group.rounds) skip.add(round.roundRow.seq)
-      for (const seq of skip) keyOfSeq.set(seq, keyOf(anchor))
-      if (!emitted.has(key)) {
-        emitted.add(key)
-        items.push({
-          kind: 'run',
-          instanceId: group.instanceId,
-          execSessionId: group.execSessionId,
-          rounds: group.rounds,
-          anchorRow: anchor,
-        })
-      }
+      keyOfSeq.set(r.seq, keyOf(anchor))
+      items.push({
+        kind: 'run',
+        instanceId: group.instanceId,
+        execSessionId: group.execSessionId,
+        rounds: group.rounds,
+        anchorRow: anchor,
+      })
       continue
     }
-    // A question row this block folded: it renders inside the block.
-    const answered =
-      r.kind === 'user_message' && r.meta?.message_id && claimedTriggers.has(r.meta.message_id)
-    if (answered) {
-      keyOfSeq.set(r.seq, keyOf(r))
+    // A question row a block folded: it renders inside that block, so its seq
+    // must resolve there — a locate on it scrolls to the block that shows it.
+    const folded = foldedInto.get(r.seq)
+    if (folded) {
+      keyOfSeq.set(r.seq, keyOf(folded))
       continue
     }
     items.push({ kind: 'row', row: r })

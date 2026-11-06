@@ -566,8 +566,8 @@ export function AppLayout() {
 
   // ── Sync right-panel tab to agent lifecycle ──────────────────────
   // Stop: bounce back to status. RightNavBar hides the workspace / memory
-  // / setup / tools / debug buttons once the agent stops, so leaving any
-  // of them active would render an empty-state shell.
+  // / setup / debug buttons once the agent stops, so leaving any of them
+  // active would render an empty-state shell.
   // Start: jump to workspace. Workspace is the most common destination
   // after a launch (file edits, skill browsing, locate-in-tree), and the
   // user typically leaves status on the offline screen only until the
@@ -584,7 +584,6 @@ export function AppLayout() {
       wasAlive !== false &&
       (activeTab === "memory" ||
         activeTab === "setup" ||
-        activeTab === "tools" ||
         activeTab === "debug" ||
         activeTab === "workspace")
     ) {

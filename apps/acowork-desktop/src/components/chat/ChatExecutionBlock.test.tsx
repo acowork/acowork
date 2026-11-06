@@ -152,7 +152,7 @@ function renderBlock(
  *  the parentheses as separate text nodes (`ExploreBlock`'s shape), so the
  *  assertion reads the header element, not a whole-text match. */
 function headerText(container: HTMLElement): string {
-  return container.querySelector("[aria-expanded]")?.textContent ?? "";
+  return container.querySelector("[data-run-header]")?.textContent ?? "";
 }
 
 describe("ChatExecutionBlock", () => {
@@ -178,7 +178,7 @@ describe("ChatExecutionBlock", () => {
       blockOf([roundOf("r1", 2), roundOf("r2", 4)]),
     );
     // One collapse header for the session, not one per reference row.
-    expect(document.querySelectorAll("[aria-expanded]")).toHaveLength(1);
+    expect(document.querySelectorAll("[data-run-header]")).toHaveLength(1);
     expect(headerText(container)).toContain("chatView.block.roundCount");
     expect(screen.getAllByText("chatView.block.roundN")).toHaveLength(2);
   });
@@ -344,6 +344,97 @@ describe("ChatExecutionBlock", () => {
     );
   });
 
+  /** Regression (2026-11-06): the projected card outlived its question.
+   *
+   * A round that timed out (or was closed by a crash repair) used to keep its
+   * `ask_question` into the terminal record, so the block painted a card whose
+   * request id no longer existed: the click answered `202`, the loop dropped it,
+   * and the card stayed until a newer row covered it. The card must be gone the
+   * moment the round is not answerable, and the answer must force a re-read
+   * instead of trusting the click's own status.
+   */
+  it("a round that can no longer take an answer wears no card", () => {
+    renderBlock({
+      [REF1]: entryOf({
+        status: "ok",
+        projection: {
+          round_id: "r1",
+          terminal: true,
+          status: "interrupted",
+          card: { kind: "ask_question", request_id: "q1", prompt: "Pick one", options: ["A"] },
+        },
+      }),
+    });
+    expect(screen.queryByText("Pick one")).toBeNull();
+    expect(screen.queryByText("A")).toBeNull();
+  });
+
+  it("a waiting park still shows its card: the question was abandoned, not answered", () => {
+    renderBlock(
+      {
+        [REF1]: entryOf({
+          status: "ok",
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "waiting",
+            card: { kind: "pause", request_id: "p1", prompt: "Blocked on you" },
+          },
+        }),
+      },
+      { onReplyToRound: vi.fn() },
+    );
+    expect(screen.getByText("Blocked on you")).toBeTruthy();
+    expect(screen.getByText("chatView.cardContinue")).toBeTruthy();
+  });
+
+  it("answering re-reads the round, whatever the POST said", async () => {
+    renderBlock({
+      [REF1]: entryOf({
+        status: "pending",
+        projection: {
+          round_id: "r1",
+          terminal: false,
+          status: "waiting",
+          card: { kind: "ask_question", request_id: "q1", prompt: "Pick one", options: ["A"] },
+        },
+      }),
+    });
+    fireEvent.click(screen.getByText("A"));
+    await waitFor(() => expect(sendAnswer).toHaveBeenCalled());
+    // The projection is the only thing that knows whether the question was still
+    // open; `/answer` queues and answers 202 either way.
+    await waitFor(() => expect(reload).toHaveBeenCalledWith("c1", [REF1]));
+  });
+
+  it("options are a column, so a long label wraps instead of breaking the layout", () => {
+    renderBlock({
+      [REF1]: entryOf({
+        status: "pending",
+        projection: {
+          round_id: "r1",
+          terminal: false,
+          status: "waiting",
+          card: {
+            kind: "ask_question",
+            request_id: "q1",
+            prompt: "Pick one",
+            options: ["按方案执行，TTL 10 分钟，桌面+手机同批", "先只做不再持久化"],
+          },
+        },
+      }),
+    });
+    const first = screen.getByText("按方案执行，TTL 10 分钟，桌面+手机同批");
+    const second = screen.getByText("先只做不再持久化");
+    const column = first.parentElement!;
+    expect(column.className).toContain("flex-col");
+    expect(column).toBe(second.parentElement);
+    // Sentence-shaped options align left and wrap; a centered wrapped label
+    // reads as two options.
+    expect(first.className).toContain("text-left");
+    expect(first.className).toContain("whitespace-normal");
+  });
+
   it("a viewer who is not the answerer sees the question and no buttons (D10)", () => {
     renderBlock(
       {
@@ -419,8 +510,10 @@ describe("ChatExecutionBlock", () => {
       { [REF1]: entryOf({}) },
       { onJumpToExec },
     );
-    const drill = screen.getByText("chatView.viewRun");
-    const pill = container.querySelector("[aria-expanded]") as HTMLElement;
+    // The drill is icon-only now (the action row above the block): its label
+    // lives in `aria-label`/`title`, not in the text layer.
+    const drill = screen.getByRole("button", { name: "chatView.viewRun" });
+    const pill = container.querySelector("[data-run-header]") as HTMLElement;
     expect(onJumpToExec).not.toHaveBeenCalled();
     fireEvent.click(drill);
     expect(onJumpToExec).toHaveBeenCalledWith("ag", "s1");
@@ -464,7 +557,7 @@ describe("ChatExecutionBlock", () => {
         },
       }),
     });
-    const pill = container.querySelector("[aria-expanded]") as HTMLElement;
+    const pill = container.querySelector("[data-run-header]") as HTMLElement;
     expect(pill.className).toContain("bg-zinc-100/60");
     // The highlight color is a button background, never a border or a title.
     expect(pill.className).not.toContain("--color-accent");
@@ -641,46 +734,80 @@ describe("ChatExecutionBlock — what a session's header claims (t-1b7bdb21)", (
 });
 
 /**
- * The block's in-place reply box (ADR-106 revision 2026-11-04). It lives OUTSIDE
- * the collapse body, so a run that is folded away is still continuable in place.
- * The three behaviours the IM habit demands, and the one wire contract:
- *   - reveal on hover, but a held draft or focus NEVER collapses it (typed
- *     words lost to a stray mouse-out is the failure mode);
- *   - the `@` picker's "去续投" focus signal reveals AND focuses on its rising
- *     edge, so the human arrives ready to type;
+ * The block's in-place reply drawer (design 27 §5.5.5; ADR-106 revision
+ * 2026-11-06). It lives in the action row ABOVE the block, so a folded run is
+ * still continuable in place and nothing below the block reserves height for a
+ * control nobody is using. The behaviours the IM habit demands, and the one wire
+ * contract:
+ *   - the drawer opens on hover, on click, and on the `@` picker's "去续投"
+ *     focus signal — but a held draft or focus NEVER closes it (typed words lost
+ *     to a stray mouse-out is the failure mode);
+ *   - closed means closed: the field is `inert`, so it is not in the tab order
+ *     behind a clipped 24px capsule;
  *   - a send rides `sendGroupText(chat, text, [], referenceRowId)` — the level-1
  *     branch — where the id is the freshest round's reference-row message_id
  *     (same value the pause card's continue button uses), not the block ref.
  */
 describe("ChatExecutionBlock in-place reply", () => {
+  /** The drawer capsule. `data-state` is the open/closed contract the tests read
+   *  instead of a class name, so restyling the motion never reddens them. */
+  function drawer(): HTMLElement {
+    const el = document.querySelector('[data-run-action="reply"]');
+    if (!el) throw new Error("no reply drawer rendered");
+    return el as HTMLElement;
+  }
+
   beforeEach(() => {
     vi.clearAllMocks();
     store.chat = { agentStates: {} };
     vi.restoreAllMocks();
   });
 
-  it("reveals on hover and refuses to hide while a draft holds", () => {
+  it("opens on hover and refuses to close while a draft holds", async () => {
     renderBlock({ [REF1]: entryOf({}) });
+    // Closed at rest: the capsule is clamped to the icon's own width and the
+    // field inside is inert, so it is not even in the accessibility tree.
+    expect(drawer().getAttribute("data-state")).toBe("closed");
+    expect(screen.queryByRole("textbox")).toBeNull();
+    // The whole row is one hover zone — crossing from an icon into the drawer is
+    // not "leaving".
+    fireEvent.mouseEnter(drawer().parentElement as HTMLElement);
+    expect(drawer().getAttribute("data-state")).toBe("open");
     const box = screen.getByRole("textbox") as HTMLTextAreaElement;
-    const shell = box.parentElement as HTMLElement;
-    const hoverZone = shell.parentElement as HTMLElement;
-    // Collapsed at rest: transparent and non-interactive.
-    expect(shell.className).toContain("opacity-0");
-    fireEvent.mouseEnter(hoverZone);
-    expect(shell.className).toContain("opacity-100");
     // Type, then the pointer leaves — the draft pins it open.
     fireEvent.change(box, { target: { value: "keep typing" } });
-    fireEvent.mouseLeave(hoverZone);
-    expect(shell.className).toContain("opacity-100");
+    fireEvent.mouseLeave(drawer().parentElement as HTMLElement);
+    await waitFor(() => expect(drawer().getAttribute("data-state")).toBe("open"));
   });
 
-  it("the picker's focus signal reveals and focuses the box", async () => {
-    renderBlock({ [REF1]: entryOf({}) }, { focusInput: true });
-    const box = screen.getByRole("textbox");
-    await waitFor(() => expect(document.activeElement).toBe(box));
-    expect((box.parentElement as HTMLElement).className).toContain(
-      "opacity-100",
+  it("closes again after the pointer leaves an empty drawer", async () => {
+    renderBlock({ [REF1]: entryOf({}) });
+    const row = drawer().parentElement as HTMLElement;
+    fireEvent.mouseEnter(row);
+    expect(drawer().getAttribute("data-state")).toBe("open");
+    fireEvent.mouseLeave(row);
+    await waitFor(() =>
+      expect(drawer().getAttribute("data-state")).toBe("closed"),
     );
+  });
+
+  it("the message button opens and focuses the drawer (keyboard reachable)", async () => {
+    renderBlock({ [REF1]: entryOf({}) });
+    fireEvent.click(
+      screen.getByRole("button", { name: "chatView.block.replyPlaceholder" }),
+    );
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox")),
+    );
+    expect(drawer().getAttribute("data-state")).toBe("open");
+  });
+
+  it("the picker's focus signal opens and focuses the box", async () => {
+    renderBlock({ [REF1]: entryOf({}) }, { focusInput: true });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("textbox")),
+    );
+    expect(drawer().getAttribute("data-state")).toBe("open");
   });
 
   it("sends an in-place continuation to the freshest round's reference row", async () => {
@@ -689,6 +816,7 @@ describe("ChatExecutionBlock in-place reply", () => {
       sendGroupText,
     } as unknown as ReturnType<typeof useChatSessionStore.getState>);
     renderBlock({ [REF1]: entryOf({}) });
+    fireEvent.mouseEnter(drawer().parentElement as HTMLElement);
     const box = screen.getByRole("textbox") as HTMLTextAreaElement;
     fireEvent.focus(box);
     fireEvent.change(box, { target: { value: "continue please" } });
@@ -701,7 +829,173 @@ describe("ChatExecutionBlock in-place reply", () => {
         "round:ag|s1|r1",
       ),
     );
-    // Cleared after send, box stays put for the next follow-up.
+    // Cleared after send, drawer stays put for the next follow-up.
     expect(box.value).toBe("");
+    expect(drawer().getAttribute("data-state")).toBe("open");
+  });
+
+  it("offers no drawer to a viewer who may not answer", () => {
+    renderBlock({ [REF1]: entryOf({}) }, { canAnswer: false });
+    expect(document.querySelector('[data-run-action="reply"]')).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+  });
+});
+
+describe("ChatExecutionBlock action row", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    store.chat = { agentStates: {} };
+    vi.restoreAllMocks();
+  });
+
+  it("copies the WHOLE run, folded rounds included", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    const entries: Record<string, ChatBlockEntry | undefined> = {};
+    const rounds: RoundItem[] = [];
+    for (let n = 1; n <= 4; n++) {
+      const round = roundOf(`r${n}`, n);
+      entries[round.ref] = entryOf({
+        ref: round.ref,
+        round_id: `r${n}`,
+        projection: {
+          round_id: `r${n}`,
+          terminal: true,
+          status: "completed",
+          answer: { body: `answer ${n}`, ts: `${n}` },
+        },
+      });
+      rounds.push(round);
+    }
+    renderBlock(entries, {}, blockOf(rounds));
+    // Four rounds, two of them behind "show earlier" — the copy still carries
+    // every one of them.
+    fireEvent.click(screen.getByRole("button", { name: "chatView.block.actionCopy" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    const payload = writeText.mock.calls[0]![0] as unknown as string;
+    for (const n of [1, 2, 3, 4]) expect(payload).toContain(`answer ${n}`);
+    expect(payload).toContain("chatView.block.roundN");
+  });
+
+  it("states an unreadable round in the copy instead of inventing its content", async () => {
+    const writeText = vi.fn(async () => undefined);
+    Object.assign(navigator, { clipboard: { writeText } });
+    renderBlock({
+      [REF1]: entryOf({ ref: REF1, status: "not_found", projection: undefined }),
+    });
+    fireEvent.click(screen.getByRole("button", { name: "chatView.block.actionCopy" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1));
+    expect(writeText.mock.calls[0]![0]).toContain("chatView.block.copyUnreadable");
+  });
+
+  it("hands the session to the composer through the @ action", () => {
+    const onReferenceRun = vi.fn();
+    renderBlock({ [REF1]: entryOf({}) }, { onReferenceRun });
+    fireEvent.click(
+      screen.getByRole("button", { name: "chatView.block.actionReference" }),
+    );
+    expect(onReferenceRun).toHaveBeenCalledWith({
+      instanceId: "ag",
+      execSessionId: "s1",
+      name: "chatView.block.unnamedRun",
+    });
+  });
+
+  it("offers no @ action to a viewer who may not address the composer", () => {
+    renderBlock({ [REF1]: entryOf({}) }, { canAnswer: false, onReferenceRun: vi.fn() });
+    expect(
+      screen.queryByRole("button", { name: "chatView.block.actionReference" }),
+    ).toBeNull();
+  });
+
+  /** ADR-106 D6 level 5, revised placement: the router's "continue in this run?"
+   *  question is drawn at the run's tail, outside the collapse, and only for the
+   *  person it asked. It is the same card as the standalone notice row — same
+   *  answer path, same wording — so only its address changed. */
+  it("draws the pending addressing question at the block's tail", () => {
+    const onChooseCard = vi.fn();
+    const ask: ChatMessageRow = {
+      seq: 9,
+      ts: 9,
+      from: "ag",
+      kind: "system_notice",
+      body: "",
+      to: "me",
+      meta: { message_id: "confirm_continue:u1", notice_type: "confirm_continue" },
+      delivery: {
+        answered: false,
+        question: {
+          answered: false,
+          options: [{ session_id: "s1", label: "fix pagination" }],
+          allow_new_task: true,
+        },
+      },
+    };
+    renderBlock(
+      { [REF1]: entryOf({}) },
+      { onChooseCard },
+      { ...blockOf([roundOf("r1", 3)]), pendingAsk: ask },
+    );
+    // The question renders even with the block collapsed: an unanswerable thing
+    // behind a fold is exactly what D8 forbids.
+    expect(screen.getByText("chatView.block.confirmSession")).toBeTruthy();
+    fireEvent.click(screen.getByText("fix pagination"));
+    expect(onChooseCard).toHaveBeenCalledWith(ask, { sessionId: "s1" });
+  });
+
+  it("keeps the question visible while the block is collapsed", () => {
+    // D8's rule in this chrome: a fold must not hide the thing waiting on the
+    // human. The block collapses once the conversation moves past it, which is
+    // exactly when an unanswered proposal needs answering.
+    const ask: ChatMessageRow = {
+      seq: 9,
+      ts: 9,
+      from: "ag",
+      kind: "system_notice",
+      body: "",
+      to: "me",
+      meta: { message_id: "confirm_continue:u1", notice_type: "confirm_continue" },
+      delivery: {
+        answered: false,
+        question: { answered: false, options: [{ session_id: "s1", label: "fix pagination" }] },
+      },
+    };
+    renderBlock(
+      { [REF1]: entryOf({}) },
+      { hasFollowUp: true },
+      { ...blockOf([roundOf("r1", 3)]), pendingAsk: ask },
+    );
+    expect(
+      document.querySelector("[data-run-header]")?.getAttribute("aria-expanded"),
+    ).toBe("false");
+    expect(screen.getByText("chatView.block.confirmSession")).toBeTruthy();
+  });
+
+  it("a viewer who cannot answer sees the block without the question's buttons", () => {
+    const ask: ChatMessageRow = {
+      seq: 9,
+      ts: 9,
+      from: "ag",
+      kind: "system_notice",
+      body: "",
+      to: "someone-else",
+      meta: { message_id: "confirm_continue:u1", notice_type: "confirm_continue" },
+      delivery: {
+        answered: false,
+        question: {
+          answered: false,
+          options: [{ session_id: "s1", label: "fix pagination" }],
+        },
+      },
+    };
+    renderBlock(
+      { [REF1]: entryOf({}) },
+      { canAnswer: false },
+      { ...blockOf([roundOf("r1", 3)]), pendingAsk: ask },
+    );
+    // D10's read/write split, same as the standalone card row: the question is
+    // visible to anyone looking at the block, only the answerer may take it.
+    expect(screen.getByText("chatView.block.confirmSession")).toBeTruthy();
+    expect(screen.getByText("chatView.block.answeredByOwner")).toBeTruthy();
   });
 });

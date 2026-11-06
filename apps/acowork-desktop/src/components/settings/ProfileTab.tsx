@@ -272,7 +272,7 @@ export function ProfileTab() {
   };
 
   // ── Render ────────────────────────────────────────────────────────
-  // Tools-tab style level-1 collapsible cards (default open)
+  // Level-1 collapsible cards (same grammar as the Setup panel), default open
   const [profileOpen, setProfileOpen] = useState(true);
   const [identityOpen, setIdentityOpen] = useState(true);
 

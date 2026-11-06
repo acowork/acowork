@@ -1,5 +1,7 @@
 # ADR-069: Per-Tool Opt-In for MCP Tools — agent_mcp_tools.json
 
+> **Panel-location revision (2026-11-06, [ADR-108](./ADR-108-right-panel-consolidation.md))**: the right-rail Tools panel no longer exists — every reference below to "the Tools panel" / "the Builtin Tools card" / "the MCP card" now means the **Setup panel** (`AgentSetupTab`); the rail entry and its tab are gone. Endpoints, stores, permissions and switch semantics are unchanged; see ADR-108 for the scope.
+
 > **Chinese source of truth**: [ADR-069](../zh/ADR-069-mcp-tool-level-optin.md)
 > **Terminology**: see [GLOSSARY.md](./GLOSSARY.md)
 

@@ -69,18 +69,25 @@ import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
+import { DeliveryAlertLine } from "./DeliveryAlertLine";
 import {
-  buildCardAnswer,
+  answerWithChoice,
   groupCardAddress,
   mayAnswerCard,
+  type CardAnswerHandler,
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { turnInflight } from "../../lib/chatTurnInflight";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
 import type { TranscriptItem } from "./chatTranscriptGroups";
+import { useRevealPendingAsk } from "./useRevealPendingAsk";
 import { useTranscriptLayout } from "./useTranscriptLayout";
-import { ChatAddressPicker, type AddressPick } from "./ChatAddressPicker";
+import {
+  ChatAddressPicker,
+  MAX_PICK_REFS,
+  type AddressPick,
+} from "./ChatAddressPicker";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
 import {
@@ -92,6 +99,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import {
+  fetchCardAnswer,
   useChatSessionStore,
   type ChatMessageRow,
   type ChatAttachmentMeta,
@@ -237,6 +245,14 @@ interface RowProps {
   /** Address the composer to one round (ADR-106 D6 level 1) — how a `pause`
    *  card is continued and how a finished round gets a follow-up. */
   onReplyToRound: (rowId: string, quote: string) => void;
+  /** Attach one execution session to this draft as a reference (design 27
+   *  §5.5.5) — the block's `@` action, riding the same address state the `@`
+   *  picker commits to. */
+  onReferenceRun?: (payload: {
+    instanceId: string;
+    execSessionId: string;
+    name: string;
+  }) => void;
   /** Admin viewing a group they never joined: runs are shown, never
    *  answered — posting into someone else's project stays forbidden. */
   readOnly?: boolean;
@@ -250,12 +266,7 @@ interface RowProps {
   /** Answer an addressing card (ADR-106 D6 levels 3 and 5) by re-delivering the
    *  utterance it asks about, now addressed. Undefined for a read-only viewer
    *  (D10): deciding where someone else's words go is not a bystander's call. */
-  onChooseCard?: (card: ChatMessageRow, choice: CardChoice) => void;
-  /** The card's question has already been answered — a round exists for the
-   *  message it asked about. The buttons stay on screen and go quiet: the
-   *  transcript must keep showing what was decided, and a second click would
-   *  deliver the same utterance again. */
-  cardAnswered?: boolean;
+  onChooseCard?: CardAnswerHandler;
   /** ADR-106 revision 2026-11-04: click a reference source chip (or the `@`
    *  picker's "去续投") to locate that run's block in the transcript. A
    *  navigation, not an address — it never changes what a message carries. */
@@ -329,7 +340,6 @@ const GroupRowView = memo(function GroupRowView({
   triggerFrom,
   onMentionContextMenu,
   onChooseCard,
-  cardAnswered,
   onLocateRef,
 }: RowProps) {
   const { t } = useTranslation();
@@ -345,21 +355,14 @@ const GroupRowView = memo(function GroupRowView({
       <ChatTurnStatusLine
         className="px-4"
         text={t("chatView.block.notFound")}
-        danger={false}
       />
     );
   }
 
   if (row.kind === "system_notice") {
     // A notice is a fact about the channel, not an utterance, so it never wears
-    // an avatar. `name` is used by one receipt: the `delivery_failed` row of
-    // ADR-105 says which agent a message never reached, resolved from the roster
-    // like every other participant reference here (`from` = `to` = that agent on
-    // the Gateway's write). Every other receipt ignores the prop.
-    const failedTarget =
-      row.meta?.notice_type === "delivery_failed"
-        ? nameOf(row.to || row.from).name
-        : undefined;
+    // an avatar. (A failed send is not one of these rows any more: it is a live
+    // alert rendered on the human's own row, see `DeliveryAlertLine`.)
     const noticeType = row.meta?.notice_type;
     // The card asks the person who spoke — `to` is them — so a viewer who is
     // not that person gets the question without the answer (D10).
@@ -374,9 +377,8 @@ const GroupRowView = memo(function GroupRowView({
       <ChatNoticeEventRow
         row={row}
         className="px-4"
-        name={failedTarget}
         onChoose={choose}
-        answered={cardAnswered}
+        authorName={nameOf(row.from).name}
       />
     );
   }
@@ -516,13 +518,18 @@ const GroupRowView = memo(function GroupRowView({
           )}
           {/* ADR-100 D12: a PM task session is bound to this group's chat, so a
               turn composed in its execution view arrives here as a `user_message`
-              whose attached items are labels only — the file lives in the run,
-              not in this chat session, so the pill is deliberately inert. They
-              also count as content, which is what keeps a file-with-no-words
-              head row from painting the empty-turn placeholder. */}
+              whose attached items are labels. They also count as content, which
+              is what keeps a file-with-no-words head row from painting the
+              empty-turn placeholder. A workspace arm is openable (D12 Rev.
+              2026-11) and resolves against the workspaces of the participant
+              who pointed at it — which is this row's sender when the sender is
+              an Agent. A human's own row stays decorative here: this surface is
+              not bound to one Agent's workspace registry, so there would be
+              nothing honest to resolve against. */}
           <ExecAttachmentLabels
             labels={row.meta?.exec_attachments}
             align={own ? "end" : "start"}
+            agentId={who.isAgent ? row.from : null}
           />
           {/* The group column is an `items-start` flex column, so the bubble is
              shrink-to-fit too: without the clamp, content that cannot be
@@ -595,6 +602,19 @@ const GroupRowView = memo(function GroupRowView({
               ))}
             </div>
           )}
+          {/* A send that failed, while it is still news (ADR-105 D5 rev.
+              2026-11-06). It rides on the human's row, not the transcript, and
+              it expires on its own — the yellow receipt used to be a row that
+              nothing ever removed. `alert.target` names the agent, so a group
+              says which member the message never reached. */}
+          {row.delivery?.alert ? (
+            <DeliveryAlertLine
+              alert={row.delivery.alert}
+              name={nameOf(row.delivery.alert.target).name}
+              align={own ? "end" : "start"}
+              className="mt-0.5"
+            />
+          ) : null}
           <div className="mt-1 flex items-center gap-2">
             <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
@@ -653,6 +673,17 @@ const GroupItemView = memo(function GroupItemView({
         canAnswer={!readOnly}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
+        onReferenceRun={rowProps.onReferenceRun}
+        // The router's question about this run is drawn at the block's tail, so
+        // the block needs the same answerer gate the standalone card row has:
+        // the person the card asked (`to`), not just anyone in the group (D10).
+        onChooseCard={
+          rowProps.onChooseCard &&
+          item.pendingAsk &&
+          mayAnswerCard(item.pendingAsk, rowProps.me)
+            ? rowProps.onChooseCard
+            : undefined
+        }
         focusInput={
           !!focusBlockSessionId && item.execSessionId === focusBlockSessionId
         }
@@ -934,6 +965,12 @@ export function GroupChatPanel() {
     virtualAttrs,
     seqsByItem,
   } = useTranscriptLayout(rows, activeGroupId ?? "");
+  // A question the router asks about a run is drawn at that run's block, which
+  // stays where the exchange began — this is what brings the reader there.
+  // Declared AFTER the follow hook, the same rule `useLocateMessage` follows
+  // below: the card lands as a new row, and follow-to-bottom would otherwise
+  // write the viewport back to the tail in the same commit and hide it.
+  useRevealPendingAsk(items, keyOfSeqRef.current, listRef);
 
   // Locate-and-flash for history jumps (ADR-097) — declared AFTER the follow
   // hook so the center-scroll wins over follow-to-bottom on the jump commit.
@@ -966,18 +1003,6 @@ export function GroupChatPanel() {
     return m;
   }, [win]);
   const hasMoreOlder = win ? win.firstPos > 0 : false;
-  // Which messages already have a round. An addressing card is answered exactly
-  // when one exists for the message it asked about (the re-delivery leaves that
-  // reference row, ADR-106 D3), so the transcript itself says the question is
-  // settled — there is no chat-side "answered" flag to keep in sync (D12).
-  const roundTriggers = useMemo(() => {
-    const s = new Set<string>();
-    for (const r of rows) {
-      if (r.kind === "execution_round" && r.meta?.in_reply_to)
-        s.add(r.meta.in_reply_to);
-    }
-    return s;
-  }, [rows]);
   const hasMoreNewer = win ? win.lastPos < win.total - 1 : false;
   // Auto-pagination: scrolling into the top band fires the next older page;
   // reaching the bottom band (only after a locate parks the window mid-history)
@@ -1220,14 +1245,27 @@ export function GroupChatPanel() {
   // Answering an addressing card (ADR-106 D6): re-send the human's OWN words
   // with the address they just chose, keyed by the original row's id so the
   // transcript keeps one message instead of narrating the decision twice.
+  // The words being re-sent come from the service, not from `rowsRef`: a card
+  // whose message sits outside the loaded window still has to answer, and the
+  // window lookup returned silently when it missed (design 31 §6). Only the
+  // click — which agent session, or new work — is the surface's.
   const answerCard = useCallback(
-    (card: ChatMessageRow, choice: CardChoice) => {
-      if (!activeGroupId) return;
-      const original = rowsRef.current.find(
-        (r) => r.meta?.message_id === card.meta?.in_reply_to,
-      );
-      const answer = buildCardAnswer(card, original, choice);
-      if (!answer) return;
+    async (card: ChatMessageRow, choice: CardChoice): Promise<boolean> => {
+      if (!activeGroupId) return false;
+      const cardId = card.meta?.message_id;
+      if (!cardId) return false;
+      const lookup = await fetchCardAnswer(activeGroupId, cardId);
+      if (!lookup.ok) {
+        // A round already settled the question (`already_answered`) settles
+        // itself on the next projection read; `gone` cannot be re-delivered and
+        // has to be said out loud.
+        if (lookup.reason === "gone") {
+          showToast({ type: "error", message: t("chatView.cardAnswerGone") });
+        }
+        return false;
+      }
+      const answer = answerWithChoice(lookup.facts, choice);
+      if (!answer) return false;
       const mentioned = resolveMentions(answer.text, agentParticipants);
       // The card came from one agent, so the answer must reach that one: the
       // original message may have named nobody (the group's default responder
@@ -1246,8 +1284,9 @@ export function GroupChatPanel() {
           answer.attachmentIds,
           groupCardAddress(answer),
         );
+      return true;
     },
-    [activeGroupId, agentParticipants],
+    [activeGroupId, agentParticipants, t],
   );
 
   // Chips follow the draft: an address whose `@` the human deleted stops being
@@ -1426,6 +1465,60 @@ export function GroupChatPanel() {
     setReplyTarget({ id: rowId, quote });
     textareaRef.current?.focus();
   }, []);
+
+  /**
+   * The block's `@` action (design 27 §5.5.5): attach THAT run to this draft.
+   *
+   * It commits into the same `addresses` record the `@` picker's "引用" writes,
+   * so the group has one kind of reference — a removable chip on the addressee's
+   * pick — rather than a second way to say "use this run". The rules it inherits:
+   * a level-1 reply names its own session and must not ride the same send (so the
+   * reply target is released first), a run already attached is a no-op instead of
+   * a duplicate chip, and the fifth reference is the server's ceiling
+   * (`MAX_PICK_REFS`) — it answers with a toast rather than dropping the click.
+   */
+  const handleReferenceRun = useCallback(
+    ({
+      instanceId,
+      execSessionId,
+      name,
+    }: {
+      instanceId: string;
+      execSessionId: string;
+      name: string;
+    }) => {
+      setReplyTarget(null);
+      setAddresses((prev) => {
+        const key = `${instanceId}|${execSessionId}`;
+        const current = prev[instanceId];
+        const refs = current?.refs ?? [];
+        if (refs.some((r) => `${r.agentInstanceId}|${r.sessionId}` === key)) {
+          return prev;
+        }
+        if (refs.length >= MAX_PICK_REFS) {
+          showToast({
+            type: "info",
+            message: t("chatView.address.refLimit", { max: MAX_PICK_REFS }),
+          });
+          return prev;
+        }
+        return {
+          ...prev,
+          [instanceId]: {
+            refs: [
+              ...refs,
+              { agentInstanceId: instanceId, sessionId: execSessionId },
+            ],
+            labels: { ...(current?.labels ?? {}), [key]: name },
+            forceNew: current?.forceNew,
+          },
+        };
+      });
+      // Land the human where the reference is going to be used.
+      textareaRef.current?.focus();
+    },
+    [t],
+  );
 
   // Jump to the exec session behind a group agent reply: select that agent
   // (closes the group in the middle pane, same as picking it in the sidebar),
@@ -1668,6 +1761,7 @@ export function GroupChatPanel() {
                   nameOf={nameOf}
                   onJumpToExec={handleJumpToExec}
                   onReplyToRound={handleReplyToRound}
+                  onReferenceRun={handleReferenceRun}
                   triggerFrom={
                     row?.meta?.in_reply_to
                       ? fromById.get(row.meta.in_reply_to)
@@ -1676,10 +1770,6 @@ export function GroupChatPanel() {
                   readOnly={!canPost}
                   onMentionContextMenu={handleMentionContextMenu}
                   onChooseCard={canPost ? answerCard : undefined}
-                  cardAnswered={
-                    !!row?.meta?.in_reply_to &&
-                    roundTriggers.has(row.meta.in_reply_to)
-                  }
                   onLocateRef={handleLocateRef}
                   focusBlockSessionId={focusBlockSessionId ?? undefined}
                 />

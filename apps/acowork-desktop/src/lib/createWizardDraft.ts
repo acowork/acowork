@@ -55,7 +55,14 @@ export interface McpServerDeclWire {
   preset?: string;
   hosted?: string;
   required_secrets: string[];
-  /** Always empty from the wizard: the server is not connected yet. */
+  /**
+   * Enabled-tool whitelist. `[]` means "no opinion" (every tool the server
+   * advertises starts enabled); a non-empty list seeds exactly those tools
+   * as enabled in `agent_mcp_tools.json` (ADR-104). The wizard fills this
+   * for platform-hosted servers, whose `tools/list` it can probe before the
+   * agent exists; presets stay `[]` because their stdio server is not
+   * connected during authoring.
+   */
   tools: string[];
   required: boolean;
   why?: string;
@@ -119,7 +126,7 @@ export interface McpPick {
   /** `preset:<id>` or `hosted:<id>` — the radio axis is the declaration form. */
   kind: "preset" | "hosted";
   id: string;
-  /** Author's reason, shown verbatim in the Tools panel later. */
+  /** Author's reason, shown verbatim in the Setup panel later. */
   why: string;
   /** Soft requirement. Defaults OFF: a fresh package must not start with alerts. */
   required: boolean;
@@ -131,6 +138,13 @@ export interface McpPick {
   requiredSecrets: string[];
   /** Display name from the registry, for the wizard's own summary list. */
   label: string;
+  /**
+   * Explicit enabled-tool whitelist for this server. `undefined` = default
+   * ("all tools allowed", serialized as the empty whitelist Rust reads as
+   * "no opinion"). Set only by the step-3 per-tool switches, once the
+   * wizard has actually read the server's `tools/list` — never guessed.
+   */
+  tools?: string[];
 }
 
 /** One `[capabilities.<action>]` row. */
@@ -183,6 +197,10 @@ export const EMPTY_WIZARD_STATE: WizardState = {
   description: "",
   labels: [],
   config: { ...EMPTY_CONFIG_INPUT },
+  // Empty here and seeded by the wizard from the catalog's `default_enabled`
+  // flags once `list_builtin_tools` resolves (`defaultBuiltinSelection`).
+  // Never hardcode a default set in this file: which tools a baseline agent
+  // needs is platform knowledge (`acowork-core`), shared with every client.
   tools: [],
   mcp: [],
   capabilities: [],
@@ -238,16 +256,19 @@ export function configFromInput(input: ConfigInput): ManifestConfigDefaultsWire 
 /**
  * Project the step-3 MCP picks into `[[mcp_servers]]` declarations.
  *
- * One declaration per pick, in registry order, and `tools` is always `[]`:
- * the server is not connected during authoring, so any tool name here would be
- * a guess the user could not verify. The whitelist is filled in later, from
- * the Tools panel, where `tools/list` is actually available.
+ * One declaration per pick, in registry order. `tools` carries the pick's
+ * explicit whitelist when the user customized the step-3 per-tool switches
+ * (platform-hosted servers only — their `tools/list` is readable before the
+ * agent exists); otherwise it stays `[]`, which Rust reads as "no opinion,
+ * everything enabled". A preset pick never has a whitelist: its stdio server
+ * is not connected during authoring, so any tool name there would be a guess —
+ * those tools are picked in the Setup panel once the agent exists.
  */
 export function mcpServersFromPicks(picks: McpPick[]): McpServerDeclWire[] {
   return picks.map((pick) => {
     const decl: McpServerDeclWire = {
       required_secrets: [...pick.requiredSecrets],
-      tools: [],
+      tools: pick.tools ? [...pick.tools] : [],
       required: pick.required,
     };
     if (pick.kind === "preset") decl.preset = pick.id;
@@ -256,6 +277,58 @@ export function mcpServersFromPicks(picks: McpPick[]): McpServerDeclWire[] {
     if (why) decl.why = why;
     return decl;
   });
+}
+
+/** The subset of `acowork_core::tools::BuiltinToolInfo` this module needs. */
+export interface BuiltinToolCatalogEntry {
+  name: string;
+  default_enabled?: boolean;
+}
+
+/**
+ * The platform's default builtin-tool selection for a newly created agent.
+ *
+ * The fact is `default_enabled` on the Rust catalog (`acowork-core`), which the
+ * wizard receives from `list_builtin_tools` — never a second list here: "which
+ * tools a baseline agent needs" is platform knowledge shared with every client.
+ *
+ * Order follows the catalog (group order in the wizard), and names missing from
+ * the catalog cannot appear: the wizard only renders catalog entries, so a
+ * default outside it would be an invisible declaration the author cannot undo.
+ */
+export function defaultBuiltinSelection(catalog: BuiltinToolCatalogEntry[]): string[] {
+  return catalog.filter((t) => t.default_enabled === true).map((t) => t.name);
+}
+
+/**
+ * Apply one step-3 tool switch and return the pick's new whitelist.
+ *
+ * `allTools` is the server's live `tools/list` (name order preserved — the
+ * emitted whitelist follows that order so the manifest stays diff-friendly).
+ * `current` is the pick's existing whitelist, `undefined` = default all-on.
+ *
+ * Two collapses keep the wire honest:
+ *   - everything back on  -> `undefined` (serializes as the empty whitelist,
+ *     "no opinion") rather than a full list that merely looks customized;
+ *   - everything off      -> `current` unchanged. The manifest cannot express
+ *     "zero tools" (empty = all), so the UI disables the last switch; this
+ *     guard makes the rule one fact in one place, not a UI-only promise.
+ */
+export function nextToolWhitelist(
+  allTools: string[],
+  current: string[] | undefined,
+  tool: string,
+  enabled: boolean,
+): string[] | undefined {
+  const on = new Set(current ?? allTools);
+  if (enabled) on.add(tool);
+  else on.delete(tool);
+  const nextList = allTools.filter((name) => on.has(name));
+  // All back on -> "no opinion" rather than a full list that merely looks
+  // customized. All off -> unchanged: the manifest cannot express zero.
+  if (allTools.length > 0 && nextList.length === allTools.length) return undefined;
+  if (nextList.length === 0) return current;
+  return nextList;
 }
 
 /** Parse one advanced JSON cell; `undefined` for "" and for unparsable text. */

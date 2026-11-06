@@ -44,7 +44,7 @@
 //! accepted and committed, expressed as `seq`; timestamps are for display
 //! only (§8).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
@@ -230,7 +230,7 @@ impl<'de> Deserialize<'de> for Participant {
 
 /// Intent-direction metadata every chat message carries (§4). All fields
 /// are empty on a `user_message`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct IntentMeta {
     /// Stable message identity (§4 `message_id`). Required on every
     /// durable row: the write entry assigns one when the client does not
@@ -367,6 +367,54 @@ pub struct IntentMeta {
     /// path must not read a projection to name a task (ADR-096).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment_brief: Option<String>,
+    /// ADR-106 D6 levels 3 and 5: the sessions an addressing card offers, one
+    /// `{session_id, label, status, origin, why}` object each
+    /// ([`acowork_core::intent::chat_kinds::CARD_NOTICES`]).
+    ///
+    /// Registered here (design 31 §5.2) because this struct **is** the payload
+    /// registry: a key the store does not declare used to be dropped by serde
+    /// on the way in, and the surfaces then rendered a card with no buttons —
+    /// the question survived, its answers did not. The option *shape* stays
+    /// opaque on purpose: it belongs to the card producer (ADR-106 D6), and a
+    /// second schema owned by storage is a second thing to drift.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<serde_json::Value>,
+    /// ADR-106 D6: the always-offered "new task" escape beside a card's
+    /// suggestions (a question must be answerable without accepting the
+    /// proposal).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub allow_new_task: Option<bool>,
+    /// ADR-106 revision 2026-11-04: the `@session` material a human pinned to
+    /// their utterance — one `{agent_instance_id, session_id, round_id,
+    /// terminal}` quadruple per reference, **coordinates only, never a body**
+    /// (the round's text lives in the execution session). The transcript
+    /// renders them as source chips and a card answer echoes them back verbatim.
+    ///
+    /// Registered because it was written but not declared: the Gateway has
+    /// stamped it since the ADR revision and every stored row lost it, so the
+    /// chips never appeared. The quadruple shape stays opaque here for the same
+    /// reason as [`Self::options`] — the pinner owns it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<serde_json::Value>,
+    /// A `delivery_failed` notice's channel error code (`agent_unreachable` /
+    /// `delivery_timeout` / …). Registered for the same reason as
+    /// [`Self::refs`]: the receipt writer has always stamped it, and the store
+    /// used to drop it, leaving the surface to guess why a send did not land.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_code: String,
+    /// Every key a writer sent that this struct does not declare.
+    ///
+    /// The field exists so an undeclared key is **carried, not dropped**:
+    /// `#[serde(flatten)]` round-trips it verbatim, so reading a row written by
+    /// a newer producer and writing it back cannot lose a field (the reader
+    /// used to be the second silent-drop boundary, after the writer). Writes
+    /// that actually try to *add* an unregistered key are refused by
+    /// [`check_write_contract`] — this is the read-side half of the same rule,
+    /// and the reason it must exist is that "unknown" and "must be rejected"
+    /// are not the same question: history is unknown-but-legal, a new write is
+    /// unknown-and-therefore-a-bug.
+    #[serde(flatten)]
+    pub unregistered: BTreeMap<String, serde_json::Value>,
 }
 
 /// One entry of [`IntentMeta::exec_attachments`] (ADR-100 D12).
@@ -983,6 +1031,83 @@ fn validate_session_id(id: &str) -> Result<(), String> {
     Ok(())
 }
 
+// ── The write contract (design 31 §5.2) ───────────────────────────────
+
+/// The facts a chat row must carry before it may become durable.
+///
+/// Three invariants, each of which is a *derivability* requirement rather than
+/// a taste rule (design 31 §4, §5.2):
+///
+/// 1. **No unregistered payload keys.** [`IntentMeta`] is the registry; a key
+///    it does not declare arrives in [`IntentMeta::unregistered`]. Storing it
+///    would mean every reader drops it (the reader shape is the same struct),
+///    which is how a card once reached the surfaces with its question intact
+///    and its `options` gone. New keys are registered here, not smuggled
+///    through the log.
+/// 2. **Every answering row names the row it answers.** `agent_message`,
+///    `interaction_request` and the threaded notice types
+///    (`chat_kinds::THREADED_NOTICES`) must carry `meta.in_reply_to`; an
+///    `execution_round` reference carries it when the turn started in the chat
+///    and has none when it did not (see the note in the body). That
+///    coordinate is the only thing that lets the projection answer "was this
+///    answered", "which block am I in", "is this card open" from the log
+///    alone; a row without it is an orphan the reader must guess about.
+/// 3. **A card carries its answers.** A `session_choice` / `confirm_continue`
+///    notice without `meta.options` is a question nobody can click, and one
+///    without `allow_new_task` is a question with no cheap escape (ADR-106 D6).
+///
+/// Deliberately *not* checked here: whether `in_reply_to` resolves to an
+/// existing row. Resolution needs the (restored) line index and a write order,
+/// and the projection is the single place allowed to resolve references
+/// (design 31 §6) — a dangling coordinate is a projection finding, not a
+/// storage veto. Channel-scoped notices (`budget_exhausted`) legitimately name
+/// a request that never became a row (design 31 §9 pending 3).
+pub fn check_write_contract(msg: &SessionMessage) -> Result<(), String> {
+    if !msg.meta.unregistered.is_empty() {
+        let mut keys: Vec<&str> = msg.meta.unregistered.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        return Err(format!(
+            "unregistered chat row meta keys: {} — register the key on IntentMeta; \
+             an undeclared key cannot be read back by any consumer",
+            keys.join(", ")
+        ));
+    }
+    let is_notice = msg.kind == KIND_SYSTEM_NOTICE;
+    let notice_type = msg.meta.notice_type.as_str();
+    // `execution_round` is deliberately absent: a reference row **answers** a
+    // chat question when the turn started there (`in_reply_to` set) and is an
+    // **origin** row when the work was dispatched from elsewhere — a PM task, a
+    // group fan-out's per-target id, a turn composed against the execution
+    // surface. Those have no chat row above them by design (design 31 §5.2,
+    // `TurnReference::trigger_message_id`), and inventing a coordinate would
+    // hang the block under a phantom message. Absence *is* the fact here, which
+    // is why it is a legal empty rather than a missing field.
+    let threaded = msg.kind == KIND_AGENT_MESSAGE
+        || msg.kind == KIND_INTERACTION_REQUEST
+        || (is_notice && acowork_core::intent::chat_kinds::is_threaded_notice(notice_type));
+    if threaded && msg.meta.in_reply_to.trim().is_empty() {
+        let what = if is_notice { notice_type } else { msg.kind.as_str() };
+        return Err(format!(
+            "a {what} row must carry meta.in_reply_to — the message_id it answers"
+        ));
+    }
+    if is_notice && acowork_core::intent::chat_kinds::is_card_notice(notice_type) {
+        if msg.meta.options.is_empty() {
+            return Err(format!(
+                "a {notice_type} card must carry meta.options — a card without \
+                 options is a question nobody can answer"
+            ));
+        }
+        if msg.meta.allow_new_task.is_none() {
+            return Err(format!(
+                "a {notice_type} card must carry meta.allow_new_task (ADR-106 D6: \
+                 the escape sits beside every suggestion)"
+            ));
+        }
+    }
+    Ok(())
+}
+
 // ── The single write entry (§8) ───────────────────────────────────────
 
 /// Append one message — the ONLY writer path for chat history.
@@ -1008,6 +1133,10 @@ pub fn append_message(
     if !KINDS.contains(&msg.kind.as_str()) {
         return Err(format!("unknown chat message kind: {}", msg.kind));
     }
+    // Design 31 §5.2: the row's coordinates and payload are part of the model,
+    // so they are checked at this entry like every other invariant — not left
+    // to the six writer call sites to remember.
+    check_write_contract(msg)?;
     if msg.kind == KIND_USER_MESSAGE
         && msg.body.trim().is_empty()
         && msg.attachment_ids.is_empty()
@@ -1964,7 +2093,27 @@ struct LineIndex {
     /// `message_id` → position in `spans` (stale positions from a popped
     /// partial line are guarded at lookup, never cleaned).
     ids: HashMap<String, u32>,
+    /// `in_reply_to` → positions in `spans` of the rows that thread to it, in
+    /// log order.
+    ///
+    /// The **only** reverse edge in the store, and it exists for one question
+    /// the read model must answer from the log alone: "did anything happen to
+    /// this message, and where did it go" (design 31 §6). Surfaces used to answer
+    /// it themselves by scanning the transcript for a row whose `in_reply_to`
+    /// matched, which is exactly the derivation that left a send waiting 300 s
+    /// when a card landed with an empty coordinate.
+    ///
+    /// Disposable by construction: rebuilt from the log (or the sidecar) on
+    /// first touch, maintained on append, never authoritative. Positions are
+    /// guarded at use, same as [`Self::ids`] — a popped partial line can leave
+    /// a stale one behind.
+    answers: HashMap<String, Vec<u32>>,
     last_partial: bool,
+    /// The sidecar on disk was refused (a v1 file from before the thread column,
+    /// or a malformed row). The log must then be re-read **and the file
+    /// rewritten**: appending to a file nobody can load would leave every
+    /// restart re-scanning the whole log.
+    sidecar_untrusted: bool,
     /// The sidecar has been read in this process.
     loaded: bool,
 }
@@ -2005,13 +2154,17 @@ fn ensure_index(dir: &Path) -> Result<Arc<Mutex<LineIndex>>, String> {
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     let covered = covered_end(&idx);
-    if covered > file_len {
-        // The log shrank under the sidecar (crash mid-line, truncation,
-        // copied directory): self-heal with one full pass.
+    if covered > file_len || idx.sidecar_untrusted {
+        // The log shrank under the sidecar (crash mid-line, truncation, copied
+        // directory), or the sidecar was refused on load: self-heal with one
+        // full pass and rewrite the file, so the next process start is
+        // incremental again.
         idx.spans.clear();
         idx.line_ids.clear();
         idx.ids.clear();
+        idx.answers.clear();
         idx.last_partial = false;
+        idx.sidecar_untrusted = false;
         scan_range(dir, &mut idx, 0, file_len, false)?;
         rewrite_sidecar(dir, &idx)?;
     } else if covered < file_len {
@@ -2019,9 +2172,7 @@ fn ensure_index(dir: &Path) -> Result<Arc<Mutex<LineIndex>>, String> {
             // The half-written line has since been completed (or extended)
             // on disk: drop the provisional entry and re-index from its
             // start.
-            idx.spans.pop();
-            idx.line_ids.pop();
-            idx.last_partial = false;
+            pop_entry(&mut idx);
         }
         let resume = covered_end(&idx);
         scan_range(dir, &mut idx, resume, file_len, true)?;
@@ -2045,8 +2196,44 @@ fn load_sidecar(dir: &Path, idx: &mut LineIndex) {
     let Ok(raw) = fs::read_to_string(line_index_path(dir)) else {
         return; // pre-index data dir: the reconcile below rebuilds once
     };
-    for line in raw.lines() {
-        let mut cols = line.splitn(3, '\t');
+    // A crash between the log write and the sidecar write leaves a final line
+    // without its newline. Drop that torn tail instead of refusing the whole
+    // file: appends are one `writeln!` each, so at most the newest row is
+    // affected, and the reconcile re-scans it from the log's own length delta.
+    // Without this, one crash costs a full re-read of the session's log.
+    let complete_len = match raw.rfind('\n') {
+        Some(end) => end + 1,
+        // Not even the marker line survived: nothing here can be trusted, and
+        // appending to a file nobody can load is what this whole marker exists
+        // to prevent.
+        None => {
+            let _ = fs::remove_file(line_index_path(dir));
+            idx.sidecar_untrusted = true;
+            return;
+        }
+    };
+    if complete_len < raw.len() {
+        // Repair the file, don't just ignore the bytes in memory: the next
+        // `sidecar_append` appends at the end, so a torn tail left in place
+        // would merge with the new row and corrupt the line after it. The
+        // sidecar is disposable, so truncating to the last complete row costs
+        // nothing the reconcile cannot rebuild.
+        if let Ok(f) = OpenOptions::new().write(true).open(line_index_path(dir)) {
+            let _ = f.set_len(complete_len as u64);
+        }
+    }
+    let mut lines = raw[..complete_len].lines();
+    if lines.next() != Some(SIDECAR_HEADER) {
+        // A v1 sidecar (no thread column): drop it and let the reconcile
+        // re-scan the log once. Keeping it would index every row with no
+        // thread edge, and "nothing answers anything" is a wrong answer, not a
+        // missing one.
+        let _ = fs::remove_file(line_index_path(dir));
+        idx.sidecar_untrusted = true;
+        return;
+    }
+    for line in lines {
+        let mut cols = line.splitn(4, '\t');
         let offset = cols.next().and_then(|v| v.parse::<u64>().ok());
         let len = cols.next().and_then(|v| v.parse::<u64>().ok());
         let (Some(offset), Some(len)) = (offset, len) else {
@@ -2055,15 +2242,20 @@ fn load_sidecar(dir: &Path, idx: &mut LineIndex) {
             idx.spans.clear();
             idx.line_ids.clear();
             idx.ids.clear();
+            idx.answers.clear();
+            idx.sidecar_untrusted = true;
             return;
         };
-        push_entry(idx, LineSpan { offset, len }, cols.next().unwrap_or(""));
+        let id = cols.next().unwrap_or("");
+        let thread = cols.next().unwrap_or("");
+        push_entry(idx, LineSpan { offset, len }, id, thread);
     }
 }
 
 /// Record one line at the end of the index (sidecar load, scans and
-/// commits all enter here, so `spans` / `line_ids` / `ids` stay aligned).
-fn push_entry(idx: &mut LineIndex, span: LineSpan, id: &str) {
+/// commits all enter here, so `spans` / `line_ids` / `ids` / `answers` stay
+/// aligned).
+fn push_entry(idx: &mut LineIndex, span: LineSpan, id: &str, in_reply_to: &str) {
     let pos = idx.spans.len() as u32;
     idx.spans.push(span);
     if id.is_empty() {
@@ -2072,6 +2264,33 @@ fn push_entry(idx: &mut LineIndex, span: LineSpan, id: &str) {
         idx.line_ids.push(Some(id.to_string()));
         idx.ids.insert(id.to_string(), pos);
     }
+    if !in_reply_to.is_empty() {
+        idx.answers
+            .entry(in_reply_to.to_string())
+            .or_default()
+            .push(pos);
+    }
+}
+
+/// Drop the newest entry (the provisional partial tail, or a half-written line
+/// whose newline has since arrived) and the thread edge it added — the maps
+/// must never point at a span that no longer exists.
+fn pop_entry(idx: &mut LineIndex) {
+    idx.spans.pop();
+    idx.line_ids.pop();
+    if let Some(thread) = idx
+        .answers
+        .iter_mut()
+        .find(|(_, positions)| positions.last() == Some(&(idx.spans.len() as u32)))
+        .map(|(thread, _)| thread.clone())
+        && let Some(positions) = idx.answers.get_mut(&thread)
+    {
+        positions.pop();
+        if positions.is_empty() {
+            idx.answers.remove(&thread);
+        }
+    }
+    idx.last_partial = false;
 }
 
 /// Index every non-blank line whose bytes lie in `[from, to)` (`to` must
@@ -2104,18 +2323,22 @@ fn scan_range(dir: &Path, idx: &mut LineIndex, from: u64, to: u64, persist: bool
         if text.trim().is_empty() {
             continue; // blank line: occupies bytes, not a message number
         }
-        let id = serde_json::from_str::<SessionMessage>(&text)
-            .ok()
-            .map(|m| m.meta.message_id)
+        let parsed = serde_json::from_str::<SessionMessage>(&text).ok();
+        let id = parsed
+            .as_ref()
+            .map(|m| m.meta.message_id.clone())
+            .unwrap_or_default();
+        let thread = parsed
+            .map(|m| m.meta.in_reply_to)
             .unwrap_or_default();
         let span = LineSpan {
             offset: pos - seg.len() as u64,
             len: body.len() as u64,
         };
-        push_entry(idx, span, &id);
+        push_entry(idx, span, &id, &thread);
         if terminated {
             if persist {
-                sidecar_append(dir, span, &id)?;
+                sidecar_append(dir, span, &id, &thread)?;
             }
         } else {
             idx.last_partial = true;
@@ -2124,7 +2347,19 @@ fn scan_range(dir: &Path, idx: &mut LineIndex, from: u64, to: u64, persist: bool
     Ok(())
 }
 
-fn sidecar_append(dir: &Path, span: LineSpan, id: &str) -> Result<(), String> {
+/// The sidecar's format marker. v2 added the thread column (`in_reply_to`) —
+/// the edge the read model answers "did anything happen to this message" from.
+/// A file without the marker is a v1 sidecar: it is dropped and the log is
+/// re-scanned once (the sanctioned full pass — the file is disposable, and the
+/// alternative is re-reading every row on every restart).
+const SIDECAR_HEADER: &str = "#v2";
+
+fn sidecar_append(
+    dir: &Path,
+    span: LineSpan,
+    id: &str,
+    in_reply_to: &str,
+) -> Result<(), String> {
     use std::io::Write as _;
     let path = line_index_path(dir);
     let mut f = OpenOptions::new()
@@ -2132,7 +2367,22 @@ fn sidecar_append(dir: &Path, span: LineSpan, id: &str) -> Result<(), String> {
         .append(true)
         .open(&path)
         .map_err(|e| format!("{}: {e}", path.display()))?;
-    writeln!(f, "{}\t{}\t{}", span.offset, span.len, id)
+    // The first commit of a session creates this file, so this is the only
+    // place the marker can be written on the incremental path. Without it the
+    // next process cannot tell the file from a v1 sidecar: it deletes it and
+    // re-reads the session's whole log — the cost the marker exists to avoid,
+    // paid once per session, invisibly. `rewrite_sidecar` writes it for the
+    // full-pass path; both writers must agree or the cheaper one silently
+    // defeats the file.
+    let empty = f
+        .metadata()
+        .map_err(|e| format!("{}: {e}", path.display()))?
+        .len()
+        == 0;
+    if empty {
+        writeln!(f, "{SIDECAR_HEADER}").map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    writeln!(f, "{}\t{}\t{}\t{}", span.offset, span.len, id, in_reply_to)
         .map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -2141,10 +2391,25 @@ fn sidecar_append(dir: &Path, span: LineSpan, id: &str) -> Result<(), String> {
 fn rewrite_sidecar(dir: &Path, idx: &LineIndex) -> Result<(), String> {
     let path = line_index_path(dir);
     let n = idx.spans.len().saturating_sub(if idx.last_partial { 1 } else { 0 });
-    let mut buf = String::new();
+    // The thread column is inverted from the reverse map on purpose: the map is
+    // the only thing the process needs (positions by thread), and a second
+    // forward `Vec<Option<String>>` would double the index's memory to serve a
+    // file write that happens on a full rebuild only.
+    let mut thread_of: HashMap<u32, &str> = HashMap::new();
+    for (thread, positions) in &idx.answers {
+        for pos in positions {
+            thread_of.insert(*pos, thread.as_str());
+        }
+    }
+    let mut buf = String::from(SIDECAR_HEADER);
+    buf.push('\n');
     for i in 0..n {
         let id = idx.line_ids[i].as_deref().unwrap_or("");
-        buf.push_str(&format!("{}\t{}\t{}\n", idx.spans[i].offset, idx.spans[i].len, id));
+        let thread = thread_of.get(&(i as u32)).copied().unwrap_or("");
+        buf.push_str(&format!(
+            "{}\t{}\t{}\t{}\n",
+            idx.spans[i].offset, idx.spans[i].len, id, thread
+        ));
     }
     fs::write(&path, buf).map_err(|e| format!("{}: {e}", path.display()))
 }
@@ -2253,9 +2518,7 @@ fn commit_row(
         // re-index from that line's start (the merged row is corrupt and
         // unparseable exactly as the whole-log reader left it).
         let from = idx.spans.last().map(|s| s.offset).unwrap_or(0);
-        idx.spans.pop();
-        idx.line_ids.pop();
-        idx.last_partial = false;
+        pop_entry(idx);
         let to = fs::metadata(&path).map_err(|e| format!("{}: {e}", path.display()))?.len();
         scan_range(dir, idx, from, to, true)?;
     } else {
@@ -2263,8 +2526,8 @@ fn commit_row(
             offset,
             len: line.len() as u64 - 1,
         };
-        push_entry(idx, span, &stored.meta.message_id);
-        sidecar_append(dir, span, &stored.meta.message_id)?;
+        push_entry(idx, span, &stored.meta.message_id, &stored.meta.in_reply_to);
+        sidecar_append(dir, span, &stored.meta.message_id, &stored.meta.in_reply_to)?;
     }
 
     session.message_count = stored.seq;
@@ -2303,7 +2566,6 @@ pub fn read_messages(
     // index from appended bytes.
     let tlock = session_lock(&dir);
     let _g = lock(&tlock);
-    let path = messages_path(&dir);
     let index = ensure_index(&dir)?;
     let window: Vec<LineSpan> = {
         let idx = lock(&index);
@@ -2313,22 +2575,85 @@ pub fn read_messages(
         idx.spans[start..end].to_vec()
     };
     let total = window_total(&index);
-    // A missing log is an empty conversation (same rule as the old
-    // whole-file read).
+    // Plan D-A/A1: the writer's identity type is a session property.
+    let participants = load(data_dir, session_id)
+        .map(|s| s.participants)
+        .unwrap_or_default();
+    let out = read_rows(&dir, &window, &participants)?;
+    Ok((out, total))
+}
+
+/// The rows that thread themselves to `ids`, in log order, keyed by the id
+/// they answer.
+///
+/// This is the storage side of the chat read model (design 31 §6): the reverse
+/// edge `in_reply_to` → answering rows, resolved through the line index and
+/// read by byte span. The read model is the only caller — a surface that needs
+/// to know whether a message was answered must not walk rows looking for the
+/// coordinate, because every surface that did it re-implemented the rule
+/// slightly differently. Unknown ids are simply absent from the map.
+pub fn answering_rows(
+    data_dir: &Path,
+    session_id: &str,
+    ids: &[String],
+) -> Result<HashMap<String, Vec<SessionMessage>>, String> {
+    validate_session_id(session_id)?;
+    let dir = session_dir(data_dir, session_id);
+    let tlock = session_lock(&dir);
+    let _g = lock(&tlock);
+    let index = ensure_index(&dir)?;
+    // Positions per id, in log order. The reverse edge is exact by
+    // construction: `push_entry` only adds the line it just appended and
+    // `pop_entry` removes both the span and its edge, so the bounds check below
+    // is the whole guard (a position that no longer exists cannot be reached).
+    let mut wanted: Vec<(String, LineSpan)> = Vec::new();
+    {
+        let idx = lock(&index);
+        for id in ids {
+            if id.is_empty() {
+                continue;
+            }
+            let positions = idx.answers.get(id.as_str()).cloned().unwrap_or_default();
+            for pos in positions {
+                let Some(span) = idx.spans.get(pos as usize).copied() else {
+                    continue;
+                };
+                wanted.push((id.clone(), span));
+            }
+        }
+    }
+    wanted.sort_by_key(|(_, span)| span.offset);
+    wanted.dedup_by_key(|(_, span)| span.offset);
+    let spans: Vec<LineSpan> = wanted.iter().map(|(_, span)| *span).collect();
+    let participants = load(data_dir, session_id).map(|s| s.participants).unwrap_or_default();
+    let rows = read_rows(&dir, &spans, &participants)?;
+    let mut out: HashMap<String, Vec<SessionMessage>> = HashMap::new();
+    for (row, (id, _)) in rows.into_iter().zip(wanted) {
+        out.entry(id).or_default().push(row);
+    }
+    Ok(out)
+}
+
+/// Read and normalise the rows at `spans`, in log order.
+///
+/// Plan D-A/A1: old `intent_*` rows are re-labelled at this single read path
+/// (write new, read old). The writer's identity type comes from the session; a
+/// session that cannot be read (or a writer not listed in it) reads as the
+/// agent side. One corrupt line is skipped, never fatal (same rule as chat.rs).
+fn read_rows(
+    dir: &Path,
+    spans: &[LineSpan],
+    participants: &[Participant],
+) -> Result<Vec<SessionMessage>, String> {
+    let path = messages_path(dir);
     let mut file = match fs::File::open(&path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), 0)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(format!("{}: {e}", path.display())),
     };
-    // Plan D-A/A1: old `intent_*` rows are re-labelled at this single
-    // read path (write new, read old). The writer's identity type comes
-    // from the session; a session that cannot be read (or a writer not
-    // listed in it) reads as the agent side.
-    let participants = load(data_dir, session_id).map(|s| s.participants).unwrap_or_default();
-    let mut out = Vec::with_capacity(window.len());
+    let mut out = Vec::with_capacity(spans.len());
     use std::io::{Seek, SeekFrom};
-    for span in &window {
-        // One corrupt line must not brick the history (same rule as chat.rs).
+    for span in spans {
         file.seek(SeekFrom::Start(span.offset))
             .map_err(|e| format!("{}: {e}", path.display()))?;
         let raw = match read_current_line(&mut file, *span) {
@@ -2351,7 +2676,7 @@ pub fn read_messages(
             ),
         }
     }
-    Ok((out, total))
+    Ok(out)
 }
 
 /// The total physical line count behind a paging answer. Kept as a
@@ -2962,7 +3287,25 @@ mod tests {
         dir
     }
 
+    /// The id every threaded fixture row answers.
+    const HEAD: &str = "head-message";
+
+    /// A row as a producer would write it. Rows that answer something carry the
+    /// coordinate they answer (`HEAD`): the write contract requires it (design
+    /// 31 §5.2), and a fixture without one models a row the store refuses —
+    /// which is [`unthreaded`]'s job.
     fn msg(from: &str, kind: &str, body: &str, message_id: &str) -> SessionMessage {
+        let mut m = unthreaded(from, kind, body, message_id);
+        if kind == KIND_AGENT_MESSAGE || kind == KIND_EXECUTION_ROUND || kind == KIND_INTERACTION_REQUEST
+        {
+            m.meta.in_reply_to = HEAD.to_string();
+        }
+        m
+    }
+
+    /// The same row with no thread coordinate — for the tests that assert the
+    /// contract itself.
+    fn unthreaded(from: &str, kind: &str, body: &str, message_id: &str) -> SessionMessage {
         SessionMessage {
             seq: 0,
             ts: 0,
@@ -4268,6 +4611,123 @@ mod tests {
         assert!(append_message(&dir, &s.session_id, &msg("u", "agent_thought", "x", ""), 7).is_err());
     }
 
+    fn two_party(dir: &Path) -> ChatSession {
+        create_session(
+            dir,
+            SessionKind::UserAgent,
+            &[
+                Participant::new("u", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "",
+            None,
+            None,
+            1,
+        )
+        .unwrap()
+    }
+
+    /// Design 31 §5.2: the row contract is enforced at the single write entry,
+    /// so no producer can store a row the projection cannot resolve from the
+    /// log. Each rejection below is a shape that used to be *stored* and then
+    /// silently lost meaning on the way out.
+    #[test]
+    fn write_contract_refuses_rows_no_reader_could_resolve() {
+        let dir = temp_dir();
+        let s = two_party(&dir);
+
+        // 1. An unregistered payload key. The error names the key: a silently
+        //    dropped `options` is exactly how a card reached the surface as a
+        //    sentence with no buttons.
+        let mut stray = unthreaded("u", KIND_USER_MESSAGE, "hi", "m-1");
+        stray
+            .meta
+            .unregistered
+            .insert("cardOptions".into(), serde_json::json!([]));
+        let err = append_message(&dir, &s.session_id, &stray, 1).unwrap_err();
+        assert!(err.contains("cardOptions"), "{err}");
+
+        // 2. An answering row with no coordinate: an orphan the reader would
+        //    have to guess the meaning of.
+        let err = append_message(
+            &dir,
+            &s.session_id,
+            &unthreaded("ag", KIND_AGENT_MESSAGE, "on it", "m-2"),
+            2,
+        )
+        .unwrap_err();
+        assert!(err.contains("in_reply_to"), "{err}");
+        // A reference row with no thread above it is an *origin*, not an
+        // orphan: a turn dispatched from a task or the execution surface has no
+        // chat question to answer, and pointing at a phantom row would hang the
+        // block under a message nobody wrote (design 31 §5.2).
+        let mut round = unthreaded("ag", KIND_EXECUTION_ROUND, "", "m-3");
+        round.meta.round_id = "r:m-1".into();
+        round.meta.agent_session_id = "s-1".into();
+        append_message(&dir, &s.session_id, &round, 3).expect("an origin reference row");
+
+        // 3. A card is a question with answers and an exit (ADR-106 D6): no
+        //    options = unclickable, no `allow_new_task` = no escape.
+        let mut card = unthreaded("ag", KIND_SYSTEM_NOTICE, "", "c-1");
+        card.meta.notice_type = "confirm_continue".into();
+        card.meta.in_reply_to = "m-1".into();
+        let err = append_message(&dir, &s.session_id, &card, 4).unwrap_err();
+        assert!(err.contains("meta.options"), "{err}");
+        card.meta.options = vec![serde_json::json!({"session_id": "s-1", "label": "task"})];
+        let err = append_message(&dir, &s.session_id, &card, 5).unwrap_err();
+        assert!(err.contains("allow_new_task"), "{err}");
+        card.meta.allow_new_task = Some(true);
+        append_message(&dir, &s.session_id, &card, 6).expect("a complete card");
+
+        // The card survives the round trip: question, answers, escape and the
+        // row it asks about. This is the regression the contract exists for.
+        let (rows, _) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
+        let stored = rows
+            .iter()
+            .find(|r| r.meta.message_id == "c-1")
+            .expect("card row");
+        assert_eq!(stored.meta.in_reply_to, "m-1");
+        assert_eq!(stored.meta.options.len(), 1);
+        assert_eq!(stored.meta.options[0]["label"], "task");
+        assert_eq!(stored.meta.allow_new_task, Some(true));
+
+        // 4. A channel-scoped notice answers no row and is still legal: the
+        //    request it names never became a durable one (design 31 §9-3).
+        let mut limit = unthreaded("ag", KIND_SYSTEM_NOTICE, "", "n-1");
+        limit.meta.notice_type = "budget_exhausted".into();
+        append_message(&dir, &s.session_id, &limit, 7).expect("a channel fact needs no thread");
+    }
+
+    /// History is unknown-but-legal: a line written by a producer this store has
+    /// not learned yet keeps its keys through the read (design 31 §3.2 — the
+    /// reader is not a second silent-drop boundary, or a read-modify path would
+    /// erase what it does not understand).
+    #[test]
+    fn unregistered_keys_in_history_survive_the_read() {
+        let dir = temp_dir();
+        let s = two_party(&dir);
+        let line = serde_json::json!({
+            "seq": 1,
+            "ts": 1,
+            "from": "u",
+            "kind": KIND_USER_MESSAGE,
+            "body": "hi",
+            "meta": {"message_id": "h-1", "future_key": {"a": 1}}
+        });
+        fs::write(
+            session_dir(&dir, &s.session_id).join("messages.jsonl"),
+            format!("{line}\n"),
+        )
+        .unwrap();
+        let (rows, _) = read_messages(&dir, &s.session_id, 0, 10).unwrap();
+        assert_eq!(rows[0].meta.unregistered["future_key"]["a"], 1);
+        // ...and it is still there after a re-serialization (the projection's
+        // path: deserialize for reading, serialize for the surface).
+        let wire = serde_json::to_value(&rows[0]).unwrap();
+        assert_eq!(wire["meta"]["future_key"]["a"], 1);
+        assert_eq!(wire["meta"]["message_id"], "h-1");
+    }
+
     #[test]
     fn golden_sample_old_rows_render_as_new_rows() {
         // 2b.2 / D-A A1 acceptance: a session containing old `intent_*`
@@ -4824,6 +5284,11 @@ mod tests {
             AttachmentLabel {
                 filename: "src/main.rs".into(),
                 kind: "attached_file".into(),
+                // ADR-100 D12 Rev. 2026-11: a workspace arm's path is the one
+                // field that must survive the round trip, because it is what
+                // the client's click resolves. Written here so the store's
+                // declared-key contract covers it, not just `filename`.
+                abs_path: Some("E:/work/demo/src/main.rs".into()),
                 ..Default::default()
             },
             AttachmentLabel {
@@ -4841,6 +5306,15 @@ mod tests {
             .expect("the row is readable");
         assert_eq!(row.meta.exec_attachments.len(), 2);
         assert_eq!(row.meta.exec_attachments[0].filename, "src/main.rs");
+        assert_eq!(
+            row.meta.exec_attachments[0].abs_path.as_deref(),
+            Some("E:/work/demo/src/main.rs"),
+            "the workspace arm's open coordinate survives the JSONL round trip"
+        );
+        assert_eq!(
+            row.meta.exec_attachments[1].abs_path, None,
+            "an upload arm never carries a path"
+        );
         // A row that sent none stays clean: the key is skipped rather than
         // written as an empty array, so ordinary transcript rows grow no noise.
         append_message(
@@ -5133,6 +5607,7 @@ mod tests {
                             to: String::new(),
                             meta: IntentMeta {
                                 message_id: format!("w{i}-m{j}"),
+                                in_reply_to: HEAD.to_string(),
                                 ..Default::default()
                             },
                             attachment_ids: Vec::new(),
@@ -5615,6 +6090,221 @@ mod tests {
 
         lock(&LINE_INDEXES).remove(&sess);
         assert_eq!(message_by_id(&dir, &g.session_id, "r-1").unwrap().map(|m| m.seq), Some(1));
+    }
+
+    #[test]
+    fn answering_rows_reads_only_the_hit_lines() {
+        // The read model's one reverse lookup (design 31 §6): "which rows answer
+        // this message". It must resolve through the index and read those spans
+        // only — a surface used to answer the same question by walking the whole
+        // transcript, and every surface walked it slightly differently.
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "r",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "one", "m-1"), 2)
+            .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "two", "m-2"), 3)
+            .unwrap();
+        let mut reply = msg("ag", KIND_AGENT_MESSAGE, "answered", "a-1");
+        reply.meta.in_reply_to = "m-1".into();
+        reply.to = "u1".into();
+        append_message(&dir, &g.session_id, &reply, 4).unwrap();
+        let mut round = msg("ag", "execution_round", "", "rr-1");
+        round.meta.in_reply_to = "m-1".into();
+        round.meta.agent_session_id = "exec-1".into();
+        round.meta.round_id = "r1".into();
+        round.to = "u1".into();
+        append_message(&dir, &g.session_id, &round, 5).unwrap();
+
+        let hits = answering_rows(&dir, &g.session_id, &["m-1".into(), "m-2".into(), String::new()])
+            .unwrap();
+        // Log order, both answers, and only them.
+        let answering = &hits["m-1"];
+        assert_eq!(answering.len(), 2);
+        assert_eq!(answering[0].meta.message_id, "a-1");
+        assert_eq!(answering[1].meta.message_id, "rr-1");
+        assert_eq!(answering[1].meta.round_id, "r1");
+        // An unanswered id is absent, not present-and-empty: the caller reads a
+        // missing key as "nothing happened", and an empty vec would be a second
+        // spelling of the same fact.
+        assert!(!hits.contains_key("m-2"));
+        assert!(!hits.contains_key(""));
+
+        // The same answer must come from the sidecar alone (a fresh process
+        // reads no log beyond the spans it needs).
+        let sess = session_dir(&dir, &g.session_id);
+        lock(&LINE_INDEXES).remove(&sess);
+        let again = answering_rows(&dir, &g.session_id, &["m-1".into()]).unwrap();
+        assert_eq!(again["m-1"].len(), 2);
+    }
+
+    /// A sidecar created by the *append* path must carry the format marker.
+    ///
+    /// `sidecar_append` creates `lines.index` on the first commit of a new
+    /// session. Without the marker the file is indistinguishable from a v1
+    /// sidecar, so the next process start deletes it and re-reads the whole log
+    /// — exactly the restart cost the marker exists to avoid, paid once per
+    /// session with no test able to see it.
+    #[test]
+    fn a_sidecar_created_by_an_append_carries_the_marker() {
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "r",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "one", "m-1"), 2)
+            .unwrap();
+        let mut reply = msg("ag", KIND_AGENT_MESSAGE, "answered", "a-1");
+        reply.meta.in_reply_to = "m-1".into();
+        reply.to = "u1".into();
+        append_message(&dir, &g.session_id, &reply, 3).unwrap();
+
+        let sess = session_dir(&dir, &g.session_id);
+        let raw = fs::read_to_string(line_index_path(&sess)).unwrap();
+        assert!(
+            raw.starts_with(SIDECAR_HEADER),
+            "the append path must write the version marker, got: {raw:?}"
+        );
+        // The marker is not decoration: the next process must be able to load
+        // what the append wrote, marker line included.
+        lock(&LINE_INDEXES).remove(&sess);
+        let hits = answering_rows(&dir, &g.session_id, &["m-1".into()]).unwrap();
+        assert_eq!(hits["m-1"].len(), 1, "the appended sidecar must load");
+        assert_eq!(hits["m-1"][0].meta.message_id, "a-1");
+        // …and the file it just read stays as it was (no rewrite on a clean
+        // load): the marker line is one header, not one per row.
+        let after = fs::read_to_string(line_index_path(&sess)).unwrap();
+        assert_eq!(after, raw, "a clean load must not rewrite the sidecar");
+    }
+
+    #[test]
+    fn a_torn_sidecar_tail_is_repaired_instead_of_refusing_the_file() {
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "r",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "one", "m-1"), 2)
+            .unwrap();
+        let mut reply = msg("ag", KIND_AGENT_MESSAGE, "answered", "a-1");
+        reply.meta.in_reply_to = "m-1".into();
+        reply.to = "u1".into();
+        append_message(&dir, &g.session_id, &reply, 3).unwrap();
+
+        // Simulate a crash inside the second `writeln!`: the log has both rows,
+        // the sidecar has the first plus half of the second, no newline.
+        let sess = session_dir(&dir, &g.session_id);
+        let path = line_index_path(&sess);
+        let raw = fs::read_to_string(&path).unwrap();
+        let keep: String = raw.split_inclusive('\n').take(2).collect();
+        let torn: String = raw.split_inclusive('\n').nth(2).unwrap().chars().take(6).collect();
+        fs::write(&path, format!("{keep}{torn}")).unwrap();
+        lock(&LINE_INDEXES).remove(&sess);
+
+        // The file still loads: the complete row is used, the torn one is
+        // re-read from the log's own bytes.
+        let hits = answering_rows(&dir, &g.session_id, &["m-1".into()]).unwrap();
+        assert_eq!(hits["m-1"].len(), 1, "the torn row's edge must come back");
+        assert_eq!(hits["m-1"][0].meta.message_id, "a-1");
+
+        // And it is repaired rather than merely ignored: every line is whole,
+        // so the next append cannot merge with the torn bytes.
+        let after = fs::read_to_string(&path).unwrap();
+        assert!(after.starts_with(SIDECAR_HEADER), "{after:?}");
+        assert!(after.ends_with('\n'), "the torn tail was truncated: {after:?}");
+        assert_eq!(
+            after.lines().count(),
+            3,
+            "marker + two rows, nothing torn left behind: {after:?}"
+        );
+    }
+
+    #[test]
+    fn a_v1_sidecar_is_rebuilt_into_v2_instead_of_trusted() {
+        // The upgrade path: a sidecar written before the thread column existed
+        // cannot answer the reverse edge, so it is dropped and the log re-scanned
+        // once (the sanctioned full pass — the file is disposable). Trusting it
+        // would preserve the old index's blind spot: every message reading as
+        // unanswered until something else happened to rewrite the file.
+        let dir = temp_dir();
+        let g = create_session(
+            &dir,
+            SessionKind::UserGroup,
+            &[
+                Participant::new("u1", ParticipantIdentity::Human),
+                Participant::new("ag", ParticipantIdentity::Agent),
+            ],
+            "r",
+            None,
+            None,
+            1,
+        )
+        .unwrap();
+        append_message(&dir, &g.session_id, &msg("u1", KIND_USER_MESSAGE, "one", "m-1"), 2)
+            .unwrap();
+        let mut reply = msg("ag", KIND_AGENT_MESSAGE, "answered", "a-1");
+        reply.meta.in_reply_to = "m-1".into();
+        reply.to = "u1".into();
+        append_message(&dir, &g.session_id, &reply, 3).unwrap();
+
+        // Downgrade the file to the v1 shape: same spans and ids, no marker and
+        // no thread column.
+        let sess = session_dir(&dir, &g.session_id);
+        let lines: Vec<String> = fs::read_to_string(line_index_path(&sess))
+            .unwrap()
+            .lines()
+            .filter(|l| !l.starts_with('#'))
+            .map(|l| {
+                let mut parts = l.split('\t');
+                format!(
+                    "{}\t{}\t{}",
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default(),
+                    parts.next().unwrap_or_default()
+                )
+            })
+            .collect();
+        fs::write(line_index_path(&sess), lines.join("\n") + "\n").unwrap();
+        lock(&LINE_INDEXES).remove(&sess);
+
+        let hits = answering_rows(&dir, &g.session_id, &["m-1".into()]).unwrap();
+        assert_eq!(hits["m-1"].len(), 1, "the re-scan must recover the edge");
+        assert_eq!(hits["m-1"][0].meta.message_id, "a-1");
+        // And the file it rewrote is v2 again, so the next restart is incremental.
+        assert!(
+            fs::read_to_string(line_index_path(&sess))
+                .unwrap()
+                .starts_with(SIDECAR_HEADER)
+        );
     }
 
     #[test]

@@ -7,17 +7,20 @@
 //! (§7.1: no polling) the conversation would go silent forever. This loop
 //! closes the hole: a delivered request with no answer past
 //! `[intent] response_timeout_secs` gets a system-generated `failed`
-//! receipt — the same durable chat row and push a real response would
-//! have produced, with the fixed fallback wording.
+//! receipt and a push.
 //!
 //! Semantics mirror `deliver_response` (the write-back entry):
-//! - chat row on the request's `source_chat_session_id`, `in_reply_to`
-//!   the request id, `status=failed`, `fallback=true`;
+//! - a **live** alert on the request's `source_chat_session_id`, anchored to
+//!   the human row the delivery owed (`result_ref`), code [`NO_RESPONSE`] —
+//!   in memory, not a transcript row (ADR-105 D5, revision 2026-11-06), so a
+//!   timeout that a later retry resolved does not stay on screen as history;
 //! - push to the initiator only when the initiator is an installed agent
 //!   and the conversation is not a `task:` relay (§5.1 / §9-8);
-//! - the receipt id is deterministic (`fallback-{request_id}`), so the
-//!   chat store's `message_id` dedup (§8) makes a retry after a partial
-//!   failure idempotent.
+//! - the push's id is deterministic (`fallback-{request_id}`), and the alert
+//!   store keys on `(chat, row, target)`, so a retry after a partial failure
+//!   replaces rather than duplicates.
+//!
+//! [`NO_RESPONSE`]: acowork_core::intent::chat_alert_codes::NO_RESPONSE
 //!
 //! Two triggers, one pass: the deadline (`[intent] response_timeout_secs`,
 //! default 3600s), and a responder-liveness short-circuit — a request
@@ -147,38 +150,36 @@ async fn emit_fallback_receipt(
     // failure (append ok, mark_answered failed) with no second receipt.
     let receipt_id = format!("fallback-{}", req.message_id);
 
-    // 1. The durable answer: a `delivery_failed` notice on the chat the
-    //    delivery owed its outcome to.
+    // 1. The live answer: an alert on the row this delivery owed its outcome to
+    //    (ADR-105 D5, revision 2026-11-06). Nothing is appended — a timeout is
+    //    news about the moment, and the row this used to write stayed in the
+    //    transcript forever, telling a reader weeks later that a message had not
+    //    been delivered even when a later retry had landed.
+    //
+    //    `result_ref` is the human's row (the delivery's `in_reply_to`), which is
+    //    where the surface paints the receipt; `message_id` names the ENVELOPE
+    //    and resolves to no row at all, so anchoring there centred the line and
+    //    left it unable to say whose message it was about.
+    let alert_row = if req.result_ref.is_empty() {
+        req.message_id.as_str()
+    } else {
+        req.result_ref.as_str()
+    };
     if !req.source_chat_session_id.is_empty() {
         let Some(port) = user_port else {
-            tracing::debug!(request_id = %req.message_id, "fallback receipt deferred: user service down");
+            tracing::debug!(request_id = %req.message_id, "fallback alert deferred: user service down");
             return;
         };
-        let meta = serde_json::json!({
-            "message_id": receipt_id,
-            "conversation_id": req.conversation_id,
-            "notice_type": "delivery_failed",
-            "in_reply_to": req.message_id,
-        });
-        if let Err(e) = chat_client::append_message(
+        if let Err(e) = chat_client::record_delivery_alert(
             port,
             &req.source_chat_session_id,
-            &chat_client::AppendMessage {
-                from: req.to_instance.clone(),
-                to: req.from_instance.clone(),
-                // ADR-106 D1: a delivery the chat owed and could not make is a
-                // channel fact, not agent speech — the responder never produced
-                // a round to reference, so there is no block to hang this on
-                // (§5.5.1).
-                kind: acowork_core::intent::chat_kinds::SYSTEM_NOTICE.to_string(),
-                body: body.to_string(),
-                meta,
-                attachment_ids: Vec::new(),
-            },
+            alert_row,
+            &req.to_instance,
+            acowork_core::intent::chat_alert_codes::NO_RESPONSE,
         )
         .await
         {
-            tracing::warn!(error = %e, request_id = %req.message_id, "fallback receipt chat row failed — retrying next tick");
+            tracing::warn!(error = %e, request_id = %req.message_id, "fallback alert not recorded — retrying next tick");
             return;
         }
     }

@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentChatView } from "./AgentChatView";
-import type { ChatMessageRow } from "../../stores/chatSessionStore";
+import type { ChatDeliveryView, ChatMessageRow } from "../../stores/chatSessionStore";
 import type { RunBlock } from "./chatTranscriptGroups";
+import { openAttachedRef } from "../../lib/openWorkspaceRef";
 
 const AGENT = "agent-1";
 const SESSION = "chat-1";
@@ -29,6 +30,10 @@ let settleTurnMock: ReturnType<typeof vi.fn> = vi.fn();
 let drafts: Record<string, unknown> = {};
 let availableModels: unknown[] = [];
 let sendTextMock: ReturnType<typeof vi.fn> = vi.fn();
+
+// The chip's click is the dispatcher under test in the attachment case below;
+// every other case here never clicks one.
+vi.mock("../../lib/openWorkspaceRef", () => ({ openAttachedRef: vi.fn() }));
 
 vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../../stores/chatSessionStore")>();
@@ -203,7 +208,11 @@ function roundRow(
   };
 }
 
-function notice(seq: number, meta: Record<string, unknown>): ChatMessageRow {
+function notice(
+  seq: number,
+  meta: Record<string, unknown>,
+  delivery?: ChatDeliveryView,
+): ChatMessageRow {
   return {
     seq,
     ts: seq,
@@ -212,6 +221,22 @@ function notice(seq: number, meta: Record<string, unknown>): ChatMessageRow {
     body: "",
     to: "user",
     meta: { message_id: `n${seq}`, ...meta },
+    ...(delivery ? { delivery } : {}),
+  };
+}
+
+/** What the service projects onto an addressing card (design 31 §6): the
+ *  answers it offers and whether a round already answered the message it asked
+ *  about. The surface renders this verbatim — the raw `meta.options` are no
+ *  longer read by any component. */
+function cardDelivery(
+  options: Array<{ session_id: string; label?: string; status?: string; origin?: string; why?: string }>,
+  answered = false,
+  allowNewTask = true,
+): ChatDeliveryView {
+  return {
+    answered: false,
+    question: { answered, options, ...(allowNewTask ? { allow_new_task: true } : {}) },
   };
 }
 
@@ -323,12 +348,13 @@ describe("AgentChatView event-log wiring", () => {
 
     const blocks = screen.getAllByTestId("exec-block");
     expect(blocks).toHaveLength(1);
-    // Both rounds are in it, oldest first, and the block sits where the session's
-    // newest work is.
+    // Both rounds are in it, oldest first, and the block sits where the session
+    // FIRST appeared: a continuation adds a round without moving the block, so
+    // the exchange keeps reading as question-then-answer.
     expect(blocks[0]!.getAttribute("data-refs")).toBe(
       `${AGENT}|exec-9|r2,${AGENT}|exec-9|r4`,
     );
-    expect(blocks[0]!.getAttribute("data-row")).toBe(`round:exec-9|r4`);
+    expect(blocks[0]!.getAttribute("data-row")).toBe(`round:exec-9|r2`);
     expect(screen.getAllByTestId("block-question")).toHaveLength(2);
     expect(screen.getAllByText("first ask")).toHaveLength(1);
     expect(screen.getAllByText("second ask")).toHaveLength(1);
@@ -433,7 +459,23 @@ describe("AgentChatView event-log wiring", () => {
   it("the round's reference row settles the claim: line gone, composer live", () => {
     // From here the block narrates the run (D3/D9), so a follow-up is allowed —
     // the execution side has a queue for it, the Chat does not need one.
-    windows = windowOf(userRow(1, "hello there"), roundRow(2, "exec-9", "r2", "u1"));
+    // The service answered the human's row with a round: that is the fact the
+    // wait line ends on, projected onto the row itself (design 31 §6).
+    windows = windowOf(
+      {
+        ...userRow(1, "hello there"),
+        delivery: {
+          answered: true,
+          answered_by: { message_id: "round:exec-9|r2", kind: "execution_round" },
+          target: {
+            agent_instance_id: AGENT,
+            agent_session_id: "exec-9",
+            round_id: "r2",
+          },
+        },
+      },
+      roundRow(2, "exec-9", "r2", "u1"),
+    );
     inflightMap = { [SESSION]: { messageId: "u1", at: 1 } };
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     expect(screen.queryByRole("status")).toBeNull();
@@ -443,11 +485,19 @@ describe("AgentChatView event-log wiring", () => {
     expect(settleTurnMock).toHaveBeenCalledWith(SESSION, "u1");
   });
 
-  it("a delivery receipt settles the claim too — it is the answer the human sees", () => {
-    windows = windowOf(
-      userRow(1, "hello there"),
-      notice(2, { notice_type: "delivery_failed", in_reply_to: "u1" }),
-    );
+  it("a live delivery alert settles the claim too — it is the outcome the human sees", () => {
+    // ADR-105 D5 rev. 2026-11-06: a failed send is no longer a receipt ROW, so
+    // nothing in the transcript answers the human's message. The failure is
+    // served live on that row (`delivery.alert`) and it IS the answer: the send
+    // bounced, and leaving the composer locked on it would read as still in
+    // flight.
+    windows = windowOf({
+      ...userRow(1, "hello there"),
+      delivery: {
+        answered: false,
+        alert: { target: AGENT, error_code: "target_not_installed", expires_in: 600 },
+      },
+    });
     inflightMap = { [SESSION]: { messageId: "u1", at: 1 } };
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     expect(screen.queryByRole("status")).toBeNull();
@@ -469,39 +519,66 @@ describe("AgentChatView event-log wiring", () => {
     expect(sendDisabled()).toBe(false);
   });
 
-  it("an addressing question asks in centered chrome and offers its answers (D7)", () => {
+  it("an addressing question is a card with a header, buttons and one escape (D7)", () => {
     windows = windowOf(
       userRow(1, "which one"),
-      notice(2, {
-        notice_type: "session_choice",
-        in_reply_to: "u1",
-        options: [
+      notice(
+        2,
+        { notice_type: "session_choice", in_reply_to: "u1" },
+        cardDelivery([
           { session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing", why: "same task" },
-        ],
-        allow_new_task: true,
-      }),
+        ]),
+      ),
     );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     const card = screen.getByTestId("chat-card-options");
+    // The question is the card's HEADER, and the candidates below it are
+    // buttons — not a bordered box of two text lines, which reads as a disabled
+    // field and leaves the human unsure what is clickable.
     expect(card.textContent).toContain("chatView.block.chooseSession");
-    // Transcript chrome, not speech: it is centered like every other notice and
-    // never wears the agent's identity, because a question about addressing is
-    // not the agent talking to the human.
-    expect(card.className).toContain("items-center");
+    expect(card.textContent).toContain("chatView.block.unanswered");
+    const option = screen.getByRole("button", { name: /Fix the bug/ });
+    expect(option.textContent).toContain("same task");
+    // Still chrome, never speech: a question about addressing is not the agent
+    // talking to the human, so it wears no identity.
     expect(screen.queryByText("Agent A")).toBeNull();
-    // D6's cheap escape rides beside the suggestion, never below a fold.
+    // D6's cheap escape rides in the same card, as a footer action rather than a
+    // second candidate of equal weight.
     expect(screen.getByRole("button", { name: "chatView.block.newTask" })).toBeTruthy();
   });
 
   it("answering the card re-delivers the human's own words with the chosen address (D6)", async () => {
     windows = windowOf(
       { ...userRow(1, "which one"), attachment_ids: ["f1"] },
-      notice(2, {
-        notice_type: "session_choice",
-        in_reply_to: "u1",
-        options: [{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }],
-        allow_new_task: true,
-      }),
+      notice(
+        2,
+        { notice_type: "session_choice", in_reply_to: "u1" },
+        cardDelivery([{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }]),
+      ),
+    );
+    // The words and the files come from the SERVICE now (design 31 §6): the
+    // surface no longer rebuilds them from the rows it happens to have loaded,
+    // which is what made a card older than the window unanswerable.
+    vi.stubGlobal(
+      "fetch",
+      // Only the card-answer route answers; everything else keeps the file's
+      // default "no network in test" so an unrelated background read stays
+      // inconclusive rather than parsing a card answer as its own payload.
+      vi.fn().mockImplementation((url: string) =>
+        String(url).endsWith("/answer")
+          ? Promise.resolve({
+              status: 200,
+              ok: true,
+              json: async () => ({
+                agent_id: "agent",
+                message_id: "u1",
+                text: "which one",
+                attachment_ids: ["f1"],
+                refs: [],
+              }),
+            })
+          : Promise.reject(new Error("no network in test")),
+      ),
     );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
     fireEvent.click(screen.getByRole("button", { name: "Fix the bug" }));
@@ -514,22 +591,34 @@ describe("AgentChatView event-log wiring", () => {
     });
   });
 
-  it("an answered card goes quiet rather than offering the same words twice", () => {
-    // The round IS the answer (D3): a reference row pointing at the message the
-    // card asked about. The buttons stay visible — the record of what was
-    // offered must not vanish — but they refuse a second delivery.
+  it("an answered card leaves the transcript to the round's block", () => {
+    // The round IS the answer (D3), and the SERVICE says so through
+    // `question.answered`. The card then paints nothing: it was a question, and
+    // the block below already names the session, its rounds and a way in. A
+    // disabled row of buttons kept the offer on screen; a receipt line repeated
+    // the block. Neither is a record of the conversation.
     windows = windowOf(
       userRow(1, "which one"),
-      notice(2, {
-        notice_type: "session_choice",
-        in_reply_to: "u1",
-        options: [{ session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" }],
-        allow_new_task: true,
-      }),
+      notice(
+        2,
+        { notice_type: "session_choice", in_reply_to: "u1" },
+        {
+          answered: false,
+          question: {
+            answered: true,
+            options: [
+              { session_id: "exec-9", label: "Fix the bug", status: "idle", origin: "existing" },
+            ],
+            allow_new_task: true,
+          },
+        },
+      ),
       roundRow(3),
     );
     render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
-    expect((screen.getByRole("button", { name: "Fix the bug" }) as HTMLButtonElement).disabled).toBe(true);
+    expect(screen.queryByTestId("chat-card-options")).toBeNull();
+    expect(screen.queryByTestId("chat-card-answered")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Fix the bug/ })).toBeNull();
     expect(sendTextMock).not.toHaveBeenCalled();
   });
 
@@ -761,5 +850,26 @@ describe("AgentChatView `@` composer gesture", () => {
     });
     const typed = screen.getByTestId("address-picker");
     expect(typed.closest('[data-toolbar-cluster="right"]')).toBeNull();
+  });
+
+  it("the workspace-ref banner a turn carried opens its file (D12 Rev. 2026-11)", () => {
+    // The reported defect: in the execution session the banner hanging off a
+    // message opened the file, in the Chat session it only painted. Same chip
+    // frame, same glyph, same dispatcher — the difference was that the label
+    // had no path to resolve. It has one now.
+    windows = windowOf(
+      userRow(1, "look at this", {
+        exec_attachments: [
+          { filename: "src/main.rs", kind: "attached_file", absPath: "E:/ws/src/main.rs" },
+        ],
+      }),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    fireEvent.click(screen.getByRole("button", { name: "src/main.rs" }));
+    expect(openAttachedRef).toHaveBeenCalledWith({
+      item: { type: "attached_file", absPath: "E:/ws/src/main.rs", name: "src/main.rs" },
+      agentId: AGENT,
+      currentWorkspaceId: "",
+    });
   });
 });

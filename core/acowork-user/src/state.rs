@@ -12,6 +12,7 @@ use tokio::sync::RwLock;
 use acowork_core::protocol::UserProfileListFile;
 
 use crate::auth::AuthService;
+use crate::chat_alerts::AlertStore;
 use crate::config::UserServiceConfig;
 
 /// Cached derived views. One field today; kept as a struct so the growth
@@ -51,6 +52,10 @@ pub struct AppState {
     pub auth_service: Option<Arc<AuthService>>,
     /// Lazily-shared mutable state (profile cache + tuning flags).
     pub shared: Arc<RwLock<SharedState>>,
+    /// Live delivery failures, by Chat (`crate::chat_alerts`). In memory on
+    /// purpose: a failed send is news while it is news, and nothing that restarts
+    /// this service should resurrect it as history.
+    pub alerts: Arc<AlertStore>,
     /// Deployment mode, resolved by the Gateway and handed down.
     pub auth_mode: crate::config::AuthMode,
 }
@@ -61,6 +66,7 @@ impl AppState {
         Self {
             auth_service,
             shared: Arc::new(RwLock::new(shared)),
+            alerts: Arc::new(AlertStore::new()),
             auth_mode: config.auth_mode,
         }
     }

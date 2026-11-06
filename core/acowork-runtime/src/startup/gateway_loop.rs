@@ -1187,7 +1187,9 @@ async fn route_intent_inbound(
         let initiator = Some(env.from.as_str()).filter(|s| !s.is_empty());
         let surface = chat_surface(&env);
         let to = env.from.clone();
-        let in_reply_to = env.in_reply_to.clone();
+        // The card asks about this very message, so its thread coordinate is
+        // the message — never the envelope's own answer-coordinate, which is
+        // empty on a fresh request (design 31 §5.2).
         let message_id = env.message_id.clone();
         let candidates = session_manager
             .lock()
@@ -1205,7 +1207,6 @@ async fn route_intent_inbound(
                         .emit_session_choice(
                             &chat,
                             &to,
-                            &in_reply_to,
                             &message_id,
                             "session_choice",
                             many.iter().map(|c| c.choice_option()).collect(),
@@ -1533,7 +1534,14 @@ async fn resolve_legacy_route(
         let mut guard = session_manager.lock().await;
         // `fresh` is the degraded-router case: the router read the conversation
         // and failed to decide, so nothing here may continue old work.
-        let continuation = if fresh {
+        //
+        // `force_new` is ADR-106 D6's cheap escape, and it belongs to the whole
+        // ladder rather than to the router's level 3: when the human answered
+        // the addressing card with "new task", a chat with exactly one bound
+        // session still may not continue it — that is the same rule that makes
+        // the router offer no candidates, applied to the deterministic route
+        // (this is the path a Chat turn takes with the router switched off).
+        let continuation = if fresh || crate::agent::chat_router::runner::force_new(env) {
             None
         } else {
             guard.chat_continuation(

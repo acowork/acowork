@@ -1,5 +1,8 @@
 # ADR-063：包级 LLM 提示词覆盖机制 - `prompts/` 特殊文件名约定扩展
 
+> **面板位置修订（2026-11-06，[ADR-108](./ADR-108-right-panel-consolidation.md)）**：本文中「位于 Debug 面板顶部」的 Prompts & Skills 卡片现已迁入**设置面板**（`AgentSetupTab`）的 Prompts & Skills 卡片；Debug 面板只保留调试开关与上下文快照。卡片的读取/覆盖逻辑、来源标注与失败分支语义均未改变；改动范围见 ADR-108。
+
+
 **状态**：已定案
 **日期**：2026-09-20
 **决策者**：大鱼

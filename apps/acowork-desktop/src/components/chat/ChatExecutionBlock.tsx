@@ -39,11 +39,9 @@ import {
   Wrench,
   X,
   Check,
-  Send,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { cn } from "../../lib/utils";
-import type { BlockCard, ChatBlockEntry } from "../../lib/chatBlocks";
+import type { BlockCard, ChatBlockEntry, RoundProjection } from "../../lib/chatBlocks";
 import type { RunBlock } from "./chatTranscriptGroups";
 import { useChatBlockStore, useChatBlocks } from "../../stores/chatBlockStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -55,13 +53,12 @@ import { deriveSessionTitle } from "../../lib/sessionConfigMapper";
 import { getProcessingPhase, isProcessing, type SessionStatus } from "../../lib/types";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
-import { ViewRunButton } from "./ViewRunButton";
+import { RunBlockActionRow } from "./RunBlockActionRow";
 import { ChatMarkdown } from "./ChatMarkdown";
-
-/** Same 90% / 80% scale as `ExploreBlock`, so a chat run and an exec run read at
- *  one size. */
-const BLOCK_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.9)";
-const BLOCK_DETAIL_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.8)";
+import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
+import type { CardAnswerHandler, CardChoice } from "../../lib/chatCardAnswer";
+import { BLOCK_DETAIL_FONT_SIZE, BLOCK_FONT_SIZE } from "./blockTypeScale";
+import { runBlockToText } from "../../lib/runBlockText";
 
 /** How many of a session's rounds stay visible when the block is opened. The
  *  older ones are one click away inside the block: the list is already a scroll
@@ -94,14 +91,28 @@ interface ChatExecutionBlockProps {
   /** Address the composer to one round (D6 level 1) — what a `pause` card's
    *  "continue" and any follow-up on a finished round ride. */
   onReplyToRound?: (rowId: string, quote: string) => void;
+  /** Attach this execution session to the composer as a reference (ADR-106 D7):
+   *  the block's `@` action. The host owns the composer's address state, so the
+   *  block reports the intent and never touches it directly. Absent on a surface
+   *  that cannot carry a reference (a read-only chat). */
+  onReferenceRun?: (payload: {
+    instanceId: string;
+    execSessionId: string;
+    name: string;
+  }) => void;
   /** A viewer who is not a round's answerer (`answerable_by`): the question
    *  shows, the buttons do not (D10's read/write split). */
   canAnswer?: boolean;
+  /** Answer the router's addressing question about THIS run (ADR-106 D6 level
+   *  5). The card is drawn at the block's tail — the layout hangs it here
+   *  (`RunBlock.pendingAsk`) so the question sits where its subject is. */
+  onChooseCard?: CardAnswerHandler;
   /** Group surface only: right-click the author → the panel's "@name" menu. */
   onAuthorContextMenu?: (e: React.MouseEvent) => void;
   /** ADR-106 revision 2026-11-04: the `@` picker's "去续投" located this block
-   *  and wants its in-place input focused. A rising edge focuses (and reveals)
-   *  the reply box, so the human lands ready to type instead of hunting. */
+   *  and wants its in-place input focused. A rising edge opens the action row's
+   *  reply drawer and puts the caret in it, so the human lands ready to type
+   *  instead of hunting. */
   focusInput?: boolean;
   className?: string;
 }
@@ -165,6 +176,47 @@ function summarize(text: string, max = 60): string {
     : collapsed;
 }
 
+/**
+ * The question ONE round leads with. Two consumers ask this — the round row's
+ * summary/body and the block's copy export — and they must answer it
+ * identically: a copied run that quotes a different question than the one on
+ * screen is a document the reader cannot point at.
+ *
+ * The order is the transcript's own: a round that shows its own user line leads
+ * with what the execution session ACTUALLY received (the router's brief, in the
+ * row the human sees), then the projection's stored question, and only then the
+ * round's own record.
+ */
+function questionOf(
+  round: RunBlock["rounds"][number],
+  projection: RoundProjection | undefined,
+): string {
+  return (
+    (round.showUserLine ? (round.triggerRow?.body ?? "") : "") ||
+    (round.questionOnTranscript
+      ? (round.roundRow.meta?.assignment_brief ?? "")
+      : "") ||
+    projection?.user?.body ||
+    ""
+  );
+}
+
+/**
+ * What a round row's status glyph says, derived once. A `pending` read is the
+ * only positive evidence a round is still going (D9), and a round parked on an
+ * unanswered card is waiting for the human instead (D8) — the two rules the row
+ * and the copy export must not state differently.
+ */
+function roundStatus(entry: ChatBlockEntry | undefined): string {
+  const projection = entry?.projection;
+  if (!entry) return "unknown";
+  if (entry.status === "pending") {
+    // Parked on an open card = waiting for the human, not executing.
+    return projection?.card ? "waiting" : "in_progress";
+  }
+  return entry.status === "ok" ? (projection?.status ?? "unknown") : "unknown";
+}
+
 export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   block,
   chatSessionId,
@@ -173,15 +225,19 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   hasFollowUp,
   onJumpToExec,
   onReplyToRound,
+  onReferenceRun,
   canAnswer = true,
   onAuthorContextMenu,
   focusInput = false,
+  onChooseCard,
   className,
 }: ChatExecutionBlockProps) {
   const { t } = useTranslation();
   const instanceId = block.instanceId;
   const execSid = block.execSessionId;
   const refs = useMemo(() => block.rounds.map((r) => r.ref), [block]);
+  /** The addressing question hung on this run (layout's `pendingAsk`), or none. */
+  const pendingAsk = block.pendingAsk;
   const entries = useChatBlocks(chatSessionId, refs);
   const reload = useChatBlockStore((s) => s.reload);
   const meta = useAgentStore((s) => s.agents[instanceId]?.meta);
@@ -200,6 +256,10 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   // resolves must not keep a finished run looking live: "how did this end" is a
   // question about the newest round, not a vote across the session.
   const newest = block.rounds[block.rounds.length - 1];
+  /** The freshest round's reference-row id — the coordinate an in-place
+   *  continuation addresses (D6 level 1). Empty means the block has no round to
+   *  answer yet, so the drawer's send stays inert. */
+  const latestRowId = newest?.roundRow.meta?.message_id ?? "";
   const newestEntry = newest ? entries[newest.ref] : undefined;
   const newestPending = newestEntry?.status === "pending";
   // A round parked on a card is not running — it is waiting for the human, and
@@ -317,6 +377,38 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   const taskId = block.rounds.find((r) => r.roundRow.meta?.task_id)?.roundRow
     .meta?.task_id;
 
+  // The "copy" payload (design 27 §5.5.5): the WHOLE session, folded rounds
+  // included — the button copies the run, and a run that dropped its first five
+  // rounds would read as if the session started at round six. A round whose
+  // content the transcript cannot read exports as a stated hole rather than an
+  // invented answer (D3/D5).
+  const copyPayload = useMemo(
+    () =>
+      runBlockToText({
+        name,
+        labels: {
+          round: (n: number) => t("chatView.block.roundN", { n }),
+          questionPrefix: t("chatView.block.copyQuestionPrefix"),
+          unreadable: t("chatView.block.copyUnreadable"),
+        },
+        rounds: block.rounds.map((round, i) => {
+          const entry = entries[round.ref];
+          const projection = entry?.projection;
+          const answer = projection?.answer?.body.trim() ?? "";
+          const status = roundStatus(entry);
+          return {
+            index: i + 1,
+            question: questionOf(round, projection),
+            // No answer body: the round's outcome is what it has to say, in the
+            // same words its row uses.
+            answer: answer || (projection ? t(statusKey(status)) : ""),
+            unreadable: !projection,
+          };
+        }),
+      }),
+    [block, entries, name, t],
+  );
+
   return (
     <div className={`px-4 py-1 ${className ?? ""}`}>
       {showHeader && (
@@ -353,13 +445,44 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
             {/* The drill keeps its own chrome and sits ABOVE the block: it opens
                 the execution session, which is a different object from the
                 rounds listed inside it. */}
-            {onJumpToExec && (
-              <ViewRunButton
-                runName={runName ?? name}
-                onJump={() => onJumpToExec(instanceId, execSid)}
-                className="mb-1 inline-flex shrink-0 items-center gap-1 rounded-full bg-zinc-100 px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-[var(--color-accent)] dark:bg-zinc-800"
-              />
-            )}
+            {/* The block's affordances, one row above it (design 27 §5.5.5):
+                open the run, reference it, copy it, continue it. The row owns
+                its own reply drawer, so nothing below the block reserves space
+                any more. */}
+            <RunBlockActionRow
+              runName={runName ?? name}
+              onJump={
+                onJumpToExec
+                  ? () => onJumpToExec(instanceId, execSid)
+                  : undefined
+              }
+              onReference={
+                onReferenceRun && canAnswer
+                  ? () =>
+                      onReferenceRun({
+                        instanceId,
+                        execSessionId: execSid,
+                        name,
+                      })
+                  : undefined
+              }
+              copyPayload={copyPayload}
+              onSend={
+                canAnswer
+                  ? async (text) => {
+                      // The level-1 branch (D6): the freshest round's reference
+                      // row, the same coordinate the pause card's continue and
+                      // the `@` picker's "去续投" address. The claim and the wait
+                      // line fall out of the machinery a card answer uses.
+                      await useChatSessionStore
+                        .getState()
+                        .sendGroupText(chatSessionId, text, [], latestRowId);
+                    }
+                  : undefined
+              }
+              canSend={!!latestRowId}
+              focusSignal={focusInput}
+            />
             <div className="max-w-full" style={{ fontSize: BLOCK_FONT_SIZE }}>
               <button
                 onClick={() => {
@@ -368,6 +491,10 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                   manuallyCollapsed.current = next ? false : true;
                 }}
                 aria-expanded={expanded}
+                // Stable hook for "the block's own collapse header": the action
+                // row above now carries `aria-expanded` too (its drawer), so a
+                // query on that generic attribute finds two different things.
+                data-run-header=""
                 className="flex w-fit items-center gap-2 rounded-md bg-zinc-100/60 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-zinc-200 dark:bg-zinc-800/30  dark:hover:bg-zinc-700"
                 style={{ fontSize: BLOCK_FONT_SIZE }}
               >
@@ -447,23 +574,24 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                   </div>
                 </OverlayScrollbar>
               )}
-              {/* ADR-106 revision 2026-11-04: reply in place. Continuing a run
-                  is answering its freshest round (D6 level 1), and the point of
-                  the `@`'s "去续投" is that the human never leaves the block to
-                  do it. Rendered only for an answerer; the box itself reveals
-                  on hover / focus and refuses to hide while it holds a draft. */}
-              {canAnswer && (
-                <BlockInlineReply
-                  chatSessionId={chatSessionId}
-                  rowId={
-                    block.rounds[block.rounds.length - 1]?.roundRow.meta
-                      ?.message_id ?? ""
-                  }
-                  focusSignal={focusInput}
-                />
-              )}
             </div>
           </div>
+          {/* The router's question about this run, drawn at the run's tail and
+              outside the collapse: an unanswerable thing behind a fold is the
+              one shape D8 forbids, and the human has to be able to answer it
+              from the block it belongs to. */}
+          {pendingAsk && (
+            <div className="mt-1">
+              <ChatNoticeEventRow
+                row={pendingAsk}
+                onChoose={
+                  canAnswer && onChooseCard
+                    ? (choice: CardChoice) => onChooseCard(pendingAsk, choice)
+                    : undefined
+                }
+              />
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -514,7 +642,14 @@ function RoundItem({
     summarize(round.roundRow.meta?.assignment_brief ?? "") ||
     t("chatView.block.noQuestion");
   const pending = entry?.status === "pending";
-  const card = projection?.card ?? null;
+  // Only a round that can still take an answer wears a card: an open one, or a
+  // `waiting` park the human has not replied to yet. The server strips the rest
+  // (`chat_blocks::sanitize_card`); this is the same rule where the pixels are,
+  // because a stale entry may have been read from an older server or cache.
+  const card =
+    projection?.card && (pending || projection.status === "waiting")
+      ? projection.card
+      : null;
   // A row parked on a card is waiting for the human, not executing — the same
   // rule the header follows, because a row that says "running" over the card it
   // is waiting on is the block contradicting its own buttons.
@@ -608,6 +743,7 @@ function RoundItem({
               canAnswer={canAnswer}
               instanceId={instanceId}
               execSid={execSid}
+              reloadRound={() => reload(chatSessionId, [round.ref])}
               rowId={round.roundRow.meta?.message_id ?? ""}
               onReplyToRound={onReplyToRound}
             />
@@ -709,6 +845,8 @@ interface BlockCardActionsProps {
   canAnswer: boolean;
   instanceId: string;
   execSid: string;
+  /** Re-read this round after an answer, whatever the answer's status says. */
+  reloadRound: () => void;
   /** The reference row's own id — the coordinate a continuation addresses (D6
    *  level 1). */
   rowId: string;
@@ -725,6 +863,7 @@ function BlockCardActions({
   canAnswer,
   instanceId,
   execSid,
+  reloadRound,
   rowId,
   onReplyToRound,
 }: BlockCardActionsProps) {
@@ -761,6 +900,13 @@ function BlockCardActions({
       setFailed(true);
     } finally {
       setBusy(false);
+      // Re-read the round in both outcomes. `POST /answer` queues the message
+      // and answers `202` — it does not, and cannot, tell a live request from
+      // one whose timeout already fired (the turn then drops the answer). So
+      // the click's own status is not evidence about the card: the projection
+      // is. Dropping a card only locally meant a dead question stayed on screen
+      // looking clickable until a newer row pushed it out of view.
+      reloadRound();
     }
   };
 
@@ -813,9 +959,15 @@ function BlockCardActions({
       {!canAnswer ? (
         <p className="text-text-tertiary">{t("chatView.block.answeredByOwner")}</p>
       ) : (
-        <div className="flex flex-wrap items-center gap-1.5">
+        /* One control per line. The options of an `ask_question` are sentences a
+           model wrote, not labels: laid out in a wrapping row they turned into
+           ragged columns that broke mid-phrase as soon as the text outgrew the
+           bubble — and the block is narrow by design. A column also makes the
+           pair of approval buttons the only horizontal row, which is what they
+           are: two sides of one decision. */
+        <div className="flex flex-col items-stretch gap-1.5">
           {kind === "approval" ? (
-            <>
+            <span className="flex items-center gap-1.5">
               <button
                 type="button"
                 disabled={busy}
@@ -847,14 +999,16 @@ function BlockCardActions({
               >
                 {t("chatView.cardApprove")}
               </button>
-            </>
+            </span>
           ) : (
             options.map((opt, i) => (
               <button
                 key={opt}
                 type="button"
                 disabled={busy}
-                className={i === 0 ? allowBtn : denyBtn}
+                /* `text-left` + wrapping: an option may be a full sentence, and a
+                   centered label that wraps reads as two options. */
+                className={`${i === 0 ? allowBtn : denyBtn} text-left whitespace-normal break-words`}
                 style={
                   i === 0
                     ? { backgroundColor: "var(--color-accent-strong)" }
@@ -904,115 +1058,6 @@ function BlockCardActions({
           ) : null}
         </div>
       )}
-    </div>
-  );
-}
-
-interface BlockInlineReplyProps {
-  chatSessionId: string;
-  /** The freshest round's reference row id — replying to it continues THAT run
-   *  (D6 level 1); the backend resolves the row into its session. Empty means
-   *  the block has no round to answer yet, so the box does nothing. */
-  rowId: string;
-  /** A rising edge (the `@` picker's "去续投") reveals and focuses the box. */
-  focusSignal?: boolean;
-}
-
-/**
- * The block's in-place reply box (ADR-106 revision 2026-11-04).
- *
- * Continuing a run used to mean borrowing the main composer, which made the
- * human leave the block they were pointing at. This sends `sendGroupText(chat,
- * text, [], rowId)` — the existing level-1 branch — so the claim and the wait
- * line fall out of the same machinery a card answer already uses, and a reply
- * to a specific round never re-opens the routing question.
- *
- * The IM habit it has to respect: the box reveals on hover or focus, but a
- * non-empty draft or held focus NEVER collapses it (losing typed words to a
- * stray mouse-out is the failure), and it only hides when it is empty AND
- * unfocused AND the pointer has left. After a send it clears and stays put, so
- * a second follow-up is one keystroke away.
- */
-function BlockInlineReply({
-  chatSessionId,
-  rowId,
-  focusSignal,
-}: BlockInlineReplyProps) {
-  const { t } = useTranslation();
-  const [draft, setDraft] = useState("");
-  const [hovering, setHovering] = useState(false);
-  const [focused, setFocused] = useState(false);
-  const [sending, setSending] = useState(false);
-  const boxRef = useRef<HTMLTextAreaElement>(null);
-
-  // A locate from the picker reveals + focuses the box on its rising edge, so
-  // the human arrives ready to type rather than hunting for a hidden control.
-  const lastSignal = useRef(false);
-  useEffect(() => {
-    if (focusSignal && !lastSignal.current) {
-      boxRef.current?.focus();
-    }
-    lastSignal.current = focusSignal ?? false;
-  }, [focusSignal]);
-
-  const visible = hovering || focused || draft.length > 0;
-
-  const send = async () => {
-    const text = draft.trim();
-    if (!text || !rowId || sending) return;
-    setSending(true);
-    try {
-      await useChatSessionStore
-        .getState()
-        .sendGroupText(chatSessionId, text, [], rowId);
-      // Clear and keep the box: an in-place continuation invites the next one.
-      setDraft("");
-    } finally {
-      setSending(false);
-    }
-  };
-
-  return (
-    <div
-      className="mt-1"
-      onMouseEnter={() => setHovering(true)}
-      onMouseLeave={() => setHovering(false)}
-    >
-      <div
-        className={cn(
-          "flex items-end gap-1 rounded-md border border-border-outer bg-surface px-1.5 py-1 transition-opacity",
-          visible ? "opacity-100" : "pointer-events-none opacity-0",
-        )}
-      >
-        <textarea
-          ref={boxRef}
-          rows={1}
-          value={draft}
-          disabled={sending}
-          aria-label={t("chatView.block.replyPlaceholder")}
-          placeholder={t("chatView.block.replyPlaceholder")}
-          onFocus={() => setFocused(true)}
-          onBlur={() => setFocused(false)}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              void send();
-            }
-          }}
-          className="min-h-[1.5rem] w-full resize-none border-0 bg-transparent px-1 outline-none placeholder:text-text-disabled disabled:opacity-50"
-          style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
-        />
-        <button
-          type="button"
-          onClick={() => void send()}
-          disabled={!draft.trim() || sending || !rowId}
-          aria-label={t("chatView.block.send")}
-          className="inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-brand-primary hover:bg-[var(--color-accent)]/10 disabled:opacity-40"
-        >
-          <Send className="h-3.5 w-3.5" />
-        </button>
-      </div>
     </div>
   );
 }

@@ -193,8 +193,22 @@ describe("GroupChatPanel in-flight turn claim", () => {
   });
 
   it("the round's reference row settles the claim: line gone, composer live", () => {
+    // The service answered the human's row with a round; that fact is projected
+    // onto the row as `delivery.answered` (design 31 §6), which is what the
+    // wait line ends on.
     tail = [
-      row(1, { body: "fix the pagination" }),
+      row(1, {
+        body: "fix the pagination",
+        delivery: {
+          answered: true,
+          answered_by: { message_id: "round:exec-1|r1", kind: "execution_round" },
+          target: {
+            agent_instance_id: AGENT_A,
+            agent_session_id: "exec-1",
+            round_id: "r1",
+          },
+        },
+      }),
       row(2, {
         from: AGENT_A,
         kind: "execution_round",
@@ -211,14 +225,18 @@ describe("GroupChatPanel in-flight turn claim", () => {
     expect(settleTurnMock).toHaveBeenCalledWith(GROUP, "m1");
   });
 
-  it("a delivery receipt settles it too — the human has an answer on screen", () => {
+  it("a live delivery alert settles it too — the human has an answer on screen", () => {
+    // ADR-105 D5 rev. 2026-11-06: the failure no longer lands as a receipt row,
+    // so the projection reports it on the human's own row. That IS the outcome
+    // the wait line was waiting for — holding the claim would lock the composer
+    // on a send that already bounced.
     tail = [
-      row(1, { body: "fix the pagination" }),
-      row(2, {
-        from: AGENT_A,
-        kind: "system_notice",
-        body: "",
-        meta: { message_id: "dlv-failed:m1:agent-a", notice_type: "delivery_failed", in_reply_to: "m1" },
+      row(1, {
+        body: "fix the pagination",
+        delivery: {
+          answered: false,
+          alert: { target: AGENT_A, error_code: "target_not_installed", expires_in: 600 },
+        },
       }),
     ];
     inflightMap = { [GROUP]: { messageId: "m1", at: 1 } };

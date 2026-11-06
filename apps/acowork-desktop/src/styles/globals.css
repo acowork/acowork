@@ -27,6 +27,13 @@
   /* = emerald-600 — success badge foreground (light) */
   --color-warning: #d97706;
   /* = amber-600 — warning badge foreground (light) */
+  --color-warning-quiet: #b45309;
+  /* = amber-700 — the warning you READ, not the one you heed. Used by the
+     chat transcript's retry-able receipts (`ChatEventText` tone `warn`): on a
+     near-black surface amber-400 glares as much as the red it replaced, and
+     this line sits one row under the reader's own bubble, where it is seen
+     every turn rather than once per failure. Contrast on both themes stays
+     above AA for body text; the badge keeps the loud token. */
 
   /* Chat palette — background shades for the message surface and
      nested blocks inside it. Used by:
@@ -612,6 +619,9 @@
   /* = emerald-400 — success badge foreground (dark) */
   --color-warning: #fbbf24;
   /* = amber-400 — warning badge foreground (dark) */
+  --color-warning-quiet: #c98a1e;
+  /* amber, dimmed for a dark surface — amber-400 at full luminance is a
+     glare, not a hint. See the light value's note. */
 
   /* Chat palette (dark) — auto-flips the @theme light values (6 tokens) */
   --color-chat-bubble: hsl(240 3.8% 15.7% / 0.7);
