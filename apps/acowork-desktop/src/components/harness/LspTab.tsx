@@ -179,7 +179,7 @@ export function LspTab() {
   );
   const [scriptDialog, setScriptDialog] = useState<{ name: string; script: string; filename: string; platform: string } | null>(null);
   const [scriptLoading, setScriptLoading] = useState(false);
-  /** LSP list — Tools-tab level-1 collapsible group, default open. */
+  /** LSP list — Setup-panel level-1 collapsible group, default open. */
   const [serversOpen, setServersOpen] = useState(true);
   /** Custom-server create / edit dialog. `null` = closed. */
   const [form, setForm] = useState<{ mode: "add" } | { mode: "edit"; name: string } | null>(null);
@@ -554,7 +554,7 @@ export function LspTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      {/* LSP Servers — Tools-tab level-1 collapsible card: chevron + title +
+      {/* LSP Servers — Setup-panel level-1 collapsible card: chevron + title +
           count badge. Node picker, Add and Refresh share the header trailing
           slot (both wrapped in stopPropagation so neither toggles the
           fold). */}

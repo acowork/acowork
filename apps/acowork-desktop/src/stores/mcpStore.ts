@@ -71,7 +71,7 @@ interface McpEnsureState {
   ensureStatus: Record<string, McpEnsureStatus | undefined>;
 }
 
-/** ensureStatus map key. Exported so the Tools panel reads the right slot. */
+/** ensureStatus map key. Exported so the Setup panel reads the right slot. */
 export const mcpEnsureKey = (agentId: string, name: string) => `${agentId}/${name}`;
 
 /** In-flight ensure watchers, keyed like ensureStatus. Module-level (not
@@ -92,7 +92,7 @@ interface McpEnsureActions {
    * updating `ensureStatus` along the way. On failure the Runtime has
    * already removed the server from `active_names` — reload the agent's
    * active list so the toggle springs back, and emit a config refresh so
-   * the Tools panel re-fetches tool state. Fire-and-forget; concurrent
+   * the Setup panel re-fetches tool state. Fire-and-forget; concurrent
    * watchers for the same key are deduplicated.
    */
   watchEnsure: (agentId: string, name: string) => Promise<void>;
@@ -110,7 +110,7 @@ interface McpActivationState {
    * the user toggled that server but the backend has not yet finished
    * reconnect+reconcile (`agent_mcp_tools.json` not yet refreshed) or
    * the subsequent `/mcp-tools` re-fetch has not returned. Cleared by
-   * `clearServerLoading` once the Tools panel reload handler observes
+   * `clearServerLoading` once the Setup panel reload handler observes
    * that the per-server tool list matches the user's intent
    * (on+non-empty / off+empty). Used to drive the in-card spinner so
    * third-party MCP reconnects (e.g. `playwright` ~5s) do not look like
@@ -128,7 +128,7 @@ interface McpActivationActions {
   toggleServer: (agentId: string, serverName: string) => Promise<void>;
   /**
    * Drop the reconcile-pending flag for one server. Called by the
-   * Tools panel after a successful `/mcp-tools` re-fetch observes
+   * Setup panel after a successful `/mcp-tools` re-fetch observes
    * the server state has settled (on+tools present / off+tools
    * cleared). Idempotent.
    */
@@ -500,9 +500,9 @@ export const useMcpStore = create<McpStore>((set, get) => ({
 
     // Mark this server as reconcile-pending BEFORE the PUT so the
     // spinner starts on the same frame as the optimistic Switch
-    // flip. `clearServerLoading` will be called by the Tools panel
+    // flip. `clearServerLoading` will be called by the MCP card's
     // reload handler once the per-server tool list settles (see
-    // `acowork:refresh-agent-config` in ToolsTab). We do not gate
+    // `acowork:refresh-agent-config` in ToolsCards). We do not gate
     // the loading flag on the PUT outcome — if the PUT fails the
     // store rolls back `activeServers` and the user toggles again,
     // which will overwrite this entry naturally.

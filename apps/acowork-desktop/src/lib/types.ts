@@ -2299,7 +2299,7 @@ export type McpRecommendationState =
   | "dismissed";
 
 /**
- * One `[[mcp_servers]]` declaration as the Tools panel renders it (ADR-104).
+ * One `[[mcp_servers]]` declaration as the Setup panel renders it (ADR-104).
  *
  * Everything except `state` is the package's, re-projected from the manifest
  * on every agent start; `state` is derived from `agent_mcp.json` × the merged
@@ -2322,7 +2322,7 @@ export interface McpRecommendationView {
   /** Secrets needed before the server is usable. */
   required_secrets: string[];
   /**
-   * Soft requirement — unmet never blocks chat or startup. The Tools panel
+   * Soft requirement — unmet never blocks chat or startup. The Setup panel
    * badges the recommendation row "required" and names any missing secret.
    */
   required: boolean;
@@ -2331,7 +2331,7 @@ export interface McpRecommendationView {
   state: McpRecommendationState;
 }
 
-/** Per-agent MCP server view (catalog ∪ local) for the Tools panel toggle */
+/** Per-agent MCP server view (catalog ∪ local) for the Setup panel toggle */
 export interface McpServerView {
   name: string;
   transport: McpTransportDef;

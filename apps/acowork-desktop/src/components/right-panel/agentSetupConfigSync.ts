@@ -30,7 +30,7 @@ export interface ServerConfigEnvelope {
      * ADR-094 note: the per-agent `skills_auto_load` field was
      * removed from the wire. Skill mode is now driven entirely by
      * the `load_skill` tool entry in `agent_tools.json` — the
-     * Tools panel keeps the two surfaces in lockstep so a separate
+     * Builtin Tools card keeps the two surfaces in lockstep so a separate
      * "auto-load skills" switch would only re-introduce the drift
      * that this helper was extracted to prevent.
      */

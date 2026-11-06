@@ -1074,7 +1074,6 @@
     "status": "状态",
     "memory": "记忆",
     "setup": "设置",
-    "tools": "工具",
     "workspace": "工作区",
     "connectingDebug": "正在连接调试服务器...",
     "debugConnectionLost": "调试连接已断开",

@@ -368,13 +368,13 @@ The right‑side Results Panel consists of a **40px toolbar (RightNavBar)** + co
 | Workspace | folder | Agent running | `WorkspaceExplorer` (file tree / browse / locate) |
 | Status | dashboard | Always | Agent runtime status, token stats, model/Provider, session stats (see below) |
 | Memory | database | Agent running | `MemoryPanel` (memory management) |
-| Tools | wrench | Agent running | `ToolsTab` (tool management) |
 | Debug | bug | Agent running | `DebugPanel` (DevMode debugging, see §4.4.2) |
-| Setup | gear | Agent running | `AgentSetupTab` (Agent configuration) |
+| Setup | gear | Agent running | `AgentSetupTab` (Agent configuration; hosts the builtin-tools / MCP / prompts-and-skills cards, see §4.4.3) |
 
 **Interaction rules**:
 - Clicking an already‑active tab's toolbar button → collapses the panel; clicking again → expands
-- When Agent stops, Workspace/Memory/Tools/Debug/Setup buttons hide, panel auto‑jumps back to Status (see `AppLayout` lifecycle effect)
+- When Agent stops, Workspace/Memory/Debug/Setup buttons hide, panel auto‑jumps back to Status (see `AppLayout` lifecycle effect)
+- The rail has **5 tabs**: the former Tools tab is gone (its builtin-tools / MCP cards moved into Setup), and the Debug tab's prompts-and-skills card moved there as well
 - When Agent enters debug mode, panel auto‑switches to Debug tab
 - The top title bar shows the current tab name; left side is the drag‑resize handle
 
@@ -391,6 +391,22 @@ Displays current session/Agent statistics: token usage (`tokenUsage`), context u
 | DevMode on + remote Gateway | "Debugging is not available in remote mode" (ADR‑048 D6: debug RPC depends on local MQTT) |
 | DevMode on + local + disconnected | "Debug connection lost" |
 | Ready | `DebugPanel`: control bar (Pause/Resume, Step, Stop, Restart, Exit Debug, Re‑execute) + status cards (iteration/phase/Token/session state) + context snapshot list (expandable sections, inline editing, patch) |
+
+#### 4.4.3 Setup Tab cards
+
+The Setup tab is the single entry point for agent-level configuration — seven level‑1 collapsible cards, top to bottom:
+
+| # | Card | Content |
+|---|------|---------|
+| 1 | Agent Info | Avatar (ADR-017, server‑side), display name |
+| 2 | Session Parameters | Session language, max iterations / sessions, shell approval, compression ratio |
+| 3 | Model Parameters | Max output tokens, context window, temperature |
+| 4 | Chat Session Router | Router model / timeout / history budget (ADR‑099) |
+| 5 | Prompts & Skills | Browse and edit the package's `prompts/` + `skills/`, plus reload (was the top card of the Debug tab, ADR‑063 §3.7) |
+| 6 | Builtin Tools | Builtin tool switches (ADR‑029, including ADR‑094's `load_skill`) |
+| 7 | MCP Servers | The package's recommended MCP group (ADR‑104) + per‑server switches (ADR‑069 / ADR‑090) |
+
+Only the **first 3** cards start expanded; the rest start collapsed (order and defaults are defined once in `agentSetupCards.ts`). Expand state is component‑local, not persisted.
 
 ### 4.5 File Editor (`FileEditorPanel.tsx`, optional)
 

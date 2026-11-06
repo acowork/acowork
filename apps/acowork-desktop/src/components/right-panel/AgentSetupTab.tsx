@@ -30,6 +30,12 @@ import { ListBox, ExpandableRow } from "../common/list";
 import { flushPendingWrites } from "./agentSetupPendingWrites";
 import { buildProfilePatchFromServerConfig } from "./agentSetupConfigSync";
 import { resolveEffectiveAvatar } from "./agentSetupAvatar";
+import {
+  initialCardOpenState,
+  type AgentSetupCardId,
+} from "./agentSetupCards";
+import { PromptsSkillsCard } from "../debug/PromptsSkillsCard";
+import { ToolsCards } from "./ToolsCards";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 // ── Helpers ───────────────────────────────────────────────────────────
@@ -133,8 +139,8 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   chatRouterTimeoutMs: FIELD_DEBOUNCE_MS,
   chatRouterHistoryMaxTokens: FIELD_DEBOUNCE_MS,
   // ADR-094 note: `skillsAutoLoad` was removed from the debounce
-  // table. Skill mode toggling goes through the Tools panel
-  // (`load_skill` Switch) and uses the built-in tools debounce,
+  // table. Skill mode toggling goes through the Builtin Tools card
+  // (`load_skill` Switch, below) and uses the built-in tools debounce,
   // not this per-field map.
 };
 
@@ -233,17 +239,19 @@ export function AgentSetupTab() {
   }, [avatarPopupOpen, computeAvatarPopupPos]);
 
   // ── Section collapse state ──────────────────────────────────────
-  // Three level-1 collapsible cards (Agent Info / Session Parameters /
-  // Model Parameters) using the same grammar as Status-tab Session
-  // Status / Agent Status cards in RightPanel and Tools-tab Builtin
-  // Tools / Web Search / MCP cards in ToolsTab. Default open so the
-  // previous always-visible behavior is preserved on first mount.
-  const [agentInfoOpen, setAgentInfoOpen] = useState(true);
-  const [sessionParamsOpen, setSessionParamsOpen] = useState(true);
-  const [modelParamsOpen, setModelParamsOpen] = useState(true);
-  // ADR-099: Chat Router card. Default expanded — users should see which
-  // model the router picks per conversation.
-  const [chatRouterOpen, setChatRouterOpen] = useState(true);
+  // Seven level-1 collapsible cards, all on the one box-card grammar the
+  // Status / Memory panels use. The list got this long when the Tools
+  // panel's Builtin / MCP cards and the Debug panel's Prompts & Skills
+  // card moved in, so the panel shows the FIRST THREE expanded and starts
+  // the rest collapsed — one rule, stated once in `agentSetupCards.ts`,
+  // which also owns the render order. The user can open every card; only
+  // the initial value comes from there.
+  const [openCards, setOpenCards] = useState<Record<AgentSetupCardId, boolean>>(
+    initialCardOpenState,
+  );
+  const toggleCard = useCallback((id: AgentSetupCardId) => {
+    setOpenCards((prev) => ({ ...prev, [id]: !prev[id] }));
+  }, []);
 
   // Draft text of the router's history-budget input while it is focused.
   // Committing per keystroke would clamp "8" into "1000" and turn the next
@@ -566,7 +574,7 @@ export function AgentSetupTab() {
 
   // ── ADR-094 note: `handleSkillsAutoLoadToggle` was removed. The
   //    skill mode (Progressive vs Manual) toggle now lives in the
-  //    Tools panel as the `load_skill` Switch and goes through
+  //    Builtin Tools card as the `load_skill` Switch and goes through
   //    `PUT /agents/{id}/builtin-tools` like every other tool.
 
   // Sync the new temperature into the chat store so the RightPanel
@@ -800,14 +808,14 @@ export function AgentSetupTab() {
       {/* ── Card 1: Agent Info ────────────────────────────────
           Avatar picker + display name. Level-1 collapsible card
           matching the Status-tab Session/Agent Status and
-          Tools-tab Builtin/Web Search/MCP cards grammar (same
+          Setup-panel Builtin/Web Search/MCP cards grammar (same
           body chrome via `bg-panel-inset` + border-t hairline).
           Default open so the previous always-visible behavior
           is preserved. */}
       <ListBox dividers={false}>
         <ExpandableRow
-          open={agentInfoOpen}
-          onToggle={() => setAgentInfoOpen((v) => !v)}
+          open={openCards.agentInfo}
+          onToggle={() => toggleCard("agentInfo")}
           title={t("agentSetup.sectionAgentInfo")}
           ariaLabel={t("agentSetup.sectionAgentInfo")}
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
@@ -998,8 +1006,8 @@ export function AgentSetupTab() {
           level-1 collapsible grammar as Card 1. */}
       <ListBox dividers={false}>
         <ExpandableRow
-          open={sessionParamsOpen}
-          onToggle={() => setSessionParamsOpen((v) => !v)}
+          open={openCards.sessionParams}
+          onToggle={() => toggleCard("sessionParams")}
           title={t("agentSetup.sectionSessionParams")}
           ariaLabel={t("agentSetup.sectionSessionParams")}
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
@@ -1190,8 +1198,8 @@ export function AgentSetupTab() {
 
     {/* ADR-094 note: the `skillsAutoLoad` Switch + label block was
         removed from the Session Parameters card. Skill mode now
-        toggles via the `load_skill` Switch in the Tools panel —
-        see ADR-094 §4. */}
+        toggles via the `load_skill` Switch in the Builtin Tools
+        card below — see ADR-094 §4. */}
           </div>
         </ExpandableRow>
       </ListBox>
@@ -1206,8 +1214,8 @@ export function AgentSetupTab() {
           Same level-1 collapsible grammar as Cards 1 and 2. */}
       <ListBox dividers={false}>
         <ExpandableRow
-          open={modelParamsOpen}
-          onToggle={() => setModelParamsOpen((v) => !v)}
+          open={openCards.modelParams}
+          onToggle={() => toggleCard("modelParams")}
           title={t("agentSetup.sectionModelParams")}
           ariaLabel={t("agentSetup.sectionModelParams")}
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
@@ -1327,8 +1335,8 @@ export function AgentSetupTab() {
           Chat surface's usage popover; both write the one field. */}
       <ListBox dividers={false}>
         <ExpandableRow
-          open={chatRouterOpen}
-          onToggle={() => setChatRouterOpen((v) => !v)}
+          open={openCards.chatRouter}
+          onToggle={() => toggleCard("chatRouter")}
           title={t("agentSetup.sectionChatRouter")}
           ariaLabel={t("agentSetup.sectionChatRouter")}
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
@@ -1426,6 +1434,32 @@ export function AgentSetupTab() {
           </div>
         </ExpandableRow>
       </ListBox>
+<div className="-mx-3 my-2 border-t border-border-divider" />
+
+      {/* ── Card 5: Prompts & Skills ───────────────────────────
+          Moved in from the Debug tab (ADR-063 §3.7), unchanged: the Debug
+          rail entry now carries only the debug switch and the context
+          snapshots, so the package prompt / skill browser lives here with
+          the rest of the agent's own settings. Its card chrome comes from
+          PromptsSkillsCard itself (`ListBox` + `ExpandableRow`), so it
+          needs no separator/wrapper of its own — only the initial expand
+          state, which the panel owns (`openCards`, position 5 → collapsed). */}
+      <PromptsSkillsCard defaultOpen={openCards.promptsSkills} />
+
+      <div className="-mx-3 my-2 border-t border-border-divider" />
+
+      {/* ── Cards 6 + 7: Builtin Tools / MCP Servers ───────────
+          Moved in from the (since removed) Tools panel (ADR-029 / ADR-069 / ADR-090 /
+          ADR-104), which lost its rail entry. Both cards keep their own
+          content, requests and collapse state; only the initial value is
+          injected (positions 6 and 7 → collapsed). The MCP-recommendation
+          group stays between them, as it was in the Tools panel: installing
+          a recommendation moves a row into the switch list below it. */}
+      <ToolsCards
+        builtinDefaultOpen={openCards.builtinTools}
+        mcpDefaultOpen={openCards.mcpServers}
+      />
+
 <div className="-mx-3 my-2 border-t border-border-divider" />
 
       {/* Footer: saving indicator + reset (ADR-052 follow-up) */}

@@ -87,7 +87,7 @@ export function GatewayTab() {
   // Gateway's relay device id. A property of the Gateway we are TALKED to,
   // not of the mode we are in — see the gw-id line in the mode card.
   const [relayGwId, setRelayGwId] = useState<string | null>(null);
-  // Tools-tab style level-1 collapsible cards (default open)
+  // Level-1 collapsible cards (same grammar as the Setup panel), default open
   const [gatewayModeOpen, setGatewayModeOpen] = useState(true);
   const [localGatewayOpen, setLocalGatewayOpen] = useState(true);
   const [gatewayConnOpen, setGatewayConnOpen] = useState(true);
@@ -1007,7 +1007,7 @@ function AppearanceTab() {
   const { t } = useTranslation();
   const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity, accentColor, customAccent, setAccentColor } = useSettingsStore();
   const [showResetConfirm, setShowResetConfirm] = useState(false);
-  // Tools-tab style level-1 collapsible cards (default open)
+  // Level-1 collapsible cards (same grammar as the Setup panel), default open
   const [themeOpen, setThemeOpen] = useState(true);
   const [accentOpen, setAccentOpen] = useState(true);
   const [contentWidthOpen, setContentWidthOpen] = useState(true);
@@ -1175,7 +1175,7 @@ function GeneralTab() {
   const [deleting, setDeleting] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [showResetOnboardingConfirm, setShowResetOnboardingConfirm] = useState(false);
-  // Tools-tab style level-1 collapsible cards (default open)
+  // Level-1 collapsible cards (same grammar as the Setup panel), default open
   const [logSetupOpen, setLogSetupOpen] = useState(true);
   const [dataDirectoryOpen, setDataDirectoryOpen] = useState(true);
   const [aboutOpen, setAboutOpen] = useState(true);

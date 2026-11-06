@@ -42,7 +42,7 @@ interface ProviderPickerProps {
 export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCatalogRefreshed }: ProviderPickerProps) {
   const { t } = useTranslation();
   const [providerSearchTerm, setProviderSearchTerm] = useState("");
-  // Tools-tab style level-1 collapsible groups, default open
+  // Setup-panel style level-1 collapsible groups, default open
   const [customOpen, setCustomOpen] = useState(true);
   const [localOpen, setLocalOpen] = useState(true);
   const [remoteOpen, setRemoteOpen] = useState(true);
@@ -247,7 +247,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
 
   return (
     <div className="space-y-4">
-      {/* ── Custom Providers — level-1 collapsible group (Tools-tab
+      {/* ── Custom Providers — level-1 collapsible group (Setup-panel
           grammar: chevron + title + count badge, default open) ── */}
       <ListBox dividers={false}>
         <ExpandableRow

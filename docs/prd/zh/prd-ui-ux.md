@@ -368,13 +368,13 @@ MQTT 连接状态由 Rust `rumqttc` eventloop 维护并推送 `mqtt-status` 事�
 | Workspace | 文件夹 | Agent 运行中 | `WorkspaceExplorer`（文件树 / 浏览 / 定位） |
 | Status | 仪表盘 | 始终 | Agent 运行状态、Token 统计、模型/Provider、会话统计（见下） |
 | Memory | 数据库 | Agent 运行中 | `MemoryPanel`（记忆管理） |
-| Tools | 扳手 | Agent 运行中 | `ToolsTab`（工具管理） |
 | Debug | 虫 | Agent 运行中 | `DebugPanel`（DevMode 调试，见 §4.4.2） |
-| Setup | 齿轮 | Agent 运行中 | `AgentSetupTab`（Agent 配置） |
+| Setup | 齿轮 | Agent 运行中 | `AgentSetupTab`（Agent 配置；内置工具 / MCP / 提示词与技能三张卡片在此，见 §4.4.3） |
 
 **交互规则**：
 - 点击已激活 Tab 的工具条按钮 → 折叠面板；再点 → 展开
-- Agent 停止时，Workspace/Memory/Tools/Debug/Setup 按钮隐藏，面板自动跳回 Status（见 `AppLayout` 生命周期 effect）
+- Agent 停止时，Workspace/Memory/Debug/Setup 按钮隐藏，面板自动跳回 Status（见 `AppLayout` 生命周期 effect）
+- 右侧栏共 **5 个 Tab**：原「工具」Tab 已下线，其内置工具 / MCP 卡片并入 Setup Tab；Debug 的提示词与技能卡片也迁至 Setup Tab
 - Agent 进入调试模式时自动切到 Debug Tab
 - 顶部标题栏显示当前 Tab 名称，左侧为拖拽调宽手柄
 
@@ -391,6 +391,22 @@ MQTT 连接状态由 Rust `rumqttc` eventloop 维护并推送 `mqtt-status` 事�
 | DevMode 开启 + 远程 Gateway | "调试在远程模式不可用"（ADR-048 D6：调试 RPC 依赖本地 MQTT） |
 | DevMode 开启 + 本地 + 未连接 | "调试连接已断开" |
 | 就绪 | `DebugPanel`：控制条（Pause/Resume、Step、Stop、Restart、Exit Debug、Re-execute）+ 状态卡（迭代/阶段/Token/会话状态）+ 上下文快照列表（可展开各 section、在线编辑、patch） |
+
+#### 4.4.3 Setup Tab 卡片
+
+Setup Tab 是全 Agent 级配置的唯一入口，7 张 level-1 折叠卡片自上而下：
+
+| # | 卡片 | 内容 |
+|---|------|------|
+| 1 | Agent Info | 头像（ADR-017 服务端）、显示名 |
+| 2 | Session Parameters | 会话语言、最大迭代/会话数、Shell 审批、压缩比阈值 |
+| 3 | Model Parameters | 最大输出 Token、上下文窗口、温度 |
+| 4 | Chat Session 路由 | 路由模型 / 超时 / 历史预算（ADR-099） |
+| 5 | 提示词与技能 | Agent 包 `prompts/` / `skills/` 浏览与编辑 + reload（原 Debug Tab 顶部卡片，ADR-063 §3.7） |
+| 6 | 内置工具 | 内置工具开关（ADR-029，含 ADR-094 的 `load_skill`） |
+| 7 | MCP 服务器 | Agent 包建议的 MCP 分组（ADR-104）+ 服务器开关（ADR-069 / ADR-090） |
+
+默认只展开**前 3 张**卡片，其余默认折叠（顺序与默认值由 `agentSetupCards.ts` 一处定义）。卡片展开状态为组件本地状态，不做持久化。
 
 ### 4.5 文件编辑器（`FileEditorPanel.tsx`，可选）
 

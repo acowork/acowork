@@ -4864,7 +4864,7 @@ export function handleMessageEvent(
           // ADR-034 §7.6.4: Runtime republishes its merged AgentConfig
           // (manifest defaults + agent_config.json) as a retained MQTT
           // message on startup and after each PUT /api/agents/{id}/config.
-          // The desktop Setup / Tools panels listen to
+          // The desktop Setup panel listens to
           // `acowork:refresh-agent-config` to re-fetch via the HTTP
           // reverse proxy. Without this emit, a Runtime-initiated
           // change (e.g. workspace_switch side effects) would silently

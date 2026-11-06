@@ -119,7 +119,7 @@ export interface McpPick {
   /** `preset:<id>` or `hosted:<id>` — the radio axis is the declaration form. */
   kind: "preset" | "hosted";
   id: string;
-  /** Author's reason, shown verbatim in the Tools panel later. */
+  /** Author's reason, shown verbatim in the Setup panel later. */
   why: string;
   /** Soft requirement. Defaults OFF: a fresh package must not start with alerts. */
   required: boolean;
@@ -241,7 +241,7 @@ export function configFromInput(input: ConfigInput): ManifestConfigDefaultsWire 
  * One declaration per pick, in registry order, and `tools` is always `[]`:
  * the server is not connected during authoring, so any tool name here would be
  * a guess the user could not verify. The whitelist is filled in later, from
- * the Tools panel, where `tools/list` is actually available.
+ * the Setup panel, where `tools/list` is actually available.
  */
 export function mcpServersFromPicks(picks: McpPick[]): McpServerDeclWire[] {
   return picks.map((pick) => {

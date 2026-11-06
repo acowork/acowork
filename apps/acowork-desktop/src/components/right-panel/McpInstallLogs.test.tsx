@@ -1,4 +1,4 @@
-//! The Tools panel's first-time MCP install progress surface.
+//! The MCP card's first-time MCP install progress surface (Setup panel).
 //!
 //! Regression cover for the case that made the feature useless: a server being
 //! installed for the first time has **no tool list yet**, so its row is never
@@ -13,7 +13,7 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, fireEvent } from "@testing-library/react";
 import i18n from "../../i18n";
-import { EnsureLogsDialog, McpServerCard } from "./ToolsTab";
+import { EnsureLogsDialog, McpServerCard } from "./ToolsCards";
 import type { McpEnsureStatus } from "../../stores/mcpStore";
 import type { McpServerView } from "../../lib/types";
 
