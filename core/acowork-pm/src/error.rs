@@ -45,6 +45,13 @@ pub enum PmError {
     #[error("assignee `{assignee}` is not a member of project {project_id}")]
     AssigneeNotProjectMember { assignee: String, project_id: String },
 
+    /// 作者身份：任务作者必须是项目 owner 或成员。任务的第一次投递是一句
+    /// 项目群聊里的话（ADR-106 D15：派单以作者身份发言），没有声音的作者
+    /// 既写不出那行、也就派不出去——所以这条权限在**创建**处判，而不是
+    /// 让任务建成功后卡在派单重试里。
+    #[error("author `{author}` is not a member of project {project_id}")]
+    AuthorNotProjectMember { author: String, project_id: String },
+
     // ── 结构冲突 ──────────────────────────────────────────────────────
     #[error("cycle detected: cannot move {task_id} under {parent_id} (would create cycle)")]
     CycleDetected { task_id: String, parent_id: String },
@@ -147,6 +154,12 @@ impl PmError {
             | PmError::InvalidStateTransition { .. }
             | PmError::AssigneeNotProjectMember { .. } => 400,
 
+            // 作者身份是**访问控制**，不是请求形状：指派错了一个人，调用者改
+            // 参数就能过；作者不在项目里，参数怎么改都过不了，只能去申请成员
+            // 资格。非成员对项目是只读的，创建任务不在只读权限里（ADR-106
+            // D15：任务的第一次投递就是作者在项目群里说的一句话）。
+            PmError::AuthorNotProjectMember { .. } => 403,
+
             PmError::CycleDetected { .. }
             | PmError::DependencyCycle(_)
             | PmError::MemberAlreadyExists(_)
@@ -177,6 +190,7 @@ impl PmError {
             PmError::PathTraversal(_) => "path_traversal",
             PmError::ReservedId(_) => "reserved_id",
             PmError::AssigneeNotProjectMember { .. } => "assignee_not_project_member",
+            PmError::AuthorNotProjectMember { .. } => "author_not_project_member",
             PmError::CycleDetected { .. } => "cycle_detected",
             PmError::MaxDepthExceeded { .. } => "max_depth_exceeded",
             PmError::TooManyChildren(_) => "too_many_children",
@@ -256,6 +270,15 @@ mod tests {
                 400,
                 "assignee_not_project_member"
             ),
+            // ── 403 access control ────────────────────────────────────
+            (
+                PmError::AuthorNotProjectMember {
+                    author: "u-bob".into(),
+                    project_id: "p-x".into(),
+                },
+                403,
+                "author_not_project_member"
+            ),
             (
                 PmError::InvalidStateTransition {
                     task_id: "t-x".into(),
@@ -328,9 +351,10 @@ mod tests {
                 expected_code
             );
         }
-        // 28 个错误码（member_* 4 个：member_not_found / assignee_not_project_member
-        // / member_already_exists / member_has_open_tasks）
-        assert_eq!(seen_codes.len(), 28);
+        // 29 个错误码（成员与作者身份 5 个：member_not_found /
+        // assignee_not_project_member / author_not_project_member /
+        // member_already_exists / member_has_open_tasks）
+        assert_eq!(seen_codes.len(), 29);
     }
 
     /// `IntoResponse` 生成的 JSON body 包含 code 与 message。
