@@ -1,25 +1,24 @@
 /**
- * A PM dispatch in the project group chat: what the reader must still get.
+ * A PM dispatch in the project group chat: the pair the reader is owed.
  *
- * ADR-106 D12 removed the dispatch's `user_message` row on purpose — the
- * dispatch IS the round's first user row, read back through the projection, so
- * the Chat does not keep a second copy of a fact it does not own. D13 moved the
- * task coordinate from the human row onto the round, and the block header is
- * where it paints.
+ * ADR-106 D12 (rev. 2026-11-06) makes a dispatch **isomorphic to a 1:1 send**:
+ * one `user_message` row in the project group plus the round's reference row
+ * threaded under it — persisted as a pair, and entering the chat session's
+ * context as a pair. The rev undid the original D12 wording, which dropped the
+ * message row on the grounds that "the projection makes it visible": that held
+ * for body visibility only, and it left the reference row's `in_reply_to`
+ * naming a mailbox id no chat holds — no trigger row, no sentence in the
+ * transcript (unread, in-chat search and the list preview all blind), and a
+ * block that could be named only by a projection read.
  *
- * Measured consequence of the two decisions landing without their second half:
- * the group showed a block named "unnamed run" beside its task chip and nothing
- * else — no title anywhere — so the dispatch read as if the human's message had
- * been swallowed. Worse, the reference row carried the PM wake-up PLAYBOOK in
- * `meta.assignment_brief` (design 27 §5.4.2: never persisted, never painted), so
- * the group's list preview and an unread projection printed the claim/submit
- * instructions.
- *
- * This pins the pair the reader is owed:
- *   1. one block, wearing the task id;
- *   2. named by the dispatch text (no trigger row exists to name it), so the
- *      human's words are on the transcript at the block — without a second
- *      bubble, and without the playbook.
+ * Two states have to stay readable, and this file pins both:
+ *   - a paired dispatch (what every dispatch looks like from now on): the
+ *     author's words stand as their own bubble, the block hangs under it wearing
+ *     the task id, and the sentence is not painted twice;
+ *   - a row written before the rev (no message row, `in_reply_to` dangling): the
+ *     block must still be identifiable and must never borrow the wake-up
+ *     playbook — design 27 §5.4.2, that string reaches the system block and no
+ *     chat surface.
  */
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -139,12 +138,28 @@ vi.mock("../editor/markdownLinkResolver", () => ({
   markdownUrlTransform: (x: string) => x,
 }));
 
-/** The dispatch round exactly as the store holds it: no `user_message` row
- *  anywhere (D12), `in_reply_to` naming the PM dispatch id that no chat row
- *  carries, the task coordinate, and `opened_new` (the dispatch opened the
- *  session). `brief` is the ROW's name — the dispatch text; `legacyBrief` is
- *  what rows written before the producer fix carry: the playbook. */
-function dispatchRound(seq: number, opts: { legacyBrief?: boolean } = {}): ChatMessageRow {
+/** The dispatch's own chat row — the task author's line in the group, carrying
+ *  the task's text and the chip coordinate. */
+function dispatchMessage(seq: number, from = ME): ChatMessageRow {
+  return {
+    seq,
+    ts: seq,
+    from,
+    kind: "user_message",
+    body: `${TITLE}\n${DESCRIPTION}`,
+    to: AGENT,
+    meta: { message_id: `pm-${seq}`, task_id: TASK },
+  };
+}
+
+/** The round's reference row: contentless, threaded under the dispatch row it
+ *  answers (`triggerId`) — or, for a row written before the rev, under a mailbox
+ *  id no chat row carries. `legacyBrief` is what those older rows put in
+ *  `assignment_brief`: the wake-up playbook. */
+function dispatchRound(
+  seq: number,
+  opts: { legacyBrief?: boolean; triggerId?: string } = {},
+): ChatMessageRow {
   const roundId = `r:pm-${seq}`;
   return {
     seq,
@@ -158,7 +173,7 @@ function dispatchRound(seq: number, opts: { legacyBrief?: boolean } = {}): ChatM
       agent_instance_id: AGENT,
       agent_session_id: "exec-1",
       round_id: roundId,
-      in_reply_to: `pm-${seq}`,
+      in_reply_to: opts.triggerId ?? `pm-${seq}`,
       opened_new: true,
       task_id: TASK,
       assignment_brief: opts.legacyBrief ? PLAYBOOK : `${TITLE}\n${DESCRIPTION}`,
@@ -189,21 +204,37 @@ describe("GroupChatPanel: a PM dispatch in the project group", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
   });
 
-  it("names the block with the dispatch text and wears the task id", () => {
-    // The transcript holds ONE row — the reference row. The human's words reach
-    // the surface through the projection, which is what D12 said they would.
+  it("stands the dispatch on the transcript, with the block under it", () => {
+    // The pair (D12 rev.): the author's row + the round threaded under it. This
+    // is what makes the group read as "who asked whom to do what" — and what
+    // puts that pair into the chat session's context, because the row is a real
+    // `user_message` and the reference row names it.
+    tail = [dispatchMessage(1), dispatchRound(2, { triggerId: "pm-1" })];
+    blocks = { [`${AGENT}|exec-1|r:pm-2`]: entryOf("r:pm-2", `${TITLE}\n${DESCRIPTION}`) };
+    render(<GroupChatPanel />);
+    // 1. The message is a message: the author's bubble, in the transcript.
+    expect(screen.getByText("You")).toBeTruthy();
+    expect(screen.getAllByText(new RegExp(DESCRIPTION)).length).toBeGreaterThan(0);
+    // 2. The work hangs under it and keeps its task coordinate.
+    expect(screen.getByText(TASK)).toBeTruthy();
+    expect(screen.queryByText("chatView.block.unnamedRun")).toBeNull();
+    // 3. One sentence, one bubble: an opener round whose words already stand on
+    //    the transcript does not repeat them inside the block.
+    expect(
+      screen.getAllByText(new RegExp(DESCRIPTION)).filter((el) => el.tagName === "PRE"),
+    ).toHaveLength(0);
+  });
+
+  it("still names a pre-rev dispatch block by the projection (no message row exists)", () => {
+    // A dispatch sent before the rev left no `user_message` row, so the
+    // transcript holds only the reference row and the projection is the only
+    // place its words survive.
     tail = [dispatchRound(1)];
     blocks = { [`${AGENT}|exec-1|r:pm-1`]: entryOf("r:pm-1", `${TITLE}\n${DESCRIPTION}`) };
     render(<GroupChatPanel />);
-    // The block exists and carries the task coordinate (D13's chip).
     expect(screen.getByText(TASK)).toBeTruthy();
-    // The dispatch text is on screen — as the block's name and as the round's
-    // line — so the reader is not left with an anonymous block.
     expect(screen.getAllByText(new RegExp(TITLE)).length).toBeGreaterThan(0);
     expect(screen.getAllByText(new RegExp(DESCRIPTION)).length).toBeGreaterThan(0);
-    // No user bubble was invented beside it: the words stand at the block, and
-    // the run is named by them, so the "question → answer" pairing survives the
-    // removed chat row without a second copy of the sentence.
     expect(screen.queryByText("You")).toBeNull();
     expect(screen.queryByText("chatView.block.unnamedRun")).toBeNull();
   });
