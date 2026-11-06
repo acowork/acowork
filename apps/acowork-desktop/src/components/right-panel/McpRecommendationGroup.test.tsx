@@ -100,6 +100,26 @@ function renderGroup(
   );
 }
 
+/** The card's own header — the only element in this subtree that publishes
+ *  `aria-expanded` (row action buttons have none). */
+function cardHeader(): HTMLElement {
+  const headers = screen
+    .getAllByRole("button")
+    .filter((el) => el.hasAttribute("aria-expanded"));
+  expect(headers).toHaveLength(1);
+  return headers[0];
+}
+
+function isCardExpanded(): boolean {
+  return cardHeader().getAttribute("aria-expanded") === "true";
+}
+
+/** Open the card the way a user does: a collapsed card keeps its rows out of
+ *  the DOM, so any assertion about row content has to start here. */
+function expandCard() {
+  if (!isCardExpanded()) fireEvent.click(cardHeader());
+}
+
 describe("McpRecommendationGroup", () => {
   beforeEach(() => {
     materializeStatus = 201;
@@ -192,6 +212,9 @@ describe("McpRecommendationGroup", () => {
 
   it("shows an active recommendation as in use with no action", () => {
     renderGroup([rec({ state: "active" })]);
+    // Fully handled → the card starts collapsed (see the default-state suite);
+    // the row is reachable one click away.
+    expandCard();
     expect(screen.getByText(i18n.t("agentSetup.mcpRecommendInUse"))).toBeTruthy();
     expect(screen.queryByRole("button", { name: i18n.t("agentSetup.mcpRecommendInstall") })).toBeNull();
     expect(screen.queryByRole("button", { name: i18n.t("agentSetup.mcpRecommendIgnore") })).toBeNull();
@@ -199,6 +222,8 @@ describe("McpRecommendationGroup", () => {
 
   it("hides dismissed rows behind a disclosure and restores them", async () => {
     renderGroup([rec({ state: "dismissed" })]);
+    // A list of nothing but ignored rows is fully handled → collapsed.
+    expandCard();
 
     // Not visible until the disclosure is opened.
     expect(screen.queryByRole("button", { name: i18n.t("agentSetup.mcpRecommendRestore") })).toBeNull();
@@ -270,5 +295,115 @@ describe("McpRecommendationGroup", () => {
 
     await waitFor(() => expect(onReload).toHaveBeenCalled());
     expect(screen.queryByText(/Action failed/)).toBeNull();
+  });
+});
+
+// ── Default expand state ────────────────────────────────────────────────
+//
+// ADR-104 §8 ("the recommendation group becoming noise"): the card opens by
+// default only while some suggestion still needs a decision, and the header
+// keeps the count so a collapsed group stays discoverable. The rule that maps
+// lifecycle states to "handled" lives in `lib/mcpRecommendations.ts` and has
+// its own suite — what is asserted here is the wiring: WHEN the default is
+// decided, and that the user's own toggle is never re-decided.
+describe("McpRecommendationGroup — default expand state", () => {
+  beforeEach(() => {
+    materializeStatus = 201;
+    materializeError = null;
+    stubFetch();
+    stubStoreActions();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it("starts expanded while a suggestion is still installable", () => {
+    renderGroup([rec({ state: "not_installed" })]);
+    expect(isCardExpanded()).toBe(true);
+  });
+
+  it("starts expanded while an installed suggestion is not started yet", () => {
+    // `installed_inactive` is still one click away from done — the user has to
+    // see it without hunting for the card.
+    renderGroup([rec({ state: "installed_inactive" })]);
+    expect(isCardExpanded()).toBe(true);
+  });
+
+  it("starts expanded when only one of several suggestions is unhandled", () => {
+    renderGroup([
+      rec({ key: "a", state: "active" }),
+      rec({ key: "b", state: "dismissed" }),
+      rec({ key: "c", state: "installed_inactive" }),
+    ]);
+    expect(isCardExpanded()).toBe(true);
+  });
+
+  it("starts collapsed once every suggestion is active or ignored", () => {
+    renderGroup([
+      rec({ key: "a", state: "active" }),
+      rec({ key: "b", state: "dismissed" }),
+    ]);
+    // Collapsed, not hidden: the header still reports the declaration count.
+    expect(isCardExpanded()).toBe(false);
+    expect(
+      cardHeader().textContent,
+    ).toContain(i18n.t("agentSetup.mcpRecommended", { count: 2 }));
+  });
+
+  it("keeps the user's collapse when a reload re-delivers the same unhandled list", () => {
+    // The default for this list is "expanded"; the user closed it anyway, and
+    // the reload after any row action must not pop it back open.
+    const { rerender } = renderGroup([rec({ state: "installed_inactive" })]);
+    expect(isCardExpanded()).toBe(true);
+    fireEvent.click(cardHeader());
+    expect(isCardExpanded()).toBe(false);
+
+    rerender(
+      <McpRecommendationGroup
+        agentId={AGENT}
+        recommendations={[rec({ state: "installed_inactive" })]}
+        onReload={() => {}}
+      />,
+    );
+    expect(isCardExpanded()).toBe(false);
+  });
+
+  it("stays open while the user works through the list", () => {
+    // Activating the last pending row flips the list to "all handled"; the
+    // default for that list is collapsed, but the card must not slam shut under
+    // the cursor that just clicked it.
+    const { rerender } = renderGroup([rec({ state: "not_installed" })]);
+    expect(isCardExpanded()).toBe(true);
+
+    rerender(
+      <McpRecommendationGroup
+        agentId={AGENT}
+        recommendations={[rec({ state: "active" })]}
+        onReload={() => {}}
+      />,
+    );
+    expect(isCardExpanded()).toBe(true);
+  });
+
+  it("decides again for a different agent instead of reusing the previous answer", () => {
+    // The host empties the list while the next agent's `/tools` is in flight
+    // (see ToolsCards: the list is stamped with its agent), so the card is
+    // unmounted in between and its successor decides from its own rows.
+    const { rerender } = renderGroup([rec({ state: "not_installed" })]);
+    expect(isCardExpanded()).toBe(true);
+
+    rerender(<McpRecommendationGroup agentId="agent-2" recommendations={[]} onReload={() => {}} />);
+    expect(screen.queryAllByRole("button")).toHaveLength(0);
+
+    rerender(
+      <McpRecommendationGroup
+        agentId="agent-2"
+        recommendations={[rec({ state: "active" })]}
+        onReload={() => {}}
+      />,
+    );
+    expect(isCardExpanded()).toBe(false);
   });
 });

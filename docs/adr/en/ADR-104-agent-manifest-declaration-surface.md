@@ -230,6 +230,8 @@ Dismissal outranks everything because it is the only *user* intent in the list: 
 
 An empty `recommended` renders **no group at all** (no "nothing recommended" placeholder).
 
+**Default expand**: the group opens by default only while some suggestion is still unhandled (`not_installed` / `installed_inactive`); once everything is handled (`active` or `dismissed` — the same classification as the §5.3 badge) it starts collapsed. The header always carries the count, so collapsed is not hidden. That default is decided **once, from the loaded list**, never re-derived per render: a user's own toggle is not overridden, and handling the last suggestion does not slam the card shut under the cursor that just clicked it.
+
 ### 5.2 The install-destination notice (mandatory)
 
 A server installed from that group enters the **machine-wide MCP catalog**, so the card must say: "Added to this machine's MCP catalog; other agents can see it, but it is only active for this one." Without it, users find "servers that appeared out of nowhere" in another agent's Tools panel.
