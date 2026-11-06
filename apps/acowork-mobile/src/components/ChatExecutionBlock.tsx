@@ -224,7 +224,16 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   }, [focusInput])
 
   const question0 = block.rounds.find((r) => r.triggerRow)?.triggerRow?.body ?? ''
-  const name = runTitle?.trim() || summarize(question0, 24) || '执行会话'
+  // No Chat row opened this run (a PM dispatch, ADR-106 D12, or a turn composed
+  // on the execution surface): the question the session actually received is the
+  // only human text the run has, so it names the run.
+  const asked0 =
+    question0.trim() ||
+    block.rounds
+      .map((r) => entries[r.ref]?.projection?.user?.body ?? '')
+      .find((body) => body.trim() !== '') ||
+    ''
+  const name = runTitle?.trim() || summarize(asked0, 24) || '执行会话'
   // The task coordinate (ADR-106 D13): it rides the ROUND, and the header is
   // where a reader looks for "which piece of work is this".
   const taskId = block.rounds.find((r) => r.roundRow.meta?.task_id)?.roundRow.meta?.task_id
@@ -364,15 +373,21 @@ function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: 
   const [open, setOpen] = useState(defaultOpen)
   const projection = entry?.projection
   // An opener round's sentence stands on the transcript as its own bubble —
-  // the block's line leads with what the execution session actually received
-  // (the router's brief), never with a second copy of the raw text.
+  // the block's line leads with the reference row's one-line `assignment_brief`,
+  // never with a second copy of the raw text and never with the projection's
+  // stored question (that one is the delivered prompt, reference parts and all).
+  // The Runtime's `reference_brief` owns what may be written there: a PM dispatch
+  // is named by its own text, never by the wake-up playbook.
   const question =
     (round.showUserLine ? round.triggerRow?.body : '') ||
     (round.questionOnTranscript ? round.roundRow.meta?.assignment_brief ?? '' : '') ||
     projection?.user?.body ||
     ''
-  const summary =
-    summarize(question) || summarize(round.roundRow.meta?.assignment_brief ?? '') || '（无提问内容）'
+  // The brief is the OPENER round's line and nothing else (ADR-106 revision
+  // 2026-11-04). As a fallback for any round it published the PM wake-up
+  // playbook as a round's question whenever the projection could not be read —
+  // the reference row's name and the system slot are different things.
+  const summary = summarize(question) || '（无提问内容）'
   const pending = entry?.status === 'pending'
   // A row parked on a card is waiting for the human, not executing — the same
   // rule the header follows, because a row that says "执行中" over the card it is

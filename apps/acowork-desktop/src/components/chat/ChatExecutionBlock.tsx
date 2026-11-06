@@ -183,9 +183,17 @@ function summarize(text: string, max = 60): string {
  * screen is a document the reader cannot point at.
  *
  * The order is the transcript's own: a round that shows its own user line leads
- * with what the execution session ACTUALLY received (the router's brief, in the
- * row the human sees), then the projection's stored question, and only then the
- * round's own record.
+ * with what the human wrote there; a round whose sentence already stands on the
+ * transcript as its own bubble (the opener) leads with the reference row's
+ * one-line `assignment_brief` — NOT with the projection's stored question, which
+ * is the *delivered prompt* and carries ADR-107's reference parts
+ * (`[user message]` + the raw sentence) verbatim.
+ *
+ * `assignment_brief` is therefore the opener's line by contract, and the Runtime
+ * owns what may be written there: `reference_brief` refuses the PM wake-up
+ * playbook (a system slot, design 27 §5.4.2) and names a dispatch by its own
+ * text. The header's name chain does not read the brief at all, so a row written
+ * before that guard cannot put the playbook on the block's title.
  */
 function questionOf(
   round: RunBlock["rounds"][number],
@@ -363,6 +371,17 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
     // not name the same run two different ways.
     deriveSessionTitle(
       block.rounds.find((r) => r.triggerRow)?.triggerRow?.body ?? "",
+    ) ||
+    // No Chat row opened this run: a PM dispatch (ADR-106 D12 writes no row —
+    // the dispatch IS the round's first user row) and a turn composed on the
+    // execution surface both land here. The question the session actually
+    // received is the only human text the run has, so it names the run; without
+    // it a task block reads "unnamed run" beside its own task chip, which is
+    // how the dispatch appeared to vanish from the group.
+    deriveSessionTitle(
+      block.rounds
+        .map((round) => entries[round.ref]?.projection?.user?.body ?? "")
+        .find((body) => body.trim() !== "") ?? "",
     ) ||
     t("chatView.block.unnamedRun");
   const displayName =
@@ -629,18 +648,19 @@ function RoundItem({
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
   const projection = entry?.projection;
-  // An opener round's sentence stands on the transcript as its own bubble —
-  // the block's line leads with what the execution session actually received
-  // (the router's brief), never with a second copy of the raw text.
+  // An opener round's sentence stands on the transcript as its own bubble — the
+  // block's line leads with the reference row's one-line `assignment_brief`, not
+  // with a second copy of the raw text and not with the projection's stored
+  // question (that one is the delivered prompt, reference parts and all). The
+  // Runtime's `reference_brief` owns what may be written there: a PM dispatch is
+  // named by its own text, never by the wake-up playbook.
   const question =
     (round.showUserLine ? round.triggerRow?.body : "") ||
     (round.questionOnTranscript ? round.roundRow.meta?.assignment_brief ?? "" : "") ||
     projection?.user?.body ||
     "";
-  const summary =
-    summarize(question) ||
-    summarize(round.roundRow.meta?.assignment_brief ?? "") ||
-    t("chatView.block.noQuestion");
+  // A round with nothing readable says so instead of borrowing the wrong line.
+  const summary = summarize(question) || t("chatView.block.noQuestion");
   const pending = entry?.status === "pending";
   // Only a round that can still take an answer wears a card: an open one, or a
   // `waiting` park the human has not replied to yet. The server strips the rest

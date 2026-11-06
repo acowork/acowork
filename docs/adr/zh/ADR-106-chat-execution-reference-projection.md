@@ -202,7 +202,7 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 
 ### D13 — 搜索、预览、未读、标题的重新归属
 
-- **列表预览 / 乐观标题**：引用行的 `assignment_brief`（或首轮的一行摘要，由 Runtime 在写引用行时一并给出，一次性、不改写）足够。禁止为渲染列表去读投影（ADR-096）。
+- **列表预览 / 乐观标题**：引用行的 `assignment_brief`（或首轮的一行摘要，由 Runtime 在写引用行时一并给出，一次性、不改写）足够。**Rev. 2026-11-06**：这一行的来源必须是"人类可读的派单文本"（`acowork-pm` 的 `build_dispatch_message`），**不得**取信封里同名的高信任 `assignment_brief`——后者是唤醒 playbook，`acowork-pm` 明确"never persisted, never displayed on a chat surface"，而 Runtime 曾把同名两个事实当成一个，于是 playbook 落库成行名、并在群聊列表预览与轮次行上屏。禁止为渲染列表去读投影（ADR-096）。
 - **全局搜索 / chat 内搜索**（ADR-097 / ADR-081）：`search.sqlite` 索引 chat 自有行 + 引用行的 `assignment_brief`；**不索引投影缓存**——那会让一份可弃拷贝进入另一个可弃索引，删除语义变成两跳，且 exec 侧本就有 conversation index（ADR-082 / ADR-095）负责正文检索。跨会话正文搜索走 exec 索引，命中的是"某会话的某轮"，跳转路径已存在（D4 的"查看执行"）。
 - **未读**：只算 chat 自有行；块的"等待人类"态作为独立的徽标位（来自投影的 `card != null`），不混入未读计数。
 

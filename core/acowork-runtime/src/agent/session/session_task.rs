@@ -1488,14 +1488,14 @@ impl SessionTask {
                             String::new()
                         },
                         opened_new,
-                        // D13: the PM dispatch's one-line task name, written once
-                        // with the reference and never rewritten. Origin-gated by
-                        // the same call that feeds the system block.
-                        assignment_brief: if brief.is_empty() {
-                            None
-                        } else {
-                            Some(brief.to_string())
-                        },
+                        // D13: the round's one-line task name, written once with
+                        // the reference and never rewritten. `brief` is the
+                        // system slot (the PM playbook), so it may name a row
+                        // only when it is NOT the playbook — see
+                        // `reference_brief`.
+                        assignment_brief: crate::agent::intent_turn::reference_brief(
+                            &kind, brief, &content,
+                        ),
                         // D13: the chip's coordinate, stated once with the row. The
                         // transport parsed it off the conversation key, so an empty
                         // string here means "not a task conversation" — a task id no
