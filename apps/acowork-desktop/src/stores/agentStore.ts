@@ -94,7 +94,7 @@ export interface AgentProfileSettings {
   // ADR-094 note: `skillsAutoLoad` was removed from the profile
   // shape. Skill mode (Progressive / Manual) now lives entirely
   // on the `load_skill` tool entry in `agent_tools.json` and is
-  // mutated by the Tools panel — there is no second switch on
+  // mutated by the Setup panel — there is no second switch on
   // the Agent Setup panel any more.
 }
 

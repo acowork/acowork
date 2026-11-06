@@ -1,4 +1,5 @@
-//! ADR-104 — the Tools panel's "recommended MCP servers" group.
+//! ADR-104 — the "recommended MCP servers" group of the tools cards
+//! (hosted by the Setup panel now that the Tools rail tab is gone).
 //!
 //! ## Why this group exists at all
 //!

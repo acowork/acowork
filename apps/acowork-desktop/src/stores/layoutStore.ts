@@ -2,8 +2,14 @@ import { create } from "zustand";
 
 import type { NavView } from "../lib/types";
 
-/** Right panel tabs — keep in sync with AppLayout.PanelTab. */
-export type PanelTab = "debug" | "status" | "setup" | "tools" | "memory" | "workspace";
+/**
+ * Right panel tabs — keep in sync with AppLayout.PanelTab.
+ *
+ * Five entries. The `tools` tab is gone: its Builtin Tools / MCP cards moved
+ * into the `setup` panel (see `components/right-panel/agentSetupCards.ts`),
+ * so there is no longer a rail entry that could become the active tab.
+ */
+export type PanelTab = "debug" | "status" | "setup" | "memory" | "workspace";
 
 /** Harness page tabs — keep in sync with HarnessPage's tab list. */
 export type HarnessTabId = "providers" | "mcp" | "embedding" | "lsp";
@@ -95,7 +101,7 @@ interface LayoutState {
 
     /**
      * Monotonically-increasing counter for "open the harness page on this
-     * tab" requests (ADR-104: the Tools panel's recommendation card sends the
+     * tab" requests (ADR-104: the MCP recommendation group sends the
      * user to the MCP tab to enter an API key). `HarnessPage` owns its active
      * tab, so the request travels through the same consume-once seq contract
      * as `navViewRequestSeq`; callers request the view *and* the tab.

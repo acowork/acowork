@@ -99,6 +99,14 @@ ADR-046 规定附件是**部件**：`user` 行之后新增 `role="system"` 的�
 
 `degraded_brief` → `degraded_background`：不再拼字符串，而是产出 `Some(MessageRef::chat_background(...))`，正文以"router 不可用，以下是对话尾部"开头（这句对模型的判断有用，必须保留），填入 `params.context_refs`。`params.message` 保持不动。两条路径在前端与持久化上的形状因此完全一致。
 
+### D8　引用正文里不出现机器标识：名称与 ID 一起交给模型
+
+引用正文是模型写的散文（D3/D4），而它会被**人逐字读到**。因此交给模型的上下文不能只有一个地址：`ws-49616826fcfc` 对人没有意义，对模型却是当时唯一可用的"工作区描述"，于是它把这串 ID 抄进了正文（2026-11-06 已报缺陷：执行会话的背景卡片正文写着"工作区 ws-49616826fcfc"）。
+
+Block C 的 `draft:` 行因此**同时给名称与 ID**：`workspace="ACoworkDev" (id ws-49616826fcfc)`。名称的权威来源与两个客户端同一条规则——`agent_workspaces.json` 的 `alias`，其次目录末段（`WorkspaceResolver::display_name`）；ID 不能省，`session_config.workspace` 按 ID 对注册表校验，所以 schema 里写明"要 ID，不要名称"。解析不到名称时只留 ID：不编名字，也不留空。
+
+不做的：**不让前端对正文做 ID→名称的正则替换**。模型行为无法预测，只能引导；把"人看得懂"寄望于渲染期的字符串修补，换个模型、换种措辞就失效，还会让同一段正文在不同客户端读出不同内容。这条规则的位置是"给模型的输入"，不是"给用户的输出"。
+
 ## 备选方案与被否决的理由
 
 | 方案 | 否决理由 |
@@ -116,6 +124,7 @@ ADR-046 规定附件是**部件**：`user` 行之后新增 `role="system"` 的�
 - 标题重新由人的原话决定；chat 派发的会话标题不再因为固定首句而收敛。
 - `user` 行恢复 ADR-046 §2.1 契约，任何按"第一条 user 行"取原话的消费者（标题、导出、`@` 引用、检索）重新正确。
 - 引用文本可 markdown 渲染，人的话仍逐字——两个需求同时满足而没有互相污染。
+- 工作区在人类可读的文本里以**名称**出现（D8），不再把 `ws-…` 地址当名字用。
 - 无引用的回合 prompt 输入逐字节不变（D3），前缀缓存不额外 miss。
 
 **负面 / 代价**
@@ -137,4 +146,5 @@ ADR-046 规定附件是**部件**：`user` 行之后新增 `role="system"` 的�
 | 回合 | `loop_.rs` | `turn_message_refs` 在 `user` 行之后、附件之前落盘；标题输入仍取 `raw_user_message` |
 | Router | [chat_router/runner.rs](../../../core/acowork-runtime/src/agent/chat_router/runner.rs) `dispatch_parts`、[chat_router/tool.rs](../../../core/acowork-runtime/src/agent/chat_router/tool.rs) schema、[chat_prompt.rs](../../../core/acowork-core/src/chat_prompt.rs) | 入参 `background`；新会话产出 `(原话, [ref])`，续会话产出 `(原话, [])`；背景与原话同文时丢弃 |
 | 降级 | [startup/gateway_loop.rs](../../../core/acowork-runtime/src/startup/gateway_loop.rs) | `degraded_background` 产出引用部件，`params.message` 不动 |
+| 词表（D8） | [tools/workspace_resolver.rs](../../../core/acowork-runtime/src/tools/workspace_resolver.rs) `display_name`、[chat_router/runner.rs](../../../core/acowork-runtime/src/agent/chat_router/runner.rs) `RouterDeps::workspace_display_name` + `draft_label` | ID→名称只有一条规则（`alias` → 目录末段 → `None`）；Block C 的名称与 ID 同出，解析不到只留 ID |
 | 前端 | [messageParts.ts](../../../apps/acowork-desktop/src/components/chat/messageParts.ts)（部件类型唯一判据）、[messageFolder.ts](../../../apps/acowork-desktop/src/components/chat/messageFolder.ts) `user_with_parts`、[MessageRefBlock.tsx](../../../apps/acowork-desktop/src/components/chat/MessageRefBlock.tsx)、`chatStore.convertConversationEntry`（保留部件 metadata） | 折叠 + 折叠卡片 markdown；`messageRefPart.test.tsx` 钉 7 条契约（折叠、字面、默认收起、展开 markdown、无原话仍渲染、载入链保留 metadata、附件不回归） |

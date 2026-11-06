@@ -33,7 +33,7 @@ describe("memoryTabAvailable", () => {
 
 describe("memoryTabFallback", () => {
     it("leaves every other tab alone", () => {
-        for (const tab of ["status", "workspace", "tools", "setup", "debug"] as const) {
+        for (const tab of ["status", "workspace", "setup", "debug"] as const) {
             expect(memoryTabFallback(tab, { agentRunning: false, memoryServiceReady: false })).toBeNull();
         }
     });

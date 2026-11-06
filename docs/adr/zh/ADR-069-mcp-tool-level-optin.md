@@ -1,5 +1,7 @@
 # ADR-069: MCP 工具级别 opt-in — agent_mcp_tools.json
 
+> **面板位置修订（2026-11-06，[ADR-108](./ADR-108-right-panel-consolidation.md)）**：右侧「工具」面板已下线 —— 本文提到的「工具面板」/「Builtin Tools 卡片」/「MCP 卡片」现在位于**设置面板**（`AgentSetupTab`），入口图标与 Tab 一并消失。端点、Store、权限与开关语义均未改变；改动范围见 ADR-108。
+
 **状态**：已接受
 **日期**：2026-09-22
 **决策者**：大鱼

@@ -1,4 +1,4 @@
-// Prompts & Skills card (Debug tab).
+// Prompts & Skills card (Setup panel).
 //
 // Browses the two editable subtrees of the agent package (`prompts/` and
 // `skills/`) through the restricted `__agent_package__` workspace API — the
@@ -26,7 +26,13 @@
 //     is a two-section browse panel, not an Explorer.
 //   - The body is capped at `max-h-60` (the same cap every other bounded
 //     list in the shell uses) and scrolls on its own, so a deep `skills/`
-//     tree can never push the debug controls off the tab.
+//     tree can never push the rest of the host panel off screen.
+//
+// Hosting: the card lives in the Setup panel (it was the top card of the Debug
+// tab until that tab was cut down to the debug switch + snapshots). Its
+// initial expand state therefore belongs to the *host* — Setup opens only its
+// first three cards and this one sits fourth-from-last — so the default is
+// injected via `defaultOpen` (`agentSetupCards.ts`) instead of hardcoded here.
 import { useCallback, useEffect, useState } from "react";
 import { FileText, Folder, FolderOpen, Loader2, RefreshCw } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -177,12 +183,17 @@ function FileNode({
   );
 }
 
-export function PromptsSkillsCard() {
+export function PromptsSkillsCard({
+  defaultOpen = true,
+}: {
+  /** Initial expand state — owned by the host panel's card order. */
+  defaultOpen?: boolean;
+} = {}) {
   const { t } = useTranslation();
   const debugAgentId = useDebugStore((s) => s.debugAgentId);
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
   const agentId = debugAgentId ?? selectedAgentId;
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(defaultOpen);
   const [entries, setEntries] = useState<TreeEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [reloading, setReloading] = useState(false);

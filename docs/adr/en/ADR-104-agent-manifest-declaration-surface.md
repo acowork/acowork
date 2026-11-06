@@ -1,5 +1,7 @@
 # ADR-104: Restructuring the Manifest Declaration Surface — `[config]` Defaults, `[[mcp_servers]]` Recommendations, the capability↔skill Relation, and `labels`
 
+> **Panel-location revision (2026-11-06, [ADR-108](./ADR-108-right-panel-consolidation.md))**: the right-rail Tools panel no longer exists — every reference below to "the Tools panel" / "the Builtin Tools card" / "the MCP card" now means the **Setup panel** (`AgentSetupTab`); the rail entry and its tab are gone. Endpoints, stores, permissions and switch semantics are unchanged; see ADR-108 for the scope.
+
 **Status**: Implemented (P1–P5 landed in full)
 **Date**: 2026-10-30
 **Deciders**: ACowork architecture group

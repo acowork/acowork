@@ -293,6 +293,11 @@
       "newTask": "开新任务",
       "unanswered": "待选择",
       "choosing": "处理中…",
+      "actionReference": "引用这个执行会话",
+      "actionCopy": "复制这个执行会话",
+      "copied": "已复制",
+      "copyQuestionPrefix": "问：",
+      "copyUnreadable": "（这一轮的内容暂时无法读取）",
       "replyPlaceholder": "回复以继续这个运行…",
       "send": "发送",
       "chooseThis": "就继续这个",
@@ -336,7 +341,8 @@
       "goContinue": "去续投",
       "refCount": "已引用 {{count}} / {{max}}",
       "done": "完成",
-      "blockNotLoaded": "该任务块不在已加载的历史中"
+      "blockNotLoaded": "该任务块不在已加载的历史中",
+      "refLimit": "一条消息最多引用 {{max}} 个执行会话"
     },
     "execSessionGone": "该执行会话已被删除，无法查看"
   },
@@ -1074,7 +1080,6 @@
     "status": "状态",
     "memory": "记忆",
     "setup": "设置",
-    "tools": "工具",
     "workspace": "工作区",
     "connectingDebug": "正在连接调试服务器...",
     "debugConnectionLost": "调试连接已断开",

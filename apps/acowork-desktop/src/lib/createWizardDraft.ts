@@ -126,7 +126,7 @@ export interface McpPick {
   /** `preset:<id>` or `hosted:<id>` — the radio axis is the declaration form. */
   kind: "preset" | "hosted";
   id: string;
-  /** Author's reason, shown verbatim in the Tools panel later. */
+  /** Author's reason, shown verbatim in the Setup panel later. */
   why: string;
   /** Soft requirement. Defaults OFF: a fresh package must not start with alerts. */
   required: boolean;
@@ -261,7 +261,8 @@ export function configFromInput(input: ConfigInput): ManifestConfigDefaultsWire 
  * (platform-hosted servers only — their `tools/list` is readable before the
  * agent exists); otherwise it stays `[]`, which Rust reads as "no opinion,
  * everything enabled". A preset pick never has a whitelist: its stdio server
- * is not connected during authoring, so any tool name there would be a guess.
+ * is not connected during authoring, so any tool name there would be a guess —
+ * those tools are picked in the Setup panel once the agent exists.
  */
 export function mcpServersFromPicks(picks: McpPick[]): McpServerDeclWire[] {
   return picks.map((pick) => {

@@ -1,5 +1,8 @@
 # ADR-063: Package-Level LLM Prompt Override Mechanism — Extending the `prompts/` Special-Filename Convention
 
+> **Panel-location revision (2026-11-06, [ADR-108](./ADR-108-right-panel-consolidation.md))**: the Prompts & Skills card described below as living "at the top of the Debug panel" now lives in the **Setup panel** (`AgentSetupTab`) as its Prompts & Skills card; the Debug panel keeps only the debug switches and the context snapshot. Read/override logic, provenance labels and failure-branch semantics are unchanged; see ADR-108 for the scope.
+
+
 > **Chinese source of truth**: [ADR-063](../zh/ADR-063-package-level-prompt-override.md)
 > **Terminology**: see [GLOSSARY.md](./GLOSSARY.md)
 

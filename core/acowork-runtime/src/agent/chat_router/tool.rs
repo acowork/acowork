@@ -113,7 +113,10 @@ pub fn exec_session_create_tool_spec() -> Value {
                 "properties": {
                     "model": { "type": "string" },
                     "provider": { "type": "string" },
-                    "workspace": { "type": "string" },
+                    "workspace": {
+                        "type": "string",
+                        "description": "The workspace id — the `id …` from Block C's `workspace=` entry — never its name: the runtime validates it against the workspace registry by id."
+                    },
                     "reasoning_effort": { "type": "string" }
                 }
             }

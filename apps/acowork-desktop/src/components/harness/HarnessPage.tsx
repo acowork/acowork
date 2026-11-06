@@ -39,7 +39,7 @@ export function HarnessPage() {
   const { t } = useTranslation();
   const [activeTab, setActiveTab] = useState<HarnessTabId>("providers");
 
-  // ADR-104: another surface (the Tools panel's MCP recommendation card) may
+  // ADR-104: another surface (the Setup panel's MCP recommendation group) may
   // ask for a specific tab — "enter your BRAVE_API_KEY here". Consumed
   // exactly once, same contract as layoutStore's other request seqs.
   const harnessTabRequestSeq = useLayoutStore((s) => s.harnessTabRequestSeq);
@@ -122,7 +122,7 @@ function ProvidersTab() {
   const [editExpandedModels, setEditExpandedModels] = useState<Set<string>>(new Set());
   const [editCompactModel, setEditCompactModel] = useState("");
 
-  // Tools-tab style level-1 collapsible groups on this tab (default open).
+  // Setup-panel style level-1 collapsible groups on this tab (default open).
   const [configuredOpen, setConfiguredOpen] = useState(true);
 
   // Gateway config for default provider indication
@@ -385,7 +385,7 @@ function ProvidersTab() {
         providers={dynamicProviders}
       />
 
-      {/* Configured Providers — Tools-tab level-1 collapsible card:
+      {/* Configured Providers — Setup-panel level-1 collapsible card:
           chevron + title + count badge in the header, default open;
           configured keys render as unified rows in the inset body. */}
       {keysLoading ? (
@@ -768,7 +768,7 @@ export function McpTab() {
   // entry (name is identity — agents reference servers by name, so the
   // name field is locked and the PUT is keyed by this original name).
   const [editingName, setEditingName] = useState<string | null>(null);
-  // Tools-tab style level-1 collapsible groups (default open)
+  // Setup-panel style level-1 collapsible groups (default open)
   const [listOpen, setListOpen] = useState(true);
 
   // New/edit server form state
@@ -819,7 +819,7 @@ export function McpTab() {
   //    user's to delete.
   //  - Custom rows are catalog entries that match no preset; these carry
   //    Remove. Runtime verification (Test) lives on the Node machine — the
-  //    Tools panel's enable switch drives ensure — so no row here probes.
+  //    MCP card's enable switch drives ensure — so no row here probes.
   const presetIds = useMemo(() => new Set(presets.map((p) => p.id)), [presets]);
   const customServers = useMemo(
     () => catalog.filter((c) => !presetIds.has(c.name)),
@@ -829,7 +829,7 @@ export function McpTab() {
   // ADR-090: "add" is a pure registry write. No probe-then-add — a Gateway-side
   // probe would spawn the server on the Gateway machine, which says nothing
   // about the Node where an Agent will actually run it. Usability is verified
-  // by the Agent when the user enables the server in the Tools panel.
+  // by the Agent once the user enables the server in the Setup panel's MCP card.
   /**
    * ADR-104: adding a preset is a *declaration materialization*, not a
    * client-side config build. The Gateway owns the spawn recipe and stamps
@@ -965,7 +965,7 @@ export function McpTab() {
 
   return (
     <div className="max-w-2xl space-y-4">
-      {/* MCP Server Catalog — Tools-tab level-1 collapsible card:
+      {/* MCP Server Catalog — Setup-panel level-1 collapsible card:
           header carries title + count badge + Add button; server rows
           live in the inset body (default open). */}
       <ListBox dividers={false}>

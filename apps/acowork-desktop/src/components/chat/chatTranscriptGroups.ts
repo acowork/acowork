@@ -11,7 +11,8 @@
  * neither of the two grammars.
  *
  * So this module folds a session's reference rows into ONE item anchored at the
- * session's newest row in the loaded window, and takes with it the chat's own
+ * session's OLDEST row in the loaded window (a continuation adds a round without
+ * moving the block), and takes with it the chat's own
  * `user_message` rows those rounds were built from: the block renders the
  * question as the round's own line, so the transcript must not hold the same
  * sentence twice (D6's re-delivery rule is the precedent).
@@ -59,9 +60,22 @@ export interface RunBlock {
   kind: "run";
   instanceId: string;
   execSessionId: string;
-  /** Chronological. The newest is the block's anchor row. */
+  /** Chronological. The newest is what the block opens to. */
   rounds: RoundItem[];
+  /** The block's position in the transcript: the session's OLDEST row here.
+   *  Continuations add rounds without moving it (see `anchorOf`). */
   anchorRow: ChatMessageRow;
+  /** The addressing question this session is waiting on, when the router asked
+   *  and the human has not answered (ADR-106 D6 level 5).
+   *
+   *  Hung on the block instead of standing at its own transcript position. The
+   *  card asks about THIS run ("continue in S?"), so drawing it anywhere else
+   *  separates the question from the thing it is about: at the bottom of the
+   *  transcript the reader answers a question about a block they cannot see, and
+   *  with the block now anchored where the exchange started (rather than at its
+   *  newest row) that distance only grows. Its seq still resolves to the block,
+   *  so a locate on the card lands where the card is drawn. */
+  pendingAsk?: ChatMessageRow;
 }
 
 /** Any other transcript row, rendered as itself. */
@@ -155,17 +169,92 @@ export function buildTranscriptItems(
     });
   }
 
-  // A group's anchor is its newest row: the block sits where the session's most
-  // recent work is, so the freshest answer stays next to the freshest question
-  // instead of stranded at the session's first appearance.
+  // A group's anchor is its OLDEST row: the block sits where the session first
+  // appeared, and it stays there for the session's whole life.
+  //
+  // The newest-row anchor this used to use was the reported defect. A session
+  // outlives the turn that opened it: every continuation writes one more
+  // reference row further down the transcript, and anchoring at the newest one
+  // dragged the block down past every row in between — after a few exchanges
+  // the chat's questions were all at the top and the block that answered them
+  // was at the bottom, the back-and-forth gone. Position is a property of the
+  // exchange, not of its latest round, so it is fixed at the exchange's start.
+  //
+  // Nothing is lost by it. The block reads `RECENT_ROUNDS` newest rounds and
+  // scrolls, `keyOfSeq` still maps every folded seq to this block's key (so a
+  // locate on a new round lands on the block), and the virtual list keyed on
+  // the anchor row now keeps ONE identity for the block's lifetime instead of
+  // rebuilding it — and dropping its height cache — on every round.
   const anchorOf = new Map<string, ChatMessageRow>();
   for (const [key, group] of groups) {
-    anchorOf.set(key, group.rounds[group.rounds.length - 1]!.roundRow);
+    anchorOf.set(key, group.rounds[0]!.roundRow);
+  }
+
+  // The addressing question a block answers for (ADR-106 D6 level 5): a
+  // `confirm_continue` card proposes ONE session, named by its only option, so
+  // the card belongs to that session's block rather than to a transcript
+  // position of its own. Skipped — and therefore left standing where it is —
+  // when the question is already answered, when it offers anything other than a
+  // single target (a multi-candidate `session_choice` has no one block to belong
+  // to), or when this window holds no single block for that session: a card
+  // hung on a guess is worse than a card in the flow.
+  const askAnchorOf = new Map<number, ChatMessageRow>();
+  const blocksBySession = new Map<string, string[]>();
+  for (const [key, group] of groups) {
+    const keys = blocksBySession.get(group.execSessionId) ?? [];
+    keys.push(key);
+    blocksBySession.set(group.execSessionId, keys);
+  }
+  const askByKey = new Map<string, ChatMessageRow>();
+  for (const r of rows) {
+    if (r.kind !== "system_notice" || r.meta?.notice_type !== "confirm_continue") {
+      continue;
+    }
+    const question = r.delivery?.question;
+    if (!question || question.answered) continue;
+    const options = question.options ?? [];
+    if (options.length !== 1) continue;
+    const sessionId = options[0]?.session_id?.trim() ?? "";
+    if (!sessionId) continue;
+    const keys = blocksBySession.get(sessionId) ?? [];
+    if (keys.length !== 1) continue;
+    // One card per block. The router can propose twice about the same session
+    // while the human answers neither; the newest is then the live question, and
+    // the older one stays a row of its own. Folding it into the map's overwritten
+    // entry would remove it from the transcript without drawing it anywhere — a
+    // question the human can no longer answer.
+    askByKey.set(keys[0]!, r);
+  }
+  for (const [key, card] of askByKey) {
+    askAnchorOf.set(card.seq, anchorOf.get(key)!);
   }
 
   const items: TranscriptItem[] = [];
   const keyOfSeq = new Map<number, string>();
-  const emitted = new Set<string>();
+
+  // Which seqs a block draws, computed BEFORE the transcript walk. The previous
+  // version resolved this inside the walk, as it met each block, which made the
+  // mapping depend on whether a block was emitted before or after the rows it
+  // folded: a folded `user_message` written after the block overwrote the
+  // block's own mapping with the row's key, and a locate then scrolled to a row
+  // that is not in the DOM. It only worked because the block used to sit at the
+  // newest row — i.e. always last. Anchor order is a layout choice; this mapping
+  // must not inherit it.
+  const foldedInto = new Map<number, ChatMessageRow>();
+  for (const [key, group] of groups) {
+    const anchor = anchorOf.get(key)!;
+    for (const round of group.rounds) {
+      if (round.roundRow !== anchor) foldedInto.set(round.roundRow.seq, anchor);
+      // Only the block that OWNS the question row folds it: a fan-out trigger
+      // claimed by another session's block is not rendered by this one, and
+      // mapping its seq here would point a locate at a block that does not show
+      // the sentence. The opener's trigger is on the transcript as a bubble of
+      // its own — `showUserLine` is false for it, so it is not folded.
+      if (round.triggerRow && round.showUserLine) {
+        foldedInto.set(round.triggerRow.seq, anchor);
+      }
+    }
+  }
 
   for (const r of rows) {
     const coord = r.kind === "execution_round" ? sessionOf(r) : null;
@@ -176,42 +265,33 @@ export function buildTranscriptItems(
       // Folded rows still resolve to the block's key, so a locate lands on the
       // block that holds them.
       if (r !== anchor) {
-        keyOfSeq.set(r.seq, keyOf(anchor));
+        keyOfSeq.set(r.seq, keyOf(foldedInto.get(r.seq) ?? anchor));
         continue;
       }
-      const triggerId = group.rounds
-        // Only the block that OWNS the question row folds it: a fan-out trigger
-        // claimed by an earlier session's block is not rendered here, and mapping
-        // its seq here would point a locate at a block that does not show it.
-        .filter((round) => round.showUserLine)
-        .map((round) => round.triggerRow)
-        .filter(Boolean)
-        .map((row) => row!.seq);
-      // The block owns its question rows too: they are the same sentence the
-      // round's line shows.
-      for (const seq of triggerId) keyOfSeq.set(seq, keyOf(anchor));
-      const skip = new Set(triggerId);
-      for (const round of group.rounds) skip.add(round.roundRow.seq);
-      for (const seq of skip) keyOfSeq.set(seq, keyOf(anchor));
-      if (!emitted.has(key)) {
-        emitted.add(key);
-        items.push({
-          kind: "run",
-          instanceId: group.instanceId,
-          execSessionId: group.execSessionId,
-          rounds: group.rounds,
-          anchorRow: anchor,
-        });
-      }
+      keyOfSeq.set(r.seq, keyOf(anchor));
+      const pendingAsk = askByKey.get(key);
+      items.push({
+        kind: "run",
+        instanceId: group.instanceId,
+        execSessionId: group.execSessionId,
+        rounds: group.rounds,
+        anchorRow: anchor,
+        ...(pendingAsk ? { pendingAsk } : {}),
+      });
       continue;
     }
-    // A question row this block folded: it renders inside the block.
-    const answered =
-      r.kind === "user_message" &&
-      r.meta?.message_id &&
-      claimedTriggers.has(r.meta.message_id);
-    if (answered) {
-      keyOfSeq.set(r.seq, keyOf(r));
+    // The addressing question a block was handed: it is drawn at the block's
+    // tail, so its seq resolves there (a locate on the card scrolls to it).
+    const askAnchor = askAnchorOf.get(r.seq);
+    if (askAnchor) {
+      keyOfSeq.set(r.seq, keyOf(askAnchor));
+      continue;
+    }
+    // A question row a block folded: it renders inside that block, so its seq
+    // must resolve there — a locate on it scrolls to the block that shows it.
+    const folded = foldedInto.get(r.seq);
+    if (folded) {
+      keyOfSeq.set(r.seq, keyOf(folded));
       continue;
     }
     items.push({ kind: "row", row: r });
@@ -227,6 +307,9 @@ export function buildTranscriptItems(
  *  renders as its own bubble, and its seq belongs to that row. */
 export function blockSeqs(block: RunBlock): number[] {
   const seqs: number[] = [block.anchorRow.seq];
+  // The addressing question is drawn here too, so this block owns its seq —
+  // a highlight on that row belongs on this item, not on nothing.
+  if (block.pendingAsk) seqs.push(block.pendingAsk.seq);
   for (const round of block.rounds) {
     seqs.push(round.roundRow.seq);
     if (round.triggerRow && !round.questionOnTranscript) {

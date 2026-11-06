@@ -94,7 +94,7 @@ D7 的反应是单一"好的，我来处理"，每个轮次读起来都一样，
 
 - **`turn_mode` meta（新增 durable 字段）**：`chat_dispatch` 与 `route_intent_session` 的返回增 `opened_new`（Rev. 5：轮转删除后返回值是 `(session_id, opened_new)` 二元）——reuse（已映射 / 切换到存活会话）报 `false`（同一任务的延续），仅 fresh-create 报 `true`（`Target::New` 恒 `true`）。该值随路由锚点透传进 `SessionMessage::Intent.opened_new`，由 `dispatch_pointer_meta` / `started_pointer_meta` 落成 `"turn_mode": "new" | "continue"`，**同时写进 `td:` 与 `ts:` 两行**（折叠后展示的一般是 `ts:`，两行都带才不丢信息）。它是路由时点的一次性事实，读时不再反推。
 - **两态文案**：`turn_started` 且 `turn_mode=new` → `chatView.notice.turnStartedNew`（"好的，启动新任务来处理：{任务名}"）；`turn_mode=continue` → `chatView.notice.turnStartedContinue`（"好的，继续之前的任务：{任务名}"）。`turn_dispatched` 保持中性"收到，排队中"不分裂。
-- **任务名解析（呈现层，不动 durable 行）**：优先执行会话自身标题（Desktop `useSessionTitle` 读 live overlay / 快照；Mobile 读 agent store 的 session 列表，"新会话"占位视同空）；标题为空（新建 run 尚未命名）回退到触发消息正文（父层 `in_reply_to → body` 索引，`truncateTaskName` 截断）。两者都解析不出时回退到原单一条 `chatView.notice.turnStarted`，绝不渲染"：（空）"这类无名残句。`ViewRunButton` 的 tooltip 同步显示该任务名。
+- **任务名解析（呈现层，不动 durable 行）**：优先执行会话自身标题（Desktop `useSessionTitle` 读 live overlay / 快照；Mobile 读 agent store 的 session 列表，"新会话"占位视同空）；标题为空（新建 run 尚未命名）回退到触发消息正文（父层 `in_reply_to → body` 索引，`truncateTaskName` 截断）。两者都解析不出时回退到原单一条 `chatView.notice.turnStarted`，绝不渲染"：（空）"这类无名残句。块动作行里的"查看执行"按钮（原 `ViewRunButton`，现 `RunBlockActionRow` 的一枚图标）的 tooltip 同步显示该任务名。
 - **范围与兼容**：Desktop 两视图 + Mobile 反应行，五语 locale 全量补 `turnStartedNew` / `turnStartedContinue`。新增的是**一个 durable meta 字段**，向后兼容——旧 `turn_started` 行无 `turn_mode` 即走单一条，无需迁移。写入方仍是这两个 builder 与两个 dispatch 站点，不新增写入口、不触碰 Gateway fs 红线（ADR-009 §5）。
 
 ### D9 — 从 chat 发起的执行会话，其本地续聊回合也必须回写该 chat

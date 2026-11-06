@@ -59,7 +59,7 @@ type DistillerPatch = {
  * numeric fields; the switch and model pick save immediately on change.
  *
  * Visual grammar: level-1 collapsible card (same shell as the Status-tab
- * Session Status / Tools-tab Builtin Tools / Debug-tab Context Snapshots
+ * Session Status / Setup-panel Builtin Tools / Debug-tab Context Snapshots
  * / Memory tab node list). The header is chevron + title + trailing
  * Switch — nothing else, so the row matches every other level-1 card
  * visually. The Switch owns the enable bit AND auto-expands the body

@@ -81,8 +81,13 @@ import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { turnInflight } from "../../lib/chatTurnInflight";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
 import type { TranscriptItem } from "./chatTranscriptGroups";
+import { useRevealPendingAsk } from "./useRevealPendingAsk";
 import { useTranscriptLayout } from "./useTranscriptLayout";
-import { ChatAddressPicker, type AddressPick } from "./ChatAddressPicker";
+import {
+  ChatAddressPicker,
+  MAX_PICK_REFS,
+  type AddressPick,
+} from "./ChatAddressPicker";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
 import {
@@ -240,6 +245,14 @@ interface RowProps {
   /** Address the composer to one round (ADR-106 D6 level 1) — how a `pause`
    *  card is continued and how a finished round gets a follow-up. */
   onReplyToRound: (rowId: string, quote: string) => void;
+  /** Attach one execution session to this draft as a reference (design 27
+   *  §5.5.5) — the block's `@` action, riding the same address state the `@`
+   *  picker commits to. */
+  onReferenceRun?: (payload: {
+    instanceId: string;
+    execSessionId: string;
+    name: string;
+  }) => void;
   /** Admin viewing a group they never joined: runs are shown, never
    *  answered — posting into someone else's project stays forbidden. */
   readOnly?: boolean;
@@ -660,6 +673,17 @@ const GroupItemView = memo(function GroupItemView({
         canAnswer={!readOnly}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
+        onReferenceRun={rowProps.onReferenceRun}
+        // The router's question about this run is drawn at the block's tail, so
+        // the block needs the same answerer gate the standalone card row has:
+        // the person the card asked (`to`), not just anyone in the group (D10).
+        onChooseCard={
+          rowProps.onChooseCard &&
+          item.pendingAsk &&
+          mayAnswerCard(item.pendingAsk, rowProps.me)
+            ? rowProps.onChooseCard
+            : undefined
+        }
         focusInput={
           !!focusBlockSessionId && item.execSessionId === focusBlockSessionId
         }
@@ -941,6 +965,12 @@ export function GroupChatPanel() {
     virtualAttrs,
     seqsByItem,
   } = useTranscriptLayout(rows, activeGroupId ?? "");
+  // A question the router asks about a run is drawn at that run's block, which
+  // stays where the exchange began — this is what brings the reader there.
+  // Declared AFTER the follow hook, the same rule `useLocateMessage` follows
+  // below: the card lands as a new row, and follow-to-bottom would otherwise
+  // write the viewport back to the tail in the same commit and hide it.
+  useRevealPendingAsk(items, keyOfSeqRef.current, listRef);
 
   // Locate-and-flash for history jumps (ADR-097) — declared AFTER the follow
   // hook so the center-scroll wins over follow-to-bottom on the jump commit.
@@ -1436,6 +1466,60 @@ export function GroupChatPanel() {
     textareaRef.current?.focus();
   }, []);
 
+  /**
+   * The block's `@` action (design 27 §5.5.5): attach THAT run to this draft.
+   *
+   * It commits into the same `addresses` record the `@` picker's "引用" writes,
+   * so the group has one kind of reference — a removable chip on the addressee's
+   * pick — rather than a second way to say "use this run". The rules it inherits:
+   * a level-1 reply names its own session and must not ride the same send (so the
+   * reply target is released first), a run already attached is a no-op instead of
+   * a duplicate chip, and the fifth reference is the server's ceiling
+   * (`MAX_PICK_REFS`) — it answers with a toast rather than dropping the click.
+   */
+  const handleReferenceRun = useCallback(
+    ({
+      instanceId,
+      execSessionId,
+      name,
+    }: {
+      instanceId: string;
+      execSessionId: string;
+      name: string;
+    }) => {
+      setReplyTarget(null);
+      setAddresses((prev) => {
+        const key = `${instanceId}|${execSessionId}`;
+        const current = prev[instanceId];
+        const refs = current?.refs ?? [];
+        if (refs.some((r) => `${r.agentInstanceId}|${r.sessionId}` === key)) {
+          return prev;
+        }
+        if (refs.length >= MAX_PICK_REFS) {
+          showToast({
+            type: "info",
+            message: t("chatView.address.refLimit", { max: MAX_PICK_REFS }),
+          });
+          return prev;
+        }
+        return {
+          ...prev,
+          [instanceId]: {
+            refs: [
+              ...refs,
+              { agentInstanceId: instanceId, sessionId: execSessionId },
+            ],
+            labels: { ...(current?.labels ?? {}), [key]: name },
+            forceNew: current?.forceNew,
+          },
+        };
+      });
+      // Land the human where the reference is going to be used.
+      textareaRef.current?.focus();
+    },
+    [t],
+  );
+
   // Jump to the exec session behind a group agent reply: select that agent
   // (closes the group in the middle pane, same as picking it in the sidebar),
   // cold-load the exec tab, flip the surface to exec. Mirrors AgentChatView.
@@ -1677,6 +1761,7 @@ export function GroupChatPanel() {
                   nameOf={nameOf}
                   onJumpToExec={handleJumpToExec}
                   onReplyToRound={handleReplyToRound}
+                  onReferenceRun={handleReferenceRun}
                   triggerFrom={
                     row?.meta?.in_reply_to
                       ? fromById.get(row.meta.in_reply_to)

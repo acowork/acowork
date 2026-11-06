@@ -42,7 +42,7 @@ export function EmbeddingModelTab() {
     const clearMigrationSession = useGatewayStore((s) => s.clearMigrationSession);
     const [testing, setTesting] = useState(false);
     const [testResult, setTestResult] = useState<EmbeddingTestResponse | null>(null);
-    // Tools-tab level-1 collapsible group shells for Local / Cloud, default open.
+    // Setup-panel level-1 collapsible group shells for Local / Cloud, default open.
     const [localOpen, setLocalOpen] = useState(true);
     const [cloudOpen, setCloudOpen] = useState(true);
     // Service status card — collapsible, default open.
@@ -524,7 +524,7 @@ export function EmbeddingModelTab() {
 
     return (
         <div className="max-w-2xl space-y-4">
-            {/* Service status — Tools-tab level-1 collapsible card.
+            {/* Service status — Setup-panel level-1 collapsible card.
                 Header holds the title only; status / active model / test
                 action all live in the fold body to keep the header
                 chrome consistent with sibling cards. */}
@@ -622,7 +622,7 @@ export function EmbeddingModelTab() {
                 />
             )}
 
-            {/* Local models — Tools-tab level-1 collapsible card: title
+            {/* Local models — Setup-panel level-1 collapsible card: title
                 + count in the header, refresh in the trailing slot
                 (same pattern as the LSP card). */}
             <ListBox dividers={false}>
@@ -689,7 +689,7 @@ export function EmbeddingModelTab() {
                 </ExpandableRow>
             </ListBox>
 
-            {/* Cloud Embedding Providers (S1-7) — Tools-tab level-1
+            {/* Cloud Embedding Providers (S1-7) — Setup-panel level-1
                 collapsible card; add / refresh live in the header
                 trailing slot (same pattern as the LSP / MCP cards). */}
             <ListBox dividers={false}>

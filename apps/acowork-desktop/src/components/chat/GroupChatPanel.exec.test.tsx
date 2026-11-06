@@ -191,6 +191,12 @@ function userRow(seq: number, body: string): ChatMessageRow {
   return { seq, ts: seq, from: ME, kind: "user_message", body, to: AGENT, meta: { message_id: `u${seq}` } };
 }
 
+/**
+ * The drill is icon-only since design 27 §5.5.5: it lives in the block's action
+ * row above the block and its label is `aria-label`/`title`, not rendered text.
+ * Every assertion below therefore queries by accessible name — a `getByText`
+ * would pass on a regression that silently stopped drawing the control.
+ */
 describe("GroupChatPanel 查看执行 affordance", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -205,7 +211,7 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     tail = [userRow(1, "ping"), roundRow(2)];
     render(<GroupChatPanel />);
 
-    const btn = screen.getByText("chatView.viewRun");
+    const btn = screen.getByRole("button", { name: "chatView.viewRun" });
     fireEvent.click(btn);
 
     // The jump now runs behind the existence probe (a rejected fetch is
@@ -223,7 +229,7 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     blockEntry = entryOf("remote-agent", "exec-9", "r9");
     render(<GroupChatPanel />);
 
-    fireEvent.click(screen.getByText("chatView.viewRun"));
+    fireEvent.click(screen.getByRole("button", { name: "chatView.viewRun" }));
     await waitFor(() => expect(openSessionMock).toHaveBeenCalledWith("remote-agent", "exec-9", { prepend: true }));
   });
 
@@ -234,7 +240,7 @@ describe("GroupChatPanel 查看执行 affordance", () => {
       projection: { round_id: "r1", terminal: true, status: "aborted", answer: null },
     };
     render(<GroupChatPanel />);
-    expect(screen.queryByText("chatView.viewRun")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "chatView.viewRun" })).toBeTruthy();
     // An outcome is reported whether or not there is a body to show.
     expect(screen.getByText("chatView.notice.interrupted")).toBeTruthy();
   });
@@ -242,14 +248,14 @@ describe("GroupChatPanel 查看执行 affordance", () => {
   it("shows no drill on the human's own row", () => {
     tail = [userRow(1, "mine")];
     render(<GroupChatPanel />);
-    expect(screen.queryByText("chatView.viewRun")).toBeNull();
+    expect(screen.queryByRole("button", { name: "chatView.viewRun" })).toBeNull();
   });
 
   it("shows no drill when the row names no resolvable round (D3)", () => {
     tail = [{ ...roundRow(2), meta: { ...roundRow(2).meta, agent_session_id: undefined } }];
     blockEntry = null;
     render(<GroupChatPanel />);
-    expect(screen.queryByText("chatView.viewRun")).toBeNull();
+    expect(screen.queryByRole("button", { name: "chatView.viewRun" })).toBeNull();
     // The pointer still states something rather than vanishing into blank space.
     expect(screen.getByText("chatView.block.notFound")).toBeTruthy();
   });
@@ -261,7 +267,7 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     tail = [roundRow(2)];
     blockEntry = { ...entryOf(AGENT, "exec-7", "r2"), status: "unreachable", projection: undefined, detail: "refused" };
     render(<GroupChatPanel />);
-    expect(screen.queryByText("chatView.viewRun")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "chatView.viewRun" })).toBeTruthy();
     expect(screen.getByText("chatView.block.unreachable")).toBeTruthy();
     expect(screen.getByText("chatView.block.retry")).toBeTruthy();
   });
@@ -277,8 +283,8 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     ];
     blockEntry = entryOf(AGENT, "exec-7", "r3");
     render(<GroupChatPanel />);
-    expect(screen.getAllByText("chatView.viewRun")).toHaveLength(1);
-    fireEvent.click(screen.getByText("chatView.viewRun"));
+    expect(screen.getAllByRole("button", { name: "chatView.viewRun" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "chatView.viewRun" }));
     // One block, one session address — the newest round's, which is the same
     // session for every row in it.
     return waitFor(() =>
@@ -297,7 +303,7 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     window.addEventListener("acowork:toast", listener);
     try {
       render(<GroupChatPanel />);
-      fireEvent.click(screen.getByText("chatView.viewRun"));
+      fireEvent.click(screen.getByRole("button", { name: "chatView.viewRun" }));
       await waitFor(() => expect(toasts.length).toBe(1));
       expect(selectAgentMock).not.toHaveBeenCalled();
       expect(openSessionMock).not.toHaveBeenCalled();

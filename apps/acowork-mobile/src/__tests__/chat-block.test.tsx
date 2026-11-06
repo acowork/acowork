@@ -205,7 +205,7 @@ beforeEach(() => {
 })
 
 describe('the fold: one block per execution session (D3/D4)', () => {
-  it('the rounds of ONE session fold into a single block anchored at the newest', () => {
+  it('the rounds of ONE session fold into a single block anchored at its first row', () => {
     const rows = [
       triggerRow('u1', '帮我整理报表'),
       refRow({ in_reply_to: 'u1' }),
@@ -218,8 +218,9 @@ describe('the fold: one block per execution session (D3/D4)', () => {
     expect(blocks).toHaveLength(1)
     const block = onlyBlock(rows)
     expect(block.rounds.map((r) => r.ref)).toEqual(['ag|s1|r1', 'ag|s1|r2'])
-    // The block sits where the session's most recent work is, not where it began.
-    expect(block.anchorRow.meta?.round_id).toBe('r2')
+    // The block sits where the session FIRST appeared: a continuation adds a
+    // round without moving it, so the exchange keeps reading question-then-answer.
+    expect(block.anchorRow.meta?.round_id).toBe('r1')
     seedEntries({
       'ag|s1|r1': entryOf({ ref: 'ag|s1|r1' }),
       'ag|s1|r2': entryOf({ ref: 'ag|s1|r2', round_id: 'r2' }),
@@ -282,9 +283,10 @@ describe('the fold: one block per execution session (D3/D4)', () => {
     expect(continuation?.questionOnTranscript).toBeUndefined()
     expect(continuation?.showUserLine).toBe(true)
     // Locate: the opener's seq points at its OWN bubble, the continuation's
-    // trigger still points at the block that draws it.
+    // trigger still points at the block that draws it — the block is anchored at
+    // the opener's round row, which is where it is drawn.
     expect(keyOfSeq.get(1)).toBe('k:u1')
-    expect(keyOfSeq.get(4)).toBe('k:round:r2')
+    expect(keyOfSeq.get(4)).toBe('k:round:r1')
 
     seedEntries({
       'ag|s1|r1': entryOf({

@@ -89,8 +89,13 @@ import { ChatUsageIcon } from "./ChatUsageIcon";
 import { AttachedContextChips } from "./AttachedContextChips";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
 import { type TranscriptItem } from "./chatTranscriptGroups";
+import { useRevealPendingAsk } from "./useRevealPendingAsk";
 import { useTranscriptLayout } from "./useTranscriptLayout";
-import { ChatAddressPicker, type AddressPick } from "./ChatAddressPicker";
+import {
+  ChatAddressPicker,
+  MAX_PICK_REFS,
+  type AddressPick,
+} from "./ChatAddressPicker";
 import {
   answerWithChoice,
   directCardAddress,
@@ -138,6 +143,14 @@ interface RowProps {
    *  `pause` card's continue button, and any follow-up on a finished round,
    *  ride. `quote` is the question the human is answering. */
   onReplyToRound: (rowId: string, quote: string) => void;
+  /** Attach one execution session to this draft as a reference (design 27
+   *  §5.5.5) — the block's `@` action, riding the same address state the `@`
+   *  picker commits to. */
+  onReferenceRun?: (payload: {
+    instanceId: string;
+    execSessionId: string;
+    name: string;
+  }) => void;
   /** Answer an addressing card (D6 levels 3 and 5) by re-delivering the
    *  utterance it asks about, now addressed. The parent hands it only to the
    *  person the card asked (D10) — `undefined` for anyone else. */
@@ -433,6 +446,8 @@ const ItemView = memo(function ItemView({
         hasFollowUp={hasFollowUp}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
+        onReferenceRun={rowProps.onReferenceRun}
+        onChooseCard={rowProps.onChooseCard}
         focusInput={
           !!rowProps.focusBlockSessionId &&
           item.execSessionId === rowProps.focusBlockSessionId
@@ -704,6 +719,12 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
 
   // Locate-and-flash for history jumps (ADR-097): declared AFTER the follow
   // hook so the center-scroll wins over follow-to-bottom on the jump commit.
+  // A question the router asks about a run is drawn at that run's block, which
+  // stays where the exchange began — this is what brings the reader there.
+  // Declared AFTER the follow hook, the same rule `useLocateMessage` follows
+  // below: the card lands as a new row, and follow-to-bottom would otherwise
+  // write the viewport back to the tail in the same commit and hide it.
+  useRevealPendingAsk(items, keyOfSeqRef.current, listRef);
   const highlightSeq = useLocateMessage(
     () => containerRef.current,
     pendingLocateSeq,
@@ -1012,6 +1033,60 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     [jumpToExec],
   );
 
+  /**
+   * The block's `@` action (design 27 §5.5.5): attach THAT run to this draft.
+   *
+   * It commits through the same `address` state the `@` picker's "引用" commits
+   * to, so this surface has one kind of reference — a removable chip carrying the
+   * coordinates the Gateway pins at send time — instead of a second, parallel
+   * way to say "use this run".
+   *
+   * Two rules it inherits rather than invents:
+   * - a level-1 reply already names its session, and the send path refuses to
+   *   carry both (see `send`). So the reply target is cleared first: the human
+   *   just asked for THIS reference, and the chip row must not be hidden behind
+   *   a reply chip they had forgotten about.
+   * - the fifth reference is the server's ceiling (`MAX_PICK_REFS`). Hitting it
+   *   says so instead of silently dropping the click.
+   */
+  const handleReferenceRun = useCallback(
+    ({
+      instanceId,
+      execSessionId,
+      name,
+    }: {
+      instanceId: string;
+      execSessionId: string;
+      name: string;
+    }) => {
+      setReplyTarget(null);
+      setAddress((prev) => {
+        const key = `${instanceId}|${execSessionId}`;
+        const refs = prev?.refs ?? [];
+        // Re-clicking a run already attached is a no-op, not a second chip for
+        // the same session.
+        if (refs.some((r) => `${r.agentInstanceId}|${r.sessionId}` === key)) {
+          return prev;
+        }
+        if (refs.length >= MAX_PICK_REFS) {
+          showToast({
+            type: "info",
+            message: t("chatView.address.refLimit", { max: MAX_PICK_REFS }),
+          });
+          return prev;
+        }
+        return {
+          refs: [...refs, { agentInstanceId: instanceId, sessionId: execSessionId }],
+          labels: { ...(prev?.labels ?? {}), [key]: name },
+          forceNew: prev?.forceNew,
+        };
+      });
+      // Land the human where the reference is going to be used.
+      textareaRef.current?.focus();
+    },
+    [t],
+  );
+
   const hasMoreOlder = win ? win.firstPos > 0 : false;
   // A locate can park the window mid-history; `!atTail` then opens the
   // downward path back to the newest page.
@@ -1160,6 +1235,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 }
                 onJumpToExec={handleBlockJump}
                 onReplyToRound={handleReplyToRound}
+                onReferenceRun={handleReferenceRun}
                 onChooseCard={
                   item.kind === "row" && mayAnswerCard(item.row, me)
                     ? answerCard

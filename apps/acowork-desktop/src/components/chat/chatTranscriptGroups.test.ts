@@ -74,7 +74,7 @@ function reply(seq: number, instance: string, body: string): ChatMessageRow {
 }
 
 describe("buildTranscriptItems", () => {
-  it("folds a session's rounds into ONE item anchored at its newest row", () => {
+  it("folds a session's rounds into ONE item anchored at its FIRST row", () => {
     const { items } = buildTranscriptItems(
       [
         ask(1, "first", A),
@@ -99,12 +99,39 @@ describe("buildTranscriptItems", () => {
       `${A}|s1|r2`,
       `${A}|s1|r3`,
     ]);
-    // The block sits where the session's most recent work is: a fresh round
-    // moves the block down instead of stacking a second card under it.
-    expect(block.anchorRow.seq).toBe(6);
+    // The block sits where the session FIRST appeared. Two continuations later it
+    // has not moved: position belongs to the exchange, not to its latest round.
+    expect(block.anchorRow.seq).toBe(2);
   });
 
-  it("keeps two execution sessions as two blocks, in transcript order", () => {
+  /** The reported defect, pinned: a continuation must not drag the block down.
+   *
+   *  Anchoring at the newest row meant every follow-up pulled the block to the
+   *  bottom of the transcript, past every row written in between — the human's
+   *  questions ended up stacked at the top with the block answering them at the
+   *  end. The block's position is now a property of the exchange. */
+  it("a continuation round does not move the block", () => {
+    const before: ChatMessageRow[] = [
+      ask(1, "看下这个 bug", A),
+      round(2, A, "s1", "r1", "u1", { opened_new: true }),
+    ];
+    const after: ChatMessageRow[] = [
+      ...before,
+      reply(3, A, "已经定位到执行块"),
+      ask(4, "继续修", A),
+      round(5, A, "s1", "r2", "u4"),
+    ];
+    const posOf = (rows: ChatMessageRow[]) => {
+      const run = buildTranscriptItems(rows, keyOf).items.find(
+        (i) => i.kind === "run",
+      );
+      return run?.kind === "run" ? run.anchorRow.seq : undefined;
+    };
+    expect(posOf(before)).toBe(2);
+    expect(posOf(after)).toBe(2);
+  });
+
+  it("keeps two execution sessions as two blocks, each where it started", () => {
     const { items } = buildTranscriptItems(
       [
         ask(1, "to A", A),
@@ -116,15 +143,18 @@ describe("buildTranscriptItems", () => {
       keyOf,
     );
 
-    // Each block sits at its OWN newest row: A's later round pulls A's block
-    // below B's, so a reader meets the freshest work of every run last.
+    // A's later round joins A's own block and moves nothing: the blocks stay in
+    // the order the exchanges began, so each answer sits under its question.
     expect(
       items
         .filter((i) => i.kind === "run")
         .map((i) => (i.kind === "run" ? i.execSessionId : "")),
-    ).toEqual(["sB", "sA"]);
+    ).toEqual(["sA", "sB"]);
     // A's second round joined its own block, so nothing extra was emitted at 5.
     expect(items).toHaveLength(2);
+    if (items[0]?.kind !== "run") return;
+    expect(items[0].anchorRow.seq).toBe(2);
+    expect(items[0].rounds).toHaveLength(2);
   });
 
   it("the question row a block folds renders exactly once — inside the block", () => {
@@ -243,5 +273,107 @@ describe("buildTranscriptItems", () => {
     );
     // seq 1 is rendered by A's block (the claimant), never by B's.
     expect(keyOfSeq.get(1)).toBe(`k:round:sA|r1`);
+  });
+
+  /** ADR-106 D6 level 5: the router proposes ONE session. The question about that
+   *  run is drawn at the run's own tail, not at the transcript's newest row —
+   *  the block is anchored where the exchange began, so a card standing at the
+   *  end would ask about something the reader has scrolled past. */
+  describe("a confirm_continue card is hung on the block it asks about", () => {
+    const askCard = (
+      seq: number,
+      sessionIds: string[],
+      opts: { answered?: boolean; notice?: string } = {},
+    ): ChatMessageRow => ({
+      seq,
+      ts: seq,
+      from: A,
+      kind: "system_notice",
+      body: "",
+      to: ME,
+      meta: {
+        message_id: `confirm_continue:u1`,
+        notice_type: opts.notice ?? "confirm_continue",
+        in_reply_to: "u1",
+      },
+      delivery: {
+        answered: false,
+        question: {
+          answered: opts.answered === true,
+          options: sessionIds.map((session_id) => ({ session_id })),
+          allow_new_task: true,
+        },
+      },
+    });
+
+    it("moves the question onto the block and resolves its seq there", () => {
+      const rows = [
+        ask(1, "继续弄登录", A),
+        round(2, A, "s1", "r1", "u1", { opened_new: true }),
+        askCard(3, ["s1"]),
+      ];
+      const { items, keyOfSeq } = buildTranscriptItems(rows, keyOf);
+      expect(items.map((i) => i.kind)).toEqual(["row", "run"]);
+      const block = items[1];
+      if (block?.kind !== "run") throw new Error("expected a run block");
+      expect(block.pendingAsk?.seq).toBe(3);
+      // A locate on the card scrolls to where the card is drawn.
+      expect(keyOfSeq.get(3)).toBe(keyOf(block.anchorRow));
+    });
+
+    it("leaves a multi-candidate question where it stands", () => {
+      // A `session_choice` offers several targets, so no ONE block owns it.
+      const rows = [
+        ask(1, "继续弄登录", A),
+        round(2, A, "s1", "r1", "u1", { opened_new: true }),
+        askCard(3, ["s1", "s2"], { notice: "session_choice" }),
+      ];
+      const { items } = buildTranscriptItems(rows, keyOf);
+      expect(items.map((i) => i.kind)).toEqual(["row", "run", "row"]);
+      const block = items[1];
+      if (block?.kind !== "run") throw new Error("expected a run block");
+      expect(block.pendingAsk).toBeUndefined();
+    });
+
+    it("leaves an answered question where it stands", () => {
+      const rows = [
+        ask(1, "继续弄登录", A),
+        round(2, A, "s1", "r1", "u1", { opened_new: true }),
+        askCard(3, ["s1"], { answered: true }),
+      ];
+      const { items } = buildTranscriptItems(rows, keyOf);
+      const block = items.find((i) => i.kind === "run");
+      if (block?.kind !== "run") throw new Error("expected a run block");
+      expect(block.pendingAsk).toBeUndefined();
+    });
+
+    it("hangs the newest question and leaves an unanswered older one on the transcript", () => {
+      // The router can propose twice about one session while the human answers
+      // neither. Folding both onto the block would draw one and drop the other
+      // out of the transcript entirely — a question that can no longer be
+      // answered is worse than two questions, one of them above the fold.
+      const rows = [
+        ask(1, "继续弄登录", A),
+        round(2, A, "s1", "r1", "u1", { opened_new: true }),
+        askCard(3, ["s1"]),
+        ask(4, "再补一句", A),
+        { ...askCard(5, ["s1"]), meta: { message_id: "confirm_continue:u4", notice_type: "confirm_continue", in_reply_to: "u4" } },
+      ];
+      const { items } = buildTranscriptItems(rows, keyOf);
+      const block = items.find((i) => i.kind === "run");
+      if (block?.kind !== "run") throw new Error("expected a run block");
+      // The newest lands on the block; the older one is still a row of its own.
+      expect(block.pendingAsk?.seq).toBe(5);
+      const standalone = items
+        .filter((i) => i.kind === "row")
+        .map((i) => (i.kind === "row" ? i.row.seq : -1));
+      expect(standalone).toContain(3);
+    });
+
+    it("leaves the question alone when its target block is not in the window", () => {
+      const rows = [ask(1, "继续弄登录", A), askCard(2, ["elsewhere"])];
+      const { items } = buildTranscriptItems(rows, keyOf);
+      expect(items.map((i) => i.kind)).toEqual(["row", "row"]);
+    });
   });
 });
