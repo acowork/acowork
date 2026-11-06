@@ -546,6 +546,37 @@ pub fn router_answer_meta(request_message_id: &str) -> serde_json::Value {
     })
 }
 
+/// The **durable Chat row** a delivery answers — one fact, one derivation, three
+/// writers.
+///
+/// Three things the Runtime writes are threaded under the human's row rather
+/// than beside it: the round's `execution_round` reference row (D3), the level-3
+/// `session_choice` card and the level-5 `confirm_continue` card (D6). All three
+/// need the same coordinate, and it is **not** the envelope's `message_id`:
+///
+/// - a 1:1 Chat message is delivered under its own row id, so `message_id` IS
+///   the row and `in_reply_to` is empty;
+/// - a group `@` fan-out delivers one row to N targets, each under its own uuid
+///   (`message_id` — the mailbox and acceptance coordinate), and hands the
+///   shared `user_message` id over as `in_reply_to`. That per-target id names no
+///   row anywhere: a card written under it asks about a message the Chat cannot
+///   find, so `GET …/answer` answers `origin_gone` (422), the re-delivery never
+///   happens, and the transcript keeps a question nothing can answer. That is
+///   the 2026-11-06 defect this function exists to close;
+/// - a `response` and a PM dispatch carry no Chat row at all — their turns owe
+///   no write-back and ask no question on that surface.
+///
+/// One reader is the point: the round reference row already preferred
+/// `in_reply_to`, the card writers did not, and two spellings of one fact is
+/// exactly how the halves drift apart.
+pub fn chat_row_id<'a>(message_id: &'a str, in_reply_to: &'a str) -> &'a str {
+    if in_reply_to.is_empty() {
+        message_id
+    } else {
+        in_reply_to
+    }
+}
+
 /// The `meta` of a Chat choice card (ADR-106 D6 levels 3 and 5).
 ///
 /// A card is the Chat's own question, so it rides the already-appendable
@@ -567,15 +598,24 @@ pub fn router_answer_meta(request_message_id: &str) -> serde_json::Value {
 /// to never settled. Two parameters for one fact is how that happened, so there
 /// is now only one.
 ///
-/// The idempotency key is the notice type plus the inbound message it answers,
-/// so a redelivered turn re-asks one question rather than stacking cards.
+/// The idempotency key is `{notice_type}:{author}:{inbound message}`.
+///
+/// The key names three facts, not two: a redelivered turn re-asks one question
+/// instead of stacking cards, and a group `@` fan-out stays one card **per
+/// asking agent**. The row alone is not enough to key on — `@A @B` is one
+/// human row delivered to two routers, each asking about its OWN candidates, so
+/// a key of `{notice_type}:{row}` lets the first card written swallow the
+/// second writer's question (`append_message` dedupes on `message_id` and the
+/// second ask returns `already_written` as success). The human would answer one
+/// card, one agent would work, and the other `@` would be silently unanswered.
 pub fn session_choice_meta(
     notice_type: &str,
+    author: &str,
     request_message_id: &str,
     options: Vec<serde_json::Value>,
 ) -> serde_json::Value {
     serde_json::json!({
-        "message_id": format!("{notice_type}:{request_message_id}"),
+        "message_id": format!("{notice_type}:{author}:{request_message_id}"),
         "notice_type": notice_type,
         "in_reply_to": request_message_id,
         "options": options,
@@ -599,7 +639,7 @@ pub async fn emit_session_choice(
     notice_type: &str,
     options: Vec<serde_json::Value>,
 ) -> Result<(), String> {
-    let meta = session_choice_meta(notice_type, request_message_id, options);
+    let meta = session_choice_meta(notice_type, instance_id, request_message_id, options);
     append_chat_row(
         instance_id,
         gateway_host,
@@ -883,15 +923,40 @@ mod tests {
     fn a_session_choice_card_answers_the_message_it_asks_about() {
         let meta = session_choice_meta(
             "confirm_continue",
+            "agent-a",
             "m-1",
             vec![serde_json::json!({"session_id": "s-1", "label": "task"})],
         );
         assert_eq!(meta["in_reply_to"], "m-1");
-        // The idempotency key still names the notice type plus the message, so
-        // a redelivered turn re-asks one question instead of stacking cards.
-        assert_eq!(meta["message_id"], "confirm_continue:m-1");
+        // The idempotency key names the notice type, the asking agent and the
+        // message: a redelivered turn re-asks one question instead of stacking
+        // cards, and two agents asked the same row each keep their own card.
+        assert_eq!(meta["message_id"], "confirm_continue:agent-a:m-1");
         assert_eq!(meta["allow_new_task"], true);
         assert_eq!(meta["options"].as_array().map(Vec::len), Some(1));
+    }
+
+    /// A group `@A @B` is ONE human row delivered to two routers. Each asks
+    /// about its own candidates, so the store's `message_id` idempotency must not
+    /// let the first card swallow the second question: `append_message` answers a
+    /// repeated id with `already_written`, which its writer reads as success —
+    /// the losing agent would return "asked", write nothing, and never be given a
+    /// session while the human believes both were addressed.
+    #[test]
+    fn two_agents_asking_about_one_row_write_two_cards() {
+        let options = || vec![serde_json::json!({"session_id": "s-1", "label": "task"})];
+        let a = session_choice_meta("session_choice", "agent-a", "row-1", options());
+        let b = session_choice_meta("session_choice", "agent-b", "row-1", options());
+        assert_ne!(a["message_id"], b["message_id"]);
+        // Both are threaded under the same human row — that is what makes each
+        // one answerable (the `GET …/answer` lookup is by `in_reply_to`).
+        assert_eq!(a["in_reply_to"], "row-1");
+        assert_eq!(b["in_reply_to"], "row-1");
+        // A redelivery of the same agent's ask is still one row.
+        assert_eq!(
+            a["message_id"],
+            session_choice_meta("session_choice", "agent-a", "row-1", options())["message_id"]
+        );
     }
 
     #[test]
@@ -1116,6 +1181,72 @@ mod tests {
     }
 
     #[test]
+    fn a_cards_thread_coordinate_is_the_durable_chat_row() {
+        // The 2026-11-06 field defect: in a project group, @Agent with ten
+        // candidate sessions wrote the level-3 choice card under the *per-target
+        // delivery id*. No row carries that id, so `GET …/answer` answered 422
+        // `origin_gone`: the card could not be answered, no execution session
+        // was created, and the send stayed parked on "正在处理…" forever.
+        //
+        // A group `@` fan-out hands the shared `user_message` id over as
+        // `in_reply_to`; the per-target id stays the mailbox coordinate.
+        assert_eq!(
+            chat_row_id("fan-out-uuid", "0309a7b1-row"),
+            "0309a7b1-row",
+            "the multi-target delivery is threaded under the human's one row"
+        );
+        // 1:1: the message IS the row, and there is no second coordinate.
+        assert_eq!(chat_row_id("chat-row-id", ""), "chat-row-id");
+        // A `response` / PM dispatch: no row arrived, so the caller gets the
+        // inbound id back rather than an empty string. Those turns write no
+        // card and owe no write-back, so nothing threads under it.
+        assert_eq!(chat_row_id("pm-t-1-gen1", ""), "pm-t-1-gen1");
+    }
+
+    #[test]
+    fn reference_brief_never_publishes_the_pm_playbook() {
+        // D13 wants the reference row to name its round so the Chat list and
+        // the block header never read a projection to do it. The envelope field
+        // that carries a name is the one that carries the PM playbook — a
+        // HIGH-TRUST system slot. Measured consequence of confusing them: the
+        // project group's list preview read "You are being woken to execute PM
+        // task t-…", and an unread projection printed the claim/submit
+        // instructions as the round's question.
+        let playbook = "You are being woken to execute PM task \"t-1\".\n1. Claim it first: \
+                    call the MCP tool `pm_claim_task`";
+        let named = reference_brief("pm_task", playbook, "修复分页不满屏\n列表页翻到最后一页不铺满");
+        assert_eq!(
+            named.as_deref(),
+            Some("修复分页不满屏 列表页翻到最后一页不铺满"),
+            "a PM dispatch names its round with the dispatch text"
+        );
+        // A dispatch whose playbook is missing still has its dispatch text, and
+        // that is what names the row: the source is chosen before anything is
+        // tested for emptiness, or the only usable name would be dropped.
+        assert_eq!(
+            reference_brief("pm_task", "  ", "修复分页不满屏").as_deref(),
+            Some("修复分页不满屏")
+        );
+        // Nothing at all to name (an execution-surface turn): the row stays
+        // unnamed rather than named by an empty string.
+        assert_eq!(reference_brief("pm_task", "", ""), None);
+        assert_eq!(reference_brief("user_message", "   ", "words"), None);
+        // Another origin keeps the brief it was given — that one is the router's
+        // human-facing line, not a system slot.
+        assert_eq!(
+            reference_brief("user_message", "继续之前的任务：分页", "words").as_deref(),
+            Some("继续之前的任务：分页")
+        );
+        // A row name is one line and bounded; the description is arbitrarily
+        // long and must not become a body.
+        let long = format!("标题\n{}", "很长的描述".repeat(200));
+        let capped = reference_brief("pm_task", playbook, &long).unwrap();
+        assert!(!capped.contains('\n'), "one line: {capped:?}");
+        assert!(capped.chars().count() <= 240, "bounded: {}", capped.chars().count());
+        assert!(capped.starts_with("标题 很长的描述"));
+    }
+
+    #[test]
     fn tool_visibility_splits_role_from_answerability() {
         // §6.5 R1 + §5.5.4 (plan 2b.3): `intent_send` is hidden by role,
         // `ask_user_question` by a *known* human-free session. Unknown
@@ -1299,48 +1430,6 @@ mod tests {
         assert!(out.contains("The user asked to commit the pending work."));
     }
 
-    #[test]
-    fn reference_brief_never_publishes_the_pm_playbook() {
-        // D13 wants the reference row to name its round so the Chat list and
-        // the block header never read a projection to do it. The envelope field
-        // that carries a name is the one that carries the PM playbook — a
-        // HIGH-TRUST system slot. Measured consequence of confusing them: the
-        // project group's list preview read "You are being woken to execute PM
-        // task t-…", and an unread projection printed the claim/submit
-        // instructions as the round's question.
-        let playbook = "You are being woken to execute PM task \"t-1\".\n1. Claim it first: \
-                    call the MCP tool `pm_claim_task`";
-        let named = reference_brief("pm_task", playbook, "修复分页不满屏\n列表页翻到最后一页不铺满");
-        assert_eq!(
-            named.as_deref(),
-            Some("修复分页不满屏 列表页翻到最后一页不铺满"),
-            "a PM dispatch names its round with the dispatch text"
-        );
-        // A dispatch whose playbook is missing still has its dispatch text, and
-        // that is what names the row: the source is chosen before anything is
-        // tested for emptiness, or the only usable name would be dropped.
-        assert_eq!(
-            reference_brief("pm_task", "  ", "修复分页不满屏").as_deref(),
-            Some("修复分页不满屏")
-        );
-        // Nothing at all to name (an execution-surface turn): the row stays
-        // unnamed rather than named by an empty string.
-        assert_eq!(reference_brief("pm_task", "", ""), None);
-        assert_eq!(reference_brief("user_message", "   ", "words"), None);
-        // Another origin keeps the brief it was given — that one is the router's
-        // human-facing line, not a system slot.
-        assert_eq!(
-            reference_brief("user_message", "继续之前的任务：分页", "words").as_deref(),
-            Some("继续之前的任务：分页")
-        );
-        // A row name is one line and bounded; the description is arbitrarily
-        // long and must not become a body.
-        let long = format!("标题\n{}", "很长的描述".repeat(200));
-        let capped = reference_brief("pm_task", playbook, &long).unwrap();
-        assert!(!capped.contains('\n'), "one line: {capped:?}");
-        assert!(capped.chars().count() <= 240, "bounded: {}", capped.chars().count());
-        assert!(capped.starts_with("标题 很长的描述"));
-    }
     #[test]
     fn a_turn_without_references_is_byte_identical_to_the_words() {
         assert_eq!(render_user_turn("hello  ", &[]), "hello  ");

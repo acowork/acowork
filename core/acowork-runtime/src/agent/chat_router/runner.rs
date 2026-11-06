@@ -1046,13 +1046,20 @@ async fn run_turn(
                 &proposal.why,
                 candidate,
             );
+            // The question points at the human's own row — the same coordinate
+            // the round reference row and the level-3 card use (`chat_row_id`),
+            // never the envelope's per-target delivery id: a card threaded
+            // under an id no row carries can never be answered.
             let asked = crate::agent::intent_turn::emit_session_choice(
                 &deps.instance_id,
                 &deps.gateway_host,
                 &deps.node_token,
                 &chat_id,
                 &envelope.from,
-                &envelope.message_id,
+                crate::agent::intent_turn::chat_row_id(
+                    &envelope.message_id,
+                    &envelope.in_reply_to,
+                ),
                 "confirm_continue",
                 vec![option],
             )

@@ -1187,10 +1187,16 @@ async fn route_intent_inbound(
         let initiator = Some(env.from.as_str()).filter(|s| !s.is_empty());
         let surface = chat_surface(&env);
         let to = env.from.clone();
-        // The card asks about this very message, so its thread coordinate is
-        // the message — never the envelope's own answer-coordinate, which is
-        // empty on a fresh request (design 31 §5.2).
-        let message_id = env.message_id.clone();
+        // The card asks about the human's own row, so its thread coordinate is
+        // that row — never the envelope's `message_id`, which on a group `@`
+        // fan-out is a per-target delivery uuid that names no durable row (the
+        // 2026-11-06 defect: the card could not be answered, `GET …/answer`
+        // returned 422 `origin_gone`, and the send stayed parked forever).
+        let message_id = crate::agent::intent_turn::chat_row_id(
+            &env.message_id,
+            &env.in_reply_to,
+        )
+        .to_string();
         let candidates = session_manager
             .lock()
             .await

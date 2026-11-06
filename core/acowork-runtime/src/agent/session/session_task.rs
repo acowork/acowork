@@ -1479,11 +1479,11 @@ impl SessionTask {
                     // stays unthreaded rather than pointing at its own intent id.
                     agent_loop.turn_reference = crate::agent::intent_turn::TurnReference {
                         trigger_message_id: if write_back {
-                            if in_reply_to.is_empty() {
-                                message_id.clone()
-                            } else {
-                                in_reply_to.clone()
-                            }
+                            crate::agent::intent_turn::chat_row_id(
+                                &message_id,
+                                &in_reply_to,
+                            )
+                            .to_string()
                         } else {
                             String::new()
                         },
