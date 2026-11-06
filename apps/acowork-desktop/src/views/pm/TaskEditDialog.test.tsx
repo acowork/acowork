@@ -552,6 +552,23 @@ describe("the three carried-over capabilities", () => {
     expect(mocks.deleteAttachment).toHaveBeenCalledWith("att-1");
   });
 
+  // 关联任务的两个候选集都是一棵树里的一块，不是一袋条目：换成树下钻之后，
+  // 这一页不该再出现"把整个项目拍平"的控件（下拉 / 一次性挂满的复选列表）。
+  it("offers a tree to drill into, not a flat dropdown or checkbox wall", () => {
+    render(<TaskEditDialog onClose={() => {}} />);
+    openTab("related");
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByTestId("parent-current")).toBeTruthy();
+    expect(screen.getByText("pm.task.change")).toBeTruthy();
+    expect(screen.getByText("+ pm.task.addDependency")).toBeTruthy();
+    // 没选依赖时没有 chips —— 引用区只在有引用时存在
+    expect(screen.queryByTestId("dependency-chips")).toBeNull();
+    // 点开才长出树
+    expect(screen.queryByTestId("task-tree")).toBeNull();
+    fireEvent.click(screen.getByText("pm.task.change"));
+    expect(screen.getByTestId("task-tree")).toBeTruthy();
+  });
+
   it("添加子任务 opens a create form that knows where it came from", () => {
     render(<TaskEditDialog onClose={() => {}} />);
     openTab("related");

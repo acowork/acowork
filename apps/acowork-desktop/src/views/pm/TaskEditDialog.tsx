@@ -56,6 +56,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { SubtaskTree } from "./SubtaskTree";
 import { TaskStatusMove } from "./TaskStatusMove";
+import { DependencyPicker, ParentTaskPicker } from "./TaskTreePicker";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { StyledInput, StyledTextarea } from "../../components/common/StyledInput";
@@ -684,48 +685,28 @@ function RelatedTasksTab({
   onAddSubtask: () => void;
 }) {
   const { t } = useTranslation();
-  const titleOf = useTaskTitleResolver();
+  // 候选集是这一棵树里的一块，不是一袋条目 —— 直接读看板那一份数组（和
+  // SubtaskTree 同源，不额外发请求），排除规则在 `lib/taskTree` 里。
+  const tasks = usePmBoardStore((s) => s.tasks);
+  const selfId = row?.id ?? null;
   return (
     <>
       <Field label={t("pm.task.parentTask")}>
-        <Dropdown
+        <ParentTaskPicker
+          tasks={tasks}
+          selfId={selfId}
           value={form.values.parentId}
           onChange={form.setParentId}
-          options={form.parentOptions}
         />
       </Field>
 
       <Field label={t("pm.task.dependencies")}>
-        {form.dependencyOptions.length === 0 ? (
-          <p className="text-xs text-text-tertiary">
-            {row && row.depends_on.length > 0
-              ? row.depends_on
-                  .map((d) => `${titleOf(d.task_id) ?? d.task_id}（${d.kind}）`)
-                  .join("、")
-              : t("pm.task.noCandidates")}
-          </p>
-        ) : (
-          <OverlayScrollbar
-            maxHeight="9rem"
-            containerClassName="rounded-md border border-border-outer"
-            className="space-y-1 p-2"
-          >
-            {form.dependencyOptions.map((opt) => (
-              <label
-                key={opt.value}
-                className="flex cursor-pointer items-center gap-2 text-xs text-text-secondary"
-              >
-                <input
-                  type="checkbox"
-                  checked={form.values.dependsOn.includes(opt.value)}
-                  onChange={() => form.toggleDependency(opt.value)}
-                  className="accent-[var(--color-accent)]"
-                />
-                <span className="min-w-0 flex-1 truncate">{opt.label}</span>
-              </label>
-            ))}
-          </OverlayScrollbar>
-        )}
+        <DependencyPicker
+          tasks={tasks}
+          selfId={selfId}
+          selected={form.values.dependsOn}
+          onToggle={form.toggleDependency}
+        />
       </Field>
 
       {/* Children need a parent id, so this is the one block a NEW task cannot
@@ -847,15 +828,6 @@ function Attachments({
         </ul>
       )}
     </div>
-  );
-}
-
-/** Board-derived task id -> title, for parent / dependency labels. */
-function useTaskTitleResolver() {
-  const tasks = usePmBoardStore((s) => s.tasks);
-  return useCallback(
-    (id?: string | null) => (id ? tasks.find((t) => t.id === id)?.title ?? null : null),
-    [tasks],
   );
 }
 
