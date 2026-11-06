@@ -246,10 +246,11 @@ dismissed 优先于一切，因为它是列表里唯一的**用户意图**：早
 | 4 技能与能力 | 技能 ZIP + `[capabilities.*]`（action / description / skills / 可选 JSON schema） | ZIP 全部解析成功、动作名合法且唯一、JSON 合法 |
 | 5 预览 | — | 后端无 error |
 
-两处结构性约束：
+三处结构性约束：
 
 - **预览不再手拼。** 旧 `buildPreviewText()` 在前端拼 TOML，第一段是 `[package]` —— 该表在 `AgentManifest` 里根本不存在（serde 静默忽略未知字段，真按它构造会丢掉预览承诺的一切）。现在预览调 `preview_manifest(draft)`，与 `create_agent(draft)` 共用 `ManifestDraft::build`，**按构造不可能漂移**。
-- **`[[mcp_servers]].tools` 在向导里不收。** 服务器未连接，拿不到 `tools/list`，让用户凭空填工具名只会产生假声明；工具子集在安装后于工具面板勾选。
+- **`[[mcp_servers]].tools` 在向导里只对「平台托管」服务器收集。** 托管服务（`pm` / `doc` / `memory`）的 `tools/list` 在创建前即可经 Gateway 反代读取（`POST /api/{pm,doc,memory}/mcp`，`tools/list` 不校验 `X-MCP-Actor`），向导选中后展开二阶列表逐个开关，白名单随声明写入 manifest；探测失败时降级为「留空 = 全部启用」，并在界面上明说。**第三方预设仍未连接**，其工具子集仍在安装后于工具面板勾选 —— 让用户凭空填工具名只会产生假声明。
+- **第 3 步预选平台默认的内置工具集。** ADR-029 是 opt-in 模型：manifest 未声明的 builtin tool 在 `agent_tools.json` 里 `enabled = false`，所以"向导里没勾"真的等于"新 Agent 调不到"。基线能力（文件写入/编辑、shell、agent 间通信、读当前会话、向用户提问、todo、按需加载技能）由 `acowork_core::tools::BUILTIN_TOOLS` 的 `default_enabled` 标记，向导据此预选、用户可改。事实留在 Rust 目录里而不是前端常量 —— 与 `[[mcp_servers]]` 的"唯一真源"同一条规则；默认集的增删由 core 的 pin 测试强制为一次显式决定。
 
 ### 5.5 区分：技能 vs 能力（写进 UI 文案）
 
@@ -302,7 +303,7 @@ dismissed 优先于一切，因为它是列表里唯一的**用户意图**：早
 
 ## 9. 未决 / 延后
 
-1. `[[mcp_servers]].tools` 的**向导内收集**（需先连服务器，属于"先安装后声明"的鸡生蛋问题）。
+1. **第三方预设**的 `[[mcp_servers]].tools 向导内收集` —— 平台托管服务器已实现（见 §5.4）；stdio 预设需先安装并连接才能拿到 `tools/list`，属于"先安装后声明"的鸡生蛋问题，仍未决。
 2. 推荐的**跨客户端一致呈现**（mobile 的推荐分组形态未与本 ADR 一同设计）。
 3. `[config]` 是否应扩展到 `search` / `chat_router` 等**平台策略**字段 —— 目前判定为"用户/平台域"，若出现明确诉求需重新评估边界。
 

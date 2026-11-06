@@ -22,7 +22,9 @@ import {
   EMPTY_WIZARD_STATE,
   PLATFORM_HOSTED_MCP,
   configFromInput,
+  defaultBuiltinSelection,
   mcpServersFromPicks,
+  nextToolWhitelist,
   stepIssues,
   toCreateAgentDraft,
   undeclaredToolDeps,
@@ -139,12 +141,77 @@ describe("mcpServersFromPicks", () => {
     expect(mcpServersFromPicks([pick({ why: "web search" })])[0].why).toBe("web search");
   });
 
-  it("always leaves tools empty — the server is not connected during authoring", () => {
+  it("carries the pick's explicit whitelist, and defaults to the empty one", () => {
+    // No customization -> `[]`, which Rust reads as "no opinion" (all on).
     expect(mcpServersFromPicks([pick()])[0].tools).toEqual([]);
+    // Customized (hosted servers only, in practice) -> verbatim, in order.
+    const decls = mcpServersFromPicks([
+      pick({ kind: "hosted", id: "pm", label: "PM", tools: ["pm_list_projects", "pm_get_task"] }),
+    ]);
+    expect(decls[0].tools).toEqual(["pm_list_projects", "pm_get_task"]);
   });
 
   it("yields no declarations for no picks", () => {
     expect(mcpServersFromPicks([])).toEqual([]);
+  });
+});
+
+describe("defaultBuiltinSelection", () => {
+  it("takes exactly the catalog entries the platform marked default-on", () => {
+    expect(
+      defaultBuiltinSelection([
+        { name: "file_write", default_enabled: true },
+        { name: "file_read", default_enabled: false },
+        { name: "shell", default_enabled: true },
+      ]),
+    ).toEqual(["file_write", "shell"]);
+  });
+
+  it("yields nothing when the catalog carries no defaults (older backend)", () => {
+    // A pre-ADR-104-follow-up `list_builtin_tools` has no `default_enabled`
+    // field; the wizard then starts from an empty selection, exactly like
+    // before, instead of inventing a list.
+    expect(defaultBuiltinSelection([{ name: "bash" }, { name: "file_read" }])).toEqual([]);
+  });
+
+  it("keeps the catalog order (grouped rendering order in step 3)", () => {
+    expect(
+      defaultBuiltinSelection([
+        { name: "intent_send", default_enabled: true },
+        { name: "file_write", default_enabled: true },
+        { name: "ask_user_question", default_enabled: true },
+      ]),
+    ).toEqual(["intent_send", "file_write", "ask_user_question"]);
+  });
+});
+
+describe("nextToolWhitelist", () => {
+  const ALL = ["a", "b", "c"];
+
+  it("starts from 'everything enabled' and emits the remainder on a flip-off", () => {
+    expect(nextToolWhitelist(ALL, undefined, "b", false)).toEqual(["a", "c"]);
+  });
+
+  it("collapses back to undefined when everything is enabled again", () => {
+    expect(nextToolWhitelist(ALL, ["a", "c"], "b", true)).toBeUndefined();
+    expect(nextToolWhitelist(ALL, ["a", "b", "c"], "b", false)).toEqual(["a", "c"]);
+  });
+
+  it("refuses to produce the un-expressible 'zero tools' whitelist", () => {
+    // An empty `[[mcp_servers]].tools` means "no opinion" = all enabled,
+    // so turning the last tool off must not silently flip to everything on.
+    expect(nextToolWhitelist(ALL, ["b"], "b", false)).toEqual(["b"]);
+    expect(nextToolWhitelist(ALL, undefined, "a", false)).toEqual(["b", "c"]);
+  });
+
+  it("keeps the server's tools/list order (diff-friendly manifest)", () => {
+    expect(nextToolWhitelist(ALL, ["c", "a"], "b", true)).toBeUndefined(); // all on = no opinion
+    expect(nextToolWhitelist(ALL, ["c", "a"], "b", false)).toEqual(["a", "c"]);
+    expect(nextToolWhitelist(ALL, ["c"], "b", true)).toEqual(["b", "c"]);
+  });
+
+  it("is inert when the tool list could not be read", () => {
+    expect(nextToolWhitelist([], undefined, "a", false)).toBeUndefined();
   });
 });
 

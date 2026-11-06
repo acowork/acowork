@@ -50,14 +50,21 @@ import { StyledInput, StyledTextarea } from "../common/StyledInput";
 import { TagInput } from "../common/TagInput";
 import { useEscapeClose } from "../../hooks/useEscapeClose";
 import { Switch } from "../common/Switch";
-import { ListBox, ListRow, Badge } from "../common/list";
+import { ListBox, ListRow, Badge, ExpandableRow } from "../common/list";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ErrorBox } from "../common/ErrorBox";
 import { fetchMcpPresets, groupPresetsByCategory, type McpPreset } from "../../lib/mcpPresets";
 import {
+  fetchHostedMcpTools,
+  isProbeableHostedMcp,
+  type HostedMcpTool,
+} from "../../lib/hostedMcpTools";
+import {
   CAPABILITY_ACTION_RE,
   EMPTY_WIZARD_STATE,
   PLATFORM_HOSTED_MCP,
+  defaultBuiltinSelection,
+  nextToolWhitelist,
   stepIssues,
   toCreateAgentDraft,
   undeclaredToolDeps,
@@ -80,6 +87,10 @@ interface BuiltinToolInfo {
   name: string;
   description: string;
   group?: string;
+  /** Platform default for a new agent (`acowork_core::tools::BuiltinToolInfo`).
+   *  The wizard pre-selects exactly these — the fact lives in the Rust catalog,
+   *  never in a second list here. */
+  default_enabled?: boolean;
 }
 
 /** Result of `preview_manifest` (mirrors `ManifestPreview` in Rust). */
@@ -129,6 +140,15 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
   const [presets, setPresets] = useState<McpPreset[]>([]);
   const [presetsError, setPresetsError] = useState<string | null>(null);
 
+  /* ---- step-3 per-tool whitelists for platform-hosted servers ---------- *
+   * Keyed by `${kind}:${id}` (the pick's identity). The tool list itself is
+   * session-cached inside `hostedMcpTools.ts`; these maps only track this
+   * dialog's view of it (loaded / failed / expanded). */
+  const [hostedTools, setHostedTools] = useState<Record<string, HostedMcpTool[]>>({});
+  const [hostedToolsFailed, setHostedToolsFailed] = useState<Record<string, boolean>>({});
+  const [hostedToolsLoading, setHostedToolsLoading] = useState<Record<string, boolean>>({});
+  const [openToolPicks, setOpenToolPicks] = useState<Set<string>>(new Set());
+
   const [skillRows, setSkillRows] = useState<SkillRow[]>([]);
   /** `[capabilities.*]` rows the user expanded the JSON area of. */
   const [openSchema, setOpenSchema] = useState<Set<string>>(new Set());
@@ -146,6 +166,13 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
    */
   const [showIssues, setShowIssues] = useState(false);
 
+  /**
+   * Has the user touched the builtin-tool checkboxes? The catalog arrives
+   * asynchronously, and seeding the platform defaults over a selection the
+   * user already made would silently rewrite their draft.
+   */
+  const toolsTouched = useRef(false);
+
   // Reset on open. Every piece of wizard state resets together: leaving one
   // behind (the old code forgot `skills` on a failed create) means the next
   // open shows a draft the user never made.
@@ -161,6 +188,11 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
     setPreview(null);
     setPreviewError(null);
     setShowIssues(false);
+    setHostedTools({});
+    setHostedToolsFailed({});
+    setHostedToolsLoading({});
+    setOpenToolPicks(new Set());
+    toolsTouched.current = false;
   }, [open]);
 
   // Static catalogs, loaded once per open: the builtin tool list comes from
@@ -171,7 +203,16 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
     let cancelled = false;
     invoke<BuiltinToolInfo[]>("list_builtin_tools")
       .then((list) => {
-        if (!cancelled) setBuiltinTools(list);
+        if (cancelled) return;
+        setBuiltinTools(list);
+        // ADR-029 keeps the Runtime opt-in (an undeclared tool starts
+        // disabled), so "nothing selected" means "the new agent can call no
+        // builtin tool at all". The platform default set is pre-selected here
+        // — unless the user already started picking, which must never be
+        // overwritten by a late catalog response.
+        if (toolsTouched.current) return;
+        const defaults = defaultBuiltinSelection(list);
+        setState((prev) => (prev.tools.length === 0 ? { ...prev, tools: defaults } : prev));
       })
       .catch((e) => {
         if (!cancelled) setError(`Failed to load builtin tool catalog: ${e}`);
@@ -371,6 +412,7 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
   /* ---- builtin tools --------------------------------------------------- */
 
   const toggleTool = (name: string) => {
+    toolsTouched.current = true;
     setState((prev) => ({
       ...prev,
       tools: prev.tools.includes(name)
@@ -434,6 +476,51 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
         pick.kind === kind && pick.id === id ? { ...pick, ...p } : pick,
       ),
     }));
+  };
+
+  /**
+   * Toggle a hosted pick's second-level tool list (same expand contract as
+   * the Tools panel's `McpServerCard`). The first expand probes the server's
+   * live `tools/list`; a failed probe leaves the pick at its default
+   * (everything enabled) and says so — it never blocks creation.
+   */
+  const toggleToolSection = (pick: McpPick) => {
+    const key = `${pick.kind}:${pick.id}`;
+    const willOpen = !openToolPicks.has(key);
+    setOpenToolPicks((prev) => {
+      const next = new Set(prev);
+      if (willOpen) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+    if (!willOpen || hostedTools[key] || hostedToolsLoading[key]) return;
+    setHostedToolsLoading((prev) => ({ ...prev, [key]: true }));
+    // Clear a previous attempt's failure: a retry that succeeds must not keep
+    // rendering the "unavailable" branch just because the flag was sticky.
+    setHostedToolsFailed((prev) => {
+      if (!prev[key]) return prev;
+      const next = { ...prev };
+      delete next[key];
+      return next;
+    });
+    fetchHostedMcpTools(pick.id)
+      .then((tools) => setHostedTools((prev) => ({ ...prev, [key]: tools })))
+      .catch(() => setHostedToolsFailed((prev) => ({ ...prev, [key]: true })))
+      .finally(() =>
+        setHostedToolsLoading((prev) => {
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        }),
+      );
+  };
+
+  /** One step-3 tool switch. The whitelist math lives in `nextToolWhitelist`. */
+  const togglePickTool = (pick: McpPick, toolName: string, enabled: boolean) => {
+    const all = (hostedTools[`${pick.kind}:${pick.id}`] ?? []).map((t) => t.name);
+    patchPick(pick.kind, pick.id, {
+      tools: nextToolWhitelist(all, pick.tools, toolName, enabled),
+    });
   };
 
   /* ---- preview --------------------------------------------------------- */
@@ -841,46 +928,154 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                     {/* What "Required" means, stated once for the whole block —
                         per row it was invisible until the switch was flipped. */}
                     <p className="text-10 text-text-tertiary">{t("createWizard.mcpRequiredHint")}</p>
-                    {state.mcp.map((pick) => (
-                      <div
-                        key={`${pick.kind}:${pick.id}`}
-                        className="space-y-2 rounded-md border border-border-divider px-3 py-2"
-                      >
-                        <div className="flex items-center justify-between gap-2">
-                          <span className="min-w-0 flex-1 truncate font-mono text-11 text-text-secondary">
-                            {pick.label}
-                            <span className="ml-1 text-text-tertiary">({pick.id})</span>
-                          </span>
-                          <Switch
-                            checked={pick.required}
-                            onChange={() =>
-                              patchPick(pick.kind, pick.id, { required: !pick.required })
-                            }
-                            disabled={busy}
-                            size="sm"
-                            label={t("createWizard.mcpRequiredLabel")}
-                            // Material layout so the switch doesn't try to
-                            // stretch to the full row width: the default
-                            // `labelPosition="left"` applies `w-full`, which
-                            // squeezed the MCP name out of the row entirely
-                            // (same workaround as RemoteFolderPicker).
-                            labelPosition="right"
-                          />
+                    {state.mcp.map((pick) => {
+                      const key = `${pick.kind}:${pick.id}`;
+                      // Second-level tool switches are only possible where the
+                      // tool list can actually be read before the agent exists:
+                      // platform-hosted servers answer `tools/list` today.
+                      const probeable =
+                        pick.kind === "hosted" && isProbeableHostedMcp(pick.id);
+                      const tools = probeable ? hostedTools[key] : undefined;
+                      const enabledNames = pick.tools ?? null;
+                      const enabledCount = tools
+                        ? enabledNames === null
+                          ? tools.length
+                          : tools.filter((t) => enabledNames.includes(t.name)).length
+                        : 0;
+                      const requiredSwitch = (
+                        <Switch
+                          checked={pick.required}
+                          onChange={() =>
+                            patchPick(pick.kind, pick.id, { required: !pick.required })
+                          }
+                          disabled={busy}
+                          size="sm"
+                          label={t("createWizard.mcpRequiredLabel")}
+                          // Material layout so the switch doesn't try to
+                          // stretch to the full row width: the default
+                          // `labelPosition="left"` applies `w-full`, which
+                          // squeezed the MCP name out of the row entirely
+                          // (same workaround as RemoteFolderPicker).
+                          labelPosition="right"
+                        />
+                      );
+                      return (
+                        <div
+                          key={key}
+                          className="space-y-2 rounded-md border border-border-divider px-3 py-2"
+                        >
+                          {probeable ? (
+                            // Same two-level contract as the Tools panel's
+                            // `McpServerCard`: chevron expands the per-tool
+                            // list, the activation-style Switch stays in the
+                            // header and stops propagation so toggling it
+                            // never collapses the row.
+                            <ExpandableRow
+                              open={openToolPicks.has(key)}
+                              onToggle={() => toggleToolSection(pick)}
+                              title={
+                                <span className="font-mono">
+                                  {pick.label}{" "}
+                                  <span className="text-text-tertiary">({pick.id})</span>
+                                </span>
+                              }
+                              meta={
+                                tools && tools.length > 0 && enabledCount < tools.length ? (
+                                  <span className="text-9 text-text-tertiary">
+                                    {t("createWizard.mcpToolsEnabled", {
+                                      enabled: enabledCount,
+                                      total: tools.length,
+                                    })}
+                                  </span>
+                                ) : undefined
+                              }
+                              trailing={
+                                <span onClick={(e) => e.stopPropagation()}>
+                                  {requiredSwitch}
+                                </span>
+                              }
+                              ariaLabel={`${pick.id} tools`}
+                            >
+                              {hostedToolsLoading[key] ? (
+                                <p className="flex items-center gap-1 px-3 py-2 text-10 text-text-tertiary">
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                  {t("createWizard.mcpToolsLoading")}
+                                </p>
+                              ) : !tools || hostedToolsFailed[key] || tools.length === 0 ? (
+                                <p className="px-3 py-2 text-10 text-text-tertiary">
+                                  {t("createWizard.mcpToolsUnavailable")}
+                                </p>
+                              ) : (
+                                <ListBox variant="plain">
+                                  {tools.map((tool) => {
+                                    const enabled =
+                                      enabledNames === null ||
+                                      enabledNames.includes(tool.name);
+                                    // The manifest cannot express "zero
+                                    // tools" (an empty whitelist means "no
+                                    // opinion" = all on), so the last enabled
+                                    // switch is refused, not flipped.
+                                    const lastEnabled = enabled && enabledCount <= 1;
+                                    return (
+                                      <ListRow
+                                        key={tool.name}
+                                        padding="nested"
+                                        surface="inset"
+                                        trailing={
+                                          <Switch
+                                            checked={enabled}
+                                            onChange={(v) =>
+                                              togglePickTool(pick, tool.name, v)
+                                            }
+                                            disabled={busy || lastEnabled}
+                                            size="sm"
+                                            aria-label={tool.name}
+                                            title={
+                                              lastEnabled
+                                                ? t("createWizard.mcpToolsLastHint")
+                                                : undefined
+                                            }
+                                          />
+                                        }
+                                      >
+                                        <span className="block truncate font-mono text-11 font-medium text-text-secondary">
+                                          {tool.name}
+                                        </span>
+                                        {tool.description && (
+                                          <span className="block truncate text-9 leading-tight text-text-tertiary">
+                                            {tool.description}
+                                          </span>
+                                        )}
+                                      </ListRow>
+                                    );
+                                  })}
+                                </ListBox>
+                              )}
+                            </ExpandableRow>
+                          ) : (
+                            <div className="flex items-center justify-between gap-2">
+                              <span className="min-w-0 flex-1 truncate font-mono text-11 text-text-secondary">
+                                {pick.label}
+                                <span className="ml-1 text-text-tertiary">({pick.id})</span>
+                              </span>
+                              {requiredSwitch}
+                            </div>
+                          )}
+                          {/* A labelled field, not a bare placeholder: the author
+                              must know this text is spoken to the end user. */}
+                          <Field label={t("createWizard.mcpWhyLabel")} hint={t("createWizard.mcpWhyHint")}>
+                            <StyledInput
+                              type="text"
+                              value={pick.why}
+                              onChange={(e) => patchPick(pick.kind, pick.id, { why: e.target.value })}
+                              placeholder={t("createWizard.mcpWhyPlaceholder")}
+                              aria-label={`${t("createWizard.mcpWhyLabel")} ${pick.id}`}
+                              disabled={busy}
+                            />
+                          </Field>
                         </div>
-                        {/* A labelled field, not a bare placeholder: the author
-                            must know this text is spoken to the end user. */}
-                        <Field label={t("createWizard.mcpWhyLabel")} hint={t("createWizard.mcpWhyHint")}>
-                          <StyledInput
-                            type="text"
-                            value={pick.why}
-                            onChange={(e) => patchPick(pick.kind, pick.id, { why: e.target.value })}
-                            placeholder={t("createWizard.mcpWhyPlaceholder")}
-                            aria-label={`${t("createWizard.mcpWhyLabel")} ${pick.id}`}
-                            disabled={busy}
-                          />
-                        </Field>
-                      </div>
-                    ))}
+                      );
+                    })}
                     <p className="text-10 text-text-tertiary">{t("createWizard.mcpToolsHint")}</p>
                   </div>
                 )}
