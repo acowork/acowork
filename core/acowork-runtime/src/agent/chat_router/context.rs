@@ -614,7 +614,10 @@ pub struct TurnContext<'a> {
     pub speaker: &'a str,
     /// RFC3339, produced by the caller once.
     pub now: &'a str,
-    /// Rendered draft config (`model=…, workspace=…`), `None` = untouched.
+    /// Rendered draft config (`model=…, workspace="ACoworkDev" (id ws-…)`),
+    /// `None` = untouched. The workspace carries both its name and its id: the
+    /// name is what a human-readable background must say, the id is what
+    /// `session_config.workspace` is validated by.
     pub draft: Option<&'a str>,
     pub candidates: &'a [CandidateLine],
     /// `project=… task=…` when the turn is a PM follow-up.
