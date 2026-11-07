@@ -3205,4 +3205,74 @@ mod tests {
         );
     }
 
+
+    // ── T1-3: pm_update_project ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_project_renames_archives_and_enforces_ownership() {
+        let router = test_router().await;
+        let owner = "pm-owner";
+        let pid = project_with_owner(&router, owner, "Original").await;
+
+        // Owner renames.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            2,
+            "pm_update_project",
+            json!({ "project_id": pid, "title": "Renamed", "description": "why" }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["title"], "Renamed");
+        assert_eq!(t["description"], "why");
+
+        // A stranger cannot — the REST rule, not a second model.
+        let v = call_tool(
+            &router,
+            Some("pm-stranger"),
+            3,
+            "pm_update_project",
+            json!({ "project_id": pid, "title": "hijacked" }),
+        )
+        .await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("forbidden"),
+            "non-owner must be refused: {v}"
+        );
+
+        // A call that changes nothing is an error, not a silent 200.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            4,
+            "pm_update_project",
+            json!({ "project_id": pid }),
+        )
+        .await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("at least one"),
+            "empty update must say so: {v}"
+        );
+
+        // Archiving is a status write and keeps the title.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            5,
+            "pm_update_project",
+            json!({ "project_id": pid, "status": "archived" }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["status"], "archived");
+        assert_eq!(t["title"], "Renamed", "an unrelated field must survive");
+    }
+
 }

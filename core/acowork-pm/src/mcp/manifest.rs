@@ -347,6 +347,24 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
         }
       }
+    },
+    {
+      "name": "pm_update_project",
+      "description": "Rename, re-describe, archive or complete a project. Owner only — the same rule as the REST endpoint, so an agent cannot reshape a project it does not own. `status=completed` also ends every agent task context under the project (the agents stop holding that context); `archived` makes it read-only without ending them. At least one of title / description / status must be given: a call that changes nothing is rejected rather than answered with 200.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["project_id"],
+        "properties": {
+          "project_id": { "type": "string", "pattern": "^p-[a-zA-Z0-9-]{1,62}$" },
+          "title": { "type": "string", "description": "New title." },
+          "description": { "type": "string", "description": "New description (replaces the old one)." },
+          "status": {
+            "type": "string",
+            "enum": ["active", "archived", "completed"],
+            "description": "active = in progress; archived = read-only, no new tasks; completed = done, ends the agents' task contexts."
+          }
+        }
+      }
     }
   ]
 }"#;
@@ -369,7 +387,7 @@ mod tests {
     fn manifest_is_valid_json() {
         let v: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 16);
+        assert_eq!(tools.len(), 17);
         for t in tools {
             assert!(t["name"].is_string());
             assert!(t["inputSchema"].is_object());

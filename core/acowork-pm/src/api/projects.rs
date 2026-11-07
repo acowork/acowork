@@ -241,7 +241,7 @@ pub async fn update(
         && let Ok(tasks) = state.store.closing_project_contexts(&pid).await
     {
         super::tasks::close_task_contexts(
-            &state,
+            &state.gateway,
             tasks.into_iter().map(|t| (pid.clone(), t)),
         )
         .await;
@@ -286,7 +286,7 @@ pub async fn delete(
         .unwrap_or_default();
     state.store.delete_project(&pid, query.cascade).await?;
     super::tasks::close_task_contexts(
-        &state,
+        &state.gateway,
         closing.into_iter().map(|t| (pid.clone(), t)),
     )
     .await;

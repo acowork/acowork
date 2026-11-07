@@ -29,7 +29,7 @@ use crate::store::tree::{PmStore, TreePmStore};
 use crate::types::{
     CreateProject, CreateTask, Dependency, MemberKind, Priority, ProjectId, ProjectStatus,
     ReparentTask, ReviewStatus, Task, TaskFilter, TaskId, TaskResponse, TaskSort, TaskStatus,
-    TaskType, UpdateTask, deserialize_clearable,
+    TaskType, UpdateProject, UpdateTask, deserialize_clearable,
 };
 
 /// 工具分发入口（由 `POST /mcp` 的 `tools/call` 调用）。
@@ -93,6 +93,10 @@ pub async fn dispatch(
         "pm_add_project_member" => {
             let a = require_actor(actor)?;
             pm_add_project_member(state, a, args).await
+        }
+        "pm_update_project" => {
+            let a = require_actor(actor)?;
+            pm_update_project(state, a, args).await
         }
 
         // ── Task activity stream (the communication channel) ─────────
@@ -261,6 +265,25 @@ impl UpdateTaskArgs {
     ];
 }
 
+/// `pm_update_project` arguments.
+#[derive(Deserialize)]
+struct UpdateProjectArgs {
+    project_id: ProjectId,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    /// `active` | `archived` | `completed`. Completing a project closes every
+    /// agent task context under it (design 27 §2.1 T2-a).
+    #[serde(default)]
+    status: Option<ProjectStatus>,
+}
+
+#[cfg(test)]
+impl UpdateProjectArgs {
+    const FIELDS: &'static [&'static str] = &["project_id", "title", "description", "status"];
+}
+
 /// `pm_list_agents` arguments.
 #[derive(Deserialize)]
 struct ListAgentsArgs {
@@ -405,6 +428,7 @@ pub(crate) const MANIFEST_FIELDS: &[(&str, &[&str])] = &[
     ("pm_add_project_member", AddProjectMemberArgs::FIELDS),
     ("pm_list_activity", ListActivityArgs::FIELDS),
     ("pm_add_activity", AddActivityArgs::FIELDS),
+    ("pm_update_project", UpdateProjectArgs::FIELDS),
 ];
 
 // ── 响应序列化辅助 ────────────────────────────────────────────────────────
@@ -904,6 +928,72 @@ async fn pm_create_project(state: &McpState, actor: &str, args: Value) -> Result
         lookup_agent_meta(state.agent_dir.as_ref(), Some(&p.created_by)).await
     };
     Ok(project_to_value(p, 0, cb_meta.as_ref()))
+}
+
+/// `pm_update_project` — rename / re-describe / archive / complete a project.
+///
+/// Authorization is exactly the REST rule ([`Project::can_govern`]): the
+/// caller must own the project. Two faces, one model (design 32 §2 principle 5)
+/// — an agent that may not reshape a project through `PATCH /projects/{id}`
+/// must not be able to do it here either.
+async fn pm_update_project(state: &McpState, actor: &str, args: Value) -> Result<Value> {
+    let a: UpdateProjectArgs = parse_args("pm_update_project", args)?;
+    let before = state
+        .store
+        .get_project(&a.project_id)
+        .await?
+        .ok_or_else(|| PmError::ProjectNotFound(a.project_id.to_string()))?;
+
+    if !before.can_govern(actor, false) {
+        return Err(PmError::Forbidden(
+            "only the project owner or an admin can update the project".into(),
+        ));
+    }
+    // A call with nothing to change is a mistake worth naming, not a no-op
+    // that returns 200 and leaves the caller believing something happened.
+    if a.title.is_none() && a.description.is_none() && a.status.is_none() {
+        return Err(PmError::BadRequest(
+            "pm_update_project needs at least one of title / description / status".into(),
+        ));
+    }
+
+    // Remember the transition: closing contexts after the write is then safe
+    // to repeat, and a project already completed closes nothing twice.
+    let closing = (a.status == Some(ProjectStatus::Completed)
+        && before.status != ProjectStatus::Completed)
+        .then(|| a.project_id.clone());
+
+    let project = state
+        .store
+        .update_project(
+            &a.project_id,
+            UpdateProject {
+                title: a.title,
+                description: a.description,
+                status: a.status,
+                metadata: None,
+            },
+        )
+        .await?;
+
+    if let Some(pid) = closing
+        && let Ok(tasks) = state.store.closing_project_contexts(&pid).await
+    {
+        crate::api::tasks::close_task_contexts(
+            &state.gateway,
+            tasks.into_iter().map(|t| (pid.clone(), t)),
+        )
+        .await;
+    }
+
+    // Same projection as `pm_create_project`: the caller sees the stored
+    // record, not an echo of what it sent.
+    let cb_meta = if creator_is_user(&project) {
+        None
+    } else {
+        lookup_agent_meta(state.agent_dir.as_ref(), Some(&project.created_by)).await
+    };
+    Ok(project_to_value(project, 0, cb_meta.as_ref()))
 }
 
 /// `pm_create_task` — 创建任务（Agent 创建 → `review_status=pending`，待人类审核）。
