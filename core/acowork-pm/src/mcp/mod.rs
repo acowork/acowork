@@ -2786,4 +2786,286 @@ mod tests {
         let stream = tool_text(&v);
         assert_eq!(stream["total"], 1, "the note is in the stream: {stream}");
     }
+
+    // ── T1-1: pm_list_tasks is the single task query ─────────────────────
+    //
+    // The guards here are what makes the cross-project mode safe to expose to
+    // an agent: without them one call reads the whole PM database and the
+    // answer is silently truncated, which is the exact shape of a wrong
+    // report.
+
+    async fn create_task(router: &Router, actor: &str, id: u64, args: Value) -> String {
+        let v = call_tool(router, Some(actor), id, "pm_create_task", args).await;
+        tool_text(&v)["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn list_tasks_cross_project_refuses_an_unfiltered_dump() {
+        let router = test_router().await;
+        project_with_owner(&router, "pm-a", "One").await;
+
+        let v = call_tool(&router, Some("pm-a"), 2, "pm_list_tasks", json!({})).await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("narrowing filter"),
+            "no project + no filter must be refused, not answered: {v}"
+        );
+
+        // With a filter the same call is fine.
+        let v = call_tool(
+            &router,
+            Some("pm-a"),
+            3,
+            "pm_list_tasks",
+            json!({ "assignee": "me" }),
+        )
+        .await;
+        assert_eq!(v["error"]["code"].as_i64(), None, "filtered: {v}");
+    }
+
+    #[tokio::test]
+    async fn list_tasks_cross_project_caps_the_limit_it_reports_back() {
+        let router = test_router().await;
+        project_with_owner(&router, "pm-a", "One").await;
+
+        let v = call_tool(
+            &router,
+            Some("pm-a"),
+            2,
+            "pm_list_tasks",
+            json!({ "status": "done", "limit": 10_000 }),
+        )
+        .await;
+        let t = tool_text(&v);
+        // The envelope must state the effective limit, not the requested one:
+        // a caller that believes it got 10000 rows stops paging.
+        assert!(
+            t["limit"].as_u64().unwrap_or(u64::MAX) <= 50,
+            "cross-project limit must be capped: {t}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_tasks_sentinel_me_resolves_to_the_caller() {
+        let router = test_router().await;
+        let actor = "inst-me-sentinel";
+        let pid = project_with_owner(&router, actor, "Sentinel").await;
+        create_task(
+            &router,
+            actor,
+            2,
+            json!({ "project_id": pid, "title": "mine", "assignee": actor }),
+        )
+        .await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "assignee": "me" }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["total"], 1, "sentinel should resolve to the actor: {t}");
+        assert_eq!(t["tasks"][0]["assignee"], actor);
+    }
+
+    #[tokio::test]
+    async fn list_tasks_type_and_review_status_answer_the_approval_backlog() {
+        let router = test_router().await;
+        let actor = "pm-types";
+        let pid = project_with_owner(&router, actor, "Types").await;
+        // An agent-submitted checkpoint waits for a human; a feature does not.
+        create_task(
+            &router,
+            actor,
+            2,
+            json!({ "project_id": pid, "title": "gate", "type": "checkpoint" }),
+        )
+        .await;
+        create_task(
+            &router,
+            actor,
+            3,
+            json!({ "project_id": pid, "title": "normal", "type": "feature" }),
+        )
+        .await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "type": "checkpoint" }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["total"], 1, "type filter: {t}");
+        assert_eq!(t["tasks"][0]["type"], "checkpoint");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "review_status": "pending" }),
+        )
+        .await;
+        // Both rows: an agent-created task awaits human approval whatever its
+        // type is (ADR-102), so `review_status=pending` is the backlog query,
+        // not a checkpoint-only query. `approved` must therefore be empty.
+        assert_eq!(tool_text(&v)["total"], 2, "approval backlog: {v}");
+        let v = call_tool(
+            &router,
+            Some(actor),
+            7,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "review_status": "approved" }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["total"], 0, "nothing is approved yet");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            6,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "type": "bug" }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["total"], 0, "an unused type matches nothing");
+    }
+
+    #[tokio::test]
+    async fn list_tasks_parent_and_query_walk_the_tree_and_titles() {
+        let router = test_router().await;
+        let actor = "pm-tree";
+        let pid = project_with_owner(&router, actor, "Tree").await;
+        let root = create_task(
+            &router,
+            actor,
+            2,
+            json!({ "project_id": pid, "title": "Release checklist" }),
+        )
+        .await;
+        create_task(
+            &router,
+            actor,
+            3,
+            json!({
+                "project_id": pid,
+                "title": "draft notes",
+                "parent_task_id": root
+            }),
+        )
+        .await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "parent_task_id": root }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["total"], 1, "children of root: {t}");
+        assert_eq!(t["tasks"][0]["parent_id"], root, "rows expose the link as parent_id");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "only_roots": true }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["total"], 1, "only_roots hides the child");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            6,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "query": "checklist" }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["total"], 1, "query is a title substring: {t}");
+        assert_eq!(t["tasks"][0]["id"], root);
+    }
+
+    #[tokio::test]
+    async fn list_tasks_envelope_admits_there_is_more() {
+        let router = test_router().await;
+        let actor = "pm-page";
+        let pid = project_with_owner(&router, actor, "Paging").await;
+        for i in 0..3 {
+            create_task(
+                &router,
+                actor,
+                10 + i,
+                json!({ "project_id": pid, "title": format!("task-{i}") }),
+            )
+            .await;
+        }
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            20,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "limit": 2 }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["total"], 3, "total counts before paging: {t}");
+        assert_eq!(t["returned"], 2);
+        assert_eq!(t["has_more"], true, "a bare limit must not look complete");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            21,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "limit": 2, "offset": 2 }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["returned"], 1);
+        assert_eq!(t["has_more"], false, "the last page says so: {t}");
+    }
+
+    #[tokio::test]
+    async fn list_tasks_order_by_rejects_a_typo_instead_of_ignoring_it() {
+        let router = test_router().await;
+        let actor = "pm-sort";
+        let pid = project_with_owner(&router, actor, "Sort").await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            2,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "order_by": "updated" }),
+        )
+        .await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("unknown order_by") && msg.contains("due_at"),
+            "a silent default would sort a report wrongly: {v}"
+        );
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "order_by": "priority" }),
+        )
+        .await;
+        assert_eq!(v["error"]["code"].as_i64(), None, "valid sort: {v}");
+    }
+
 }
