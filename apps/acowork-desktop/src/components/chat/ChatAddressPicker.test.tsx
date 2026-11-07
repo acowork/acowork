@@ -178,19 +178,107 @@ describe("ChatAddressPicker", () => {
     expect(onPick).not.toHaveBeenCalled();
   });
 
-  it("walks the list with the arrows and toggles the highlighted run's reference on Enter", async () => {
+  it("walks the list with the arrows and takes effect on Enter in one key", async () => {
     const { onPick } = picker();
     const list = await screen.findByTestId("chat-address-picker");
     // The highlight starts on the escape row; one step down is the first session.
     fireEvent.keyDown(list, { key: "ArrowDown" });
     fireEvent.keyDown(list, { key: "Enter" });
-    // Enter QUOTES the run — the list stays open for more picks; "done" commits.
-    expect(onPick).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByTestId("chat-address-done"));
+    // Enter is COMMIT-NOW, like Enter on "new task": the highlighted run is
+    // forced into the selection even though Space never checked it, and the
+    // picker closes — no second trip to the footer.
     expect(onPick).toHaveBeenCalledWith({
       refs: [{ agentInstanceId: "agent-a", sessionId: "s-1" }],
       labels: { "agent-a|s-1": "Draft the release note" },
     });
+  });
+
+  it("Enter adds the highlighted run to what Space already picked, then commits", async () => {
+    const { onPick } = picker();
+    const list = await screen.findByTestId("chat-address-picker");
+    fireEvent.keyDown(list, { key: "ArrowDown" });
+    fireEvent.keyDown(list, { key: " " }); // s-1 picked, list stays open
+    expect(onPick).not.toHaveBeenCalled();
+    fireEvent.keyDown(list, { key: "ArrowDown" });
+    fireEvent.keyDown(list, { key: "Enter" }); // s-2 forced in, both commit
+    expect(onPick).toHaveBeenCalledWith({
+      refs: [
+        { agentInstanceId: "agent-a", sessionId: "s-1" },
+        { agentInstanceId: "agent-a", sessionId: "s-2" },
+      ],
+      labels: {
+        "agent-a|s-1": "Draft the release note",
+        "agent-a|s-2": "Review the schema",
+      },
+    });
+  });
+
+  it("Enter on a focused checkbox selects that run and commits immediately", async () => {
+    const { onPick } = picker();
+    const list = await screen.findByTestId("chat-address-picker");
+    const box = list.querySelectorAll('button[role="checkbox"]')[1];
+    // The native click would toggle and keep the list open; Enter means
+    // select + commit + close instead.
+    fireEvent.keyDown(box, { key: "Enter" });
+    expect(onPick).toHaveBeenCalledWith({
+      refs: [{ agentInstanceId: "agent-a", sessionId: "s-2" }],
+      labels: { "agent-a|s-2": "Review the schema" },
+    });
+  });
+
+  it("keeps Enter on the escape row as the one-key new task", async () => {
+    const { onPick } = picker();
+    const list = await screen.findByTestId("chat-address-picker");
+    fireEvent.keyDown(list, { key: "Enter" });
+    expect(onPick).toHaveBeenCalledWith({ forceNew: true });
+  });
+
+  it("toggles the highlighted run's reference on Space, the checkbox's own key", async () => {
+    const { onPick } = picker();
+    const list = await screen.findByTestId("chat-address-picker");
+    const box = () =>
+      list.querySelectorAll('button[role="checkbox"]')[0] as HTMLButtonElement;
+    fireEvent.keyDown(list, { key: "ArrowDown" });
+    fireEvent.keyDown(list, { key: " " });
+    expect(box().getAttribute("aria-checked")).toBe("true");
+    // Space is a TOGGLE, not a one-way pick — un-highlighting matters as much
+    // when the thumb, not the Enter key, is doing the work.
+    fireEvent.keyDown(list, { key: " " });
+    expect(box().getAttribute("aria-checked")).toBe("false");
+    expect(onPick).not.toHaveBeenCalled();
+  });
+
+  it("leaves Space on the escape row as typing, not a pick", async () => {
+    const { onPick, onClose } = picker();
+    const input = await screen.findByLabelText("chatView.address.search");
+    // The highlight starts on the "new task" row, which has no reference to
+    // toggle; swallowing Space there would make titles with a space
+    // unsearchable.
+    fireEvent.keyDown(input, { key: " " });
+    expect(onPick).not.toHaveBeenCalled();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("does not double-handle Space inside a focused checkbox", async () => {
+    picker();
+    const list = await screen.findByTestId("chat-address-picker");
+    const box = list.querySelectorAll('button[role="checkbox"]')[0];
+    // A focused control owns its activation keys: the container must stay out
+    // of the way so the browser's native button click toggles exactly once.
+    fireEvent.keyDown(box, { key: " " });
+    expect(box.getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("leaves Tab to the browser so 'done' is reachable by keyboard", async () => {
+    const { onPick } = picker();
+    const list = await screen.findByTestId("chat-address-picker");
+    // Tab used to be hijacked as an Enter alias, which sealed every control
+    // behind the search box — including the footer's commit button.
+    fireEvent.keyDown(list, { key: "ArrowDown" });
+    fireEvent.keyDown(list, { key: "Tab" });
+    expect(onPick).not.toHaveBeenCalled();
+    const box = list.querySelectorAll('button[role="checkbox"]')[0];
+    expect(box.getAttribute("aria-checked")).toBe("false");
   });
 
   it("opens with the caret in the search box, where typing a filter starts", async () => {
@@ -209,7 +297,8 @@ describe("ChatAddressPicker", () => {
     fireEvent.change(input, { target: { value: "draft" } });
     fireEvent.keyDown(input, { key: "ArrowDown" });
     fireEvent.keyDown(input, { key: "Enter" });
-    fireEvent.click(screen.getByTestId("chat-address-done"));
+    // The keys bubble from the input to the list's handler: Enter commits
+    // straight away, no footer click needed.
     expect(onPick).toHaveBeenCalledWith({
       refs: [{ agentInstanceId: "agent-a", sessionId: "s-1" }],
       labels: { "agent-a|s-1": "Draft the release note" },
