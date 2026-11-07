@@ -12,6 +12,11 @@ triggers:
 tool_deps:
   - doc_read
   - doc_write
+  - doc_mkdir
+  - doc_move
+  - doc_rmdir
+  - doc_stat
+  - doc_list
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -27,8 +32,10 @@ Organize documents around how readers find and use information, not around how f
 The library structure is the file system of the doc service — restructure it there.
 
 - `doc_mkdir` creates a directory (one level at a time; the parent must exist).
-- `doc_move` moves and renames documents and directories. When renaming a directory,
-  move contents bottom-up: its children keep their paths relative to it.
+- `doc_move` moves and renames **documents** (paths must end in `.md`) and can publish
+  atomically by writing to a temp name first. It does not move directories: to
+  restructure one, move its documents out, `doc_rmdir` it, and `doc_mkdir` the
+  replacement.
 - `doc_rmdir` removes an **empty** directory only and never cascades — if it refuses,
   the directory still holds documents or sub-directories; empty it deliberately.
 - Do not "reorganize" by rewriting bodies: a moved document keeps its id and history,

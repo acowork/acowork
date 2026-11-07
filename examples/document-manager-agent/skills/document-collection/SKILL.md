@@ -11,6 +11,8 @@ triggers:
   - gather documents
 tool_deps:
   - file_read
+  - doc_list
+  - doc_search
   - doc_write
   - http_request
   - web_fetch
@@ -45,7 +47,7 @@ Collecting means importing into the library, not copying files around.
 
 2. **Collect source materials**
    - Use `file_read` to inspect local documents, notes, specs, plans, meeting records, exports, and indexes
-   - Use `network` only for provided or approved links and references
+   - Use `http_request` / `web_fetch` only for provided or approved links and references
    - Capture files, links, titles, authors, dates, versions, owners, and related topics
    - Do not collect secrets, credentials, or private personal data into docs
 

@@ -12,6 +12,7 @@ triggers:
 tool_deps:
   - doc_read
   - doc_write
+  - doc_stat
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---

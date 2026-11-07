@@ -14,6 +14,8 @@ tool_deps:
   - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
+  - pm_create_task
+  - pm_get_task
   - pm_list_tasks
   - pm_update_task
   - pm_add_activity

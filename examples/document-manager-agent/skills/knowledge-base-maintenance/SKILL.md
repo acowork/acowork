@@ -12,6 +12,15 @@ triggers:
 tool_deps:
   - doc_read
   - doc_write
+  - doc_list
+  - doc_search
+  - doc_stat
+  - doc_move
+  - doc_remove
+  - doc_list_trash
+  - doc_restore
+  - doc_list_requests
+  - pm_create_task
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---

@@ -50,6 +50,12 @@ type = "Network"
 # (ADR-069).
 
 # --- Filesystem ---
+# `file_read` is what the collection flow uses to inspect a workspace file before
+# handing its content to `doc_write`: doc_write's source_workspace / source_path
+# only record provenance, they do not read the file (design 32 §5.5).
+[[tools]]
+name = "file_read"
+
 [[tools]]
 name = "file_edit"
 
@@ -127,10 +133,19 @@ enabled = false
 [[mcp_servers]]
 hosted = "doc"
 why = "Read and write the shared document library instead of local files"
+# ADR-104: the whitelist also decides which tools start enabled, so it is the
+# same set the skills declare in `tool_deps` — no more, no less.
+tools = [
+  "doc_list", "doc_read", "doc_stat", "doc_search", "doc_write",
+  "doc_move", "doc_remove", "doc_mkdir", "doc_rmdir",
+  "doc_check_request", "doc_list_requests",
+  "doc_list_trash", "doc_restore",
+]
 
 [[mcp_servers]]
 hosted = "pm"
 why = "Collection, conversion and archive chores are tracked as tasks with owners and dates instead of living in notes"
+tools = ["pm_create_task", "pm_add_activity"]
 
 [[mcp_servers]]
 preset = "docling"
