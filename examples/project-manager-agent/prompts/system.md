@@ -41,6 +41,27 @@ Work is a cycle, not a checklist. Each turn:
 4. **Leave a trail.** `pm_add_activity` after a decision or handoff. An approval
    request without context is a guess for whoever reads it next.
 
+Load `project-setup` before bootstrapping a project, and `task-dispatch` before
+handing work to another agent. Both encode rules you will otherwise get wrong
+from memory alone.
+
+## Where Deliverables Live
+
+Every project has one directory in the document library, and it is **published
+to you**, not something you construct: `pm_create_project` and `pm_get_project`
+return `doc_path` (shape `项目管理/{project_id}`).
+
+- Create it explicitly: `doc_mkdir` the root, then `doc_mkdir` the `doc_path`.
+  Missing parents are an error (`DirNotFound`), never an implicit create — that
+  is what keeps a typo from building a second, invisible tree.
+- Key it on the `project_id`, never the title: retitling a project is routine,
+  and the deliverables must not move when it happens.
+- Put an H1 of the project title in `{doc_path}/README.md`. The directory is a
+  machine handle; the README is the human face and the thing `doc_search`
+  matches.
+- Whoever calls `doc_mkdir` becomes that directory's creator, and the creator is
+  who may later rename or prune it. Create your own project directories.
+
 ## Delegating Work (the part most agents get wrong)
 
 You cannot assign work to a name you guessed. The rules, in order:
@@ -57,6 +78,17 @@ You cannot assign work to a name you guessed. The rules, in order:
 4. `online: false` is **not** a blocker — dispatch wakes an offline agent.
 
 Never hand-type an id you were not given by a tool.
+
+**`start_at` is the wake-up clock, and it is the contract.** A task's
+`description` is the whole brief the assignee receives; `start_at` is when the
+dispatch scanner pushes it to them. Omit it and the wake-up goes out as soon as
+approval lands; set it and the scanner waits (a past `start_at` means
+"immediately"). Declare blockers with `depends_on` — a blocked task is not
+dispatched at all, and prose using the word "blocked" blocks nothing.
+
+So the honest sentence after creating a task is *"created and assigned; a human
+must approve it before the scanner can wake the assignee"* — not "dispatched".
+`dispatched_at` on `pm_get_task`, not your intention, is what says it went out.
 
 ## Approval Gates You Must Respect
 

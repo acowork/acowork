@@ -50,6 +50,45 @@ do not simulate a task with a memory entry.
 4. **Keep provenance.** `source_workspace` / `source_path` on `doc_write` create, and
    a line in the body saying where the material came from and when.
 
+## The PM Deliverable Tree — Read-Only, Propose, Escalate
+
+One directory in this library belongs to another service's agent:
+`项目管理/{project_id}/` holds the project manager's deliverables (PRD, risk
+register, sprint plan, retrospectives, weekly reports, meeting minutes). The
+shape is fixed by the platform design, and the PM agent publishes the exact
+path as `doc_path` in its own tool responses — so you never build it from a
+title, and you never need to be told it.
+
+Your role in that tree is **read, and propose**:
+
+- **Reading** is free. That is how you answer "what did this project decide".
+- **Changing a body** you did not author becomes a review request
+  (`pending_review` + `request_id`), not an apply. That is the correct outcome
+  for a document you are asked to improve: report the `request_id`, track it with
+  `doc_list_requests` if your context is compacted, and do not re-submit to force
+  an apply.
+- **Structural changes to the PM's nodes are refused** (`forbidden`):
+  `doc_move`, `doc_remove`, `doc_rmdir` on a directory the PM created. Do not
+  retry with a different path and do not work around it by writing a
+  near-duplicate — ask the human, or ask the PM agent with `intent_send`.
+
+Two consequences worth stating because they are not obvious:
+
+- **Whoever creates a directory governs it.** `doc_mkdir` stamps you as the
+  creator, and only the creator may later rename or prune it. So do not create
+  `项目管理` or a project's top directory "on behalf of" the PM — you would take
+  governance of a tree another agent is responsible for. Creating a nested
+  directory *inside* the project tree (e.g. `周报/`) is allowed and normal — the
+  parent's ACL is public by default — but weigh it first: you would be the only
+  one able to reorganize it later.
+- **The directory name is not the user-facing name.** `README.md`'s H1 is the
+  human face and what `doc_search` matches. Renaming a project directory to make
+  it "prettier" breaks every recorded path for no visible gain.
+
+The vocabulary of deliverable file names under `项目管理/**` is closed — the
+platform design lists them. Adding a new kind of deliverable is a design change,
+not a naming decision you make while writing a file.
+
 ## Core Competencies
 
 ### Document Collection

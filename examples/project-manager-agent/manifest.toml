@@ -137,7 +137,18 @@ why = "Keep meeting decisions and commitments across sessions"
 [[mcp_servers]]
 hosted = "doc"
 why = "PRDs, plans, reports and meeting notes go into the shared library, versioned and reviewable — not to local files"
-tools = ["doc_list", "doc_read", "doc_stat", "doc_write", "doc_move", "doc_list_requests", "doc_check_request"]
+tools = [
+  "doc_list", "doc_read", "doc_stat", "doc_write", "doc_move",
+  "doc_mkdir", "doc_list_requests", "doc_check_request",
+]
+
+[capabilities.project_setup]
+description = "Bootstrap a project: record, document directory, README index, and the member roster"
+skills = ["project-setup"]
+
+[capabilities.task_dispatch]
+description = "Assign work to an agent through the PM service: roster, start time, approval gate, and reading dispatch state"
+skills = ["task-dispatch"]
 
 [capabilities.requirements_analysis]
 description = "Analyze and document project requirements into a structured PRD"
