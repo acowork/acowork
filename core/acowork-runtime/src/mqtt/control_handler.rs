@@ -88,6 +88,12 @@ pub enum ControlAction {
         /// The durable Chat row this delivery opens or answers, declared by the
         /// Gateway that wrote it (ADR-106 D3). Empty = no row: an origin turn.
         chat_row_id: String,
+        /// ADR-076 §决策 4 (rev.): human accounts with read-only awareness
+        /// of the session this intent creates, seeded by the Gateway from
+        /// both agents' ownership rosters plus the originator. Stamped onto
+        /// the new session's meta at creation; inert on a follow-up to an
+        /// existing session. Empty = no extra readers.
+        aware_users: Vec<String>,
     },
 }
 
@@ -125,6 +131,7 @@ pub fn parse_control_payload(topic: &str, payload: &[u8]) -> Option<ControlActio
             has_human: intent.has_human_participant,
             chat_attachment_ids: intent.chat_attachment_ids,
             chat_row_id: intent.chat_row_id,
+            aware_users: intent.aware_users,
         },
     };
 

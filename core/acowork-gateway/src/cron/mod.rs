@@ -477,6 +477,7 @@ pub async fn run_cron_scheduler(
             // delivery entry resolves + validates it against the install
             // table and fails loudly (observable error) otherwise.
             let req = crate::intent::delivery::DeliveryRequest {
+                aware_users: Vec::new(),
                 message_id: format!("cron-{}-{}", trigger_id, now.timestamp_millis()),
                 conversation_id: String::new(),
                 from_instance: format!("cron:{}", trigger_id),

@@ -4316,6 +4316,7 @@ mod tests {
         // Persist SessionMeta via the conversation module API so the
         // format stays in lock-step with `scan_sessions_from_meta`.
         let meta = crate::conversation::SessionMeta {
+            aware_users: Vec::new(),
             version: 3, // CONVERSATION_FORMAT_VERSION — keep in sync with conversation.rs
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
@@ -4539,6 +4540,7 @@ mod tests {
             },
         );
         let meta = crate::conversation::SessionMeta {
+            aware_users: Vec::new(),
             version: 3,
             session_id: "20260101_120000_tok".to_string(),
             agent_id: "com.test.agent".to_string(),
@@ -4571,6 +4573,7 @@ mod tests {
     /// only spell out what they actually assert on.
     fn test_session_meta_minimal() -> crate::conversation::SessionMeta {
         crate::conversation::SessionMeta {
+            aware_users: Vec::new(),
             version: 3,
             session_id: String::new(),
             agent_id: "com.test.agent".to_string(),
@@ -6856,6 +6859,7 @@ mod tests {
         // so the session has to exist. (Unauthorized uploads are covered by
         // `session_control`'s own tests.)
         let meta = crate::conversation::SessionMeta {
+            aware_users: Vec::new(),
             version: 1,
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
@@ -7634,6 +7638,7 @@ mod tests {
         // Create a session with model set in meta
         use crate::conversation::{SessionMeta, write_session_meta};
         let meta = SessionMeta {
+            aware_users: Vec::new(),
             version: 3, // CONVERSATION_FORMAT_VERSION
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),

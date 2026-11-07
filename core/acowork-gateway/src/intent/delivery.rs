@@ -132,6 +132,13 @@ pub struct DeliveryRequest {
     /// from a shape-checked JSON object; empty = none). The responder
     /// treats it as a suggestion within its allowed set (§13-6).
     pub session_config_json: String,
+    /// ADR-076 §决策 4 (rev.): the human accounts with read-only awareness
+    /// of the session this intent creates. The Gateway computes the seed
+    /// (`deliver_intent`) from the sender's and target's owner + guests —
+    /// an agent-to-agent intent has no human initiator, so without this the
+    /// two agents' conversation would be a black box no one can inspect.
+    /// Empty for a human-initiated delivery (the initiator already sees it).
+    pub aware_users: Vec<String>,
     /// "request" (default) | "response" (design 27 §5.4.5 R2). A response
     /// is system-generated: the Gateway builds it at the responder's
     /// turn end and routes it to the initiator — `intent_send` never
@@ -269,6 +276,7 @@ async fn deliver_inner(
         has_human_participant: req.has_human,
         chat_attachment_ids: req.chat_attachment_ids.clone(),
         chat_row_id: req.chat_row_id.clone(),
+        aware_users: req.aware_users.clone(),
     };
     let command = mqtt_proto::ControlCommand {
         instance_id: instance_id.clone(),
@@ -356,6 +364,7 @@ mod tests {
 
     fn req(target: &str) -> DeliveryRequest {
         DeliveryRequest {
+            aware_users: Vec::new(),
             message_id: "m-1".into(),
             conversation_id: String::new(),
             from_instance: "cron:test".into(),

@@ -721,6 +721,7 @@ impl AgentLoop {
                 .conversation
                 .as_ref()
                 .and_then(|c| c.chat_session_id()),
+            initiator: self.session.conversation.as_ref().and_then(|c| c.initiator()),
         };
         match tool.execute_with_context(params, &ctx).await {
             Ok(result) if result.ok => Ok(result.content),
@@ -3332,6 +3333,7 @@ mod tests {
                     has_human: None,
                     chat_attachment_ids: Vec::new(),
                     chat_row_id: String::new(),
+                    aware_users: Vec::new(),
                 },
             )))
             .unwrap();

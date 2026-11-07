@@ -1135,6 +1135,11 @@ pub struct ConversationSession {
     /// `SessionMeta.chat_session_id`. Stamped with `Members` visibility
     /// when a session is created from a `chat:` routing key.
     chat_session_id: std::sync::Mutex<Option<String>>,
+    /// ADR-076 §决策 4 (rev.): human accounts with read-only awareness of
+    /// this session, mirrored from `SessionMeta.aware_users`. Written once
+    /// by the creation path (the Gateway-resolved seed carried on the
+    /// Intent wire); never re-assigned. Empty for human-origin sessions.
+    aware_users: std::sync::Mutex<Vec<String>>,
     /// ADR-060: todo snapshot mirror (Block C source).
     ///
     /// The single persistence owner is [`ConversationSession`] — the
@@ -1343,6 +1348,12 @@ impl ConversationSession {
             initiator: self.initiator.lock().ok().and_then(|u| u.clone()),
             visibility: self.visibility.lock().ok().and_then(|v| *v),
             chat_session_id: self.chat_session_id.lock().ok().and_then(|c| c.clone()),
+            aware_users: self
+                .aware_users
+                .lock()
+                .ok()
+                .map(|a| a.clone())
+                .unwrap_or_default(),
             title: self.current_title.lock().ok().and_then(|t| t.clone()),
             workspace_id: self.workspace_id.lock().ok().and_then(|w| w.clone()),
             model: self.model.lock().ok().and_then(|m| m.clone()),
@@ -1686,6 +1697,7 @@ impl ConversationSession {
             initiator: std::sync::Mutex::new(None),
             visibility: std::sync::Mutex::new(None),
             chat_session_id: std::sync::Mutex::new(None),
+            aware_users: std::sync::Mutex::new(Vec::new()),
             tokens: std::sync::Mutex::new(None),
             model_usage: std::sync::Mutex::new(None),
             llm_call_counter: std::sync::Mutex::new(None),
@@ -1823,6 +1835,7 @@ impl ConversationSession {
                 initiator: std::sync::Mutex::new(meta.initiator),
                 visibility: std::sync::Mutex::new(meta.visibility),
                 chat_session_id: std::sync::Mutex::new(meta.chat_session_id.clone()),
+                aware_users: std::sync::Mutex::new(meta.aware_users.clone()),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
                 model_usage: std::sync::Mutex::new(meta.model_usage.clone()),
                 llm_call_counter: std::sync::Mutex::new(meta.llm_call_counter),
@@ -2602,6 +2615,42 @@ impl ConversationSession {
         self.initiator.lock().ok().and_then(|u| u.clone())
     }
 
+    /// ADR-076 §决策 4 (rev.): record the human accounts granted read-only
+    /// awareness of this session.
+    ///
+    /// Called **once** by the intent-creation path with the Gateway-
+    /// resolved seed carried on the Intent wire. Like ownership this is a
+    /// creation-time fact: a later call that would *change* a non-empty
+    /// list is ignored with a warning, and an empty seed is a no-op so a
+    /// human-origin session (which never seeds this) keeps its empty list
+    /// without a meta flush. Idempotent re-set of the same list is a no-op.
+    pub fn set_aware_users(&self, users: Vec<String>) {
+        {
+            let mut slot = self.aware_users.lock().unwrap_or_else(|e| e.into_inner());
+            if *slot == users {
+                return;
+            }
+            if !slot.is_empty() {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    "aware_users is a creation-time snapshot — ignoring re-assignment"
+                );
+                return;
+            }
+            *slot = users;
+        }
+        // Persist immediately for the same reason `set_initiator` does: the
+        // listing/authorization paths read the meta file, and a seed left
+        // in memory only would hide the entitled readers until an unrelated
+        // mutation happened to flush.
+        self.write_meta();
+    }
+
+    /// The human accounts with read-only awareness of this session.
+    pub fn aware_users(&self) -> Vec<String> {
+        self.aware_users.lock().ok().map(|a| a.clone()).unwrap_or_default()
+    }
+
     /// ADR-076 §决策 4: whether this session is restricted to its owner.
     ///
     /// An unset visibility means public — see [`SessionVisibility`].
@@ -3122,6 +3171,9 @@ impl Clone for ConversationSession {
             initiator: std::sync::Mutex::new(self.initiator.lock().ok().and_then(|u| u.clone())),
             visibility: std::sync::Mutex::new(self.visibility.lock().ok().and_then(|v| *v)),
             chat_session_id: std::sync::Mutex::new(self.chat_session_id.lock().ok().and_then(|c| c.clone())),
+            aware_users: std::sync::Mutex::new(
+                self.aware_users.lock().ok().map(|a| a.clone()).unwrap_or_default(),
+            ),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
             model_usage: std::sync::Mutex::new(
                 self.model_usage.lock().ok().and_then(|m| m.clone()),
@@ -4623,6 +4675,7 @@ mod tests {
     fn seed_session(conv: &Path, sid: &str, owner: Option<&str>, last_active_at: &str) {
         std::fs::create_dir_all(conv).unwrap();
         let meta = SessionMeta {
+            aware_users: Vec::new(),
             version: 1,
             session_id: sid.to_string(),
             agent_id: "com.test.agent".to_string(),
@@ -4861,6 +4914,7 @@ mod tests {
         ];
         for (id, ts) in &ids {
             let meta = SessionMeta {
+                aware_users: Vec::new(),
                 version: CONVERSATION_FORMAT_VERSION,
                 session_id: id.to_string(),
                 agent_id: "com.test".to_string(),
@@ -5152,6 +5206,7 @@ mod tests {
         // Create a valid session with a meta row.
         let valid_id = "20260503_100000_valid";
         let valid_meta = SessionMeta {
+            aware_users: Vec::new(),
             version: CONVERSATION_FORMAT_VERSION,
             session_id: valid_id.to_string(),
             agent_id: "com.test".to_string(),
@@ -5183,6 +5238,7 @@ mod tests {
         // Create a corrupted session (corrupted flag set).
         let corrupt_id = "20260503_110000_corrupt";
         let corrupt_meta = SessionMeta {
+            aware_users: Vec::new(),
             session_id: corrupt_id.to_string(),
             corrupted: true,
             title: None,
@@ -5902,6 +5958,7 @@ mod tests {
     fn test_session_meta_serde_roundtrip() {
         // ADR-024: full round-trip with SessionMeta fields.
         let meta = SessionMeta {
+            aware_users: Vec::new(),
             version: CONVERSATION_FORMAT_VERSION,
             session_id: "roundtrip_test".to_string(),
             agent_id: "com.test".to_string(),
@@ -6242,6 +6299,7 @@ mod tests {
             std::fs::create_dir_all(&conv_dir).unwrap();
 
             let base = SessionMeta {
+                aware_users: Vec::new(),
                 version: 3,
                 session_id: String::new(),
                 agent_id: "com.test".to_string(),
@@ -6271,6 +6329,7 @@ mod tests {
 
             // Session A: full cache breakdown.
             let meta_a = SessionMeta {
+                aware_users: Vec::new(),
                 session_id: "scan_cache_a".to_string(),
                 tokens: Some(SessionTokens {
                     last_input: 1000,
@@ -6288,6 +6347,7 @@ mod tests {
 
             // Session B: legacy meta (cache fields default to 0).
             let meta_b = SessionMeta {
+                aware_users: Vec::new(),
                 session_id: "scan_cache_b".to_string(),
                 created_at: "2026-01-03T00:00:00Z".to_string(),
                 last_active_at: "2026-01-04T00:00:00Z".to_string(),
@@ -8080,6 +8140,7 @@ mod tests {
         let local = SessionScope::Unfiltered;
 
         let meta = |owner: Option<&str>, visibility: Option<SessionVisibility>| SessionMeta {
+            aware_users: Vec::new(),
             version: 1,
             session_id: "s".into(),
             agent_id: "a".into(),
@@ -8152,6 +8213,7 @@ mod tests {
     /// absent, so each test sets only the fields it is about.
     fn bare_session_meta() -> SessionMeta {
         SessionMeta {
+            aware_users: Vec::new(),
             version: 1,
             session_id: "s".into(),
             agent_id: "a".into(),
@@ -8191,6 +8253,7 @@ mod tests {
         let alice = SessionScope::user("u-alice");
 
         let owned_by_alice = SessionMeta {
+            aware_users: Vec::new(),
             initiator: Some("u-alice".into()),
             visibility: Some(SessionVisibility::Private),
             ..bare_session_meta()
@@ -8202,6 +8265,7 @@ mod tests {
         );
 
         let owned_by_admin = SessionMeta {
+            aware_users: Vec::new(),
             initiator: Some("u-admin".into()),
             ..owned_by_alice.clone()
         };
@@ -8252,6 +8316,7 @@ mod tests {
     fn members_visibility_gates_read_on_chat_membership() {
         fn session_meta_fixture() -> SessionMeta {
             SessionMeta {
+                aware_users: Vec::new(),
                 version: 1,
                 session_id: "s".into(),
                 agent_id: "a".into(),
@@ -8294,6 +8359,7 @@ mod tests {
         let revoked = SessionScope::user("u-bob");
 
         let bound = || SessionMeta {
+            aware_users: Vec::new(),
             chat_session_id: Some("cs-group-1".into()),
             visibility: Some(SessionVisibility::Members),
             initiator: Some("u-alice".into()),
@@ -8315,6 +8381,7 @@ mod tests {
         // Ownerless + Members (a binding without an attributable creator)
         // is readable through the chat path only.
         let unowned = SessionMeta {
+            aware_users: Vec::new(),
             initiator: None,
             ..bound()
         };
@@ -8341,6 +8408,7 @@ mod tests {
         assert!(unowned.is_writable_by(&SessionScope::admin("u-root")));
         assert!(
             !SessionMeta {
+                aware_users: Vec::new(),
                 visibility: Some(SessionVisibility::Private),
                 ..unowned.clone()
             }
@@ -8351,6 +8419,7 @@ mod tests {
         // `Members` without a binding is inert: nothing to match against,
         // so only owner / admin reach it.
         let unbound = SessionMeta {
+            aware_users: Vec::new(),
             chat_session_id: None,
             ..bound()
         };
@@ -8376,6 +8445,7 @@ mod tests {
 
         let meta = |sid: &str, owner: Option<&str>, v: Option<SessionVisibility>, at: &str| {
             SessionMeta {
+                aware_users: Vec::new(),
                 version: 1,
                 session_id: sid.into(),
                 agent_id: "a".into(),
@@ -8532,6 +8602,7 @@ mod tests {
 
         let meta = |sid: &str, owner: &str, at: &str, visibility: Option<SessionVisibility>| {
             SessionMeta {
+                aware_users: Vec::new(),
                 version: 1,
                 session_id: sid.into(),
                 agent_id: "a".into(),
@@ -8650,6 +8721,7 @@ mod tests {
         std::fs::create_dir_all(&conv).unwrap();
 
         let meta = |sid: &str, chat: Option<&str>, at: &str| SessionMeta {
+            aware_users: Vec::new(),
             version: 1,
             session_id: sid.into(),
             agent_id: "a".into(),

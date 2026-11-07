@@ -86,6 +86,14 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         .and_then(SessionVisibility::from_db_str);
     // Design 27 §8.2: Chat session binding for `Members` visibility.
     let chat_session_id: Option<String> = row.get("chat_session_id")?;
+    // ADR-076 §决策 4 (rev.): read-only human awareness. A NULL column (any
+    // row written before the migration) reads as an empty list — "no extra
+    // readers", the pre-feature behaviour.
+    let aware_users_json: Option<String> = row.get("aware_users")?;
+    let aware_users: Vec<String> = aware_users_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
 
     let title: Option<String> = row.get("title")?;
     let workspace_id: Option<String> = row.get("workspace_id")?;
@@ -179,6 +187,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         initiator,
         visibility,
         chat_session_id,
+        aware_users,
         title,
         workspace_id,
         model,
@@ -699,7 +708,7 @@ const SELECT_ALL_COLUMNS: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, model_usage \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, aware_users, model_usage \
 FROM sessions WHERE session_id = ?1";
 
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
@@ -710,7 +719,7 @@ const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, model_usage \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, aware_users, model_usage \
 FROM sessions";
 
 /// Clamp a `u64` token counter into SQLite's `i64` column.
@@ -733,6 +742,13 @@ fn upsert_row(
         .todos
         .as_ref()
         .map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".to_string()));
+    // ADR-076 §决策 4 (rev.): the awareness list is stored as a JSON array; an
+    // empty list writes NULL so the column matches "no extra readers".
+    let aware_users_json = if meta.aware_users.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&meta.aware_users).unwrap_or_else(|_| "[]".to_string()))
+    };
     conn.execute(
         "INSERT INTO sessions( \
             session_id, agent_id, created_at, last_active_at, \
@@ -742,7 +758,7 @@ fn upsert_row(
             token_last_input, token_last_output, token_total_input, token_total_output, \
             token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
             perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, \
-            version, corrupted, initiator, visibility, chat_session_id, model_usage \
+            version, corrupted, initiator, visibility, chat_session_id, aware_users, model_usage \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
             ?5, ?6, ?7, ?8, ?9, ?10, \
@@ -751,7 +767,7 @@ fn upsert_row(
             ?18, ?19, ?20, ?21, \
             ?22, ?23, ?24, ?25, \
             ?26, ?27, ?28, ?29, \
-            ?30, ?31, ?32, ?33, ?34, ?35 \
+            ?30, ?31, ?32, ?33, ?34, ?35, ?36 \
          ) \
          ON CONFLICT(session_id) DO UPDATE SET \
             agent_id = excluded.agent_id, \
@@ -787,6 +803,7 @@ fn upsert_row(
             initiator = excluded.initiator, \
             visibility = excluded.visibility, \
             chat_session_id = excluded.chat_session_id, \
+            aware_users = excluded.aware_users, \
             model_usage = excluded.model_usage",
         params![
             meta.session_id,
@@ -826,6 +843,7 @@ fn upsert_row(
             meta.initiator,
             meta.visibility.map(|v| v.as_str()),
             meta.chat_session_id,
+            aware_users_json,
             serialize_model_usage(meta.model_usage.as_ref()),
         ],
     )?;

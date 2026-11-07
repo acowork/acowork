@@ -143,8 +143,10 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// terminal mark, both on the session's own row instead of a side file);
 /// 11 = `chat_token_usage.history_tokens` (the router's projected-history
 /// occupancy — the only number comparable to the
-/// `chat_router.history_max_tokens` budget).
-pub const SCHEMA_VERSION: i64 = 11;
+/// `chat_router.history_max_tokens` budget); 12 = `sessions.aware_users`
+/// (ADR-076 §决策 4 rev. — human accounts with read-only awareness of an
+/// execution session, seeded by the Gateway for agent-to-agent intents).
+pub const SCHEMA_VERSION: i64 = 12;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -308,6 +310,16 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         11,
         "ALTER TABLE chat_token_usage ADD COLUMN history_tokens INTEGER;",
+    ),
+    // ADR-076 §决策 4 (rev.): the human accounts with read-only awareness of
+    // an execution session. Nullable JSON array with no default: a row written
+    // before this migration reads as NULL → an empty list, i.e. "no extra
+    // readers" — exactly the pre-feature behaviour, and no backfill (a
+    // fabricated reader would be a privacy leak). Only agent-to-agent sessions
+    // created after the upgrade carry a non-empty list.
+    (
+        12,
+        "ALTER TABLE sessions ADD COLUMN aware_users JSON;",
     ),
 ];
 
@@ -504,6 +516,12 @@ const TARGET_SCHEMA: &[SchemaObject] = &[
         name: "history_tokens",
         decl: "history_tokens INTEGER",
     },
+    // v12 — ADR-076 §决策 4 (rev.): read-only human awareness of a session.
+    SchemaObject::Column {
+        table: "sessions",
+        name: "aware_users",
+        decl: "aware_users JSON",
+    },
 ];
 
 /// Apply the version-gated [`MIGRATIONS`] chain, then converge [`TARGET_SCHEMA`],
@@ -549,6 +567,14 @@ pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Res
             // written by a build that shipped the column before stamping
             // the version must still open.
             if *target == 11 && has_column(&tx, "chat_token_usage", "history_tokens")? {
+                continue;
+            }
+            // The v12 column-add has the same guard: SQLite rejects a
+            // `WHERE` on `ADD COLUMN`, so a build that shipped
+            // `sessions.aware_users` before stamping 12 must not hard-fail
+            // here. The end state is identical and `TARGET_SCHEMA` converges
+            // it anyway.
+            if *target == 12 && has_column(&tx, "sessions", "aware_users")? {
                 continue;
             }
             tx.execute_batch(sql)?;
@@ -835,6 +861,79 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
     }
 
+    /// ADR-076 §决策 4 (rev.): the v12 step adds `sessions.aware_users` and
+    /// keeps existing rows, reading the absent column back as "no extra
+    /// readers" (NULL) rather than a fabricated grant.
+    #[test]
+    fn migration_12_adds_the_aware_users_column_and_keeps_the_rows() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        // The v11 shape: `sessions` without the awareness column.
+        conn.execute_batch(
+            "CREATE TABLE sessions ( \
+                 session_id TEXT PRIMARY KEY, \
+                 agent_id TEXT, \
+                 initiator TEXT, \
+                 chat_session_id TEXT \
+             ); \
+             INSERT INTO sessions (session_id, agent_id) VALUES ('s-1', 'com.test.a'); \
+             PRAGMA user_version = 11;",
+        )
+        .expect("seed v11 store");
+
+        apply_migrations(&mut conn).expect("migrate");
+
+        let cols: Vec<String> = conn
+            .prepare("PRAGMA table_info(sessions)")
+            .expect("table_info")
+            .query_map([], |r| r.get::<_, String>(1))
+            .expect("rows")
+            .collect::<rusqlite::Result<_>>()
+            .expect("collect");
+        assert!(
+            cols.iter().any(|c| c == "aware_users"),
+            "columns: {cols:?}"
+        );
+
+        // The pre-existing row survives with a NULL awareness column.
+        let aware: Option<String> = conn
+            .query_row(
+                "SELECT aware_users FROM sessions WHERE session_id = 's-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("row survives the migration");
+        assert_eq!(aware, None, "a pre-v12 row reads as no extra readers");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// The v12 step is guarded against an already-present column: a database
+    /// written by a build that shipped `aware_users` before stamping 12 must
+    /// still open, not fail on a duplicate `ADD COLUMN`.
+    #[test]
+    fn migration_12_is_a_noop_when_the_column_is_already_present() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE sessions ( \
+                 session_id TEXT PRIMARY KEY, \
+                 agent_id TEXT, \
+                 aware_users JSON \
+             ); \
+             PRAGMA user_version = 11;",
+        )
+        .expect("seed already-migrated store");
+
+        apply_migrations(&mut conn).expect("open must not fail on the duplicate column");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
     /// The incident this whole convergence pass exists for.
     ///
     /// Two branches both allocated schema version 10: the intent branch used it
@@ -851,9 +950,13 @@ mod tests {
     #[test]
     fn a_shadowed_version_number_still_heals_the_missing_column() {
         let mut conn = rusqlite::Connection::open_in_memory().expect("open");
-        // A v11 store that carries the response-api branch's v10 and nothing of
-        // the intent branch's v10.
-        conn.execute_batch(
+        // A store stamped at the *current* version that carries the
+        // response-api branch's v10 and nothing of the intent branch's v10.
+        // (The historical incident was a collision at 10; the invariant this
+        // pins is version-independent: a database that claims to be current
+        // but is missing a column must be healed by convergence, not by a
+        // stamp change.)
+        conn.execute_batch(&format!(
             "CREATE TABLE sessions ( \
                  session_id TEXT PRIMARY KEY, \
                  initiator TEXT, \
@@ -867,8 +970,8 @@ mod tests {
              ); \
              INSERT INTO sessions (session_id, initiator, last_active_at) \
                  VALUES ('s-1', 'babea202', 0); \
-             PRAGMA user_version = 11;",
-        )
+             PRAGMA user_version = {SCHEMA_VERSION};"
+        ))
         .expect("seed the incident's store shape");
 
         apply_migrations(&mut conn).expect("open must heal, not stay broken");
@@ -899,7 +1002,7 @@ mod tests {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("version");
-        assert_eq!(version, 11, "the stamp is not rewritten downwards or upwards");
+        assert_eq!(version, SCHEMA_VERSION, "the stamp is not rewritten downwards or upwards");
     }
 
     /// Every fact [`TARGET_SCHEMA`] asserts must hold after opening a baseline

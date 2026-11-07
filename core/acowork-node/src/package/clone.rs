@@ -821,6 +821,7 @@ mod tests {
         for sid in ["s1", "s2", "s3"] {
             meta_store
                 .upsert(&SessionMeta {
+                    aware_users: Vec::new(),
                     version: 1,
                     session_id: sid.to_string(),
                     agent_id: "com.test.weather".to_string(),

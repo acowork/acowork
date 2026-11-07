@@ -35,6 +35,7 @@ fn make_meta(
     agent: &str,
 ) -> SessionMeta {
     SessionMeta {
+        aware_users: Vec::new(),
         version: 4,
         session_id: sid.to_string(),
         agent_id: agent.to_string(),
@@ -144,10 +145,25 @@ fn round_trip_preserves_every_field() -> AcoworkResult<()> {
     let mut bound = got.clone();
     bound.visibility = Some(SessionVisibility::Members);
     bound.chat_session_id = Some("cs-group-1".into());
+    // ADR-076 §决策 4 (rev.): the awareness list round-trips through the
+    // JSON column. A lost list would silently revoke the owner's and guests'
+    // read access to an agent-to-agent session — the black box the field
+    // exists to prevent.
+    bound.aware_users = vec!["owner-lucy".into(), "nicholas".into()];
     sm.upsert(&bound)?;
     let got = sm.get("abc")?.expect("row present after binding");
     assert_eq!(got.visibility, Some(SessionVisibility::Members));
     assert_eq!(got.chat_session_id.as_deref(), Some("cs-group-1"));
+    assert_eq!(got.aware_users, vec!["owner-lucy".to_string(), "nicholas".to_string()]);
+    // An empty list round-trips as empty (stored NULL): "no extra readers",
+    // not a lost field.
+    let mut unbound = got.clone();
+    unbound.aware_users = Vec::new();
+    sm.upsert(&unbound)?;
+    assert!(
+        sm.get("abc")?.expect("row present").aware_users.is_empty(),
+        "empty awareness must not resurrect a stale list"
+    );
     let tokens = got.tokens.as_ref().expect("tokens persisted");
     assert_eq!(tokens.last_input, 100);
     assert_eq!(tokens.last_output, 50);
@@ -574,6 +590,7 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
              DROP INDEX IF EXISTS idx_sessions_intent_key;
              ALTER TABLE sessions DROP COLUMN intent_key;
              ALTER TABLE sessions DROP COLUMN intent_closed;
+             ALTER TABLE sessions DROP COLUMN aware_users;
              PRAGMA user_version = 1;",
         )
         .unwrap();
@@ -712,6 +729,7 @@ fn v6_migration_backfills_unknown_breakdown_and_aggregate() -> AcoworkResult<()>
              DROP INDEX IF EXISTS idx_sessions_intent_key;
              ALTER TABLE sessions DROP COLUMN intent_key;
              ALTER TABLE sessions DROP COLUMN intent_closed;
+             ALTER TABLE sessions DROP COLUMN aware_users;
              ALTER TABLE sessions ADD COLUMN last_compaction_summary TEXT;
              PRAGMA user_version = 5;",
         )
