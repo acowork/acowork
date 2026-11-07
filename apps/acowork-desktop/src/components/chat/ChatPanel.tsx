@@ -22,6 +22,7 @@ import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { useInitiatorIdentity } from "../../lib/sessionInitiator";
+import type { SpeakerKind } from "./speakerBubble";
 import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock } from "lucide-react";
 import type { ChatMessage, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
@@ -657,6 +658,19 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const userBuiltinAvatarId = initiatorIdentity
     ? initiatorIdentity.builtinAvatarId
     : (profileBuiltinAvatarId ?? undefined);
+  // The initiator side of an execution session is not always a person: an
+  // agent-to-agent intent run has an Agent as its initiator, and every turn
+  // that arrives in the session is that Agent speaking in markdown. The
+  // transcript renders accordingly (`components/chat/speakerBubble.ts`); a
+  // `null` identity means "this is me" or a pre-accounts session, both of
+  // which are a person.
+  const userSpeakerKind: SpeakerKind = initiatorIdentity?.kind ?? "user";
+  // Only an Agent resolves to an instance identity, which is what
+  // `AgentAvatar` needs as its seed and its cache-buster.
+  const userAgentId =
+    initiatorIdentity?.kind === "agent" ? activeSessionInitiator : null;
+  const userAgentVersion =
+    initiatorIdentity?.kind === "agent" ? initiatorIdentity.version : null;
 
   // Global state and actions — selectors to avoid full-store re-render
   // `effectiveConnection` is the watchdog's 6-state summary (see
@@ -2153,6 +2167,9 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               userDisplayName={userDisplayName}
               userAvatarUrl={userAvatarUrl}
               userBuiltinAvatarId={userBuiltinAvatarId}
+              userSpeakerKind={userSpeakerKind}
+              userAgentId={userAgentId}
+              userAgentVersion={userAgentVersion}
               onApprove={handleToolApprove}
               onCancelTool={handleToolCancel}
               toolProgress={toolProgressByToolCallId}

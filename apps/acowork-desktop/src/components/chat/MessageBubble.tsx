@@ -11,10 +11,11 @@ import { ThinkBlock } from "./ThinkBlock";
 import { MermaidBlock } from "./MermaidBlock";
 import { CompactionCard } from "./CompactionCard";
 import { UserAvatar } from "../common/UserAvatar";
+import { AgentAvatar } from "../common/AgentAvatar";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
 import { markdownUrlTransform } from "../editor/markdownLinkResolver";
-import { chatMarkdownComponents, CHAT_MARKDOWN_SHELL_CLASS } from "./ChatMarkdown";
+import { chatMarkdownComponents, CHAT_MARKDOWN_SHELL_CLASS, ChatMarkdown } from "./ChatMarkdown";
 import type { AttachedItem } from "../../lib/types";
 import {
   ContextMenu,
@@ -24,6 +25,11 @@ import {
 import { copySelectionOrFallback, snapshotSelection } from "../../lib/clipboard";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
+import {
+  speakerBubbleClass,
+  speakerRendersMarkdown,
+  type SpeakerKind,
+} from "./speakerBubble";
 
 // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -92,12 +98,31 @@ const MessageBubble = React.memo(function MessageBubble({
   liveUserName: liveUserNameProp,
   liveUserAvatarUrl,
   liveUserBuiltinAvatarId,
+  speakerKind = "user",
+  senderAgentId = null,
+  senderAgentVersion = null,
 }: {
   message: ChatMessage;
   currentSessionId: string;
   liveUserName?: string;
   liveUserAvatarUrl?: string | null;
   liveUserBuiltinAvatarId?: string | null;
+  /**
+   * What KIND the speaker on the `user` side of this session is. The
+   * execution session writes every inbound turn — a human's message, an
+   * Agent's intent — as a `user` entry, so the role alone cannot answer that;
+   * `ChatPanel` resolves it from the session's `initiator` (ADR-076 §决策 4).
+   * It decides the bubble's skin and whether its body is parsed as markdown
+   * (`speakerBubble.ts`). Defaults to `"user"`: a caller that has no initiator
+   * fact is rendering a person.
+   */
+  speakerKind?: SpeakerKind;
+  /** The initiator's agent instance id when `speakerKind` is `"agent"`.
+   *  `AgentAvatar` needs it as its deterministic seed / cache key. */
+  senderAgentId?: string | null;
+  /** The initiator agent's package version, for `AgentAvatar`'s `?v=` cache
+   *  bust. Ignored for a person. */
+  senderAgentVersion?: string | null;
 }) {
   // Convergent model: content always comes from the frozen message.
   const displayContent = message.content;
@@ -105,6 +130,11 @@ const MessageBubble = React.memo(function MessageBubble({
   const [expanded, setExpanded] = useState(false);
   // Use CSS custom property for font size — set once in store, global effect
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
+  // Renderer + skin both follow the SPEAKER, decided once here so the two
+  // cannot be configured apart (`speakerBubble.ts`).
+  const asAgentSpeech = speakerRendersMarkdown(speakerKind);
+  // Narrowed once, so the avatar branch below has a non-null instance id.
+  const senderAgent = speakerKind === "agent" ? senderAgentId : null;
   // Live names — received as props from ChatPanel so React.memo can detect
   // profile changes (name/avatar edits update all rendered bubbles instantly).
   const liveUserName = liveUserNameProp ?? message.senderDisplayName;
@@ -292,8 +322,15 @@ const MessageBubble = React.memo(function MessageBubble({
               <div
                 className={`group mt-[6px] max-w-[85%] flex flex-col ${bubbleMetaAnchor("own")}`}
               >
+                {/* The skin follows the SPEAKER, not the side: an Agent's
+                    words get the agent bubble (`speakerBubble.ts`), because
+                    the markdown shell paints its own near-black prose color
+                    and would win over the accent bubble's white text — the
+                    "user bubble turned black" defect. The side and the tail
+                    corner do NOT change: this is still the session's
+                    initiator. */}
                 <div
-                  className="w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
+                  className={`w-full rounded-md rounded-br-sm ${speakerBubbleClass(speakerKind)} px-4 py-2.5 select-text break-words`}
                   style={fontSizeStyle}
                 >
                   {/* Human text renders in full — no height cap, no inner
@@ -301,9 +338,17 @@ const MessageBubble = React.memo(function MessageBubble({
                       chat surfaces (`AgentChatView`, `GroupChatPanel`): a
                       capped box put a second, native scrollbar inside the
                       list's own overlay thumb. */}
-                  <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
-                    {message.content}
-                  </div>
+                  {asAgentSpeech ? (
+                    /* Agent speech: the shared markdown shell every chat
+                       surface renders speech through (`ChatMarkdown`), so the
+                       brief reads the same here as it does in the group panel
+                       and the 1:1 thread. */
+                    <ChatMarkdown content={message.content} style={fontSizeStyle} />
+                  ) : (
+                    <div className="whitespace-pre-wrap break-words">
+                      {message.content}
+                    </div>
+                  )}
                 </div>
                 {message.timestamp && (
                   <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
@@ -313,17 +358,33 @@ const MessageBubble = React.memo(function MessageBubble({
               </div>
             )}
           </div>
-          <UserAvatar
-            displayName={liveUserName}
-            avatarUrl={liveUserAvatarUrl ?? null}
-            // Pass the tri-state through untouched: `null` means "this other
-            // person has no builtin avatar"; coalescing it to `undefined` here
-            // would fall back to the *viewer's* profile icon on their bubble
-            // (regression t-9764c5fa, ADR-076 §决策 4).
-            builtinAvatarId={liveUserBuiltinAvatarId}
-            size={40}
-            className="shrink-0 mt-1"
-          />
+          {senderAgent ? (
+            // An Agent initiator is drawn with the agent avatar, not the
+            // person's: `avatarUrl` here is a package-relative path that only
+            // `AgentAvatar` knows how to resolve (through the avatar-file
+            // endpoint, keyed by instance id + version).
+            <AgentAvatar
+              agentId={senderAgent}
+              displayName={liveUserName}
+              avatarUrl={liveUserAvatarUrl ?? null}
+              version={senderAgentVersion}
+              builtinAvatarId={liveUserBuiltinAvatarId ?? null}
+              size={40}
+              className="shrink-0 mt-1"
+            />
+          ) : (
+            <UserAvatar
+              displayName={liveUserName}
+              avatarUrl={liveUserAvatarUrl ?? null}
+              // Pass the tri-state through untouched: `null` means "this other
+              // person has no builtin avatar"; coalescing it to `undefined` here
+              // would fall back to the *viewer's* profile icon on their bubble
+              // (regression t-9764c5fa, ADR-076 §决策 4).
+              builtinAvatarId={liveUserBuiltinAvatarId}
+              size={40}
+              className="shrink-0 mt-1"
+            />
+          )}
         </div>
         <ContextMenu
           isOpen={menu.isOpen}
@@ -718,10 +779,21 @@ const MessageBubble = React.memo(function MessageBubble({
 }, (prev, next) => {
   // Convergent model: message objects are frozen records from HTTP.
   // Reference equality is sufficient.
+  //
+  // The `liveUser*` / `speaker*` props are compared explicitly because this
+  // comparator is a whitelist: a prop left out is a prop that cannot
+  // re-render the bubble. Dropping `speakerKind` here would freeze an
+  // initiator-side row at whatever skin the first render picked — the
+  // agent/person resolution arrives asynchronously (the agent registry and
+  // the account directory both load after mount), so that is not a corner
+  // case, it is the normal arrival order.
   return prev.message === next.message
     && prev.liveUserName === next.liveUserName
     && prev.liveUserAvatarUrl === next.liveUserAvatarUrl
-    && prev.liveUserBuiltinAvatarId === next.liveUserBuiltinAvatarId;
+    && prev.liveUserBuiltinAvatarId === next.liveUserBuiltinAvatarId
+    && prev.speakerKind === next.speakerKind
+    && prev.senderAgentId === next.senderAgentId
+    && prev.senderAgentVersion === next.senderAgentVersion;
 });
 
 export { MessageBubble };

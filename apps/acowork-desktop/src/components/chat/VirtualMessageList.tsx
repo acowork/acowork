@@ -12,6 +12,7 @@ import { estimateBlockHeight, recordMeasuredHeight } from "./blockHeightEstimato
 import { StreamingSourceBlock } from "./StreamingSourceBlock";
 import { EmptyState } from "./EmptyState";
 import { decideBottomPin } from "../common/bottomAnchor";
+import type { SpeakerKind } from "./speakerBubble";
 // ADR-050 post-C5 fix: StreamingSourceBlock is used by VML to render
 // isLive assistant blocks (streaming preview).  Thought streaming
 // previews are still rendered inside ExploreBlock via ThinkBlock.
@@ -77,6 +78,18 @@ interface VirtualMessageListProps {
   userAvatarUrl: string | null | undefined;
   /** User builtin avatar ID (for MessageBubble). */
   userBuiltinAvatarId: string | null | undefined;
+  /**
+   * Whether the session's initiator — the speaker on this side — is an Agent
+   * rather than a person. Drives the bubble's skin and whether its body is
+   * parsed as markdown (`speakerBubble.ts`); an agent-to-agent run's task
+   * brief is markdown and must not paint its own syntax as characters.
+   */
+  userSpeakerKind: SpeakerKind;
+  /** The initiator's agent instance id when `userSpeakerKind` is `"agent"`,
+   *  else `null`. Needed by `AgentAvatar` as its seed / cache key. */
+  userAgentId: string | null;
+  /** The initiator agent's package version, for `AgentAvatar`'s cache bust. */
+  userAgentVersion: string | null;
   /** Tool approval callback. */
   onApprove: (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => void;
   /** Translation function. */
@@ -190,6 +203,9 @@ export const VirtualMessageList = React.forwardRef<
     userDisplayName,
     userAvatarUrl,
     userBuiltinAvatarId,
+    userSpeakerKind,
+    userAgentId,
+    userAgentVersion,
     onApprove,
     t,
     scrollContainerRef,
@@ -693,6 +709,9 @@ export const VirtualMessageList = React.forwardRef<
                       liveUserName={userDisplayName}
                       liveUserAvatarUrl={userAvatarUrl}
                       liveUserBuiltinAvatarId={userBuiltinAvatarId}
+                      speakerKind={userSpeakerKind}
+                      senderAgentId={userAgentId}
+                      senderAgentVersion={userAgentVersion}
                     />
                   );
                 })()}
@@ -710,6 +729,9 @@ export const VirtualMessageList = React.forwardRef<
                       liveUserName={userDisplayName}
                       liveUserAvatarUrl={userAvatarUrl}
                       liveUserBuiltinAvatarId={userBuiltinAvatarId}
+                      speakerKind={userSpeakerKind}
+                      senderAgentId={userAgentId}
+                      senderAgentVersion={userAgentVersion}
                       agentId={selectedAgentId as string | undefined}
                     />
                   );
