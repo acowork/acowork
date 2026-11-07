@@ -38,9 +38,13 @@
   - [5.4 Memory](#54-memory)
     - [5.4.1 Service-direct prefix `/api/memory/*` (ADR-101)](#541-service-direct-prefix-apimemoryadr-100)
   - [5.5 Workspace](#55-workspace)
+  - [5.6 Session Control Plane (ADR-076 §Decision 4)](#56-session-control-plane-adr-076-decision-4)
+    - [5.6.1 Lifecycle (first batch)](#561-lifecycle-first-batch)
+    - [5.6.2 Session actions (second batch)](#562-session-actions-second-batch)
+    - [5.6.3 Tool narrowing: per-session over per-agent](#563-tool-narrowing-per-session-over-per-agent)
   - [5.7 Round Projection Read (ADR-106 D4)](#57-round-projection-read-adr-106-d4)
 - [6. Static File Service (direct streaming of raw bytes)](#6-static-file-service-direct-streaming-of-raw-bytes)
-- [7. Migrated to MQTT (HTTP endpoints removed)](#7-migrated-to-mqtt-http-endpoints-removed)
+- [7. MQTT Responsibility Boundary (ADR-076 §Decision 4)](#7-mqtt-responsibility-boundary-adr-076-decision-4)
 - [8. Common Error Codes](#8-common-error-codes)
 - [9. Typical Request Examples](#9-typical-request-examples)
 - [10. Notes](#10-notes)
@@ -54,7 +58,7 @@
 - **Authentication**: when `[http].auth_enabled = true`, all `/api/*` requests must carry `Authorization: Bearer <token>`, token file located at `<data_dir>/http_token`.
 - **Error format**: `{ "error": "..." }` + corresponding HTTP status code
 - **Streaming event channel (MQTT)**: chat event streaming no longer uses WebSocket; clients subscribe to MQTT topic `chat/stream/{session_id}` (Desktop App subscribes via its Tauri backend MQTT client).
-- **Command / write channel (MQTT)**: user-initiated session control (send message, activate, rename, delete, close, continue) and human‑in‑the‑loop approvals / Q&A also go over MQTT topics `acowork/agents/{id}/sessions/control/{cmd}`, no longer over HTTP (see [§7](#7-migrated-to-mqtt-http-endpoints-removed)).
+- **Command / write channel (HTTP)**: user-initiated session control (create, open, close, delete, visibility, workspace, config, send message, stop, continue, approvals, Q&A, tool narrowing) goes over the authenticated HTTP API — Gateway token auth plus the reverse proxy's injected `x-user-id`, verified against session ownership by the Runtime. See [§5.6](#56-session-control-plane-adr-076-decision-4). (ADR-033/034 had moved these to MQTT; ADR-076 §Decision 4 moved them back, because an MQTT control message carries no identity.)
 - **Global resource active pull (HTTP)**: Runtime, after mqtt client + available_cache are ready (phase_a), actively `GET /api/global-resources` and performs a **503 retry loop** (30s total budget) as a **fallback to avoid retained-delivery race** alongside MQTT retained push. Shares the same `AvailableResourceCache::update_from_mqtt` processing path; 503 semantics detailed in [§4.13](#413-global-resource-snapshot-runtime-active-pull-entry).
 
 ---
@@ -747,6 +751,164 @@ Mapping and gating rules:
 | POST | `/api/agents/{id}/workspaces/copy` | Copy file/directory | `/workspaces/copy` |
 | POST | `/api/agents/{id}/workspaces/rename` | Atomic rename file/dir | `/workspaces/rename` |
 
+### 5.6 Session Control Plane (ADR-076 §Decision 4)
+
+⚠️ These are **HTTP control interfaces**. They share the session domain with
+[§5.2](#52-session-read-only-queries) but are emphatically **not** part of the
+read-only reverse proxy: the Gateway must authenticate and the Runtime must
+verify ownership. ADR-076 §Decision 4 moved **every user-initiated session
+operation** from MQTT back to HTTP in two batches — **5.6.1 lifecycle** (first)
+and **5.6.2 session actions** (second), fourteen commands in total. The last two
+rows of the §5.6.2 table (tool narrowing, ADR-109) are **new interfaces added
+later** and are not part of that MQTT migration.
+`open` is a **write** authorization as well: it activates the session into
+Runtime memory, which is a lifecycle change, so only the owner / admin may call
+it (see below).
+
+#### 5.6.1 Lifecycle (first batch)
+
+| Method | Path | Purpose | Runtime path | Permission |
+|---|---|---|---|---|
+| POST | `/api/agents/{id}/sessions` | Create a session (**owner = caller**) | `/sessions` | any signed-in user |
+| POST | `/api/agents/{id}/sessions/{sid}/open` | Activate (ADR-038; Closed/NotFound → Active, idempotent) | `/sessions/{sid}/open` | owner / admin |
+| POST | `/api/agents/{id}/sessions/{sid}/close` | Graceful close (triggers distillation, keeps the JSONL) | `/sessions/{sid}/close` | owner / admin |
+| DELETE | `/api/agents/{id}/sessions/{sid}` | Delete the session and its files | `/sessions/{sid}` | owner / admin |
+| PUT | `/api/agents/{id}/sessions/{sid}/visibility` | Share / unshare | `/sessions/{sid}/visibility` | owner / admin |
+| PUT | `/api/agents/{id}/sessions/{sid}/workspace` | Switch workspace | `/sessions/{sid}/workspace` | owner / admin |
+| PUT | `/api/agents/{id}/sessions/{sid}/config` | Switch model / reasoning depth / title | `/sessions/{sid}/config` | owner / admin |
+
+> **`open` and `close` are both write-authorized**: `open` activates the session
+> into Runtime memory, and `Active` / `Closed` are per-session **global** states
+> (not per-connection). A non-owner of a public session therefore does **not**
+> activate it — the frontend skips `POST .../open` entirely when
+> `can_write === false`. Letting a viewer activate would create a permanently
+> resident session that the viewer may not close and whose owner does not know
+> who holds it: the lifecycle loses its accountable party, and the Runtime has
+> **no** per-session GC (`evict_idle_sessions` has no caller; only agent-level
+> auto-sleep), so reclaiming it would need observer reference counting.
+>
+> **Read-only presentation of a public session**: when a non-owner opens someone
+> else's public session, `can_write: false` from `GET /sessions` drives the
+> frontend to disable the composer and the model / workspace / visibility
+> switches, and `openSession` / `closeTab` skip `POST .../open` /
+> `POST .../close` (tab open/close stays local); history still loads through
+> `GET .../messages` (read authorization) and the event stream through the
+> wildcard MQTT subscription. Write operations (send, stop, …) are rejected by
+> the Runtime as 404 (`is_writable_by`) even if the frontend is bypassed.
+>
+> **Re-sharing an ownerless session** is an admin-only call (`403`): who may
+> "re-share" a session that has no owner is a strictly narrower question than
+> who may change it.
+
+| `visibility` | Non-owner may read | Non-owner may write |
+|---|---|---|
+| absent / `"public"` | ✅ | ❌ (404) |
+| `"private"` | ❌ (404) | ❌ (404) |
+
+**`can_write` field**: every item from `GET /api/agents/{id}/sessions` carries
+`can_write: bool` (the result of `SessionMeta::is_writable_by(scope)`). It is the
+**only** basis on which the frontend disables write controls — never infer it
+from `visibility`: public means "others may read", while admin / local mode may
+also write sessions they do not own. A missing field (older Runtime) reads as
+`true`.
+
+#### 5.6.2 Session actions (second batch)
+
+The second batch moves the operations that "act on an already-open session" to
+HTTP as well. They carry **no ownership decision** (they change session content,
+not ownership), so nothing about authorization is gained by moving them — what
+is gained is a **single division of labour**: user-initiated → HTTP;
+backend-reported → MQTT events. Every user operation then necessarily carries an
+identity, with no exceptions.
+
+| Method | Path | Purpose | Runtime path | Permission |
+|---|---|---|---|---|
+| POST | `/api/agents/{id}/sessions/{sid}/messages` | Send a message (ex-mqtt `chat_message`) | `/sessions/{sid}/messages` | owner (write) |
+| POST | `/api/agents/{id}/sessions/{sid}/stop` | Stop the current round (ex-mqtt `stop`) | `/sessions/{sid}/stop` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/continue` | Resume after a pause (ex-mqtt `continue_execution`) | `/sessions/{sid}/continue` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/approval` | Tool approval allow / deny (ex-mqtt `approval_decision`) | `/sessions/{sid}/approval` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/answer` | Answer `ask_user_question` (ex-mqtt `question_answer`) | `/sessions/{sid}/answer` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/cancel-tool` | Cancel one running tool (ex-mqtt `cancel_tool`, ADR-045) | `/sessions/{sid}/cancel-tool` | owner |
+| POST | `/api/agents/{id}/sessions/{sid}/compress` | Context compression (ex-mqtt `compress_action`; `compact_context` was a duplicate command, removed too) | `/sessions/{sid}/compress` | owner |
+| GET | `/api/agents/{id}/sessions/{sid}/tool-policy` | Read this session's tool narrowing (`null` = follow the agent layer; ADR-109, **not** an MQTT migration item) | `/sessions/{sid}/tool-policy` | read auth |
+| PUT | `/api/agents/{id}/sessions/{sid}/tool-policy` | Write this session's tool narrowing (whole replacement; ADR-109, **not** an MQTT migration item) | `/sessions/{sid}/tool-policy` | write auth |
+
+**Action request bodies** (fields map 1:1 onto the Runtime handlers; all
+optional unless noted):
+
+```json
+// POST .../messages — equivalent to the former mqtt ChatMessage (`params_json`
+// is a STRING; the Runtime parses attached_items / content_parts out of it)
+{ "content": "...", "message_id": "...", "command": "", "params_json": "{}" }
+
+// POST .../approval  /  .../answer  — the human-in-the-loop replies
+{ "approved": true }
+{ "answer": "..." }
+
+// PUT .../config — the three write commands removed from MQTT (field names are
+// the backend's SessionConfigDelta names, snake_case)
+{ "model": "gpt-5", "provider": "openai" }   // ex-mqtt model_switch
+{ "reasoning_effort": "high" }               // ex-mqtt reasoning_effort
+{ "title": "New title" }                     // ex-mqtt update_session_title
+
+// PUT .../workspace — switching workspace has its own endpoint; the /config
+// branch only rewrites meta, so tools would keep working in the old directory.
+{ "workspace_id": "ws-123" }
+
+// PUT .../tool-policy — this session's tool narrowing, **whole replacement**
+// (not incremental). All three groups are deny lists: they can only switch OFF
+// something the agent layer exposes, never switch something back on. All-empty
+// (or an explicit null) = follow the agent layer, and the meta column goes back
+// to NULL. NOTE: `disabled_mcp_tools` is a **server → tool-name map** (Rust's
+// BTreeMap), NOT a [{server, tool}] list; the Desktop converts it through
+// fromWirePolicy / toWirePolicy (ADR-109 D1).
+{ "tool_policy": {
+    "disabled_builtin_tools": ["shell"],
+    "disabled_mcp_servers": ["playwright"],
+    "disabled_mcp_tools": { "playwright": ["screenshot"] }
+} }
+// back to inheriting: { "tool_policy": null }
+```
+
+**The MQTT side is gone entirely**: the fourteen commands above were published
+on `sessions/control/{cmd}` (`create_session` / `open_session` / `close_session` /
+`delete_session` / `model_switch` / `reasoning_effort` / `update_session_title` /
+`workspace_switch` / `chat_message` / `stop` / `continue_execution` /
+`approval_decision` / `question_answer` / `cancel_tool` / `compress_action`;
+`compact_context` was a duplicate of `compress_action` and was removed with it).
+Their proto fields were **removed** from `ControlCommand` (the field numbers were
+then renumbered contiguously, see [mqtt.md](./mqtt.md) §4), and the matching
+`ControlAction` / `InboundMessage` variants plus the Gateway / Tauri command-name
+maps were deleted — so this is not "sent and rejected", it is **unexpressible**:
+no broker client can silently rewrite someone else's session through them.
+`ControlCommand` now holds only `Intent` (Gateway → Runtime) and
+`ActiveHeartbeat` (liveness); neither is a user action.
+
+#### 5.6.3 Tool narrowing: per-session over per-agent
+
+Tool switches have two layers, and the direction is **one-way**: the agent layer
+(`agent-tools.json` / `agent-mcp.json`, edited in the right-panel settings)
+decides which builtin tools and which MCP servers / tools this agent has at all;
+the session layer can only **take away from it**, never add back. The reason is
+composability: if it could widen, sessions of one agent would each hold their own
+tool set, and both the agent-level approval / risk rules and `agent-mcp.json`'s
+connection lifecycle would stop applying (a tool an agent did not enable has no
+wrapper in memory to begin with).
+
+- **A new session inherits**: the `tool_policy` column is `NULL`, and it stays
+  `NULL` until a switch is actually moved — "write only on change" is a property
+  of the data model, not a convention. Values set per session affect **that
+  session only**; the agent layer keeps describing what the *next* session starts
+  from.
+- **Three independent groups**: builtin tools, MCP servers, MCP tools (per
+  server). Each has its own "follow the agent default" reset. Disabling a server
+  wins over its tools, and the per-tool rows are kept so re-enabling the server
+  restores the previous per-tool choices instead of wiping them.
+- **Whole replacement** on write, so an optimistic retry cannot compound and
+  there is exactly one writer (the UI) to lose a race against.
+- Names are stored as given; an entry naming a tool the agent no longer exposes
+  is inert (the layer only filters), which is why the endpoint validates nothing.
+
 ### 5.7 Round Projection Read (ADR-106 D4)
 
 > **Implementation**: [`core/acowork-runtime/src/http/rounds.rs`](../../../core/acowork-runtime/src/http/rounds.rs) (routes and authorization) + [`core/acowork-runtime/src/rounds.rs`](../../../core/acowork-runtime/src/rounds.rs) (round side table and projection assembly).
@@ -880,26 +1042,56 @@ Discipline (**the row is not written first**):
 
 ---
 
-## 7. Migrated to MQTT (HTTP endpoints removed)
+## 7. MQTT Responsibility Boundary (ADR-076 §Decision 4)
 
-> **ADR-033 + ADR-034**: the following interactions now use MQTT; **HTTP no longer provides corresponding endpoints**.
-> Registering these paths at the Gateway HTTP layer would conflict with `proxy_routes` / `chat_routes` and panic at startup.
-> Callers should subscribe / publish to the corresponding MQTT topics. Full protocol details in [mqtt.md](./mqtt.md).
+> **ADR-033 + ADR-034 once moved user interaction from HTTP to MQTT; ADR-076
+> §Decision 4 moved all of it back to HTTP.** The conclusion, fixed:
+>
+> 1. **Everything a user triggers goes over HTTP** — Gateway token auth plus the
+>    reverse proxy's injected `x-user-id`, with the Runtime verifying ownership.
+>    Two batches: **lifecycle** (create / open / close / delete / visibility /
+>    workspace / config) and **session actions** (messages / stop / continue /
+>    approval / answer / cancel-tool / compress), see
+>    [§5.6](#56-session-control-plane-adr-076-decision-4).
+> 2. **MQTT carries only backend-reported events** — the frontend subscribes and
+>    refreshes passively: `sessions/created` / `sessions/deleted`,
+>    `sessions/{sid}/messages/#` (chunk / tool_call / done / …),
+>    `sessions/{sid}/meta` / `config` (retained snapshots). `ControlCommand` holds
+>    only `Intent` (Gateway → Runtime) and `ActiveHeartbeat` (liveness) —
+>    **neither is a user action**.
+> 3. **Why**: an MQTT control message carries no identity — the broker cannot
+>    stamp one — so the Runtime can neither record nor check a session's owner.
+>    Any client able to reach the broker could silently rewrite or delete another
+>    account's session (the extreme case: `approval_decision{approved:true}` =
+>    arbitrary command execution in someone else's workspace). The proto fields
+>    were **removed**, not deprecated: the capability is unexpressible at the
+>    type level — it cannot be sent, rather than being sent and rejected.
 
-| Removed HTTP endpoint | Replacement MQTT channel | Notes |
+The table below keeps the ADR-033/034-era endpoint mapping, with the **third
+column naming the ADR-076 §Decision 4 outcome**:
+
+| Historical HTTP endpoint | MQTT channel it moved to | Current state (ADR-076 §Decision 4) |
 |---|---|---|
-| `POST /api/agents/{id}/message` | `PUB acowork/agents/{id}/sessions/control/chat_message` | Send message (includes message_id, content, session_id, command, attached_items, content_parts) — ADR-046 removed `document_ids` / `attached_context`; unified via `attached_items` (wire fields camelCase, see §5.3.3) |
-| `GET /api/agents/{id}/stream` | `SUB acowork/agents/{id}/sessions/{sid}/messages/#` (or `chat/stream/{session_id}`) | Streaming chat events: chunk / tool_call / done / approval_needed / question_pending |
-| `POST /api/agents/{id}/sessions/{sid}/activate` | `PUB sessions/control/open_session` | ADR-038: Closed / NotFound → Active |
-| `PUT /api/agents/{id}/sessions/{sid}/title` | `PUB sessions/control/update_title` | |
-| `DELETE /api/agents/{id}/sessions/{sid}` | `PUB sessions/control/delete_session` | |
-| `POST /api/agents/{id}/sessions/{sid}/close` | `PUB sessions/control/close_session` | Triggers distillation, retains JSONL |
-| `POST /api/agents/{id}/continue` | `PUB sessions/control/continue_execution` | Resume after pause (e.g., iteration_limit) |
-| `POST /api/agents/{id}/approval` | `PUB inbound` ApprovalDecision | User allow/deny for tool calls |
-| `POST /api/agents/{id}/question` | `PUB inbound` QuestionAnswer | User answers to `ask_user_question` prompts |
-| `POST /api/agents/{id}/model-switch` (if any) | `PUB sessions/control/model_switch` | Switch model + optional provider |
+| `POST /api/agents/{id}/message` | `PUB sessions/control/chat_message` | ⚠️ back to HTTP: `POST .../sessions/{sid}/messages`, see §5.6.2 |
+| `GET /api/agents/{id}/stream` | `SUB sessions/{sid}/messages/#` | ✅ stays MQTT (the event plane was always backend-reported) |
+| `POST /api/agents/{id}/continue` | `PUB sessions/control/continue_execution` | ⚠️ back to HTTP: `POST .../sessions/{sid}/continue` |
+| `POST /api/agents/{id}/approval` | `PUB ... ApprovalDecision` | ⚠️ back to HTTP: `POST .../sessions/{sid}/approval` (**closes the forged-approval hole**) |
+| `POST /api/agents/{id}/question` | `PUB ... QuestionAnswer` | ⚠️ back to HTTP: `POST .../sessions/{sid}/answer` |
+| `POST .../sessions/{sid}/open` | `PUB sessions/control/open_session` | ⚠️ back to HTTP, see §5.6.1 |
+| `PUT .../sessions/{sid}/title` | `PUB sessions/control/update_session_title` | ⚠️ back to HTTP: `PUT .../sessions/{sid}/config` (`{title}`) |
+| `DELETE /api/agents/{id}/sessions/{sid}` | `PUB sessions/control/delete_session` | ⚠️ back to HTTP, see §5.6.1 |
+| `POST .../sessions/{sid}/close` | `PUB sessions/control/close_session` | ⚠️ back to HTTP, see §5.6.1 |
+| `POST /api/agents/{id}/model-switch` | `PUB sessions/control/model_switch` | ⚠️ back to HTTP: `PUT .../sessions/{sid}/config` (`{model, provider}`) |
+| `PUT .../sessions/{sid}/reasoning-effort` | `PUB sessions/control/reasoning_effort` | ⚠️ back to HTTP: `PUT .../sessions/{sid}/config` (`{reasoning_effort}`) |
+| `PUT .../sessions/{sid}/workspace` | `PUB sessions/control/workspace_switch` | ⚠️ back to HTTP (**not** through `/config`: that branch only rewrites meta), see §5.6.1 |
+| (new) `POST /api/agents/{id}/sessions` | — | ⚠️ HTTP: create a session, owner = caller, see §5.6.1 |
+| (new) `PUT .../sessions/{sid}/visibility` | — | ⚠️ HTTP: share / unshare, see §5.6.1 |
+| (new) `POST .../sessions/{sid}/{stop,cancel-tool,compress}` | was `PUB sessions/control/{stop,cancel_tool,compress_action}` | ⚠️ HTTP, see §5.6.2 (`compact_context` was a duplicate and went with it) |
 
-**Runtime‑side handling entry**: all the above commands are deserialised and dispatched via the `ControlAction` enum in [`core/acowork-runtime/src/mqtt/control_handler.rs`](../../../core/acowork-runtime/src/mqtt/control_handler.rs).
+**The MQTT-side proto fields, `ControlAction` variants and command-name maps**
+(Gateway `mqtt/client.rs`, Tauri `chat_mqtt.rs` / `mqtt_client.rs`) are **all
+deleted**; the field numbers were then renumbered contiguously (no compatibility
+need during development, see [mqtt.md](./mqtt.md) §4).
 
 ---
 

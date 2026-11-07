@@ -825,9 +825,10 @@ Gateway 会校验并把它当作 scope 注入（等同于以该用户身份读�
 
 ### 5.6 会话控制面（ADR-076 §决策 4）
 
-⚠️ 这十四条是 **HTTP 控制接口**，与 [§5.2](#52-会话只读查询) 同属会话域，但**不是**只读反代：
+⚠️ 这些接口都是 **HTTP 控制接口**，与 [§5.2](#52-会话只读查询) 同属会话域，但**不是**只读反代：
 Gateway 必须鉴权，Runtime 必须校验 owner。ADR-076 §决策 4 把**所有用户主动触发的会话操作**
-从 MQTT 搬到 HTTP，分两批：**5.6.1 生命周期**（第一批）与 **5.6.2 会话动作**（第二批）。
+从 MQTT 搬到 HTTP，分两批共十四条命令：**5.6.1 生命周期**（第一批）与 **5.6.2 会话动作**（第二批）。
+其中 §5.6.2 表末两条工具收窄接口（ADR-109）是**后加的新接口**，不在 MQTT 迁移之列。
 `open` 也是**写**授权：它把会话激活进 Runtime 内存，属于生命周期变更，只有 owner / admin 可调（见下）。
 
 #### 5.6.1 生命周期（第一批）
@@ -873,6 +874,8 @@ Gateway 必须鉴权，Runtime 必须校验 owner。ADR-076 §决策 4 把**所�
 | POST | `/api/agents/{id}/sessions/{sid}/answer` | 回答 `ask_user_question`（原 mqtt `question_answer`） | `/sessions/{sid}/answer` | owner |
 | POST | `/api/agents/{id}/sessions/{sid}/cancel-tool` | 取消单个在跑工具（原 mqtt `cancel_tool`，ADR-045） | `/sessions/{sid}/cancel-tool` | owner |
 | POST | `/api/agents/{id}/sessions/{sid}/compress` | 上下文压缩（原 mqtt `compress_action`；`compact_context` 是重复命令，一并删除） | `/sessions/{sid}/compress` | owner |
+| GET | `/api/agents/{id}/sessions/{sid}/tool-policy` | 读本会话的工具收窄（`null` = 跟随 Agent 层；ADR-109，**非** MQTT 迁移项） | `/sessions/{sid}/tool-policy` | 读授权 |
+| PUT | `/api/agents/{id}/sessions/{sid}/tool-policy` | 写本会话的工具收窄（整体替换；ADR-109，**非** MQTT 迁移项） | `/sessions/{sid}/tool-policy` | 写授权 |
 
 **动作请求体**（字段与 Runtime handler 一一对应；除注明外均可省略）：
 
@@ -910,6 +913,19 @@ Gateway 必须鉴权，Runtime 必须校验 owner。ADR-076 §决策 4 把**所�
 // PUT .../workspace — 必须走这个端点，不能走 /config：/config 的 workspace_id
 // 分支只改 meta，不重推 workspace context / prompt 文件，工具会在旧目录里干活。
 { "workspace_id": "ws-123" }
+
+// PUT .../tool-policy —— 本会话的工具收窄，**整体替换**（不是增量）。
+// 三组都是"拒绝列表"：只能把 Agent 层已放行的那一项关掉，不能反过来打开。
+// 全部为空（或直接传 null）= 跟随 Agent 层，Meta 列写回 NULL。
+// 注意 `disabled_mcp_tools` 是 **server → tool 名的 map**（Rust 的 BTreeMap），
+// 不是 [{server, tool}] 列表；Desktop 侧由 fromWirePolicy / toWirePolicy 转换
+// （ADR-109 D1）。
+{ "tool_policy": {
+    "disabled_builtin_tools": ["shell"],
+    "disabled_mcp_servers": ["playwright"],
+    "disabled_mcp_tools": { "playwright": ["screenshot"] }
+} }
+// 恢复继承：{ "tool_policy": null }
 
 // PUT .../config — 已从 MQTT 删除的三条写命令改走这里（字段名 = SessionConfigDelta）
 { "model": "gpt-5", "provider": "openai" }   // 原 mqtt model_switch
@@ -950,6 +966,24 @@ Tauri 的命令名映射表也一并删除 —— 也就是说这不是"发出�
 任何 broker 客户端都无法借此静默改写他人会话。
 `ControlCommand` 现只余 `Intent`（Gateway → Runtime）与 `ActiveHeartbeat`（存在性心跳），
 **均非用户动作**。新代码请用上表 HTTP 接口：只有 HTTP 路径携带身份，MQTT 控制消息不携带。
+
+#### 5.6.3 工具收窄：per-session 覆盖 per-agent
+
+工具开关有两层，**方向是单向的**：Agent 层（`agent-tools.json` / `agent-mcp.json`，右侧设置面板编辑）
+决定这个 Agent 有哪些内置工具、哪些 MCP server / tool 可用；会话层只能**从这层里拿掉**，不能加回来。
+理由是可组合性：若能加宽，同一个 Agent 的会话就会各自持有工具集，Agent 级的审批/风险规则与
+`agent-mcp.json` 的连接生命周期（server 未启用时其 tool 根本没有 wrapper）都会失效。
+
+- **新会话默认继承**：Meta 的 `tool_policy` 列为 `NULL`，任何工具开关一次都没动过就一直是 `NULL`——
+  "只有改过才写"是数据模型层面的事实，不是前端的约定。
+- **两层互不影响**：per-session 的改动只作用于**这一个** session（含它后续每一轮），与 per-agent 的
+  配置值互不覆盖；而 per-agent 的值继续是**下一个新建 session 的默认值**。所以右侧设置面板与 `+` 菜单
+  同时显示不同的值是正常的——面板描述 Agent 层，会话层只在它之下做减法。
+- **写整份策略，不做逐项 toggle**：请求体是完整替换，重放同一请求不会叠加；这也让 UI 的乐观更新
+  与服务端回显一一对应。
+- **三组拒绝列表各自独立重置**：把 MCP server 恢复默认不会连带把用户关掉的内置工具打开。
+- **生效时机**：会话活跃时立即重编工具集（下一轮 LLM 调用生效，无需重开）；会话已关闭时只改 Meta，
+  下次打开时按 Meta 合成。
 
 ### 5.3 附件（Attachment）
 
