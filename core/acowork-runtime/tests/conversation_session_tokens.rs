@@ -407,6 +407,7 @@ async fn legacy_meta_file_loads_with_tokens_none() {
         temperature: None,
         context_window: None,
         todos: None,
+        tool_policy: None,
         message_count: 7,
         last_active_at: "2026-01-01T00:00:00Z".to_string(),
         tokens: None, // missing in legacy format
@@ -572,6 +573,7 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
         temperature: None,
         context_window: None,
         todos: None,
+        tool_policy: None,
         message_count: 1,
         last_active_at: "2026-01-01T00:00:00Z".to_string(),
         tokens: None,

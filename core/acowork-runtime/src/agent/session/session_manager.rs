@@ -2273,6 +2273,81 @@ impl SessionManager {
         crate::conversation::write_session_meta(&conversations_dir, &meta).is_ok()
     }
 
+    /// Read a session's per-session tool narrowing.
+    ///
+    /// Returns `None` both when the session inherits the agent layer and when
+    /// the session does not exist — callers that need the distinction read the
+    /// meta themselves (the HTTP layer already resolves existence for its
+    /// 404).
+    pub fn session_tool_policy(
+        &self,
+        session_id: &str,
+    ) -> Option<acowork_core::session_meta::SessionToolPolicy> {
+        if let Some(handle) = self.sessions.get(session_id)
+            && let Some(conv) = handle.conversation.as_ref()
+        {
+            return conv.tool_policy();
+        }
+        let conversations_dir =
+            std::path::Path::new(&self.core.config.work_dir).join("conversations");
+        crate::conversation::read_session_meta(&conversations_dir, session_id)
+            .ok()
+            .and_then(|meta| meta.tool_policy)
+    }
+
+    /// Set a session's per-session tool narrowing (builtin tools + MCP
+    /// servers/tools this ONE session keeps out of what the agent exposes).
+    ///
+    /// Works whether the session is live or only on disk, mirroring
+    /// [`Self::set_session_visibility`]:
+    ///
+    /// - **live**: `ConversationSession` persists the row (it is the single
+    ///   persistence owner) and the session task is told to re-compose its
+    ///   tool set, so the change lands on the next LLM call without a reopen;
+    /// - **closed**: the meta row is read-modify-written in place. There is no
+    ///   live tool set to touch — `SessionTask::new` composes the layer from
+    ///   the hydrated policy when the session opens.
+    ///
+    /// `None` (and an all-empty policy) mean "inherit the agent layer". See
+    /// [`crate::agent::session::session_tool_layer`] for why the session layer
+    /// can only narrow.
+    ///
+    /// Returns `false` when no such session exists.
+    pub fn set_session_tool_policy(
+        &self,
+        session_id: &str,
+        policy: Option<acowork_core::session_meta::SessionToolPolicy>,
+    ) -> bool {
+        let normalised = policy.filter(|p| !p.is_empty());
+
+        if let Some(handle) = self.sessions.get(session_id)
+            && let Some(conv) = handle.conversation.as_ref()
+        {
+            conv.set_tool_policy(normalised.clone());
+            // A closed inbound channel means the task is gone; the persisted
+            // row is already correct, so the next open picks it up.
+            if let Err(e) = handle.send(SessionMessage::UpdateToolPolicy {
+                policy: normalised,
+            }) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "set_session_tool_policy: live session did not accept the update (likely closed)"
+                );
+            }
+            return true;
+        }
+
+        let conversations_dir =
+            std::path::Path::new(&self.core.config.work_dir).join("conversations");
+        let Ok(mut meta) = crate::conversation::read_session_meta(&conversations_dir, session_id)
+        else {
+            return false;
+        };
+        meta.tool_policy = normalised;
+        crate::conversation::write_session_meta(&conversations_dir, &meta).is_ok()
+    }
+
     /// ADR-038: Explicit session activation (transitions Closed/NotFound → Active).
     ///
     /// Idempotent: an already-Active session returns
@@ -5627,6 +5702,7 @@ mod tests {
                 temperature: None,
                 context_window: None,
                 todos: None,
+                tool_policy: None,
                 message_count: 0,
                 last_active_at: "2026-01-01T00:00:00Z".to_string(),
                 tokens: None,
@@ -6760,5 +6836,149 @@ mod tests {
             "MCP connect failure must not push anything into the session context, got: {:?}",
             received[0]
         );
+    }
+
+    /// Per-session tool narrowing persists through BOTH session states:
+    ///
+    /// - **live**: the `ConversationSession` (single persistence owner) holds
+    ///   it AND the task is told to re-compose — a persisting-only or
+    ///   notifying-only implementation would break one of the two assertions;
+    /// - **closed**: there is no task, so the meta row is read-modify-written
+    ///   and the next open composes from it.
+    ///
+    /// Also pins the "inherit" normalisation: an all-empty policy must read
+    /// back as `None`, so "reset to the agent default" is byte-identical to a
+    /// never-toggled session.
+    #[tokio::test]
+    async fn set_session_tool_policy_persists_for_live_and_closed_sessions() {
+        use crate::agent::session::session_handle::SessionHandle;
+        use crate::agent::session::session_task::SessionMessage;
+        use crate::agent::session_state::{SessionRuntimeSnapshot, SessionStatus};
+        use acowork_core::session_meta::SessionToolPolicy;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut manager, _chunk_rx) = republish_test_manager(&dir);
+
+        let mut policy = SessionToolPolicy::default();
+        policy.disabled_builtin_tools.insert("web_fetch".into());
+        policy.disabled_mcp_servers.insert("playwright".into());
+
+        // ── live session ────────────────────────────────────────
+        let sid = "policy_live".to_string();
+        let (conv, _cfg_rx, _state_rx) = ConversationSession::new(
+            dir.path(),
+            &sid,
+            crate::conversation::SessionConfig {
+                agent_id: "com.test.policy".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let conv = std::sync::Arc::new(conv);
+        let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel::<SessionMessage>(8);
+        let (agent_inbound_tx, _agent_inbound_rx) =
+            tokio::sync::mpsc::channel::<crate::agent::inbound::InboundMessage>(1);
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        manager.sessions.insert(
+            sid.clone(),
+            SessionHandle {
+                session_id: sid.clone(),
+                inbound_tx,
+                agent_inbound_tx,
+                join_handle: tokio::spawn(async {}),
+                status_rx,
+                last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
+                pending_debug_handles: Arc::new(tokio::sync::Mutex::new(None)),
+                snapshot: Arc::new(std::sync::RwLock::new(SessionRuntimeSnapshot {
+                    session_id: sid.clone(),
+                    status: r#""idle""#.to_string(),
+                    model: None,
+                    provider: None,
+                    account_id: None,
+                    ratio: None,
+                    todos_json: None,
+                    context_usage: None,
+                })),
+                workspace_id: Arc::new(std::sync::RwLock::new("__agent_home__".to_string())),
+                current_work_dir: Arc::new(std::sync::RwLock::new(None)),
+                conversation: Some(conv.clone()),
+            },
+        );
+
+        assert!(manager.set_session_tool_policy(&sid, Some(policy.clone())));
+        assert_eq!(
+            manager.session_tool_policy(&sid),
+            Some(policy.clone()),
+            "a live session must report the policy it was just given"
+        );
+        assert_eq!(
+            conv.tool_policy(),
+            Some(policy.clone()),
+            "the live ConversationSession is the persistence owner and must hold it"
+        );
+        match inbound_rx.try_recv() {
+            Ok(SessionMessage::UpdateToolPolicy { policy: pushed }) => assert_eq!(pushed, Some(policy.clone())),
+            other => panic!("expected UpdateToolPolicy, got {other:?}"),
+        }
+
+        // ── closed session ──────────────────────────────────────
+        let closed = "policy_closed";
+        let conversations_dir = dir.path().join("conversations");
+        let meta = crate::conversation::SessionMeta {
+            version: 3, // `CONVERSATION_FORMAT_VERSION` (private to `conversation`)
+            session_id: closed.to_string(),
+            agent_id: "com.test.policy".to_string(),
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            initiator: None,
+            visibility: None,
+            chat_session_id: None,
+            aware_users: Vec::new(),
+            title: Some("closed".to_string()),
+            workspace_id: None,
+            model: None,
+            provider: None,
+            account_id: None,
+            reasoning_effort: None,
+            temperature: None,
+            context_window: None,
+            todos: None,
+            tool_policy: None,
+            message_count: 0,
+            last_active_at: "2026-01-01T00:00:00.000Z".to_string(),
+            tokens: None,
+            model_usage: None,
+            llm_call_counter: None,
+            perf: None,
+            model_ratio: None,
+            last_compaction_offset: None,
+            corrupted: false,
+        };
+        crate::conversation::write_session_meta(&conversations_dir, &meta).expect("seed meta");
+
+        assert!(manager.set_session_tool_policy(closed, Some(policy.clone())));
+        let persisted = crate::conversation::read_session_meta(&conversations_dir, closed)
+            .expect("meta readable")
+            .tool_policy;
+        assert_eq!(
+            persisted,
+            Some(policy.clone()),
+            "a closed session must be updated in place in the meta row"
+        );
+        assert_eq!(manager.session_tool_policy(closed), Some(policy.clone()));
+
+        // ── normalisation ───────────────────────────────────────
+        assert!(manager.set_session_tool_policy(closed, Some(SessionToolPolicy::default())));
+        assert_eq!(
+            crate::conversation::read_session_meta(&conversations_dir, closed)
+                .expect("meta readable")
+                .tool_policy,
+            None,
+            "an empty policy must persist as None (inherit the agent layer)"
+        );
+        assert!(!manager.set_session_tool_policy("no-such-session", None));
     }
 }

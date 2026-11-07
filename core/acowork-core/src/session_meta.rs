@@ -30,6 +30,8 @@
 //! JSONL files are not this backend's concern — the caller cleans them up.
 //! Keeping the side-effect split lets the trait stay pure on the storage axis.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -352,6 +354,94 @@ pub enum TodoStatus {
     Completed,
 }
 
+/// Per-session **narrowing** of the agent-level tool configuration.
+///
+/// The agent layer (`agent_tools.json` / `agent_mcp.json` /
+/// `agent_mcp_tools.json`) owns which tools exist for the agent; this type
+/// owns which of them a *single session* keeps. Absent (`None` on
+/// [`SessionMeta::tool_policy`]) means "inherit the agent layer verbatim",
+/// which is the state every session starts in — the row is written **only**
+/// when the user flips a switch for one session.
+///
+/// # Why a deny-list and not a tri-state map
+///
+/// The session layer can only ever *remove* tools, never add them back:
+///
+/// - MCP tool wrappers are materialised per-agent at connect time
+///   (`connect_mcp_with_reconcile_and_filter`), so a tool the agent layer
+///   did not expose has no wrapper in memory for a session to re-enable.
+///   Re-enabling would need a reconnect or a second, permanently-resident
+///   wrapper set.
+/// - A uniform "on for this session" switch over all four groups keeps one
+///   mental model. A tri-state map would let the UI show a token as on in a
+///   session while the agent panel shows it off, which reads as a bug.
+///
+/// Deny-lists also mean a tool added to the agent later is automatically
+/// available in every existing session (no row to migrate), and an empty
+/// policy is byte-identical to "never toggled" — see [`Self::is_empty`].
+///
+/// Identities: builtin entries are tool names; MCP servers are their
+/// `agent_mcp.json` names; MCP tools are keyed by server, then by the
+/// **unprefixed** tool name as the server's own `tools/list` spells it
+/// (the `mcp_<server>__<tool>` prefix is a runtime rendering detail, not
+/// persisted state).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionToolPolicy {
+    /// Builtin tool names switched off for this session.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_builtin_tools: BTreeSet<String>,
+    /// MCP server names switched off for this session. Disabling a server
+    /// disables every tool it contributes, whatever `disabled_mcp_tools`
+    /// says (the narrower list is kept so toggling the server back on
+    /// restores the per-tool choices instead of resetting them).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_mcp_servers: BTreeSet<String>,
+    /// Per-server tool names switched off for this session.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub disabled_mcp_tools: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl SessionToolPolicy {
+    /// `true` when the policy removes nothing — i.e. "inherit the agent
+    /// layer". Persisted as `NULL` by the store (see `upsert_row`), so this
+    /// is the single test every write path uses to decide "store the
+    /// override" vs "go back to inheriting".
+    pub fn is_empty(&self) -> bool {
+        self.disabled_builtin_tools.is_empty()
+            && self.disabled_mcp_servers.is_empty()
+            && self.disabled_mcp_tools.is_empty()
+    }
+
+    /// May this session use the builtin tool `name`?
+    pub fn builtin_allowed(&self, name: &str) -> bool {
+        !self.disabled_builtin_tools.contains(name)
+    }
+
+    /// May this session use MCP server `server` at all?
+    ///
+    /// Only the server list is consulted — per-tool rows are irrelevant
+    /// while the whole server is off.
+    pub fn mcp_server_allowed(&self, server: &str) -> bool {
+        !self.disabled_mcp_servers.contains(server)
+    }
+
+    /// May this session use `tool` from MCP `server`?
+    ///
+    /// Both levels are ANDed: a disabled server wins over an enabled tool.
+    /// Callers pass the server name and the server's own tool name, which
+    /// is what `split_prefixed_tool` yields — the policy never parses the
+    /// prefixed wire name itself.
+    pub fn mcp_tool_allowed(&self, server: &str, tool: &str) -> bool {
+        if !self.mcp_server_allowed(server) {
+            return false;
+        }
+        !self
+            .disabled_mcp_tools
+            .get(server)
+            .is_some_and(|tools| tools.contains(tool))
+    }
+}
+
 /// Who may read a session (ADR-076 §决策 4).
 ///
 /// The field exists so a session can be *shared* rather than owned
@@ -656,6 +746,17 @@ pub struct SessionMeta {
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todos: Option<Vec<TodoItem>>,
+    /// Per-session tool narrowing (see [`SessionToolPolicy`]). `None` = the
+    /// session uses the agent-level tool configuration verbatim, which is
+    /// the state every session starts in; the JSON column is written only
+    /// after the user flips a switch for this one session.
+    ///
+    /// Deliberately an *override*, never a copy: copying the agent list at
+    /// creation would freeze that session against later agent changes,
+    /// which is the opposite of the intended "inherit until touched"
+    /// semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<SessionToolPolicy>,
 
     pub message_count: u64,
     pub last_active_at: String,
@@ -687,6 +788,14 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    /// The session's tool narrowing, materialised for callers that only
+    /// need the deny-lists. `None` (never toggled) reads as the empty
+    /// policy = "inherit the agent layer", so no call site has to spell
+    /// out the `Option` dance and risk treating "absent" as "deny all".
+    pub fn tool_policy_or_default(&self) -> SessionToolPolicy {
+        self.tool_policy.clone().unwrap_or_default()
+    }
+
     /// May `scope` **read** this session (ADR-076 §决策 4)?
     ///
     /// An unset (`None`) visibility is public: every signed-in account
@@ -1195,5 +1304,116 @@ mod aware_users_tests {
         let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &["user-nicholas"]);
         assert_eq!(m.visibility, Some(SessionVisibility::Private));
         assert!(m.is_readable_by(&SessionScope::user("user-nicholas")));
+    }
+}
+
+#[cfg(test)]
+mod tool_policy_tests {
+    use super::SessionToolPolicy;
+
+    fn policy() -> SessionToolPolicy {
+        let mut p = SessionToolPolicy::default();
+        p.disabled_builtin_tools.insert("web_fetch".into());
+        p.disabled_mcp_servers.insert("playwright".into());
+        p.disabled_mcp_tools
+            .entry("pm".into())
+            .or_default()
+            .insert("pm_submit_task".into());
+        p
+    }
+
+    /// A never-toggled session carries the empty policy, which removes
+    /// nothing — the whole "inherit the agent layer" contract rests on this.
+    #[test]
+    fn default_policy_allows_everything() {
+        let p = SessionToolPolicy::default();
+        assert!(p.is_empty());
+        assert!(p.builtin_allowed("web_fetch"));
+        assert!(p.mcp_server_allowed("playwright"));
+        assert!(p.mcp_tool_allowed("pm", "pm_submit_task"));
+    }
+
+    #[test]
+    fn builtin_and_server_lists_narrow_independently() {
+        let p = policy();
+        assert!(!p.is_empty());
+        assert!(!p.builtin_allowed("web_fetch"));
+        assert!(p.builtin_allowed("read_file"));
+        assert!(!p.mcp_server_allowed("playwright"));
+        assert!(p.mcp_server_allowed("pm"));
+    }
+
+    /// A disabled server wins over an individually enabled tool — the server
+    /// toggle is the coarser switch and must never be bypassed by the finer
+    /// one. The per-tool row is deliberately NOT cleared when the server is
+    /// switched off, so switching the server back on restores the per-tool
+    /// choices instead of silently enabling everything.
+    #[test]
+    fn disabled_server_outranks_tool_level_state() {
+        let mut p = policy();
+        p.disabled_mcp_servers.insert("pm".into());
+        assert!(!p.mcp_tool_allowed("pm", "pm_claim_task"));
+        assert!(!p.mcp_tool_allowed("pm", "pm_submit_task"));
+
+        p.disabled_mcp_servers.remove("pm");
+        assert!(p.mcp_tool_allowed("pm", "pm_claim_task"));
+        assert!(!p.mcp_tool_allowed("pm", "pm_submit_task"));
+    }
+
+    /// An unknown server/tool is allowed: the deny-list only ever removes
+    /// identities it was told about, so a tool added to the agent after the
+    /// session was configured appears without a migration.
+    #[test]
+    fn unknown_identities_are_allowed() {
+        let p = policy();
+        assert!(p.mcp_server_allowed("docling"));
+        assert!(p.mcp_tool_allowed("docling", "convert"));
+        assert!(p.mcp_tool_allowed("pm", "pm_create_task"));
+    }
+
+    /// The per-tool denies are a **map of arrays** (`{"server": ["tool"]}`),
+    /// not a list of `{server, tool}` pairs. Pinned as a literal because the
+    /// Desktop's `fromWirePolicy` / `toWirePolicy`
+    /// (`apps/acowork-desktop/src/lib/toolInventory.ts`) assert the same
+    /// literal: the two sides are only kept honest by agreeing on this shape,
+    /// and neither mock-based suite can notice a drift on its own.
+    #[test]
+    fn mcp_tool_denies_serialise_as_a_map() {
+        let mut p = SessionToolPolicy::default();
+        p.disabled_builtin_tools.insert("web_fetch".into());
+        p.disabled_mcp_servers.insert("docling".into());
+        p.disabled_mcp_tools
+            .insert("pm".into(), ["pm_claim_task".to_string()].into());
+        p.disabled_mcp_tools
+            .insert("docling".into(), ["convert".to_string()].into());
+
+        let json = serde_json::to_value(&p).expect("serialise");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "disabled_builtin_tools": ["web_fetch"],
+                "disabled_mcp_servers": ["docling"],
+                "disabled_mcp_tools": { "pm": ["pm_claim_task"], "docling": ["convert"] },
+            })
+        );
+        let back: SessionToolPolicy = serde_json::from_value(json).expect("deserialise");
+        assert_eq!(back, p);
+    }
+
+    /// The wire shape is what the Desktop writes: stable key names, empty
+    /// groups omitted entirely (so an untouched group cannot be mistaken for
+    /// "explicitly empty" by a future reader).
+    #[test]
+    fn serialises_only_the_groups_in_use() {
+        let mut p = SessionToolPolicy::default();
+        p.disabled_builtin_tools.insert("web_fetch".into());
+        let json = serde_json::to_value(&p).expect("serialise");
+        assert_eq!(
+            json,
+            serde_json::json!({ "disabled_builtin_tools": ["web_fetch"] })
+        );
+
+        let back: SessionToolPolicy = serde_json::from_value(json).expect("deserialise");
+        assert_eq!(back, p);
     }
 }

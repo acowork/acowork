@@ -73,6 +73,7 @@ fn make_session(sid: &str, tokens: SessionTokens) -> SessionMeta {
         temperature: None,
         context_window: None,
         todos: None,
+        tool_policy: None,
         message_count: 0,
         last_active_at: "2026-01-02T00:00:00.000Z".into(),
         tokens: Some(tokens),

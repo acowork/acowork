@@ -38,6 +38,7 @@ fn make_meta(sid: &str, last_active: &str, title: &str) -> SessionMeta {
         temperature: None,
         context_window: None,
         todos: None,
+        tool_policy: None,
         message_count: 1,
         last_active_at: last_active.to_string(),
         tokens: None,

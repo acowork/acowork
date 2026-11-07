@@ -53,6 +53,7 @@ fn make_meta(
             content: "ship it".into(),
             status: TodoStatus::InProgress,
         }]),
+        tool_policy: None,
         message_count: 3,
         last_active_at: last_active.to_string(),
         tokens: Some(SessionTokens {
@@ -183,6 +184,51 @@ fn get_missing_returns_none() -> AcoworkResult<()> {
     let path = dir.path().join("store.sqlite");
     let (_store, sm) = open_pair(&path);
     assert!(sm.get("never-existed")?.is_none());
+    Ok(())
+}
+
+/// Per-session tool narrowing round-trips, and "inherit" has exactly one
+/// on-disk spelling: `NULL` and an all-empty policy both read back as
+/// `None`, so the UI's "follow the agent" reset and a never-toggled session
+/// are indistinguishable — which is the point (a lingering empty override
+/// would keep the session pinned against later agent changes).
+#[test]
+fn tool_policy_round_trips_and_empty_means_inherit() -> AcoworkResult<()> {
+    use acowork_core::session_meta::SessionToolPolicy;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("store.sqlite");
+    let (_store, sm) = open_pair(&path);
+
+    let mut policy = SessionToolPolicy::default();
+    policy.disabled_builtin_tools.insert("web_fetch".into());
+    policy.disabled_mcp_servers.insert("playwright".into());
+    policy
+        .disabled_mcp_tools
+        .entry("pm".into())
+        .or_default()
+        .insert("pm_submit_task".into());
+
+    let mut meta = make_meta("p1", "2026-05-01T00:00:00.000Z", Some("policy"), "agent");
+    meta.tool_policy = Some(policy.clone());
+    sm.upsert(&meta)?;
+
+    let got = sm.get("p1")?.expect("row present");
+    assert_eq!(got.tool_policy, Some(policy.clone()));
+    assert!(!got.tool_policy_or_default().builtin_allowed("web_fetch"));
+    assert!(got.tool_policy_or_default().builtin_allowed("read_file"));
+
+    // An all-empty policy stores as NULL and reads back as `None`.
+    let mut cleared = got.clone();
+    cleared.tool_policy = Some(SessionToolPolicy::default());
+    sm.upsert(&cleared)?;
+    assert_eq!(sm.get("p1")?.expect("row present").tool_policy, None);
+
+    // ... and so does an explicit `None`.
+    let mut cleared = got.clone();
+    cleared.tool_policy = None;
+    sm.upsert(&cleared)?;
+    assert_eq!(sm.get("p1")?.expect("row present").tool_policy, None);
     Ok(())
 }
 
@@ -591,6 +637,7 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
              ALTER TABLE sessions DROP COLUMN intent_key;
              ALTER TABLE sessions DROP COLUMN intent_closed;
              ALTER TABLE sessions DROP COLUMN aware_users;
+             ALTER TABLE sessions DROP COLUMN tool_policy;
              PRAGMA user_version = 1;",
         )
         .unwrap();

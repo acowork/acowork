@@ -618,6 +618,15 @@ impl RuntimeHttpServer {
                 "/sessions/{sid}/visibility",
                 put(crate::http::session_control::put_session_visibility),
             )
+            // Per-session tool narrowing over the agent layer
+            // (`agent-tools.json` / `agent-mcp.json`). Same shape as
+            // `visibility`: a plain meta-backed REST resource with no side
+            // effects beyond re-composing the live session's tool set.
+            .route(
+                "/sessions/{sid}/tool-policy",
+                get(crate::http::session_control::get_session_tool_policy)
+                    .put(crate::http::session_control::put_session_tool_policy),
+            )
             // ADR-076 §决策 4: workspace switch gets its own endpoint
             // rather than riding `PUT .../config` — only
             // `route_workspace_switch` updates `current_work_dir` and the
@@ -4332,6 +4341,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 3,
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
             tokens: None,
@@ -4546,6 +4556,7 @@ mod tests {
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
+            tool_policy: None,
             message_count: 1,
             model_usage: Some(usage),
             ..test_session_meta_minimal()
@@ -4589,6 +4600,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: "2026-01-01T12:00:00Z".to_string(),
             tokens: None,
@@ -6875,6 +6887,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: "2026-01-01T00:00:00Z".to_string(),
             tokens: None,
@@ -7654,6 +7667,7 @@ mod tests {
             temperature: Some(0.5),
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: "2026-01-01T12:00:00Z".to_string(),
             tokens: None,

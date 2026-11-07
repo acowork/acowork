@@ -119,6 +119,15 @@ pub enum SessionMessage {
     UpdateBuiltinTools {
         entries: Vec<crate::agent_config::AgentToolEntry>,
     },
+    /// Per-session tool narrowing changed (`PUT /sessions/{sid}/tool-policy`).
+    ///
+    /// `None` = the session goes back to inheriting the agent layer. This is
+    /// the only per-session tool message: the agent layer keeps using the two
+    /// broadcasts above, and both re-compose this session's layer on arrival
+    /// (see `session_tool_layer`).
+    UpdateToolPolicy {
+        policy: Option<acowork_core::session_meta::SessionToolPolicy>,
+    },
     /// ADR-063 §3.7.6: replace the main-dialog system prompt in this
     /// session's `ContextBuilder`. Produced by
     /// `SessionManager::apply_system_prompt` (triggered by the L2 reload
@@ -338,6 +347,10 @@ impl std::fmt::Debug for SessionMessage {
                     &mcp_tools.as_ref().map(|t| t.len()).unwrap_or(0),
                 )
                 .finish(),
+            SessionMessage::UpdateToolPolicy { policy } => f
+                .debug_struct("UpdateToolPolicy")
+                .field("inherits_agent", &policy.is_none())
+                .finish(),
             SessionMessage::UpdateBuiltinTools { entries } => f
                 .debug_struct("UpdateBuiltinTools")
                 .field("entry_count", &entries.len())
@@ -460,6 +473,11 @@ pub(crate) struct SessionTask {
     /// different lifecycle from the per-turn `ChatMessage.active_skill`:
     /// this one lives as long as the session.
     skill_summary: Option<String>,
+    /// Agent layer ∧ session layer, and the single writer of this session's
+    /// tool set. Every agent-wide broadcast lands here first, so the session
+    /// narrowing is re-composed on top instead of being overwritten (see
+    /// `session_tool_layer`).
+    tool_layer: crate::agent::session::session_tool_layer::SessionToolLayer,
 }
 
 // ADR-046: pre-extraction helpers (`extract_document_text`,
@@ -626,6 +644,20 @@ impl SessionTask {
         }
         // Set MCP tools and rebuild
         core_mut.mcp_tools = mcp_tools;
+
+        // Two-layer tool composition (agent ∧ session). Built BEFORE the
+        // dispatch list so the very first `all_tools` already reflects the
+        // session's persisted narrowing: the baselines are captured from the
+        // freshly cloned core (agent-layer values), then `apply_to` writes the
+        // composed set back. A resumed session hydrates its policy from
+        // `SessionMeta.tool_policy` inside `ConversationSession::resume`, so
+        // this is the only place the meta → live-tool-set wiring is needed.
+        let session_policy = session.conversation().and_then(|c| c.tool_policy());
+        let tool_layer = crate::agent::session::session_tool_layer::SessionToolLayer::from_core(
+            &core_mut,
+            session_policy,
+        );
+        tool_layer.apply_to(&mut core_mut);
         core_mut.rebuild_all_tools();
 
         // Inject pending debug handles
@@ -701,6 +733,7 @@ impl SessionTask {
             session_id,
             identity_context,
             protocol_type,
+            tool_layer,
         };
         (task, agent_inbound_tx)
     }
@@ -761,6 +794,7 @@ impl SessionTask {
             identity_context,
             protocol_type,
             skill_summary,
+            mut tool_layer,
         } = self;
 
         // Build ContextBuilder with identity. Tool definitions are NOT
@@ -1837,8 +1871,29 @@ impl SessionTask {
                         mcp_tool_count = mcp_tools.as_ref().map(|t| t.len()).unwrap_or(0),
                         "SessionTask: updating MCP tools on AgentCore"
                     );
-                    agent_loop.core.mcp_tools = mcp_tools;
-                    agent_loop.core.rebuild_all_tools();
+                    // The payload is the AGENT-layer set (already filtered at
+                    // connect time by `agent_mcp_tools.json`), so it becomes a
+                    // baseline, not the answer: re-compose the session layer on
+                    // top or this broadcast would erase the session's switches.
+                    tool_layer.set_agent_mcp(mcp_tools);
+                    tool_layer.apply_to(&mut agent_loop.core);
+                    refresh_builtin_tools_dependents(&mut agent_loop.core, &mut context_builder);
+                }
+                Some(SessionMessage::UpdateToolPolicy { policy }) => {
+                    let changed = tool_layer.set_policy(policy);
+                    tracing::info!(
+                        session_id = %session_id,
+                        changed,
+                        inherits_agent = tool_layer.policy().is_none(),
+                        "SessionTask: applying per-session tool policy"
+                    );
+                    if changed {
+                        tool_layer.apply_to(&mut agent_loop.core);
+                        refresh_builtin_tools_dependents(
+                            &mut agent_loop.core,
+                            &mut context_builder,
+                        );
+                    }
                 }
                 Some(SessionMessage::UpdateBuiltinTools { entries }) => {
                     let update_count = entries.len();
@@ -1849,11 +1904,16 @@ impl SessionTask {
                         enabled_count,
                         "SessionTask: updating builtin tools on AgentCore"
                     );
-                    // Atomic mutation: rebuild agent_tools dispatch list + LLM
-                    // tool_definitions in one shot. `apply_builtin_tools_update`
-                    // re-resolves through the shared policy, so no manual
-                    // override is needed here.
-                    apply_builtin_tools_update(&mut agent_loop.core, &mut context_builder, entries);
+                    // The payload is the AGENT-layer desired state. Record it
+                    // as the baseline and re-compose the session layer on top
+                    // (`apply_builtin_tools_update` alone would write layer A
+                    // verbatim, dropping this session's narrowing).
+                    tool_layer.set_agent_builtin(&entries);
+                    apply_builtin_tools_update(
+                        &mut agent_loop.core,
+                        &mut context_builder,
+                        tool_layer.effective_builtin(),
+                    );
                 }
                 Some(SessionMessage::UpdateSystemPrompt { system_prompt }) => {
                     tracing::info!(
@@ -2229,7 +2289,10 @@ fn apply_builtin_tools_update(
 /// MUST NOT call `rebuild_all_tools` / `rebuild_context_tool_definitions`
 /// separately — that would re-introduce the duplicated flow that this
 /// function deprecates.
-fn refresh_builtin_tools_dependents(core: &mut AgentCore, context_builder: &mut ContextBuilder) {
+pub(crate) fn refresh_builtin_tools_dependents(
+    core: &mut AgentCore,
+    context_builder: &mut ContextBuilder,
+) {
     core.rebuild_all_tools();
     rebuild_context_tool_definitions(&core.builtin_tools, context_builder);
 }

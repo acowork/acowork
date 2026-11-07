@@ -145,8 +145,11 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// occupancy — the only number comparable to the
 /// `chat_router.history_max_tokens` budget); 12 = `sessions.aware_users`
 /// (ADR-076 §决策 4 rev. — human accounts with read-only awareness of an
-/// execution session, seeded by the Gateway for agent-to-agent intents).
-pub const SCHEMA_VERSION: i64 = 12;
+/// execution session, seeded by the Gateway for agent-to-agent intents);
+/// 13 = `sessions.tool_policy` (per-session narrowing of the agent-level
+/// builtin-tool / MCP configuration — JSON, `NULL` = inherit the agent
+/// layer).
+pub const SCHEMA_VERSION: i64 = 13;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -320,6 +323,20 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         12,
         "ALTER TABLE sessions ADD COLUMN aware_users JSON;",
+    ),
+    // Per-session tool narrowing (`SessionMeta.tool_policy`): which builtin
+    // tools and MCP servers/tools this one session keeps, out of what the
+    // agent layer exposes. Nullable with no default: a pre-existing row (and
+    // every session the user has never toggled) reads as NULL = "inherit the
+    // agent layer verbatim", so no backfill and no behaviour change. Written
+    // only when the user flips a switch for one session — the row is an
+    // override, never a copy of the agent list.
+    //
+    // Same guard as v11/v12: SQLite rejects a `WHERE` on `ADD COLUMN`, so
+    // `apply_migrations` does the `has_column` check.
+    (
+        13,
+        "ALTER TABLE sessions ADD COLUMN tool_policy JSON;",
     ),
 ];
 
@@ -522,6 +539,12 @@ const TARGET_SCHEMA: &[SchemaObject] = &[
         name: "aware_users",
         decl: "aware_users JSON",
     },
+    // v13 — per-session narrowing of the agent-layer tool configuration.
+    SchemaObject::Column {
+        table: "sessions",
+        name: "tool_policy",
+        decl: "tool_policy JSON",
+    },
 ];
 
 /// Apply the version-gated [`MIGRATIONS`] chain, then converge [`TARGET_SCHEMA`],
@@ -575,6 +598,10 @@ pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Res
             // here. The end state is identical and `TARGET_SCHEMA` converges
             // it anyway.
             if *target == 12 && has_column(&tx, "sessions", "aware_users")? {
+                continue;
+            }
+            // v13 is a column-add of the same shape; same guard, same reason.
+            if *target == 13 && has_column(&tx, "sessions", "tool_policy")? {
                 continue;
             }
             tx.execute_batch(sql)?;
@@ -932,6 +959,60 @@ mod tests {
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("version");
         assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// v13 is the same shape of step as v12 (a `sessions` column-add) and
+    /// needs the same guard: a build that shipped `tool_policy` before
+    /// stamping 13 must still open.
+    #[test]
+    fn migration_13_is_a_noop_when_the_column_is_already_present() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE sessions ( \
+                 session_id TEXT PRIMARY KEY, \
+                 agent_id TEXT, \
+                 tool_policy JSON \
+             ); \
+             PRAGMA user_version = 12;",
+        )
+        .expect("seed already-migrated store");
+
+        apply_migrations(&mut conn).expect("open must not fail on the duplicate column");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// A v12 database (the last release before per-session tool narrowing)
+    /// gains a NULL `tool_policy` on upgrade — every existing session keeps
+    /// inheriting the agent layer, which is exactly the pre-feature
+    /// behaviour.
+    #[test]
+    fn migration_13_leaves_existing_rows_inheriting_the_agent_layer() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE sessions ( \
+                 session_id TEXT PRIMARY KEY, \
+                 agent_id TEXT, \
+                 aware_users JSON \
+             ); \
+             INSERT INTO sessions (session_id, agent_id) VALUES ('s-1', 'com.test.a'); \
+             PRAGMA user_version = 12;",
+        )
+        .expect("seed v12 store");
+
+        apply_migrations(&mut conn).expect("migrate");
+
+        let policy: Option<String> = conn
+            .query_row(
+                "SELECT tool_policy FROM sessions WHERE session_id = 's-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("column exists and the row survives");
+        assert_eq!(policy, None, "a pre-v13 row reads as 'inherit the agent layer'");
     }
 
     /// The incident this whole convergence pass exists for.

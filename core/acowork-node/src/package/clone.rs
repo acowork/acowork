@@ -838,6 +838,7 @@ mod tests {
                     temperature: None,
                     context_window: None,
                     todos: None,
+                    tool_policy: None,
                     message_count: 0,
                     llm_call_counter: None,
                     perf: None,

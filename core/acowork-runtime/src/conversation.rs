@@ -27,7 +27,7 @@ use crate::agent::session_state::TodoItem;
 // surfaces use the same type via `pub use` aliasing.
 pub use acowork_core::session_meta::{
     ModelUsageEntry, SessionMeta, SessionMetaStore, SessionPerf, SessionScope, SessionTokens,
-    SessionVisibility, TokenStatsRow, model_usage_key,
+    SessionToolPolicy, SessionVisibility, TokenStatsRow, model_usage_key,
 };
 use acowork_core::protocol::{ContextUsageSection, ModelCostInfo};
 use acowork_core::providers::traits::UsageInfo;
@@ -1146,6 +1146,16 @@ pub struct ConversationSession {
     /// runtime-side `SessionState.todos` mirrors into this via
     /// [`Self::set_todos`]; no double-writer.
     todos: std::sync::Mutex<Option<Vec<TodoItem>>>,
+    /// Per-session tool narrowing, mirrored from `SessionMeta.tool_policy`.
+    ///
+    /// `None` = inherit the agent-level tool configuration. Owned by
+    /// [`Self::set_tool_policy`] (the single persistence writer), and read by
+    /// the session-open path and the tool-policy endpoint to compose the
+    /// session's effective tool set. Must live here and not only in the
+    /// store: [`Self::write_meta`] persists the whole row from memory, so a
+    /// field the in-memory struct does not carry would be erased by the
+    /// next unrelated meta write.
+    tool_policy: std::sync::Mutex<Option<SessionToolPolicy>>,
     /// ADR-027: snapshot + cumulative token counts (raw Provider values).
     /// `None` means no LLM call has been recorded yet.
     tokens: std::sync::Mutex<Option<SessionTokens>>,
@@ -1363,6 +1373,12 @@ impl ConversationSession {
             temperature: self.temperature.lock().ok().and_then(|t| *t),
             context_window: self.context_window.lock().ok().and_then(|c| *c),
             todos: self.todos.lock().ok().and_then(|t| t.clone()),
+            tool_policy: self
+                .tool_policy
+                .lock()
+                .ok()
+                .and_then(|p| p.clone())
+                .filter(|p| !p.is_empty()),
             message_count: self.message_count.load(Ordering::Relaxed),
             last_active_at: now,
             tokens,
@@ -1694,6 +1710,7 @@ impl ConversationSession {
             temperature: std::sync::Mutex::new(None),
             context_window: std::sync::Mutex::new(None),
             todos: std::sync::Mutex::new(None),
+            tool_policy: std::sync::Mutex::new(None),
             initiator: std::sync::Mutex::new(None),
             visibility: std::sync::Mutex::new(None),
             chat_session_id: std::sync::Mutex::new(None),
@@ -1832,6 +1849,7 @@ impl ConversationSession {
                 temperature: std::sync::Mutex::new(meta.temperature),
                 context_window: std::sync::Mutex::new(meta.context_window),
                 todos: std::sync::Mutex::new(meta.todos),
+                tool_policy: std::sync::Mutex::new(meta.tool_policy.clone()),
                 initiator: std::sync::Mutex::new(meta.initiator),
                 visibility: std::sync::Mutex::new(meta.visibility),
                 chat_session_id: std::sync::Mutex::new(meta.chat_session_id.clone()),
@@ -2580,6 +2598,51 @@ impl ConversationSession {
         );
     }
 
+    /// The per-session tool narrowing, or `None` when the session inherits
+    /// the agent-level configuration verbatim.
+    pub fn tool_policy(&self) -> Option<SessionToolPolicy> {
+        self.tool_policy.lock().ok().and_then(|p| p.clone())
+    }
+
+    /// Persist the per-session tool narrowing.
+    ///
+    /// `None` (and an empty policy) both mean "inherit the agent layer", so
+    /// they are stored as `None` — that is what makes the UI's per-group
+    /// "follow the agent" reset return the row to the state a never-toggled
+    /// session is in, instead of leaving an empty override behind that would
+    /// keep the session pinned against future agent changes.
+    ///
+    /// Write policy mirrors [`Self::set_todos`]: content-equal updates skip
+    /// the write, changed updates persist immediately (this is a metadata
+    /// mutation, not the high-frequency message path).
+    pub fn set_tool_policy(&self, policy: Option<SessionToolPolicy>) {
+        let normalised = policy.filter(|p| !p.is_empty());
+        {
+            let mut slot = self
+                .tool_policy
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            if *slot == normalised {
+                return;
+            }
+            *slot = normalised.clone();
+        }
+        self.write_meta();
+        tracing::info!(
+            session_id = %self.session_id,
+            inherits_agent = normalised.is_none(),
+            disabled_builtin_tools = normalised
+                .as_ref()
+                .map(|p| p.disabled_builtin_tools.len())
+                .unwrap_or(0),
+            disabled_mcp_servers = normalised
+                .as_ref()
+                .map(|p| p.disabled_mcp_servers.len())
+                .unwrap_or(0),
+            "Session tool policy persisted to meta"
+        );
+    }
+
     /// ADR-076 §决策 4: record the owning account.
     ///
     /// Called **once** by the session-creation path. Ownership is an
@@ -3168,6 +3231,9 @@ impl Clone for ConversationSession {
             temperature: std::sync::Mutex::new(self.temperature.lock().ok().and_then(|t| *t)),
             context_window: std::sync::Mutex::new(self.context_window.lock().ok().and_then(|c| *c)),
             todos: std::sync::Mutex::new(self.todos.lock().ok().and_then(|t| t.clone())),
+            tool_policy: std::sync::Mutex::new(
+                self.tool_policy.lock().ok().and_then(|p| p.clone()),
+            ),
             initiator: std::sync::Mutex::new(self.initiator.lock().ok().and_then(|u| u.clone())),
             visibility: std::sync::Mutex::new(self.visibility.lock().ok().and_then(|v| *v)),
             chat_session_id: std::sync::Mutex::new(self.chat_session_id.lock().ok().and_then(|c| c.clone())),
@@ -4691,6 +4757,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: last_active_at.to_string(),
             tokens: None,
@@ -4930,6 +4997,7 @@ mod tests {
                 temperature: None,
                 context_window: None,
                 todos: None,
+                tool_policy: None,
                 message_count: 0,
                 last_active_at: ts.clone(),
                 tokens: None,
@@ -5222,6 +5290,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             tokens: None,
@@ -5974,6 +6043,7 @@ mod tests {
             temperature: Some(0.7),
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 5,
             last_active_at: "2026-01-01T00:00:00Z".to_string(),
             tokens: Some(SessionTokens {
@@ -6315,6 +6385,7 @@ mod tests {
                 temperature: None,
                 context_window: None,
                 todos: None,
+                tool_policy: None,
                 message_count: 5,
                 last_active_at: "2026-01-02T00:00:00Z".to_string(),
                 tokens: None,
@@ -6351,6 +6422,7 @@ mod tests {
                 session_id: "scan_cache_b".to_string(),
                 created_at: "2026-01-03T00:00:00Z".to_string(),
                 last_active_at: "2026-01-04T00:00:00Z".to_string(),
+                tool_policy: None,
                 message_count: 3,
                 tokens: Some(SessionTokens {
                     last_input: 500,
@@ -6460,6 +6532,79 @@ mod tests {
             resumed2.todos(),
             None,
             "emptied todo list must persist as None"
+        );
+    }
+
+    /// Per-session tool narrowing survives a restart, and clearing it
+    /// returns the session to "inherit the agent layer" rather than leaving
+    /// an empty override behind. The second half is the one that matters:
+    /// `write_meta` persists the whole row from in-memory state, so a field
+    /// the session does not carry would be erased by the next unrelated meta
+    /// write — this asserts it is carried.
+    #[test]
+    fn test_tool_policy_persists_across_resume() {
+        use acowork_core::session_meta::SessionToolPolicy;
+
+        let temp_dir = TempDir::new().unwrap();
+        let sid = "20260503_090000_tool_policy";
+        let committed = Arc::new(AtomicUsize::new(0));
+
+        let (session, _cfg_rx, _state_rx) = ConversationSession::new(
+            temp_dir.path(),
+            sid,
+            SessionConfig {
+                agent_id: "com.test".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            committed,
+        )
+        .unwrap();
+
+        // A fresh session inherits the agent layer.
+        assert_eq!(session.tool_policy(), None);
+
+        let mut policy = SessionToolPolicy::default();
+        policy.disabled_builtin_tools.insert("web_fetch".to_string());
+        policy.disabled_mcp_servers.insert("playwright".to_string());
+        policy
+            .disabled_mcp_tools
+            .entry("pm".to_string())
+            .or_default()
+            .insert("pm_submit_task".to_string());
+        session.set_tool_policy(Some(policy.clone()));
+
+        let (resumed, _cfg_rx, _state_rx) =
+            ConversationSession::resume(temp_dir.path(), sid, Arc::new(AtomicUsize::new(0)))
+                .unwrap();
+        assert_eq!(
+            resumed.tool_policy(),
+            Some(policy),
+            "tool policy must be restored from meta after session restart"
+        );
+
+        // An unrelated meta write must not drop the override.
+        resumed.set_title("renamed");
+        let (resumed_after_title, _cfg_rx, _state_rx) =
+            ConversationSession::resume(temp_dir.path(), sid, Arc::new(AtomicUsize::new(0)))
+                .unwrap();
+        assert!(
+            resumed_after_title.tool_policy().is_some(),
+            "a title write must not erase the tool policy"
+        );
+
+        // Clearing persists as None (= inherit), and an all-empty policy is
+        // normalised to the same state.
+        resumed_after_title.set_tool_policy(Some(SessionToolPolicy::default()));
+        let (cleared, _cfg_rx, _state_rx) =
+            ConversationSession::resume(temp_dir.path(), sid, Arc::new(AtomicUsize::new(0)))
+                .unwrap();
+        assert_eq!(
+            cleared.tool_policy(),
+            None,
+            "an empty policy must persist as None (inherit the agent layer)"
         );
     }
 
@@ -8156,6 +8301,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: "t".into(),
             tokens: None,
@@ -8230,6 +8376,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: "t".into(),
             tokens: None,
@@ -8333,6 +8480,7 @@ mod tests {
                 temperature: None,
                 context_window: None,
                 todos: None,
+                tool_policy: None,
                 message_count: 0,
                 last_active_at: "t".into(),
                 tokens: None,
@@ -8461,6 +8609,7 @@ mod tests {
                 temperature: None,
                 context_window: None,
                 todos: None,
+                tool_policy: None,
                 message_count: 0,
                 last_active_at: at.into(),
                 tokens: None,
@@ -8618,6 +8767,7 @@ mod tests {
                 temperature: None,
                 context_window: None,
                 todos: None,
+                tool_policy: None,
                 message_count: 0,
                 last_active_at: at.into(),
                 tokens: None,
@@ -8737,6 +8887,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: at.into(),
             tokens: None,

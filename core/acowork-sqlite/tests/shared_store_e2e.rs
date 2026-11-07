@@ -31,6 +31,7 @@ fn meta(sid: &str, title: &str) -> SessionMeta {
         temperature: None,
         context_window: None,
         todos: None,
+        tool_policy: None,
         message_count: 1,
         last_active_at: "2026-02-02T00:00:00.000Z".into(),
         tokens: None,
