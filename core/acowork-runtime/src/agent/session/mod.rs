@@ -10,6 +10,7 @@ pub mod restorer;
 pub(crate) mod session_handle;
 pub mod session_manager;
 pub mod session_task;
+pub(crate) mod session_tool_layer;
 
 pub use session_manager::{
     SessionLifecycleState, SessionManager, SessionManagerConfig, SessionOpenOutcome,

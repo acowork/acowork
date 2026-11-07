@@ -57,7 +57,7 @@
 2. **admin 不能伪造 user_id**：admin 视图下"以 user A 身份看 session"通过 `?as_user=<user_id>` query 实现，但 `as_user` 不会被普通 user 使用；token 中 `role` 字段在签发时定死，不接受请求内覆盖。
 3. **账号凭据加密不依赖 Vault unlocked**：账号读路径在 Vault locked 状态下退化为 401（无法解密 → 无法登录），但**账号列表（不含密码）的元数据允许在 Vault locked 时展示**（仅元数据，如 username/role/created_at），便于锁屏场景下仍能选账号。
 4. **session.initiator 写入是 immutable**：一个 session 一旦创建绑定发起方后**不再修改**（迁移/导入等场景除外，且必须 admin 操作）；这保证会话历史"主人"的不可篡改性。
-4a. **执行 session 只有一个发起方，且不可群聊**：执行 session = (绑定的 chat session, initiator)，非发起方只读（admin 也**不可写**，只可 `as_user` 只读巡检）；同一群里不同人 @ 同一个 agent 是两次任务、两个执行 session（见 §决策 4 v2）。
+4a. **执行 session 只有一个发起方，且不可群聊**：执行 session = (绑定的 chat session, initiator)，非发起方只读（admin 也**不可写**，只可 `as_user` 只读巡检）；同一群里不同人 @ 同一个 agent 是两次任务、两个执行 session（见 §决策 4 v2）。**（v3 修订：「非发起方只读」之外，agent↔agent 会话另有一批**知情只读**人类（`aware_users`，Gateway 按 agent ACL 投递时解析）；写门规则一字未动，见 §决策 4 v3。）**
 5. **聊天双方对等**：用户 A → 用户 B 的消息存在 `min(a,b)/chats/max(a,b)/` 目录下，双方 GET / POST 对称，无需在 Gateway 内维护 per-user 状态机。
 6. **密码修改强制旧密码**：改密 API 接受 `old_password + new_password`，避免 token 泄漏后任意改密；admin 不能改他人密码（必须先 reset 再走首次登录改密流程）。
 
@@ -576,6 +576,46 @@ GET /api/agents/{id}/sessions?as_user=<user_id>
 **Desktop**：执行面的身份来自 session 的 `initiator`（人查账号目录 `GET /api/users/directory`，agent 查 `agentStore.agents`），不再读 `userProfileStore`；`initiator == 我` 时才回落到本机 profile。群聊里他人的头像走账号目录，不回落当前账号 profile。
 
 **实现记录**：`acowork-core`（`SessionScope` 三态 + 谓词）、`acowork-memory`（schema v8）、`acowork-sqlite`、`acowork-runtime`（改名 + 发起方落盘 + 路由 key + 候选过滤）、`acowork-gateway`（admin scope 头）、Desktop（身份/只读 tab/`setMode`/`resolveActiveSession`）。测试：`chat_routed_sessions_carry_the_members_binding` 同文件内新增"同群两个发起方 → 两个执行 session 且互不可写"，Desktop 侧 `apps/acowork-desktop/src/stores/execInitiator.test.ts`。
+
+#### §决策 4 v3：`aware_users` — agent↔agent 执行会话的只读知情权
+
+**触发**：intent 通信排查（2026-11）两问：(a) agent 经 intent 触发的执行 session 对**任何人类不可见**（黑盒）；(b) PM 派发的任务 session 对项目 owner **可见但不可写**。根因是同一个字段被压了两件事：`initiator` 既回答"谁发起了这个 session"又被当作"谁有权读写"——agent↔agent 时它是 agent UUID，v2 的"任何人类不可写"连带"任何人类不可读"；PM 时它取了 `Task::created_by`（MCP 建任务 = PM agent），于是 owner 只能靠群聊 `Members` 分支读、写门永远进不去。
+
+**决策**：`initiator` 语义还原为"谁发起了这个 session"（agent↔agent 保持 agent，v2 不变量原样成立），另立**第三个正交字段** `SessionMeta.aware_users: Vec<String>` 承载"哪些人类有只读知情权"：
+
+| 字段 | 回答的问题 | agent↔agent | user↔agent / PM 任务 |
+|---|---|---|---|
+| `initiator` | 单一归属/写者 | 发起的 agent | 发言的人类（Chat=该用户；PmTask=`Project::owner()`） |
+| `origin: TurnOrigin` | 人话还是 peer 请求 | `AgentRequest`/`AgentResponse` | `Chat`/`PmTask` |
+| `aware_users` | 哪些人类有**只读**知情权 | owner ∪ guests（两侧 agent）∪ 发起人 | 空（由 initiator + chat 覆盖） |
+
+**不变量（新增，测试锁死）**：
+
+1. **ACL seed 只对 `origin ∈ {AgentRequest, AgentResponse}` 成立**。人类来源（Chat/PmTask）的会话**不从 agent ACL seed**——否则共享 agent 下用户 B 会被灌进用户 A 的私聊执行会话，ACL 规则反噬人类隐私主体。
+2. **agent↔agent 会话的 `aware_users` 永不为空**（auth 模式每 agent 有 owner，ACL 并集保证；local 模式经 `Unfiltered` scope 本就全可读，seed 允许为空，不变量经 scope 层满足）。
+3. **只读**：`is_readable_by` 各 User 分支统一加 aware 命中放行（含覆盖 `Private` 拒绝），`is_writable_by` **永不咨询**该字段。
+4. **creation-time 快照、write-once**：Gateway（agent ACL 唯一持有方，ADR-087 D1）投递时解析、随 Intent wire（proto field 17）带到接收侧，Runtime 建会话时原样 stamp、不查表不刷新；后加入的 guest 不追溯获得旧会话知情权（已确认接受，将来另做 ACL reconcile）。
+
+**PM 任务的可写性根修（同批）**：`dispatch_task` 的执行会话 initiator 由 `Task::created_by` 改为 **`Project::owner()`**（人类），owner 获得读+写。Chat 行的声音（ADR-106 D15 assignment 语义）与目标 agent 的 `intent:receive` allowlist 仍挂 creator——发言者与写者是两件事，拆开。
+
+**信任假设（已接受，注释声明）**：`on_behalf_of`（发送侧 Runtime 声明的链上发起人）只经"是否已安装 agent"过滤，**不向账号目录校验**。恶意 agent 最多往**其新建**的 agent↔agent 会话只读名单塞任意 uid：单向加读者、不可收窄、不可写、不影响既有会话，且 ACL 并集实际已覆盖绝大多数名单来源；校验往返会把 user-service 依赖压进投递热路径，刻意不做。
+
+**实现记录**：`acowork-core`（字段 + `is_readable_by` 放行 + proto field 17 + `ToolContext.initiator`）、`acowork-gateway`（`aware_users_seed`，`deliver_intent`/`deliver_response`/sweeper fallback receipt 三处 seed——后两者覆盖"回执到达时原会话已关、新开 `AgentResponse` 会话"的黑盒漏洞；`pm_task_initiator`）、`acowork-runtime`（`IntentEnvelope.aware_users`、`create_intent_session` stamp、`set_aware_users` write-once、`intent_send` 转发 `on_behalf_of` + `source_chat_session_id`）、`acowork-sqlite`（列映射）、`acowork-memory`（schema v12）、`acowork-pm`（dispatch 携带 `Project::owner()`）。测试：core `aware_users_tests`(5)（读放行/写不放行/空列表惰性/Members 叠加/Private 覆盖）、gateway `aware_users_seed_tests`(6)（并集去重/非空/originator 判别/PM initiator）、runtime `intent_session_stamps_aware_users_on_meta`。完整计划与评审记录：[docs/plan/zh/intent-agent-to-agent-human-visibility-plan.md](../../plan/zh/intent-agent-to-agent-human-visibility-plan.md)。
+
+#### §决策 4 v4：绑定 ≠ 义务——应答方的 Chat 授予只按成员资格算
+
+**触发**：同 v3 的 intent 排查（2026-11-07）。v3 解决了"agent↔agent 执行会话对人类不可见（黑盒）"，但 §决策 4 那句"Gateway 在投递时创建或复用一个执行会话，**绑定到发起方所在的同一个 Chat session**"被实现成了一条**写入义务**：应答方 turn 往发起方的 Chat 写引用行。1:1 Chat 只有一个 agent 参与者，于是从 1:1 转发的 Intent 永远 403。
+
+**决策**：`绑定` 这个词在本节里从此只有两个可分离的含义，且必须分开说：
+
+| 含义 | 承载字段 | 谁有权 |
+|---|---|---|
+| **问责/可见性**：这条对话属于哪个 Chat（repo 注入、`aware_users`、sweeper 告警锚点、回执地址） | 信箱条目 `source_chat_session_id`（来源） | 平台内部事实，不构成写权限 |
+| **写入义务**：应答方 turn 欠哪个 Chat 一行引用/一张卡 | 投递授予值 `ChatGrant.surface`（应答方信封携带） | 仅当应答方 ∈ 该 Chat 参与者 |
+
+agent 转发的 Intent：来源仍是发起方的 Chat，**授予为空**——应答方的执行会话不绑发起方的 Chat，它只属于这两个 agent；它的转述由发起方以自己的名义写进自己的 Chat。人类发起的投递（群聊 `@`、回执行块、PM 任务派发）：授予成立，且**成员资格不成立时投递前拒绝**，不允许"运行成功但答案没人能读"（详见 ADR-106 修订 2026-11-07）。
+
+**与 v3 的关系**：`initiator` / `aware_users` 语义一字未动——只读知情权仍由 ACL 并集保证，跳转入口（发起方气泡里指向应答方执行会话的快捷方式）另单，且它不得复用执行块图标：那个图标说的是"本 Chat 绑定了这个会话"。
 
 ### 决策 5：管理员角色 — `role = "admin"` 绕过过滤 + 特殊权限
 

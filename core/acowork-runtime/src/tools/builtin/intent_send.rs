@@ -176,6 +176,22 @@ impl Tool for IntentSendTool {
             "repo": repo,
             "session_config": session_config,
             "conversation_id": conversation_id,
+            // ADR-076 §决策 4 (rev.): forward this session's initiator as
+            // the chain's originator. It is a human account id when a human
+            // started the session and an agent instance id when another
+            // agent did — the two are indistinguishable here (both UUID v4),
+            // so the Gateway resolves it against the installed-agent table
+            // and keeps it only when it names a human. That is what lets the
+            // originating human stay aware of the agent-to-agent session
+            // this call starts, even when they are not on either agent's
+            // permission roster (a group-chat originator, a chain hop).
+            "on_behalf_of": ctx.initiator,
+            // ADR-076 §决策 4 (rev.) / design 27 §4.2.3: the chat surface
+            // this execution is bound to, so a descendant intent's card /
+            // delivery lands back on the human's original conversation
+            // instead of a fresh agent-agent pair the human cannot see.
+            // Empty when the session has no chat binding.
+            "source_chat_session_id": ctx.chat_session_id,
         });
 
         let mut req = self.client.post(&url).json(&body);

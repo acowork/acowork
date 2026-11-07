@@ -10,10 +10,13 @@ triggers:
   - weekly report
   - project status
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
+  - pm_list_tasks
+  - pm_get_task
+  - pm_add_activity
 ---
 
 # Progress Tracking Skill
@@ -24,11 +27,25 @@ Status must be evidence-based. Do not report green if scope, schedule, quality, 
 
 Bad news should be surfaced early with options and a recommended recovery path.
 
+## System of Record
+
+Status comes from the service, never from recollection.
+
+- `pm_list_tasks` (`assignee="me"` or a project filter) is the state of the world.
+  `review_status=pending` is the queue waiting on a human — report it as a blocker,
+  not as progress.
+- `pm_get_task` before quoting a status: `status`, `review_status`, `is_blocked`,
+  `blocked_by`, `updated_at`.
+- A status report that cites no `pm_*` result is an opinion. If the tools disagree
+  with what you remember, the tools are right.
+- Leave the trail with `pm_add_activity` when you report a slippage or a re-plan, so
+  the next session sees why the date moved.
+
 ## Execution Steps
 
 1. **Collect evidence from sources**
    - Use `mcp_memory__memory_recall` to retrieve plan, sprint commitment, previous status, velocity, risks, blockers, and decisions
-   - Use `file_read` to inspect tracking files, task lists, changelogs, PRs, release notes, test results, or meeting notes
+   - Use `doc_read` to inspect tracking files, task lists, changelogs, PRs, release notes, test results, or meeting notes
    - Collect completed, in-progress, blocked, at-risk, and newly discovered work
    - Separate verified facts from estimates and self-reported status
 
@@ -57,7 +74,7 @@ Bad news should be surfaced early with options and a recommended recovery path.
    - Always include impact of doing nothing
 
 6. **Publish and persist**
-   - Use `file_write` to save the status report when requested
+   - Use `doc_write` to save the status report when requested
    - Use `mcp_memory__memory_store` to persist status, metrics, decisions, velocity, estimation accuracy, and blockers
 
 ## Output Format

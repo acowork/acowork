@@ -1139,6 +1139,18 @@ message Intent {
   /// wake): the turn is then an *origin* and the reference row it writes stays
   /// unthreaded instead of naming a coordinate no transcript holds.
   string chat_row_id = 16;
+  /// ADR-076 §决策 4 (rev.): human accounts granted read-only awareness of the
+  /// execution session this delivery creates. The Gateway — the only party that
+  /// holds the agent ownership table (ADR-087 D1) — resolves the seed at
+  /// delivery time and stamps it here, exactly as `has_human_participant` is
+  /// stamped; the receiving Runtime writes it verbatim onto `SessionMeta` and
+  /// never queries an ACL table to compute it. Populated ONLY for agent-to-agent
+  /// origins (`request` / `response`), where there is no human privacy subject
+  /// to protect; empty for human origins (`user_message` / `pm_task`), whose
+  /// readers are already covered by the initiator and the Chat membership. The
+  /// Runtime's `is_readable_by` treats this as a read-only grant — it never
+  /// confers write. Additive field 17.
+  repeated string aware_users = 17;
 }
 
 // ── Memory (§3.2) — Phase 2/3 stubs ───────────────────────────────────

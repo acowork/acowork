@@ -27,13 +27,21 @@ type = "Network"
 # Tool opt-in declarations (ADR-029).
 # Document Manager focuses on collecting, organizing, archiving, writing,
 # reviewing, and converting documentation. Tools cover the full doc lifecycle:
-#   - doc_reader              → PRIMARY tool: read PDF/Word/Excel/PowerPoint
-#   - file_*/glob_search/content_search → organize, write, search knowledge base
+#   - doc_*    (hosted document service) → THE library and the system of record:
+#                                           read/write/move/trash/restore,
+#                                           review requests, versions
+#   - pm_*     (hosted project service)  → collection, conversion and archive
+#                                           chores as tasks with owners and dates
+#   - doc_reader              → one-off PDF/Word/Excel/PowerPoint extraction
 #   - http_request/web_fetch             → gather external references
 #   - mcp_memory__* (hosted memory MCP, ADR-101)   → knowledge-base persistence across sessions
 #   - intent_send             → coordinate with content-owner agents
 #   - ask_user_question, todo_write → clarify scope & track doc tasks
-# No shell tools — Doc Manager does not hold a Shell permission.
+#
+# Shell tools are declared as a cross-platform detection set, not a core
+# workflow dependency: document work goes through doc_* (format conversion
+# through the docling preset), so the declarations stay only so a job that
+# genuinely needs a local command can run one after the user grants it.
 
 # --- Memory (ADR-101) ---
 # `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
@@ -42,6 +50,12 @@ type = "Network"
 # (ADR-069).
 
 # --- Filesystem ---
+# `file_read` is what the collection flow uses to inspect a workspace file before
+# handing its content to `doc_write`: doc_write's source_workspace / source_path
+# only record provenance, they do not read the file (design 32 §5.5).
+[[tools]]
+name = "file_read"
+
 [[tools]]
 name = "file_edit"
 
@@ -119,6 +133,19 @@ enabled = false
 [[mcp_servers]]
 hosted = "doc"
 why = "Read and write the shared document library instead of local files"
+# ADR-104: the whitelist also decides which tools start enabled, so it is the
+# same set the skills declare in `tool_deps` — no more, no less.
+tools = [
+  "doc_list", "doc_read", "doc_stat", "doc_search", "doc_write",
+  "doc_move", "doc_remove", "doc_mkdir", "doc_rmdir",
+  "doc_check_request", "doc_list_requests",
+  "doc_list_trash", "doc_restore",
+]
+
+[[mcp_servers]]
+hosted = "pm"
+why = "Collection, conversion and archive chores are tracked as tasks with owners and dates instead of living in notes"
+tools = ["pm_create_task", "pm_add_activity"]
 
 [[mcp_servers]]
 preset = "docling"

@@ -242,6 +242,7 @@ impl GatewayClient {
         task_id: &str,
         target_agent: &str,
         owner: &str,
+        project_owner: &str,
         message: &str,
         assignment_brief: &str,
         message_id: &str,
@@ -259,6 +260,12 @@ impl GatewayClient {
                 "task_id": task_id,
                 "target_agent": target_agent,
                 "owner": owner,
+                // ADR-076 §决策 4 (rev.): `Project::owner()` (a human), used
+                // by the Gateway as the execution session's initiator so the
+                // project owner can write into it. Kept separate from
+                // `owner` (the task creator) above, which drives the Chat
+                // row's voice and the target's `intent:receive` check.
+                "project_owner": project_owner,
                 "message": message,
                 "assignment_brief": assignment_brief,
                 "message_id": message_id,

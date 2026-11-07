@@ -28,8 +28,11 @@ use crate::types::AclRole;
 use crate::service::policy::{gate_owner, gate_write, OwnerGate, WriteGate};
 use crate::service::request::{RequestService, SubmitRequestInput};
 use crate::service::search::SearchService;
+use crate::service::trash::TrashService;
 use crate::state::DocState;
-use crate::types::{DocMeta, ImportSource, RequestStatus, ROOT_DIR_ID};
+use crate::types::{
+    DocMeta, ImportSource, RequestStatus, ROOT_DIR_ID, TRASH_ID_PREFIX,
+};
 
 // ── 身份与参数辅助 ──────────────────────────────────────────────────────
 
@@ -40,15 +43,24 @@ fn require_actor(actor: Option<&str>) -> Result<&str> {
     })
 }
 
-/// 结构性操作（`doc_move` / `doc_remove`）的治理闸门。
+/// 结构性操作（`doc_move` / `doc_remove` / `doc_rmdir`）的治理闸门。
 ///
-/// 所有权优先（[`gate_owner`](crate::service::policy::gate_owner)）；文档没有
+/// 所有权优先（[`gate_owner`](crate::service::policy::gate_owner)）；节点没有
 /// 创建人记录时（creator 标记上线前的历史数据、导入的文档）不直接拒绝，而是
 /// 交给节点 ACL 裁决——结构性操作没有审核兜底，按所有权一律拒绝会让这类文档
 /// 在 Agent 面上永久不可达（既不能改名也不能删），那不是保护而是死锁。
 /// ACL 默认公开，显式收紧时才拦人，admin 在 ACL 层内已豁免。
-async fn gate_structural(state: &DocState, actor: &str, meta: &DocMeta) -> Result<()> {
-    match gate_owner(actor, false, meta.creator.as_deref())? {
+///
+/// `target` 由调用方给出（文档传 [`AclTarget::Doc`]，目录传 [`AclTarget::Dir`]）：
+/// 闸门规则只依赖创建人与目标坐标，与节点的 kind 无关，所以两者共用一份实现——
+/// 这正是 REST 面（`DELETE /api/dirs/:id` → `AclTarget::Dir` + `Edit`）执行的规则。
+async fn gate_structural(
+    state: &DocState,
+    actor: &str,
+    creator: Option<&str>,
+    target: AclTarget<'_>,
+) -> Result<()> {
+    match gate_owner(actor, false, creator)? {
         OwnerGate::Owner => Ok(()),
         OwnerGate::Unowned => {
             state
@@ -58,7 +70,7 @@ async fn gate_structural(state: &DocState, actor: &str, meta: &DocMeta) -> Resul
                         id: Some(actor.to_string()),
                         is_admin: false,
                     },
-                    AclTarget::Doc(&meta.doc_id),
+                    target,
                     AclRole::Edit,
                 )
                 .await
@@ -66,7 +78,38 @@ async fn gate_structural(state: &DocState, actor: &str, meta: &DocMeta) -> Resul
     }
 }
 
-/// 宽松参数解析：缺省字段走 `default`；未知字段忽略；类型错误给清晰信息。
+/// `edit` 闸门，作用在**目标目录**上——所有“往别人的节点里放东西”的创建操作
+/// 都先过这一关。
+///
+/// 与结构性闸门的分工：结构性操作（移动/删除）动的是节点本身，按**创建人**
+/// 裁决（[`gate_structural`]）；创建动的是父目录的**内容**，按目录的
+/// **节点 ACL** 裁决。两者都是 REST 面已有的规则，这里只是让 MCP 面追上：
+/// `POST /api/dirs`（`api/dirs.rs`）与 `POST /api/docs`（`api/docs.rs`）都对
+/// 目标目录做 `AclTarget::Dir` + `Edit`。
+///
+/// 新增文档改自 / 追加到别人已存在的文档，走的是 `gate_write`（转 `Review`
+/// 审核队列）；**创建**没有可审核的对象，所以只剩这道节点闸门——缺了它，
+/// agent 就能把内容写进用户显式收紧过的目录，而 REST 面会拒。
+async fn gate_create(state: &DocState, actor: &str, parent_dir_id: &str) -> Result<()> {
+    state
+        .acl
+        .check(
+            &ActorCtx {
+                id: Some(actor.to_string()),
+                is_admin: false,
+            },
+            AclTarget::Dir(parent_dir_id),
+            AclRole::Edit,
+        )
+        .await
+}
+
+/// 参数解析：缺省字段走 `default`；**未知字段直接报错**；类型错误给清晰信息。
+///
+/// 每个 Args 结构都带 `deny_unknown_fields`：模型拼错字段名（`titel`）时 serde
+/// 的报错会列出可接受字段名（`unknown field `titel`, expected one of …`），
+/// 模型据此自我纠正；静默丢弃则会让调用“成功”但字段没生效——那是比报错更难查的
+/// 失败。取值/类型错误本来就报得清楚，缺的正是“名字”这一维。
 fn parse_args<T: for<'de> Deserialize<'de>>(name: &str, args: Value) -> Result<T> {
     serde_json::from_value(args)
         .map_err(|e| DocError::BadRequest(format!("invalid arguments for {name}: {e}")))
@@ -252,6 +295,7 @@ async fn doc_list(state: &DocState, args: Value) -> Result<Value> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DocRefArgs {
     #[serde(rename = "ref")]
     reference: String,
@@ -308,6 +352,7 @@ fn doc_to_value(meta: DocMeta, path: String) -> Result<Value> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SearchArgs {
     keyword: String,
     #[serde(default = "default_search_limit")]
@@ -365,14 +410,17 @@ async fn doc_mkdir(state: &DocState, actor: &str, args: Value) -> Result<Value> 
         ));
     }
     let parent_dir_id = resolve_dir_or_root(state.dirs.as_ref(), parent_path).await?;
+    gate_create(state, actor, &parent_dir_id).await?;
     let meta = state
         .dirs
         .create(CreateDirectoryInput {
             parent_dir_id,
             name: name.to_string(),
-            // Provenance only — MCP agent calls are not ACL-enforced in v1
-            // (see `service::acl` module docs); the creator stamp keeps
-            // "who made this" answerable.
+            // The creator stamp is not provenance-only any more: it is what
+            // the structural gate (`gate_structural` → `gate_owner`) reads
+            // when someone later tries to rename or prune this directory, so
+            // the agent that creates a bucket becomes the one that governs
+            // it.
             creator: Some(actor.to_string()),
         })
         .await?;
@@ -396,6 +444,7 @@ enum WriteMode {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct WriteArgs {
     #[serde(rename = "ref")]
     reference: String,
@@ -469,6 +518,11 @@ async fn doc_write(state: &DocState, actor: &str, args: Value) -> Result<Value> 
                     "creating needs a path (it supplies the directory and the file name)".into(),
                 ));
             }
+            // Creating is the one write with no review fallback: there is no
+            // existing document to propose a change to, so the target
+            // directory's own ACL is the only gate — same rule the REST face
+            // applies (`POST /api/docs` → `AclTarget::Dir` + `Edit`).
+            gate_create(state, actor, &dir_id).await?;
             let title = stem_of_ref(&a.reference)?;
             limit::ensure_document_size(a.content.len(), state.config.max_doc_size_bytes)?;
             let import = import_of(actor, &a.source_workspace, &a.source_path);
@@ -619,6 +673,7 @@ fn import_of(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MoveArgs {
     from: String,
     to: String,
@@ -643,7 +698,7 @@ async fn doc_move(state: &DocState, actor: &str, args: Value) -> Result<Value> {
     let (_src_dir, src) =
         resolve_target(state.dirs.as_ref(), state.docs.as_ref(), &a.from).await?;
     let src = src.ok_or_else(|| DocError::DocNotFound(a.from.clone()))?;
-    gate_structural(state, actor, &src).await?;
+    gate_structural(state, actor, src.creator.as_deref(), AclTarget::Doc(&src.doc_id)).await?;
 
     let to = a.to.trim();
     let (to_dir_path, _) = to.rsplit_once('/').unwrap_or(("", to));
@@ -658,7 +713,9 @@ async fn doc_move(state: &DocState, actor: &str, args: Value) -> Result<Value> {
 
     match &dst_existing {
         Some(dst) if !a.overwrite => return Err(DocError::NameConflict(dst_name)),
-        Some(dst) => gate_structural(state, actor, dst).await?,
+        Some(dst) => {
+            gate_structural(state, actor, dst.creator.as_deref(), AclTarget::Doc(&dst.doc_id)).await?
+        }
         None => {}
     }
 
@@ -678,6 +735,7 @@ async fn doc_move(state: &DocState, actor: &str, args: Value) -> Result<Value> {
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RemoveArgs {
     #[serde(rename = "ref")]
     reference: String,
@@ -690,7 +748,7 @@ async fn doc_remove(state: &DocState, actor: &str, args: Value) -> Result<Value>
     let (_dir, meta) =
         resolve_target(state.dirs.as_ref(), state.docs.as_ref(), &a.reference).await?;
     let meta = meta.ok_or_else(|| DocError::DocNotFound(a.reference.clone()))?;
-    gate_structural(state, actor, &meta).await?;
+    gate_structural(state, actor, meta.creator.as_deref(), AclTarget::Doc(&meta.doc_id)).await?;
     let path = PathCtx::new(state.dirs.as_ref())
         .doc(state.docs.as_ref(), &meta.doc_id)
         .await?;
@@ -699,6 +757,7 @@ async fn doc_remove(state: &DocState, actor: &str, args: Value) -> Result<Value>
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CheckRequestArgs {
     request_id: String,
 }
@@ -759,6 +818,16 @@ pub async fn dispatch(state: &DocState, actor: Option<&str>, name: &str, args: V
         "doc_remove" => {
             let actor = require_actor(actor)?;
             doc_remove(state, actor, args).await
+        }
+        "doc_rmdir" => {
+            let a = require_actor(actor)?;
+            doc_rmdir(state, a, args).await
+        }
+        "doc_list_requests" => doc_list_requests(state, args).await,
+        "doc_list_trash" => doc_list_trash(state, args).await,
+        "doc_restore" => {
+            let a = require_actor(actor)?;
+            doc_restore(state, a, args).await
         }
 
         // 未知工具 → 协议级 method-not-found（tools/call 已校验存在，
@@ -1241,8 +1310,7 @@ mod tests {
 
     /// The same fall-through must not open an explicitly ACL-locked node.
     #[tokio::test]
-    async fn unowned_document_with_a_restrictive_acl_still_denies() {
-        let (_tmp, state) = setup().await;
+    async fn unowned_document_with_a_restrictive_acl_still_denies() {        let (_tmp, state) = setup().await;
         const OTHER: &str = "inst-0000-0000-0000-0000-000000000002";
         let meta = state
             .docs
@@ -1410,6 +1478,491 @@ mod tests {
         let tree = state.dirs.list_tree("root").await.unwrap();
         assert!(tree.dirs.iter().any(|d| d.name == "abs"));
     }
+
+    /// **Creation is gated on the target directory's ACL, like the REST face.**
+    ///
+    /// `doc_mkdir` and `doc_write(mode=create)` were the last two ungated entry
+    /// points: an agent could seed a directory a user had explicitly
+    /// restricted, while `POST /api/dirs` / `POST /api/docs` refused the same
+    /// call. Both now route through [`gate_create`].
+    #[tokio::test]
+    async fn creating_inside_a_restricted_directory_is_denied() {
+        let (_tmp, state) = setup().await;
+        const OTHER: &str = "inst-0000-0000-0000-0000-000000000002";
+
+        ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "私有" })).await;
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "私有/已存在.md", "mode": "create", "content": "x" }),
+        )
+        .await;
+        let dir = state
+            .dirs
+            .list_tree(ROOT_DIR_ID)
+            .await
+            .unwrap()
+            .dirs
+            .into_iter()
+            .find(|d| d.name == "私有")
+            .expect("dir exists");
+
+        // Lock it to one principal; the creator keeps access by construction.
+        state
+            .acl
+            .set(
+                &ActorCtx {
+                    id: Some("human".into()),
+                    is_admin: false,
+                },
+                AclTarget::Dir(&dir.dir_id),
+                Some(vec![crate::types::Ace {
+                    principal: AGENT.into(),
+                    role: AclRole::Edit,
+                }]),
+            )
+            .await
+            .unwrap();
+
+        // 1. outside agent cannot create a sub-directory in it …
+        let e = err(&state, Some(OTHER), "doc_mkdir", json!({ "path": "私有/子目录" })).await;
+        assert!(matches!(e, DocError::AclDenied { .. }), "got {e:?}");
+
+        // 2. … and cannot seed a document into it.
+        let e = err(
+            &state,
+            Some(OTHER),
+            "doc_write",
+            json!({ "ref": "私有/注入.md", "mode": "create", "content": "x" }),
+        )
+        .await;
+        assert!(matches!(e, DocError::AclDenied { .. }), "got {e:?}");
+
+        // 3. Nothing was created by the two refused calls.
+        let listing = ok(&state, None, "doc_list", json!({ "path": "私有" })).await;
+        assert_eq!(listing["total"], 1, "{listing}");
+
+        // 4. The principal that owns the directory still works.
+        let v = ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "私有/子目录" })).await;
+        assert_eq!(v["name"], "子目录");
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "私有/提案.md", "mode": "create", "content": "mine" }),
+        )
+        .await;
+        assert_eq!(v["status"], "applied");
+    }
+
+    /// **Design 32 §5.5, verified against the real resolver.**
+    ///
+    /// The PM surface publishes `doc_path` (`项目管理/{project_id}`); this is
+    /// the other half of the contract — that the string is addressable, and
+    /// that it is **not** created implicitly. `doc_write` into a missing
+    /// directory chain fails with `DirNotFound`, so the convention's carrier
+    /// skill must create the chain first. A typo therefore surfaces as an
+    /// error instead of silently building a parallel tree.
+    #[tokio::test]
+    async fn the_project_document_directory_round_trips() {
+        let (_tmp, state) = setup().await;
+        let doc_path = acowork_core::doc_layout::project_doc_dir("p-1a2b3c");
+
+        // Writing before the chain exists is refused, and the error names the
+        // segment that is missing (the actionable half).
+        let e = err(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": format!("{doc_path}/PRD.md"), "mode": "create", "content": "# PRD" }),
+        )
+        .await;
+        match e {
+            DocError::DirNotFound(seg) => assert_eq!(seg, "directory path segment: 项目管理"),
+            other => panic!("expected DirNotFound, got {other:?}"),
+        }
+
+        // The convention's two-step setup: root, then the project directory.
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_mkdir",
+            json!({ "path": acowork_core::doc_layout::PROJECT_DOC_ROOT }),
+        )
+        .await;
+        ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": doc_path })).await;
+
+        // Now the published path addresses a document.
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": format!("{doc_path}/PRD.md"), "mode": "create", "content": "# PRD" }),
+        )
+        .await;
+        assert_eq!(v["path"], format!("{doc_path}/PRD.md"));
+        // The human face of the directory: an H1 in README.md, not a nice
+        // directory name (the directory is a machine handle).
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": format!("{doc_path}/README.md"), "mode": "create", "content": "# 项目" }),
+        )
+        .await;
+        assert_eq!(v["status"], "applied");
+        let read = ok(
+            &state,
+            None,
+            "doc_read",
+            json!({ "ref": format!("{doc_path}/README.md") }),
+        )
+        .await;
+        assert_eq!(read["content"], "# 项目");
+    }
 }
 
+// ── Review-request and trash surfaces (design 32 §3, P2) ────────────────
+//
+// Three questions an agent cannot answer today:
+//
+// * "what did I submit that is still waiting?" — `doc_check_request` needs a
+//   `request_id`, and that id exists only in the write response. Compaction
+//   drops it, and the pending change is then unreachable *and* unrevertible.
+// * "what is in the trash?" — `doc_remove` promises a recoverable delete but
+//   the recovery surface was REST-only, so the promise was not keepable from
+//   an agent session.
+// * "how do I restructure the library?" — `doc_mkdir` existed with no
+//   counterpart, so directory trees could be grown but never pruned.
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListRequestsArgs {
+    /// `pending` (default) | `approved` | `rejected` | `expired`.
+    #[serde(default)]
+    status: Option<String>,
+    /// Restrict to one document (`doc-…` id or a library path).
+    #[serde(default)]
+    reference: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `doc_list_requests` — the review queue, so a lost `request_id` is not a
+/// lost change.
+async fn doc_list_requests(state: &DocState, args: Value) -> Result<Value> {
+    // No `unwrap_or(default)` here: that would answer a malformed call with a
+    // plausible-looking queue, and the caller would never learn it was wrong.
+    let a: ListRequestsArgs = parse_args("doc_list_requests", args)?;
+    let status = match a.status.as_deref().map(str::trim) {
+        None | Some("") | Some("pending") => Some(RequestStatus::Pending),
+        Some("approved") => Some(RequestStatus::Approved),
+        Some("rejected") => Some(RequestStatus::Rejected),
+        Some("expired") => Some(RequestStatus::Expired),
+        Some("all") => None,
+        Some(other) => {
+            return Err(DocError::BadRequest(format!(
+                "unknown status `{other}`; valid: pending | approved | rejected | expired | all"
+            )));
+        }
+    };
+
+    let requests = match &a.reference {
+        Some(reference) => {
+            let (_dir, meta) =
+                resolve_target(state.dirs.as_ref(), state.docs.as_ref(), reference).await?;
+            let meta = meta.ok_or_else(|| DocError::DocNotFound(reference.clone()))?;
+            state.requests.list_for_doc(&meta.doc_id).await?
+        }
+        None => state.requests.list(status).await?,
+    };
+
+    let limit = a.limit.unwrap_or(50).clamp(1, 200);
+    let total = requests.len();
+    let page: Vec<Value> = requests
+        .into_iter()
+        .take(limit)
+        .map(|r| {
+            let mut v = json!({
+                "request_id": r.request_id,
+                "doc_id": r.doc_id,
+                "status": request_status_str(r.status),
+                "submitted_by": r.submitted_by,
+                "submitted_at": r.created_at,
+            });
+            if let Some(note) = &r.review_note {
+                v["review_note"] = Value::String(note.clone());
+            }
+            v
+        })
+        .collect();
+
+    Ok(json!({
+        "total": total,
+        "returned": page.len(),
+        "has_more": total > page.len(),
+        "requests": page,
+    }))
+}
+
+fn request_status_str(status: RequestStatus) -> &'static str {
+    match status {
+        RequestStatus::Pending => "pending",
+        RequestStatus::Approved => "approved",
+        RequestStatus::Rejected => "rejected",
+        RequestStatus::Expired => "expired",
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListTrashArgs {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `doc_list_trash` — what `doc_remove` took away, with the id to bring it
+/// back.
+async fn doc_list_trash(state: &DocState, args: Value) -> Result<Value> {
+    let a: ListTrashArgs = parse_args("doc_list_trash", args)?;
+    let entries = state.trash.list().await?;
+    let limit = a.limit.unwrap_or(50).clamp(1, 200);
+    let total = entries.len();
+    let page: Vec<Value> = entries
+        .into_iter()
+        .take(limit)
+        .map(|e| {
+            json!({
+                "trash_id": e.trash_id,
+                "doc_id": e.doc_id,
+                "original_name": e.original_name,
+                "original_dir_id": e.original_dir_id,
+                "deleted_at": e.deleted_at,
+                "file_size_bytes": e.file_size_bytes,
+                "creator": e.creator,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "total": total,
+        "returned": page.len(),
+        "has_more": total > page.len(),
+        "entries": page,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RestoreArgs {
+    trash_id: String,
+}
+
+/// `doc_restore` — undo a `doc_remove`.
+///
+/// The gate mirrors the REST endpoint: restoring writes a document back into
+/// its directory, so it needs the same edit right the delete needed. There is
+/// deliberately **no purge** counterpart: an agent may undo a deletion, never
+/// make one irreversible.
+async fn doc_restore(state: &DocState, actor: &str, args: Value) -> Result<Value> {
+    let a: RestoreArgs = parse_args("doc_restore", args)?;
+    if !a.trash_id.starts_with(TRASH_ID_PREFIX) {
+        return Err(DocError::BadRequest(format!(
+            "trash ids start with `{TRASH_ID_PREFIX}`, got: {}",
+            a.trash_id
+        )));
+    }
+    let slot = state
+        .trash
+        .list()
+        .await?
+        .into_iter()
+        .find(|e| e.trash_id == a.trash_id)
+        .ok_or_else(|| DocError::DocNotFound(a.trash_id.clone()))?;
+
+    state
+        .acl
+        .check_trashed(
+            &ActorCtx {
+                id: Some(actor.to_string()),
+                is_admin: false,
+            },
+            &slot,
+            AclRole::Edit,
+        )
+        .await?;
+
+    let meta = state.trash.restore(&a.trash_id).await?;
+    // No `unwrap_or_default()` here: an empty `path` reads as "restored at the
+    // library root", which is a claim about where the document is, not a
+    // missing decoration. Every other call site propagates the resolver error.
+    let path = PathCtx::new(state.dirs.as_ref())
+        .doc(state.docs.as_ref(), &meta.doc_id)
+        .await?;
+    Ok(json!({
+        "restored": true,
+        "doc_id": meta.doc_id,
+        "name": meta.name,
+        "path": path,
+    }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RmdirArgs {
+    path: String,
+}
+
+// ── Manifest reconciliation table ─────────────────────────────────────
+//
+// Same rule as the PM crate (design 32 §7 D2): the field names the manifest
+// declares must **equal** the wire names the implementation accepts, in both
+// directions. A field the LLM cannot see is a feature that does not exist; a
+// field the schema promises but the server ignores makes the caller's input
+// vanish without an error. `manifest_fields_cover_every_tool` keeps the table
+// from going stale — being on it is the rule, not an opt-in.
+
+#[cfg(test)]
+impl ListArgs {
+    const FIELDS: &'static [&'static str] = &["path", "query", "offset", "limit"];
+}
+
+#[cfg(test)]
+impl DocRefArgs {
+    const FIELDS: &'static [&'static str] = &["ref"];
+}
+
+#[cfg(test)]
+impl SearchArgs {
+    const FIELDS: &'static [&'static str] = &["keyword", "limit"];
+}
+
+#[cfg(test)]
+impl MkdirArgs {
+    const FIELDS: &'static [&'static str] = &["path"];
+}
+
+#[cfg(test)]
+impl WriteArgs {
+    const FIELDS: &'static [&'static str] = &[
+        "ref",
+        "content",
+        "mode",
+        "if_version",
+        "source_workspace",
+        "source_path",
+    ];
+}
+
+#[cfg(test)]
+impl MoveArgs {
+    const FIELDS: &'static [&'static str] = &["from", "to", "overwrite"];
+}
+
+#[cfg(test)]
+impl RemoveArgs {
+    const FIELDS: &'static [&'static str] = &["ref"];
+}
+
+#[cfg(test)]
+impl CheckRequestArgs {
+    const FIELDS: &'static [&'static str] = &["request_id"];
+}
+
+#[cfg(test)]
+impl ListRequestsArgs {
+    const FIELDS: &'static [&'static str] = &["status", "reference", "limit"];
+}
+
+#[cfg(test)]
+impl ListTrashArgs {
+    const FIELDS: &'static [&'static str] = &["limit"];
+}
+
+#[cfg(test)]
+impl RestoreArgs {
+    const FIELDS: &'static [&'static str] = &["trash_id"];
+}
+
+#[cfg(test)]
+impl RmdirArgs {
+    const FIELDS: &'static [&'static str] = &["path"];
+}
+
+/// Tool → the **wire field names** its implementation accepts.
+#[cfg(test)]
+pub(crate) const MANIFEST_FIELDS: &[(&str, &[&str])] = &[
+    ("doc_list", ListArgs::FIELDS),
+    ("doc_read", DocRefArgs::FIELDS),
+    ("doc_stat", DocRefArgs::FIELDS),
+    ("doc_write", WriteArgs::FIELDS),
+    ("doc_move", MoveArgs::FIELDS),
+    ("doc_remove", RemoveArgs::FIELDS),
+    ("doc_mkdir", MkdirArgs::FIELDS),
+    ("doc_search", SearchArgs::FIELDS),
+    ("doc_check_request", CheckRequestArgs::FIELDS),
+    ("doc_list_requests", ListRequestsArgs::FIELDS),
+    ("doc_list_trash", ListTrashArgs::FIELDS),
+    ("doc_restore", RestoreArgs::FIELDS),
+    ("doc_rmdir", RmdirArgs::FIELDS),
+];
+
+/// `doc_rmdir` — remove an **empty** directory.
+///
+/// Deliberately not the REST behaviour: `DELETE /api/dirs/{id}` cascades a
+/// whole subtree into the trash. An agent that names the wrong path would
+/// sweep away an information architecture in one call, so this refuses unless
+/// the directory is empty and makes the caller name what it means to delete.
+///
+/// Gated like every structural op ([`gate_structural`] → `AclTarget::Dir`),
+/// which is the same rule the REST face applies to the same operation.
+///
+/// "Empty" counts the recycle bin too: a directory whose last document sits in
+/// the trash still has an owner of record for that slot, and pruning it would
+/// leave `doc_restore` pointing at a directory that no longer exists.
+async fn doc_rmdir(state: &DocState, actor: &str, args: Value) -> Result<Value> {
+    let a: RmdirArgs = parse_args("doc_rmdir", args)?;
+    let path = a.path.trim().trim_matches('/');
+    if path.is_empty() {
+        return Err(DocError::BadRequest(
+            "doc_rmdir requires a non-empty `path` (the root cannot be removed)".into(),
+        ));
+    }
+    let dir_id = resolve_dir(state.dirs.as_ref(), path).await?;
+    // `resolve_dir` never yields the root for a non-empty path, but the
+    // constant is the boundary the call must never cross — keep it explicit
+    // rather than relying on the resolver's current behaviour.
+    if dir_id == ROOT_DIR_ID {
+        return Err(DocError::BadRequest(
+            "doc_rmdir cannot remove the library root".into(),
+        ));
+    }
+    let meta = state.dirs.read(&dir_id).await?;
+    gate_structural(state, actor, meta.creator.as_deref(), AclTarget::Dir(&dir_id)).await?;
+    let tree = state.dirs.list_tree(&dir_id).await?;
+    if !tree.files.is_empty() || !tree.dirs.is_empty() {
+        return Err(DocError::BadRequest(format!(
+            "`{path}` is not empty ({} document(s), {} sub-director(ies)); \
+             move or remove its contents first — doc_rmdir never cascades",
+            tree.files.len(),
+            tree.dirs.len()
+        )));
+    }
+    // A sub-directory would have been rejected above, so the only slots that
+    // can target this directory are its own: `original_dir_id == dir_id`.
+    let trashed = state
+        .trash
+        .list()
+        .await?
+        .into_iter()
+        .filter(|e| e.original_dir_id == dir_id)
+        .count();
+    if trashed > 0 {
+        return Err(DocError::BadRequest(format!(
+            "`{path}` has {trashed} document(s) in the recycle bin; \
+             restore or purge them first — removing the directory would strand them"
+        )));
+    }
+    state.dirs.delete(&dir_id).await?;
+    Ok(json!({ "removed": true, "path": path }))
+}

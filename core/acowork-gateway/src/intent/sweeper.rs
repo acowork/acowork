@@ -199,7 +199,15 @@ async fn emit_fallback_receipt(
             mqtt: Some(state.mqtt_gateway_client.as_ref().expect("checked in sweep_once")),
             mailbox: Some(mailbox),
         };
+        // ADR-076 §决策 4 (rev.): the receipt is a `kind=response` delivery —
+        // like `deliver_response` it can open a fresh initiator session when
+        // the original one has closed, so the seed belongs here too. No
+        // originator: the mailbox entry does not carry one, the ACL union
+        // alone keeps the invariant (never-empty for agent-to-agent).
+        let aware_users =
+            crate::http::intent_api::aware_users_seed(state, &req.to_instance, &req.from_instance, None);
         let dreq = delivery::DeliveryRequest {
+            aware_users,
             message_id: receipt_id.clone(),
             conversation_id: req.conversation_id.clone(),
             from_instance: req.to_instance.clone(),
@@ -208,6 +216,15 @@ async fn emit_fallback_receipt(
             action: "chat".to_string(),
             params_json: serde_json::json!({ "message": body }).to_string(),
             source_chat_session_id: req.source_chat_session_id.clone(),
+            // The receipt re-enters the initiator's conversation, exactly as a
+            // live response does: the surface it was granted is the surface the
+            // request recorded, and the origin's human presence is the fact the
+            // initiator's turn needs in order to ask.
+            chat_grant: crate::http::intent_api::chat_grant(
+                &req.source_chat_session_id,
+                true,
+                req.has_human,
+            ),
             repo: String::new(),
             session_config_json: String::new(),
             kind: "response".to_string(),

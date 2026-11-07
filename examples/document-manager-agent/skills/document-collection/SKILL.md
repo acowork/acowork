@@ -11,8 +11,11 @@ triggers:
   - gather documents
 tool_deps:
   - file_read
-  - file_write
-  - network
+  - doc_list
+  - doc_search
+  - doc_write
+  - http_request
+  - web_fetch
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -23,6 +26,18 @@ tool_deps:
 
 Do not mix source material with interpretation. Every collected item needs provenance, scope, owner if known, and confidence level.
 
+## System of Record
+
+Collecting means importing into the library, not copying files around.
+
+- Read the external source (workspace file, export, note) with the file tools, then
+  `doc_write` with `mode="create"` and record provenance: `source_workspace`,
+  `source_path`, plus a line in the body saying where it came from and when.
+- Check first with `doc_search` / `doc_list` — an import that duplicates an existing
+  page makes the library worse.
+- The imported page is shared and versioned; the workspace file is not. If you only
+  copied, you collected nothing.
+
 ## Execution Steps
 
 1. **Define collection scope**
@@ -32,7 +47,7 @@ Do not mix source material with interpretation. Every collected item needs prove
 
 2. **Collect source materials**
    - Use `file_read` to inspect local documents, notes, specs, plans, meeting records, exports, and indexes
-   - Use `network` only for provided or approved links and references
+   - Use `http_request` / `web_fetch` only for provided or approved links and references
    - Capture files, links, titles, authors, dates, versions, owners, and related topics
    - Do not collect secrets, credentials, or private personal data into docs
 
@@ -42,7 +57,7 @@ Do not mix source material with interpretation. Every collected item needs prove
    - Identify duplicates and possible canonical sources
 
 4. **Create inventory**
-   - Use `file_write` to save inventory when requested
+   - Use `doc_write` to save inventory when requested
    - Include provenance and open questions
    - Use `mcp_memory__memory_store` to persist inventory location, canonical-source candidates, and collection rules
 

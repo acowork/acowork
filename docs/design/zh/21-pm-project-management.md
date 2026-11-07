@@ -306,22 +306,19 @@ stateDiagram-v2
 - 身份：调用方经 **`X-MCP-Actor` header** 携带 `agent_instance_id`（UUID，ADR-073 §1.3 不变量 1）— Gateway 下发 `{instance_id}` 模板，Runtime 收到 `acowork/global/mcps` 时替换为 `self.bootstrap_data.instance_id`；服务端校验（§9），**所有状态变更工具都校验调用者 instance_id 与任务 assignee 一致**。
 - 错误码：`-32001` Unauthenticated（无可信身份调变更工具）、`-32002` Forbidden（非 assignee）；业务错误（409 依赖未满足等）映射为对应 `PmError` code。
 
-| 工具 | 参数 | 返回 | 说明 |
-|------|------|------|------|
-| `pm_list_projects` | — | 项目列表 | 只读 |
-| `pm_get_project` | `project_id` | 项目详情（含任务数统计） | 只读 |
-| `pm_create_project` | `title` `description?` | 新建项目 | |
-| `pm_list_tasks` | `project_id` `assignee?` `status?` | 任务列表 | Agent 自查任务主入口（可过滤 assignee=自己） |
-| `pm_get_task` | `task_id` | 任务详情（含 is_blocked/blocked_by/depth） | 只读 |
-| `pm_create_task` | `project_id` `title` `description?` `assignee?` `priority?` `type?` `due_at?` `parent_task_id?` `depends_on?` | 新 `task_id` | **Agent 创建 → `review_status=pending` 待人类审核**（§4）；assignee 必须存在（§9.1） |
-| `pm_check_task` | `task_id` | 状态 + `review_status` | 仅创建者可查；Agent 查询自己创建的任务是否被批准 |
-| `pm_update_task` | `task_id` `title?` `description?` `status?` `priority?` `assignee?` | 更新后的任务 | 状态在 `pending / in_progress / submitted / done / rejected / cancelled` 间按状态机流转 |
-| `pm_claim_task` | `task_id` | 自领后的任务 | **pending → in_progress**，**仅限 assignee == 调用者**（-32002）；依赖未满足返回 409 |
-| `pm_submit_task` | `task_id` `text` `attachment_ids?` | 提交后的任务 | **in_progress → submitted**，写入 `result {text, attachment_ids, submitted_by}` |
-| `pm_list_my_tasks` | `status?` `limit?` | 当前调用者名下任务 | Agent 会话开始自查主入口 |
-| `pm_reparent_task` | `task_id` `new_parent_task_id?` | 成功/失败 | **移动任务到新父下**（new_parent=null 提升为根任务），DFS 防环 |
-
-> **实际工具清单**：[`core/acowork-pm/src/mcp/manifest.rs`](../../../core/acowork-pm/src/mcp/manifest.rs)（12 个工具，schema 以代码为准）。
+> **工具表已迁出本节。** 参数、返回形状、错误码与 deprecated 别名的**唯一事实来源**是
+> [`core/acowork-pm/src/mcp/manifest.rs`](../../../core/acowork-pm/src/mcp/manifest.rs)
+> 的 manifest（`tools/list` 直接由它生成），设计契约见
+> [32-pm-doc-mcp-tool-surface-for-agents.md](./32-pm-doc-mcp-tool-surface-for-agents.md) §3。
+> 本节只保留**机制**叙述（状态机、审批闸门、派工链），不再复制工具清单——D5 的教训是
+> 复制出来的第二份清单必然漂移：迁移前它缺 `pm_update_task` 的 `type`/`depends_on`、
+> 缺 `pm_list_tasks` 的 `only_blocked`，并把 `pm_check_task` 写成"仅创建者可查"（已成为
+> `pm_get_task` 的别名）。
+>
+> 面向 agent 的三条不变式（细节见文档 32）：
+> 1. `assignee` 必须是该项目的 **agent 成员**（M7），人类成员由 Desktop 侧指派；
+> 2. Agent 创建的任务一律 `review_status=pending`，人工批准后方可 claim（ADR-102）；
+> 3. 状态流转按 §4 状态机，非法流转的报错会列出当前态的合法去向。
 
 ---
 

@@ -362,7 +362,21 @@
     "modelMenuNoMatch": "No match",
     "modelMenuLastUsed": "last used",
     "reasoningMenuTitle": "Reasoning effort",
-    "selectAgentOrPeer": "Select an agent or a conversation to start"
+    "selectAgentOrPeer": "Select an agent or a conversation to start",
+    "plusMenu": "Add to message",
+    "plusMenuUnavailable": "Select a session first",
+    "plusSkills": "Skills",
+    "plusMcp": "MCP servers",
+    "plusBuiltinTools": "Builtin tools",
+    "plusAttachments": "Attachments",
+    "followAgentDefault": "Follow Agent defaults",
+    "plusLoading": "Loading...",
+    "plusLoadFailed": "Could not load the tool list",
+    "plusNoTools": "This agent exposes no builtin tools",
+    "plusNoMcp": "This agent has no MCP servers",
+    "plusNoToolsConnected": "No tools connected yet",
+    "plusToolCount": "{{n}} tools",
+    "plusAgentDisabledNote": "{{n}} of these are disabled in the agent configuration"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM is reasoning",
@@ -988,7 +1002,13 @@
     "importing": "Importing...",
     "buttonImport": "Import",
     "buttonImportSkills": "Import Skills",
-    "searchPlaceholder": "Search skills..."
+    "searchPlaceholder": "Search skills...",
+    "empty": "No skills loaded",
+    "importZipOnly": "Please drop a .zip file",
+    "importSuccess": "Skill \"{{name}}\" imported",
+    "importFailed": "Import failed",
+    "importHint": "Select a skill ZIP package to import. The ZIP must contain a SKILL.md file with YAML frontmatter.",
+    "importDropZone": "Click to select or drop a .zip file"
   },
   "debugPanel": {
     "editSection": "Edit section",

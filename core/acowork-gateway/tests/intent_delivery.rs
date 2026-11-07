@@ -67,6 +67,7 @@ fn req(target: &str) -> DeliveryRequest {
         action: "do".into(),
         params_json: r#"{"k":1}"#.into(),
         source_chat_session_id: String::new(),
+        chat_grant: acowork_gateway::intent::delivery::ChatGrant::default(),
         repo: String::new(),
         session_config_json: String::new(),
         kind: "request".into(),
@@ -75,6 +76,7 @@ fn req(target: &str) -> DeliveryRequest {
         has_human: None,
         chat_attachment_ids: Vec::new(),
         chat_row_id: String::new(),
+        aware_users: Vec::new(),
     }
 }
 
@@ -647,6 +649,7 @@ fn intent_wire_fields_roundtrip() {
         has_human_participant: None,
         chat_attachment_ids: vec!["att-1".into()],
         chat_row_id: "m-7".into(),
+        aware_users: vec![],
     };
     let cmd = ControlCommand {
         instance_id: TARGET.into(),

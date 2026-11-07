@@ -116,7 +116,7 @@ pub async fn update(
     // Design 27 §2.1 T2-a: a manual PATCH into a terminal status ends the
     // target agent's logical execution context for this task.
     if let Some(before) = before {
-        close_task_context_if_terminal(&state, &before, &task).await;
+        close_task_context_if_terminal(&state.gateway, &before, &task).await;
     }
     Ok(Json(task))
 }
@@ -140,7 +140,7 @@ pub async fn delete(
     // (`delete_task` cascades regardless of the flag).
     let closing = state.store.closing_task_contexts(&tid).await.unwrap_or_default();
     state.store.delete_task(&tid, query.cascade).await?;
-    close_task_contexts(&state, closing).await;
+    close_task_contexts(&state.gateway, closing).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
 }
 
@@ -259,7 +259,7 @@ pub async fn review(
     // after approval and the scanner picks it up on the next tick). A
     // terminal transition still closes the execution context.
     if let Some(before) = before {
-        close_task_context_if_terminal(&state, &before, &task).await;
+        close_task_context_if_terminal(&state.gateway, &before, &task).await;
     }
     Ok(Json(task))
 }
@@ -342,9 +342,10 @@ pub type _ReviewStatus = ReviewStatus;
 /// Provisioner from the Gateway config; `None` when PM runs without
 /// `--gateway-url` (single-component dev) — every dispatch/close hook
 /// degrades to a no-op there.
-fn provisioner(state: &ApiState) -> Option<crate::gateway_client::GatewayClient> {
-    state
-        .gateway
+pub(crate) fn provisioner(
+    gateway: &Option<(String, Option<String>)>,
+) -> Option<crate::gateway_client::GatewayClient> {
+    gateway
         .as_ref()
         .map(|(url, token)| crate::gateway_client::GatewayClient::new(url.clone(), token.clone()))
 }
@@ -352,10 +353,12 @@ fn provisioner(state: &ApiState) -> Option<crate::gateway_client::GatewayClient>
 /// End the assignee agents' logical execution contexts for `tasks`
 /// (§2.1 T2-a). Only agent-assigned tasks have a context to close.
 pub(crate) async fn close_task_contexts(
-    state: &ApiState,
+    gateway_infra: &Option<(String, Option<String>)>,
     tasks: impl IntoIterator<Item = (ProjectId, Task)>,
 ) {
-    let Some(gateway) = provisioner(state) else { return };
+    let Some(gateway) = provisioner(gateway_infra) else {
+        return;
+    };
     for (pid, task) in tasks {
         let Some(assignee) = task.assignee.as_deref() else {
             continue;
@@ -371,7 +374,11 @@ pub(crate) async fn close_task_contexts(
 
 /// PATCH/review convenience: only a *transition into* a terminal status
 /// ends the context (`done` / `rejected` / `cancelled`).
-async fn close_task_context_if_terminal(state: &ApiState, before: &Task, after: &Task) {
+async fn close_task_context_if_terminal(
+    gateway: &Option<(String, Option<String>)>,
+    before: &Task,
+    after: &Task,
+) {
     if before.status == after.status {
         return;
     }
@@ -379,6 +386,6 @@ async fn close_task_context_if_terminal(state: &ApiState, before: &Task, after: 
         after.status,
         TaskStatus::Done | TaskStatus::Rejected | TaskStatus::Cancelled
     ) {
-        close_task_contexts(state, [(after.project_id.clone(), after.clone())]).await;
+        close_task_contexts(gateway, [(after.project_id.clone(), after.clone())]).await;
     }
 }

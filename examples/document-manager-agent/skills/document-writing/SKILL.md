@@ -10,8 +10,13 @@ triggers:
   - README
   - guide
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
+  - doc_stat
+  - doc_move
+  - doc_remove
+  - doc_check_request
+  - doc_list_requests
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -22,11 +27,27 @@ tool_deps:
 
 Write for a specific reader and task. Do not create generic documentation without audience, purpose, owner, and freshness expectations.
 
+## System of Record
+
+Write into the library, with the concurrency guard.
+
+- `doc_stat` for the current `version`, then `doc_write` with `if_version` on
+  overwrite. A version conflict means someone else edited the document — re-read and
+  merge; never overwrite blind.
+- `mode="create"` fails if the name is taken (good: it prevents accidental clobber),
+  `append` adds to the end, `overwrite` replaces. For long content: create a temporary
+  name, `append` the chunks, publish atomically with `doc_move`.
+- If the response says `pending_review`, the write did not apply — it is a request.
+  Keep the `request_id`; `doc_check_request` polls it, `doc_list_requests` finds it
+  again after compaction.
+- Deleting is `doc_remove` (trash, recoverable) — never leave a "draft" lying at a
+  path someone will read.
+
 ## Execution Steps
 
 1. **Define audience and purpose**
    - Use `mcp_memory__memory_recall` to retrieve writing conventions, templates, taxonomy, and style decisions
-   - Use `file_read` to inspect source material, related docs, examples, and canonical references
+   - Use `doc_read` to inspect source material, related docs, examples, and canonical references
    - Identify audience, task, document type, depth, owner, and lifecycle status
    - Choose structure: tutorial, how-to, reference, explanation, runbook, ADR, FAQ, onboarding, release note, or knowledge-base article
 
@@ -44,7 +65,7 @@ Write for a specific reader and task. Do not create generic documentation withou
 
 4. **Review and save**
    - Check accuracy, completeness, clarity, consistency, links, and freshness
-   - Use `file_write` to save or update document when requested
+   - Use `doc_write` to save or update document when requested
    - Use `mcp_memory__memory_store` to persist document location, template, style decisions, and owner/freshness rules
 
 ## Output Format

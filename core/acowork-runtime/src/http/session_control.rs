@@ -28,6 +28,7 @@ use std::sync::Arc;
 use crate::agent::inbound::InboundMessage;
 use crate::conversation::{SessionMeta, SessionScope, SessionVisibility};
 use crate::http::server::HttpState;
+use acowork_core::session_meta::SessionToolPolicy;
 
 /// The header the Gateway uses to hand the Runtime the caller's scope.
 ///
@@ -664,6 +665,90 @@ pub(crate) async fn put_session_visibility(
     Ok(Json(serde_json::json!({
         "session_id": sid,
         "visibility": body.visibility,
+    })))
+}
+
+/// Body of `PUT /sessions/{sid}/tool-policy`.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct PutToolPolicyBody {
+    /// `null` (or an omitted field) means "inherit the agent layer" and
+    /// clears the column. Wrapped in an object rather than sent bare so a
+    /// reset is expressible and distinguishable from a malformed body.
+    #[serde(default)]
+    pub(crate) tool_policy: Option<SessionToolPolicy>,
+}
+
+/// `GET /sessions/{sid}/tool-policy` — the session's own tool narrowing.
+///
+/// `tool_policy: null` means the session inherits the agent layer
+/// (`agent-tools.json` / `agent-mcp.json`) unchanged — the state every new
+/// session starts in. A non-null policy is a *narrowing* only: the layer can
+/// remove what the agent exposes, never add to it
+/// (`agent/session/session_tool_layer.rs`).
+///
+/// `authorize_read`: seeing which tools a session runs with is reading its
+/// configuration, not changing it.
+pub(crate) async fn get_session_tool_policy(
+    State(state): State<HttpState>,
+    Path(sid): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let scope = scope_from_headers(&headers);
+    authorize_read(&state, &sid, &scope)?;
+
+    let policy = session_manager(&state)
+        .await?
+        .lock()
+        .await
+        .session_tool_policy(&sid);
+
+    Ok(Json(serde_json::json!({
+        "session_id": sid,
+        "tool_policy": policy,
+    })))
+}
+
+/// `PUT /sessions/{sid}/tool-policy` — replace the session's tool narrowing.
+///
+/// Replace semantics, not a per-item toggle: the caller sends the complete
+/// policy it wants the session to run with (`{"tool_policy": null}` =
+/// inherit). Keeping the endpoint idempotent is what lets the desktop
+/// optimistic toggle survive a retry, and it leaves exactly one writer —
+/// the UI — so there is no read-modify-write race to lose.
+///
+/// Names are stored as given. An entry naming a tool the agent no longer
+/// exposes is inert (the layer only filters), so it needs no validation —
+/// and validating here would make a concurrent agent-side tool change turn
+/// an unrelated toggle into a 400.
+pub(crate) async fn put_session_tool_policy(
+    State(state): State<HttpState>,
+    Path(sid): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<PutToolPolicyBody>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let scope = scope_from_headers(&headers);
+    authorize_write(&state, &sid, &scope)?;
+
+    let policy = body.tool_policy.filter(|p| !p.is_empty());
+    let ok = session_manager(&state)
+        .await?
+        .lock()
+        .await
+        .set_session_tool_policy(&sid, policy.clone());
+
+    if !ok {
+        return Err(not_found(&sid));
+    }
+
+    tracing::info!(
+        session_id = %sid,
+        inherits_agent = policy.is_none(),
+        "HTTP: session tool policy updated"
+    );
+
+    Ok(Json(serde_json::json!({
+        "session_id": sid,
+        "tool_policy": policy,
     })))
 }
 

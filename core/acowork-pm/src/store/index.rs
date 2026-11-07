@@ -14,7 +14,9 @@ use std::path::PathBuf;
 
 use chrono::{DateTime, Utc};
 
-use crate::types::{AttachmentId, Priority, ProjectId, ReviewStatus, TaskId, TaskStatus};
+use crate::types::{
+    AttachmentId, Priority, ProjectId, ReviewStatus, TaskId, TaskStatus, TaskType,
+};
 
 /// 二级索引。
 ///
@@ -61,6 +63,13 @@ pub struct TaskEntry {
     /// Consecutive dispatch failures of the current generation (abandon
     /// gate: at or above MAX the task no longer enters the due set).
     pub dispatch_attempts: u32,
+    /// Task kind, indexed so `pm_list_tasks(type=...)` can narrow the
+    /// candidate set **before** any `task.json` is read.
+    pub task_type: TaskType,
+    /// Title, indexed for substring search (`pm_list_tasks(query=...)`).
+    /// Same reason as `task_type`: a cross-project search must not load every
+    /// task on the machine in order to throw most of them away.
+    pub title: String,
 }
 
 impl TaskEntry {
@@ -88,6 +97,8 @@ impl TaskEntry {
                 .map(|d| d.task_id.clone())
                 .collect(),
             dispatch_attempts: task.dispatch_attempts,
+            task_type: task.task_type,
+            title: task.title.clone(),
         }
     }
 }
@@ -215,6 +226,8 @@ mod tests {
                 priority: Priority::Normal,
                 blocks: vec![],
                 dispatch_attempts: 0,
+                task_type: TaskType::Task,
+                title: "example task".to_string(),
             },
         );
         assert_eq!(idx.len(), 1);

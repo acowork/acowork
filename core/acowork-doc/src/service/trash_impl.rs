@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Duration, Utc};
 
 use crate::error::Result;
+use crate::service::directory::DirectoryService;
 use crate::service::document::{CreateDocumentInput, DocumentService};
 use crate::service::trash::TrashService;
 use crate::store::trash::TrashStore;
@@ -16,18 +17,25 @@ type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 pub struct LibraryTrashService {
     store: TrashStore,
     docs: Arc<dyn DocumentService>,
+    dirs: Arc<dyn DirectoryService>,
     clock: Clock,
     retention: Duration,
 }
 
 impl LibraryTrashService {
     /// Build the service. `docs` is the document service the restore
-    /// path re-creates into; `store` shares the same library root;
-    /// `retention_days` comes from `DocConfig::trash_retention_days`.
-    pub fn new(docs: Arc<dyn DocumentService>, store: TrashStore, retention_days: u32) -> Self {
+    /// path re-creates into, `dirs` the directory service that tells whether
+    /// that parent is still part of the tree; `store` shares the same library
+    /// root; `retention_days` comes from `DocConfig::trash_retention_days`.
+    pub fn new(
+        docs: Arc<dyn DocumentService>,
+        dirs: Arc<dyn DirectoryService>,
+        store: TrashStore,
+        retention_days: u32,
+    ) -> Self {
         let clock: Clock = Arc::new(Utc::now);
         let retention = Duration::days(i64::from(retention_days));
-        Self { store, docs, clock, retention }
+        Self { store, docs, dirs, clock, retention }
     }
 
     pub fn with_clock(mut self, clock: Clock) -> Self {
@@ -55,6 +63,11 @@ impl TrashService for LibraryTrashService {
         let cutoff = self.now() - self.retention;
         let _ = self.store.purge_expired(cutoff).await?;
         let (entry, body) = self.store.find(trash_id).await?;
+        // The slot's parent must still be part of the tree. A pruned directory
+        // leaves its `library.json` on disk, so `create` would otherwise
+        // succeed and hand back a document no listing can ever show. Fail
+        // before touching the slot (the caller keeps it).
+        self.dirs.read(&entry.original_dir_id).await?;
         let content = self.store.read_content(&body).await?;
         let created = self
             .docs
@@ -98,6 +111,7 @@ impl TrashService for LibraryTrashService {
 mod tests {
     use super::*;
     use crate::error::DocError;
+    use crate::service::directory_impl::LibraryDirectoryService;
     use crate::service::document::{CreateDocumentInput, DocumentService};
     use crate::service::document_impl::LibraryDocumentService;
     use crate::service::trash::TrashService;
@@ -121,9 +135,13 @@ mod tests {
         let docs = Arc::new(LibraryDocumentService::new(
             LibraryStore::new(tmp.path().to_path_buf()),
         ));
+        let dirs = Arc::new(LibraryDirectoryService::new(
+            LibraryStore::new(tmp.path().to_path_buf()),
+        ));
         let trash = Arc::new(
             LibraryTrashService::new(
                 docs.clone(),
+                dirs,
                 TrashStore::new(tmp.path().to_path_buf()),
                 30,
             )
@@ -229,6 +247,60 @@ mod tests {
         assert_eq!(trash.list().await.unwrap().len(), 1);
     }
 
+    /// The documented contract of `restore` is "if the original directory no
+    /// longer exists the call fails and the slot is left untouched". A pruned
+    /// directory still has its `library.json` on disk, so `create` used to
+    /// succeed and hand back a document that no listing could ever show.
+    #[tokio::test]
+    async fn restore_into_a_pruned_directory_fails_and_keeps_the_slot() {
+        use crate::service::directory::CreateDirectoryInput;
+
+        let tmp = TempDir::new().unwrap();
+        let root = tmp.path().to_path_buf();
+        let seed = LibraryStore::new(root.clone());
+        seed.ensure_root().await.unwrap();
+        let docs = Arc::new(LibraryDocumentService::new(LibraryStore::new(root.clone())));
+        let dirs = Arc::new(LibraryDirectoryService::new(LibraryStore::new(root.clone())));
+        let trash = LibraryTrashService::new(
+            docs.clone(),
+            dirs.clone(),
+            TrashStore::new(root.clone()),
+            30,
+        )
+        .with_clock(fixed_clock());
+
+        let dir = dirs
+            .create(CreateDirectoryInput {
+                parent_dir_id: ROOT_DIR_ID.to_string(),
+                name: "gone".into(),
+                creator: Some("agent-a".into()),
+            })
+            .await
+            .unwrap();
+        let doc = docs
+            .create(CreateDocumentInput {
+                parent_dir_id: dir.dir_id.clone(),
+                title: "note".into(),
+                content: "body".into(),
+                import: None,
+                creator: Some("agent-a".into()),
+            })
+            .await
+            .unwrap();
+        docs.delete(&doc.doc_id).await.unwrap();
+        dirs.delete(&dir.dir_id).await.unwrap();
+
+        let slots = trash.list().await.unwrap();
+        assert_eq!(slots.len(), 1);
+        let err = trash.restore(&slots[0].trash_id).await.unwrap_err();
+        assert!(matches!(err, DocError::DirNotFound(_)), "{err:?}");
+        assert_eq!(
+            trash.list().await.unwrap().len(),
+            1,
+            "a refused restore must leave the slot in place"
+        );
+    }
+
     #[tokio::test]
     async fn expired_slots_are_purged_on_list() {
         // A 1-day retention means a slot deleted 2 days ago disappears
@@ -243,6 +315,9 @@ mod tests {
         let trash = Arc::new(
             LibraryTrashService::new(
                 docs.clone(),
+                Arc::new(LibraryDirectoryService::new(LibraryStore::new(
+                    tmp.path().to_path_buf(),
+                ))),
                 TrashStore::new(tmp.path().to_path_buf()),
                 1, // 1-day retention
             )

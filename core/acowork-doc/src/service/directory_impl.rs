@@ -291,6 +291,20 @@ impl DirectoryService for LibraryDirectoryService {
                 self.store.save(&idx).await?;
             }
         }
+        // The target's own entry lives in its **parent's** index, which the
+        // two passes above never touch (they only walk the subtree beneath
+        // it). Without this the directory stays visible in every listing —
+        // `list_tree` filters on `deleted` — while the call reports success.
+        let mut parent_idx = self.store.load(&parent_id).await?;
+        if let Some(entry) = parent_idx
+            .dirs
+            .iter_mut()
+            .find(|d| d.dir_id == dir_id && !d.deleted)
+        {
+            entry.deleted = true;
+            entry.updated_at = now;
+            self.store.save(&parent_idx).await?;
+        }
         crate::mqtt_publisher::notify_tree_changed(vec![parent_id]);
         Ok(())
     }

@@ -214,6 +214,7 @@ fn control_action_to_inbound(
             has_human,
             chat_attachment_ids,
             chat_row_id,
+            aware_users,
         } => {
             let params: serde_json::Value =
                 serde_json::from_str(&params_json).unwrap_or(serde_json::json!({}));
@@ -237,6 +238,7 @@ fn control_action_to_inbound(
                     has_human,
                     chat_attachment_ids,
                     chat_row_id,
+                    aware_users,
                 })),
             ))
         }
@@ -1584,6 +1586,12 @@ async fn resolve_legacy_route(
                 // or the agent instance that started the work. Never
                 // the account this Runtime happens to be carrying.
                 Some(env.from.as_str()),
+                // ADR-076 §决策 4 (rev.): the read-only awareness list the
+                // Gateway seeded (both agents' owner + guests + the
+                // originator). This is the agent-to-agent branch — the
+                // initiator is an agent, so without this no human could
+                // read the session. Stamped only when it creates one.
+                &env.aware_users,
             )
             .await
     }
@@ -1671,6 +1679,9 @@ async fn deliver_intent_turn(
         has_human,
         chat_attachment_ids,
         chat_row_id,
+        // Consumed at creation in `resolve_legacy_route`, not here — the
+        // session this turn runs in is already routed and stamped.
+        aware_users: _,
     } = *env;
 
     // A PM dispatch's wake-up playbook is model-facing and ephemeral: it
@@ -1932,6 +1943,7 @@ A: hi")).unwrap();
             has_human: None,
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
+            aware_users: Vec::new(),
         })
         .expect("Intent must map");
         assert_eq!(
@@ -1969,6 +1981,7 @@ A: hi")).unwrap();
             has_human: None,
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
+            aware_users: Vec::new(),
         })
         .expect("Intent must still map");
 
@@ -2000,6 +2013,7 @@ A: hi")).unwrap();
             has_human: Some(true),
             chat_attachment_ids: Vec::new(),
             chat_row_id: "m-1".into(),
+            aware_users: Vec::new(),
         })
     }
 

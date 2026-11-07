@@ -364,7 +364,21 @@
     "reasoningMenuTitle": "思考深度",
     "readOnlySession": "該會話已共享，你只有唯讀權限",
     "readOnlySessionPlaceholder": "唯讀工作階段：由其他帳號共享",
-    "selectAgentOrPeer": "選擇一個 Agent 或聯絡人開始對話"
+    "selectAgentOrPeer": "選擇一個 Agent 或聯絡人開始對話",
+    "plusMenu": "新增",
+    "plusMenuUnavailable": "請先選擇一個會話",
+    "plusSkills": "技能",
+    "plusMcp": "MCP 服務",
+    "plusBuiltinTools": "內建工具",
+    "plusAttachments": "附件",
+    "followAgentDefault": "跟隨 Agent 預設",
+    "plusLoading": "載入中...",
+    "plusLoadFailed": "工具清單載入失敗",
+    "plusNoTools": "此 Agent 未啟用內建工具",
+    "plusNoMcp": "此 Agent 沒有 MCP 服務",
+    "plusNoToolsConnected": "尚未連線工具",
+    "plusToolCount": "{{n}} 個工具",
+    "plusAgentDisabledNote": "其中 {{n}} 項已由 Agent 設定關閉"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 推理進行中",
@@ -1320,7 +1334,13 @@
     "importing": "匯入中...",
     "buttonImport": "匯入",
     "searchPlaceholder": "搜尋技能...",
-    "buttonImportSkills": "匯入技能"
+    "buttonImportSkills": "匯入技能",
+    "empty": "暂无技能",
+    "importZipOnly": "請拖入 .zip 檔案",
+    "importSuccess": "技能 \"{{name}}\" 已匯入",
+    "importFailed": "匯入失敗",
+    "importHint": "選擇要匯入的技能 ZIP 包。ZIP 內需包含帶 YAML frontmatter 的 SKILL.md 檔案。",
+    "importDropZone": "點擊選擇或拖入 .zip 檔案"
   },
   "statusBar": {
     "agent": "agent",

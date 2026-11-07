@@ -10,8 +10,9 @@ triggers:
   - markdown
   - HTML
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
+  - doc_stat
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -22,11 +23,23 @@ tool_deps:
 
 Format conversion must preserve meaning, structure, links, metadata, code blocks, tables, and provenance. If information cannot be preserved, flag the loss explicitly.
 
+## System of Record
+
+A conversion produces a new document, not an overwrite.
+
+- `doc_read` the source, convert, then `doc_write` (`mode="create"`) to the target
+  path; give the derived page a line stating it is derived, from which version, and
+  by what transformation.
+- Never convert in place: the source is evidence, the derivative is a copy, and a
+  version conflict on the source should be impossible.
+- If the target exists, `doc_stat` it first — replacing a converted page silently is
+  how two formats drift apart.
+
 ## Execution Steps
 
 1. **Confirm source and target**
    - Use `mcp_memory__memory_recall` to retrieve format preferences, templates, and publishing rules
-   - Use `file_read` to inspect source document and related assets
+   - Use `doc_read` to inspect source document and related assets
    - Confirm target format, audience, destination, required metadata, and fidelity expectations
    - Identify unsupported elements before conversion
 
@@ -36,7 +49,7 @@ Format conversion must preserve meaning, structure, links, metadata, code blocks
    - Preserve stable IDs, anchors, and cross-references when possible
 
 3. **Convert content**
-   - Use `file_write` to create converted document when requested
+   - Use `doc_write` to create converted document when requested
    - Keep content semantically equivalent
    - Do not silently summarize unless asked
    - Add conversion notes when fidelity trade-offs exist

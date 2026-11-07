@@ -32,7 +32,9 @@ pub enum PmError {
     #[error("invalid id: {0}")]
     InvalidId(String),
 
-    #[error("bad request: {0}")]
+    /// The class word lives in `error_code()`; repeating it in `Display`
+    /// produced `bad_request: bad request: ...` at every MCP boundary.
+    #[error("{0}")]
     BadRequest(String),
 
     #[error("path traversal detected for id: {0}")]
@@ -86,11 +88,17 @@ pub enum PmError {
     TooManyAttachments(String),
 
     // ── 状态机 ────────────────────────────────────────────────────────
-    #[error("invalid state transition for task {task_id}: {from} → {to}")]
+    #[error(
+        "invalid state transition for task {task_id}: {from} → {to}; from {from} you may go to: {allowed}"
+    )]
     InvalidStateTransition {
         task_id: String,
         from: String,
         to: String,
+        /// Comma-separated legal successors of `from` (`"(none — terminal)"`
+        /// when there are none). Quoted in the message so a caller does not
+        /// have to rediscover the state machine by trial and error.
+        allowed: String,
     },
 
     /// Agent 创建的任务尚未经人类审批（`review_status=pending`），
@@ -104,12 +112,24 @@ pub enum PmError {
 
     // ── MCP 鉴权（设计 §9.2 / §9.3）──────────────────────────────────
     /// 调用者不是任务 assignee，或匿名调用被禁止的工具。
-    #[error("forbidden: {0}")]
+    #[error("{0}")]
     Forbidden(String),
 
     /// MCP 匿名连接调用需要身份的工具（无 `X-MCP-Actor`）。
     #[error("authentication required: {0}")]
     Unauthenticated(String),
+
+    /// An upstream dependency (the Gateway agent directory) has no usable data
+    /// yet.
+    ///
+    /// This MUST stay distinguishable from "the query succeeded and the result
+    /// is empty": if `pm_list_agents` reports an unready directory as an empty
+    /// roster, the caller (an LLM) concludes "there is nobody on this platform
+    /// to dispatch to" and abandons dispatch — a false negative far more
+    /// expensive than one explicit retry (design 32 §3.3). HTTP 503: transient,
+    /// retry later.
+    #[error("directory unavailable: {0}")]
+    DirectoryUnavailable(String),
 
     // ── 基础设施（自动 From 转换）───────────────────────────────────
     #[error("io: {0}")]
@@ -170,6 +190,8 @@ impl PmError {
 
             PmError::Unauthenticated(_) => 401,
 
+            PmError::DirectoryUnavailable(_) => 503,
+
             PmError::Forbidden(_) => 403,
 
             PmError::Io(_) | PmError::Json(_) | PmError::Multipart(_) | PmError::Image(_) => 500,
@@ -204,6 +226,7 @@ impl PmError {
             PmError::InvalidStateTransition { .. } => "invalid_state_transition",
             PmError::ReviewNotApproved { .. } => "review_not_approved",
             PmError::Unauthenticated(_) => "unauthenticated",
+            PmError::DirectoryUnavailable(_) => "directory_unavailable",
             PmError::Forbidden(_) => "forbidden",
             PmError::Io(_) => "io_error",
             PmError::Json(_) => "json_error",
@@ -284,6 +307,7 @@ mod tests {
                     task_id: "t-x".into(),
                     from: "done".into(),
                     to: "pending".into(),
+                    allowed: "pending, in_progress".into(),
                 },
                 400,
                 "invalid_state_transition"
@@ -417,6 +441,7 @@ mod tests {
                 task_id: "t".into(),
                 from: "a".into(),
                 to: "b".into(),
+                allowed: "c".into(),
             },
             PmError::ReviewNotApproved { task_id: "t".into() },
             PmError::Io(io::Error::other("x")),

@@ -205,7 +205,7 @@ async fn remote_agent_claim_submit_full_chain() {
     .await;
     let tasks = tool_result(&v);
     let tids: Vec<String> = tasks
-        .as_array()
+        ["tasks"].as_array()
         .unwrap()
         .iter()
         .filter_map(|t| t["id"].as_str().map(|s| s.to_string()))
@@ -477,7 +477,7 @@ async fn multi_instance_same_package_tasks_are_isolated() {
         &client, &base, Some(workspace_a), 1, "pm_list_my_tasks",
         json!({ "project_id": pid }),
     ).await;
-    let my_tasks_a: Vec<String> = tool_result(&v)
+    let my_tasks_a: Vec<String> = tool_result(&v)["tasks"]
         .as_array().unwrap().iter()
         .filter_map(|t| t["id"].as_str().map(String::from))
         .collect();
@@ -489,7 +489,7 @@ async fn multi_instance_same_package_tasks_are_isolated() {
         &client, &base, Some(workspace_b), 2, "pm_list_my_tasks",
         json!({ "project_id": pid }),
     ).await;
-    let my_tasks_b: Vec<String> = tool_result(&v)
+    let my_tasks_b: Vec<String> = tool_result(&v)["tasks"]
         .as_array().unwrap().iter()
         .filter_map(|t| t["id"].as_str().map(String::from))
         .collect();

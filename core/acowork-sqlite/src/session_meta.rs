@@ -86,6 +86,14 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         .and_then(SessionVisibility::from_db_str);
     // Design 27 §8.2: Chat session binding for `Members` visibility.
     let chat_session_id: Option<String> = row.get("chat_session_id")?;
+    // ADR-076 §决策 4 (rev.): read-only human awareness. A NULL column (any
+    // row written before the migration) reads as an empty list — "no extra
+    // readers", the pre-feature behaviour.
+    let aware_users_json: Option<String> = row.get("aware_users")?;
+    let aware_users: Vec<String> = aware_users_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
 
     let title: Option<String> = row.get("title")?;
     let workspace_id: Option<String> = row.get("workspace_id")?;
@@ -96,6 +104,11 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
     let temperature: Option<f64> = row.get("temperature")?;
     let context_window: Option<i64> = row.get("context_window")?;
     let todos_json: Option<String> = row.get("todos")?;
+    // Per-session tool narrowing. Corrupt JSON reads as "inherit the agent
+    // layer" (an empty policy) rather than failing the whole listing — the
+    // column is user state written by one endpoint, and a hand-edited row
+    // must not make a session unreadable (same lenience as `visibility`).
+    let tool_policy_json: Option<String> = row.get("tool_policy")?;
     let message_count: i64 = row.get("message_count")?;
     let llm_call_counter: Option<i64> = row.get("llm_call_counter")?;
     let model_ratio: Option<f64> = row.get("model_ratio")?;
@@ -144,6 +157,16 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         None => None,
     };
 
+    // `NULL` and "an empty policy" mean the same thing — inherit the agent
+    // layer — so a decoded-but-empty object is normalised to `None` and the
+    // store never carries two spellings of one state.
+    let tool_policy = tool_policy_json
+        .as_deref()
+        .and_then(|s| {
+            serde_json::from_str::<acowork_core::session_meta::SessionToolPolicy>(s).ok()
+        })
+        .filter(|p| !p.is_empty());
+
     // A row that never produced a measurement reads as `None` (frontend
     // shows "—") rather than a fabricated 0 — the same "宁可 miss 也不估计"
     // rule the token counters follow. The two figures keep separate sample
@@ -179,6 +202,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         initiator,
         visibility,
         chat_session_id,
+        aware_users,
         title,
         workspace_id,
         model,
@@ -188,6 +212,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         temperature: temperature.map(|t| t as f32),
         context_window: context_window.map(|c| c.max(0) as u64),
         todos,
+        tool_policy,
         message_count: message_count.max(0) as u64,
         last_active_at,
         tokens,
@@ -699,7 +724,7 @@ const SELECT_ALL_COLUMNS: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, model_usage \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, aware_users, model_usage, tool_policy \
 FROM sessions WHERE session_id = ?1";
 
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
@@ -710,7 +735,7 @@ const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, model_usage \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, aware_users, model_usage, tool_policy \
 FROM sessions";
 
 /// Clamp a `u64` token counter into SQLite's `i64` column.
@@ -733,6 +758,22 @@ fn upsert_row(
         .todos
         .as_ref()
         .map(|t| serde_json::to_string(t).unwrap_or_else(|_| "[]".to_string()));
+    // An empty policy (or none at all) writes NULL: "inherit the agent
+    // layer" has exactly one on-disk spelling, so clearing the last switch
+    // returns the row to the state a never-toggled session is in.
+    let tool_policy_json = meta
+        .tool_policy
+        .as_ref()
+        .filter(|p| !p.is_empty())
+        .map(|p| serde_json::to_string(p).unwrap_or_else(|_| "null".to_string()));
+
+    // ADR-076 §决策 4 (rev.): the awareness list is stored as a JSON array; an
+    // empty list writes NULL so the column matches "no extra readers".
+    let aware_users_json = if meta.aware_users.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&meta.aware_users).unwrap_or_else(|_| "[]".to_string()))
+    };
     conn.execute(
         "INSERT INTO sessions( \
             session_id, agent_id, created_at, last_active_at, \
@@ -742,7 +783,7 @@ fn upsert_row(
             token_last_input, token_last_output, token_total_input, token_total_output, \
             token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
             perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, \
-            version, corrupted, initiator, visibility, chat_session_id, model_usage \
+            version, corrupted, initiator, visibility, chat_session_id, aware_users, model_usage, tool_policy \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
             ?5, ?6, ?7, ?8, ?9, ?10, \
@@ -751,7 +792,7 @@ fn upsert_row(
             ?18, ?19, ?20, ?21, \
             ?22, ?23, ?24, ?25, \
             ?26, ?27, ?28, ?29, \
-            ?30, ?31, ?32, ?33, ?34, ?35 \
+            ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37 \
          ) \
          ON CONFLICT(session_id) DO UPDATE SET \
             agent_id = excluded.agent_id, \
@@ -787,7 +828,9 @@ fn upsert_row(
             initiator = excluded.initiator, \
             visibility = excluded.visibility, \
             chat_session_id = excluded.chat_session_id, \
-            model_usage = excluded.model_usage",
+            aware_users = excluded.aware_users, \
+            model_usage = excluded.model_usage, \
+            tool_policy = excluded.tool_policy",
         params![
             meta.session_id,
             meta.agent_id,
@@ -826,7 +869,9 @@ fn upsert_row(
             meta.initiator,
             meta.visibility.map(|v| v.as_str()),
             meta.chat_session_id,
+            aware_users_json,
             serialize_model_usage(meta.model_usage.as_ref()),
+            tool_policy_json,
         ],
     )?;
     Ok(())

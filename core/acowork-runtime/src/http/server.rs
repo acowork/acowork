@@ -618,6 +618,15 @@ impl RuntimeHttpServer {
                 "/sessions/{sid}/visibility",
                 put(crate::http::session_control::put_session_visibility),
             )
+            // Per-session tool narrowing over the agent layer
+            // (`agent-tools.json` / `agent-mcp.json`). Same shape as
+            // `visibility`: a plain meta-backed REST resource with no side
+            // effects beyond re-composing the live session's tool set.
+            .route(
+                "/sessions/{sid}/tool-policy",
+                get(crate::http::session_control::get_session_tool_policy)
+                    .put(crate::http::session_control::put_session_tool_policy),
+            )
             // ADR-076 §决策 4: workspace switch gets its own endpoint
             // rather than riding `PUT .../config` — only
             // `route_workspace_switch` updates `current_work_dir` and the
@@ -4316,6 +4325,7 @@ mod tests {
         // Persist SessionMeta via the conversation module API so the
         // format stays in lock-step with `scan_sessions_from_meta`.
         let meta = crate::conversation::SessionMeta {
+            aware_users: Vec::new(),
             version: 3, // CONVERSATION_FORMAT_VERSION — keep in sync with conversation.rs
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
@@ -4331,6 +4341,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 3,
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
             tokens: None,
@@ -4539,11 +4550,13 @@ mod tests {
             },
         );
         let meta = crate::conversation::SessionMeta {
+            aware_users: Vec::new(),
             version: 3,
             session_id: "20260101_120000_tok".to_string(),
             agent_id: "com.test.agent".to_string(),
             created_at: "2026-01-01T12:00:00Z".to_string(),
             last_active_at: "2026-01-01T12:00:01Z".to_string(),
+            tool_policy: None,
             message_count: 1,
             model_usage: Some(usage),
             ..test_session_meta_minimal()
@@ -4571,6 +4584,7 @@ mod tests {
     /// only spell out what they actually assert on.
     fn test_session_meta_minimal() -> crate::conversation::SessionMeta {
         crate::conversation::SessionMeta {
+            aware_users: Vec::new(),
             version: 3,
             session_id: String::new(),
             agent_id: "com.test.agent".to_string(),
@@ -4586,6 +4600,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: "2026-01-01T12:00:00Z".to_string(),
             tokens: None,
@@ -6856,6 +6871,7 @@ mod tests {
         // so the session has to exist. (Unauthorized uploads are covered by
         // `session_control`'s own tests.)
         let meta = crate::conversation::SessionMeta {
+            aware_users: Vec::new(),
             version: 1,
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
@@ -6871,6 +6887,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: "2026-01-01T00:00:00Z".to_string(),
             tokens: None,
@@ -7634,6 +7651,7 @@ mod tests {
         // Create a session with model set in meta
         use crate::conversation::{SessionMeta, write_session_meta};
         let meta = SessionMeta {
+            aware_users: Vec::new(),
             version: 3, // CONVERSATION_FORMAT_VERSION
             session_id: session_id.to_string(),
             agent_id: "com.test.agent".to_string(),
@@ -7649,6 +7667,7 @@ mod tests {
             temperature: Some(0.5),
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 0,
             last_active_at: "2026-01-01T12:00:00Z".to_string(),
             tokens: None,

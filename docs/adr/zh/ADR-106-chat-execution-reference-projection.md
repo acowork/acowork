@@ -446,6 +446,31 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 
 **范围**。Desktop 两主面 + Mobile 1:1 面同批接入锚点与映射修订（Mobile 的寻址卡仍以独立行呈现，块尾挂载与视口带位在其卡片渲染器上另行落地）。不做历史迁移：位置是读时计算的，旧转录同样受益。
 
+## 修订（2026-11-07）：引用行的义务由"授予"决定——agent 转发的 Intent 不授予发起方 Chat（D3 收缩）
+
+**触发**：Intent 转发排查（2026-11-07）。用户 Nicholas 在 1:1 会话里让 SSE 给 PM 发 `create_task`，PM 的 turn 死在 `open_round`：chat 存储以 403 `writer is not a participant of the chat session` 拒绝它写引用行，人类侧只剩一句 `Unexpected error. See details.`，并留下一个 transcript 0 字节、`.rounds` 里 `terminal:false` 永不闭合的执行会话。
+
+**根因不是守卫，是义务挂错了坐标。** D3 的引用行义务挂在**信封带来的 chat 坐标**上（`TurnSurface::from_envelope(env.source_chat_session_id)`），而那个坐标记录的是**这条对话从哪里来**，不是**应答方对哪个 Chat 有问责面**。1:1 Chat 按定义只有一个 agent 参与者，所以"从 1:1 Chat 绑定的执行会话向任何非该 Chat 成员的 agent 发 Intent"是**永远**失败的——不是 corner case，是整条口子。守卫（`chat_append` 参与者检查）自始至终是对的，错的是有人被要求去做一次它做不了的写。
+
+**决策**：
+
+1. **来源与义务分成两个事实**。一次投递携带：来源 Chat（信箱记录、回执地址、sweeper 告警锚点、发起方报告的面）与**授予应答方的 surface**。应答方的信封只携带授予值；未授予即为空，其 turn 自然无 chat 义务（`echo_chat()` / `card_target()` 早已按空 surface 收敛，Runtime 零改动）。
+2. **授予只按成员资格算**，由 Gateway 在服务端 roster 上算，发起方无法伪造：应答方 ∈ 该 Chat 参与者 ⇒ 授予；否则不授予。
+3. **未授予 ⇒ 该 turn 没有任何 Chat 写入义务，且 `has_human_participant = Some(false)`**——没有 surface 就没有可问的人类。需要澄清时以 `needs_input` 应答回发起方，由发起方去问人类：人类界面是发起方，不是应答方。
+4. **无 Chat 是第三态**（cron 触发）：不授予，也**不**断言人类存在与否（`None`），保留人类侧工具。这一态与第 3 态必须可区分，否则"这里没有人类"与"这里没有面"会被混成一句话。
+5. **人类发起的投递必须授予，否则拒绝而不是静默降级**。群聊 `@`、单聊回执行块、PM 任务派发这三条路径上，应答的可见性**就**依赖应答方在该 Chat 的轮次块（设计 27 §9-8：task 应答是 relay，不唤醒任何人，人类读的是该群投影的那块）。目标不是成员时，运行是成功的、答案是没人能读的——那正是本平台已经判过一次的黑盒入口。故改为投递前拒绝：`@` 点名非成员 → 400；回块目标非成员 → 400；PM 派发目标不在项目群 → `target_not_in_project_group`（PM 侧可重试失败）。
+
+**不变量**：
+
+- 引用行的写入者永远是**被授予该 surface 的那个 agent**，而它必然是该 Chat 的参与者——`chat_append` 的参与者守卫因此在这条链路上永不触发。守卫保留，作为纵深防御，不作为常规拒绝路径。
+- **授予与 `has_human` 永不分置**：二者是同一个 `ChatGrant` 值的两个字段。被要求写不进的面，不能同时被告知"那里有人类可以答你的卡"——一张写不进去的卡会让 turn 永远 park，与写不进去的引用行是同一个缺陷的两个方向。
+
+**实现**：`acowork-gateway`——`intent::delivery::ChatGrant`（surface + answerability 成对）、`http::intent_api::chat_grant`（授予判据，唯一生产者）、`intent_payload`（从 `deliver_inner` 抽出，使"来源 vs 授予"两个事实可在无 broker 下并排断言）；七处投递点显式表态：`deliver_intent`（agent 转发路径，按 roster 判成员）、`deliver_response`（回发起方，成员资格在请求时已验）、sweeper 兜底回执（同上）、`cron`（无 Chat 态）、`deliver_mentions`（先拒绝非成员再授予）、`deliver_chat_message`（同）、`dispatch_task`（同）。**Runtime 与 Desktop 零改动**。
+
+**测试**：gateway lib 6 条——授予三态各一（1:1 转发不授予且断言无人类、成员保留且沿用来源事实、无 Chat 不授予亦不断言），线上传播两条（未授予 ⇒ 信封 chat 为空且 `has_human_participant=false`；授予 ⇒ 携带该 Chat），信箱一条（未授予时来源仍留在信箱条目里，回执轮因此仍能在发起方自己的 Chat 里问人类）。
+
+**遗留（另单，不夹带）**：① 发起方气泡里指向应答方执行会话的**跳转链接**（快捷方式，不是绑定；不得复用块左侧的执行图标，避免与"绑定了执行会话"混淆）；② 错误呈现分流——路由/权限类拒绝不再压成 `Unexpected error. See details.`；③ 非终态 round 的收敛（模型错误死在半路仍会留下 `terminal:false` 残骸，本修订只消除了它的触发主因）；④ agent↔agent pair chat 的人类入口尚未设计，本修订不依赖它。
+
 ## 参考
 
 - [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md)（可弃侧表的完整模式：写时增量、失败只 warn、水位/首触重建、Windows 句柄顺序——本 ADR 的 D5 逐条沿用）

@@ -13,7 +13,8 @@ use std::sync::Arc;
 use crate::config::DocConfig;
 use crate::error::Result;
 use crate::service::{
-    AclService, DocumentService, LibraryDirectoryService, LibraryDocumentService,
+    AclService, DirectoryService, DocumentService, LibraryDirectoryService,
+    LibraryDocumentService,
     LibraryRequestService, LibrarySearchService, LibraryTrashService, TrashService,
 };
 use crate::store::library::LibraryStore;
@@ -67,6 +68,7 @@ impl DocState {
         // lazy purge (design §3.3 "30 天后清理" — no background task).
         let trash = Arc::new(LibraryTrashService::new(
             docs_dyn,
+            dirs.clone() as Arc<dyn DirectoryService>,
             TrashStore::new(store.root().to_path_buf()),
             config.trash_retention_days,
         ));

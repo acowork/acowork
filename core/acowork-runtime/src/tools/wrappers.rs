@@ -1308,6 +1308,7 @@ mod tests {
             session_id: Some("sess-1".to_string()),
             current_user_message: None,
             chat_session_id: Some("cs-1".to_string()),
+            initiator: None,
         };
         let result = tool
             .execute_with_context(serde_json::json!({}), &ctx)

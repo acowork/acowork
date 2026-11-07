@@ -10,10 +10,13 @@ triggers:
   - meeting minutes
   - take notes
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
+  - pm_add_activity
+  - pm_create_task
+  - pm_list_tasks
 ---
 
 # Meeting Notes Skill
@@ -24,11 +27,24 @@ The value of meeting notes is decisions and follow-through, not transcription.
 
 Every decision needs rationale. Every action item needs one owner, due date, and success condition.
 
+## System of Record
+
+Notes are worth nothing if the actions in them evaporate.
+
+- Write the notes with `doc_write` (raw notes and decisions, with attendees and
+  date).
+- **Every action item becomes a `pm_create_task`** with the owner resolved through
+  `pm_list_agents(project_id)`; if the owner is a human, say in the note that it is
+  assigned in the Desktop app — do not put a human account in `assignee`.
+- Decisions that change scope get `pm_add_activity` on the affected task, so the
+  change has a date and an author.
+- Link the note from the task description (document path), not the other way only.
+
 ## Execution Steps
 
 1. **Prepare context**
    - Use `mcp_memory__memory_recall` to retrieve project context, prior decisions, open action items, stakeholder preferences, and unresolved questions
-   - Use `file_read` to inspect agenda, prior notes, status report, risk register, or relevant project docs
+   - Use `doc_read` to inspect agenda, prior notes, status report, risk register, or relevant project docs
    - Document meeting purpose, desired outcomes, attendees, decision-makers, and absent stakeholders
    - Bring forward unresolved action items from prior meetings
 
@@ -56,7 +72,7 @@ Every decision needs rationale. Every action item needs one owner, due date, and
    - Confirm owners and due dates before meeting ends
 
 5. **Distribute and persist**
-   - Use `file_write` to save formatted notes when requested
+   - Use `doc_write` to save formatted notes when requested
    - Put decisions and action items near the top
    - Distribute notes within 24 hours
    - Use `mcp_memory__memory_store` to persist decisions, action items, owner commitments, and follow-up dates

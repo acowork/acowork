@@ -436,6 +436,7 @@ mod tests {
 
     fn meta(session_id: &str, title: &str, active: &str, bound: Option<&str>, owner: Option<&str>) -> SessionMeta {
         SessionMeta {
+            aware_users: Vec::new(),
             version: 3,
             session_id: session_id.to_string(),
             agent_id: "com.acowork.test".to_string(),
@@ -452,6 +453,7 @@ mod tests {
             temperature: None,
             context_window: None,
             todos: None,
+            tool_policy: None,
             message_count: 1,
             last_active_at: active.to_string(),
             tokens: None,

@@ -28,12 +28,20 @@ type = "Network"
 # Project Manager focuses on requirements analysis, task decomposition,
 # progress tracking, risk assessment, and team coordination. Tools cover those
 # workflows:
-#   - file_*/doc_reader/glob_search/content_search → project docs, status reports
-#   - http_request/web_fetch                      → research tools/methodologies
-#   - mcp_memory__* (hosted memory MCP, ADR-101)   → project history & decisions
-#   - intent_send                                  → coordinate team member agents
-#   - ask_user_question, todo_write                → clarify requirements & track tasks
-# No shell tools — PM does not hold a Shell permission.
+#   - pm_*  (hosted project service)              → THE task system of record:
+#                                                   projects, tasks, assignment,
+#                                                   approval gates, activity
+#   - doc_* (hosted document service)             → PRDs, plans, reports and notes:
+#                                                   versioned, shared, reviewable
+#   - mcp_memory__* (hosted memory MCP, ADR-101)  → project history & decisions
+#   - intent_send                                 → coordinate team member agents
+#   - ask_user_question, todo_write               → clarify requirements & track tasks
+#   - doc_reader                                   → one-off PDF/Office extraction
+#
+# Shell tools are declared as a cross-platform detection set, not a core
+# workflow dependency: PM work happens through pm_* and doc_*, and the
+# declarations stay so a task that genuinely needs a local command can use one
+# after the user grants it.
 
 # --- Memory (ADR-101) ---
 # `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
@@ -112,10 +120,35 @@ enabled = false
 [[mcp_servers]]
 hosted = "pm"
 why = "Create and track tasks, dependencies and milestones in the project service"
+# ADR-104: the whitelist also decides which tools start enabled, so it is the
+# same set the skills declare in `tool_deps`.
+tools = [
+  "pm_list_projects", "pm_get_project", "pm_create_project", "pm_update_project",
+  "pm_add_project_member", "pm_list_agents",
+  "pm_create_task", "pm_get_task", "pm_list_tasks", "pm_update_task",
+  "pm_claim_task", "pm_submit_task",
+  "pm_add_activity", "pm_list_activity",
+]
 
 [[mcp_servers]]
 hosted = "memory"
 why = "Keep meeting decisions and commitments across sessions"
+
+[[mcp_servers]]
+hosted = "doc"
+why = "PRDs, plans, reports and meeting notes go into the shared library, versioned and reviewable — not to local files"
+tools = [
+  "doc_list", "doc_read", "doc_stat", "doc_write", "doc_move",
+  "doc_mkdir", "doc_list_requests", "doc_check_request",
+]
+
+[capabilities.project_setup]
+description = "Bootstrap a project: record, document directory, README index, and the member roster"
+skills = ["project-setup"]
+
+[capabilities.task_dispatch]
+description = "Assign work to an agent through the PM service: roster, start time, approval gate, and reading dispatch state"
+skills = ["task-dispatch"]
 
 [capabilities.requirements_analysis]
 description = "Analyze and document project requirements into a structured PRD"

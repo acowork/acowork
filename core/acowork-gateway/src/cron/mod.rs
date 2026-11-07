@@ -477,6 +477,7 @@ pub async fn run_cron_scheduler(
             // delivery entry resolves + validates it against the install
             // table and fails loudly (observable error) otherwise.
             let req = crate::intent::delivery::DeliveryRequest {
+                aware_users: Vec::new(),
                 message_id: format!("cron-{}-{}", trigger_id, now.timestamp_millis()),
                 conversation_id: String::new(),
                 from_instance: format!("cron:{}", trigger_id),
@@ -485,6 +486,10 @@ pub async fn run_cron_scheduler(
                 action: action.clone(),
                 params_json: serde_json::to_string(&params).unwrap_or_default(),
                 source_chat_session_id: String::new(),
+                // A trigger has no Chat at all, so there is no surface to
+                // grant and no answerability to assert — the Runtime keeps its
+                // human-facing tools (see `has_human` below).
+                chat_grant: crate::intent::delivery::ChatGrant::default(),
                 repo: String::new(),
                 session_config_json: String::new(),
                 kind: String::new(),

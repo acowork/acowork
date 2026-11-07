@@ -10,10 +10,12 @@ triggers:
   - product requirements
   - gather requirements
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
+  - pm_create_task
+  - pm_add_activity
 ---
 
 # Requirements Analysis Skill
@@ -24,11 +26,25 @@ No plan without validated requirements. A requirement is not ready until it has 
 
 If a requirement is ambiguous, ask one focused question before turning it into scope.
 
+## System of Record
+
+The PRD belongs in the library; the work it implies belongs in the PM service.
+
+- Write the PRD with `doc_write` (`mode="create"`, `source_workspace` /
+  `source_path` when it came from somewhere), and use `if_version` when updating an
+  existing one — a version conflict means a human edited it in between.
+- Every requirement that implies work becomes a `pm_create_task` (or a child under a
+  requirements epic). A PRD with no tasks is a document nobody is delivering.
+- Open questions are tasks (`type="checkpoint"` if they need a human decision) — a
+  question in prose is a question nobody answers.
+- Cross-reference both ways: task descriptions cite the document path and section;
+  the document's status section cites the task ids.
+
 ## Execution Steps
 
 1. **Collect context and sources**
    - Use `mcp_memory__memory_recall` to retrieve project context, stakeholder preferences, prior requirements, decisions, and constraints
-   - Use `file_read` to inspect docs, meeting notes, backlog items, roadmap, support issues, and customer feedback
+   - Use `doc_read` to inspect docs, meeting notes, backlog items, roadmap, support issues, and customer feedback
    - Identify sources: users, business stakeholders, engineering, operations, compliance, support, market, and dependencies
    - Separate facts, assumptions, opinions, and open questions
 
@@ -57,7 +73,7 @@ If a requirement is ambiguous, ask one focused question before turning it into s
    - For high-uncertainty items, recommend spike, prototype, or stakeholder decision before commitment
 
 6. **Create the PRD and review gate**
-   - Use `file_write` to save the PRD when requested
+   - Use `doc_write` to save the PRD when requested
    - Include owners, decision-makers, sign-off status, and unresolved questions
    - Present the PRD for stakeholder review before task decomposition or sprint commitment
    - Use `mcp_memory__memory_store` to persist requirement decisions, changes, rationale, and PRD location

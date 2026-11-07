@@ -110,6 +110,23 @@ pub struct DeliveryContext<'a> {
     pub mailbox: Option<&'a IntentMailbox>,
 }
 
+/// What a delivery grants its receiver on the Chat side: the surface its turn
+/// may write into, and the answerability fact that must go with it.
+///
+/// One value, not two fields, because the pair must never be configured apart:
+/// a turn that writes a reference row into a Chat it was not granted is a
+/// refused write, and a turn that is told a human is reachable on a surface it
+/// does not have is a card that can never be parked. Both are the same defect
+/// seen from either end — see the field on [`DeliveryRequest`].
+#[derive(Debug, Clone, Default)]
+pub struct ChatGrant {
+    /// The Chat the receiver's turn is accountable to. `None` = no surface.
+    pub surface: Option<String>,
+    /// Answerability fact for the receiver's turn
+    /// (`Intent::has_human_participant` on the wire).
+    pub has_human: Option<bool>,
+}
+
 /// One Intent to deliver. `from_instance` must already be the trusted
 /// sender identity (the Gateway stamps it — D4); client-claimed `from`
 /// values are never copied here.
@@ -123,8 +140,34 @@ pub struct DeliveryRequest {
     pub action: String,
     /// JSON-serialised params (wire `Intent.params_json`).
     pub params_json: String,
-    /// Source chat session id (design 27 §4.2.3; empty until Phase 2).
+    /// Source chat session id (design 27 §4.2.3; empty until Phase 2). This is
+    /// the **origin** of the conversation — where it came from, where the
+    /// reply address points, and where the sweeper raises its alert. It is
+    /// recorded in the mailbox as such. It is NOT an obligation on the
+    /// receiver: the receiver's own surface is [`Self::chat_surface`], because
+    /// the origin belongs to whoever was speaking there, and a peer request
+    /// travels between two agents (design 27 §5.4.5 R2).
     pub source_chat_session_id: String,
+    /// What this delivery grants its **receiver**: the Chat its turn may write
+    /// into, and the answerability fact that goes with it. Built by
+    /// [`crate::http::intent_api::chat_grant`] from the server-side roster —
+    /// the receiver's membership is the one fact the sender cannot forge.
+    ///
+    /// `ChatGrant::default()` (no surface) is the shape of a peer request
+    /// forwarded out of a 1:1 Chat, and of a delivery with no Chat at all
+    /// (cron). Withholding is not a degradation of the exchange: the answer
+    /// still returns to the initiator over the mailbox, and the initiator
+    /// reports it in its own Chat. It is what keeps that report the only
+    /// Chat-side trace of an agent-to-agent conversation, instead of a
+    /// reference row the responder is refused for writing — a refusal that
+    /// used to land inside the responder's `open_round`, after its session
+    /// existed and its round was open: a 0-message session with a round that
+    /// never terminates, and `Unexpected error` on the human's screen for what
+    /// is a routing fact (the 2026-11-07 defect: **every** Intent forwarded
+    /// from a 1:1 Chat to an agent outside that Chat failed this way,
+    /// permanently — a 1:1 Chat has exactly one agent participant by
+    /// definition).
+    pub chat_grant: ChatGrant,
     /// Source-side authorized repo (design 27 §4.2.3; validated at the
     /// HTTP entry before this request is built — PR-D).
     pub repo: String,
@@ -132,6 +175,13 @@ pub struct DeliveryRequest {
     /// from a shape-checked JSON object; empty = none). The responder
     /// treats it as a suggestion within its allowed set (§13-6).
     pub session_config_json: String,
+    /// ADR-076 §决策 4 (rev.): the human accounts with read-only awareness
+    /// of the session this intent creates. The Gateway computes the seed
+    /// (`deliver_intent`) from the sender's and target's owner + guests —
+    /// an agent-to-agent intent has no human initiator, so without this the
+    /// two agents' conversation would be a black box no one can inspect.
+    /// Empty for a human-initiated delivery (the initiator already sees it).
+    pub aware_users: Vec<String>,
     /// "request" (default) | "response" (design 27 §5.4.5 R2). A response
     /// is system-generated: the Gateway builds it at the responder's
     /// turn end and routes it to the initiator — `intent_send` never
@@ -206,6 +256,53 @@ pub async fn wake_and_deliver(
     result
 }
 
+/// The wire payload for one delivery, as a pure function of the request.
+///
+/// Split out because the two Chat facts a delivery carries are the part that
+/// must never be confused, and a test that reads them side by side should not
+/// need a broker to do it:
+///
+/// - `source_chat_session_id` on the **envelope** is the surface the receiver's
+///   turn was GRANTED — what the Runtime stamps as the new session's Chat
+///   binding and what its reference rows and cards are written into;
+/// - `source_chat_session_id` on the **mailbox entry** is the conversation's
+///   ORIGIN — the reply address, the surface the initiator reports into, and
+///   where the sweeper raises its alert.
+///
+/// They differ on exactly one shape, and it is the common one: a peer request
+/// forwarded out of a 1:1 Chat. Granting the responder the origin there made
+/// the responder's own turn perform a write the Chat store refuses
+/// (non-participant), inside `open_round`, after its session existed — the
+/// 2026-11-07 defect. Withholding is what keeps design 27 §5.4.5 R2's
+/// "a peer request is a private channel between two agents" true on the wire.
+fn intent_payload(req: &DeliveryRequest) -> acowork_core::mqtt_proto::Intent {
+    acowork_core::mqtt_proto::Intent {
+        from: req.from_instance.clone(),
+        action: req.action.clone(),
+        params_json: req.params_json.clone(),
+        message_id: req.message_id.clone(),
+        conversation_id: req.conversation_id.clone(),
+        source_agent_session_id: req.from_session_id.clone(),
+        source_chat_session_id: req.chat_grant.surface.clone().unwrap_or_default(),
+        repo: req.repo.clone(),
+        session_config_json: req.session_config_json.clone(),
+        kind: req.kind.clone(),
+        in_reply_to: req.in_reply_to.clone(),
+        status: req.status.clone(),
+        // The receiver's answerability fact travels with the surface it was
+        // granted, never with the origin: this is what the Runtime's
+        // availability gate reads to decide whether the turn may offer
+        // `ask_user_question` at all. The origin's own human presence is a
+        // different fact and it lives in the mailbox entry, so the initiator's
+        // receipt turn can still ask the human after a responder's turn was
+        // told there was no one to ask.
+        has_human_participant: req.chat_grant.has_human,
+        chat_attachment_ids: req.chat_attachment_ids.clone(),
+        chat_row_id: req.chat_row_id.clone(),
+        aware_users: req.aware_users.clone(),
+    }
+}
+
 async fn deliver_inner(
     ctx: &DeliveryContext<'_>,
     req: &DeliveryRequest,
@@ -253,23 +350,7 @@ async fn deliver_inner(
 
     // 4. Publish. The control topic and the ControlCommand both carry
     //    the INSTANCE identity.
-    let intent = mqtt_proto::Intent {
-        from: req.from_instance.clone(),
-        action: req.action.clone(),
-        params_json: req.params_json.clone(),
-        message_id: req.message_id.clone(),
-        conversation_id: req.conversation_id.clone(),
-        source_agent_session_id: req.from_session_id.clone(),
-        source_chat_session_id: req.source_chat_session_id.clone(),
-        repo: req.repo.clone(),
-        session_config_json: req.session_config_json.clone(),
-        kind: req.kind.clone(),
-        in_reply_to: req.in_reply_to.clone(),
-        status: req.status.clone(),
-        has_human_participant: req.has_human,
-        chat_attachment_ids: req.chat_attachment_ids.clone(),
-        chat_row_id: req.chat_row_id.clone(),
-    };
+    let intent = intent_payload(req);
     let command = mqtt_proto::ControlCommand {
         instance_id: instance_id.clone(),
         command: Some(Command::Intent(intent)),
@@ -356,6 +437,7 @@ mod tests {
 
     fn req(target: &str) -> DeliveryRequest {
         DeliveryRequest {
+            aware_users: Vec::new(),
             message_id: "m-1".into(),
             conversation_id: String::new(),
             from_instance: "cron:test".into(),
@@ -366,6 +448,7 @@ mod tests {
             repo: String::new(),
             session_config_json: String::new(),
             source_chat_session_id: String::new(),
+            chat_grant: ChatGrant::default(),
             kind: "request".into(),
             in_reply_to: String::new(),
             status: String::new(),
@@ -443,6 +526,94 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, DeliveryError::WakeTimeout { .. }));
+    }
+
+    /// The 2026-11-07 defect, pinned at the wire. A peer request forwarded out
+    /// of a 1:1 Chat grants the responder NO surface: the responder is not a
+    /// participant of that Chat (a 1:1 Chat has exactly one agent), so the
+    /// envelope must not name it — naming it made the responder's own turn
+    /// write its reference row into a Chat that refuses the write, inside
+    /// `open_round`, after its session already existed.
+    #[test]
+    fn a_withheld_surface_reaches_the_receiver_as_no_chat_at_all() {
+        let mut r = req(INST);
+        r.source_chat_session_id = "chat-nicholas-sse".into();
+        r.chat_grant = ChatGrant { surface: None, has_human: Some(false) };
+        let env = intent_payload(&r);
+        assert_eq!(
+            env.source_chat_session_id, "",
+            "a responder that was granted no surface must not be handed the \
+             initiator's Chat as if it had one"
+        );
+        assert_eq!(
+            env.has_human_participant,
+            Some(false),
+            "no surface means no human reachable through it — a turn told \
+             otherwise parks on a card it can never write"
+        );
+    }
+
+    /// The other half: when the responder IS in the Chat (a group `@`, an
+    /// ensured agent-agent pair), it keeps both the surface and the origin's
+    /// answerability fact — nothing about the working case changes.
+    #[test]
+    fn a_granted_surface_travels_with_its_own_answerability_fact() {
+        let mut r = req(INST);
+        r.source_chat_session_id = "chat-project-group".into();
+        r.has_human = Some(true);
+        r.chat_grant = ChatGrant { surface: Some("chat-project-group".into()), has_human: Some(true) };
+        let env = intent_payload(&r);
+        assert_eq!(env.source_chat_session_id, "chat-project-group");
+        assert_eq!(env.has_human_participant, Some(true));
+    }
+
+    /// The two Chat facts must not collapse into one another. The ORIGIN owns
+    /// the mailbox entry — it is the reply address, the surface the initiator
+    /// reports into, and where the sweeper alerts — while the receiver's
+    /// envelope carries only what it was granted. Losing the origin would make
+    /// the initiator's receipt turn silent in its own Chat; keeping it on the
+    /// envelope is the defect above.
+    #[tokio::test]
+    async fn the_origin_stays_in_the_mailbox_when_the_surface_is_withheld() {
+        let mut gw = GatewayState::new("/tmp");
+        gw.add_installed(agent_info(INST, "node-1"));
+        let state: SharedState = Arc::new(tokio::sync::RwLock::new(gw));
+        let registry = crate::mqtt::agent_registry::new_shared_registry();
+        let online = status_envelope(INST, true);
+        registry
+            .write()
+            .await
+            .update_from_mqtt(&format!("acowork/agents/{INST}/status"), &online);
+        let mb = IntentMailbox::in_memory();
+        let ctx = DeliveryContext {
+            state: &state,
+            registry: &registry,
+            node_control: None,
+            // Publish fails after the record — the assertion is about what the
+            // record kept, and it must survive a delivery that never landed.
+            mqtt: None,
+            mailbox: Some(&mb),
+        };
+        let mut r = req(INST);
+        r.source_chat_session_id = "chat-nicholas-sse".into();
+        r.has_human = Some(true);
+        r.chat_grant = ChatGrant { surface: None, has_human: Some(false) };
+        let err = wake_and_deliver(&ctx, &r, Duration::from_millis(50))
+            .await
+            .unwrap_err();
+        assert_eq!(err.code(), "delivery_unavailable");
+        let entry = mb.get("m-1").expect("the delivery fact is recorded");
+        assert_eq!(
+            entry.source_chat_session_id, "chat-nicholas-sse",
+            "the conversation's origin is not the responder's surface, but it \
+             is still where the reply belongs"
+        );
+        assert_eq!(
+            entry.has_human,
+            Some(true),
+            "the origin keeps its own human-presence fact: the initiator's \
+             receipt turn reads it through the mailbox to ask the human"
+        );
     }
 }
 

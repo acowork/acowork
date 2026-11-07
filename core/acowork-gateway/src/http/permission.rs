@@ -714,6 +714,12 @@ mod tests {
             (Method::POST, "sessions/s1/messages"),
             (Method::PUT, "sessions/s1/config"),
             (Method::PUT, "sessions/s1/workspace"),
+            // Per-session tool narrowing changes what the agent *does* for
+            // this one session: a guest who may drive the session may also
+            // trim its tools (`use`). Reading it is `view`, like the rest of
+            // the session-control reads above — it exposes nothing beyond
+            // the agent config the viewer can already read.
+            (Method::PUT, "sessions/s1/tool-policy"),
             (Method::POST, "sessions/s1/open"),
             (Method::POST, "sessions/s1/compress"),
         ] {

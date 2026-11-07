@@ -34,11 +34,14 @@
  *   is an instruction, so the absence of one has to stay reachable.
  *
  * Keyboard lives here rather than in the host: the list takes focus on open and
- * owns arrows / Enter / Escape, so both surfaces (the group's `@` popup and the
- * 1:1 composer's address button) drive it the same way and neither re-implements
- * the traversal. Enter toggles the highlighted run's reference; the go-continue
- * action is pointer-only (it is a navigation, and a keyboard commit for it would
- * fight Enter's reference meaning).
+ * owns arrows / Enter / Space / Escape, so both surfaces (the group's `@` popup
+ * and the 1:1 composer's address button) drive it the same way and neither
+ * re-implements the traversal. Space toggles the highlighted run's reference
+ * and keeps the list open; Enter TAKES EFFECT AND CLOSES — on a session row it
+ * first forces that run into the selection, exactly like Enter fires "new task"
+ * in one key. Tab is left to the browser. The go-continue action is
+ * pointer-only (it is a navigation, and a keyboard commit for it would fight
+ * Enter's commit meaning).
  */
 
 import {
@@ -56,7 +59,6 @@ import {
   Loader2,
   Plus,
   Search,
-  SquareCheck,
 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
@@ -246,22 +248,46 @@ export function ChatAddressPicker({
   // Commit the current reference selection and close. An empty selection means
   // "nothing attached" — the same answer as Escape / the last row, so the
   // message drops to the ladder's lower levels instead of being referenced.
-  const commit = useCallback(() => {
-    const entries = Object.entries(picked);
-    if (entries.length === 0) {
-      onPick({});
-      return;
-    }
-    const refs: ChatRefPick[] = entries.map(([key]) => {
-      const sep = key.indexOf("|");
-      const agentInstanceId = key.slice(0, sep);
-      const sessionId = key.slice(sep + 1);
-      return { agentInstanceId, sessionId };
-    });
-    const labels: Record<string, string> = {};
-    for (const [key, label] of entries) if (label) labels[key] = label;
-    onPick({ refs, labels });
-  }, [picked, onPick]);
+  const commitEntries = useCallback(
+    (entries: [string, string][]) => {
+      if (entries.length === 0) {
+        onPick({});
+        return;
+      }
+      const refs: ChatRefPick[] = entries.map(([key]) => {
+        const sep = key.indexOf("|");
+        const agentInstanceId = key.slice(0, sep);
+        const sessionId = key.slice(sep + 1);
+        return { agentInstanceId, sessionId };
+      });
+      const labels: Record<string, string> = {};
+      for (const [key, label] of entries) if (label) labels[key] = label;
+      onPick({ refs, labels });
+    },
+    [onPick],
+  );
+
+  const commit = useCallback(
+    () => commitEntries(Object.entries(picked)),
+    [commitEntries, picked],
+  );
+
+  // Enter on a session row (highlighted or focused) means "take effect NOW":
+  // the run is forced into the selection even if Space never checked it, then
+  // the picker commits and closes — the same one-key answer Enter gives on the
+  // "new task" row. The server's clamp still wins: at five picks an unchecked
+  // row is not smuggled in, the existing selection commits instead.
+  const commitWith = useCallback(
+    (session: SessionInfo) => {
+      const key = refKey(instanceId, session.session_id);
+      const entries = Object.entries(picked);
+      if (!picked[key] && entries.length < MAX_PICK_REFS) {
+        entries.push([key, session.title ?? ""]);
+      }
+      commitEntries(entries);
+    },
+    [instanceId, picked, commitEntries],
+  );
 
   const choose = useCallback(
     (row: Row) => {
@@ -297,9 +323,28 @@ export function ChatAddressPicker({
           );
           return;
         }
-        if (e.key === "Enter" || e.key === "Tab") {
+        // Space toggles the highlighted run's reference and leaves the list
+        // open for more picks; Enter commits and closes — on a session row it
+        // first forces the highlighted run into the selection, so the row
+        // under the cursor lands on the message exactly like "new task" does.
+        // Inside a focused button the activation keys belong to that control
+        // (the row's own Enter handler commits; Space activates natively), and
+        // Space on a non-session row is typing — the caret lives in the search
+        // box and a title may contain a space. Tab is deliberately NOT
+        // hijacked: native traversal reaches every control.
+        if (e.key === "Enter" || e.key === " ") {
+          if ((e.target as HTMLElement).tagName === "BUTTON") return;
+          const idx = Math.min(active, rows.length - 1);
+          const row = rows[idx];
+          if (e.key === " ") {
+            if (row?.kind !== "session") return;
+            e.preventDefault();
+            pickAt(idx);
+            return;
+          }
           e.preventDefault();
-          pickAt(Math.min(active, rows.length - 1));
+          if (row?.kind === "session") commitWith(row.session);
+          else if (row) choose(row);
           return;
         }
         if (e.key === "Escape") {
@@ -385,19 +430,33 @@ export function ChatAddressPicker({
                     disabled={refDisabled}
                     title={t("chatView.address.referenceAction")}
                     onClick={() => toggleRef(row.session)}
+                    onKeyDown={(e) => {
+                      // Enter on this row's own control = select + commit +
+                      // close. `preventDefault` suppresses the native click,
+                      // which would toggle and keep the list open.
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        commitWith(row.session);
+                      }
+                    }}
                     className={cn(
+                      // Unified with the model/reasoning menus' selection
+                      // tick: a bare accent `Check`, no box, no wash — the
+                      // old bordered button + `SquareCheck` (itself a boxed
+                      // glyph) stacked two borders, and the unchecked
+                      // `border-outer` hairline was the container token, far
+                      // too faint for an interactive box. The unchecked box
+                      // keeps a single visible border (the same zinc-300 /
+                      // zinc-600 interactive-box pair the library picker
+                      // uses) so the affordance stays clickable-looking.
                       "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border",
                       checked
-                        ? "border-brand-primary bg-brand-primary/15 text-brand-primary"
-                        : "border-border-outer text-transparent hover:text-text-tertiary",
+                        ? "border-transparent text-[var(--color-accent)]"
+                        : "border-zinc-300 text-transparent hover:border-zinc-400 hover:text-text-tertiary dark:border-zinc-600 dark:hover:border-zinc-500",
                       refDisabled && "cursor-not-allowed opacity-40",
                     )}
                   >
-                    {checked ? (
-                      <SquareCheck className="h-3.5 w-3.5" />
-                    ) : (
-                      <Check className="h-3.5 w-3.5" />
-                    )}
+                    <Check size={12} />
                   </button>
                 ) : (
                   <span className="inline-flex h-5 w-5 shrink-0 items-center justify-center">
@@ -421,6 +480,16 @@ export function ChatAddressPicker({
                   role="option"
                   aria-selected={i === active}
                   onClick={() => choose(row)}
+                  onKeyDown={(e) => {
+                    // Same rule as the checkbox: Enter on a session row
+                    // commits (with the row forced in) instead of the native
+                    // click's toggle-and-stay-open. Escape rows already
+                    // commit-and-close natively.
+                    if (e.key === "Enter" && row.kind === "session") {
+                      e.preventDefault();
+                      commitWith(row.session);
+                    }
+                  }}
                   className="flex min-w-0 flex-1 items-center gap-1 text-left"
                 >
                   <span className="min-w-0 flex-1 truncate">{label}</span>

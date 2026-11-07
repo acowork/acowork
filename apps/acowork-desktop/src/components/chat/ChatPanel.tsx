@@ -22,7 +22,8 @@ import { AddProviderFlow } from "../harness/AddProviderFlow";
 import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { useInitiatorIdentity } from "../../lib/sessionInitiator";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Paperclip, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock } from "lucide-react";
+import type { SpeakerKind } from "./speakerBubble";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock } from "lucide-react";
 import type { ChatMessage, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
@@ -81,7 +82,7 @@ import { AskQuestionCard } from "./AskQuestionCard";
 import { DebugPausedBanner } from "./DebugPausedBanner";
 import { RetryWaitBanner } from "./RetryWaitBanner";
 import { SessionTabBar } from "./SessionTabBar";
-import { SkillsPanel } from "../skills/SkillsPanel";
+import { ComposerPlusMenu } from "./ComposerPlusMenu";
 import { WorkspaceSelector } from "../workspace/WorkspaceSelector";
 import { useToolbarCollapse } from "../common/useToolbarCollapse";
 import { DocumentChip } from "./DocumentChip";
@@ -498,7 +499,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const modelBtnRef = useRef<HTMLDivElement>(null);
   const effortBtnRef = useRef<HTMLDivElement>(null);
   const wsBtnRef = useRef<HTMLDivElement>(null);
-  const skBtnRef = useRef<HTMLDivElement>(null);
   const { setToolbarRef, textHidden } = useToolbarCollapse();
 
 
@@ -658,6 +658,19 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const userBuiltinAvatarId = initiatorIdentity
     ? initiatorIdentity.builtinAvatarId
     : (profileBuiltinAvatarId ?? undefined);
+  // The initiator side of an execution session is not always a person: an
+  // agent-to-agent intent run has an Agent as its initiator, and every turn
+  // that arrives in the session is that Agent speaking in markdown. The
+  // transcript renders accordingly (`components/chat/speakerBubble.ts`); a
+  // `null` identity means "this is me" or a pre-accounts session, both of
+  // which are a person.
+  const userSpeakerKind: SpeakerKind = initiatorIdentity?.kind ?? "user";
+  // Only an Agent resolves to an instance identity, which is what
+  // `AgentAvatar` needs as its seed and its cache-buster.
+  const userAgentId =
+    initiatorIdentity?.kind === "agent" ? activeSessionInitiator : null;
+  const userAgentVersion =
+    initiatorIdentity?.kind === "agent" ? initiatorIdentity.version : null;
 
   // Global state and actions — selectors to avoid full-store re-render
   // `effectiveConnection` is the watchdog's 6-state summary (see
@@ -2154,6 +2167,9 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               userDisplayName={userDisplayName}
               userAvatarUrl={userAvatarUrl}
               userBuiltinAvatarId={userBuiltinAvatarId}
+              userSpeakerKind={userSpeakerKind}
+              userAgentId={userAgentId}
+              userAgentVersion={userAgentVersion}
               onApprove={handleToolApprove}
               onCancelTool={handleToolCancel}
               toolProgress={toolProgressByToolCallId}
@@ -2741,6 +2757,18 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           >
             {/* Left: feature buttons */}
             <div className="flex items-center gap-1 min-w-0 overflow-visible">
+              {/* `+` menu — one trigger for everything the message can carry:
+                  skills, MCP server / tool switches, builtin tool switches and
+                  attachments. Replaces the former standalone skills dropdown
+                  (left cluster) and paperclip button (right cluster) to keep
+                  the composer strip compact. ADR-076: every entry is a
+                  session write, so a shared read-only session disables the
+                  whole trigger rather than half of it. */}
+              <ComposerPlusMenu
+                readOnly={readOnlySession}
+                disabled={!selectedAgentId || !currentSessionId}
+                onPickAttachments={() => void handleFileUpload()}
+              />
              {/* Model switcher — shown for any configured model(s); the
                   button doubles as the current-model indicator (ADR:
                   single-model setups still need to SEE which model is in
@@ -2776,13 +2804,9 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               <div ref={wsBtnRef} className="min-w-0">
                 <WorkspaceSelector textHidden={textHidden.ws} readOnly={readOnlySession} />
               </div>
-              {/* Skills dropdown */}
-              <div ref={skBtnRef} className="min-w-0">
-                <SkillsPanel textHidden={textHidden.sk} readOnly={readOnlySession} />
-              </div>
             </div>
 
-            {/* Right: session visibility + usage + attachment + send.
+            {/* Right: session visibility + usage + send.
                 `data-toolbar-cluster="right"` marks the cluster so the
                 collapse algorithm can MEASURE its offsetWidth (instead
                 of counting buttons × 28 + gaps × 4 by hand). Adding a
@@ -2801,21 +2825,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               {selectedAgentId && currentSessionId && (
                 <SessionVisibilityToggle agentId={selectedAgentId} sessionId={currentSessionId} />
               )}
-
-              {/* File upload button — single entry point for documents and images.
-                  Placed adjacent to send so attachments sit with the action that
-                  consumes them. ADR-076: an attachment is session-write input,
-                  so it is disabled on a read-only session. */}
-              <Tooltip content={readOnlySession ? t("chatPanel.readOnlySession") : t("chatPanel.uploadHint")}>
-                <button
-                  className={toolbarIconButton}
-                  onClick={handleFileUpload}
-                  disabled={!currentSessionId || !selectedAgentId || readOnlySession}
-                  aria-label={t("chatPanel.uploadFile")}
-                >
-                  <Paperclip size={14} />
-                </button>
-              </Tooltip>
 
               {/* Send/Stop button with tooltip above */}
               <Tooltip content={sending

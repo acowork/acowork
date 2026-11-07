@@ -22,6 +22,7 @@ const DIM: usize = 8;
 
 fn make_meta(sid: &str, last_active: &str, title: &str) -> SessionMeta {
     SessionMeta {
+        aware_users: Vec::new(),
         version: 4,
         session_id: sid.to_string(),
         agent_id: "test-agent".to_string(),
@@ -37,6 +38,7 @@ fn make_meta(sid: &str, last_active: &str, title: &str) -> SessionMeta {
         temperature: None,
         context_window: None,
         todos: None,
+        tool_policy: None,
         message_count: 1,
         last_active_at: last_active.to_string(),
         tokens: None,

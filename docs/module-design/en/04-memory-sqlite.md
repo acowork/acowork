@@ -203,7 +203,7 @@ purged_at TEXT NOT NULL
 ### 4.1 The trinity
 
 ```rust
-pub const SCHEMA_VERSION: i64 = 5;                           // current version
+pub const SCHEMA_VERSION: i64 = 13;                          // current version
 pub(crate) const MIGRATIONS: &[(i64, &str)] = &[...];        // [(target, sql)]
 pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 ```
@@ -236,6 +236,14 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 | 3 | `sessions.perf_tps_sum` / `perf_tps_samples` / `perf_ttft_ms_sum` / `perf_ttft_ms_samples` | Session-level LLM output speed and first-token latency |
 | 4 | `sessions.chat_session_id` | Design 27 §8.2 (a group-execution session's owning Chat session) |
 | 5 | `sessions.last_compaction_summary` + the new `conversation_state` table | Design 27 §4 (O(1) handoff read + indexer watermark) |
+| 6 | `sessions.model_usage` breakdown + the `token_stats` aggregate table | Multi-provider / multi-model usage |
+| 7 | drop `sessions.last_compaction_summary` | Its only reader (the retired intent-rotation handoff) is gone |
+| 8 | rename `sessions.user_id` to `initiator` | ADR-076 §Decision 4 (the column is the initiator; `user_id` belongs to accounts) |
+| 9 | `chat_token_usage` ledger table | Design 27 (Chat Router usage, one aggregate row per Chat) |
+| 10 | `sessions.intent_key` / `intent_closed` | ADR-106 D11 (the intent context a session owns, plus its terminal mark) |
+| 11 | `chat_token_usage.history_tokens` | Design 27 (router projected-history occupancy, the only figure comparable to the budget) |
+| 12 | `sessions.aware_users` | ADR-076 §Decision 4 rev. (read-only aware accounts, seeded by the Gateway for agent-to-agent intents) |
+| 13 | `sessions.tool_policy` (JSON, `NULL` = inherit the agent layer) | ADR-109 (per-session builtin-tool / MCP narrowing) |
 
 v3 stores **sum + count**, not a folded mean: each figure divides by its own sample count. A call can be measurable for TTFT only (the Provider reported no completion count), and a shared denominator would systematically inflate the speed mean.
 

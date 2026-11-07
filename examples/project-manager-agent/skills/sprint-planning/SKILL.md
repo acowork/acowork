@@ -10,10 +10,15 @@ triggers:
   - plan sprint
   - iteration planning
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
+  - pm_create_task
+  - pm_get_task
+  - pm_list_tasks
+  - pm_update_task
+  - pm_add_activity
 ---
 
 # Sprint Planning Skill
@@ -24,6 +29,21 @@ Do not commit unready work. Sprint commitment requires clear acceptance criteria
 
 A sprint goal is the commitment; individual stories are the forecast.
 
+## System of Record
+
+The sprint lives in the PM service, not in the planning document.
+
+- Read the candidate backlog with `pm_list_tasks` (`status=pending`,
+  `order_by=priority`), then commit the sprint by setting `priority` / `assignee` /
+  `start_at` on the chosen tasks with `pm_update_task`.
+- Check `depends_on` before promising a sequence: a task whose blocker is not in the
+  sprint is not really planned. `pm_get_task` shows `is_blocked` / `blocked_by`.
+- Record the plan and its rationale with `pm_add_activity` on the sprint's tracking
+  task (or a `pm_create_task` "Sprint N" parent with the tasks as children) so the
+  decision survives your context.
+- Capacity claims must name their evidence (`mcp_memory__memory_recall` for velocity);
+  an estimate with no source is a guess and should be labelled one.
+
 ## Execution Steps
 
 1. **Review previous sprint evidence**
@@ -33,7 +53,7 @@ A sprint goal is the commitment; individual stories are the forecast.
    - Apply retrospective actions as explicit sprint planning constraints
 
 2. **Inspect and refine backlog**
-   - Use `file_read` to examine backlog, PRD, task breakdown, risk register, and dependencies
+   - Use `doc_read` to examine backlog, PRD, task breakdown, risk register, and dependencies
    - Check readiness for each candidate item:
      - Clear acceptance criteria
      - Estimate available
@@ -65,7 +85,7 @@ A sprint goal is the commitment; individual stories are the forecast.
    - If capacity is insufficient, present options: reduce scope, extend timeline, add capacity, or accept risk
 
 6. **Save and persist**
-   - Use `file_write` to save the sprint plan when requested
+   - Use `doc_write` to save the sprint plan when requested
    - Use `mcp_memory__memory_store` to persist sprint goal, commitment, capacity assumptions, selected items, risks, and retrospective actions
 
 ## Output Format

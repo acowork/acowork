@@ -599,6 +599,7 @@ impl SessionManager {
         seed: Option<super::intent_routing::SessionSeed>,
         source_chat_session_id: Option<&str>,
         initiator: Option<&str>,
+        aware_users: &[String],
     ) -> Result<(String, bool)> {
         // ADR-106 D11: the binding is a column on the session's own row, read
         // through the meta store — there is no side file, so no second truth that
@@ -640,7 +641,9 @@ impl SessionManager {
                 "Intent routing entry points at a non-active session — opening a fresh one"
             );
         }
-        let new_sid = self.create_intent_session(initiator, seed.as_ref()).await?;
+        let new_sid = self
+            .create_intent_session(initiator, seed.as_ref(), aware_users)
+            .await?;
         self.stamp_chat_binding(chat_id, &new_sid);
         if let Err(e) = store.intent_bind(&new_sid, key) {
             // The session is live and taking the turn; losing only the binding
@@ -923,7 +926,9 @@ impl SessionManager {
             return Ok((session_id, false));
         }
 
-        let new_sid = self.create_intent_session(initiator, seed.as_ref()).await?;
+        let new_sid = self
+            .create_intent_session(initiator, seed.as_ref(), &[])
+            .await?;
         self.stamp_chat_binding(Some(chat_session_id), &new_sid);
         Ok((new_sid, true))
     }
@@ -1411,6 +1416,7 @@ impl SessionManager {
         &mut self,
         initiator: Option<&str>,
         seed: Option<&super::intent_routing::SessionSeed>,
+        aware_users: &[String],
     ) -> Result<String> {
         // ADR-076 §决策 4: an initiator is an **account** or an **agent
         // instance**. The cron trigger key (`cron:<trigger_id>`, ADR-073 —
@@ -1445,6 +1451,19 @@ impl SessionManager {
             && let Some(conv) = &handle.conversation
         {
             conv.update_reasoning_effort(Some(effort.to_string()));
+        }
+        // ADR-076 §决策 4 (rev.): stamp the read-only awareness list onto
+        // the session this intent just created. `set_aware_users` is
+        // write-once, so a follow-up that reuses this session cannot
+        // re-seed it — the list is a creation-time snapshot, matching the
+        // ACL the Gateway read when it delivered. For a human-initiated
+        // delivery the list is empty (the initiator already grants access)
+        // and this is inert.
+        if !aware_users.is_empty()
+            && let Some(handle) = self.get_session(&sid)
+            && let Some(conv) = &handle.conversation
+        {
+            conv.set_aware_users(aware_users.to_vec());
         }
         Ok(sid)
     }
@@ -2251,6 +2270,81 @@ impl SessionManager {
             return false;
         };
         meta.visibility = visibility;
+        crate::conversation::write_session_meta(&conversations_dir, &meta).is_ok()
+    }
+
+    /// Read a session's per-session tool narrowing.
+    ///
+    /// Returns `None` both when the session inherits the agent layer and when
+    /// the session does not exist — callers that need the distinction read the
+    /// meta themselves (the HTTP layer already resolves existence for its
+    /// 404).
+    pub fn session_tool_policy(
+        &self,
+        session_id: &str,
+    ) -> Option<acowork_core::session_meta::SessionToolPolicy> {
+        if let Some(handle) = self.sessions.get(session_id)
+            && let Some(conv) = handle.conversation.as_ref()
+        {
+            return conv.tool_policy();
+        }
+        let conversations_dir =
+            std::path::Path::new(&self.core.config.work_dir).join("conversations");
+        crate::conversation::read_session_meta(&conversations_dir, session_id)
+            .ok()
+            .and_then(|meta| meta.tool_policy)
+    }
+
+    /// Set a session's per-session tool narrowing (builtin tools + MCP
+    /// servers/tools this ONE session keeps out of what the agent exposes).
+    ///
+    /// Works whether the session is live or only on disk, mirroring
+    /// [`Self::set_session_visibility`]:
+    ///
+    /// - **live**: `ConversationSession` persists the row (it is the single
+    ///   persistence owner) and the session task is told to re-compose its
+    ///   tool set, so the change lands on the next LLM call without a reopen;
+    /// - **closed**: the meta row is read-modify-written in place. There is no
+    ///   live tool set to touch — `SessionTask::new` composes the layer from
+    ///   the hydrated policy when the session opens.
+    ///
+    /// `None` (and an all-empty policy) mean "inherit the agent layer". See
+    /// [`crate::agent::session::session_tool_layer`] for why the session layer
+    /// can only narrow.
+    ///
+    /// Returns `false` when no such session exists.
+    pub fn set_session_tool_policy(
+        &self,
+        session_id: &str,
+        policy: Option<acowork_core::session_meta::SessionToolPolicy>,
+    ) -> bool {
+        let normalised = policy.filter(|p| !p.is_empty());
+
+        if let Some(handle) = self.sessions.get(session_id)
+            && let Some(conv) = handle.conversation.as_ref()
+        {
+            conv.set_tool_policy(normalised.clone());
+            // A closed inbound channel means the task is gone; the persisted
+            // row is already correct, so the next open picks it up.
+            if let Err(e) = handle.send(SessionMessage::UpdateToolPolicy {
+                policy: normalised,
+            }) {
+                tracing::warn!(
+                    session_id = %session_id,
+                    error = %e,
+                    "set_session_tool_policy: live session did not accept the update (likely closed)"
+                );
+            }
+            return true;
+        }
+
+        let conversations_dir =
+            std::path::Path::new(&self.core.config.work_dir).join("conversations");
+        let Ok(mut meta) = crate::conversation::read_session_meta(&conversations_dir, session_id)
+        else {
+            return false;
+        };
+        meta.tool_policy = normalised;
         crate::conversation::write_session_meta(&conversations_dir, &meta).is_ok()
     }
 
@@ -5592,6 +5686,7 @@ mod tests {
         write_session_meta(
             &conversations_dir,
             &SessionMeta {
+                aware_users: Vec::new(),
                 version: 3, // CONVERSATION_FORMAT_VERSION
                 session_id: survivor_id.to_string(),
                 agent_id: "com.test.delete_latest".to_string(),
@@ -5607,6 +5702,7 @@ mod tests {
                 temperature: None,
                 context_window: None,
                 todos: None,
+                tool_policy: None,
                 message_count: 0,
                 last_active_at: "2026-01-01T00:00:00Z".to_string(),
                 tokens: None,
@@ -5810,7 +5906,7 @@ mod tests {
         }));
 
         let sid = manager
-            .create_intent_session(Some("u-initiator"), None)
+            .create_intent_session(Some("u-initiator"), None, &[])
             .await
             .expect("create intent session");
         let meta = read_session_meta(&conversations, &sid).expect("read meta");
@@ -5832,7 +5928,7 @@ mod tests {
         // An agent-initiated turn stamps the agent instance, so no human
         // holds the write — exactly the single-initiator rule.
         let agent_sid = manager
-            .create_intent_session(Some("8f7be9a6-agent-instance"), None)
+            .create_intent_session(Some("8f7be9a6-agent-instance"), None, &[])
             .await
             .expect("create agent-initiated session");
         let meta = read_session_meta(&conversations, &agent_sid).expect("read meta");
@@ -5843,7 +5939,7 @@ mod tests {
         // normalize to ownerless + public, not stamp as an unmatchable owner
         // that hides the session from every human account.
         let cron_sid = manager
-            .create_intent_session(Some("cron:trig-1"), None)
+            .create_intent_session(Some("cron:trig-1"), None, &[])
             .await
             .expect("create cron-initiated session");
         let meta = read_session_meta(&conversations, &cron_sid).expect("read meta");
@@ -5853,6 +5949,82 @@ mod tests {
                 && meta.is_writable_by(&SessionScope::user("u-initiator")),
             "an ownerless cron session stays open to signed-in accounts"
         );
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    /// ADR-076 §决策 4 (rev.) — the awareness seed lands on disk. An
+    /// agent-to-agent intent creates a session whose initiator is an agent
+    /// (so no human can write it), but the Gateway-seeded `aware_users` make
+    /// it readable by the owner and permission guests of both agents plus the
+    /// originator. This is the runtime half of "no agent-to-agent session is
+    /// a black box": the list the Gateway computed is stamped onto the new
+    /// session's meta and survives to the store row the read path consults.
+    #[tokio::test]
+    async fn intent_session_stamps_aware_users_on_meta() {
+        use crate::conversation::{SessionScope, read_session_meta};
+
+        let mut config = crate::config::RuntimeConfig::default();
+        let work_dir = std::env::temp_dir().join(format!("acowork-aware-{}", Uuid::new_v4()));
+        config.work_dir = work_dir.to_string_lossy().to_string();
+
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.aware"
+            version = "1.0.0"
+            name = "Test aware"
+            description = "Pin the execution-session awareness seed"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider =
+            Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(vec![]),
+        )));
+        let conversations = work_dir.join("conversations");
+
+        let aware = vec!["owner-lucy".to_string(), "guest-a".to_string(), "nicholas".to_string()];
+        let sid = manager
+            .create_intent_session(Some("8f7be9a6-agent-instance"), None, &aware)
+            .await
+            .expect("create agent-initiated session with awareness");
+        let meta = read_session_meta(&conversations, &sid).expect("read meta");
+
+        // Initiator stays the agent (the semantics Nicholas insisted on: an
+        // agent-to-agent session is not relabelled as a human one).
+        assert_eq!(meta.initiator.as_deref(), Some("8f7be9a6-agent-instance"));
+        // The seed is persisted verbatim.
+        assert_eq!(meta.aware_users, aware);
+        // Every aware human can read it, though none is the initiator.
+        for u in &aware {
+            assert!(
+                meta.is_readable_by(&SessionScope::user(u)),
+                "{u} must read the agent-to-agent session"
+            );
+        }
+        // …but none can write it — awareness is read-only by construction.
+        for u in &aware {
+            assert!(
+                !meta.is_writable_by(&SessionScope::user(u)),
+                "{u} must not write a session they did not start"
+            );
+        }
+        // A stranger off the list reads nothing.
+        assert!(!meta.is_readable_by(&SessionScope::user("stranger")));
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }
@@ -5907,6 +6079,7 @@ mod tests {
                 None,
                 Some("cs-group-1"),
                 Some("u-alice"),
+                &[],
             )
             .await
             .expect("route chat session");
@@ -5981,7 +6154,7 @@ mod tests {
 
         // A `conv:` key keeps the pre-Wave-4 shape: no binding, private.
         let (csid, _) = manager
-            .route_intent_session("conv:c-1", None, None, None)
+            .route_intent_session("conv:c-1", None, None, None, &[])
             .await
             .expect("route conv session");
         let cmeta = read_session_meta(&conversations, &csid).expect("read conv meta");
@@ -6045,7 +6218,7 @@ mod tests {
 
         let key = "conv:task:proj-1:T-7:com.test.task_bind";
         let (sid, _) = manager
-            .route_intent_session(key, None, Some("cs-project-group"), None)
+            .route_intent_session(key, None, Some("cs-project-group"), None, &[])
             .await
             .expect("route task session");
         let meta = read_session_meta(&conversations, &sid).expect("read task meta");
@@ -6081,7 +6254,7 @@ mod tests {
 
         // No source chat → no binding (pre-Wave-4 shape).
         let (plain, _) = manager
-            .route_intent_session("conv:c-2", None, None, None)
+            .route_intent_session("conv:c-2", None, None, None, &[])
             .await
             .expect("route conv session");
         let plain_meta = read_session_meta(&conversations, &plain).expect("read conv meta");
@@ -6132,7 +6305,7 @@ mod tests {
         )));
 
         let (sid, first_new) = manager
-            .route_intent_session("conv:c-not3", None, None, None)
+            .route_intent_session("conv:c-not3", None, None, None, &[])
             .await
             .expect("create chat session");
         assert!(first_new, "a first routing creates the session");
@@ -6143,7 +6316,7 @@ mod tests {
             ..Default::default()
         };
         let (sid2, opened_new) = manager
-            .route_intent_session("conv:c-not3", Some(seed), None, None)
+            .route_intent_session("conv:c-not3", Some(seed), None, None, &[])
             .await
             .expect("reuse under a config seed");
         assert_eq!(sid, sid2, "a config seed alone creates nothing");
@@ -6346,7 +6519,7 @@ mod tests {
         // A brand-new registry key creates — and is reported as new, so a
         // first PM task also gets an honest "启动新任务" reaction.
         let (_, task_new) = manager
-            .route_intent_session("conv:task:p:T1:com.test.x", None, None, None)
+            .route_intent_session("conv:task:p:T1:com.test.x", None, None, None, &[])
             .await
             .expect("task session created");
         assert!(task_new, "a first-time registry key creates its session");
@@ -6663,5 +6836,149 @@ mod tests {
             "MCP connect failure must not push anything into the session context, got: {:?}",
             received[0]
         );
+    }
+
+    /// Per-session tool narrowing persists through BOTH session states:
+    ///
+    /// - **live**: the `ConversationSession` (single persistence owner) holds
+    ///   it AND the task is told to re-compose — a persisting-only or
+    ///   notifying-only implementation would break one of the two assertions;
+    /// - **closed**: there is no task, so the meta row is read-modify-written
+    ///   and the next open composes from it.
+    ///
+    /// Also pins the "inherit" normalisation: an all-empty policy must read
+    /// back as `None`, so "reset to the agent default" is byte-identical to a
+    /// never-toggled session.
+    #[tokio::test]
+    async fn set_session_tool_policy_persists_for_live_and_closed_sessions() {
+        use crate::agent::session::session_handle::SessionHandle;
+        use crate::agent::session::session_task::SessionMessage;
+        use crate::agent::session_state::{SessionRuntimeSnapshot, SessionStatus};
+        use acowork_core::session_meta::SessionToolPolicy;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let (mut manager, _chunk_rx) = republish_test_manager(&dir);
+
+        let mut policy = SessionToolPolicy::default();
+        policy.disabled_builtin_tools.insert("web_fetch".into());
+        policy.disabled_mcp_servers.insert("playwright".into());
+
+        // ── live session ────────────────────────────────────────
+        let sid = "policy_live".to_string();
+        let (conv, _cfg_rx, _state_rx) = ConversationSession::new(
+            dir.path(),
+            &sid,
+            crate::conversation::SessionConfig {
+                agent_id: "com.test.policy".to_string(),
+                workspace_id: None,
+                model: None,
+                provider: None,
+            },
+            0,
+            Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+        .unwrap();
+        let conv = std::sync::Arc::new(conv);
+        let (inbound_tx, mut inbound_rx) = tokio::sync::mpsc::channel::<SessionMessage>(8);
+        let (agent_inbound_tx, _agent_inbound_rx) =
+            tokio::sync::mpsc::channel::<crate::agent::inbound::InboundMessage>(1);
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        manager.sessions.insert(
+            sid.clone(),
+            SessionHandle {
+                session_id: sid.clone(),
+                inbound_tx,
+                agent_inbound_tx,
+                join_handle: tokio::spawn(async {}),
+                status_rx,
+                last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
+                pending_debug_handles: Arc::new(tokio::sync::Mutex::new(None)),
+                snapshot: Arc::new(std::sync::RwLock::new(SessionRuntimeSnapshot {
+                    session_id: sid.clone(),
+                    status: r#""idle""#.to_string(),
+                    model: None,
+                    provider: None,
+                    account_id: None,
+                    ratio: None,
+                    todos_json: None,
+                    context_usage: None,
+                })),
+                workspace_id: Arc::new(std::sync::RwLock::new("__agent_home__".to_string())),
+                current_work_dir: Arc::new(std::sync::RwLock::new(None)),
+                conversation: Some(conv.clone()),
+            },
+        );
+
+        assert!(manager.set_session_tool_policy(&sid, Some(policy.clone())));
+        assert_eq!(
+            manager.session_tool_policy(&sid),
+            Some(policy.clone()),
+            "a live session must report the policy it was just given"
+        );
+        assert_eq!(
+            conv.tool_policy(),
+            Some(policy.clone()),
+            "the live ConversationSession is the persistence owner and must hold it"
+        );
+        match inbound_rx.try_recv() {
+            Ok(SessionMessage::UpdateToolPolicy { policy: pushed }) => assert_eq!(pushed, Some(policy.clone())),
+            other => panic!("expected UpdateToolPolicy, got {other:?}"),
+        }
+
+        // ── closed session ──────────────────────────────────────
+        let closed = "policy_closed";
+        let conversations_dir = dir.path().join("conversations");
+        let meta = crate::conversation::SessionMeta {
+            version: 3, // `CONVERSATION_FORMAT_VERSION` (private to `conversation`)
+            session_id: closed.to_string(),
+            agent_id: "com.test.policy".to_string(),
+            created_at: "2026-01-01T00:00:00.000Z".to_string(),
+            initiator: None,
+            visibility: None,
+            chat_session_id: None,
+            aware_users: Vec::new(),
+            title: Some("closed".to_string()),
+            workspace_id: None,
+            model: None,
+            provider: None,
+            account_id: None,
+            reasoning_effort: None,
+            temperature: None,
+            context_window: None,
+            todos: None,
+            tool_policy: None,
+            message_count: 0,
+            last_active_at: "2026-01-01T00:00:00.000Z".to_string(),
+            tokens: None,
+            model_usage: None,
+            llm_call_counter: None,
+            perf: None,
+            model_ratio: None,
+            last_compaction_offset: None,
+            corrupted: false,
+        };
+        crate::conversation::write_session_meta(&conversations_dir, &meta).expect("seed meta");
+
+        assert!(manager.set_session_tool_policy(closed, Some(policy.clone())));
+        let persisted = crate::conversation::read_session_meta(&conversations_dir, closed)
+            .expect("meta readable")
+            .tool_policy;
+        assert_eq!(
+            persisted,
+            Some(policy.clone()),
+            "a closed session must be updated in place in the meta row"
+        );
+        assert_eq!(manager.session_tool_policy(closed), Some(policy.clone()));
+
+        // ── normalisation ───────────────────────────────────────
+        assert!(manager.set_session_tool_policy(closed, Some(SessionToolPolicy::default())));
+        assert_eq!(
+            crate::conversation::read_session_meta(&conversations_dir, closed)
+                .expect("meta readable")
+                .tool_policy,
+            None,
+            "an empty policy must persist as None (inherit the agent layer)"
+        );
+        assert!(!manager.set_session_tool_policy("no-such-session", None));
     }
 }

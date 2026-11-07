@@ -318,6 +318,54 @@ mod tests {
         (status, value)
     }
 
+    /// Same as [`raw`], but against a caller-owned router.
+    ///
+    /// [`raw`] builds a fresh temporary library per call, which is fine for
+    /// single-call shapes and useless for a scenario: creating a directory and
+    /// then listing the root cannot be observed across two isolated libraries.
+    async fn raw_shared(
+        router: &axum::Router,
+        body: &str,
+        actor: Option<&str>,
+    ) -> (StatusCode, Value) {
+        let mut builder = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json");
+        if let Some(a) = actor {
+            builder = builder.header("x-mcp-actor", a);
+        }
+        let resp = router
+            .clone()
+            .oneshot(builder.body(Body::from(body.to_string())).unwrap())
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+        let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    /// A router over one durable temporary library, for multi-step tests.
+    async fn shared_router() -> (axum::Router, tempfile::TempDir) {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cfg = crate::config::DocConfig {
+            data_dir: tmp.path().to_path_buf(),
+            ..Default::default()
+        };
+        let state = DocState::new(cfg).await.unwrap();
+        (mcp_router(state), tmp)
+    }
+
+    async fn call_shared(router: &axum::Router, name: &str, args: Value, actor: Option<&str>) -> Value {
+        let payload = json!({
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": { "name": name, "arguments": args }
+        });
+        let (_status, value) = raw_shared(router, &payload.to_string(), actor).await;
+        value
+    }
+
     async fn call(name: &str, args: Value, actor: Option<&str>) -> Value {
         let payload = json!({
             "jsonrpc": "2.0", "id": 1, "method": "tools/call",
@@ -354,7 +402,7 @@ mod tests {
         .await;
         assert_eq!(status, StatusCode::OK);
         let tools = value["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 9);
+        assert_eq!(tools.len(), 13);
         let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
         for expected in [
             "doc_list",
@@ -382,6 +430,26 @@ mod tests {
         assert_eq!(value["error"]["code"], METHOD_NOT_FOUND);
     }
 
+    /// A misspelled argument name must be an error naming the key, not a
+    /// silently dropped field (which would "succeed" while writing nothing).
+    #[tokio::test]
+    async fn misspelled_argument_names_the_field_instead_of_vanishing() {
+        let (router, _tmp) = shared_router().await;
+        let v = call_shared(
+            &router,
+            "doc_write",
+            json!({ "ref": "a.md", "mode": "create", "conten": "typo" }),
+            Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"),
+        )
+        .await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default().to_string();
+        assert!(msg.contains("conten"), "must name the offending key: {v}");
+        assert!(msg.contains("content"), "must list accepted names: {v}");
+        // And nothing was created.
+        let v = call_shared(&router, "doc_list", json!({}), None).await;
+        assert_eq!(content(&v)["items"].as_array().unwrap().len(), 0, "{v}");
+    }
+
     #[tokio::test]
     async fn anonymous_write_tool_is_forbidden() {
         let value = call("doc_mkdir", json!({ "path": "新目录" }), None).await;
@@ -400,5 +468,305 @@ mod tests {
         let items = payload["items"].as_array().unwrap();
         assert!(items.is_empty());
     }
-}
 
+    // ── P2: review queue, trash, and directory pruning ───────────────────
+
+    const P2_ACTOR: Option<&str> = Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d");
+
+    #[tokio::test]
+    async fn rmdir_refuses_a_non_empty_directory_and_never_cascades() {
+        let (router, _tmp) = shared_router().await;
+        let actor = P2_ACTOR;
+
+        // One level at a time: the parent must exist first.
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p2-rmdir" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir parent: {v}");
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p2-rmdir/empty" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir child: {v}");
+
+        // Empty: removable.
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p2-rmdir/empty" }), actor).await;
+        assert!(v["error"].is_null(), "empty dir should be removable: {v}");
+        assert_eq!(content(&v)["removed"], true);
+
+        // Non-empty: refused, and the refusal names the contents.
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p2-rmdir/busy" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir busy: {v}");
+        let v = call_shared(
+            &router,
+            "doc_write",
+            json!({
+                "ref": "p2-rmdir/busy/note.md",
+                "mode": "create",
+                "content": "keep me"
+            }),
+            actor,
+        )
+        .await;
+        assert!(v["error"].is_null(), "write: {v}");
+
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p2-rmdir/busy" }), actor).await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("not empty"),
+            "a populated directory must be refused: {v}"
+        );
+
+        // The document is still there: nothing cascaded.
+        let v = call_shared(
+            &router,
+            "doc_read",
+            json!({ "ref": "p2-rmdir/busy/note.md" }),
+            actor,
+        )
+        .await;
+        assert!(v["error"].is_null(), "doc must survive the refused rmdir: {v}");
+        assert_eq!(content(&v)["content"], "keep me");
+
+        // The root is never removable.
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "" }), actor).await;
+        assert!(!v["error"].is_null(), "root removal must be refused: {v}");
+    }
+
+    /// Regression: `{"removed": true}` must mean the directory is gone from the
+    /// tree, not just that the handler returned. The service used to mark only
+    /// the subtree beneath the target, never the target's own entry in its
+    /// parent index, so `doc_list` kept listing it and a second `doc_rmdir`
+    /// reported success again.
+    #[tokio::test]
+    async fn rmdir_really_removes_the_directory_from_the_tree() {
+        let (router, _tmp) = shared_router().await;
+        let actor = P2_ACTOR;
+
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-gone" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir parent: {v}");
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-gone/leaf" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir leaf: {v}");
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-gone/leaf" }), actor).await;
+        assert!(v["error"].is_null(), "rmdir: {v}");
+        assert_eq!(content(&v)["removed"], true);
+
+        // 1. no longer listed under its parent …
+        let v = call_shared(&router, "doc_list", json!({ "path": "p3-gone" }), actor).await;
+        assert!(v["error"].is_null(), "list: {v}");
+        let names: Vec<String> = content(&v)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            !names.contains(&"leaf".to_string()),
+            "removed dir still listed: {names:?}"
+        );
+
+        // 2. a second removal fails instead of reporting success twice …
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-gone/leaf" }), actor).await;
+        assert!(!v["error"].is_null(), "second rmdir must fail: {v}");
+
+        // 3. … and the name is free again.
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-gone/leaf" }), actor).await;
+        assert!(v["error"].is_null(), "name must be reusable: {v}");
+    }
+
+    /// Regression: pruning a directory is a structural op, so it carries the
+    /// same ownership gate as `doc_move` / `doc_remove` — and the same one the
+    /// REST face (`DELETE /api/dirs/:id` → `AclTarget::Dir` + `Edit`) applies.
+    #[tokio::test]
+    async fn rmdir_is_ownership_gated() {
+        let (router, _tmp) = shared_router().await;
+        const OWNER: Option<&str> = Some("11111111-2222-4333-8444-555555555555");
+        const OTHER: Option<&str> = Some("99999999-8888-4777-8666-555555555555");
+
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-mine" }), OWNER).await;
+        assert!(v["error"].is_null(), "mkdir: {v}");
+
+        // Someone else cannot remove it …
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-mine" }), OTHER).await;
+        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "{v}");
+        // … and it is still there afterwards.
+        let v = call_shared(&router, "doc_list", json!({}), OWNER).await;
+        let names: Vec<String> = content(&v)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            names.contains(&"p3-mine".to_string()),
+            "dir must survive: {names:?}"
+        );
+
+        // The owner can.
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-mine" }), OWNER).await;
+        assert!(v["error"].is_null(), "owner rmdir: {v}");
+    }
+
+    /// Regression: "empty" counts the recycle bin. Otherwise pruning strands
+    /// the slot and `doc_restore` resurrects a document into a directory that
+    /// no listing can show.
+    #[tokio::test]
+    async fn rmdir_refuses_while_the_recycle_bin_still_targets_it() {
+        let (router, _tmp) = shared_router().await;
+        let actor = P2_ACTOR;
+
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-bin" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir: {v}");
+        let v = call_shared(
+            &router,
+            "doc_write",
+            json!({ "ref": "p3-bin/x.md", "mode": "create", "content": "body" }),
+            actor,
+        )
+        .await;
+        assert!(v["error"].is_null(), "write: {v}");
+        let v = call_shared(&router, "doc_remove", json!({ "ref": "p3-bin/x.md" }), actor).await;
+        assert!(v["error"].is_null(), "remove: {v}");
+
+        // The directory looks empty to `doc_list`, but the slot still owns it.
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-bin" }), actor).await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("recycle bin"),
+            "a bin-backed dir must be refused: {v}"
+        );
+
+        // Restore still works, and reports where the document landed.
+        let v = call_shared(&router, "doc_list_trash", json!({}), actor).await;
+        assert!(v["error"].is_null(), "list_trash: {v}");
+        let trash_id = content(&v)["entries"][0]["trash_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let v = call_shared(&router, "doc_restore", json!({ "trash_id": trash_id }), actor).await;
+        assert!(v["error"].is_null(), "restore: {v}");
+        let payload = content(&v);
+        assert_eq!(
+            payload["path"], "p3-bin/x.md",
+            "restore must report the real path: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn trash_is_listable_and_restorable() {
+        let (router, _tmp) = shared_router().await;
+        let actor = P2_ACTOR;
+
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p2-trash" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir: {v}");
+        let v = call_shared(
+            &router,
+            "doc_write",
+            json!({
+                "ref": "p2-trash/doomed.md",
+                "mode": "create",
+                "content": "bring me back"
+            }),
+            actor,
+        )
+        .await;
+        assert!(v["error"].is_null(), "write: {v}");
+
+        let v = call_shared(&router, "doc_remove", json!({ "ref": "p2-trash/doomed.md" }), actor).await;
+        assert!(v["error"].is_null(), "remove: {v}");
+
+        // Gone from the library...
+        let v = call_shared(&router, "doc_read", json!({ "ref": "p2-trash/doomed.md" }), actor).await;
+        assert!(!v["error"].is_null(), "removed doc must not be readable: {v}");
+
+        // ...but the trash lists it, with the id needed to undo.
+        let v = call_shared(&router, "doc_list_trash", json!({}), actor).await;
+        assert!(v["error"].is_null(), "list_trash: {v}");
+        let listed = content(&v);
+        let entry = listed["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|e| e["original_name"] == "doomed")
+            .cloned()
+            .expect("the deleted document must be in the trash");
+        let trash_id = entry["trash_id"].as_str().unwrap().to_string();
+        assert!(trash_id.starts_with("tr-"), "trash id shape: {trash_id}");
+
+        // Restore puts the body back where it came from.
+        let v = call_shared(&router, "doc_restore", json!({ "trash_id": trash_id }), actor).await;
+        assert!(v["error"].is_null(), "restore: {v}");
+        assert_eq!(content(&v)["restored"], true);
+
+        let v = call_shared(&router, "doc_read", json!({ "ref": "p2-trash/doomed.md" }), actor).await;
+        assert!(v["error"].is_null(), "restored doc must be readable: {v}");
+        assert_eq!(content(&v)["content"], "bring me back");
+
+        // A second restore is a clear not-found, not a silent success.
+        let v = call_shared(&router, "doc_restore", json!({ "trash_id": trash_id }), actor).await;
+        assert!(
+            !v["error"].is_null(),
+            "restoring the same slot twice must fail: {v}"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_requests_answers_the_pending_queue() {
+        let (router, _tmp) = shared_router().await;
+        let actor = P2_ACTOR;
+
+        // Whatever the policy decided, the tool must answer with an envelope —
+        // this is the recovery path for a request_id lost to compaction.
+        let v = call_shared(&router, "doc_list_requests", json!({}), actor).await;
+        assert!(v["error"].is_null(), "list_requests: {v}");
+        let listed = content(&v);
+        assert!(
+            listed["requests"].is_array(),
+            "must return a request list: {listed}"
+        );
+        assert!(listed["total"].is_number());
+
+        // A typo in the filter is named, not silently defaulted.
+        let v = call_shared(&router, "doc_list_requests", json!({ "status": "pendng" }), actor).await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("unknown status"),
+            "a bad status must be reported: {v}"
+        );
+
+        // Malformed arguments are named, not swallowed into a default answer:
+        // "status": 5 used to fall back to the pending queue, which looks like
+        // a correct answer to a question that was never understood.
+        let v = call_shared(&router, "doc_list_requests", json!({ "status": 5 }), actor).await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("invalid arguments"),
+            "a wrongly-typed argument must be rejected: {v}"
+        );
+        let v = call_shared(&router, "doc_list_trash", json!({ "limit": "many" }), actor).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid arguments"),
+            "a wrongly-typed limit must be rejected: {v}"
+        );
+
+        // Filtered by document: the reference is resolved, not passed through.
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p2-req" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir: {v}");
+        let v = call_shared(
+            &router,
+            "doc_write",
+            json!({ "ref": "p2-req/x.md", "mode": "create", "content": "x" }),
+            actor,
+        )
+        .await;
+        assert!(v["error"].is_null(), "write: {v}");
+        let v = call_shared(
+            &router,
+            "doc_list_requests",
+            json!({ "reference": "p2-req/x.md", "status": "all" }),
+            actor,
+        )
+        .await;
+        assert!(v["error"].is_null(), "per-doc list: {v}");
+        assert!(content(&v)["requests"].is_array());
+    }
+
+}

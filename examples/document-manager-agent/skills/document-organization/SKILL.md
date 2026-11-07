@@ -10,8 +10,13 @@ triggers:
   - 整理文档
   - docs IA
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
+  - doc_mkdir
+  - doc_move
+  - doc_rmdir
+  - doc_stat
+  - doc_list
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -22,11 +27,26 @@ tool_deps:
 
 Organize documents around how readers find and use information, not around how files happened to be created.
 
+## System of Record
+
+The library structure is the file system of the doc service — restructure it there.
+
+- `doc_mkdir` creates a directory (one level at a time; the parent must exist).
+- `doc_move` moves and renames **documents** (paths must end in `.md`) and can publish
+  atomically by writing to a temp name first. It does not move directories: to
+  restructure one, move its documents out, `doc_rmdir` it, and `doc_mkdir` the
+  replacement.
+- `doc_rmdir` removes an **empty** directory only and never cascades — if it refuses,
+  the directory still holds documents or sub-directories; empty it deliberately.
+- Do not "reorganize" by rewriting bodies: a moved document keeps its id and history,
+  a rewritten one loses both.
+- Publish the resulting map with `doc_write` so humans can see the target structure.
+
 ## Execution Steps
 
 1. **Load inventory and conventions**
    - Use `mcp_memory__memory_recall` to retrieve taxonomy, naming conventions, canonical sources, and archive rules
-   - Use `file_read` to inspect existing docs tree, README files, indexes, summaries, and document inventories
+   - Use `doc_read` to inspect existing docs tree, README files, indexes, summaries, and document inventories
    - Identify current navigation, duplicate areas, stale docs, orphan docs, and missing entry points
 
 2. **Define information architecture**
@@ -43,7 +63,7 @@ Organize documents around how readers find and use information, not around how f
 4. **Plan reorganization safely**
    - Preserve existing links or document redirects/compatibility notes when paths change
    - Avoid large unexplained moves without mapping old path to new path
-   - Use `file_write` to save organization plan or indexes when requested
+   - Use `doc_write` to save organization plan or indexes when requested
    - Use `mcp_memory__memory_store` to persist taxonomy and canonical-source decisions
 
 ## Output Format

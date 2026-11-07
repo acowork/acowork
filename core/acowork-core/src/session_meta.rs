@@ -30,6 +30,8 @@
 //! JSONL files are not this backend's concern — the caller cleans them up.
 //! Keeping the side-effect split lets the trait stay pure on the storage axis.
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -352,6 +354,94 @@ pub enum TodoStatus {
     Completed,
 }
 
+/// Per-session **narrowing** of the agent-level tool configuration.
+///
+/// The agent layer (`agent_tools.json` / `agent_mcp.json` /
+/// `agent_mcp_tools.json`) owns which tools exist for the agent; this type
+/// owns which of them a *single session* keeps. Absent (`None` on
+/// [`SessionMeta::tool_policy`]) means "inherit the agent layer verbatim",
+/// which is the state every session starts in — the row is written **only**
+/// when the user flips a switch for one session.
+///
+/// # Why a deny-list and not a tri-state map
+///
+/// The session layer can only ever *remove* tools, never add them back:
+///
+/// - MCP tool wrappers are materialised per-agent at connect time
+///   (`connect_mcp_with_reconcile_and_filter`), so a tool the agent layer
+///   did not expose has no wrapper in memory for a session to re-enable.
+///   Re-enabling would need a reconnect or a second, permanently-resident
+///   wrapper set.
+/// - A uniform "on for this session" switch over all four groups keeps one
+///   mental model. A tri-state map would let the UI show a token as on in a
+///   session while the agent panel shows it off, which reads as a bug.
+///
+/// Deny-lists also mean a tool added to the agent later is automatically
+/// available in every existing session (no row to migrate), and an empty
+/// policy is byte-identical to "never toggled" — see [`Self::is_empty`].
+///
+/// Identities: builtin entries are tool names; MCP servers are their
+/// `agent_mcp.json` names; MCP tools are keyed by server, then by the
+/// **unprefixed** tool name as the server's own `tools/list` spells it
+/// (the `mcp_<server>__<tool>` prefix is a runtime rendering detail, not
+/// persisted state).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionToolPolicy {
+    /// Builtin tool names switched off for this session.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_builtin_tools: BTreeSet<String>,
+    /// MCP server names switched off for this session. Disabling a server
+    /// disables every tool it contributes, whatever `disabled_mcp_tools`
+    /// says (the narrower list is kept so toggling the server back on
+    /// restores the per-tool choices instead of resetting them).
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub disabled_mcp_servers: BTreeSet<String>,
+    /// Per-server tool names switched off for this session.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub disabled_mcp_tools: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl SessionToolPolicy {
+    /// `true` when the policy removes nothing — i.e. "inherit the agent
+    /// layer". Persisted as `NULL` by the store (see `upsert_row`), so this
+    /// is the single test every write path uses to decide "store the
+    /// override" vs "go back to inheriting".
+    pub fn is_empty(&self) -> bool {
+        self.disabled_builtin_tools.is_empty()
+            && self.disabled_mcp_servers.is_empty()
+            && self.disabled_mcp_tools.is_empty()
+    }
+
+    /// May this session use the builtin tool `name`?
+    pub fn builtin_allowed(&self, name: &str) -> bool {
+        !self.disabled_builtin_tools.contains(name)
+    }
+
+    /// May this session use MCP server `server` at all?
+    ///
+    /// Only the server list is consulted — per-tool rows are irrelevant
+    /// while the whole server is off.
+    pub fn mcp_server_allowed(&self, server: &str) -> bool {
+        !self.disabled_mcp_servers.contains(server)
+    }
+
+    /// May this session use `tool` from MCP `server`?
+    ///
+    /// Both levels are ANDed: a disabled server wins over an enabled tool.
+    /// Callers pass the server name and the server's own tool name, which
+    /// is what `split_prefixed_tool` yields — the policy never parses the
+    /// prefixed wire name itself.
+    pub fn mcp_tool_allowed(&self, server: &str, tool: &str) -> bool {
+        if !self.mcp_server_allowed(server) {
+            return false;
+        }
+        !self
+            .disabled_mcp_tools
+            .get(server)
+            .is_some_and(|tools| tools.contains(tool))
+    }
+}
+
 /// Who may read a session (ADR-076 §决策 4).
 ///
 /// The field exists so a session can be *shared* rather than owned
@@ -604,6 +694,40 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_session_id: Option<String>,
 
+    /// ADR-076 §决策 4 (rev.): the human accounts granted **read-only
+    /// awareness** of this session — the right to know it exists and to
+    /// read its history, without owning it and without writing into it.
+    ///
+    /// This is a deliberate third axis, orthogonal to `initiator` and
+    /// `chat_session_id`, and it exists so `initiator` can keep its true
+    /// meaning ("who started this session" — an agent for an agent-to-agent
+    /// intent, a person for a human turn) instead of being overloaded with
+    /// a human just so that human can see the run. Conflating the two is
+    /// what erased the agent-to-agent vs user-to-agent distinction.
+    ///
+    /// The list is a **creation-time snapshot**, resolved by the Gateway
+    /// (the only party that holds the agent ownership table, ADR-087 D1)
+    /// and carried on the Intent wire to the receiving Runtime, which
+    /// stamps it verbatim. The Runtime never queries an ACL table to
+    /// compute or refresh it — that keeps `is_readable_by` a pure
+    /// membership test with no new dependency. A guest added to an agent
+    /// after a session was created does not retroactively enter this list;
+    /// reconciling the two is a separate concern, not this field's job.
+    ///
+    /// It is seeded **only for agent-to-agent origins** (`AgentRequest` /
+    /// `AgentResponse`), where there is no human privacy subject to protect:
+    /// the owner and guests of both participating agents, plus the nearest
+    /// human in the chain. It is left empty for human origins (`Chat` /
+    /// `PmTask`), because widening those by agent ACL would let one user of
+    /// a shared agent read another user's private conversation — the ACL
+    /// rule must never override a human's privacy subject.
+    ///
+    /// Read-only by construction: `is_writable_by` does not consult this
+    /// field. An empty list is the default and means "no extra readers", so
+    /// pre-existing rows deserialise to unchanged behaviour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aware_users: Vec<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -622,6 +746,17 @@ pub struct SessionMeta {
     pub context_window: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub todos: Option<Vec<TodoItem>>,
+    /// Per-session tool narrowing (see [`SessionToolPolicy`]). `None` = the
+    /// session uses the agent-level tool configuration verbatim, which is
+    /// the state every session starts in; the JSON column is written only
+    /// after the user flips a switch for this one session.
+    ///
+    /// Deliberately an *override*, never a copy: copying the agent list at
+    /// creation would freeze that session against later agent changes,
+    /// which is the opposite of the intended "inherit until touched"
+    /// semantics.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_policy: Option<SessionToolPolicy>,
 
     pub message_count: u64,
     pub last_active_at: String,
@@ -653,6 +788,14 @@ pub struct SessionMeta {
 }
 
 impl SessionMeta {
+    /// The session's tool narrowing, materialised for callers that only
+    /// need the deny-lists. `None` (never toggled) reads as the empty
+    /// policy = "inherit the agent layer", so no call site has to spell
+    /// out the `Option` dance and risk treating "absent" as "deny all".
+    pub fn tool_policy_or_default(&self) -> SessionToolPolicy {
+        self.tool_policy.clone().unwrap_or_default()
+    }
+
     /// May `scope` **read** this session (ADR-076 §决策 4)?
     ///
     /// An unset (`None`) visibility is public: every signed-in account
@@ -669,6 +812,18 @@ impl SessionMeta {
             // writing — see `is_writable_by`.
             SessionScope::Unfiltered | SessionScope::Admin { .. } => true,
             SessionScope::User { uid, chats } => {
+                // ADR-076 §决策 4 (rev.): read-only awareness. The Gateway
+                // seeds this list when it delivers an agent-to-agent intent
+                // — the owner and permission guests of both agents see the
+                // session the two agents started between themselves, which
+                // has no human initiator to otherwise grant them. It grants
+                // reading only: `is_writable_by` deliberately never consults
+                // it, so an aware account cannot type into an execution it
+                // did not start. For a human-initiated session the list is
+                // empty and this is inert.
+                if self.aware_users.iter().any(|u| u == uid) {
+                    return true;
+                }
                 if self.visibility == Some(SessionVisibility::Members) {
                     // Design 27 §8.2: a group execution session is readable
                     // by its owner and by any current participant of the
@@ -1049,3 +1204,216 @@ mod chat_scope_tests {
     }
 }
 
+
+#[cfg(test)]
+mod aware_users_tests {
+    use super::{SessionMeta, SessionScope, SessionVisibility};
+
+    /// Build a session meta from a minimal JSON body. The fields that carry
+    /// no serde default (`version`/`session_id`/`agent_id`/`created_at`/
+    /// `message_count`/`last_active_at`) are supplied; everything else —
+    /// including `aware_users` — takes its default, so a test names only
+    /// what it is about.
+    fn meta(initiator: Option<&str>, visibility: Option<&str>, aware: &[&str]) -> SessionMeta {
+        let mut obj = serde_json::Map::new();
+        obj.insert("version".into(), serde_json::json!(3));
+        obj.insert("session_id".into(), serde_json::json!("s-1"));
+        obj.insert("agent_id".into(), serde_json::json!("com.test.agent"));
+        obj.insert("created_at".into(), serde_json::json!("2026-01-01T00:00:00Z"));
+        obj.insert("message_count".into(), serde_json::json!(0));
+        obj.insert("last_active_at".into(), serde_json::json!("2026-01-01T00:00:00Z"));
+        if let Some(u) = initiator {
+            obj.insert("initiator".into(), serde_json::json!(u));
+        }
+        if let Some(v) = visibility {
+            obj.insert("visibility".into(), serde_json::json!(v));
+        }
+        if !aware.is_empty() {
+            obj.insert(
+                "aware_users".into(),
+                serde_json::json!(aware.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+            );
+        }
+        serde_json::from_value(serde_json::Value::Object(obj)).expect("valid meta")
+    }
+
+    /// ADR-076 §决策 4 (rev.) — the hard invariant. An agent-to-agent session
+    /// (initiator is an agent instance, Private) is readable by every human on
+    /// the awareness list, even though none of them is the initiator.
+    #[test]
+    fn aware_account_can_read_an_agent_initiated_session() {
+        let m = meta(
+            Some("8f7be9a6-agent-instance"),
+            Some("private"),
+            &["user-nicholas", "user-guest"],
+        );
+        assert!(m.is_readable_by(&SessionScope::user("user-nicholas")));
+        assert!(m.is_readable_by(&SessionScope::user("user-guest")));
+        // A human not on the list, not the initiator, still cannot read it.
+        assert!(!m.is_readable_by(&SessionScope::user("user-stranger")));
+    }
+
+    /// The awareness grant is read-only by construction: `is_writable_by`
+    /// never consults `aware_users`, so an aware account cannot type into an
+    /// execution it did not start. This is what keeps the口子 open for eyes
+    /// only, never for a second hand on the wheel.
+    #[test]
+    fn aware_account_cannot_write() {
+        let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &["user-nicholas"]);
+        assert!(m.is_readable_by(&SessionScope::user("user-nicholas")));
+        assert!(!m.is_writable_by(&SessionScope::user("user-nicholas")));
+        // Only the initiating agent can write it.
+        assert!(m.is_writable_by(&SessionScope::user("8f7be9a6-agent-instance")));
+    }
+
+    /// A human-initiated session carries no awareness list (the initiator
+    /// already grants access, and seeding the ACL there would leak a private
+    /// request). An empty `aware_users` is inert: it neither widens nor
+    /// narrows the pre-feature behaviour.
+    #[test]
+    fn empty_awareness_is_inert_for_a_human_initiator() {
+        let m = meta(Some("user-nicholas"), Some("private"), &[]);
+        assert!(m.is_readable_by(&SessionScope::user("user-nicholas")));
+        assert!(m.is_writable_by(&SessionScope::user("user-nicholas")));
+        assert!(!m.is_readable_by(&SessionScope::user("user-stranger")));
+    }
+
+    /// Awareness does not override an explicit `Members` chat grant's rules —
+    /// it is purely additive. A `Members` session bound to a chat is readable
+    /// by that chat's members; an aware account outside the chat is *also*
+    /// readable, but a stranger in neither is not.
+    #[test]
+    fn awareness_adds_to_members_without_replacing_it() {
+        let m = meta(Some("8f7be9a6-agent-instance"), Some("members"), &["user-aware"]);
+        let mut bound = SessionScope::user("user-member");
+        if let SessionScope::User { chats, .. } = &mut bound {
+            chats.push("chat-group-1".to_string());
+        }
+        let mut meta_with_chat = m.clone();
+        meta_with_chat.chat_session_id = Some("chat-group-1".to_string());
+        assert!(meta_with_chat.is_readable_by(&bound)); // via chat membership
+        assert!(meta_with_chat.is_readable_by(&SessionScope::user("user-aware"))); // via awareness
+        assert!(!meta_with_chat.is_readable_by(&SessionScope::user("user-stranger")));
+    }
+
+    /// The visibility enum's `is_private` must not be confused with the
+    /// awareness path: an aware account reads a Private session even though
+    /// the Private branch would otherwise deny every non-initiator.
+    #[test]
+    fn awareness_overrides_private_denial() {
+        let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &["user-nicholas"]);
+        assert_eq!(m.visibility, Some(SessionVisibility::Private));
+        assert!(m.is_readable_by(&SessionScope::user("user-nicholas")));
+    }
+}
+
+#[cfg(test)]
+mod tool_policy_tests {
+    use super::SessionToolPolicy;
+
+    fn policy() -> SessionToolPolicy {
+        let mut p = SessionToolPolicy::default();
+        p.disabled_builtin_tools.insert("web_fetch".into());
+        p.disabled_mcp_servers.insert("playwright".into());
+        p.disabled_mcp_tools
+            .entry("pm".into())
+            .or_default()
+            .insert("pm_submit_task".into());
+        p
+    }
+
+    /// A never-toggled session carries the empty policy, which removes
+    /// nothing — the whole "inherit the agent layer" contract rests on this.
+    #[test]
+    fn default_policy_allows_everything() {
+        let p = SessionToolPolicy::default();
+        assert!(p.is_empty());
+        assert!(p.builtin_allowed("web_fetch"));
+        assert!(p.mcp_server_allowed("playwright"));
+        assert!(p.mcp_tool_allowed("pm", "pm_submit_task"));
+    }
+
+    #[test]
+    fn builtin_and_server_lists_narrow_independently() {
+        let p = policy();
+        assert!(!p.is_empty());
+        assert!(!p.builtin_allowed("web_fetch"));
+        assert!(p.builtin_allowed("read_file"));
+        assert!(!p.mcp_server_allowed("playwright"));
+        assert!(p.mcp_server_allowed("pm"));
+    }
+
+    /// A disabled server wins over an individually enabled tool — the server
+    /// toggle is the coarser switch and must never be bypassed by the finer
+    /// one. The per-tool row is deliberately NOT cleared when the server is
+    /// switched off, so switching the server back on restores the per-tool
+    /// choices instead of silently enabling everything.
+    #[test]
+    fn disabled_server_outranks_tool_level_state() {
+        let mut p = policy();
+        p.disabled_mcp_servers.insert("pm".into());
+        assert!(!p.mcp_tool_allowed("pm", "pm_claim_task"));
+        assert!(!p.mcp_tool_allowed("pm", "pm_submit_task"));
+
+        p.disabled_mcp_servers.remove("pm");
+        assert!(p.mcp_tool_allowed("pm", "pm_claim_task"));
+        assert!(!p.mcp_tool_allowed("pm", "pm_submit_task"));
+    }
+
+    /// An unknown server/tool is allowed: the deny-list only ever removes
+    /// identities it was told about, so a tool added to the agent after the
+    /// session was configured appears without a migration.
+    #[test]
+    fn unknown_identities_are_allowed() {
+        let p = policy();
+        assert!(p.mcp_server_allowed("docling"));
+        assert!(p.mcp_tool_allowed("docling", "convert"));
+        assert!(p.mcp_tool_allowed("pm", "pm_create_task"));
+    }
+
+    /// The per-tool denies are a **map of arrays** (`{"server": ["tool"]}`),
+    /// not a list of `{server, tool}` pairs. Pinned as a literal because the
+    /// Desktop's `fromWirePolicy` / `toWirePolicy`
+    /// (`apps/acowork-desktop/src/lib/toolInventory.ts`) assert the same
+    /// literal: the two sides are only kept honest by agreeing on this shape,
+    /// and neither mock-based suite can notice a drift on its own.
+    #[test]
+    fn mcp_tool_denies_serialise_as_a_map() {
+        let mut p = SessionToolPolicy::default();
+        p.disabled_builtin_tools.insert("web_fetch".into());
+        p.disabled_mcp_servers.insert("docling".into());
+        p.disabled_mcp_tools
+            .insert("pm".into(), ["pm_claim_task".to_string()].into());
+        p.disabled_mcp_tools
+            .insert("docling".into(), ["convert".to_string()].into());
+
+        let json = serde_json::to_value(&p).expect("serialise");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "disabled_builtin_tools": ["web_fetch"],
+                "disabled_mcp_servers": ["docling"],
+                "disabled_mcp_tools": { "pm": ["pm_claim_task"], "docling": ["convert"] },
+            })
+        );
+        let back: SessionToolPolicy = serde_json::from_value(json).expect("deserialise");
+        assert_eq!(back, p);
+    }
+
+    /// The wire shape is what the Desktop writes: stable key names, empty
+    /// groups omitted entirely (so an untouched group cannot be mistaken for
+    /// "explicitly empty" by a future reader).
+    #[test]
+    fn serialises_only_the_groups_in_use() {
+        let mut p = SessionToolPolicy::default();
+        p.disabled_builtin_tools.insert("web_fetch".into());
+        let json = serde_json::to_value(&p).expect("serialise");
+        assert_eq!(
+            json,
+            serde_json::json!({ "disabled_builtin_tools": ["web_fetch"] })
+        );
+
+        let back: SessionToolPolicy = serde_json::from_value(json).expect("deserialise");
+        assert_eq!(back, p);
+    }
+}

@@ -200,7 +200,7 @@ purged_at TEXT NOT NULL
 ### 4.1 三件套
 
 ```rust
-pub const SCHEMA_VERSION: i64 = 5;                           // 当前版本
+pub const SCHEMA_VERSION: i64 = 13;                          // 当前版本
 pub(crate) const MIGRATIONS: &[(i64, &str)] = &[...];        // [(target, sql)]
 pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 ```
@@ -233,6 +233,14 @@ pub(crate) fn apply_migrations(conn: &mut Connection) -> Result<()>;
 | 3 | `sessions.perf_tps_sum` / `perf_tps_samples` / `perf_ttft_ms_sum` / `perf_ttft_ms_samples` | 会话级 LLM 输出速度与首字延迟 |
 | 4 | `sessions.chat_session_id` | 设计 27 §8.2（群组执行会话归属到某个 Chat 会话） |
 | 5 | `sessions.last_compaction_summary` + 新表 `conversation_state` | 设计 27 §4（O(1) 交接读 + 索引水位） |
+| 6 | `sessions.model_usage`（模型用量明细）+ `token_stats` 汇总表 | 多 provider / 多模型用量拆分 |
+| 7 | 删除 `sessions.last_compaction_summary` | 唯一读者（已退役的 intent rotation 交接）不存在了 |
+| 8 | `sessions.user_id` 改名 `initiator` | ADR-076 §决策 4（该列是会话发起者，`user_id` 归账号体系） |
+| 9 | `chat_token_usage` 台账表 | 设计 27（Chat Router 用量，一 Chat 一行聚合） |
+| 10 | `sessions.intent_key` / `intent_closed` | ADR-106 D11（会话持有的 intent 上下文与其终态标记） |
+| 11 | `chat_token_usage.history_tokens` | 设计 27（router 的投影历史占用，唯一可与预算比较的数） |
+| 12 | `sessions.aware_users` | ADR-076 §决策 4 rev.（只读知情者，由 Gateway 为 agent-to-agent intent 注入） |
+| 13 | `sessions.tool_policy`（JSON，`NULL` = 继承 Agent 层） | ADR-109（per-session 内置工具 / MCP 收窄） |
 
 v3 存 **sum + count** 而非折叠好的均值：两个指标各自统计自己的样本数。一次调用可能只测得出 TTFT（Provider 未上报 completion 数），共用一个分母会把速度均值系统性抬高。
 

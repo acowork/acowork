@@ -10,7 +10,13 @@ triggers:
   - docs quality
   - proofreading
 tool_deps:
-  - file_read
+  - doc_read
+  - doc_write
+  - doc_stat
+  - doc_check_request
+  - doc_list_requests
+  - pm_create_task
+  - pm_add_activity
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -23,11 +29,24 @@ A document is not ready if readers cannot trust it, find what they need, or know
 
 Review against purpose, audience, source accuracy, structure, and maintainability.
 
+## System of Record
+
+A review is a read plus a decision, and both go through the service.
+
+- `doc_stat` (metadata, version, timestamps) then `doc_read` (body). Review the thing
+  that is stored, not a copy you made.
+- Findings that require a change are `pm_create_task` entries with the document path
+  and section; findings you fix yourself are a `doc_write` with `if_version`.
+- Pending changes you are asked about: `doc_list_requests` (`reference=<path>`) shows
+  the queue; `doc_check_request` shows one decision.
+- Record the verdict with `pm_add_activity` on the review task — "reviewed and
+  accepted" with a date is the only durable form of approval.
+
 ## Execution Steps
 
 1. **Load review context**
    - Use `mcp_memory__memory_recall` to retrieve style guide, templates, taxonomy, canonical sources, and prior review findings
-   - Use `file_read` to inspect target document and related canonical references
+   - Use `doc_read` to inspect target document and related canonical references
    - Identify audience, purpose, owner, lifecycle status, and publication target
 
 2. **Review accuracy and completeness**

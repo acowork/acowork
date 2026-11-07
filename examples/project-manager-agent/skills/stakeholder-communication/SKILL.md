@@ -10,10 +10,14 @@ triggers:
   - executive summary
   - stakeholder communication
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
+  - pm_create_task
+  - pm_get_task
+  - pm_list_tasks
+  - pm_add_activity
 ---
 
 # Stakeholder Communication Skill
@@ -24,11 +28,23 @@ Communication must be audience-specific and action-oriented. If the audience nee
 
 Do not hide bad news. State the situation, impact, options, recommendation, and next action.
 
+## System of Record
+
+Report from the service, and record what you reported.
+
+- Pull every number from `pm_list_tasks` / `pm_get_task` before it goes into a report.
+  Quote counts and dates with the filter that produced them.
+- Escalations are tasks, not paragraphs: `pm_create_task` with `type="checkpoint"`
+  and the decision needed in the title, so a human can approve or reject it.
+- Publish the report with `doc_write` (this is what "shared" means); keep the
+  recipient list in the document, not in your memory.
+- `pm_add_activity` on the tracked item when a report changes a commitment.
+
 ## Execution Steps
 
 1. **Identify audience and purpose**
    - Use `mcp_memory__memory_recall` to retrieve stakeholder profiles, communication preferences, prior feedback, and decision patterns
-   - Use `file_read` to inspect relevant PRD, plan, status report, risk register, or meeting notes
+   - Use `doc_read` to inspect relevant PRD, plan, status report, risk register, or meeting notes
    - Identify audience type: executive, product, engineering, team, customer, partner, compliance, operations
    - Define communication purpose: inform, decide, escalate, align, unblock, or confirm
    - Identify the decision-maker and affected stakeholders
@@ -54,7 +70,7 @@ Do not hide bad news. State the situation, impact, options, recommendation, and 
    - External partner/customer: commitments, dates, dependencies, support needs
 
 5. **Create artifact and follow up**
-   - Use `file_write` to create the communication artifact when requested
+   - Use `doc_write` to create the communication artifact when requested
    - Use `mcp_memory__memory_store` to record what was communicated, to whom, decisions, commitments, feedback, and follow-up date
    - Track pending responses and escalate missed decision deadlines
 

@@ -17,12 +17,13 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
 use tokio::sync::RwLock;
 
-use super::{AgentDirectory, AgentInfo};
+use super::{AgentDirectory, AgentEntry, AgentInfo};
 
 /// HTTP Agent 目录（查询 Gateway `/api/agents`）。
 ///
@@ -48,6 +49,12 @@ pub struct HttpAgentDirectory {
     /// 这样 `agent_exists` 的存在性语义与旧实现（`HashSet<String>`）完全
     /// 一致：只依赖 `instance_id` 是否在列表里，元信息尽力而为。
     cache: RwLock<HashMap<String, Option<AgentInfo>>>,
+    /// Whether the first full refresh has succeeded. Separates "the directory
+    /// is empty" from "the directory has no data yet", so
+    /// [`AgentDirectory::list_agents`] can report `None` (unavailable) honestly
+    /// instead of returning a misleading empty list. Set once `refresh()`
+    /// succeeds; never reset afterwards.
+    refreshed: AtomicBool,
     /// HTTP 客户端（短超时，避免阻塞 MCP 调用）。
     client: reqwest::Client,
     /// 周期刷新间隔。
@@ -68,6 +75,7 @@ impl HttpAgentDirectory {
             gateway_url: gateway_url.trim_end_matches('/').to_string(),
             auth_token,
             cache: RwLock::new(HashMap::new()),
+            refreshed: AtomicBool::new(false),
             client: reqwest::Client::builder()
                 .timeout(Duration::from_secs(5))
                 .connect_timeout(Duration::from_secs(3))
@@ -100,9 +108,13 @@ impl HttpAgentDirectory {
     pub(crate) async fn refresh(&self) {
         match self.fetch_agents().await {
             Ok(ids) => {
+                let count = ids.len();
                 let mut cache = self.cache.write().await;
                 *cache = ids;
-                tracing::debug!(count = cache.len(), "Agent directory refreshed");
+                // The cache now holds a trustworthy full set → `list_agents`
+                // may report real numbers.
+                self.refreshed.store(true, Ordering::Release);
+                tracing::debug!(count, "Agent directory refreshed");
             }
             Err(e) => {
                 tracing::warn!(
@@ -152,6 +164,11 @@ impl HttpAgentDirectory {
                 .get("role")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
+            // ADR-085 liveness. Absent (older Gateway / abnormal response) →
+            // `None`, which the tool layer renders as JSON null rather than
+            // `false`: "unknown" and "offline" are different answers to an
+            // agent deciding whether a target is worth dispatching to.
+            let online = a.get("alive").and_then(|v| v.as_bool());
             // 存在性只依赖 instance_id（与旧 HashSet 语义一致）：即使
             // agent_id 缺失也保留条目（值为 `None` = 存在但元信息不可用），
             // 避免把该 instance 从存在性缓存中剔除（否则 agent_exists
@@ -160,6 +177,7 @@ impl HttpAgentDirectory {
                 agent_id,
                 name,
                 role,
+                online,
             });
             out.insert(instance_id.to_string(), entry);
         }
@@ -218,10 +236,14 @@ impl HttpAgentDirectory {
             .get("role")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        // Same liveness semantics as the list path above: missing → `None`,
+        // not `false`.
+        let online = body.get("alive").and_then(|v| v.as_bool());
         Some(AgentInfo {
             agent_id,
             name,
             role,
+            online,
         })
     }
 }
@@ -246,6 +268,28 @@ impl AgentDirectory for HttpAgentDirectory {
         // 未进缓存 / 缓存过期窗口）。并发与去重由调用方
         // `batch_lookup_agent_meta`（限流）负责。
         self.query_gateway_info(instance_id).await
+    }
+
+    /// A snapshot of the full directory currently cached.
+    ///
+    /// **Not sorted**: the stable order promised to the LLM is a wire-format
+    /// contract of `pm_list_agents` and belongs to the tool layer — enforcing
+    /// it here would mean asking every directory implementation to remember to
+    /// sort.
+    async fn list_agents(&self) -> Option<Vec<AgentEntry>> {
+        if !self.refreshed.load(Ordering::Acquire) {
+            return None;
+        }
+        let cache = self.cache.read().await;
+        Some(
+            cache
+                .iter()
+                .map(|(instance_id, info)| AgentEntry {
+                    instance_id: instance_id.clone(),
+                    info: info.clone(),
+                })
+                .collect(),
+        )
     }
 }
 
@@ -677,6 +721,80 @@ mod tests {
             info.role.as_deref(),
             Some("Project Manager"),
             "query_gateway_info must pass role through"
+        );
+    }
+
+    /// ADR-085 liveness reaches `pm_list_agents` from both directory paths,
+    /// and an absent `alive` field stays `None` rather than becoming `false`.
+    ///
+    /// Rendering "unknown" as "offline" would tell a PM agent that a perfectly
+    /// assignable member is down — the same class of false negative as the
+    /// empty-roster bug this crate just fixed.
+    #[tokio::test]
+    async fn alive_is_extracted_from_list_and_detail_paths() {
+        let online = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let unknown = "a91b07e4-c2d3-4f8b-a91b-07e4c2d34f8b";
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let app = Router::new()
+            .route(
+                "/api/agents",
+                get(move || async move {
+                    axum::Json(vec![
+                        serde_json::json!({
+                            "instance_id": online,
+                            "agent_id": "com.acowork.engineer",
+                            "name": "Engineer",
+                            "alive": true,
+                        }),
+                        // Older Gateway / abnormal response: no liveness at all.
+                        serde_json::json!({
+                            "instance_id": unknown,
+                            "agent_id": "com.acowork.legacy",
+                            "name": "Legacy",
+                        }),
+                    ])
+                }),
+            )
+            .route(
+                "/api/agents/{id}",
+                get(move |axum::extract::Path(id): axum::extract::Path<String>| async move {
+                    axum::Json(serde_json::json!({
+                        "instance_id": id,
+                        "agent_id": "com.acowork.engineer",
+                        "name": "Engineer",
+                        "alive": false,
+                    }))
+                }),
+            );
+        tokio::spawn(async move { axum::serve(listener, app).await.ok() });
+        let gw = format!("http://127.0.0.1:{port}");
+
+        // List path.
+        let dir = Arc::new(HttpAgentDirectory::new(gw.clone(), None, Duration::from_secs(3600)));
+        dir.refresh().await;
+        let listed = dir.list_agents().await.expect("directory available after refresh");
+        let find = |id: &str| {
+            listed
+                .iter()
+                .find(|e| e.instance_id == id)
+                .and_then(|e| e.info.as_ref())
+                .and_then(|i| i.online)
+        };
+        assert_eq!(find(online), Some(true), "alive=true must survive the list path");
+        assert_eq!(find(unknown), None, "a missing alive field must stay unknown, not false");
+
+        // Detail-fallback path (cache miss).
+        let cold = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
+        let info = cold
+            .agent_info(unknown)
+            .await
+            .expect("fallback meta");
+        assert_eq!(
+            info.online,
+            Some(false),
+            "alive=false must survive the detail path — it is a real answer"
         );
     }
 }

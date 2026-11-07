@@ -10,8 +10,14 @@ triggers:
   - 文档归档
   - retention
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
+  - doc_move
+  - doc_remove
+  - doc_list_trash
+  - doc_restore
+  - doc_rmdir
+  - pm_create_task
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -22,11 +28,24 @@ tool_deps:
 
 Archiving should preserve retrievability and context. Do not simply move files without metadata, reason, status, and replacement path when applicable.
 
+## System of Record
+
+Archiving is a move with a rule, not a delete with a hope.
+
+- `doc_move` the retired document into the archive directory; it keeps its id,
+  version and history. Say in the body (or in the index page) *why* it was retired and
+  what replaced it.
+- Only genuinely valueless content goes to `doc_remove` (trash). `doc_list_trash`
+  and `doc_restore` are the undo; there is no purge, so do not promise permanence.
+- Directory pruning after an archive sweep: `doc_rmdir` empties bottom-up, refuses a
+  non-empty directory, and never cascades.
+- Retention follow-up is a `pm_create_task` with a due date, not a note.
+
 ## Execution Steps
 
 1. **Identify archive candidates**
    - Use `mcp_memory__memory_recall` to retrieve archive rules, document lifecycle policies, and canonical sources
-   - Use `file_read` to inspect document inventory, indexes, stale docs, superseded docs, and duplicates
+   - Use `doc_read` to inspect document inventory, indexes, stale docs, superseded docs, and duplicates
    - Determine why each document should be archived: obsolete, superseded, historical snapshot, duplicate, completed project, or compliance retention
 
 2. **Assess archive impact**
@@ -39,7 +58,7 @@ Archiving should preserve retrievability and context. Do not simply move files w
    - Add deprecation or archive notice when document remains discoverable
 
 4. **Update indexes and references**
-   - Use `file_write` to create archive manifest, notices, or updated indexes when requested
+   - Use `doc_write` to create archive manifest, notices, or updated indexes when requested
    - Preserve retrieval path and cross-links
    - Use `mcp_memory__memory_store` to persist archive decisions and locations
 

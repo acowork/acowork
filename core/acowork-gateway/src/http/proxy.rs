@@ -177,6 +177,14 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}/visibility",
             put(proxy_set_session_visibility),
         )
+        // Per-session tool narrowing over the agent layer. Transparent
+        // proxy like `config` / `visibility`: the Runtime owns the meta row
+        // and the live tool set, the Gateway owns neither (ADR-009 §5 —
+        // agent-private state is reached only through Runtime HTTP).
+        .route(
+            "/api/agents/{id}/sessions/{sid}/tool-policy",
+            get(proxy_get_session_tool_policy).put(proxy_put_session_tool_policy),
+        )
         // ADR-076 §决策 4: `workspace_switch` moved off MQTT. It needs its
         // own endpoint rather than riding `PUT .../config` — a workspace
         // switch has to push the new context to the session, not just
@@ -786,6 +794,47 @@ async fn proxy_set_session_visibility(
     body: Bytes,
 ) -> Response {
     let path = format!("/sessions/{}/visibility", sid);
+    let payload: Option<Vec<u8>> = if body.is_empty() {
+        None
+    } else {
+        Some(body.to_vec())
+    };
+    proxy_to_runtime_with_method(
+        &state,
+        &id,
+        &path,
+        "",
+        reqwest::Method::PUT,
+        payload,
+        &headers,
+    )
+    .await
+}
+
+/// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/tool-policy`
+/// to Runtime's `GET /sessions/{sid}/tool-policy`.
+async fn proxy_get_session_tool_policy(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    let path = format!("/sessions/{}/tool-policy", sid);
+    proxy_to_runtime(&state, &id, &path, "", &headers).await
+}
+
+/// Reverse-proxy `PUT /api/agents/{id}/sessions/{sid}/tool-policy`
+/// to Runtime's `PUT /sessions/{sid}/tool-policy`.
+///
+/// Replace semantics end to end: the body is the complete policy the session
+/// should run with (`{"tool_policy": null}` = inherit the agent layer), so
+/// retrying a request cannot compound.
+async fn proxy_put_session_tool_policy(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let path = format!("/sessions/{}/tool-policy", sid);
     let payload: Option<Vec<u8>> = if body.is_empty() {
         None
     } else {
