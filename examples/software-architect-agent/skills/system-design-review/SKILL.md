@@ -11,7 +11,7 @@ triggers:
   - 架构评审
   - 设计评审
 tool_deps:
-  - doc_read
+  - file_read
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -22,7 +22,7 @@ tool_deps:
 
 1. **Load context**
    - Use `mcp_memory__memory_recall` to retrieve prior decisions, conventions, and known constraints
-   - Use `doc_read` to inspect the proposed design, relevant source files, and existing architecture docs
+   - Use `file_read` to inspect the proposed design, relevant source files, and existing architecture docs
    - Identify stated goals, non-goals, constraints, and affected subsystems
 
 2. **Check requirements coverage**

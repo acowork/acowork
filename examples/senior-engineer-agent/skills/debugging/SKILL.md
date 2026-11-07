@@ -10,8 +10,8 @@ triggers:
   - troubleshoot
   - investigate
 tool_deps:
-  - doc_read
-  - doc_write
+  - file_read
+  - file_write
   - shell
   - mcp_memory__memory_recall
   - mcp_memory__memory_store
@@ -29,7 +29,7 @@ If you cannot explain why the bug happens, do not change production code except 
 
 1. **Reproduce and capture facts**
    - Use `mcp_memory__memory_recall` to check whether a similar issue, convention, or known failure mode exists
-   - Use `doc_read` to inspect relevant source, tests, configuration, and docs
+   - Use `file_read` to inspect relevant source, tests, configuration, and docs
    - Use `shell` to run the exact failing command or scenario
    - Record environment, inputs, expected behavior, actual behavior, logs, stack traces, and frequency
    - If the issue is not reproducible, gather more evidence instead of guessing
@@ -67,7 +67,7 @@ If you cannot explain why the bug happens, do not change production code except 
    - Do not proceed until the failure proves the bug is captured
 
 7. **Implement the minimal fix**
-   - Use `doc_write` to change only the root cause
+   - Use `file_write` to change only the root cause
    - Avoid unrelated cleanup, refactoring, renaming, or formatting
    - Keep the fix narrow and reversible
    - If the fix changes behavior, update tests and relevant docs

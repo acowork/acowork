@@ -10,8 +10,8 @@ triggers:
   - system design
   - 架构设计
 tool_deps:
-  - doc_read
-  - doc_write
+  - file_read
+  - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -28,7 +28,7 @@ Architecture is trade-off management. Always document the choice, rejected alter
 
 1. **Explore project context**
    - Use `mcp_memory__memory_recall` to retrieve prior architectural decisions, constraints, conventions, and known risks
-   - Use `doc_read` to inspect existing docs, source structure, module boundaries, interfaces, tests, and deployment assumptions
+   - Use `file_read` to inspect existing docs, source structure, module boundaries, interfaces, tests, and deployment assumptions
    - Identify whether this is a new system, an extension, a migration, or a redesign
    - If the request spans multiple independent subsystems, propose decomposition before designing details
 
@@ -65,7 +65,7 @@ Architecture is trade-off management. Always document the choice, rejected alter
    - If rollback is unclear, mark the design incomplete
 
 7. **Write and self-review the design**
-   - Use `doc_write` to save the architecture document when requested
+   - Use `file_write` to save the architecture document when requested
    - Use `mcp_memory__memory_store` to persist accepted decisions, rejected alternatives, risks, and assumptions
    - Self-review the design for placeholders, contradictions, ambiguous requirements, missing tests, and oversized scope
    - If the design has unresolved material questions, surface them before implementation planning

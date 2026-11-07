@@ -10,8 +10,8 @@ triggers:
   - 测试用例
   - 用例设计
 tool_deps:
-  - doc_read
-  - doc_write
+  - file_read
+  - file_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +26,7 @@ Test cases must prove behavior and risk coverage, not implementation details. Ev
 
 1. **Load requirements and context**
    - Use `mcp_memory__memory_recall` to retrieve known edge cases, defect patterns, test conventions, and flaky areas
-   - Use `doc_read` to inspect PRD, acceptance criteria, design docs, test plan, existing tests, and defect history
+   - Use `file_read` to inspect PRD, acceptance criteria, design docs, test plan, existing tests, and defect history
    - Identify target behavior, user roles, inputs, outputs, state changes, and error conditions
 
 2. **Design scenarios**
@@ -46,7 +46,7 @@ Test cases must prove behavior and risk coverage, not implementation details. Ev
    - Identify flaky risk and required stabilization work
 
 5. **Save and persist**
-   - Use `doc_write` to save test cases when requested
+   - Use `file_write` to save test cases when requested
    - Use `mcp_memory__memory_store` to persist reusable edge cases, scenario patterns, and automation decisions
 
 ## Output Format
