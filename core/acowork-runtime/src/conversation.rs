@@ -322,6 +322,21 @@ pub enum WriterCommand {
     /// the writer awaits via `blocking_recv` and the caller's `.await` on the
     /// returned receiver hops back to the async runtime context.
     Flush { done: oneshot::Sender<()> },
+    /// ADR-106 D4/D5 + the terminal-card doorbell ordering: a *synchronous*
+    /// FIFO barrier. The writer replies on `done` only after it has reached this
+    /// command, which — single-consumer FIFO — means every previously-enqueued
+    /// `RoundSnapshot` has already run its (synchronous) `append_record` into the
+    /// round side table. The round doorbell (`publish_round_state`) rides the
+    /// chunk channel, a path the writer cannot order against; ringing it without
+    /// this barrier lets the Chat be told to re-read before the record it names
+    /// is durable, so a finished block reads its old "running" state until the
+    /// next remount or the interval backstop.
+    ///
+    /// Uses `std::sync::mpsc::SyncSender` (not `tokio::oneshot`) because the
+    /// caller is the synchronous `publish_round_state`, reachable from inside a
+    /// tokio task where `tokio::oneshot::blocking_recv` would panic; a std
+    /// sync_channel is safe to block on from any context.
+    SyncBarrier { done: std::sync::mpsc::SyncSender<()> },
     /// ADR-106 D2/D4: write a round snapshot line into the session's round side
     /// table.
     ///
@@ -717,6 +732,20 @@ impl ConversationWriter {
                     }
                     // Always reply, even on failure, so the caller never
                     // deadlocks waiting for a `done` that never arrives.
+                    let _ = done.send(());
+                }
+                WriterCommand::SyncBarrier { done } => {
+                    // FIFO single-consumer: reaching this arm means every prior
+                    // `RoundSnapshot` already ran its synchronous
+                    // `append_record`. Flush the JSONL too so a caller that
+                    // depends on transcript durability is covered by the same
+                    // barrier, then reply.
+                    if let Err(e) = self.file.flush() {
+                        tracing::error!(
+                            "Failed to flush conversation file on SyncBarrier: {}",
+                            e
+                        );
+                    }
                     let _ = done.send(());
                 }
             }
@@ -2189,6 +2218,34 @@ impl ConversationSession {
         }
         let _ = rx.await;
         Ok(())
+    }
+
+    /// Synchronous FIFO barrier: block until the writer has processed every
+    /// command enqueued before this call, so any `RoundSnapshot` handed to it is
+    /// durable on the round side table when this returns.
+    ///
+    /// The round doorbell (`publish_round_state`) is synchronous and rides the
+    /// chunk channel, which the writer cannot order against; it calls this before
+    /// ringing so the Chat is never told to re-read a round record that has not
+    /// landed. Safe to block on from any context (async task or not) — see
+    /// [`WriterCommand::SyncBarrier`].
+    pub fn flush_now(&self) {
+        let (done_tx, done_rx) = std::sync::mpsc::sync_channel::<()>(0);
+        if self
+            .sender
+            .send(WriterCommand::SyncBarrier { done: done_tx })
+            .is_err()
+        {
+            // Writer gone: there is no thread left to drain, and the interval
+            // backstop is the only remaining path. Saying so is cheaper than
+            // pretending the barrier held.
+            tracing::debug!("rounds index: writer gone, sync barrier skipped");
+            return;
+        }
+        // Ignore a recv error: it only fires if the writer dropped `done`
+        // without replying (panicked mid-command); the doorbell is still worth
+        // ringing in that case.
+        let _ = done_rx.recv();
     }
 
     /// Return the session ID.
