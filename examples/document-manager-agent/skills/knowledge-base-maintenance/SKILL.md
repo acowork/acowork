@@ -10,8 +10,8 @@ triggers:
   - 文档维护
   - docs maintenance
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +26,7 @@ A knowledge base is only useful if users can find current, trusted answers. Main
 
 1. **Audit current state**
    - Use `mcp_memory__memory_recall` to retrieve taxonomy, canonical docs, maintenance cadence, and known stale areas
-   - Use `file_read` to inspect indexes, docs, tags, categories, search terms, and recent updates
+   - Use `doc_read` to inspect indexes, docs, tags, categories, search terms, and recent updates
    - Identify stale, duplicate, orphaned, conflicting, missing, and high-value documents
 
 2. **Prioritize maintenance work**
@@ -44,7 +44,7 @@ A knowledge base is only useful if users can find current, trusted answers. Main
 4. **Improve discoverability**
    - Add descriptive titles, summaries, keywords, tags, and cross-references
    - Ensure common reader questions have clear entry points
-   - Use `file_write` to update docs or indexes when requested
+   - Use `doc_write` to update docs or indexes when requested
    - Use `mcp_memory__memory_store` to persist taxonomy, canonical decisions, and maintenance rules
 
 ## Output Format

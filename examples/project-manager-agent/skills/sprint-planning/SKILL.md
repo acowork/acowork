@@ -10,10 +10,13 @@ triggers:
   - plan sprint
   - iteration planning
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
+  - pm_list_tasks
+  - pm_update_task
+  - pm_add_activity
 ---
 
 # Sprint Planning Skill
@@ -33,7 +36,7 @@ A sprint goal is the commitment; individual stories are the forecast.
    - Apply retrospective actions as explicit sprint planning constraints
 
 2. **Inspect and refine backlog**
-   - Use `file_read` to examine backlog, PRD, task breakdown, risk register, and dependencies
+   - Use `doc_read` to examine backlog, PRD, task breakdown, risk register, and dependencies
    - Check readiness for each candidate item:
      - Clear acceptance criteria
      - Estimate available
@@ -65,7 +68,7 @@ A sprint goal is the commitment; individual stories are the forecast.
    - If capacity is insufficient, present options: reduce scope, extend timeline, add capacity, or accept risk
 
 6. **Save and persist**
-   - Use `file_write` to save the sprint plan when requested
+   - Use `doc_write` to save the sprint plan when requested
    - Use `mcp_memory__memory_store` to persist sprint goal, commitment, capacity assumptions, selected items, risks, and retrospective actions
 
 ## Output Format

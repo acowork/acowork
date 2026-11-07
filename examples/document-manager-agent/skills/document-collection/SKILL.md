@@ -11,7 +11,7 @@ triggers:
   - gather documents
 tool_deps:
   - file_read
-  - file_write
+  - doc_write
   - network
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
@@ -42,7 +42,7 @@ Do not mix source material with interpretation. Every collected item needs prove
    - Identify duplicates and possible canonical sources
 
 4. **Create inventory**
-   - Use `file_write` to save inventory when requested
+   - Use `doc_write` to save inventory when requested
    - Include provenance and open questions
    - Use `mcp_memory__memory_store` to persist inventory location, canonical-source candidates, and collection rules
 

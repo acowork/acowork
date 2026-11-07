@@ -10,10 +10,12 @@ triggers:
   - executive summary
   - stakeholder communication
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
+  - pm_list_tasks
+  - pm_add_activity
 ---
 
 # Stakeholder Communication Skill
@@ -28,7 +30,7 @@ Do not hide bad news. State the situation, impact, options, recommendation, and 
 
 1. **Identify audience and purpose**
    - Use `mcp_memory__memory_recall` to retrieve stakeholder profiles, communication preferences, prior feedback, and decision patterns
-   - Use `file_read` to inspect relevant PRD, plan, status report, risk register, or meeting notes
+   - Use `doc_read` to inspect relevant PRD, plan, status report, risk register, or meeting notes
    - Identify audience type: executive, product, engineering, team, customer, partner, compliance, operations
    - Define communication purpose: inform, decide, escalate, align, unblock, or confirm
    - Identify the decision-maker and affected stakeholders
@@ -54,7 +56,7 @@ Do not hide bad news. State the situation, impact, options, recommendation, and 
    - External partner/customer: commitments, dates, dependencies, support needs
 
 5. **Create artifact and follow up**
-   - Use `file_write` to create the communication artifact when requested
+   - Use `doc_write` to create the communication artifact when requested
    - Use `mcp_memory__memory_store` to record what was communicated, to whom, decisions, commitments, feedback, and follow-up date
    - Track pending responses and escalate missed decision deadlines
 

@@ -11,8 +11,8 @@ triggers:
   - 技术计划
   - 实施计划
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -23,7 +23,7 @@ tool_deps:
 
 1. **Read the approved design**
    - Use `mcp_memory__memory_recall` to retrieve relevant decisions and conventions
-   - Use `file_read` to inspect the design/spec, existing file structure, tests, and implementation patterns
+   - Use `doc_read` to inspect the design/spec, existing file structure, tests, and implementation patterns
    - Confirm scope, non-goals, constraints, and acceptance criteria
 
 2. **Map file responsibilities**
@@ -51,7 +51,7 @@ tool_deps:
    - Check that every requirement maps to at least one task
    - Remove placeholders such as TBD, TODO, or "handle edge cases"
    - Check type, interface, and file-name consistency across tasks
-   - Use `file_write` to save the plan when requested
+   - Use `doc_write` to save the plan when requested
    - Use `mcp_memory__memory_store` to persist key decisions and implementation constraints
 
 ## Output Format

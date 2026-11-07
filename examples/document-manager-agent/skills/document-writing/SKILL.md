@@ -10,8 +10,8 @@ triggers:
   - README
   - guide
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +26,7 @@ Write for a specific reader and task. Do not create generic documentation withou
 
 1. **Define audience and purpose**
    - Use `mcp_memory__memory_recall` to retrieve writing conventions, templates, taxonomy, and style decisions
-   - Use `file_read` to inspect source material, related docs, examples, and canonical references
+   - Use `doc_read` to inspect source material, related docs, examples, and canonical references
    - Identify audience, task, document type, depth, owner, and lifecycle status
    - Choose structure: tutorial, how-to, reference, explanation, runbook, ADR, FAQ, onboarding, release note, or knowledge-base article
 
@@ -44,7 +44,7 @@ Write for a specific reader and task. Do not create generic documentation withou
 
 4. **Review and save**
    - Check accuracy, completeness, clarity, consistency, links, and freshness
-   - Use `file_write` to save or update document when requested
+   - Use `doc_write` to save or update document when requested
    - Use `mcp_memory__memory_store` to persist document location, template, style decisions, and owner/freshness rules
 
 ## Output Format

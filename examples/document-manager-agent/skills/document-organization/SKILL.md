@@ -10,8 +10,8 @@ triggers:
   - 整理文档
   - docs IA
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +26,7 @@ Organize documents around how readers find and use information, not around how f
 
 1. **Load inventory and conventions**
    - Use `mcp_memory__memory_recall` to retrieve taxonomy, naming conventions, canonical sources, and archive rules
-   - Use `file_read` to inspect existing docs tree, README files, indexes, summaries, and document inventories
+   - Use `doc_read` to inspect existing docs tree, README files, indexes, summaries, and document inventories
    - Identify current navigation, duplicate areas, stale docs, orphan docs, and missing entry points
 
 2. **Define information architecture**
@@ -43,7 +43,7 @@ Organize documents around how readers find and use information, not around how f
 4. **Plan reorganization safely**
    - Preserve existing links or document redirects/compatibility notes when paths change
    - Avoid large unexplained moves without mapping old path to new path
-   - Use `file_write` to save organization plan or indexes when requested
+   - Use `doc_write` to save organization plan or indexes when requested
    - Use `mcp_memory__memory_store` to persist taxonomy and canonical-source decisions
 
 ## Output Format

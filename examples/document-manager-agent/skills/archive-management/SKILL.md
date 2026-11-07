@@ -10,8 +10,8 @@ triggers:
   - 文档归档
   - retention
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +26,7 @@ Archiving should preserve retrievability and context. Do not simply move files w
 
 1. **Identify archive candidates**
    - Use `mcp_memory__memory_recall` to retrieve archive rules, document lifecycle policies, and canonical sources
-   - Use `file_read` to inspect document inventory, indexes, stale docs, superseded docs, and duplicates
+   - Use `doc_read` to inspect document inventory, indexes, stale docs, superseded docs, and duplicates
    - Determine why each document should be archived: obsolete, superseded, historical snapshot, duplicate, completed project, or compliance retention
 
 2. **Assess archive impact**
@@ -39,7 +39,7 @@ Archiving should preserve retrievability and context. Do not simply move files w
    - Add deprecation or archive notice when document remains discoverable
 
 4. **Update indexes and references**
-   - Use `file_write` to create archive manifest, notices, or updated indexes when requested
+   - Use `doc_write` to create archive manifest, notices, or updated indexes when requested
    - Preserve retrieval path and cross-links
    - Use `mcp_memory__memory_store` to persist archive decisions and locations
 

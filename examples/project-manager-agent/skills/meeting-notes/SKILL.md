@@ -10,10 +10,12 @@ triggers:
   - meeting minutes
   - take notes
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
+  - pm_add_activity
+  - pm_list_tasks
 ---
 
 # Meeting Notes Skill
@@ -28,7 +30,7 @@ Every decision needs rationale. Every action item needs one owner, due date, and
 
 1. **Prepare context**
    - Use `mcp_memory__memory_recall` to retrieve project context, prior decisions, open action items, stakeholder preferences, and unresolved questions
-   - Use `file_read` to inspect agenda, prior notes, status report, risk register, or relevant project docs
+   - Use `doc_read` to inspect agenda, prior notes, status report, risk register, or relevant project docs
    - Document meeting purpose, desired outcomes, attendees, decision-makers, and absent stakeholders
    - Bring forward unresolved action items from prior meetings
 
@@ -56,7 +58,7 @@ Every decision needs rationale. Every action item needs one owner, due date, and
    - Confirm owners and due dates before meeting ends
 
 5. **Distribute and persist**
-   - Use `file_write` to save formatted notes when requested
+   - Use `doc_write` to save formatted notes when requested
    - Put decisions and action items near the top
    - Distribute notes within 24 hours
    - Use `mcp_memory__memory_store` to persist decisions, action items, owner commitments, and follow-up dates

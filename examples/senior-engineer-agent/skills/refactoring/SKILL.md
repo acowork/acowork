@@ -10,8 +10,8 @@ triggers:
   - restructure
   - improve code
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_write
   - shell
   - mcp_memory__memory_recall
   - mcp_memory__memory_store
@@ -29,7 +29,7 @@ Do not refactor without a safety net. Add characterization tests first when cove
 
 1. **Establish baseline**
    - Use `mcp_memory__memory_recall` to retrieve project conventions and prior refactoring decisions
-   - Use `file_read` to inspect target code, adjacent modules, tests, and public interfaces
+   - Use `doc_read` to inspect target code, adjacent modules, tests, and public interfaces
    - Use `shell` to run relevant tests before changing code
    - Record current behavior, public contracts, and baseline failures if any
    - If tests are missing or weak, add characterization tests before refactoring
@@ -57,7 +57,7 @@ Do not refactor without a safety net. Add characterization tests first when cove
    - If the change spans unrelated concerns, split it into separate refactoring plans
 
 4. **Apply one refactor at a time**
-   - Use `file_write` for one step only
+   - Use `doc_write` for one step only
    - Run focused tests after the step
    - If tests fail, revert or make the step smaller
    - Do not fix bugs discovered during refactoring in the same change; record them separately unless they block the refactor
