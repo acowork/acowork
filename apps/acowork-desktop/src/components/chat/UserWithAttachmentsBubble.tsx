@@ -10,6 +10,13 @@
  */
 import { useCallback } from "react";
 import { UserAvatar } from "../common/UserAvatar";
+import { AgentAvatar } from "../common/AgentAvatar";
+import { ChatMarkdown } from "./ChatMarkdown";
+import {
+  speakerBubbleClass,
+  speakerRendersMarkdown,
+  type SpeakerKind,
+} from "./speakerBubble";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import type { AttachedItem, ChatMessage } from "../../lib/types";
 import { useChatStore } from "../../stores/chatStore";
@@ -34,6 +41,18 @@ export interface UserWithAttachmentsBubbleProps {
   liveUserAvatarUrl: string | null | undefined;
   /** User builtin avatar ID. */
   liveUserBuiltinAvatarId: string | null | undefined;
+  /**
+   * What KIND the session's initiator — the speaker of this row — is. An
+   * agent-to-agent run has an Agent on this side, and its words are markdown;
+   * the bubble then takes the agent skin and the markdown renderer
+   * (`speakerBubble.ts`). Defaults to `"user"`.
+   */
+  speakerKind?: SpeakerKind;
+  /** The initiator's agent instance id when `speakerKind` is `"agent"`
+   *  (`AgentAvatar`'s seed), else null. */
+  senderAgentId?: string | null;
+  /** The initiator agent's package version, for `AgentAvatar`'s cache bust. */
+  senderAgentVersion?: string | null;
   /** Current session ID (for remove handler). */
   currentSessionId: string;
   /** Agent ID (for image blob fetch). */
@@ -103,6 +122,9 @@ export function UserWithAttachmentsBubble({
   liveUserBuiltinAvatarId,
   currentSessionId,
   agentId,
+  speakerKind = "user",
+  senderAgentId = null,
+  senderAgentVersion = null,
 }: UserWithAttachmentsBubbleProps) {
   const removeMessageAttachment = useChatStore((s) => s.removeMessageAttachment);
 
@@ -132,6 +154,11 @@ export function UserWithAttachmentsBubble({
   );
 
   const fontSizeStyle: React.CSSProperties = { fontSize: "var(--ui-font-size, 0.875rem)" };
+  // Renderer + skin both follow the SPEAKER, decided once so the two cannot
+  // be configured apart (`speakerBubble.ts`).
+  const asAgentSpeech = speakerRendersMarkdown(speakerKind);
+  // Narrowed once, so the avatar branch below has a non-null instance id.
+  const senderAgent = speakerKind === "agent" ? senderAgentId : null;
 
   const attachments = parts.filter(isAttachmentPart);
   const refs = parts.filter(isMessageRefPart);
@@ -196,13 +223,20 @@ export function UserWithAttachmentsBubble({
           >
             {userMessage.content && (
               <div
-                className="w-fit max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text"
+                className={`w-fit max-w-full rounded-md rounded-br-sm ${speakerBubbleClass(speakerKind)} px-4 py-2.5 select-text break-words`}
                 style={fontSizeStyle}
               >
-                {/* Uncapped — see MessageBubble's user branch. */}
-                <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
-                  {userMessage.content}
-                </div>
+                {/* Uncapped — see MessageBubble's user branch. The renderer
+                    and the skin follow the SPEAKER, not the role: an Agent
+                    initiator's brief is markdown, a person's typed words are
+                    literal (`speakerBubble.ts`). */}
+                {asAgentSpeech ? (
+                  <ChatMarkdown content={userMessage.content} style={fontSizeStyle} />
+                ) : (
+                  <div className="whitespace-pre-wrap break-words">
+                    {userMessage.content}
+                  </div>
+                )}
               </div>
             )}
 
@@ -229,14 +263,29 @@ export function UserWithAttachmentsBubble({
         )}
       </div>
 
-      <UserAvatar
-        displayName={liveUserName ?? undefined}
-        avatarUrl={liveUserAvatarUrl ?? null}
-        // Tri-state passthrough — `null` must stay `null` (see MessageBubble).
-        builtinAvatarId={liveUserBuiltinAvatarId}
-        size={40}
-        className="shrink-0 mt-1"
-      />
+      {senderAgent ? (
+        // An Agent initiator is drawn with the agent avatar: its `avatarUrl`
+        // is a package-relative path only `AgentAvatar` can resolve (see
+        // MessageBubble's user branch for the same rule).
+        <AgentAvatar
+          agentId={senderAgent}
+          displayName={liveUserName ?? undefined}
+          avatarUrl={liveUserAvatarUrl ?? null}
+          version={senderAgentVersion}
+          builtinAvatarId={liveUserBuiltinAvatarId ?? null}
+          size={40}
+          className="shrink-0 mt-1"
+        />
+      ) : (
+        <UserAvatar
+          displayName={liveUserName ?? undefined}
+          avatarUrl={liveUserAvatarUrl ?? null}
+          // Tri-state passthrough — `null` must stay `null` (see MessageBubble).
+          builtinAvatarId={liveUserBuiltinAvatarId}
+          size={40}
+          className="shrink-0 mt-1"
+        />
+      )}
     </div>
   );
 }

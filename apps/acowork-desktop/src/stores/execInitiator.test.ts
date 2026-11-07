@@ -5,7 +5,9 @@
  * The three rules this file pins, one per bug the ticket reported:
  *
  *   1. the execution surface names the session's INITIATOR, never the
- *      logged-in account (`resolveInitiatorIdentity`);
+ *      logged-in account (`resolveInitiatorIdentity`) — and names its KIND,
+ *      because an Agent initiator's bubbles are agent speech (markdown) while
+ *      a person's are literal text;
  *   2. a read-only execution session opened from history keeps its tab —
  *      `syncActiveTabs` prunes only tabs the Runtime no longer reports AND
  *      that are not in the foreground, otherwise the panel parked on
@@ -48,14 +50,32 @@ describe("execution surface identity = initiator", () => {
       () => undefined,
     );
     expect(id?.displayName).toBe("Admin");
+    // The kind travels with the name: the renderer must know this speaker is a
+    // person, whose words are literal text (`speakerBubble.ts`).
+    expect(id?.kind).toBe("user");
+    expect(id?.version).toBeNull();
   });
 
   it("names an agent initiator from the agent's own metadata", () => {
     const id = resolveInitiatorIdentity("inst-1", "u-nicholas", [], () => ({
       name: "A.Ponytail",
       display_name: "A.Ponytail",
+      version: "1.2.0",
     }));
     expect(id?.displayName).toBe("A.Ponytail");
+    // `agent` is what turns the initiator-side bubble into agent speech:
+    // markdown, agent skin, agent avatar. The registry is the fact, the same
+    // one the Gateway tests with `resolve_installed_key`.
+    expect(id?.kind).toBe("agent");
+    expect(id?.version).toBe("1.2.0");
+  });
+
+  it("reports an id in neither registry as unknown — and never as an agent", () => {
+    // An uninstalled initiator, or a registry still loading. Claiming "agent"
+    // here would parse a person's typed words as markdown.
+    const id = resolveInitiatorIdentity("inst-gone", "u-nicholas", [], () => undefined);
+    expect(id?.displayName).toBe("inst-gon");
+    expect(id?.kind).toBe("unknown");
   });
 
   it("returns null when I am the initiator — the surface uses my own profile", () => {
