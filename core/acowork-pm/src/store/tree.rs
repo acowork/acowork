@@ -601,16 +601,7 @@ impl TreePmStore {
     /// 即可重建看板树（无需逐任务调用 `/tasks/:tid/children`）。
     pub fn parent_of(&self, task_id: &TaskId) -> Option<TaskId> {
         let entry = self.index.read().by_id.get(task_id)?.clone();
-        let parent = entry.dir_path.parent()?;
-        // 子任务父目录名为 "children"，其上一级目录名即父任务 id
-        if parent.file_name()?.to_string_lossy() == "children" {
-            let grand = parent.parent()?;
-            let name = grand.file_name()?.to_string_lossy().into_owned();
-            TaskId::parse(&name).ok()
-        } else {
-            // 根任务：父目录名是 "tasks"
-            None
-        }
+        parent_id_of_entry(&entry)
     }
 
     /// 内部辅助：联动指派校验 —— `assignee`（非空）必须是项目成员。
@@ -725,6 +716,26 @@ fn priority_rank(p: Priority) -> u8 {
         Priority::High => 1,
         Priority::Normal => 2,
         Priority::Low => 3,
+    }
+}
+
+/// Direct parent of an indexed task, derived from its physical location.
+///
+/// Free function (rather than a method) because the list filter calls it while
+/// already holding the index read lock: `parent_of` re-locks and clones, which
+/// would be a lock-per-row inside a predicate.
+///
+/// Layout: a nested task lives in `<parent>/children/<id>/task.json`, a root
+/// task in `tasks/<id>/task.json`. So the parent id is the grandparent
+/// directory name when the parent directory is literally `children`.
+fn parent_id_of_entry(entry: &TaskEntry) -> Option<TaskId> {
+    let parent = entry.dir_path.parent()?;
+    if parent.file_name()?.to_string_lossy() == "children" {
+        let grand = parent.parent()?;
+        TaskId::parse(&grand.file_name()?.to_string_lossy()).ok()
+    } else {
+        // Root task: the parent directory is `tasks`.
+        None
     }
 }
 
@@ -1158,6 +1169,37 @@ impl PmStore for TreePmStore {
                         && e.assignee.as_deref() != Some(a.as_str())
                     {
                         return false;
+                    }
+                    // Everything below is answered from the index too, so a
+                    // cross-project search loads only what it will return
+                    // (design 32 §3.2: `pm_list_tasks` must not become a disk
+                    // sweep of the whole machine).
+                    if let Some(rs) = filter.review_status
+                        && e.review_status != rs
+                    {
+                        return false;
+                    }
+                    if let Some(tt) = filter.task_type
+                        && e.task_type != tt
+                    {
+                        return false;
+                    }
+                    if let Some(q) = &filter.query {
+                        let q = q.to_lowercase();
+                        if !e.title.to_lowercase().contains(&q) {
+                            return false;
+                        }
+                    }
+                    if filter.parent_task_id.is_some() || filter.only_roots {
+                        let parent = parent_id_of_entry(e);
+                        if let Some(want) = &filter.parent_task_id
+                            && Some(want) != parent.as_ref()
+                        {
+                            return false;
+                        }
+                        if filter.only_roots && parent.is_some() {
+                            return false;
+                        }
                     }
                     true
                 })

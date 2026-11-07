@@ -43,7 +43,7 @@ pub async fn dispatch(
         // ── 只读（匿名允许，设计 §9.3）──────────────────────────────
         "pm_list_projects" => pm_list_projects(state, args).await,
         "pm_get_project" => pm_get_project(state, args).await,
-        "pm_list_tasks" => pm_list_tasks(state, args).await,
+        "pm_list_tasks" => pm_list_tasks(state, actor, args).await,
         "pm_get_task" => pm_get_task(state, args).await,
 
         // ── 需要身份的只读（自查）───────────────────────────────────
@@ -275,6 +275,65 @@ impl ListAgentsArgs {
     const FIELDS: &'static [&'static str] = &["project_id", "query", "limit"];
 }
 
+/// `pm_list_tasks` arguments.
+#[derive(Deserialize)]
+struct ListTasksArgs {
+    /// Omit to search across every project; then at least one narrowing
+    /// filter is required and `limit` is capped at `CROSS_PROJECT_MAX_LIMIT`.
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    #[serde(default)]
+    status: Option<TaskStatus>,
+    /// Agent instance id, the `"human"` literal, or the `"me"` sentinel.
+    #[serde(default)]
+    assignee: Option<String>,
+    #[serde(default)]
+    only_blocked: bool,
+    #[serde(default)]
+    review_status: Option<ReviewStatus>,
+    #[serde(rename = "type", default)]
+    task_type: Option<TaskType>,
+    /// Case-insensitive substring over the task title.
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default)]
+    parent_task_id: Option<TaskId>,
+    #[serde(default)]
+    only_roots: bool,
+    #[serde(default)]
+    order_by: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    offset: Option<usize>,
+}
+
+#[cfg(test)]
+impl ListTasksArgs {
+    const FIELDS: &'static [&'static str] = &[
+        "project_id",
+        "status",
+        "assignee",
+        "only_blocked",
+        "review_status",
+        "type",
+        "query",
+        "parent_task_id",
+        "only_roots",
+        "order_by",
+        "limit",
+        "offset",
+    ];
+}
+
+fn default_task_limit() -> usize {
+    20
+}
+
+/// Cap for a scope-less listing: the point of `pm_list_tasks` across projects
+/// is "what is stuck / what awaits review", not a full export.
+const CROSS_PROJECT_MAX_LIMIT: usize = 50;
+
 /// `pm_add_project_member` arguments.
 #[derive(Deserialize)]
 struct AddProjectMemberArgs {
@@ -330,6 +389,7 @@ impl AddActivityArgs {
 pub(crate) const MANIFEST_FIELDS: &[(&str, &[&str])] = &[
     ("pm_create_task", CreateTaskArgs::FIELDS),
     ("pm_update_task", UpdateTaskArgs::FIELDS),
+    ("pm_list_tasks", ListTasksArgs::FIELDS),
     ("pm_list_agents", ListAgentsArgs::FIELDS),
     ("pm_add_project_member", AddProjectMemberArgs::FIELDS),
     ("pm_list_activity", ListActivityArgs::FIELDS),
@@ -641,35 +701,91 @@ async fn pm_get_project(state: &McpState, args: Value) -> Result<Value> {
 }
 
 /// `pm_list_tasks` — 项目内任务列表（支持过滤 + limit）。
-async fn pm_list_tasks(state: &McpState, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        project_id: ProjectId,
-        #[serde(default)]
-        status: Option<TaskStatus>,
-        #[serde(default)]
-        assignee: Option<String>,
-        #[serde(default)]
-        only_blocked: bool,
-        #[serde(default = "default_limit")]
-        limit: usize,
+async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Result<Value> {
+    let a: ListTasksArgs = parse_args("pm_list_tasks", args)?;
+
+    // `me` is resolved server-side from the MCP actor, so a caller never has
+    // to know its own instance id (which it cannot read from anywhere else).
+    let assignee = match a.assignee.as_deref() {
+        Some("me") => Some(actor.ok_or_else(|| {
+            PmError::Unauthenticated(
+                "pm_list_tasks: assignee \"me\" needs an authenticated MCP connection".to_string(),
+            )
+        })?.to_string()),
+        other => other.map(|s| s.to_string()),
+    };
+
+    let narrowed = a.status.is_some()
+        || assignee.is_some()
+        || a.review_status.is_some()
+        || a.task_type.is_some()
+        || a.query.is_some()
+        || a.parent_task_id.is_some()
+        || a.only_roots
+        || a.only_blocked;
+    // Without a project scope this walks the whole index; the filter is what
+    // keeps it from becoming a disk sweep of every task on the machine.
+    if a.project_id.is_none() && !narrowed {
+        return Err(PmError::BadRequest(
+            "cross-project pm_list_tasks needs at least one narrowing filter (status / assignee / review_status / type / query / parent_task_id / only_roots / only_blocked), or a project_id".to_string(),
+        ));
     }
-    fn default_limit() -> usize {
-        20
+    if a.parent_task_id.is_some() && a.only_roots {
+        return Err(PmError::BadRequest(
+            "parent_task_id and only_roots contradict each other: pick one".to_string(),
+        ));
     }
-    let a: Args = parse_args("pm_list_tasks", args)?;
+
+    let limit = {
+        let d = a.limit.unwrap_or(default_task_limit());
+        match (a.project_id.is_some(), a.limit) {
+            (false, Some(v)) => v.min(CROSS_PROJECT_MAX_LIMIT),
+            (false, None) => d.min(CROSS_PROJECT_MAX_LIMIT),
+            (true, _) => d.min(100),
+        }
+        .max(1)
+    };
+    let offset = a.offset.unwrap_or(0);
+
+    let sort = match a.order_by.as_deref() {
+        None | Some("created_at") => Some(TaskSort::CreatedAt),
+        Some("updated_at") => Some(TaskSort::UpdatedAt),
+        Some("due_at") => Some(TaskSort::DueAt),
+        Some("priority") => Some(TaskSort::Priority),
+        Some(other) => {
+            return Err(PmError::BadRequest(format!(
+                "unknown order_by `{other}`; valid: created_at | updated_at | due_at | priority"
+            )));
+        }
+    };
 
     let filter = TaskFilter {
-        project_id: Some(a.project_id),
+        project_id: a.project_id,
         status: a.status,
-        assignee: a.assignee,
+        assignee,
         only_blocked: a.only_blocked,
-        sort: Some(TaskSort::CreatedAt),
+        sort,
+        review_status: a.review_status,
+        task_type: a.task_type,
+        query: a.query,
+        parent_task_id: a.parent_task_id,
+        only_roots: a.only_roots,
     };
     let tasks = state.store.find_tasks(&filter).await?;
+    let total = tasks.len();
+    let page: Vec<_> = tasks.into_iter().skip(offset).take(limit).collect();
     let agent_dir: &dyn AgentDirectory = state.agent_dir.as_ref();
-    let out = tasks_to_values(&state.store, agent_dir, tasks, a.limit.max(1)).await?;
-    Ok(Value::Array(out))
+    let out = tasks_to_values(&state.store, agent_dir, page, limit).await?;
+    // An object envelope, not a bare array: `offset` is only usable if the
+    // caller can see how much is left.
+    Ok(json!({
+        "total": total,
+        "offset": offset,
+        "limit": limit,
+        "returned": out.len(),
+        "has_more": offset + out.len() < total,
+        "tasks": out,
+    }))
 }
 
 /// `pm_get_task` — 任务详情（含 is_blocked / blocked_by / depth / parent_id）。

@@ -1622,7 +1622,7 @@ mod tests {
         )
         .await;
         let list_tasks_text = tool_text(&v);
-        let tasks = list_tasks_text.as_array().expect("list_tasks returns array");
+        let tasks = list_tasks_text["tasks"].as_array().expect("list_tasks returns an envelope").clone();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0]["assignee_meta"]["name"], "Architect");
         assert_eq!(tasks[0]["created_by_meta"]["name"], "Senior Engineer");
@@ -2046,7 +2046,7 @@ mod tests {
             json!({ "project_id": pid, "assignee": agent }),
         )
         .await;
-        assert_eq!(tool_text(&v).as_array().unwrap().len(), 1);
+        assert_eq!(tool_text(&v)["tasks"].as_array().unwrap().len(), 1);
 
         // limit=1
         let v = call_tool(
@@ -2057,7 +2057,7 @@ mod tests {
             json!({ "project_id": pid, "limit": 1 }),
         )
         .await;
-        assert_eq!(tool_text(&v).as_array().unwrap().len(), 1);
+        assert_eq!(tool_text(&v)["tasks"].as_array().unwrap().len(), 1);
     }
 
     /// e2e：pm_reparent_task 匿名拒绝（§9.3 匿名仅只读）。

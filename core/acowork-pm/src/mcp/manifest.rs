@@ -82,18 +82,32 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_list_tasks",
-      "description": "List tasks in a project. Supports filter by status and assignee.",
+      "description": "The one task query. `project_id` given = inside that project; omitted = across every project, which then REQUIRES at least one narrowing filter (status / assignee / review_status / type / query / parent_task_id / only_roots / only_blocked) and caps `limit` at 50. `assignee` also accepts the sentinel \"me\" (resolved from your own MCP identity — you never need to know your instance id). Returns an envelope, not an array: {total, offset, limit, returned, has_more, tasks[]} — `has_more` is how you know paging is left, since a bare limit hides everything past it. `review_status=pending` is the approval backlog (who is waiting on a human); `order_by`: created_at (default, newest first) | updated_at | due_at (soonest first) | priority (highest first).",
       "inputSchema": {
         "type": "object",
-        "required": ["project_id"],
         "properties": {
           "project_id": { "type": "string", "pattern": "^p-[a-zA-Z0-9-]{1,62}$" },
           "status": {
             "type": "string",
             "enum": ["pending", "in_progress", "submitted", "done", "rejected", "cancelled"]
           },
-          "assignee": { "type": "string", "description": "human literal or agent_instance_id (UUID v4, ADR-073 §1.2)" },
+          "assignee": { "type": "string", "description": "human literal, agent_instance_id (UUID v4, ADR-073 §1.2), or \"me\"" },
           "only_blocked": { "type": "boolean", "default": false },
+          "review_status": {
+            "type": "string",
+            "enum": ["not_required", "pending", "approved", "rejected"],
+            "description": "Approval gate state; \"pending\" = waiting on a human"
+          },
+          "type": { "type": "string", "enum": ["task", "bug", "feature", "epic", "checkpoint"] },
+          "query": { "type": "string", "description": "Case-insensitive substring over the task title" },
+          "parent_task_id": {
+            "type": "string",
+            "pattern": "^t-[a-zA-Z0-9-]{1,62}$",
+            "description": "Direct children of this task. null means \"no filter\" here — use only_roots for the roots"
+          },
+          "only_roots": { "type": "boolean", "default": false },
+          "order_by": { "type": "string", "enum": ["created_at", "updated_at", "due_at", "priority"] },
+          "offset": { "type": "integer", "minimum": 0, "default": 0 },
           "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
         }
       }

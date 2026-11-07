@@ -205,7 +205,7 @@ async fn remote_agent_claim_submit_full_chain() {
     .await;
     let tasks = tool_result(&v);
     let tids: Vec<String> = tasks
-        .as_array()
+        ["tasks"].as_array()
         .unwrap()
         .iter()
         .filter_map(|t| t["id"].as_str().map(|s| s.to_string()))

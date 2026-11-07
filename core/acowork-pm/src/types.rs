@@ -736,6 +736,25 @@ pub struct TaskFilter {
     /// queue-first order (soonest / highest).
     #[serde(default)]
     pub sort: Option<TaskSort>,
+    /// Review gate filter. Index field → narrowed before any disk read.
+    #[serde(default)]
+    pub review_status: Option<ReviewStatus>,
+    /// Task kind filter. Index field, same reason as `review_status`.
+    #[serde(default)]
+    pub task_type: Option<TaskType>,
+    /// Case-insensitive substring over the title. Index field, same reason.
+    #[serde(default)]
+    pub query: Option<String>,
+    /// Direct-parent filter, matched against the physical tree (`dir_path`),
+    /// so it also narrows before a disk read. `None` = do not care — an
+    /// explicit JSON null from an LLM caller means "unfiltered", which is why
+    /// "roots only" is the separate `only_roots` flag rather than a null here.
+    #[serde(default)]
+    pub parent_task_id: Option<TaskId>,
+    /// Restrict to root tasks (no parent). Mutually exclusive with
+    /// `parent_task_id`, enforced by the caller-facing layer, not here.
+    #[serde(default)]
+    pub only_roots: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]

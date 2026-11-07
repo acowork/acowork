@@ -278,3 +278,13 @@ PM 的规划产出落文档库，固定形态：
 | **Q5** | `pm_list_agents` 是否按权限过滤 | **按项目成员过滤**（`project_id` 参数即边界）。**原风险「越权指派」是虚警并已撤销**——`assignee ∈ project.members` 早已由 store 强制（M7）。因此不新建权限模型（原则 5），改为：① `pm_list_agents(project_id)` 返回合法指派集；② 补 `pm_add_project_member` 作为 M7 的解锁键；③ `pm_create_task` 存在性校验**不放宽** | [types.rs:233](../../../core/acowork-pm/src/types.rs#L233) · [tree.rs:620](../../../core/acowork-pm/src/store/tree.rs#L620) · [projects.rs:327](../../../core/acowork-pm/src/api/projects.rs#L327) |
 | **Q6** | PM 产出物路径约定 | `项目管理/{project_id}/…`，目录名用 id 不用 slug，`README.md` 承担人面；文件名词汇表封闭 | §5.5 权衡表：可从单值推导 + 改名不断链 优先于 目录可读性 |
 | **Q7** | `pm_list_agents` 的两条实现期边界 | ① **模式不对称的失败语义**：全局目录模式在首次刷新未完成时 503（假阴性「没人可派工」比一次重试昂贵），roster 模式**不**503——指派 key 来自 PM store，目录挂了也照样能派给已知成员，行内元信息为 null 并以 `directory_available: false` 说明；② **`online` 是信息不是闸门**：投递本身会拉起离线目标（`wake_and_deliver` 第 3 步在宿主节点 start 并等 online 翻转），故 `null` ≠ 离线，description 明写「派给离线 agent 可行」，防止 agent 自行加一条平台没有的闸门 | 实现期发现（P0）；[delivery.rs:215-251](../../../core/acowork-gateway/src/intent/delivery.rs#L215) |
+
+---
+
+## 10. 变更记录
+
+| 版本 | 日期 | 变更 |
+|---|---|---|
+| v1.0 | 2026-07-08 | 首版定稿：机制 M1–M7、工具面（PM 12→14 + 3 别名 / Doc 9→12）、缺陷 D1–D6、§8 决策全部关闭 |
+| v1.1 | 2026-07-08 | P0 实施期新增 **D7**（成员闸 / 目录存在性校验 / 派工投递目标三层不一致：人类账号可被存为 assignee 却永远派不出去）与 **Q7**（`pm_list_agents` 两种模式的失败语义不对称；`online` 是信息不是闸门）。据此：roster 模式只列 agent 成员 + `human_member_count` 显式上报；不做 agent→human 派工。 |
+| v1.2 | 2026-07-08 | P1 T1-1：`pm_list_tasks` 收敛为唯一任务查询——`project_id` 可选（省略 = 跨项目，须至少一个过滤条件 + 有限 `limit`）、新增 `parent_task_id`/`type`/`review_status`/`query`/`order_by`/`offset`、`assignee` 接受哨兵 `"me"`（服务端按 actor 解析，agent 无需知道自己的 instance id）；返回统一为 `{total,count,tasks,truncated,next_offset}` 信封。`TaskIndex` 随之携带 `type`/`parent_task_id`，全部过滤走内存索引、不做逐项目扫描。 |
