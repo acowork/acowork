@@ -99,7 +99,11 @@ impl PmService {
             self.agent_dir.clone(),
             self.gateway.clone(),
         )
-        .merge(crate::mcp::mcp_router(self.store.clone(), self.agent_dir.clone()))
+        .merge(crate::mcp::mcp_router(
+            self.store.clone(),
+            self.agent_dir.clone(),
+            self.gateway.clone(),
+        ))
     }
 
     /// 在给定地址上 serve 全量路由（REST + MCP + `/health`）。

@@ -24,7 +24,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::{PmError, Result};
-use crate::mcp::{AgentDirectory, AgentInfo, McpState};
+use crate::mcp::{AgentDirectory, AgentEntry, AgentInfo, McpState};
 use crate::store::tree::{PmStore, TreePmStore};
 use crate::types::{
     CreateProject, CreateTask, Dependency, MemberKind, Priority, ProjectId, ProjectStatus,
@@ -82,6 +82,26 @@ pub async fn dispatch(
             pm_reparent_task(state, a, args).await
         }
 
+        // ── Dispatch prerequisites (design 32 §3.3) ────────────────
+        "pm_list_agents" => {
+            // Requires an actor on purpose: an unauthenticated caller has no
+            // use for a roster, and the tool exists to answer "whom can I
+            // dispatch to" from inside a session that always carries one.
+            let a = require_actor(actor)?;
+            pm_list_agents(state, a, args).await
+        }
+        "pm_add_project_member" => {
+            let a = require_actor(actor)?;
+            pm_add_project_member(state, a, args).await
+        }
+
+        // ── Task activity stream (the communication channel) ─────────
+        "pm_list_activity" => pm_list_activity(state, args).await,
+        "pm_add_activity" => {
+            let a = require_actor(actor)?;
+            pm_add_activity(state, a, args).await
+        }
+
         other => Err(PmError::BadRequest(format!("unknown tool: {other}"))),
     }
 }
@@ -124,6 +144,197 @@ fn parse_args<T: for<'de> Deserialize<'de>>(name: &str, args: Value) -> Result<T
     serde_json::from_value(args)
         .map_err(|e| PmError::BadRequest(format!("invalid arguments for {name}: {e}")))
 }
+
+// ── Tool argument structs (the unit manifest is reconciled against) ──────
+//
+// **Why these `Args` live at module level and each carries a `const
+// FIELDS`**: defect D2 was that `pm_update_task`'s implementation had long
+// accepted `type` / `depends_on` while the manifest did not declare them — a
+// field the LLM cannot see in the schema is a feature that does not exist, and
+// the old test only spot-checked 6 fields, so it passed silently (design 32
+// §7 D2). Keeping the struct next to its **wire field names** lets the test
+// assert **set equality** against the manifest properties instead of
+// spot-checking.
+//
+// `FIELDS` lists **wire names** (`type`, not Rust's `task_type`), because what
+// is being reconciled is the schema sent to the LLM.
+//
+// **Rule when adding a field**: changing `Args` means changing `FIELDS` and
+// the manifest on the same screen; miss any of the three and
+// `manifest_properties_equal_impl_fields` goes red.
+//
+// Coverage: the 6 tools touched by this change. The rest (`pm_list_projects` /
+// `pm_get_project` / `pm_get_task` / `pm_claim_task` / `pm_reparent_task` /
+// `pm_check_task` / `pm_list_my_tasks` / `pm_submit_task`) join the table when
+// P1 T1-4 touches dispatch — they have few parameters and little drift surface,
+// but they should not stay off the table forever.
+
+/// `pm_create_task` arguments.
+#[derive(Deserialize)]
+struct CreateTaskArgs {
+    project_id: ProjectId,
+    title: String,
+    #[serde(default)]
+    description: String,
+    #[serde(rename = "type", default)]
+    task_type: TaskType,
+    #[serde(default)]
+    priority: Priority,
+    #[serde(default)]
+    parent_task_id: Option<TaskId>,
+    #[serde(default)]
+    depends_on: Vec<Dependency>,
+    #[serde(default)]
+    assignee: Option<String>,
+    #[serde(default)]
+    due_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Start time: the PM dispatch scanner pushes the intent once it is due;
+    /// absent means immediately.
+    #[serde(default)]
+    start_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+#[cfg(test)]
+impl CreateTaskArgs {
+    const FIELDS: &'static [&'static str] = &[
+        "project_id",
+        "title",
+        "description",
+        "type",
+        "priority",
+        "parent_task_id",
+        "depends_on",
+        "assignee",
+        "due_at",
+        "start_at",
+    ];
+}
+
+/// `pm_update_task` arguments.
+#[derive(Deserialize)]
+struct UpdateTaskArgs {
+    task_id: TaskId,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    description: Option<String>,
+    #[serde(rename = "type", default)]
+    task_type: Option<TaskType>,
+    #[serde(default)]
+    status: Option<TaskStatus>,
+    #[serde(default)]
+    priority: Option<Priority>,
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    assignee: Option<Option<String>>,
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    due_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    start_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
+    #[serde(default)]
+    depends_on: Option<Vec<Dependency>>,
+}
+
+#[cfg(test)]
+impl UpdateTaskArgs {
+    const FIELDS: &'static [&'static str] = &[
+        "task_id",
+        "title",
+        "description",
+        "type",
+        "status",
+        "priority",
+        "assignee",
+        "due_at",
+        "start_at",
+        "depends_on",
+    ];
+}
+
+/// `pm_list_agents` arguments.
+#[derive(Deserialize)]
+struct ListAgentsArgs {
+    /// Scope the answer to one project's member roster — see
+    /// [`pm_list_agents`]: with it the result is the *assignable set*,
+    /// without it it is the *installable set*.
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+    /// Case-insensitive substring over `name` / `role` / `agent_id`.
+    /// A large roster must not be dumped into the caller's context whole.
+    #[serde(default)]
+    query: Option<String>,
+    #[serde(default = "default_agent_limit")]
+    limit: usize,
+}
+
+fn default_agent_limit() -> usize {
+    50
+}
+
+#[cfg(test)]
+impl ListAgentsArgs {
+    const FIELDS: &'static [&'static str] = &["project_id", "query", "limit"];
+}
+
+/// `pm_add_project_member` arguments.
+#[derive(Deserialize)]
+struct AddProjectMemberArgs {
+    project_id: ProjectId,
+    instance_id: String,
+    /// `agent` (default) or `user`. Mirrors `AddProjectMember.kind`.
+    #[serde(default)]
+    kind: MemberKind,
+}
+
+#[cfg(test)]
+impl AddProjectMemberArgs {
+    const FIELDS: &'static [&'static str] = &["project_id", "instance_id", "kind"];
+}
+
+/// `pm_list_activity` arguments.
+#[derive(Deserialize)]
+struct ListActivityArgs {
+    task_id: TaskId,
+    #[serde(default = "default_activity_limit")]
+    limit: usize,
+}
+
+fn default_activity_limit() -> usize {
+    20
+}
+
+#[cfg(test)]
+impl ListActivityArgs {
+    const FIELDS: &'static [&'static str] = &["task_id", "limit"];
+}
+
+/// `pm_add_activity` arguments.
+#[derive(Deserialize)]
+struct AddActivityArgs {
+    task_id: TaskId,
+    text: String,
+}
+
+#[cfg(test)]
+impl AddActivityArgs {
+    const FIELDS: &'static [&'static str] = &["task_id", "text"];
+}
+
+/// Tool → the **wire field names** its implementation accepts.
+///
+/// Its only reason to exist is reconciling the manifest against the
+/// implementation (see the header of `manifest.rs`). A tool absent from this
+/// table is a tool left unguarded — whoever adds a field edits `Args` and never
+/// thinks of the schema. P1 T1-4 brings the remaining tools in when it touches
+/// dispatch.
+#[cfg(test)]
+pub(crate) const MANIFEST_FIELDS: &[(&str, &[&str])] = &[
+    ("pm_create_task", CreateTaskArgs::FIELDS),
+    ("pm_update_task", UpdateTaskArgs::FIELDS),
+    ("pm_list_agents", ListAgentsArgs::FIELDS),
+    ("pm_add_project_member", AddProjectMemberArgs::FIELDS),
+    ("pm_list_activity", ListActivityArgs::FIELDS),
+    ("pm_add_activity", AddActivityArgs::FIELDS),
+];
 
 // ── 响应序列化辅助 ────────────────────────────────────────────────────────
 
@@ -306,7 +517,6 @@ async fn tasks_to_values(
     }
     Ok(out)
 }
-
 
 /// 项目 → 精简 JSON。
 ///
@@ -573,29 +783,7 @@ async fn pm_create_project(state: &McpState, actor: &str, args: Value) -> Result
 ///
 /// `assignee` 若提供则必须存在于 Agent 目录（§9.1）；不要求是调用者本人（§9.2）。
 async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        project_id: ProjectId,
-        title: String,
-        #[serde(default)]
-        description: String,
-        #[serde(rename = "type", default)]
-        task_type: TaskType,
-        #[serde(default)]
-        priority: Priority,
-        #[serde(default)]
-        parent_task_id: Option<TaskId>,
-        #[serde(default)]
-        depends_on: Vec<Dependency>,
-        #[serde(default)]
-        assignee: Option<String>,
-        #[serde(default)]
-        due_at: Option<chrono::DateTime<chrono::Utc>>,
-        /// 开始时间：到期才由 PM 派发扫描器推送 intent；缺省 = 立即。
-        #[serde(default)]
-        start_at: Option<chrono::DateTime<chrono::Utc>>,
-    }
-    let a: Args = parse_args("pm_create_task", args)?;
+    let a: CreateTaskArgs = parse_args("pm_create_task", args)?;
 
     // 设计 §9.1：assignee 必须存在（按 instance_id 校验，ADR-073）
     if let Some(assignee) = &a.assignee
@@ -627,29 +815,7 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
 
 /// `pm_update_task` — 更新任务（仅 assignee 本人，设计 §9.2）。
 async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        task_id: TaskId,
-        #[serde(default)]
-        title: Option<String>,
-        #[serde(default)]
-        description: Option<String>,
-        #[serde(rename = "type", default)]
-        task_type: Option<TaskType>,
-        #[serde(default)]
-        status: Option<TaskStatus>,
-        #[serde(default)]
-        priority: Option<Priority>,
-        #[serde(default, deserialize_with = "deserialize_clearable")]
-        assignee: Option<Option<String>>,
-        #[serde(default, deserialize_with = "deserialize_clearable")]
-        due_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
-        #[serde(default, deserialize_with = "deserialize_clearable")]
-        start_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
-        #[serde(default)]
-        depends_on: Option<Vec<Dependency>>,
-    }
-    let a: Args = parse_args("pm_update_task", args)?;
+    let a: UpdateTaskArgs = parse_args("pm_update_task", args)?;
 
     let task = state
         .store
@@ -737,4 +903,367 @@ async fn pm_reparent_task(state: &McpState, actor: &str, args: Value) -> Result<
     };
     state.store.reparent_task(&a.task_id, input).await?;
     Ok(json!({ "ok": true, "task_id": a.task_id }))
+}
+
+// ── Dispatch prerequisites (design 32 §3.3) ────────────────────────────
+
+/// `pm_list_agents` — answers "which `instance_id` may I put in `assignee`",
+/// the one question the dispatch chain cannot work around: `assignee` accepts
+/// only a UUID instance id (ADR-073), and before this tool an agent could get
+/// one only by having a human tell it (design 32 §1.2 M4).
+///
+/// Two modes, because there are two different questions:
+///
+/// * `project_id` given → **the assignable set**: that project's member
+///   roster, annotated with directory metadata. Every `instance_id` returned
+///   is guaranteed to pass the store's membership gate (M7,
+///   `PmTree::ensure_assignee_is_member`), so a caller cannot assemble a
+///   `pm_create_task` the platform will reject. This is design 32 §3.3 / Q5:
+///   reuse the permission boundary that already exists as the query boundary,
+///   instead of inventing a second ACL.
+/// * `project_id` omitted → **the installable set**: the local agent
+///   directory, i.e. "who should I invite" — upstream of the roster.
+///
+/// Failure semantics differ per mode, deliberately. Directory mode returns 503
+/// rather than an empty list when the first refresh has not completed:
+/// "nobody is installed" is a false negative that makes an agent abandon
+/// dispatch, far more expensive than an explicit retry. Roster mode keeps
+/// answering, because the assignable keys live in the PM store — those rows
+/// merely carry null display fields plus `directory_available: false`.
+async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<Value> {
+    let a: ListAgentsArgs = parse_args("pm_list_agents", args)?;
+
+    // One directory snapshot per call. Joining row by row would turn a list
+    // whose whole purpose is batching into an N+1 against the Gateway.
+    let snapshot = state.agent_dir.list_agents().await;
+    let directory_available = snapshot.is_some();
+    let entries: &[AgentEntry] = snapshot.as_deref().unwrap_or(&[]);
+    let by_instance: std::collections::HashMap<&str, Option<&AgentInfo>> = entries
+        .iter()
+        .map(|e| (e.instance_id.as_str(), e.info.as_ref()))
+        .collect();
+
+    // Both modes fold into one row type, so filtering / ordering /
+    // serialisation are written once and a caller tells them apart by `mode`
+    // rather than by which fields happen to be null.
+    struct Row {
+        instance_id: String,
+        kind: MemberKind,
+        info: Option<AgentInfo>,
+        added_at: Option<String>,
+    }
+
+    // `human_member_count` is reported alongside the result, never folded into
+    // the assignable rows — see the roster branch below (D7).
+    let mut rows: Vec<Row> = Vec::new();
+    let mut human_member_count = 0usize;
+    if let Some(pid) = &a.project_id {
+        let project = state
+            .store
+            .get_project(pid)
+            .await?
+            .ok_or_else(|| PmError::ProjectNotFound(pid.to_string()))?;
+        // Agent members only. The store's M7 gate would accept a human member
+        // as `assignee`, but the MCP path cannot deliver on it: `pm_create_task`
+        // requires the assignee to exist in the agent directory (design 21
+        // §9.1), and the dispatch scanner wakes `task.assignee` through intent
+        // delivery, which fails with `target_not_installed` for an account id —
+        // so a human assignee would create a task that silently never
+        // dispatches. Listing humans here would be a false promise about the
+        // assignable set; they stay visible in pm_get_project's roster, and the
+        // count is reported instead of being hidden (D7).
+        human_member_count = project
+            .members
+            .iter()
+            .filter(|m| m.kind == MemberKind::User)
+            .count();
+        rows.extend(
+            project
+                .members
+                .iter()
+                .filter(|m| m.kind == MemberKind::Agent)
+                .map(|m| Row {
+                    instance_id: m.instance_id.clone(),
+                    kind: m.kind,
+                    // A member the directory no longer knows (uninstalled since
+                    // the invite) still has a valid `instance_id`, so it is
+                    // listed with null metadata rather than dropped — dropping
+                    // it would hide a roster entry the caller can legitimately
+                    // see in pm_get_project.
+                    info: by_instance
+                        .get(m.instance_id.as_str())
+                        .copied()
+                        .flatten()
+                        .cloned(),
+                    added_at: Some(m.added_at.to_rfc3339()),
+                }),
+        );
+    } else {
+        if !directory_available {
+            return Err(PmError::DirectoryUnavailable(
+                "agent directory has not completed its first refresh (or the Gateway is unreachable); retry shortly — this is NOT an empty roster"
+                    .to_string(),
+            ));
+        }
+        rows.extend(entries.iter().map(|e| Row {
+            instance_id: e.instance_id.clone(),
+            kind: MemberKind::Agent,
+            info: e.info.clone(),
+            added_at: None,
+        }));
+    }
+    let total = rows.len();
+
+    // `query` narrows on display fields only. A row without directory metadata
+    // (a human member, or any row while the directory is down) has nothing to
+    // match and is dropped — the tool description tells callers to omit
+    // `query` when they want the complete roster.
+    if let Some(q) = a.query.as_deref().map(|s| s.to_lowercase()) {
+        rows.retain(|r| {
+            let name = r.info.as_ref().map(|i| i.name.as_str()).unwrap_or("");
+            let role = r
+                .info
+                .as_ref()
+                .and_then(|i| i.role.as_deref())
+                .unwrap_or("");
+            let pkg = r.info.as_ref().map(|i| i.agent_id.as_str()).unwrap_or("");
+            name.to_lowercase().contains(&q)
+                || role.to_lowercase().contains(&q)
+                || pkg.to_lowercase().contains(&q)
+        });
+    }
+
+    // Stable order is part of the wire contract, enforced here rather than in
+    // `AgentDirectory` (which would ask every implementation to remember to
+    // sort): unordered input plus `limit` truncation means the same question
+    // returns different people twice, and an agent reads that as "the
+    // directory changed". Nameless rows compare as the empty string and sort
+    // first — they are the least dispatch-like entries and belong where they
+    // get noticed.
+    rows.sort_by(|x, y| {
+        let kx = (
+            x.info.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
+            x.instance_id.as_str(),
+        );
+        let ky = (
+            y.info.as_ref().map(|i| i.name.as_str()).unwrap_or(""),
+            y.instance_id.as_str(),
+        );
+        kx.cmp(&ky)
+    });
+    rows.truncate(a.limit);
+
+    let agents: Vec<Value> = rows
+        .iter()
+        .map(|r| {
+            json!({
+                // The only value `assignee` accepts (ADR-073).
+                "instance_id": r.instance_id,
+                // Always "agent": the MCP surface cannot dispatch to a human
+                // account (D7), and the directory only holds agents.
+                "kind": r.kind,
+                // Display-only; never valid as `assignee`.
+                "agent_id": r.info.as_ref().map(|i| i.agent_id.clone()),
+                "name": r.info.as_ref().map(|i| i.name.clone()),
+                "role": r.info.as_ref().and_then(|i| i.role.clone()),
+                // ADR-085 liveness as the Gateway reports it. Informational
+                // only — intent delivery wakes a stopped target itself.
+                // `null` means "not reported", NOT "offline".
+                "online": r.info.as_ref().and_then(|i| i.online),
+                "added_at": r.added_at,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "mode": if a.project_id.is_some() { "project_members" } else { "directory" },
+        "project_id": a.project_id.as_ref().map(|p| p.to_string()),
+        "directory_available": directory_available,
+        "total": total,
+        // Roster mode only: how many members were left out because the MCP
+        // surface cannot dispatch to a human account (D7). Reported rather than
+        // silently dropped, so "nobody else is in this project" is never a
+        // conclusion an agent can draw from this result by accident.
+        "human_member_count": (human_member_count > 0).then_some(human_member_count),
+        "count": agents.len(),
+        "agents": agents,
+    }))
+}
+
+/// `pm_add_project_member` — invite an agent instance or a human account into
+/// a project.
+///
+/// **Why the MCP surface must have it**: `assignee ∈ project.members` is
+/// enforced by the store (M7, `PmTree::ensure_assignee_is_member`), and until
+/// now only REST `POST /projects/:pid/members` could change the roster. An
+/// agent hitting `assignee_not_project_member` had no next step on the MCP
+/// surface and fell back to asking a human — the dispatch chain broke right
+/// there (design 32 §3.3).
+///
+/// Governance is **identical to REST** ([`crate::types::Project::can_govern`],
+/// one definition, two faces): inviting widens the project boundary, so it is a
+/// governance act reserved to the owner. An MCP caller is an agent and never an
+/// admin, hence `is_admin = false`.
+///
+/// On success [`sync_group_chat`] must run: the newcomer also joins the project
+/// group chat (design 27 §8.3). Otherwise it is a member in PM data and not one
+/// in the chat domain — a half-applied state is worse than a failure.
+async fn pm_add_project_member(state: &McpState, actor: &str, args: Value) -> Result<Value> {
+    let a: AddProjectMemberArgs = parse_args("pm_add_project_member", args)?;
+
+    if a.instance_id.trim().is_empty() {
+        return Err(PmError::BadRequest(
+            "instance_id must not be empty".to_string(),
+        ));
+    }
+
+    let project = state
+        .store
+        .get_project(&a.project_id)
+        .await?
+        .ok_or_else(|| PmError::ProjectNotFound(a.project_id.to_string()))?;
+
+    if !project.can_govern(actor, false) {
+        return Err(PmError::Forbidden(format!(
+            "only the project owner can add a member to project {}; it is owned by `{}`, not by caller `{}`. Adding a member widens the project, so it is governance, not membership — you may still create and update tasks inside it",
+            a.project_id,
+            project.owner(),
+            actor
+        )));
+    }
+
+    // Agent members must exist in the directory (same check as REST). User
+    // members are account ids the agent directory does not know — skip it.
+    if a.kind == MemberKind::Agent && !state.agent_dir.agent_exists(&a.instance_id).await {
+        return Err(PmError::BadRequest(format!(
+            "agent instance `{}` is not in the agent directory; call pm_list_agents to get valid instance_id values",
+            a.instance_id
+        )));
+    }
+
+    let (updated, already_member) = match state
+        .store
+        .add_project_member(&a.project_id, &a.instance_id, a.kind)
+        .await
+    {
+        Ok(p) => (p, false),
+        // Idempotent by design: an agent may retry after a lost response, and
+        // "they are already in" is not a failure worth a retry loop. The flag
+        // keeps the distinction observable instead of hiding it.
+        Err(PmError::MemberAlreadyExists(_)) => (project.clone(), true),
+        Err(e) => return Err(e),
+    };
+
+    // Converge the project group chat with the roster either way — a no-op
+    // push when the member was already there, a join when they are new.
+    crate::api::projects::sync_group_chat(&state.gateway, &updated);
+
+    let info = if a.kind == MemberKind::Agent {
+        state.agent_dir.agent_info(&a.instance_id).await
+    } else {
+        None
+    };
+
+    Ok(json!({
+        "ok": true,
+        "project_id": updated.id,
+        "already_member": already_member,
+        "member": {
+            "instance_id": a.instance_id,
+            "kind": a.kind,
+            "agent_id": info.as_ref().map(|i| i.agent_id.clone()),
+            "name": info.as_ref().map(|i| i.name.clone()),
+            "role": info.as_ref().and_then(|i| i.role.clone()),
+        },
+        "member_count": updated.members.len(),
+    }))
+}
+
+// ── Task activity stream (design 32 §3.3) ────────────────────────────────
+
+/// `pm_list_activity` — the task's activity stream (submissions / reviews /
+/// replies), ascending in time.
+///
+/// The woken execution agent has to read context back: `pm_get_task` carries
+/// only `result` (the last submission); the full history lives in the activity
+/// stream. This is also why `description` must not be reused as a conversation
+/// slot — it is the carrier of the acceptance criteria, and rewriting it
+/// overwrites them.
+///
+/// **Returns the most recent N by default and flags truncation explicitly**:
+/// the stream is append-only and grows with every submission, so not truncating
+/// would pour the whole history into the caller's context, and not flagging it
+/// would let an agent read a partial stream as the complete one.
+async fn pm_list_activity(state: &McpState, args: Value) -> Result<Value> {
+    let a: ListActivityArgs = parse_args("pm_list_activity", args)?;
+
+    let entries = state.store.list_activity(&a.task_id).await?;
+    let total = entries.len();
+    let start = total.saturating_sub(a.limit);
+    let page = &entries[start..];
+
+    Ok(json!({
+        "task_id": a.task_id,
+        "total": total,
+        "returned": page.len(),
+        // `true` = older entries exist and are NOT in this response.
+        "truncated": start > 0,
+        "activity": page
+            .iter()
+            .map(|act| json!({
+                "id": act.id,
+                "kind": act.kind,
+                "actor": act.actor,
+                "actor_kind": act.actor_kind,
+                "text": act.text,
+                "created_at": act.created_at,
+            }))
+            .collect::<Vec<_>>(),
+    }))
+}
+
+/// `pm_add_activity` — append a reply to a task (`ActivityKind::Comment`).
+///
+/// **Write permission = assignee or creator**, one notch wider than
+/// `ensure_assignee`, and that notch is the entire point of this tool: after
+/// dispatching, the PM has to leave context on the task (why it is blocked, why
+/// it was re-scheduled, the doc-library path), and it is neither the assignee
+/// nor the one doing the work. Gating on the assignee alone would silence the
+/// coordinator, and the agent would fall back to editing `description` — a
+/// destructive act that overwrites the acceptance criteria.
+///
+/// Humans ([`HUMAN_CREATOR`] sentinel) go through REST, not this path; no
+/// special allowance here.
+async fn pm_add_activity(state: &McpState, actor: &str, args: Value) -> Result<Value> {
+    let a: AddActivityArgs = parse_args("pm_add_activity", args)?;
+
+    let task = state
+        .store
+        .get_task(&a.task_id)
+        .await?
+        .ok_or_else(|| PmError::TaskNotFound(a.task_id.to_string()))?;
+
+    let is_assignee = task.assignee.as_deref() == Some(actor);
+    let is_creator = task.created_by == actor;
+    if !is_assignee && !is_creator {
+        return Err(PmError::Forbidden(format!(
+            "task {} belongs to project {} as assignee `{}` created_by `{}`; only the assignee or the creator can comment on it. Read it with pm_get_task, or ask its creator to add you to the project",
+            task.id,
+            task.project_id,
+            task.assignee.as_deref().unwrap_or("(unassigned)"),
+            task.created_by
+        )));
+    }
+
+    let activity = state
+        .store
+        .add_task_comment(&a.task_id, &a.text, actor)
+        .await?;
+
+    Ok(json!({
+        "ok": true,
+        "task_id": a.task_id,
+        "activity_id": activity.id,
+        "created_at": activity.created_at,
+    }))
 }

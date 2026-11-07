@@ -111,6 +111,18 @@ pub enum PmError {
     #[error("authentication required: {0}")]
     Unauthenticated(String),
 
+    /// An upstream dependency (the Gateway agent directory) has no usable data
+    /// yet.
+    ///
+    /// This MUST stay distinguishable from "the query succeeded and the result
+    /// is empty": if `pm_list_agents` reports an unready directory as an empty
+    /// roster, the caller (an LLM) concludes "there is nobody on this platform
+    /// to dispatch to" and abandons dispatch — a false negative far more
+    /// expensive than one explicit retry (design 32 §3.3). HTTP 503: transient,
+    /// retry later.
+    #[error("directory unavailable: {0}")]
+    DirectoryUnavailable(String),
+
     // ── 基础设施（自动 From 转换）───────────────────────────────────
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -170,6 +182,8 @@ impl PmError {
 
             PmError::Unauthenticated(_) => 401,
 
+            PmError::DirectoryUnavailable(_) => 503,
+
             PmError::Forbidden(_) => 403,
 
             PmError::Io(_) | PmError::Json(_) | PmError::Multipart(_) | PmError::Image(_) => 500,
@@ -204,6 +218,7 @@ impl PmError {
             PmError::InvalidStateTransition { .. } => "invalid_state_transition",
             PmError::ReviewNotApproved { .. } => "review_not_approved",
             PmError::Unauthenticated(_) => "unauthenticated",
+            PmError::DirectoryUnavailable(_) => "directory_unavailable",
             PmError::Forbidden(_) => "forbidden",
             PmError::Io(_) => "io_error",
             PmError::Json(_) => "json_error",

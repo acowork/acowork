@@ -76,6 +76,12 @@ use crate::store::tree::TreePmStore;
 pub struct McpState {
     pub store: Arc<TreePmStore>,
     pub agent_dir: Arc<dyn AgentDirectory>,
+    /// Gateway base URL + internal-service token, same value and same
+    /// degradation rule as [`crate::api::ApiState::gateway`]: `None` (PM
+    /// started without `--gateway-url`) skips project group chat sync.
+    /// `pm_add_project_member` needs it so an agent-added member joins the
+    /// group exactly like a human-added one.
+    pub gateway: Option<(String, Option<String>)>,
 }
 
 /// Agent 目录契约（设计 §9.1）：查询某 `agent_id` 是否已安装/存在。
@@ -99,25 +105,71 @@ pub trait AgentDirectory: Send + Sync {
     async fn agent_info(&self, _instance_id: &str) -> Option<AgentInfo> {
         None
     }
+
+    /// The full list of installed agent instances — the only data source of
+    /// `pm_list_agents`.
+    ///
+    /// **`None` means the directory is unavailable** (first refresh not
+    /// finished / Gateway unreachable); `Some(vec![])` means "there really are
+    /// no other agents". Callers must keep the two apart: reporting an
+    /// unavailable directory as an empty one makes an agent conclude "nothing
+    /// on this platform can be dispatched to" and abandon dispatching — a
+    /// false negative far more expensive than one clear error (design 32 §3.3).
+    ///
+    /// Defaults to `None`: `NoopAgentDirectory` holds no directory data and
+    /// reports unavailability honestly.
+    async fn list_agents(&self) -> Option<Vec<AgentEntry>> {
+        None
+    }
 }
 
-/// Agent 元信息（`AgentDirectory::agent_info` 返回）。
+/// One list item of [`AgentDirectory::list_agents`].
 ///
-/// 字段刻意保持最少：`pm_get_project` 投影成员时只需要 `agent_id`（包 ID，
-/// 用于展示/日志）+ `name`（显示名，用于 LLM 识别）+ `role`（来自
-/// manifest 顶层 `role = "..."`，人类用户 / PM agent 派活时判断"这个
-/// 实例适合干什么"）。`instance_id` 是查询 key，不重复放在 value 里。
+/// `instance_id` is **the only identity usable as `assignee`** (ADR-073);
+/// `info` is best-effort and `None` when metadata is unavailable (existence is
+/// already expressed by the key).
+#[derive(Debug, Clone)]
+pub struct AgentEntry {
+    pub instance_id: String,
+    pub info: Option<AgentInfo>,
+}
+
+/// Agent metadata returned by `AgentDirectory::agent_info`.
 ///
-/// **`role` 来源**：Gateway `AgentListResponse.role`（已从 `manifest.role`
-/// 透出，ADR-073 唯一真相源 = Gateway `installed_agents`）。`HttpAgentDirectory`
-/// 周期刷新时一并拉取并缓存；缺字段 / 未声明 → `None`，不报错。
+/// Fields are deliberately minimal: `pm_get_project` projects the roster with
+/// `agent_id` (package id, for display and logs) + `name` (display name, so the
+/// LLM can recognise the entry) + `role` (from the manifest's top-level
+/// `role = "..."`, used by humans / the PM agent to judge what this instance is
+/// for). `instance_id` is the lookup key and is not repeated in the value.
+///
+/// **`role` source**: Gateway `AgentListResponse.role` (surfaced from
+/// `manifest.role`; ADR-073 says the single source of truth is the Gateway's
+/// `installed_agents`). `HttpAgentDirectory` fetches and caches it during
+/// periodic refresh; a missing field / undeclared role → `None`, never an error.
 #[derive(Debug, Clone)]
 pub struct AgentInfo {
     pub agent_id: String,
     pub name: String,
-    /// Agent 角色（manifest 顶层 `role`，例：`"Senior Software Engineer"`）。
-    /// Gateway 列表响应缺字段或 `.agent` 包未声明 → `None`。
+    /// Agent role (manifest top-level `role`, e.g. `"Senior Software Engineer"`).
+    /// Gateway list response missing the field, or the `.agent` package not
+    /// declaring one → `None`.
     pub role: Option<String>,
+    /// ADR-085 liveness, taken verbatim from Gateway `AgentListResponse.alive`
+    /// (the retained MQTT `AgentStatus`, not a PID probe).
+    ///
+    /// `None` = the directory did not report it (older Gateway, or the field
+    /// absent from an abnormal response). That is **not** "offline" — a
+    /// directory that cannot see liveness must not be rendered to the LLM as a
+    /// roster of dead agents.
+    ///
+    /// **Informational only.** It is not a dispatch gate and MUST NOT be
+    /// described as one: intent delivery wakes a stopped target itself
+    /// (`gateway/src/intent/delivery.rs` `wake_and_deliver` step 3 starts the
+    /// agent on its hosting node and waits for the online flip). The one real
+    /// exception is an instance whose hosting node is still the `"local"`
+    /// sentinel — there is no node to ask for a start, so delivery fails with
+    /// `NoHostingNode`.
+    pub online: Option<bool>,
 }
 
 /// 默认（宽松）Agent 目录：不校验存在性。`PmService::new` 未注入目录时使用。
@@ -134,10 +186,18 @@ impl AgentDirectory for NoopAgentDirectory {
 ///
 /// 返回 `Router<()>`（内部 `.with_state(McpState)`），与 REST `pm_router`
 /// 合并后由 Gateway `nest_service("/api/pm", ...)` 挂载。
-pub fn mcp_router(store: Arc<TreePmStore>, agent_dir: Arc<dyn AgentDirectory>) -> Router {
+pub fn mcp_router(
+    store: Arc<TreePmStore>,
+    agent_dir: Arc<dyn AgentDirectory>,
+    gateway: Option<(String, Option<String>)>,
+) -> Router {
     Router::new()
         .route("/mcp", post(jsonrpc_endpoint))
-        .with_state(McpState { store, agent_dir })
+        .with_state(McpState {
+            store,
+            agent_dir,
+            gateway,
+        })
 }
 
 // ── JSON-RPC 协议常量 ────────────────────────────────────────────────────
@@ -369,7 +429,14 @@ mod tests {
             ..Default::default()
         };
         let store = Arc::new(TreePmStore::new(cfg).await.unwrap());
-        (McpState { store, agent_dir }, tmp)
+        (
+            McpState {
+                store,
+                agent_dir,
+                gateway: None,
+            },
+            tmp,
+        )
     }
 
     #[tokio::test]
@@ -581,6 +648,7 @@ mod tests {
                             agent_id: (*aid).to_string(),
                             name: (*n).to_string(),
                             role: None,
+                            online: None,
                         },
                     )
                 })
@@ -606,6 +674,21 @@ mod tests {
         }
         async fn agent_info(&self, instance_id: &str) -> Option<AgentInfo> {
             self.infos.lock().unwrap().get(instance_id).cloned()
+        }
+        /// A fully available directory (the state of `HttpAgentDirectory`
+        /// after its first successful refresh). Division of labour with
+        /// [`WhitelistAgentDirectory`]: this one tests "has data", that one
+        /// tests "directory not ready yet" — the two must behave oppositely.
+        async fn list_agents(&self) -> Option<Vec<AgentEntry>> {
+            let map = self.infos.lock().unwrap();
+            Some(
+                map.iter()
+                    .map(|(instance_id, info)| AgentEntry {
+                        instance_id: instance_id.clone(),
+                        info: Some(info.clone()),
+                    })
+                    .collect(),
+            )
         }
     }
 
@@ -1273,6 +1356,7 @@ mod tests {
                 agent_id: "com.acowork.project-manager".to_string(),
                 name: "PM".to_string(),
                 role: Some("Project Manager".to_string()),
+                online: None,
             },
         );
         // `pm_add_member` MCP tool 不存在 — 直接走 store API 加 member
@@ -2010,5 +2094,696 @@ mod tests {
         )
         .await;
         assert_eq!(v["error"]["code"], CODE_UNAUTHENTICATED, "anonymous reparent: {v}");
+    }
+
+    // ── P0: dispatch usability (design 32 §3.3 / plan T0-1..T0-3) ──────
+
+    /// `pm_list_agents` must report "unavailable" when the directory is not
+    /// ready, and **never** an empty list.
+    ///
+    /// This is the tool's most important assertion: an empty list makes an
+    /// agent conclude there is nobody to dispatch to and give up — a false
+    /// negative far more expensive than one explicit retry.
+    /// `WhitelistAgentDirectory` does not implement `list_agents` (it takes
+    /// the trait's default `None`), which simulates exactly an unfinished
+    /// first refresh.
+    #[tokio::test]
+    async fn pm_list_agents_reports_unavailable_not_empty() {
+        let dir = Arc::new(WhitelistAgentDirectory::new(&["ag-1"]));
+        let router = test_router_with_dir(dir).await;
+
+        let v = call_tool(&router, Some("ag-1"), 1, "pm_list_agents", json!({})).await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, INTERNAL_ERROR, "expected a business error: {v}");
+        assert_eq!(prefix, "directory_unavailable", "wrong code: {msg}");
+        assert!(
+            msg.contains("NOT an empty roster"),
+            "message must tell the caller not to read this as an empty roster: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pm_list_agents_returns_instance_ids_and_filters_query() {
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            ("11111111-1111-4111-8111-111111111111", "com.acowork.architect", "Architect"),
+            ("22222222-2222-4222-8222-222222222222", "com.acowork.qa", "QA Bot"),
+        ]));
+        dir.set(
+            "11111111-1111-4111-8111-111111111111",
+            AgentInfo {
+                agent_id: "com.acowork.architect".to_string(),
+                name: "Architect".to_string(),
+                role: Some("Software Architect".to_string()),
+                online: Some(true),
+            },
+        );
+        let router = test_router_with_dir(dir).await;
+
+        let v = call_tool(&router, Some("pm-actor"), 1, "pm_list_agents", json!({})).await;
+        let got = tool_text(&v);
+        assert_eq!(got["total"], 2, "{got}");
+        assert_eq!(got["mode"], "directory", "no project_id = the invitable set");
+        assert_eq!(got["directory_available"], true);
+        assert_eq!(
+            got["agents"][0]["online"], true,
+            "ADR-085 liveness must reach the caller instead of being dropped"
+        );
+        // `instance_id` must be present and is the only assignable value.
+        let ids: Vec<&str> = got["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["instance_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"11111111-1111-4111-8111-111111111111"), "{ids:?}");
+        assert_eq!(
+            got["agents"][0]["agent_id"].as_str(),
+            Some("com.acowork.architect"),
+            "agent_id is display-only but must be present for recognition"
+        );
+
+        // `query` filters on role — the way a caller finds "who does X".
+        let v = call_tool(
+            &router,
+            Some("pm-actor"),
+            2,
+            "pm_list_agents",
+            json!({ "query": "architect" }),
+        )
+        .await;
+        let got = tool_text(&v);
+        assert_eq!(got["count"], 1, "role substring should match one: {got}");
+        assert_eq!(
+            got["agents"][0]["instance_id"],
+            "11111111-1111-4111-8111-111111111111"
+        );
+    }
+
+    /// Design 32 §3.3 / Q5, the positive lock: with `project_id` the tool
+    /// returns **the assignable set**. Every id it lists really can be
+    /// dispatched to (asserted below by dispatching), and an agent that is
+    /// installed but outside the project is not listed at all — the whole
+    /// point of reusing the roster as the query boundary is that a caller
+    /// cannot assemble a call the platform will reject.
+    #[tokio::test]
+    async fn pm_list_agents_scoped_to_project_returns_the_assignable_set() {
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            ("pm-inst", "com.pm", "PM"),
+            ("eng-inst", "com.acowork.engineer", "Engineer"),
+            ("stranger-inst", "com.acowork.qa", "QA"),
+        ]));
+        dir.set(
+            "eng-inst",
+            AgentInfo {
+                agent_id: "com.acowork.engineer".to_string(),
+                name: "Engineer".to_string(),
+                role: Some("Senior Software Engineer".to_string()),
+                online: Some(false),
+            },
+        );
+        let router = test_router_with_dir(dir).await;
+        let pid = project_with_owner(&router, "pm-inst", "Dispatch").await;
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            2,
+            "pm_add_project_member",
+            json!({ "project_id": pid, "instance_id": "eng-inst" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "invite: {v}");
+
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            3,
+            "pm_list_agents",
+            json!({ "project_id": pid }),
+        )
+        .await;
+        let got = tool_text(&v);
+        assert_eq!(got["mode"], "project_members", "{got}");
+        assert_eq!(got["count"], 2, "owner + invited engineer: {got}");
+        let ids: Vec<&str> = got["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["instance_id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"eng-inst"), "{ids:?}");
+        assert!(
+            !ids.contains(&"stranger-inst"),
+            "an installed non-member must not be listed — it is not assignable (M7): {ids:?}"
+        );
+
+        let eng = got["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["instance_id"] == "eng-inst")
+            .unwrap();
+        assert_eq!(eng["role"], "Senior Software Engineer", "roster rows carry directory metadata");
+        assert_eq!(eng["online"], false, "`false` is a real answer, distinct from null");
+
+        // The contract is proven by acting on it, not by reading it.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            4,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": "eng-inst" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "a listed member must be dispatchable: {v}");
+    }
+
+    /// Roster mode must NOT inherit directory mode's 503. The assignable keys
+    /// come from the PM store, so an unreachable Gateway may not stop a PM
+    /// agent from dispatching to members it already knows — the rows simply
+    /// lose their display metadata and say so via `directory_available`.
+    #[tokio::test]
+    async fn pm_list_agents_roster_mode_survives_directory_outage() {
+        // WhitelistAgentDirectory answers existence but not the listing.
+        let dir = Arc::new(WhitelistAgentDirectory::new(&["ag-1"]));
+        let router = test_router_with_dir(dir).await;
+        let pid = project_with_owner(&router, "ag-1", "Outage").await;
+
+        let v = call_tool(
+            &router,
+            Some("ag-1"),
+            2,
+            "pm_list_agents",
+            json!({ "project_id": pid }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "roster mode must not 503: {v}");
+        let got = tool_text(&v);
+        assert_eq!(got["directory_available"], false, "{got}");
+        assert_eq!(got["count"], 1, "{got}");
+        assert!(
+            got["agents"][0]["instance_id"].is_string(),
+            "the id is still usable even with no metadata: {got}"
+        );
+        assert!(got["agents"][0]["name"].is_null(), "unreported metadata is null, not invented");
+    }
+
+    /// Creates a project owned by `actor` and returns its project_id.
+    async fn project_with_owner(router: &Router, actor: &str, title: &str) -> String {
+        let v = call_tool(
+            router,
+            Some(actor),
+            1,
+            "pm_create_project",
+            json!({ "title": title }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "create_project: {v}");
+        tool_text(&v)["id"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test]
+    async fn pm_add_project_member_requires_governance() {
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            ("owner-inst", "com.pm", "PM"),
+            ("stranger-inst", "com.other", "Other"),
+            ("target-inst", "com.acowork.engineer", "Engineer"),
+        ]));
+        let router = test_router_with_dir(dir).await;
+        // `owner-inst` creates the project, so it is the owner.
+        let pid = project_with_owner(&router, "owner-inst", "Governed").await;
+
+        // A non-member, non-owner cannot widen someone else's project.
+        let v = call_tool(
+            &router,
+            Some("stranger-inst"),
+            2,
+            "pm_add_project_member",
+            json!({ "project_id": pid, "instance_id": "target-inst" }),
+        )
+        .await;
+        let (code, _, msg) = assert_rpc_error(&v);
+        assert_eq!(code, CODE_FORBIDDEN, "non-owner invite: {v}");
+        assert!(
+            msg.contains("governance"),
+            "error must explain why inviting is not a membership right: {msg}"
+        );
+
+        // The owner can.
+        let v = call_tool(
+            &router,
+            Some("owner-inst"),
+            3,
+            "pm_add_project_member",
+            json!({ "project_id": pid, "instance_id": "target-inst" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "owner invite failed: {v}");
+        let got = tool_text(&v);
+        assert_eq!(got["already_member"], false, "{got}");
+        assert_eq!(got["member"]["name"], "Engineer", "{got}");
+    }
+
+    /// Re-inviting is not an error (an agent may retry after a lost response),
+    /// but it must stay observable.
+    #[tokio::test]
+    async fn pm_add_project_member_is_idempotent_and_flags_it() {
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            ("owner-inst", "com.pm", "PM"),
+            ("target-inst", "com.acowork.engineer", "Engineer"),
+        ]));
+        let router = test_router_with_dir(dir).await;
+        let pid = project_with_owner(&router, "owner-inst", "Idempotent").await;
+
+        for i in 1..=2 {
+            let v = call_tool(
+                &router,
+                Some("owner-inst"),
+                i,
+                "pm_add_project_member",
+                json!({ "project_id": pid, "instance_id": "target-inst" }),
+            )
+            .await;
+            assert!(v["error"].is_null(), "attempt {i} failed: {v}");
+        }
+        let got = tool_text(&call_tool(
+            &router,
+            Some("owner-inst"),
+            3,
+            "pm_add_project_member",
+            json!({ "project_id": pid, "instance_id": "target-inst" }),
+        )
+        .await);
+        assert_eq!(got["already_member"], true, "second add must be observable: {got}");
+
+        // And the roster really has them once — not twice.
+        let v = call_tool(
+            &router,
+            Some("owner-inst"),
+            4,
+            "pm_get_project",
+            json!({ "project_id": pid }),
+        )
+        .await;
+        let proj = tool_text(&v);
+        let targets = proj["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m["instance_id"] == "target-inst")
+            .count();
+        assert_eq!(targets, 1, "duplicate member row: {proj}");
+    }
+
+    #[tokio::test]
+    async fn pm_add_project_member_rejects_unknown_instance_and_points_to_the_roster() {
+        let dir = Arc::new(MapAgentDirectory::new(&[("owner-inst", "com.pm", "PM")]));
+        let router = test_router_with_dir(dir).await;
+        let pid = project_with_owner(&router, "owner-inst", "Strict").await;
+
+        let v = call_tool(
+            &router,
+            Some("owner-inst"),
+            2,
+            "pm_add_project_member",
+            json!({ "project_id": pid, "instance_id": "does-not-exist" }),
+        )
+        .await;
+        let (_, _, msg) = assert_rpc_error(&v);
+        assert!(
+            msg.contains("pm_list_agents"),
+            "error must name the tool that yields valid ids: {msg}"
+        );
+    }
+
+    /// **M7 regression lock**: an agent that exists in the directory but is
+    /// not a project member is still refused as assignee, and the error must
+    /// name the unlock path (invite first) — otherwise the agent can only go
+    /// back to a human.
+    #[tokio::test]
+    async fn pm_create_task_rejects_non_member_and_names_the_unlock_path() {
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            ("pm-inst", "com.pm", "PM"),
+            ("eng-inst", "com.acowork.engineer", "Engineer"),
+        ]));
+        let router = test_router_with_dir(dir).await;
+        let pid = project_with_owner(&router, "pm-inst", "Dispatch").await;
+
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            2,
+            "pm_create_task",
+            json!({
+                "project_id": pid,
+                "title": "implement",
+                "assignee": "eng-inst",
+                "start_at": "2026-12-01T09:00:00Z"
+            }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "assignee_not_project_member", "M7: {v}");
+        assert!(
+            msg.contains("pm_add_project_member") || msg.contains("member"),
+            "error must be actionable: {msg}"
+        );
+
+        // Invite, then the same dispatch succeeds — the loop closes.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            3,
+            "pm_add_project_member",
+            json!({ "project_id": pid, "instance_id": "eng-inst" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "invite failed: {v}");
+
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            4,
+            "pm_create_task",
+            json!({
+                "project_id": pid,
+                "title": "implement",
+                "assignee": "eng-inst",
+                "start_at": "2026-12-01T09:00:00Z"
+            }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "dispatch after invite: {v}");
+        let task = tool_text(&v);
+        // M1: an agent-created task waits for human approval before it can run.
+        assert_eq!(task["review_status"], "pending", "{task}");
+    }
+
+    /// The core value of `pm_add_activity`: the party that dispatched the work
+    /// (creator) is **not** the assignee and must still be able to leave
+    /// context on the task. Gating on the assignee alone would push it to edit
+    /// the description instead.
+    #[tokio::test]
+    async fn pm_add_activity_allows_the_creator_who_is_not_the_assignee() {
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            ("pm-inst", "com.pm", "PM"),
+            ("eng-inst", "com.acowork.engineer", "Engineer"),
+        ]));
+        let (router, store) = test_router_store_with_dir(dir).await;
+        let pid = project_with_owner(&router, "pm-inst", "Context").await;
+        call_tool(
+            &router,
+            Some("pm-inst"),
+            2,
+            "pm_add_project_member",
+            json!({ "project_id": pid, "instance_id": "eng-inst" }),
+        )
+        .await;
+
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            3,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "build it", "assignee": "eng-inst" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "create_task: {v}");
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // PM (creator, not assignee) leaves context.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            4,
+            "pm_add_activity",
+            json!({ "task_id": tid, "text": "PRD is at 项目管理/p-1/PRD.md" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "creator comment: {v}");
+
+        // The assignee can too.
+        approve_creation(&store, &tid).await;
+        call_tool(&router, Some("eng-inst"), 5, "pm_claim_task", json!({ "task_id": tid }))
+            .await;
+        let v = call_tool(
+            &router,
+            Some("eng-inst"),
+            6,
+            "pm_add_activity",
+            json!({ "task_id": tid, "text": "blocked on the API contract" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "assignee comment: {v}");
+
+        // A stranger cannot.
+        let v = call_tool(
+            &router,
+            Some("nobody-inst"),
+            7,
+            "pm_add_activity",
+            json!({ "task_id": tid, "text": "injected" }),
+        )
+        .await;
+        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "stranger comment: {v}");
+
+        // Both notes are readable, oldest first.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            8,
+            "pm_list_activity",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        let got = tool_text(&v);
+        let texts: Vec<&str> = got["activity"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["text"].as_str().unwrap())
+            .collect();
+        assert!(texts.contains(&"PRD is at 项目管理/p-1/PRD.md"), "{got}");
+        assert!(texts.contains(&"blocked on the API contract"), "{got}");
+    }
+
+    /// Truncation of the activity stream must be explicit: reading a partial
+    /// stream as the whole history is a mistake agents make.
+    #[tokio::test]
+    async fn pm_list_activity_marks_truncation_and_returns_the_tail() {
+        let router = test_router().await;
+        let pid = project_with_owner(&router, "pm-inst", "Long history").await;
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            2,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "noisy" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        for i in 0..5 {
+            call_tool(
+                &router,
+                Some("pm-inst"),
+                10 + i,
+                "pm_add_activity",
+                json!({ "task_id": tid, "text": format!("note-{i}") }),
+            )
+            .await;
+        }
+
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            99,
+            "pm_list_activity",
+            json!({ "task_id": tid, "limit": 2 }),
+        )
+        .await;
+        let got = tool_text(&v);
+        assert_eq!(got["total"], 5, "{got}");
+        assert_eq!(got["returned"], 2, "{got}");
+        assert_eq!(got["truncated"], true, "must flag that older entries exist: {got}");
+        // The tail (most recent), oldest-first within the page.
+        assert_eq!(got["activity"][0]["text"], "note-3", "{got}");
+        assert_eq!(got["activity"][1]["text"], "note-4", "{got}");
+    }
+
+    /// **Plan P0 acceptance, made executable**: a PM agent that knows only a
+    /// project *title* runs the whole chain — find the project → get the
+    /// assignable set → invite the right agent → create a task with `start_at`
+    /// → leave context → read the review state back — with **no human in the
+    /// loop and no hand-typed ids**.
+    ///
+    /// This is written as one test on purpose. T0-1..T0-6 each pass in
+    /// isolation without ever closing this loop, and an unclosed loop is
+    /// exactly the bug being fixed: the pieces existed, the path did not.
+    #[tokio::test]
+    async fn p0_acceptance_dispatch_chain_needs_no_human_and_no_hand_typed_ids() {
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            ("pm-inst", "com.acowork.project-manager", "PM"),
+            ("eng-inst", "com.acowork.senior-engineer", "SSE"),
+        ]));
+        dir.set(
+            "eng-inst",
+            AgentInfo {
+                agent_id: "com.acowork.senior-engineer".to_string(),
+                name: "SSE".to_string(),
+                role: Some("Senior Software Engineer".to_string()),
+                online: Some(false),
+            },
+        );
+        let (router, _store) = test_router_store_with_dir(dir.clone()).await;
+
+        // Precondition the scenario starts from: a project exists, owned by the
+        // PM agent, and the engineer is not in it yet.
+        let _ = call_tool(
+            &router,
+            Some("pm-inst"),
+            1,
+            "pm_create_project",
+            json!({ "title": "Q4 Billing" }),
+        )
+        .await;
+
+        // 1. Only the title is known. Find the project — no id was typed by a
+        //    human anywhere in this test.
+        let v = call_tool(&router, Some("pm-inst"), 2, "pm_list_projects", json!({})).await;
+        let projects = tool_text(&v);
+        let pid = projects
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["title"] == "Q4 Billing")
+            .and_then(|p| p["id"].as_str())
+            .expect("project found by title")
+            .to_string();
+
+        // 2. The assignable set does not contain the engineer yet.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            3,
+            "pm_get_project",
+            json!({ "project_id": pid }),
+        )
+        .await;
+        let roster = tool_text(&v)["members"].as_array().unwrap().clone();
+        assert!(
+            !roster.iter().any(|m| m["instance_id"] == "eng-inst"),
+            "precondition: {roster:?}"
+        );
+
+        // 3. Discover *whom to invite* by role text, not by an id someone
+        //    dictated.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            4,
+            "pm_list_agents",
+            json!({ "query": "engineer" }),
+        )
+        .await;
+        let found = tool_text(&v);
+        assert_eq!(found["count"], 1, "role query should find the engineer: {found}");
+        let target = found["agents"][0]["instance_id"].as_str().unwrap().to_string();
+        assert_eq!(target, "eng-inst");
+
+        // 4. Invite — the M7 unlock, no human needed.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            5,
+            "pm_add_project_member",
+            json!({ "project_id": pid, "instance_id": target }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "invite: {v}");
+
+        // 5. The assignable set now contains it: the query boundary and the
+        //    permission boundary are the same thing.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            6,
+            "pm_list_agents",
+            json!({ "project_id": pid }),
+        )
+        .await;
+        let scoped = tool_text(&v);
+        assert_eq!(scoped["mode"], "project_members", "{scoped}");
+        assert!(
+            scoped["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a["instance_id"] == "eng-inst"),
+            "roster mode must list what create_task will now accept: {scoped}"
+        );
+
+        // 6. Dispatch with a scheduled wake-up.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            7,
+            "pm_create_task",
+            json!({
+                "project_id": pid,
+                "title": "Fix invoice rounding",
+                "description": "Round to cents at line level, not at total.",
+                "assignee": target,
+                "start_at": "2027-01-04T09:00:00Z",
+            }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "dispatch after invite: {v}");
+        let task = tool_text(&v);
+        let tid = task["id"].as_str().unwrap().to_string();
+
+        // 7. Context that must not overwrite the acceptance criteria.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            8,
+            "pm_add_activity",
+            json!({
+                "task_id": tid,
+                "text": "Spec is at 产品设计/Q4 Billing/invoice-rounding.md; blocked on finance sign-off.",
+            }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "the dispatcher must be able to comment: {v}");
+
+        // 8. Follow-up: an agent-created task waits for human approval, and the
+        //    tool says so instead of pretending it is already dispatched.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            9,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        let task = tool_text(&v);
+        assert_eq!(task["review_status"], "pending", "{task}");
+        assert_eq!(task["assignee"], "eng-inst", "{task}");
+        assert_eq!(task["start_at"], "2027-01-04T09:00:00Z", "{task}");
+        assert_eq!(
+            task["dispatched_at"],
+            Value::Null,
+            "an unapproved task must not be marked dispatched: {task}"
+        );
+
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            10,
+            "pm_list_activity",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        let stream = tool_text(&v);
+        assert_eq!(stream["total"], 1, "the note is in the stream: {stream}");
     }
 }

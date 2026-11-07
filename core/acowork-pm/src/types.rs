@@ -20,6 +20,16 @@ use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// The reserved actor value for the **localhost Desktop human** (the `X-Actor`
+/// the Gateway injects when a request comes from the local UI rather than from
+/// an agent runtime). It is not a UUID and never appears in the agent
+/// directory, which is why [`MemberKind::from_actor`] maps it to
+/// [`MemberKind::User`].
+///
+/// Defined here rather than in the API layer so that [`Project::can_govern`]
+/// can fold the REST and MCP authorization faces into one rule.
+pub const LOCAL_ACTOR: &str = "human";
+
 // ────────────────────────────────────────────────────────────────────────────
 // 强类型 ID（newtype + 格式校验）
 // ────────────────────────────────────────────────────────────────────────────
@@ -219,9 +229,10 @@ impl MemberKind {
     /// 遗留常量 `"human"` 与 `"unknown"`（`X-Actor` 缺失时的兜底）视为
     /// `User`；其余（UUID instance_id）视为 `Agent`。
     pub fn from_actor(actor: &str) -> Self {
-        match actor {
-            "human" | "unknown" => Self::User,
-            _ => Self::Agent,
+        if actor == LOCAL_ACTOR || actor == "unknown" {
+            Self::User
+        } else {
+            Self::Agent
         }
     }
 }
@@ -290,6 +301,21 @@ impl Project {
     /// reads through this so transfer is reflected everywhere at once.
     pub fn owner(&self) -> &str {
         self.owner_id.as_deref().unwrap_or(&self.created_by)
+    }
+
+    /// Whether `actor` may perform a **governance** action on this project
+    /// (invite or evict members, transfer ownership, edit project fields).
+    ///
+    /// Single source of truth for the rule: the REST surface
+    /// (`api::projects::require_governance`) and the MCP surface
+    /// (`pm_add_project_member`) both fold into this, so the two faces can
+    /// never grow into two authorization models (design 32 §2 principle 5).
+    ///
+    /// [`LOCAL_ACTOR`] is the localhost Desktop identity and is always
+    /// allowed; `is_admin` carries the ADR-076 admin flag, which the MCP
+    /// surface never sets — an agent is not an admin.
+    pub fn can_govern(&self, actor: &str, is_admin: bool) -> bool {
+        actor == LOCAL_ACTOR || is_admin || actor == self.owner()
     }
 }
 

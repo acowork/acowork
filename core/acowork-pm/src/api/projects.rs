@@ -90,8 +90,12 @@ pub(crate) fn group_participants(project: &Project) -> Vec<String> {
 /// Best-effort, same rule as provisioning: the PM store is the source of truth,
 /// the next call converges, and a failure is logged by the client rather than
 /// surfaced to the caller. No-op without a Gateway (standalone / test mode).
-pub(crate) fn sync_group_chat(state: &ApiState, project: &Project) {
-    let Some((gw_url, token)) = &state.gateway else {
+/// Takes the gateway pair (not `ApiState`) so the MCP surface — which has its
+/// own state type — can push the identical update. A member added through
+/// `pm_add_project_member` must join the project group chat exactly as one
+/// added through REST does; two faces, one sync path (design 32 §2 principle 5).
+pub(crate) fn sync_group_chat(gateway: &Option<(String, Option<String>)>, project: &Project) {
+    let Some((gw_url, token)) = gateway else {
         return;
     };
     let provisioner = crate::gateway_client::GatewayClient::new(gw_url.clone(), token.clone());
@@ -148,13 +152,6 @@ fn mark_group_deleted(state: &ApiState, pid: &ProjectId) {
 // Governance — who may mutate a project
 // ────────────────────────────────────────────────────────────────────────────
 
-/// ADR-076 §决策 12: under `local` the Gateway has no account store, so every
-/// REST call carries this constant actor. One machine, one human — there is no
-/// cross-account to protect against, so the local actor governs every project,
-/// including one an agent created through `pm_create_project` (whose owner id
-/// is an instance id no human header can ever match).
-const LOCAL_ACTOR: &str = "human";
-
 /// Only the project's owner (`Project::owner()` = `owner_id ?? created_by`) or
 /// a platform admin may mutate the project itself — rename / description /
 /// status (PATCH), delete, the member roster (add / remove), and the ownership
@@ -168,6 +165,10 @@ const LOCAL_ACTOR: &str = "human";
 /// them as identity. PM has no account store of its own, and a PM socket
 /// reachable by anything other than its own Gateway is outside this design (it
 /// binds loopback by default).
+///
+/// The **rule** lives in [`Project::can_govern`] so the MCP surface
+/// (`pm_add_project_member`) enforces exactly the same thing — two faces, one
+/// authorization model (design 32 §2 principle 5).
 fn require_governance(
     headers: &axum::http::HeaderMap,
     project: &Project,
@@ -177,14 +178,11 @@ fn require_governance(
         .get("x-actor")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
-    if actor == LOCAL_ACTOR {
-        return Ok(());
-    }
-    let actor_admin = headers
+    let is_admin = headers
         .get("x-actor-admin")
         .and_then(|v| v.to_str().ok())
         == Some("true");
-    if actor == project.owner() || actor_admin {
+    if project.can_govern(actor, is_admin) {
         return Ok(());
     }
     Err(crate::error::PmError::Forbidden(format!(
@@ -253,7 +251,7 @@ pub async fn update(
     // the session row — otherwise the sidebar keeps showing the old title until
     // the next member churn. Same converge-on-push path as the roster/owner.
     if project.title != before.title {
-        sync_group_chat(&state, &project);
+        sync_group_chat(&state.gateway, &project);
     }
     Ok(Json(project))
 }
@@ -350,7 +348,7 @@ pub async fn add_member(
     // group chat too. `sync_group` converges the participant set to the
     // project's current members — the old `ensure_group` call was idempotent
     // on `project_id` but never actually added the newcomer.
-    sync_group_chat(&state, &project);
+    sync_group_chat(&state.gateway, &project);
     Ok(Json(project))
 }
 
@@ -382,7 +380,7 @@ pub async fn remove_member(
     // Design 27 §8.3: the removed member leaves the project group chat
     // too — participant removal is what revokes their read access to the
     // group's execution sessions (the chat history itself is kept).
-    sync_group_chat(&state, &project);
+    sync_group_chat(&state.gateway, &project);
     Ok(Json(project))
 }
 
@@ -424,7 +422,7 @@ pub async fn transfer_owner(
     // the group chat participant set and fire the doorbell (same as add/remove).
     // The new owner rides the same call, so the group's `chat.md` governance
     // moves with the project instead of staying on the demoted former owner.
-    sync_group_chat(&state, &project);
+    sync_group_chat(&state.gateway, &project);
     Ok(Json(project))
 }
 
