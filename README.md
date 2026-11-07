@@ -9,6 +9,8 @@
   <a href="https://www.rust-lang.org"><img src="https://img.shields.io/badge/language-Rust-ff6600" alt="Language" /></a>
   <a href="./docs/design/zh/"><img src="https://img.shields.io/badge/docs-design-brightgreen" alt="Docs" /></a>
   <a href="./apps/acowork-desktop/"><img src="https://img.shields.io/badge/status-alpha-orange" alt="Status" /></a>
+  <a href="https://discord.gg/4xGRnwvFQV"><img src="https://img.shields.io/badge/discord-join-5865F2?logo=discord&amp;logoColor=white" alt="Discord" /></a>
+  <a href="https://deepwiki.com/acowork/acowork"><img src="https://img.shields.io/badge/deepwiki-ask-5B4EE8" alt="DeepWiki" /></a>
 </p>
 
 <p align="center">
@@ -165,6 +167,7 @@ Full build, packaging, CI, and deployment guide: [`dev/README.md`](./dev/README.
 ## 📚 Documentation
 
 - Architecture design: [`docs/design/zh/`](./docs/design/zh/)
+- AI-generated code wiki (DeepWiki): [deepwiki.com/acowork/acowork](https://deepwiki.com/acowork/acowork)
 - Module-level design: [`docs/module-design/zh/`](./docs/module-design/zh/)
 - Design notes & decision history: [`docs/adr/zh/`](./docs/adr/zh/)
 - Developer conventions: [`AGENTS.md`](./AGENTS.md)
