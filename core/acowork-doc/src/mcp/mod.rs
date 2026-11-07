@@ -590,6 +590,24 @@ mod tests {
             "a bad status must be reported: {v}"
         );
 
+        // Malformed arguments are named, not swallowed into a default answer:
+        // "status": 5 used to fall back to the pending queue, which looks like
+        // a correct answer to a question that was never understood.
+        let v = call_shared(&router, "doc_list_requests", json!({ "status": 5 }), actor).await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("invalid arguments"),
+            "a wrongly-typed argument must be rejected: {v}"
+        );
+        let v = call_shared(&router, "doc_list_trash", json!({ "limit": "many" }), actor).await;
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("invalid arguments"),
+            "a wrongly-typed limit must be rejected: {v}"
+        );
+
         // Filtered by document: the reference is resolved, not passed through.
         let v = call_shared(&router, "doc_mkdir", json!({ "path": "p2-req" }), actor).await;
         assert!(v["error"].is_null(), "mkdir: {v}");

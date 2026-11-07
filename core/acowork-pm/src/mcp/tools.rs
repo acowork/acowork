@@ -47,6 +47,8 @@ pub async fn dispatch(
         "pm_get_task" => pm_get_task(state, args).await,
 
         // ── 需要身份的只读（自查）───────────────────────────────────
+        // Deprecated alias of `pm_list_tasks(assignee = caller)` — see the
+        // alias note above `pm_check_task`.
         "pm_list_my_tasks" => {
             let a = require_actor(actor)?;
             let mut args = args;
@@ -55,14 +57,15 @@ pub async fn dispatch(
             }
             pm_list_tasks(state, actor, args).await
         }
-        // ── Deprecated aliases (design 32 §3.1, D1) ──────────────────
-        // Each alias translates its arguments and then runs the *same*
-        // handler as the tool it points at, so the answer is byte-identical
-        // by construction: one implementation, nothing to drift. The old
-        // shapes are deliberately retired — `pm_check_task` returned a flat
-        // review summary, `pm_list_my_tasks` a bare array, `pm_reparent_task`
-        // `{ok:true}`; a caller reads the field it needs out of the canonical
-        // answer instead. Folded away in the next minor (plan T4-5).
+        // Deprecated alias — sits next to the read tools it shares a family
+        // with, not in the alias block at the bottom. All three aliases
+        // (`pm_check_task`, `pm_list_my_tasks`, `pm_reparent_task`) translate
+        // their arguments and then run the *same* handler as their target, so
+        // the answer is byte-identical by construction: one implementation,
+        // nothing to drift (design 32 §3.1, D1). The old shapes are retired —
+        // a flat review summary, a bare array, `{ok:true}`; callers read the
+        // field they need out of the canonical answer. Folded away in the next
+        // minor (plan §9.3).
         "pm_check_task" => pm_get_task(state, args).await,
 
         // ── 状态变更（需要身份）──────────────────────────────────────
@@ -86,6 +89,7 @@ pub async fn dispatch(
             let a = require_actor(actor)?;
             pm_submit_task(state, a, args).await
         }
+        // Deprecated alias of `pm_update_task(parent_task_id = …)`.
         "pm_reparent_task" => {
             let a = require_actor(actor)?;
             let mut args = args;

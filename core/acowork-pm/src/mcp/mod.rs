@@ -1176,7 +1176,8 @@ mod tests {
         );
     }
 
-    /// e2e：deprecated 别名与其主工具返回**逐字节相同**的 JSON（设计 32 D1）。
+    /// e2e: a deprecated alias returns byte-identical JSON to its target
+    /// (design 32 D1).
     ///
     /// This is the guarantee that makes the aliases safe to keep in
     /// `tools/list` for a release: there is one handler, so no amount of

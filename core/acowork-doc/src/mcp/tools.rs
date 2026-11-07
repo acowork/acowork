@@ -1453,11 +1453,9 @@ struct ListRequestsArgs {
 /// `doc_list_requests` — the review queue, so a lost `request_id` is not a
 /// lost change.
 async fn doc_list_requests(state: &DocState, args: Value) -> Result<Value> {
-    let a: ListRequestsArgs = parse_args("doc_list_requests", args).unwrap_or(ListRequestsArgs {
-        status: None,
-        reference: None,
-        limit: None,
-    });
+    // No `unwrap_or(default)` here: that would answer a malformed call with a
+    // plausible-looking queue, and the caller would never learn it was wrong.
+    let a: ListRequestsArgs = parse_args("doc_list_requests", args)?;
     let status = match a.status.as_deref().map(str::trim) {
         None | Some("") | Some("pending") => Some(RequestStatus::Pending),
         Some("approved") => Some(RequestStatus::Approved),
@@ -1527,7 +1525,7 @@ struct ListTrashArgs {
 /// `doc_list_trash` — what `doc_remove` took away, with the id to bring it
 /// back.
 async fn doc_list_trash(state: &DocState, args: Value) -> Result<Value> {
-    let a: ListTrashArgs = parse_args("doc_list_trash", args).unwrap_or(ListTrashArgs { limit: None });
+    let a: ListTrashArgs = parse_args("doc_list_trash", args)?;
     let entries = state.trash.list().await?;
     let limit = a.limit.unwrap_or(50).clamp(1, 200);
     let total = entries.len();

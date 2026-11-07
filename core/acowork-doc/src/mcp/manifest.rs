@@ -267,7 +267,7 @@ pub const DOC_TOOL_MANIFEST: &str = r#"{
         "properties": {
           "path": {
             "type": "string",
-            "description": "Relative directory path, e.g. \"研发/临时\". The library root cannot be removed."
+            "description": "Relative directory path, e.g. \"engineering/scratch\". The library root cannot be removed."
           }
         }
       }
