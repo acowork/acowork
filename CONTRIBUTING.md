@@ -171,6 +171,13 @@ cargo clippy --all-targets -- -D warnings      # warnings are errors
 cargo test --workspace --exclude acowork-embed
 ```
 
+> **`CARGO_TARGET_DIR` must be rooted at `core/`.** End-to-end test executables are
+> built with `CARGO_TARGET_DIR=target-e2e` — set it from the `core/` directory so the
+> artifacts land in `core/target-e2e` and never in a running process's default
+> `target/`. Run it from a sub-crate (or its `src/`) and a second `target-e2e` tree
+> silently grows inside that crate's source tree (it has already cost us a 2 GB
+> `core/acowork-pm/src/target-e2e`).
+
 ### The red-line checks
 
 `dev/ci.sh check` runs a set of **architecture red lines** — grep-based checks that
