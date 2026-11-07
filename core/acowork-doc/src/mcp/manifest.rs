@@ -212,6 +212,65 @@ pub const DOC_TOOL_MANIFEST: &str = r#"{
           }
         }
       }
+    },
+    {
+      "name": "doc_list_requests",
+      "description": "List review requests — the answer to \"what did I submit that is still waiting?\". doc_check_request needs a request_id, and that id only exists in the write response; if your context was compacted the pending change would otherwise be unreachable and unrevertible. Defaults to the pending queue. Use this at the start of a session to find changes waiting on a human, and before re-submitting work you are unsure about.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": ["pending", "approved", "rejected", "expired", "all"],
+            "default": "pending",
+            "description": "Review state to list. `all` drops the filter."
+          },
+          "reference": {
+            "type": "string",
+            "description": "Restrict to one document: a doc_id (doc-xxxx) or a library path ending in .md."
+          },
+          "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+        }
+      }
+    },
+    {
+      "name": "doc_list_trash",
+      "description": "List deleted documents that can still be restored, each with the trash_id needed by doc_restore. doc_remove only moves a document to the trash — use this and doc_restore to undo a deletion instead of rewriting the file.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "limit": { "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }
+        }
+      }
+    },
+    {
+      "name": "doc_restore",
+      "description": "Restore a document from the trash back into the directory it was deleted from. Undo for doc_remove. Needs the same edit right the deletion needed. There is no purge tool: an agent can undo a deletion, never make one irreversible.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["trash_id"],
+        "properties": {
+          "trash_id": {
+            "type": "string",
+            "pattern": "^tr-[a-f0-9]{12}$",
+            "description": "Trash slot id from doc_list_trash."
+          }
+        }
+      }
+    },
+    {
+      "name": "doc_rmdir",
+      "description": "Remove an EMPTY directory. Refuses when the directory still holds documents or sub-directories, and never cascades: deleting a whole subtree by naming one path is how an information architecture disappears by accident. Empty it first, bottom-up.",
+      "inputSchema": {
+        "type": "object",
+        "required": ["path"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Relative directory path, e.g. \"研发/临时\". The library root cannot be removed."
+          }
+        }
+      }
     }
   ]
 }"#;
@@ -230,7 +289,7 @@ mod tests {
     #[test]
     fn manifest_parses_to_expected_tool_count() {
         let tools = manifest_tools();
-        assert_eq!(tools.len(), 9, "resource+action surface: 9 doc_* tools");
+        assert_eq!(tools.len(), 13, "9 filesystem/review tools + 4 P2 additions (requests, trash, restore, rmdir)");
         for t in &tools {
             assert!(t["name"].as_str().unwrap().starts_with("doc_"));
             assert!(t["description"].as_str().unwrap().len() > 10);

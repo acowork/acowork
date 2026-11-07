@@ -28,8 +28,11 @@ use crate::types::AclRole;
 use crate::service::policy::{gate_owner, gate_write, OwnerGate, WriteGate};
 use crate::service::request::{RequestService, SubmitRequestInput};
 use crate::service::search::SearchService;
+use crate::service::trash::TrashService;
 use crate::state::DocState;
-use crate::types::{DocMeta, ImportSource, RequestStatus, ROOT_DIR_ID};
+use crate::types::{
+    DocMeta, ImportSource, RequestStatus, ROOT_DIR_ID, TRASH_ID_PREFIX,
+};
 
 // ── 身份与参数辅助 ──────────────────────────────────────────────────────
 
@@ -760,6 +763,16 @@ pub async fn dispatch(state: &DocState, actor: Option<&str>, name: &str, args: V
             let actor = require_actor(actor)?;
             doc_remove(state, actor, args).await
         }
+        "doc_rmdir" => {
+            let a = require_actor(actor)?;
+            doc_rmdir(state, a, args).await
+        }
+        "doc_list_requests" => doc_list_requests(state, args).await,
+        "doc_list_trash" => doc_list_trash(state, args).await,
+        "doc_restore" => {
+            let a = require_actor(actor)?;
+            doc_restore(state, a, args).await
+        }
 
         // 未知工具 → 协议级 method-not-found（tools/call 已校验存在，
         // 防御未知分支）
@@ -1412,4 +1425,222 @@ mod tests {
     }
 }
 
+// ── Review-request and trash surfaces (design 32 §3, P2) ────────────────
+//
+// Three questions an agent cannot answer today:
+//
+// * "what did I submit that is still waiting?" — `doc_check_request` needs a
+//   `request_id`, and that id exists only in the write response. Compaction
+//   drops it, and the pending change is then unreachable *and* unrevertible.
+// * "what is in the trash?" — `doc_remove` promises a recoverable delete but
+//   the recovery surface was REST-only, so the promise was not keepable from
+//   an agent session.
+// * "how do I restructure the library?" — `doc_mkdir` existed with no
+//   counterpart, so directory trees could be grown but never pruned.
 
+#[derive(Deserialize)]
+struct ListRequestsArgs {
+    /// `pending` (default) | `approved` | `rejected` | `expired`.
+    #[serde(default)]
+    status: Option<String>,
+    /// Restrict to one document (`doc-…` id or a library path).
+    #[serde(default)]
+    reference: Option<String>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `doc_list_requests` — the review queue, so a lost `request_id` is not a
+/// lost change.
+async fn doc_list_requests(state: &DocState, args: Value) -> Result<Value> {
+    let a: ListRequestsArgs = parse_args("doc_list_requests", args).unwrap_or(ListRequestsArgs {
+        status: None,
+        reference: None,
+        limit: None,
+    });
+    let status = match a.status.as_deref().map(str::trim) {
+        None | Some("") | Some("pending") => Some(RequestStatus::Pending),
+        Some("approved") => Some(RequestStatus::Approved),
+        Some("rejected") => Some(RequestStatus::Rejected),
+        Some("expired") => Some(RequestStatus::Expired),
+        Some("all") => None,
+        Some(other) => {
+            return Err(DocError::BadRequest(format!(
+                "unknown status `{other}`; valid: pending | approved | rejected | expired | all"
+            )));
+        }
+    };
+
+    let requests = match &a.reference {
+        Some(reference) => {
+            let (_dir, meta) =
+                resolve_target(state.dirs.as_ref(), state.docs.as_ref(), reference).await?;
+            let meta = meta.ok_or_else(|| DocError::DocNotFound(reference.clone()))?;
+            state.requests.list_for_doc(&meta.doc_id).await?
+        }
+        None => state.requests.list(status).await?,
+    };
+
+    let limit = a.limit.unwrap_or(50).clamp(1, 200);
+    let total = requests.len();
+    let page: Vec<Value> = requests
+        .into_iter()
+        .take(limit)
+        .map(|r| {
+            let mut v = json!({
+                "request_id": r.request_id,
+                "doc_id": r.doc_id,
+                "status": request_status_str(r.status),
+                "submitted_by": r.submitted_by,
+                "submitted_at": r.created_at,
+            });
+            if let Some(note) = &r.review_note {
+                v["review_note"] = Value::String(note.clone());
+            }
+            v
+        })
+        .collect();
+
+    Ok(json!({
+        "total": total,
+        "returned": page.len(),
+        "has_more": total > page.len(),
+        "requests": page,
+    }))
+}
+
+fn request_status_str(status: RequestStatus) -> &'static str {
+    match status {
+        RequestStatus::Pending => "pending",
+        RequestStatus::Approved => "approved",
+        RequestStatus::Rejected => "rejected",
+        RequestStatus::Expired => "expired",
+    }
+}
+
+#[derive(Deserialize)]
+struct ListTrashArgs {
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// `doc_list_trash` — what `doc_remove` took away, with the id to bring it
+/// back.
+async fn doc_list_trash(state: &DocState, args: Value) -> Result<Value> {
+    let a: ListTrashArgs = parse_args("doc_list_trash", args).unwrap_or(ListTrashArgs { limit: None });
+    let entries = state.trash.list().await?;
+    let limit = a.limit.unwrap_or(50).clamp(1, 200);
+    let total = entries.len();
+    let page: Vec<Value> = entries
+        .into_iter()
+        .take(limit)
+        .map(|e| {
+            json!({
+                "trash_id": e.trash_id,
+                "doc_id": e.doc_id,
+                "original_name": e.original_name,
+                "original_dir_id": e.original_dir_id,
+                "deleted_at": e.deleted_at,
+                "file_size_bytes": e.file_size_bytes,
+                "creator": e.creator,
+            })
+        })
+        .collect();
+    Ok(json!({
+        "total": total,
+        "returned": page.len(),
+        "has_more": total > page.len(),
+        "entries": page,
+    }))
+}
+
+#[derive(Deserialize)]
+struct RestoreArgs {
+    trash_id: String,
+}
+
+/// `doc_restore` — undo a `doc_remove`.
+///
+/// The gate mirrors the REST endpoint: restoring writes a document back into
+/// its directory, so it needs the same edit right the delete needed. There is
+/// deliberately **no purge** counterpart: an agent may undo a deletion, never
+/// make one irreversible.
+async fn doc_restore(state: &DocState, actor: &str, args: Value) -> Result<Value> {
+    let a: RestoreArgs = parse_args("doc_restore", args)?;
+    if !a.trash_id.starts_with(TRASH_ID_PREFIX) {
+        return Err(DocError::BadRequest(format!(
+            "trash ids start with `{TRASH_ID_PREFIX}`, got: {}",
+            a.trash_id
+        )));
+    }
+    let slot = state
+        .trash
+        .list()
+        .await?
+        .into_iter()
+        .find(|e| e.trash_id == a.trash_id)
+        .ok_or_else(|| DocError::DocNotFound(a.trash_id.clone()))?;
+
+    state
+        .acl
+        .check_trashed(
+            &ActorCtx {
+                id: Some(actor.to_string()),
+                is_admin: false,
+            },
+            &slot,
+            AclRole::Edit,
+        )
+        .await?;
+
+    let meta = state.trash.restore(&a.trash_id).await?;
+    let path = PathCtx::new(state.dirs.as_ref())
+        .doc(state.docs.as_ref(), &meta.doc_id)
+        .await
+        .unwrap_or_default();
+    Ok(json!({
+        "restored": true,
+        "doc_id": meta.doc_id,
+        "name": meta.name,
+        "path": path,
+    }))
+}
+
+#[derive(Deserialize)]
+struct RmdirArgs {
+    path: String,
+}
+
+/// `doc_rmdir` — remove an **empty** directory.
+///
+/// Deliberately not the REST behaviour: `DELETE /api/dirs/{id}` cascades a
+/// whole subtree into the trash. An agent that names the wrong path would
+/// sweep away an information architecture in one call, so this refuses unless
+/// the directory is empty and makes the caller name what it means to delete.
+async fn doc_rmdir(state: &DocState, actor: &str, args: Value) -> Result<Value> {
+    let a: RmdirArgs = parse_args("doc_rmdir", args)?;
+    let path = a.path.trim().trim_matches('/');
+    if path.is_empty() {
+        return Err(DocError::BadRequest(
+            "doc_rmdir requires a non-empty `path` (the root cannot be removed)".into(),
+        ));
+    }
+    let _ = actor;
+    let dir_id = resolve_dir(state.dirs.as_ref(), path).await?;
+    if dir_id == ROOT_DIR_ID {
+        return Err(DocError::BadRequest(
+            "doc_rmdir cannot remove the library root".into(),
+        ));
+    }
+    let tree = state.dirs.list_tree(&dir_id).await?;
+    if !tree.files.is_empty() || !tree.dirs.is_empty() {
+        return Err(DocError::BadRequest(format!(
+            "`{path}` is not empty ({} document(s), {} sub-director(ies)); \
+             move or remove its contents first — doc_rmdir never cascades",
+            tree.files.len(),
+            tree.dirs.len()
+        )));
+    }
+    state.dirs.delete(&dir_id).await?;
+    Ok(json!({ "removed": true, "path": path }))
+}
