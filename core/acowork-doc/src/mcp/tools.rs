@@ -78,6 +78,32 @@ async fn gate_structural(
     }
 }
 
+/// `edit` 闸门，作用在**目标目录**上——所有“往别人的节点里放东西”的创建操作
+/// 都先过这一关。
+///
+/// 与结构性闸门的分工：结构性操作（移动/删除）动的是节点本身，按**创建人**
+/// 裁决（[`gate_structural`]）；创建动的是父目录的**内容**，按目录的
+/// **节点 ACL** 裁决。两者都是 REST 面已有的规则，这里只是让 MCP 面追上：
+/// `POST /api/dirs`（`api/dirs.rs`）与 `POST /api/docs`（`api/docs.rs`）都对
+/// 目标目录做 `AclTarget::Dir` + `Edit`。
+///
+/// 新增文档改自 / 追加到别人已存在的文档，走的是 `gate_write`（转 `Review`
+/// 审核队列）；**创建**没有可审核的对象，所以只剩这道节点闸门——缺了它，
+/// agent 就能把内容写进用户显式收紧过的目录，而 REST 面会拒。
+async fn gate_create(state: &DocState, actor: &str, parent_dir_id: &str) -> Result<()> {
+    state
+        .acl
+        .check(
+            &ActorCtx {
+                id: Some(actor.to_string()),
+                is_admin: false,
+            },
+            AclTarget::Dir(parent_dir_id),
+            AclRole::Edit,
+        )
+        .await
+}
+
 /// 参数解析：缺省字段走 `default`；**未知字段直接报错**；类型错误给清晰信息。
 ///
 /// 每个 Args 结构都带 `deny_unknown_fields`：模型拼错字段名（`titel`）时 serde
@@ -384,14 +410,17 @@ async fn doc_mkdir(state: &DocState, actor: &str, args: Value) -> Result<Value> 
         ));
     }
     let parent_dir_id = resolve_dir_or_root(state.dirs.as_ref(), parent_path).await?;
+    gate_create(state, actor, &parent_dir_id).await?;
     let meta = state
         .dirs
         .create(CreateDirectoryInput {
             parent_dir_id,
             name: name.to_string(),
-            // Provenance only — MCP agent calls are not ACL-enforced in v1
-            // (see `service::acl` module docs); the creator stamp keeps
-            // "who made this" answerable.
+            // The creator stamp is not provenance-only any more: it is what
+            // the structural gate (`gate_structural` → `gate_owner`) reads
+            // when someone later tries to rename or prune this directory, so
+            // the agent that creates a bucket becomes the one that governs
+            // it.
             creator: Some(actor.to_string()),
         })
         .await?;
@@ -489,6 +518,11 @@ async fn doc_write(state: &DocState, actor: &str, args: Value) -> Result<Value> 
                     "creating needs a path (it supplies the directory and the file name)".into(),
                 ));
             }
+            // Creating is the one write with no review fallback: there is no
+            // existing document to propose a change to, so the target
+            // directory's own ACL is the only gate — same rule the REST face
+            // applies (`POST /api/docs` → `AclTarget::Dir` + `Edit`).
+            gate_create(state, actor, &dir_id).await?;
             let title = stem_of_ref(&a.reference)?;
             limit::ensure_document_size(a.content.len(), state.config.max_doc_size_bytes)?;
             let import = import_of(actor, &a.source_workspace, &a.source_path);
@@ -1276,8 +1310,7 @@ mod tests {
 
     /// The same fall-through must not open an explicitly ACL-locked node.
     #[tokio::test]
-    async fn unowned_document_with_a_restrictive_acl_still_denies() {
-        let (_tmp, state) = setup().await;
+    async fn unowned_document_with_a_restrictive_acl_still_denies() {        let (_tmp, state) = setup().await;
         const OTHER: &str = "inst-0000-0000-0000-0000-000000000002";
         let meta = state
             .docs
@@ -1444,6 +1477,149 @@ mod tests {
         assert_eq!(v["name"], "abs");
         let tree = state.dirs.list_tree("root").await.unwrap();
         assert!(tree.dirs.iter().any(|d| d.name == "abs"));
+    }
+
+    /// **Creation is gated on the target directory's ACL, like the REST face.**
+    ///
+    /// `doc_mkdir` and `doc_write(mode=create)` were the last two ungated entry
+    /// points: an agent could seed a directory a user had explicitly
+    /// restricted, while `POST /api/dirs` / `POST /api/docs` refused the same
+    /// call. Both now route through [`gate_create`].
+    #[tokio::test]
+    async fn creating_inside_a_restricted_directory_is_denied() {
+        let (_tmp, state) = setup().await;
+        const OTHER: &str = "inst-0000-0000-0000-0000-000000000002";
+
+        ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "私有" })).await;
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "私有/已存在.md", "mode": "create", "content": "x" }),
+        )
+        .await;
+        let dir = state
+            .dirs
+            .list_tree(ROOT_DIR_ID)
+            .await
+            .unwrap()
+            .dirs
+            .into_iter()
+            .find(|d| d.name == "私有")
+            .expect("dir exists");
+
+        // Lock it to one principal; the creator keeps access by construction.
+        state
+            .acl
+            .set(
+                &ActorCtx {
+                    id: Some("human".into()),
+                    is_admin: false,
+                },
+                AclTarget::Dir(&dir.dir_id),
+                Some(vec![crate::types::Ace {
+                    principal: AGENT.into(),
+                    role: AclRole::Edit,
+                }]),
+            )
+            .await
+            .unwrap();
+
+        // 1. outside agent cannot create a sub-directory in it …
+        let e = err(&state, Some(OTHER), "doc_mkdir", json!({ "path": "私有/子目录" })).await;
+        assert!(matches!(e, DocError::AclDenied { .. }), "got {e:?}");
+
+        // 2. … and cannot seed a document into it.
+        let e = err(
+            &state,
+            Some(OTHER),
+            "doc_write",
+            json!({ "ref": "私有/注入.md", "mode": "create", "content": "x" }),
+        )
+        .await;
+        assert!(matches!(e, DocError::AclDenied { .. }), "got {e:?}");
+
+        // 3. Nothing was created by the two refused calls.
+        let listing = ok(&state, None, "doc_list", json!({ "path": "私有" })).await;
+        assert_eq!(listing["total"], 1, "{listing}");
+
+        // 4. The principal that owns the directory still works.
+        let v = ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": "私有/子目录" })).await;
+        assert_eq!(v["name"], "子目录");
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": "私有/提案.md", "mode": "create", "content": "mine" }),
+        )
+        .await;
+        assert_eq!(v["status"], "applied");
+    }
+
+    /// **Design 32 §5.5, verified against the real resolver.**
+    ///
+    /// The PM surface publishes `doc_path` (`项目管理/{project_id}`); this is
+    /// the other half of the contract — that the string is addressable, and
+    /// that it is **not** created implicitly. `doc_write` into a missing
+    /// directory chain fails with `DirNotFound`, so the convention's carrier
+    /// skill must create the chain first. A typo therefore surfaces as an
+    /// error instead of silently building a parallel tree.
+    #[tokio::test]
+    async fn the_project_document_directory_round_trips() {
+        let (_tmp, state) = setup().await;
+        let doc_path = acowork_core::doc_layout::project_doc_dir("p-1a2b3c");
+
+        // Writing before the chain exists is refused, and the error names the
+        // segment that is missing (the actionable half).
+        let e = err(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": format!("{doc_path}/PRD.md"), "mode": "create", "content": "# PRD" }),
+        )
+        .await;
+        match e {
+            DocError::DirNotFound(seg) => assert_eq!(seg, "directory path segment: 项目管理"),
+            other => panic!("expected DirNotFound, got {other:?}"),
+        }
+
+        // The convention's two-step setup: root, then the project directory.
+        ok(
+            &state,
+            Some(AGENT),
+            "doc_mkdir",
+            json!({ "path": acowork_core::doc_layout::PROJECT_DOC_ROOT }),
+        )
+        .await;
+        ok(&state, Some(AGENT), "doc_mkdir", json!({ "path": doc_path })).await;
+
+        // Now the published path addresses a document.
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": format!("{doc_path}/PRD.md"), "mode": "create", "content": "# PRD" }),
+        )
+        .await;
+        assert_eq!(v["path"], format!("{doc_path}/PRD.md"));
+        // The human face of the directory: an H1 in README.md, not a nice
+        // directory name (the directory is a machine handle).
+        let v = ok(
+            &state,
+            Some(AGENT),
+            "doc_write",
+            json!({ "ref": format!("{doc_path}/README.md"), "mode": "create", "content": "# 项目" }),
+        )
+        .await;
+        assert_eq!(v["status"], "applied");
+        let read = ok(
+            &state,
+            None,
+            "doc_read",
+            json!({ "ref": format!("{doc_path}/README.md") }),
+        )
+        .await;
+        assert_eq!(read["content"], "# 项目");
     }
 }
 
