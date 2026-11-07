@@ -216,6 +216,15 @@ async fn emit_fallback_receipt(
             action: "chat".to_string(),
             params_json: serde_json::json!({ "message": body }).to_string(),
             source_chat_session_id: req.source_chat_session_id.clone(),
+            // The receipt re-enters the initiator's conversation, exactly as a
+            // live response does: the surface it was granted is the surface the
+            // request recorded, and the origin's human presence is the fact the
+            // initiator's turn needs in order to ask.
+            chat_grant: crate::http::intent_api::chat_grant(
+                &req.source_chat_session_id,
+                true,
+                req.has_human,
+            ),
             repo: String::new(),
             session_config_json: String::new(),
             kind: "response".to_string(),

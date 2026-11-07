@@ -602,6 +602,21 @@ GET /api/agents/{id}/sessions?as_user=<user_id>
 
 **实现记录**：`acowork-core`（字段 + `is_readable_by` 放行 + proto field 17 + `ToolContext.initiator`）、`acowork-gateway`（`aware_users_seed`，`deliver_intent`/`deliver_response`/sweeper fallback receipt 三处 seed——后两者覆盖"回执到达时原会话已关、新开 `AgentResponse` 会话"的黑盒漏洞；`pm_task_initiator`）、`acowork-runtime`（`IntentEnvelope.aware_users`、`create_intent_session` stamp、`set_aware_users` write-once、`intent_send` 转发 `on_behalf_of` + `source_chat_session_id`）、`acowork-sqlite`（列映射）、`acowork-memory`（schema v12）、`acowork-pm`（dispatch 携带 `Project::owner()`）。测试：core `aware_users_tests`(5)（读放行/写不放行/空列表惰性/Members 叠加/Private 覆盖）、gateway `aware_users_seed_tests`(6)（并集去重/非空/originator 判别/PM initiator）、runtime `intent_session_stamps_aware_users_on_meta`。完整计划与评审记录：[docs/plan/zh/intent-agent-to-agent-human-visibility-plan.md](../../plan/zh/intent-agent-to-agent-human-visibility-plan.md)。
 
+#### §决策 4 v4：绑定 ≠ 义务——应答方的 Chat 授予只按成员资格算
+
+**触发**：同 v3 的 intent 排查（2026-11-07）。v3 解决了"agent↔agent 执行会话对人类不可见（黑盒）"，但 §决策 4 那句"Gateway 在投递时创建或复用一个执行会话，**绑定到发起方所在的同一个 Chat session**"被实现成了一条**写入义务**：应答方 turn 往发起方的 Chat 写引用行。1:1 Chat 只有一个 agent 参与者，于是从 1:1 转发的 Intent 永远 403。
+
+**决策**：`绑定` 这个词在本节里从此只有两个可分离的含义，且必须分开说：
+
+| 含义 | 承载字段 | 谁有权 |
+|---|---|---|
+| **问责/可见性**：这条对话属于哪个 Chat（repo 注入、`aware_users`、sweeper 告警锚点、回执地址） | 信箱条目 `source_chat_session_id`（来源） | 平台内部事实，不构成写权限 |
+| **写入义务**：应答方 turn 欠哪个 Chat 一行引用/一张卡 | 投递授予值 `ChatGrant.surface`（应答方信封携带） | 仅当应答方 ∈ 该 Chat 参与者 |
+
+agent 转发的 Intent：来源仍是发起方的 Chat，**授予为空**——应答方的执行会话不绑发起方的 Chat，它只属于这两个 agent；它的转述由发起方以自己的名义写进自己的 Chat。人类发起的投递（群聊 `@`、回执行块、PM 任务派发）：授予成立，且**成员资格不成立时投递前拒绝**，不允许"运行成功但答案没人能读"（详见 ADR-106 修订 2026-11-07）。
+
+**与 v3 的关系**：`initiator` / `aware_users` 语义一字未动——只读知情权仍由 ACL 并集保证，跳转入口（发起方气泡里指向应答方执行会话的快捷方式）另单，且它不得复用执行块图标：那个图标说的是"本 Chat 绑定了这个会话"。
+
 ### 决策 5：管理员角色 — `role = "admin"` 绕过过滤 + 特殊权限
 
 **admin 创建流程**：

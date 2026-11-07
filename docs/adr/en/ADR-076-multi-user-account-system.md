@@ -582,6 +582,21 @@ Exactly one injection point each: the Gateway writes these two headers only in `
 
 **Implementation record**: `acowork-core` (field + `is_readable_by` grant + proto field 17 + `ToolContext.initiator`), `acowork-gateway` (`aware_users_seed`, seeded at three call sites — `deliver_intent`, `deliver_response`, and the sweeper's fallback receipt; the latter two close the black-box hole where a response/receipt arrives after the initiator's session closed and `route_intent_session` opens a fresh `AgentResponse` session; `pm_task_initiator`), `acowork-runtime` (`IntentEnvelope.aware_users`, the `create_intent_session` stamp, write-once `set_aware_users`, `intent_send` forwarding `on_behalf_of` + `source_chat_session_id`), `acowork-sqlite` (column mapping), `acowork-memory` (schema v12), `acowork-pm` (dispatch carries `Project::owner()`). Tests: core `aware_users_tests` (5: read grant / no write / empty-is-inert / Members overlay / Private override), gateway `aware_users_seed_tests` (6: union + dedupe / non-emptiness / originator discrimination / PM initiator), runtime `intent_session_stamps_aware_users_on_meta`. Full plan and review record: [docs/plan/zh/intent-agent-to-agent-human-visibility-plan.md](../../plan/zh/intent-agent-to-agent-human-visibility-plan.md).
 
+#### §Decision 4 v4: binding ≠ obligation — the responder's Chat grant is computed from membership only
+
+**Trigger**: the same Intent investigation (2026-11-07). v3 fixed "an agent↔agent execution session is invisible to humans (a black box)", but §Decision 4's sentence "the Gateway creates or reuses an execution session **bound to the same Chat session the initiator is in**" had been implemented as a **write obligation**: the responder's turn writes its reference row into the initiator's Chat. A 1:1 Chat has exactly one agent participant, so every Intent forwarded out of a 1:1 Chat failed with 403.
+
+**Decision**: the word *binding* now carries two separable meanings, and they must be stated separately:
+
+| Meaning | Carrier | Who holds the right |
+|---|---|---|
+| **Accountability / visibility**: which Chat this conversation belongs to (repo injection, `aware_users`, the sweeper's alert anchor, the reply address) | mailbox entry `source_chat_session_id` (the origin) | an internal platform fact; it grants no write |
+| **Write obligation**: which Chat the responder's turn owes a reference row or a card | the granted value `ChatGrant.surface` (carried by the responder's envelope) | only when the responder is a participant of that Chat |
+
+For an agent-forwarded Intent the origin stays the initiator's Chat but **nothing is granted**: the responder's execution session is not bound to the initiator's Chat, it belongs to those two agents alone, and its report is written by the initiator in its own voice into its own Chat. For a human-authored delivery (group `@`, reply-to-block, PM task dispatch) the grant holds — and when membership does not hold the delivery is **refused before it runs**, because "succeeded, but nobody can read the answer" is not an acceptable outcome (see the ADR-106 revision of 2026-11-07).
+
+**Relation to v3**: `initiator` and `aware_users` are untouched — read-only awareness still comes from the ACL union. The jump entry (a shortcut in the initiator's bubble to the responder's execution session) is a separate ticket, and it must not reuse the execution block's icon: that icon says "this Chat is bound to this session".
+
 ### Decision 5: the admin role — `role = "admin"` bypasses filtering + special privileges
 
 **The admin creation flow**:

@@ -560,6 +560,33 @@ async fn dispatch_task(
     // listener attached afterwards would miss it and degrade a good answer
     // into "no receipt".
     let acceptance_waiter = crate::intent::accept::AcceptanceWaiter::register(&message_id);
+    // A human-authored dispatch has no relay of its own: the answer's durable
+    // home IS the block this group projects for the responder's round (design
+    // 27 §9-8 — a task response is relayed, nobody is woken). So membership is
+    // not a preference here, it is the condition under which the human will
+    // ever see the result. A target outside this roster would run with no
+    // surface and answer into nowhere — a working run that produces an
+    // invisible answer is worse than a refusal, and it is the black-box entry
+    // this platform has already ruled out once. Refuse before the session
+    // exists, in the shape PM's dispatcher already treats as retryable.
+    let target_in_group = session
+        .participants
+        .iter()
+        .any(|p| p.id() == req.target_agent);
+    if !target_in_group {
+        return Ok(Json(serde_json::json!({
+            "status": "failed",
+            "error_code": "target_not_in_project_group",
+            "error": format!(
+                "target {t} is not a member of the project group {chat}; add it to the \
+                 project before dispatching, or the answer will have no surface to be \
+                 read from",
+                t = req.target_agent,
+                chat = chat_session_id,
+            ),
+        })));
+    }
+    let chat_grant = chat_grant(&chat_session_id, target_in_group, Some(true));
     let dreq = delivery::DeliveryRequest {
         message_id: message_id.clone(),
         conversation_id: conversation_id.clone(),
@@ -583,6 +610,7 @@ async fn dispatch_task(
         })
         .to_string(),
         source_chat_session_id: chat_session_id.clone(),
+        chat_grant,
         repo,
         session_config_json: String::new(),
         // A human dispatch, not a peer request: `pm_task` keeps the
@@ -591,7 +619,12 @@ async fn dispatch_task(
         kind: acowork_core::intent::TurnOrigin::PmTask.as_str().to_string(),
         in_reply_to: String::new(),
         status: String::new(),
-        // PM dispatch lands in a project group the human owner belongs to.
+        // PM dispatch lands in a project group the human owner belongs to: this
+        // is the ORIGIN's fact, recorded in the mailbox for the turns that
+        // report back into that group. What the responder may ask is carried by
+        // `chat_grant` above, and it reads `false` when the target turned out
+        // not to be in this group — a card that cannot be written is worse than
+        // no card, because the turn parks on it forever.
         has_human: Some(true),
         // PM attachments live in the PM store, not the Chat session's
         // `files/` dir — nothing to pin here (the chat row is written with
@@ -1046,6 +1079,49 @@ pub struct IntentRequest {
 /// the sole local account" is satisfied by the scope tier, not by seeding;
 /// this function deliberately does not special-case local mode.
 ///
+/// The Chat a delivery grants its receiver, and what that grant says about
+/// human presence (ADR-106 D3's obligation surface; design 27 §5.4.5 R2).
+///
+/// One decision, two outputs, because the two must never disagree: a turn that
+/// may write into a Chat may also park a card there and may block on a human in
+/// it, and a turn that may not must not be handed a `has_human` that suggests
+/// otherwise — the availability gate reads exactly that fact to decide whether
+/// `ask_user_question` is offered at all. A card parked in a Chat the writer
+/// cannot write to is the same defect as the reference row that used to be
+/// written there: it fails after the session exists and the round is open.
+///
+/// The grant is withheld on membership alone — the one fact the receiver cannot
+/// forge, the Gateway already holds, and the Chat store enforces on the write.
+/// An agent that is not a participant of the Chat the message came from has no
+/// writable surface in it, so its turn runs agent-to-agent: the answer returns
+/// to the initiator, and the initiator reports it in its own Chat, in its own
+/// voice, under its own avatar. The responder's execution session is reachable
+/// from there as a shortcut, never as a binding — the two sessions belong to
+/// two different conversations.
+///
+/// `origin_has_human` is the Chat's own human presence as the Gateway derived it
+/// from the session it loaded (never from the sender). With no Chat at all the
+/// result stays `None` = unknown: an unbound turn keeps its human-facing tools,
+/// which is the documented cron shape, not an accident.
+pub(crate) fn chat_grant(
+    origin_chat: &str,
+    receiver_is_participant: bool,
+    origin_has_human: Option<bool>,
+) -> delivery::ChatGrant {
+    let chat = origin_chat.trim();
+    if chat.is_empty() {
+        return delivery::ChatGrant::default();
+    }
+    if receiver_is_participant {
+        delivery::ChatGrant { surface: Some(chat.to_string()), has_human: origin_has_human }
+    } else {
+        // No surface ⇒ no human reachable through it. This is a fact about the
+        // surface, not a guess about the Chat: the Chat may well have a human,
+        // and that human is served by the initiator's turn, not this one.
+        delivery::ChatGrant { surface: None, has_human: Some(false) }
+    }
+}
+
 /// Shared with `deliver_response` and the fallback sweeper: a response or
 /// a timeout receipt can open a *fresh* initiator session when the one the
 /// request created has since been closed (origin `AgentResponse`), and the
@@ -1218,12 +1294,23 @@ async fn deliver_intent(
     // §5.5.4 answerability fact for the responder's turn (plan 2b.3):
     // derived from the session we just bound to, never from the sender.
     let mut has_human: Option<bool> = None;
+    // Is the TARGET a participant of the Chat above? Decided here, from the
+    // server-side roster, because it is the whole difference between a turn
+    // that owes this Chat a reference row and one that owes it nothing — and
+    // the sender's word on it would be a forgery (§4.1).
+    let mut receiver_is_participant = false;
     if let Some(port) = user_port {
         if source_chat_session_id.is_empty() {
             match chat_client::ensure_pair(port, &req.sender, &req.target, "agent_agent").await {
                 Ok(s) => {
                     has_human = s.has_human_participant();
                     source_chat_session_id = s.session_id;
+                    // The pair session is created for exactly these two agents,
+                    // so the target belongs to it by construction. This is the
+                    // one agent-to-agent shape where the responder DOES have a
+                    // surface: it is a Chat both of them are in, and no human's
+                    // 1:1 conversation.
+                    receiver_is_participant = true;
                 }
                 Err(e) => tracing::warn!(
                     error = %e, sender = %req.sender, target = %req.target,
@@ -1240,6 +1327,10 @@ async fn deliver_intent(
                             "intent sender is not a participant of the source chat session",
                         ));
                     }
+                    receiver_is_participant = session
+                        .participants
+                        .iter()
+                        .any(|p| p.id() == req.target);
                     has_human = session.has_human_participant();
                     if let Some(r) = session.repo.filter(|r| !r.is_empty()) {
                         repo = r;
@@ -1253,6 +1344,15 @@ async fn deliver_intent(
             }
         }
     }
+    // ADR-106 D3 / design 27 §5.4.5 R2: the origin stays the conversation's
+    // durable surface — the mailbox records it, the reply address points at it,
+    // the sweeper alerts there, and the initiator reports the dispatch and the
+    // receipt into it. What the RESPONDER is granted is a separate decision,
+    // and a 1:1 Chat grants its single agent's counterpart nothing: forwarding
+    // the Chat id along as if it did is what made every agent-to-agent Intent
+    // started from a 1:1 Chat fail with a non-participant write refused inside
+    // the responder's own `open_round`.
+    let chat_grant = chat_grant(&source_chat_session_id, receiver_is_participant, has_human);
 
     // ADR-076 §决策 4 (rev.): this handler is the agent-to-agent path —
     // `req.sender` is an agent instance, so the session it creates has no
@@ -1306,6 +1406,7 @@ async fn deliver_intent(
         )))
         .unwrap_or_default(),
         source_chat_session_id,
+        chat_grant,
         repo,
         session_config_json: req
             .session_config
@@ -1594,6 +1695,18 @@ async fn deliver_response(
         )))
             .unwrap_or_default(),
         source_chat_session_id: entry.source_chat_session_id.clone(),
+        // The response re-enters the INITIATOR's conversation, and the
+        // initiator's membership in that Chat is not re-guessed here: it was
+        // verified server-side when the request was accepted (or the pair
+        // session was created for the two of them). So the surface is granted
+        // — and granting it is what lets the initiator report the receipt in
+        // its own Chat, in its own voice, which is the whole human-visible half
+        // of an agent-to-agent exchange.
+        chat_grant: chat_grant(
+            &entry.source_chat_session_id,
+            true,
+            entry.has_human,
+        ),
         repo: String::new(),
         session_config_json: String::new(),
         kind: "response".to_string(),
@@ -2217,6 +2330,26 @@ async fn deliver_mentions(
     // dropped and never re-decided — see [`validate_mention_addresses`].
     validate_mention_addresses(&req.target_sessions, &req.force_new_for, &targets, &req.refs)?;
 
+    // An `@` that names an agent outside this Chat's roster is refused here,
+    // before the shared row exists. Not a politeness: a human-authored round's
+    // answer is read from the block this Chat projects for that agent's round,
+    // so an agent with no surface here would run and answer into nowhere. And
+    // it is never a silent drop — §5.4.5 R4's rule is to refuse and say so, in
+    // the same shape as `dispatch_task`'s gate.
+    {
+        let outsiders: Vec<&str> = targets
+            .iter()
+            .filter(|t| !session.participants.iter().any(|p| p.id() == **t))
+            .map(String::as_str)
+            .collect();
+        if !outsiders.is_empty() {
+            return Err(ApiError::bad_request(&format!(
+                "@ names an agent that is not a participant of this session: {}",
+                outsiders.join(", ")
+            )));
+        }
+    }
+
     // ADR-106 revision 2026-11-04: pin the reference material BEFORE the row
     // exists. A pin that cannot be resolved answers 400/502 and the row is
     // never written — the coordinates on a durable row are facts, and a row
@@ -2448,6 +2581,12 @@ async fn deliver_mentions(
             action: "chat".to_string(),
             params_json: params.to_string(),
             source_chat_session_id: req.chat_session_id.clone(),
+            // A group `@` addresses the target **in this Chat**, and the
+            // roster gate above established that every target here is a member
+            // of it — so the surface is granted, and the round's reference row
+            // belongs here. This is the case the rule keeps: `@B` is what puts
+            // B in the group.
+            chat_grant: chat_grant(&req.chat_session_id, true, Some(true)),
             repo: repo.clone(),
             session_config_json: String::new(),
             // §5.4.5 role table: a group @ is human input — the target
@@ -2944,6 +3083,18 @@ async fn deliver_chat_message(
         let object = params.as_object_mut().expect("chat params are an object");
         object.insert("attached_items".to_string(), serde_json::json!(attached_items));
     }
+    // The agent taking this turn was resolved from this Chat's own roster (1:1:
+    // its single agent; group: the agent the replied-to block names), so
+    // membership is not assumed here — it is enforced. A human's reply that
+    // landed on a non-member would be answered into a surface this Chat does not
+    // project, i.e. an answer nobody can read; refuse, the same rule as
+    // `dispatch_task`.
+    if !session.participants.iter().any(|p| p.id() == target) {
+        return Err(ApiError::bad_request(
+            "chat-message targets an agent that is not a participant of this session",
+        ));
+    }
+    let chat_grant = chat_grant(&req.chat_session_id, true, Some(true));
     let dreq = delivery::DeliveryRequest {
         aware_users: Vec::new(),
         message_id: message_id.clone(),
@@ -2954,6 +3105,7 @@ async fn deliver_chat_message(
         action: "chat".to_string(),
         params_json: params.to_string(),
         source_chat_session_id: req.chat_session_id.clone(),
+        chat_grant,
         repo: repo.clone(),
         session_config_json: req
             .session_config
@@ -3475,6 +3627,53 @@ mod chat_params_tests {
         assert_eq!(params[CHAT_ATTACHMENTS_PARAM], serde_json::json!([]));
         // An absent `chat.md` override keeps its pre-existing wire shape.
         assert_eq!(params["chat_prompt"], serde_json::Value::Null);
+    }
+
+    /// The grant decision, one case at a time. It is a four-line function and
+    /// it is the whole difference between an agent-to-agent exchange that
+    /// works and one that fails permanently: the surface a responder is handed
+    /// is where its turn writes, and a 1:1 Chat has exactly one agent
+    /// participant — so handing the counterpart that Chat was a guaranteed
+    /// refusal (2026-11-07).
+    #[test]
+    fn a_peer_request_out_of_a_one_to_one_chat_grants_the_responder_no_surface() {
+        let grant = chat_grant("chat-nicholas-sse", false, Some(true));
+        assert_eq!(grant.surface, None);
+        assert_eq!(
+            grant.has_human,
+            Some(false),
+            "withheld surface and an answerable human must never travel together"
+        );
+    }
+
+    /// A group `@`, a PM dispatch into a project the target belongs to, and an
+    /// ensured agent-agent pair all share one shape: the responder is in the
+    /// Chat, so it keeps the surface and the Chat's own human fact.
+    #[test]
+    fn a_responder_that_belongs_to_the_chat_keeps_it() {
+        let grant = chat_grant("chat-project-group", true, Some(true));
+        assert_eq!(grant.surface.as_deref(), Some("chat-project-group"));
+        assert_eq!(grant.has_human, Some(true));
+        // The pair Chat has no human, and that is the honest answer, not a
+        // withheld one.
+        let pair = chat_grant("chat-sse-pm", true, Some(false));
+        assert_eq!(pair.surface.as_deref(), Some("chat-sse-pm"));
+        assert_eq!(pair.has_human, Some(false));
+    }
+
+    /// No Chat at all is a third case, and it must not read as "withheld":
+    /// a cron trigger has no surface AND no answerability claim, which is what
+    /// keeps its turn's human-facing tools available (documented cron shape).
+    #[test]
+    fn a_delivery_with_no_chat_grants_nothing_and_claims_nothing() {
+        for blank in ["", "   "] {
+            let grant = chat_grant(blank, false, Some(true));
+            assert_eq!(grant.surface, None, "a blank Chat id names no surface");
+            assert_eq!(
+                grant.has_human, None,
+                "and asserts nothing about a human — unknown, not absent"
+            );
+        }
     }
 
     /// ADR-106 D6 level 1: replying to a block is addressing, so the reference
