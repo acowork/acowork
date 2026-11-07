@@ -28,12 +28,20 @@ type = "Network"
 # Project Manager focuses on requirements analysis, task decomposition,
 # progress tracking, risk assessment, and team coordination. Tools cover those
 # workflows:
-#   - file_*/doc_reader/glob_search/content_search → project docs, status reports
-#   - http_request/web_fetch                      → research tools/methodologies
-#   - mcp_memory__* (hosted memory MCP, ADR-101)   → project history & decisions
-#   - intent_send                                  → coordinate team member agents
-#   - ask_user_question, todo_write                → clarify requirements & track tasks
-# No shell tools — PM does not hold a Shell permission.
+#   - pm_*  (hosted project service)              → THE task system of record:
+#                                                   projects, tasks, assignment,
+#                                                   approval gates, activity
+#   - doc_* (hosted document service)             → PRDs, plans, reports and notes:
+#                                                   versioned, shared, reviewable
+#   - mcp_memory__* (hosted memory MCP, ADR-101)  → project history & decisions
+#   - intent_send                                 → coordinate team member agents
+#   - ask_user_question, todo_write               → clarify requirements & track tasks
+#   - doc_reader                                   → one-off PDF/Office extraction
+#
+# Shell tools are declared as a cross-platform detection set, not a core
+# workflow dependency: PM work happens through pm_* and doc_*, and the
+# declarations stay so a task that genuinely needs a local command can use one
+# after the user grants it.
 
 # --- Memory (ADR-101) ---
 # `memory_recall` / `memory_store` are no longer built-ins, so nothing is declared
