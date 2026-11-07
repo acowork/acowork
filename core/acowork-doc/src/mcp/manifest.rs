@@ -297,6 +297,67 @@ mod tests {
         }
     }
 
+    /// **The manifest and the implementation must agree on field names**, in
+    /// both directions (design 32 §7 D2). Either direction is a real defect: a
+    /// field the implementation accepts but the schema omits is invisible to
+    /// the caller, and a field the schema promises but the server ignores makes
+    /// the caller's input vanish without an error.
+    #[test]
+    fn manifest_properties_equal_impl_fields() {
+        use std::collections::BTreeSet;
+
+        let tools = manifest_tools();
+        for (name, fields) in crate::mcp::tools::MANIFEST_FIELDS {
+            let tool = tools
+                .iter()
+                .find(|t| t["name"].as_str() == Some(name))
+                .unwrap_or_else(|| panic!("`{name}` is implemented but missing from the manifest"));
+            let declared: BTreeSet<&str> = tool["inputSchema"]["properties"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(|k| k.as_str())
+                .collect();
+            let implemented: BTreeSet<&str> = fields.iter().copied().collect();
+            assert_eq!(
+                declared,
+                implemented,
+                "`{name}`: manifest and implementation disagree (only-in-manifest: {:?}, only-in-impl: {:?})",
+                declared.difference(&implemented).copied().collect::<Vec<_>>(),
+                implemented.difference(&declared).copied().collect::<Vec<_>>(),
+            );
+        }
+    }
+
+    /// Every tool the server lists must be on the reconciliation table —
+    /// otherwise the table is opt-in, and opt-in is how a schema drifts with
+    /// nobody noticing.
+    #[test]
+    fn manifest_fields_cover_every_tool() {
+        use std::collections::BTreeSet;
+
+        let tools = manifest_tools();
+        let covered: BTreeSet<&str> = crate::mcp::tools::MANIFEST_FIELDS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let unguarded: Vec<&str> = tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .filter(|name| !covered.contains(name))
+            .collect();
+        assert!(
+            unguarded.is_empty(),
+            "tools missing from MANIFEST_FIELDS (their schema is unreconciled): {unguarded:?}"
+        );
+        for (name, _) in crate::mcp::tools::MANIFEST_FIELDS {
+            assert!(
+                tools.iter().any(|t| t["name"].as_str() == Some(*name)),
+                "unknown tool in MANIFEST_FIELDS: {name}"
+            );
+        }
+    }
+
     /// The whole point of the redesign: governance must not appear in a tool
     /// name, and the "each use case gets its own verb" trio must be gone.
     #[test]

@@ -430,6 +430,26 @@ mod tests {
         assert_eq!(value["error"]["code"], METHOD_NOT_FOUND);
     }
 
+    /// A misspelled argument name must be an error naming the key, not a
+    /// silently dropped field (which would "succeed" while writing nothing).
+    #[tokio::test]
+    async fn misspelled_argument_names_the_field_instead_of_vanishing() {
+        let (router, _tmp) = shared_router().await;
+        let v = call_shared(
+            &router,
+            "doc_write",
+            json!({ "ref": "a.md", "mode": "create", "conten": "typo" }),
+            Some("3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"),
+        )
+        .await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default().to_string();
+        assert!(msg.contains("conten"), "must name the offending key: {v}");
+        assert!(msg.contains("content"), "must list accepted names: {v}");
+        // And nothing was created.
+        let v = call_shared(&router, "doc_list", json!({}), None).await;
+        assert_eq!(content(&v)["items"].as_array().unwrap().len(), 0, "{v}");
+    }
+
     #[tokio::test]
     async fn anonymous_write_tool_is_forbidden() {
         let value = call("doc_mkdir", json!({ "path": "新目录" }), None).await;
@@ -506,6 +526,125 @@ mod tests {
         // The root is never removable.
         let v = call_shared(&router, "doc_rmdir", json!({ "path": "" }), actor).await;
         assert!(!v["error"].is_null(), "root removal must be refused: {v}");
+    }
+
+    /// Regression: `{"removed": true}` must mean the directory is gone from the
+    /// tree, not just that the handler returned. The service used to mark only
+    /// the subtree beneath the target, never the target's own entry in its
+    /// parent index, so `doc_list` kept listing it and a second `doc_rmdir`
+    /// reported success again.
+    #[tokio::test]
+    async fn rmdir_really_removes_the_directory_from_the_tree() {
+        let (router, _tmp) = shared_router().await;
+        let actor = P2_ACTOR;
+
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-gone" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir parent: {v}");
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-gone/leaf" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir leaf: {v}");
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-gone/leaf" }), actor).await;
+        assert!(v["error"].is_null(), "rmdir: {v}");
+        assert_eq!(content(&v)["removed"], true);
+
+        // 1. no longer listed under its parent …
+        let v = call_shared(&router, "doc_list", json!({ "path": "p3-gone" }), actor).await;
+        assert!(v["error"].is_null(), "list: {v}");
+        let names: Vec<String> = content(&v)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            !names.contains(&"leaf".to_string()),
+            "removed dir still listed: {names:?}"
+        );
+
+        // 2. a second removal fails instead of reporting success twice …
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-gone/leaf" }), actor).await;
+        assert!(!v["error"].is_null(), "second rmdir must fail: {v}");
+
+        // 3. … and the name is free again.
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-gone/leaf" }), actor).await;
+        assert!(v["error"].is_null(), "name must be reusable: {v}");
+    }
+
+    /// Regression: pruning a directory is a structural op, so it carries the
+    /// same ownership gate as `doc_move` / `doc_remove` — and the same one the
+    /// REST face (`DELETE /api/dirs/:id` → `AclTarget::Dir` + `Edit`) applies.
+    #[tokio::test]
+    async fn rmdir_is_ownership_gated() {
+        let (router, _tmp) = shared_router().await;
+        const OWNER: Option<&str> = Some("11111111-2222-4333-8444-555555555555");
+        const OTHER: Option<&str> = Some("99999999-8888-4777-8666-555555555555");
+
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-mine" }), OWNER).await;
+        assert!(v["error"].is_null(), "mkdir: {v}");
+
+        // Someone else cannot remove it …
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-mine" }), OTHER).await;
+        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "{v}");
+        // … and it is still there afterwards.
+        let v = call_shared(&router, "doc_list", json!({}), OWNER).await;
+        let names: Vec<String> = content(&v)["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["name"].as_str().unwrap_or_default().to_string())
+            .collect();
+        assert!(
+            names.contains(&"p3-mine".to_string()),
+            "dir must survive: {names:?}"
+        );
+
+        // The owner can.
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-mine" }), OWNER).await;
+        assert!(v["error"].is_null(), "owner rmdir: {v}");
+    }
+
+    /// Regression: "empty" counts the recycle bin. Otherwise pruning strands
+    /// the slot and `doc_restore` resurrects a document into a directory that
+    /// no listing can show.
+    #[tokio::test]
+    async fn rmdir_refuses_while_the_recycle_bin_still_targets_it() {
+        let (router, _tmp) = shared_router().await;
+        let actor = P2_ACTOR;
+
+        let v = call_shared(&router, "doc_mkdir", json!({ "path": "p3-bin" }), actor).await;
+        assert!(v["error"].is_null(), "mkdir: {v}");
+        let v = call_shared(
+            &router,
+            "doc_write",
+            json!({ "ref": "p3-bin/x.md", "mode": "create", "content": "body" }),
+            actor,
+        )
+        .await;
+        assert!(v["error"].is_null(), "write: {v}");
+        let v = call_shared(&router, "doc_remove", json!({ "ref": "p3-bin/x.md" }), actor).await;
+        assert!(v["error"].is_null(), "remove: {v}");
+
+        // The directory looks empty to `doc_list`, but the slot still owns it.
+        let v = call_shared(&router, "doc_rmdir", json!({ "path": "p3-bin" }), actor).await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("recycle bin"),
+            "a bin-backed dir must be refused: {v}"
+        );
+
+        // Restore still works, and reports where the document landed.
+        let v = call_shared(&router, "doc_list_trash", json!({}), actor).await;
+        assert!(v["error"].is_null(), "list_trash: {v}");
+        let trash_id = content(&v)["entries"][0]["trash_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let v = call_shared(&router, "doc_restore", json!({ "trash_id": trash_id }), actor).await;
+        assert!(v["error"].is_null(), "restore: {v}");
+        let payload = content(&v);
+        assert_eq!(
+            payload["path"], "p3-bin/x.md",
+            "restore must report the real path: {v}"
+        );
     }
 
     #[tokio::test]
