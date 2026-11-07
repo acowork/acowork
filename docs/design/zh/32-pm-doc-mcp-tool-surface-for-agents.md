@@ -229,6 +229,13 @@ PM 的规划产出落文档库，固定形态：
 - 词汇表**封闭**：产出物文件名只允许上述集合，agent 不得自造名。新增一类产出须先改本节。
 - 单向依赖：**PM 引用 doc，doc 不知道 PM**。这是两个服务之间唯一的耦合点。
 
+**这条约定以工具响应字段发布，不以 prompt 文案发布**（P3.1 修正）：
+
+- `pm_create_project` / `pm_get_project` / `pm_list_projects` / `pm_update_project` 的响应都带 `doc_path = "项目管理/{project_id}"`，字符串由 `acowork_core::doc_layout` 提供（PM 渲染、Doc 侧测试引用，两侧同一常量）。
+- 理由：写进 prompt 的约定会被上下文压缩吃掉，且覆盖不到未改造的 agent 与用户自建 agent；工具响应字段则被压缩后仍可重读，并且天然进入模板。
+- **不隐式建目录**：`doc_write` 遇到不存在的父目录报 `DirNotFound`（逐级），所以约定要配一个建树序列（`doc_mkdir` 根 → `doc_mkdir` `doc_path`）。这是刻意的——自动建父目录会让拼错的路径静默长出一棵平行树。
+- **谁建谁治理**：`doc_mkdir` 把调用方记为创建人，结构操作（改名/删除）只对创建人放行。所以 `项目管理/**` 必须由 PM agent 自己建，代建等于把治理权交给别人。
+
 ---
 
 ## 6. 官方 Agent 融合改造范围
@@ -240,16 +247,16 @@ PM 的规划产出落文档库，固定形态：
 | `prompts/system.md` | 新增 §5.1 状态机 / §5.2 派工模型 / §5.4 ID 纪律 / §5.5 路径约定；`todo_write` 降级为「会话内临时清单」——凡跨会话或需他人履约的，一律落 PM 服务 |
 | `manifest.toml` | 补 `[[mcp_servers]] hosted = "doc"`（产出物需要文档库）；`tool_deps` 声明 `pm_*` / `doc_*`；`capabilities` 指向新增 skill；**shell 三件套保留**，仅修 D4 矛盾注释 |
 | 现有 7 skills | 全部重写 `tool_deps` 与步骤：`requirements-analysis` → doc 发布 + `pm_create_project`；`task-decomposition` → `parent_task_id` + `depends_on` + `start_at` 建真树；`progress-tracking` → `only_blocked` + `pm_get_project` 计数；`sprint-planning` → `type=milestone` |
-| 新增 2 skills | `task-dispatch`（成员 → 派工 → 双审批闸 → 跟进全链路，覆盖 M1/M2/M4/M5/M7）、`project-setup`（项目 + 文档目录树 + 名册 bootstrap） |
+| 新增 2 skills | `task-dispatch`（成员 → 派工 → 双审批闸 → 跟进全链路，覆盖 M1/M2/M4/M5/M7）、`project-setup`（项目 + 文档目录树 + 名册 bootstrap，含 `doc_path` 建树序列与创建人归属） |
 
 ### 6.2 `document-manager-agent`
 
 | 文件 | 改造 |
 |---|---|
-| `prompts/system.md` | 新增 §5.3 写入纪律 / §5.4 ID 路径纪律 / §5.5 约定（PM 产出物是它的被服务对象，不得随意搬动 `项目管理/**`）；确立「库是事实源，workspace 只是导入源」 |
+| `prompts/system.md` | 新增 §5.3 写入纪律 / §5.4 ID 路径纪律 / §5.5 约定；确立「库是事实源，workspace 只是导入源」。`项目管理/**` 的规则按**代码实际强制的东西**写：正文改动转审核提案（可接受）、结构改动被拒（`forbidden`，报人）、自己在项目树里建子目录则只有自己能重组它 |
 | `manifest.toml` | `tool_deps` 声明 `doc_*`；修 D4 注释；shell 保留 |
 | 现有 7 skills | `document-collection` 改为「读 workspace（`file_read`，需在 manifest 声明）→ `doc_write(mode=create, source_workspace, source_path)`」；`document-organization` 用 `doc_mkdir` / `doc_move`（**文档**，目录靠移出 + `doc_rmdir` + `doc_mkdir`）/ `doc_rmdir`；`document-quality-review` 用 `doc_read` + `doc_stat` + 审核队列三件 |
-| 新增 1 skill | `review-tracking`（`pending_review` 生命周期，依赖 `doc_list_requests`） |
+| 新增 0 skill | ~~`review-tracking`~~：与 `document-quality-review` 能力重复（后者 `tool_deps` 已含 `doc_list_requests` / `doc_check_request`，`System of Record` 段已覆盖 `pending_review` 生命周期），**不建文件**，内容并入既有 skill |
 
 ---
 

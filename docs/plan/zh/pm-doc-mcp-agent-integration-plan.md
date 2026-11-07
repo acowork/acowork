@@ -191,8 +191,9 @@ graph LR
 | P1 | 14 主工具 + 3 别名（返回逐字节一致）+ `pm_update_task` 吸收 reparent + `pm_update_project` + 状态机表单一事实来源 | pm 163 全绿 |
 | P2 | Doc 9→13：`doc_list_requests`/`doc_list_trash`/`doc_restore`/`doc_rmdir` | doc 170 全绿 |
 | P3 | 2 个 `system.md` 工作区契约 + 14 skill 的 `System of Record` 段 + `tool_deps` 校正 + 两个 manifest 补推荐 MCP（含 ADR-104 的 `tools` 白名单） | — |
+| P3.1 | §5.5 路径约定改为**工具响应字段**（`doc_path`）+ `project-setup` / `task-dispatch` 两个 skill + 创建闸门 + 派工链 e2e + 别名 tripwire + 7 个 `.agent` 重打 | pm 169 / doc 179 全绿，clippy 0 警告 |
 
-**P3 的交付边界（别把这行读成"全做完了"）**：T3-4 的 `task-dispatch` / `project-setup` 与 T3-7 的 `review-tracking` **未建**，设计 32 §5.5 的 `项目管理/{project_id}/**` 路径约定**未写进两个 `system.md`**（全仓 `grep 项目管理 examples/*-agent` 为 0），`start_at` 作为派工唤醒钩子只有两处顺带提及。这三项见 §9.4。|
+P3 首版的交付边界曾如实记为「三个 skill 未建、路径约定只在设计文档里」。P3.1 已把它们补掉，并**改了做法**：路径约定不再是 prompt 里的一句话，而是 `pm_create_project` / `pm_get_project` / `pm_list_projects` / `pm_update_project` 响应里的 `doc_path` 字段（见 §9.2 第 10 条）。三个 skill 变成两个，第三个并入既有 skill（§9.2 第 11 条）。
 
 ### 9.2 实施期与设计不符处（已按实测修正）
 
@@ -206,6 +207,11 @@ graph LR
 | 6 | `doc_rmdir` 复用 REST 删除 | REST 是**级联**删除 | agent 面只删空目录、不级联（写错路径的代价与收益不成比例）。**复核补记**：首版实现报 `{"removed": true}` 却没真删——`LibraryDirectoryService::delete()` 只标记子树、从不标记目标自己在父索引里的条目；且完全没有授权闸门（`let _ = actor`）而 REST 同操作有 `AclTarget::Dir` + `edit`；"空"也没算回收站。三处已修（服务层补父索引标记、结构性闸门收敛为 `gate_structural(target, creator)`、`doc_rmdir` 统计 `original_dir_id == dir_id` 的槽位），并补了四条反向断言。 |
 | 7 | 目录可跨父移动 | `DirMeta` 无 `parent` 字段（父子即物理嵌套），跨父移动需整体搬迁子树 | 本期不做，属独立特性；**设计 32 与 `document-organization` 正文已同步改口**（原写作"`doc_move` 支持目录"） |
 | 8 | `MANIFEST_FIELDS` 对账足够守住 schema | 首版只覆盖 PM 8/17、Doc 0/13：把 `pm_get_task` 的 `task_id` 改名成 `id`，163 个测试仍全绿；`pm_submit_task.attachment_ids`、`pm_list_my_tasks.project_id` 已实际漂移 | 覆盖全部工具（别名在内，Doc 新建同款表），并加 `manifest_fields_cover_every_tool`——"在表上"变成规则而非可选 |
+| 9 | MCP 面与 REST 面授权一致 | **不一致，且比预想更大**：`doc_mkdir` 与 `doc_write(mode=create)` 在 MCP 面**完全没有授权**（`doc_mkdir` 的注释还写着"v1 不对 MCP 做 ACL 强制"），而 REST 面 `POST /api/dirs`、`POST /api/docs` 都对目标目录做 `AclTarget::Dir` + `Edit`。即任何 agent 都能往用户显式收紧过的目录里塞内容 | 两处收敛到 `gate_create`（目标目录的节点 ACL），与 REST 同规则；`doc_mkdir` 的创建人注释改为事实（它现在是结构闸门读取的治理依据）。四条断言：他人被拒、内容未落盘、创建人仍可写、拒绝后不产生条目 |
+| 10 | §5.5 路径约定写进 `system.md` 即可生效 | 写进 prompt 也不可靠：① 上下文压缩后丢失（M2 建 skill 的同一个理由）；② 覆盖不到未改造的 4 个 agent 和用户自建 agent；③ 标题改了就断链的风险被文案掩盖 | 改为**工具响应字段**：`project_to_value` 统一投影 `doc_path`，一次改动覆盖 create/get/list/update 四个工具；字符串落 `acowork_core::doc_layout`（两侧可测的契约，不是复制进 prompt 的字面量）；契约测试钉住"retitle 不改变 `doc_path`"，Doc 侧测试钉住该路径可寻址且**不会隐式创建** |
+| 11 | 需要 3 个新 skill | `document-quality-review` 的 `tool_deps` 已含 `doc_list_requests` / `doc_check_request` / `pm_add_activity`，`System of Record` 段已在写 `pending_review` 生命周期——`review-tracking` 是同一能力的第二个入口 | 3 → 2：`project-setup`、`task-dispatch` 建；`review-tracking` **不建文件**，内容并入既有 skill。验收标准从「skill 文件数」改为「能力是否可达」 |
+| 12 | T4-1 端到端可在一个 crate 内完成 | 扫描器唯一的外部依赖是一次 HTTP POST，**不需要活体 Gateway**；但「写周报进 doc」那一腿不可能在 pm crate 内做（`core/acowork-pm/Cargo.toml` 不依赖 `acowork-doc`），硬塞等于要求双服务活体环境 | 拆 a/b：T4-1a 在 crate 内用 stub Gateway 断言 brief 四要素、`dispatched_at` 幂等、claim → submit → done（已交付）；T4-1b 改为场景脚本证据，不进 CI |
+| 13 | 只有 2 个 `.agent` 包过期 | 加守卫后实测 **7 个里 5 个** `manifest.toml` 过期（`e55a580b` 改了源码 manifest 未重打），两个标杆 agent 则是 prompt 与 manifest 双双过期 | 全部按 `build-agent.sh` 流程重打（zip → sign → verify）；守卫写成测试：包内 `manifest.toml` / `prompts/**` / `skills/**` 与源码逐字节一致，且不得残留源码已删的文件 |
 
 ### 9.3 别名删除 checklist（T4-5，下一 minor）
 
@@ -218,13 +224,13 @@ graph LR
 - [ ] `e2e_deprecated_aliases_answer_exactly_like_their_targets` 删除（它守护的对象已不存在）
 - [ ] 21 §6 / 32 §3.1 的工具数表述同步（17 → 14）
 
-### 9.4 未做（明确排除）
+### 9.4 未做（明确排除，附约束）
 
-- **P2 的 `doc_move` 目录跨父移动、`doc_list(recursive=true)`、`doc_get_acl`/`doc_set_acl`**：见 §9.2 第 7 条与设计 32 §3 的优先级判断。
-- **T3-4 / T3-7 的三个 skill**（`task-dispatch`、`project-setup`、`review-tracking`）：未建。三者是 M2（`start_at` 唤醒）与审核队列闭环的载体，缺它们则「派工链无人教、评审上下文压缩后失联」仍靠 `system.md` 的散文兜着。
-- **设计 32 §5.5 的路径约定**：`项目管理/{project_id}/{PRD,plan,report}.md` 未写进两个 `system.md`，PM↔Doc 的唯一耦合点目前只存在于设计文档里。
-- **T3-8 重打两个 `.agent` 包**：`examples/agent-packages/*.agent` 按 ADR-104 属打包产物，仍带改造前的 prompt（`pm_*`/`doc_*` 引用 0 处、manifest 仍写"No shell tools"）。发布前一并重打，或按 ADR-104 先例保持延后。
-- **T4-1 派工链端到端**：现有 `p0_acceptance_dispatch_chain_needs_no_human_and_no_hand_typed_ids` 覆盖到"建任务 + 读回"，缺"批准 → 扫描器唤醒 → claim → submit → 写周报进 doc"。
-- **T4-2 别名读时迁移表**（`MCP_TOOL_ALIASES`）：未实现，本批对 `core/acowork-runtime` 零改动。别名仍在发行所以不炸，但它被 §9.3 删除门①依赖，删除前必须先补。
-- **另外 4 个官方 agent（product-manager / architect / engineer / QA）**：同样的缺陷，本轮**已回退**未纳入；待本标杆验证后批量套用 §9.1 的 P3 手法（`system.md` 工作区契约 + 每 skill 的 `System of Record` 段 + `tool_deps` 校正）。
-- **设计文档 en 版**：zh 为源（ADR 约定），en 待补。
+- **`review-tracking` skill**：并入 `document-quality-review`，**不建文件**（§9.2 第 11 条）。若日后确实需要独立的"审核跟踪"入口，先说明它比既有 skill 多做什么，再建。
+- **T4-1b（派工链的"写周报进 doc"腿）**：`acowork-pm` 不依赖 `acowork-doc`，放进 CI 等于要求双服务活体环境。改为场景脚本证据：跑 S3 记录 `doc_path` + `doc_write` 结果与截图，进交付记录，不进 CI。
+- **T4-2 别名读时迁移表**（`MCP_TOOL_ALIASES`）：排下个迭代，本批对 `core/acowork-runtime` 零改动。**T4-5（删除三个别名）冻结至 T4-2 落地**，且已加 tripwire（`deprecated_aliases_stay_advertised_until_the_read_path_lands`）——别名消失或 `DEPRECATED` 标记丢失会让测试红，而不是让线上 agent 红。
+- **`doc_move` 跨父移动目录 / `doc_list(recursive=true)` / `doc_get_acl`·`doc_set_acl`**：维持原判断，不立项。`DirMeta` 无 `parent` 字段（父子即物理嵌套），跨父移动是整体搬迁子树，等出现真实失败案例再开。
+- **另外 4 个官方 agent（product-manager / architect / engineer / QA）**：本轮仍未纳入（本批已回退其 skills 改动）。它们的 `.agent` 包因 §9.2 第 13 条的守卫已随源码重打，但 prompt/skill 的 P3 手法未套用；待标杆验证后批量做。
+- **设计 32 en 版**：zh 为源（ADR 约定），en 待补。
+
+**发布门（不可协商）**：任何声称"标杆 agent 已深度融合"的版本，必须带与源码一致的 `.agent` 包。守卫测试已把它变成 CI 事实，不是 checklist 记忆——过去两次过期包都是人工解压才发现的。
