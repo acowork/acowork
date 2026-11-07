@@ -22,6 +22,19 @@ tool_deps:
 
 A knowledge base is only useful if users can find current, trusted answers. Maintenance must reduce duplication, stale content, and unclear ownership.
 
+## System of Record
+
+Maintenance is a sweep of the library plus tracked follow-up.
+
+- Find candidates with `doc_search` / `doc_list` (and `doc_stat` for `updated_at`,
+  `version`, creator) — stale and duplicated pages are visible from metadata.
+- Merging or superseding: `doc_move` the superseded page to an archive directory and
+  `doc_write` the pointer at the old path, or `doc_remove` it into the trash if it is
+  genuinely dead (recoverable via `doc_list_trash` / `doc_restore`).
+- Every recurring maintenance job is a `pm_create_task` with a `start_at` — a
+  schedule that lives only in your head does not exist.
+- `doc_list_requests` before editing: your own pending changes may already cover it.
+
 ## Execution Steps
 
 1. **Audit current state**

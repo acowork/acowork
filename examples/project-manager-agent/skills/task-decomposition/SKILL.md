@@ -27,6 +27,25 @@ Do not decompose vague scope. Start from an approved PRD, design, milestone, or 
 
 Each task must be small enough to complete, review, and verify independently.
 
+## System of Record
+
+The breakdown is not finished when it is written down — it is finished when it is
+**created in the PM service**.
+
+- **One `pm_create_task` per task**, with `project_id`, `title`, `description`,
+  `parent_task_id` when the work nests, `depends_on` for blockers, `priority`, `type`.
+- **`assignee` must already be a project member.** Get the legal set from
+  `pm_get_project` → `members`, or `pm_list_agents(project_id)` → the assignable
+  agents. Use `instance_id`, never `agent_id`. Need someone new?
+  `pm_add_project_member` first (you must own the project).
+- **Nothing assigned yet?** Leave `assignee` off. An unassigned task is honest; a task
+  assigned to a human account can never be dispatched (the chain delivers to agents),
+  so humans are assigned in the Desktop app.
+- **The written breakdown is the mirror, not the record.** `doc_write` the table for
+  humans; the tasks in the service are what dispatch, block, and get approved.
+- Agent-created tasks enter `review_status=pending` and cannot be claimed until a
+  human approves. Say so when you hand off instead of pretending work started.
+
 ## Execution Steps
 
 1. **Confirm source of truth**

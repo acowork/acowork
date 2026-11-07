@@ -26,6 +26,18 @@ A risk is an uncertain future event. An issue is already happening. Do not mix t
 
 Every High or Medium risk needs an owner, trigger, mitigation, contingency, residual risk, and review cadence.
 
+## System of Record
+
+A risk register in a file is a risk nobody watches.
+
+- Each risk worth tracking becomes a `pm_create_task`: `type="risk"`-like framing in
+  the title, `description` carrying impact × probability, trigger, mitigation, owner,
+  and the review date.
+- Mitigation work that is real work gets a `depends_on` link to the task it protects.
+- `pm_add_activity` when a trigger fires or a mitigation changes — that timestamped
+  note is the evidence the risk was managed rather than merely listed.
+- The register itself goes to `doc_write` for humans, and stays the mirror.
+
 ## Execution Steps
 
 1. **Load context and history**

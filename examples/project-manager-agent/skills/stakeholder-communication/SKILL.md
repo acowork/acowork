@@ -26,6 +26,18 @@ Communication must be audience-specific and action-oriented. If the audience nee
 
 Do not hide bad news. State the situation, impact, options, recommendation, and next action.
 
+## System of Record
+
+Report from the service, and record what you reported.
+
+- Pull every number from `pm_list_tasks` / `pm_get_task` before it goes into a report.
+  Quote counts and dates with the filter that produced them.
+- Escalations are tasks, not paragraphs: `pm_create_task` with `type="checkpoint"`
+  and the decision needed in the title, so a human can approve or reject it.
+- Publish the report with `doc_write` (this is what "shared" means); keep the
+  recipient list in the document, not in your memory.
+- `pm_add_activity` on the tracked item when a report changes a commitment.
+
 ## Execution Steps
 
 1. **Identify audience and purpose**

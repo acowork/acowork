@@ -23,6 +23,19 @@ A document is not ready if readers cannot trust it, find what they need, or know
 
 Review against purpose, audience, source accuracy, structure, and maintainability.
 
+## System of Record
+
+A review is a read plus a decision, and both go through the service.
+
+- `doc_stat` (metadata, version, timestamps) then `doc_read` (body). Review the thing
+  that is stored, not a copy you made.
+- Findings that require a change are `pm_create_task` entries with the document path
+  and section; findings you fix yourself are a `doc_write` with `if_version`.
+- Pending changes you are asked about: `doc_list_requests` (`reference=<path>`) shows
+  the queue; `doc_check_request` shows one decision.
+- Record the verdict with `pm_add_activity` on the review task — "reviewed and
+  accepted" with a date is the only durable form of approval.
+
 ## Execution Steps
 
 1. **Load review context**

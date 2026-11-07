@@ -178,3 +178,45 @@ graph LR
 - **其他 4 个官方 agent**（`software-architect` / `senior-engineer` / `quality-assurance` / `product-manager`）的同类改造。它们有**完全相同的病**（注入了 pm/doc MCP、prompt 零引用），本次先立标杆、验证 prompt 结构后再批量套用，避免 6 个一起返工。
 - **`doc_write` 二进制/图片支持**：库是纯 Markdown 文本面，图片需另设资源面。
 - **`agent_id` → `instance_id` 历史数据迁移**：ADR-073 已处理。
+
+---
+
+## 9. 实施结果（P0–P3 收口）
+
+### 9.1 已交付
+
+| 阶段 | 结果 | 测试 |
+|---|---|---|
+| P0 | `pm_list_agents`（双模式）+ `pm_add_project_member` + `pm_add_activity`/`pm_list_activity` + D2/D3/D6/D7 修复 | pm 163 全绿 |
+| P1 | 14 主工具 + 3 别名（返回逐字节一致）+ `pm_update_task` 吸收 reparent + `pm_update_project` + 状态机表单一事实来源 | pm 163 全绿 |
+| P2 | Doc 9→13：`doc_list_requests`/`doc_list_trash`/`doc_restore`/`doc_rmdir` | doc 170 全绿 |
+| P3 | 2 个 `system.md` 工作区契约 + 14 skill 的 `System of Record` 段 + `tool_deps` 校正 + 两个 manifest 补推荐 MCP | — |
+
+### 9.2 实施期与设计不符处（已按实测修正）
+
+| # | 设计假设 | 实测 | 处理 |
+|---|---|---|---|
+| 1 | 别名可返回旧的形状以兼容 | 旧形状与新工具本质不同（裸数组 / 扁平摘要 / `{ok:true}`） | 别名翻译参数后走**同一 handler**，旧形状明确废弃；等价测试断言整体 JSON 相等 |
+| 2 | `review_status=pending` 只含 checkpoint | Agent 建的**任何**任务都待审批（ADR-102） | 测试改为 `pending=N, approved=0` 双向钉住 |
+| 3 | 任务行含 `children` | 无此字段，子树只能 `pm_list_tasks(parent_task_id)` | 文档写明，不扩范围 |
+| 4 | 父链字段名对称 | 入参 `parent_task_id`、行内 `parent_id`（REST/Desktop 已依赖） | 保留不对称，description 明写 |
+| 5 | MCP 测试可跨调用 | `raw()` 每次新建临时库，跨调用状态不存在 | 新增 `shared_router()`/`call_shared()` |
+| 6 | `doc_rmdir` 复用 REST 删除 | REST 是**级联**删除 | agent 面只删空目录、不级联（写错路径的代价与收益不成比例） |
+| 7 | 目录可跨父移动 | `DirMeta` 无 `parent` 字段（父子即物理嵌套），跨父移动需整体搬迁子树 | 本期不做，属独立特性 |
+
+### 9.3 别名删除 checklist（T4-5，下一 minor）
+
+删除 `pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 前逐条确认：
+
+- [ ] 读时迁移落地：`agent_mcp_tools.json` 与本仓库全部 `.agent` 包内**无** `pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 残留（`grep -r` 为空）
+- [ ] 两个官方 agent 的 `tool_deps` 与正文**无**别名引用（本仓库已满足）
+- [ ] `manifest.rs` 中三条 description 的 `DEPRECATED` 标记已存在满一个 minor（0.2.0 → 0.3.0）
+- [ ] `dispatch` 三个别名分支删除，`tools/list` 数从 17 降至 14
+- [ ] `e2e_deprecated_aliases_answer_exactly_like_their_targets` 删除（它守护的对象已不存在）
+- [ ] 21 §6 / 32 §3.1 的工具数表述同步（17 → 14）
+
+### 9.4 未做（明确排除）
+
+- **P2 的 `doc_move` 目录跨父移动、`doc_list(recursive=true)`、`doc_get_acl`/`doc_set_acl`**：见 §9.2 第 7 条与设计 32 §3 的优先级判断。
+- **另外 4 个官方 agent（product-manager / architect / engineer / QA）**：同样的缺陷，本轮**已回退**未纳入；待本标杆验证后批量套用 §9.1 的 P3 手法（`system.md` 工作区契约 + 每 skill 的 `System of Record` 段 + `tool_deps` 校正）。
+- **设计文档 en 版**：zh 为源（ADR 约定），en 待补。

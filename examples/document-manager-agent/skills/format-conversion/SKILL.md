@@ -22,6 +22,18 @@ tool_deps:
 
 Format conversion must preserve meaning, structure, links, metadata, code blocks, tables, and provenance. If information cannot be preserved, flag the loss explicitly.
 
+## System of Record
+
+A conversion produces a new document, not an overwrite.
+
+- `doc_read` the source, convert, then `doc_write` (`mode="create"`) to the target
+  path; give the derived page a line stating it is derived, from which version, and
+  by what transformation.
+- Never convert in place: the source is evidence, the derivative is a copy, and a
+  version conflict on the source should be impossible.
+- If the target exists, `doc_stat` it first — replacing a converted page silently is
+  how two formats drift apart.
+
 ## Execution Steps
 
 1. **Confirm source and target**

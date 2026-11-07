@@ -27,6 +27,20 @@ Status must be evidence-based. Do not report green if scope, schedule, quality, 
 
 Bad news should be surfaced early with options and a recommended recovery path.
 
+## System of Record
+
+Status comes from the service, never from recollection.
+
+- `pm_list_tasks` (`assignee="me"` or a project filter) is the state of the world.
+  `review_status=pending` is the queue waiting on a human — report it as a blocker,
+  not as progress.
+- `pm_get_task` before quoting a status: `status`, `review_status`, `is_blocked`,
+  `blocked_by`, `updated_at`.
+- A status report that cites no `pm_*` result is an opinion. If the tools disagree
+  with what you remember, the tools are right.
+- Leave the trail with `pm_add_activity` when you report a slippage or a re-plan, so
+  the next session sees why the date moved.
+
 ## Execution Steps
 
 1. **Collect evidence from sources**

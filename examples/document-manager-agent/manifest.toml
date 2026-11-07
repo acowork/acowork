@@ -121,6 +121,10 @@ hosted = "doc"
 why = "Read and write the shared document library instead of local files"
 
 [[mcp_servers]]
+hosted = "pm"
+why = "Collection, conversion and archive chores are tracked as tasks with owners and dates instead of living in notes"
+
+[[mcp_servers]]
 preset = "docling"
 why = "Convert PDF / Office files the built-in doc_reader cannot parse"
 

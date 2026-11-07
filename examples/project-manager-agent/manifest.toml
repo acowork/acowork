@@ -117,6 +117,10 @@ why = "Create and track tasks, dependencies and milestones in the project servic
 hosted = "memory"
 why = "Keep meeting decisions and commitments across sessions"
 
+[[mcp_servers]]
+hosted = "doc"
+why = "PRDs, plans, reports and meeting notes go into the shared library, versioned and reviewable — not to local files"
+
 [capabilities.requirements_analysis]
 description = "Analyze and document project requirements into a structured PRD"
 skills = ["requirements-analysis"]

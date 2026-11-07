@@ -22,6 +22,19 @@ tool_deps:
 
 Archiving should preserve retrievability and context. Do not simply move files without metadata, reason, status, and replacement path when applicable.
 
+## System of Record
+
+Archiving is a move with a rule, not a delete with a hope.
+
+- `doc_move` the retired document into the archive directory; it keeps its id,
+  version and history. Say in the body (or in the index page) *why* it was retired and
+  what replaced it.
+- Only genuinely valueless content goes to `doc_remove` (trash). `doc_list_trash`
+  and `doc_restore` are the undo; there is no purge, so do not promise permanence.
+- Directory pruning after an archive sweep: `doc_rmdir` empties bottom-up, refuses a
+  non-empty directory, and never cascades.
+- Retention follow-up is a `pm_create_task` with a due date, not a note.
+
 ## Execution Steps
 
 1. **Identify archive candidates**

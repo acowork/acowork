@@ -26,6 +26,19 @@ The value of meeting notes is decisions and follow-through, not transcription.
 
 Every decision needs rationale. Every action item needs one owner, due date, and success condition.
 
+## System of Record
+
+Notes are worth nothing if the actions in them evaporate.
+
+- Write the notes with `doc_write` (raw notes and decisions, with attendees and
+  date).
+- **Every action item becomes a `pm_create_task`** with the owner resolved through
+  `pm_list_agents(project_id)`; if the owner is a human, say in the note that it is
+  assigned in the Desktop app — do not put a human account in `assignee`.
+- Decisions that change scope get `pm_add_activity` on the affected task, so the
+  change has a date and an author.
+- Link the note from the task description (document path), not the other way only.
+
 ## Execution Steps
 
 1. **Prepare context**

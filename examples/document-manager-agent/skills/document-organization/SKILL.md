@@ -22,6 +22,19 @@ tool_deps:
 
 Organize documents around how readers find and use information, not around how files happened to be created.
 
+## System of Record
+
+The library structure is the file system of the doc service — restructure it there.
+
+- `doc_mkdir` creates a directory (one level at a time; the parent must exist).
+- `doc_move` moves and renames documents and directories. When renaming a directory,
+  move contents bottom-up: its children keep their paths relative to it.
+- `doc_rmdir` removes an **empty** directory only and never cascades — if it refuses,
+  the directory still holds documents or sub-directories; empty it deliberately.
+- Do not "reorganize" by rewriting bodies: a moved document keeps its id and history,
+  a rewritten one loses both.
+- Publish the resulting map with `doc_write` so humans can see the target structure.
+
 ## Execution Steps
 
 1. **Load inventory and conventions**
