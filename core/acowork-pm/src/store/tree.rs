@@ -659,32 +659,27 @@ fn parse_task_id(s: &str) -> Result<TaskId> {
 
 /// 状态流转合法校验（对齐设计文档 §4 状态机图）。
 fn validate_transition(from: TaskStatus, to: TaskStatus, task_id: &TaskId) -> Result<()> {
-    let allowed = match from {
-        // `pending → rejected`：人类驳回一个 Agent 刚建、从未开工的任务
-        // （创建审批的 reject 分支，区别于结果审核的 `submitted → rejected`）。
-        TaskStatus::Pending => matches!(
-            to,
-            TaskStatus::InProgress | TaskStatus::Rejected | TaskStatus::Cancelled
-        ),
-        TaskStatus::InProgress => matches!(
-            to,
-            TaskStatus::Pending | TaskStatus::Submitted | TaskStatus::Cancelled
-        ),
-        TaskStatus::Submitted => matches!(to, TaskStatus::Done | TaskStatus::Rejected),
-        TaskStatus::Done => matches!(to, TaskStatus::InProgress),
-        TaskStatus::Rejected => {
-            matches!(to, TaskStatus::Pending | TaskStatus::InProgress | TaskStatus::Cancelled)
-        }
-        TaskStatus::Cancelled => false,
-    };
-    if !allowed {
-        return Err(PmError::InvalidStateTransition {
-            task_id: task_id.to_string(),
-            from: from.board_column().to_string(),
-            to: to.board_column().to_string(),
-        });
+    // The table lives on `TaskStatus` so the error message and the check
+    // cannot disagree (design 32 T1-6).
+    let legal = from.legal_successors();
+    if legal.contains(&to) {
+        return Ok(());
     }
-    Ok(())
+    let allowed = if legal.is_empty() {
+        "(none — terminal status)".to_string()
+    } else {
+        legal
+            .iter()
+            .map(|s| s.board_column())
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    Err(PmError::InvalidStateTransition {
+        task_id: task_id.to_string(),
+        from: from.board_column().to_string(),
+        to: to.board_column().to_string(),
+        allowed,
+    })
 }
 
 /// **创建审批闸门**：Agent 创建的任务（`review_status=pending`）未经人类

@@ -86,11 +86,17 @@ pub enum PmError {
     TooManyAttachments(String),
 
     // ── 状态机 ────────────────────────────────────────────────────────
-    #[error("invalid state transition for task {task_id}: {from} → {to}")]
+    #[error(
+        "invalid state transition for task {task_id}: {from} → {to}; from {from} you may go to: {allowed}"
+    )]
     InvalidStateTransition {
         task_id: String,
         from: String,
         to: String,
+        /// Comma-separated legal successors of `from` (`"(none — terminal)"`
+        /// when there are none). Quoted in the message so a caller does not
+        /// have to rediscover the state machine by trial and error.
+        allowed: String,
     },
 
     /// Agent 创建的任务尚未经人类审批（`review_status=pending`），
@@ -299,6 +305,7 @@ mod tests {
                     task_id: "t-x".into(),
                     from: "done".into(),
                     to: "pending".into(),
+                    allowed: "pending, in_progress".into(),
                 },
                 400,
                 "invalid_state_transition"
@@ -432,6 +439,7 @@ mod tests {
                 task_id: "t".into(),
                 from: "a".into(),
                 to: "b".into(),
+                allowed: "c".into(),
             },
             PmError::ReviewNotApproved { task_id: "t".into() },
             PmError::Io(io::Error::other("x")),

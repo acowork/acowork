@@ -141,6 +141,44 @@ impl TaskStatus {
     }
 }
 
+impl TaskStatus {
+    /// The legal successors of this status — the state machine as data.
+    ///
+    /// Single source of truth for two consumers: [`validate_transition`]
+    /// rejects anything outside this set, and the rejection message quotes it
+    /// so the caller learns what it *could* have done instead of just that it
+    /// was wrong. An agent that cannot run `pm_update_task` a second time on a
+    /// guess needs the legal moves in the first error.
+    ///
+    /// ([`validate_transition`]: crate::store::tree::validate_transition)
+    pub fn legal_successors(self) -> &'static [TaskStatus] {
+        match self {
+            // `pending → rejected`: a human rejects an agent-created task that
+            // never started (creation review), distinct from the `submitted →
+            // rejected` result review.
+            TaskStatus::Pending => &[
+                TaskStatus::InProgress,
+                TaskStatus::Rejected,
+                TaskStatus::Cancelled,
+            ],
+            TaskStatus::InProgress => &[
+                TaskStatus::Pending,
+                TaskStatus::Submitted,
+                TaskStatus::Cancelled,
+            ],
+            TaskStatus::Submitted => &[TaskStatus::Done, TaskStatus::Rejected],
+            TaskStatus::Done => &[TaskStatus::InProgress],
+            TaskStatus::Rejected => &[
+                TaskStatus::Pending,
+                TaskStatus::InProgress,
+                TaskStatus::Cancelled,
+            ],
+            // Terminal, and not reopenable by hand: a cancelled task is history.
+            TaskStatus::Cancelled => &[],
+        }
+    }
+}
+
 /// 任务类型。
 ///
 /// - `task`：普通任务

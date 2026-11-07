@@ -3366,4 +3366,71 @@ mod tests {
         assert_eq!(t["title"], "Renamed", "an unrelated field must survive");
     }
 
+
+    // ── T1-6: a rejected transition names the moves that are legal ───────
+
+    #[tokio::test]
+    async fn invalid_transition_error_lists_the_legal_moves() {
+        let (router, store) = test_router_and_store().await;
+        let agent = "pm-fsm";
+        let v = call_tool(
+            &router,
+            Some(agent),
+            2,
+            "pm_create_project",
+            json!({ "title": "FSM" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(agent),
+            3,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": agent }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        approve_creation(&store, &tid).await;
+        call_tool(&router, Some(agent), 4, "pm_claim_task", json!({ "task_id": tid })).await;
+
+        // in_progress → done is not a legal move (the work must be submitted).
+        let v = call_tool(
+            &router,
+            Some(agent),
+            5,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "done" }),
+        )
+        .await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("in_progress") && msg.contains("submitted"),
+            "the error must name the current status and where it may go: {v}"
+        );
+
+        // Cancelled is terminal: say so instead of listing nothing.
+        call_tool(
+            &router,
+            Some(agent),
+            6,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "cancelled" }),
+        )
+        .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            7,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "in_progress" }),
+        )
+        .await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("terminal"),
+            "a terminal status must say 'no legal moves', not print an empty list: {v}"
+        );
+    }
+
 }
