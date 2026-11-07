@@ -761,7 +761,9 @@ mod tests {
         let v = call_tool(&router, Some(agent), 13, "pm_check_task", json!({ "task_id": tid }))
             .await;
         let chk = tool_text(&v);
-        assert_eq!(chk["approved"], true, "approved after human review: {chk}");
+        // The alias returns the task itself now, so approval is read from
+        // `review_status` rather than the retired flat `approved` flag.
+        assert_eq!(chk["review_status"], "approved", "approved after review: {chk}");
         assert_eq!(chk["status"], "pending", "creation approval keeps status: {chk}");
 
         // 4. claim（assignee 本人，批准后放行）
@@ -914,8 +916,14 @@ mod tests {
         // 匿名自查工具（list_my_tasks / check_task）也要身份
         let v = call_tool(&router, None, 34, "pm_list_my_tasks", json!({})).await;
         assert_eq!(v["error"]["code"], CODE_UNAUTHENTICATED);
+        // `pm_check_task` is an alias of the read tool `pm_get_task` now, so
+        // it no longer carries the actor requirement the other two keep.
         let v = call_tool(&router, None, 35, "pm_check_task", json!({ "task_id": tid })).await;
-        assert_eq!(v["error"]["code"], CODE_UNAUTHENTICATED);
+        assert_eq!(
+            v["error"]["code"],
+            serde_json::Value::Null,
+            "a deprecated read alias must not be stricter than the tool it points at: {v}"
+        );
     }
 
     // ── P3 e2e 补齐：剩余工具 happy path + 边界场景 ───────────────────
@@ -1140,10 +1148,14 @@ mod tests {
         // 自查：只返回自己的 2 个任务
         let v = call_tool(&router, Some(agent), 56, "pm_list_my_tasks", json!({})).await;
         let mine = tool_text(&v);
-        assert_eq!(mine.as_array().unwrap().len(), 2, "my_tasks: {mine}");
+        assert_eq!(
+            mine["tasks"].as_array().unwrap().len(),
+            2,
+            "my_tasks: {mine}"
+        );
 
         // status 过滤：把第一个 claim 后，pending 只剩 1 个
-        let my_tid = mine[0]["id"].as_str().unwrap().to_string();
+        let my_tid = mine["tasks"][0]["id"].as_str().unwrap().to_string();
         approve_creation(&store, &my_tid).await;
         let v = call_tool(&router, Some(agent), 57, "pm_claim_task", json!({ "task_id": my_tid }))
             .await;
@@ -1157,12 +1169,21 @@ mod tests {
         )
         .await;
         let pending = tool_text(&v);
-        assert_eq!(pending.as_array().unwrap().len(), 1, "pending my_tasks: {pending}");
+        assert_eq!(
+            pending["tasks"].as_array().unwrap().len(),
+            1,
+            "pending my_tasks: {pending}"
+        );
     }
 
-    /// e2e：pm_check_task 非创建者 403（设计 §6：仅创建者可查审核状态）。
+    /// e2e：deprecated 别名与其主工具返回**逐字节相同**的 JSON（设计 32 D1）。
+    ///
+    /// This is the guarantee that makes the aliases safe to keep in
+    /// `tools/list` for a release: there is one handler, so no amount of
+    /// later drift on the main tool can leave the alias answering a
+    /// different shape.
     #[tokio::test]
-    async fn e2e_check_task_non_creator_forbidden() {
+    async fn e2e_deprecated_aliases_answer_exactly_like_their_targets() {
         let router = test_router().await;
         let creator = "agent-creator";
         let other = "agent-other";
@@ -1186,18 +1207,88 @@ mod tests {
         .await;
         let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
 
-        // 非创建者 check → 403 forbidden
-        let v = call_tool(&router, Some(other), 61, "pm_check_task", json!({ "task_id": tid }))
+        // pm_check_task === pm_get_task (a non-creator reads it too: the alias
+        // inherits the read tool's authorization, it does not keep the old
+        // creator-only gate).
+        for actor in [creator, other] {
+            let alias = call_tool(
+                &router,
+                Some(actor),
+                61,
+                "pm_check_task",
+                json!({ "task_id": tid }),
+            )
             .await;
-        let (code, prefix, _msg) = assert_rpc_error(&v);
-        assert_eq!(code, CODE_FORBIDDEN, "non-creator check should be forbidden");
-        assert_eq!(prefix, "forbidden");
+            let target = call_tool(&router, Some(actor), 62, "pm_get_task", json!({ "task_id": tid }))
+                .await;
+            assert_eq!(
+                tool_text(&alias),
+                tool_text(&target),
+                "pm_check_task must answer exactly like pm_get_task for {actor}"
+            );
+        }
 
-        // 创建者本人可查
-        let v = call_tool(&router, Some(creator), 62, "pm_check_task", json!({ "task_id": tid }))
-            .await;
-        assert!(v["error"].is_null());
-        assert_eq!(tool_text(&v)["id"], tid);
+        // pm_list_my_tasks === pm_list_tasks(assignee="me")
+        let alias = call_tool(&router, Some(creator), 63, "pm_list_my_tasks", json!({})).await;
+        let target = call_tool(
+            &router,
+            Some(creator),
+            64,
+            "pm_list_tasks",
+            json!({ "assignee": "me" }),
+        )
+        .await;
+        assert_eq!(
+            tool_text(&alias),
+            tool_text(&target),
+            "pm_list_my_tasks must answer exactly like pm_list_tasks(assignee=me)"
+        );
+
+        // pm_reparent_task === pm_update_task(parent_task_id=...)
+        let v = call_tool(
+            &router,
+            Some(creator),
+            65,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "child", "assignee": creator }),
+        )
+        .await;
+        let child = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let alias = call_tool(
+            &router,
+            Some(creator),
+            66,
+            "pm_reparent_task",
+            json!({ "task_id": child, "new_parent": tid }),
+        )
+        .await;
+        // Undo, then do it again through the main tool and compare.
+        call_tool(
+            &router,
+            Some(creator),
+            67,
+            "pm_update_task",
+            json!({ "task_id": child, "parent_task_id": null }),
+        )
+        .await;
+        let target = call_tool(
+            &router,
+            Some(creator),
+            68,
+            "pm_update_task",
+            json!({ "task_id": child, "parent_task_id": tid }),
+        )
+        .await;
+        // `updated_at` necessarily differs: the two calls are two writes. Every
+        // other field, including the new `parent_id` and `depth`, must match.
+        let mut a_val = tool_text(&alias);
+        let mut t_val = tool_text(&target);
+        a_val.as_object_mut().unwrap().remove("updated_at");
+        t_val.as_object_mut().unwrap().remove("updated_at");
+        assert_eq!(
+            a_val, t_val,
+            "pm_reparent_task must answer exactly like pm_update_task"
+        );
     }
 
     /// e2e：pm_create_task assignee 不在 Agent 目录 → 400 bad_request
@@ -1653,7 +1744,7 @@ mod tests {
         )
         .await;
         let my_text = tool_text(&v);
-        let my = my_text.as_array().unwrap();
+        let my = my_text["tasks"].as_array().unwrap();
         assert_eq!(my.len(), 1);
         assert_eq!(my[0]["assignee"], worker);
         assert_eq!(my[0]["assignee_meta"]["name"], "Architect");

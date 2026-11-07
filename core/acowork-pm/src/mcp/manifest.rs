@@ -39,6 +39,7 @@
 /// JSON Schema 子集严格遵循 MCP 规范（[tools/list](https://modelcontextprotocol.io/docs/concepts/tools#tool-definition)）。
 pub const PM_TOOL_MANIFEST: &str = r#"{
   "schema_version": "2025-06-18",
+  "version": "0.2.0",
   "tools": [
     {
       "name": "pm_list_projects",
@@ -170,7 +171,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_check_task",
-      "description": "Check whether a task created by the calling agent has been approved by a human. Returns status + review_status. Only the task creator may call this.",
+      "description": "DEPRECATED — use `pm_get_task`. Identical answer (it runs the same handler), so `review_status` and `approved` are read from the task you get back. Folded away in the next minor release.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],
@@ -257,7 +258,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_list_my_tasks",
-      "description": "List tasks currently assigned to the calling agent. Useful for self-check on session start.",
+      "description": "DEPRECATED — use `pm_list_tasks` with `assignee: \"me\"`, which this alias forwards to. The answer is that tool's envelope ({total, tasks[], has_more}), not the bare array this used to return: read `tasks`. Folded away in the next minor release.",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -271,7 +272,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_reparent_task",
-      "description": "Move a task to a new parent. Set new_parent=null to promote to project root. Fails with cycle_detected if would create a cycle.",
+      "description": "DEPRECATED — use `pm_update_task` with `parent_task_id` (null promotes to a project root), which this alias forwards to; `new_parent` is translated to it. The answer is now the updated task, not {ok:true}. Cycles are still rejected. Folded away in the next minor release.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id", "new_parent"],

@@ -49,12 +49,21 @@ pub async fn dispatch(
         // ── 需要身份的只读（自查）───────────────────────────────────
         "pm_list_my_tasks" => {
             let a = require_actor(actor)?;
-            pm_list_my_tasks(state, a, args).await
+            let mut args = args;
+            if let Some(obj) = args.as_object_mut() {
+                obj.insert("assignee".into(), serde_json::json!(a));
+            }
+            pm_list_tasks(state, actor, args).await
         }
-        "pm_check_task" => {
-            let a = require_actor(actor)?;
-            pm_check_task(state, a, args).await
-        }
+        // ── Deprecated aliases (design 32 §3.1, D1) ──────────────────
+        // Each alias translates its arguments and then runs the *same*
+        // handler as the tool it points at, so the answer is byte-identical
+        // by construction: one implementation, nothing to drift. The old
+        // shapes are deliberately retired — `pm_check_task` returned a flat
+        // review summary, `pm_list_my_tasks` a bare array, `pm_reparent_task`
+        // `{ok:true}`; a caller reads the field it needs out of the canonical
+        // answer instead. Folded away in the next minor (plan T4-5).
+        "pm_check_task" => pm_get_task(state, args).await,
 
         // ── 状态变更（需要身份）──────────────────────────────────────
         "pm_create_project" => {
@@ -79,7 +88,15 @@ pub async fn dispatch(
         }
         "pm_reparent_task" => {
             let a = require_actor(actor)?;
-            pm_reparent_task(state, a, args).await
+            let mut args = args;
+            if let Some(obj) = args.as_object_mut() {
+                // The old name for the same thing: `new_parent` becomes the
+                // three-state `parent_task_id` (absent / null / a task id).
+                if let Some(v) = obj.remove("new_parent") {
+                    obj.insert("parent_task_id".into(), v);
+                }
+            }
+            pm_update_task(state, a, args).await
         }
 
         // ── Dispatch prerequisites (design 32 §3.3) ────────────────
@@ -839,66 +856,6 @@ async fn pm_get_task(state: &McpState, args: Value) -> Result<Value> {
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
-/// `pm_list_my_tasks` — Agent 自查：指派给当前调用者的任务。
-async fn pm_list_my_tasks(state: &McpState, actor: &str, args: Value) -> Result<Value> {
-    #[derive(Deserialize, Default)]
-    struct Args {
-        #[serde(default)]
-        status: Option<TaskStatus>,
-        #[serde(default = "default_limit")]
-        limit: usize,
-    }
-    fn default_limit() -> usize {
-        20
-    }
-    let a: Args = parse_args("pm_list_my_tasks", args)?;
-
-    let filter = TaskFilter {
-        assignee: Some(actor.to_string()),
-        status: a.status,
-        ..Default::default()
-    };
-    let tasks = state.store.find_tasks(&filter).await?;
-    let agent_dir: &dyn AgentDirectory = state.agent_dir.as_ref();
-    let out = tasks_to_values(&state.store, agent_dir, tasks, a.limit.max(1)).await?;
-    Ok(Value::Array(out))
-}
-
-/// `pm_check_task` — 查询自己创建的任务是否被批准（含审核状态）。
-async fn pm_check_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        task_id: TaskId,
-    }
-    let a: Args = parse_args("pm_check_task", args)?;
-
-    let task = state
-        .store
-        .get_task(&a.task_id)
-        .await?
-        .ok_or_else(|| PmError::TaskNotFound(a.task_id.to_string()))?;
-    // 仅允许创建者查询（设计 §6：`Agent 查询自己创建的任务是否被批准`）。
-    if task.created_by != actor {
-        return Err(PmError::Forbidden(format!(
-            "task {} was created by `{}`, not `{}`; only the creator can check its review status",
-            task.id, task.created_by, actor
-        )));
-    }
-    let created_by_info = lookup_agent_meta(state.agent_dir.as_ref(), Some(&task.created_by)).await;
-    Ok(json!({
-        "id": task.id,
-        "project_id": task.project_id,
-        "title": task.title,
-        "status": task.status,
-        "review_status": task.review_status,
-        "approved": matches!(task.review_status, ReviewStatus::Approved),
-        "created_by": task.created_by,
-        "created_by_meta": agent_ref_value(Some(&task.created_by), created_by_info.as_ref()),
-        "created_at": task.created_at,
-        "updated_at": task.updated_at,
-    }))
-}
-
 // ── 状态变更工具 ──────────────────────────────────────────────────────────
 
 /// `pm_create_project` — 创建项目。
@@ -1116,28 +1073,6 @@ async fn pm_submit_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         .submit_task(&a.task_id, &a.text, a.attachment_ids, actor)
         .await?;
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
-}
-
-/// `pm_reparent_task` — 移动任务到新父下（new_parent=null 提升为根），DFS 防环。
-///
-/// 需要身份（§9.3 匿名仅只读）；设计 §9.2 未要求 assignee 匹配，但要求已认证。
-async fn pm_reparent_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        task_id: TaskId,
-        #[serde(default)]
-        new_parent: Option<TaskId>,
-    }
-    let a: Args = parse_args("pm_reparent_task", args)?;
-
-    // actor 仅用于满足"已认证"前提（见上方 doc）；任务存在性/防环由 store 校验
-    let _actor = actor;
-
-    let input = ReparentTask {
-        new_parent: a.new_parent,
-    };
-    state.store.reparent_task(&a.task_id, input).await?;
-    Ok(json!({ "ok": true, "task_id": a.task_id }))
 }
 
 // ── Dispatch prerequisites (design 32 §3.3) ────────────────────────────
