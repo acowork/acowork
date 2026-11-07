@@ -3596,8 +3596,7 @@ mod tests {
         );
     }
 
-    // ── T4-1a: the dispatch chain, end to end inside this crate ──────────
-    //
+    // ── T4-1a: the dispatch chain, end to end inside this crate ──────────    //
     // The P0 acceptance test stops where the interesting part starts: it
     // creates a task and reads it back, so nothing proves the *loop* runs —
     // that the scanner actually wakes the assignee, that it does so exactly
@@ -3794,5 +3793,58 @@ mod tests {
         assert_eq!(tool_text(&v)["status"], "done", "the chain must close: {v}");
 
         shutdown.request();
+    }
+
+    /// **T4-2 freeze tripwire.** Three overlapping tools were turned into
+    /// deprecated aliases (T2-5) and are scheduled for removal once the read
+    /// path (`MCP_TOOL_ALIASES`) lands — T4-2, which is *not* in this patch.
+    /// Until it does, the aliases must stay advertised: deleting them early
+    /// breaks every agent still calling the old name, and the plan's removal
+    /// gate (§9.3) is a checklist entry, i.e. exactly the kind of promise
+    /// that rots silently.
+    ///
+    /// This test is the tripwire. Its failure means either the aliases were
+    /// dropped without T4-2, or a rename lost the `DEPRECATED` marker and
+    /// agents no longer get told where to go.
+    #[tokio::test]
+    async fn deprecated_aliases_stay_advertised_until_the_read_path_lands() {
+        let (state, _tmp) = test_mcp_state().await;
+        let router = Router::new()
+            .route("/mcp", post(jsonrpc_endpoint))
+            .with_state(state);
+
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
+            ))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        let v = body_to_value(resp).await;
+        let tools = v["result"]["tools"].as_array().unwrap();
+
+        // alias → the tool it now forwards to (the description must name it,
+        // otherwise the marker tells the reader nothing actionable).
+        for (alias, target) in [
+            ("pm_check_task", "pm_get_task"),
+            ("pm_list_my_tasks", "pm_list_tasks"),
+            ("pm_reparent_task", "pm_update_task"),
+        ] {
+            let tool = tools
+                .iter()
+                .find(|t| t["name"] == alias)
+                .unwrap_or_else(|| panic!("`{alias}` must stay advertised until T4-2 lands"));
+            let desc = tool["description"].as_str().unwrap_or_default();
+            assert!(
+                desc.starts_with("DEPRECATED"),
+                "`{alias}` must be marked DEPRECATED: {desc}"
+            );
+            assert!(
+                desc.contains(target),
+                "`{alias}` must name its replacement `{target}`: {desc}"
+            );
+        }
     }
 }
