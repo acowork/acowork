@@ -2085,10 +2085,19 @@ async fn deliver_mentions(
         "repo": repo,
     });
     // ADR-106 D6 level 1: the block this utterance answers, so the transcript
-    // can render the reply inside that block instead of beside it. Recorded
-    // whatever the resolution concluded — an `in_reply_to` at a row that is not
-    // a reference is still a quote the human made.
-    if !req.in_reply_to.trim().is_empty() {
+    // can render the reply inside that block instead of beside it.
+    //
+    // ADR-106 D15 (2026-11-06) made the coordinate a durable fact the store
+    // vetoes: a row may only name a coordinate that resolves to a row in this
+    // log. So the quote is recorded *only when it resolved* — `replied_round`
+    // is the row the ladder found above. When the human answered a card that is
+    // not in the log (cleaned up, or a stale client id), the routing already
+    // fell through to a plain turn (§5.5.4: the utterance is never dropped);
+    // the row must then carry no coordinate at all — an origin row, which D15
+    // always accepts. Recording the dangling id would have the store reject the
+    // append and turn a human's plain message into a 5xx, which is the opposite
+    // of "not dropped".
+    if replied_round.is_some() && !req.in_reply_to.trim().is_empty() {
         meta["in_reply_to"] = serde_json::Value::String(req.in_reply_to.trim().to_string());
     }
     // The pinned quadruples, durable with the row: the transcript renders them
@@ -2679,9 +2688,19 @@ async fn deliver_chat_message(
     // same turn.
     let mut meta = serde_json::json!({
         "message_id": message_id,
-        "in_reply_to": req.in_reply_to,
         "exec_attachments": exec_attachments,
     });
+    // ADR-106 D15: a durable row may only name a coordinate that resolves to a
+    // row in this log. `replied` is that resolution, read once above. When the
+    // human answered a card that is not in the log (cleaned up, or a stale
+    // client id), the routing already fell through to a plain turn (§5.5.4: the
+    // utterance is never dropped) — the row must then carry no coordinate at
+    // all, an origin row D15 always accepts. Recording the dangling id would
+    // have the store reject the append and turn a human's plain message into a
+    // 5xx, the opposite of "not dropped".
+    if replied.is_some() && !req.in_reply_to.trim().is_empty() {
+        meta["in_reply_to"] = serde_json::Value::String(req.in_reply_to.trim().to_string());
+    }
     // Pinned reference coordinates, durable with the row — the 1:1 twin of the
     // group form: chips render from them and the row is the source of truth for
     // what the turn quoted (ADR-106 revision 2026-11-04).

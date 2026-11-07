@@ -426,6 +426,15 @@ fn default_pair_chat_message_persists_and_agent_writeback_doorbells() {
         }
 
         let up = user_service_port(&gw.home);
+        // ADR-106 D15: the agent's write-back threads under the human's row, so
+        // that origin row must be in the log first.
+        let human_origin = serde_json::json!({
+            "session_id": sid,
+            "message": {"ts": 0, "from": root, "kind": "user_message", "body": "do the thing", "meta": {"message_id": "e2e-human-row-1"}}
+        });
+        let (code, body, _) = http_post_json(up, "/internal/chat-sessions/messages", &serde_json::to_vec(&human_origin).unwrap());
+        assert_eq!(code, 201, "human origin row; body:\n{body}");
+
         let append = serde_json::json!({
             "session_id": sid,
             "message": {"ts": 0, "from": "agent-chain-1", "kind": "agent_message", "body": "sure, on it", "meta": {"message_id": "e2e-agent-row-1", "in_reply_to": "e2e-human-row-1"}}
@@ -644,10 +653,11 @@ fn participant_sync_group_and_reinstall_history() {
     assert!(!listed("p-three"), "removed from the list too (index maintained)");
 }
 
-/// §5.5.4: an answer naming a card that does not exist is NOT dropped —
-/// it falls through to a plain human turn (the row is durable, the
-/// `in_reply_to` is recorded in its meta) and the delivery outcome is
-/// reported explicitly. A silent swallow would be the real failure mode.
+/// §5.5.4 + ADR-106 D15: an answer naming a card that does not exist is NOT
+/// dropped — it falls through to a plain human turn (the row is durable). D15
+/// makes a dangling coordinate a fact the store vetoes, so the Gateway records
+/// no `in_reply_to` at all: the utterance survives as an origin row rather than
+/// being rejected into a 5xx. A silent swallow would be the real failure mode.
 #[test]
 fn card_answer_for_unknown_card_falls_through_as_plain_turn() {
     let _serial = lock_chain();
@@ -668,7 +678,10 @@ fn card_answer_for_unknown_card_falls_through_as_plain_turn() {
     assert_eq!(page["total"].as_u64(), Some(before + 1), "the answer row is durable");
     let row = page["messages"].as_array().unwrap().last().unwrap();
     assert_eq!(row["body"].as_str(), Some("yes do it"));
-    assert_eq!(row["meta"]["in_reply_to"].as_str(), Some("no-such-card-id"), "the quote is recorded");
+    assert!(
+        row["meta"].get("in_reply_to").and_then(|v| v.as_str()).unwrap_or("").is_empty(),
+        "an unresolvable coordinate is not recorded (ADR-106 D15): the turn is a plain origin row, not a thread under a card that is not in the log"
+    );
 }
 
 /// Design 27 §5.3 form ③: a group turn — the human's row archives in the
@@ -862,6 +875,17 @@ fn agent_agent_pair_is_one_shared_channel_for_both_sides() {
     let sid_ab = pair(a, b);
     let sid_ba = pair(b, a);
     assert_eq!(sid_ab, sid_ba, "A×B and B×A resolve to one shared session (§5.4.3)");
+
+    // ADR-106 D15: a row may only name a coordinate that resolves to a row
+    // already in this log. An agent opens the thread with an *assignment*
+    // origin (carries `meta.task_id`, so no sentence asked for it); the reply
+    // (`aa-row-1`) then threads under that origin.
+    let origin = serde_json::json!({
+        "session_id": sid_ab,
+        "message": {"ts": 0, "from": a, "kind": "agent_message", "body": "from A (opening)", "meta": {"message_id": "aa-row-0", "task_id": "aa-task-0"}}
+    });
+    let (code, body, _) = http_post_json(up, "/internal/chat-sessions/messages", &serde_json::to_vec(&origin).unwrap());
+    assert!((200..300).contains(&code), "A writes the origin row: {code} {body}");
 
     let append = serde_json::json!({
         "session_id": sid_ab,
