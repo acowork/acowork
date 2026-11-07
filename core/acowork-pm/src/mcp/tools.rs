@@ -51,11 +51,21 @@ pub async fn dispatch(
         // alias note above `pm_check_task`.
         "pm_list_my_tasks" => {
             let a = require_actor(actor)?;
-            let mut args = args;
-            if let Some(obj) = args.as_object_mut() {
-                obj.insert("assignee".into(), serde_json::json!(a));
+            // Parse the retired shape first (so its own schema is enforced and
+            // reconciled), then translate: the caller never had to spell out
+            // `assignee`, and never could.
+            let my: ListMyTasksArgs = parse_args("pm_list_my_tasks", args)?;
+            let mut forwarded = serde_json::json!({ "assignee": a });
+            if let Some(status) = my.status {
+                forwarded["status"] = serde_json::json!(status);
             }
-            pm_list_tasks(state, actor, args).await
+            if let Some(limit) = my.limit {
+                forwarded["limit"] = serde_json::json!(limit);
+            }
+            if let Some(project_id) = my.project_id {
+                forwarded["project_id"] = serde_json::json!(project_id);
+            }
+            pm_list_tasks(state, actor, forwarded).await
         }
         // Deprecated alias — sits next to the read tools it shares a family
         // with, not in the alias block at the bottom. All three aliases
@@ -92,15 +102,19 @@ pub async fn dispatch(
         // Deprecated alias of `pm_update_task(parent_task_id = …)`.
         "pm_reparent_task" => {
             let a = require_actor(actor)?;
-            let mut args = args;
-            if let Some(obj) = args.as_object_mut() {
-                // The old name for the same thing: `new_parent` becomes the
-                // three-state `parent_task_id` (absent / null / a task id).
-                if let Some(v) = obj.remove("new_parent") {
-                    obj.insert("parent_task_id".into(), v);
-                }
-            }
-            pm_update_task(state, a, args).await
+            let r: ReparentTaskArgs = parse_args("pm_reparent_task", args)?;
+            // The old name for the same thing: `new_parent` becomes the
+            // three-state `parent_task_id` (absent / null / a task id).
+            let parent_task_id = match r.new_parent {
+                Some(parent) => serde_json::json!(parent),
+                // Explicit `null`: detach to root.
+                None => serde_json::Value::Null,
+            };
+            let forwarded = serde_json::json!({
+                "task_id": r.task_id,
+                "parent_task_id": parent_task_id,
+            });
+            pm_update_task(state, a, forwarded).await
         }
 
         // ── Dispatch prerequisites (design 32 §3.3) ────────────────
@@ -165,6 +179,14 @@ fn ensure_assignee(task: &Task, actor: &str) -> Result<()> {
 
 // ── 参数解析辅助 ──────────────────────────────────────────────────────────
 
+/// 参数解析：缺省字段走 `#[serde(default)]`，**未知字段直接报错**。
+///
+/// 每个 Args 结构都带 `deny_unknown_fields`：模型拼错字段名（`asignee`）时 serde
+/// 的报错会列出可接受字段名（`unknown field `asignee`, expected one of …`）。
+/// 静默丢弃的代价是“调用成功但字段没生效”——一个没有 assignee 的任务
+/// 只会在很久以后以 `forbidden: task has no assignee` 的形式回到调用方。
+/// 取值/类型错误本来就报得清楚，缺的正是“名字”这一维。别名工具的入参翻译先做
+/// （旧名 → 新名，见 [`dispatch`]），所以旧名不会因此报错。
 fn parse_args<T: for<'de> Deserialize<'de>>(name: &str, args: Value) -> Result<T> {
     serde_json::from_value(args)
         .map_err(|e| PmError::BadRequest(format!("invalid arguments for {name}: {e}")))
@@ -196,6 +218,7 @@ fn parse_args<T: for<'de> Deserialize<'de>>(name: &str, args: Value) -> Result<T
 
 /// `pm_create_task` arguments.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CreateTaskArgs {
     project_id: ProjectId,
     title: String,
@@ -237,6 +260,7 @@ impl CreateTaskArgs {
 
 /// `pm_update_task` arguments.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateTaskArgs {
     task_id: TaskId,
     #[serde(default)]
@@ -288,6 +312,7 @@ impl UpdateTaskArgs {
 
 /// `pm_update_project` arguments.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UpdateProjectArgs {
     project_id: ProjectId,
     #[serde(default)]
@@ -307,6 +332,7 @@ impl UpdateProjectArgs {
 
 /// `pm_list_agents` arguments.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListAgentsArgs {
     /// Scope the answer to one project's member roster — see
     /// [`pm_list_agents`]: with it the result is the *assignable set*,
@@ -332,6 +358,7 @@ impl ListAgentsArgs {
 
 /// `pm_list_tasks` arguments.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListTasksArgs {
     /// Omit to search across every project; then at least one narrowing
     /// filter is required and `limit` is capped at `CROSS_PROJECT_MAX_LIMIT`.
@@ -391,6 +418,7 @@ const CROSS_PROJECT_MAX_LIMIT: usize = 50;
 
 /// `pm_add_project_member` arguments.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddProjectMemberArgs {
     project_id: ProjectId,
     instance_id: String,
@@ -406,6 +434,7 @@ impl AddProjectMemberArgs {
 
 /// `pm_list_activity` arguments.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListActivityArgs {
     task_id: TaskId,
     #[serde(default = "default_activity_limit")]
@@ -423,6 +452,7 @@ impl ListActivityArgs {
 
 /// `pm_add_activity` arguments.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AddActivityArgs {
     task_id: TaskId,
     text: String,
@@ -433,23 +463,166 @@ impl AddActivityArgs {
     const FIELDS: &'static [&'static str] = &["task_id", "text"];
 }
 
+// ── Argument structs for the read / lifecycle tools ─────────────────────
+//
+// These used to be `struct Args` defined *inside* each handler. They are
+// hoisted for one reason: the reconciliation table below can only cite a type
+// it can name, and a tool that is not on the table is a tool with an unguarded
+// schema — `pm_submit_task` accepted `attachment_ids` while the manifest never
+// declared it, so no caller could discover the field (design 32 §7 D2).
+
+/// `pm_list_projects` arguments.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct ListProjectsArgs {
+    #[serde(default)]
+    include_archived: bool,
+}
+
+#[cfg(test)]
+impl ListProjectsArgs {
+    const FIELDS: &'static [&'static str] = &["include_archived"];
+}
+
+/// `pm_get_project` arguments.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetProjectArgs {
+    project_id: ProjectId,
+}
+
+#[cfg(test)]
+impl GetProjectArgs {
+    const FIELDS: &'static [&'static str] = &["project_id"];
+}
+
+/// `pm_get_task` (and its `pm_check_task` alias) arguments.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GetTaskArgs {
+    task_id: TaskId,
+}
+
+#[cfg(test)]
+impl GetTaskArgs {
+    const FIELDS: &'static [&'static str] = &["task_id"];
+}
+
+/// `pm_create_project` arguments.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CreateProjectArgs {
+    title: String,
+    #[serde(default)]
+    description: String,
+}
+
+#[cfg(test)]
+impl CreateProjectArgs {
+    const FIELDS: &'static [&'static str] = &["title", "description"];
+}
+
+/// `pm_claim_task` arguments.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimTaskArgs {
+    task_id: TaskId,
+}
+
+#[cfg(test)]
+impl ClaimTaskArgs {
+    const FIELDS: &'static [&'static str] = &["task_id"];
+}
+
+/// `pm_submit_task` arguments.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SubmitTaskArgs {
+    task_id: TaskId,
+    text: String,
+    #[serde(default)]
+    attachment_ids: Vec<crate::types::AttachmentId>,
+}
+
+#[cfg(test)]
+impl SubmitTaskArgs {
+    const FIELDS: &'static [&'static str] = &["task_id", "text", "attachment_ids"];
+}
+
+/// `pm_list_my_tasks` — the deprecated alias parses its own (retired) shape
+/// before translating, so its manifest schema is reconciled like any other
+/// tool instead of being whatever the target happens to accept.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ListMyTasksArgs {
+    #[serde(default)]
+    status: Option<TaskStatus>,
+    #[serde(default)]
+    limit: Option<usize>,
+    /// Narrowing by project always worked through the alias (it forwarded every
+    /// key to `pm_list_tasks`); the schema never said so. Declared now that the
+    /// alias parses its own shape.
+    #[serde(default)]
+    project_id: Option<ProjectId>,
+}
+
+#[cfg(test)]
+impl ListMyTasksArgs {
+    const FIELDS: &'static [&'static str] = &["status", "limit", "project_id"];
+}
+
+/// `pm_reparent_task` — same rule as [`ListMyTasksArgs`]: parse the old shape,
+/// then translate to `pm_update_task(parent_task_id = …)`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReparentTaskArgs {
+    task_id: TaskId,
+    /// Three states, and all three mean something different: a task id
+    /// reparents, `null` detaches to root, and an **absent** key is a caller bug
+    /// the schema declares `required` — so it is a deserialization error, never
+    /// a silent detach.
+    new_parent: Option<TaskId>,
+}
+
+#[cfg(test)]
+impl ReparentTaskArgs {
+    const FIELDS: &'static [&'static str] = &["task_id", "new_parent"];
+}
+
 /// Tool → the **wire field names** its implementation accepts.
 ///
 /// Its only reason to exist is reconciling the manifest against the
 /// implementation (see the header of `manifest.rs`). A tool absent from this
 /// table is a tool left unguarded — whoever adds a field edits `Args` and never
-/// thinks of the schema. P1 T1-4 brings the remaining tools in when it touches
-/// dispatch.
+/// thinks of the schema.
+///
+/// **Coverage rule**: every tool served by `tools/list` (aliases included) has a
+/// row — `manifest_fields_cover_every_tool` fails when one is added and not
+/// registered here. Being on the table is not a nicety: it is the only thing
+/// that stops a schema from drifting, which is exactly how `pm_update_task`'s
+/// `type` / `depends_on` and `pm_submit_task`'s `attachment_ids` went missing
+/// from the manifest (design 32 §7 D2).
 #[cfg(test)]
 pub(crate) const MANIFEST_FIELDS: &[(&str, &[&str])] = &[
+    ("pm_list_projects", ListProjectsArgs::FIELDS),
+    ("pm_get_project", GetProjectArgs::FIELDS),
+    ("pm_create_project", CreateProjectArgs::FIELDS),
+    ("pm_update_project", UpdateProjectArgs::FIELDS),
+    ("pm_add_project_member", AddProjectMemberArgs::FIELDS),
+    ("pm_list_agents", ListAgentsArgs::FIELDS),
     ("pm_create_task", CreateTaskArgs::FIELDS),
     ("pm_update_task", UpdateTaskArgs::FIELDS),
     ("pm_list_tasks", ListTasksArgs::FIELDS),
-    ("pm_list_agents", ListAgentsArgs::FIELDS),
-    ("pm_add_project_member", AddProjectMemberArgs::FIELDS),
-    ("pm_list_activity", ListActivityArgs::FIELDS),
+    ("pm_get_task", GetTaskArgs::FIELDS),
+    ("pm_claim_task", ClaimTaskArgs::FIELDS),
+    ("pm_submit_task", SubmitTaskArgs::FIELDS),
     ("pm_add_activity", AddActivityArgs::FIELDS),
-    ("pm_update_project", UpdateProjectArgs::FIELDS),
+    ("pm_list_activity", ListActivityArgs::FIELDS),
+    // Deprecated aliases are reconciled too: their schemas are still served by
+    // `tools/list`, so a caller may still be reading them.
+    ("pm_check_task", GetTaskArgs::FIELDS),
+    ("pm_list_my_tasks", ListMyTasksArgs::FIELDS),
+    ("pm_reparent_task", ReparentTaskArgs::FIELDS),
 ];
 
 // ── 响应序列化辅助 ────────────────────────────────────────────────────────
@@ -663,12 +836,7 @@ fn project_to_value(
 
 /// `pm_list_projects` — 项目列表（摘要 + 任务数）。
 async fn pm_list_projects(state: &McpState, args: Value) -> Result<Value> {
-    #[derive(Deserialize, Default)]
-    struct Args {
-        #[serde(default)]
-        include_archived: bool,
-    }
-    let a: Args = parse_args("pm_list_projects", args)?;
+    let a: ListProjectsArgs = parse_args("pm_list_projects", args)?;
 
     let projects = state.store.list_projects().await?;
     // 先过滤可见项目，再一次性批量查 created_by 的 agent 元信息
@@ -704,11 +872,7 @@ async fn pm_list_projects(state: &McpState, args: Value) -> Result<Value> {
 /// 成员列表后能用 agent name 反查到 `instance_id` 用于 `pm_create_task` 指派。
 /// `NoopAgentDirectory`（宽松模式）下所有 `agent_id` / `name` 字段为 `null`。
 async fn pm_get_project(state: &McpState, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        project_id: ProjectId,
-    }
-    let a: Args = parse_args("pm_get_project", args)?;
+    let a: GetProjectArgs = parse_args("pm_get_project", args)?;
 
     let p = state
         .store
@@ -846,11 +1010,7 @@ async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Re
 
 /// `pm_get_task` — 任务详情（含 is_blocked / blocked_by / depth / parent_id）。
 async fn pm_get_task(state: &McpState, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        task_id: TaskId,
-    }
-    let a: Args = parse_args("pm_get_task", args)?;
+    let a: GetTaskArgs = parse_args("pm_get_task", args)?;
 
     let task = state
         .store
@@ -864,13 +1024,7 @@ async fn pm_get_task(state: &McpState, args: Value) -> Result<Value> {
 
 /// `pm_create_project` — 创建项目。
 async fn pm_create_project(state: &McpState, actor: &str, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        title: String,
-        #[serde(default)]
-        description: String,
-    }
-    let a: Args = parse_args("pm_create_project", args)?;
+    let a: CreateProjectArgs = parse_args("pm_create_project", args)?;
 
     let input = CreateProject {
         title: a.title,
@@ -1037,11 +1191,7 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
 
 /// `pm_claim_task` — 自领（pending → in_progress），仅限 assignee；依赖未满足 409。
 async fn pm_claim_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        task_id: TaskId,
-    }
-    let a: Args = parse_args("pm_claim_task", args)?;
+    let a: ClaimTaskArgs = parse_args("pm_claim_task", args)?;
 
     let task = state
         .store
@@ -1056,14 +1206,7 @@ async fn pm_claim_task(state: &McpState, actor: &str, args: Value) -> Result<Val
 
 /// `pm_submit_task` — 提交结果（in_progress → submitted），仅限 assignee。
 async fn pm_submit_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
-    #[derive(Deserialize)]
-    struct Args {
-        task_id: TaskId,
-        text: String,
-        #[serde(default)]
-        attachment_ids: Vec<crate::types::AttachmentId>,
-    }
-    let a: Args = parse_args("pm_submit_task", args)?;
+    let a: SubmitTaskArgs = parse_args("pm_submit_task", args)?;
 
     let task = state
         .store

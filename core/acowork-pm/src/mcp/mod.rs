@@ -1292,6 +1292,51 @@ mod tests {
         );
     }
 
+    /// Regression: a misspelled argument name must be an error that names the
+    /// offending key and lists the accepted ones — not a silently dropped
+    /// field. `asignee` used to create a task with no assignee and no error; the
+    /// caller only found out much later, as `forbidden: task has no assignee` on
+    /// someone else's claim attempt.
+    #[tokio::test]
+    async fn e2e_misspelled_argument_names_the_field_instead_of_vanishing() {
+        let router = test_router().await;
+        let v = call_tool(
+            &router,
+            Some("agent-a"),
+            70,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        let v = call_tool(
+            &router,
+            Some("agent-a"),
+            71,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "asignee": "agent-a" }),
+        )
+        .await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default().to_string();
+        assert!(msg.contains("asignee"), "must name the offending key: {v}");
+        assert!(
+            msg.contains("assignee"),
+            "must list the accepted field names: {v}"
+        );
+
+        // Nothing was created as a side effect of the rejected call.
+        let v = call_tool(
+            &router,
+            Some("agent-a"),
+            72,
+            "pm_list_tasks",
+            json!({ "project_id": pid }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["tasks"].as_array().unwrap().len(), 0, "{v}");
+    }
+
     /// e2e：pm_create_task assignee 不在 Agent 目录 → 400 bad_request
     /// （设计 §9.1；用白名单目录验证存在性校验，ADR-073 按 instance_id）。
     #[tokio::test]

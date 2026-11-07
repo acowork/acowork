@@ -252,7 +252,12 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
         "required": ["task_id", "text"],
         "properties": {
           "task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
-          "text": { "type": "string", "minLength": 1, "maxLength": 20000 }
+          "text": { "type": "string", "minLength": 1, "maxLength": 20000 },
+          "attachment_ids": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Optional attachment ids. There is no upload path from an agent (a human attaches files in the Desktop task panel), so leave this out and put what the reviewer needs in `text`."
+          }
         }
       }
     },
@@ -266,7 +271,12 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "type": "string",
             "enum": ["pending", "in_progress", "submitted", "done", "rejected", "cancelled"]
           },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
+          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
+          "project_id": {
+            "type": "string",
+            "pattern": "^p-[a-zA-Z0-9-]{1,62}$",
+            "description": "Narrow to one project."
+          }
         }
       }
     },
@@ -439,6 +449,38 @@ mod tests {
                     .collect::<Vec<_>>(),
             );
         }
+    }
+
+    /// **Every** tool served by `tools/list` must be on the reconciliation
+    /// table. Without this assertion the table is opt-in, and opt-in is how two
+    /// tools kept unguarded schemas for months: `pm_update_task` accepted
+    /// `type` / `depends_on` invisibly, and `pm_submit_task` accepted
+    /// `attachment_ids` invisibly (design 32 §7 D2). Adding a tool without a
+    /// row now fails here instead of drifting quietly.
+    #[test]
+    fn manifest_fields_cover_every_tool() {
+        let parsed: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
+        let tools = parsed["tools"].as_array().unwrap();
+        let covered: BTreeSet<&str> = crate::mcp::tools::MANIFEST_FIELDS
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+        let unguarded: Vec<&str> = tools
+            .iter()
+            .map(|t| t["name"].as_str().unwrap())
+            .filter(|name| !covered.contains(name))
+            .collect();
+        assert!(
+            unguarded.is_empty(),
+            "tools missing from MANIFEST_FIELDS (their schema is unreconciled): {unguarded:?}"
+        );
+        assert_eq!(
+            covered.len(),
+            tools.len(),
+            "MANIFEST_FIELDS has {} rows for {} tools",
+            covered.len(),
+            tools.len()
+        );
     }
 
     /// The table itself must not name a tool that does not exist (a typo would
