@@ -1292,6 +1292,59 @@ mod tests {
         );
     }
 
+    /// The alias equivalence above is asserted for two *authenticated* actors.
+    /// The anonymous case is the one design 32:70 decided explicitly (reads stay
+    /// open), so pin it: both names answer, with the same body, and the
+    /// write-shaped alias still refuses for lack of an actor.
+    #[tokio::test]
+    async fn e2e_deprecated_aliases_are_equivalent_anonymously() {
+        let router = test_router().await;
+        let v = call_tool(
+            &router,
+            Some("agent-creator"),
+            73,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some("agent-creator"),
+            74,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": "agent-creator" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // Anonymous reads: the alias inherits the target's openness.
+        let alias = call_tool(&router, None, 75, "pm_check_task", json!({ "task_id": tid })).await;
+        assert!(alias["error"].is_null(), "anonymous alias must read: {alias}");
+        let target = call_tool(&router, None, 76, "pm_get_task", json!({ "task_id": tid })).await;
+        assert_eq!(
+            tool_text(&alias),
+            tool_text(&target),
+            "pm_check_task must answer exactly like pm_get_task when anonymous"
+        );
+
+        // `pm_list_my_tasks` needs to know who "my" is: both names refuse.
+        let alias = call_tool(&router, None, 77, "pm_list_my_tasks", json!({})).await;
+        let target = call_tool(
+            &router,
+            None,
+            78,
+            "pm_list_tasks",
+            json!({ "assignee": "me" }),
+        )
+        .await;
+        assert!(!alias["error"].is_null(), "anonymous my_tasks must refuse: {alias}");
+        assert!(
+            !target["error"].is_null(),
+            "anonymous assignee=me must refuse: {target}"
+        );
+    }
+
     /// Regression: a misspelled argument name must be an error that names the
     /// offending key and lists the accepted ones — not a silently dropped
     /// field. `asignee` used to create a task with no assignee and no error; the

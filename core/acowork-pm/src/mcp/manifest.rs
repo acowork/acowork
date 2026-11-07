@@ -115,7 +115,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_get_task",
-      "description": "Get task details including dependency status (is_blocked, blocked_by) and depth.",
+      "description": "Get task details including dependency status and depth. `is_blocked` / `blocked_by` are OMITTED when the task is not blocked — absence means unblocked, not unknown.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],
@@ -126,7 +126,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_create_task",
-      "description": "Create a task. Set parent_task_id to create a child task. Use depends_on to declare dependencies (other tasks must exist). Tasks created by an agent enter review_status=pending and CANNOT be claimed until a human approves them (pm_claim_task returns 409 review_not_approved); check pm_check_task to see whether approval landed.",
+      "description": "Create a task. Set parent_task_id to create a child task. Use depends_on to declare dependencies (other tasks must exist). Tasks created by an agent enter review_status=pending and CANNOT be claimed until a human approves them (pm_claim_task returns 409 review_not_approved); check `review_status` on `pm_get_task` to see whether approval landed.",
       "inputSchema": {
         "type": "object",
         "required": ["project_id", "title"],
@@ -171,7 +171,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_check_task",
-      "description": "DEPRECATED — use `pm_get_task`. Identical answer (it runs the same handler), so `review_status` and `approved` are read from the task you get back. Folded away in the next minor release.",
+      "description": "DEPRECATED — use `pm_get_task`. Identical answer (it runs the same handler), so read `review_status` from the task you get back — there is no separate `approved` flag, `review_status: \"approved\"` is that same fact. Folded away in the next minor release.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],

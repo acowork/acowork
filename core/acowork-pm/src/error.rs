@@ -32,7 +32,9 @@ pub enum PmError {
     #[error("invalid id: {0}")]
     InvalidId(String),
 
-    #[error("bad request: {0}")]
+    /// The class word lives in `error_code()`; repeating it in `Display`
+    /// produced `bad_request: bad request: ...` at every MCP boundary.
+    #[error("{0}")]
     BadRequest(String),
 
     #[error("path traversal detected for id: {0}")]
@@ -110,7 +112,7 @@ pub enum PmError {
 
     // ── MCP 鉴权（设计 §9.2 / §9.3）──────────────────────────────────
     /// 调用者不是任务 assignee，或匿名调用被禁止的工具。
-    #[error("forbidden: {0}")]
+    #[error("{0}")]
     Forbidden(String),
 
     /// MCP 匿名连接调用需要身份的工具（无 `X-MCP-Actor`）。
