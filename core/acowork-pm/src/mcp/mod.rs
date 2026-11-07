@@ -3596,4 +3596,203 @@ mod tests {
         );
     }
 
+    // ── T4-1a: the dispatch chain, end to end inside this crate ──────────
+    //
+    // The P0 acceptance test stops where the interesting part starts: it
+    // creates a task and reads it back, so nothing proves the *loop* runs —
+    // that the scanner actually wakes the assignee, that it does so exactly
+    // once, and that the wake-up leads through claim → submit → done.
+    //
+    // A live Gateway is not needed for that (and would make the test
+    // unrunnable in CI): the scanner's only outside-world dependency is one
+    // HTTP POST, so the test serves that POST itself and asserts on the
+    // payload. What the stub proves is what the agent receives; what the
+    // store proves is that the agent's own tools can act on it.
+
+    /// A Gateway stand-in: records every `POST /api/intents/task-dispatch`
+    /// body and answers `delivered`, which is the contract
+    /// [`crate::gateway_client::GatewayClient`] parses.
+    async fn stub_gateway() -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+        let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = seen.clone();
+        let app = Router::new().route(
+            "/api/intents/task-dispatch",
+            post(move |body: axum::Json<Value>| {
+                let sink = sink.clone();
+                async move {
+                    sink.lock().unwrap().push(body.0);
+                    axum::Json(json!({
+                        "status": "delivered",
+                        "message_id": "stub-message-id",
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), seen)
+    }
+
+    #[tokio::test]
+    async fn dispatch_chain_wakes_the_assignee_once_then_claim_submit_done() {
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            ("pm-inst", "com.acowork.project-manager", "PM"),
+            ("eng-inst", "com.acowork.senior-engineer", "SSE"),
+        ]));
+        let (router, store) = test_router_store_with_dir(dir).await;
+        let pid = project_with_owner(&router, "pm-inst", "Q4 Billing").await;
+        call_tool(
+            &router,
+            Some("pm-inst"),
+            2,
+            "pm_add_project_member",
+            json!({ "project_id": pid, "instance_id": "eng-inst" }),
+        )
+        .await;
+
+        // Scheduled in the past so the M2 gate (`start_at <= now`) is open;
+        // a future `start_at` is covered at the store level already.
+        let past = (chrono::Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            3,
+            "pm_create_task",
+            json!({
+                "project_id": pid,
+                "title": "Fix invoice rounding",
+                "description": "Round to cents at line level.",
+                "assignee": "eng-inst",
+                "start_at": past,
+            }),
+        )
+        .await;
+        let task = tool_text(&v);
+        let tid = task["id"].as_str().unwrap().to_string();
+        assert_eq!(task["review_status"], "pending", "{task}");
+
+        // Human approval is the one step no agent can perform — do what the
+        // REST review endpoint does, then let the scanner run.
+        store
+            .review_task(
+                &TaskId::parse(&tid).unwrap(),
+                true,
+                "human",
+                Some("go"),
+            )
+            .await
+            .unwrap();
+
+        let (base, seen) = stub_gateway().await;
+        let shutdown = acowork_core::shutdown::Shutdown::new();
+        crate::dispatch::spawn_scanner(
+            store.clone(),
+            (base, None),
+            Duration::from_millis(25),
+            10,
+            shutdown.clone(),
+        );
+
+        // 1. The scanner pushes exactly one wake-up, within a human-scale
+        //    window (the tick is 25 ms; 5 s is the failure floor, not a wait).
+        let mut waited = 0u64;
+        while seen.lock().unwrap().is_empty() && waited < 5_000 {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            waited += 20;
+        }
+        let pushes = seen.lock().unwrap().clone();
+        assert_eq!(pushes.len(), 1, "one wake-up per task generation: {pushes:?}");
+        let push = &pushes[0];
+
+        // 2. The envelope addresses the right agent and identifies itself —
+        //    `message_id` is the dedupe key across retries and restarts.
+        assert_eq!(push["task_id"], tid.as_str(), "{push}");
+        assert_eq!(push["target_agent"], "eng-inst", "{push}");
+        assert_eq!(push["owner"], "pm-inst", "the dispatcher, not the assignee sent it: {push}");
+        assert_eq!(push["project_id"], pid.as_str(), "{push}");
+        assert!(!push["message_id"].as_str().unwrap_or_default().is_empty(), "{push}");
+        let message = push["message"].as_str().unwrap();
+        assert!(message.contains("Fix invoice rounding"), "{message}");
+        assert!(message.contains("Round to cents at line level."), "{message}");
+
+        // 3. The brief is the playbook, and it names the exact tools and the
+        //    409 branches — a stripped-down brief is what sends an agent into
+        //    a claim retry loop.
+        let brief = push["assignment_brief"].as_str().unwrap();
+        for needle in [
+            tid.as_str(),
+            "pm_claim_task",
+            "pm_submit_task",
+            "409 review_not_approved",
+            "409 dependency_not_satisfied",
+        ] {
+            assert!(brief.contains(needle), "brief is missing `{needle}`: {brief}");
+        }
+
+        // 4. Delivery is stamped, so the same generation cannot be pushed
+        //    twice — a second tick must stay silent.
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            4,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert!(tool_text(&v)["dispatched_at"].is_string(), "stamp: {v}");
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "an idempotent dispatch must not be re-pushed on the next tick"
+        );
+
+        // 5. The wake-up is actionable: the assignee claims it (this is the
+        //    first moment the task becomes `in_progress`), submits, and the
+        //    human's approval closes it.
+        let v = call_tool(
+            &router,
+            Some("eng-inst"),
+            5,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "claim: {v}");
+        assert_eq!(tool_text(&v)["status"], "in_progress", "{v}");
+
+        let v = call_tool(
+            &router,
+            Some("eng-inst"),
+            6,
+            "pm_submit_task",
+            json!({ "task_id": tid, "text": "Rounded at line level; tests added." }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "submit: {v}");
+        assert_eq!(tool_text(&v)["status"], "submitted", "{v}");
+
+        // The claimed task leaves the candidate set, so no further push.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(seen.lock().unwrap().len(), 1, "claimed tasks are not re-pushed");
+
+        store
+            .review_task(&TaskId::parse(&tid).unwrap(), true, "human", None)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some("pm-inst"),
+            7,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["status"], "done", "the chain must close: {v}");
+
+        shutdown.request();
+    }
 }
