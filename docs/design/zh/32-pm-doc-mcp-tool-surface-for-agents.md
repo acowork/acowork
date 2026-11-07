@@ -131,7 +131,7 @@ Doc 侧**不改动现有 9 个工具**——文件系统语义已收敛（`doc_a
 |---|---|---|---|
 | `doc_list_requests` | **新增 P1** | `GET /requests`、`GET /docs/{id}/requests` | `doc_check_request` 需要 `request_id`（`r-{hex12}`），而**该 id 只存在于工具返回值里**——上下文压缩后丢失，那笔 `pending_review` 改动就**永久失联**：查不到、撤不回。这是 M6 的闭环缺口。 |
 | `doc_list_trash` / `doc_restore` | **新增 P1** | `GET /trash`、`POST /trash/{id}/restore` | `doc_remove` 明确「进回收站，可恢复」，但恢复面在 MCP 上不存在——能删不能救。**声明了可恢复却不给恢复路径，是语义上的欺骗。** 恢复走与 `doc_remove` 对称的所有权闸门。**不暴露 `purge`**——agent 不该有不可逆删除权。 |
-| `doc_move` 支持目录 + `doc_rmdir` | **增强 P2** | `PATCH/DELETE /dirs/{id}` | POSIX `mv` 本不区分文件与目录。当前有 `doc_mkdir` 却无任何目录改名/删除能力 → **信息架构重构在 agent 面上做不了**，而这正是 `document-organization` skill 的看家本领。`doc_rmdir` 仅空目录可删，非空返回明确错误、**不级联**。 |
+| `doc_rmdir`（+ 目录改名的替代路径） | **增强 P2** | `DELETE /dirs/{id}` | 当前有 `doc_mkdir` 却无任何目录删除能力 → **信息架构重构在 agent 面上做不了**，而这正是 `document-organization` skill 的看家本领。`doc_rmdir` 仅空目录可删，非空返回明确错误、**不级联**，且与 REST 同一所有权闸门（`AclTarget::Dir` + `edit`）、把回收站里还指向该目录的槽位也算作"非空"。**`doc_move` 仍只动文档**（path 必须以 `.md` 结尾）：`DirMeta` 无独立 parent 字段（父子即物理嵌套），目录改名/跨父移动要整体搬迁子树，属独立特性（计划 §9.2 第 7 条）；agent 侧的目录重构 = 移出文档 → `doc_rmdir` → `doc_mkdir` 新名。 |
 | `doc_list(recursive=true)` | **增强 P3** | `GET /tree` | 合并优于新增：不造 `doc_tree` 动词。默认 `false` 保持现行为，递归模式带深度与节点数上限。 |
 | `doc_get_acl` / `doc_set_acl` | **新增 P3** | `GET/PUT /permissions/{kind}/{id}` | agent 撞 ACL 才发现不能改。优先级最低：读默认公开、admin 在 ACL 层已豁免，多数场景不阻塞。 |
 
@@ -248,7 +248,7 @@ PM 的规划产出落文档库，固定形态：
 |---|---|
 | `prompts/system.md` | 新增 §5.3 写入纪律 / §5.4 ID 路径纪律 / §5.5 约定（PM 产出物是它的被服务对象，不得随意搬动 `项目管理/**`）；确立「库是事实源，workspace 只是导入源」 |
 | `manifest.toml` | `tool_deps` 声明 `doc_*`；修 D4 注释；shell 保留 |
-| 现有 7 skills | `document-collection` 改为「读 workspace → `doc_write(mode=create, source_workspace, source_path)`」；`document-organization` 用 `doc_mkdir` / `doc_move`（含目录）；`document-quality-review` 用 `doc_read` + `doc_stat` |
+| 现有 7 skills | `document-collection` 改为「读 workspace（`file_read`，需在 manifest 声明）→ `doc_write(mode=create, source_workspace, source_path)`」；`document-organization` 用 `doc_mkdir` / `doc_move`（**文档**，目录靠移出 + `doc_rmdir` + `doc_mkdir`）/ `doc_rmdir`；`document-quality-review` 用 `doc_read` + `doc_stat` + 审核队列三件 |
 | 新增 1 skill | `review-tracking`（`pending_review` 生命周期，依赖 `doc_list_requests`） |
 
 ---

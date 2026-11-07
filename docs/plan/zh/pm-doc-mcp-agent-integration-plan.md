@@ -190,7 +190,9 @@ graph LR
 | P0 | `pm_list_agents`（双模式）+ `pm_add_project_member` + `pm_add_activity`/`pm_list_activity` + D2/D3/D6/D7 修复 | pm 163 全绿 |
 | P1 | 14 主工具 + 3 别名（返回逐字节一致）+ `pm_update_task` 吸收 reparent + `pm_update_project` + 状态机表单一事实来源 | pm 163 全绿 |
 | P2 | Doc 9→13：`doc_list_requests`/`doc_list_trash`/`doc_restore`/`doc_rmdir` | doc 170 全绿 |
-| P3 | 2 个 `system.md` 工作区契约 + 14 skill 的 `System of Record` 段 + `tool_deps` 校正 + 两个 manifest 补推荐 MCP | — |
+| P3 | 2 个 `system.md` 工作区契约 + 14 skill 的 `System of Record` 段 + `tool_deps` 校正 + 两个 manifest 补推荐 MCP（含 ADR-104 的 `tools` 白名单） | — |
+
+**P3 的交付边界（别把这行读成"全做完了"）**：T3-4 的 `task-dispatch` / `project-setup` 与 T3-7 的 `review-tracking` **未建**，设计 32 §5.5 的 `项目管理/{project_id}/**` 路径约定**未写进两个 `system.md`**（全仓 `grep 项目管理 examples/*-agent` 为 0），`start_at` 作为派工唤醒钩子只有两处顺带提及。这三项见 §9.4。|
 
 ### 9.2 实施期与设计不符处（已按实测修正）
 
@@ -201,8 +203,9 @@ graph LR
 | 3 | 任务行含 `children` | 无此字段，子树只能 `pm_list_tasks(parent_task_id)` | 文档写明，不扩范围 |
 | 4 | 父链字段名对称 | 入参 `parent_task_id`、行内 `parent_id`（REST/Desktop 已依赖） | 保留不对称，description 明写 |
 | 5 | MCP 测试可跨调用 | `raw()` 每次新建临时库，跨调用状态不存在 | 新增 `shared_router()`/`call_shared()` |
-| 6 | `doc_rmdir` 复用 REST 删除 | REST 是**级联**删除 | agent 面只删空目录、不级联（写错路径的代价与收益不成比例） |
-| 7 | 目录可跨父移动 | `DirMeta` 无 `parent` 字段（父子即物理嵌套），跨父移动需整体搬迁子树 | 本期不做，属独立特性 |
+| 6 | `doc_rmdir` 复用 REST 删除 | REST 是**级联**删除 | agent 面只删空目录、不级联（写错路径的代价与收益不成比例）。**复核补记**：首版实现报 `{"removed": true}` 却没真删——`LibraryDirectoryService::delete()` 只标记子树、从不标记目标自己在父索引里的条目；且完全没有授权闸门（`let _ = actor`）而 REST 同操作有 `AclTarget::Dir` + `edit`；"空"也没算回收站。三处已修（服务层补父索引标记、结构性闸门收敛为 `gate_structural(target, creator)`、`doc_rmdir` 统计 `original_dir_id == dir_id` 的槽位），并补了四条反向断言。 |
+| 7 | 目录可跨父移动 | `DirMeta` 无 `parent` 字段（父子即物理嵌套），跨父移动需整体搬迁子树 | 本期不做，属独立特性；**设计 32 与 `document-organization` 正文已同步改口**（原写作"`doc_move` 支持目录"） |
+| 8 | `MANIFEST_FIELDS` 对账足够守住 schema | 首版只覆盖 PM 8/17、Doc 0/13：把 `pm_get_task` 的 `task_id` 改名成 `id`，163 个测试仍全绿；`pm_submit_task.attachment_ids`、`pm_list_my_tasks.project_id` 已实际漂移 | 覆盖全部工具（别名在内，Doc 新建同款表），并加 `manifest_fields_cover_every_tool`——"在表上"变成规则而非可选 |
 
 ### 9.3 别名删除 checklist（T4-5，下一 minor）
 
@@ -218,5 +221,10 @@ graph LR
 ### 9.4 未做（明确排除）
 
 - **P2 的 `doc_move` 目录跨父移动、`doc_list(recursive=true)`、`doc_get_acl`/`doc_set_acl`**：见 §9.2 第 7 条与设计 32 §3 的优先级判断。
+- **T3-4 / T3-7 的三个 skill**（`task-dispatch`、`project-setup`、`review-tracking`）：未建。三者是 M2（`start_at` 唤醒）与审核队列闭环的载体，缺它们则「派工链无人教、评审上下文压缩后失联」仍靠 `system.md` 的散文兜着。
+- **设计 32 §5.5 的路径约定**：`项目管理/{project_id}/{PRD,plan,report}.md` 未写进两个 `system.md`，PM↔Doc 的唯一耦合点目前只存在于设计文档里。
+- **T3-8 重打两个 `.agent` 包**：`examples/agent-packages/*.agent` 按 ADR-104 属打包产物，仍带改造前的 prompt（`pm_*`/`doc_*` 引用 0 处、manifest 仍写"No shell tools"）。发布前一并重打，或按 ADR-104 先例保持延后。
+- **T4-1 派工链端到端**：现有 `p0_acceptance_dispatch_chain_needs_no_human_and_no_hand_typed_ids` 覆盖到"建任务 + 读回"，缺"批准 → 扫描器唤醒 → claim → submit → 写周报进 doc"。
+- **T4-2 别名读时迁移表**（`MCP_TOOL_ALIASES`）：未实现，本批对 `core/acowork-runtime` 零改动。别名仍在发行所以不炸，但它被 §9.3 删除门①依赖，删除前必须先补。
 - **另外 4 个官方 agent（product-manager / architect / engineer / QA）**：同样的缺陷，本轮**已回退**未纳入；待本标杆验证后批量套用 §9.1 的 P3 手法（`system.md` 工作区契约 + 每 skill 的 `System of Record` 段 + `tool_deps` 校正）。
 - **设计文档 en 版**：zh 为源（ADR 约定），en 待补。
