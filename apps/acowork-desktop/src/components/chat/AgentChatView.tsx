@@ -22,7 +22,7 @@
 //   is the whole point (pick model/workspace/reasoning first).
 //   Persisting it on the session (not in component state) is what keeps the
 //   last pick across tab switches, reloads and devices.
-// - No SkillsPanel here at all. Skills are auto-loaded by the model, not
+// - No skill menu here at all. Skills are auto-loaded by the model, not
 //   session-seeded (they are deliberately outside the §4.5 seed), and the
 //   chat-message channel carries no skill/command field — there is nothing
 //   this surface could write per-message, so the chip is hidden rather than

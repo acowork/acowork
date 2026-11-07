@@ -10,10 +10,14 @@
 //!
 //! This is a hook rather than a prop on purpose. ADR-076 gated the
 //! session's write controls by threading a `readOnly` boolean into each
-//! child, and three of them were missed (SkillsPanel, the upload button,
-//! the paste/upload context-menu items) — the toolbar rendered half
+//! child, and three of them were missed (the skills dropdown, the upload
+//! button, the paste/upload context-menu items) — the toolbar rendered half
 //! enabled on a read-only session. A control that renders its own gate
 //! cannot be forgotten; a control that waits to be told can be.
+//!
+//! The composer `+` menu (ComposerPlusMenu) follows the same rule from one
+//! gate: attachments, skill picking and the per-session tool switches are all
+//! session writes, so the trigger is disabled as a unit rather than half of it.
 //!
 //! Defaults to `false` (i.e. writable) when the answer is unknown: a
 //! session created optimistically and not yet in the list, and an older

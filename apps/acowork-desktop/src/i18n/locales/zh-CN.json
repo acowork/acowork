@@ -456,7 +456,21 @@
     "modelMenuNoMatch": "无匹配项",
     "modelMenuLastUsed": "上次使用",
     "reasoningMenuTitle": "思考深度",
-    "selectAgentOrPeer": "选择一个 Agent 或联系人开始对话"
+    "selectAgentOrPeer": "选择一个 Agent 或联系人开始对话",
+    "plusMenu": "添加",
+    "plusMenuUnavailable": "请先选择一个会话",
+    "plusSkills": "技能",
+    "plusMcp": "MCP 服务",
+    "plusBuiltinTools": "内置工具",
+    "plusAttachments": "附件",
+    "followAgentDefault": "跟随 Agent 默认",
+    "plusLoading": "加载中...",
+    "plusLoadFailed": "工具列表加载失败",
+    "plusNoTools": "该 Agent 未启用内置工具",
+    "plusNoMcp": "该 Agent 没有 MCP 服务",
+    "plusNoToolsConnected": "尚未连接工具",
+    "plusToolCount": "{{n}} 个工具",
+    "plusAgentDisabledNote": "其中 {{n}} 项已由 Agent 配置关闭"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 推理进行中",
@@ -1534,7 +1548,13 @@
     "importing": "导入中...",
     "buttonImport": "导入",
     "searchPlaceholder": "搜索技能...",
-    "buttonImportSkills": "导入技能"
+    "buttonImportSkills": "导入技能",
+    "empty": "暂无技能",
+    "importZipOnly": "请拖入 .zip 文件",
+    "importSuccess": "技能 \"{{name}}\" 已导入",
+    "importFailed": "导入失败",
+    "importHint": "选择要导入的技能 ZIP 包。ZIP 内需包含带 YAML frontmatter 的 SKILL.md 文件。",
+    "importDropZone": "点击选择或拖入 .zip 文件"
   },
   "statusBar": {
     "agent": "agent",

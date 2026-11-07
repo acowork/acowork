@@ -38,7 +38,7 @@ const MENUS = [
     'isCurrent ? "text-[var(--color-accent)]"',
     'currentWsId === "__agent_home__" ? { color: "var(--color-accent)" } : {}',
   ]],
-  ["components/skills/SkillsPanel.tsx", 1, [
+  ["components/skills/SkillMenuList.tsx", 1, [
     'isActive ? "text-[var(--color-accent)]"',
     'style={isActive ? { color: "var(--color-accent)" } : { color: "" }}',
   ]],

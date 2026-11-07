@@ -263,7 +263,7 @@ const handleCompressSummary = () => {
       </button>
 
       {/* Detailed usage popover. Sized and styled to match the sibling
-          ModelMenu / SkillsPanel / SessionPanel dropdowns above the input
+          ModelMenu / ComposerPlusMenu / SessionPanel dropdowns above the input
           toolbar (w-80, rounded-md, bg-modal-surface, zinc borders).
           The five-category list and stacked progress bar come from the
           latest debug context snapshot (see ADR-066). */}

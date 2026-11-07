@@ -16,6 +16,10 @@ import { getGatewayUrl } from "./config";
 import { with503Retry, WRITE_503_RETRY } from "./httpRetry";
 import { log } from "./logger";
 import { NOT_AUTHORIZED, permissionMessage } from "./api-error";
+// Type-only: the policy shape is owned by the semantic layer (toolInventory),
+// and a `import type` edge carries no runtime dependency, so this module keeps
+// its one-way "control plane transport" role.
+import type { WireSessionToolPolicy } from "./toolInventory";
 
 /**
  * A control-plane call the Gateway refused on authorization grounds
@@ -51,12 +55,27 @@ async function controlRequest(
   path: string,
   body?: unknown,
 ): Promise<void> {
+  const resp = await controlFetch(method, path, body);
+  if (!resp.ok) await throwControlFailure(resp, path);
+}
+
+/**
+ * The one transport behind every control-plane call: 503 retry + identity
+ * headers. Callers own the response handling, so both the void-returning
+ * writers above and the JSON-returning readers below share the same retry and
+ * failure mapping.
+ */
+function controlFetch(
+  method: "GET" | "POST" | "DELETE" | "PUT",
+  path: string,
+  body?: unknown,
+): Promise<Response> {
   // Bug B v3: the Runtime's `session manager not ready` window (between
   // Gateway discovering an agent and its HTTP port landing in the reverse
   // proxy) makes every control op 503 for a second or two. Retry inside
   // the shared helper so all six callers recover transparently instead of
   // each logging a hard error.
-  const resp = await with503Retry(
+  return with503Retry(
     () =>
       fetch(`${getGatewayUrl()}${path}`, {
         method,
@@ -65,33 +84,35 @@ async function controlRequest(
       }),
     { policy: WRITE_503_RETRY, tag: `session-control ${method} ${path}`, logger: log },
   );
-  if (!resp.ok) {
-    const text = await resp.text();
-    // 401/403 = authenticated but not authorized; 404 = the resource is
-    // not visible to this account (ADR-087 D5). Both are terminal for
-    // this agent — a retry cannot help.
-    if (resp.status === 401 || resp.status === 403 || resp.status === 404) {
-      const agentId = path.split("/")[3] ?? "";
-      // ADR-087 D5.3: the Gateway denial is a flat JSON body — extract
-      // the refusing tier so callers render "需要使用权/管理权" instead
-      // of a raw `HTTP 403: {"error":"forbidden",…}` dump.
-      let required: string | undefined;
-      try {
-        const body = JSON.parse(text) as { code?: string; required?: string };
-        if (body?.code === NOT_AUTHORIZED && typeof body.required === "string") {
-          required = body.required;
-        }
-      } catch {
-        /* non-JSON denial — fall through to the raw text */
+}
+
+/** Map a non-2xx control-plane response onto `SessionAccessError` / `Error`. */
+async function throwControlFailure(resp: Response, path: string): Promise<never> {
+  const text = await resp.text();
+  // 401/403 = authenticated but not authorized; 404 = the resource is
+  // not visible to this account (ADR-087 D5). Both are terminal for
+  // this agent — a retry cannot help.
+  if (resp.status === 401 || resp.status === 403 || resp.status === 404) {
+    const agentId = path.split("/")[3] ?? "";
+    // ADR-087 D5.3: the Gateway denial is a flat JSON body — extract
+    // the refusing tier so callers render "需要使用权/管理权" instead
+    // of a raw `HTTP 403: {"error":"forbidden",…}` dump.
+    let required: string | undefined;
+    try {
+      const body = JSON.parse(text) as { code?: string; required?: string };
+      if (body?.code === NOT_AUTHORIZED && typeof body.required === "string") {
+        required = body.required;
       }
-      const message =
-        resp.status === 403 && required !== undefined
-          ? permissionMessage(required)
-          : `HTTP ${resp.status}: ${text}`;
-      throw new SessionAccessError(resp.status, agentId, message, required);
+    } catch {
+      /* non-JSON denial — fall through to the raw text */
     }
-    throw new Error(`HTTP ${resp.status}: ${text}`);
+    const message =
+      resp.status === 403 && required !== undefined
+        ? permissionMessage(required)
+        : `HTTP ${resp.status}: ${text}`;
+    throw new SessionAccessError(resp.status, agentId, message, required);
   }
+  throw new Error(`HTTP ${resp.status}: ${text}`);
 }
 
 /**
@@ -205,6 +226,50 @@ export function patchSessionConfig(
   },
 ): Promise<void> {
   return controlRequest("PUT", `/api/agents/${agentId}/sessions/${sessionId}/config`, patch);
+}
+
+/**
+ * `GET /api/agents/{id}/sessions/{sid}/tool-policy` — the session layer of the
+ * two-layer tool switch (ADR-109).
+ *
+ * Returns the **wire** shape: `null` when the session has never been trimmed
+ * (it inherits the agent layer), otherwise the raw JSON, which may carry empty
+ * groups or duplicates the store normalises away. Normalisation is the semantic
+ * layer's job ([toolInventory](lib/toolInventory.ts)), not the transport's.
+ */
+export async function getSessionToolPolicy(
+  agentId: string,
+  sessionId: string,
+): Promise<WireSessionToolPolicy | null> {
+  const path = `/api/agents/${agentId}/sessions/${sessionId}/tool-policy`;
+  const resp = await controlFetch("GET", path);
+  if (!resp.ok) await throwControlFailure(resp, path);
+  const data = (await resp.json()) as {
+    tool_policy?: WireSessionToolPolicy | null;
+  };
+  return data.tool_policy ?? null;
+}
+
+/**
+ * `PUT /api/agents/{id}/sessions/{sid}/tool-policy` — replace the session
+ * layer. `null` clears it (back to inheriting the agent layer).
+ *
+ * Replace-not-patch on purpose: the caller sends the complete policy, so a
+ * retry of the same body cannot compound, and returning the Runtime's echo
+ * (it normalises an all-empty policy back to `null`) lets the caller reconcile.
+ */
+export async function putSessionToolPolicy(
+  agentId: string,
+  sessionId: string,
+  policy: WireSessionToolPolicy | null,
+): Promise<WireSessionToolPolicy | null> {
+  const path = `/api/agents/${agentId}/sessions/${sessionId}/tool-policy`;
+  const resp = await controlFetch("PUT", path, { tool_policy: policy });
+  if (!resp.ok) await throwControlFailure(resp, path);
+  const data = (await resp.json()) as {
+    tool_policy?: WireSessionToolPolicy | null;
+  };
+  return data.tool_policy ?? null;
 }
 
 /**

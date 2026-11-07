@@ -365,7 +365,21 @@
     "modelMenuNoMatch": "一致する項目がありません",
     "modelMenuLastUsed": "前回使用",
     "reasoningMenuTitle": "思考深度",
-    "selectAgentOrPeer": "エージェントまたは連絡先を選んで会話を始めましょう"
+    "selectAgentOrPeer": "エージェントまたは連絡先を選んで会話を始めましょう",
+    "plusMenu": "追加",
+    "plusMenuUnavailable": "先にセッションを選択してください",
+    "plusSkills": "スキル",
+    "plusMcp": "MCP サーバー",
+    "plusBuiltinTools": "組み込みツール",
+    "plusAttachments": "添付ファイル",
+    "followAgentDefault": "Agent の既定値に従う",
+    "plusLoading": "読み込み中...",
+    "plusLoadFailed": "ツール一覧を読み込めませんでした",
+    "plusNoTools": "この Agent には組み込みツールがありません",
+    "plusNoMcp": "この Agent には MCP サーバーがありません",
+    "plusNoToolsConnected": "接続済みのツールはありません",
+    "plusToolCount": "{{n}} 個のツール",
+    "plusAgentDisabledNote": "うち {{n}} 件は Agent の設定で無効です"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM推論中",
@@ -1329,7 +1343,13 @@
     "importing": "インポート中...",
     "buttonImport": "インポート",
     "searchPlaceholder": "スキルを検索...",
-    "buttonImportSkills": "スキルをインポート"
+    "buttonImportSkills": "スキルをインポート",
+    "empty": "スキルがありません",
+    "importZipOnly": ".zip ファイルをドロップしてください",
+    "importSuccess": "スキル \"{{name}}\" をインポートしました",
+    "importFailed": "インポートに失敗しました",
+    "importHint": "インポートするスキルの ZIP パッケージを選択してください。ZIP には YAML frontmatter 付きの SKILL.md が必要です。",
+    "importDropZone": "クリックして選択、または .zip をドロップ"
   },
   "statusBar": {
     "agent": "agent",

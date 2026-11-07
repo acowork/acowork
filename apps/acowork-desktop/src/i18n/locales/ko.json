@@ -364,7 +364,21 @@
     "reasoningMenuTitle": "思考深度",
     "readOnlySession": "공유된 세션이므로 읽기 전용입니다",
     "readOnlySessionPlaceholder": "읽기 전용 세션 — 다른 계정이 공유함",
-    "selectAgentOrPeer": "에이전트 또는 대화를 선택해 시작하세요"
+    "selectAgentOrPeer": "에이전트 또는 대화를 선택해 시작하세요",
+    "plusMenu": "추가",
+    "plusMenuUnavailable": "먼저 세션을 선택하세요",
+    "plusSkills": "스킬",
+    "plusMcp": "MCP 서버",
+    "plusBuiltinTools": "내장 도구",
+    "plusAttachments": "첨부 파일",
+    "followAgentDefault": "Agent 기본값 따르기",
+    "plusLoading": "불러오는 중...",
+    "plusLoadFailed": "도구 목록을 불러오지 못했습니다",
+    "plusNoTools": "이 Agent 에는 내장 도구가 없습니다",
+    "plusNoMcp": "이 Agent 에는 MCP 서버가 없습니다",
+    "plusNoToolsConnected": "연결된 도구가 없습니다",
+    "plusToolCount": "도구 {{n}} 개",
+    "plusAgentDisabledNote": "이 중 {{n}} 개는 Agent 설정에서 비활성화됨"
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 추론 중",
@@ -1330,7 +1344,13 @@
     "importing": "가져오는 중...",
     "buttonImport": "가져오기",
     "searchPlaceholder": "스킬 검색...",
-    "buttonImportSkills": "스킬 가져오기"
+    "buttonImportSkills": "스킬 가져오기",
+    "empty": "스킬이 없습니다",
+    "importZipOnly": ".zip 파일을 드롭하세요",
+    "importSuccess": "스킬 \"{{name}}\" 을(를) 가져왔습니다",
+    "importFailed": "가져오기에 실패했습니다",
+    "importHint": "가져올 스킬 ZIP 패키지를 선택하세요. ZIP 에는 YAML frontmatter 가 있는 SKILL.md 가 필요합니다.",
+    "importDropZone": "클릭하여 선택하거나 .zip 을 드롭하세요"
   },
   "statusBar": {
     "agent": "agent",
