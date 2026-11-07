@@ -296,6 +296,20 @@ struct TaskDispatchRequest {
     target_agent: String,
     /// Dispatching human identity (project owner) — the chat row's `from`.
     owner: String,
+    /// ADR-076 §决策 4 (rev.): the project's owner (`Project::owner()` =
+    /// `owner_id ?? created_by`), used as the execution session's
+    /// *initiator* so the owner can write into it. It is deliberately kept
+    /// separate from `owner` above: `owner` is the task's creator
+    /// (`Task::created_by`) and drives the Chat row's voice (a PM-created
+    /// task speaks as the PM — an *assignment*, ADR-106 D15) and the
+    /// target's `intent:receive` allowlist check, neither of which should
+    /// change. For a human-filed task the two coincide; for an MCP-created
+    /// task `created_by` is the PM agent, and without this field the
+    /// execution session would be owned by that agent and read-only to the
+    /// human who actually runs the project. Absent/blank → falls back to
+    /// `owner` (pre-fix behavior).
+    #[serde(default)]
+    project_owner: Option<String>,
     /// Human-readable dispatch text (task title + description).
     message: String,
     /// Model-facing wake-up playbook (claim → work → submit). Delivered
@@ -549,7 +563,16 @@ async fn dispatch_task(
     let dreq = delivery::DeliveryRequest {
         message_id: message_id.clone(),
         conversation_id: conversation_id.clone(),
-        from_instance: req.owner.clone(),
+        // ADR-076 §决策 4 (rev.): the execution session's initiator is the
+        // project owner, not the task's creator. A PM-agent-created task has
+        // `created_by` = the PM agent; stamping that as the initiator made
+        // the session read-only to the human who runs the project. Falling
+        // back to `req.owner` (creator) when PM sends no owner preserves the
+        // old behavior for a human-filed task, where the two are the same.
+        // The Chat row's voice (`chat_turn::open` below) and the target's
+        // `intent:receive` check still key off `req.owner` — only the
+        // session's write-ownership changes here.
+        from_instance: pm_task_initiator(req.project_owner.as_deref(), &req.owner).to_string(),
         from_session_id: String::new(),
         target_instance: req.target_agent.clone(),
         action: "task".to_string(),
@@ -578,6 +601,11 @@ async fn dispatch_task(
         // — the delivery is made under its id, so the receiving Runtime threads
         // the round's reference row under the sentence that asked for the work.
         chat_row_id: message_id.clone(),
+        // ADR-076 §决策 4 (rev.): no extra awareness list needed — the
+        // initiator is now the human project owner (read + write), and every
+        // other member of the project reads the session through the bound
+        // group chat (the `Members` branch of `is_readable_by`).
+        aware_users: Vec::new(),
     };
     let outcome =
         delivery::wake_and_deliver(&ctx, &dreq, acowork_core::timeout_config::constants::INTENT_DEFAULT)
@@ -977,6 +1005,94 @@ pub struct IntentRequest {
     /// timeout). Empty = completed.
     #[serde(default)]
     pub status: Option<String>,
+    /// ADR-076 §决策 4 (rev.): the human account that originated the chain
+    /// this intent belongs to, declared by the sending Runtime from its own
+    /// session context (the initiator of the session it is running, or the
+    /// originator it was itself delivered). This is the *source of truth*
+    /// for who started the conversation, which the wire otherwise loses:
+    /// `sender` is an agent instance, not a human. The Gateway folds it
+    /// into the created session's `aware_users` seed so the originating
+    /// human can read the agent-to-agent execution even when they are not
+    /// on either agent's permission roster. Absent = a purely autonomous
+    /// agent-to-agent intent (no human in the chain) — the ACL seed alone
+    /// then guarantees visibility.
+    #[serde(default)]
+    pub on_behalf_of: Option<String>,
+}
+
+/// ADR-076 §决策 4 (rev.): compute the read-only awareness seed for an
+/// agent-to-agent intent — the human accounts that must be able to read
+/// the session the two agents are about to start between themselves.
+///
+/// The seed is `owner(sender) ∪ guests(sender) ∪ owner(target) ∪
+/// guests(target) ∪ {originator}`. The ACL part is what each agent's
+/// permission roster already authorizes to *use* that agent, so seeing an
+/// execution their agent took part in is not a new grant; the originator is
+/// the human who actually started the chain (the wire's `sender` is an
+/// agent, so without this the human would be lost). In a deployment with
+/// auth enabled every agent has an owner (ownerless rows are adopted into
+/// the admin at startup), so the seed is non-empty — which is exactly the
+/// invariant this exists to hold: no agent-to-agent session is a black box
+/// no human can read.
+///
+/// A `None`/empty owner or guest is skipped; duplicates collapse; order is
+/// sender-first so the list reads predictably in logs.
+///
+/// Local mode (`agent_owners = None`, no ACL table) yields the originator
+/// alone — and with no declared originator, an empty list. That is not the
+/// black box this field exists to prevent: local mode reads every session
+/// through `SessionScope::Unfiltered` (no account to restrict), so the
+/// single local account already sees everything. The plan's "fail-open to
+/// the sole local account" is satisfied by the scope tier, not by seeding;
+/// this function deliberately does not special-case local mode.
+///
+/// Shared with `deliver_response` and the fallback sweeper: a response or
+/// a timeout receipt can open a *fresh* initiator session when the one the
+/// request created has since been closed (origin `AgentResponse`), and the
+/// non-empty-seed invariant covers that session too.
+pub(crate) fn aware_users_seed(
+    state: &AppState,
+    sender: &str,
+    target: &str,
+    originator: Option<&str>,
+) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |v: Option<String>| {
+        if let Some(u) = v {
+            let u = u.trim();
+            if !u.is_empty() && !out.iter().any(|x| x == u) {
+                out.push(u.to_string());
+            }
+        }
+    };
+    if let Some(store) = state.agent_owners.as_ref() {
+        let guard = crate::gateway::ownership::lock(store);
+        for id in [sender, target] {
+            if let Some(rec) = guard.get(id) {
+                push(rec.owner_user_id.clone());
+                for g in &rec.guests {
+                    push(Some(g.clone()));
+                }
+            }
+        }
+    }
+    push(originator.map(str::to_string));
+    out
+}
+
+/// ADR-076 §决策 4 (rev.): the execution session's initiator for a PM task
+/// dispatch — the **project owner** (a human) when PM supplied one, else the
+/// task creator. A PM-agent-created task has `created_by` = the PM agent;
+/// stamping that as the initiator made the session read-only to the human
+/// who runs the project. Preferring `Project::owner()` puts a human at the
+/// write gate. The creator remains the Chat row's voice and the
+/// `intent:receive` subject (see `TaskDispatchRequest`), which is why this
+/// is a separate resolution rather than an overwrite of `owner`.
+fn pm_task_initiator<'a>(project_owner: Option<&'a str>, creator: &'a str) -> &'a str {
+    project_owner
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(creator)
 }
 
 async fn deliver_intent(
@@ -1138,6 +1254,46 @@ async fn deliver_intent(
         }
     }
 
+    // ADR-076 §决策 4 (rev.): this handler is the agent-to-agent path —
+    // `req.sender` is an agent instance, so the session it creates has no
+    // human initiator. Seed the read-only awareness list from both agents'
+    // ownership rosters plus the declared originator so at least one human
+    // (and, per the "both sides count" rule, the permission guests of both)
+    // can read the execution. A response to an existing conversation
+    // carries the seed too, but the receiving Runtime only stamps it when
+    // it creates a session, so it is inert there.
+    // ADR-076 §决策 4 (rev.): resolve the declared originator to a *human*
+    // or to nothing. The runtime forwards its session's initiator, which is
+    // a human account id for a human-started session but an agent instance
+    // id for an agent-started one — and the two are both UUID v4, so only
+    // the installed-agent table can tell them apart. An id that resolves to
+    // an installed agent is not a human originator: drop it and let the ACL
+    // seed carry visibility. Anything else is taken as a human account.
+    //
+    // Trust assumption (accepted, not enforced): the declared uid is not
+    // verified against the user service, and a dishonest agent could name
+    // *any* human here. The blast radius is read-only and one-directional
+    // — it can only ADD a reader to the session this intent creates, and
+    // that session's content is already the joint work of two agents whose
+    // owner+guest rosters are seeded in full. It cannot narrow anyone's
+    // access, cannot write, and cannot touch pre-existing sessions (the
+    // stamp is creation-time, write-once). Reconciling against the account
+    // directory is a hardening step, deliberately not taken here: the
+    // user-service round-trip would put a new dependency on the delivery
+    // hot path for a grant the ACL seed already covers in practice.
+    let originator = match req.on_behalf_of.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => {
+            let gw = state.gateway_state.read().await;
+            if gw.resolve_installed_key(s).is_some() {
+                None
+            } else {
+                Some(s.to_string())
+            }
+        }
+        _ => None,
+    };
+    let aware_users =
+        aware_users_seed(&state, &req.sender, &req.target, originator.as_deref());
     let dreq = delivery::DeliveryRequest {
         message_id: message_id.clone(),
         conversation_id: conversation_id.clone(),
@@ -1165,6 +1321,7 @@ async fn deliver_intent(
         // reference row says so instead of naming a coordinate no transcript
         // holds.
         chat_row_id: String::new(),
+        aware_users,
     };
     let outcome = delivery::wake_and_deliver(
         &ctx,
@@ -1413,7 +1570,17 @@ async fn deliver_response(
         mqtt: Some(mqtt),
         mailbox: mailbox.as_deref(),
     };
+    // ADR-076 §决策 4 (rev.): seed the awareness list here too, not only on
+    // the request path. A response normally re-enters the initiator's
+    // existing session (already stamped at creation, so this is inert), but
+    // when that session has since been closed `route_intent_session` opens
+    // a fresh one under `AgentResponse` — and the invariant says such a
+    // session is never a black box. No originator is threaded: the mailbox
+    // does not store one, and the ACL union alone guarantees non-emptiness
+    // in every deployment where accounts exist.
+    let aware_users = aware_users_seed(&state, &entry.to_instance, &entry.from_instance, None);
     let dreq = delivery::DeliveryRequest {
+        aware_users,
         message_id: response_id.clone(),
         conversation_id: entry.conversation_id.clone(),
         from_instance: entry.to_instance.clone(),
@@ -2085,10 +2252,19 @@ async fn deliver_mentions(
         "repo": repo,
     });
     // ADR-106 D6 level 1: the block this utterance answers, so the transcript
-    // can render the reply inside that block instead of beside it. Recorded
-    // whatever the resolution concluded — an `in_reply_to` at a row that is not
-    // a reference is still a quote the human made.
-    if !req.in_reply_to.trim().is_empty() {
+    // can render the reply inside that block instead of beside it.
+    //
+    // ADR-106 D15 (2026-11-06) made the coordinate a durable fact the store
+    // vetoes: a row may only name a coordinate that resolves to a row in this
+    // log. So the quote is recorded *only when it resolved* — `replied_round`
+    // is the row the ladder found above. When the human answered a card that is
+    // not in the log (cleaned up, or a stale client id), the routing already
+    // fell through to a plain turn (§5.5.4: the utterance is never dropped);
+    // the row must then carry no coordinate at all — an origin row, which D15
+    // always accepts. Recording the dangling id would have the store reject the
+    // append and turn a human's plain message into a 5xx, which is the opposite
+    // of "not dropped".
+    if replied_round.is_some() && !req.in_reply_to.trim().is_empty() {
         meta["in_reply_to"] = serde_json::Value::String(req.in_reply_to.trim().to_string());
     }
     // The pinned quadruples, durable with the row: the transcript renders them
@@ -2259,6 +2435,7 @@ async fn deliver_mentions(
             address,
         );
         let dreq = delivery::DeliveryRequest {
+            aware_users: Vec::new(),
             message_id: message_id.clone(),
             // §4.2: a human-initiated round carries no agent conversation
             // — it never counts against the R4 budget; continuity lives in the
@@ -2679,9 +2856,19 @@ async fn deliver_chat_message(
     // same turn.
     let mut meta = serde_json::json!({
         "message_id": message_id,
-        "in_reply_to": req.in_reply_to,
         "exec_attachments": exec_attachments,
     });
+    // ADR-106 D15: a durable row may only name a coordinate that resolves to a
+    // row in this log. `replied` is that resolution, read once above. When the
+    // human answered a card that is not in the log (cleaned up, or a stale
+    // client id), the routing already fell through to a plain turn (§5.5.4: the
+    // utterance is never dropped) — the row must then carry no coordinate at
+    // all, an origin row D15 always accepts. Recording the dangling id would
+    // have the store reject the append and turn a human's plain message into a
+    // 5xx, the opposite of "not dropped".
+    if replied.is_some() && !req.in_reply_to.trim().is_empty() {
+        meta["in_reply_to"] = serde_json::Value::String(req.in_reply_to.trim().to_string());
+    }
     // Pinned reference coordinates, durable with the row — the 1:1 twin of the
     // group form: chips render from them and the row is the source of truth for
     // what the turn quoted (ADR-106 revision 2026-11-04).
@@ -2758,6 +2945,7 @@ async fn deliver_chat_message(
         object.insert("attached_items".to_string(), serde_json::json!(attached_items));
     }
     let dreq = delivery::DeliveryRequest {
+        aware_users: Vec::new(),
         message_id: message_id.clone(),
         conversation_id: String::new(),
         from_instance: req.from_user.clone(),
@@ -3992,5 +4180,118 @@ mod pin_reference_rounds_tests {
         .await
         .expect_err("unreadable echo session must be refused");
         assert_eq!(e.code, 400);
+    }
+}
+
+#[cfg(test)]
+mod aware_users_seed_tests {
+    use super::*;
+    use crate::gateway::ownership::{self, OwnerRecord};
+    use crate::gateway::state::GatewayState;
+    use crate::http::auth::HttpAuth;
+
+    /// Build an `AppState` whose agent-ownership table holds `rows`
+    /// (`instance_id`, `owner`, `guests`). The store is backed by a unique
+    /// temp dir so it starts empty; we then write the rows directly.
+    fn state_with_owners(rows: &[(&str, Option<&str>, &[&str])]) -> AppState {
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-seed-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4()
+        ));
+        let gw = GatewayState::new(&dir.to_string_lossy());
+        let mut st = AppState::new(
+            std::sync::Arc::new(tokio::sync::RwLock::new(gw)),
+            std::sync::Arc::new(HttpAuth::new(false)),
+        );
+        let store = ownership::new_shared_agent_owners(&dir);
+        {
+            let mut guard = ownership::lock(&store);
+            for (id, owner, guests) in rows {
+                let mut rec = OwnerRecord::new((*owner).map(str::to_string));
+                rec.guests = guests.iter().map(|g| g.to_string()).collect();
+                guard.put(id, rec);
+            }
+        }
+        st.agent_owners = Some(store);
+        let _ = std::fs::remove_dir_all(&dir);
+        st
+    }
+
+    /// ADR-076 §决策 4 (rev.) — the seed is the union of both agents'
+    /// owner + guests plus the originator, deduped, sender-first. This is
+    /// what guarantees an agent-to-agent session is never a black box: in a
+    /// deployment with auth enabled every agent has an owner, so the seed is
+    /// non-empty even when no originator is declared.
+    #[test]
+    fn seed_unions_both_sides_and_originator() {
+        let st = state_with_owners(&[
+            ("lucy", Some("owner-lucy"), &["guest-a"]),
+            ("pm", Some("owner-pm"), &["guest-b"]),
+        ]);
+        let seed = aware_users_seed(&st, "lucy", "pm", Some("originator-nicholas"));
+        assert_eq!(
+            seed,
+            vec![
+                "owner-lucy".to_string(),
+                "guest-a".to_string(),
+                "owner-pm".to_string(),
+                "guest-b".to_string(),
+                "originator-nicholas".to_string(),
+            ],
+            "sender-first union, then the originator"
+        );
+    }
+
+    /// The originator is collapsed when already present (Nicholas is also
+    /// Lucy's owner): the list has no duplicates.
+    #[test]
+    fn seed_dedupes_the_originator() {
+        let st = state_with_owners(&[("lucy", Some("nicholas"), &[]), ("pm", Some("alice"), &[])]);
+        let seed = aware_users_seed(&st, "lucy", "pm", Some("nicholas"));
+        assert_eq!(seed, vec!["nicholas".to_string(), "alice".to_string()]);
+    }
+
+    /// No originator, but both agents owned → still non-empty (the invariant
+    /// holds without any declared human).
+    #[test]
+    fn seed_is_non_empty_from_acl_alone() {
+        let st = state_with_owners(&[("lucy", Some("owner-lucy"), &[]), ("pm", Some("owner-pm"), &[])]);
+        let seed = aware_users_seed(&st, "lucy", "pm", None);
+        assert!(!seed.is_empty(), "the ACL seed alone guarantees a reader");
+        assert_eq!(seed, vec!["owner-lucy".to_string(), "owner-pm".to_string()]);
+    }
+
+    /// Unknown instances contribute nothing (no ownership row); a declared
+    /// originator is still carried, so a purely-ownerless pair is not a
+    /// black box as long as the runtime named a human.
+    #[test]
+    fn seed_carries_originator_when_acl_is_empty() {
+        let st = state_with_owners(&[]);
+        let seed = aware_users_seed(&st, "unknown-a", "unknown-b", Some("nicholas"));
+        assert_eq!(seed, vec!["nicholas".to_string()]);
+    }
+
+    /// Empty/whitespace owner and originator are skipped, never pushed as "".
+    #[test]
+    fn seed_skips_blank_entries() {
+        let st = state_with_owners(&[("lucy", Some("   "), &["", "guest-a"]), ("pm", None, &[])]);
+        let seed = aware_users_seed(&st, "lucy", "pm", Some("  "));
+        assert_eq!(seed, vec!["guest-a".to_string()]);
+    }
+
+    /// ADR-076 §决策 4 (rev.) — problem 2's fix. A PM-agent-created task
+    /// (creator = the PM agent instance) dispatches under the project owner,
+    /// so the human who runs the project becomes the session's initiator and
+    /// can write it. A blank/absent owner falls back to the creator (a
+    /// human-filed task, where the two coincide).
+    #[test]
+    fn pm_task_initiator_prefers_the_project_owner() {
+        let owner = pm_task_initiator(Some("nicholas"), "pm-agent-instance");
+        assert_eq!(owner, "nicholas");
+        // Blank owner → creator (no human project owner resolved).
+        assert_eq!(pm_task_initiator(Some("   "), "creator"), "creator");
+        // Absent owner → creator (pre-fix behavior for human-filed tasks).
+        assert_eq!(pm_task_initiator(None, "creator"), "creator");
     }
 }

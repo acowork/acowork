@@ -391,6 +391,7 @@ async fn legacy_meta_file_loads_with_tokens_none() {
 
     let session_id = "legacy_session";
     let legacy_meta = SessionMeta {
+        aware_users: Vec::new(),
         version: 2,
         session_id: session_id.to_string(),
         agent_id: AGENT_ID.to_string(),
@@ -555,6 +556,7 @@ async fn resume_hydrates_last_compaction_offset_from_meta() {
     let conv_dir = dir.path().join("conversations");
     std::fs::create_dir_all(&conv_dir).unwrap();
     let meta = SessionMeta {
+        aware_users: Vec::new(),
         version: 2,
         session_id: session_id.to_string(),
         agent_id: AGENT_ID.to_string(),

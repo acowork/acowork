@@ -123,6 +123,7 @@ impl AgentLoop {
                         .conversation
                         .as_ref()
                         .and_then(|c| c.chat_session_id()),
+                    initiator: self.session.conversation.as_ref().and_then(|c| c.initiator()),
                 };
 
                 // ADR-045: per-tool cancel token. Created BEFORE `spawn`

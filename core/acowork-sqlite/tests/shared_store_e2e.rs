@@ -15,6 +15,7 @@ const DIM: usize = 4;
 
 fn meta(sid: &str, title: &str) -> SessionMeta {
     SessionMeta {
+        aware_users: Vec::new(),
         version: 4,
         session_id: sid.to_string(),
         agent_id: "agent".into(),

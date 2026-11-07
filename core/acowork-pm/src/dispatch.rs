@@ -174,6 +174,15 @@ pub fn spawn_scanner(
             }
             let now = std::time::Instant::now();
             let mut dispatched = 0usize;
+            // ADR-076 §决策 4 (rev.): the project owner (`Project::owner()`,
+            // a human) travels with each dispatch so the Gateway can stamp
+            // it as the execution session's initiator. Cached per tick —
+            // several tasks of one project are dispatched together, and the
+            // owner is stable within a tick.
+            let mut project_owners: std::collections::HashMap<
+                crate::types::ProjectId,
+                String,
+            > = std::collections::HashMap::new();
             for tid in due {
                 if dispatched >= per_tick {
                     break;
@@ -225,12 +234,29 @@ pub fn spawn_scanner(
                 }
                 let message = build_dispatch_message(&task);
                 let brief = build_assignment_brief(&task);
+                // ADR-076 §决策 4 (rev.): resolve `Project::owner()` (a
+                // human) so the Gateway makes them the execution session's
+                // initiator and they can write into it. A project that
+                // vanished mid-tick falls back to the creator — the same
+                // identity PM has always sent — so dispatch never breaks on
+                // a missing row.
+                let project_owner = match project_owners.get(&task.project_id) {
+                    Some(o) => o.clone(),
+                    None => match store.get_project(&task.project_id).await {
+                        Ok(Some(p)) => p.owner().to_string(),
+                        _ => task.created_by.as_str().to_string(),
+                    },
+                };
+                project_owners
+                    .entry(task.project_id.clone())
+                    .or_insert_with(|| project_owner.clone());
                 match client
                     .dispatch_task(
                         task.project_id.as_str(),
                         task.id.as_str(),
                         assignee,
                         &task.created_by,
+                        &project_owner,
                         &message,
                         &brief,
                         &identity,

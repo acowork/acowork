@@ -74,7 +74,7 @@ pub struct Turn<'a> {
 /// invent. An untyped (pre-design-27-§8.1) participant is *not* evidence of an
 /// agent, so its turn is human speech, which is also the only kind the store
 /// would accept for it.
-fn kind_of<'a>(session: &'a SessionInfo, from: &str) -> Result<&'static str, String> {
+fn kind_of(session: &SessionInfo, from: &str) -> Result<&'static str, String> {
     let author = session
         .participants
         .iter()

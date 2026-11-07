@@ -1424,6 +1424,11 @@ async fn execute_info_tool(
         session_id: None,
         current_user_message: Some(user_text.to_string()),
         chat_session_id: (!chat_id.is_empty()).then(|| chat_id.to_string()),
+        // The router turn owns no execution session, so there is no
+        // session initiator to forward as `on_behalf_of` (ADR-076 §决策 4
+        // rev.). The chat's own human participants are the visibility
+        // surface here, not a per-session awareness list.
+        initiator: None,
     };
     let outcome = tokio::time::timeout(
         Duration::from_millis(timeout_ms),
@@ -2112,6 +2117,7 @@ mod tests {
             // A router envelope is always a Chat row the Gateway wrote; the
             // declared coordinate is that row.
             chat_row_id: "m-1".into(),
+            aware_users: Vec::new(),
         }
     }
 

@@ -135,6 +135,12 @@ pub struct IntentEnvelope {
     /// reference row it writes stays unthreaded, which is the truth.
     #[serde(default)]
     pub chat_row_id: String,
+    /// ADR-076 §决策 4 (rev.): human accounts with read-only awareness of
+    /// the session this intent creates (see `ControlAction::IntentReceived`).
+    /// `route_intent_session` stamps it onto a newly created session's meta
+    /// via `set_aware_users`; a follow-up to an existing session ignores it.
+    #[serde(default)]
+    pub aware_users: Vec<String>,
     // ADR-100 Rev. 8: the execution-view pin (`for_execution_session`) is gone.
     // A message composed inside an execution session is a session-scoped write
     // (`InboundMessage::ChatMessage` over HTTP), never an Intent envelope, so
@@ -404,6 +410,7 @@ mod tests {
             has_human: None,
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
+            aware_users: Vec::new(),
         }));
         let json = serde_json::to_string(&msg).unwrap();
         let decoded: InboundMessage = serde_json::from_str(&json).unwrap();
@@ -526,6 +533,7 @@ mod tests {
             has_human: None,
             chat_attachment_ids: Vec::new(),
             chat_row_id: String::new(),
+            aware_users: Vec::new(),
         }));
         let (msg, truncated) = msg.enforce_size_limit();
         assert!(truncated);

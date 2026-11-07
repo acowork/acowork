@@ -3733,15 +3733,29 @@ mod tests {
 
         // 4. Delivery is stamped, so the same generation cannot be pushed
         //    twice — a second tick must stay silent.
-        let v = call_tool(
-            &router,
-            Some("pm-inst"),
-            4,
-            "pm_get_task",
-            json!({ "task_id": tid }),
-        )
-        .await;
-        assert!(tool_text(&v)["dispatched_at"].is_string(), "stamp: {v}");
+        //
+        // The stamp is persisted only *after* the stub replies (it pushes
+        // the body into `seen` before sending the response), so a single
+        // read right after step 1 can land in that window. Poll instead,
+        // with the same 20 ms ticks and 5 s failure floor as step 1.
+        let mut waited = 0u64;
+        let task = loop {
+            let v = call_tool(
+                &router,
+                Some("pm-inst"),
+                4,
+                "pm_get_task",
+                json!({ "task_id": tid }),
+            )
+            .await;
+            let task = tool_text(&v);
+            if task["dispatched_at"].is_string() || waited >= 5_000 {
+                break task; // stamped, or the failure floor: assert below
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            waited += 20;
+        };
+        assert!(task["dispatched_at"].is_string(), "stamp: {task}");
         tokio::time::sleep(Duration::from_millis(150)).await;
         assert_eq!(
             seen.lock().unwrap().len(),

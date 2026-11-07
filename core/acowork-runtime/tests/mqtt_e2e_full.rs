@@ -181,6 +181,7 @@ fn integration_control_message_flow() {
                 has_human_participant: None,
                 chat_attachment_ids: vec![],
                 chat_row_id: String::new(),
+                aware_users: vec![],
                 params_json: r#"{"hello":"e2e"}"#.into(),
             })),
         };
@@ -282,6 +283,7 @@ fn integration_control_intent_flow() {
                 has_human_participant: None,
                 chat_attachment_ids: vec![],
                 chat_row_id: String::new(),
+                aware_users: vec![],
                 params_json: String::new(),
             })),
         };
@@ -327,6 +329,7 @@ fn integration_control_intent_flow() {
                                     has_human_participant: None,
                                     chat_attachment_ids: vec![],
                                     chat_row_id: String::new(),
+                                    aware_users: vec![],
                                     params_json: String::new(),
                                 })),
                             },
@@ -414,6 +417,7 @@ fn integration_multiple_messages() {
                     has_human_participant: None,
                     chat_attachment_ids: vec![],
                     chat_row_id: String::new(),
+                    aware_users: vec![],
                     params_json: format!(r#"{{"seq":{i}}}"#),
                 })),
             };

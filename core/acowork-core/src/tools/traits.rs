@@ -68,6 +68,17 @@ pub struct ToolContext {
     /// like `chat_history_read` can resolve the source chat without requiring
     /// the agent to carry internal ids in its text output.
     pub chat_session_id: Option<String>,
+    /// ADR-076 §决策 4 (rev.): the session's initiator — a human account id
+    /// for a human-started session, an agent instance id for an
+    /// agent-started one (the two are indistinguishable by format, so the
+    /// consumer that needs the distinction resolves it against the installed
+    /// agent table). `intent_send` forwards it as the intent's `on_behalf_of`
+    /// so the Gateway can keep the originating human aware of the
+    /// agent-to-agent session the current agent is about to start; the
+    /// Gateway drops it when it names an agent rather than a human.
+    /// `None` for a turn that belongs to no execution session (the chat
+    /// router).
+    pub initiator: Option<String>,
 }
 
 /// Core Tool trait that all tools must implement

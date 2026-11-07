@@ -721,6 +721,7 @@ impl AgentLoop {
                 .conversation
                 .as_ref()
                 .and_then(|c| c.chat_session_id()),
+            initiator: self.session.conversation.as_ref().and_then(|c| c.initiator()),
         };
         match tool.execute_with_context(params, &ctx).await {
             Ok(result) if result.ok => Ok(result.content),
@@ -1005,6 +1006,11 @@ impl AgentLoop {
         // terminal outcome and a round parked on a card are the same notification
         // hole — and it names the round only: the word a reader sees comes from
         // the projection read it triggers (D4), not from this event.
+        //
+        // The durability ordering this event owes the reader — the round record
+        // must be on the side table *before* the Chat is told to re-read it — is
+        // enforced inside [`Self::publish_round_state`], the single choke point
+        // every round doorbell passes through, so no call site can forget it.
         self.publish_round_state(&round_id);
         outcome
     }
@@ -1035,6 +1041,18 @@ impl AgentLoop {
             .as_ref()
             .and_then(|conv| conv.chat_session_id())
             .unwrap_or_default();
+        // Durability-before-notification, enforced at the single choke point
+        // every round doorbell passes through. The snapshot the bell announces
+        // rode the writer mailbox (a path the chunk channel cannot order
+        // against); drain the writer first so the Chat's reload-on-bell always
+        // finds the record it is told to re-read. Doing it here — not at each
+        // call site — is what makes "the Chat is never told to re-read before
+        // the fact landed" a property of the code rather than a rule every
+        // producer has to remember (ADR-106 D4/D5; the terminal-card-not-live
+        // defect, problem 3).
+        if let Some(conv) = &self.session.conversation {
+            conv.flush_now();
+        }
         if !self.session_core.try_send_chunk(ChunkEvent::RoundState {
             round_id: round_id.to_string(),
             chat_session_id,
@@ -2740,6 +2758,46 @@ mod tests {
         assert!(!rec.terminal, "the turn is still running");
     }
 
+    /// Problem 3 (terminal card not live): the round doorbell must not reach the
+    /// Chat before the round record it announces is durable on the side table,
+    /// or the reload-on-bell re-reads the old "running" state and the block sits
+    /// stuck until the next remount or the interval backstop. The fix is a
+    /// synchronous writer barrier inside `publish_round_state` — the single
+    /// choke point every doorbell passes through. This pins it by reading the
+    /// side table directly with no `round_record` poll: were the snapshot still
+    /// in the writer mailbox when the bell fired, `read_record` would answer
+    /// `None` here.
+    #[test]
+    fn closing_a_turn_makes_the_terminal_record_durable_before_the_doorbell() {
+        let dir = tempfile::tempdir().unwrap();
+        let (agent_loop, mut chunk_rx, conv) = card_test_loop(dir.path(), "chat-1");
+        // A round the writer *holds*: arm the stamp, publish it to the index
+        // (synchronous — this is what production's turn open does, and what makes
+        // `close_turn_round`'s `current_round_id` answer), then write its opener.
+        conv.begin_round("r:1");
+        conv.announce_round("r:1");
+        conv.append_message("user", "do the thing", None);
+
+        agent_loop.close_turn_round(Ok("done".to_string())).ok();
+
+        // The doorbell fired, naming the round and the Chat that owes it.
+        let bell = chunk_rx.try_recv().expect("the closure rings");
+        assert!(
+            matches!(&bell.event, ChunkEvent::RoundState { round_id, chat_session_id }
+                if round_id == "r:1" && chat_session_id == "chat-1"),
+            "got {:?}",
+            bell.event
+        );
+
+        // …and the terminal record was ALREADY durable when it fired. The flush
+        // barrier is what makes this deterministic rather than a race.
+        let rec = crate::rounds::read_record(conv.rounds_index_path(), "r:1")
+            .expect("side table readable")
+            .expect("terminal record durable before the doorbell — no writer race");
+        assert!(rec.terminal, "the closed round is terminal (D4)");
+        assert_eq!(rec.status.as_deref(), Some("completed"));
+    }
+
     // ── S1.5: Streaming tests ─────────────────────────────────────────
 
     #[tokio::test]
@@ -3275,6 +3333,7 @@ mod tests {
                     has_human: None,
                     chat_attachment_ids: Vec::new(),
                     chat_row_id: String::new(),
+                    aware_users: Vec::new(),
                 },
             )))
             .unwrap();

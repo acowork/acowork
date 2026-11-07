@@ -599,6 +599,7 @@ impl SessionManager {
         seed: Option<super::intent_routing::SessionSeed>,
         source_chat_session_id: Option<&str>,
         initiator: Option<&str>,
+        aware_users: &[String],
     ) -> Result<(String, bool)> {
         // ADR-106 D11: the binding is a column on the session's own row, read
         // through the meta store — there is no side file, so no second truth that
@@ -640,7 +641,9 @@ impl SessionManager {
                 "Intent routing entry points at a non-active session — opening a fresh one"
             );
         }
-        let new_sid = self.create_intent_session(initiator, seed.as_ref()).await?;
+        let new_sid = self
+            .create_intent_session(initiator, seed.as_ref(), aware_users)
+            .await?;
         self.stamp_chat_binding(chat_id, &new_sid);
         if let Err(e) = store.intent_bind(&new_sid, key) {
             // The session is live and taking the turn; losing only the binding
@@ -923,7 +926,9 @@ impl SessionManager {
             return Ok((session_id, false));
         }
 
-        let new_sid = self.create_intent_session(initiator, seed.as_ref()).await?;
+        let new_sid = self
+            .create_intent_session(initiator, seed.as_ref(), &[])
+            .await?;
         self.stamp_chat_binding(Some(chat_session_id), &new_sid);
         Ok((new_sid, true))
     }
@@ -1411,6 +1416,7 @@ impl SessionManager {
         &mut self,
         initiator: Option<&str>,
         seed: Option<&super::intent_routing::SessionSeed>,
+        aware_users: &[String],
     ) -> Result<String> {
         // ADR-076 §决策 4: an initiator is an **account** or an **agent
         // instance**. The cron trigger key (`cron:<trigger_id>`, ADR-073 —
@@ -1445,6 +1451,19 @@ impl SessionManager {
             && let Some(conv) = &handle.conversation
         {
             conv.update_reasoning_effort(Some(effort.to_string()));
+        }
+        // ADR-076 §决策 4 (rev.): stamp the read-only awareness list onto
+        // the session this intent just created. `set_aware_users` is
+        // write-once, so a follow-up that reuses this session cannot
+        // re-seed it — the list is a creation-time snapshot, matching the
+        // ACL the Gateway read when it delivered. For a human-initiated
+        // delivery the list is empty (the initiator already grants access)
+        // and this is inert.
+        if !aware_users.is_empty()
+            && let Some(handle) = self.get_session(&sid)
+            && let Some(conv) = &handle.conversation
+        {
+            conv.set_aware_users(aware_users.to_vec());
         }
         Ok(sid)
     }
@@ -5592,6 +5611,7 @@ mod tests {
         write_session_meta(
             &conversations_dir,
             &SessionMeta {
+                aware_users: Vec::new(),
                 version: 3, // CONVERSATION_FORMAT_VERSION
                 session_id: survivor_id.to_string(),
                 agent_id: "com.test.delete_latest".to_string(),
@@ -5810,7 +5830,7 @@ mod tests {
         }));
 
         let sid = manager
-            .create_intent_session(Some("u-initiator"), None)
+            .create_intent_session(Some("u-initiator"), None, &[])
             .await
             .expect("create intent session");
         let meta = read_session_meta(&conversations, &sid).expect("read meta");
@@ -5832,7 +5852,7 @@ mod tests {
         // An agent-initiated turn stamps the agent instance, so no human
         // holds the write — exactly the single-initiator rule.
         let agent_sid = manager
-            .create_intent_session(Some("8f7be9a6-agent-instance"), None)
+            .create_intent_session(Some("8f7be9a6-agent-instance"), None, &[])
             .await
             .expect("create agent-initiated session");
         let meta = read_session_meta(&conversations, &agent_sid).expect("read meta");
@@ -5843,7 +5863,7 @@ mod tests {
         // normalize to ownerless + public, not stamp as an unmatchable owner
         // that hides the session from every human account.
         let cron_sid = manager
-            .create_intent_session(Some("cron:trig-1"), None)
+            .create_intent_session(Some("cron:trig-1"), None, &[])
             .await
             .expect("create cron-initiated session");
         let meta = read_session_meta(&conversations, &cron_sid).expect("read meta");
@@ -5853,6 +5873,82 @@ mod tests {
                 && meta.is_writable_by(&SessionScope::user("u-initiator")),
             "an ownerless cron session stays open to signed-in accounts"
         );
+
+        let _ = std::fs::remove_dir_all(&work_dir);
+    }
+
+    /// ADR-076 §决策 4 (rev.) — the awareness seed lands on disk. An
+    /// agent-to-agent intent creates a session whose initiator is an agent
+    /// (so no human can write it), but the Gateway-seeded `aware_users` make
+    /// it readable by the owner and permission guests of both agents plus the
+    /// originator. This is the runtime half of "no agent-to-agent session is
+    /// a black box": the list the Gateway computed is stamped onto the new
+    /// session's meta and survives to the store row the read path consults.
+    #[tokio::test]
+    async fn intent_session_stamps_aware_users_on_meta() {
+        use crate::conversation::{SessionScope, read_session_meta};
+
+        let mut config = crate::config::RuntimeConfig::default();
+        let work_dir = std::env::temp_dir().join(format!("acowork-aware-{}", Uuid::new_v4()));
+        config.work_dir = work_dir.to_string_lossy().to_string();
+
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.aware"
+            version = "1.0.0"
+            name = "Test aware"
+            description = "Pin the execution-session awareness seed"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider =
+            Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(vec![]),
+        )));
+        let conversations = work_dir.join("conversations");
+
+        let aware = vec!["owner-lucy".to_string(), "guest-a".to_string(), "nicholas".to_string()];
+        let sid = manager
+            .create_intent_session(Some("8f7be9a6-agent-instance"), None, &aware)
+            .await
+            .expect("create agent-initiated session with awareness");
+        let meta = read_session_meta(&conversations, &sid).expect("read meta");
+
+        // Initiator stays the agent (the semantics Nicholas insisted on: an
+        // agent-to-agent session is not relabelled as a human one).
+        assert_eq!(meta.initiator.as_deref(), Some("8f7be9a6-agent-instance"));
+        // The seed is persisted verbatim.
+        assert_eq!(meta.aware_users, aware);
+        // Every aware human can read it, though none is the initiator.
+        for u in &aware {
+            assert!(
+                meta.is_readable_by(&SessionScope::user(u)),
+                "{u} must read the agent-to-agent session"
+            );
+        }
+        // …but none can write it — awareness is read-only by construction.
+        for u in &aware {
+            assert!(
+                !meta.is_writable_by(&SessionScope::user(u)),
+                "{u} must not write a session they did not start"
+            );
+        }
+        // A stranger off the list reads nothing.
+        assert!(!meta.is_readable_by(&SessionScope::user("stranger")));
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }
@@ -5907,6 +6003,7 @@ mod tests {
                 None,
                 Some("cs-group-1"),
                 Some("u-alice"),
+                &[],
             )
             .await
             .expect("route chat session");
@@ -5981,7 +6078,7 @@ mod tests {
 
         // A `conv:` key keeps the pre-Wave-4 shape: no binding, private.
         let (csid, _) = manager
-            .route_intent_session("conv:c-1", None, None, None)
+            .route_intent_session("conv:c-1", None, None, None, &[])
             .await
             .expect("route conv session");
         let cmeta = read_session_meta(&conversations, &csid).expect("read conv meta");
@@ -6045,7 +6142,7 @@ mod tests {
 
         let key = "conv:task:proj-1:T-7:com.test.task_bind";
         let (sid, _) = manager
-            .route_intent_session(key, None, Some("cs-project-group"), None)
+            .route_intent_session(key, None, Some("cs-project-group"), None, &[])
             .await
             .expect("route task session");
         let meta = read_session_meta(&conversations, &sid).expect("read task meta");
@@ -6081,7 +6178,7 @@ mod tests {
 
         // No source chat → no binding (pre-Wave-4 shape).
         let (plain, _) = manager
-            .route_intent_session("conv:c-2", None, None, None)
+            .route_intent_session("conv:c-2", None, None, None, &[])
             .await
             .expect("route conv session");
         let plain_meta = read_session_meta(&conversations, &plain).expect("read conv meta");
@@ -6132,7 +6229,7 @@ mod tests {
         )));
 
         let (sid, first_new) = manager
-            .route_intent_session("conv:c-not3", None, None, None)
+            .route_intent_session("conv:c-not3", None, None, None, &[])
             .await
             .expect("create chat session");
         assert!(first_new, "a first routing creates the session");
@@ -6143,7 +6240,7 @@ mod tests {
             ..Default::default()
         };
         let (sid2, opened_new) = manager
-            .route_intent_session("conv:c-not3", Some(seed), None, None)
+            .route_intent_session("conv:c-not3", Some(seed), None, None, &[])
             .await
             .expect("reuse under a config seed");
         assert_eq!(sid, sid2, "a config seed alone creates nothing");
@@ -6346,7 +6443,7 @@ mod tests {
         // A brand-new registry key creates — and is reported as new, so a
         // first PM task also gets an honest "启动新任务" reaction.
         let (_, task_new) = manager
-            .route_intent_session("conv:task:p:T1:com.test.x", None, None, None)
+            .route_intent_session("conv:task:p:T1:com.test.x", None, None, None, &[])
             .await
             .expect("task session created");
         assert!(task_new, "a first-time registry key creates its session");

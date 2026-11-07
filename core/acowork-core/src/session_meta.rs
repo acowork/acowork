@@ -604,6 +604,40 @@ pub struct SessionMeta {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub chat_session_id: Option<String>,
 
+    /// ADR-076 §决策 4 (rev.): the human accounts granted **read-only
+    /// awareness** of this session — the right to know it exists and to
+    /// read its history, without owning it and without writing into it.
+    ///
+    /// This is a deliberate third axis, orthogonal to `initiator` and
+    /// `chat_session_id`, and it exists so `initiator` can keep its true
+    /// meaning ("who started this session" — an agent for an agent-to-agent
+    /// intent, a person for a human turn) instead of being overloaded with
+    /// a human just so that human can see the run. Conflating the two is
+    /// what erased the agent-to-agent vs user-to-agent distinction.
+    ///
+    /// The list is a **creation-time snapshot**, resolved by the Gateway
+    /// (the only party that holds the agent ownership table, ADR-087 D1)
+    /// and carried on the Intent wire to the receiving Runtime, which
+    /// stamps it verbatim. The Runtime never queries an ACL table to
+    /// compute or refresh it — that keeps `is_readable_by` a pure
+    /// membership test with no new dependency. A guest added to an agent
+    /// after a session was created does not retroactively enter this list;
+    /// reconciling the two is a separate concern, not this field's job.
+    ///
+    /// It is seeded **only for agent-to-agent origins** (`AgentRequest` /
+    /// `AgentResponse`), where there is no human privacy subject to protect:
+    /// the owner and guests of both participating agents, plus the nearest
+    /// human in the chain. It is left empty for human origins (`Chat` /
+    /// `PmTask`), because widening those by agent ACL would let one user of
+    /// a shared agent read another user's private conversation — the ACL
+    /// rule must never override a human's privacy subject.
+    ///
+    /// Read-only by construction: `is_writable_by` does not consult this
+    /// field. An empty list is the default and means "no extra readers", so
+    /// pre-existing rows deserialise to unchanged behaviour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aware_users: Vec<String>,
+
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -669,6 +703,18 @@ impl SessionMeta {
             // writing — see `is_writable_by`.
             SessionScope::Unfiltered | SessionScope::Admin { .. } => true,
             SessionScope::User { uid, chats } => {
+                // ADR-076 §决策 4 (rev.): read-only awareness. The Gateway
+                // seeds this list when it delivers an agent-to-agent intent
+                // — the owner and permission guests of both agents see the
+                // session the two agents started between themselves, which
+                // has no human initiator to otherwise grant them. It grants
+                // reading only: `is_writable_by` deliberately never consults
+                // it, so an aware account cannot type into an execution it
+                // did not start. For a human-initiated session the list is
+                // empty and this is inert.
+                if self.aware_users.iter().any(|u| u == uid) {
+                    return true;
+                }
                 if self.visibility == Some(SessionVisibility::Members) {
                     // Design 27 §8.2: a group execution session is readable
                     // by its owner and by any current participant of the
@@ -1049,3 +1095,105 @@ mod chat_scope_tests {
     }
 }
 
+
+#[cfg(test)]
+mod aware_users_tests {
+    use super::{SessionMeta, SessionScope, SessionVisibility};
+
+    /// Build a session meta from a minimal JSON body. The fields that carry
+    /// no serde default (`version`/`session_id`/`agent_id`/`created_at`/
+    /// `message_count`/`last_active_at`) are supplied; everything else —
+    /// including `aware_users` — takes its default, so a test names only
+    /// what it is about.
+    fn meta(initiator: Option<&str>, visibility: Option<&str>, aware: &[&str]) -> SessionMeta {
+        let mut obj = serde_json::Map::new();
+        obj.insert("version".into(), serde_json::json!(3));
+        obj.insert("session_id".into(), serde_json::json!("s-1"));
+        obj.insert("agent_id".into(), serde_json::json!("com.test.agent"));
+        obj.insert("created_at".into(), serde_json::json!("2026-01-01T00:00:00Z"));
+        obj.insert("message_count".into(), serde_json::json!(0));
+        obj.insert("last_active_at".into(), serde_json::json!("2026-01-01T00:00:00Z"));
+        if let Some(u) = initiator {
+            obj.insert("initiator".into(), serde_json::json!(u));
+        }
+        if let Some(v) = visibility {
+            obj.insert("visibility".into(), serde_json::json!(v));
+        }
+        if !aware.is_empty() {
+            obj.insert(
+                "aware_users".into(),
+                serde_json::json!(aware.iter().map(|s| s.to_string()).collect::<Vec<_>>()),
+            );
+        }
+        serde_json::from_value(serde_json::Value::Object(obj)).expect("valid meta")
+    }
+
+    /// ADR-076 §决策 4 (rev.) — the hard invariant. An agent-to-agent session
+    /// (initiator is an agent instance, Private) is readable by every human on
+    /// the awareness list, even though none of them is the initiator.
+    #[test]
+    fn aware_account_can_read_an_agent_initiated_session() {
+        let m = meta(
+            Some("8f7be9a6-agent-instance"),
+            Some("private"),
+            &["user-nicholas", "user-guest"],
+        );
+        assert!(m.is_readable_by(&SessionScope::user("user-nicholas")));
+        assert!(m.is_readable_by(&SessionScope::user("user-guest")));
+        // A human not on the list, not the initiator, still cannot read it.
+        assert!(!m.is_readable_by(&SessionScope::user("user-stranger")));
+    }
+
+    /// The awareness grant is read-only by construction: `is_writable_by`
+    /// never consults `aware_users`, so an aware account cannot type into an
+    /// execution it did not start. This is what keeps the口子 open for eyes
+    /// only, never for a second hand on the wheel.
+    #[test]
+    fn aware_account_cannot_write() {
+        let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &["user-nicholas"]);
+        assert!(m.is_readable_by(&SessionScope::user("user-nicholas")));
+        assert!(!m.is_writable_by(&SessionScope::user("user-nicholas")));
+        // Only the initiating agent can write it.
+        assert!(m.is_writable_by(&SessionScope::user("8f7be9a6-agent-instance")));
+    }
+
+    /// A human-initiated session carries no awareness list (the initiator
+    /// already grants access, and seeding the ACL there would leak a private
+    /// request). An empty `aware_users` is inert: it neither widens nor
+    /// narrows the pre-feature behaviour.
+    #[test]
+    fn empty_awareness_is_inert_for_a_human_initiator() {
+        let m = meta(Some("user-nicholas"), Some("private"), &[]);
+        assert!(m.is_readable_by(&SessionScope::user("user-nicholas")));
+        assert!(m.is_writable_by(&SessionScope::user("user-nicholas")));
+        assert!(!m.is_readable_by(&SessionScope::user("user-stranger")));
+    }
+
+    /// Awareness does not override an explicit `Members` chat grant's rules —
+    /// it is purely additive. A `Members` session bound to a chat is readable
+    /// by that chat's members; an aware account outside the chat is *also*
+    /// readable, but a stranger in neither is not.
+    #[test]
+    fn awareness_adds_to_members_without_replacing_it() {
+        let m = meta(Some("8f7be9a6-agent-instance"), Some("members"), &["user-aware"]);
+        let mut bound = SessionScope::user("user-member");
+        if let SessionScope::User { chats, .. } = &mut bound {
+            chats.push("chat-group-1".to_string());
+        }
+        let mut meta_with_chat = m.clone();
+        meta_with_chat.chat_session_id = Some("chat-group-1".to_string());
+        assert!(meta_with_chat.is_readable_by(&bound)); // via chat membership
+        assert!(meta_with_chat.is_readable_by(&SessionScope::user("user-aware"))); // via awareness
+        assert!(!meta_with_chat.is_readable_by(&SessionScope::user("user-stranger")));
+    }
+
+    /// The visibility enum's `is_private` must not be confused with the
+    /// awareness path: an aware account reads a Private session even though
+    /// the Private branch would otherwise deny every non-initiator.
+    #[test]
+    fn awareness_overrides_private_denial() {
+        let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &["user-nicholas"]);
+        assert_eq!(m.visibility, Some(SessionVisibility::Private));
+        assert!(m.is_readable_by(&SessionScope::user("user-nicholas")));
+    }
+}

@@ -274,6 +274,7 @@ fn two_runtime_instances_same_package_coexist_on_one_broker() {
                 has_human_participant: None,
                 chat_attachment_ids: vec![],
                 chat_row_id: String::new(),
+                aware_users: vec![],
                 params_json: r#"{"target":"A"}"#.into(),
             })),
         };

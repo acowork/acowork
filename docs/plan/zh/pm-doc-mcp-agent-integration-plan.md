@@ -234,3 +234,17 @@ P3 首版的交付边界曾如实记为「三个 skill 未建、路径约定只�
 - **设计 32 en 版**：zh 为源（ADR 约定），en 待补。
 
 **发布门（不可协商）**：任何声称"标杆 agent 已深度融合"的版本，必须带与源码一致的 `.agent` 包。守卫测试已把它变成 CI 事实，不是 checklist 记忆——过去两次过期包都是人工解压才发现的。
+
+### 9.5 验收记录（P3.1）
+
+**独立复核（review 侧逐条自验，非采信交付方摘要）**：`doc_path` 单次投影（4 个调用点）、Doc 侧三方契约（寻址 / `DirNotFound` 不隐式建 / 错误指出缺段）、2 个 skill + 第三个并入、PM manifest `doc_mkdir` 白名单（真依赖，非补格式）、7 个 `.agent` 包 zip→源码逐文件比对 7/7 零差异、重打守卫三向断言 + `checked > 0` 兜底、别名 tripwire、§9.1/§9.2/§9.4 口径——全部复核通过。
+
+**唯一红项 T4-1a（证据测试本身）**：
+
+- **现象**：`mcp::tests::dispatch_chain_wakes_the_assignee_once_then_claim_submit_done` 第 4 步 `dispatched_at` 断言红。`cargo test -p acowork-pm` 全量并行负载下 2/2 失败、隔离单跑 6/8 通过——该命令在本提交上不可能是绿的。
+- **根因**：测试同步错，不是产品 bug。stub 的 `sink.push(body)` 在回响应**之前**执行，`mark_dispatched`（盖章 + `atomic_write_json` 落盘）在客户端拿到响应**之后**执行；第 1 步轮询在 `seen` 非空瞬间退出，第 4 步紧接着单次读，必然可能落在「已铸号、未盖章」窗口。
+- **修复**：盖章断言改为有界轮询（20 ms 步进 × 5 s failure floor，与第 1 步等 `seen` 同一写法），break 后统一断言并带失败载荷；不引入任何猜时长的 sleep。
+- **接受条件**：`cd core && CARGO_TARGET_DIR=target-e2e cargo test -p acowork-pm` **全量连跑 3 次全绿**——已达成（lib 130/130 × 3，含集成套 27/2/5/5）。
+- **结论**：接受条件已满足，P3.1 收口（待 review 侧签收）；发布门维持 §9.4 原样。
+
+**附注（流程）**：`core/acowork-pm/src/target-e2e`（2 GB，gitignore 内）已清。来历：从子 crate 目录起步设相对 `CARGO_TARGET_DIR=target-e2e`，产物落进该 crate 的 `src/`。规则已写进 `CONTRIBUTING.md` 测试段：`CARGO_TARGET_DIR` 必须以 `core/` 为根（从 `core/` 起步，产物落 `core/target-e2e`）。
