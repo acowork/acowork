@@ -224,6 +224,10 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
                 "kind": { "type": "string", "enum": ["blocks", "relates", "duplicates"], "default": "blocks" }
               }
             }
+          },
+          "parent_task_id": {
+            "type": ["string", "null"],
+            "description": "Move the task in the tree: a task id re-parents it under that task, null promotes it to a project root, omitting the key leaves the position alone. Cycles are rejected (you cannot move a task under its own descendant). This replaces pm_reparent_task."
           }
         }
       }

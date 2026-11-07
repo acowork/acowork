@@ -232,6 +232,16 @@ struct UpdateTaskArgs {
     start_at: Option<Option<chrono::DateTime<chrono::Utc>>>,
     #[serde(default)]
     depends_on: Option<Vec<Dependency>>,
+    /// Move the task in the tree. Three-state like the other clearable
+    /// fields: absent = leave alone, `null` = promote to a project root,
+    /// a task id = re-parent under it.
+    ///
+    /// This is `pm_reparent_task` folded into the one update tool
+    /// (design 32 §3.1) — a structural move is still "changing a field of
+    /// this task", and two tools for it means two places to get the
+    /// permission and cycle checks right.
+    #[serde(default, deserialize_with = "deserialize_clearable")]
+    parent_task_id: Option<Option<TaskId>>,
 }
 
 #[cfg(test)]
@@ -247,6 +257,7 @@ impl UpdateTaskArgs {
         "due_at",
         "start_at",
         "depends_on",
+        "parent_task_id",
     ];
 }
 
@@ -951,7 +962,25 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         start_at: a.start_at,
         depends_on: a.depends_on,
     };
-    let task = state.store.update_task(&a.task_id, input).await?;
+    let mut task = state.store.update_task(&a.task_id, input).await?;
+
+    // A parent change is structural: it relocates the task directory on disk
+    // and has to keep the subtree acyclic, so it goes through the store's
+    // reparent path rather than through `UpdateTask`. Doing it after the
+    // field write means one call can rename and re-parent at once.
+    if let Some(new_parent) = &a.parent_task_id {
+        state
+            .store
+            .reparent_task(&a.task_id, ReparentTask { new_parent: new_parent.clone() })
+            .await?;
+        // `update_task` returned the pre-move record; the caller needs the
+        // stored one so the response reflects the new position.
+        task = state
+            .store
+            .get_task(&a.task_id)
+            .await?
+            .ok_or_else(|| PmError::TaskNotFound(a.task_id.to_string()))?;
+    }
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 

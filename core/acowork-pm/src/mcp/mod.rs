@@ -3068,4 +3068,141 @@ mod tests {
         assert_eq!(v["error"]["code"].as_i64(), None, "valid sort: {v}");
     }
 
+
+    // ── T1-2: pm_update_task owns the tree position ──────────────────────
+
+    #[tokio::test]
+    async fn update_task_reparents_and_promotes_to_root() {
+        let router = test_router().await;
+        let actor = "pm-reparent";
+        let pid = project_with_owner(&router, actor, "Reparent").await;
+        let root = create_task(
+            &router,
+            actor,
+            2,
+            json!({ "project_id": pid, "title": "root", "assignee": actor }),
+        )
+        .await;
+        let leaf = create_task(
+            &router,
+            actor,
+            3,
+            json!({ "project_id": pid, "title": "leaf", "assignee": actor }),
+        )
+        .await;
+
+        // Attach — and rename in the same call, which is the point of folding
+        // the structural move into the one update tool.
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_update_task",
+            json!({ "task_id": leaf, "title": "leaf renamed", "parent_task_id": root }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["parent_id"], root, "attach via update: {t}");
+        assert_eq!(t["title"], "leaf renamed");
+
+        // The tree agrees, read the designed way: children come from
+        // pm_list_tasks(parent_task_id), not from a field on the parent row.
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "parent_task_id": root }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["total"], 1, "one child under root");
+
+        // Detach — explicit null, not omission.
+        let v = call_tool(
+            &router,
+            Some(actor),
+            6,
+            "pm_update_task",
+            json!({ "task_id": leaf, "parent_task_id": null }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["parent_id"], Value::Null, "null promotes to root");
+
+        // Omitting the key leaves the position alone.
+        create_task(
+            &router,
+            actor,
+            7,
+            json!({ "project_id": pid, "title": "other" }),
+        )
+        .await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            8,
+            "pm_update_task",
+            json!({ "task_id": leaf, "priority": "high" }),
+        )
+        .await;
+        assert_eq!(
+            tool_text(&v)["parent_id"],
+            Value::Null,
+            "an unrelated field write must not move the task"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_task_refuses_to_bury_a_task_under_its_own_descendant() {
+        let router = test_router().await;
+        let actor = "pm-cycle";
+        let pid = project_with_owner(&router, actor, "Cycle").await;
+        let root = create_task(
+            &router,
+            actor,
+            2,
+            json!({ "project_id": pid, "title": "root" }),
+        )
+        .await;
+        let child = create_task(
+            &router,
+            actor,
+            3,
+            json!({
+                "project_id": pid,
+                "title": "child",
+                "parent_task_id": root
+            }),
+        )
+        .await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_update_task",
+            json!({ "task_id": root, "parent_task_id": child }),
+        )
+        .await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("cycle"),
+            "re-parenting under a descendant must be refused, not silently\n            done — the subtree would be unreachable from the root: {v}"
+        );
+
+        // And the refused write did not half-apply.
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_get_task",
+            json!({ "task_id": root }),
+        )
+        .await;
+        assert_eq!(
+            tool_text(&v)["parent_id"],
+            Value::Null,
+            "the cycle attempt must leave the tree as it was"
+        );
+    }
+
 }
