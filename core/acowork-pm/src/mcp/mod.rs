@@ -2977,6 +2977,70 @@ mod tests {
         assert_eq!(stream["total"], 1, "the note is in the stream: {stream}");
     }
 
+    /// **Design 32 §5.5, published instead of instructed.** The document
+    /// directory of a project must reach the agent through a tool *result*:
+    /// a path written only into prompts is lost at the first context
+    /// compaction, and it never reaches the agents we did not rewrite.
+    ///
+    /// Every projection of a project (`create` / `get` / `list`) carries the
+    /// same string, and it is the one [`acowork_core::doc_layout`] owns — a
+    /// second copy of the convention elsewhere would be the drift this test
+    /// is here to prevent.
+    #[tokio::test]
+    async fn every_project_read_publishes_the_document_directory() {
+        let router = test_router().await;
+        let v = call_tool(
+            &router,
+            Some("pm-a"),
+            1,
+            "pm_create_project",
+            json!({ "title": "Billing" }),
+        )
+        .await;
+        let created = tool_text(&v);
+        let pid = created["id"].as_str().unwrap().to_string();
+        let expected = acowork_core::doc_layout::project_doc_dir(&pid);
+        assert_eq!(
+            created["doc_path"], expected,
+            "create must publish the directory: {created}"
+        );
+
+        let v = call_tool(
+            &router,
+            Some("pm-a"),
+            2,
+            "pm_get_project",
+            json!({ "project_id": pid }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["doc_path"], expected, "get must agree");
+
+        let v = call_tool(&router, Some("pm-a"), 3, "pm_list_projects", json!({})).await;
+        let listed = tool_text(&v);
+        let row = listed
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == pid.as_str())
+            .expect("project in list");
+        assert_eq!(row["doc_path"], expected, "list must agree: {row}");
+
+        // A retitle does not move the directory — that is the whole point of
+        // deriving it from the id.
+        let v = call_tool(
+            &router,
+            Some("pm-a"),
+            4,
+            "pm_update_project",
+            json!({ "project_id": pid, "title": "Billing (renamed)" }),
+        )
+        .await;
+        assert_eq!(
+            tool_text(&v)["doc_path"], expected,
+            "retitle must not move the directory"
+        );
+    }
+
     // ── T1-1: pm_list_tasks is the single task query ─────────────────────
     //
     // The guards here are what makes the cross-project mode safe to expose to

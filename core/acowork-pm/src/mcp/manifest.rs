@@ -43,7 +43,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
   "tools": [
     {
       "name": "pm_list_projects",
-      "description": "List all projects. Returns summary: id, title, status, task counts.",
+      "description": "List all projects. Returns summary: id, title, status, task counts, and `doc_path` (the project's document-library directory, design 32 §5.5).",
       "inputSchema": {
         "type": "object",
         "properties": {
@@ -57,7 +57,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_get_project",
-      "description": "Get project details: task count breakdown AND the member roster. `members[]` is the set of agents you may assign work to — pm_create_task rejects any assignee outside it with error `assignee_not_project_member`, so read the roster here BEFORE dispatching. Each entry carries `instance_id` (the only value valid as `assignee`), `kind` (agent|user), and `agent_id` / `name` / `role` for display (may be null). If the agent you want is not in `members`, invite it with pm_add_project_member (project owner only).",
+      "description": "Get project details: task count breakdown AND the member roster. `members[]` is the set of agents you may assign work to — pm_create_task rejects any assignee outside it with error `assignee_not_project_member`, so read the roster here BEFORE dispatching. Each entry carries `instance_id` (the only value valid as `assignee`), `kind` (agent|user), and `agent_id` / `name` / `role` for display (may be null). If the agent you want is not in `members`, invite it with pm_add_project_member (project owner only). `doc_path` is where this project's deliverables go in the document library (design 32 §5.5): create it with doc_mkdir before the first write, and never re-derive the path from the title — a retitle does not move it.",
       "inputSchema": {
         "type": "object",
         "required": ["project_id"],
@@ -71,7 +71,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_create_project",
-      "description": "Create a new project. Returns the created project with generated id.",
+      "description": "Create a new project. Returns the created project with generated id, and `doc_path` — the document-library directory reserved for its deliverables (design 32 §5.5). Run doc_mkdir on `doc_path` right after creating the project so the deliverables have somewhere to land; the path is derived from the id and survives retitles.",
       "inputSchema": {
         "type": "object",
         "required": ["title"],

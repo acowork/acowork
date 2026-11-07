@@ -814,6 +814,18 @@ async fn tasks_to_values(
 /// agent 目录塞回列表响应，撑爆 LLM 上下文）。
 ///
 /// `created_by_meta`（MCP 专属）见 [`task_to_value`]。
+///
+/// `doc_path` is the design 32 §5.5 convention rendered into the response:
+/// the project's deliverable directory inside the document library. It is
+/// published here rather than only in agent prompts because a prompt-level
+/// convention dies with the context window — after compaction the agent no
+/// longer remembers where deliverables go, while a field on every project
+/// read survives. It also reaches the agents we did not rewrite, and the ones
+/// users write themselves, for free.
+///
+/// The string comes from [`acowork_core::doc_layout`] and is a Doc path, not
+/// a filesystem path; the caller may `doc_mkdir` it and then
+/// `doc_write(reference = format!("{doc_path}/PRD.md"))`.
 fn project_to_value(
     p: crate::types::Project,
     task_count: usize,
@@ -829,6 +841,8 @@ fn project_to_value(
         "created_at": p.created_at,
         "updated_at": p.updated_at,
         "task_count": task_count,
+        // design 32 §5.5: one derivable value, so no lookup and no drift.
+        "doc_path": acowork_core::doc_layout::project_doc_dir(p.id.as_str()),
     })
 }
 

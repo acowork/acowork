@@ -62,6 +62,7 @@ pub mod budget;
 pub mod chat_prompt;
 pub mod crlf;
 pub mod defaults;
+pub mod doc_layout;
 pub mod embedding;
 pub mod error;
 pub mod error_codes;
