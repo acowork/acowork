@@ -67,6 +67,7 @@ fn req(target: &str) -> DeliveryRequest {
         action: "do".into(),
         params_json: r#"{"k":1}"#.into(),
         source_chat_session_id: String::new(),
+        chat_grant: acowork_gateway::intent::delivery::ChatGrant::default(),
         repo: String::new(),
         session_config_json: String::new(),
         kind: "request".into(),

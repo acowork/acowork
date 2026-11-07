@@ -486,6 +486,10 @@ pub async fn run_cron_scheduler(
                 action: action.clone(),
                 params_json: serde_json::to_string(&params).unwrap_or_default(),
                 source_chat_session_id: String::new(),
+                // A trigger has no Chat at all, so there is no surface to
+                // grant and no answerability to assert — the Runtime keeps its
+                // human-facing tools (see `has_human` below).
+                chat_grant: crate::intent::delivery::ChatGrant::default(),
                 repo: String::new(),
                 session_config_json: String::new(),
                 kind: String::new(),
