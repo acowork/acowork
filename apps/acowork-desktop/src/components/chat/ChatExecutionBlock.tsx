@@ -94,6 +94,10 @@ interface ChatExecutionBlockProps {
   /** Address the composer to one round (D6 level 1) — what a `pause` card's
    *  "continue" and any follow-up on a finished round ride. */
   onReplyToRound?: (rowId: string, quote: string) => void;
+  /** Answer a `pause` card with one click: the host sends the continuation
+   *  reply itself (D6 level 1) — the chat-side twin of the execution
+   *  surface's Paused Continue. */
+  onContinueRound?: (rowId: string) => void;
   /** Attach this execution session to the composer as a reference (ADR-106 D7):
    *  the block's `@` action. The host owns the composer's address state, so the
    *  block reports the intent and never touches it directly. Absent on a surface
@@ -236,6 +240,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   hasFollowUp,
   onJumpToExec,
   onReplyToRound,
+  onContinueRound,
   onReferenceRun,
   canAnswer = true,
   onAuthorContextMenu,
@@ -604,6 +609,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                         reload={reload}
                         canAnswer={canAnswer}
                         onReplyToRound={onReplyToRound}
+                        onContinueRound={onContinueRound}
                       />
                     ))}
                   </div>
@@ -645,6 +651,7 @@ interface RoundItemProps {
   reload: (chatId: string, refs: string[]) => void;
   canAnswer: boolean;
   onReplyToRound?: (rowId: string, quote: string) => void;
+  onContinueRound?: (rowId: string) => void;
 }
 
 /** One round: a question line that opens into the question/answer pair, in
@@ -660,6 +667,7 @@ function RoundItem({
   reload,
   canAnswer,
   onReplyToRound,
+  onContinueRound,
 }: RoundItemProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
@@ -782,6 +790,7 @@ function RoundItem({
               reloadRound={() => reload(chatSessionId, [round.ref])}
               rowId={round.roundRow.meta?.message_id ?? ""}
               onReplyToRound={onReplyToRound}
+              onContinueRound={onContinueRound}
             />
           ) : null}
         </div>
@@ -887,6 +896,7 @@ interface BlockCardActionsProps {
    *  level 1). */
   rowId: string;
   onReplyToRound?: (rowId: string, quote: string) => void;
+  onContinueRound?: (rowId: string) => void;
 }
 /**
  * The round's pending decision, answered against the EXECUTION session (D8).
@@ -908,6 +918,7 @@ function BlockCardActions({
   reloadRound,
   rowId,
   onReplyToRound,
+  onContinueRound,
 }: BlockCardActionsProps) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
@@ -973,12 +984,16 @@ function BlockCardActions({
             <ChatMarkdown content={card.prompt} />
           </div>
         ) : null}
-        {canAnswer && onReplyToRound ? (
+        {canAnswer && (onContinueRound || onReplyToRound) ? (
           <button
             type="button"
             className={cardButtonAccent}
             style={{ backgroundColor: "var(--color-accent-strong)" }}
-            onClick={() => onReplyToRound(rowId, card.prompt ?? "")}
+            onClick={() =>
+              onContinueRound
+                ? onContinueRound(rowId)
+                : onReplyToRound?.(rowId, card.prompt ?? "")
+            }
           >
             {t("chatView.cardContinue")}
           </button>
