@@ -379,6 +379,7 @@
     "plusNoMcp": "この Agent には MCP サーバーがありません",
     "plusNoToolsConnected": "接続済みのツールはありません",
     "plusToolCount": "{{n}} 個のツール",
+    "plusShowTools": "このサーバーのツールを表示",
     "plusAgentDisabledNote": "うち {{n}} 件は Agent の設定で無効です"
   },
   "sessionTabBar": {

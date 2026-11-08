@@ -33,6 +33,7 @@ vi.mock("../skills/SkillMenuList", () => ({
 }));
 
 import { ComposerPlusMenu } from "./ComposerPlusMenu";
+import { CircularProgressIcon } from "./CircularProgressIcon";
 import { useToolPolicyStore } from "../../stores/toolPolicyStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -47,7 +48,13 @@ const TOOLS = {
   ],
 };
 
-const MCP_TOOLS = { playwright: [{ name: "navigate", enabled: true }] };
+// The real `GET /mcp-tools` envelope: `{ agent_id, servers }`. A stub that
+// returns the bare `servers` map here matches the old, wrong reader and lets
+// the "no tool drill-down" bug pass its own component test.
+const MCP_TOOLS = {
+  agent_id: "agent-1",
+  servers: { playwright: [{ name: "navigate", enabled: true }] },
+};
 
 function stubFetch(putStatus = 200) {
   const puts: unknown[] = [];
@@ -179,14 +186,34 @@ describe("ComposerPlusMenu", () => {
     renderMenu();
     fireEvent.click(screen.getByText("chatPanel.plusMcp"));
 
-    // The server row: its switch plus a chevron for the tool level.
+    // The server row: its switch plus a drill into the tool level.
     const serverSwitch = await screen.findByRole("switch");
     expect((serverSwitch as HTMLInputElement).checked).toBe(true);
-    fireEvent.click(screen.getByLabelText("tools"));
+
+    // The drill target is the ROW, not a sub-control. This is the gesture the
+    // settings panel trains users to make and the one the hover tint promises;
+    // pinning the row is what keeps "clicked it, nothing happened" from
+    // coming back as a passing test.
+    fireEvent.click(screen.getByRole("button", { name: "chatPanel.plusShowTools" }));
 
     await waitFor(() => expect(screen.getByText("navigate")).toBeTruthy());
     // The server switch is gone; the tool's is the only one left.
     expect(screen.getAllByRole("switch")).toHaveLength(1);
+  });
+
+  it("flipping the server switch does not navigate into its tools", async () => {
+    const puts = stubFetch();
+    renderMenu();
+    fireEvent.click(screen.getByText("chatPanel.plusMcp"));
+    const serverSwitch = await screen.findByRole("switch");
+
+    fireEvent.click(serverSwitch);
+
+    // The switch owns its own click; navigation is the row's. Without the
+    // stopPropagation both fire, and turning a server off also throws the user
+    // into the tool list of a server they just closed.
+    await waitFor(() => expect(puts.length).toBeGreaterThan(0));
+    expect(screen.queryByText("navigate")).toBeNull();
   });
 
   it("does not offer level 2 for an agent-disabled server", async () => {
@@ -216,8 +243,10 @@ describe("ComposerPlusMenu", () => {
     }));
     renderMenu();
     fireEvent.click(screen.getByText("chatPanel.plusMcp"));
-    // No chevron: the box it would open holds nothing reachable.
-    expect(screen.queryByLabelText("tools")).toBeNull();
+    // Not a drill target: the box it would open holds nothing reachable.
+    expect(screen.queryByRole("button", { name: "chatPanel.plusShowTools" })).toBeNull();
+    // The switch is still there — the row is inert, not missing.
+    expect(await screen.findByRole("switch")).toBeTruthy();
   });
 
   it("shows the reset affordance only when the group denies something", async () => {
@@ -252,5 +281,90 @@ describe("ComposerPlusMenu", () => {
           .disabled,
       ).toBe(false),
     );
+  });
+});
+
+/**
+ * The trigger's mark sits between the usage ring and the rest of the row.
+ *
+ * Pinned as a *relationship*, not as a number, because both ends of the range
+ * are real regressions that have already been shipped once:
+ *
+ *   - lucide `Plus` at the cluster's 16 → ~10.7px of ink: users read the `+`
+ *     as missing ("太小了，不显眼").
+ *   - the cross full-bleed to the ring's 16px / 2px stroke → the loudest glyph
+ *     on the strip, which reads as abrupt ("有点大的过头了，突兀").
+ *
+ * So the invariant is a band, measured in ink — the span each glyph actually
+ * paints — not in box size. lucide gives every glyph the same 24-unit box and
+ * fills it unevenly, so two glyphs with the same box can paint very different
+ * marks; box size is exactly the thing that hid the original bug.
+ */
+describe("ComposerPlusMenu trigger glyph", () => {
+  /**
+   * Width of what an SVG glyph actually paints, in CSS pixels.
+   *
+   * For a ring: `2 * (r + stroke/2)`. For a stroked path: the centreline
+   * extent plus one cap radius at each end. Both are computed in user units
+   * and then scaled by `width / viewBox-width` — without that step a lucide
+   * glyph reads as full-size no matter how small it renders, which is the
+   * measurement error that let the original 14px `+` look fine on paper.
+   */
+  function inkSpan(svg: SVGSVGElement): number {
+    const viewBox = (svg.getAttribute("viewBox") ?? "0 0 24 24").split(/\s+/);
+    const scale = Number(svg.getAttribute("width")) / Number(viewBox[2]);
+
+    const circle = svg.querySelector("circle");
+    if (circle) {
+      const r = Number(circle.getAttribute("r"));
+      const stroke = Number(circle.getAttribute("stroke-width"));
+      return 2 * (r + stroke / 2) * scale;
+    }
+
+    const stroke = Number(svg.getAttribute("stroke-width"));
+    const cap = svg.getAttribute("stroke-linecap") === "round" ? stroke / 2 : 0;
+    // The horizontal arm is the `h` command (`M2.5 8h11`).
+    const horizontal = /h([-\d.]+)/.exec(String(svg.querySelector("path")?.getAttribute("d")));
+    return (Number(horizontal?.[1]) + 2 * cap) * scale;
+  }
+
+  function strokeWeight(svg: SVGSVGElement): number {
+    // The weight lives on the painted shape in the ring (`<circle>` carries
+    // its own stroke-width) and on the root in the cross — read whichever
+    // element actually holds it rather than assuming where the author put it.
+    const painted = svg.querySelector("circle, path");
+    return Number(painted?.getAttribute("stroke-width") ?? svg.getAttribute("stroke-width"));
+  }
+
+  function plusGlyph(): SVGSVGElement {
+    const { container } = render(
+      <ComposerPlusMenu readOnly={false} onPickAttachments={vi.fn()} />,
+    );
+    return container.querySelector("button svg") as SVGSVGElement;
+  }
+
+  function ringGlyph(): SVGSVGElement {
+    const { container } = render(<CircularProgressIcon usagePercent={50} />);
+    return container.querySelector("svg") as SVGSVGElement;
+  }
+
+  it("stays quieter than the usage ring — it must not be the loudest mark on the row", () => {
+    expect(inkSpan(plusGlyph())).toBeLessThan(inkSpan(ringGlyph()));
+    expect(strokeWeight(plusGlyph())).toBeLessThan(strokeWeight(ringGlyph()));
+  });
+
+  it("stays loud enough to read beside the ring", () => {
+    // The floor is what the shipped 14px lucide cross broke: it painted 0.58
+    // of the ring's span and the button read as absent.
+    expect(inkSpan(plusGlyph())).toBeGreaterThanOrEqual(0.7 * inkSpan(ringGlyph()));
+  });
+
+  it("keeps the shared icon-only button box, so the toolbar row does not move", () => {
+    const { container } = render(
+      <ComposerPlusMenu readOnly={false} onPickAttachments={vi.fn()} />,
+    );
+    // Only the glyph changed. The 28x28 click target, and with it the fold
+    // engine's `[data-toolbar-btn]` measurement, must not.
+    expect(container.querySelector("button")?.className).toMatch(/h-7 w-7/);
   });
 });

@@ -5,9 +5,10 @@
  * The block used to carry its affordances at both ends: a "View run" pill above
  * and a reply box below. Two chrome bands around one object read as two objects,
  * and the reply box's reserved height pushed the rest of the transcript down for
- * a control the human was not using. This row puts all four affordances above
- * the block, icon-only, in the order the reader meets them: open the run,
- * reference it, copy it, continue it.
+ * a control the human was not using. This row puts all the affordances above
+ * the block, icon-only: open the run, reference it, copy it, then the run's own
+ * composer controls (tool/attachment `+`, usage, visibility) so the human can
+ * manage the run without entering it, and continue it.
  *
  * Why icon-only, and what that costs: four text buttons would be a toolbar
  * wider than the block header. The price is discoverability, so every button
@@ -46,12 +47,19 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { AtSign, Check, Copy, MessageSquare, Send } from "lucide-react";
+import { AtSign, Check, Copy, MessageSquare, Paperclip, Send, X } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { copyText } from "../../lib/clipboard";
 import { BLOCK_DETAIL_FONT_SIZE } from "./blockTypeScale";
 import { OutlineBrainIcon } from "../common/BrainIcon";
+import { ComposerPlusMenu } from "./ComposerPlusMenu";
+import { ContextUsageIcon } from "./ContextUsageIcon";
+import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
+import {
+  useChatSessionStore,
+  type ChatAttachmentMeta,
+} from "../../stores/chatSessionStore";
 
 /** One 24×24 hover circle shared by all four controls. Deliberately NOT
  *  `toolbarIconButton` (`h-7 w-7 rounded-md`, sized for the composer's cluster):
@@ -112,13 +120,27 @@ interface RunBlockActionRowProps {
    *  copying nothing. */
   copyPayload: string;
   /** In-place continuation (ADR-106 D6 level 1). Absent = the row has no drawer
-   *  at all (a block nobody may answer). */
-  onSend?: (text: string) => Promise<void>;
+   *  at all (a block nobody may answer). `attachmentIds` are the files picked
+   *  through the row's `+` menu, uploaded into THIS chat session; the router
+   *  forwards them to the run alongside the text (`chat_attachment_ids`). */
+  onSend?: (text: string, attachmentIds: string[]) => Promise<void>;
   /** A round to address. False renders the drawer inert — a brand-new block may
    *  have no round yet, and a send with no target is not a send. */
   canSend?: boolean;
   /** Rising edge: reveal and focus the drawer (the picker's locate). */
   focusSignal?: boolean;
+  /** The execution session's agent (ADR-073 instance id) + session id. Present
+   *  = the row carries the three composer controls (tools `+`, usage,
+   *  visibility) so the human can manage the run without entering it. */
+  agentId?: string;
+  sessionId?: string;
+  /** The Chat session these replies are sent into — where the drawer's
+   *  attachments are uploaded (its `files/` dir, §4.2.1). */
+  chatSessionId?: string;
+  /** Whether this viewer may write the run (round answerer, ADR-106 D10).
+   *  False = the `+` menu is read-only; usage stays readable, and the
+   *  visibility toggle gates itself on `can_write`. */
+  canManage?: boolean;
   className?: string;
 }
 
@@ -130,6 +152,10 @@ export function RunBlockActionRow({
   onSend,
   canSend = true,
   focusSignal = false,
+  agentId,
+  sessionId,
+  chatSessionId,
+  canManage = true,
   className,
 }: RunBlockActionRowProps) {
   const { t } = useTranslation();
@@ -145,6 +171,29 @@ export function RunBlockActionRow({
   const leaveTimer = useRef<number | null>(null);
   const copiedTimer = useRef<number | null>(null);
   const lastSignal = useRef(false);
+  // The drawer's pending attachments — files chosen through the row's `+`
+  // menu, uploaded into the Chat session's `files/` dir at pick time (same
+  // grammar as the Chat composer), and carried as ids by the next send.
+  const attachInputRef = useRef<HTMLInputElement | null>(null);
+  const [pendingAttachments, setPendingAttachments] = useState<ChatAttachmentMeta[]>([]);
+  const [uploading, setUploading] = useState(false);
+
+  const handleFilesChosen = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    e.target.value = ""; // allow re-picking the same file
+    if (!chatSessionId || files.length === 0) return;
+    setUploading(true);
+    try {
+      for (const f of files) {
+        const meta = await useChatSessionStore.getState().upload(chatSessionId, f);
+        setPendingAttachments((prev) => [...prev, meta]);
+      }
+    } catch (err) {
+      console.warn("[RunBlockActionRow] attachment upload failed:", err);
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const clearLeave = useCallback(() => {
     if (leaveTimer.current !== null) {
@@ -180,9 +229,12 @@ export function RunBlockActionRow({
     if (!text || !onSend || !canSend || sending) return;
     setSending(true);
     try {
-      await onSend(text);
+      await onSend(text, pendingAttachments.map((a) => a.id));
       // Clear but stay open: an in-place continuation invites the next one.
+      // The attachments rode THIS send — a pending file is never implicit
+      // context for the next message.
       setDraft("");
+      setPendingAttachments([]);
     } finally {
       setSending(false);
     }
@@ -257,6 +309,57 @@ export function RunBlockActionRow({
         )}
       </button>
 
+      {/* The run's composer controls, surfaced on the block so the human
+          manages the run WITHOUT entering it: usage (the ring — click to
+          open; the ring's percent is live via the Desktop's wildcard
+          `sessions/+/state` subscription, the click only pulls the ≤3s
+          coalescing gap) and read-visibility. They address the run by its
+          own (agentId, sessionId), never the global selection. */}
+      {agentId && sessionId && (
+        <ContextUsageIcon
+          agentId={agentId}
+          sessionId={sessionId}
+          refreshOnOpen
+          trigger="click"
+          buttonClassName={ACTION_BUTTON}
+        />
+      )}
+      {agentId && sessionId && (
+        <SessionVisibilityToggle
+          agentId={agentId}
+          sessionId={sessionId}
+          buttonClassName={ACTION_BUTTON}
+        />
+      )}
+
+      {/* The `+` menu's Attachments row drives this hidden picker; the chosen
+          files become the drawer's pending attachments. */}
+      <input
+        ref={attachInputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => void handleFilesChosen(e)}
+      />
+
+      {/* The `+` sits directly LEFT of the reply button, deliberately: the
+          attachments it picks ride that button's drawer send, so adjacency
+          states the dependency (tools policy included — one menu, one run). */}
+      {agentId && sessionId && (
+        <ComposerPlusMenu
+          readOnly={!canManage}
+          disabled={!onSend}
+          onPickAttachments={() => attachInputRef.current?.click()}
+          agentId={agentId}
+          sessionId={sessionId}
+          showSkills={false}
+          placement="bottom"
+          portal
+          buttonClassName={ACTION_BUTTON}
+          openClassName={ACTION_BUTTON_ACTIVE}
+        />
+      )}
+
       {onSend && (
         <div
           data-run-action="reply"
@@ -294,6 +397,32 @@ export function RunBlockActionRow({
             inert={!open}
             aria-hidden={!open}
           >
+          {pendingAttachments.length > 0 && (
+            <div className="flex min-w-0 shrink-0 max-w-[150px] items-center gap-1 overflow-hidden">
+              {pendingAttachments.map((a) => (
+                <span
+                  key={a.id}
+                  data-run-attachment={a.id}
+                  title={a.filename}
+                  className="inline-flex h-5 min-w-0 max-w-[72px] shrink items-center gap-1 rounded-full bg-[var(--color-accent)]/12 px-1.5 text-text-secondary"
+                  style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
+                >
+                  <Paperclip className="h-3 w-3 shrink-0" strokeWidth={1.75} />
+                  <span className="min-w-0 truncate">{a.filename}</span>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setPendingAttachments((prev) => prev.filter((x) => x.id !== a.id))
+                    }
+                    aria-label={t("chatPanel.removeAttachment")}
+                    className="shrink-0 text-text-tertiary hover:text-text"
+                  >
+                    <X className="h-3 w-3" strokeWidth={1.75} />
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
             <textarea
               ref={fieldRef}
               rows={1}
@@ -323,12 +452,21 @@ export function RunBlockActionRow({
                 }
               }}
               style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
-              className="h-5 w-[300px] resize-none border-0 bg-transparent px-1 leading-5 outline-none placeholder:text-text-disabled disabled:opacity-50"
+              className={cn(
+                "h-5 resize-none border-0 bg-transparent px-1 leading-5 outline-none placeholder:text-text-disabled disabled:opacity-50",
+                // Fixed width while empty (the animation's no-jitter contract);
+                // a pending-attachment row is a discrete user event, so the
+                // one-step shrink cannot reflow mid-animation.
+                pendingAttachments.length > 0 ? "w-[150px]" : "w-[300px]",
+              )}
             />
             <button
               type="button"
               onClick={() => void submit()}
-              disabled={!draft.trim() || sending || !canSend}
+              // `uploading` gates the send: a file still in flight has no id
+              // yet, and a send that silently drops a chosen attachment is
+              // worse than a send button that visibly waits one beat.
+              disabled={!draft.trim() || sending || !canSend || uploading}
               aria-label={t("chatView.block.send")}
               className={cn(ACTION_BUTTON, "h-5 w-5")}
             >

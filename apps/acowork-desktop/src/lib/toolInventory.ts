@@ -26,7 +26,7 @@ import { getGatewayUrl } from "./config";
 import { with503Retry } from "./httpRetry";
 import { log } from "./logger";
 import { getSessionToolPolicy, putSessionToolPolicy } from "./session-control";
-import type { AgentMcpToolItem, McpServerView } from "./types";
+import type { AgentMcpToolsConfig, McpServerView } from "./types";
 
 /**
  * Wire mirror of `acowork_core::session_meta::SessionToolPolicy`.
@@ -177,8 +177,21 @@ interface AgentToolsResponse {
   mcp_servers_defs?: McpServerView[];
 }
 
-/** Shape of `GET /api/agents/{id}/mcp-tools`. */
-type AgentMcpToolsResponse = Record<string, AgentMcpToolItem[]>;
+/** Shape of `GET /api/agents/{id}/mcp-tools`.
+ *
+ * The endpoint answers with the `{ agent_id, servers }` envelope
+ * (`core/acowork-runtime/src/http/server.rs::get_agent_mcp_tools`); the
+ * per-server map the inventory needs is the `servers` field inside it. The
+ * envelope is declared once, in [types](types.ts) (`AgentMcpToolsConfig`),
+ * next to the settings panel's copy of the same shape.
+ *
+ * Do NOT re-declare the inner map as this endpoint's response type here: an
+ * `as` to such an alias is unchecked, so indexing the envelope by server name
+ * type-checks and yields `undefined` for every server. That is how the `+`
+ * menu ended up with no tool drill-down at all while its pure fold function
+ * stayed green — the drift lived one layer out, at the fetch boundary.
+ */
+type McpToolsServers = AgentMcpToolsConfig["servers"];
 
 /** The Runtime-side prefix separator for an MCP tool's LLM-facing name. */
 export const MCP_TOOL_SEPARATOR = "__";
@@ -198,7 +211,7 @@ export function prefixedMcpToolName(server: string, tool: string): string {
 export function buildToolInventory(
   agentId: string,
   tools: AgentToolsResponse | null | undefined,
-  mcpTools: AgentMcpToolsResponse | null | undefined,
+  mcpTools: McpToolsServers | null | undefined,
 ): AgentToolInventory {
   const builtin: InventoryBuiltinTool[] = (tools?.tools ?? []).map((t) => ({
     name: t.name,
@@ -404,12 +417,16 @@ export async function fetchAgentToolInventory(
     throw new Error(`GET /agents/${agentId}/tools -> ${toolsResp.status}`);
   }
   const tools = (await toolsResp.json()) as AgentToolsResponse;
-  let mcpTools: AgentMcpToolsResponse | null = null;
+  // The endpoint answers with the `{ agent_id, servers }` envelope, so the
+  // per-server map has to be unwrapped before it reaches the fold function.
+  // Reading the envelope itself as that map is what left every server with
+  // zero tools — and hence no drill-down in the `+` menu.
+  let mcpServers: McpToolsServers | null = null;
   if (mcpToolsResp?.ok) {
-    mcpTools = (await mcpToolsResp.json()) as AgentMcpToolsResponse;
+    mcpServers = ((await mcpToolsResp.json()) as AgentMcpToolsConfig).servers ?? null;
   }
 
-  return buildToolInventory(agentId, tools, mcpTools);
+  return buildToolInventory(agentId, tools, mcpServers);
 }
 
 /**

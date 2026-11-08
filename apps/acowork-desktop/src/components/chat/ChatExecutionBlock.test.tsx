@@ -860,6 +860,9 @@ describe("ChatExecutionBlock in-place reply", () => {
         "continue please",
         [],
         "round:ag|s1|r1",
+        // No attachments picked through the row's `+` menu → the field is
+        // omitted (undefined), not sent as an empty list.
+        undefined,
       ),
     );
     // Cleared after send, drawer stays put for the next follow-up.

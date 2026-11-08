@@ -376,6 +376,7 @@
     "plusNoMcp": "This agent has no MCP servers",
     "plusNoToolsConnected": "No tools connected yet",
     "plusToolCount": "{{n}} tools",
+    "plusShowTools": "Show this server's tools",
     "plusAgentDisabledNote": "{{n}} of these are disabled in the agent configuration"
   },
   "sessionTabBar": {

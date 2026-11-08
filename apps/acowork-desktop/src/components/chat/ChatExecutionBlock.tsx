@@ -470,6 +470,10 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                 any more. */}
             <RunBlockActionRow
               runName={runName ?? name}
+              agentId={instanceId}
+              sessionId={execSid}
+              chatSessionId={chatSessionId}
+              canManage={canAnswer !== false}
               onJump={
                 onJumpToExec
                   ? () => onJumpToExec(instanceId, execSid)
@@ -488,14 +492,23 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
               copyPayload={copyPayload}
               onSend={
                 canAnswer
-                  ? async (text) => {
+                  ? async (text, attachmentIds) => {
                       // The level-1 branch (D6): the freshest round's reference
                       // row, the same coordinate the pause card's continue and
                       // the `@` picker's "去续投" address. The claim and the wait
                       // line fall out of the machinery a card answer uses.
+                      // `attachmentIds` are the files the row's `+` menu picked
+                      // (uploaded into this Chat session); the router forwards
+                      // them to the run as `chat_attachment_ids`.
                       await useChatSessionStore
                         .getState()
-                        .sendGroupText(chatSessionId, text, [], latestRowId);
+                        .sendGroupText(
+                          chatSessionId,
+                          text,
+                          [],
+                          latestRowId,
+                          attachmentIds.length > 0 ? attachmentIds : undefined,
+                        );
                     }
                   : undefined
               }

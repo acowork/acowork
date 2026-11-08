@@ -33,6 +33,42 @@ vi.mock("../../lib/clipboard", () => ({
   copyText: vi.fn(async () => true),
 }));
 
+// The three run-management controls are separate components with their own
+// suites; here they are stubs so what fails or passes is the row's WIRING —
+// which props the row hands them, and whether the attachment pipeline that
+// lives IN the row works.
+const { PlusStub, UsageStub, VisStub, plusProps } = vi.hoisted(() => {
+  const captured: { current: Record<string, unknown> } = { current: {} };
+  return {
+    plusProps: captured,
+    PlusStub: (props: Record<string, unknown>) => {
+      captured.current = props;
+      return <div data-testid="plus-menu" />;
+    },
+    UsageStub: (props: { sessionId?: string }) => (
+      <div data-testid="usage" data-session={props.sessionId} />
+    ),
+    VisStub: (props: { sessionId?: string }) => (
+      <div data-testid="visibility" data-session={props.sessionId} />
+    ),
+  };
+});
+vi.mock("./ComposerPlusMenu", () => ({ ComposerPlusMenu: PlusStub }));
+vi.mock("./ContextUsageIcon", () => ({ ContextUsageIcon: UsageStub }));
+vi.mock("./SessionVisibilityToggle", () => ({ SessionVisibilityToggle: VisStub }));
+
+const uploadMock = vi.hoisted(() =>
+  vi.fn(async (_chat: string, file: File) => ({
+    id: `att-${file.name}`,
+    filename: file.name,
+    mime: file.type || "application/octet-stream",
+    size: file.size,
+  })),
+);
+vi.mock("../../stores/chatSessionStore", () => ({
+  useChatSessionStore: { getState: () => ({ upload: uploadMock }) },
+}));
+
 /** The drawer capsule. `data-state` is the contract; class names are not. */
 function drawer(): HTMLElement {
   const el = document.querySelector('[data-run-action="reply"]');
@@ -204,7 +240,7 @@ describe("RunBlockActionRow", () => {
     fireEvent.change(box, { target: { value: "  continue please  " } });
     fireEvent.keyDown(box, { key: "Enter" });
     await waitFor(() =>
-      expect(onSend).toHaveBeenCalledWith("continue please"),
+      expect(onSend).toHaveBeenCalledWith("continue please", []),
     );
     expect(box.value).toBe("");
     expect(drawer().getAttribute("data-state")).toBe("open");
@@ -293,5 +329,83 @@ describe("RunBlockActionRow", () => {
     });
     // Latched open with the caret in the field: no pointer involved at all.
     expect(isLit(reply)).toBe(true);
+  });
+
+  describe("run-management controls (the composer's +, usage, visibility)", () => {
+    /** The row without the block's run address — the pre-existing shape. */
+    it("renders none of the three without the run's agent/session address", () => {
+      renderRow();
+      expect(screen.queryByTestId("plus-menu")).toBeNull();
+      expect(screen.queryByTestId("usage")).toBeNull();
+      expect(screen.queryByTestId("visibility")).toBeNull();
+    });
+
+    it("addresses all three at the RUN, not at the surface's selection", () => {
+      renderRow({ agentId: "ag-1", sessionId: "s-1", chatSessionId: "c1" });
+      expect(screen.getByTestId("usage").getAttribute("data-session")).toBe("s-1");
+      expect(screen.getByTestId("visibility").getAttribute("data-session")).toBe("s-1");
+      expect(plusProps.current.agentId).toBe("ag-1");
+      expect(plusProps.current.sessionId).toBe("s-1");
+      // The block variant hides the Skills row (it rides the exec composer's
+      // pending-send state, which this drawer does not have), opens down, and
+      // portals the panel out of the transcript's clipping scroll container.
+      expect(plusProps.current.showSkills).toBe(false);
+      expect(plusProps.current.placement).toBe("bottom");
+      expect(plusProps.current.portal).toBe(true);
+    });
+
+    it("gates the + menu on the answerer, not on the viewer", () => {
+      renderRow({ agentId: "ag-1", sessionId: "s-1", chatSessionId: "c1", canManage: false });
+      expect(plusProps.current.readOnly).toBe(true);
+    });
+
+    it("uploads files picked via the + menu into the chat session, chips them in the drawer, and sends their ids with the next continuation", async () => {
+      const onSend = vi.fn(async () => {});
+      renderRow({ onSend, agentId: "ag-1", sessionId: "s-1", chatSessionId: "c1" });
+      // The menu's Attachments row drives the row's hidden file input.
+      const pick = plusProps.current.onPickAttachments as () => void;
+      const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+      pick();
+      fireEvent.change(input, {
+        target: { files: [new File(["pdf bytes"], "spec.pdf", { type: "application/pdf" })] },
+      });
+      await waitFor(() =>
+        expect(uploadMock).toHaveBeenCalledWith("c1", expect.any(File)),
+      );
+      expect(document.querySelector('[data-run-attachment="att-spec.pdf"]')).not.toBeNull();
+
+      fireEvent.mouseEnter(drawer().parentElement as HTMLElement);
+      const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(box, { target: { value: "see the spec" } });
+      fireEvent.keyDown(box, { key: "Enter" });
+      await waitFor(() =>
+        expect(onSend).toHaveBeenCalledWith("see the spec", ["att-spec.pdf"]),
+      );
+      // The file rode THAT send — it is not implicit context for the next one.
+      expect(document.querySelector('[data-run-attachment="att-spec.pdf"]')).toBeNull();
+    });
+
+    it("drops a pending attachment before sending when its chip is removed", async () => {
+      const onSend = vi.fn(async () => {});
+      renderRow({ onSend, agentId: "ag-1", sessionId: "s-1", chatSessionId: "c1" });
+      const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+      fireEvent.change(input, {
+        target: { files: [new File(["x"], "gone.txt", { type: "text/plain" })] },
+      });
+      await waitFor(() =>
+        expect(document.querySelector('[data-run-attachment="att-gone.txt"]')).not.toBeNull(),
+      );
+      // The chips live inside the drawer capsule, which is `aria-hidden` while
+      // closed — open it before the remove button is reachable by role.
+      fireEvent.mouseEnter(drawer().parentElement as HTMLElement);
+      fireEvent.click(screen.getByRole("button", { name: "chatPanel.removeAttachment" }));
+      expect(document.querySelector('[data-run-attachment="att-gone.txt"]')).toBeNull();
+
+      fireEvent.mouseEnter(drawer().parentElement as HTMLElement);
+      const box = screen.getByRole("textbox") as HTMLTextAreaElement;
+      fireEvent.change(box, { target: { value: "just text" } });
+      fireEvent.keyDown(box, { key: "Enter" });
+      await waitFor(() => expect(onSend).toHaveBeenCalledWith("just text", []));
+    });
   });
 });

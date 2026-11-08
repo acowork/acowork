@@ -470,6 +470,7 @@
     "plusNoMcp": "该 Agent 没有 MCP 服务",
     "plusNoToolsConnected": "尚未连接工具",
     "plusToolCount": "{{n}} 个工具",
+    "plusShowTools": "查看该服务的工具",
     "plusAgentDisabledNote": "其中 {{n}} 项已由 Agent 配置关闭"
   },
   "sessionTabBar": {

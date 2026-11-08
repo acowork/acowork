@@ -378,6 +378,7 @@
     "plusNoMcp": "此 Agent 沒有 MCP 服務",
     "plusNoToolsConnected": "尚未連線工具",
     "plusToolCount": "{{n}} 個工具",
+    "plusShowTools": "檢視該伺服器的工具",
     "plusAgentDisabledNote": "其中 {{n}} 項已由 Agent 設定關閉"
   },
   "sessionTabBar": {

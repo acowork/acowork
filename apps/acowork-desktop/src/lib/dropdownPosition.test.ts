@@ -164,4 +164,69 @@ describe("computeDropdownPlacement", () => {
     expect(p.left).toBeGreaterThanOrEqual(0);
     expect(p.top).toBeGreaterThanOrEqual(0);
   });
+
+  describe('align: "left" (the Chat block\'s row — grow rightward, into the chat pane)', () => {
+    const anchor = { left: 300, right: 316, top: 100, bottom: 124 };
+    it("anchors on the trigger's LEFT edge and grows rightward", () => {
+      const p = computeDropdownPlacement({
+        anchor,
+        menuWidth: MENU_W,
+        menuHeight: MENU_H,
+        viewportWidth: VIEWPORT_W,
+        viewportHeight: VIEWPORT_H,
+        direction: "down",
+        align: "left",
+      });
+      expect(p.left).toBe(anchor.left);
+      expect(p.rightAligned).toBe(false);
+    });
+
+    it("does NOT grow leftward over the agent list when there is room to the right", () => {
+      // The regression this locks: with the old right-aligned rule the same
+      // trigger placed the menu at 316-320 = -4 (clamped to the gap) — the
+      // popover landed on top of the agent list, left of the chat pane.
+      const p = computeDropdownPlacement({
+        anchor,
+        menuWidth: MENU_W,
+        menuHeight: MENU_H,
+        viewportWidth: VIEWPORT_W,
+        viewportHeight: VIEWPORT_H,
+        direction: "down",
+        align: "left",
+      });
+      expect(p.left).toBeGreaterThanOrEqual(anchor.left);
+    });
+
+    it("falls back to right-aligned only when growing right would leave the window", () => {
+      const nearRight = { left: VIEWPORT_W - 100, right: VIEWPORT_W - 84, top: 100, bottom: 124 };
+      const p = computeDropdownPlacement({
+        anchor: nearRight,
+        menuWidth: MENU_W,
+        menuHeight: MENU_H,
+        viewportWidth: VIEWPORT_W,
+        viewportHeight: VIEWPORT_H,
+        direction: "down",
+        align: "left",
+      });
+      expect(p.rightAligned).toBe(true);
+      expect(p.left).toBe(nearRight.right - MENU_W);
+    });
+
+    it('keeps the default rule byte-identical when "align" is omitted', () => {
+      // Anchor far enough right that the right-aligned rule FITS — the
+      // block's own anchor (left=300) would legitimately fall back to
+      // left-aligned even under the default rule (316-320 crosses the edge).
+      const wideAnchor = { left: 1000, right: 1016, top: 100, bottom: 124 };
+      const p = computeDropdownPlacement({
+        anchor: wideAnchor,
+        menuWidth: MENU_W,
+        menuHeight: MENU_H,
+        viewportWidth: VIEWPORT_W,
+        viewportHeight: VIEWPORT_H,
+        direction: "down",
+      });
+      expect(p.rightAligned).toBe(true);
+      expect(p.left).toBe(wideAnchor.right - MENU_W);
+    });
+  });
 });
