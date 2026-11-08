@@ -84,6 +84,20 @@ function seed(tail: ChatMessageRow[], inflight: Record<string, InflightTurn | un
   })
 }
 
+/** Install the peer's registry info. `role` is what the turn header paints
+ *  under the name, on the tier the regular agent message header gives it
+ *  (`.msg-sender-role`); a case that omits it pins the no-role shape. */
+function seedAgent(role?: string): void {
+  useAgentStore.setState({
+    agents: {
+      [AGENT]: {
+        info: { id: AGENT, name: '小助手', node_id: 'n1', role } as never,
+        sessions: [],
+      },
+    },
+  })
+}
+
 const statusLine = () => container.querySelector('[role="status"]')
 const composer = () => container.querySelector<HTMLTextAreaElement>('.composer-input')!
 const sendButton = () => container.querySelector<HTMLButtonElement>('.composer-send')!
@@ -100,9 +114,7 @@ describe('AgentChatScreen in-flight turn claim', () => {
     )
     useAuthStore.setState({ me: { user_id: 'u1', username: 'nancy', display_name: 'Nancy' } as never })
     useChatStore.setState({ selectedAgentId: AGENT })
-    useAgentStore.setState({
-      agents: { [AGENT]: { info: { id: AGENT, name: '小助手', node_id: 'n1' } as never, sessions: [] } },
-    })
+    seedAgent()
     container = document.createElement('div')
     document.body.appendChild(container)
     root = createRoot(container)
@@ -124,6 +136,49 @@ describe('AgentChatScreen in-flight turn claim', () => {
     expect(statusLine()?.textContent).toContain('小助手')
     expect(composer().disabled).toBe(true)
     expect(sendButton().disabled).toBe(true)
+  })
+
+  it('a claim that names its responder wears the turn header (ADR-106 rev. 2026-11-08)', () => {
+    // The peer id was recorded on the claim at send time — a delivery decision
+    // input, not a read of the transcript's shape. With it the wait wears the
+    // peer's face and name, and the centered line steps back: one statement,
+    // one shape. The lock is the header's to keep.
+    seed([HUMAN], { [SESSION]: { messageId: 'm-1', at: 1, responders: [AGENT] } })
+    mount()
+    const header = container.querySelector('.chat-turn-header')
+    expect(header).toBeTruthy()
+    expect(header!.textContent).toContain('小助手')
+    expect(header!.textContent).toContain('正在处理')
+    expect(container.querySelector('.msg-avatar')).toBeTruthy()
+    expect(container.querySelector('.chat-turn-status')).toBeNull()
+    expect(composer().disabled).toBe(true)
+  })
+
+  it('the turn header shows the peer role, as the regular message header does', () => {
+    // Same field, same class as a normal agent message's role line: the header
+    // is that header plus the claim's word, so the two must not differ in what
+    // they say about the speaker — only in what they say about the wait.
+    seedAgent('资深工程师')
+    seed([HUMAN], { [SESSION]: { messageId: 'm-1', at: 1, responders: [AGENT] } })
+    mount()
+    const header = container.querySelector('.chat-turn-header')!
+    const role = header.querySelector('.msg-sender-role')
+    expect(role?.textContent).toBe('资深工程师')
+    // Under the name, ahead of the claim's word.
+    const text = header.textContent ?? ''
+    expect(text.indexOf('资深工程师')).toBeGreaterThan(text.indexOf('小助手'))
+    expect(text.indexOf('正在处理')).toBeGreaterThan(text.indexOf('资深工程师'))
+  })
+
+  it('a claim naming an agent this device cannot resolve keeps the centered line', () => {
+    // No face without a name to put on it: the header is an upgrade, never a
+    // prerequisite of the claim, so the wait falls back to the platform's own
+    // line while the lock holds.
+    seed([HUMAN], { [SESSION]: { messageId: 'm-1', at: 1, responders: ['ghost-x'] } })
+    mount()
+    expect(container.querySelector('.chat-turn-header')).toBeNull()
+    expect(statusLine()?.textContent).toContain('小助手')
+    expect(composer().disabled).toBe(true)
   })
 
   it('the round’s reference row settles the claim: line gone, composer live', () => {

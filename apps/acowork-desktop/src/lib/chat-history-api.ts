@@ -27,6 +27,15 @@ export interface HistoryHit {
   kind: string;
   body: string;
   attachments: ChatAttachmentMeta[];
+  /** For an `execution_round` hit: the projection address
+   *  `instance|session|round`, resolved through `GET /api/chat-blocks` to
+   *  render the round's answer fragment. Empty on every other kind (ADR-106
+   *  D3: the reference row carries coordinates, never content). */
+  exec_ref?: string;
+  /** For an `execution_round` hit: the row's durable one-line task name
+   *  (`assignment_brief`), the fallback label when the projection is not
+   *  readable. Empty on every other kind. */
+  brief?: string;
 }
 
 /** Mirrors `chat_sessions_api::SearchPage`. */

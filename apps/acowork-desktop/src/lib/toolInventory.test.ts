@@ -5,13 +5,14 @@
  * session can narrow the agent layer but never widen it. Everything else here
  * is bookkeeping around that.
  */
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   buildToolInventory,
   deriveBuiltinState,
   deriveMcpServerState,
   deriveMcpToolState,
   emptyToolPolicy,
+  fetchAgentToolInventory,
   isToolPolicyEmpty,
   fromWirePolicy,
   toWirePolicy,
@@ -93,6 +94,72 @@ describe("buildToolInventory", () => {
       null,
     );
     expect(inv.mcpServers[0].tools).toEqual([]);
+  });
+});
+
+/**
+ * The fetch boundary — the only place that reads the wire shape as it actually
+ * arrives.
+ *
+ * `buildToolInventory` is pure and its tests hand it the per-server map
+ * directly, so not one of them can see that `GET /mcp-tools` wraps that map in
+ * a `{ agent_id, servers }` envelope. Indexing the envelope by server name
+ * type-checks (it is an `as` cast) and yields `undefined` for every server, so
+ * every server folds to zero tools and the `+` menu silently loses its tool
+ * drill-down — while the settings panel, which unwraps `servers`, keeps
+ * showing them. Two surfaces disagreeing about one endpoint is the tell, and
+ * this test is what pins the boundary they both read.
+ */
+describe("fetchAgentToolInventory", () => {
+  function stubEndpoints(mcpToolsPayload: unknown) {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn((url: string) => {
+        const ok = (payload: unknown) =>
+          Promise.resolve({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve(payload),
+          });
+        if (url.endsWith("/tools"))
+          return ok({
+            tools: [{ name: "read_file", enabled: true }],
+            mcp_servers_defs: [serverView("playwright", true)],
+          });
+        if (url.endsWith("/mcp-tools")) return ok(mcpToolsPayload);
+        return Promise.resolve({
+          ok: false,
+          status: 500,
+          json: () => Promise.resolve({}),
+        });
+      }),
+    );
+  }
+
+  it("unwraps the `servers` envelope into the per-server tool map", async () => {
+    stubEndpoints({
+      agent_id: "agent-1",
+      servers: { playwright: [{ name: "navigate", enabled: true }] },
+    });
+
+    const inv = await fetchAgentToolInventory("agent-1");
+
+    expect(inv.mcpServers[0].tools.map((t) => t.prefixedName)).toEqual([
+      "playwright__navigate",
+    ]);
+    vi.unstubAllGlobals();
+  });
+
+  it("does not fold the bare per-server map, which is the envelope's inner field", async () => {
+    // The shape the old reader assumed. Handing it over must NOT produce a
+    // usable tool list: if this ever starts passing, the unwrap has been
+    // dropped again and the `+` menu has lost its drill-down with it.
+    stubEndpoints({ playwright: [{ name: "navigate", enabled: true }] });
+
+    const inv = await fetchAgentToolInventory("agent-1");
+
+    expect(inv.mcpServers[0].tools).toEqual([]);
+    vi.unstubAllGlobals();
   });
 });
 

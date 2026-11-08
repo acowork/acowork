@@ -48,6 +48,16 @@ export interface DropdownPlacementInput {
   viewportHeight: number;
   /** Which side the menu opens on. */
   direction: DropDirection;
+  /** Horizontal growth rule.
+   *  "right" (default) anchors on the trigger's RIGHT edge and grows
+   *  leftward — the rule for triggers that sit in a RIGHT-side panel, where
+   *  the room the menu needs is to the trigger's left.
+   *  "left" anchors on the trigger's LEFT edge and grows rightward — the
+   *  rule for triggers on the LEFT side of a wide pane (the Chat block's
+   *  action row): growing left would leave the pane and cover the agent
+   *  list beside it. Falls back to the other side only when the preferred
+   *  one would cross the viewport. */
+  align?: "right" | "left";
   /** Gap between trigger and menu, px. Default 4. */
   gap?: number;
 }
@@ -99,18 +109,33 @@ export function computeDropdownPlacement({
   viewportWidth,
   viewportHeight,
   direction,
+  align = "right",
   gap = DROPDOWN_EDGE_GAP,
 }: DropdownPlacementInput): DropdownPlacement {
   const g = Math.max(0, gap);
 
-  // ── Horizontal: right-aligned by default ──
-  let left = anchor.right - menuWidth;
-  let rightAligned = true;
-  // Overflowing the LEFT edge means there is no room to grow leftward, so
-  // grow rightward instead.
-  if (left < g) {
+  // ── Horizontal: anchored on the requested side, falling back to the
+  // other side only when the preferred one would cross the viewport ──
+  let left: number;
+  let rightAligned: boolean;
+  if (align === "left") {
+    // Grow rightward from the trigger's left edge (left-side triggers:
+    // the Chat block's action row — growing left would leave the chat
+    // pane and cover the agent list).
     left = anchor.left;
     rightAligned = false;
+    if (left + menuWidth > viewportWidth - g) {
+      left = anchor.right - menuWidth;
+      rightAligned = true;
+    }
+  } else {
+    // Grow leftward from the trigger's right edge (right-panel triggers).
+    left = anchor.right - menuWidth;
+    rightAligned = true;
+    if (left < g) {
+      left = anchor.left;
+      rightAligned = false;
+    }
   }
   // Belt-and-braces: keep the menu on screen even if it is wider than the
   // window (`w-80` in a very narrow window).

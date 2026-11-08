@@ -76,6 +76,10 @@ interface ChatSessionStore {
     inReplyTo?: string,
     attachmentIds?: string[],
     address?: ChatAddress,
+    /** Agent instances this send is expected to reach (ADR-106 revision
+     *  2026-11-08) — recorded on the claim so the surface can render the
+     *  turn header. For a 1:1 chat this is its peer. */
+    responders?: string[],
   ): Promise<boolean>
   /** The doorbell reaction: re-read the one session that can be on screen. */
   wake(): Promise<void>
@@ -196,7 +200,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     }
   },
 
-  sendText: async (chatSessionId, text, inReplyTo, attachmentIds, address) => {
+  sendText: async (chatSessionId, text, inReplyTo, attachmentIds, address, responders) => {
     const me = useAuthStore.getState().me?.user_id
     if (!me || get().sending[chatSessionId]) return false
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }))
@@ -208,7 +212,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       // delivery is not claimed: that arm writes no receipt into the Chat, so a
       // claim would wait for a row that cannot exist and lock the composer for
       // the whole deadline.
-      if (resp.status === 'delivered') armTurn(chatSessionId, resp.message_id)
+      if (resp.status === 'delivered') armTurn(chatSessionId, resp.message_id, responders)
     } catch (e) {
       console.warn('chat send failed:', e)
     } finally {
@@ -252,10 +256,17 @@ export function wakeAgentChat(): void {
 const turnTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 /** Claim the turn this device just sent, and arm its deadline. */
-function armTurn(chatSessionId: string, messageId: string): void {
+function armTurn(chatSessionId: string, messageId: string, responders?: string[]): void {
   if (!messageId) return
   useChatSessionStore.setState((s) => ({
-    inflight: { ...s.inflight, [chatSessionId]: { messageId, at: Date.now() } },
+    inflight: {
+      ...s.inflight,
+      [chatSessionId]: {
+        messageId,
+        at: Date.now(),
+        ...(responders && responders.length > 0 ? { responders } : {}),
+      },
+    },
   }))
   const prev = turnTimers.get(chatSessionId)
   if (prev !== undefined) clearTimeout(prev)

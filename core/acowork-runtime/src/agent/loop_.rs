@@ -1470,37 +1470,29 @@ impl AgentLoop {
 
             // ⑨ Iteration limit check — pause and await user decision
             if iteration > self.core.config.max_iterations {
-                // Design 27 §6.5 R3 + §5.5.4 (plan 3.1): a chat-triggered
-                // turn never enters the indefinite Paused state. With an
-                // answerable human the pause becomes an
-                // `interaction_request` card and the turn ends `waiting`
-                // — the execution slot is released, the human's answer
-                // opens a new turn in the same session (§5.5.4). With no
-                // human to answer (pure agent-agent, or a responder turn
-                // whose answerability is unknown) the turn ends `aborted`
-                // naming where it got stuck (§7.1 table). The outcome
-                // lives on the write-back context (plan D-C/C1): that is
-                // what both terminal writers read (ADR-100 follow-up).
+                // One pause state, two views (ADR-106 D8 + ADR-014).
+                //
+                // The pause is ALWAYS the execution session's own fact: the
+                // turn parks in place on `Paused{IterationLimit}` and waits for
+                // `ContinueExecution`. That is what the execution surface's
+                // banner renders and what its Continue sends — a chat binding
+                // must not move the turn to a different state machine, or the
+                // surface the human is actually looking at goes silent.
+                //
+                // When the turn was triggered by a Chat (it has a card target)
+                // the same pause is ADDITIONALLY recorded as the round's
+                // `pause` card, so the Chat block can offer the same Continue.
+                // The card is a projection of the paused state, never a
+                // replacement for it: opened here, retracted by the resume
+                // arm below.
+                //
+                // With no human to answer (pure agent-agent, or a responder
+                // turn whose answerability is unknown) the turn ends `aborted`
+                // naming where it got stuck (§7.1 table).
                 let pause_message = format!(
                     "Iteration limit reached ({}/{}). Reply to continue.",
                     iteration, self.core.config.max_iterations
                 );
-                if self.turn_surface.card_target().is_some()
-                    && self.turn_surface.has_human == Some(true)
-                {
-                    self.track_interaction(serde_json::json!({
-                        "kind": "pause",
-                        "request_id": self.current_round_id(),
-                        "question": pause_message,
-                    }));
-                    self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Waiting;
-                    tracing::warn!(
-                        iteration,
-                        "Chat turn hit iteration limit — round parked on the pause card, ending waiting"
-                    );
-                    self.transition_status(SessionStatus::Idle);
-                    return Ok(format!("[waiting] {pause_message}"));
-                }
                 if self.pending_intent.is_some() || self.turn_surface.has_human == Some(false) {
                     self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Aborted;
                     tracing::warn!(
@@ -1513,6 +1505,15 @@ impl AgentLoop {
                         "[aborted] Reached the iteration limit ({}/{}) before finishing this intent request.",
                         iteration, self.core.config.max_iterations
                     ));
+                }
+                // Nobody is going to answer an aborted turn, so the card is
+                // recorded only on the path that actually waits below.
+                if self.turn_surface.card_target().is_some() {
+                    self.track_interaction(serde_json::json!({
+                        "kind": "pause",
+                        "request_id": self.current_round_id(),
+                        "question": pause_message,
+                    }));
                 }
                 tracing::warn!(
                     iteration,
@@ -1554,6 +1555,14 @@ impl AgentLoop {
                                 reason = %reason,
                                 "User chose to continue, resetting iteration counter"
                             );
+                            // The pause is over, so the card that offers it
+                            // must go with it: drop the record and publish the
+                            // non-terminal "nothing pending" snapshot, which
+                            // rings the round's bell and makes the Chat block
+                            // re-read. Without this the block keeps offering a
+                            // Continue for a run that already moved on.
+                            self.supersede_pause_cards();
+                            self.publish_round_card_state(None);
                             // ADR-014: Paused → Streaming
                             // ADR-049: HTTP request not yet sent → LlmAwaitingFirstChunk.
                             self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
@@ -1586,6 +1595,11 @@ impl AgentLoop {
                                         reason = %reason,
                                         "UserOp: continue loop via fast channel"
                                     );
+                                    // Same withdrawal as the ContinueExecution
+                                    // arm above — the fast channel is another
+                                    // way to answer the same pause.
+                                    self.supersede_pause_cards();
+                                    self.publish_round_card_state(None);
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;
                                     if let Err(e) =
@@ -1666,31 +1680,18 @@ impl AgentLoop {
                     Ok(result) => break result,
                     Err(RuntimeError::LoopDetected(msg)) => {
                         // Design 27 §6.5 R3: responder turns never pause —
-                        // loop detection ends the turn as `aborted`. The
-                        // outcome lives on the loop (plan
-                        // D-C/C1 + §5.5.4 (plan 3.1): chat-triggered turn
-                        // with an answerable human → pause card + `waiting`
-                        // (slot released, answer opens a new turn); no
-                        // answerer → `aborted` receipt.
+                        // loop detection ends the turn as `aborted`.
+                        //
+                        // One pause state, two views, exactly as the iteration
+                        // limit above: the turn always parks in place on
+                        // `Paused{LoopDetected}` and waits for
+                        // `ContinueExecution`; a chat-bound turn ADDITIONALLY
+                        // records the round's `pause` card so the Chat block
+                        // offers the same Continue.
                         let loop_summary = format!(
                             "Loop detected ({}). Reply to continue.",
                             msg
                         );
-                        if self.turn_surface.card_target().is_some()
-                            && self.turn_surface.has_human == Some(true)
-                        {
-                            self.track_interaction(serde_json::json!({
-                                "kind": "pause",
-                                "request_id": self.current_round_id(),
-                                "question": loop_summary,
-                            }));
-                            self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Waiting;
-                            tracing::warn!(
-                                "Chat turn hit loop detection — round parked on the pause card, ending waiting"
-                            );
-                            self.transition_status(SessionStatus::Idle);
-                            return Ok(format!("[waiting] {loop_summary}"));
-                        }
                         if self.pending_intent.is_some()
                             || self.turn_surface.has_human == Some(false)
                         {
@@ -1701,6 +1702,15 @@ impl AgentLoop {
                             );
                             self.transition_status(SessionStatus::Idle);
                             return Ok(format!("[aborted] Loop detected before finishing this intent request: {msg}"));
+                        }
+                        // Only the path that waits below can be answered, so
+                        // only it records a card.
+                        if self.turn_surface.card_target().is_some() {
+                            self.track_interaction(serde_json::json!({
+                                "kind": "pause",
+                                "request_id": self.current_round_id(),
+                                "question": loop_summary,
+                            }));
                         }
                         // Loop detection: inject system warning into history,
                         // reset detector, pause, and wait for ContinueExecution.
@@ -1755,6 +1765,13 @@ impl AgentLoop {
                                         reason = %reason,
                                         "User chose to continue after loop detection"
                                     );
+                                    // The pause is over — withdraw the card and
+                                    // ring the round's bell, so the Chat block
+                                    // stops offering a Continue that no longer
+                                    // applies (the same withdrawal the
+                                    // iteration-limit arm performs).
+                                    self.supersede_pause_cards();
+                                    self.publish_round_card_state(None);
                                     // ADR-049: HTTP request about to be sent → LlmAwaitingFirstChunk.
                                     self.transition_status(SessionStatus::LlmAwaitingFirstChunk);
                                     iteration = 0;

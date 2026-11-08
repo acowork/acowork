@@ -61,7 +61,7 @@ import { DeliveryAlertLine } from '../../components/DeliveryAlertLine'
 import { ChatAddressSheet, type AddressPick } from '../../components/ChatAddressSheet'
 import { answerWithChoice, directCardAddress, mayAnswerCard, type CardChoice } from '../../lib/chatCardAnswer'
 import { fetchCardAnswer } from '../../lib/api'
-import { turnInflight } from '../../lib/chatTurnInflight'
+import { turnInflight, resolveExpectedResponders } from '../../lib/chatTurnInflight'
 import { buildTranscriptItems, type TranscriptItem } from '../../lib/chatTranscriptGroups'
 import { renderMarkdown } from '../../lib/markdown'
 import type { ChatAttachment } from '../../lib/chatAttachment'
@@ -147,6 +147,15 @@ export function AgentChatScreen() {
   // composer invites the second send this Chat cannot absorb, and a locked
   // composer with no line reads as a broken button.
   const composerLocked = sending || turnLive
+  // The turn header's face (ADR-106 revision 2026-11-08): the claim's own
+  // expected responder, resolved through the store the bubbles use. A claim
+  // that names nobody, or names an agent this device cannot resolve, keeps the
+  // centered line — a header without a name to put on it is not an upgrade.
+  const turnHeaderAgent: string | null = (() => {
+    const ids = inflightTurn?.responders ?? []
+    if (ids.length !== 1 || ids[0] !== agentId || !agent) return null
+    return agent.name || null
+  })()
   // Hand the claim back as soon as a row answers it, so nothing keeps
   // asserting a turn the transcript has already settled.
   useEffect(() => {
@@ -174,7 +183,9 @@ export function AgentChatScreen() {
     setFocusBlockSessionId(null)
     // Sending re-claims the follow (the IM convention), before the echo lands.
     stickNow()
-    void useChatSessionStore.getState().sendText(sessionId, text, inReplyTo, attachmentIds, addr)
+    void useChatSessionStore
+      .getState()
+      .sendText(sessionId, text, inReplyTo, attachmentIds, addr, resolveExpectedResponders(agentId))
   }
 
   const send = () => {
@@ -380,18 +391,50 @@ export function AgentChatScreen() {
               </Fragment>
             )
           })}
-          {/* D9: the only "working on it" line this surface may paint is about a
-              send of its own — never about the transcript's shape. It ends at the
-              first row that answers the send (the round's reference row, the
-              router's reply, a receipt), so it cannot fake liveness for a node
-              that is gone; and the round's own liveness rides inside its block,
-              off the `pending` projection read. */}
+          {/* D9: the only "working on it" statement this surface may paint is
+              about a send of its own — never about the transcript's shape. It
+              ends at the first row that answers the send (the round's reference
+              row, the router's reply, a receipt), so it cannot fake liveness for
+              a node that is gone; and the round's own liveness rides inside its
+              block, off the `pending` projection read.
+              ADR-106 revision (2026-11-08, the turn header): while the claim is
+              live AND the claim itself names this chat's peer, the wait wears
+              the peer's face and name, and the block's own header takes over at
+              the same anchor when the first answering row lands. The peer comes
+              from the claim's `responders` — recorded at send time by
+              `resolveExpectedResponders` — not from `agentId` at render time:
+              a legacy claim, or one this surface never armed, keeps the
+              centered line. The POST-in-flight moment does too. */}
           {composerLocked ? (
-            <div className="chat-turn-status" role="status">
-              <span className="chat-turn-status-text chat-turn-status-text-live">
-                {agent?.name ? `${agent.name}正在处理…` : '正在处理…'}
-              </span>
-            </div>
+            turnLive && turnHeaderAgent ? (
+              <div className="chat-turn-header" role="status">
+                <div className="msg-avatar">{agentAvatar}</div>
+                <div className="msg-sender">
+                  <span className="msg-sender-name">{turnHeaderAgent}</span>
+                  {/* The role, on the tier the regular agent message header
+                      gives it (`.msg-sender-role`) — this header IS that
+                      header plus the claim's word, so the role has to be in
+                      place before the turn's answer rows land under it. The
+                      claim names one responder here (`ids.length !== 1` keeps
+                      the centered line), so there is no fan-out list to
+                      disambiguate. */}
+                  {agent?.role ? <span className="msg-sender-role">{agent.role}</span> : null}
+                  {/* The claim's word in the execution surface's status-line
+                      grammar (`.status-line`: pulse dot + 13px text) —
+                      "someone is busy" reads the same on both surfaces. */}
+                  <span className="chat-turn-header-status">
+                    <span className="status-pulse" aria-hidden />
+                    <span>正在处理…</span>
+                  </span>
+                </div>
+              </div>
+            ) : (
+              <div className="chat-turn-status" role="status">
+                <span className="chat-turn-status-text chat-turn-status-text-live">
+                  {agent?.name ? `${agent.name}正在处理…` : '正在处理…'}
+                </span>
+              </div>
+            )
           ) : null}
           {/* Back-to-bottom arrow — visible only while the reader has scrolled
               up off the tail (and there is content). Tapping is the explicit

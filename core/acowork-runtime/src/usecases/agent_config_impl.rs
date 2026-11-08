@@ -33,6 +33,7 @@
 //! the desktop.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 
@@ -47,11 +48,31 @@ use crate::usecases::agent_config::{
 /// `workspace/config/agent_config.json` file.
 pub struct RuntimeAgentConfigService {
     work_dir: PathBuf,
+    /// Serialises the load-merge-save cycle in [`Self::put_config`].
+    ///
+    /// The PUT DTO is a *partial* body, so a subject that owns two coupled
+    /// fields writes them as two patches — the Setup panel's model picker is
+    /// exactly that case (`default_model` + `default_provider`, ADR-110; the
+    /// ADR-099 router picker is the same shape). Two requests arriving on
+    /// different executor threads both load the pre-write file, merge their
+    /// own single field and save the whole struct, so whichever finishes last
+    /// silently discards the other's half — the user's pick then survives as
+    /// "model without provider" (or is dropped entirely).
+    ///
+    /// Serialising here — the one audit point for this file on the HTTP path
+    /// — makes every partial PUT compose with every other one, instead of
+    /// pushing the ordering responsibility onto each client. A `std::sync`
+    /// mutex is deliberate: the guarded section has no await point, so it can
+    /// never be held across a suspension.
+    write_lock: Mutex<()>,
 }
 
 impl RuntimeAgentConfigService {
     pub fn new(work_dir: PathBuf) -> Self {
-        Self { work_dir }
+        Self {
+            work_dir,
+            write_lock: Mutex::new(()),
+        }
     }
 }
 
@@ -74,6 +95,17 @@ impl AgentConfigService for RuntimeAgentConfigService {
         agent_id: &str,
         body: PutAgentConfigBody,
     ) -> Result<PutAgentConfigResult, AgentConfigError> {
+        // 0. One writer at a time — see `write_lock`. Poisoning is
+        //    impossible in practice (the section is panic-free apart from a
+        //    file IO failure, which returns an error rather than panicking),
+        //    but recovering the guard is still the right thing to do: the
+        //    on-disk file is the state of record, so a previous panic left
+        //    nothing in memory to be inconsistent with.
+        let _writing = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // 1. Load current (or default for fresh-install).
         let mut cfg: AgentConfig = agent_config::load_agent_config(&self.work_dir)
             .map_err(|e| AgentConfigError::Persistence(e.to_string()))?
@@ -156,6 +188,26 @@ fn apply_field_patch(
         // memory service and `AgentConfig` no longer writes them.
         ConfigField::SessionLanguage => {
             cfg.session_language = patch_typed::<String>(field, op);
+        }
+        // ADR-110: the per-agent NEW-session defaults. An empty string is
+        // treated as an explicit clear, same as the router's model field —
+        // the Setup panel clears with JSON `null` (`FieldPatch::Clear`), but a
+        // client that sends `""` means the same thing and must not persist an
+        // empty model/provider/effort.
+        ConfigField::DefaultModel => {
+            cfg.default_model = patch_typed::<String>(field, op)
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty());
+        }
+        ConfigField::DefaultProvider => {
+            cfg.default_provider = patch_typed::<String>(field, op)
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty());
+        }
+        ConfigField::DefaultReasoningEffort => {
+            cfg.default_reasoning_effort = patch_typed::<String>(field, op)
+                .map(|e| e.trim().to_lowercase())
+                .filter(|e| !e.is_empty());
         }
         // ADR-099: sub-field patches against the nested `chat_router`
         // block. The block is created on first write; an all-`None`
@@ -391,6 +443,191 @@ mod tests {
             crate::agent_config::ChatRouterConfig::DEFAULT_HISTORY_MAX_TOKENS
         );
     }
+
+    // ========================================================================
+    // ADR-110: per-agent NEW-session defaults
+    // ========================================================================
+
+    /// The wire group translates onto the three `default_*` patches with the
+    /// same present/null/absent semantics as every other field, and — since
+    /// it is built by its own constructor — does not disturb the body the
+    /// handler already assembled from `from_request_fields`.
+    #[test]
+    fn test_agent_default_wire_to_patch_translation_and_append() {
+        let mut body = PutAgentConfigBody::from_request_fields(
+            None, None, None, None, None, None, None, None, // 8 core knobs
+            Some(serde_json::json!("zh-CN")), // session_language -> Set
+            None, None, None, None, None,    // no chat_router fields
+        );
+        body.patches
+            .extend(PutAgentConfigBody::session_default_patches(
+                Some(serde_json::json!("claude-sonnet-4")), // -> Set
+                Some(serde_json::json!(null)),              // -> Clear
+                None,                                       // absent -> skip
+            ));
+
+        let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
+            body.patches.iter().map(|p| (p.field, &p.op)).collect();
+        assert_eq!(fields.len(), 3, "session_language + model set + provider clear");
+        assert!(fields.contains(&(ConfigField::SessionLanguage, &FieldPatch::Set(serde_json::json!("zh-CN")))));
+        assert!(fields.contains(&(
+            ConfigField::DefaultModel,
+            &FieldPatch::Set(serde_json::json!("claude-sonnet-4"))
+        )));
+        assert!(fields.contains(&(ConfigField::DefaultProvider, &FieldPatch::Clear)));
+        assert!(
+            !fields
+                .iter()
+                .any(|(f, _)| *f == ConfigField::DefaultReasoningEffort),
+            "an absent field must not become a patch"
+        );
+    }
+
+    /// Each default is set / cleared independently; an empty string means
+    /// the same as a wire `null` (the Setup panel's "no default" option), and
+    /// the effort is normalised to the lowercase spelling the backend
+    /// `ReasoningEffort::from_str_loose` accepts.
+    #[test]
+    fn test_agent_default_field_patches() {
+        let mut cfg = AgentConfig::default();
+
+        apply(
+            &mut cfg,
+            &[
+                patch(ConfigField::DefaultModel, serde_json::json!("gpt-5")),
+                patch(ConfigField::DefaultProvider, serde_json::json!("openai")),
+                patch(
+                    ConfigField::DefaultReasoningEffort,
+                    serde_json::json!("HIGH"),
+                ),
+            ],
+        );
+        assert_eq!(cfg.default_model.as_deref(), Some("gpt-5"));
+        assert_eq!(cfg.default_provider.as_deref(), Some("openai"));
+        assert_eq!(cfg.default_reasoning_effort.as_deref(), Some("high"));
+
+        // Clearing the model does not silently drop the provider: an explicit
+        // `null` on one field is a statement about that field only (the panel
+        // sends both when the user picks "no default model").
+        apply(&mut cfg, &[clear(ConfigField::DefaultModel)]);
+        assert_eq!(cfg.default_model, None);
+        assert_eq!(cfg.default_provider.as_deref(), Some("openai"));
+
+        // Empty string == clear, for all three.
+        apply(
+            &mut cfg,
+            &[
+                patch(ConfigField::DefaultModel, serde_json::json!("   ")),
+                patch(ConfigField::DefaultProvider, serde_json::json!("")),
+                patch(ConfigField::DefaultReasoningEffort, serde_json::json!("")),
+            ],
+        );
+        assert_eq!(cfg.default_model, None);
+        assert_eq!(cfg.default_provider, None);
+        assert_eq!(cfg.default_reasoning_effort, None);
+
+        // A wrong-typed value is dropped (warn only) instead of panicking —
+        // the same contract every other field has.
+        apply(
+            &mut cfg,
+            &[patch(ConfigField::DefaultReasoningEffort, serde_json::json!(3))],
+        );
+        assert_eq!(cfg.default_reasoning_effort, None);
+    }
+
+    /// The three defaults must NOT enter the live-broadcast projection: they
+    /// are creation-time seeds, and `RuntimeConfigOverrides` cannot express
+    /// "cleared" (`None` = keep), which is exactly why they are read from disk
+    /// per new session instead of cached there.
+    #[test]
+    fn test_agent_defaults_are_not_live_overrides() {
+        let cfg = AgentConfig {
+            default_model: Some("gpt-5".into()),
+            default_provider: Some("openai".into()),
+            default_reasoning_effort: Some("high".into()),
+            ..Default::default()
+        };
+        // Documented by construction: `From<&AgentConfig>` projects only the
+        // live-editable fields, and this one asserts that stays true — a
+        // future "just add it to the override struct" would ship a cache that
+        // cannot represent a cleared default.
+        let ov = crate::agent::session::session_manager::RuntimeConfigOverrides::from(&cfg);
+        assert!(
+            ov.is_empty(),
+            "per-agent new-session defaults must not enter the live-override push"
+        );
+        let json = serde_json::to_string(&ov).expect("overrides serialize");
+        assert!(
+            !json.contains("gpt-5") && !json.contains("openai") && !json.contains("high"),
+            "no default value may leak onto the broadcast wire"
+        );
+    }
+
+    // ── Serialised load-merge-save (ADR-110) ───────────────────────────
+
+    /// Two coupled fields written as two partial PUTs must BOTH survive.
+    ///
+    /// This is the shape the Setup panel produces: picking a model emits
+    /// `default_model` and `default_provider` as two requests, each carrying
+    /// only its own field. Without `write_lock` both requests load the
+    /// pre-write file and the second save discards the first patch, leaving
+    /// the agent with a model and no provider (or vice versa) — i.e. a new
+    /// session silently does not start on the default the user picked, which
+    /// is the one contract ADR-110 has to guarantee.
+    ///
+    /// The iteration count is what makes this a real regression test rather
+    /// than a lucky pass: an unserialised implementation loses a half within
+    /// a few rounds, a serialised one never does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_partial_puts_of_a_coupled_pair_both_persist() {
+        let dir = std::env::temp_dir().join(format!("acw-cfg-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let svc = std::sync::Arc::new(RuntimeAgentConfigService::new(dir.clone()));
+
+        for round in 0..25 {
+            let model = format!("model-{round}");
+            let provider = format!("provider-{round}");
+
+            let a = {
+                let svc = svc.clone();
+                let body = PutAgentConfigBody {
+                    patches: PutAgentConfigBody::session_default_patches(
+                        Some(serde_json::json!(model)),
+                        None,
+                        None,
+                    ),
+                };
+                tokio::spawn(async move { svc.put_config("agent", body).await })
+            };
+            let b = {
+                let svc = svc.clone();
+                let body = PutAgentConfigBody {
+                    patches: PutAgentConfigBody::session_default_patches(
+                        None,
+                        Some(serde_json::json!(provider)),
+                        None,
+                    ),
+                };
+                tokio::spawn(async move { svc.put_config("agent", body).await })
+            };
+            a.await.unwrap().unwrap();
+            b.await.unwrap().unwrap();
+
+            let cfg = agent_config::load_agent_config(&dir)
+                .expect("load")
+                .expect("file exists");
+            assert_eq!(
+                cfg.default_model.as_deref(),
+                Some(model.as_str()),
+                "round {round}: the model half of the pair was lost"
+            );
+            assert_eq!(
+                cfg.default_provider.as_deref(),
+                Some(provider.as_str()),
+                "round {round}: the provider half of the pair was lost"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
-
-

@@ -1494,26 +1494,56 @@ impl SessionManager {
         let mut initial_model = conversation.as_ref().and_then(|c| c.model());
         let mut initial_provider = conversation.as_ref().and_then(|c| c.provider());
         let mut initial_account = conversation.as_ref().and_then(|c| c.account_id());
+        // ADR-012: the session's own persisted reasoning effort is the first
+        // layer of the chain; a resumed session keeps whatever it had.
+        let persisted_effort = conversation.as_ref().and_then(|c| c.reasoning_effort());
+
+        // ADR-110: the per-agent defaults a NEW session starts from
+        // (`agent_config.json::{default_model, default_provider,
+        // default_reasoning_effort}`). Loaded only when this session actually
+        // needs a seed — a resume that already carries all three never pays
+        // for the read.
+        let agent_defaults = if initial_model.is_none()
+            || initial_provider.is_none()
+            || persisted_effort.is_none()
+        {
+            crate::agent_config::AgentSessionDefaults::load(std::path::Path::new(
+                &self.core.config.work_dir,
+            ))
+        } else {
+            crate::agent_config::AgentSessionDefaults::default()
+        };
 
         // Fall back to Runtime-internal default when the session has no
         // explicit model/provider (new agent, first session ever created).
-        // current_model_and_provider() atomically returns the (model, provider)
-        // pair from the most recently active session, or the first entry from
-        // global_provider_list if no session has ever been activated.
-        if initial_model.is_none() || initial_provider.is_none() {
-            let (fallback_model, fallback_provider) = self.current_model_and_provider();
+        // ADR-110 inserts the per-agent default ahead of the pre-existing
+        // "inherit the most recently active session" rule; see
+        // `new_session_model_provider`.
+        //
+        // The seed fills a MISSING half, it never replaces a present one: a
+        // session that already carries a model of its own keeps it even when
+        // its provider is missing (the caller chose that model; the agent
+        // default is only a fallback for a session with no opinion), so only
+        // the provider is derived. Replacing the whole pair here was the
+        // silent-override bug the ADR-110 regression test pins.
+        if initial_model.is_none() {
+            let (seed_model, seed_provider) = self.new_session_model_provider(&agent_defaults);
 
-            // Persist the fallback to JSONL so the session carries
+            // Persist the seed to JSONL so the session carries
             // consistent (model, provider) metadata into the next
             // `OpenSession` activation — the proto `SessionOpened` event
             // reports these fields directly to the frontend.
-            if let (Some(conv), Some(model)) = (&conversation, &fallback_model)
+            if let (Some(conv), Some(model)) = (&conversation, &seed_model)
                 && conv.model().is_none()
             {
-                conv.update_model_provider(model, fallback_provider.as_deref());
+                conv.update_model_provider(model, seed_provider.as_deref());
             }
-            initial_model = fallback_model;
-            initial_provider = fallback_provider;
+            initial_model = seed_model;
+            initial_provider = seed_provider;
+        } else if initial_provider.is_none()
+            && let Some(model) = initial_model.as_deref()
+        {
+            initial_provider = self.provider_serving_model(model);
         }
 
         // Same fallback chain for the multi-account pick: when the new
@@ -1626,44 +1656,33 @@ impl SessionManager {
             let budget = self.core.context_trim_budget_with(Some(resolved), m);
             session_state.history_mut().set_max_tokens(budget);
 
-            // Three-level priority chain for reasoning_effort:
-            // 1. Persisted session value (from JSONL metadata, via ConversationSession)
-            // 2. Provider capabilities default_reasoning_effort
-            // 3. None (provider does not support thinking control)
-            let persisted_effort = session_state
-                .conversation()
-                .and_then(|c| c.reasoning_effort());
+            // Reasoning-effort chain (ADR-110 adds layer 2), resolved by the
+            // single implementation in
+            // `session_config::llm_effects::resolve_effective_reasoning_effort`:
+            //   1. the session's persisted value (JSONL metadata)
+            //   2. `agent_config.json::default_reasoning_effort` — the
+            //      per-agent default for NEW sessions
+            //   3. the model's capability default
+            //   4. Auto (reasoning-capable model with no declared default) —
+            //      keeps the composer's effort control visible
+            //   5. None (model cannot control reasoning → control hidden)
+            //
+            // This call site used to spell the chain out by hand with layer 2
+            // missing; it now shares the one implementation the HTTP/MQTT
+            // readers already use, so the three surfaces cannot drift.
+            let caps = self.core.get_model_capabilities(m);
+            let effort = crate::agent::session_config::llm_effects::
+                resolve_effective_reasoning_effort(
+                    caps.as_ref(),
+                    persisted_effort
+                        .as_deref()
+                        .or(agent_defaults.reasoning_effort.as_deref()),
+                );
+            session_state.set_reasoning_effort(effort);
 
-            if let Some(ref effort_str) = persisted_effort {
-                // Session already has a persisted value; restore it.
-                let effort =
-                    acowork_core::providers::traits::ReasoningEffort::from_str_loose(effort_str);
-                session_state.set_reasoning_effort(effort);
-            } else {
-                // No persisted value: initialize from provider capabilities default.
-                // If default_reasoning_effort is None but supports_reasoning is true,
-                // fall back to Auto so the user sees the reasoning effort control.
-                let caps = self.core.get_model_capabilities(m);
-                let provider_default = caps
-                    .as_ref()
-                    .and_then(|c| c.default_reasoning_effort.clone());
-                let effort = provider_default
-                    .as_deref()
-                    .and_then(acowork_core::providers::traits::ReasoningEffort::from_str_loose)
-                    .or_else(|| {
-                        // Model supports reasoning but has no explicit default → Auto
-                        if caps
-                            .as_ref()
-                            .and_then(|c| c.supports_reasoning)
-                            .unwrap_or(false)
-                        {
-                            Some(acowork_core::providers::traits::ReasoningEffort::Auto)
-                        } else {
-                            None
-                        }
-                    });
-                session_state.set_reasoning_effort(effort);
-                // Write back to ConversationSession so future resumes have a value.
+            if persisted_effort.is_none() {
+                // Write back to ConversationSession so future resumes (and the
+                // config snapshot the Desktop reads) carry the seed.
                 if let Some(conv) = session_state.conversation() {
                     let effort_str = effort.as_ref().map(|e| e.to_string());
                     conv.update_reasoning_effort(effort_str);
@@ -3679,6 +3698,60 @@ impl SessionManager {
         (model, provider)
     }
 
+    /// The `(model, provider)` a **new** session starts on (ADR-110).
+    ///
+    /// Resolution chain (the FIRST layer that yields a model wins; the
+    /// provider always travels with the model so the two can never come from
+    /// different layers — the cross-contamination hazard
+    /// [`Self::current_model_and_provider`] exists to avoid):
+    ///
+    /// ```text
+    /// 1. agent_config.json default_model (+ default_provider, else the first
+    ///    configured provider that actually exposes that model id)
+    ///    — the per-agent default the Setup panel edits
+    /// 2. self.current_model_and_provider()
+    ///    — the most recently active session's pair (pre-ADR-110 behaviour,
+    ///      and the fallback when the agent declares no default)
+    /// ```
+    ///
+    /// A `default_provider` on its own (no `default_model`) is ignored:
+    /// "provider without a model" is not a selectable state in the UI and
+    /// picking its first model here would silently override the
+    /// most-recently-used choice with a different model.
+    fn new_session_model_provider(
+        &self,
+        defaults: &crate::agent_config::AgentSessionDefaults,
+    ) -> (Option<String>, Option<String>) {
+        if let Some(model) = defaults.model.clone() {
+            let provider = defaults
+                .provider
+                .clone()
+                .or_else(|| self.provider_serving_model(&model));
+            tracing::info!(
+                model = %model,
+                provider = ?provider,
+                "New session seeded from the per-agent default model (ADR-110)"
+            );
+            return (Some(model), provider);
+        }
+        self.current_model_and_provider()
+    }
+
+    /// First provider in the global inventory that exposes `model`.
+    ///
+    /// Used only when `agent_config.json` sets `default_model` without a
+    /// `default_provider` (hand-edited config, or a provider that was renamed
+    /// after the pick was saved). `None` = no configured provider serves the
+    /// model — the session is then created with a model but no provider, the
+    /// same shape the pre-ADR-110 fallback can produce, and the model menu
+    /// still shows the model so the user can re-pick.
+    fn provider_serving_model(&self, model: &str) -> Option<String> {
+        let list = self.core.global_provider_list.read().ok()?;
+        list.iter()
+            .find(|p| p.models.iter().any(|m| m.id == model))
+            .map(|p| p.id.clone())
+    }
+
     /// Resolve the account_id the next newly-created session should inherit.
     ///
     /// Mirrors [`current_model_and_provider`]'s two-level resolution for
@@ -5469,6 +5542,208 @@ mod tests {
             .expect("s2 snapshot exists");
         assert_eq!(s2_snap.model.as_deref(), Some("model-A"));
         assert_eq!(s2_snap.provider.as_deref(), Some("provider-X"));
+    }
+
+    // ── Per-agent NEW-session defaults (ADR-110) ───────────────────
+    //
+    // Contract: `agent_config.json::{default_model, default_provider,
+    // default_reasoning_effort}` seed every NEW session, and they beat the
+    // pre-ADR-110 "inherit whatever the last session used" rule. The old
+    // rule stays in place as the fallback for an agent that declares no
+    // default.
+    //
+    // The defaults are read from disk at creation time (not cached in
+    // `RuntimeConfigOverrides`) precisely so that CLEARING one takes effect
+    // on the next session without a restart — the last block below pins
+    // that.
+    #[tokio::test]
+    async fn new_session_is_seeded_from_agent_defaults_not_last_used() {
+        let work_dir = std::env::temp_dir().join(format!("acowork-adr110-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(work_dir.join("config")).unwrap();
+        let write_defaults = |model: Option<&str>, provider: Option<&str>, effort: Option<&str>| {
+            crate::agent_config::save_agent_config(
+                &work_dir,
+                &crate::agent_config::AgentConfig {
+                    default_model: model.map(str::to_string),
+                    default_provider: provider.map(str::to_string),
+                    default_reasoning_effort: effort.map(str::to_string),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        };
+        write_defaults(Some("agent-default-model"), Some("agent-default-provider"), Some("high"));
+
+        let config = crate::config::RuntimeConfig {
+            work_dir: work_dir.to_string_lossy().to_string(),
+            agent_id: "com.test.agent_defaults".to_string(),
+            ..Default::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.agent_defaults"
+            version = "1.0.0"
+            name = "Test agent defaults"
+            description = "Pin ADR-110 new-session seeding"
+            author = "test"
+            runtime_version = "0.1.0"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text("test"));
+        let core = Arc::new(AgentCore::new(
+            config,
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+
+        // A configured inventory so the provider auto-resolution path can be
+        // exercised (default_provider unset ⇒ first provider serving the id).
+        core.global_provider_list
+            .write()
+            .unwrap()
+            .push(acowork_core::protocol::ProviderListItem {
+                id: "inventory-provider".to_string(),
+                base_url: String::new(),
+                protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+                models: vec![acowork_core::protocol::ProviderModelEntry {
+                    id: "agent-default-model".to_string(),
+                    capabilities: acowork_core::ModelCapabilitiesInfo {
+                        context_window: 200_000,
+                        max_output_tokens: 8_192,
+                        max_input_tokens: None,
+                        supports_tool_calling: true,
+                        supports_reasoning: Some(true),
+                        supports_attachment: None,
+                        supports_temperature: None,
+                        cost: None,
+                        modalities: None,
+                        name: None,
+                        family: None,
+                        knowledge_cutoff: None,
+                        default_reasoning_effort: None,
+                        thinking_mode: None,
+                        reasoning_efforts: None,
+                    },
+                    max_output_tokens_limit: 16_384,
+                    protocol_type: None,
+                    base_url: None,
+                    protocol_probe: None,
+                }],
+                compact_model: None,
+                custom: false,
+            });
+
+        let mut manager = SessionManager::new(core.clone(), SessionManagerConfig::default());
+        // `create_frontend_session` resolves the workspace context through the
+        // resolver; an empty test resolver = agent home only.
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            WorkspaceResolver::new_for_test(Vec::new()),
+        )));
+        let conversations = work_dir.join("conversations");
+
+        // 1. A brand-new session starts on the per-agent defaults — not on
+        //    whatever `current_model_and_provider()` would have produced.
+        let s1 = manager
+            .create_frontend_session(None, None, None, None)
+            .await
+            .expect("create s1");
+        let s1_snap = manager.snapshot_session_state(&s1).expect("s1 snapshot");
+        assert_eq!(s1_snap.model.as_deref(), Some("agent-default-model"));
+        assert_eq!(s1_snap.provider.as_deref(), Some("agent-default-provider"));
+
+        // The effort is resolved at creation and persisted into the
+        // session's own meta, so a later resume keeps it (ADR-012).
+        let meta = crate::conversation::read_session_meta(&conversations, &s1)
+            .expect("s1 meta");
+        assert_eq!(meta.reasoning_effort.as_deref(), Some("high"));
+        assert_eq!(meta.model.as_deref(), Some("agent-default-model"));
+
+        // 2. The user works in s1 on a different model/provider. That is a
+        //    per-session fact and must not move the per-agent default.
+        manager
+            .route_model_switch(
+                &s1,
+                "switched-model".to_string(),
+                Some("switched-provider".to_string()),
+                None,
+            )
+            .unwrap();
+        let s1_after = manager.snapshot_session_state(&s1).expect("s1 snapshot");
+        assert_eq!(s1_after.model.as_deref(), Some("switched-model"));
+
+        // 3. The NEXT session still starts from the per-agent default.
+        let s2 = manager
+            .create_frontend_session(None, None, None, None)
+            .await
+            .expect("create s2");
+        let s2_snap = manager.snapshot_session_state(&s2).expect("s2 snapshot");
+        assert_eq!(s2_snap.model.as_deref(), Some("agent-default-model"));
+        assert_eq!(s2_snap.provider.as_deref(), Some("agent-default-provider"));
+
+        // 4. Provider auto-resolution: with `default_provider` cleared, the
+        //    first configured provider that exposes the default model wins.
+        write_defaults(Some("agent-default-model"), None, Some("high"));
+        let s3 = manager
+            .create_frontend_session(None, None, None, None)
+            .await
+            .expect("create s3");
+        let s3_snap = manager.snapshot_session_state(&s3).expect("s3 snapshot");
+        assert_eq!(s3_snap.model.as_deref(), Some("agent-default-model"));
+        assert_eq!(s3_snap.provider.as_deref(), Some("inventory-provider"));
+
+        // 5. An EXPLICIT model on a session that has no provider yet must
+        //    survive: the per-agent default is a fallback for a session with
+        //    no opinion of its own, never an override of one the caller gave.
+        //    (The pre-ADR-110 shape filled the whole pair here, which
+        //    silently replaced a caller-chosen model with the agent default.)
+        write_defaults(
+            Some("agent-default-model"),
+            Some("agent-default-provider"),
+            Some("high"),
+        );
+        let s_explicit = manager
+            .create_frontend_session(None, Some("caller-model"), None, None)
+            .await
+            .expect("create s_explicit");
+        let explicit_snap = manager
+            .snapshot_session_state(&s_explicit)
+            .expect("s_explicit snapshot");
+        assert_eq!(
+            explicit_snap.model.as_deref(),
+            Some("caller-model"),
+            "an explicitly chosen model must not be replaced by the agent default"
+        );
+
+        // 6. Clearing the defaults must take effect on the NEXT session
+        //    without a restart: the pre-ADR-110 fallback rule (the
+        //    most-recently-active session's pair) returns. This is why the
+        //    defaults are read fresh instead of being cached in the
+        //    `Some`-wins/`None`-preserves `RuntimeConfigOverrides` — a cached
+        //    copy would keep seeding new sessions with the removed default.
+        write_defaults(None, None, None);
+        // Make s1 (the switched pair) the most recently active session again,
+        // so the assertion below cannot be satisfied by s3's own pair.
+        manager.get_session(&s1).expect("s1 is live").touch();
+        assert_eq!(
+            manager.current_model_and_provider(),
+            (
+                Some("switched-model".to_string()),
+                Some("switched-provider".to_string())
+            ),
+            "precondition: s1 is the most recently active session"
+        );
+        let s4 = manager
+            .create_frontend_session(None, None, None, None)
+            .await
+            .expect("create s4");
+        let s4_snap = manager.snapshot_session_state(&s4).expect("s4 snapshot");
+        assert_eq!(s4_snap.model.as_deref(), Some("switched-model"));
+        assert_eq!(s4_snap.provider.as_deref(), Some("switched-provider"));
+
+        drop(manager);
+        let _ = std::fs::remove_dir_all(&work_dir);
     }
 
     // ── Multi-account pick inheritance regression (ADR-012) ────────

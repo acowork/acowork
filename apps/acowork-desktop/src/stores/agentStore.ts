@@ -91,6 +91,21 @@ export interface AgentProfileSettings {
    *  the window is sized by context cost, not by a message count.
    *  Undefined = built-in default (8000); clamped 1000–64000. */
   chatRouterHistoryMaxTokens?: number;
+  /** ADR-110: model a NEW session starts on (`agent_config.json`
+   *  `default_model`). Undefined = no opinion — a new session inherits
+   *  the most recently active session's model. Always paired with
+   *  `defaultProvider` (the composer's model menu selects a
+   *  provider+model pair); a model id alone would be ambiguous when two
+   *  configured providers serve it. */
+  defaultModel?: string;
+  /** ADR-110: provider for `defaultModel` (`default_provider`).
+   *  Undefined = whichever configured provider exposes the model. */
+  defaultProvider?: string;
+  /** ADR-110: reasoning effort a NEW session starts on
+   *  (`default_reasoning_effort`), one of the levels the composer's effort
+   *  menu offers. Undefined = no opinion — the model's capability default
+   *  (then `auto`) applies. */
+  defaultReasoningEffort?: string;
   // ADR-094 note: `skillsAutoLoad` was removed from the profile
   // shape. Skill mode (Progressive / Manual) now lives entirely
   // on the `load_skill` tool entry in `agent_tools.json` and is
@@ -207,6 +222,21 @@ function normalizeProfile(s: Partial<AgentProfileSettings>): AgentProfileSetting
       s.chatRouterHistoryMaxTokens >= 1000 &&
       s.chatRouterHistoryMaxTokens <= 64000
         ? Math.floor(s.chatRouterHistoryMaxTokens)
+        : undefined,
+    // ADR-110 new-session defaults. Non-empty strings only — "" is the
+    // dropdown's "no default" marker and must normalize to undefined so the
+    // panel and the runtime agree on what "no opinion" means.
+    defaultModel:
+      typeof s.defaultModel === "string" && s.defaultModel.trim()
+        ? s.defaultModel.trim()
+        : undefined,
+    defaultProvider:
+      typeof s.defaultProvider === "string" && s.defaultProvider.trim()
+        ? s.defaultProvider.trim()
+        : undefined,
+    defaultReasoningEffort:
+      typeof s.defaultReasoningEffort === "string" && s.defaultReasoningEffort.trim()
+        ? s.defaultReasoningEffort.trim().toLowerCase()
         : undefined,
   };
 }

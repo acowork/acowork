@@ -143,6 +143,23 @@ export const dialogButtonPrimary =
 export const dialogButtonSecondary =
   "w-20 rounded px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700";
 
+// ── Interaction-card buttons ────────────────────────────────────────
+
+/**
+ * The approval pair every interaction surface uses: one side of one decision
+ * sits on the accent, the other stays neutral. The recipe was written in
+ * `ExploreBlock` (the execution surface's tool-approval row) and copied
+ * verbatim into `ChatExecutionBlock`'s card; a third copy would drift the
+ * first time the pair changes. The accent side keeps its background as an
+ * inline `var(--color-accent-strong)` — the ONE place the highlight color is
+ * allowed to paint (see `chatCardChrome.test.tsx`).
+ */
+export const cardButtonNeutral =
+  "rounded-md border border-zinc-300 px-2 py-0.5 text-11 font-medium text-text-secondary transition-colors hover:bg-zinc-200 disabled:opacity-50 dark:border-zinc-500 dark:hover:bg-zinc-600";
+
+export const cardButtonAccent =
+  "rounded-md px-2 py-0.5 text-11 font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50";
+
 // ── Test result styles ──────────────────────────────────────────────
 
 /** Test result message (success/error) */

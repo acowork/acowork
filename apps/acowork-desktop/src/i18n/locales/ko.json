@@ -378,6 +378,7 @@
     "plusNoMcp": "이 Agent 에는 MCP 서버가 없습니다",
     "plusNoToolsConnected": "연결된 도구가 없습니다",
     "plusToolCount": "도구 {{n}} 개",
+    "plusShowTools": "이 서버의 도구 보기",
     "plusAgentDisabledNote": "이 중 {{n}} 개는 Agent 설정에서 비활성화됨"
   },
   "sessionTabBar": {
@@ -671,6 +672,12 @@
     "chatRouterTimeoutMsDesc": "직접 전달로 폴백하기까지 단일 라우터 LLM 호출의 시간 초과. 범위 1000–300000, 기본 60000.",
     "chatRouterHistoryMaxTokens": "Chat 기록 컨텍스트 길이",
     "chatRouterHistoryMaxTokensDesc": "라우팅 판단 전에 라우터가 읽을 수 있는 대화 기록의 길이(토큰). 윈도우는 메시지 개수가 아니라 컨텍스트 크기로 잘립니다. 범위 1000–64000, 기본 8000.",
+    "defaultModel": "기본 모델",
+    "defaultModelInherit": "자동 (마지막 사용 모델 따르기)",
+    "defaultModelDesc": "새 세션이 시작하는 모델입니다. 자동으로 두면 마지막으로 사용한 모델을 따릅니다.",
+    "defaultReasoningEffort": "기본 추론 강도",
+    "defaultReasoningInherit": "자동 (모델 기본값 따르기)",
+    "defaultReasoningEffortDesc": "새 세션이 시작하는 추론 강도입니다. 자동을 선택하면 모델 자체의 기본값을 따릅니다.",
     "mcpToggleError": "MCP 서버 업데이트 실패: {{error}}",
     "sectionAgentInfo": "Agent 정보",
     "sectionSessionParams": "세션 파라미터",

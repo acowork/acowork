@@ -1,3 +1,4 @@
+import { useEffect, useRef } from "react";
 import { Eye, EyeOff } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { useAgentStore } from "../../stores/agentStore";
@@ -62,9 +63,13 @@ import { toolbarIconButton } from "../../lib/ui-styles";
 export function SessionVisibilityToggle({
   agentId,
   sessionId,
+  buttonClassName,
 }: {
   agentId: string;
   sessionId: string;
+  /** Trigger style override — the Chat block's action row uses its own 24px
+   *  round cluster instead of `toolbarIconButton`. */
+  buttonClassName?: string;
 }) {
   const { t } = useTranslation();
   const { addToast } = useToast();
@@ -72,8 +77,21 @@ export function SessionVisibilityToggle({
   // re-rendering only when `renameSession` / `setSessionVisibility` swap
   // the object — same read path as ChatPanel's `readOnlySession`.
   const session = useAgentStore((s) =>
-    s.agents[agentId]?.sessions.find((x) => x.session_id === sessionId),
+    s.agents[agentId]?.sessions?.find((x) => x.session_id === sessionId),
   );
+  const fetchSessions = useAgentStore((s) => s.fetchSessions);
+
+  // The Chat surface does not guarantee this agent's session list is loaded
+  // (the exec surface opens it on selection), and an agent row can exist
+  // before its `sessions` array is hydrated. Without the row there is no
+  // visibility / can_write to render, so pull it once per mount — the store
+  // caches per agent, and the row's arrival re-renders this via the selector.
+  const pulledRef = useRef(false);
+  useEffect(() => {
+    if (session || !fetchSessions || pulledRef.current) return;
+    pulledRef.current = true;
+    void fetchSessions(agentId);
+  }, [session, agentId, fetchSessions]);
 
   // Absent on responses from an older Runtime → treat as public (the
   // on-disk default) instead of hiding the control.
@@ -113,7 +131,7 @@ export function SessionVisibilityToggle({
       }
     >
       <button
-        className={toolbarIconButton}
+        className={buttonClassName ?? toolbarIconButton}
         onClick={handleToggle}
         disabled={!canWrite}
         aria-label={label}

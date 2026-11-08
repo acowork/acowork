@@ -24,6 +24,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | The agent lifecycle contract | [ADR-085](./ADR-085-agent-lifecycle-state-machine.md) |
 | Where a desktop right-rail control lives, and why there are five panels | [ADR-108](./ADR-108-right-panel-consolidation.md) |
 | Why a session may run with fewer tools than its agent, and where the composer's `+` menu gets its switches | [ADR-109](./ADR-109-session-tool-narrowing.md) |
+| What model / reasoning effort a brand-new session starts on | [ADR-110](./ADR-110-per-agent-session-defaults.md) |
 
 ## Index
 
@@ -131,6 +132,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 100 | [ADR-107](./ADR-107-message-ref-part.md) | Reference Parts — the Chat Background Rides Alongside, the `user` Row Keeps Only the Words | Proposed (pending architecture review); landed | [zh](../zh/ADR-107-message-ref-part.md) |
 | 108 | [ADR-108](./ADR-108-right-panel-consolidation.md) | Consolidating the Right Rail — the Tools Panel Retires, Its Cards Move into Setup | Implemented | [zh](../zh/ADR-108-right-panel-consolidation.md) |
 | 109 | [ADR-109](./ADR-109-session-tool-narrowing.md) | Per-session Tool Narrowing — a Narrow-Only Session Layer, and the Composer `+` Menu | Implemented | [zh](../zh/ADR-109-session-tool-narrowing.md) |
+| 110 | [ADR-110](./ADR-110-per-agent-session-defaults.md) | Per-agent New-session Defaults — `default_model` / `default_provider` / `default_reasoning_effort` Seed Every New Session | Implemented | [zh](../zh/ADR-110-per-agent-session-defaults.md) |
 
 ---
 

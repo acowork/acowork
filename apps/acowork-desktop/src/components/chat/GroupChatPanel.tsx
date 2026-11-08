@@ -78,7 +78,8 @@ import {
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
-import { turnInflight } from "../../lib/chatTurnInflight";
+import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
+import { turnInflight, resolveExpectedResponders } from "../../lib/chatTurnInflight";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
 import type { TranscriptItem } from "./chatTranscriptGroups";
 import { useRevealPendingAsk } from "./useRevealPendingAsk";
@@ -945,6 +946,28 @@ export function GroupChatPanel() {
   // Chat-side queue to absorb the second send.
   const turnLive = turnInflight(rows, inflightTurn);
   const composerLocked = sending || turnLive;
+  // The turn header's faces (ADR-106 revision 2026-11-08): the claim's
+  // expected responders — mention list / replied round's agent / default
+  // responder, the delivery decision's own inputs — resolved through the
+  // agent registry. ONE unresolved face degrades the WHOLE header to the
+  // centered line: a stack with a hole in it guesses louder than a name.
+  const turnHeaderIdentities = useMemo<TurnIdentity[]>(() => {
+    const ids = inflightTurn?.responders ?? [];
+    if (ids.length === 0) return [];
+    const out: TurnIdentity[] = [];
+    for (const id of ids) {
+      const meta = agentsMap[id]?.meta;
+      if (!meta) return [];
+      out.push({
+        id,
+        displayName: meta.display_name ?? meta.name ?? id,
+        role: meta.role ?? null,
+        avatarUrl: meta.avatar ?? null,
+        builtinAvatarId: meta.builtin_avatar ?? null,
+      });
+    }
+    return out;
+  }, [inflightTurn, agentsMap]);
   // Release the claim once a row answers it, so the surface stops asserting a
   // turn the transcript has already settled.
   useEffect(() => {
@@ -1283,6 +1306,11 @@ export function GroupChatPanel() {
           undefined,
           answer.attachmentIds,
           groupCardAddress(answer),
+          // The card names one agent, and the send carries exactly that
+          // mention list (ADR-106 revision 2026-11-08): the ladder's own
+          // answer for these inputs is the target list, so it is asked here
+          // rather than assumed.
+          resolveExpectedResponders({ mentions: targets }),
         );
       return true;
     },
@@ -1325,6 +1353,19 @@ export function GroupChatPanel() {
     const address = sentReplyTo
       ? undefined
       : buildChatAddress(targets, sentAddresses);
+    // The claim's expected responders (ADR-106 revision 2026-11-08): the
+    // delivery decision's own inputs, handed to the one function that writes
+    // the ladder down — `resolveExpectedResponders`. The addressed row goes
+    // over as the row itself, because whether it names a round at all is the
+    // ladder's first question, and the window can simply not have it.
+    const repliedRow = sentReplyTo
+      ? rows.find((r) => r.meta?.message_id === sentReplyTo) ?? null
+      : undefined;
+    const responders = resolveExpectedResponders({
+      mentions: targets,
+      repliedRow,
+      defaultResponder: group?.default_responder ?? null,
+    });
     const ok = await useChatSessionStore
       .getState()
       .sendGroupText(
@@ -1334,6 +1375,7 @@ export function GroupChatPanel() {
         sentReplyTo,
         attachmentIds,
         address,
+        responders,
       );
     if (ok) setReplyTarget(null);
     // Refund the composer on failure so nothing typed, attached or addressed is
@@ -1353,6 +1395,8 @@ export function GroupChatPanel() {
     addresses,
     uploading,
     composerLocked,
+    rows,
+    group,
   ]);
 
   // Upload each chosen file into the group's `files/` dir and stack a chip.
@@ -1776,22 +1820,35 @@ export function GroupChatPanel() {
               );
             }}
           />
-          {/* The one "still working" line this surface may add for itself: a
-            send THIS device made has not been answered yet. The claim starts at
-            that send's response id and ends at the first row answering it (the
-            round's reference row, an agent's own reply, a receipt) or on a
-            deadline — never at a shape read off the transcript, which is how a
-            dead node used to look alive, and never longer than the turn it
-            speaks for. Whether an agent is chewing on a round is a fact about
-            the ROUND, and the round speaks for itself inside its block
-            (ADR-106 D9). Generic wording: one utterance fans out to several
-            agents, so naming one of them would be a guess. */}
+          {/* The one "still working" statement this surface may add for
+            itself: a send THIS device made has not been answered yet. The
+            claim starts at that send's response id and ends at the first row
+            answering it (the round's reference row, an agent's own reply, a
+            receipt) or on a deadline — never at a shape read off the
+            transcript, which is how a dead node used to look alive, and never
+            longer than the turn it speaks for. Whether an agent is chewing on
+            a round is a fact about the ROUND, and the round speaks for itself
+            inside its block (ADR-106 D9).
+            ADR-106 revision (2026-11-08, the turn header): while the claim is
+            live and its expected responders all resolve, the wait wears their
+            faces — the mention list / the replied round's agent / the group's
+            default responder are the delivery decision's inputs, not guesses
+            read off the transcript, and any re-route or failure closes the
+            claim with the row that states it. The POST-in-flight moment and
+            an unresolved identity keep the generic centered line. */}
           {composerLocked && (
-            <ChatTurnStatusLine
-              className="px-4"
-              live
-              text={t("chatView.notice.pendingTurnGeneric")}
-            />
+            turnLive && turnHeaderIdentities.length > 0 ? (
+              <ChatTurnHeader
+                identities={turnHeaderIdentities}
+                text={t("chatView.notice.pendingTurnGeneric")}
+              />
+            ) : (
+              <ChatTurnStatusLine
+                className="px-4"
+                live
+                text={t("chatView.notice.pendingTurnGeneric")}
+              />
+            )
           )}
           {hasMoreNewer && (
             <div className="py-2 text-center text-10 text-text-tertiary">

@@ -124,6 +124,19 @@ pub enum ConfigField {
     /// `UserProfile.language`). `None` = follow the user's global
     /// language from `UserProfile`.
     SessionLanguage,
+    /// `AgentConfig::default_model` — `Option<String>` (ADR-110).
+    /// Model a **new** session starts on; `None` = inherit the most
+    /// recently active session's model.
+    DefaultModel,
+    /// `AgentConfig::default_provider` — `Option<String>` (ADR-110).
+    /// Provider for [`Self::DefaultModel`]; `None` = whichever configured
+    /// provider exposes that model id.
+    DefaultProvider,
+    /// `AgentConfig::default_reasoning_effort` — `Option<String>`
+    /// (ADR-110). Reasoning effort a **new** session starts on; `None` =
+    /// the model's capability default. Same spellings as the composer's
+    /// effort menu (`ReasoningEffort::from_str_loose`).
+    DefaultReasoningEffort,
     /// `AgentConfig::chat_router.enabled` — `Option<bool>` (ADR-099).
     /// `None` = enabled (the design default).
     ChatRouterEnabled,
@@ -166,6 +179,9 @@ impl ConfigField {
             ConfigField::ApprovalTimeoutSecs => "approval_timeout_secs",
             ConfigField::CompressionRatioThreshold => "compression_ratio_threshold",
             ConfigField::SessionLanguage => "session_language",
+            ConfigField::DefaultModel => "default_model",
+            ConfigField::DefaultProvider => "default_provider",
+            ConfigField::DefaultReasoningEffort => "default_reasoning_effort",
             ConfigField::ChatRouterEnabled => "chat_router_enabled",
             ConfigField::ChatRouterModel => "chat_router_model",
             ConfigField::ChatRouterProvider => "chat_router_provider",
@@ -332,6 +348,39 @@ impl PutAgentConfigBody {
             });
         }
         PutAgentConfigBody { patches }
+    }
+
+    /// Patch list for the per-agent NEW-session defaults (ADR-110).
+    ///
+    /// A separate constructor rather than three more positional parameters on
+    /// [`Self::from_request_fields`]: that signature is already at the
+    /// practical limit (14 same-typed `Option<serde_json::Value>` arguments,
+    /// `clippy::too_many_arguments` allowed), and one more group of identical
+    /// types is how an argument-order bug gets in. The handler appends this
+    /// list to the body it already built, so the patch list still has exactly
+    /// one producer per field group.
+    pub fn session_default_patches(
+        default_model: Option<serde_json::Value>,
+        default_provider: Option<serde_json::Value>,
+        default_reasoning_effort: Option<serde_json::Value>,
+    ) -> Vec<ConfigFieldPatch> {
+        let mut patches = Vec::new();
+        for (field, value) in [
+            (ConfigField::DefaultModel, default_model),
+            (ConfigField::DefaultProvider, default_provider),
+            (
+                ConfigField::DefaultReasoningEffort,
+                default_reasoning_effort,
+            ),
+        ] {
+            if let Some(v) = value {
+                patches.push(ConfigFieldPatch {
+                    field,
+                    op: value_to_patch(&v),
+                });
+            }
+        }
+        patches
     }
 }
 

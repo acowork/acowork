@@ -46,6 +46,32 @@ export interface InflightTurn {
    *  (a `Date.now()` inside a memo would make the line's presence depend on
    *  when a re-render happened to occur). */
   at: number
+  /**
+   * ADR-106 revision (2026-11-08, the turn header): the agent instances this
+   * send was EXPECTED to reach, read off the delivery decision's own inputs
+   * at send time — for a 1:1 chat, its peer. A fact about the routing's
+   * inputs, never an inference from transcript shape (what D9 bans); a
+   * re-route or a failed delivery closes the claim with the row that states
+   * it, so a wrong name cannot outlive the wait line it replaced. Absent →
+   * the surface keeps the generic centered line (the header is an upgrade,
+   * never a prerequisite of the claim).
+   */
+  responders?: string[]
+}
+
+/** The responder ids a send is expected to reach (ADR-106 revision
+ *  2026-11-08, design 33 §5) — the mobile twin of Desktop's function of the
+ *  same name, and mobile is 1:1 only (design 27 §5.4.4), so the peer is the
+ *  whole ladder here: it is the only agent that send can reach. The group
+ *  rungs (`@`-mentions, the addressed round, the default responder) live in
+ *  the Desktop twin; a surface that gains them calls the same name.
+ *
+ *  An absent peer (no agent selected) yields no names, which is the same
+ *  answer the Desktop surfaces give for an unresolved identity: the header is
+ *  an upgrade, and the centered line carries the wait without it.
+ */
+export function resolveExpectedResponders(peer?: string | null): string[] {
+  return peer ? [peer] : [];
 }
 
 /** Backstop for a turn whose outcome rows never arrive (a Runtime that died

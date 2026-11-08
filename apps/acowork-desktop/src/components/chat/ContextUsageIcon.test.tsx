@@ -34,6 +34,7 @@ const mocks = vi.hoisted(() => ({
     },
     sendCompressAction: vi.fn(),
     cancelCompressAction: vi.fn(),
+    fetchSessionState: vi.fn(async () => {}),
   },
   agentState: {
     agents: {
@@ -70,7 +71,11 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("../../stores/chatStore", () => ({
-  useChatStore: (selector: (state: unknown) => unknown) => selector(mocks.chatState),
+  useChatStore: Object.assign(
+    (selector: (state: unknown) => unknown) => selector(mocks.chatState),
+    // The component's `refreshOnOpen` path reads the store imperatively.
+    { getState: () => mocks.chatState },
+  ),
 }));
 
 vi.mock("../../stores/agentStore", () => ({
@@ -85,6 +90,7 @@ describe("ContextUsageIcon", () => {
   beforeEach(() => {
     mocks.chatState.sendCompressAction.mockReset();
     mocks.chatState.cancelCompressAction.mockReset();
+    mocks.chatState.fetchSessionState.mockReset();
     mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].isCompacting = false;
     mocks.chatState.agentStates["agent-1"].sessionStates["session-1"].sessionStatus =
       { status: "idle" } as const;
@@ -276,5 +282,76 @@ describe("ContextUsageIcon", () => {
     expect(screen.getByText("3.8%")).toBeTruthy();
     expect(screen.getByText("49.7%")).toBeTruthy();
     expect(screen.getByText("0.4%")).toBeTruthy();
+  });
+
+  describe("refreshOnOpen (the Chat block's snapshot contract)", () => {
+    it("pulls the session state on each closed→open edge, never while open", async () => {
+      const { container } = render(
+        <ContextUsageIcon agentId="agent-1" sessionId="session-1" refreshOnOpen />,
+      );
+      const host = container.firstElementChild!;
+
+      fireEvent.mouseEnter(host);
+      expect(mocks.chatState.fetchSessionState).toHaveBeenCalledTimes(1);
+      expect(mocks.chatState.fetchSessionState).toHaveBeenCalledWith("agent-1", "session-1");
+
+      // Pointer wobble (leave then re-enter inside the 150ms close grace) does
+      // NOT re-fetch: the popover never left the open state.
+      fireEvent.mouseLeave(host);
+      fireEvent.mouseEnter(host);
+      expect(mocks.chatState.fetchSessionState).toHaveBeenCalledTimes(1);
+
+      // A real close (grace timer elapsed) followed by a fresh display DOES.
+      fireEvent.mouseLeave(host);
+      await new Promise((r) => setTimeout(r, 200));
+      fireEvent.mouseEnter(host);
+      expect(mocks.chatState.fetchSessionState).toHaveBeenCalledTimes(2);
+    });
+
+    it("stays silent without the flag — the exec composer's ring is stream-fed", () => {
+      const { container } = render(
+        <ContextUsageIcon agentId="agent-1" sessionId="session-1" />,
+      );
+      fireEvent.mouseEnter(container.firstElementChild!);
+      expect(mocks.chatState.fetchSessionState).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("click trigger (the Chat block: hover-open was too jumpy)", () => {
+    it("hover does not open; click opens with a fresh pull; outside click and Escape close", () => {
+      const { container } = render(
+        <ContextUsageIcon
+          agentId="agent-1"
+          sessionId="session-1"
+          trigger="click"
+          refreshOnOpen
+        />,
+      );
+      const host = container.firstElementChild!;
+      const button = screen.getByRole("button", { name: "contextUsage.ariaLabel" });
+
+      fireEvent.mouseEnter(host);
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(mocks.chatState.fetchSessionState).not.toHaveBeenCalled();
+
+      fireEvent.click(button);
+      expect(screen.getByRole("dialog", { name: "上下文用量" })).toBeTruthy();
+      expect(mocks.chatState.fetchSessionState).toHaveBeenCalledTimes(1);
+
+      // A mousedown INSIDE the portalled panel must not close it — the
+      // containment test has to cover the portal, not just the wrapper.
+      fireEvent.mouseDown(screen.getByRole("dialog"));
+      expect(screen.getByRole("dialog", { name: "上下文用量" })).toBeTruthy();
+
+      fireEvent.mouseDown(document.body);
+      expect(screen.queryByRole("dialog")).toBeNull();
+
+      // Re-display pulls fresh again.
+      fireEvent.click(button);
+      expect(mocks.chatState.fetchSessionState).toHaveBeenCalledTimes(2);
+
+      fireEvent.keyDown(document, { key: "Escape" });
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
   });
 });

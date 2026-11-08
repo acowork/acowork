@@ -89,6 +89,18 @@ function unwatchRefs(chatId: string, refs: string[], key: string) {
   if (byRef.size === 0) watchers.delete(chatId);
 }
 
+/**
+ * Is this held block still able to change on its own?
+ *
+ * A round that has not reached a terminal state, or that is still offering a
+ * card, moves without the Chat transcript gaining a row (ADR-106's zero-write),
+ * so a successful read of it is provisional in the same way a `pending` read is
+ * — it must be re-read whenever the block is asked for, not cached as an answer.
+ */
+function isLiveBlock(e: ChatBlockEntry): boolean {
+  return e.status === "ok" && (e.projection?.terminal === false || !!e.projection?.card);
+}
+
 export const useChatBlockStore = create<ChatBlockState>((set, get) => {
   const flush = (chatId: string) => {
     timers.delete(chatId);
@@ -144,7 +156,27 @@ export const useChatBlockStore = create<ChatBlockState>((set, get) => {
     if (!chatId || refs.length === 0) return;
     const state = get();
     const held = state.blocks;
-    const wanted = refs.filter((r) => force || !held[r]);
+    // A `pending` read is provisional by contract (D9) — it says "still
+    // running" and nothing about the card the round may have parked on
+    // since. Holding one is NOT a reason to skip a re-read: a block
+    // re-mounted from a held-but-stale `pending` entry would render the
+    // pre-card state (no card, no buttons) until the interval backstop
+    // fired — and a webview that throttles timers does not fire it at all.
+    // This was the "second approval card never shows in the Chat" symptom:
+    // the doorbell lands while the Chat surface is unmounted, the re-entry
+    // read is skipped as already-held, and the block stays cardless.
+    //
+    // A round that is still running or still offering a card is the same
+    // shape of provisional: its projection can change without the Chat
+    // transcript gaining a row (ADR-106's zero-write), so a successful read
+    // is not a settled answer either. This is what left a pause card's
+    // Continue rendered after the run had been resumed — the withdrawal
+    // happened while this surface was away, the bell reached no watcher, and
+    // the held `waiting` copy was never re-read.
+    const wanted = refs.filter(
+      (r) =>
+        force || !held[r] || held[r]!.status === "pending" || isLiveBlock(held[r]!),
+    );
     if (wanted.length === 0) return;
     const queue = new Set(state.pending[chatId] ?? []);
     wanted.forEach((r) => queue.add(r));

@@ -1,6 +1,8 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
+import { createPortal } from "react-dom";
 import { Minimize2, Pencil, Square, X } from "lucide-react";
 import { CircularProgressIcon } from "./CircularProgressIcon";
+import { computeDropdownPlacement, DROPDOWN_EDGE_GAP } from "../../lib/dropdownPosition";
 import { useChatStore } from "../../stores/chatStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -38,11 +40,46 @@ const CATEGORY_META: Record<ContextUsageCategoryKey, { labelKey: string; color: 
 
 
 
-export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sessionId: string }) {
+export function ContextUsageIcon({
+  agentId,
+  sessionId,
+  refreshOnOpen = false,
+  trigger = "hover",
+  buttonClassName,
+}: {
+  agentId: string;
+  sessionId: string;
+  /** Pull `fetchSessionState` on every open transition. The ring needs no
+   *  pull to be live: the Desktop holds a wildcard MQTT subscription to
+   *  `acowork/agents/+/sessions/+/state` (retained), and the Runtime only
+   *  publishes it ON state change — so a RUNNING session's ring updates in
+   *  real time (coalesced behind a ~3s relay), while an idle or never-opened
+   *  session costs zero traffic and is covered by the retained snapshot at
+   *  connect. This pull exists only to close the ≤3s coalescing gap at the
+   *  moment the human clicks the popover open. */
+  refreshOnOpen?: boolean;
+  /** How the popover is summoned. "hover" is the exec composer's grammar
+   *  (the ring sits in a static strip; the popover anchors above it).
+   *  "click" is the Chat block's: hover-open there was too jumpy for a
+   *  control sitting mid-transcript, and the popover must be portalled —
+   *  the block lives inside a scroll container that hard-crops an
+   *  absolutely-positioned panel. */
+  trigger?: "hover" | "click";
+  /** Trigger style override — the block's action row uses its own 24px
+   *  round cluster instead of `toolbarIconButton`. */
+  buttonClassName?: string;
+}) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const popoverRef = useRef<HTMLDivElement>(null);
+  const wrapperRef = useRef<HTMLDivElement>(null);
   const closeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Click-mode placement: the panel is portalled to `document.body` with
+  // `position: fixed` because the Chat block's row lives inside a scroll
+  // container that HARD-CROPS an absolutely-positioned panel (same failure
+  // `WorkspaceSelector` documents). Null until measured — the panel paints
+  // `invisible` for that frame so it never flashes at (0,0).
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
 
   const contextUsage = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.contextUsage ?? null);
   const isCompacting = useChatStore((s) => s.agentStates[agentId]?.sessionStates[sessionId]?.isCompacting ?? false);
@@ -95,16 +132,39 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
   );
   const perTurnCacheHitRateLabel = formatCacheHitRate(perTurnCacheStats.ratio);
 
-// Open popover on hover (not click), with a small delay before closing
+// Open popover on hover (not click), with a small delay before closing.
+// In "click" mode (the Chat block) hover does NOTHING — the popover is
+// summoned by the button only, because a transcript control that opens on
+// pointer-cross is too jumpy (the user's call: "太跳脱了").
   const handleMouseEnter = useCallback(() => {
+    if (trigger === "click") return;
     if (closeTimerRef.current) {
       clearTimeout(closeTimerRef.current);
       closeTimerRef.current = null;
     }
-    setOpen(true);
-  }, []);
+    // Fresh-at-display: a surface that does not stream this session's state
+    // pulls the snapshot on the closed→open edge only (never while open), so
+    // the numbers shown are the latest without a live subscription.
+    setOpen((prev) => {
+      if (!prev && refreshOnOpen) {
+        void useChatStore.getState().fetchSessionState(agentId, sessionId);
+      }
+      return true;
+    });
+  }, [refreshOnOpen, agentId, sessionId, trigger]);
+
+  const handleClickToggle = useCallback(() => {
+    if (trigger !== "click") return;
+    setOpen((prev) => {
+      if (!prev && refreshOnOpen) {
+        void useChatStore.getState().fetchSessionState(agentId, sessionId);
+      }
+      return !prev;
+    });
+  }, [refreshOnOpen, agentId, sessionId, trigger]);
 
   const handleMouseLeave = useCallback(() => {
+    if (trigger === "click") return;
     closeTimerRef.current = setTimeout(() => setOpen(false), 150);
   }, []);
 
@@ -121,6 +181,91 @@ export function ContextUsageIcon({ agentId, sessionId }: { agentId: string; sess
       if (closeTimerRef.current) clearTimeout(closeTimerRef.current);
     };
   }, []);
+
+  // ── Click-mode dismissal (the Chat block) ─────────────────────────
+  // Outside mousedown + Escape. The panel is portalled to body, so the
+  // containment test must check BOTH the wrapper and the panel — testing
+  // only the wrapper would close the popover on the first click inside it
+  // (the same trap `WorkspaceSelector` documents).
+  useEffect(() => {
+    if (trigger !== "click" || !open) return;
+    const onDown = (e: MouseEvent) => {
+      const target = e.target as Node;
+      if (wrapperRef.current?.contains(target) || popoverRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", onDown);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onDown);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [trigger, open]);
+
+  // ── Click-mode placement ──────────────────────────────────────────
+  // Same grammar as `WorkspaceSelector`: portal + `position: fixed` +
+  // measurement via `computeDropdownPlacement` (right-anchored, falls back
+  // to left-anchored when the menu would cross the viewport's left edge,
+  // clamped both ways). Vertical side is chosen here: prefer DOWN — the
+  // block's row sits above its own transcript, which is the natural panel
+  // body — and flip up only when the menu cannot fit below but can above.
+  const computeMenuPos = useCallback(() => {
+    const anchorEl = wrapperRef.current;
+    const menuEl = popoverRef.current;
+    if (!anchorEl || !menuEl) return;
+    const r = anchorEl.getBoundingClientRect();
+    const mh = menuEl.offsetHeight;
+    const mw = menuEl.offsetWidth;
+    const direction =
+      window.innerHeight - r.bottom >= mh + DROPDOWN_EDGE_GAP ||
+      r.top < mh + DROPDOWN_EDGE_GAP
+        ? "down"
+        : "up";
+    const placement = computeDropdownPlacement({
+      anchor: { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
+      menuWidth: mw,
+      menuHeight: mh,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      direction,
+      // The block's row sits on the chat pane's LEFT side: grow rightward,
+      // back into the chat area. Right-aligning (the right-panel rule)
+      // would push the popover over the agent list.
+      align: "left",
+    });
+    setMenuPos({ top: placement.top, left: placement.left });
+  }, []);
+
+  // Measure synchronously before paint, so the panel never shows at (0,0).
+  useLayoutEffect(() => {
+    if (trigger !== "click") return;
+    if (open) computeMenuPos();
+    else setMenuPos(null);
+  }, [open, trigger, computeMenuPos]);
+
+  // Re-measure while open: the panel's own height changes (the window
+  // editor expands), the transcript scrolls under it, and the window
+  // resizes. Capture-phase scroll catches the transcript's own container.
+  useEffect(() => {
+    if (trigger !== "click" || !open) return;
+    computeMenuPos();
+    const menuEl = popoverRef.current;
+    const ro =
+      typeof ResizeObserver !== "undefined" && menuEl
+        ? new ResizeObserver(() => computeMenuPos())
+        : null;
+    if (ro && menuEl) ro.observe(menuEl);
+    window.addEventListener("resize", computeMenuPos);
+    window.addEventListener("scroll", computeMenuPos, true);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener("resize", computeMenuPos);
+      window.removeEventListener("scroll", computeMenuPos, true);
+    };
+  }, [trigger, open, computeMenuPos]);
 
   const usagePercent = contextUsage?.usage_percent ?? 0;
   const usageBreakdown = computeContextUsageBreakdown(
@@ -243,6 +388,7 @@ const handleCompressSummary = () => {
 
   return (
     <div
+      ref={wrapperRef}
       className="relative"
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
@@ -250,8 +396,10 @@ const handleCompressSummary = () => {
       {/* Icon button — shared right-cluster token so the hover rectangle
           matches the visibility / attachment / send buttons exactly. */}
       <button
-        className={toolbarIconButton}
+        className={buttonClassName ?? toolbarIconButton}
         aria-label={t("contextUsage.ariaLabel")}
+        aria-expanded={open}
+        onClick={handleClickToggle}
       >
         {isCompacting ? (
           <span className="h-4 w-4 flex items-center justify-center">
@@ -267,17 +415,28 @@ const handleCompressSummary = () => {
           toolbar (w-80, rounded-md, bg-modal-surface, zinc borders).
           The five-category list and stacked progress bar come from the
           latest debug context snapshot (see ADR-066). */}
-      {open && (
+      {open && (() => {
+        const panel = (
         <div
           ref={popoverRef}
           role="dialog"
           aria-label={t("contextUsage.title")}
-          onMouseEnter={handlePopoverEnter}
-          onMouseLeave={handleMouseLeave}
+          onMouseEnter={trigger === "hover" ? handlePopoverEnter : undefined}
+          onMouseLeave={trigger === "hover" ? handleMouseLeave : undefined}
           // ponytail: cap is viewport-bound so the editor expands naturally
           // without a scrollbar; the previous 460px ceiling was too low once
           // the inline window editor + presets + breakdown all rendered.
-          className="absolute bottom-full right-0 z-50 mb-2 w-72 max-h-[calc(100vh-32px)] select-none overflow-y-auto overscroll-contain rounded-md border border-border-outer bg-modal-surface text-text-secondary shadow-lg "
+          className={cn(
+            "w-72 max-h-[calc(100vh-32px)] select-none overflow-y-auto overscroll-contain rounded-md border border-border-outer bg-modal-surface text-text-secondary shadow-lg",
+            trigger === "hover"
+              ? "absolute bottom-full right-0 z-50 mb-2"
+              : cn("z-[100]", menuPos ? "visible" : "invisible"),
+          )}
+          style={
+            trigger === "click"
+              ? { position: "fixed", top: menuPos?.top ?? 0, left: menuPos?.left ?? 0 }
+              : undefined
+          }
         >
           <div className="flex items-center justify-between px-3 pt-2.5">
             <h2 className="text-sm font-normal text-text-secondary ">
@@ -521,7 +680,9 @@ const handleCompressSummary = () => {
             )}
           </button>
         </div>
-      )}
+        );
+        return trigger === "click" ? createPortal(panel, document.body) : panel;
+      })()}
     </div>
   );
 }

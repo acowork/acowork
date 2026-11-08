@@ -75,8 +75,13 @@ const TOOLS = {
     { name: "playwright", transport: "stdio", command: "npx", args: [], active: true },
   ],
 };
+// `GET /mcp-tools` answers with the `{ agent_id, servers }` envelope, not the
+// bare per-server map — see `toolInventory.ts::fetchAgentToolInventory`.
 const MCP_TOOLS = {
-  playwright: [{ name: "navigate", enabled: true }],
+  agent_id: AGENT,
+  servers: {
+    playwright: [{ name: "navigate", enabled: true }],
+  },
 };
 
 function reset() {

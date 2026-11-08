@@ -14,12 +14,32 @@
  * milestones never) lives in `acowork-user`'s read model, tested there.
  */
 import { describe, expect, it } from "vitest";
-import { turnInflight, turnSettled, type InflightTurn } from "./chatTurnInflight";
+import {
+  turnInflight,
+  turnSettled,
+  resolveExpectedResponders,
+  type InflightTurn,
+} from "./chatTurnInflight";
 import type { ChatDeliveryView, ChatMessageRow } from "../stores/chatSessionStore";
 
 /** The send this device made. `messageId` is the id the Gateway gave it: it
  *  addresses the row whose `delivery` closes the claim. */
 const TURN: InflightTurn = { messageId: "m-1", at: 1 };
+
+/** A round's reference row — the only kind of replied row that addresses a
+ *  round for the Gateway (`addressed_execution_round` needs the kind AND both
+ *  ids). */
+function roundRow(agent: string): ChatMessageRow {
+  return {
+    seq: 3,
+    ts: 1,
+    from: agent,
+    kind: "execution_round",
+    body: "",
+    to: "u1",
+    meta: { message_id: "round:1", agent_instance_id: agent, agent_session_id: "s-1" },
+  };
+}
 
 function row(delivery: ChatDeliveryView | undefined, over: Partial<ChatMessageRow> = {}): ChatMessageRow {
   return {
@@ -81,5 +101,63 @@ describe("chatTurnInflight", () => {
     // evidence of liveness (D9) — a dead node would look busy forever.
     expect(turnInflight([row(UNANSWERED)], undefined)).toBe(false);
     expect(turnSettled([row(UNANSWERED)], undefined)).toBe(true);
+  });
+});
+
+// The turn header's naming basis (ADR-106 revision 2026-11-08): the delivery
+// decision's OWN inputs, in the order the wire honours them. This is the one
+// place the ladder is written down, so the surfaces cannot each re-derive it
+// (and drift). The cases mirror `deliver_mentions` /
+// `addressed_execution_round` in the Gateway, rung for rung.
+describe("resolveExpectedResponders", () => {
+  it("a 1:1 send names its peer, and nothing else", () => {
+    expect(resolveExpectedResponders({ peer: "p" })).toEqual(["p"]);
+  });
+
+  it("a level-1 reply reaches the round's agent, whoever else the body names", () => {
+    // The inReplyTo channel ignores the mention list server-side — naming the
+    // mentions here would put a face on an agent that never sees the send.
+    expect(
+      resolveExpectedResponders({
+        mentions: ["a", "b"],
+        repliedRow: roundRow("c"),
+      }),
+    ).toEqual(["c"]);
+  });
+
+  it("a reply to a row that names no round falls through, as the server's does", () => {
+    // `addressed_execution_round` only accepts an `execution_round` row with
+    // both ids; a reply to a human's own row is an ordinary turn, so the
+    // mentions are the targets again.
+    expect(
+      resolveExpectedResponders({
+        mentions: ["a"],
+        repliedRow: { seq: 1, ts: 1, from: "u1", kind: "user_message", body: "", to: "a" },
+      }),
+    ).toEqual(["a"]);
+  });
+
+  it("a reply whose row this surface has not loaded names nobody", () => {
+    // Unresolved is not the same as absent: the Gateway resolves `in_reply_to`
+    // against the whole log and delivers to the round's agent alone, so the
+    // mentions would be a guess about a send they never receive. The centered
+    // line carries that wait until the closing row lands.
+    expect(
+      resolveExpectedResponders({ mentions: ["a", "b"], repliedRow: null }),
+    ).toEqual([]);
+  });
+
+  it("without a reply, the mentions are the targets", () => {
+    expect(resolveExpectedResponders({ mentions: ["a", "b"] })).toEqual(["a", "b"]);
+  });
+
+  it("an un-addressed send goes to the group's default responder", () => {
+    expect(
+      resolveExpectedResponders({ mentions: [], defaultResponder: "z" }),
+    ).toEqual(["z"]);
+  });
+
+  it("none of those: the row archives, and no claim — so no names", () => {
+    expect(resolveExpectedResponders({ mentions: [] })).toEqual([]);
   });
 });

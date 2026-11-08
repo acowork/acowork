@@ -1,6 +1,6 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import {
-  Plus,
   Sparkles,
   Plug,
   Wrench,
@@ -11,6 +11,7 @@ import {
   Loader2,
 } from "lucide-react";
 import { cn } from "../../lib/utils";
+import { computeDropdownPlacement, DROPDOWN_EDGE_GAP } from "../../lib/dropdownPosition";
 import { menuItemHover, toolbarIconButton } from "../../lib/ui-styles";
 import { Tooltip } from "../common/Tooltip";
 import { Switch } from "../common/Switch";
@@ -66,10 +67,65 @@ type PlusView =
   | { kind: "mcp" }
   | { kind: "mcpTools"; server: string };
 
+/**
+ * The `+` trigger's mark.
+ *
+ * Drawn here instead of taken from lucide for one measurable reason: lucide
+ * gives every glyph a 24-unit box but fills it unevenly, and `Plus` is a light
+ * case — its paths run 5→19 on each axis. Rendered at the 16 this cluster's
+ * icon-only buttons use (`Send`, `Paperclip`, `Eye`, the usage ring), that is
+ * only ~10.7px of ink at a 1.33px stroke, which is the "the + is barely
+ * visible" tell.
+ *
+ * The mark is therefore specified in *ink* rather than in box size, and it
+ * lands between the ring and the rest of the row:
+ *
+ *     usage ring            16.0px span, 2.00px stroke  (the loud end)
+ *     this cross            12.5px span, 1.50px stroke
+ *     lucide Plus at 16     10.7px span, 1.33px stroke  (the quiet end)
+ *
+ * Matching the ring exactly was tried first and reads as abrupt: the cross then
+ * carries more ink and a heavier stroke than every other glyph in the strip, so
+ * it stops being one control among peers and becomes the loudest thing on the
+ * row. ~78% of the ring's span at 75% of its weight is still clearly the
+ * largest mark in the left cluster without shouting over the ring.
+ *
+ * Geometry: a 16 box (the cluster's size, so the button and the fold engine's
+ * measurement are untouched), 1.5 stroke, round caps on centrelines of 11 —
+ * the caps add half a stroke at each end, so the ink measures 12.5px across.
+ *
+ * `currentColor` keeps colour with the button's own tokens
+ * (`toolbarIconButton`, plus its open-state tint) — this glyph owns size only.
+ */
+function PlusGlyph() {
+  return (
+    <svg
+      width={16}
+      height={16}
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      aria-hidden="true"
+    >
+      <path d="M2.5 8h11" />
+      <path d="M8 2.5v11" />
+    </svg>
+  );
+}
+
 export function ComposerPlusMenu({
   readOnly,
   onPickAttachments,
   disabled,
+  agentId,
+  sessionId,
+  showSkills = true,
+  placement = "top",
+  buttonClassName,
+  openClassName,
+  portal = false,
 }: {
   /** ADR-076: a session shared with us is read-only — attachments are
    *  session-write input and tool switches are session writes, so the whole
@@ -79,16 +135,54 @@ export function ComposerPlusMenu({
   onPickAttachments: () => void;
   /** No session / agent yet. */
   disabled?: boolean;
+  /** Target agent (ADR-073 instance id). Absent = the surface's selected
+   *  agent. The Chat execution block passes the block's own agent, because
+   *  the global selection points at the Chat surface, not at the run. */
+  agentId?: string | null;
+  /** Target session. Absent = the agent's active session. */
+  sessionId?: string | null;
+  /** The Skills row rides the exec composer's pending-send state (`activeSkill`
+   *  is that input's, not the session's), so a surface without that input —
+   *  the block's reply drawer — hides it instead of writing state nothing reads. */
+  showSkills?: boolean;
+  /** Which side the panel opens on. The composer strip opens upward ("top");
+   *  the block's action row sits above its transcript, so it opens downward. */
+  placement?: "top" | "bottom";
+  /** Trigger style override — the block's action row uses its own 24px round
+   *  cluster instead of `toolbarIconButton`. */
+  buttonClassName?: string;
+  /** Trigger style while the menu is open (mirrors `buttonClassName` for the
+   *  open tint, which is surface-specific). */
+  openClassName?: string;
+  /** Render the panel through a `document.body` portal with `position: fixed`
+   *  placement. The Chat block's row lives inside a scroll container that
+   *  hard-crops an absolutely-positioned panel (the failure
+   *  `WorkspaceSelector`/`ContextUsageIcon` document); a surface inside one
+   *  sets this. */
+  portal?: boolean;
 }) {
   const { t } = useTranslation();
-  const { selectedAgentId } = useAgentStore();
-  const currentSessionId = useChatStore((s) =>
+  // Selector form, not a bare destructure: the bare call subscribes to the
+  // whole store (every agent mutation re-renders the menu) and assumes the
+  // hook is always invoked with a selector.
+  const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
+  const activeSessionId = useChatStore((s) =>
     selectedAgentId ? (s.agentStates[selectedAgentId]?.activeSessionId ?? null) : null,
   );
+  // The override-or-global pair: every read/write below targets THIS menu's
+  // session, which on the exec composer is the global selection (props absent)
+  // and on a Chat execution block is the block's own run (props present).
+  const targetAgentId = agentId ?? selectedAgentId;
+  const targetSessionId = sessionId ?? activeSessionId;
 
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<PlusView>({ kind: "root" });
   const ref = useRef<HTMLDivElement>(null);
+  // Portal-mode panel: measured placement, same grammar as
+  // `WorkspaceSelector` / the block's `ContextUsageIcon` — the panel must
+  // escape the transcript's scroll container, which hard-crops it otherwise.
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [panelPos, setPanelPos] = useState<{ top: number; left: number } | null>(null);
 
   const loadInventory = useToolPolicyStore((s) => s.loadInventory);
   const loadPolicy = useToolPolicyStore((s) => s.loadPolicy);
@@ -98,18 +192,18 @@ export function ComposerPlusMenu({
   const resetGroup = useToolPolicyStore((s) => s.resetGroup);
 
   const inventory: AgentToolInventory | undefined = useToolPolicyStore((s) =>
-    selectedAgentId ? s.inventory[selectedAgentId] : undefined,
+    targetAgentId ? s.inventory[targetAgentId] : undefined,
   );
   const inventoryLoading = useToolPolicyStore((s) =>
-    selectedAgentId ? (s.inventoryLoading[selectedAgentId] ?? false) : false,
+    targetAgentId ? (s.inventoryLoading[targetAgentId] ?? false) : false,
   );
   const inventoryError = useToolPolicyStore((s) =>
-    selectedAgentId ? (s.inventoryError[selectedAgentId] ?? null) : null,
+    targetAgentId ? (s.inventoryError[targetAgentId] ?? null) : null,
   );
   // `selectPolicyEntry` returns a module-level constant when the session has
   // no entry yet, so this selector is identity-stable across renders.
   const policyEntry = useToolPolicyStore((s) =>
-    selectPolicyEntry(s, selectedAgentId, currentSessionId),
+    selectPolicyEntry(s, targetAgentId, targetSessionId),
   );
   const policy: SessionToolPolicy = policyEntry.policy;
 
@@ -124,20 +218,86 @@ export function ComposerPlusMenu({
   // previous copy visible while the refresh is in flight, so this costs no
   // flicker.
   useEffect(() => {
-    if (!open || !selectedAgentId || !currentSessionId) return;
-    void loadInventory(selectedAgentId, { force: true });
-    void loadPolicy(selectedAgentId, currentSessionId, { force: true });
-  }, [open, selectedAgentId, currentSessionId, loadInventory, loadPolicy]);
+    if (!open || !targetAgentId || !targetSessionId) return;
+    void loadInventory(targetAgentId, { force: true });
+    void loadPolicy(targetAgentId, targetSessionId, { force: true });
+  }, [open, targetAgentId, targetSessionId, loadInventory, loadPolicy]);
 
   // Closing resets the depth, so reopening always starts at level 1.
   useEffect(() => {
     if (!open) setView({ kind: "root" });
   }, [open]);
 
+  // ── Portal-mode placement ─────────────────────────────────────────
+  const computePanelPos = useCallback(() => {
+    const anchorEl = ref.current;
+    const panelEl = panelRef.current;
+    if (!anchorEl || !panelEl) return;
+    const r = anchorEl.getBoundingClientRect();
+    const ph = panelEl.offsetHeight;
+    // Prefer the requested side; flip only when it cannot fit there but
+    // fits on the other. (The block asks for "bottom".)
+    const fitsRequested =
+      (placement === "bottom"
+        ? window.innerHeight - r.bottom >= ph + DROPDOWN_EDGE_GAP
+        : r.top >= ph + DROPDOWN_EDGE_GAP);
+    const flipFits =
+      placement === "bottom"
+        ? r.top >= ph + DROPDOWN_EDGE_GAP
+        : window.innerHeight - r.bottom >= ph + DROPDOWN_EDGE_GAP;
+    const direction = fitsRequested || !flipFits
+      ? (placement === "bottom" ? "down" : "up")
+      : (placement === "bottom" ? "up" : "down");
+    const p = computeDropdownPlacement({
+      anchor: { left: r.left, right: r.right, top: r.top, bottom: r.bottom },
+      menuWidth: panelEl.offsetWidth,
+      menuHeight: ph,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      direction,
+      // Same rule as the block's usage popover: the row sits on the chat
+      // pane's LEFT side, so the panel grows rightward, back into the chat.
+      align: "left",
+    });
+    setPanelPos({ top: p.top, left: p.left });
+  }, [placement]);
+
+  // Measure synchronously before paint so the panel never flashes at (0,0).
+  useLayoutEffect(() => {
+    if (!portal) return;
+    if (open) computePanelPos();
+    else setPanelPos(null);
+  }, [open, portal, computePanelPos]);
+
+  // Re-measure while open: drill-down swaps the panel's height, the
+  // transcript scrolls under it, the window resizes.
+  useEffect(() => {
+    if (!portal || !open) return;
+    computePanelPos();
+    const panelEl = panelRef.current;
+    const ro =
+      typeof ResizeObserver !== "undefined" && panelEl
+        ? new ResizeObserver(() => computePanelPos())
+        : null;
+    if (ro && panelEl) ro.observe(panelEl);
+    window.addEventListener("resize", computePanelPos);
+    window.addEventListener("scroll", computePanelPos, true);
+    return () => {
+      ro?.disconnect();
+      window.removeEventListener("resize", computePanelPos);
+      window.removeEventListener("scroll", computePanelPos, true);
+    };
+  }, [portal, open, computePanelPos]);
+
   useEffect(() => {
     if (!open) return;
     const onDown = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+      const target = e.target as Node;
+      // The portalled panel is NOT a descendant of the trigger wrapper —
+      // testing only `ref` would close the menu on the first click inside
+      // a switch (the trap `WorkspaceSelector` documents).
+      if (ref.current?.contains(target) || panelRef.current?.contains(target)) return;
+      setOpen(false);
     };
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
@@ -204,27 +364,52 @@ export function ComposerPlusMenu({
           aria-label={t("chatPanel.plusMenu")}
           aria-expanded={open}
           className={cn(
-            toolbarIconButton,
-            open && "bg-zinc-200 text-text dark:bg-zinc-700",
+            buttonClassName ?? toolbarIconButton,
+            open && (openClassName ?? "bg-zinc-200 text-text dark:bg-zinc-700"),
           )}
         >
-          <Plus size={14} />
+          <PlusGlyph />
         </button>
       </Tooltip>
 
-      {open && (
+      {open && (() => {
+        const panel = (
         <div
-          className="absolute bottom-full left-0 z-[100] mb-1 flex w-72 flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-lg"
-          style={{ maxHeight: "min(380px, 60vh)" }}
+          ref={portal ? panelRef : undefined}
+          className={cn(
+            "z-[100] flex w-72 flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-lg",
+            portal
+              ? panelPos
+                ? "visible"
+                : "invisible"
+              : cn(
+                  "absolute left-0",
+                  placement === "top" ? "bottom-full mb-1" : "top-full mt-1",
+                ),
+          )}
+          style={
+            portal
+              ? {
+                  // Fixed + portalled: escapes the transcript's scroll
+                  // container, which hard-crops an absolute panel.
+                  position: "fixed",
+                  top: panelPos?.top ?? 0,
+                  left: panelPos?.left ?? 0,
+                  maxHeight: "min(380px, 60vh)",
+                }
+              : { maxHeight: "min(380px, 60vh)" }
+          }
           role="menu"
         >
           {view.kind === "root" ? (
             <div className="py-1">
-              <RootRow
-                icon={<Sparkles className="h-3.5 w-3.5" />}
-                label={t("chatPanel.plusSkills")}
-                onClick={() => setView({ kind: "skills" })}
-              />
+              {showSkills && (
+                <RootRow
+                  icon={<Sparkles className="h-3.5 w-3.5" />}
+                  label={t("chatPanel.plusSkills")}
+                  onClick={() => setView({ kind: "skills" })}
+                />
+              )}
               <RootRow
                 icon={<Plug className="h-3.5 w-3.5" />}
                 label={t("chatPanel.plusMcp")}
@@ -265,14 +450,14 @@ export function ComposerPlusMenu({
                 onBack={() => setView({ kind: "root" })}
                 onReset={
                   view.kind === "builtin"
-                    ? () => selectedAgentId && currentSessionId &&
-                        void resetGroup(selectedAgentId, currentSessionId, "builtin")
+                    ? () => targetAgentId && targetSessionId &&
+                        void resetGroup(targetAgentId, targetSessionId, "builtin")
                     : view.kind === "mcp"
-                      ? () => selectedAgentId && currentSessionId &&
-                          void resetGroup(selectedAgentId, currentSessionId, "mcpServers")
+                      ? () => targetAgentId && targetSessionId &&
+                          void resetGroup(targetAgentId, targetSessionId, "mcpServers")
                       : view.kind === "mcpTools"
-                        ? () => selectedAgentId && currentSessionId &&
-                            void resetGroup(selectedAgentId, currentSessionId, "mcpTools")
+                        ? () => targetAgentId && targetSessionId &&
+                            void resetGroup(targetAgentId, targetSessionId, "mcpTools")
                         : undefined
                 }
                 resetDisabled={
@@ -332,11 +517,11 @@ export function ComposerPlusMenu({
                             state={st}
                             saving={rowBusy}
                             onChange={(on) =>
-                              selectedAgentId &&
-                              currentSessionId &&
+                              targetAgentId &&
+                              targetSessionId &&
                               void toggleBuiltin(
-                                selectedAgentId,
-                                currentSessionId,
+                                targetAgentId,
+                                targetSessionId,
                                 tool.name,
                                 on,
                               )
@@ -386,11 +571,11 @@ export function ComposerPlusMenu({
                                 : undefined
                             }
                             onChange={(on) =>
-                              selectedAgentId &&
-                              currentSessionId &&
+                              targetAgentId &&
+                              targetSessionId &&
                               void toggleMcpServer(
-                                selectedAgentId,
-                                currentSessionId,
+                                targetAgentId,
+                                targetSessionId,
                                 server.name,
                                 on,
                               )
@@ -414,11 +599,11 @@ export function ComposerPlusMenu({
                           state={st}
                           saving={rowBusy}
                           onChange={(on) =>
-                            selectedAgentId &&
-                            currentSessionId &&
+                            targetAgentId &&
+                            targetSessionId &&
                             void toggleMcpTool(
-                              selectedAgentId,
-                              currentSessionId,
+                              targetAgentId,
+                              targetSessionId,
                               tool.server,
                               tool.tool,
                               on,
@@ -437,7 +622,9 @@ export function ComposerPlusMenu({
             </>
           )}
         </div>
-      )}
+        );
+        return portal ? createPortal(panel, document.body) : panel;
+      })()}
     </div>
   );
 }
@@ -526,6 +713,18 @@ function MenuHeader({
 /**
  * One switchable row. Not a `<button>`: `Switch` renders its own `<label>`, and
  * nesting a label inside a button is invalid HTML and breaks the click target.
+ *
+ * When the row drills, the row *is* the target — `role="button"` on the div,
+ * which is exactly how `ExpandableRow` does it. The first version had this
+ * backwards: the drill was a separate 24px chevron button inside a ~260px row,
+ * while the row itself carried a hover tint that promised a click would do
+ * something. Clicking the row — what the settings panel trains users to do, and
+ * what the hover says — did nothing at all. The chevron now stays what it was
+ * always better at: an `aria-hidden` indicator of depth.
+ *
+ * The `Switch` keeps its own click and stops propagation, so flipping a server
+ * on or off does not also navigate into its tools — the same contract as
+ * `ExpandableRow`'s `trailing` slot.
  */
 function SwitchRow({
   label,
@@ -542,12 +741,30 @@ function SwitchRow({
   onChange: (on: boolean) => void;
   drill?: () => void;
 }) {
+  const { t } = useTranslation();
   const lockedByAgent = !state.agentEnabled;
+  const drillable = !!drill;
   return (
     <div
+      role={drillable ? "button" : undefined}
+      tabIndex={drillable ? 0 : undefined}
+      aria-label={drillable ? t("chatPanel.plusShowTools") : undefined}
+      onClick={drillable ? drill : undefined}
+      onKeyDown={
+        drillable
+          ? (e) => {
+              if (e.key === "Enter" || e.key === " ") {
+                e.preventDefault();
+                drill();
+              }
+            }
+          : undefined
+      }
       className={cn(
         "flex items-center gap-1.5 rounded px-1.5 py-1",
-        menuItemHover,
+        // The hover tint is a promise that clicking the row does something, so
+        // it may only sit on a row that actually does one.
+        drillable && [menuItemHover, "cursor-pointer"],
       )}
     >
       <div className="min-w-0 flex-1">
@@ -564,22 +781,20 @@ function SwitchRow({
           <div className="truncate text-10 text-text-tertiary">{sub}</div>
         )}
       </div>
-      {drill && (
-        <button
-          type="button"
-          onClick={drill}
-          aria-label="tools"
-          className={cn(toolbarIconButton, "h-6 w-6")}
-        >
-          <ChevronRight size={13} />
-        </button>
+      {drillable && (
+        <ChevronRight
+          aria-hidden
+          className="h-3.5 w-3.5 shrink-0 text-text-tertiary"
+        />
       )}
-      <Switch
-        size="sm"
-        checked={state.effective}
-        disabled={lockedByAgent || saving}
-        onChange={onChange}
-      />
+      <span onClick={(e) => e.stopPropagation()}>
+        <Switch
+          size="sm"
+          checked={state.effective}
+          disabled={lockedByAgent || saving}
+          onChange={onChange}
+        />
+      </span>
     </div>
   );
 }
