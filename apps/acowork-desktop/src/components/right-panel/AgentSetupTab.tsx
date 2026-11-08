@@ -12,6 +12,7 @@ import { getGatewayUrl } from "../../lib/config";
 import { httpApiError } from "../../lib/api-error";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { useTranslation } from "../../i18n/useTranslation";
+import { reasoningLevelsFor } from "../../lib/reasoningEfforts";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
 import { fetchProviders } from "../../lib/gateway-api";
@@ -99,7 +100,13 @@ type WiredField =
   | "chatRouterModel"
   | "chatRouterProvider"
   | "chatRouterTimeoutMs"
-  | "chatRouterHistoryMaxTokens";
+  | "chatRouterHistoryMaxTokens"
+  // ADR-110: per-agent NEW-session defaults (Model Parameters card).
+  // `defaultModel` / `defaultProvider` are written together from the model
+  // dropdown, exactly like the router pair above; empty string clears.
+  | "defaultModel"
+  | "defaultProvider"
+  | "defaultReasoningEffort";
 
 const WIRE_FIELD: Record<WiredField, string> = {
   maxTokens: "max_output_tokens",
@@ -115,6 +122,9 @@ const WIRE_FIELD: Record<WiredField, string> = {
   chatRouterProvider: "chat_router_provider",
   chatRouterTimeoutMs: "chat_router_timeout_ms",
   chatRouterHistoryMaxTokens: "chat_router_history_max_tokens",
+  defaultModel: "default_model",
+  defaultProvider: "default_provider",
+  defaultReasoningEffort: "default_reasoning_effort",
   // ADR-094 note: `skillsAutoLoad` was removed from the
   // `WIRE_FIELD` table. Skill mode lives on the `load_skill`
   // tool entry in `agent_tools.json` (ADR-094 §4) — Toggling it
@@ -138,6 +148,9 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
   chatRouterProvider: FIELD_DEBOUNCE_MS,
   chatRouterTimeoutMs: FIELD_DEBOUNCE_MS,
   chatRouterHistoryMaxTokens: FIELD_DEBOUNCE_MS,
+  defaultModel: FIELD_DEBOUNCE_MS,
+  defaultProvider: FIELD_DEBOUNCE_MS,
+  defaultReasoningEffort: FIELD_DEBOUNCE_MS,
   // ADR-094 note: `skillsAutoLoad` was removed from the debounce
   // table. Skill mode toggling goes through the Builtin Tools card
   // (`load_skill` Switch, below) and uses the built-in tools debounce,
@@ -791,6 +804,124 @@ export function AgentSetupTab() {
     }
   };
 
+  // ── ADR-110: per-agent NEW-session defaults ────────────────────────
+  //
+  // The option lists are the composer's own, not a parallel inventory:
+  // `availableModels` is exactly what the chat input's `ModelMenu`
+  // renders (provider + model pair, same vault/provider source), and the
+  // effort levels come from `reasoningLevelsFor` over that model's
+  // declared support set — the same helper the composer's effort menu
+  // uses. A user therefore sees the same choices in both places, with the
+  // only difference being the scope (per-agent default vs per-session).
+  const availableModels = useChatStore((s) => s.availableModels);
+
+  /** `provider::model` → the pair, and the value the dropdown writes. */
+  const defaultModelValue = useMemo(() => {
+    const m = profile.defaultModel;
+    if (!m) return "";
+    const p = profile.defaultProvider;
+    const exact = availableModels.find(
+      (x) => x.name === m && (!p || x.provider === p),
+    );
+    // A configured-but-unlisted model (stale entry, list still loading)
+    // still has to render as the current selection, not as blank.
+    return exact ? `${exact.provider}::${exact.name}` : `${p ?? ""}::${m}`;
+  }, [availableModels, profile.defaultModel, profile.defaultProvider]);
+
+  const defaultModelDropdownOptions = useMemo(() => {
+    const opts: { value: string; label: string }[] = [
+      { value: "", label: t("agentSetup.defaultModelInherit") },
+    ];
+    const seen = new Set<string>();
+    for (const m of availableModels) {
+      const key = `${m.provider}::${m.name}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const providerName = routerProviderNames.get(m.provider) ?? m.provider;
+      opts.push({ value: key, label: `${providerName} · ${m.name}` });
+    }
+    // Keep a persisted pick visible even when the inventory does not list
+    // it (provider removed from the vault, list still loading).
+    if (defaultModelValue && !seen.has(defaultModelValue)) {
+      opts.unshift({ value: defaultModelValue, label: profile.defaultModel ?? "" });
+    }
+    return opts;
+  }, [
+    availableModels,
+    routerProviderNames,
+    profile.defaultModel,
+    defaultModelValue,
+    t,
+  ]);
+
+  const handleDefaultModelChange = (value: string) => {
+    if (value === "") {
+      // "No per-agent default": clear both halves — a provider without a
+      // model is not a state the runtime honours (ADR-110 §resolution).
+      saveField("defaultModel", "");
+      saveField("defaultProvider", "");
+      return;
+    }
+    const m = availableModels.find(
+      (x) => `${x.provider}::${x.name}` === value,
+    );
+    if (m) {
+      saveField("defaultModel", m.name);
+      saveField("defaultProvider", m.provider);
+      return;
+    }
+    // Unlisted persisted pair — keep model + provider as they are on the
+    // key so a re-selection cannot half-apply.
+    const [provider, ...rest] = value.split("::");
+    saveField("defaultModel", rest.join("::"));
+    saveField("defaultProvider", provider);
+  };
+
+  /** Depth levels the per-agent default model declares.
+   *
+   *  `undefined` = the model is unknown (custom / not in the catalog, or no
+   *  default model pinned at all) → `reasoningLevelsFor` then returns the
+   *  generic set, exactly like the composer does for a model it cannot
+   *  classify. When no default is pinned we genuinely cannot know which model
+   *  a new session will inherit (it is whatever the last active session used,
+   *  a runtime-side fact this panel does not receive), so offering the generic
+   *  set is the honest answer. Note the generic set is what the composer also
+   *  offers for an unclassifiable model, so the two surfaces stay aligned —
+   *  no clamping happens downstream, and an unsupported level is the
+   *  provider's to reject, exactly as it already is for a per-session pick. */
+  const defaultReasoningLevels = useMemo(() => {
+    const m = profile.defaultModel;
+    const p = profile.defaultProvider;
+    if (!m) return undefined;
+    return availableModels.find(
+      (x) => x.name === m && (!p || x.provider === p),
+    )?.reasoning_efforts;
+  }, [availableModels, profile.defaultModel, profile.defaultProvider]);
+
+  const defaultEffortDropdownOptions = useMemo(() => {
+    const opts: { value: string; label: string }[] = [
+      { value: "", label: t("agentSetup.defaultReasoningInherit") },
+      { value: "auto", label: t("chatPanel.reasoningAuto") },
+      { value: "off", label: t("chatPanel.reasoningOff") },
+    ];
+    for (const level of reasoningLevelsFor(defaultReasoningLevels)) {
+      opts.push({
+        value: level,
+        label: t(
+          `chatPanel.reasoning${level[0].toUpperCase()}${level.slice(1)}`,
+        ),
+      });
+    }
+    // A persisted level the current model does not declare (user changed the
+    // model after picking) stays selectable so the select never renders a
+    // value that is not in its option list.
+    const cur = profile.defaultReasoningEffort;
+    if (cur && !opts.some((o) => o.value === cur)) {
+      opts.push({ value: cur, label: cur });
+    }
+    return opts;
+  }, [defaultReasoningLevels, profile.defaultReasoningEffort, t]);
+
   return (
     <OverlayScrollbar dataTabScroll className="flex-1 bg-right-panel p-3">
       {/* ADR-087: view-only caller — say so up front instead of letting
@@ -1210,6 +1341,7 @@ export function AgentSetupTab() {
       <div className="-mx-3 my-2 border-t border-border-divider" />
 
       {/* ── Card 3: Model Parameters ───────────────────────────
+          default_model / default_reasoning_effort (ADR-110) plus
           max_output_tokens / context_window / temperature.
           Same level-1 collapsible grammar as Cards 1 and 2. */}
       <ListBox dividers={false}>
@@ -1221,7 +1353,44 @@ export function AgentSetupTab() {
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"
         >
           <div className="space-y-3">
-    {/* Max Output Tokens */}
+            {/* Default model for NEW sessions (ADR-110) — the same option
+                list as the composer's model menu, scoped to the agent
+                instead of to one session. */}
+            <div className="space-y-1">
+              <label className="block text-10 font-medium text-text-tertiary ">
+                {t("agentSetup.defaultModel")}
+              </label>
+              <Dropdown
+                value={defaultModelValue}
+                onChange={handleDefaultModelChange}
+                options={defaultModelDropdownOptions}
+              />
+              <p className="text-9 text-text-tertiary ">
+                {t("agentSetup.defaultModelDesc")}
+              </p>
+            </div>
+
+            {/* Default reasoning effort for NEW sessions (ADR-110) */}
+            <div className="space-y-1">
+              <label className="block text-10 font-medium text-text-tertiary ">
+                {t("agentSetup.defaultReasoningEffort")}
+              </label>
+              <Dropdown
+                value={profile.defaultReasoningEffort ?? ""}
+                onChange={(value) =>
+                  saveField(
+                    "defaultReasoningEffort",
+                    value === "" ? undefined : value,
+                  )
+                }
+                options={defaultEffortDropdownOptions}
+              />
+              <p className="text-9 text-text-tertiary ">
+                {t("agentSetup.defaultReasoningEffortDesc")}
+              </p>
+            </div>
+
+            {/* Max Output Tokens */}
           <div className="space-y-1">
             <label className="block text-10 font-medium text-text-tertiary ">
               {t("agentSetup.maxOutputTokens")}

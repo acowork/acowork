@@ -35,6 +35,14 @@ export interface ServerConfigEnvelope {
      * that this helper was extracted to prevent.
      */
     session_language?: string | null;
+    /** ADR-110 per-agent NEW-session defaults. Each is a non-empty string
+     *  or absent — the runtime uses `skip_serializing_if = "Option::is_none"`
+     *  and the Setup panel's patch builder only overwrites on a concrete
+     *  value, so an absent key means "no opinion" (and therefore "keep the
+     *  local optimistic value"). */
+    default_model?: string | null;
+    default_provider?: string | null;
+    default_reasoning_effort?: string | null;
     /** ADR-099 Chat Router block. The same skip-serializing rule
      *  applies per sub-field — absent (or the whole block absent)
      *  means "no opinion", not "cleared". */
@@ -126,6 +134,23 @@ export function buildProfilePatchFromServerConfig(
   // optimistic local edit while in-flight).
   if (cfg.session_language !== undefined) {
     patch.sessionLanguage = cfg.session_language;
+  }
+  // ADR-110 per-agent NEW-session defaults. Same race-safe rule: a concrete
+  // string overwrites, an absent key keeps the local (possibly in-flight)
+  // edit. A cleared default comes back as an absent key rather than `null`
+  // because of `skip_serializing_if`, and the dropdown's "" entry already
+  // renders "no default".
+  if (typeof cfg.default_model === "string" && cfg.default_model) {
+    patch.defaultModel = cfg.default_model;
+  }
+  if (typeof cfg.default_provider === "string" && cfg.default_provider) {
+    patch.defaultProvider = cfg.default_provider;
+  }
+  if (
+    typeof cfg.default_reasoning_effort === "string" &&
+    cfg.default_reasoning_effort
+  ) {
+    patch.defaultReasoningEffort = cfg.default_reasoning_effort;
   }
   // ADR-099 Chat Session Router sub-fields. Race-safe like every other
   // field: only overwrite when the server returned a concrete value. An

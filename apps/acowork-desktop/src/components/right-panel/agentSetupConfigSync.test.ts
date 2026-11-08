@@ -153,4 +153,45 @@ describe("buildProfilePatchFromServerConfig", () => {
     // optimistic local edit while the write is in flight).
     expect(buildProfilePatchFromServerConfig({ config: {} })).toEqual({});
   });
+
+  // ── ADR-110 per-agent new-session defaults ────────────────────────
+  //
+  // These three are the seed for the NEXT session, not a live setting, so
+  // the sync contract is the same typeof-guard as every other field: a
+  // concrete string overwrites, an absent key keeps the local (possibly
+  // in-flight) optimistic edit.
+  it("syncs the per-agent new-session defaults", () => {
+    const p = buildProfilePatchFromServerConfig({
+      config: {
+        default_model: "claude-sonnet-4-6",
+        default_provider: "anthropic",
+        default_reasoning_effort: "high",
+      },
+    });
+    expect(p).toEqual({
+      defaultModel: "claude-sonnet-4-6",
+      defaultProvider: "anthropic",
+      defaultReasoningEffort: "high",
+    });
+  });
+
+  it("treats a cleared default as 'no opinion' rather than inventing one", () => {
+    // `None` on disk is `skip_serializing_if`-omitted on the wire, so a
+    // cleared default arrives as an ABSENT key. The panel's "" option
+    // already renders "no default", so the sync must not write anything —
+    // otherwise the refresh that follows every PUT would resurrect the
+    // value the user just cleared.
+    expect(buildProfilePatchFromServerConfig({ config: {} })).toEqual({});
+    const p = buildProfilePatchFromServerConfig({
+      config: {
+        default_model: null,
+        default_provider: null,
+        default_reasoning_effort: "",
+      },
+    });
+    expect(p).toEqual({});
+    expect(p.defaultModel).toBeUndefined();
+    expect(p.defaultProvider).toBeUndefined();
+    expect(p.defaultReasoningEffort).toBeUndefined();
+  });
 });
