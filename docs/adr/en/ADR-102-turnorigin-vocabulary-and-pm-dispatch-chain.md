@@ -35,6 +35,8 @@ The review (fix plan) found two implementation-level defects confirming the gap:
 
 Adding an origin = adding an enum variant + a policy row; the compiler forces every decision point to take a position. This is where "module design replaces point-patching" lands.
 
+> Follow-up (2026-11-09, [intent-human-rendering-plan](../../plan/zh/intent-human-rendering-plan.md)): this ADR fixed the **PmTask side** of `render_envelope`, but `AgentRequest` / `AgentResponse` stayed ✓, so agent↔agent turns still rendered the envelope as body text. The completion does **not** change `render_envelope`'s meaning (`content` stays the machine envelope the model must read, reply coordinates included); it renders a second, human-facing projection at the same delivery boundary: `intent_turn::render_intent_display` → the user row's `metadata.intent` → `RoundProjection.user.display`. The two ✓ rows now mean only "`content` is an envelope", no longer "an envelope is all any surface can read".
+
 ### D2 — Task-coordinate constants in one place
 
 The `task:` prefix format (conversation id `task:{project}:{task}`, routing key) has exactly one implementation, in `intent.rs`: `TASK_CONVERSATION_PREFIX` / `task_conversation_id()` / `is_task_conversation()` / `task_routing_key()` / `is_task_routing_key()`. Feature code must not write bare `starts_with("task:")` (all 5 original sites replaced).

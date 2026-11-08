@@ -35,6 +35,8 @@ review（修复计划）另发现两个实现级缺陷印证了缺口的存在�
 
 新增来源 = 加枚举变体 + 策略行，编译器强制所有决策点表态——这是"以模块设计替代逐点打补丁"的落点。
 
+> 后续（2026-11-09，[intent-human-rendering-plan](../../plan/zh/intent-human-rendering-plan.md)）：本文修复了 `render_envelope` 的 **PmTask 一侧**，但 `AgentRequest` / `AgentResponse` 仍为 ✓，于是 agent↔agent 的轮次依旧把信封当正文显示。补全方式是**不改 `render_envelope` 的语义**（`content` 仍是模型要读的机器信封，含回写坐标），而是在同一投递边界另生成一条人类展示投影：`intent_turn::render_intent_display` → user 行 `metadata.intent` → `RoundProjection.user.display`。表格中两行的 ✓ 现在只表示"content 是信封"，不再表示"各表面只有信封可读"。
+
 ### D2 — task 坐标常量收口
 
 `task:` 前缀格式（conversation_id `task:{project}:{task}`、routing key）的唯一实现收进 `intent.rs`：`TASK_CONVERSATION_PREFIX` / `task_conversation_id()` / `is_task_conversation()` / `task_routing_key()` / `is_task_routing_key()`。feature 代码禁止裸 `starts_with("task:")`（原 5 处全部替换）。
