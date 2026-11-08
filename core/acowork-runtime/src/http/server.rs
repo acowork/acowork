@@ -2612,7 +2612,7 @@ async fn put_agent_config(
     //    `agent_tools.json` (ADR-094 §4 — `load_skill` is the toggle,
     //    full stop). Toggling it goes through
     //    `PUT /agents/{id}/builtin-tools`, not this endpoint.
-    let body = crate::usecases::PutAgentConfigBody::from_request_fields(
+    let mut body = crate::usecases::PutAgentConfigBody::from_request_fields(
         req.max_output_tokens,
         req.max_iterations,
         req.max_sessions,
@@ -2628,6 +2628,15 @@ async fn put_agent_config(
         req.chat_router_timeout_ms,
         req.chat_router_history_max_tokens,
     );
+    // ADR-110: the per-agent NEW-session defaults are a self-contained patch
+    // group (see `session_default_patches` for why they are not three more
+    // positional arguments above).
+    body.patches
+        .extend(crate::usecases::PutAgentConfigBody::session_default_patches(
+            req.default_model,
+            req.default_provider,
+            req.default_reasoning_effort,
+        ));
     let svc = state
         .agent_config
         .lock()
@@ -2796,6 +2805,24 @@ struct UpdateAgentConfigRequest {
     /// `ChatRouterConfig::history_max_tokens` at read time, not here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     chat_router_history_max_tokens: Option<serde_json::Value>,
+    /// ADR-110: default model a **new** session starts on
+    /// (`agent_config.json::default_model`). Absent = leave alone;
+    /// `null` = clear (a new session then inherits the most recently
+    /// active session's model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_model: Option<serde_json::Value>,
+    /// ADR-110: provider for `default_model`
+    /// (`agent_config.json::default_provider`). Empty string / `null`
+    /// clears it — the Runtime then resolves whichever configured
+    /// provider exposes that model id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_provider: Option<serde_json::Value>,
+    /// ADR-110: reasoning effort a **new** session starts on
+    /// (`agent_config.json::default_reasoning_effort`). Same spellings as
+    /// the composer's effort menu; `null` clears (the model's capability
+    /// default wins again).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_reasoning_effort: Option<serde_json::Value>,
     // Note: `skills_auto_load` was deleted — the toggle now lives on
     // the `load_skill` entry of `agent_tools.json` (see ADR-094 §4:
     // `load_skill` is the toggle, full stop). Toggling it goes through

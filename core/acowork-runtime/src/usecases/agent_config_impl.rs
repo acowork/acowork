@@ -157,6 +157,26 @@ fn apply_field_patch(
         ConfigField::SessionLanguage => {
             cfg.session_language = patch_typed::<String>(field, op);
         }
+        // ADR-110: the per-agent NEW-session defaults. An empty string is
+        // treated as an explicit clear, same as the router's model field —
+        // the Setup panel clears with JSON `null` (`FieldPatch::Clear`), but a
+        // client that sends `""` means the same thing and must not persist an
+        // empty model/provider/effort.
+        ConfigField::DefaultModel => {
+            cfg.default_model = patch_typed::<String>(field, op)
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty());
+        }
+        ConfigField::DefaultProvider => {
+            cfg.default_provider = patch_typed::<String>(field, op)
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty());
+        }
+        ConfigField::DefaultReasoningEffort => {
+            cfg.default_reasoning_effort = patch_typed::<String>(field, op)
+                .map(|e| e.trim().to_lowercase())
+                .filter(|e| !e.is_empty());
+        }
         // ADR-099: sub-field patches against the nested `chat_router`
         // block. The block is created on first write; an all-`None`
         // block serializes as `{}` and `chat_router_config()` reads it
@@ -391,6 +411,123 @@ mod tests {
             crate::agent_config::ChatRouterConfig::DEFAULT_HISTORY_MAX_TOKENS
         );
     }
+
+    // ========================================================================
+    // ADR-110: per-agent NEW-session defaults
+    // ========================================================================
+
+    /// The wire group translates onto the three `default_*` patches with the
+    /// same present/null/absent semantics as every other field, and — since
+    /// it is built by its own constructor — does not disturb the body the
+    /// handler already assembled from `from_request_fields`.
+    #[test]
+    fn test_agent_default_wire_to_patch_translation_and_append() {
+        let mut body = PutAgentConfigBody::from_request_fields(
+            None, None, None, None, None, None, None, None, // 8 core knobs
+            Some(serde_json::json!("zh-CN")), // session_language -> Set
+            None, None, None, None, None,    // no chat_router fields
+        );
+        body.patches
+            .extend(PutAgentConfigBody::session_default_patches(
+                Some(serde_json::json!("claude-sonnet-4")), // -> Set
+                Some(serde_json::json!(null)),              // -> Clear
+                None,                                       // absent -> skip
+            ));
+
+        let fields: Vec<(ConfigField, &FieldPatch<serde_json::Value>)> =
+            body.patches.iter().map(|p| (p.field, &p.op)).collect();
+        assert_eq!(fields.len(), 3, "session_language + model set + provider clear");
+        assert!(fields.contains(&(ConfigField::SessionLanguage, &FieldPatch::Set(serde_json::json!("zh-CN")))));
+        assert!(fields.contains(&(
+            ConfigField::DefaultModel,
+            &FieldPatch::Set(serde_json::json!("claude-sonnet-4"))
+        )));
+        assert!(fields.contains(&(ConfigField::DefaultProvider, &FieldPatch::Clear)));
+        assert!(
+            !fields
+                .iter()
+                .any(|(f, _)| *f == ConfigField::DefaultReasoningEffort),
+            "an absent field must not become a patch"
+        );
+    }
+
+    /// Each default is set / cleared independently; an empty string means
+    /// the same as a wire `null` (the Setup panel's "no default" option), and
+    /// the effort is normalised to the lowercase spelling the backend
+    /// `ReasoningEffort::from_str_loose` accepts.
+    #[test]
+    fn test_agent_default_field_patches() {
+        let mut cfg = AgentConfig::default();
+
+        apply(
+            &mut cfg,
+            &[
+                patch(ConfigField::DefaultModel, serde_json::json!("gpt-5")),
+                patch(ConfigField::DefaultProvider, serde_json::json!("openai")),
+                patch(
+                    ConfigField::DefaultReasoningEffort,
+                    serde_json::json!("HIGH"),
+                ),
+            ],
+        );
+        assert_eq!(cfg.default_model.as_deref(), Some("gpt-5"));
+        assert_eq!(cfg.default_provider.as_deref(), Some("openai"));
+        assert_eq!(cfg.default_reasoning_effort.as_deref(), Some("high"));
+
+        // Clearing the model does not silently drop the provider: an explicit
+        // `null` on one field is a statement about that field only (the panel
+        // sends both when the user picks "no default model").
+        apply(&mut cfg, &[clear(ConfigField::DefaultModel)]);
+        assert_eq!(cfg.default_model, None);
+        assert_eq!(cfg.default_provider.as_deref(), Some("openai"));
+
+        // Empty string == clear, for all three.
+        apply(
+            &mut cfg,
+            &[
+                patch(ConfigField::DefaultModel, serde_json::json!("   ")),
+                patch(ConfigField::DefaultProvider, serde_json::json!("")),
+                patch(ConfigField::DefaultReasoningEffort, serde_json::json!("")),
+            ],
+        );
+        assert_eq!(cfg.default_model, None);
+        assert_eq!(cfg.default_provider, None);
+        assert_eq!(cfg.default_reasoning_effort, None);
+
+        // A wrong-typed value is dropped (warn only) instead of panicking —
+        // the same contract every other field has.
+        apply(
+            &mut cfg,
+            &[patch(ConfigField::DefaultReasoningEffort, serde_json::json!(3))],
+        );
+        assert_eq!(cfg.default_reasoning_effort, None);
+    }
+
+    /// The three defaults must NOT enter the live-broadcast projection: they
+    /// are creation-time seeds, and `RuntimeConfigOverrides` cannot express
+    /// "cleared" (`None` = keep), which is exactly why they are read from disk
+    /// per new session instead of cached there.
+    #[test]
+    fn test_agent_defaults_are_not_live_overrides() {
+        let cfg = AgentConfig {
+            default_model: Some("gpt-5".into()),
+            default_provider: Some("openai".into()),
+            default_reasoning_effort: Some("high".into()),
+            ..Default::default()
+        };
+        // Documented by construction: `From<&AgentConfig>` projects only the
+        // live-editable fields, and this one asserts that stays true — a
+        // future "just add it to the override struct" would ship a cache that
+        // cannot represent a cleared default.
+        let ov = crate::agent::session::session_manager::RuntimeConfigOverrides::from(&cfg);
+        assert!(
+            ov.is_empty(),
+            "per-agent new-session defaults must not enter the live-override push"
+        );
+        let json = serde_json::to_string(&ov).expect("overrides serialize");
+        assert!(
+            !json.contains("gpt-5") && !json.contains("openai") && !json.contains("high"),
+            "no default value may leak onto the broadcast wire"
+        );
+    }
 }
-
-

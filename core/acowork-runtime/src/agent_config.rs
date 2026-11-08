@@ -252,6 +252,48 @@ pub struct AgentConfig {
     // are gone. `agent_config.json` files written before the move still parse —
     // serde drops the unknown keys and the next save rewrites the file clean.
 
+    // ── Per-agent NEW-session defaults (ADR-110) ──────────────────────
+    //
+    // These three fields are a **seed, not an override**. A session's own
+    // (model, provider, reasoning_effort) still lives in the session's
+    // meta/JSONL and is still the only thing an in-flight session reads
+    // (ADR-012 — "model selection is per-session"). What the fields below
+    // decide is what the NEXT session starts with, replacing the pre-ADR-110
+    // "inherit whatever the last session happened to use" rule.
+    //
+    // Resolution chain at creation time (only for a session that has no
+    // value of its own yet — see `SessionManager::build_initial_session_state`):
+    //   model/provider      default_model(+default_provider) -> last-active
+    //                       session's pair -> first global provider entry
+    //   reasoning_effort    session meta -> default_reasoning_effort ->
+    //                       model capability default -> Auto -> None
+    /// Default model for a **new** session. `None` = no opinion — a new
+    /// session inherits the most recently active session's model (the
+    /// pre-ADR-110 behaviour). The value is a model id as it appears in the
+    /// provider list (`ModelInfo::id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_model: Option<String>,
+
+    /// Provider that serves [`Self::default_model`]. `None` = resolve the
+    /// first provider in the global inventory that exposes the model. Kept
+    /// as its own field (not folded into `default_model` as `provider::model`)
+    /// because the Setup panel's dropdown is the (provider, model) pair the
+    /// composer's model menu selects — the same id can be served by two
+    /// configured providers, and the pair is what makes the choice
+    /// unambiguous.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_provider: Option<String>,
+
+    /// Default reasoning effort for a **new** session, in the same spellings
+    /// the composer offers (`auto` / `off` / `minimal` / `low` / `medium` /
+    /// `high` / `xhigh` / `max` — see `ReasoningEffort::from_str_loose`).
+    /// `None` = no opinion — fall through to the model's capability default
+    /// (then Auto for a reasoning-capable model, then "no control" for a
+    /// model that cannot reason). An unparsable value is treated as `None`
+    /// rather than rejected, matching how a per-session value is read.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_reasoning_effort: Option<String>,
+
     /// Per-agent LLM session language override (e.g. `"zh-CN"`, `"en"`).
     ///
     /// When `Some(_)`, this value replaces `UserProfile.language` in the
@@ -519,6 +561,147 @@ pub fn save_agent_config(work_dir: &Path, cfg: &AgentConfig) -> Result<(), Strin
     );
 
     Ok(())
+}
+
+// ── Per-agent NEW-session defaults (ADR-110) ───────────────────────────
+
+/// The per-agent defaults a **new** session is initialised from (ADR-110).
+///
+/// A derived value object, deliberately **not** a second store: it is
+/// computed from [`AgentConfig`] where it is needed and never cached.
+///
+/// Why not cache it next to the other per-agent overrides
+/// ([`crate::agent::session::session_manager::RuntimeConfigOverrides`])?
+/// That cache exists to hot-reload *running* sessions and is
+/// "`Some` replaces, `None` preserves" by design — it cannot express
+/// "cleared". A default that the user removed in the Setup panel would
+/// therefore keep seeding new sessions until the process restarted. The
+/// only consumer here is session creation, a user-triggered event that
+/// already pays a read of this same file (`SessionManager::
+/// create_frontend_session` reads it for `max_sessions`), so reading it
+/// fresh is both cheaper than the bug and simpler than a tri-state cache.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentSessionDefaults {
+    /// Model a new session starts on. `None` = inherit the last-active one.
+    pub model: Option<String>,
+    /// Provider for [`Self::model`]. `None` = resolve from the inventory.
+    pub provider: Option<String>,
+    /// Reasoning effort a new session starts on. `None` = model capability
+    /// default.
+    pub reasoning_effort: Option<String>,
+}
+
+impl AgentSessionDefaults {
+    /// Project the three persisted fields out of an [`AgentConfig`].
+    ///
+    /// Empty strings are normalised to `None`: the Setup panel clears a
+    /// dropdown by writing `null`, but a hand-edited or legacy file can carry
+    /// `""` and "the empty model" is not a model.
+    pub fn from_agent_config(cfg: &AgentConfig) -> Self {
+        let norm = |v: &Option<String>| {
+            v.as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+        };
+        Self {
+            model: norm(&cfg.default_model),
+            provider: norm(&cfg.default_provider),
+            reasoning_effort: norm(&cfg.default_reasoning_effort),
+        }
+    }
+
+    /// Load the defaults from `{work_dir}/config/agent_config.json`.
+    ///
+    /// Never fails: a missing file (fresh install), an empty `work_dir`
+    /// (standalone/tests) and an unreadable or corrupt file all degrade to
+    /// "no opinion", which is exactly the pre-ADR-110 behaviour. A corrupt
+    /// file must not be able to block session creation — the same reason
+    /// `create_frontend_session` reads it with `unwrap_or_default`.
+    pub fn load(work_dir: &Path) -> Self {
+        if work_dir.as_os_str().is_empty() {
+            return Self::default();
+        }
+        match load_agent_config(work_dir) {
+            Ok(Some(cfg)) => Self::from_agent_config(&cfg),
+            Ok(None) => Self::default(),
+            Err(e) => {
+                tracing::warn!(
+                    work_dir = %work_dir.display(),
+                    error = %e,
+                    "agent session defaults: unreadable agent_config.json, using no defaults"
+                );
+                Self::default()
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod agent_session_defaults_tests {
+    use super::*;
+
+    #[test]
+    fn projects_the_three_fields_and_normalises_empties() {
+        let cfg = AgentConfig {
+            default_model: Some("claude-sonnet-4".into()),
+            default_provider: Some("anthropic".into()),
+            default_reasoning_effort: Some("high".into()),
+            temperature: Some(0.5),
+            ..Default::default()
+        };
+        let d = AgentSessionDefaults::from_agent_config(&cfg);
+        assert_eq!(d.model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(d.provider.as_deref(), Some("anthropic"));
+        assert_eq!(d.reasoning_effort.as_deref(), Some("high"));
+        assert!(d.model.is_some());
+    }
+
+    #[test]
+    fn empty_strings_are_no_opinion() {
+        let cfg = AgentConfig {
+            default_model: Some("   ".into()),
+            default_provider: Some(String::new()),
+            default_reasoning_effort: Some(String::new()),
+            ..Default::default()
+        };
+        assert_eq!(AgentSessionDefaults::from_agent_config(&cfg), AgentSessionDefaults::default());
+    }
+
+    #[test]
+    fn load_is_total_for_missing_file_and_empty_work_dir() {
+        // Empty work dir (standalone/tests) short-circuits before any fs call.
+        assert_eq!(
+            AgentSessionDefaults::load(Path::new("")),
+            AgentSessionDefaults::default()
+        );
+        // A directory with no config/agent_config.json is "no opinion".
+        let dir = std::env::temp_dir().join(format!("acw-defaults-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(AgentSessionDefaults::load(&dir), AgentSessionDefaults::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn load_reads_persisted_config_and_survives_a_corrupt_file() {
+        let dir = std::env::temp_dir().join(format!("acw-defaults-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("config")).unwrap();
+        let cfg = AgentConfig {
+            default_model: Some("model-x".into()),
+            default_provider: Some("provider-y".into()),
+            default_reasoning_effort: Some("low".into()),
+            ..Default::default()
+        };
+        save_agent_config(&dir, &cfg).unwrap();
+        let loaded = AgentSessionDefaults::load(&dir);
+        assert_eq!(loaded.model.as_deref(), Some("model-x"));
+        assert_eq!(loaded.provider.as_deref(), Some("provider-y"));
+        assert_eq!(loaded.reasoning_effort.as_deref(), Some("low"));
+
+        std::fs::write(dir.join("config").join(AGENT_CONFIG_FILE), "{not json").unwrap();
+        assert_eq!(AgentSessionDefaults::load(&dir), AgentSessionDefaults::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
 // ── Manifest → agent_config.json seeding (ADR-104) ─────────────────────
