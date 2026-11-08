@@ -38,6 +38,7 @@ import {
   Plus,
 } from "lucide-react";
 import { ChatEventText } from "./ChatEventText";
+import { InteractionCardShell } from "./InteractionCardShell";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { RETIRED_NOTICES } from "../../lib/retiredNotices";
@@ -230,25 +231,27 @@ export function ChatNoticeEventRow({
         <div className="flex items-start gap-2">
           <div className="w-10 shrink-0" />
           <div className="flex min-w-0 flex-1 flex-col items-start">
-            <div className="w-fit min-w-[18rem] max-w-[32rem] overflow-hidden rounded-md border border-border-outer">
-              {/* Header: icon + the question + whether it still wants an answer. */}
-              <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-2.5 py-[6px] text-11 font-medium text-text-secondary">
-                {confirm ? (
-                  <CornerDownRight className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <ListTree className="h-3.5 w-3.5 shrink-0" />
-                )}
-                <span className="flex-1 truncate">{question}</span>
-                {onChoose && (
+            {/* The shared card chrome — the same shell `AskQuestionCard`
+                wears, so a question does not change costume between
+                surfaces. The body is a full-width ruled list, so the card's
+                own surface replaces the default bubble fill. */}
+            <InteractionCardShell
+              icon={confirm ? CornerDownRight : ListTree}
+              title={question}
+              className="w-fit min-w-[18rem] max-w-[32rem]"
+              bodyClassName="bg-surface p-0"
+              headerRight={
+                onChoose ? (
                   <span className="shrink-0 text-10 font-normal text-text-tertiary">
                     {busy ? t("chatView.block.choosing") : t("chatView.block.unanswered")}
                   </span>
-                )}
-              </div>
+                ) : undefined
+              }
+            >
               {/* One row per candidate. The whole row is the button: a bordered
                   box holding two lines of text reads as a disabled field, not as
                   something to press. */}
-              <div className="divide-y divide-border-divider bg-surface">
+              <div className="divide-y divide-border-divider">
                 {options.map((option) => {
                   const label = labelOf(option);
                   const why = option.why?.trim();
@@ -329,11 +332,11 @@ export function ChatNoticeEventRow({
                 </div>
               )}
               {!onChoose && (
-                <div className="border-t border-border-divider bg-surface px-2.5 py-1.5 text-10 text-text-tertiary">
+                <div className="border-t border-border-divider px-2.5 py-1.5 text-10 text-text-tertiary">
                   {t("chatView.block.answeredByOwner")}
                 </div>
               )}
-            </div>
+            </InteractionCardShell>
           </div>
         </div>
       </div>

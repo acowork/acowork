@@ -94,19 +94,46 @@ describe("interaction card chrome", () => {
   });
 
   it("the fix does not strip the accent BUTTONS inside the cards", () => {
-    // The rule is "the highlight paints a BUTTON BACKGROUND", and the two
-    // surfaces implement that with their family's recipe: the execution-session
-    // card uses the shared `btn-accent` class, the chat block copies
-    // `ExploreBlock`'s approval pair (an inline `--color-accent-strong`
-    // background). Either is acceptable; a card that lost its primary action to
-    // the neutral-border fix would not be.
+    // The rule is "the highlight paints a BUTTON BACKGROUND", and the accent
+    // primary action now lives in the shared card parts: the ask-question
+    // body recipe (`QuestionAnswerForm`, `btn-accent`) and the block card's
+    // approval pair (an inline `--color-accent-strong` background). Either is
+    // acceptable; a card that lost its primary action to the neutral-border
+    // fix would not be.
     const recipes: Record<string, string> = {
-      "AskQuestionCard.tsx": "btn-accent",
+      "QuestionAnswerForm.tsx": "btn-accent",
       "ChatExecutionBlock.tsx": "--color-accent-strong",
     };
     for (const [file, marker] of Object.entries(recipes)) {
       const src = readFileSync(resolve(__dirname, file), "utf8");
       expect(src, `${file} must keep its accent primary action`).toContain(marker);
     }
+  });
+
+  /** Regression (2026-11-07): the chat block had re-invented the card.
+   *
+   * `BlockCardActions` painted its own costume — a bare title row, full-width
+   * option buttons, an unstyled `<input>` next to a small button — and
+   * `ChatNoticeEventRow` hand-copied the shell recipe with drifted paddings.
+   * The rule the comments had claimed for a year ("one question, one
+   * costume") is now structural: both chat-side cards compose the shared
+   * parts, and the old invented chrome must not come back.
+   */
+  it("the chat-side cards compose the shared shell, not a copy of it", () => {
+    for (const file of ["ChatExecutionBlock.tsx", "ChatNoticeEventRow.tsx"]) {
+      const src = readFileSync(resolve(__dirname, file), "utf8");
+      expect(src, `${file} must wear the shared card shell`).toContain(
+        'import { InteractionCardShell } from "./InteractionCardShell"',
+      );
+      // The header recipe belongs to the shell alone: a second copy of
+      // `bg-chat-title` in a card file is a drift waiting to happen.
+      expect(src, `${file} must not re-copy the card header recipe`).not.toContain(
+        "bg-chat-title",
+      );
+    }
+    // The invented chrome of the old block card is gone for good: the bare
+    // free-text input that read as "not an input field".
+    const block = readFileSync(resolve(__dirname, "ChatExecutionBlock.tsx"), "utf8");
+    expect(block).not.toContain("bg-transparent px-1.5 py-0.5");
   });
 });
