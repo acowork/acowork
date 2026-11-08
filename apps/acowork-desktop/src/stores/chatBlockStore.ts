@@ -144,7 +144,18 @@ export const useChatBlockStore = create<ChatBlockState>((set, get) => {
     if (!chatId || refs.length === 0) return;
     const state = get();
     const held = state.blocks;
-    const wanted = refs.filter((r) => force || !held[r]);
+    // A `pending` read is provisional by contract (D9) — it says "still
+    // running" and nothing about the card the round may have parked on
+    // since. Holding one is NOT a reason to skip a re-read: a block
+    // re-mounted from a held-but-stale `pending` entry would render the
+    // pre-card state (no card, no buttons) until the interval backstop
+    // fired — and a webview that throttles timers does not fire it at all.
+    // This was the "second approval card never shows in the Chat" symptom:
+    // the doorbell lands while the Chat surface is unmounted, the re-entry
+    // read is skipped as already-held, and the block stays cardless.
+    const wanted = refs.filter(
+      (r) => force || !held[r] || held[r]!.status === "pending",
+    );
     if (wanted.length === 0) return;
     const queue = new Set(state.pending[chatId] ?? []);
     wanted.forEach((r) => queue.add(r));

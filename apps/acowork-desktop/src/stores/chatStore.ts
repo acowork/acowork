@@ -4965,7 +4965,17 @@ export function handleMessageEvent(
       });
       const chatId = (data.chat_session_id as string | undefined) ?? "";
       if (ref && chatId) {
-        noteRoundState(chatId, ref);
+        // `heard` is the measurable gap: false means no mounted block holds
+        // this ref (the Chat surface was away — the re-entry read in
+        // `chatBlockStore.ensure` is what catches up for it), true means the
+        // re-read was queued. Without this the doorbell is invisible in the
+        // logs and a dropped bell is indistinguishable from a dead store.
+        const heard = noteRoundState(chatId, ref);
+        log.debug("[ChatStore] round_state doorbell:", {
+          chatId,
+          ref,
+          heard,
+        });
       }
       break;
     }

@@ -91,14 +91,14 @@ describe("the pending backstop", () => {
   });
 
   it("re-reads a still-pending block on EVERY tick, not once", async () => {
-    // The regression. A held `pending` ref is not re-queued by `ensure`, so the
-    // first fetch here can only be the poll — and one fetch in two intervals is
-    // exactly the block that looked frozen until the view was remounted. The
-    // `+ BATCH_SLACK` is the 16 ms batch window the reload has to ride.
+    // The regression, in two layers. A held `pending` ref IS re-read on mount
+    // now — a provisional read held across an unmount is exactly how a
+    // card-written-while-away stayed invisible after re-entry — and the poll
+    // keeps re-reading it on every interval, never a one-shot.
     seedPending();
     renderHook(() => useChatBlocks(CHAT, [REF]));
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(POLL_MS + BATCH_SLACK);
+      await vi.advanceTimersByTimeAsync(BATCH_SLACK);
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     await act(async () => {
@@ -124,7 +124,7 @@ describe("the pending backstop", () => {
     seedPending();
     renderHook(() => useChatBlocks(CHAT, [REF]));
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(POLL_MS + BATCH_SLACK);
+      await vi.advanceTimersByTimeAsync(BATCH_SLACK);
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     // The read lands as history: the poll's dependency flips and the interval is
@@ -140,7 +140,7 @@ describe("the pending backstop", () => {
     seedPending();
     const { unmount } = renderHook(() => useChatBlocks(CHAT, [REF]));
     await act(async () => {
-      await vi.advanceTimersByTimeAsync(POLL_MS + BATCH_SLACK);
+      await vi.advanceTimersByTimeAsync(BATCH_SLACK);
     });
     expect(fetchMock).toHaveBeenCalledTimes(1);
     unmount();
@@ -187,6 +187,12 @@ describe("noteRoundState (ADR-106 revision 2026-11-03)", () => {
   it("does not fetch for a Chat or a round nobody is showing", async () => {
     seedPending();
     renderHook(() => useChatBlocks(CHAT, [REF]));
+    // The mount re-read lands first (held-pending contract); after it, the
+    // only fetches left are the ones a signal names.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(BATCH_SLACK);
+    });
+    fetchMock.mockClear();
     await act(async () => {
       expect(noteRoundState("other-chat", REF)).toBe(false);
       expect(noteRoundState(CHAT, "i-2|s-2|r:9")).toBe(false);
