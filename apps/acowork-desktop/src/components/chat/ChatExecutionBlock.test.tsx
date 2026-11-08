@@ -537,12 +537,37 @@ describe("ChatExecutionBlock", () => {
       { onReplyToRound, onContinueRound },
     );
     fireEvent.click(screen.getByText("chatView.cardContinue"));
-    // The resume message rides the execution session's own write endpoint —
-    // instance id and execution session id, the same pair the execution
-    // composer posts to. The chat send path (composer addressing) is never
-    // involved: no user bubble in the transcript, no Chat Router detour.
+    // The resume rides the same transition the execution surface's Continue
+    // sends — instance id and execution session id. The chat send path
+    // (composer addressing) is never involved: no user bubble in the
+    // transcript, no Chat Router detour.
     expect(onContinueRound).toHaveBeenCalledWith("ag", "s1");
     expect(onReplyToRound).not.toHaveBeenCalled();
+  });
+
+  it("a pause is resumed once — a second click cannot re-transition the same pause", () => {
+    const onContinueRound = vi.fn();
+    renderBlock(
+      {
+        [REF1]: entryOf({
+          status: "pending",
+          projection: {
+            round_id: "r1",
+            terminal: false,
+            status: "waiting",
+            card: { kind: "pause", request_id: "p1", prompt: "Blocked on you" },
+          },
+        }),
+      },
+      { onContinueRound },
+    );
+    const button = screen.getByText("chatView.cardContinue").closest("button")!;
+    fireEvent.click(button);
+    // The projection still says `waiting` until the runtime withdraws the card
+    // and its bell reaches this surface; in that window the button must not be
+    // able to ask the session to resume a pause it has already left.
+    fireEvent.click(button);
+    expect(onContinueRound).toHaveBeenCalledTimes(1);
   });
 
   it("the header carries the session's live state without inventing liveness", () => {

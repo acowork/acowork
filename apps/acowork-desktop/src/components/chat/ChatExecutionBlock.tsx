@@ -927,6 +927,11 @@ function BlockCardActions({
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
+  // A Continue is a state transition, not a message: once sent, this pause is
+  // over as far as this surface is concerned — a second click would ask the
+  // execution session to resume a pause it has already left. Keyed by
+  // `request_id`, so a genuinely new pause on the same row gets a live button.
+  const [sentFor, setSentFor] = useState<string | undefined>(undefined);
 
   const kind = card.kind ?? "ask_question";
   const Icon =
@@ -1000,11 +1005,12 @@ function BlockCardActions({
             // it, so no user bubble lands in the transcript and the Chat
             // Router cannot hijack it into a new session. Without an
             // execution id on the projection, fall back to the composer.
-            onClick={() =>
-              execSid && onContinueRound
-                ? onContinueRound(instanceId, execSid)
-                : onReplyToRound?.(rowId, card.prompt ?? "")
-            }
+            disabled={sentFor === card.request_id}
+            onClick={() => {
+              setSentFor(card.request_id);
+              if (execSid && onContinueRound) onContinueRound(instanceId, execSid);
+              else onReplyToRound?.(rowId, card.prompt ?? "");
+            }}
           >
             {t("chatView.cardContinue")}
           </button>

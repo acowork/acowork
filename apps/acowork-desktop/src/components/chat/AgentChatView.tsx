@@ -104,6 +104,7 @@ import {
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
 import { turnInflight } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
 import {
@@ -118,7 +119,7 @@ import { DeliveryAlertLine } from "./DeliveryAlertLine";
 import { useChatStore } from "../../stores/chatStore";
 import type { WorkspaceRef } from "../../lib/types";
 import { useAgentStore } from "../../stores/agentStore";
-import { sendMessage, sessionExists } from "../../lib/session-control";
+import { sessionExists } from "../../lib/session-control";
 import { showToast } from "../common/ToastProvider";
 import { useAuthStore } from "../../stores/authStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
@@ -622,6 +623,25 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // composer invites the second send this Chat has no queue to absorb, and a
   // locked composer with no line reads as a broken button.
   const composerLocked = sending || turnLive;
+  // The turn header's face (ADR-106 revision 2026-11-08): the claim's expected
+  // responder, resolved through the registry the bubbles already use. A 1:1
+  // chat's claim names exactly its peer — a delivery-decision input, not a
+  // transcript inference. Anything else (no responders on a legacy claim, a
+  // peer the registry lost) leaves this empty and the surface keeps the
+  // centered line: a header without a resolvable name is not an upgrade.
+  const turnHeaderIdentities = useMemo<TurnIdentity[]>(() => {
+    const ids = inflightTurn?.responders ?? [];
+    if (ids.length !== 1 || ids[0] !== agentId || !agentMeta) return [];
+    return [
+      {
+        id: agentId,
+        displayName: agentName,
+        avatarUrl: agentMeta.avatar ?? null,
+        builtinAvatarId: agentMeta.builtin_avatar ?? null,
+        version: agentMeta.version ?? null,
+      },
+    ];
+  }, [inflightTurn, agentId, agentMeta, agentName]);
   // Hand the claim back as soon as a row answers it, so nothing keeps
   // asserting a turn the transcript has already settled.
   useEffect(() => {
@@ -767,16 +787,23 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // lands in the transcript and the Chat Router cannot hijack it; the runtime
   // opens the next turn in place, the iteration counter resets, and the
   // round's reference row lands in this same block as Round N.
+  // A pause card's Continue is the SAME action as the execution surface's
+  // Continue banner: resume the paused turn in place (`POST /sessions/{sid}/continue`
+  // → `ContinueExecution`), so the iteration counter resets and the loop carries
+  // on inside the same round. Deliberately NOT a chat message: a "Continue"
+  // utterance would open a new turn with a fabricated user row, leave the paused
+  // round parked forever, and hand the text to the Chat Router — none of which
+  // the human asked for. One pause state, one resume path, two surfaces.
   const handleContinueRound = useCallback(
     (instanceId: string, execSessionId: string) => {
       if (!execSessionId) return;
-      void sendMessage(instanceId, execSessionId, {
-        content: "Continue",
-        message_id: `msg-${crypto.randomUUID()}`,
-      }).catch((err) => {
-        console.error("[chat] pause-card continue failed:", err);
-        showToast({ type: "error", message: t("chatView.continueFailed") });
-      });
+      void useChatStore
+        .getState()
+        .continueExecution(instanceId, execSessionId)
+        .catch((err) => {
+          console.error("[chat] pause-card continue failed:", err);
+          showToast({ type: "error", message: t("chatView.continueFailed") });
+        });
     },
     [showToast, t],
   );
@@ -845,10 +872,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         undefined,
         answer.attachmentIds,
         directCardAddress(answer),
+        [agentId],
       );
       return true;
     },
-    [sendText, sessionId, t],
+    [sendText, sessionId, t, agentId],
   );
 
   const handleSend = () => {
@@ -902,6 +930,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       sessionConfig,
       attachmentIds,
       wire,
+      [agentId],
     );
   };
 
@@ -1274,8 +1303,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               />
             )}
           />
-          {/* D9, first person only: this line claims that a send THIS device
-              made has not been answered yet. It starts from the id that send's
+          {/* D9, first person only: this claims that a send THIS device made
+              has not been answered yet. It starts from the id that send's
               response carried and ends at the first row answering it — the
               round's reference row, the router's own reply, a receipt — or on a
               deadline, so it cannot outlive the send it belongs to and never
@@ -1284,17 +1313,31 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               reload there is nothing to claim. The same flag locks the composer
               below — a Chat has no queue, so a second send would race a router
               still deciding the first. The round's own liveness rides inside its
-              block, off the `pending` projection read. */}
+              block, off the `pending` projection read.
+              ADR-106 revision (2026-11-08, the turn header): while the claim is
+              live and its expected responder resolves (a 1:1 chat's is its
+              peer — a delivery-decision input, not a transcript inference), the
+              wait wears the peer's avatar + name and hands over to the block's
+              own header at the same anchor when the first answering row lands.
+              The POST-in-flight moment and an unresolvable identity keep the
+              centered line: no face without a name to put on it. */}
           {composerLocked && (
-            <ChatTurnStatusLine
-              className="px-4"
-              live
-              text={
-                agentName
-                  ? t("chatView.notice.pendingTurn", { name: agentName })
-                  : t("chatView.notice.pendingTurnGeneric")
-              }
-            />
+            turnLive && turnHeaderIdentities.length > 0 ? (
+              <ChatTurnHeader
+                identities={turnHeaderIdentities}
+                text={t("chatView.notice.pendingTurnGeneric")}
+              />
+            ) : (
+              <ChatTurnStatusLine
+                className="px-4"
+                live
+                text={
+                  agentName
+                    ? t("chatView.notice.pendingTurn", { name: agentName })
+                    : t("chatView.notice.pendingTurnGeneric")
+                }
+              />
+            )
           )}
           {hasMoreNewer && (
             <div className="py-2 text-center text-10 text-text-tertiary">
