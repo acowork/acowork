@@ -1729,6 +1729,11 @@ async fn deliver_intent_turn(
         &in_reply_to,
         &status,
     );
+    // The same envelope, for the other audience: `content` above is the prompt
+    // (coordinates in it, `params` as compact JSON), this is what a human reads.
+    // Produced here, at the one boundary that holds the envelope, so the surfaces
+    // never have to interpret the machine format.
+    let display = crate::agent::intent_turn::render_intent_display(&kind, &action, &params);
 
     // §5.5.5 pending queue: which intents must be shown in the execution
     // side's pending list while that session is busy. A Chat-sourced turn that
@@ -1803,6 +1808,7 @@ async fn deliver_intent_turn(
             opened_new: Some(opened_new),
             // ADR-107: context the sender supplied that the human did not type.
             context_refs,
+            display,
         },
     )
 }

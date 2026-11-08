@@ -650,10 +650,55 @@ pub struct RoundProjection {
 /// The human half of a round.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoundUserRow {
+    /// The row as stored. For an agent-origin turn this is the **machine
+    /// envelope** (`[intent:…] {params}` + reply coordinates) — the model reads
+    /// it, and a human surface must not print it directly.
     pub body: String,
     pub ts: String,
     #[serde(default)]
     pub attachments: Vec<Value>,
+    /// The same turn for the other audience: the display projection the producer
+    /// wrote beside the body (`metadata.intent`, design 27 §5.4.5).
+    ///
+    /// `None` on every human turn (its body already is the person's words) and on
+    /// every row written before the projection existed — a surface that gets
+    /// `None` renders `body`, which is the honest fallback rather than a blank.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<RoundUserDisplay>,
+}
+
+/// The human rendering of an agent-origin turn, as the Chat surfaces read it.
+///
+/// Shape owned by the producer (`intent_turn::IntentDisplay` serialises these
+/// fields); the extra keys it carries (`origin`, `action`) are not needed here and
+/// are ignored on read.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RoundUserDisplay {
+    /// One line: a block header, a round row, a list preview.
+    #[serde(default)]
+    pub summary: String,
+    /// Markdown the reader gets in place of the envelope.
+    #[serde(default)]
+    pub body: String,
+    /// `body` was cut by the producer; the raw `RoundUserRow::body` still holds
+    /// everything.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+impl RoundUserDisplay {
+    /// The display on a round's user row, when the row carries a usable one.
+    ///
+    /// A row with an empty body and no summary is treated as absent: painting an
+    /// empty panel is worse than falling back to the stored row.
+    fn from_entry(entry: &ConversationEntry) -> Option<Self> {
+        let raw = entry
+            .metadata
+            .as_ref()
+            .and_then(|m| m.get(crate::agent::intent_turn::META_KEY_INTENT_DISPLAY))?;
+        let display: Self = serde_json::from_value(raw.clone()).ok()?;
+        (!display.body.trim().is_empty() || !display.summary.trim().is_empty()).then_some(display)
+    }
 }
 
 /// The agent half of a round. Its terminal state is carried by the enclosing
@@ -751,6 +796,7 @@ pub fn project(jsonl: &Path, rec: &RoundRecord) -> Result<Option<RoundProjection
     Ok(Some(RoundProjection {
         round_id: rec.round_id.clone(),
         user: Some(RoundUserRow {
+            display: RoundUserDisplay::from_entry(&user),
             body: user.content,
             ts: user.ts,
             attachments,
@@ -1237,6 +1283,63 @@ mod tests {
         let rendered = serde_json::to_string(&p).unwrap();
         assert!(!rendered.contains("secret detail"));
         assert!(!rendered.contains("secret output"));
+    }
+
+    #[test]
+    fn a_peer_round_projects_its_human_display_beside_the_envelope() {
+        // Two audiences, two formats, one row: `body` stays the machine envelope
+        // the model reads, `display` is what a Chat surface prints. A row without
+        // the projection (a human turn, or any row written before it existed)
+        // projects `display: None` so the surface keeps its old rendering.
+        let dir = TempDir::new().unwrap();
+        let mut agent_turn = entry("user", "[intent:inst-a:analyze] {\"title\":\"x\"}", Some("r:1"));
+        agent_turn.metadata = Some(serde_json::json!({
+            META_KEY_ROUND_ID: "r:1",
+            "intent": {
+                "origin": "request",
+                "action": "analyze",
+                "summary": "审计 usecase 分层",
+                "body": "### 审计 usecase 分层
+
+检查接口",
+                "truncated": false,
+            }
+        }));
+        let jsonl = write_jsonl(
+            &dir,
+            &[agent_turn, entry("assistant", "done", Some("r:1"))],
+        );
+        let mut r = rec("r:1", 0, true);
+        r.answer = Some(1);
+        r.status = Some("completed".into());
+        let p = project(&jsonl, &r).unwrap().expect("round is projectable");
+        let user = p.user.as_ref().unwrap();
+        assert!(user.body.starts_with("[intent:inst-a:analyze]"), "the row is untouched");
+        let display = user.display.as_ref().expect("display projected");
+        assert_eq!(display.summary, "审计 usecase 分层");
+        assert!(display.body.starts_with("### "));
+        assert!(!display.truncated);
+    }
+
+    #[test]
+    fn a_row_without_a_usable_display_projects_none() {
+        let dir = TempDir::new().unwrap();
+        let mut broken = entry("user", "[intent:…] {}", Some("r:1"));
+        broken.metadata = Some(serde_json::json!({
+            META_KEY_ROUND_ID: "r:1",
+            // Not the shape the producer writes: an unusable projection must read
+            // as absent, never as a failure of the whole round (D9's "a broken
+            // side table is never an outage", applied to the row).
+            "intent": 7,
+        }));
+        let jsonl = write_jsonl(&dir, &[broken]);
+        let p = project(&jsonl, &rec("r:1", 0, false)).unwrap().expect("projectable");
+        assert!(p.user.as_ref().unwrap().display.is_none());
+
+        // A human turn carries no projection at all.
+        let jsonl = write_jsonl(&dir, &[entry("user", "修复分页", Some("r:2"))]);
+        let p = project(&jsonl, &rec("r:2", 0, false)).unwrap().expect("projectable");
+        assert!(p.user.as_ref().unwrap().display.is_none());
     }
 
     #[test]
