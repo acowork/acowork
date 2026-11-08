@@ -12,7 +12,7 @@
  * a page, renders it, and pages toward older rows on scroll.
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FileText, Loader2, Search } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { formatBubbleTime } from "../../lib/formatTime";
@@ -29,6 +29,7 @@ import {
   chatAttachmentObjectUrl,
   type ChatAttachmentMeta,
 } from "../../stores/chatSessionStore";
+import { useChatBlocks } from "../../stores/chatBlockStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useAuthStore } from "../../stores/authStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
@@ -49,6 +50,8 @@ interface ChatHistoryDialogProps {
 const PAGE_SIZE = 50;
 /** Distance from the list bottom (px) that triggers the next older page. */
 const LOAD_MORE_BOTTOM_PX = 80;
+/** Stable empty ref list: a closed dialog must not register block watchers. */
+const NO_REFS: readonly string[] = [];
 
 /** Case-insensitive keyword highlight (same shape as GlobalSearchDialog). */
 function highlightParts(text: string, query: string): { text: string; hit: boolean }[] {
@@ -254,6 +257,26 @@ export function ChatHistoryDialog({
   );
   const nameOf = resolveName ?? registryName;
 
+  // Execution rounds surface as bodyless reference rows (ADR-106 D3): their
+  // answer text lives in the execution session, not the chat log. Resolve each
+  // round's answer fragment through the SAME projection read the transcript
+  // uses (`GET /api/chat-blocks`, batched per chat), keyed by the reference's
+  // `exec_ref`. A round whose projection is not yet readable falls back to its
+  // durable `assignment_brief`, then to a neutral placeholder — never a blank
+  // row, which is what made the history list read as consecutive user messages.
+  const execRefs = useMemo(
+    () =>
+      hits
+        .map((h) => (h.kind === "execution_round" ? h.exec_ref ?? "" : ""))
+        .filter((r) => r !== ""),
+    [hits],
+  );
+  // `hits` outlives `open` (closing the dialog only unmounts its render), so the
+  // ref list must be gated on it: this hook registers watchers and arms a
+  // pending poll, and a CLOSED dialog keeps paying for both — a re-read on every
+  // round-state signal and a 15s poll — for rounds nobody is looking at.
+  const blocks = useChatBlocks(chatSessionId, open ? execRefs : NO_REFS);
+
   const tabs: Array<{ key: HistoryCategory; label: string }> = useMemo(
     () => [
       { key: "text", label: t("chatHistory.tabText") },
@@ -362,16 +385,21 @@ export function ChatHistoryDialog({
                       <FileRow
                         key={`${hit.line_pos}-${hit.seq}`}
                         hit={hit}
-                        nameOf={nameOf}
-                        onJump={() => jump(hit)}
+                        name={nameOf(hit.from)}
+                        onJump={jump}
                       />
                     ) : (
                       <TextRow
                         key={`${hit.line_pos}-${hit.seq}`}
                         hit={hit}
                         query={ranQuery}
-                        nameOf={nameOf}
-                        onJump={() => jump(hit)}
+                        name={nameOf(hit.from)}
+                        answerBody={
+                          hit.kind === "execution_round" && hit.exec_ref
+                            ? blocks[hit.exec_ref]?.projection?.answer?.body
+                            : undefined
+                        }
+                        onJump={jump}
                       />
                     ),
                   )}
@@ -452,22 +480,41 @@ function SenderAvatar({
   );
 }
 
-function TextRow({
+const TextRow = memo(function TextRow({
   hit,
   query,
-  nameOf,
+  name,
+  answerBody,
   onJump,
 }: {
   hit: HistoryHit;
   query: string;
-  nameOf: (id: string) => string;
-  onJump: () => void;
+  /** Sender display name, resolved by the list so this row's props stay
+   *  primitives — a resolver function prop would defeat `memo`. */
+  name: string;
+  /** Resolved answer text for an `execution_round` hit (from the projection);
+   *  `undefined` for every other kind or while the read is in flight. */
+  answerBody?: string;
+  onJump: (hit: HistoryHit) => void;
 }) {
-  const name = nameOf(hit.from);
+  // The row's displayable text. A plain speech row shows its own body. An
+  // `execution_round` is a bodyless reference (ADR-106 D3), so it shows the
+  // round's answer head fragment from the projection; when that is not yet
+  // readable it falls back to the durable one-line task name, and only when
+  // both are absent to a neutral marker — never an empty line, which is what
+  // made the history read as consecutive user messages with no reply between.
+  //
+  // Under an active query the brief wins: it is the round's indexed text
+  // (ADR-106 D13), so it is what matched — showing the answer fragment instead
+  // would display a row whose highlight is nowhere in sight.
+  const isRound = hit.kind === "execution_round";
+  const brief = hit.brief?.trim() ?? "";
+  const roundText = query ? brief : headFragment(answerBody) || brief;
+  const display = isRound ? roundText || "—" : hit.body;
   return (
     <button
       type="button"
-      onClick={onJump}
+      onClick={() => onJump(hit)}
       className={cn("flex w-full items-start gap-2.5 px-4 py-2 text-left", listRowHover)}
     >
       <SenderAvatar id={hit.from} name={name} className="mt-0.5 shrink-0" />
@@ -482,11 +529,24 @@ function TextRow({
           </span>
         </div>
         <span className="line-clamp-2 text-xs text-text-primary">
-          <Highlight text={hit.body} query={query} />
+          <Highlight text={display} query={query} />
         </span>
       </div>
     </button>
   );
+});
+
+/** The leading single line of a projection answer, trimmed and bounded — the
+ *  "头部片段" the history row shows for an execution round. Newlines collapse
+ *  so a multi-paragraph answer still fits the two-line clamp. */
+function headFragment(body: string | undefined): string {
+  if (!body) return "";
+  const first = body.trim().split(/\r?\n/)[0]?.trim() ?? "";
+  const MAX = 160;
+  // Slice by code point: a UTF-16 slice can cut a surrogate pair in half and
+  // render the answer's head as a replacement glyph.
+  const chars = Array.from(first);
+  return chars.length > MAX ? `${chars.slice(0, MAX).join("")}…` : first;
 }
 
 function formatSize(bytes: number): string {
@@ -495,29 +555,30 @@ function formatSize(bytes: number): string {
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function FileRow({
+const FileRow = memo(function FileRow({
   hit,
-  nameOf,
+  name,
   onJump,
 }: {
   hit: HistoryHit;
-  nameOf: (id: string) => string;
-  onJump: () => void;
+  /** Sender display name (see `TextRow`). */
+  name: string;
+  onJump: (hit: HistoryHit) => void;
 }) {
   const files = hit.attachments.filter((a) => !isImage(a));
   return (
     <button
       type="button"
-      onClick={onJump}
+      onClick={() => onJump(hit)}
       className={cn("flex w-full items-center gap-3 px-4 py-2 text-left", listRowHover)}
     >
       <FileText size={18} className="shrink-0 text-text-tertiary" />
       <div className="min-w-0 flex-1">
         <div className="truncate text-xs font-medium text-text-primary">
-          {files[0]?.filename ?? hit.body ?? nameOf(hit.from)}
+          {files[0]?.filename ?? hit.body ?? name}
         </div>
         <div className="flex items-center gap-2 text-10 text-text-tertiary">
-          <span className="min-w-0 truncate">{nameOf(hit.from)}</span>
+          <span className="min-w-0 truncate">{name}</span>
           <span className="shrink-0">{formatBubbleTime(hit.ts * 1000)}</span>
         </div>
       </div>
@@ -526,7 +587,7 @@ function FileRow({
       )}
     </button>
   );
-}
+});
 
 function ImageGrid({
   hits,

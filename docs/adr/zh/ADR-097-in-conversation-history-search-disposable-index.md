@@ -34,18 +34,20 @@
 
 ### D2 — schema 与坐标
 
-- 单张 FTS5 表 `search`（内嵌 content，`tokenize = 'trigram'`）：主列 `body`（全文），其余 `seq / ts / from_id / kind / cat / attachments` 全 `UNINDEXED`；`rowid = line_pos`。
+- 单张 FTS5 表 `search`（内嵌 content，`tokenize = 'trigram'`）：全文列为 `body`（speech 正文）与 `brief`（`execution_round` 引用行的一行任务名，ADR-106 D13），其余 `seq / ts / from_id / kind / cat / attachments / exec_ref` 全 `UNINDEXED`；`rowid = line_pos`。一个引用行没有正文（铁律），它对外的可检索文本就是 `brief`——因此 `brief` 必须进全文列，否则用户在列表里看得见的那行字反而搜不到它自己。
 - `line_pos` 与 `lines.index` **同一坐标**的 0-based 升序物理行号（blank 行占字节不占位、corrupt 行占位不入库），保证前端把命中行换算成 `read_messages` offset 时两套索引一致。
-- `cat` 是位掩码：bit0 文本（speech 且 body 非空）、bit1 图片（附件 mime `image/*`）、bit2 文件（其余附件）；一行可携多类。附件 JSON 存 `attachments` 列供文件类目按 filename 命中、前端渲染缩略图/文件条。
-- `meta(indexed_lines)` 存水位线：已索引的物理行数，用作一致性判据。
+- `cat` 是位掩码：bit0 文本（speech 且 body 非空，**或** `execution_round` 引用行）、bit1 图片（附件 mime `image/*`）、bit2 文件（其余附件）；一行可携多类。附件 JSON 存 `attachments` 列供文件类目按 filename 命中、前端渲染缩略图/文件条。`execution_round` 按 ADR-106 D3 是无正文的引用行，仍计入 bit0：它是这段对话一次执行工作的持久记录，若被过滤掉，历史列表就会读成一串连续的用户消息、中间没有任何回复。引用行不带正文（铁律），其**显示**文本由前端按 `exec_ref`（`instance|session|round`）经 `GET /api/chat-blocks` 投影解析、回退到行内 `assignment_brief`（ADR-106 D13）；查询生效时该行显示被命中的 `brief` 本身（高亮才对得上）——**绝不**把执行正文镜像进 chat 日志。
+- `meta` 存两件事：`indexed_lines`（水位线：已索引的物理行数，一致性判据）与 `schema_version`（列集版本，见下）。**列集一旦变化即 `SCHEMA_VERSION` +1**：旧侧表不是被查询，而是整表 `DROP` 后由 `ensure` 重建（水位线被置为任何真实行数都不等于的 `-1`）。侧表可弃，重建是被认可的愈合，永不是数据丢失。
 
 ### D3 — 写路径：best-effort 增量，失败不回滚消息
 
-`append_message` 在 `commit_row` 之后调 `index_append(dir, line_pos, msg)`：水位线恰好等于 `line_pos` 时开事务 `INSERT` + 抬水位；否则退化为一次 `rebuild`。**索引写失败只记 warn，绝不 `?` 上抛**——log 才是事实源，消息落盘成功即算写入成功；侧表落后由下次查询/写的首触重建愈合。搜索永远是聊天的一层可弃附件。
+`append_message` 在 `commit_row` 之后调 `index_append(dir, line_pos, msg)`：水位线恰好等于 `line_pos` 时开事务 `INSERT` + 抬水位；否则**只是放弃这一次增量、把侧表留在滞后态**，重建交给下一次查询的 `ensure`（D4）。
+
+**为什么不在写路径重建**：重建要读整份 `messages.jsonl`，而 `index_append` 跑在 `append_message` 里——即发消息的请求路径上、持着会话锁——ADR-096 禁止在那里做全量读。把全量读挪到用户主动发起的搜索上，代价只付一次，且不在发消息的延迟里。**索引写失败只记 warn，绝不 `?` 上抛**——log 才是事实源，消息落盘成功即算写入成功。搜索永远是聊天的一层可弃附件。
 
 ### D4 — 重建是唯一 sanctioned 全量读，靠水位线触发
 
-`ensure(dir, log_line_count)`：打开句柄后，若 `meta.indexed_lines ≠ 权威行数`（fresh / 说谎 / 崩溃窗口 / 拷贝或缺失文件）→ 从 `messages.jsonl` 整体重建一次并抬水位。这与 [ADR-096 D4](./ADR-096-no-full-session-reads.md) 的首触协调同级豁免——每进程每会话至多一次，非每请求、非每写。打开失败（corrupt）时删侧表 + `-journal` 重试一次，从干净重建。
+`ensure(dir, log_line_count)`：打开句柄后，若 `meta.indexed_lines ≠ 权威行数`（fresh / 说谎 / 崩溃窗口 / 拷贝或缺失文件 / 列集变化后置为 `-1`）→ 从 `messages.jsonl` 整体重建一次并抬水位。这与 [ADR-096 D4](./ADR-096-no-full-session-reads.md) 的首触协调同级豁免——每进程每会话至多一次，非每请求、非每写。打开失败（corrupt）时删侧表 + `-journal` 重试一次，从干净重建。
 
 ### D5 — 查询：三类目共用游标分页，只读侧表
 

@@ -411,8 +411,12 @@ export function AgentChatScreen() {
                 <div className="msg-avatar">{agentAvatar}</div>
                 <div className="msg-sender">
                   <span className="msg-sender-name">{turnHeaderAgent}</span>
-                  <span className="chat-turn-status-text chat-turn-status-text-live">
-                    正在处理…
+                  {/* The claim's word in the execution surface's status-line
+                      grammar (`.status-line`: pulse dot + 13px text) —
+                      "someone is busy" reads the same on both surfaces. */}
+                  <span className="chat-turn-header-status">
+                    <span className="status-pulse" aria-hidden />
+                    <span>正在处理…</span>
                   </span>
                 </div>
               </div>

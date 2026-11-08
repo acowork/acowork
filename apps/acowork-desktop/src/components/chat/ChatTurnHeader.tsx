@@ -114,11 +114,20 @@ export function ChatTurnHeader({ identities, text, className }: ChatTurnHeaderPr
       )}
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-xs font-medium text-text-tertiary">{names}</span>
-        {/* The claim's word, on the same tier as the centered lines' — the
-            `thinking-shimmer` is what "the platform is still waiting" reads
-            like everywhere else in the transcript. */}
-        <span className="text-10 leading-tight text-text-tertiary thinking-shimmer">
-          {text}
+        {/* The claim's word, in the execution surface's phase-line grammar
+            (ADR-049): a pulsing dot + shimmering text at the UI font size —
+            "someone is busy" must read the same on both surfaces, which is
+            what this revision is for. The dot wears the `waiting` hue: the
+            claim asserts a send the transcript has not answered yet, not a
+            phase the run reported (that word arrives with the block). */}
+        <span className="flex items-center gap-1.5">
+          <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
+          <span
+            className="thinking-shimmer text-text-tertiary"
+            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+          >
+            {text}
+          </span>
         </span>
       </div>
     </div>

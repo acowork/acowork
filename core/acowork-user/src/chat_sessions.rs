@@ -3963,6 +3963,99 @@ mod tests {
     }
 
     #[test]
+    fn search_surfaces_execution_round_as_a_reference_hit() {
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        let sid = &s.session_id;
+        // A human turn, then the round it routed — the reference is bodyless by
+        // contract but must still appear in the text tab, or the history list
+        // reads as consecutive user messages with no assistant reply between
+        // them (the reported defect).
+        let asked = append_message(
+            &dir,
+            sid,
+            &msg("human-1", KIND_USER_MESSAGE, "帮我把分页修一下", "m-1"),
+            1,
+        )
+        .unwrap()
+        .0;
+        let mut round = msg("agent-1", KIND_EXECUTION_ROUND, "", "round:r:m-1");
+        round.meta.in_reply_to = asked.meta.message_id.clone();
+        round.meta.round_id = "r:m-1".to_string();
+        round.meta.agent_session_id = "sess-9".to_string();
+        round.meta.agent_instance_id = "agent-1".to_string();
+        round.meta.assignment_brief = Some("修复分页不满屏".to_string());
+        append_message(&dir, sid, &round, 2).unwrap();
+
+        let (hits, _) = search_messages(&dir, sid, Category::Text, "", None, 50).unwrap();
+        assert_eq!(hits.len(), 2, "the user row AND the round both surface");
+        let r = hits.iter().find(|h| h.kind == KIND_EXECUTION_ROUND).expect("round hit present");
+        assert!(r.body.is_empty(), "the reference carries no body");
+        assert_eq!(r.exec_ref, "agent-1|sess-9|r:m-1", "the projection address rides the hit");
+        assert_eq!(r.brief, "修复分页不满屏", "the durable one-line name rides the hit");
+        // A plain user row resolves no projection.
+        let u = hits.iter().find(|h| h.kind == KIND_USER_MESSAGE).unwrap();
+        assert!(u.exec_ref.is_empty() && u.brief.is_empty());
+
+        // The brief is this row's searchable text (ADR-106 D13): searching a
+        // word only the round's label carries finds the round, both through
+        // FTS (>= TRIGRAM_MIN) and through the short-query LIKE fallback.
+        for q in ["分页不满", "分页"] {
+            let (found, _) = search_messages(&dir, sid, Category::Text, q, None, 50).unwrap();
+            let round_hit = found
+                .iter()
+                .find(|h| h.kind == KIND_EXECUTION_ROUND)
+                .unwrap_or_else(|| panic!("a round is reachable by its brief (q={q:?})"));
+            assert_eq!(round_hit.brief, "修复分页不满屏");
+        }
+    }
+
+    #[test]
+    fn search_sidecar_from_an_older_schema_is_rebuilt_not_queried() {
+        let dir = temp_dir();
+        let s = pair_session(&dir);
+        let sid = &s.session_id;
+        append_message(&dir, sid, &msg("human-1", KIND_USER_MESSAGE, "alpha", "m-1"), 1).unwrap();
+        append_message(&dir, sid, &msg("human-1", KIND_USER_MESSAGE, "beta", "m-2"), 2).unwrap();
+        search_messages(&dir, sid, Category::Text, "", None, 50).unwrap();
+
+        // Rewrite the sidecar as v1: the pre-`exec_ref`/`brief` column set and
+        // no `schema_version`. Opening it must drop and rebuild rather than
+        // query a column set it does not have — and the append path must not be
+        // the one that pays for that whole-log read.
+        let sess = session_dir(&dir, sid);
+        crate::search_index::forget(&sess);
+        let path = sess.join("search.sqlite");
+        fs::remove_file(&path).unwrap();
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE VIRTUAL TABLE search USING fts5(
+                     body, seq UNINDEXED, ts UNINDEXED, from_id UNINDEXED,
+                     kind UNINDEXED, cat UNINDEXED, attachments UNINDEXED,
+                     tokenize = 'trigram');
+                 CREATE TABLE meta(key TEXT PRIMARY KEY, val INTEGER);
+                 INSERT INTO search(rowid, body, seq, ts, from_id, kind, cat, attachments)
+                     VALUES (0, 'alpha', 1, 0, 'human-1', 'user_message', 1, '[]');
+                 INSERT INTO search(rowid, body, seq, ts, from_id, kind, cat, attachments)
+                     VALUES (1, 'beta', 2, 0, 'human-1', 'user_message', 1, '[]');
+                 INSERT INTO meta(key, val) VALUES ('indexed_lines', 2);",
+            )
+            .unwrap();
+        }
+
+        // A write against the stale sidecar must never fail the message.
+        append_message(&dir, sid, &msg("human-1", KIND_USER_MESSAGE, "gamma", "m-3"), 3).unwrap();
+
+        let (rows, total) = search_messages(&dir, sid, Category::Text, "", None, 50).unwrap();
+        assert_eq!(total, 3);
+        assert_eq!(rows.len(), 3, "v1 sidecar dropped and rebuilt from the log");
+        for body in ["alpha", "beta", "gamma"] {
+            assert!(rows.iter().any(|h| h.body == body), "{body} present after migration");
+        }
+    }
+
+    #[test]
     fn search_rebuilds_from_log_when_sidecar_missing_or_corrupt() {
         let dir = temp_dir();
         let s = pair_session(&dir);

@@ -2444,6 +2444,16 @@
   gap: 8px;
   margin: 6px 0;
 }
+/* The claim's word inside the turn header: the execution surface's
+   `.status-line` grammar (pulse dot + 13px secondary text), kept as its own
+   class so the two faces cannot drift through one shared selector. */
+.chat-turn-header-status {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: 13px;
+  color: var(--color-label-secondary);
+}
 
 /* Back-to-bottom arrow on the agent chat: the reader scrolled up off the tail.
    `position: sticky` (not an overlay) for the same reason as `.chat-newpill`:
