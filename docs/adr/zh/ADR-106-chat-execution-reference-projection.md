@@ -483,6 +483,8 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 
 **决策四：覆盖 = claim 结束，不新造折叠逻辑**。第一条应答行（轮次引用行 / agent 消息 / 回执）到达时 claim 收口，轮次头随窗口快照消失；轮次内容由 `ChatExecutionBlock` 自有的头像头（或 agent 气泡头）在同一头像锚点接管（`avatarAnchor` 机制既有），视觉连续、无跳动。多目标 fan-out 渲染一个堆叠头（头像堆 + 名字列表）：一次发送是一个事实，不拆成 N 个头。
 
+**修订（2026-11-08b·角色行）**：轮次头在名字**下面**补一行 `role`（取自 agent 目录的同一份 meta，与块头 `ChatExecutionBlock` / 常规 agent 消息头同层级同字段），于是它是"头像 + 名字 + role + 状态词"。理由是决策四的接管不变式：块头渲染名字 + role，若 claim 窗口只有名字，接管时就要在名字下**插入**一行、整列下移；先摆好 role，接管只消失状态词，位置不动。多目标 fan-out **不渲染** role 行——拼接出的 role 列表不对应任何单一响应者，头像堆本身已经表达"多人"。
+
 **不变量保留**：终态收口（`aborted` / `failed` / `timeout` / `waiting`）仍是居中平台行，不套头像——停止不是 agent 的话；`block.notFound` 等空洞类文案同理。三条 D9 不变量（终态居中行、live 仅呈现层、不可达 ≠ 进行中）原样成立。
 
 **范围**。Desktop 两个主面（`AgentChatView`、`GroupChatPanel`）与 Mobile 1:1 面同批切换；新增共享组件与单点响应者解析函数（`resolveExpectedResponders`），claim 元数据（预期响应者实例 id 列表）由 `armTurn` 在发送时携带、随 claim 清除。纯呈现层：无新网络接口、无 proto 字段、无存储写入。设计细节与交付分期见设计 33（`docs/design/zh/33-chat-turn-header.md`）。

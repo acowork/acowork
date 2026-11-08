@@ -961,6 +961,7 @@ export function GroupChatPanel() {
       out.push({
         id,
         displayName: meta.display_name ?? meta.name ?? id,
+        role: meta.role ?? null,
         avatarUrl: meta.avatar ?? null,
         builtinAvatarId: meta.builtin_avatar ?? null,
       });

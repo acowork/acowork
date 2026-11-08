@@ -16,10 +16,10 @@
  * line it replaced.
  *
  * Shape follows the block header it hands over to (`ChatExecutionBlock`):
- * same gutter, same 40px avatar, same name tier — the takeover happens at
- * the same anchor, so "content overwrites the state" reads as one column
- * that stops shimmering, not as a jump. Multiple responders (a fan-out)
- * wear ONE stacked header: one send is one fact.
+ * same gutter, same 40px avatar, same name tier, same role tier under it —
+ * the takeover happens at the same anchor, so "content overwrites the state"
+ * reads as one column that stops shimmering, not as a jump. Multiple
+ * responders (a fan-out) wear ONE stacked header: one send is one fact.
  *
  * What this component does NOT do: it never renders a nameless avatar (the
  * caller degrades to `ChatTurnStatusLine` when identities do not resolve),
@@ -37,6 +37,10 @@ export interface TurnIdentity {
   /** Instance id — the avatar seed. */
   id: string;
   displayName: string;
+  /** The agent's role, as its registry meta carries it — the same field and
+   *  the same tier the block header paints under the name, so the handover
+   *  swaps the state line and nothing else. */
+  role?: string | null;
   avatarUrl?: string | null;
   builtinAvatarId?: string | null;
   version?: string | null;
@@ -114,6 +118,19 @@ export function ChatTurnHeader({ identities, text, className }: ChatTurnHeaderPr
       )}
       <div className="flex min-w-0 flex-col">
         <span className="truncate text-xs font-medium text-text-tertiary">{names}</span>
+        {/* The agent's role, on the tier the block header gives it: the whole
+            point of the takeover is that this column becomes that column, so
+            the role has to be in place BEFORE the block lands, or the handover
+            inserts a line above the anchor instead of shifting nothing.
+            One identity only: a fan-out's names are a list, and a joined list
+            of roles names no one in particular — the faces already say
+            "several". A claim with no role paints no line rather than an empty
+            one, exactly as the block header does. */}
+        {single && identities[0].role ? (
+          <span className="truncate text-10 leading-tight text-text-tertiary">
+            {identities[0].role}
+          </span>
+        ) : null}
         {/* The claim's word, in the execution surface's phase-line grammar
             (ADR-049): a pulsing dot + shimmering text at the UI font size —
             "someone is busy" must read the same on both surfaces, which is

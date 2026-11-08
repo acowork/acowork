@@ -26,6 +26,10 @@ const GROUP = "group-1";
 let tail: ChatMessageRow[];
 // The claim the store holds for this session; `null` = nothing in flight.
 let inflightMap: Record<string, unknown> = {};
+// Registry `role` of the fan-out's agent. Mutable per case: the header paints
+// it under the name only when the claim names ONE responder (ADR-106 rev.
+// 2026-11-08), which is the rule the case below pins on this surface.
+let agentRole: string | undefined;
 let settleTurnMock: ReturnType<typeof vi.fn> = vi.fn();
 
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: (x: string) => x }));
@@ -73,7 +77,9 @@ vi.mock("../../stores/agentStore", () => ({
   useAgentStore: Object.assign(
     (selector: (state: unknown) => unknown) =>
       selector({
-        agents: { [AGENT_A]: { meta: { display_name: "Agent A", name: "agent-a" } } },
+        agents: {
+          [AGENT_A]: { meta: { display_name: "Agent A", name: "agent-a", role: agentRole } },
+        },
       }),
     { getState: () => ({ selectAgent: vi.fn() }) },
   ),
@@ -181,6 +187,7 @@ describe("GroupChatPanel in-flight turn claim", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     inflightMap = {};
+    agentRole = undefined;
     settleTurnMock = vi.fn();
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
   });
@@ -209,6 +216,17 @@ describe("GroupChatPanel in-flight turn claim", () => {
     // The centered line steps back — one statement, one shape.
     expect(document.querySelector("[data-event-text]")).toBeNull();
     expect(composerLocked()).toBe(true);
+  });
+
+  it("a single-responder claim carries that agent's role, as its block will", () => {
+    // Same registry meta the block header reads: the wait line and the block
+    // that takes over must agree on who is speaking, so the role is already
+    // under the name when the swap happens.
+    agentRole = "资深工程师";
+    tail = [row(1, { body: "fix the pagination" })];
+    inflightMap = { [GROUP]: { messageId: "m1", at: 1, responders: [AGENT_A] } };
+    render(<GroupChatPanel />);
+    expect(document.querySelector("[data-turn-header]")!.textContent).toContain("资深工程师");
   });
 
   it("an unresolvable responder degrades the header to the generic line", () => {

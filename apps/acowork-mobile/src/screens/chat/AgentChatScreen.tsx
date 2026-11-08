@@ -411,6 +411,14 @@ export function AgentChatScreen() {
                 <div className="msg-avatar">{agentAvatar}</div>
                 <div className="msg-sender">
                   <span className="msg-sender-name">{turnHeaderAgent}</span>
+                  {/* The role, on the tier the regular agent message header
+                      gives it (`.msg-sender-role`) — this header IS that
+                      header plus the claim's word, so the role has to be in
+                      place before the turn's answer rows land under it. The
+                      claim names one responder here (`ids.length !== 1` keeps
+                      the centered line), so there is no fan-out list to
+                      disambiguate. */}
+                  {agent?.role ? <span className="msg-sender-role">{agent.role}</span> : null}
                   {/* The claim's word in the execution surface's status-line
                       grammar (`.status-line`: pulse dot + 13px text) —
                       "someone is busy" reads the same on both surfaces. */}

@@ -41,8 +41,8 @@ The change is purely presentational: no new network endpoints, no proto changes,
 
 ### Functional
 
-- FR-1: In a 1:1 chat, right after the send's `delivered` receipt, the transcript tail shows the peer agent's avatar + name + status line.
-- FR-2: In a group, the header shows the expected responder(s) per the resolution rules (avatar stack + name list for multiple targets) + status line.
+- FR-1: In a 1:1 chat, right after the send's `delivered` receipt, the transcript tail shows the peer agent's avatar + name + role + status line (the role line was added by the 2026-11-08b amendment, §9.1).
+- FR-2: In a group, the header shows the expected responder(s) per the resolution rules (avatar stack + name list for multiple targets, and no role line) + status line.
 - FR-3: When the round's reference row arrives (block renders) or an agent answer row arrives, the turn header disappears and content takes over at the same avatar anchor — block header / bubble header — with no visual jump.
 - FR-4: `archived` sends, all-failed fan-outs, and page reloads (no local claim) show no turn header — identical gating to today's waiting line.
 - FR-5: Terminal closings (aborted / failed / timeout) remain centered platform lines, never avatar-wrapped.
@@ -159,6 +159,8 @@ P1/P2 are independently reviewable and mergeable; no phase spans modules.
 ### 9.1 ADR-106 D9 Revision Draft (for review; to be appended to the ADR's revision chapter on approval)
 
 > **Revision (2026-11-08 · turn header)**: within "this device's send claim", D9's waiting line is upgraded from a centered generic line to a **turn header**: it renders the expected responder(s) (1:1 peer / @-mentions / group default responder — all delivery-decision inputs, not transcript-shape inference) as avatar + name + status word; the first answering row or the deadline hands over to the block's own avatar header at the same anchor. The "never guess the responder" ban narrows to "never infer the responder from transcript shape"; when delivery-decision inputs are unresolvable, degrade to the generic centered line. The three invariants (centered terminal rows, live-as-presentation-only, unreachable≠running) are kept verbatim. The criteria, window, and closing mechanism are unchanged (still the D9 claim).
+
+> **Revision (2026-11-08b · the role line)**: the turn header's shape is fixed as **avatar + name + role + status word**. The role comes from the same agent-directory meta that `ChatExecutionBlock`'s header and a regular agent message header read, on the same tier (one step under the name). The reason is not "more information" but ADR-106 Decision 4's takeover invariant: the block header renders name + role, so a claim window showing only the name would have to *insert* a line under it at handover and shift the whole column — and the point of the turn header is "content overwrites state", not a re-layout. A multi-target fan-out renders **no** role line: a joined list of roles names no single responder, and the avatar stack already says "several".
 
 ## 10. Open Questions
 

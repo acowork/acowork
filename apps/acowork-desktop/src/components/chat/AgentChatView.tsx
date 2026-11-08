@@ -636,6 +636,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       {
         id: agentId,
         displayName: agentName,
+        role: agentMeta.role ?? null,
         avatarUrl: agentMeta.avatar ?? null,
         builtinAvatarId: agentMeta.builtin_avatar ?? null,
         version: agentMeta.version ?? null,

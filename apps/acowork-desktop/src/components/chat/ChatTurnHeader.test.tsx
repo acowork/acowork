@@ -57,6 +57,47 @@ describe("ChatTurnHeader", () => {
     expect(Number(first.style.zIndex)).toBeGreaterThan(Number(second.style.zIndex));
   });
 
+  it("paints the agent's role under the name, on the block header's own tier", () => {
+    // The takeover is a swap of the state line, not a re-layout: the block
+    // header shows name + role, so the claim window has to show the role
+    // already or the handover inserts a line under the name and shifts the
+    // column. Tier and order are the assertion; the block's own suite pins
+    // what the role's tier IS.
+    const withRole: TurnIdentity = { ...A, role: "资深工程师" };
+    render(<ChatTurnHeader identities={[withRole]} text="working" />);
+    const header = document.querySelector("[data-turn-header]")!;
+    const text = header.textContent ?? "";
+    const nameAt = text.indexOf("Agent A");
+    const roleAt = text.indexOf("资深工程师");
+    const wordAt = text.indexOf("working");
+    expect(nameAt).toBeGreaterThanOrEqual(0);
+    expect(roleAt).toBeGreaterThan(nameAt);
+    expect(wordAt).toBeGreaterThan(roleAt);
+    expect(screen.getByText("资深工程师").className).toContain("text-10");
+  });
+
+  it("a claim carrying no role paints no line, not an empty one", () => {
+    render(<ChatTurnHeader identities={[A]} text="working" />);
+    const header = document.querySelector("[data-turn-header]")!;
+    expect(header.querySelectorAll(".text-10")).toHaveLength(0);
+  });
+
+  it("a fan-out leaves the role out — a joined role list names nobody", () => {
+    // One send is one fact, and a fan-out's identity line is already a list of
+    // names; joining the roles as well ("A工程师、B工程师") would state a fact
+    // about no single responder. The faces say "several" on their own.
+    render(
+      <ChatTurnHeader
+        identities={[{ ...A, role: "资深工程师" }, { ...B, role: "测试工程师" }]}
+        text="working"
+      />,
+    );
+    const header = document.querySelector("[data-turn-header]")!;
+    expect(header.textContent).not.toContain("资深工程师");
+    expect(header.textContent).not.toContain("测试工程师");
+    expect(header.querySelectorAll(".text-10")).toHaveLength(0);
+  });
+
   it("no identities, no header — a faceless avatar is the centered line's job", () => {
     const { container } = render(<ChatTurnHeader identities={[]} text="working" />);
     expect(container.innerHTML).toBe("");

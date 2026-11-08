@@ -81,9 +81,18 @@ vi.mock("../../stores/chatStore", () => ({
   ),
 }));
 
+// The registry meta the surface reads a responder's face, name and role from.
+// `role` is mutable per case: it is what the turn header paints under the name
+// (ADR-106 rev. 2026-11-08), and losing it on the way to the header is exactly
+// the defect the case below pins.
+let agentRole: string | undefined;
 vi.mock("../../stores/agentStore", () => ({
   useAgentStore: (selector: (state: unknown) => unknown) =>
-    selector({ agents: { [AGENT]: { meta: { display_name: "Agent A", name: "agent-a" } } } }),
+    selector({
+      agents: {
+        [AGENT]: { meta: { display_name: "Agent A", name: "agent-a", role: agentRole } },
+      },
+    }),
 }));
 
 vi.mock("../../stores/authStore", () => ({
@@ -306,6 +315,7 @@ describe("AgentChatView event-log wiring", () => {
     vi.clearAllMocks();
     sendingMap = {};
     inflightMap = {};
+    agentRole = undefined;
     setModeMock = vi.fn();
     openSessionMock = vi.fn().mockResolvedValue(undefined);
     seedTitleMock = vi.fn();
@@ -474,6 +484,18 @@ describe("AgentChatView event-log wiring", () => {
     // The lock is the header's to keep — the upgrade changes the shape, not
     // the claim's teeth.
     expect(sendDisabled()).toBe(true);
+  });
+
+  it("the turn header carries the agent's role, as the block header will", () => {
+    // Same registry meta, same field: the wait line and the block that takes
+    // it over must agree on who is speaking, or the role appears only after
+    // the handover and the reader sees the header change, not just settle.
+    agentRole = "资深工程师";
+    windows = windowOf(userRow(1, "hello there"));
+    inflightMap = { [SESSION]: { messageId: "u1", at: 1, responders: [AGENT] } };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const header = document.querySelector("[data-turn-header]")!;
+    expect(header.textContent).toContain("资深工程师");
   });
 
   it("an unresolvable responder degrades the header to the centered line", () => {
