@@ -117,7 +117,12 @@ vi.mock("../../lib/stickToBottom", () => ({
   useStickToBottom: () => ({ ref: { current: null }, stickNow: vi.fn() }),
 }));
 vi.mock("../../i18n/useTranslation", () => ({
-  useTranslation: () => ({ t: (key: string) => key }),
+  useTranslation: () => ({
+    t: (key: string) => key,
+    // The real hook returns `{ t, i18n }`; the turn header reads the locale to
+    // join a multi-responder name chain, so the fake has to carry it.
+    i18n: { language: "zh-CN" },
+  }),
 }));
 
 vi.mock("../common/AgentAvatar", () => ({ AgentAvatar: () => <div /> }));
@@ -190,6 +195,32 @@ describe("GroupChatPanel in-flight turn claim", () => {
     );
     expect(composerLocked()).toBe(true);
     expect(sendDisabled()).toBe(true);
+  });
+
+  it("a claim naming its responders wears the turn header (ADR-106 rev 2026-11-08)", () => {
+    // The names come from the delivery decision's inputs recorded at send
+    // time, not from the transcript's shape: with them the wait wears faces.
+    tail = [row(1, { body: "fix the pagination" })];
+    inflightMap = { [GROUP]: { messageId: "m1", at: 1, responders: [AGENT_A] } };
+    render(<GroupChatPanel />);
+    const header = document.querySelector("[data-turn-header]");
+    expect(header).toBeTruthy();
+    expect(header!.textContent).toContain("Agent A");
+    // The centered line steps back — one statement, one shape.
+    expect(document.querySelector("[data-event-text]")).toBeNull();
+    expect(composerLocked()).toBe(true);
+  });
+
+  it("an unresolvable responder degrades the header to the generic line", () => {
+    // An agent the registry lost must not buy the header a blank face: the
+    // surface falls back to the centered line it used before the revision.
+    tail = [row(1, { body: "fix the pagination" })];
+    inflightMap = { [GROUP]: { messageId: "m1", at: 1, responders: ["ghost-x"] } };
+    render(<GroupChatPanel />);
+    expect(document.querySelector("[data-turn-header]")).toBeNull();
+    expect(screen.getByRole("status").textContent).toContain(
+      "chatView.notice.pendingTurnGeneric",
+    );
   });
 
   it("the round's reference row settles the claim: line gone, composer live", () => {

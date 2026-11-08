@@ -105,7 +105,7 @@ import {
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
-import { turnInflight } from "../../lib/chatTurnInflight";
+import { turnInflight, resolveExpectedResponders } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
 import {
   fetchCardAnswer,
@@ -872,7 +872,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         undefined,
         answer.attachmentIds,
         directCardAddress(answer),
-        [agentId],
+        resolveExpectedResponders({ peer: agentId }),
       );
       return true;
     },
@@ -930,7 +930,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       sessionConfig,
       attachmentIds,
       wire,
-      [agentId],
+      resolveExpectedResponders({ peer: agentId }),
     );
   };
 

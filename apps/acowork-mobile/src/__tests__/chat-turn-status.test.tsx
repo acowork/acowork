@@ -126,6 +126,33 @@ describe('AgentChatScreen in-flight turn claim', () => {
     expect(sendButton().disabled).toBe(true)
   })
 
+  it('a claim that names its responder wears the turn header (ADR-106 rev. 2026-11-08)', () => {
+    // The peer id was recorded on the claim at send time — a delivery decision
+    // input, not a read of the transcript's shape. With it the wait wears the
+    // peer's face and name, and the centered line steps back: one statement,
+    // one shape. The lock is the header's to keep.
+    seed([HUMAN], { [SESSION]: { messageId: 'm-1', at: 1, responders: [AGENT] } })
+    mount()
+    const header = container.querySelector('.chat-turn-header')
+    expect(header).toBeTruthy()
+    expect(header!.textContent).toContain('小助手')
+    expect(header!.textContent).toContain('正在处理')
+    expect(container.querySelector('.msg-avatar')).toBeTruthy()
+    expect(container.querySelector('.chat-turn-status')).toBeNull()
+    expect(composer().disabled).toBe(true)
+  })
+
+  it('a claim naming an agent this device cannot resolve keeps the centered line', () => {
+    // No face without a name to put on it: the header is an upgrade, never a
+    // prerequisite of the claim, so the wait falls back to the platform's own
+    // line while the lock holds.
+    seed([HUMAN], { [SESSION]: { messageId: 'm-1', at: 1, responders: ['ghost-x'] } })
+    mount()
+    expect(container.querySelector('.chat-turn-header')).toBeNull()
+    expect(statusLine()?.textContent).toContain('小助手')
+    expect(composer().disabled).toBe(true)
+  })
+
   it('the round’s reference row settles the claim: line gone, composer live', () => {
     // From here the block narrates the run (D3/D9), so a follow-up is allowed —
     // the execution side has a queue for it; the Chat does not need one. And the

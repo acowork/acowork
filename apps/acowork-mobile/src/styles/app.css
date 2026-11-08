@@ -2433,6 +2433,18 @@
   color: var(--color-danger, #ef4444);
 }
 
+/* Turn header (ADR-106 revision 2026-11-08): the claim-window identity line —
+   the expected responder's face + name + the claim's word. It wears the exact
+   geometry of a message header (`.msg-header`), because the block's own header
+   takes over at this anchor when the first answering row lands: the handover
+   must read as one column that stops shimmering, not as a jump. */
+.chat-turn-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 6px 0;
+}
+
 /* Back-to-bottom arrow on the agent chat: the reader scrolled up off the tail.
    `position: sticky` (not an overlay) for the same reason as `.chat-newpill`:
    `.screen` is not a positioned ancestor, and a chip that only ever grows the
