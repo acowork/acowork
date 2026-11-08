@@ -143,7 +143,6 @@ interface RowProps {
    *  `pause` card's continue button, and any follow-up on a finished round,
    *  ride. `quote` is the question the human is answering. */
   onReplyToRound: (rowId: string, quote: string) => void;
-  onContinueRound?: (rowId: string) => void;
   /** Attach one execution session to this draft as a reference (design 27
    *  §5.5.5) — the block's `@` action, riding the same address state the `@`
    *  picker commits to. */
@@ -447,7 +446,6 @@ const ItemView = memo(function ItemView({
         hasFollowUp={hasFollowUp}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
-        onContinueRound={rowProps.onContinueRound}
         onReferenceRun={rowProps.onReferenceRun}
         onChooseCard={rowProps.onChooseCard}
         focusInput={
@@ -755,19 +753,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     setReplyTarget({ id: rowId, quote });
     textareaRef.current?.focus();
   }, []);
-
-  // A `pause` card's Continue answers the way the execution surface's Paused
-  // card does — one click, no typing. The reply is sent programmatically,
-  // addressed to the round (D6 level 1), so it continues that run without
-  // routing and without a composer detour; the human who wants to say
-  // something else instead of "Continue" types it into the same block.
-  const handleContinueRound = useCallback(
-    (rowId: string) => {
-      stickNow();
-      void sendText(sessionId, "Continue", rowId, undefined, [], undefined);
-    },
-    [sendText, sessionId, stickNow],
-  );
 
   // ADR-106 revision 2026-11-04: "去续投" / a source-chip click locate the run's
   // block. The block is the newest `execution_round` row whose session matches;
@@ -1250,7 +1235,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 }
                 onJumpToExec={handleBlockJump}
                 onReplyToRound={handleReplyToRound}
-                onContinueRound={handleContinueRound}
                 onReferenceRun={handleReferenceRun}
                 onChooseCard={
                   item.kind === "row" && mayAnswerCard(item.row, me)
