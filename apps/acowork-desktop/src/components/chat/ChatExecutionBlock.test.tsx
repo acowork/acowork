@@ -1067,6 +1067,89 @@ describe("ChatExecutionBlock action row", () => {
     expect(screen.getByText("chatView.block.confirmSession")).toBeTruthy();
   });
 
+  /** Design 27 §5.4.5: one row, two audiences. The row body is the machine
+   *  envelope the model reads; the display projection beside it is what a human
+   *  reads. Before this, a peer round printed `[intent:2f3c…:analyze] {"title":…}`
+   *  in the row line, the panel and the copy export. */
+  it("an agent-origin round shows the human display, not the envelope", () => {
+    const base = roundRow(3, "r1");
+    const peer: RoundItem = {
+      ref: REF1,
+      roundRow: {
+        ...base,
+        meta: { ...base.meta, opened_new: true, assignment_brief: "审计 usecase 分层" },
+      },
+      showUserLine: false,
+      questionOnTranscript: true,
+    };
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            user: {
+              body: '[intent:inst-a:analyze] {"title":"审计 usecase 分层"}',
+              ts: "1",
+              display: {
+                summary: "审计 usecase 分层",
+                body: "### 审计 usecase 分层\n\n检查接口分层",
+              },
+            },
+            answer: { body: "done", ts: "2" },
+            card: null,
+          },
+        }),
+      },
+      {},
+      blockOf([peer]),
+    );
+    // The newest round opens by default, so the question panel is on screen.
+    // The human rendering went through the Markdown renderer (the question panel
+    // is the first `md` slot; the answer panel follows it)...
+    expect(screen.getAllByTestId("md")[0]!.textContent).toContain("检查接口分层");
+    // ...the raw envelope is a disclosure, closed by default, not the panel...
+    expect(screen.getByText("chatView.block.rawEnvelope")).toBeTruthy();
+    const details = container.querySelector("details");
+    expect(details?.textContent).toContain("[intent:inst-a:analyze]");
+    expect(details?.hasAttribute("open")).toBe(false);
+    // ...and the round's line names the work, not the payload.
+    expect(container.textContent).toContain("审计 usecase 分层");
+  });
+
+  it("a legacy round without a display still renders its stored row", () => {
+    // Rows written before the projection existed carry no display: the fallback
+    // is the stored body, so old transcripts keep rendering exactly as they did.
+    const base = roundRow(3, "r1");
+    const peer: RoundItem = {
+      ref: REF1,
+      roundRow: base,
+      showUserLine: false,
+      questionOnTranscript: true,
+    };
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            user: { body: "[intent:inst-a:analyze] {}", ts: "1" },
+            answer: { body: "done", ts: "2" },
+            card: null,
+          },
+        }),
+      },
+      {},
+      blockOf([peer]),
+    );
+    // No display → no panel and no disclosure chrome; the row line falls back to
+    // the stored body (truncated by the row, as before).
+    expect(screen.queryByText("chatView.block.rawEnvelope")).toBeNull();
+    expect(container.textContent).toContain("[intent:inst-a:analyze]");
+  });
+
   it("a viewer who cannot answer sees the block without the question's buttons", () => {
     const ask: ChatMessageRow = {
       seq: 9,

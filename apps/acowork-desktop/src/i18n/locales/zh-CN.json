@@ -318,7 +318,9 @@
         "toolExecuting": "执行工具中",
         "waitingApproval": "等你审批",
         "paused": "已暂停"
-      }
+      },
+      "rawEnvelope": "原始信封（机器格式）",
+      "displayTruncated": "正文已截断，完整内容见原始信封"
     },
     "address": {
       "label": "这条消息投给哪个任务？",

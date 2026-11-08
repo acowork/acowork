@@ -215,6 +215,30 @@ function questionOf(
     (round.questionOnTranscript
       ? (round.roundRow.meta?.assignment_brief ?? "")
       : "") ||
+    // An agent-origin round (design 27 §5.4.5): the row body is the machine
+    // envelope, and the display projection beside it is the sentence a human
+    // reads. `summary` first (a title when the sender gave one) and the body
+    // after it, because a round row's line is a name, not a paragraph.
+    projection?.user?.display?.summary ||
+    projection?.user?.display?.body ||
+    projection?.user?.body ||
+    ""
+  );
+}
+
+/**
+ * The question a reader EXPANDS into — the full text, not the row's one-liner.
+ *
+ * Same precedence as {@link questionOf} with the display's `body` ahead of its
+ * `summary`: the collapsed row names the round, the open round shows it.
+ */
+function questionBodyOf(
+  round: RunBlock["rounds"][number],
+  projection: RoundProjection | undefined,
+): string {
+  return (
+    projection?.user?.display?.body ||
+    (round.showUserLine ? (round.triggerRow?.body ?? "") : "") ||
     projection?.user?.body ||
     ""
   );
@@ -390,9 +414,17 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
     // received is the only human text the run has, so it names the run; without
     // it a task block reads "unnamed run" beside its own task chip, which is
     // how the dispatch appeared to vanish from the group.
+    // A peer round's `user.body` is the machine envelope, so the run is named by
+    // the display projection when the turn has one (design 27 §5.4.5) — the same
+    // sentence the exec session's own title is seeded from.
     deriveSessionTitle(
       block.rounds
-        .map((round) => entries[round.ref]?.projection?.user?.body ?? "")
+        .map((round) => {
+          const user = entries[round.ref]?.projection?.user;
+          return (
+            user?.display?.summary || user?.display?.body || user?.body || ""
+          );
+        })
         .find((body) => body.trim() !== "") ?? "",
     ) ||
     t("chatView.block.unnamedRun");
@@ -429,7 +461,10 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
           const status = roundStatus(entry);
           return {
             index: i + 1,
-            question: questionOf(round, projection),
+            // The export is a document a reader points at, so it carries the
+            // full question the round shows when expanded — for an agent-origin
+            // round that is the display body, not the `[intent:…] {json}` row.
+            question: questionBodyOf(round, projection),
             // No answer body: the round's outcome is what it has to say, in the
             // same words its row uses.
             answer: answer || (projection ? t(statusKey(status)) : ""),
@@ -676,17 +711,18 @@ function RoundItem({
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
   const projection = entry?.projection;
-  // An opener round's sentence stands on the transcript as its own bubble — the
-  // block's line leads with the reference row's one-line `assignment_brief`, not
-  // with a second copy of the raw text and not with the projection's stored
-  // question (that one is the delivered prompt, reference parts and all). The
-  // Runtime's `reference_brief` owns what may be written there: a PM dispatch is
-  // named by its own text, never by the wake-up playbook.
-  const question =
-    (round.showUserLine ? round.triggerRow?.body : "") ||
-    (round.questionOnTranscript ? round.roundRow.meta?.assignment_brief ?? "" : "") ||
-    projection?.user?.body ||
-    "";
+  // One answer for the row's line and the copy export (`questionOf`), one for
+  // the expanded panel (`questionBodyOf`): an opener round's sentence already
+  // stands on the transcript as its own bubble, so the row leads with the
+  // reference row's one-line name and does not repeat the raw text; an
+  // agent-origin round has no bubble at all, and shows the display projection it
+  // carries instead of the machine envelope (design 27 §5.4.5).
+  const question = questionOf(round, projection);
+  const questionBody = questionBodyOf(round, projection);
+  // The machine format, kept reachable but never painted by default: this is the
+  // envelope the model reads (coordinates, `params`).
+  const rawEnvelope = projection?.user?.display ? (projection.user.body ?? "") : "";
+  const display = projection?.user?.display ?? null;
   // A round with nothing readable says so instead of borrowing the wrong line.
   const summary = summarize(question) || t("chatView.block.noQuestion");
   const pending = entry?.status === "pending";
@@ -776,6 +812,35 @@ function RoundItem({
             >
               {question}
             </pre>
+          )}
+          {/* An agent-origin round has no bubble of its own on the transcript
+              (ADR-106 D12 writes no chat row for the exchange), so this is the
+              only place its question appears — as the display projection the
+              turn carried, in Markdown, with the machine envelope one click
+              away. Painting `projection.user.body` here is what read
+              `[intent:2f3c…:analyze] {"title":…}` to a human. */}
+          {!round.showUserLine && display && questionBody && (
+            <div
+              className="rounded bg-[var(--color-accent)]/10 p-2 text-text-secondary"
+              style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
+            >
+              <ChatMarkdown content={questionBody} />
+              {display.truncated ? (
+                <div className="mt-1 text-text-tertiary">
+                  {t("chatView.block.displayTruncated")}
+                </div>
+              ) : null}
+              {rawEnvelope ? (
+                <details className="mt-1">
+                  <summary className="cursor-pointer text-text-tertiary">
+                    {t("chatView.block.rawEnvelope")}
+                  </summary>
+                  <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-zinc-100 p-2 text-text-tertiary dark:bg-zinc-800">
+                    {rawEnvelope}
+                  </pre>
+                </details>
+              ) : null}
+            </div>
           )}
           <RoundBody
             entry={entry}
