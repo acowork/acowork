@@ -1066,11 +1066,28 @@ async fn dispatch_inbound(
                         // own inbound id, which is the same value `run()` will
                         // mint, so the surface names the round even for a loop
                         // with no conversation writer.
+                        // ADR-106 §2.2 availability gate, the honest form:
+                        // this transport carries a message a VERIFIED HUMAN
+                        // ACCOUNT wrote (the HTTP `/messages` action's
+                        // Gateway-checked caller uid, the same value
+                        // `answerable_by` holds). A non-empty caller uid is
+                        // therefore a human participant of the chat this
+                        // turn is accountable to — `Some(true)`. An empty
+                        // uid (no account system) stays answerable-by nobody,
+                        // so the card gate fails closed on `card_target`
+                        // alone and `has_human` must not claim otherwise.
+                        // This was `None`, and `None` was a lie with a
+                        // symptom: the iteration-limit branch requires
+                        // `Some(true)` to park the round on a pause card, so
+                        // every chat turn that hit the limit fell through to
+                        // the legacy indefinite `Paused` — a card the
+                        // execution surface shows and the Chat never learns
+                        // of (the "no Continue button in the block" defect).
                         surface: crate::agent::intent_turn::TurnSurface::new(
                             String::new(),
                             &message_id,
                             &answerable_by,
-                            None,
+                            Some(!answerable_by.is_empty()),
                         ),
                     },
                 );
