@@ -217,10 +217,19 @@ async fn rejected_parameters_are_corrected_confirmed_and_persisted() {
     );
 
     // ── Persisted in its own file ─────────────────────────────────────
+    //
+    // Poll for the KEY, not for readability: the file is written whole, and
+    // an earlier persist (the one that carried the still-unconfirmed
+    // candidate) already left a readable `{"version":3,"entries":{}}`
+    // behind. Breaking on "some file exists" therefore sampled that stale
+    // snapshot and failed under machine load, while passing whenever the
+    // confirmed write happened to win the race.
     let path = cache_path(dir.path().to_str().expect("utf-8 path"));
     let mut persisted = String::new();
     for _ in 0..40 {
-        if let Ok(raw) = std::fs::read_to_string(&path) {
+        if let Ok(raw) = std::fs::read_to_string(&path)
+            && raw.contains(&key)
+        {
             persisted = raw;
             break;
         }
