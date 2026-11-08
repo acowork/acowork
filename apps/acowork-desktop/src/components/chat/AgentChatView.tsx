@@ -118,7 +118,7 @@ import { DeliveryAlertLine } from "./DeliveryAlertLine";
 import { useChatStore } from "../../stores/chatStore";
 import type { WorkspaceRef } from "../../lib/types";
 import { useAgentStore } from "../../stores/agentStore";
-import { sessionExists } from "../../lib/session-control";
+import { sendMessage, sessionExists } from "../../lib/session-control";
 import { showToast } from "../common/ToastProvider";
 import { useAuthStore } from "../../stores/authStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
@@ -143,6 +143,11 @@ interface RowProps {
    *  `pause` card's continue button, and any follow-up on a finished round,
    *  ride. `quote` is the question the human is answering. */
   onReplyToRound: (rowId: string, quote: string) => void;
+  /** A pause card's Continue, delivered as a plain "Continue" message to the
+   *  execution session's own write endpoint — a control signal for that
+   *  session's loop, NOT a chat utterance: the chat send path, the Chat
+   *  Router and the transcript never see it. */
+  onContinueRound: (instanceId: string, execSessionId: string) => void;
   /** Attach one execution session to this draft as a reference (design 27
    *  §5.5.5) — the block's `@` action, riding the same address state the `@`
    *  picker commits to. */
@@ -446,6 +451,7 @@ const ItemView = memo(function ItemView({
         hasFollowUp={hasFollowUp}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
+        onContinueRound={rowProps.onContinueRound}
         onReferenceRun={rowProps.onReferenceRun}
         onChooseCard={rowProps.onChooseCard}
         focusInput={
@@ -753,6 +759,27 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     setReplyTarget({ id: rowId, quote });
     textareaRef.current?.focus();
   }, []);
+
+  // A pause card's Continue is a control signal for the execution session's
+  // loop, not a chat utterance: it goes straight to that session's own write
+  // endpoint — the same request the execution composer makes when a human
+  // types "Continue". The chat send path never sees it, so no user bubble
+  // lands in the transcript and the Chat Router cannot hijack it; the runtime
+  // opens the next turn in place, the iteration counter resets, and the
+  // round's reference row lands in this same block as Round N.
+  const handleContinueRound = useCallback(
+    (instanceId: string, execSessionId: string) => {
+      if (!execSessionId) return;
+      void sendMessage(instanceId, execSessionId, {
+        content: "Continue",
+        message_id: `msg-${crypto.randomUUID()}`,
+      }).catch((err) => {
+        console.error("[chat] pause-card continue failed:", err);
+        showToast({ type: "error", message: t("chatView.continueFailed") });
+      });
+    },
+    [showToast, t],
+  );
 
   // ADR-106 revision 2026-11-04: "去续投" / a source-chip click locate the run's
   // block. The block is the newest `execution_round` row whose session matches;
@@ -1235,6 +1262,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 }
                 onJumpToExec={handleBlockJump}
                 onReplyToRound={handleReplyToRound}
+                onContinueRound={handleContinueRound}
                 onReferenceRun={handleReferenceRun}
                 onChooseCard={
                   item.kind === "row" && mayAnswerCard(item.row, me)

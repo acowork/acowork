@@ -158,6 +158,7 @@
     "cardAsk": "Agent Question",
     "cardApproval": "Approval Required",
     "cardAnswerGone": "This card can no longer be answered — the message it asks about is gone",
+    "continueFailed": "Couldn't resume this run — try again",
     "cardPause": "Step Confirmation",
     "cardApprove": "Approve",
     "cardReject": "Reject",

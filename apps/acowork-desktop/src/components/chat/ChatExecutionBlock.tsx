@@ -94,6 +94,14 @@ interface ChatExecutionBlockProps {
   /** Address the composer to one round (D6 level 1) — what a `pause` card's
    *  "continue" and any follow-up on a finished round ride. */
   onReplyToRound?: (rowId: string, quote: string) => void;
+  /** A pause card's Continue, sent as a plain "Continue" message straight to
+   *  the execution session's own write endpoint — the same request the
+   *  execution composer makes when a human types it. It is a control signal
+   *  for that session's loop, NOT a chat message: the chat send path never
+   *  sees it, so no user bubble lands in the transcript and the Chat Router
+   *  cannot hijack it into a new session. Absent, the button falls back to
+   *  addressing the composer. */
+  onContinueRound?: (instanceId: string, execSessionId: string) => void;
   /** Attach this execution session to the composer as a reference (ADR-106 D7):
    *  the block's `@` action. The host owns the composer's address state, so the
    *  block reports the intent and never touches it directly. Absent on a surface
@@ -236,6 +244,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   hasFollowUp,
   onJumpToExec,
   onReplyToRound,
+  onContinueRound,
   onReferenceRun,
   canAnswer = true,
   onAuthorContextMenu,
@@ -604,6 +613,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                         reload={reload}
                         canAnswer={canAnswer}
                         onReplyToRound={onReplyToRound}
+                        onContinueRound={onContinueRound}
                       />
                     ))}
                   </div>
@@ -645,6 +655,7 @@ interface RoundItemProps {
   reload: (chatId: string, refs: string[]) => void;
   canAnswer: boolean;
   onReplyToRound?: (rowId: string, quote: string) => void;
+  onContinueRound?: (instanceId: string, execSessionId: string) => void;
 }
 
 /** One round: a question line that opens into the question/answer pair, in
@@ -660,6 +671,7 @@ function RoundItem({
   reload,
   canAnswer,
   onReplyToRound,
+  onContinueRound,
 }: RoundItemProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
@@ -782,6 +794,7 @@ function RoundItem({
               reloadRound={() => reload(chatSessionId, [round.ref])}
               rowId={round.roundRow.meta?.message_id ?? ""}
               onReplyToRound={onReplyToRound}
+              onContinueRound={onContinueRound}
             />
           ) : null}
         </div>
@@ -887,6 +900,7 @@ interface BlockCardActionsProps {
    *  level 1). */
   rowId: string;
   onReplyToRound?: (rowId: string, quote: string) => void;
+  onContinueRound?: (instanceId: string, execSessionId: string) => void;
 }
 /**
  * The round's pending decision, answered against the EXECUTION session (D8).
@@ -908,6 +922,7 @@ function BlockCardActions({
   reloadRound,
   rowId,
   onReplyToRound,
+  onContinueRound,
 }: BlockCardActionsProps) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
@@ -973,12 +988,23 @@ function BlockCardActions({
             <ChatMarkdown content={card.prompt} />
           </div>
         ) : null}
-        {canAnswer && onReplyToRound ? (
+        {canAnswer && (onContinueRound || onReplyToRound) ? (
           <button
             type="button"
             className={cardButtonAccent}
             style={{ backgroundColor: "var(--color-accent-strong)" }}
-            onClick={() => onReplyToRound(rowId, card.prompt ?? "")}
+            // Continue is a control signal for the execution session's loop,
+            // not a chat message: it goes to the execution session's own
+            // write endpoint — the same request the execution composer makes
+            // when a human types "Continue". The chat send path never sees
+            // it, so no user bubble lands in the transcript and the Chat
+            // Router cannot hijack it into a new session. Without an
+            // execution id on the projection, fall back to the composer.
+            onClick={() =>
+              execSid && onContinueRound
+                ? onContinueRound(instanceId, execSid)
+                : onReplyToRound?.(rowId, card.prompt ?? "")
+            }
           >
             {t("chatView.cardContinue")}
           </button>

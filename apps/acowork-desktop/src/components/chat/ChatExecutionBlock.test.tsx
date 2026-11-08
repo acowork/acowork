@@ -519,6 +519,32 @@ describe("ChatExecutionBlock", () => {
     expect(sendAnswer).not.toHaveBeenCalled();
   });
 
+  it("a pause card's Continue goes straight to the execution session, not through the chat composer", () => {
+    const onReplyToRound = vi.fn();
+    const onContinueRound = vi.fn();
+    renderBlock(
+      {
+        [REF1]: entryOf({
+          status: "pending",
+          projection: {
+            round_id: "r1",
+            terminal: false,
+            status: "waiting",
+            card: { kind: "pause", request_id: "p1", prompt: "Blocked on you" },
+          },
+        }),
+      },
+      { onReplyToRound, onContinueRound },
+    );
+    fireEvent.click(screen.getByText("chatView.cardContinue"));
+    // The resume message rides the execution session's own write endpoint —
+    // instance id and execution session id, the same pair the execution
+    // composer posts to. The chat send path (composer addressing) is never
+    // involved: no user bubble in the transcript, no Chat Router detour.
+    expect(onContinueRound).toHaveBeenCalledWith("ag", "s1");
+    expect(onReplyToRound).not.toHaveBeenCalled();
+  });
+
   it("the header carries the session's live state without inventing liveness", () => {
     store.chat = {
       agentStates: {
