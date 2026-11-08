@@ -104,7 +104,8 @@ import {
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
-import { turnInflight } from "../../lib/chatTurnInflight";
+import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
+import { turnInflight, resolveExpectedResponders } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
 import {
   fetchCardAnswer,
@@ -143,6 +144,11 @@ interface RowProps {
    *  `pause` card's continue button, and any follow-up on a finished round,
    *  ride. `quote` is the question the human is answering. */
   onReplyToRound: (rowId: string, quote: string) => void;
+  /** A pause card's Continue, delivered as a plain "Continue" message to the
+   *  execution session's own write endpoint — a control signal for that
+   *  session's loop, NOT a chat utterance: the chat send path, the Chat
+   *  Router and the transcript never see it. */
+  onContinueRound: (instanceId: string, execSessionId: string) => void;
   /** Attach one execution session to this draft as a reference (design 27
    *  §5.5.5) — the block's `@` action, riding the same address state the `@`
    *  picker commits to. */
@@ -446,6 +452,7 @@ const ItemView = memo(function ItemView({
         hasFollowUp={hasFollowUp}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
+        onContinueRound={rowProps.onContinueRound}
         onReferenceRun={rowProps.onReferenceRun}
         onChooseCard={rowProps.onChooseCard}
         focusInput={
@@ -616,6 +623,26 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // composer invites the second send this Chat has no queue to absorb, and a
   // locked composer with no line reads as a broken button.
   const composerLocked = sending || turnLive;
+  // The turn header's face (ADR-106 revision 2026-11-08): the claim's expected
+  // responder, resolved through the registry the bubbles already use. A 1:1
+  // chat's claim names exactly its peer — a delivery-decision input, not a
+  // transcript inference. Anything else (no responders on a legacy claim, a
+  // peer the registry lost) leaves this empty and the surface keeps the
+  // centered line: a header without a resolvable name is not an upgrade.
+  const turnHeaderIdentities = useMemo<TurnIdentity[]>(() => {
+    const ids = inflightTurn?.responders ?? [];
+    if (ids.length !== 1 || ids[0] !== agentId || !agentMeta) return [];
+    return [
+      {
+        id: agentId,
+        displayName: agentName,
+        role: agentMeta.role ?? null,
+        avatarUrl: agentMeta.avatar ?? null,
+        builtinAvatarId: agentMeta.builtin_avatar ?? null,
+        version: agentMeta.version ?? null,
+      },
+    ];
+  }, [inflightTurn, agentId, agentMeta, agentName]);
   // Hand the claim back as soon as a row answers it, so nothing keeps
   // asserting a turn the transcript has already settled.
   useEffect(() => {
@@ -754,6 +781,34 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     textareaRef.current?.focus();
   }, []);
 
+  // A pause card's Continue is a control signal for the execution session's
+  // loop, not a chat utterance: it goes straight to that session's own write
+  // endpoint — the same request the execution composer makes when a human
+  // types "Continue". The chat send path never sees it, so no user bubble
+  // lands in the transcript and the Chat Router cannot hijack it; the runtime
+  // opens the next turn in place, the iteration counter resets, and the
+  // round's reference row lands in this same block as Round N.
+  // A pause card's Continue is the SAME action as the execution surface's
+  // Continue banner: resume the paused turn in place (`POST /sessions/{sid}/continue`
+  // → `ContinueExecution`), so the iteration counter resets and the loop carries
+  // on inside the same round. Deliberately NOT a chat message: a "Continue"
+  // utterance would open a new turn with a fabricated user row, leave the paused
+  // round parked forever, and hand the text to the Chat Router — none of which
+  // the human asked for. One pause state, one resume path, two surfaces.
+  const handleContinueRound = useCallback(
+    (instanceId: string, execSessionId: string) => {
+      if (!execSessionId) return;
+      void useChatStore
+        .getState()
+        .continueExecution(instanceId, execSessionId)
+        .catch((err) => {
+          console.error("[chat] pause-card continue failed:", err);
+          showToast({ type: "error", message: t("chatView.continueFailed") });
+        });
+    },
+    [showToast, t],
+  );
+
   // ADR-106 revision 2026-11-04: "去续投" / a source-chip click locate the run's
   // block. The block is the newest `execution_round` row whose session matches;
   // its seq resolves through the layout's `keyOfSeq` to the virtual item, which
@@ -818,10 +873,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         undefined,
         answer.attachmentIds,
         directCardAddress(answer),
+        resolveExpectedResponders({ peer: agentId }),
       );
       return true;
     },
-    [sendText, sessionId, t],
+    [sendText, sessionId, t, agentId],
   );
 
   const handleSend = () => {
@@ -875,6 +931,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       sessionConfig,
       attachmentIds,
       wire,
+      resolveExpectedResponders({ peer: agentId }),
     );
   };
 
@@ -1235,6 +1292,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 }
                 onJumpToExec={handleBlockJump}
                 onReplyToRound={handleReplyToRound}
+                onContinueRound={handleContinueRound}
                 onReferenceRun={handleReferenceRun}
                 onChooseCard={
                   item.kind === "row" && mayAnswerCard(item.row, me)
@@ -1246,8 +1304,8 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               />
             )}
           />
-          {/* D9, first person only: this line claims that a send THIS device
-              made has not been answered yet. It starts from the id that send's
+          {/* D9, first person only: this claims that a send THIS device made
+              has not been answered yet. It starts from the id that send's
               response carried and ends at the first row answering it — the
               round's reference row, the router's own reply, a receipt — or on a
               deadline, so it cannot outlive the send it belongs to and never
@@ -1256,17 +1314,31 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               reload there is nothing to claim. The same flag locks the composer
               below — a Chat has no queue, so a second send would race a router
               still deciding the first. The round's own liveness rides inside its
-              block, off the `pending` projection read. */}
+              block, off the `pending` projection read.
+              ADR-106 revision (2026-11-08, the turn header): while the claim is
+              live and its expected responder resolves (a 1:1 chat's is its
+              peer — a delivery-decision input, not a transcript inference), the
+              wait wears the peer's avatar + name and hands over to the block's
+              own header at the same anchor when the first answering row lands.
+              The POST-in-flight moment and an unresolvable identity keep the
+              centered line: no face without a name to put on it. */}
           {composerLocked && (
-            <ChatTurnStatusLine
-              className="px-4"
-              live
-              text={
-                agentName
-                  ? t("chatView.notice.pendingTurn", { name: agentName })
-                  : t("chatView.notice.pendingTurnGeneric")
-              }
-            />
+            turnLive && turnHeaderIdentities.length > 0 ? (
+              <ChatTurnHeader
+                identities={turnHeaderIdentities}
+                text={t("chatView.notice.pendingTurnGeneric")}
+              />
+            ) : (
+              <ChatTurnStatusLine
+                className="px-4"
+                live
+                text={
+                  agentName
+                    ? t("chatView.notice.pendingTurn", { name: agentName })
+                    : t("chatView.notice.pendingTurnGeneric")
+                }
+              />
+            )
           )}
           {hasMoreNewer && (
             <div className="py-2 text-center text-10 text-text-tertiary">

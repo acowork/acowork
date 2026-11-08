@@ -57,6 +57,25 @@ vi.mock("./ComposerPlusMenu", () => ({ ComposerPlusMenu: PlusStub }));
 vi.mock("./ContextUsageIcon", () => ({ ContextUsageIcon: UsageStub }));
 vi.mock("./SessionVisibilityToggle", () => ({ SessionVisibilityToggle: VisStub }));
 
+// The row's usage gate reads context-usage presence from chatStore. The
+// fixture has usage for s-1 only — s-2 models the never-opened,
+// never-pushed run whose ring would have nothing honest to draw.
+const { chatStoreMock } = vi.hoisted(() => ({
+  chatStoreMock: {
+    agentStates: {
+      "ag-1": {
+        sessionStates: {
+          "s-1": { contextUsage: { usage_percent: 42, total_tokens: 100 } },
+          "s-2": {},
+        },
+      },
+    },
+  },
+}));
+vi.mock("../../stores/chatStore", () => ({
+  useChatStore: (selector: (state: unknown) => unknown) => selector(chatStoreMock),
+}));
+
 const uploadMock = vi.hoisted(() =>
   vi.fn(async (_chat: string, file: File) => ({
     id: `att-${file.name}`,
@@ -357,6 +376,16 @@ describe("RunBlockActionRow", () => {
     it("gates the + menu on the answerer, not on the viewer", () => {
       renderRow({ agentId: "ag-1", sessionId: "s-1", chatSessionId: "c1", canManage: false });
       expect(plusProps.current.readOnly).toBe(true);
+    });
+
+    it("hides the usage ring when the store has no context usage for the run", () => {
+      // A never-opened, never-pushed run would draw the ring at 0% — a lie.
+      renderRow({ agentId: "ag-1", sessionId: "s-2", chatSessionId: "c1" });
+      expect(screen.queryByTestId("usage")).toBeNull();
+      // The other two stay: their endpoints read AND write persisted
+      // session meta, so they work on a closed run.
+      expect(screen.getByTestId("plus-menu")).toBeTruthy();
+      expect(screen.getByTestId("visibility")).toBeTruthy();
     });
 
     it("uploads files picked via the + menu into the chat session, chips them in the drawer, and sends their ids with the next continuation", async () => {

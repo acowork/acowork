@@ -56,6 +56,7 @@ import { OutlineBrainIcon } from "../common/BrainIcon";
 import { ComposerPlusMenu } from "./ComposerPlusMenu";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
+import { useChatStore } from "../../stores/chatStore";
 import {
   useChatSessionStore,
   type ChatAttachmentMeta,
@@ -168,6 +169,19 @@ export function RunBlockActionRow({
    *  the pointer leaving, released when the field empties and lets go. */
   const [latched, setLatched] = useState(false);
   const fieldRef = useRef<HTMLTextAreaElement | null>(null);
+  // The usage ring renders ONLY when the store actually holds context usage
+  // for this run. A never-opened, never-pushed run has no numbers — and a
+  // ring pinned at 0% is a lie the row need not tell ("与其全0不如不显示").
+  // The two paths that fill the store also flip this: opening the exec
+  // session (loadSession's snapshot pull) and the run pushing
+  // `sessions/+/state` while it works. The `+` menu and the visibility
+  // toggle have no such condition — both their read AND write endpoints
+  // fall back to persisted session meta for closed sessions (verified:
+  // session_manager's `session_tool_policy` fs fallback, and
+  // `set_session_tool_policy_persists_for_live_and_closed_sessions`).
+  const usageKnown = useChatStore((s) =>
+    !!(agentId && sessionId && s.agentStates[agentId]?.sessionStates[sessionId]?.contextUsage),
+  );
   const leaveTimer = useRef<number | null>(null);
   const copiedTimer = useRef<number | null>(null);
   const lastSignal = useRef(false);
@@ -315,7 +329,7 @@ export function RunBlockActionRow({
           `sessions/+/state` subscription, the click only pulls the ≤3s
           coalescing gap) and read-visibility. They address the run by its
           own (agentId, sessionId), never the global selection. */}
-      {agentId && sessionId && (
+      {agentId && sessionId && usageKnown && (
         <ContextUsageIcon
           agentId={agentId}
           sessionId={sessionId}

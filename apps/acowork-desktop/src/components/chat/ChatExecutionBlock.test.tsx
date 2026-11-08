@@ -368,7 +368,11 @@ describe("ChatExecutionBlock", () => {
         },
       }),
     });
+    // The execution card's own interaction: pick a row, then submit. Nothing
+    // is sent until the submit, so a stray click on a sentence-shaped option
+    // cannot answer for the human.
     fireEvent.click(screen.getByText("A"));
+    fireEvent.click(screen.getByText("askQuestionCard.submit"));
     await waitFor(() =>
       expect(sendAnswer).toHaveBeenCalledWith("ag", "s1", {
         request_id: "q1",
@@ -433,14 +437,16 @@ describe("ChatExecutionBlock", () => {
         },
       }),
     });
+    // The submit is part of the answer: select, then send.
     fireEvent.click(screen.getByText("A"));
+    fireEvent.click(screen.getByText("askQuestionCard.submit"));
     await waitFor(() => expect(sendAnswer).toHaveBeenCalled());
     // The projection is the only thing that knows whether the question was still
     // open; `/answer` queues and answers 202 either way.
     await waitFor(() => expect(reload).toHaveBeenCalledWith("c1", [REF1]));
   });
 
-  it("options are a column, so a long label wraps instead of breaking the layout", () => {
+  it("options are a vertical radio list, so a long label wraps instead of breaking the layout", () => {
     renderBlock({
       [REF1]: entryOf({
         status: "pending",
@@ -459,13 +465,16 @@ describe("ChatExecutionBlock", () => {
     });
     const first = screen.getByText("按方案执行，TTL 10 分钟，桌面+手机同批");
     const second = screen.getByText("先只做不再持久化");
-    const column = first.parentElement!;
-    expect(column.className).toContain("flex-col");
-    expect(column).toBe(second.parentElement);
-    // Sentence-shaped options align left and wrap; a centered wrapped label
-    // reads as two options.
-    expect(first.className).toContain("text-left");
-    expect(first.className).toContain("whitespace-normal");
+    // The execution card's body: one radio row per option, stacked in a list.
+    // Sentence-shaped options are rows of a `ul`, never a wrapping button row
+    // that breaks mid-phrase; the label itself wraps (`break-words`).
+    const firstRow = first.closest("li");
+    const secondRow = second.closest("li");
+    expect(firstRow).toBeTruthy();
+    expect(firstRow!.tagName).toBe("LI");
+    expect(firstRow!.parentElement).toBe(secondRow!.parentElement);
+    expect(firstRow!.parentElement!.tagName).toBe("UL");
+    expect(first.className).toContain("break-words");
   });
 
   it("a viewer who is not the answerer sees the question and no buttons (D10)", () => {
@@ -508,6 +517,57 @@ describe("ChatExecutionBlock", () => {
     expect(onReplyToRound).toHaveBeenCalledWith("round:ag|s1|r1", "Blocked on you");
     // A pause has no execution-side request to resolve.
     expect(sendAnswer).not.toHaveBeenCalled();
+  });
+
+  it("a pause card's Continue goes straight to the execution session, not through the chat composer", () => {
+    const onReplyToRound = vi.fn();
+    const onContinueRound = vi.fn();
+    renderBlock(
+      {
+        [REF1]: entryOf({
+          status: "pending",
+          projection: {
+            round_id: "r1",
+            terminal: false,
+            status: "waiting",
+            card: { kind: "pause", request_id: "p1", prompt: "Blocked on you" },
+          },
+        }),
+      },
+      { onReplyToRound, onContinueRound },
+    );
+    fireEvent.click(screen.getByText("chatView.cardContinue"));
+    // The resume rides the same transition the execution surface's Continue
+    // sends — instance id and execution session id. The chat send path
+    // (composer addressing) is never involved: no user bubble in the
+    // transcript, no Chat Router detour.
+    expect(onContinueRound).toHaveBeenCalledWith("ag", "s1");
+    expect(onReplyToRound).not.toHaveBeenCalled();
+  });
+
+  it("a pause is resumed once — a second click cannot re-transition the same pause", () => {
+    const onContinueRound = vi.fn();
+    renderBlock(
+      {
+        [REF1]: entryOf({
+          status: "pending",
+          projection: {
+            round_id: "r1",
+            terminal: false,
+            status: "waiting",
+            card: { kind: "pause", request_id: "p1", prompt: "Blocked on you" },
+          },
+        }),
+      },
+      { onContinueRound },
+    );
+    const button = screen.getByText("chatView.cardContinue").closest("button")!;
+    fireEvent.click(button);
+    // The projection still says `waiting` until the runtime withdraws the card
+    // and its bell reaches this surface; in that window the button must not be
+    // able to ask the session to resume a pause it has already left.
+    fireEvent.click(button);
+    expect(onContinueRound).toHaveBeenCalledTimes(1);
   });
 
   it("the header carries the session's live state without inventing liveness", () => {

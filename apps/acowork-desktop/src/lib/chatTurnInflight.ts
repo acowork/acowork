@@ -44,6 +44,73 @@ export interface InflightTurn {
    *  (a `Date.now()` inside a memo would make the line's presence depend on
    *  when a re-render happened to occur). */
   at: number;
+  /**
+   * ADR-106 revision (2026-11-08, the turn header): the agent instances this
+   * send was EXPECTED to reach, read off the delivery decision's own inputs
+   * at send time — the `@`-mention list, the round being replied to, the
+   * group's default responder; for a 1:1 chat, its peer. These are facts about
+   * the routing's inputs, never inferences from transcript shape (what D9
+   * bans): a re-route or a failed delivery is stated by a server-side closing
+   * row, and a closing row ends the claim, so a wrong name cannot outlive the
+   * wait line it replaced. Absent (legacy claim, or a caller that knew
+   * nothing) → the surface keeps the generic centered line — the header is an
+   * upgrade, never a prerequisite of the claim.
+   */
+  responders?: string[];
+}
+
+/** The delivery decision's inputs, as each surface knows them at send time.
+ *  A 1:1 send carries `peer`; a group send carries `mentions` and, for a
+ *  level-1 reply, the addressed row as the loaded window has it; an
+ *  un-addressed group send carries the group's `defaultResponder`. */
+export interface ExpectedRespondersInput {
+  /** A 1:1 chat's peer — the only agent that send can reach. */
+  peer?: string | null;
+  /** The `@`-mention list a group send carries (instance ids). */
+  mentions?: readonly string[];
+  /** The row a group reply addresses (ADR-106 D6 level 1), as this surface can
+   *  see it: the row when the loaded window holds it; `null` when the send
+   *  addresses a row this surface has not loaded — an UNRESOLVED fact, not an
+   *  absent one; `undefined` when this send addresses nothing. */
+  repliedRow?: ChatMessageRow | null;
+  /** The group's default responder (ADR-105). */
+  defaultResponder?: string | null;
+}
+
+/** The Gateway's `addressed_execution_round` (`http/intent_api.rs`) mirrored:
+ *  only a reference row that names BOTH an agent and a session addresses a
+ *  round. A reply to any other row is an ordinary turn and the ladder falls
+ *  through — which is why the row, not a pre-resolved id, is what the surfaces
+ *  hand to `resolveExpectedResponders`. */
+function addressedRoundAgent(row: ChatMessageRow): string | null {
+  if (row.kind !== "execution_round") return null;
+  const agent = row.meta?.agent_instance_id;
+  const session = row.meta?.agent_session_id;
+  return agent && session ? agent : null;
+}
+
+/**
+ * The responder ids a send is expected to reach (ADR-106 revision 2026-11-08,
+ * design 33 §5) — the ONE place that ladder is written down, so a surface
+ * cannot re-derive it and drift. It mirrors the wire, not a wish: the Gateway
+ * resolves `in_reply_to` against the whole log and, when the row names a round,
+ * delivers to that round's agent ALONE and ignores the mention list beside it;
+ * otherwise the `@`s are the targets; an un-addressed group send goes to the
+ * default responder (ADR-105); none of those, and the row archives — no claim
+ * is armed for it, so an empty list is the honest answer.
+ */
+export function resolveExpectedResponders(
+  input: ExpectedRespondersInput,
+): string[] {
+  if (input.peer) return [input.peer];
+  if (input.repliedRow === null) return [];
+  if (input.repliedRow) {
+    const agent = addressedRoundAgent(input.repliedRow);
+    if (agent) return [agent];
+  }
+  const mentions = input.mentions ?? [];
+  if (mentions.length > 0) return [...mentions];
+  return input.defaultResponder ? [input.defaultResponder] : [];
 }
 
 /** Backstop for a turn whose outcome rows never arrive (a Runtime that died

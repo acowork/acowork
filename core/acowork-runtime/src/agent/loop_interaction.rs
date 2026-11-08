@@ -122,7 +122,7 @@ impl AgentLoop {
     /// re-reading", and the reader's bounded 500 ms retry (published path) is
     /// what covers the writer's few-microsecond lag — the same ordering the
     /// turn-boundary bell already relies on.
-    fn publish_round_card_state(&self, card: Option<serde_json::Value>) {
+    pub(crate) fn publish_round_card_state(&self, card: Option<serde_json::Value>) {
         let Some(conv) = &self.session.conversation else {
             return;
         };

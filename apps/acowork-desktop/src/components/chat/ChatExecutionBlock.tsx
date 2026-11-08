@@ -56,6 +56,9 @@ import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { RunBlockActionRow } from "./RunBlockActionRow";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
+import { InteractionCardShell } from "./InteractionCardShell";
+import { QuestionAnswerForm } from "./QuestionAnswerForm";
+import { cardButtonAccent, cardButtonNeutral } from "../../lib/ui-styles";
 import type { CardAnswerHandler, CardChoice } from "../../lib/chatCardAnswer";
 import { BLOCK_DETAIL_FONT_SIZE, BLOCK_FONT_SIZE } from "./blockTypeScale";
 import { runBlockToText } from "../../lib/runBlockText";
@@ -91,6 +94,14 @@ interface ChatExecutionBlockProps {
   /** Address the composer to one round (D6 level 1) — what a `pause` card's
    *  "continue" and any follow-up on a finished round ride. */
   onReplyToRound?: (rowId: string, quote: string) => void;
+  /** A pause card's Continue, sent as a plain "Continue" message straight to
+   *  the execution session's own write endpoint — the same request the
+   *  execution composer makes when a human types it. It is a control signal
+   *  for that session's loop, NOT a chat message: the chat send path never
+   *  sees it, so no user bubble lands in the transcript and the Chat Router
+   *  cannot hijack it into a new session. Absent, the button falls back to
+   *  addressing the composer. */
+  onContinueRound?: (instanceId: string, execSessionId: string) => void;
   /** Attach this execution session to the composer as a reference (ADR-106 D7):
    *  the block's `@` action. The host owns the composer's address state, so the
    *  block reports the intent and never touches it directly. Absent on a surface
@@ -233,6 +244,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   hasFollowUp,
   onJumpToExec,
   onReplyToRound,
+  onContinueRound,
   onReferenceRun,
   canAnswer = true,
   onAuthorContextMenu,
@@ -601,6 +613,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                         reload={reload}
                         canAnswer={canAnswer}
                         onReplyToRound={onReplyToRound}
+                        onContinueRound={onContinueRound}
                       />
                     ))}
                   </div>
@@ -642,6 +655,7 @@ interface RoundItemProps {
   reload: (chatId: string, refs: string[]) => void;
   canAnswer: boolean;
   onReplyToRound?: (rowId: string, quote: string) => void;
+  onContinueRound?: (instanceId: string, execSessionId: string) => void;
 }
 
 /** One round: a question line that opens into the question/answer pair, in
@@ -657,6 +671,7 @@ function RoundItem({
   reload,
   canAnswer,
   onReplyToRound,
+  onContinueRound,
 }: RoundItemProps) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(defaultOpen);
@@ -779,6 +794,7 @@ function RoundItem({
               reloadRound={() => reload(chatSessionId, [round.ref])}
               rowId={round.roundRow.meta?.message_id ?? ""}
               onReplyToRound={onReplyToRound}
+              onContinueRound={onContinueRound}
             />
           ) : null}
         </div>
@@ -884,13 +900,20 @@ interface BlockCardActionsProps {
    *  level 1). */
   rowId: string;
   onReplyToRound?: (rowId: string, quote: string) => void;
+  onContinueRound?: (instanceId: string, execSessionId: string) => void;
 }
-
-/** The round's pending decision, answered against the EXECUTION session (D8).
+/**
+ * The round's pending decision, answered against the EXECUTION session (D8).
  *  `request_id` is an unguessable capability the projection only hands to a
- *  participant, which is why no chat-side copy is needed to close it. The
- *  buttons are `ExploreBlock`'s approval pair — the same decision, on the same
- *  surface family, in the same chrome. */
+ *  participant, which is why no chat-side copy is needed to close it.
+ *
+ *  The chrome is the shared `InteractionCardShell` + `QuestionAnswerForm` —
+ *  the same components `AskQuestionCard` wears on the execution surface, so
+ *  one question does not change costume between surfaces. (This function used
+ *  to re-invent that: a bare title row, full-width option buttons whose first
+ *  was accent-washed, and an unstyled `<input>` next to a small button —
+ *  labels that did not read as labels, buttons that did not read as buttons.)
+ */
 function BlockCardActions({
   card,
   canAnswer,
@@ -899,11 +922,16 @@ function BlockCardActions({
   reloadRound,
   rowId,
   onReplyToRound,
+  onContinueRound,
 }: BlockCardActionsProps) {
   const { t } = useTranslation();
   const [busy, setBusy] = useState(false);
   const [failed, setFailed] = useState(false);
-  const [freeText, setFreeText] = useState("");
+  // A Continue is a state transition, not a message: once sent, this pause is
+  // over as far as this surface is concerned — a second click would ask the
+  // execution session to resume a pause it has already left. Keyed by
+  // `request_id`, so a genuinely new pause on the same row gets a live button.
+  const [sentFor, setSentFor] = useState<string | undefined>(undefined);
 
   const kind = card.kind ?? "ask_question";
   const Icon =
@@ -943,154 +971,129 @@ function BlockCardActions({
     }
   };
 
-  const denyBtn =
-    "rounded-md border border-zinc-300 px-2 py-0.5 text-11 font-medium text-text-secondary transition-colors hover:bg-zinc-200 disabled:opacity-50 dark:border-zinc-500  dark:hover:bg-zinc-600";
-  const allowBtn =
-    "rounded-md px-2 py-0.5 text-11 font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50";
+  const failedNote = failed ? (
+    <span className="text-red-500">{t("chatView.block.answerFailed")}</span>
+  ) : undefined;
+
+  // A viewer who is not a round's answerer (D10): the question shows, the
+  // controls do not — the click is the speaker's, and a dead button would
+  // promise a decision this surface cannot make.
+  const notYours = (
+    <p className="text-text-tertiary">{t("chatView.block.answeredByOwner")}</p>
+  );
 
   // A pause has no execution-side request to resolve: the turn already ended
   // `waiting`, and the human's reply IS the next turn of this round (D6
   // level 1) — so it rides the composer, addressed to the reference row.
   if (kind === "pause") {
     return (
-      <div className="space-y-1 py-1">
-        <div className="flex items-center gap-1.5 text-text-secondary">
-          <Icon className="h-3.5 w-3.5 shrink-0" />
-          <span>{t(titleKey)}</span>
-        </div>
+      <InteractionCardShell icon={Icon} title={t(titleKey)}>
         {card.prompt ? (
-          <div className="text-text-secondary">
+          <div className="mb-2">
             <ChatMarkdown content={card.prompt} />
           </div>
         ) : null}
-        {canAnswer && onReplyToRound ? (
+        {canAnswer && (onContinueRound || onReplyToRound) ? (
           <button
             type="button"
-            className={allowBtn}
+            className={cardButtonAccent}
             style={{ backgroundColor: "var(--color-accent-strong)" }}
-            onClick={() => onReplyToRound(rowId, card.prompt ?? "")}
+            // Continue is a control signal for the execution session's loop,
+            // not a chat message: it goes to the execution session's own
+            // write endpoint — the same request the execution composer makes
+            // when a human types "Continue". The chat send path never sees
+            // it, so no user bubble lands in the transcript and the Chat
+            // Router cannot hijack it into a new session. Without an
+            // execution id on the projection, fall back to the composer.
+            disabled={sentFor === card.request_id}
+            onClick={() => {
+              setSentFor(card.request_id);
+              if (execSid && onContinueRound) onContinueRound(instanceId, execSid);
+              else onReplyToRound?.(rowId, card.prompt ?? "");
+            }}
           >
             {t("chatView.cardContinue")}
           </button>
-        ) : null}
-      </div>
+        ) : (
+          notYours
+        )}
+      </InteractionCardShell>
     );
   }
 
-  const options = card.options ?? [];
+  if (kind === "approval") {
+    return (
+      <InteractionCardShell icon={Icon} title={t(titleKey)}>
+        {card.prompt ? <ChatMarkdown content={card.prompt} /> : null}
+        {canAnswer ? (
+          <div className="mt-2 flex items-center gap-1.5">
+            <button
+              type="button"
+              disabled={busy}
+              className={cardButtonNeutral}
+              onClick={() =>
+                post(() =>
+                  sendApproval(instanceId, execSid, {
+                    request_id: card.request_id,
+                    approved: false,
+                  }),
+                )
+              }
+            >
+              {t("chatView.cardReject")}
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              className={cardButtonAccent}
+              style={{ backgroundColor: "var(--color-accent-strong)" }}
+              onClick={() =>
+                post(() =>
+                  sendApproval(instanceId, execSid, {
+                    request_id: card.request_id,
+                    approved: true,
+                  }),
+                )
+              }
+            >
+              {t("chatView.cardApprove")}
+            </button>
+            {failedNote}
+          </div>
+        ) : (
+          <div className="mt-2">{notYours}</div>
+        )}
+      </InteractionCardShell>
+    );
+  }
+
+  // `ask_question`: the execution card's own body — radio list, "Other"
+  // textarea, one submit. The options of an `ask_question` are sentences a
+  // model wrote, not labels, and the form wraps them instead of breaking
+  // them mid-phrase in a button row.
   return (
-    <div className="space-y-1 py-1">
-      <div className="flex items-center gap-1.5 text-text-secondary">
-        <Icon className="h-3.5 w-3.5 shrink-0" />
-        <span>{t(titleKey)}</span>
-      </div>
-      {card.prompt ? (
-        <div className="text-text-secondary">
-          <ChatMarkdown content={card.prompt} />
+    <InteractionCardShell icon={Icon} title={t(titleKey)}>
+      {card.prompt ? <ChatMarkdown content={card.prompt} /> : null}
+      {canAnswer ? (
+        <div className="mt-2">
+          <QuestionAnswerForm
+            name={card.request_id}
+            options={(card.options ?? []).map((label) => ({ label }))}
+            disabled={busy}
+            note={failedNote}
+            onSubmit={(answer) =>
+              post(() =>
+                sendAnswer(instanceId, execSid, {
+                  request_id: card.request_id,
+                  answer,
+                }),
+              )
+            }
+          />
         </div>
-      ) : null}
-      {!canAnswer ? (
-        <p className="text-text-tertiary">{t("chatView.block.answeredByOwner")}</p>
       ) : (
-        /* One control per line. The options of an `ask_question` are sentences a
-           model wrote, not labels: laid out in a wrapping row they turned into
-           ragged columns that broke mid-phrase as soon as the text outgrew the
-           bubble — and the block is narrow by design. A column also makes the
-           pair of approval buttons the only horizontal row, which is what they
-           are: two sides of one decision. */
-        <div className="flex flex-col items-stretch gap-1.5">
-          {kind === "approval" ? (
-            <span className="flex items-center gap-1.5">
-              <button
-                type="button"
-                disabled={busy}
-                className={denyBtn}
-                onClick={() =>
-                  post(() =>
-                    sendApproval(instanceId, execSid, {
-                      request_id: card.request_id,
-                      approved: false,
-                    }),
-                  )
-                }
-              >
-                {t("chatView.cardReject")}
-              </button>
-              <button
-                type="button"
-                disabled={busy}
-                className={allowBtn}
-                style={{ backgroundColor: "var(--color-accent-strong)" }}
-                onClick={() =>
-                  post(() =>
-                    sendApproval(instanceId, execSid, {
-                      request_id: card.request_id,
-                      approved: true,
-                    }),
-                  )
-                }
-              >
-                {t("chatView.cardApprove")}
-              </button>
-            </span>
-          ) : (
-            options.map((opt, i) => (
-              <button
-                key={opt}
-                type="button"
-                disabled={busy}
-                /* `text-left` + wrapping: an option may be a full sentence, and a
-                   centered label that wraps reads as two options. */
-                className={`${i === 0 ? allowBtn : denyBtn} text-left whitespace-normal break-words`}
-                style={
-                  i === 0
-                    ? { backgroundColor: "var(--color-accent-strong)" }
-                    : undefined
-                }
-                onClick={() =>
-                  post(() =>
-                    sendAnswer(instanceId, execSid, {
-                      request_id: card.request_id,
-                      answer: opt,
-                    }),
-                  )
-                }
-              >
-                {opt}
-              </button>
-            ))
-          )}
-          {kind === "ask_question" ? (
-            <span className="flex items-center gap-1">
-              <input
-                value={freeText}
-                onChange={(e) => setFreeText(e.target.value)}
-                placeholder={t("chatView.block.otherAnswer")}
-                className="rounded border border-zinc-300 bg-transparent px-1.5 py-0.5 dark:border-zinc-500"
-                style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
-              />
-              <button
-                type="button"
-                disabled={busy || !freeText.trim()}
-                className={denyBtn}
-                onClick={() =>
-                  post(() =>
-                    sendAnswer(instanceId, execSid, {
-                      request_id: card.request_id,
-                      answer: freeText.trim(),
-                    }),
-                  ).then(() => setFreeText(""))
-                }
-              >
-                {t("chatView.answer")}
-              </button>
-            </span>
-          ) : null}
-          {failed ? (
-            <span className="text-red-500">{t("chatView.block.answerFailed")}</span>
-          ) : null}
-        </div>
+        <div className="mt-2">{notYours}</div>
       )}
-    </div>
+    </InteractionCardShell>
   );
 }

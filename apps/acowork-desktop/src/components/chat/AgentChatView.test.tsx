@@ -81,9 +81,18 @@ vi.mock("../../stores/chatStore", () => ({
   ),
 }));
 
+// The registry meta the surface reads a responder's face, name and role from.
+// `role` is mutable per case: it is what the turn header paints under the name
+// (ADR-106 rev. 2026-11-08), and losing it on the way to the header is exactly
+// the defect the case below pins.
+let agentRole: string | undefined;
 vi.mock("../../stores/agentStore", () => ({
   useAgentStore: (selector: (state: unknown) => unknown) =>
-    selector({ agents: { [AGENT]: { meta: { display_name: "Agent A", name: "agent-a" } } } }),
+    selector({
+      agents: {
+        [AGENT]: { meta: { display_name: "Agent A", name: "agent-a", role: agentRole } },
+      },
+    }),
 }));
 
 vi.mock("../../stores/authStore", () => ({
@@ -108,6 +117,9 @@ vi.mock("../../i18n/useTranslation", () => ({
   useTranslation: () => ({
     t: (key: string, vars?: Record<string, unknown>) =>
       vars && Object.keys(vars).length ? `${key}|${Object.values(vars).join("|")}` : key,
+    // The real hook returns `{ t, i18n }`; the turn header reads the locale to
+    // join a multi-responder name chain, so the fake has to carry it.
+    i18n: { language: "zh-CN" },
   }),
 }));
 
@@ -303,6 +315,7 @@ describe("AgentChatView event-log wiring", () => {
     vi.clearAllMocks();
     sendingMap = {};
     inflightMap = {};
+    agentRole = undefined;
     setModeMock = vi.fn();
     openSessionMock = vi.fn().mockResolvedValue(undefined);
     seedTitleMock = vi.fn();
@@ -456,6 +469,45 @@ describe("AgentChatView event-log wiring", () => {
     expect(sendDisabled()).toBe(true);
   });
 
+  it("a claim naming its responder wears the turn header (ADR-106 rev 2026-11-08)", () => {
+    // The 1:1 peer is a delivery-decision input, not a transcript inference:
+    // once the claim carries it, the wait wears the peer's face and name, and
+    // the named centered line steps back — one statement, one shape.
+    windows = windowOf(userRow(1, "hello there"));
+    inflightMap = { [SESSION]: { messageId: "u1", at: 1, responders: [AGENT] } };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const header = document.querySelector("[data-turn-header]");
+    expect(header).toBeTruthy();
+    expect(header!.textContent).toContain("Agent A");
+    expect(header!.textContent).toContain("chatView.notice.pendingTurnGeneric");
+    expect(screen.queryByText("chatView.notice.pendingTurn|Agent A")).toBeNull();
+    // The lock is the header's to keep — the upgrade changes the shape, not
+    // the claim's teeth.
+    expect(sendDisabled()).toBe(true);
+  });
+
+  it("the turn header carries the agent's role, as the block header will", () => {
+    // Same registry meta, same field: the wait line and the block that takes
+    // it over must agree on who is speaking, or the role appears only after
+    // the handover and the reader sees the header change, not just settle.
+    agentRole = "资深工程师";
+    windows = windowOf(userRow(1, "hello there"));
+    inflightMap = { [SESSION]: { messageId: "u1", at: 1, responders: [AGENT] } };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const header = document.querySelector("[data-turn-header]")!;
+    expect(header.textContent).toContain("资深工程师");
+  });
+
+  it("an unresolvable responder degrades the header to the centered line", () => {
+    // A face without a name guesses louder than no face at all: the registry
+    // not knowing the id puts the surface back on the old line.
+    windows = windowOf(userRow(1, "hello there"));
+    inflightMap = { [SESSION]: { messageId: "u1", at: 1, responders: ["ghost-x"] } };
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(document.querySelector("[data-turn-header]")).toBeNull();
+    expect(screen.getByRole("status")).toBeTruthy();
+  });
+
   it("the round's reference row settles the claim: line gone, composer live", () => {
     // From here the block narrates the run (D3/D9), so a follow-up is allowed —
     // the execution side has a queue for it, the Chat does not need one.
@@ -585,10 +637,12 @@ describe("AgentChatView event-log wiring", () => {
     await waitFor(() => expect(sendTextMock).toHaveBeenCalled());
     // One message, not two: the re-delivery carries the ORIGINAL row id, so the
     // store dedupes it instead of narrating the decision as a new utterance.
+    // The trailing list is the claim's expected responders — in a 1:1 chat
+    // that is its peer (ADR-106 revision 2026-11-08, the turn header).
     expect(sendTextMock).toHaveBeenCalledWith(SESSION, "which one", undefined, undefined, ["f1"], {
       targetSession: "exec-9",
       messageId: "u1",
-    });
+    }, [AGENT]);
   });
 
   it("an answered card leaves the transcript to the round's block", () => {

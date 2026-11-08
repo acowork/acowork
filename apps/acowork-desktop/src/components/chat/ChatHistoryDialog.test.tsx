@@ -19,13 +19,19 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, screen, act } from "@testing-library/react";
+import { render, screen, act, fireEvent } from "@testing-library/react";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => ({})) }));
 vi.mock("../../lib/config", () => ({ getGatewayUrl: () => "http://gw.test" }));
 
 const searchChatHistory = vi.hoisted(() => vi.fn());
 vi.mock("../../lib/chat-history-api", () => ({ searchChatHistory }));
+
+// The execution-round answer fragment is resolved through the block store's
+// projection read; mock it so a test controls what a round's row shows and no
+// real fetch is fired from the dialog.
+const useChatBlocks = vi.hoisted(() => vi.fn(() => ({} as Record<string, never>)));
+vi.mock("../../stores/chatBlockStore", () => ({ useChatBlocks }));
 
 import { ChatHistoryDialog } from "./ChatHistoryDialog";
 import { useAuthStore } from "../../stores/authStore";
@@ -124,6 +130,145 @@ describe("ChatHistoryDialog sender naming", () => {
     });
 
     expect(screen.getByText("Bob")).toBeTruthy();
+  });
+});
+
+describe("ChatHistoryDialog execution rounds", () => {
+  it("shows a round's answer fragment, resolving it from the projection", async () => {
+    searchChatHistory.mockResolvedValue({
+      hits: [
+        hit({
+          seq: 2,
+          line_pos: 5,
+          from: AGENT_INSTANCE,
+          kind: "execution_round",
+          body: "",
+          exec_ref: `${AGENT_INSTANCE}|sess-9|r:m-1`,
+          brief: "修复分页不满屏",
+        }),
+        hit({ seq: 1, line_pos: 4, from: ME, kind: "user_message", body: "帮我把分页修一下" }),
+      ],
+      total_lines: 6,
+      next_before_line: null,
+    });
+    // The projection read resolves the round's answer text.
+    useChatBlocks.mockReturnValue({
+      [`${AGENT_INSTANCE}|sess-9|r:m-1`]: {
+        ref: `${AGENT_INSTANCE}|sess-9|r:m-1`,
+        status: "ok",
+        projection: { answer: { body: "已修复，分页现在铺满整屏。", ts: "1" }, terminal: true },
+      },
+    });
+
+    await act(async () => {
+      render(<ChatHistoryDialog open chatSessionId="s-1" onClose={() => {}} />);
+    });
+
+    // The round surfaces as its own row (the reported defect: it was dropped,
+    // leaving consecutive user messages with no reply between them), and shows
+    // the answer head fragment — not the empty reference body.
+    expect(screen.getByText("帮我把分页修一下")).toBeTruthy();
+    expect(screen.getByText("已修复，分页现在铺满整屏。")).toBeTruthy();
+  });
+
+  it("falls back to the durable brief when the projection is not readable", async () => {
+    searchChatHistory.mockResolvedValue({
+      hits: [
+        hit({
+          seq: 2,
+          line_pos: 5,
+          from: AGENT_INSTANCE,
+          kind: "execution_round",
+          body: "",
+          exec_ref: `${AGENT_INSTANCE}|sess-9|r:m-1`,
+          brief: "修复分页不满屏",
+        }),
+      ],
+      total_lines: 6,
+      next_before_line: null,
+    });
+    useChatBlocks.mockReturnValue({}); // no projection landed yet
+
+    await act(async () => {
+      render(<ChatHistoryDialog open chatSessionId="s-1" onClose={() => {}} />);
+    });
+
+    // Never a blank row: the one-line task name stands in.
+    expect(screen.getByText("修复分页不满屏")).toBeTruthy();
+  });
+
+  it("shows the matched brief, not the answer, while a query is active", async () => {
+    // The brief is the round's indexed text (ADR-106 D13), so it is what a
+    // keyword search matched. Rendering the answer fragment instead would show a
+    // row whose highlight appears nowhere in it.
+    const round = hit({
+      seq: 2,
+      line_pos: 5,
+      from: AGENT_INSTANCE,
+      kind: "execution_round",
+      body: "",
+      exec_ref: `${AGENT_INSTANCE}|sess-9|r:m-1`,
+      brief: "修复分页不满屏",
+    });
+    searchChatHistory.mockResolvedValue({
+      hits: [round],
+      total_lines: 6,
+      next_before_line: null,
+    });
+    useChatBlocks.mockReturnValue({
+      [`${AGENT_INSTANCE}|sess-9|r:m-1`]: {
+        ref: `${AGENT_INSTANCE}|sess-9|r:m-1`,
+        status: "ok",
+        projection: { answer: { body: "已修复，分页现在铺满整屏。", ts: "1" }, terminal: true },
+      },
+    });
+
+    await act(async () => {
+      render(<ChatHistoryDialog open chatSessionId="s-1" onClose={() => {}} />);
+    });
+    expect(screen.getByText("已修复，分页现在铺满整屏。")).toBeTruthy();
+
+    const input = screen.getByRole("textbox");
+    await act(async () => {
+      fireEvent.change(input, { target: { value: "分页" } });
+      fireEvent.keyDown(input, { key: "Enter" });
+    });
+
+    expect(searchChatHistory).toHaveBeenLastCalledWith("s-1", "text", "分页", null, 50);
+    // The matched brief is what the row shows, with the hit highlighted in it
+    // (`getByText` can only see the `<mark>` slice, so compare the row's text).
+    const row = screen.getByText("分页").closest("button") as HTMLElement;
+    expect(row.textContent).toContain("修复分页不满屏");
+    expect(row.textContent).not.toContain("已修复");
+  });
+
+  it("asks for no projection at all while the dialog is closed", async () => {
+    // `hits` outlives `open`, so an ungated ref list would leave a closed dialog
+    // holding block watchers and a 15s pending poll for rounds nobody renders.
+    searchChatHistory.mockResolvedValue({
+      hits: [
+        hit({
+          from: AGENT_INSTANCE,
+          kind: "execution_round",
+          body: "",
+          exec_ref: `${AGENT_INSTANCE}|sess-9|r:m-1`,
+          brief: "修复分页不满屏",
+        }),
+      ],
+      total_lines: 1,
+      next_before_line: null,
+    });
+    useChatBlocks.mockReturnValue({});
+
+    const { rerender } = await act(async () =>
+      render(<ChatHistoryDialog open chatSessionId="s-1" onClose={() => {}} />),
+    );
+    expect(useChatBlocks.mock.calls.at(-1)?.[1]).toEqual([`${AGENT_INSTANCE}|sess-9|r:m-1`]);
+
+    await act(async () => {
+      rerender(<ChatHistoryDialog open={false} chatSessionId="s-1" onClose={() => {}} />);
+    });
+    expect(useChatBlocks.mock.calls.at(-1)?.[1]).toEqual([]);
   });
 });
 

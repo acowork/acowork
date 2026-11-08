@@ -3,6 +3,7 @@ import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X, Square }
 import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
 import { useTranslation } from "../../i18n/useTranslation";
+import { cardButtonAccent, cardButtonNeutral } from "../../lib/ui-styles";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 
 interface ExploreBlockProps {
@@ -703,13 +704,13 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
             )}
             <button
               onClick={() => onApprove("deny", specificApproval)}
-              className="rounded-md border border-zinc-300 px-2 py-0.5 text-11 font-medium text-text-secondary transition-colors hover:bg-zinc-200 dark:border-zinc-500  dark:hover:bg-zinc-600"
+              className={cardButtonNeutral}
             >
               Deny
             </button>
             <button
               onClick={() => onApprove("allow", specificApproval)}
-              className="rounded-md px-2 py-0.5 text-11 font-medium text-white transition-opacity hover:opacity-90"
+              className={cardButtonAccent}
               style={{ backgroundColor: "var(--color-accent-strong)" }}
             >
               Allow

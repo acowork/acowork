@@ -848,6 +848,11 @@ interface ChatSessionStore {
     inReplyTo?: string,
     attachmentIds?: string[],
     address?: ChatAddress,
+    /** Agent instances this send is expected to reach (ADR-106 revision
+     *  2026-11-08) — resolved by the caller from the delivery decision's
+     *  inputs; recorded on the claim so the surface can render the turn
+     *  header. Empty/absent keeps the generic wait line. */
+    responders?: string[],
   ): Promise<boolean>;
   setMode(agentId: string, mode: "chat" | "exec"): void;
   /** Persist the Chat surface's full seed draft to the session row,
@@ -872,6 +877,8 @@ interface ChatSessionStore {
     sessionConfig?: ChatSessionConfig,
     attachmentIds?: string[],
     address?: ChatAddress,
+    /** See `sendGroupText`'s `responders` — for a 1:1 chat this is its peer. */
+    responders?: string[],
   ): Promise<boolean>;
   upload(chatSessionId: string, file: File): Promise<ChatAttachmentMeta>;
   /** The doorbell reaction: re-read every session that could be on screen. */
@@ -996,7 +1003,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     await get().refresh(chatSessionId, true);
   },
 
-  sendGroupText: async (chatSessionId, text, targets, inReplyTo, attachmentIds, address) => {
+  sendGroupText: async (chatSessionId, text, targets, inReplyTo, attachmentIds, address, responders) => {
     const me = useAuthStore.getState().account?.user_id;
     if (!me) return false;
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }));
@@ -1028,7 +1035,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
         }
       }
       ok = true;
-      if (claimed) armTurn(chatSessionId, claimed);
+      if (claimed) armTurn(chatSessionId, claimed, responders);
     } catch (e) {
       console.warn("[chatSessionStore] group send failed:", e);
     }
@@ -1259,7 +1266,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
     }));
   },
 
-  sendText: async (chatSessionId, text, inReplyTo, sessionConfig, attachmentIds, address) => {
+  sendText: async (chatSessionId, text, inReplyTo, sessionConfig, attachmentIds, address, responders) => {
     const me = useAuthStore.getState().account?.user_id;
     if (!me) return false;
     set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }));
@@ -1279,7 +1286,7 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
       // delivery is not claimed: that arm writes no receipt into the Chat, so
       // a claim would wait for a row that cannot exist and lock the composer
       // for the whole deadline.
-      if (resp.status === "delivered") armTurn(chatSessionId, resp.message_id);
+      if (resp.status === "delivered") armTurn(chatSessionId, resp.message_id, responders);
       if (attachedItems) {
         set((s) => ({ attachedContext: { ...s.attachedContext, [chatSessionId]: [] } }));
       }
@@ -1314,10 +1321,17 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
 const turnTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 /** Claim the turn this device just sent, and arm its deadline. */
-function armTurn(chatSessionId: string, messageId: string): void {
+function armTurn(chatSessionId: string, messageId: string, responders?: string[]): void {
   if (!messageId) return;
   useChatSessionStore.setState((s) => ({
-    inflight: { ...s.inflight, [chatSessionId]: { messageId, at: Date.now() } },
+    inflight: {
+      ...s.inflight,
+      [chatSessionId]: {
+        messageId,
+        at: Date.now(),
+        ...(responders && responders.length > 0 ? { responders } : {}),
+      },
+    },
   }));
   const prev = turnTimers.get(chatSessionId);
   if (prev !== undefined) clearTimeout(prev);
