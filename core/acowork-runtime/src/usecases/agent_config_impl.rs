@@ -33,6 +33,7 @@
 //! the desktop.
 
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use async_trait::async_trait;
 
@@ -47,11 +48,31 @@ use crate::usecases::agent_config::{
 /// `workspace/config/agent_config.json` file.
 pub struct RuntimeAgentConfigService {
     work_dir: PathBuf,
+    /// Serialises the load-merge-save cycle in [`Self::put_config`].
+    ///
+    /// The PUT DTO is a *partial* body, so a subject that owns two coupled
+    /// fields writes them as two patches — the Setup panel's model picker is
+    /// exactly that case (`default_model` + `default_provider`, ADR-110; the
+    /// ADR-099 router picker is the same shape). Two requests arriving on
+    /// different executor threads both load the pre-write file, merge their
+    /// own single field and save the whole struct, so whichever finishes last
+    /// silently discards the other's half — the user's pick then survives as
+    /// "model without provider" (or is dropped entirely).
+    ///
+    /// Serialising here — the one audit point for this file on the HTTP path
+    /// — makes every partial PUT compose with every other one, instead of
+    /// pushing the ordering responsibility onto each client. A `std::sync`
+    /// mutex is deliberate: the guarded section has no await point, so it can
+    /// never be held across a suspension.
+    write_lock: Mutex<()>,
 }
 
 impl RuntimeAgentConfigService {
     pub fn new(work_dir: PathBuf) -> Self {
-        Self { work_dir }
+        Self {
+            work_dir,
+            write_lock: Mutex::new(()),
+        }
     }
 }
 
@@ -74,6 +95,17 @@ impl AgentConfigService for RuntimeAgentConfigService {
         agent_id: &str,
         body: PutAgentConfigBody,
     ) -> Result<PutAgentConfigResult, AgentConfigError> {
+        // 0. One writer at a time — see `write_lock`. Poisoning is
+        //    impossible in practice (the section is panic-free apart from a
+        //    file IO failure, which returns an error rather than panicking),
+        //    but recovering the guard is still the right thing to do: the
+        //    on-disk file is the state of record, so a previous panic left
+        //    nothing in memory to be inconsistent with.
+        let _writing = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
         // 1. Load current (or default for fresh-install).
         let mut cfg: AgentConfig = agent_config::load_agent_config(&self.work_dir)
             .map_err(|e| AgentConfigError::Persistence(e.to_string()))?
@@ -529,5 +561,73 @@ mod tests {
             !json.contains("gpt-5") && !json.contains("openai") && !json.contains("high"),
             "no default value may leak onto the broadcast wire"
         );
+    }
+
+    // ── Serialised load-merge-save (ADR-110) ───────────────────────────
+
+    /// Two coupled fields written as two partial PUTs must BOTH survive.
+    ///
+    /// This is the shape the Setup panel produces: picking a model emits
+    /// `default_model` and `default_provider` as two requests, each carrying
+    /// only its own field. Without `write_lock` both requests load the
+    /// pre-write file and the second save discards the first patch, leaving
+    /// the agent with a model and no provider (or vice versa) — i.e. a new
+    /// session silently does not start on the default the user picked, which
+    /// is the one contract ADR-110 has to guarantee.
+    ///
+    /// The iteration count is what makes this a real regression test rather
+    /// than a lucky pass: an unserialised implementation loses a half within
+    /// a few rounds, a serialised one never does.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_partial_puts_of_a_coupled_pair_both_persist() {
+        let dir = std::env::temp_dir().join(format!("acw-cfg-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let svc = std::sync::Arc::new(RuntimeAgentConfigService::new(dir.clone()));
+
+        for round in 0..25 {
+            let model = format!("model-{round}");
+            let provider = format!("provider-{round}");
+
+            let a = {
+                let svc = svc.clone();
+                let body = PutAgentConfigBody {
+                    patches: PutAgentConfigBody::session_default_patches(
+                        Some(serde_json::json!(model)),
+                        None,
+                        None,
+                    ),
+                };
+                tokio::spawn(async move { svc.put_config("agent", body).await })
+            };
+            let b = {
+                let svc = svc.clone();
+                let body = PutAgentConfigBody {
+                    patches: PutAgentConfigBody::session_default_patches(
+                        None,
+                        Some(serde_json::json!(provider)),
+                        None,
+                    ),
+                };
+                tokio::spawn(async move { svc.put_config("agent", body).await })
+            };
+            a.await.unwrap().unwrap();
+            b.await.unwrap().unwrap();
+
+            let cfg = agent_config::load_agent_config(&dir)
+                .expect("load")
+                .expect("file exists");
+            assert_eq!(
+                cfg.default_model.as_deref(),
+                Some(model.as_str()),
+                "round {round}: the model half of the pair was lost"
+            );
+            assert_eq!(
+                cfg.default_provider.as_deref(),
+                Some(provider.as_str()),
+                "round {round}: the provider half of the pair was lost"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
