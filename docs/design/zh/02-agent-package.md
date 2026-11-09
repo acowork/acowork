@@ -245,7 +245,6 @@ note = "本地开发调试用"
 agent_id = "com.example.weather"
 version = "1.0.0"
 name = "Weather Agent"
-display_name = "天气助手"
 role = "Weather Specialist"
 description = "查询实时天气并建议穿衣"
 author = "example@domain.com"
@@ -379,7 +378,8 @@ progressive = false
 
 - `runtime_version`：声明兼容的 Agent Runtime 版本。当前为 `"0.1.0"`。
 - `dev`：是否为开发者模式。用于本地开发测试。
-- `display_name` / `role`：UI 展示用的短名称和角色标题。`display_name` 默认为 `name`。
+- `name` / `role`：`name` 是**包名**，也是新实例物化时的初值（实例名之后由用户在 Agent 设置面板改写，落在实例自己的 `workspace/config/agent_config.json` 的 `name`，见 [ADR-111](../../adr/zh/ADR-111-one-agent-one-name-one-file.md)）；`role` 是角色标题。
+- **manifest 不声明实例名。** 曾经存在的 `display_name` 已删除（ADR-111）：一个实例只有一个名字，由实例持有；包声明它必然导致"人看到的名字"和"Agent 自述的名字"分叉。
 - `avatar`：可选，包内头像图片路径（如 `"assets/avatar.png"`）。优先级最高。
 - `builtin_avatar`：可选，内置头像索引（如 `"icon-05"` 或裸数字 `"5"`），用于在没有 `avatar` 时给首次安装的客户端一个确定的默认图标。客户端按字母数字顺序归一化为 `"icon-XX"`，并对照自身捆绑的图标集校验；无法识别时回退到随机。
 

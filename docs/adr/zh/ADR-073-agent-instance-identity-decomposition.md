@@ -1,6 +1,6 @@
 # ADR-073: Agent 身份模型分层 — `agent_id` / `agent_instance_id` / `node_id` 彻底解耦
 
-**状态**：已接受
+**状态**：已接受；§1.3 的"重命名走 `display_name`"、`InstalledAgentInfo.overrides_json`、`{instance_id}.overrides.json` 三项由 [ADR-111](./ADR-111-one-agent-one-name-one-file.md) 取代
 **日期**：2026-10-10
 **决策者**：大鱼
 **前置**：
@@ -289,6 +289,8 @@ pub struct AgentListResponse {
     pub node_id: String,             // 当前位置
     pub name: String,
     pub display_name: Option<String>, // 用户可重命名（取代 alias 概念）
+    // ↑ 已由 ADR-111 取代：manifest 不再声明 display_name，重命名写
+    //   workspace/config/agent_config.json 的 name，实例只有一个名字。
     pub role: Option<String>,
     pub avatar: Option<String>,
     pub builtin_avatar: Option<String>,
@@ -439,7 +441,7 @@ acowork-runtime --agent-instance-id 3f8c2a1b-... --http-port 0 ...
 
 视图模式由 `gatewayMode` 自动判断，用户不手动切换。
 
-**Alias 概念取消**：原考虑的"instance alias"取消——用户重命名走 manifest 的 `display_name` 字段即可，不需要再增加一层身份字段。原方案中的「包视图（按 agent_id 折叠）」取消——多包场景天然按多节点分组已足够清晰，再叠加一层包折叠反而冗余。
+**Alias 概念取消**：原考虑的"instance alias"取消——用户重命名走 manifest 的 `display_name` 字段即可，不需要再增加一层身份字段。**（已被 ADR-111 取代：`display_name` 字段删除，重命名写实例自己的 `workspace/config/agent_config.json` 的 `name`；"不再增加一层身份字段"这条结论仍然成立，实例只有一个名字。）**原方案中的「包视图（按 agent_id 折叠）」取消——多包场景天然按多节点分组已足够清晰，再叠加一层包折叠反而冗余。
 
 ---
 
@@ -508,7 +510,7 @@ acowork-runtime --agent-instance-id 3f8c2a1b-... --http-port 0 ...
 - `src/components/agent-list/AgentList.tsx`：根据 `gatewayMode` 自动渲染两套布局
   - `local` 模式：当前布局不变（每行一个 instance，多实例显示徽标）
   - `remote` 模式：按 `node_id` 分组，每组顶部插入 `NodeGroupHeader`（1/3 item 高度窄条，无背景色无边框，仅分割线 + 折叠箭头 + node 名称），默认展开，点击切换
-- rename 流程：编辑 display_name 即可
+- rename 流程：编辑 display_name 即可 **（ADR-111 起：`PUT /agents/{id}/avatar-config` 写 `agent_config.json` 的 `name`，并热更新 `AgentCore.instance_name`）**
 
 ---
 
