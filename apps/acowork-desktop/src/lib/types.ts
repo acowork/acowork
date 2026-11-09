@@ -900,6 +900,12 @@ export interface ChatMessage {
    *  into messages[] by the Gateway. Renders with a pulse cursor and its content
    *  is replaced by id on each poll (no placeholder machinery needed). */
   isStreaming?: boolean;
+  /** The human rendering of this turn, when the Runtime has one: an
+   *  agent-origin intent's `content` is the machine envelope, and this is the
+   *  projection written beside it. Absent on human turns and on rows written
+   *  before the projection existed — then `content` is what a person reads.
+   *  See {@link IntentDisplay}. */
+  display?: IntentDisplay;
   /** Raw metadata from the JSONL entry. Used by system entries to carry
    *  attachment metadata (ADR-046 §2.5: 5 metadata.type branches). */
   metadata?: Record<string, unknown>;
@@ -1807,12 +1813,39 @@ export interface SessionNotOpenedEvent {
 }
 
 /** A single conversation entry as stored in JSONL */
+/** The human rendering of one agent-origin intent turn (design 27 §5.4.5).
+ *
+ *  One declaration for the whole desktop: the round projection
+ *  (`RoundProjection.user.display`), a session-message entry
+ *  (`ConversationEntry.display`) and the surfaces that paint either of them all
+ *  reference this. The Runtime owns the values; the client only transports and
+ *  renders them. */
+export interface IntentDisplay {
+  /** Wire kind the display came from (`request` / `response`). */
+  origin: string;
+  /** The action the sender named (`analyze`, `notify`, …). */
+  action: string;
+  /** One line: a block header, a round row, a list preview. */
+  summary: string;
+  /** Markdown the reader gets in place of the envelope. */
+  body: string;
+  /** The producer cut `body`; `content` still holds everything. */
+  truncated?: boolean;
+}
+
 export interface ConversationEntry {
   id: string;
   ts: string;
   role: "user" | "assistant" | "think" | "thought" | "tool_call" | "tool_result" | "system";
   content: string;
   metadata?: Record<string, unknown>;
+  /** The same turn written for a human, when the Runtime has one: an
+   *  agent-origin intent's `content` is the machine envelope (design 27 §3.2,
+   *  the model reads it), and this is the projection beside it. Absent on human
+   *  turns and on rows written before the projection existed. The Runtime
+   *  resolves it — no client reads `metadata.intent` itself.
+   *  See {@link IntentDisplay}. */
+  display?: IntentDisplay;
   /** Entry kind. `undefined`/`"message"` denotes a regular role-based message.
    *  `"compaction"` denotes an LLM-driven compaction summary event whose
    *  `content` is the summary text and `metadata` is `CompactionEventMeta`. */

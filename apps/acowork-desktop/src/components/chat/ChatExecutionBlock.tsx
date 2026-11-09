@@ -55,6 +55,7 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { RunBlockActionRow } from "./RunBlockActionRow";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { IntentDisplayBody } from "./IntentDisplayBody";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import { InteractionCardShell } from "./InteractionCardShell";
 import { QuestionAnswerForm } from "./QuestionAnswerForm";
@@ -824,22 +825,7 @@ function RoundItem({
               className="rounded bg-[var(--color-accent)]/10 p-2 text-text-secondary"
               style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
             >
-              <ChatMarkdown content={questionBody} />
-              {display.truncated ? (
-                <div className="mt-1 text-text-tertiary">
-                  {t("chatView.block.displayTruncated")}
-                </div>
-              ) : null}
-              {rawEnvelope ? (
-                <details className="mt-1">
-                  <summary className="cursor-pointer text-text-tertiary">
-                    {t("chatView.block.rawEnvelope")}
-                  </summary>
-                  <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-zinc-100 p-2 text-text-tertiary dark:bg-zinc-800">
-                    {rawEnvelope}
-                  </pre>
-                </details>
-              ) : null}
+              <IntentDisplayBody display={display} envelope={rawEnvelope} />
             </div>
           )}
           <RoundBody

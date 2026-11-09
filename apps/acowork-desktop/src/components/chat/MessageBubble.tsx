@@ -16,6 +16,7 @@ import { AttachmentChipRow } from "./AttachmentChipRow";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
 import { markdownUrlTransform } from "../editor/markdownLinkResolver";
 import { chatMarkdownComponents, CHAT_MARKDOWN_SHELL_CLASS, ChatMarkdown } from "./ChatMarkdown";
+import { IntentDisplayBody } from "./IntentDisplayBody";
 import type { AttachedItem } from "../../lib/types";
 import {
   ContextMenu,
@@ -132,9 +133,22 @@ const MessageBubble = React.memo(function MessageBubble({
   const fontSizeStyle = { fontSize: "var(--ui-font-size, 0.875rem)" };
   // Renderer + skin both follow the SPEAKER, decided once here so the two
   // cannot be configured apart (`speakerBubble.ts`).
-  const asAgentSpeech = speakerRendersMarkdown(speakerKind);
+  //
+  // A display projection only exists on an agent-written turn, so it settles the
+  // speaker even though the row's ROLE is `user`: an execution session writes
+  // every inbound turn as `user` (design 27 §5.4.5), and painting an Agent's
+  // markdown inside the accent bubble is the "user text turned black" defect.
+  // The avatar and name deliberately keep following `speakerKind` — who SENT
+  // the turn is a separate fact the projection does not carry yet.
+  const speaker: SpeakerKind = message.display ? "agent" : speakerKind;
+  const asAgentSpeech = speakerRendersMarkdown(speaker);
   // Narrowed once, so the avatar branch below has a non-null instance id.
   const senderAgent = speakerKind === "agent" ? senderAgentId : null;
+  // What a person reads is what Copy falls back to (design 27 §5.4.5): the
+  // Runtime's display projection when the turn has one, the stored body
+  // otherwise. Resend keeps using `content` — it re-sends the turn as it was
+  // recorded, machine text included.
+  const readableBody = message.display?.body || message.content;
   // Live names — received as props from ChatPanel so React.memo can detect
   // profile changes (name/avatar edits update all rendered bubbles instantly).
   const liveUserName = liveUserNameProp ?? message.senderDisplayName;
@@ -198,8 +212,8 @@ const MessageBubble = React.memo(function MessageBubble({
   // `useContextMenu.openAt` BEFORE button focus can clear it (the root
   // cause of the original bug).
   const handleCopy = useCallback((selectionAtOpen: string) => {
-    void copySelectionOrFallback(selectionAtOpen || (message.content ?? ""));
-  }, [message.content]);
+    void copySelectionOrFallback(selectionAtOpen || (readableBody ?? ""));
+  }, [readableBody]);
 
   // ── Menu items ──────────────────────────────────────────────────────
   // useMemo keeps the array stable across renders — important because
@@ -330,7 +344,7 @@ const MessageBubble = React.memo(function MessageBubble({
                     corner do NOT change: this is still the session's
                     initiator. */}
                 <div
-                  className={`w-full rounded-md rounded-br-sm ${speakerBubbleClass(speakerKind)} px-4 py-2.5 select-text break-words`}
+                  className={`w-full rounded-md rounded-br-sm ${speakerBubbleClass(speaker)} px-4 py-2.5 select-text break-words`}
                   style={fontSizeStyle}
                 >
                   {/* Human text renders in full — no height cap, no inner
@@ -338,7 +352,22 @@ const MessageBubble = React.memo(function MessageBubble({
                       chat surfaces (`AgentChatView`, `GroupChatPanel`): a
                       capped box put a second, native scrollbar inside the
                       list's own overlay thumb. */}
-                  {asAgentSpeech ? (
+                  {message.display ? (
+                    /* An agent-origin turn (design 27 §5.4.5): `content` is the
+                       machine envelope the model reads, and the Runtime's display
+                       projection beside it is the same turn written for a person.
+                       The envelope stays folded one click away — it is the only
+                       text carrying the reply coordinates.
+
+                       This overrides the speaker rule on purpose: a person's own
+                       words are literal text (`speakerRendersMarkdown`), but this
+                       row was written by an AGENT, so it is speech. */
+                    <IntentDisplayBody
+                      display={message.display}
+                      envelope={message.content}
+                      fontSize={fontSizeStyle}
+                    />
+                  ) : asAgentSpeech ? (
                     /* Agent speech: the shared markdown shell every chat
                        surface renders speech through (`ChatMarkdown`), so the
                        brief reads the same here as it does in the group panel
