@@ -87,11 +87,11 @@
 - 渲染（移动）：气泡当前对 user 轮传 `literal`（纯文本），intent 轮因此把信封当纯文本画出来（[ChatDetailScreen.tsx:387](../../../apps/acowork-mobile/src/screens/chat/ChatDetailScreen.tsx#L387)）。规则改为：**有 `display` 时按 markdown 渲染 `display.body`（`literal` 不适用，它是 agent 写的），信封折叠**；无 `display` 走原 `literal` 行为。同桌面：`literal` 优先于 `display` 的反向覆盖是不允许的，且 [chat-row-text.test.tsx](../../../apps/acowork-mobile/src/__tests__/chat-row-text.test.tsx) 里"人类输入按纯文本"的断言保持不变，另加一条"带 display 的 user 行按 markdown"。
 - 验收：转换器测试（有 display 保留 / 无 display 为 undefined）；气泡渲染测试（有 display 渲染 markdown 且信封折叠 / 旧行不变）。
 
-### M4（runtime，等待队列预览）— 可后置
+### M4（runtime，等待队列预览）
 
-会话忙时队列行的 `preview` 也来自信封（[session_state.rs:126](../../../core/acowork-runtime/src/agent/session_state.rs#L126) `pending_preview(content)`，桌面 [ChatPanel.tsx:2529](../../../apps/acowork-desktop/src/components/chat/ChatPanel.tsx#L2529) 渲染它）。在产生 display 的同一处（`deliver_intent_turn`）构造 `PendingIntent` 时优先用 `display.summary`，否则维持现状。后端一行改动，前端不动。
+会话忙时队列行的 `preview` 也来自信封（[session_state.rs:126](../../../core/acowork-runtime/src/agent/session_state.rs#L126) `pending_preview(content)`，桌面 [ChatPanel.tsx:2529](../../../apps/acowork-desktop/src/components/chat/ChatPanel.tsx#L2529) 渲染它）。队列是人的界面，规则与气泡、轮次行同一条：**有投影就用投影的名字**。取舍落在 `preview_source(content, refs, display)` 一处（`display.summary` → 本轮的正文 → 第一个 reference block），`deliver_intent_turn` 传 `display.as_ref()`，路由路径（只有人的原话、没有信封）传 `None`。前端不动。
 
-**顺序**：M1 → M2 → M3（一次可验证的闭环）；M4 视需要后置。
+**顺序**：M1 → M2 → M3（一次可验证的闭环）→ M4。
 
 ---
 
@@ -117,14 +117,22 @@
 
 ---
 
-## 7. 已知瑕疵（本计划范围外，另行安排）
+## 7. 遗留项
+
+本轮 review 的六条已全部清理，只剩签名/朝向一条（本计划范围外）。
+
+### 已清理
+
+1. **`assignment_brief` 语义过载** → 改名 `round_name`（`b9426305`）：字段名与它所存的事实一致；JSONL 键同步改名，前端读新键优先、回落旧键（旧行照旧可读，写入只写新键）。PM 派发文本仍只在 system block 用，门禁未动。
+2. **分页循环重复 + 同一文件读两次盘**（`57818d6a`）：`read_first_user_turn` 一次读盘产出 `{ body, display_summary }`，标题优先级挪到 `title_seed()`；顺带让 display 侧也走 `IntentDisplay::from_metadata`，不再自己 `metadata.get("intent").get("summary")`。
+3. **截断逻辑重复 + 240 两份常量**（`f5d93d84`）：`truncate_marked(body, max_bytes)` + `capped_one_line(text, max_chars)` 各一份，标记统一为 `\n[truncated]`；`reference_brief` 改用 `DISPLAY_SUMMARY_MAX_CHARS`。
+4. **写链欠账**（`13f2ad27`）：`intent_display_meta` → `from_metadata` 的 round-trip 等值测试，生产者与读取规则从此由断言绑在一起。
+5. **桌面空 body 回落**（`b08ada27` / `f9e94496`）：规则不放在各处调用点，而是收进渲染器本身——`IntentDisplayBody`（桌面）与 `Bubble`（移动）画 `display.body || display.summary`，"有 display 就绝不画信封"因此对每个调用点自动成立；`questionBodyOf`/`questionBody` 同步收口（复制导出同源）。
+6. **移动端新分支无测试**（`4319c941` / `f9e94496`）：`chat-row-text.test.tsx` 覆盖"有投影画 markdown / 折信封 / 截断提示 / 空 body 用 summary / 无投影照旧 literal"。文案硬编码中文沿用移动端现状（该 app 无 i18n 基础设施，全站同构，不是本次引入的欠账）。
+
+### 未做（范围外，另行安排）
 
 1. **气泡署名与朝向**：执行会话里 user 行的昵称来自"人类"，而 agent-origin intent 的发送者其实是另一个 agent，于是 Lucy 的消息被画成"你自己的消息"。正解是给投影加一条 `from` 事实（生产侧已持有 `env.from`，前端不解析信封），属于模型加字段，单独一轮。
-2. `metadata.assignment_brief` 语义过载（peer 的 display.summary 写进了 PM 派发文本的字段名）：信任门禁目前成立（`brief_for_system_block` 按 kind 门禁），但字段名已不准。
-3. [conversation.rs:4249](../../../core/acowork-runtime/src/conversation.rs#L4249) `read_first_user_display_summary` 与 `read_first_user_message` 的分页循环重复，且两次读盘各自可能读不到（标题仍可能从信封派生）。
-4. **写链零测试**（已提交代码的欠账）：`AgentLoop::turn_user_row_meta` 无单测；生产者 `intent_display_meta` 与读取规则（`RoundUserDisplay::from_entry` / 将来的 `from_metadata`）各自手写键名与形状，缺一条 round-trip 断言。M1 收敛读取规则后补这一条最省事：写一条 `serde_json::to_value(display)` → `from_metadata` 的等值测试即闭合。
-5. **桌面空 body 回落**（已提交代码的缺陷）：`questionBodyOf` 在 `display.body` 为空时会回落到 `projection.user.body`，于是 `display.summary` 存在而 body 为空的旧投影会把信封当 markdown 画出来。规则应改为"有 display 就绝不回落 body"。
-6. 重复实现：`truncate_display_body` 与 `truncate_response_body` 的 char-boundary 逻辑、16KB/240 两个上限常量各两份；`reference_brief` 的注释在泛化为 `reference_name` 时被吞掉。移动端新增分支无测试、文案硬编码中文（应走 i18n）。
 
 ---
 
@@ -136,10 +144,13 @@
 | M2 | 已完成 | `62abf82d` `ConversationEntryView`（`flatten` + `display`）+ `get_messages` 映射；`265fcea6` 补 HTTP 级断言（视图自测抓不到装配错误） |
 | M3 桌面 | 已完成 | `ebcb9d11` 类型收敛到 `types.ts`、`convertConversationEntry` 只搬运、`MessageBubble` 渲染 → 抽 `IntentDisplayBody` 与执行块共用 |
 | M3 移动 | 已完成 | `4319c941` 同规则；`display` 优先于 `literal`（`ChatDetailScreen` 对 user 轮传 literal） |
-| M4 | 可后置 | 未做：队列预览用 `display.summary` |
+| M4 | 已完成 | `f23a5b72` `preview_source` 取 `display.summary` 优先（唯一规则），两个调用点按"有无信封"传参 |
 
-**实施中与原计划的三处偏差（都已就地处理，记录理由）**：
+**实施中与原计划的五处偏差（都已就地处理，记录理由）**：
 
 1. **视图放在 `usecases/session_metadata.rs` 而不是 `http/server.rs`**：逐条 entry 的转换本来就在 usecase 里（tool_result 截断也在那），handler 只做 `to_value`。边界不变，只是落在真正做转换的那一层。
 2. **视图用 `#[serde(flatten)]` 包住 `ConversationEntry`，而不是逐字段列一遍**：逐字段列会让"将来给 entry 加字段，忘了加到视图"变成静默丢字段。`flatten` 让存储形状自动透传，视图只声明它多出的那一件事（`display`）。
 3. **桌面端把"markdown + 截断提示 + 折叠信封"抽成 `IntentDisplayBody`**，执行块与气泡共用：两处若各写一遍，i18n key 与折叠形状没有理由保持一致。移动端渲染器不同（`renderMarkdown` + CSS 类），未抽。
+4. **M4 比原计划多改一处签名**：原计划"在 `deliver_intent_turn` 里优先用 `display.summary`"，实现改成把取舍放进 `preview_source` 的唯一规则里——否则"预览从哪来"的第 N 个来源会散落在第 N 个调用点。两个调用点因此各传一个 `display` 实参，其中路由路径明确传 `None` 并注释为什么。
+
+5. **空 body 的收口位置下移一层**：原计划改 `questionBodyOf` 的回落顺序，实现改成渲染器自己画 `body || summary`。调用点有三处（气泡、执行块面板、复制/导出），逐个改必然漏一处；改在渲染器上则"有投影就画投影的字"对所有调用点自动成立。
