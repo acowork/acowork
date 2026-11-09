@@ -244,7 +244,7 @@ dismissed 优先于一切，因为它是列表里唯一的**用户意图**：早
 
 | 步骤 | 覆盖字段 | 可进入下一步的条件 |
 |---|---|---|
-| 1 基础 | `agent_id`、`name`、`display_name`、`role`、`version`、`author`、`description`、**`labels`** | 反向域名 + 名称非空 + 标签 ≤12 |
+| 1 基础 | `agent_id`、`name`、`role`、`version`、`author`、`description`、**`labels`** | 反向域名 + 名称非空 + 标签 ≤12 |
 | 2 模型与参数 | `[config]` 五项 | 已填字段全部在范围内（全空合法） |
 | 3 工具与 MCP | `[[tools]]` + `[[mcp_servers]]` | 总是可以（全部可选） |
 | 4 技能与能力 | 技能 ZIP + `[capabilities.*]`（action / description / skills / 可选 JSON schema） | ZIP 全部解析成功、动作名合法且唯一、JSON 合法 |

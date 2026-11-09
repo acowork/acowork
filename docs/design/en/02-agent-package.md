@@ -245,7 +245,6 @@ This is purely local and does not depend on any online platform service. A more 
 agent_id = "com.example.weather"
 version = "1.0.0"
 name = "Weather Agent"
-display_name = "Weather Assistant"
 role = "Weather Specialist"
 description = "Query real-time weather and suggest clothing"
 author = "example@domain.com"
@@ -385,7 +384,8 @@ progressive = false
 
 - `runtime_version`: Declares compatible Agent Runtime version. Currently `"0.1.0"`.
 - `dev`: Whether this is a development mode Agent. Used for local development and testing.
-- `display_name` / `role`: Short name and role title for UI display. `display_name` defaults to `name`.
+- `name` / `role`: `name` is the **package name** and the initial value a new instance is materialized from (the instance's own name is later rewritten by the user on the agent settings panel and stored in the instance's `workspace/config/agent_config.json` as `name`, see [ADR-111](../../adr/en/ADR-111-one-agent-one-name-one-file.md)); `role` is the role title.
+- **The manifest does not declare an instance name.** The former `display_name` is gone (ADR-111): an instance has exactly one name and the instance owns it — a package that declared one inevitably split "the name a human sees" from "the name the agent uses for itself".
 - `avatar`: Optional, in-package avatar image path (e.g. `"assets/avatar.png"`). Highest priority.
 - `builtin_avatar`: Optional, built-in avatar index (e.g. `"icon-05"` or bare number `"5"`). Used to assign a deterministic default icon to first-time installs when no `avatar` is set. Clients normalize this alphabetically/numerically to `"icon-XX"` and validate against their bundled icon set; fall back to random if unrecognized.
 
