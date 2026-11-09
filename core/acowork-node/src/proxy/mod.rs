@@ -171,7 +171,7 @@ async fn proxy_agent(
             // from the instance's `agent_config.json`). Refresh it: the
             // inventory is the only source for a stopped agent, and every
             // human-facing surface reads it.
-            if status.is_success() && method == Method::PUT && rest == "avatar-config" {
+            if status.is_success() && refreshes_inventory(&method, &rest) {
                 crate::package::republish_installed_info(&state, &id).await;
             }
             let resp_headers = response.headers().clone();
@@ -201,6 +201,38 @@ async fn proxy_agent(
                 .into_response()
         }
     }
+}
+
+/// Does a successful Runtime write on this proxied request change the
+/// instance identity that the retained inventory mirrors?
+///
+/// The inventory's `identity` (name + avatar) is a projection of the
+/// instance's `agent_config.json`, and `PUT /avatar-config` is that file's
+/// only writer. Every such write must therefore refresh the retained entry:
+/// the inventory is what `GET /api/agents` renders from, so a missed
+/// refresh leaves the sidebar and every chat transcript painting the
+/// pre-write avatar until the Node restarts.
+///
+/// ## Match the path's last segment, not the whole suffix
+///
+/// `rest` is what arrived *after* the node-local `/agents/{id}` route
+/// prefix — and that prefix is not necessarily the only one in front of the
+/// Runtime path. The Gateway addresses a Runtime through the endpoint the
+/// Node advertised (`http://{node}:19900/agents/{id}`) and then appends the
+/// Runtime's own `/agents/{id}/avatar-config`, so the suffix reaches this
+/// proxy as `agents/{id}/avatar-config`. An equality check against
+/// `"avatar-config"` never matched that shape: the write landed in
+/// `agent_config.json` (the Runtime's `GET /avatar-config` and the settings
+/// panel agreed) while the identity inventory — and therefore the list
+/// view — kept the old avatar forever.
+///
+/// Keeping the comparison on the segment makes the hook independent of how
+/// many prefixes a caller composes, which is the caller's business, not
+/// this one's. Which paths rewrite identity is still this function's
+/// business, and it stays a whitelist of one: a write that does not touch
+/// `agent_config.json` must not cost an inventory republish.
+fn refreshes_inventory(method: &Method, rest: &str) -> bool {
+    *method == Method::PUT && rest.rsplit('/').next() == Some("avatar-config")
 }
 
 /// ADR-055 Phase 5a §6.8: validate the inbound `X-ACowork-Node-Token`.
@@ -346,6 +378,40 @@ mod tests {
             builder = builder.header("X-ACowork-Node-Token", t);
         }
         builder.body(Body::empty()).unwrap()
+    }
+
+    /// The identity-write hook must fire for the path shape the Gateway
+    /// actually sends, not only for the one it was written against.
+    ///
+    /// Regression: `rest == "avatar-config"` never matched a request that
+    /// came through the Gateway, because the advertised endpoint already
+    /// carries `/agents/{id}` and the Runtime path is appended to it
+    /// (observed URL:
+    /// `http://127.0.0.1:19900/agents/{id}/agents/{id}/avatar-config`).
+    /// The republish was dead code, so a newly picked avatar never reached
+    /// the inventory and the sidebar/transcript kept the old one.
+    #[test]
+    fn refreshes_inventory_matches_every_avatar_config_path_shape() {
+        const IID: &str = "bd68e6a7-7dd4-4ca7-82a2-e65745c4d198";
+        // What the Gateway sends (endpoint prefix + Runtime path).
+        let via_gateway = format!("agents/{IID}/avatar-config");
+        assert!(refreshes_inventory(&Method::PUT, &via_gateway));
+        // What a node-addressed call (`proxy_to_node`) sends.
+        assert!(refreshes_inventory(&Method::PUT, "avatar-config"));
+    }
+
+    /// The hook stays a whitelist of one: only `agent_config.json`'s writer
+    /// costs an inventory republish, and only on a write.
+    #[test]
+    fn refreshes_inventory_ignores_other_paths_and_reads() {
+        const IID: &str = "bd68e6a7-7dd4-4ca7-82a2-e65745c4d198";
+        assert!(!refreshes_inventory(&Method::GET, "avatar-config"));
+        assert!(!refreshes_inventory(&Method::GET, &format!("agents/{IID}/avatar-config")));
+        assert!(!refreshes_inventory(&Method::PUT, "avatar-file"));
+        assert!(!refreshes_inventory(&Method::PUT, &format!("agents/{IID}/manifest/avatar")));
+        assert!(!refreshes_inventory(&Method::PUT, &format!("agents/{IID}/chat")));
+        // A path that merely ends in the word must not qualify.
+        assert!(!refreshes_inventory(&Method::PUT, "not-avatar-config"));
     }
 
     #[test]
