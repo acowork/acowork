@@ -485,14 +485,9 @@ export interface BlockCard {
  *
  *  A round's `user.body` is the machine envelope (`[intent:…] {params}` plus the
  *  reply coordinates) because the model reads it; this is the same turn written
- *  for the reader. Absent on a human turn — its body already is the person's
- *  words — and on every row written before the projection existed. */
-export interface RoundUserDisplay {
-  summary: string
-  body: string
-  /** The producer cut `body`; `user.body` still holds everything. */
-  truncated?: boolean
-}
+ *  for the reader. Declared once, above ({@link IntentDisplay}) — the block
+ *  projection and a session-message entry are the same shape. */
+export type RoundUserDisplay = IntentDisplay
 
 export interface RoundProjection {
   round_id: string
