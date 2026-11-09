@@ -422,8 +422,11 @@
   /* zinc-300 — light gray, blends into the surface */
   --ui-scrollbar-thumb-hover: #a1a1aa;
   /* zinc-400 — slightly deeper on hover */
-  --ui-scrollbar-size: 6px;
-  /* width & height of the scrollbar track */
+  --ui-scrollbar-size: 8px;
+  /* Width & height of the native fallback bar. Keep it equal to
+     `.overlay-scrollbar-track`'s width below — the fallback bar and the
+     floating overlay thumb must be the same thickness, or a panel that mixes
+     converted and unconverted scrollers shows two different bars. */
 
   /* Font sizes — relative to --ui-font-size, NOT rem.
      `--ui-font-size` is written by settingsStore (the "font size"
@@ -834,7 +837,22 @@ body {
   -webkit-user-select: text;
 }
 
-/* Scrollbar — themed via --ui-scrollbar-* tokens */
+/* Scrollbar — the unified skin, via --ui-scrollbar-* tokens.
+ *
+ * These rules only have ANY effect because nothing in the app sets
+ * `scrollbar-width` / `scrollbar-color` to a non-`auto` value: Chromium 121+
+ * drops the entire `::-webkit-scrollbar` family the moment either standard
+ * property is set. A global `* { scrollbar-width: thin; scrollbar-color: … }`
+ * used to live further down this file and silently killed every rule below —
+ * which is why the app had fallen back to the OS scrollbar everywhere except
+ * the hand-wrapped `OverlayScrollbar` sites. Keep it that way: hide a bar
+ * with `scrollbar-width: none` (or `.overlay-scrollbar-viewport`), theme it
+ * here, but never style it with `scrollbar-color`.
+ *
+ * The skin deliberately mirrors `.overlay-scrollbar-thumb` (the overlay block
+ * further down): same width, radius and translucent thumb, so a scroller
+ * still on this fallback reads as the same control as one that has been
+ * converted to the floating overlay thumb. */
 ::-webkit-scrollbar {
   width: var(--ui-scrollbar-size);
   height: var(--ui-scrollbar-size);
@@ -859,13 +877,19 @@ body {
   background: transparent;
 }
 
+/* The corner where a vertical and a horizontal bar meet — transparent so it
+   does not paint a square block over the panel's rounded edge. */
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 ::-webkit-scrollbar-thumb {
-  background: var(--ui-scrollbar-thumb);
-  border-radius: 3px;
+  background: color-mix(in srgb, var(--ui-scrollbar-thumb) 68%, transparent);
+  border-radius: 9999px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: var(--ui-scrollbar-thumb-hover);
+  background: color-mix(in srgb, var(--ui-scrollbar-thumb-hover) 82%, transparent);
 }
 
 /* Suppress native webkit scrollbars inside Monaco editor containers.
@@ -895,12 +919,6 @@ body {
   width: 0;
   height: 0;
   -webkit-appearance: none;
-}
-
-/* Firefox */
-* {
-  scrollbar-width: thin;
-  scrollbar-color: var(--ui-scrollbar-thumb) transparent;
 }
 
 /* Reduced motion */
