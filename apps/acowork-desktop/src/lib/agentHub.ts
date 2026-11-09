@@ -80,6 +80,47 @@ export interface LocalPackageInfo {
 }
 
 /**
+ * One row of the Local tab's file library (`list_local_agent_packages`).
+ *
+ * Mirror of `commands::agent_library::LocalAgentRow`. Identity comes from the
+ * package's own `manifest.toml`, never from the filename (REQ-024) — which is
+ * why a row whose file cannot be parsed still exists, with every manifest field
+ * `null` and `error` filled (PRD §14.4). Rendering `""` there would make the UI
+ * responsible for knowing what "empty" means.
+ */
+export interface LocalAgentRow {
+  file_name: string;
+  /** Absolute path — handed back verbatim to `ensureLocalAgent`. */
+  path: string;
+  agent_id: string | null;
+  name: string | null;
+  version: string | null;
+  description: string | null;
+  size_bytes: number | null;
+  /** Declared permissions — only counted, never confirmed (REQ-007 boundary). */
+  permissions: string[];
+  error: string | null;
+}
+
+/**
+ * Envelope of the Local list. `warning` is the library-level reason the list is
+ * empty or incomplete (seeding failed / directory unreadable) in the IO's own
+ * words — REQ-028 forbids a guessed message, and an empty list without a reason
+ * is indistinguishable from a broken one.
+ */
+export interface LocalAgentList {
+  rows: LocalAgentRow[];
+  warning: string | null;
+}
+
+/** Result of `ensure_local_agent` — mirrors the Hub path's shape (D11). */
+export interface LocalAgentEnsureResult {
+  agent_id: string;
+  instance_id: string;
+  already_present: boolean;
+}
+
+/**
  * Permissions the user must explicitly accept before anything is submitted
  * (REQ-007). The Hub's own `high_risk_permissions` list wins when it is
  * published; this set is the fallback for entries that omit it, so a package
@@ -193,18 +234,6 @@ export function formatSizeBytes(bytes: number): string {
   return `${(kb / 1024).toFixed(1)} MB`;
 }
 
-/**
- * Signature channel (D7): the raw `signature.status` mapped to an i18n key.
- * No tier language anywhere — this is the Hub's statement about where the
- * package came from, not a verification this app performed (R3).
- */
-export function hubSignatureStatusKey(agent: HubAgent): "official" | "thirdParty" | "unknown" {
-  const status = (agent.signature?.status ?? "").trim().toLowerCase();
-  if (status === "official-channel") return "official";
-  if (status === "third-party") return "thirdParty";
-  return "unknown";
-}
-
 /** `deprecated` marker + reason (REQ-017), tolerant of either shape. */
 export function hubDeprecationOf(agent: HubAgent): { flagged: boolean; reason?: string } {
   const value = agent.deprecated;
@@ -300,4 +329,33 @@ export function installFromHub(input: {
 /** Local `.agent` file summary (extension + manifest id + size). */
 export function inspectLocalPackage(packagePath: string): Promise<LocalPackageInfo> {
   return invoke<LocalPackageInfo>("inspect_local_package", { packagePath });
+}
+
+/**
+ * Every `.agent` in the user's library, manifests already parsed.
+ *
+ * ONE call for N files (F13): the Rust side loops the directory and parses each
+ * `manifest.toml`, so the webview never does N `invoke`s. Seeding happens
+ * inside the same call, which is why the first open of the app is enough to
+ * make the shipped packages appear.
+ */
+export function listLocalAgentPackages(): Promise<LocalAgentList> {
+  return invoke<LocalAgentList>("list_local_agent_packages");
+}
+
+/**
+ * Install a library file on `nodeId` idempotently (`/api/agents/ensure`).
+ *
+ * The row's primary button. `already_present` is the Gateway's answer, so a
+ * second click converges instead of creating a second instance (REQ-026) — the
+ * non-idempotent `/install` path stays behind the row menu (REQ-027).
+ */
+export function ensureLocalAgent(input: {
+  packagePath: string;
+  nodeId: string | null;
+}): Promise<LocalAgentEnsureResult> {
+  return invoke<LocalAgentEnsureResult>("ensure_local_agent", {
+    packagePath: input.packagePath,
+    nodeId: input.nodeId,
+  });
 }
