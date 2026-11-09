@@ -38,9 +38,14 @@ export function IntentDisplayBody({
 }) {
   const { t } = useTranslation();
   const raw = envelope?.trim() ? envelope : null;
+  // `body` empty is a shape the producer may write (a payload with no words:
+  // every field is `serde(default)`), and the summary is then the only human
+  // text there is. Painting nothing would leave the panel blank while the
+  // envelope sits folded beside it.
+  const text = display.body || display.summary;
   return (
     <>
-      <ChatMarkdown content={display.body} style={fontSize} />
+      <ChatMarkdown content={text} style={fontSize} />
       {display.truncated ? (
         <div className="mt-1 text-text-tertiary">
           {t("chatView.block.displayTruncated")}

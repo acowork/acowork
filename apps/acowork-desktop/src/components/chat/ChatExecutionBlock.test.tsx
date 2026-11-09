@@ -1143,6 +1143,45 @@ describe("ChatExecutionBlock action row", () => {
     expect(container.textContent).toContain("审计 usecase 分层");
   });
 
+  /** A display with a summary and no body is the producer's honest shape for
+   *  a payload with no words (every field is `serde(default)`). The panel must
+   *  show that summary — falling through to `user.body` would paint the machine
+   *  envelope into the one surface the display exists to replace. */
+  it("a display with no body falls back to its own summary, never to the envelope", () => {
+    const base = roundRow(3, "r1");
+    const peer: RoundItem = {
+      ref: REF1,
+      roundRow: { ...base, meta: { ...base.meta, opened_new: true } },
+      showUserLine: false,
+      questionOnTranscript: true,
+    };
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            user: {
+              body: '[intent:inst-a:notify] {"status":"done"}',
+              ts: "1",
+              display: { summary: "收尾完成", body: "" },
+            },
+            answer: { body: "done", ts: "2" },
+            card: null,
+          },
+        }),
+      },
+      {},
+      blockOf([peer]),
+    );
+    expect(screen.getAllByTestId("md")[0]!.textContent).toContain("收尾完成");
+    // The envelope stays reachable, folded — and out of the panel.
+    const details = container.querySelector("details");
+    expect(details?.textContent).toContain("[intent:inst-a:notify]");
+    expect(container.querySelector('pre[data-seq="1"]')).toBeNull();
+  });
+
   it("a legacy round without a display still renders its stored row", () => {
     // Rows written before the projection existed carry no display: the fallback
     // is the stored body, so old transcripts keep rendering exactly as they did.

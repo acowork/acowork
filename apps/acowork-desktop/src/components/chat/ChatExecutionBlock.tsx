@@ -241,8 +241,13 @@ function questionBodyOf(
   round: RunBlock["rounds"][number],
   projection: RoundProjection | undefined,
 ): string {
+  // A display PRESENT is a decision, not a hint: the turn has a human rendering,
+  // and its empty `body` means the producer wrote only a one-line `summary`.
+  // Falling through to `user.body` there painted the machine envelope into the
+  // expanded panel — the very text the display exists to replace.
+  const display = projection?.user?.display;
+  if (display) return display.body || display.summary;
   return (
-    projection?.user?.display?.body ||
     (round.showUserLine ? (round.triggerRow?.body ?? "") : "") ||
     projection?.user?.body ||
     ""
