@@ -83,3 +83,67 @@ describe('Bubble: human input is literal text', () => {
     expect(html).toContain('bubble-raw')
   })
 })
+
+/**
+ * The exception to that grammar: an agent-origin intent turn whose row role is
+ * `user` (design 27 §5.4.5).
+ *
+ * An execution session writes every inbound turn as a user row, and for an intent
+ * the row's `content` is the machine envelope the model reads. The Runtime returns
+ * the human projection beside it as `display`; the bubble paints that instead, as
+ * markdown, and folds the envelope. `literal` must not win here — the words are an
+ * agent's even though the role says otherwise.
+ */
+describe('Bubble: a display projection overrides both the role and `literal`', () => {
+  const ENVELOPE = '[intent:inst-a:create_dev_tasks] {"project_id":"p-1"}'
+  const intentMsg = (display?: {
+    origin: string
+    action: string
+    summary: string
+    body: string
+    truncated?: boolean
+  }) =>
+    ({
+      id: 'm1',
+      role: 'user',
+      content: ENVELOPE,
+      created_at: '2026-10-24T00:00:00.000Z',
+      display,
+    }) as never
+
+  const DISPLAY = {
+    origin: 'request',
+    action: 'create_dev_tasks',
+    summary: '拆解 v0.2 任务',
+    body: '### 拆解 v0.2 任务\n\n- **project_id**: p-1',
+  }
+
+  it('paints the projection as markdown, not the envelope', () => {
+    const html = renderToStaticMarkup(<Bubble msg={intentMsg(DISPLAY)} literal />)
+    // `###` becomes a heading (the renderer maps `#` to h3 — a bubble has no h1).
+    expect(html).toContain('<h5 class="md-h">拆解 v0.2 任务</h5>')
+    expect(html).toContain('<strong>project_id</strong>')
+    expect(html).not.toContain('### 拆解')
+    // The envelope is present only inside the folded <details>.
+    expect(html).toContain('chat-run-raw')
+    expect(html.indexOf('[intent:inst-a:create_dev_tasks]')).toBeGreaterThan(
+      html.indexOf('<details'),
+    )
+  })
+
+  it('states a truncated body and keeps the envelope reachable', () => {
+    const html = renderToStaticMarkup(
+      <Bubble msg={intentMsg({ ...DISPLAY, truncated: true })} literal />,
+    )
+    expect(html).toContain('正文已截断')
+    expect(html).toContain('<details class="chat-run-raw">')
+    expect(html).toContain('<summary>')
+  })
+
+  it('falls back to `literal` for a row with no projection', () => {
+    const html = renderToStaticMarkup(<Bubble msg={intentMsg(undefined)} literal />)
+    expect(html).toContain('[intent:inst-a:create_dev_tasks]')
+    expect(html).toContain('bubble-raw')
+    expect(html).not.toContain('<details')
+  })
+})

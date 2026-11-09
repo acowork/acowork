@@ -362,6 +362,9 @@ export function mapConversationEntries(entries: ConversationEntry[]): ChatMessag
           content: e.content,
           created_at: isoToMs(e.ts),
           kind: 'text',
+          // Carried, not derived: the Runtime resolved this from the row's
+          // metadata, so no screen here has to know the key or the rule.
+          display: e.display,
         })
         break
       case 'tool_call': {

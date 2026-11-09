@@ -31,6 +31,31 @@ export function Bubble({ msg, literal = false }: { msg: ChatMessage; literal?: b
   const tool = (msg.payload ?? {}) as ToolPayload
   if (tool.type === 'tool_call') return <ToolRow msg={msg} name={tool.name ?? 'tool'} />
   const self = msg.role === 'user'
+  // An agent-origin intent turn (design 27 §5.4.5): `content` is the machine
+  // envelope the model reads — `[intent:from:action] {params}` plus the reply
+  // coordinates — and `display` is the same turn written for a person. `literal`
+  // does NOT apply: the execution detail passes it for the user's own turns, but
+  // these words are an agent's, whatever the row's role says. The envelope stays
+  // one tap away because it is the only text carrying the coordinates.
+  const display = msg.display
+  if (display) {
+    return (
+      <div className={`bubble${self ? ' bubble-self' : ' bubble-peer'}`}>
+        <div className="bubble-text">
+          {renderMarkdown(display.body)}
+          {display.truncated ? (
+            <span className="chat-run-note">正文已截断，完整内容见原始信封</span>
+          ) : null}
+          {msg.content ? (
+            <details className="chat-run-raw">
+              <summary>原始信封（机器格式）</summary>
+              <pre>{msg.content}</pre>
+            </details>
+          ) : null}
+        </div>
+      </div>
+    )
+  }
   return (
     <div className={`bubble${self ? ' bubble-self' : ' bubble-peer'}`}>
       <div className={`bubble-text${literal ? ' bubble-raw' : ''}`}>
