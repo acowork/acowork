@@ -16,7 +16,7 @@
  */
 
 import { getGatewayUrl } from "./config";
-import type { IntentDisplay } from "./types";
+import type { IntentDisplay, TurnSpeaker } from "./types";
 import { useAuthStore } from "../stores/authStore";
 
 /** The card a round is parked on (ADR-106 D8): what the round is waiting for,
@@ -56,6 +56,9 @@ export interface RoundProjection {
     ts: string;
     /** What a human reads instead of `body`; see {@link RoundUserDisplay}. */
     display?: RoundUserDisplay | null;
+    /** Who actually spoke this turn, when that is not the session's initiator
+     *  (plan D3). Absent on an ordinary turn; see {@link TurnSpeaker}. */
+    speaker?: TurnSpeaker | null;
   } | null;
   answer?: { body: string; ts: string } | null;
   card?: BlockCard | null;

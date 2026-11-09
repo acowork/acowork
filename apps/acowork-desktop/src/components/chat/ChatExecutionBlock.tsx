@@ -48,6 +48,7 @@ import { useChatStore } from "../../stores/chatStore";
 import { useChatSessionStore } from "../../stores/chatSessionStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSessionTitle } from "../../lib/useSessionTitle";
+import { speakerDisclosure } from "./speakerProvenance";
 import { sendAnswer, sendApproval } from "../../lib/session-control";
 import { deriveSessionTitle } from "../../lib/sessionConfigMapper";
 import { getProcessingPhase, isProcessing, type SessionStatus } from "../../lib/types";
@@ -723,6 +724,20 @@ function RoundItem({
   // envelope the model reads (coordinates, `params`).
   const rawEnvelope = projection?.user?.display ? (projection.user.body ?? "") : "";
   const display = projection?.user?.display ?? null;
+  // Plan D3: a round whose row was written by a human standing in for the run's
+  // initiator says so here too. The Chat's block is the second surface that
+  // shows these words, and a disclosure on the bubble but not here would let the
+  // same sentence read as the agent's on one side of the app and as a person's on
+  // the other.
+  const disclosure = speakerDisclosure(projection?.user?.speaker);
+  // The words of a turn composed in the execution view: it has no Chat row to
+  // pair with, so `showUserLine` is true with nothing to show
+  // (`triggerRow` absent) and the block used to fall through to "no question".
+  // Now that a human can keep an agent-to-agent run alive from that view, that
+  // gap is the normal case rather than an edge: the round's own user body IS the
+  // sentence, and it is the human's literal text, so it needs no display layer.
+  const userBody = projection?.user?.body ?? "";
+  const showComposedLine = !round.showUserLine && !display && userBody.trim().length > 0;
   // A round with nothing readable says so instead of borrowing the wrong line.
   const summary = summarize(question) || t("chatView.block.noQuestion");
   const pending = entry?.status === "pending";
@@ -824,7 +839,37 @@ function RoundItem({
               className="rounded bg-[var(--color-accent)]/10 p-2 text-text-secondary"
               style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
             >
+              {disclosure && (
+                <div className="mb-1 text-text-tertiary">
+                  {t("chatPanel.speakerOnBehalfOf", {
+                    author: disclosure.author,
+                    target: disclosure.standsInFor,
+                  })}
+                </div>
+              )}
               <IntentDisplayBody display={display} envelope={rawEnvelope} />
+            </div>
+          )}
+          {/* A round whose words came from the execution view: no Chat row to
+              pair with, so there is no bubble above and no display projection
+              (the author is a person, whose text is already literal). Rendering
+              nothing left the block printing "no question" over a round that has
+              one — the exact gap the intervention tier turns into the common
+              case. */}
+          {showComposedLine && (
+            <div
+              className="rounded bg-[var(--color-accent)]/10 p-2 text-text-secondary"
+              style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
+            >
+              {disclosure && (
+                <div className="mb-1 text-text-tertiary">
+                  {t("chatPanel.speakerOnBehalfOf", {
+                    author: disclosure.author,
+                    target: disclosure.standsInFor,
+                  })}
+                </div>
+              )}
+              <pre className="whitespace-pre-wrap break-words">{userBody}</pre>
             </div>
           )}
           <RoundBody

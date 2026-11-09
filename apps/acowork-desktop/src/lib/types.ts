@@ -911,6 +911,11 @@ export interface ChatMessage {
    *  before the projection existed — then `content` is what a person reads.
    *  See {@link IntentDisplay}. */
   display?: IntentDisplay;
+  /** Who spoke this turn, when that is not the session's initiator (plan D3).
+   *  Resolved by the Runtime; absent on an ordinary turn, so a surface that gets
+   *  it renders no disclosure and everything else is unchanged.
+   *  See {@link TurnSpeaker} and `speakerProvenance.ts`. */
+  speaker?: TurnSpeaker;
   /** Raw metadata from the JSONL entry. Used by system entries to carry
    *  attachment metadata (ADR-046 §2.5: 5 metadata.type branches). */
   metadata?: Record<string, unknown>;
@@ -1838,6 +1843,20 @@ export interface IntentDisplay {
   truncated?: boolean;
 }
 
+/** Who actually spoke one turn, when that is not the session's initiator
+ *  (plan D3). The Runtime resolves this from the row's metadata — no client
+ *  reads `metadata.speaker` itself, for the same reason it does not read
+ *  `metadata.intent`.
+ *
+ *  Mirrors `acowork_core::turn_speaker::TurnSpeaker`. `on_behalf_of` is the only
+ *  field that means "these words are voiced as somebody else"; it is absent,
+ *  never `null`, when nobody stood in for the author. */
+export interface TurnSpeaker {
+  origin: "human" | "agent";
+  author?: string;
+  on_behalf_of?: string;
+}
+
 export interface ConversationEntry {
   id: string;
   ts: string;
@@ -1851,6 +1870,11 @@ export interface ConversationEntry {
    *  resolves it — no client reads `metadata.intent` itself.
    *  See {@link IntentDisplay}. */
   display?: IntentDisplay;
+  /** Who spoke this turn, when that is not the session's initiator: a human who
+   *  stepped into an agent-to-agent run. Absent on an ordinary turn — absence
+   *  means "nothing to announce", never "unknown speaker".
+   *  See {@link TurnSpeaker}. */
+  speaker?: TurnSpeaker;
   /** Entry kind. `undefined`/`"message"` denotes a regular role-based message.
    *  `"compaction"` denotes an LLM-driven compaction summary event whose
    *  `content` is the summary text and `metadata` is `CompactionEventMeta`. */

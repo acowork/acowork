@@ -17,6 +17,8 @@ import {
   speakerRendersMarkdown,
   type SpeakerKind,
 } from "./speakerBubble";
+import { speakerDisclosure } from "./speakerProvenance";
+import { useTranslation } from "../../i18n/useTranslation";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import type { AttachedItem, ChatMessage } from "../../lib/types";
 import { useChatStore } from "../../stores/chatStore";
@@ -126,6 +128,7 @@ export function UserWithAttachmentsBubble({
   senderAgentId = null,
   senderAgentVersion = null,
 }: UserWithAttachmentsBubbleProps) {
+  const { t } = useTranslation();
   const removeMessageAttachment = useChatStore((s) => s.removeMessageAttachment);
 
   const handleChipRemove = useCallback(
@@ -159,6 +162,10 @@ export function UserWithAttachmentsBubble({
   const asAgentSpeech = speakerRendersMarkdown(speakerKind);
   // Narrowed once, so the avatar branch below has a non-null instance id.
   const senderAgent = speakerKind === "agent" ? senderAgentId : null;
+  // Plan D3: this row's voice, decided by the same pure rule as the plain user
+  // bubble (`speakerProvenance.ts`) — the two paths must not disagree about who
+  // spoke, and they must agree about staying silent on an ordinary turn.
+  const disclosure = speakerDisclosure(userMessage.speaker);
 
   const attachments = parts.filter(isAttachmentPart);
   const refs = parts.filter(isMessageRefPart);
@@ -169,6 +176,14 @@ export function UserWithAttachmentsBubble({
         {liveUserName && (
           <span className="mt-[2px] text-xs text-text-tertiary ">
             {liveUserName}
+          </span>
+        )}
+        {disclosure && (
+          <span className="mt-[2px] text-xs text-text-tertiary">
+            {t("chatPanel.speakerOnBehalfOf", {
+              author: disclosure.author,
+              target: disclosure.standsInFor,
+            })}
           </span>
         )}
 

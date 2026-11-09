@@ -390,6 +390,19 @@ export function cancelTool(
   });
 }
 
+/**
+ * `POST .../sessions/{sid}/retry` — re-run the last turn in place.
+ *
+ * Body-less on purpose: the words and `message_id` come from the Runtime's own
+ * transcript, so this cannot become a second, different question. Changing the
+ * model first is a separate `PUT .../config`; the two facts stay independent,
+ * which is why the error banner can offer "Retry" and "Switch model" as two
+ * buttons instead of one ambiguous one.
+ */
+export function retryTurn(agentId: string, sessionId: string): Promise<void> {
+  return controlRequest("POST", `/api/agents/${agentId}/sessions/${sessionId}/retry`);
+}
+
 /** `POST .../sessions/{sid}/compress` — user-initiated context compression. */
 export function compressSession(
   agentId: string,
