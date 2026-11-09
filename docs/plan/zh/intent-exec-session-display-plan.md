@@ -130,9 +130,16 @@
 
 ## 8. 实施进度
 
-| 模块 | 状态 | 备注 |
+| 模块 | 状态 | 提交 |
 |---|---|---|
-| M1 | 待开始 | 删 `RoundUserDisplay`，加 `from_metadata` |
-| M2 | 待开始 | `ConversationEntryView` + `get_messages` 映射 |
-| M3 | 待开始 | 桌面 + 移动：类型、搬运、渲染 |
-| M4 | 可后置 | 队列预览用 `display.summary` |
+| M1 | 已完成 | `13f2ad27` 删 `RoundUserDisplay`，加 `IntentDisplay::from_metadata`（唯一读取规则），字段全 `serde(default)`；round-trip + 宽容读取两条测试 |
+| M2 | 已完成 | `62abf82d` `ConversationEntryView`（`flatten` + `display`）+ `get_messages` 映射；`265fcea6` 补 HTTP 级断言（视图自测抓不到装配错误） |
+| M3 桌面 | 已完成 | `ebcb9d11` 类型收敛到 `types.ts`、`convertConversationEntry` 只搬运、`MessageBubble` 渲染 → 抽 `IntentDisplayBody` 与执行块共用 |
+| M3 移动 | 已完成 | `4319c941` 同规则；`display` 优先于 `literal`（`ChatDetailScreen` 对 user 轮传 literal） |
+| M4 | 可后置 | 未做：队列预览用 `display.summary` |
+
+**实施中与原计划的三处偏差（都已就地处理，记录理由）**：
+
+1. **视图放在 `usecases/session_metadata.rs` 而不是 `http/server.rs`**：逐条 entry 的转换本来就在 usecase 里（tool_result 截断也在那），handler 只做 `to_value`。边界不变，只是落在真正做转换的那一层。
+2. **视图用 `#[serde(flatten)]` 包住 `ConversationEntry`，而不是逐字段列一遍**：逐字段列会让"将来给 entry 加字段，忘了加到视图"变成静默丢字段。`flatten` 让存储形状自动透传，视图只声明它多出的那一件事（`display`）。
+3. **桌面端把"markdown + 截断提示 + 折叠信封"抽成 `IntentDisplayBody`**，执行块与气泡共用：两处若各写一遍，i18n key 与折叠形状没有理由保持一致。移动端渲染器不同（`renderMarkdown` + CSS 类），未抽。
