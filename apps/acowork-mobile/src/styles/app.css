@@ -2207,6 +2207,16 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* The same folded envelope inside a chat bubble inherits the bubble's ink: the
+ * dim gray above is tuned for the block's peer fill, and on the accent bubble
+ * (`bubble-self`) it falls below AA. */
+.bubble-self .chat-run-raw {
+  color: rgba(255, 255, 255, 0.85);
+}
+.bubble-self .chat-run-raw pre {
+  color: inherit;
+  background: rgba(255, 255, 255, 0.14);
+}
 /* A hole is stated as a hole (D5): inventing content would be writing history. */
 .chat-run-note {
   padding: 8px 10px;

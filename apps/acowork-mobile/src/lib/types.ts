@@ -80,6 +80,9 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'system'
   content: string
   created_at: number
+  /** The human rendering of this turn, when the Runtime has one. The bubble
+   *  paints it in place of `content` (see `Bubble`). */
+  display?: IntentDisplay
   /** Only assistant messages can ask a question or request an approval. */
   kind?: 'text' | 'ask_question' | 'approval'
   payload?: unknown
@@ -217,6 +220,26 @@ export interface MessagesWindow {
   total: number
 }
 
+/** The human rendering of one agent-origin intent turn (design 27 §5.4.5).
+ *
+ *  A turn has two texts: `content` is the machine envelope the model reads
+ *  (`[intent:from:action] {params}` + the reply coordinates), and this is the
+ *  same turn written for a person. The Runtime owns the values — no client reads
+ *  `metadata.intent` itself. Absent on human turns and on rows written before the
+ *  projection existed, where `content` is what a person reads. */
+export interface IntentDisplay {
+  /** Wire kind the display came from (`request` / `response`). */
+  origin: string
+  /** The action the sender named (`analyze`, `notify`, …). */
+  action: string
+  /** One line: a block header, a round row, a list preview. */
+  summary: string
+  /** Markdown the reader gets in place of the envelope. */
+  body: string
+  /** The producer cut `body`; `content` still holds everything. */
+  truncated?: boolean
+}
+
 /** One conversation JSONL entry. Roles beyond user/assistant exist and are */
 /* filtered or folded by `mapConversationEntries`.                          */
 export interface ConversationEntry {
@@ -226,6 +249,8 @@ export interface ConversationEntry {
   content: string
   metadata?: unknown
   kind?: string | null
+  /** The same turn written for a human, when the Runtime has one. */
+  display?: IntentDisplay
 }
 
 /**
