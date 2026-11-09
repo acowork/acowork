@@ -110,7 +110,17 @@ pub enum SessionMessage {
         /// `exec:` keyed line (D9) in the chat the session is bound to.
         /// Produced by `TurnSurface::from_envelope`; see ADR-100 follow-up.
         surface: crate::agent::intent_turn::TurnSurface,
+        /// Plan D3: who typed this turn, when that is not the session's own
+        /// initiator. Rides to the `user` row's `metadata.speaker` and is what
+        /// lets a surface say "nicholas, as agent-a" instead of "agent-a".
+        speaker: Option<acowork_core::turn_speaker::TurnSpeaker>,
     },
+    /// Plan D5: re-run this session's last turn in place (`POST …/retry`).
+    ///
+    /// No payload: the content and the `message_id` are read from the transcript
+    /// (or from the turn the task just ran), so a retry cannot become a way to
+    /// re-submit different words under the old round's coordinate.
+    RetryTurn,
     /// Continue execution after tool result or iteration pause
     ContinueExecution,
     /// Apply runtime config overrides from Gateway
@@ -328,6 +338,7 @@ impl std::fmt::Debug for SessionMessage {
                 attached_items,
                 content_parts,
                 surface,
+                speaker,
             } => f
                 .debug_struct("ChatMessage")
                 .field("content", &content.chars().take(64).collect::<String>())
@@ -339,8 +350,12 @@ impl std::fmt::Debug for SessionMessage {
                 )
                 .field("has_content_parts", &content_parts.is_some())
                 .field("chat", &surface.chat_session_id)
+                // Provenance is a debugging fact: "whose words are these" is
+                // the first question a transcript bug asks.
+                .field("speaker", &speaker.as_ref().map(|s| s.author.clone()))
                 .field("round", &surface.round_id)
                 .finish(),
+            SessionMessage::RetryTurn => f.debug_tuple("RetryTurn").finish(),
             SessionMessage::ContinueExecution => f.debug_tuple("ContinueExecution").finish(),
             SessionMessage::UpdateRuntimeConfig(overrides) => f
                 .debug_struct("UpdateRuntimeConfig")
@@ -840,6 +855,18 @@ impl SessionTask {
             context_builder.set_skill_summary(skills.clone());
         }
 
+        // Plan D3/D6: a session with an intervention roster is one a human can
+        // type into, voiced as its initiator. Say so once, in Block A — the
+        // roster is write-once at creation, so this is a session-lifetime fact
+        // and Block A stays byte-stable.
+        if let Some(conv) = agent_loop.session.conversation()
+            && !conv.interveners().is_empty()
+        {
+            context_builder.set_operator_presence(operator_presence_note(
+                conv.initiator().as_deref(),
+            ));
+        }
+
         // Mirror the identity onto SessionState so compaction paths
         // (loop_context / loop_session) can inject the user's preferred
         // language into the compact model's system prompt.
@@ -1094,6 +1121,7 @@ impl SessionTask {
                     attached_items,
                     content_parts,
                     surface,
+                    speaker,
                 }) => {
                     let has_attached = attached_items.as_ref().is_some_and(|a| !a.is_empty());
                     let has_content_parts = content_parts.as_ref().is_some_and(|p| !p.is_empty());
@@ -1363,6 +1391,16 @@ impl SessionTask {
                     // obligations from one place — set here, released by
                     // `end_turn_obligations` when the turn is over.
                     agent_loop.turn_surface = surface;
+                    // Plan D3: the row's provenance, written at the same moment
+                    // the surface is installed and by the same rule — the entry
+                    // that dequeued the message owns both facts for this turn.
+                    // `None` (the initiator's own words, or a transport with no
+                    // identity) leaves the metadata untouched, so an ordinary
+                    // turn's row is byte-identical to what it was before.
+                    if let Some(speaker) = speaker {
+                        agent_loop.turn_user_row_meta =
+                            Some(serde_json::Value::Object(speaker.to_meta()));
+                    }
                     match agent_loop
                         .run(
                             &enriched_content,
@@ -1427,6 +1465,33 @@ impl SessionTask {
                             // `failed`, and the Chat block renders that state
                             // from the projection. The error event below is the
                             // execution surface's consequence.
+                            //
+                            // Plan D5: the event alone is not enough, and it is
+                            // the reason an agent-to-agent run could end with
+                            // *nothing* to act on. `ChunkEvent::Error` reaches
+                            // whoever is connected at that instant; a session
+                            // whose human opens it a minute later sees a normal
+                            // Idle transcript and no trace of the failure, so
+                            // there is no affordance to fix the model and retry.
+                            // A `system` row is the durable notice: the restorer
+                            // replays it at System role for the transcript and
+                            // `ContextBuilder::build` strips it from the model
+                            // context, so it informs the human without becoming
+                            // a standing instruction to the agent.
+                            let notice = format!(
+                                "This turn ended without finishing: {user_message}. The session is idle — change its model or provider, or press Retry, to continue."
+                            );
+                            if let Some(conv) = agent_loop.session.conversation() {
+                                conv.append_message(
+                                    "system",
+                                    &notice,
+                                    Some(serde_json::json!({
+                                        "notice": "turn_failed",
+                                        "error_type": error_type,
+                                        "detail": detail,
+                                    })),
+                                );
+                            }
                             if let Some(ref tx) = chunk_tx {
                                 let event = SessionChunkEvent {
                                     session_id: session_id.clone(),
@@ -2107,6 +2172,125 @@ impl SessionTask {
                     );
                     break;
                 }
+                // Plan D5: re-run the last turn in place.
+                //
+                // Three facts make this a *retry* rather than a re-submission:
+                // the words come from the transcript (never from the caller),
+                // the `message_id` is the one the row already carries, and the
+                // run goes through `replay` — which appends no `user` row. So the
+                // round keeps its coordinate, the transcript gains an answer
+                // instead of a duplicate question, and the model does not read
+                // the same instruction twice.
+                Some(SessionMessage::RetryTurn) => {
+                    let last = match last_user_message.clone() {
+                        Some(pair) => Some(pair),
+                        // After a restart the task holds no memory of the turn,
+                        // and that is exactly when a human retries (they come
+                        // back to a session they left). The transcript is the
+                        // record, so read it rather than inventing a second one.
+                        None => last_user_row(&agent_loop, &session_id),
+                    };
+                    let Some((content, msg_id)) = last else {
+                        tracing::info!(
+                            session_id = %session_id,
+                            "RetryTurn: session has no user turn to replay — ignored"
+                        );
+                        continue;
+                    };
+                    tracing::info!(
+                        session_id = %session_id,
+                        message_id = %msg_id,
+                        "RetryTurn: replaying the last user turn"
+                    );
+                    // The chosen model/provider/effort must be the ones the human
+                    // just picked, and a config change lands as a pending effect
+                    // applied before the next run — so apply them first, exactly
+                    // as the ChatMessage path does before its run.
+                    apply_pending_config_effects(
+                        &mut agent_loop,
+                        &mut context_builder,
+                        &session_id,
+                        &mut last_config_version,
+                        &mut last_config_snapshot,
+                    );
+                    agent_loop.supersede_pause_cards();
+                    // A retry is not a Chat-composed turn: it answers no row and
+                    // owes no card to one. Leaving the previous surface in place
+                    // would let the resumed round inherit another turn's chat
+                    // obligations.
+                    agent_loop.turn_surface = Default::default();
+                    agent_loop.turn_user_row_meta = None;
+                    match agent_loop
+                        .replay(&content, &mut context_builder, None, Some(msg_id.clone()))
+                        .await
+                    {
+                        Ok(response) => {
+                            tracing::info!(
+                                session_id = %session_id,
+                                response_len = response.len(),
+                                "RetryTurn: replay finished"
+                            );
+                            if let Some(ref tx) = chunk_tx {
+                                let event = SessionChunkEvent {
+                                    session_id: session_id.clone(),
+                                    event: ChunkEvent::Done {
+                                        content: response,
+                                        message_id: msg_id,
+                                    },
+                                };
+                                if tx.send(event).await.is_err() {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        "RetryTurn: failed to send Done chunk event"
+                                    );
+                                }
+                            }
+                            agent_loop.session_core.notify_new_data_available();
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                session_id = %session_id,
+                                error = %e,
+                                "RetryTurn: replay failed"
+                            );
+                            // The durable notice the failure path writes belongs to
+                            // this turn too: a retry that fails again must leave the
+                            // same evidence, or the second failure would be the one
+                            // that looks like nothing happened.
+                            let (user_message, detail, error_type) = e.error_info();
+                            if let Some(conv) = agent_loop.session.conversation() {
+                                conv.append_message(
+                                    "system",
+                                    &format!(
+                                        "The retry ended without finishing: {user_message}. "
+                                    ),
+                                    Some(serde_json::json!({
+                                        "notice": "turn_failed",
+                                        "error_type": error_type,
+                                        "detail": detail,
+                                    })),
+                                );
+                            }
+                            if let Some(ref tx) = chunk_tx {
+                                let event = SessionChunkEvent {
+                                    session_id: session_id.clone(),
+                                    event: ChunkEvent::Error {
+                                        user_message,
+                                        detail,
+                                        error_type,
+                                        message_id: msg_id,
+                                    },
+                                };
+                                if tx.send(event).await.is_err() {
+                                    tracing::warn!(
+                                        session_id = %session_id,
+                                        "RetryTurn: failed to send Error chunk event"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 Some(SessionMessage::CompressAction(action)) => {
                     tracing::info!(
                         session_id = %session_id,
@@ -2254,6 +2438,71 @@ impl SessionTask {
 /// a mismatch between what the LLM *sees* (stale tool_definitions) and what
 /// the runtime can *dispatch* (fresh all_tools):
 ///
+/// The one place that words the operator-presence note (plan D3/D6).
+///
+/// An execution session created by an Intent has an **agent** initiator, and a
+/// human added to its intervention roster may type into it. Their words are
+/// voiced as that initiator — which is the point, because the run is the
+/// initiator's task and a second voice from nowhere would re-open the question
+/// of whose work this is. But the model must not be left to conclude that every
+/// instruction it reads is the requester's own: an operator stepping in to fix a
+/// broken launch parameter is *not* the requester confirming a plan.
+///
+/// So the fact is stated once, in Block A, for the whole session — not attached
+/// to the operator's message, because the turns before it were written by the
+/// agent and would otherwise read as if a human had been present all along.
+///
+/// `initiator` is the session's own row (an agent instance id in an
+/// agent-to-agent session, a human account id in a human-started one), and the
+/// note is worded to be true in both cases.
+pub(crate) fn operator_presence_note(initiator: Option<&str>) -> String {
+    let voice = initiator
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("the account this session belongs to");
+    format!(
+        "This session is shared with a human operator who can append turns. A message may therefore have been typed by that person while being voiced as {voice}, so that the work stays on one task and one thread. Treat such a message as an instruction from {voice}: act on it, answer it, and do not treat it as {voice} confirming anything the operator did not write. The operator can also change this session's model, provider or reasoning effort and can retry a turn; if a turn of yours ended in an error, say plainly what failed rather than assuming the work is finished."
+    )
+}
+
+/// The last genuine user turn of a session, read back from its transcript.
+///
+/// `SessionTask` keeps `last_user_message` in memory, which is enough while the
+/// task that saw the turn is still running. A human pressing Retry usually does
+/// so after a restart, when that memory is gone — but the transcript still holds
+/// the row, so the retry has something to replay instead of silently doing
+/// nothing. Assistant/system rows, internal artifacts and compaction events are
+/// skipped: only a turn that was actually written as `user` may be replayed.
+fn last_user_row(
+    agent_loop: &crate::agent::loop_::AgentLoop,
+    session_id: &str,
+) -> Option<(String, String)> {
+    let conversation = agent_loop.session.conversation()?;
+    let path = conversation.session_path();
+    let text = std::fs::read_to_string(path).ok()?;
+    let mut found = None;
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<crate::conversation::ConversationEntry>(line) else {
+            continue;
+        };
+        if entry.role != "user" || entry.is_internal() || entry.kind.is_some() {
+            continue;
+        }
+        if entry.content.trim().is_empty() {
+            continue;
+        }
+        found = Some((entry.content, entry.id));
+    }
+    if found.is_none() {
+        tracing::info!(session_id = %session_id, "no replayable user turn in transcript");
+    }
+    found
+}
+
 /// - Tool enabled at runtime → LLM never sees it → never calls it
 /// - Tool disabled at runtime → LLM still sees it → calls it → "Unknown tool"
 ///

@@ -203,6 +203,33 @@ fn may_change_visibility(meta: &SessionMeta, scope: &SessionScope) -> bool {
         )
 }
 
+/// Plan D1: refuse `field` unless the caller's tier allows it.
+///
+/// [`authorize_write`] answers "may this caller write the session at all"; this
+/// answers "may it write *this*". The two are different questions now that the
+/// intervention tier exists: an intervener may re-point a run at a usable model
+/// and must not re-premise it (workspace, tool set, who can read it, whether it
+/// exists). The table it consults lives in `acowork_core::session_meta` so the
+/// HTTP answer and the `SessionInfo.capabilities` advertisement cannot drift.
+pub(crate) fn require_field(
+    meta: &SessionMeta,
+    scope: &SessionScope,
+    field: crate::conversation::ConfigField,
+) -> Result<(), ApiError> {
+    let authority = meta.authority_for(scope);
+    if authority.may(field) {
+        return Ok(());
+    }
+    Err(err(
+        StatusCode::FORBIDDEN,
+        format!(
+            "{} may not change `{}` on this session",
+            authority.as_str(),
+            field.as_str()
+        ),
+    ))
+}
+
 /// Authorize a **write** to `sid`. Returns the meta on success.
 pub(crate) fn authorize_write(
     state: &HttpState,
@@ -553,7 +580,10 @@ pub(crate) async fn delete_session(
     headers: HeaderMap,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let scope = scope_from_headers(&headers);
-    authorize_write(&state, &sid, &scope)?;
+    let meta = authorize_write(&state, &sid, &scope)?;
+    // Plan D1: deleting is an owner action even though it is spelled as a
+    // write — an intervener rescues a run, it does not erase the record of it.
+    require_field(&meta, &scope, crate::conversation::ConfigField::Delete)?;
 
     session_manager(&state).await?.lock().await.delete_session(&sid).await;
 
@@ -644,6 +674,12 @@ pub(crate) async fn put_session_visibility(
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let scope = scope_from_headers(&headers);
     let meta = authorize_write(&state, &sid, &scope)?;
+    // Plan D1: re-sharing is the owner's call. This is load-bearing for the
+    // intervention tier: every agent-to-agent session *has* an initiator (the
+    // dispatching agent), so `may_change_visibility` alone says yes — and an
+    // intervener could then hide from its own rescuers the run it was added to
+    // rescue.
+    require_field(&meta, &scope, crate::conversation::ConfigField::Visibility)?;
 
     if !may_change_visibility(&meta, &scope) {
         return Err(err(
@@ -848,6 +884,51 @@ pub(crate) struct SendMessageBody {
     pub(crate) params_json: String,
 }
 
+/// Make sure `sid` has a live session task before an action is dispatched to it.
+///
+/// `dispatch_inbound` hands the message to the in-memory session task; a
+/// session that is only on disk (`Closed`) has no task, so the action would be
+/// dropped after a 202 — silently. `Closed` is not an edge case: **every**
+/// session is `Closed` right after a Runtime restart and after an idle
+/// eviction, which is exactly when a human comes back to a stuck session and
+/// presses Stop / Retry / Continue.
+///
+/// `NotFound` is refused (there is nothing to act on), `Closed` is resumed from
+/// disk (and the activation is broadcast, because nobody asked for it), and
+/// `Active` is a no-op (an event per action would be pure noise).
+async fn open_for_action(
+    state: &HttpState,
+    sid: &str,
+    label: &str,
+) -> Result<(), ApiError> {
+    let sm = session_manager(state).await?;
+    let opened = {
+        let mut guard = sm.lock().await;
+        guard.ensure_session_active(sid).await
+    };
+    match opened {
+        Ok(Some(crate::agent::session::SessionOpenOutcome::ResumedFromDisk)) => {
+            let _ = announce_session_opened(
+                state,
+                &sm,
+                sid,
+                crate::agent::session::SessionOpenOutcome::ResumedFromDisk,
+            )
+            .await;
+            Ok(())
+        }
+        Ok(Some(_)) => Ok(()),
+        Ok(None) => Err(not_found(sid)),
+        Err(e) => {
+            tracing::warn!(session_id = %sid, error = %e, label, "failed to resume session for action");
+            Err(err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("failed to open session for {label}: {e}"),
+            ))
+        }
+    }
+}
+
 /// `POST /sessions/{sid}/messages` — send a user chat message.
 pub(crate) async fn post_send_message(
     State(state): State<HttpState>,
@@ -856,8 +937,23 @@ pub(crate) async fn post_send_message(
     body: Option<Json<SendMessageBody>>,
 ) -> Result<StatusCode, ApiError> {
     let scope = scope_from_headers(&headers);
-    authorize_write(&state, &sid, &scope)?;
+    let meta = authorize_write(&state, &sid, &scope)?;
     let body = body.map(|Json(b)| b).unwrap_or_default();
+
+    // Plan D3: resolve *who spoke* here, because here is the last place that
+    // knows it. `scope.caller_uid()` is the Gateway-verified account; the
+    // session's own row supplies the two facts the voice rule needs (its
+    // initiator, and the Chat whose participants speak as themselves). Past this
+    // point the message travels as a `SessionMessage`, which carries no caller.
+    //
+    // `None` is the ordinary case — the initiator typing into their own session
+    // — and leaves the row exactly as it was before this existed.
+    let speaker = crate::conversation::TurnSpeaker::for_write(
+        meta.initiator.as_deref(),
+        meta.chat_session_id.as_deref(),
+        scope.caller_uid().unwrap_or_default(),
+        scope.chats(),
+    );
 
     // ADR-038 / ADR-100 Rev. 8: the execution surface's ONLY write path.
     //
@@ -881,37 +977,7 @@ pub(crate) async fn post_send_message(
     // state machine does everywhere else: `NotFound` is refused (there is
     // nothing to write into), `Closed` is resumed from disk, `Active` is a
     // no-op.
-    let sm = session_manager(&state).await?;
-    let opened = {
-        let mut guard = sm.lock().await;
-        guard.ensure_session_active(&sid).await
-    };
-    match opened {
-        // ADR-038: activation is broadcast. This one nobody asked for — the
-        // human typed into a session the Runtime had already evicted — so
-        // without the announce every other client keeps reading the
-        // transcript as if the session were still on disk.
-        Ok(Some(crate::agent::session::SessionOpenOutcome::ResumedFromDisk)) => {
-            let _ = announce_session_opened(
-                &state,
-                &sm,
-                &sid,
-                crate::agent::session::SessionOpenOutcome::ResumedFromDisk,
-            )
-            .await;
-        }
-        // Already Active: nothing changed, and an event per message would be
-        // pure noise (the send itself is the fact the client is watching).
-        Ok(Some(_)) => {}
-        Ok(None) => return Err(not_found(&sid)),
-        Err(e) => {
-            tracing::warn!(session_id = %sid, error = %e, "failed to resume session for send");
-            return Err(err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("failed to open session for send: {e}"),
-            ));
-        }
-    }
+    open_for_action(&state, &sid, "send").await?;
 
     let queued = crate::http::server::dispatch_session_action(
         &state,
@@ -929,6 +995,7 @@ pub(crate) async fn post_send_message(
             // the Gateway verified is a fact about the caller, not a hint a
             // client carries about a binding it may not know.
             answerable_by: scope.caller_uid().unwrap_or_default().to_string(),
+            speaker,
         },
     )
     .await;
@@ -994,6 +1061,51 @@ pub(crate) async fn post_continue_execution(
     )
     .await;
     accepted(&sid, "continue_execution", queued)
+}
+
+/// `POST /sessions/{sid}/retry` — re-run the last turn in place (plan §D5).
+///
+/// The button a human presses when a turn ended badly: a failed model, a
+/// provider that just started working, a session that went idle on an error.
+/// It is a **turn-level** action, so it needs write authority — unlike
+/// `/answer` and `/approval`, which only assert that the caller can read the
+/// session they are being asked about.
+///
+/// It carries no content: the turn's words and `message_id` come from the
+/// transcript ([`crate::agent::session::session_task::last_user_row`] when the
+/// task holds no memory of the turn, e.g. after a restart), so a retry can
+/// never become a second, different question. Changing the model first is a
+/// separate `PUT /sessions/{sid}/config` — the two facts stay independent.
+pub(crate) async fn post_retry_turn(
+    State(state): State<HttpState>,
+    Path(sid): Path<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, ApiError> {
+    let scope = scope_from_headers(&headers);
+    authorize_write(&state, &sid, &scope)?;
+    // A retry is most often pressed on a session the Runtime has already
+    // evicted (that is what "I came back to it later" means), so open first.
+    open_for_action(&state, &sid, "retry").await?;
+
+    // Plan §D7: a retry is also the human saying "try again anyway" — they may
+    // have topped up the account or added a key, and the negative cache cannot
+    // see that happen (it is out-of-band). Clearing it is what keeps a 15-minute
+    // verdict from outliving the fix it was waiting for.
+    {
+        let sm = session_manager(&state).await?;
+        sm.lock().await.clear_model_health();
+    }
+
+    let queued = crate::http::server::dispatch_session_action(
+        &state,
+        "retry_turn",
+        &sid,
+        InboundMessage::RetryTurn {
+            session_id: sid.clone(),
+        },
+    )
+    .await;
+    accepted(&sid, "retry_turn", queued)
 }
 
 /// Body of `POST /sessions/{sid}/approval`.

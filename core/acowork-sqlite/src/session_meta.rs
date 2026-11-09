@@ -94,6 +94,13 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok())
         .unwrap_or_default();
+    // Plan D2: the human interveners. Same NULL tolerance as `aware_users`
+    // above - a row written before the column existed grants no intervention.
+    let interveners_json: Option<String> = row.get("interveners")?;
+    let interveners: Vec<String> = interveners_json
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok())
+        .unwrap_or_default();
 
     let title: Option<String> = row.get("title")?;
     let workspace_id: Option<String> = row.get("workspace_id")?;
@@ -203,6 +210,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         visibility,
         chat_session_id,
         aware_users,
+        interveners,
         title,
         workspace_id,
         model,
@@ -724,7 +732,7 @@ const SELECT_ALL_COLUMNS: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, aware_users, model_usage, tool_policy \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, aware_users, model_usage, tool_policy, interveners \
 FROM sessions WHERE session_id = ?1";
 
 const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
@@ -735,7 +743,7 @@ const SELECT_ALL_COLUMNS_PREFIX: &str = "SELECT \
     llm_call_counter, model_ratio, last_compaction_offset, \
     token_last_input, token_last_output, token_total_input, token_total_output, \
     token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
-    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, aware_users, model_usage, tool_policy \
+    perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, chat_session_id, aware_users, model_usage, tool_policy, interveners \
 FROM sessions";
 
 /// Clamp a `u64` token counter into SQLite's `i64` column.
@@ -774,6 +782,13 @@ fn upsert_row(
     } else {
         Some(serde_json::to_string(&meta.aware_users).unwrap_or_else(|_| "[]".to_string()))
     };
+    // Same shape for the intervention roster: empty writes NULL, so an
+    // untouched row stays identical to a pre-feature one.
+    let interveners_json = if meta.interveners.is_empty() {
+        None
+    } else {
+        Some(serde_json::to_string(&meta.interveners).unwrap_or_else(|_| "[]".to_string()))
+    };
     conn.execute(
         "INSERT INTO sessions( \
             session_id, agent_id, created_at, last_active_at, \
@@ -783,7 +798,7 @@ fn upsert_row(
             token_last_input, token_last_output, token_total_input, token_total_output, \
             token_last_cache_read, token_last_cache_write, token_total_cache_read, token_total_cache_write, \
             perf_tps_sum, perf_tps_samples, perf_ttft_ms_sum, perf_ttft_ms_samples, \
-            version, corrupted, initiator, visibility, chat_session_id, aware_users, model_usage, tool_policy \
+            version, corrupted, initiator, visibility, chat_session_id, aware_users, model_usage, tool_policy, interveners \
          ) VALUES ( \
             ?1, ?2, ?3, ?4, \
             ?5, ?6, ?7, ?8, ?9, ?10, \
@@ -792,7 +807,7 @@ fn upsert_row(
             ?18, ?19, ?20, ?21, \
             ?22, ?23, ?24, ?25, \
             ?26, ?27, ?28, ?29, \
-            ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37 \
+            ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38 \
          ) \
          ON CONFLICT(session_id) DO UPDATE SET \
             agent_id = excluded.agent_id, \
@@ -830,7 +845,8 @@ fn upsert_row(
             chat_session_id = excluded.chat_session_id, \
             aware_users = excluded.aware_users, \
             model_usage = excluded.model_usage, \
-            tool_policy = excluded.tool_policy",
+            tool_policy = excluded.tool_policy, \
+            interveners = excluded.interveners",
         params![
             meta.session_id,
             meta.agent_id,
@@ -872,6 +888,7 @@ fn upsert_row(
             aware_users_json,
             serialize_model_usage(meta.model_usage.as_ref()),
             tool_policy_json,
+            interveners_json,
         ],
     )?;
     Ok(())

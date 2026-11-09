@@ -175,6 +175,25 @@ pub enum InboundMessage {
         /// Reason for continuing (optional, for logging).
         reason: String,
     },
+    /// Plan D5: re-run the session's last turn in place.
+    ///
+    /// The recovery path for a turn that ended `failed` on something the human
+    /// can fix: the reported case is a run parked on a model with no quota,
+    /// where the only writer used to be the agent that dispatched the work —
+    /// which is told "failed" and never retries. Configuration is not part of
+    /// this message: the caller changes the model through
+    /// `PUT /sessions/{sid}/config` and then asks for the retry, so the two
+    /// facts stay separate and a retry that changes nothing is still meaningful.
+    ///
+    /// It reuses [`crate::agent::loop_::AgentLoop::replay`], which does **not**
+    /// append or rewrite the `user` row: the turn keeps its `message_id` and
+    /// therefore its round, so the transcript gains an answer instead of a
+    /// duplicate question.
+    RetryTurn {
+        /// Session to re-run; carried for routing parity with the other
+        /// session-scoped control messages.
+        session_id: String,
+    },
     /// ADR-034: Tool approval decision from user (shell command risk confirmation).
     /// Delivered by Gateway after user clicks Allow/Deny in the Desktop App.
     /// Carries `session_id` for parity with proto Message.
@@ -238,6 +257,16 @@ pub enum InboundMessage {
         /// nobody to answer it is a dead button, so without this the card is
         /// not written at all.
         answerable_by: String,
+        /// Who actually typed this turn (plan D3), already resolved by the
+        /// write entry that knows the verified caller and the session's
+        /// initiator. `None` = nothing to announce: the MQTT path carries no
+        /// identity, and the ordinary case (the initiator typing into their own
+        /// session) must stay invisible.
+        ///
+        /// It travels with the message rather than being recomputed at the row
+        /// write, because by then the caller uid is gone: `SessionMessage` and
+        /// the loop know the session, not the account that pressed Enter.
+        speaker: Option<acowork_core::turn_speaker::TurnSpeaker>,
     },
     /// ADR-029 + ADR-052: agent-level builtin-tool enabled-flag update.
     ///
@@ -338,6 +367,9 @@ impl InboundMessage {
             }
             InboundMessage::ApprovalDecision { .. } => {
                 // Approval decisions don't need size limits
+            }
+            InboundMessage::RetryTurn { .. } => {
+                // A control command carries no payload to bound.
             }
             InboundMessage::QuestionAnswer { answer, .. } => {
                 if answer.len() > MAX_INBOUND_PAYLOAD_SIZE {

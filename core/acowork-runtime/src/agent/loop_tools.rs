@@ -388,7 +388,7 @@ impl AgentLoop {
                                 // as an `interaction_request` card below
                                 // (WaitingApproval is time-boxed, not the
                                 // indefinite pause §6.5 R3 forbids).
-                                if self.turn_surface.has_human == Some(false) {
+                                if self.interactive_human() == Some(false) {
                                     let _ = decision_tx.send(ApprovalDecision {
                                         approved: false,
                                         allow_all_session: false,
@@ -1366,7 +1366,7 @@ impl AgentLoop {
             // answerability for `ask_user_question`.
             let hallucinated_gate = match tc.function.name.as_str() {
                 "intent_send" => self.pending_intent.is_some(),
-                "ask_user_question" => self.turn_surface.has_human == Some(false),
+                "ask_user_question" => self.interactive_human() == Some(false),
                 _ => false,
             };
             if hallucinated_gate {

@@ -35,6 +35,7 @@ fn make_meta(
     agent: &str,
 ) -> SessionMeta {
     SessionMeta {
+        interveners: Vec::new(),
         aware_users: Vec::new(),
         version: 4,
         session_id: sid.to_string(),
@@ -164,6 +165,26 @@ fn round_trip_preserves_every_field() -> AcoworkResult<()> {
     assert!(
         sm.get("abc")?.expect("row present").aware_users.is_empty(),
         "empty awareness must not resurrect a stale list"
+    );
+    // Plan D2: the intervention roster round-trips too, and is stored
+    // independently of the awareness list — dropping or merging the two would
+    // silently either hand out write access or take it away.
+    let mut steered = got.clone();
+    steered.interveners = vec!["nicholas".into()];
+    sm.upsert(&steered)?;
+    let got = sm.get("abc")?.expect("row present after intervention");
+    assert_eq!(got.interveners, vec!["nicholas".to_string()]);
+    assert_eq!(
+        got.aware_users,
+        vec!["owner-lucy".to_string(), "nicholas".to_string()],
+        "writing the intervention roster must not disturb the awareness list"
+    );
+    let mut unsteered = got.clone();
+    unsteered.interveners = Vec::new();
+    sm.upsert(&unsteered)?;
+    assert!(
+        sm.get("abc")?.expect("row present").interveners.is_empty(),
+        "empty intervention roster must not resurrect a stale list"
     );
     let tokens = got.tokens.as_ref().expect("tokens persisted");
     assert_eq!(tokens.last_input, 100);
@@ -638,6 +659,7 @@ fn fresh_and_upgraded_databases_share_one_sessions_shape() -> AcoworkResult<()> 
              ALTER TABLE sessions DROP COLUMN intent_closed;
              ALTER TABLE sessions DROP COLUMN aware_users;
              ALTER TABLE sessions DROP COLUMN tool_policy;
+             ALTER TABLE sessions DROP COLUMN interveners;
              PRAGMA user_version = 1;",
         )
         .unwrap();

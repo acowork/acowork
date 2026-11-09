@@ -22,6 +22,7 @@ const DIM: usize = 8;
 
 fn make_meta(sid: &str, last_active: &str, title: &str) -> SessionMeta {
     SessionMeta {
+        interveners: Vec::new(),
         aware_users: Vec::new(),
         version: 4,
         session_id: sid.to_string(),

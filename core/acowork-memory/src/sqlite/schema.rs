@@ -148,8 +148,10 @@ CREATE INDEX IF NOT EXISTS idx_purge_log_purged_at ON purge_log(purged_at);
 /// execution session, seeded by the Gateway for agent-to-agent intents);
 /// 13 = `sessions.tool_policy` (per-session narrowing of the agent-level
 /// builtin-tool / MCP configuration — JSON, `NULL` = inherit the agent
-/// layer).
-pub const SCHEMA_VERSION: i64 = 13;
+/// layer); 14 = `sessions.interveners` (the human accounts allowed to steer
+/// an execution session they did not initiate: append turns and re-point the
+/// run at a usable model — plan D2).
+pub const SCHEMA_VERSION: i64 = 14;
 
 /// Versioned upgrade steps, ordered.
 ///
@@ -337,6 +339,24 @@ const MIGRATIONS: &[(i64, &str)] = &[
     (
         13,
         "ALTER TABLE sessions ADD COLUMN tool_policy JSON;",
+    ),
+    // Plan D2: the human accounts allowed to **intervene** in a session they
+    // did not initiate — append turns and change the run's launch parameters
+    // (model / provider / reasoning effort). Orthogonal to `aware_users`
+    // (reading), deliberately a second column: one list cannot express "may
+    // know this run exists" without also granting "may steer it".
+    //
+    // Nullable with no default: a row written before this migration reads as
+    // NULL -> an empty list -> exactly the previous single-writer behaviour,
+    // and nothing is retroactively opened to anybody. Unlike `aware_users`
+    // this list is NOT write-once: the human-join route appends to it when a
+    // person is added to the bound Chat as a participant.
+    //
+    // Same guard as v11-v13: SQLite rejects a `WHERE` on `ADD COLUMN`, so
+    // `apply_migrations` does the `has_column` check.
+    (
+        14,
+        "ALTER TABLE sessions ADD COLUMN interveners JSON;",
     ),
 ];
 
@@ -545,6 +565,13 @@ const TARGET_SCHEMA: &[SchemaObject] = &[
         name: "tool_policy",
         decl: "tool_policy JSON",
     },
+    // v14 — plan D2: human interveners (steer an execution session they did
+    // not initiate).
+    SchemaObject::Column {
+        table: "sessions",
+        name: "interveners",
+        decl: "interveners JSON",
+    },
 ];
 
 /// Apply the version-gated [`MIGRATIONS`] chain, then converge [`TARGET_SCHEMA`],
@@ -602,6 +629,10 @@ pub(crate) fn apply_migrations(conn: &mut rusqlite::Connection) -> rusqlite::Res
             }
             // v13 is a column-add of the same shape; same guard, same reason.
             if *target == 13 && has_column(&tx, "sessions", "tool_policy")? {
+                continue;
+            }
+            // v14 likewise.
+            if *target == 14 && has_column(&tx, "sessions", "interveners")? {
                 continue;
             }
             tx.execute_batch(sql)?;
@@ -1013,6 +1044,55 @@ mod tests {
             )
             .expect("column exists and the row survives");
         assert_eq!(policy, None, "a pre-v13 row reads as 'inherit the agent layer'");
+    }
+
+    /// v14 (plan D2): a v13 database gains a NULL `interveners`. Every
+    /// pre-existing session therefore keeps its exact single-writer behaviour —
+    /// the migration must not retroactively open anybody into anybody's run.
+    #[test]
+    fn migration_14_grants_no_intervention_to_pre_existing_sessions() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE sessions (                  session_id TEXT PRIMARY KEY,                  agent_id TEXT,                  aware_users JSON,                  tool_policy JSON              );              INSERT INTO sessions (session_id, agent_id) VALUES ('s-1', 'com.test.a');              PRAGMA user_version = 13;",
+        )
+        .expect("seed v13 store");
+
+        apply_migrations(&mut conn).expect("migrate");
+
+        let interveners: Option<String> = conn
+            .query_row(
+                "SELECT interveners FROM sessions WHERE session_id = 's-1'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("column exists and the row survives");
+        assert_eq!(
+            interveners, None,
+            "a pre-v14 row reads as 'no human may steer this run'"
+        );
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
+    }
+
+    /// Same guard as v11-v13: SQLite rejects a `WHERE` on `ADD COLUMN`, so a
+    /// build that shipped `interveners` before stamping 14 must still open.
+    #[test]
+    fn migration_14_is_a_noop_when_the_column_is_already_present() {
+        let mut conn = rusqlite::Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE sessions (                  session_id TEXT PRIMARY KEY,                  agent_id TEXT,                  interveners JSON              );              PRAGMA user_version = 13;",
+        )
+        .expect("seed already-migrated store");
+
+        apply_migrations(&mut conn).expect("open must not fail on the duplicate column");
+
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .expect("version");
+        assert_eq!(version, SCHEMA_VERSION);
     }
 
     /// The incident this whole convergence pass exists for.

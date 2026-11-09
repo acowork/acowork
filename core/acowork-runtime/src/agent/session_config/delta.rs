@@ -8,6 +8,7 @@
 //! used by HTTP GET, MQTT retained messages, and LLM-side effect
 //! application.
 
+use acowork_core::session_meta::ConfigField;
 use serde::{Deserialize, Serialize};
 
 /// Partial session config update.
@@ -40,6 +41,39 @@ pub struct SessionConfigDelta {
     pub title: Option<String>,
 }
 
+impl SessionConfigDelta {
+    /// The [`ConfigField`]s this delta actually touches, in
+    /// [`ConfigField::ALL`] order.
+    ///
+    /// The authorization table in `put_session_config` iterates **this**, not
+    /// the handler's own field list: a field added to both structs and this
+    /// method is gated automatically, and one added only to the struct fails to
+    /// compile here — which is the only way a per-field gate stays exhaustive
+    /// as the delta grows.
+    pub fn present_fields(&self) -> Vec<ConfigField> {
+        let mut out = Vec::new();
+        for field in ConfigField::ALL {
+            let present = match field {
+                ConfigField::Model => self.model.is_some(),
+                ConfigField::Provider => self.provider.is_some(),
+                ConfigField::Account => self.account_id.is_some(),
+                ConfigField::ReasoningEffort => self.reasoning_effort.is_some(),
+                ConfigField::Temperature => self.temperature.is_some(),
+                ConfigField::ContextWindow => self.context_window.is_some(),
+                ConfigField::Workspace => self.workspace_id.is_some(),
+                ConfigField::Title => self.title.is_some(),
+                // Not carried by this delta: they have their own endpoints
+                // (share / delete), which enforce the same table.
+                ConfigField::ToolPolicy | ConfigField::Visibility | ConfigField::Delete => false,
+            };
+            if present {
+                out.push(*field);
+            }
+        }
+        out
+    }
+}
+
 /// Read-only snapshot of current session config.
 ///
 /// Used by HTTP GET, MQTT retained, and LLM-side effect application.
@@ -59,4 +93,45 @@ pub struct SessionConfigSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
     pub title: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every field the delta can carry must be classified by the authorization
+    /// table, or `put_session_config` would enforce a subset and let the rest
+    /// through on the caller's mere `may_turn()`.
+    ///
+    /// Written as one all-fields delta rather than eight cases: the assertion
+    /// that fails when a field is added is "the list changed", which is exactly
+    /// the moment someone has to decide its tier.
+    #[test]
+    fn every_delta_field_is_classified_by_the_authority_table() {
+        let delta = SessionConfigDelta {
+            model: Some("m".into()),
+            provider: Some("p".into()),
+            account_id: Some("a".into()),
+            workspace_id: Some("w".into()),
+            reasoning_effort: Some("low".into()),
+            temperature: Some(0.5),
+            context_window: Some(200_000),
+            title: Some("t".into()),
+        };
+        assert_eq!(
+            delta.present_fields(),
+            vec![
+                ConfigField::Model,
+                ConfigField::Provider,
+                ConfigField::Account,
+                ConfigField::ReasoningEffort,
+                ConfigField::Temperature,
+                ConfigField::ContextWindow,
+                ConfigField::Workspace,
+                ConfigField::Title,
+            ]
+        );
+        // An empty delta touches nothing — "unchanged" is not "allowed".
+        assert!(SessionConfigDelta::default().present_fields().is_empty());
+    }
 }

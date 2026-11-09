@@ -247,6 +247,12 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/sessions/{sid}/compress",
             post(proxy_post_session_compress),
         )
+        // Plan §D5: re-run the last turn in place — the only way back from a
+        // turn that already ended (failed model, quota, restart).
+        .route(
+            "/api/agents/{id}/sessions/{sid}/retry",
+            post(proxy_post_session_retry),
+        )
         // ADR-101: the `/api/agents/{id}/memory/*` panel surface is no longer
         // proxied here — the standalone memory service answers it, through
         // `crate::http::memory_proxy` (one catch-all, `instance_id` injected
@@ -1087,6 +1093,18 @@ async fn proxy_post_session_compress(
     body: Bytes,
 ) -> Response {
     proxy_post_session_action(&state, &id, &sid, "compress", &headers, body).await
+}
+
+/// Reverse-proxy `POST .../sessions/{sid}/retry` — re-run the last turn.
+///
+/// Body-less by design: the Runtime replays the turn from its own transcript,
+/// so a retry cannot be turned into a different question by the caller.
+async fn proxy_post_session_retry(
+    State(state): State<AppState>,
+    Path((id, sid)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Response {
+    proxy_post_session_action(&state, &id, &sid, "retry", &headers, Bytes::new()).await
 }
 
 /// Reverse-proxy `GET /api/agents/{id}/sessions/{sid}/state` to

@@ -263,6 +263,10 @@ impl E2eHarness {
                         attached_items: None,
                         content_parts: None,
                         surface: Default::default(),
+                        // A test harness goes through the same path a real turn
+                        // does; provenance is a fact of the write entry, and this
+                        // one has no caller identity.
+                        speaker: None,
                     },
                 )
                 .expect("session task accepts the message");

@@ -55,6 +55,17 @@ pub struct ContextBuilder {
     /// from the session's own tool-call history. Injected into Block A
     /// under a `## Task Assignment` heading.
     task_brief: Option<String>,
+    /// Plan D3/D6 — "a human operator may speak here", for a session whose
+    /// transcript is shared with a human who can append turns.
+    ///
+    /// Session-lifetime and constant (the intervention roster is write-once at
+    /// creation), so Block A stays byte-stable. It lives in Block A rather than
+    /// in the turn because it is true of the *session*, not of one message: the
+    /// operator's first appearance must not be the moment the model learns it
+    /// can happen, or the turn before it reads every instruction as the agent's.
+    ///
+    /// Injected under `## Operator Presence` by [`Self::set_operator_presence`].
+    operator_presence: Option<String>,
     /// ADR-094: agent-level Progressive-mode skills summary (compact
     /// name + description list). Session-lifetime: seeded when the session
     /// is created and replaced by `UpdateSkillInstructions` broadcasts.
@@ -107,6 +118,7 @@ impl ContextBuilder {
             ambiguous_confirmation_hint: None,
             abstention_prompt: None,
             task_brief: None,
+            operator_presence: None,
             skill_summary: None,
             active_skill: None,
             reasoning_effort: None,
@@ -468,6 +480,21 @@ impl ContextBuilder {
         self.task_brief.as_deref()
     }
 
+    /// Tell the model that a human may be speaking through this session.
+    ///
+    /// Set once, by the party that knows the fact (the intervention roster is
+    /// stamped on the session row at creation). The wording is produced by
+    /// [`crate::agent::session::session_task::operator_presence_note`]; this
+    /// method only owns the slot, so the text has one home.
+    pub fn set_operator_presence(&mut self, note: String) {
+        self.operator_presence = Some(note);
+    }
+
+    /// Get the operator-presence note, if set.
+    pub fn operator_presence(&self) -> Option<&str> {
+        self.operator_presence.as_deref()
+    }
+
     /// Clear the ambiguous-confirmation hint.
     ///
     /// ADR-054: debug patch empty-string clearing semantics — an empty
@@ -600,6 +627,15 @@ impl ContextBuilder {
         // turns. Never part of the user message, never persisted.
         if let Some(ref brief) = self.task_brief {
             system_content.push_str(&format!("\n\n## Task Assignment\n{brief}"));
+        }
+
+        // 2.5.3 Operator presence (plan D3/D6): this session is shared with a
+        // human who can append turns. Without this note the model has no way to
+        // know that a message voiced as the requester may have been typed by
+        // that person — it would read the same words as the requester's own
+        // confirmation.
+        if let Some(ref note) = self.operator_presence {
+            system_content.push_str(&format!("\n\n## Operator Presence\n{note}"));
         }
 
         // 2.6 Skill instructions: agent-level Progressive summary + this
@@ -1073,6 +1109,36 @@ mod tests {
             request.messages[0].cache_control,
             Some(acowork_core::providers::traits::CacheControl::Ephemeral)
         );
+    }
+
+    /// Plan D3/D6: the operator-presence note is a Block A section — set once
+    /// for the session, present on every turn, absent when no human can speak.
+    ///
+    /// The ordering half of this test matters as much as the presence half: the
+    /// note must not land in the user turn, because a session whose *first*
+    /// message carries "a human may be typing" would make every later turn look
+    /// like an operator's too.
+    #[test]
+    fn operator_presence_is_a_session_section_not_a_turn() {
+        let mut history = HistoryManager::new(10000);
+        history.append(ChatMessage::user("hello"));
+
+        let mut builder = ContextBuilder::new("kernel".to_string())
+            .with_override_model("gpt-4".to_string());
+        builder.set_operator_presence("voice follows presence".to_string());
+        let request = builder.build(&history, None, 32_768);
+
+        let system = request.messages[0].content.clone();
+        assert!(system.contains("## Operator Presence"), "{system}");
+        assert!(system.contains("voice follows presence"), "{system}");
+        assert_eq!(request.messages[1].content, "hello");
+
+        // Unset ⇒ no trace of the section, byte-identical to the pre-existing
+        // shape (a session nobody can intervene in).
+        let plain = ContextBuilder::new("kernel".to_string())
+            .with_override_model("gpt-4".to_string())
+            .build(&history, None, 32_768);
+        assert!(!plain.messages[0].content.contains("Operator Presence"));
     }
 
     /// Regression test: the built request's temperature must not carry the

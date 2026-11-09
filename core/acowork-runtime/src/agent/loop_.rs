@@ -1487,7 +1487,11 @@ impl AgentLoop {
             iteration += 1;
             // Resolve current model name for this iteration — model_switch
             // may update override_model mid-session, so compute it fresh each loop.
-            let current_model = self.resolve_current_model(Some(context_builder));
+            // `mut`: a capacity failure may degrade the model mid-iteration
+            // (plan §D7, see the `RetryAction::GiveUp` arm below), and every
+            // later use in this iteration must see the model that is actually
+            // serving the run.
+            let mut current_model = self.resolve_current_model(Some(context_builder));
             tracing::info!(
                 iteration,
                 history_token_count = self.session.history.token_count(),
@@ -1521,7 +1525,15 @@ impl AgentLoop {
                     "Iteration limit reached ({}/{}). Reply to continue.",
                     iteration, self.core.config.max_iterations
                 );
-                if self.pending_intent.is_some() || self.turn_surface.has_human == Some(false) {
+                // Plan D2: an agent-to-agent turn whose session has an
+                // intervention roster parks instead of aborting. Without this
+                // the execution view — the only surface that can show the stall
+                // — never sees one: the turn ends here and the human is left
+                // with a dead session and no button (§7.1's "aborted" carried
+                // the news to the *initiator*, who does not retry).
+                if !self.human_can_reach_pause()
+                    && (self.pending_intent.is_some() || self.turn_surface.has_human == Some(false))
+                {
                     self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Aborted;
                     tracing::warn!(
                         iteration,
@@ -1720,8 +1732,9 @@ impl AgentLoop {
                             "Loop detected ({}). Reply to continue.",
                             msg
                         );
-                        if self.pending_intent.is_some()
-                            || self.turn_surface.has_human == Some(false)
+                        if !self.human_can_reach_pause()
+                            && (self.pending_intent.is_some()
+                                || self.turn_surface.has_human == Some(false))
                         {
                             self.turn_outcome = crate::agent::intent_turn::TurnOutcome::Aborted;
                             tracing::warn!(
@@ -1955,6 +1968,29 @@ impl AgentLoop {
                                 continue;
                             }
                             RetryAction::GiveUp => {
+                                // Plan §D7 — one question before the run dies:
+                                // can another model serve this turn? A capacity
+                                // failure (no balance, rejected key) is a fact
+                                // about one triple, not about the task, and in
+                                // an agent-to-agent session there is nobody on
+                                // the other end to notice the difference. If the
+                                // ladder has an answer we continue on it with the
+                                // counters reset, so the new triple gets its own
+                                // retry budget rather than inheriting this one's.
+                                if self.degrade_after_capacity_failure(context_builder, &e) {
+                                    iteration_retries = 0;
+                                    long_retry_count = 0;
+                                    persistent_retries = 0;
+                                    // The degraded model is resolved fresh from
+                                    // the session/context state — re-read it,
+                                    // because every remaining use of
+                                    // `current_model` in this iteration (trim,
+                                    // budget, request build) must agree with the
+                                    // provider instance we just swapped in.
+                                    current_model =
+                                        self.resolve_current_model(Some(context_builder));
+                                    continue;
+                                }
                                 // Non-retryable error (auth/quota/tool/etc.) —
                                 // transition to Idle and surface the error.
                                 // ADR-014: Streaming → Idle.

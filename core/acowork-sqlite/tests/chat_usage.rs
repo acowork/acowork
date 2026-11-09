@@ -56,6 +56,7 @@ fn stats_sum(sm: &SqliteSessionMetaStore) -> (i64, i64) {
 
 fn make_session(sid: &str, tokens: SessionTokens) -> SessionMeta {
     SessionMeta {
+        interveners: Vec::new(),
         aware_users: Vec::new(),
         version: 4,
         session_id: sid.to_string(),

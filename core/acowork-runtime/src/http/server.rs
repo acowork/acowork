@@ -694,6 +694,14 @@ impl RuntimeHttpServer {
                 "/sessions/{sid}/cancel-tool",
                 post(crate::http::session_control::post_cancel_tool),
             )
+            // Plan §D5: re-run the last turn in place. Every other action
+            // below resumes *something*; this one is the only way back from a
+            // turn that already ended badly, which in an agent-to-agent
+            // session is the difference between recoverable and dead.
+            .route(
+                "/sessions/{sid}/retry",
+                post(crate::http::session_control::post_retry_turn),
+            )
             .route(
                 "/sessions/{sid}/compress",
                 post(crate::http::session_control::post_compress_action),
@@ -1442,11 +1450,40 @@ async fn put_session_config(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     // ADR-076 §决策 4: writing config is a write — a public session is
     // readable by all but switchable (model / workspace) only by its owner.
-    crate::http::session_control::authorize_write(
-        &state,
-        &sid,
-        &crate::http::session_control::scope_from_headers(&headers),
-    )?;
+    //
+    // Plan D1: "a write" now has **tiers**. `authorize_write` admits the
+    // intervention tier as well (that is what makes a stalled agent-to-agent
+    // run recoverable at all), so the per-field table has to be consulted
+    // here or an intervener would silently gain the workspace, the title and
+    // the tool policy along with the model. `ConfigField::min_authority` is the
+    // single source for that split; this handler only asks it.
+    let scope = crate::http::session_control::scope_from_headers(&headers);
+    let meta = crate::http::session_control::authorize_write(&state, &sid, &scope)?;
+    let authority = meta.authority_for(&scope);
+    let refused: Vec<crate::conversation::ConfigField> = delta
+        .present_fields()
+        .into_iter()
+        .filter(|f| !authority.may(*f))
+        .collect();
+    if let Some(field) = refused.first() {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": format!(
+                    "{} may not change `{}` on this session",
+                    authority.as_str(),
+                    field.as_str()
+                ),
+                "authority": authority.as_str(),
+                "field": field.as_str(),
+                "refused": refused.iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+                // What the caller CAN change here: a surface that gets this
+                // wrong can correct itself without a second request.
+                "allowed": meta.capabilities_for(&scope).config_fields
+                    .iter().map(|f| f.as_str()).collect::<Vec<_>>(),
+            })),
+        ));
+    }
 
     // ADR-074 D6: out-of-range `context_window` → 400 (no silent clamp).
     // `0` is legal (clear); validity is judged by the single
@@ -4352,6 +4389,7 @@ mod tests {
         // Persist SessionMeta via the conversation module API so the
         // format stays in lock-step with `scan_sessions_from_meta`.
         let meta = crate::conversation::SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 3, // CONVERSATION_FORMAT_VERSION — keep in sync with conversation.rs
             session_id: session_id.to_string(),
@@ -4588,6 +4626,7 @@ mod tests {
             },
         );
         let meta = crate::conversation::SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 3,
             session_id: "20260101_120000_tok".to_string(),
@@ -4622,6 +4661,7 @@ mod tests {
     /// only spell out what they actually assert on.
     fn test_session_meta_minimal() -> crate::conversation::SessionMeta {
         crate::conversation::SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 3,
             session_id: String::new(),
@@ -6909,6 +6949,7 @@ mod tests {
         // so the session has to exist. (Unauthorized uploads are covered by
         // `session_control`'s own tests.)
         let meta = crate::conversation::SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 1,
             session_id: session_id.to_string(),
@@ -7689,6 +7730,7 @@ mod tests {
         // Create a session with model set in meta
         use crate::conversation::{SessionMeta, write_session_meta};
         let meta = SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 3, // CONVERSATION_FORMAT_VERSION
             session_id: session_id.to_string(),

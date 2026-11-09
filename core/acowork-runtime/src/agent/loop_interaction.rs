@@ -188,6 +188,64 @@ impl AgentLoop {
         self.forget_interactions_of_kind(&["pause"]);
     }
 
+    /// Plan D2: can a human actually reach a pause in this session?
+    ///
+    /// The §2.2 gate answered that question from the Chat alone
+    /// (`TurnSurface::has_human`), which made every agent-to-agent responder
+    /// turn **unpausable**: no Chat ⇒ `Some(false)` ⇒ the run aborts at the
+    /// iteration limit instead of waiting, and the execution surface — the one
+    /// place a human could look at it — only ever sees a finished turn. The
+    /// intervention roster is the other half of the answer, and it is the
+    /// Runtime's own fact: a session with at least one `intervener` has a
+    /// person who can read it and whose Continue/Stop the write gate accepts.
+    ///
+    /// Deliberately narrow: it only ever turns "must not wait" into "may
+    /// wait". A session with no intervener and no Chat-bound human keeps
+    /// ending its turn `aborted` — parking on nobody is what the original
+    /// rule forbade, and that is still right.
+    pub(crate) fn human_can_reach_pause(&self) -> bool {
+        self.has_intervener()
+    }
+
+    /// Plan D3 — is there a human on this session's intervention roster?
+    ///
+    /// The primitive both questions downstream are built on: "may this run
+    /// park?" ([`Self::human_can_reach_pause`]) and "may it ask?" ([`Self::interactive_human`]).
+    /// One read, so the two can never disagree — a run that may pause on a
+    /// person but not ask them anything (or the reverse) is the shape of both
+    /// bugs this pair exists to prevent.
+    pub(crate) fn has_intervener(&self) -> bool {
+        self.session
+            .conversation()
+            .is_some_and(|c| !c.interveners().is_empty())
+    }
+
+    /// Plan D3 — the ANSWERABILITY fact the interactive-tool gates read.
+    ///
+    /// `TurnSurface::has_human` is the Gateway's view of the bound Chat: `Some(
+    /// false)` means the Chat this turn is accountable to is agent-only, which
+    /// the §5.5.4 gate reads as "a card here would be unanswerable". That was
+    /// true when the Chat was the only way to reach a person. It is no longer
+    /// the whole truth: an execution session with an `intervener` roster has a
+    /// human who can read it, can answer `/answer` and `/approval`, and whose
+    /// continue/stop the write gate accepts ([`Self::human_can_reach_pause`]).
+    ///
+    /// So the answerability fact is the union of the two, in that order of
+    /// authority: the roster is the Runtime's own row (it cannot be forged by
+    /// a transport), and it is exactly the fact `human_can_reach_pause` already
+    /// uses for pausing. Reading one fact for "may pause" and another for "may
+    /// ask" is what would let a run ask a question nobody can see.
+    ///
+    /// Deliberately narrow, like its sibling: it only ever turns "no human"
+    /// into "a human", never the reverse — a session with neither stays
+    /// `Some(false)`, and an unknown transport keeps failing open.
+    pub(crate) fn interactive_human(&self) -> Option<bool> {
+        if self.has_intervener() {
+            return Some(true);
+        }
+        self.turn_surface.has_human
+    }
+
     /// The card the current round is parked on, as a reference.
     ///
     /// ADR-106 D2/D4: a round's `card` is recorded when its turn ends `waiting`, so
@@ -470,5 +528,104 @@ impl AgentLoop {
             }
             None => "Todo list is now empty.".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::loop_context::hidden_tools_for_turn;
+    use crate::conversation::ConversationSession;
+
+    /// A loop with a real (disk-backed) conversation, so the intervention
+    /// roster is a real row rather than a mocked fact — `interactive_human`
+    /// reads `ConversationSession::interveners`, and a fake would prove nothing
+    /// about the gate that consumes it.
+    fn loop_with_roster(roster: &[&str]) -> (AgentLoop, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let (session, _config_rx, _state_rx) = ConversationSession::new(
+            dir.path(),
+            "sess-gate",
+            crate::conversation::SessionConfig {
+                agent_id: "test".into(),
+                workspace_id: None,
+                model: Some("test-model".into()),
+                provider: Some("test-provider".into()),
+            },
+            0,
+            std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        )
+        .unwrap();
+        if !roster.is_empty() {
+            session.set_interveners(roster.iter().map(|s| s.to_string()).collect());
+        }
+        let (loop_, _inbound_tx) = AgentLoop::new(
+            crate::config::RuntimeConfig::default(),
+            acowork_core::AgentManifest::from_toml(
+                r#"
+                agent_id = "com.test.gate"
+                version = "1.0.0"
+                name = "Gate Test Agent"
+                description = "Test"
+                author = "test"
+                runtime_version = "0.1.0"
+
+                [llm]
+                provider = "test-provider"
+                model = "test-model"
+                "#,
+            )
+            .expect("manifest must parse"),
+            std::sync::Arc::new(acowork_core::providers::mock::MockProvider::single_text("ok")),
+            Vec::new(),
+            acowork_core::Budget {
+                daily_tokens: None,
+                monthly_tokens: None,
+                daily_cost_usd: None,
+                monthly_cost_usd: None,
+                exceeded_action: "warn".to_string(),
+            },
+            None,
+            Some(std::sync::Arc::new(session)),
+        );
+        (loop_, dir)
+    }
+
+    /// The roster is the second way to reach a person (plan D3). Without it,
+    /// the Gateway's `has_human: Some(false)` for an agent-to-agent pair makes
+    /// every interactive tool unavailable — and in an execution session that is
+    /// the whole difference between "the operator can answer B's question" and
+    /// "B cannot ask".
+    #[test]
+    fn an_intervener_roster_makes_the_turn_answerable() {
+        let (mut loop_, _dir) = loop_with_roster(&["human-1"]);
+        loop_.turn_surface.has_human = Some(false);
+        assert_eq!(loop_.interactive_human(), Some(true));
+        assert!(
+            !hidden_tools_for_turn(true, loop_.interactive_human())
+                .contains(&"ask_user_question"),
+            "a session with an intervener must keep ask_user_question"
+        );
+    }
+
+    /// No roster, no Chat human: the §2.2 gate keeps its original answer, both
+    /// for the tool set and for the hallucination backstop.
+    #[test]
+    fn without_a_roster_the_gate_still_says_no_human() {
+        let (mut loop_, _dir) = loop_with_roster(&[]);
+        loop_.turn_surface.has_human = Some(false);
+        assert_eq!(loop_.interactive_human(), Some(false));
+        assert!(
+            hidden_tools_for_turn(true, loop_.interactive_human()).contains(&"ask_user_question")
+        );
+    }
+
+    /// Unknown stays unknown (fail open): the roster must not turn a transport
+    /// that carried no answerability fact into a refusal.
+    #[test]
+    fn an_unknown_answerability_still_fails_open() {
+        let (loop_, _dir) = loop_with_roster(&[]);
+        assert_eq!(loop_.interactive_human(), None);
+        assert!(hidden_tools_for_turn(false, loop_.interactive_human()).is_empty());
     }
 }

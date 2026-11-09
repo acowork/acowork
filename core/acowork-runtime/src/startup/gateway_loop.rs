@@ -893,6 +893,19 @@ async fn dispatch_inbound(
                 .map_err(|e| RuntimeError::Config(format!("CompressAction: {}", e)))
         }
 
+        // ⑫c RetryTurn — plan D5: re-run the last turn in place.
+        //
+        // Routed to the SESSION TASK's channel, not the session inbox: a retry
+        // is only ever asked for when the session is idle (the failure already
+        // ended the turn), and a message left on the loop's inbound channel would
+        // be drained by the next unrelated run and injected into history as a
+        // stray user message instead of running anything.
+        InboundMessage::RetryTurn { .. } => session_manager
+            .lock()
+            .await
+            .send_to_session(&session_id, SessionMessage::RetryTurn)
+            .map_err(|e| RuntimeError::Config(format!("RetryTurn: {}", e))),
+
         // ⑫b UpdateBuiltinTools - ADR-029/ADR-052: agent-level builtin tool
         // enabled mutation. Routed globally through
         // `SessionManager::apply_builtin_tools_enabled` so sessions
@@ -942,6 +955,7 @@ async fn dispatch_inbound(
             command,
             params_json,
             answerable_by,
+            speaker,
         } => {
             // Parse params_json to extract attached_items (ADR-046 replaces
             // the prior document_ids + content_parts + attached_context
@@ -1089,6 +1103,7 @@ async fn dispatch_inbound(
                             &answerable_by,
                             Some(!answerable_by.is_empty()),
                         ),
+                        speaker,
                     },
                 );
                 if let Err(e) = sent {
