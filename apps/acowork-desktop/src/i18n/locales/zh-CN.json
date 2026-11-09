@@ -345,7 +345,8 @@
       "refCount": "已引用 {{count}} / {{max}}",
       "done": "完成",
       "blockNotLoaded": "该任务块不在已加载的历史中",
-      "refLimit": "一条消息最多引用 {{max}} 个执行会话"
+      "refLimit": "一条消息最多引用 {{max}} 个执行会话",
+      "notAddressable": "该 agent 已不在本会话中，无法 @ 它"
     },
     "execSessionGone": "该执行会话已被删除，无法查看"
   },

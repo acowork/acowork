@@ -247,8 +247,9 @@ interface RowProps {
    *  card is continued and how a finished round gets a follow-up. */
   onReplyToRound: (rowId: string, quote: string) => void;
   /** Attach one execution session to this draft as a reference (design 27
-   *  §5.5.5) — the block's `@` action, riding the same address state the `@`
-   *  picker commits to. */
+   *  §5.5.5) — the block's `@` action. The host performs BOTH halves of the
+   *  composer's `@` gesture (name the agent in the text, attach the run behind
+   *  it); the block itself only reports the intent. */
   onReferenceRun?: (payload: {
     instanceId: string;
     execSessionId: string;
@@ -1428,15 +1429,21 @@ export function GroupChatPanel() {
   };
 
   /** Insert `text` at the textarea's caret / selection range, then re-sync
-   *  the mention picker against the new caret. */
+   *  the mention picker against the new caret.
+   *
+   *  Reads the draft from the live textarea rather than from `draft` state, so
+   *  the callback keeps ONE identity across keystrokes: the row renderers take
+   *  its callers as props and are memoized against exactly that (render-perf
+   *  plan L1). The no-textarea fallback appends functionally for the same
+   *  reason — a stale `draft` capture would drop what was typed. */
   const insertTextAtCaret = useCallback(
     (text: string) => {
       const ta = textareaRef.current;
-      const current = ta?.value ?? draft;
       if (!ta) {
-        setDraft(current + text);
+        setDraft((prev) => prev + text);
         return;
       }
+      const current = ta.value;
       const start = ta.selectionStart ?? current.length;
       const end = ta.selectionEnd ?? current.length;
       const next = current.slice(0, start) + text + current.slice(end);
@@ -1448,7 +1455,7 @@ export function GroupChatPanel() {
         syncMention(next, caret);
       });
     },
-    [draft, syncMention],
+    [syncMention],
   );
 
   // Ctrl+V parity with the 1:1 chat surface: files, images and OS screenshots
@@ -1511,15 +1518,23 @@ export function GroupChatPanel() {
   }, []);
 
   /**
-   * The block's `@` action (design 27 §5.5.5): attach THAT run to this draft.
+   * The block's `@` action (design 27 §5.5.5): address this draft to THAT run.
    *
-   * It commits into the same `addresses` record the `@` picker's "引用" writes,
-   * so the group has one kind of reference — a removable chip on the addressee's
-   * pick — rather than a second way to say "use this run". The rules it inherits:
-   * a level-1 reply names its own session and must not ride the same send (so the
-   * reply target is released first), a run already attached is a no-op instead of
-   * a duplicate chip, and the fifth reference is the server's ceiling
+   * It is the composer's `@` gesture, so it writes BOTH halves of that gesture:
+   * the `@<agent>` token into the text, and the run as that agent's
+   * second-level pick in the same `addresses` record the `@` picker's "引用"
+   * commits to. The token is not decoration — `addressRows` draws only the
+   * picks the draft mentions and `buildChatAddress` sends only those, so a
+   * click that wrote the pick alone showed nothing and sent nothing.
+   *
+   * The rules it inherits: a level-1 reply names its own session and must not
+   * ride the same send (so the reply target is released first), a run already
+   * attached is a no-op instead of a duplicate chip (and never a second token
+   * for the same agent), and the fifth reference is the server's ceiling
    * (`MAX_PICK_REFS`) — it answers with a toast rather than dropping the click.
+   * An agent this chat cannot name is a toast too: a token `resolveMentions`
+   * cannot resolve would be a reference the human believes in and the Gateway
+   * never receives.
    */
   const handleReferenceRun = useCallback(
     ({
@@ -1532,36 +1547,63 @@ export function GroupChatPanel() {
       name: string;
     }) => {
       setReplyTarget(null);
-      setAddresses((prev) => {
-        const key = `${instanceId}|${execSessionId}`;
-        const current = prev[instanceId];
-        const refs = current?.refs ?? [];
-        if (refs.some((r) => `${r.agentInstanceId}|${r.sessionId}` === key)) {
-          return prev;
-        }
-        if (refs.length >= MAX_PICK_REFS) {
-          showToast({
-            type: "info",
-            message: t("chatView.address.refLimit", { max: MAX_PICK_REFS }),
-          });
-          return prev;
-        }
-        return {
-          ...prev,
-          [instanceId]: {
-            refs: [
-              ...refs,
-              { agentInstanceId: instanceId, sessionId: execSessionId },
-            ],
-            labels: { ...(current?.labels ?? {}), [key]: name },
-            forceNew: current?.forceNew,
-          },
-        };
-      });
+      const refs = addresses[instanceId]?.refs ?? [];
+      const key = `${instanceId}|${execSessionId}`;
+      const attached = refs.some(
+        (r) => `${r.agentInstanceId}|${r.sessionId}` === key,
+      );
+      if (!attached && refs.length >= MAX_PICK_REFS) {
+        showToast({
+          type: "info",
+          message: t("chatView.address.refLimit", { max: MAX_PICK_REFS }),
+        });
+        return;
+      }
+      // The name that goes in the text must be the one `resolveMentions` reads
+      // back, so it comes from the same participant list the send resolves
+      // against — never from the block's own run label.
+      const participant = agentParticipants.find((p) => p.id === instanceId);
+      if (!participant) {
+        showToast({
+          type: "info",
+          message: t("chatView.address.notAddressable"),
+        });
+        return;
+      }
+      const text = textareaRef.current?.value ?? "";
+      if (!resolveMentions(text, agentParticipants).includes(instanceId)) {
+        insertTextAtCaret(`@${participant.name} `);
+      }
+      if (!attached) {
+        setAddresses((prev) => {
+          const current = prev[instanceId];
+          const currentRefs = current?.refs ?? [];
+          // Re-checked against the live record: two clicks in one tick must
+          // still produce one chip.
+          if (
+            currentRefs.some(
+              (r) => `${r.agentInstanceId}|${r.sessionId}` === key,
+            )
+          ) {
+            return prev;
+          }
+          return {
+            ...prev,
+            [instanceId]: {
+              refs: [
+                ...currentRefs,
+                { agentInstanceId: instanceId, sessionId: execSessionId },
+              ],
+              labels: { ...(current?.labels ?? {}), [key]: name },
+              forceNew: current?.forceNew,
+            },
+          };
+        });
+      }
       // Land the human where the reference is going to be used.
       textareaRef.current?.focus();
     },
-    [t],
+    [addresses, agentParticipants, insertTextAtCaret, t],
   );
 
   // Jump to the exec session behind a group agent reply: select that agent
