@@ -230,7 +230,6 @@ async fn bootstrap_imports_manifest_facts_once_per_instance() {
         "agent_id": "com.acowork.senior-engineer",
         "name": "Senior Engineer",
         "description": "Writes and reviews production Rust",
-        "display_name": "SE",
         "role": "Engineer",
         "capabilities": {
             "code_review": { "description": "Reviews diffs for defects" }
@@ -241,13 +240,13 @@ async fn bootstrap_imports_manifest_facts_once_per_instance() {
         .post(&format!("/admin/bootstrap?{q}"), manifest.clone())
         .await;
     assert_eq!(status, StatusCode::OK, "{out}");
-    assert_eq!(out["identity_written"], 5);
+    assert_eq!(out["identity_written"], 4);
     assert_eq!(out["capability_written"], 1);
     assert_eq!(out["skipped_existing"], false);
 
     // The panel sees them as self-knowledge, in the bootstrapped instance only.
     let (_, stats) = server.get(&format!("/memory/stats?{q}")).await;
-    assert_eq!(stats["by_type"]["Autobiographical"], 6, "{stats}");
+    assert_eq!(stats["by_type"]["Autobiographical"], 5, "{stats}");
     let (_, other) = server
         .get(&format!("/memory/stats?instance_id={INSTANCE_B}"))
         .await;
@@ -262,8 +261,61 @@ async fn bootstrap_imports_manifest_facts_once_per_instance() {
         .await;
     assert_eq!(status, StatusCode::OK, "{again}");
     assert_eq!(again["skipped_existing"], true, "{again}");
+    assert_eq!(again["identity_updated"], 0, "{again}");
     let (_, stats) = server.get(&format!("/memory/stats?{q}")).await;
-    assert_eq!(stats["by_type"]["Autobiographical"], 6, "{stats}");
+    assert_eq!(stats["by_type"]["Autobiographical"], 5, "{stats}");
+}
+
+/// The rename path, end to end: the owner renames the instance (its
+/// `agent_config.json` changes, so the next bootstrap declares a new name) and
+/// the self-knowledge must follow it — one node, new value. A seed-once
+/// bootstrap leaves the agent introducing itself by a name nobody uses, which
+/// is the human/agent mismatch ADR-073 rules out.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_rename_rewrites_the_identity_fact_in_place() {
+    let server = TestServer::spawn().await;
+    let q = format!("instance_id={INSTANCE_A}");
+    let before = json!({
+        "agent_id": "com.acowork.senior-engineer",
+        "name": "Senior Engineer",
+        "description": "Writes and reviews production Rust",
+    });
+    let (status, _) = server
+        .post(&format!("/admin/bootstrap?{q}"), before)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let after = json!({
+        "agent_id": "com.acowork.senior-engineer",
+        "name": "SE.Kevin",
+        "description": "Writes and reviews production Rust",
+    });
+    let (status, out) = server.post(&format!("/admin/bootstrap?{q}"), after).await;
+    assert_eq!(status, StatusCode::OK, "{out}");
+    assert_eq!(out["identity_updated"], 1, "{out}");
+    assert_eq!(out["identity_written"], 0, "{out}");
+
+    // The panel renders `content` as `{key}: {value}`, so one converged node
+    // means exactly one line carrying the new name.
+    let (_, nodes) = server
+        .get(&format!("/memory/nodes?{q}&node_type=Autobiographical"))
+        .await;
+    let listed = nodes["nodes"].as_array().expect("nodes array");
+    let names: Vec<&str> = listed
+        .iter()
+        .map(|n| n["content"].as_str().unwrap_or_default())
+        .filter(|c| c.contains(" name: "))
+        .collect();
+    assert_eq!(
+        names,
+        vec!["Identity: name: SE.Kevin"],
+        "one node, converged: {nodes}"
+    );
+    assert_eq!(
+        listed.len(),
+        3,
+        "the rename neither duplicated nor dropped a fact: {nodes}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 
 use crate::service::api::{InstanceQuery, instance_store};
 use crate::service::error::Result;
+use crate::sqlite::SqliteStore;
 use crate::service::state::MemoryState;
 use crate::{AutobioCategory, AutobiographicalNode, NodeStatus};
 
@@ -63,8 +64,6 @@ pub struct BootstrapBody {
     pub name: String,
     #[serde(default)]
     pub description: String,
-    #[serde(default)]
-    pub display_name: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
     /// Declared capabilities. A `BTreeMap` so node insertion order is stable
@@ -100,9 +99,6 @@ fn identity_entries(body: &BootstrapBody) -> Vec<(&'static str, String)> {
         ("name", body.name.clone()),
         ("description", body.description.clone()),
     ];
-    if let Some(display_name) = body.display_name.clone() {
-        entries.push(("display_name", display_name));
-    }
     if let Some(role) = body.role.clone() {
         entries.push(("role", role));
     }
@@ -160,12 +156,17 @@ fn apply_policy(state: &MemoryState, instance_id: &str, policy: &ManifestPolicy)
     tracing::info!(instance_id, "applied manifest memory policy");
 }
 
-/// `POST /admin/bootstrap?instance_id=` — import the manifest's static
+/// `POST /admin/bootstrap?instance_id=` — sync the declared static
 /// self-knowledge into one instance namespace.
 ///
-/// **Idempotent**: if the namespace already holds an Identity node it is
-/// considered bootstrapped and nothing is written (`skipped_existing`). A
-/// re-import must not duplicate the identity facts on every agent start.
+/// **Idempotent by convergence, not by seeding once.** The caller sends the
+/// same facts on every start and this route makes the store agree with them:
+/// creating what is missing and updating what changed. Seeding once is not
+/// enough, because some of these facts are owned elsewhere — the instance's
+/// `name` lives in its `agent_config.json` and its owner may rename it between
+/// two starts, so a write-once policy would leave the agent recognizing itself
+/// under a name nobody uses any more (`docs/memory-write-entrypoints.md`,
+/// ADR-111 D7).
 ///
 /// Individual write failures are logged and skipped rather than aborting the
 /// run — a partial bootstrap still leaves the agent usable, and the panel shows
@@ -177,69 +178,118 @@ pub async fn bootstrap(
 ) -> Result<Json<Value>> {
     let (instance_id, store) = instance_store(&state, query.as_deref())?;
 
-    if !store
-        .find_autobiographical_by_category(AutobioCategory::Identity)?
-        .is_empty()
-    {
-        tracing::debug!(
-            instance_id = %instance_id,
-            "autobiographical nodes already exist, skipping manifest bootstrap"
-        );
-        return Ok(Json(json!({
-            "identity_written": 0,
-            "capability_written": 0,
-            "skipped_existing": true,
-        })));
-    }
-
     let now = Utc::now();
-    let mut identity_written = 0usize;
-    for (key, value) in identity_entries(&body) {
-        let node = autobio_node(AutobioCategory::Identity, key.to_string(), value, now);
-        match store.store_autobiographical(&node) {
-            Ok(_) => identity_written += 1,
-            Err(e) => {
-                tracing::warn!(key = %key, error = %e, "failed to bootstrap Autobiographical/Identity node");
-            }
-        }
-    }
+    let existing_identity = store.find_autobiographical_by_category(AutobioCategory::Identity)?;
+    // "First import" is the one condition under which the package's declared
+    // memory policy is still the authority over the panel's saved settings.
+    let first_import = existing_identity.is_empty();
+    let (identity_written, identity_updated) = sync_declared(
+        &store,
+        &existing_identity,
+        AutobioCategory::Identity,
+        identity_entries(&body)
+            .into_iter()
+            .map(|(key, value)| (key.to_string(), value)),
+        now,
+    );
 
-    let mut capability_written = 0usize;
-    for (cap_key, decl) in &body.capabilities {
-        if cap_key.trim().is_empty() || decl.description.trim().is_empty() {
-            continue;
-        }
-        let node = autobio_node(
-            AutobioCategory::Capability,
-            cap_key.clone(),
-            decl.description.clone(),
-            now,
-        );
-        match store.store_autobiographical(&node) {
-            Ok(_) => capability_written += 1,
-            Err(e) => {
-                tracing::warn!(capability = %cap_key, error = %e, "failed to bootstrap Autobiographical/Capability node");
-            }
-        }
-    }
+    let capabilities: Vec<(String, String)> = body
+        .capabilities
+        .iter()
+        .filter(|(key, decl)| !key.trim().is_empty() && !decl.description.trim().is_empty())
+        .map(|(key, decl)| (key.clone(), decl.description.clone()))
+        .collect();
+    let existing_capabilities =
+        store.find_autobiographical_by_category(AutobioCategory::Capability)?;
+    let (capability_written, capability_updated) = sync_declared(
+        &store,
+        &existing_capabilities,
+        AutobioCategory::Capability,
+        capabilities,
+        now,
+    );
 
-    // Package policy: first import only (the early return above owns the
-    // "already bootstrapped" case), so this never clobbers the panel.
-    if let Some(policy) = body.memory.as_ref() {
+    if first_import && let Some(policy) = body.memory.as_ref() {
         apply_policy(&state, &instance_id, policy);
     }
 
     tracing::info!(
         instance_id = %instance_id,
-        identity_count = identity_written,
-        capability_count = capability_written,
-        "bootstrapped Autobiographical/Identity+Capability nodes from manifest"
+        identity_written,
+        identity_updated,
+        capability_written,
+        capability_updated,
+        "synced Autobiographical/Identity+Capability nodes from the manifest"
     );
     Ok(Json(json!({
         "identity_written": identity_written,
+        "identity_updated": identity_updated,
         "capability_written": capability_written,
-        "skipped_existing": false,
+        "capability_updated": capability_updated,
+        // Nothing had to be written: the store already agreed with the caller.
+        "skipped_existing": identity_written == 0 && identity_updated == 0,
     })))
+}
+
+/// Make the store agree with one category of declared facts.
+///
+/// Returns `(created, updated)`. Per declared key:
+///
+/// - **absent** → create it. The caller declares it, so it is ours to write.
+/// - **present with [`MANIFEST_SOURCE`], value changed** → update in place. The
+///   declaration is the younger fact: it carries the name the instance has now.
+/// - **present with [`MANIFEST_SOURCE`], value identical** → leave it, so a
+///   restart does not bump `updated_at` for nothing.
+/// - **present with any other source** → leave it. Evidence-derived and
+///   imported facts (the distiller's `self_evaluation`, a legacy import) are not
+///   the caller's to overwrite; its declaration is only the *default*.
+///
+/// A key the caller stops declaring is **not** deleted. Bootstrap owns the keys
+/// it declares, not their absence: a manifest that drops `role` is not a
+/// statement that the agent has no role, and retiring a self-fact is a decision
+/// for a human on the panel.
+fn sync_declared(
+    store: &SqliteStore,
+    existing: &[AutobiographicalNode],
+    category: AutobioCategory,
+    declared: impl IntoIterator<Item = (String, String)>,
+    now: DateTime<Utc>,
+) -> (usize, usize) {
+    let mut created = 0usize;
+    let mut updated = 0usize;
+    for (key, value) in declared {
+        match existing.iter().find(|node| node.key == key) {
+            Some(node) if node.source == MANIFEST_SOURCE => {
+                if node.value == value {
+                    continue;
+                }
+                let mut next = node.clone();
+                next.value = value;
+                if let Err(e) = store.update_autobiographical(&next) {
+                    tracing::warn!(key = %key, error = %e, "failed to refresh a declared self-fact");
+                    continue;
+                }
+                updated += 1;
+            }
+            Some(node) => {
+                tracing::debug!(
+                    key = %key,
+                    source = %node.source,
+                    "self-fact has a non-manifest source, leaving it alone"
+                );
+            }
+            None => {
+                let node = autobio_node(category.clone(), key.clone(), value, now);
+                match store.store_autobiographical(&node) {
+                    Ok(_) => created += 1,
+                    Err(e) => {
+                        tracing::warn!(key = %key, error = %e, "failed to bootstrap a declared self-fact");
+                    }
+                }
+            }
+        }
+    }
+    (created, updated)
 }
 
 #[cfg(test)]
@@ -252,7 +302,6 @@ mod tests {
             "agent_id": "com.acowork.senior-engineer",
             "name": "Senior Engineer",
             "description": "Writes and reviews production Rust",
-            "display_name": "SE",
             "role": "Engineer",
             "capabilities": {
                 "code_review": { "description": "Reviews diffs for defects" },
@@ -295,7 +344,7 @@ mod tests {
         b.description = "  ".to_string();
         b.role = None;
         let keys: Vec<&str> = identity_entries(&b).into_iter().map(|(k, _)| k).collect();
-        assert_eq!(keys, vec!["agent_id", "name", "display_name"]);
+        assert_eq!(keys, vec!["agent_id", "name"]);
     }
 
     #[tokio::test]
@@ -305,7 +354,7 @@ mod tests {
         let id = "12121212-1212-4122-8122-121212121212";
 
         let out = run(&state, id).await;
-        assert_eq!(out["identity_written"], 5);
+        assert_eq!(out["identity_written"], 4);
         // The blank-description capability is not a memory.
         assert_eq!(out["capability_written"], 1);
         assert_eq!(out["skipped_existing"], false);
@@ -314,7 +363,7 @@ mod tests {
         let identity = store
             .find_autobiographical_by_category(AutobioCategory::Identity)
             .unwrap();
-        assert_eq!(identity.len(), 5);
+        assert_eq!(identity.len(), 4);
         assert!(
             identity.iter().all(|n| n.source == MANIFEST_SOURCE),
             "bootstrapped nodes are stamped as authoritative"
@@ -348,9 +397,100 @@ mod tests {
                 .find_autobiographical_by_category(AutobioCategory::Identity)
                 .unwrap()
                 .len(),
-            5,
+            4,
             "no duplicate identity facts on the second agent start"
         );
+    }
+
+    /// The instance name is owned by `agent_config.json`, and the owner may
+    /// rename the agent between two starts. Seeding once would leave the agent
+    /// answering to a name nobody uses — the exact mismatch ADR-073 forbids.
+    #[tokio::test]
+    async fn a_rename_converges_the_declared_name() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = state_in(dir.path());
+        let id = "16161616-1616-4166-8166-161616161616";
+
+        run(&state, id).await;
+        let mut renamed = body();
+        renamed.name = "Senior.Engineer".to_string();
+        let Json(out) = bootstrap(
+            State(state.clone()),
+            Query(InstanceQuery {
+                instance_id: Some(id.to_string()),
+            }),
+            Json(renamed),
+        )
+        .await
+        .expect("second bootstrap");
+        assert_eq!(out["identity_updated"], 1, "{out}");
+        assert_eq!(out["identity_written"], 0, "{out}");
+        assert_eq!(out["skipped_existing"], false, "{out}");
+
+        let store = state.store(id).unwrap();
+        let names: Vec<String> = store
+            .find_autobiographical_by_category(AutobioCategory::Identity)
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.key == "name")
+            .map(|n| n.value)
+            .collect();
+        assert_eq!(names, vec!["Senior.Engineer"], "refreshed in place, not appended");
+    }
+
+    /// A fact the store holds on other evidence is not the manifest's to
+    /// rewrite: the declaration is the default, the observation is the finding.
+    #[tokio::test]
+    async fn a_fact_from_another_source_survives_the_sync() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = state_in(dir.path());
+        let id = "17171717-1717-4177-8177-171717171717";
+
+        let store = state.store(id).unwrap();
+        store
+            .store_autobiographical(&AutobiographicalNode {
+                category: AutobioCategory::Identity,
+                key: "name".to_string(),
+                value: "What They Call Me".to_string(),
+                source: "self_evaluation".to_string(),
+                ..autobio_node(AutobioCategory::Identity, "name".into(), "x".into(), Utc::now())
+            })
+            .unwrap();
+
+        let Json(out) = bootstrap(
+            State(state.clone()),
+            Query(InstanceQuery {
+                instance_id: Some(id.to_string()),
+            }),
+            Json(body()),
+        )
+        .await
+        .expect("bootstrap");
+        assert_eq!(out["identity_updated"], 0, "{out}");
+
+        let kept: Vec<String> = store
+            .find_autobiographical_by_category(AutobioCategory::Identity)
+            .unwrap()
+            .into_iter()
+            .filter(|n| n.key == "name")
+            .map(|n| n.value)
+            .collect();
+        assert_eq!(kept, vec!["What They Call Me"]);
+    }
+
+    /// Convergence is per key: an unchanged fact is not rewritten just because
+    /// a sibling changed (that would bump `updated_at` on every start).
+    #[tokio::test]
+    async fn an_unchanged_fact_is_not_rewritten() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let state = state_in(dir.path());
+        let id = "18181818-1818-4188-8188-181818181818";
+
+        run(&state, id).await;
+        let out = run(&state, id).await;
+        assert_eq!(out["identity_updated"], 0, "{out}");
+        assert_eq!(out["capability_updated"], 0, "{out}");
+        assert_eq!(out["skipped_existing"], true, "{out}");
     }
 
     #[tokio::test]
