@@ -348,6 +348,13 @@ pub fn reference_name(
     reference_brief(kind, brief, human_text)
 }
 
+/// The envelope-derived name of a row, for a turn with no human projection.
+///
+/// This is the pre-projection behaviour, kept as the fallback: [`reference_name`]
+/// asks the display first and lands here when there is none (a human origin, or a
+/// row written before the projection existed). The source is chosen by origin — a
+/// dispatch is named by the human's own words, everything else by the brief the
+/// sender addressed it with.
 pub fn reference_brief(kind: &str, brief: &str, human_text: &str) -> Option<String> {
     // The source is chosen FIRST: a dispatch whose playbook is missing still has
     // its dispatch text, and that is what names the row. Testing `brief` for
@@ -361,18 +368,13 @@ pub fn reference_brief(kind: &str, brief: &str, human_text: &str) -> Option<Stri
     };
     // One line, bounded: this value is a row's durable name, not a body. The
     // dispatch text is title + description, and a description is arbitrarily
-    // long — the same cap the surfaces apply when they shorten it.
-    const MAX: usize = 240;
-    let collapsed = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    // long — the same cap the display's `summary` uses, because both name a
+    // round on the same surfaces.
+    let collapsed = one_line(source);
     if collapsed.is_empty() {
         return None;
     }
-    Some(if collapsed.chars().count() > MAX {
-        let cut: String = collapsed.chars().take(MAX - 1).collect();
-        format!("{}…", cut.trim_end())
-    } else {
-        collapsed
-    })
+    Some(capped_one_line(&collapsed, DISPLAY_SUMMARY_MAX_CHARS))
 }
 
 /// Render an Intent envelope as the user-role message the receiving model
@@ -526,7 +528,7 @@ pub fn render_intent_display(kind: &str, action: &str, params: &Value) -> Option
         return None;
     }
     let summary = display_summary(headline.as_deref().unwrap_or_default(), action);
-    let (body, truncated) = truncate_display_body(&body);
+    let (body, truncated) = truncate_marked(&body, DISPLAY_BODY_MAX_BYTES);
     Some(IntentDisplay {
         origin: kind.trim().to_string(),
         action: action.trim().to_string(),
@@ -655,6 +657,21 @@ fn one_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// A row's durable name: one line, bounded, ellipsis-marked when cut.
+///
+/// Two producers shorten the same sentence for the same surfaces — the display's
+/// `summary` and the envelope-derived row name ([`reference_brief`]) — so the cap
+/// and the marker live here once. Two lengths would let a round row and its block
+/// header shorten one sentence differently.
+fn capped_one_line(text: &str, max_chars: usize) -> String {
+    let folded = one_line(text);
+    if folded.chars().count() <= max_chars {
+        return folded;
+    }
+    let cut: String = folded.chars().take(max_chars - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
 /// The one-line name of a round, cut from the phrase that should name it.
 ///
 /// The caller passes the envelope's own headline (its `title`, else the prose it
@@ -670,31 +687,7 @@ fn display_summary(headline: &str, action: &str) -> String {
     if folded.is_empty() {
         return one_line(action);
     }
-    if folded.chars().count() > DISPLAY_SUMMARY_MAX_CHARS {
-        let cut: String = folded.chars().take(DISPLAY_SUMMARY_MAX_CHARS - 1).collect();
-        return format!("{}…", cut.trim_end());
-    }
-    folded
-}
-
-/// Cut a display body at [`DISPLAY_BODY_MAX_BYTES`] on a line boundary when one
-/// is close enough, so a list or fence is not severed mid-token. The marker is
-/// the same one [`truncate_response_body`] writes: two spellings of "there is
-/// more" would be two things for the surfaces to know.
-fn truncate_display_body(body: &str) -> (String, bool) {
-    if body.len() <= DISPLAY_BODY_MAX_BYTES {
-        return (body.to_string(), false);
-    }
-    let mut end = DISPLAY_BODY_MAX_BYTES;
-    while end > 0 && !body.is_char_boundary(end) {
-        end -= 1;
-    }
-    if let Some(nl) = body[..end].rfind('\n')
-        && nl > DISPLAY_BODY_MAX_BYTES / 2
-    {
-        end = nl;
-    }
-    (format!("{}\n[truncated]", &body[..end]), true)
+    capped_one_line(&folded, DISPLAY_SUMMARY_MAX_CHARS)
 }
 
 /// The `metadata.intent` object a turn's user row carries for the human surfaces.
@@ -1180,15 +1173,31 @@ fn percent_decode(s: &str) -> Option<String> {
 /// (design 27 §5.5.1 length bound; the initiator asks for more with a new
 /// request rather than the wire carrying an unbounded turn).
 pub fn truncate_response_body(body: &str, max_bytes: usize) -> String {
+    truncate_marked(body, max_bytes).0
+}
+
+/// Cut `body` at `max_bytes` and mark it: on a char boundary, and — when one is
+/// close enough — on a line boundary, so a list or a fence is not severed
+/// mid-token.
+///
+/// The ceiling is the caller's: a response body and a display body are bounded by
+/// different numbers (design 27 §5.5.1 vs [`DISPLAY_BODY_MAX_BYTES`]). How a cut is
+/// made, and what it is marked with, is not: two spellings of "there is more" would
+/// be two things every surface had to know.
+fn truncate_marked(body: &str, max_bytes: usize) -> (String, bool) {
     if body.len() <= max_bytes {
-        return body.to_string();
+        return (body.to_string(), false);
     }
-    // Cut on a char boundary.
     let mut end = max_bytes;
     while end > 0 && !body.is_char_boundary(end) {
         end -= 1;
     }
-    format!("{}\n[truncated]", &body[..end])
+    if let Some(nl) = body[..end].rfind('\n')
+        && nl > max_bytes / 2
+    {
+        end = nl;
+    }
+    (format!("{}\n[truncated]", &body[..end]), true)
 }
 
 #[cfg(test)]
@@ -1389,6 +1398,26 @@ mod tests {
         assert!(t.ends_with("[truncated]"));
         assert!(s.starts_with(&t[..t.len() - "\n[truncated]".len()]));
         assert_eq!(truncate_response_body(s, 100), s);
+    }
+
+    #[test]
+    fn both_bodies_are_cut_by_one_rule_and_wear_one_marker() {
+        // The response body and the display body held two copies of "cut on a
+        // char boundary, then write the marker". A surface must not be able to
+        // tell which copy produced the text it is painting.
+        let body = format!("{}{}{}", "a".repeat(30), "\n", "b".repeat(50));
+        // The break sits past halfway through the window, so the cut moves back
+        // to it instead of severing the line that follows.
+        let expected = format!("{}{}[truncated]", "a".repeat(30), "\n");
+        assert_eq!(truncate_response_body(&body, 40), expected);
+        assert_eq!(truncate_marked(&body, 40), (expected, true));
+        // A long first line has no usable break: the cut stays on the window
+        // edge, on a char boundary (40 bytes lands inside the 14th `字`).
+        let unbroken = "字".repeat(30);
+        assert_eq!(
+            truncate_response_body(&unbroken, 40),
+            format!("{}{}[truncated]", "字".repeat(13), "\n")
+        );
     }
 
     // ── Human display projection (M1) ──────────────────────────────────────
