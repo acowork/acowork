@@ -137,19 +137,34 @@ pub struct AgentEntry {
 /// Agent metadata returned by `AgentDirectory::agent_info`.
 ///
 /// Fields are deliberately minimal: `pm_get_project` projects the roster with
-/// `agent_id` (package id, for display and logs) + `name` (display name, so the
-/// LLM can recognise the entry) + `role` (from the manifest's top-level
-/// `role = "..."`, used by humans / the PM agent to judge what this instance is
-/// for). `instance_id` is the lookup key and is not repeated in the value.
+/// `agent_id` (package id, for display and logs) + `name` (package name) +
+/// `display_name` (per-instance label, what a human actually recognises the
+/// entry by) + `role` (from the manifest's top-level `role = "..."`, used by
+/// humans / the PM agent to judge what this instance is for). `instance_id` is
+/// the lookup key and is not repeated in the value.
+///
+/// **`display_name` source**: Gateway `AgentListResponse.display_name`
+/// (user override first, `manifest.display_name` second — identical to how the
+/// Desktop labels the same instance). It is the *only* field that distinguishes
+/// several instances of one package: `agent_id`, `name` and `role` are all
+/// package-level and therefore identical across them (`SSE.Cassie` vs
+/// `SSE.Kevin` are one `com.acowork.senior-engineer`). Consumers render
+/// `display_name ?? name`, the same fallback the Desktop uses — so a `None`
+/// degrades to today's behaviour instead of producing an empty label.
 ///
 /// **`role` source**: Gateway `AgentListResponse.role` (surfaced from
 /// `manifest.role`; ADR-073 says the single source of truth is the Gateway's
-/// `installed_agents`). `HttpAgentDirectory` fetches and caches it during
-/// periodic refresh; a missing field / undeclared role → `None`, never an error.
+/// `installed_agents`). `HttpAgentDirectory` fetches and caches both fields
+/// during periodic refresh; a missing field / undeclared value → `None`, never
+/// an error.
 #[derive(Debug, Clone)]
 pub struct AgentInfo {
     pub agent_id: String,
     pub name: String,
+    /// Per-instance display label (`"SSE.Kevin"`), user override first.
+    /// Absent from the response (older Gateway / package without one) → `None`;
+    /// callers fall back to [`Self::name`].
+    pub display_name: Option<String>,
     /// Agent role (manifest top-level `role`, e.g. `"Senior Software Engineer"`).
     /// Gateway list response missing the field, or the `.agent` package not
     /// declaring one → `None`.
@@ -647,6 +662,7 @@ mod tests {
                         AgentInfo {
                             agent_id: (*aid).to_string(),
                             name: (*n).to_string(),
+                            display_name: None,
                             role: None,
                             online: None,
                         },
@@ -1545,6 +1561,7 @@ mod tests {
             crate::mcp::AgentInfo {
                 agent_id: "com.acowork.project-manager".to_string(),
                 name: "PM".to_string(),
+                display_name: None,
                 role: Some("Project Manager".to_string()),
                 online: None,
             },
@@ -2323,6 +2340,7 @@ mod tests {
             AgentInfo {
                 agent_id: "com.acowork.architect".to_string(),
                 name: "Architect".to_string(),
+                display_name: None,
                 role: Some("Software Architect".to_string()),
                 online: Some(true),
             },
@@ -2369,6 +2387,148 @@ mod tests {
         );
     }
 
+    /// 同一个包安装两个实例时，`pm_list_agents` 必须能让调用方区分它们。
+    ///
+    /// Regression: `agent_id`、`name`、`role` 三者全是**包级**字段，两个实例
+    /// 逐字相同（这正是 `SSE.Cassie` / `SSE.Kevin` 的现实情形）——
+    /// `display_name` 是唯一的实例级标签。此前 `AgentInfo` 没这个字段，
+    /// 工具返回两行完全相同的记录，调用方只能靠猜或去问人。
+    ///
+    /// 三条断言各自锁一个面：
+    /// 1. 每行都带 `display_name`（无值 → `null`，字段不省略：schema 稳定）
+    /// 2. `query` 能按 `display_name` 命中（人输入的是 "kevin"，不是包名 "SSE"）
+    /// 3. 排序键是调用方实际读到的标签（`display_name ?? name`），而不是
+    ///    两个实例共享的 `name` —— 否则同包分组内顺序看起来是随机的
+    /// 4. `pm_get_project` 的 members 投影同样带 `display_name`
+    #[tokio::test]
+    async fn pm_list_agents_distinguishes_instances_of_one_package() {
+        let cassie = "422c3696-c762-4e19-b8fd-bdec5eb6b1bb";
+        let kevin = "bd68e6a7-7dd4-4ca7-82a2-e65745c4d198";
+        let legacy = "b07e4c2d-34e4-4b91-b07e-4c2d34f8b91a1";
+
+        let dir = Arc::new(MapAgentDirectory::new(&[
+            (cassie, "com.acowork.senior-engineer", "SSE"),
+            (kevin, "com.acowork.senior-engineer", "SSE"),
+            // 未设 display_name 的实例：必须序列化为 null，而不是空串
+            (legacy, "com.acowork.legacy", "Legacy"),
+        ]));
+        dir.set(
+            cassie,
+            AgentInfo {
+                agent_id: "com.acowork.senior-engineer".to_string(),
+                name: "SSE".to_string(),
+                display_name: Some("SSE.Cassie".to_string()),
+                role: Some("Senior Software Engineer".to_string()),
+                online: Some(true),
+            },
+        );
+        dir.set(
+            kevin,
+            AgentInfo {
+                agent_id: "com.acowork.senior-engineer".to_string(),
+                name: "SSE".to_string(),
+                display_name: Some("SSE.Kevin".to_string()),
+                role: Some("Senior Software Engineer".to_string()),
+                online: Some(true),
+            },
+        );
+        let (router, store) = test_router_store_with_dir(dir.clone()).await;
+
+        let v = call_tool(&router, Some("pm-actor"), 200, "pm_list_agents", json!({})).await;
+        let got = tool_text(&v);
+        assert_eq!(got["total"], 3, "{got}");
+
+        let by_id = |id: &str| -> &serde_json::Value {
+            got["agents"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|a| a["instance_id"] == id)
+                .unwrap_or_else(|| panic!("missing instance {id}: {got}"))
+        };
+
+        // 1. 实例级标签透传，包级字段保持相同（说明区分只能靠 display_name）
+        assert_eq!(by_id(cassie)["display_name"], "SSE.Cassie");
+        assert_eq!(by_id(kevin)["display_name"], "SSE.Kevin");
+        assert_eq!(by_id(cassie)["name"], by_id(kevin)["name"]);
+        assert_eq!(by_id(cassie)["agent_id"], by_id(kevin)["agent_id"]);
+        // 无值 → 显式 null，字段不省略
+        assert!(
+            by_id(legacy)["display_name"].is_null(),
+            "absent display_name must be null, not a missing key: {}",
+            by_id(legacy)
+        );
+        assert!(
+            by_id(legacy)
+                .as_object()
+                .unwrap()
+                .contains_key("display_name"),
+            "display_name key must be present even when null — schema stability"
+        );
+
+        // 2. 按显示名检索命中唯一实例
+        let v = call_tool(
+            &router,
+            Some("pm-actor"),
+            201,
+            "pm_list_agents",
+            json!({ "query": "kevin" }),
+        )
+        .await;
+        let got_q = tool_text(&v);
+        assert_eq!(got_q["count"], 1, "display_name is searchable: {got_q}");
+        assert_eq!(got_q["agents"][0]["instance_id"], kevin);
+
+        // 3. 排序键 = 显示标签：SSE.Cassie 在 SSE.Kevin 之前
+        let order: Vec<&str> = got["agents"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["instance_id"].as_str().unwrap())
+            .collect();
+        let pos = |id: &str| order.iter().position(|x| *x == id).unwrap();
+        assert!(
+            pos(cassie) < pos(kevin),
+            "order must follow display_name, got {order:?}"
+        );
+
+        // 4. 项目成员投影同样带 display_name（任务/成员视图与列表同一套命名）
+        let v = call_tool(
+            &router,
+            Some("pm-actor"),
+            202,
+            "pm_create_project",
+            json!({ "title": "P-display" }),
+        )
+        .await;
+        let pid_str = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let pid: ProjectId = pid_str.parse().expect("valid project id");
+        store
+            .add_project_member(&pid, kevin, crate::types::MemberKind::Agent)
+            .await
+            .expect("add kevin");
+
+        let v = call_tool(
+            &router,
+            Some("pm-actor"),
+            203,
+            "pm_get_project",
+            json!({ "project_id": pid_str }),
+        )
+        .await;
+        let resp = tool_text(&v);
+        let kevin_member = resp["members"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["instance_id"] == kevin)
+            .expect("kevin is a member");
+        assert_eq!(
+            kevin_member["display_name"], "SSE.Kevin",
+            "pm_get_project members must carry display_name: {kevin_member}"
+        );
+    }
+
     /// Design 32 §3.3 / Q5, the positive lock: with `project_id` the tool
     /// returns **the assignable set**. Every id it lists really can be
     /// dispatched to (asserted below by dispatching), and an agent that is
@@ -2387,6 +2547,7 @@ mod tests {
             AgentInfo {
                 agent_id: "com.acowork.engineer".to_string(),
                 name: "Engineer".to_string(),
+                display_name: None,
                 role: Some("Senior Software Engineer".to_string()),
                 online: Some(false),
             },
@@ -2820,6 +2981,7 @@ mod tests {
             AgentInfo {
                 agent_id: "com.acowork.senior-engineer".to_string(),
                 name: "SSE".to_string(),
+                display_name: None,
                 role: Some("Senior Software Engineer".to_string()),
                 online: Some(false),
             },
