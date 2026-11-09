@@ -436,6 +436,7 @@ mod tests {
 
     fn meta(session_id: &str, title: &str, active: &str, bound: Option<&str>, owner: Option<&str>) -> SessionMeta {
         SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 3,
             session_id: session_id.to_string(),

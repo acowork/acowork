@@ -65,6 +65,7 @@ impl acowork_runtime::usecases::chat_usage::ChatUsageService for NoopChatUsage {
 
 fn meta(sid: &str, owner: &str, visibility: Option<SessionVisibility>, chat: Option<&str>) -> SessionMeta {
     SessionMeta {
+        interveners: Vec::new(),
         aware_users: Vec::new(),
         version: 4,
         session_id: sid.to_string(),

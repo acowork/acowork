@@ -18,6 +18,8 @@ pub mod intent_accept;
 pub mod intent_turn;
 pub mod llm_availability;
 pub mod loop_;
+pub mod loop_fallback;
+pub mod model_fallback;
 pub mod loop_approval;
 pub mod loop_context;
 pub mod loop_detector;

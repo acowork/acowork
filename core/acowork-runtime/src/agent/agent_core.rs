@@ -106,6 +106,15 @@ pub struct AgentCore {
     /// Provider key vault (in-memory only, never persisted).
     pub(crate) provider_key_vault: Arc<RwLock<HashMap<String, Vec<ProviderKeyEntry>>>>,
 
+    /// Plan §D7 — which `(provider, model, account)` triples the provider has
+    /// told us we cannot use right now (no balance, key rejected).
+    ///
+    /// Shared across the agent's sessions on purpose: the verdict is a property
+    /// of the key, not of the session that hit the wall, and a session created
+    /// one second later must not walk into the same 402. Read by
+    /// [`crate::agent::model_fallback`], written by the loop's degradation path.
+    pub(crate) model_health: Arc<crate::agent::model_fallback::ModelHealthRegistry>,
+
     /// Per-agent compatibility cache, shared across all provider instances
     /// (including those rebuilt by `build_provider_for`).  `None` when no
     /// provider was available at startup (noop fallback).
@@ -486,6 +495,7 @@ impl AgentCore {
             global_provider_list: Arc::new(RwLock::new(Vec::new())),
             provider_list_version: Arc::new(RwLock::new(0)),
             provider_key_vault: Arc::new(RwLock::new(HashMap::new())),
+            model_health: Arc::new(crate::agent::model_fallback::ModelHealthRegistry::new()),
             compat_cache: None,
             responses_compat_cache: None,
             anthropic_compat_cache: None,
@@ -1252,6 +1262,134 @@ impl AgentCore {
         }
     }
 
+    /// Plan §D7 — the ordered fallbacks for a model that just refused to run.
+    ///
+    /// The inventory knowledge lives here (provider list + key vault), the
+    /// *policy* lives in [`crate::agent::model_fallback`]: this method only
+    /// enumerates, in ladder order, the triples that exist. Whether one may be
+    /// used right now is [`crate::agent::model_fallback::next_usable`]'s job —
+    /// that split is what lets the ladder be tested without building a vault.
+    ///
+    /// Order (user-approved, plan §7 O5):
+    /// 1. same provider + model, another account — the run keeps its model;
+    /// 2. the agent's default model on the same provider, any of its accounts;
+    /// 3. the agent's default model on another provider (cross-provider is
+    ///    allowed, and the switch stays scoped to the session that failed).
+    pub fn fallback_candidates(
+        &self,
+        failed: &crate::agent::model_fallback::ModelRef,
+    ) -> Vec<crate::agent::model_fallback::FallbackCandidate> {
+        use crate::agent::model_fallback::{DegradationStep, FallbackCandidate, ModelRef};
+        let mut out: Vec<FallbackCandidate> = Vec::new();
+
+        // Every account this provider knows about. `None` (an empty vault
+        // entry) means "the provider's first account", which is still a tri
+        // worth trying: the vault may not have been pushed yet.
+        let accounts_of = |provider_id: &str| -> Vec<Option<String>> {
+            let vault = self.provider_key_vault.read().unwrap();
+            match vault.get(provider_id) {
+                Some(entries) if !entries.is_empty() => entries
+                    .iter()
+                    .map(|e| Some(e.account_id.clone()))
+                    .collect(),
+                _ => vec![None],
+            }
+        };
+        let serves_model = |provider_id: &str, model: &str| -> bool {
+            self.get_provider(provider_id)
+                .map(|p| p.models.iter().any(|m| m.id == model))
+                .unwrap_or(false)
+        };
+
+        // ── Rung 1: same model, another account ──────────────────────────
+        if let Some(pid) = failed.provider.as_deref() {
+            for account in accounts_of(pid) {
+                if account == failed.account {
+                    continue;
+                }
+                out.push(FallbackCandidate {
+                    target: ModelRef {
+                        provider: Some(pid.to_string()),
+                        model: failed.model.clone(),
+                        account,
+                    },
+                    step: DegradationStep::SameProviderOtherAccount,
+                });
+            }
+        }
+
+        // ── Rungs 2 and 3: the agent's own default model ─────────────────
+        //
+        // `default_model` is "the model this agent is configured to use", and
+        // it is the only rung that keeps the *task premise* intact while
+        // changing the thing that broke. A model the agent never chose
+        // (whatever happens to be first in the inventory) is NOT a fallback:
+        // silently swapping in an unrelated model changes capability and cost
+        // behind the user's back, which is why the ladder ends here instead.
+        // The agent's own preference, read from the same file the session seed
+        // reads (ADR-110) rather than from a second cache that could drift.
+        // Only reached on a failure, so the read is rare by construction.
+        let defaults = crate::agent_config::AgentSessionDefaults::load(
+            std::path::Path::new(&self.config.work_dir),
+        );
+        let Some(default_model) = defaults.model.clone() else {
+            return out;
+        };
+        if default_model == failed.model {
+            // Rung 1 already covered every account of it.
+            return out;
+        }
+        let default_provider = defaults.provider.clone();
+
+        // Rung 2 — same provider.
+        if let Some(pid) = failed.provider.as_deref()
+            && serves_model(pid, &default_model)
+        {
+            for account in accounts_of(pid) {
+                out.push(FallbackCandidate {
+                    target: ModelRef {
+                        provider: Some(pid.to_string()),
+                        model: default_model.clone(),
+                        account,
+                    },
+                    step: DegradationStep::AgentDefaultModel,
+                });
+            }
+        }
+
+        // Rung 3 — another provider that serves it.
+        let mut other_providers: Vec<String> = Vec::new();
+        if let Some(dp) = default_provider.as_deref()
+            && Some(dp) != failed.provider.as_deref()
+            && serves_model(dp, &default_model)
+        {
+            other_providers.push(dp.to_string());
+        }
+        for entry in self.global_provider_list.read().unwrap().iter() {
+            if Some(entry.id.as_str()) == failed.provider.as_deref()
+                || other_providers.iter().any(|p| p == &entry.id)
+            {
+                continue;
+            }
+            if entry.models.iter().any(|m| m.id == default_model) {
+                other_providers.push(entry.id.clone());
+            }
+        }
+        for pid in other_providers {
+            for account in accounts_of(&pid) {
+                out.push(FallbackCandidate {
+                    target: ModelRef {
+                        provider: Some(pid.clone()),
+                        model: default_model.clone(),
+                        account,
+                    },
+                    step: DegradationStep::AgentDefaultProvider,
+                });
+            }
+        }
+        out
+    }
+
     /// ADR-056: Whether the global default compact model's provider is
     /// actually usable right now. A provider is usable when either:
     ///
@@ -1457,6 +1595,7 @@ impl Clone for AgentCore {
             global_provider_list: self.global_provider_list.clone(),
             provider_list_version: Arc::clone(&self.provider_list_version),
             provider_key_vault: self.provider_key_vault.clone(),
+            model_health: Arc::clone(&self.model_health),
             compat_cache: self.compat_cache.clone(),
             responses_compat_cache: self.responses_compat_cache.clone(),
             anthropic_compat_cache: self.anthropic_compat_cache.clone(),
@@ -2265,6 +2404,205 @@ mod tests {
 
     // ── ADR-066: agent-level cache counter tests ─────────────────────
 
+    /// Build an `AgentCore` whose provider list, key vault and
+    /// `agent_config.json` describe one concrete deployment, so the fallback
+    /// ladder is exercised over the same data it reads in production.
+    fn core_with_inventory(work_dir: &std::path::Path) -> AgentCore {
+        let config = RuntimeConfig {
+            work_dir: work_dir.to_string_lossy().to_string(),
+            ..RuntimeConfig::default()
+        };
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.fallback"
+            version = "1.0.0"
+            name = "Fallback test"
+            description = "plan D7"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "ark"
+            model = "doubao-pro"
+            "#,
+        )
+        .unwrap();
+        let core = AgentCore::new(
+            config,
+            manifest,
+            Arc::new(MockProvider::single_text("test")),
+            vec![],
+        );
+        let entry = |id: &str, models: &[&str]| ProviderListItem {
+            id: id.to_string(),
+            base_url: "https://example.invalid/v1".to_string(),
+            protocol_type: acowork_core::protocol::ProtocolType::OpenAI,
+            models: models
+                .iter()
+                .map(|m| ProviderModelEntry {
+                    id: m.to_string(),
+                    capabilities: ModelCapabilitiesInfo {
+                        context_window: 128_000,
+                        max_output_tokens: 4096,
+                        max_input_tokens: None,
+                        supports_tool_calling: true,
+                        supports_reasoning: None,
+                        supports_attachment: None,
+                        supports_temperature: None,
+                        cost: None,
+                        modalities: None,
+                        name: None,
+                        family: None,
+                        knowledge_cutoff: None,
+                        default_reasoning_effort: None,
+                        thinking_mode: None,
+                        reasoning_efforts: None,
+                    },
+                    max_output_tokens_limit: 4096,
+                    protocol_type: None,
+                    base_url: None,
+                    protocol_probe: None,
+                })
+                .collect(),
+            compact_model: None,
+            custom: false,
+        };
+        *core.global_provider_list.write().unwrap() = vec![
+            entry("ark", &["doubao-pro"]),
+            entry("openai", &["gpt-4o"]),
+        ];
+        {
+            let mut vault = core.provider_key_vault.write().unwrap();
+            vault.insert(
+                "ark".to_string(),
+                vec![
+                    ProviderKeyEntry {
+                        provider_id: "ark".into(),
+                        account_id: "acct-1".into(),
+                        api_key: "k1".into(),
+                    },
+                    ProviderKeyEntry {
+                        provider_id: "ark".into(),
+                        account_id: "acct-2".into(),
+                        api_key: "k2".into(),
+                    },
+                ],
+            );
+            vault.insert(
+                "openai".to_string(),
+                vec![ProviderKeyEntry {
+                    provider_id: "openai".into(),
+                    account_id: "acct-oai".into(),
+                    api_key: "k3".into(),
+                }],
+            );
+        }
+        core
+    }
+
+    fn write_agent_defaults(work_dir: &std::path::Path, model: &str, provider: &str) {
+        let dir = work_dir.join("config");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("agent_config.json"),
+            serde_json::json!({
+                "default_model": model,
+                "default_provider": provider,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+
+    /// The ladder in the order the user approved: another account of the model
+    /// that failed first (the premise stays untouched), then the agent's own
+    /// default model, then that default on another provider.
+    #[test]
+    fn the_ladder_is_other_account_then_agent_default_then_other_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_defaults(dir.path(), "gpt-4o", "openai");
+        let core = core_with_inventory(dir.path());
+
+        let failed = crate::agent::model_fallback::ModelRef::new(
+            Some("ark"),
+            "doubao-pro",
+            Some("acct-1"),
+        );
+        let got = core.fallback_candidates(&failed);
+        let labels: Vec<String> = got
+            .iter()
+            .map(|c| format!("{}|{}", c.step.as_str(), c.target.label()))
+            .collect();
+
+        assert_eq!(
+            labels,
+            vec![
+                // Rung 1 — the other ark account, same model.
+                "same_provider_other_account|ark/doubao-pro/account acct-2".to_string(),
+                // Rung 3 — `gpt-4o` is not served by ark, so rung 2 is empty.
+                "agent_default_provider|openai/gpt-4o/account acct-oai".to_string(),
+            ],
+            "unexpected ladder: {labels:?}"
+        );
+    }
+
+    /// When the current provider also serves the agent's default model, that
+    /// rung comes before crossing providers: the smaller change wins.
+    #[test]
+    fn the_default_model_on_the_same_provider_comes_before_another_provider() {
+        let dir = tempfile::tempdir().unwrap();
+        write_agent_defaults(dir.path(), "gpt-4o", "openai");
+        let core = core_with_inventory(dir.path());
+        // Make ark serve the agent default too.
+        {
+            let mut list = core.global_provider_list.write().unwrap();
+            let mut entry = list[0].models[0].clone();
+            entry.id = "gpt-4o".to_string();
+            list[0].models.push(entry);
+        }
+
+        let failed = crate::agent::model_fallback::ModelRef::new(
+            Some("ark"),
+            "doubao-pro",
+            Some("acct-1"),
+        );
+        let steps: Vec<&str> = core
+            .fallback_candidates(&failed)
+            .iter()
+            .map(|c| c.step.as_str())
+            .collect();
+        assert_eq!(
+            steps,
+            vec![
+                "same_provider_other_account",
+                "agent_default_model",
+                "agent_default_model",
+                "agent_default_provider",
+            ],
+            "rung 2 must enumerate ark's accounts before crossing providers"
+        );
+    }
+
+    /// No agent default configured ⇒ the ladder ends after rung 1, and an
+    /// exhausted ladder is what makes the run give up *loudly* instead of
+    /// looping on a model that cannot serve it.
+    #[test]
+    fn without_an_agent_default_the_ladder_stops_after_another_account() {
+        let dir = tempfile::tempdir().unwrap();
+        let core = core_with_inventory(dir.path());
+        let failed = crate::agent::model_fallback::ModelRef::new(
+            Some("ark"),
+            "doubao-pro",
+            Some("acct-1"),
+        );
+        let got = core.fallback_candidates(&failed);
+        assert_eq!(got.len(), 1);
+        assert_eq!(
+            got[0].step,
+            crate::agent::model_fallback::DegradationStep::SameProviderOtherAccount
+        );
+    }
+
     /// Helper: build an AgentCore with default test config and no
     /// manifest, suitable for token-counter tests.
     fn make_minimal_core() -> AgentCore {
@@ -2290,6 +2628,7 @@ mod tests {
         let provider = Arc::new(MockProvider::single_text("test"));
         AgentCore::new(config, manifest, provider, vec![])
     }
+
 
     /// The instance name is one value shared by every session clone, so a
     /// rename reaches the prompt of an already-running session.

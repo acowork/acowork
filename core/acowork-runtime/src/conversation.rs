@@ -26,9 +26,14 @@ use crate::agent::session_state::TodoItem;
 // `crate::agent::session_state` (kept as a thin re-export) and the two
 // surfaces use the same type via `pub use` aliasing.
 pub use acowork_core::session_meta::{
-    ModelUsageEntry, SessionMeta, SessionMetaStore, SessionPerf, SessionScope, SessionTokens,
-    SessionToolPolicy, SessionVisibility, TokenStatsRow, model_usage_key,
+    ConfigField, ModelUsageEntry, SessionAuthority, SessionCapabilities, SessionMeta,
+    SessionMetaStore, SessionPerf, SessionScope, SessionTokens, SessionToolPolicy,
+    SessionVisibility, TokenStatsRow, model_usage_key,
 };
+// Plan D3: the provenance record a `user` row carries. Re-exported here because
+// every writer of such a row already reaches the transcript through this module,
+// and a second import path would invite a second name for the same fact.
+pub use acowork_core::turn_speaker::{META_KEY_TURN_SPEAKER, SpeakerOrigin, TurnSpeaker};
 use acowork_core::protocol::{ContextUsageSection, ModelCostInfo};
 use acowork_core::providers::traits::UsageInfo;
 
@@ -1140,6 +1145,15 @@ pub struct ConversationSession {
     /// by the creation path (the Gateway-resolved seed carried on the
     /// Intent wire); never re-assigned. Empty for human-origin sessions.
     aware_users: std::sync::Mutex<Vec<String>>,
+    /// Plan D2: human accounts that may **steer** this session — append turns
+    /// and re-point the run at a usable model without owning it, mirrored from
+    /// `SessionMeta.interveners`.
+    ///
+    /// A separate slot from `aware_users` although both are seeded from the
+    /// same Gateway roster today: the two are different *tiers*, not different
+    /// memberships, and collapsing them would let a future aware-but-read-only
+    /// grant silently buy write access. Written once, like the awareness list.
+    interveners: std::sync::Mutex<Vec<String>>,
     /// ADR-060: todo snapshot mirror (Block C source).
     ///
     /// The single persistence owner is [`ConversationSession`] — the
@@ -1351,6 +1365,12 @@ impl ConversationSession {
         // (see `append_compaction_event`).
         let last_compaction_offset = self.last_compaction_offset.lock().ok().and_then(|g| *g);
         SessionMeta {
+            interveners: self
+                .interveners
+                .lock()
+                .ok()
+                .map(|i| i.clone())
+                .unwrap_or_default(),
             version: CONVERSATION_FORMAT_VERSION,
             session_id: self.session_id.clone(),
             agent_id: self.agent_id.clone(),
@@ -1715,6 +1735,7 @@ impl ConversationSession {
             visibility: std::sync::Mutex::new(None),
             chat_session_id: std::sync::Mutex::new(None),
             aware_users: std::sync::Mutex::new(Vec::new()),
+            interveners: std::sync::Mutex::new(Vec::new()),
             tokens: std::sync::Mutex::new(None),
             model_usage: std::sync::Mutex::new(None),
             llm_call_counter: std::sync::Mutex::new(None),
@@ -1854,6 +1875,7 @@ impl ConversationSession {
                 visibility: std::sync::Mutex::new(meta.visibility),
                 chat_session_id: std::sync::Mutex::new(meta.chat_session_id.clone()),
                 aware_users: std::sync::Mutex::new(meta.aware_users.clone()),
+                interveners: std::sync::Mutex::new(meta.interveners.clone()),
                 tokens: std::sync::Mutex::new(meta.tokens.clone()),
                 model_usage: std::sync::Mutex::new(meta.model_usage.clone()),
                 llm_call_counter: std::sync::Mutex::new(meta.llm_call_counter),
@@ -2714,6 +2736,38 @@ impl ConversationSession {
         self.aware_users.lock().ok().map(|a| a.clone()).unwrap_or_default()
     }
 
+    /// Plan D2: record the human accounts allowed to **steer** this session.
+    ///
+    /// Same creation-time contract as [`Self::set_aware_users`] — one shot from
+    /// the intent-creation path, write-once, empty seed is a no-op — because
+    /// the roster mirrors the ACL the Gateway resolved when it delivered. It
+    /// exists so an agent-to-agent run whose launch parameters are unusable has
+    /// a writer: without it the only party that could fix the model is the
+    /// agent that dispatched the work, and it has already been told the run
+    /// failed.
+    pub fn set_interveners(&self, users: Vec<String>) {
+        {
+            let mut slot = self.interveners.lock().unwrap_or_else(|e| e.into_inner());
+            if *slot == users {
+                return;
+            }
+            if !slot.is_empty() {
+                tracing::warn!(
+                    session_id = %self.session_id,
+                    "interveners is a creation-time snapshot — ignoring re-assignment"
+                );
+                return;
+            }
+            *slot = users;
+        }
+        self.write_meta();
+    }
+
+    /// The human accounts that may steer this session (plan D2).
+    pub fn interveners(&self) -> Vec<String> {
+        self.interveners.lock().ok().map(|i| i.clone()).unwrap_or_default()
+    }
+
     /// ADR-076 §决策 4: whether this session is restricted to its owner.
     ///
     /// An unset visibility means public — see [`SessionVisibility`].
@@ -3240,6 +3294,9 @@ impl Clone for ConversationSession {
             aware_users: std::sync::Mutex::new(
                 self.aware_users.lock().ok().map(|a| a.clone()).unwrap_or_default(),
             ),
+            interveners: std::sync::Mutex::new(
+                self.interveners.lock().ok().map(|i| i.clone()).unwrap_or_default(),
+            ),
             tokens: std::sync::Mutex::new(self.tokens.lock().ok().and_then(|t| t.clone())),
             model_usage: std::sync::Mutex::new(
                 self.model_usage.lock().ok().and_then(|m| m.clone()),
@@ -3383,6 +3440,16 @@ pub struct SessionInfo {
     /// disable the workspace / model / title inputs up front instead of
     /// firing a request that 404s (and to open a foreign session read-only).
     pub can_write: bool,
+    /// Plan D1: the caller's **tier** over this session, the same ladder the
+    /// write handlers enforce. `can_write` is its `may_turn()` shorthand; this
+    /// is the value a surface needs to know whether the model picker should be
+    /// enabled while the workspace picker stays dead — the difference between
+    /// "read-only" and "an intervener who may rescue a stalled run".
+    pub authority: SessionAuthority,
+    /// Plan D1: the config fields this caller may write, in
+    /// [`ConfigField::ALL`] order. Sent rather than derived client-side so a
+    /// new field cannot leave a surface offering a write the server refuses.
+    pub config_fields: Vec<ConfigField>,
 }
 
 // ── Session Index (fast O(1) lookup) ───────────────────────────────────────
@@ -3974,20 +4041,25 @@ fn build_session_page(
 
     let infos = sessions[start..end]
         .iter()
-        .map(|(sid, meta)| SessionInfo {
-            session_id: sid.clone(),
-            created_at: meta.created_at.clone(),
-            last_active_at: meta.last_active_at.clone(),
-            message_count: meta.message_count as u32,
-            title: meta.title.clone(),
-            corrupted: meta.corrupted,
-            model: meta.model.clone(),
-            provider: meta.provider.clone(),
-            account_id: meta.account_id.clone(),
-            workspace_id: meta.workspace_id.clone(),
-            visibility: meta.visibility,
-            initiator: meta.initiator.clone(),
-            can_write: meta.is_writable_by(scope),
+        .map(|(sid, meta)| {
+            let authority = meta.authority_for(scope);
+            SessionInfo {
+                session_id: sid.clone(),
+                created_at: meta.created_at.clone(),
+                last_active_at: meta.last_active_at.clone(),
+                message_count: meta.message_count as u32,
+                title: meta.title.clone(),
+                corrupted: meta.corrupted,
+                model: meta.model.clone(),
+                provider: meta.provider.clone(),
+                account_id: meta.account_id.clone(),
+                workspace_id: meta.workspace_id.clone(),
+                visibility: meta.visibility,
+                initiator: meta.initiator.clone(),
+                can_write: authority.may_turn(),
+                authority,
+                config_fields: SessionCapabilities::of(authority).config_fields,
+            }
         })
         .collect();
 
@@ -4790,6 +4862,7 @@ mod tests {
     fn seed_session(conv: &Path, sid: &str, owner: Option<&str>, last_active_at: &str) {
         std::fs::create_dir_all(conv).unwrap();
         let meta = SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 1,
             session_id: sid.to_string(),
@@ -5030,6 +5103,7 @@ mod tests {
         ];
         for (id, ts) in &ids {
             let meta = SessionMeta {
+                interveners: Vec::new(),
                 aware_users: Vec::new(),
                 version: CONVERSATION_FORMAT_VERSION,
                 session_id: id.to_string(),
@@ -5323,6 +5397,7 @@ mod tests {
         // Create a valid session with a meta row.
         let valid_id = "20260503_100000_valid";
         let valid_meta = SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: CONVERSATION_FORMAT_VERSION,
             session_id: valid_id.to_string(),
@@ -6076,6 +6151,7 @@ mod tests {
     fn test_session_meta_serde_roundtrip() {
         // ADR-024: full round-trip with SessionMeta fields.
         let meta = SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: CONVERSATION_FORMAT_VERSION,
             session_id: "roundtrip_test".to_string(),
@@ -6418,6 +6494,7 @@ mod tests {
             std::fs::create_dir_all(&conv_dir).unwrap();
 
             let base = SessionMeta {
+                interveners: Vec::new(),
                 aware_users: Vec::new(),
                 version: 3,
                 session_id: String::new(),
@@ -8385,6 +8462,7 @@ mod tests {
         let local = SessionScope::Unfiltered;
 
         let meta = |owner: Option<&str>, visibility: Option<SessionVisibility>| SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 1,
             session_id: "s".into(),
@@ -8459,6 +8537,7 @@ mod tests {
     /// absent, so each test sets only the fields it is about.
     fn bare_session_meta() -> SessionMeta {
         SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 1,
             session_id: "s".into(),
@@ -8563,6 +8642,7 @@ mod tests {
     fn members_visibility_gates_read_on_chat_membership() {
         fn session_meta_fixture() -> SessionMeta {
             SessionMeta {
+                interveners: Vec::new(),
                 aware_users: Vec::new(),
                 version: 1,
                 session_id: "s".into(),
@@ -8693,6 +8773,7 @@ mod tests {
 
         let meta = |sid: &str, owner: Option<&str>, v: Option<SessionVisibility>, at: &str| {
             SessionMeta {
+                interveners: Vec::new(),
                 aware_users: Vec::new(),
                 version: 1,
                 session_id: sid.into(),
@@ -8851,6 +8932,7 @@ mod tests {
 
         let meta = |sid: &str, owner: &str, at: &str, visibility: Option<SessionVisibility>| {
             SessionMeta {
+                interveners: Vec::new(),
                 aware_users: Vec::new(),
                 version: 1,
                 session_id: sid.into(),
@@ -8971,6 +9053,7 @@ mod tests {
         std::fs::create_dir_all(&conv).unwrap();
 
         let meta = |sid: &str, chat: Option<&str>, at: &str| SessionMeta {
+            interveners: Vec::new(),
             aware_users: Vec::new(),
             version: 1,
             session_id: sid.into(),

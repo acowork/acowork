@@ -30,7 +30,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::agent::intent_turn::IntentDisplay;
-use crate::conversation::{ConversationEntry, read_messages_paginated};
+use crate::conversation::{ConversationEntry, TurnSpeaker, read_messages_paginated};
 use crate::error::Result;
 
 /// Metadata key carrying the round coordinate on a JSONL entry (D2).
@@ -670,6 +670,19 @@ pub struct RoundUserRow {
     /// here would let the metadata key and the emptiness rule drift per read model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display: Option<IntentDisplay>,
+    /// Who actually spoke this row, when that is not the session's initiator
+    /// (plan D3).
+    ///
+    /// `None` on an ordinary turn (the initiator's own words) and on every row
+    /// written before provenance existed — a surface that gets `None` shows no
+    /// badge, which is the honest fallback: absence means "nothing to announce",
+    /// not "unknown speaker".
+    ///
+    /// Read through [`TurnSpeaker::from_metadata`], the same single reader the
+    /// write path uses, so the key and the emptiness rule cannot drift between
+    /// the row and this projection.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<TurnSpeaker>,
 }
 
 /// The agent half of a round. Its terminal state is carried by the enclosing
@@ -771,6 +784,10 @@ pub fn project(jsonl: &Path, rec: &RoundRecord) -> Result<Option<RoundProjection
                 .metadata
                 .as_ref()
                 .and_then(IntentDisplay::from_metadata),
+            speaker: user
+                .metadata
+                .as_ref()
+                .and_then(TurnSpeaker::from_metadata),
             body: user.content,
             ts: user.ts,
             attachments,
@@ -1293,6 +1310,45 @@ mod tests {
         assert_eq!(display.summary, "审计 usecase 分层");
         assert!(display.body.starts_with("### "));
         assert!(!display.truncated);
+    }
+
+    #[test]
+    fn a_human_standing_in_for_the_initiator_projects_as_such() {
+        // Plan D3: the row says who spoke, and the projection carries that
+        // through untouched. Without it, "a human kept this run alive" renders
+        // identically to "agent-a wrote this" — the exact confusion the
+        // intervention tier would otherwise introduce.
+        let dir = TempDir::new().unwrap();
+        let mut stand_in = entry("user", "换成 sonnet 再试", Some("r:1"));
+        stand_in.metadata = Some(serde_json::json!({
+            META_KEY_ROUND_ID: "r:1",
+            "speaker": { "origin": "human", "author": "nicholas", "on_behalf_of": "agent-a" },
+        }));
+        let jsonl = write_jsonl(&dir, &[stand_in, entry("assistant", "ok", Some("r:1"))]);
+        let mut r = rec("r:1", 0, true);
+        r.answer = Some(1);
+        let p = project(&jsonl, &r).unwrap().expect("projectable");
+        let speaker = p.user.as_ref().unwrap().speaker.as_ref().expect("speaker projected");
+        assert_eq!(speaker.author, "nicholas");
+        assert_eq!(speaker.on_behalf_of.as_deref(), Some("agent-a"));
+        assert!(speaker.is_substitution());
+        // The body stays the human's words: provenance is metadata, never a
+        // prefix a later turn would read back as the model's input.
+        assert_eq!(p.user.as_ref().unwrap().body, "换成 sonnet 再试");
+
+        // A participant speaking as themselves: author recorded, nobody stood in
+        // for — and the surface hides no badge for it, because there is nothing
+        // to disclose.
+        let mut own_voice = entry("user", "我来看一下", Some("r:2"));
+        own_voice.metadata = Some(serde_json::json!({
+            META_KEY_ROUND_ID: "r:2",
+            "speaker": { "origin": "human", "author": "nicholas" },
+        }));
+        let jsonl = write_jsonl(&dir, &[own_voice]);
+        let p = project(&jsonl, &rec("r:2", 0, false)).unwrap().expect("projectable");
+        let speaker = p.user.as_ref().unwrap().speaker.as_ref().expect("speaker projected");
+        assert!(!speaker.is_substitution());
+        assert_eq!(speaker.author, "nicholas");
     }
 
     #[test]

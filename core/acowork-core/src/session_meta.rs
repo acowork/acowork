@@ -652,6 +652,182 @@ impl SessionScope {
     }
 }
 
+/// What a caller may **do** to one session, as opposed to what it may read.
+///
+/// ADR-076 §决策 4 gave an execution session exactly one writer (its
+/// `initiator`), which is right for the machine-to-machine case and wrong for
+/// the one that motivated this type: an agent-to-agent run has no human in it,
+/// so when its launch parameters turn out to be unusable the run has no
+/// recovery path at all. The ladder below adds a tier — a human who may steer
+/// the run without owning it — and keeps the owner tier exactly where it was.
+///
+/// **Read stays a separate axis** ([`SessionMeta::is_readable_by`]): an
+/// administrator reads everything and an `aware_users` account reads a session
+/// it cannot write, so a single ladder covering both would have to widen one
+/// of them. Ordered so `>=` is "at least as powerful".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionAuthority {
+    /// May not write. Whether it may *read* is
+    /// [`SessionMeta::is_readable_by`]'s answer, not this one.
+    ReadOnly,
+    /// May append turns and change the run's launch parameters — the
+    /// intervention tier ([`ConfigField::min_authority`] is the table).
+    Intervener,
+    /// The session's initiator (or local mode): everything, including the
+    /// structure that defines the task (workspace, tool policy, deletion).
+    Owner,
+}
+
+impl SessionAuthority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read_only",
+            Self::Intervener => "intervener",
+            Self::Owner => "owner",
+        }
+    }
+
+    /// May append a turn to the session (a message, a retry, a stop/continue,
+    /// a card answer, an approval)? Every transcript-visible write asks this —
+    /// one predicate, so a new interactive affordance cannot be forgotten the
+    /// way `PUT …/config` and the composer were.
+    pub fn may_turn(self) -> bool {
+        self >= Self::Intervener
+    }
+
+    /// May change `field` through `PUT /sessions/{sid}/config` (or the
+    /// dedicated endpoint for the non-config fields)?
+    pub fn may(self, field: ConfigField) -> bool {
+        self >= field.min_authority()
+    }
+}
+
+/// One field a session's configuration can be changed through, and the
+/// authority that field requires.
+///
+/// A table rather than ad-hoc checks in the handler for the same reason
+/// [`acowork_core::intent::TurnOrigin`] is a table: the failure mode is a
+/// *future* field nobody remembered to gate. Adding a field to
+/// `SessionConfigDelta` without adding a row here does not compile the
+/// validation — so the handler matches on this enum exhaustively.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigField {
+    /// Which model the run uses. The whole point of the intervention tier:
+    /// the reported failure is a run parked on a model with no quota.
+    Model,
+    Provider,
+    /// Which key/account the provider is called with. Part of the intervention
+    /// tier because it is the first rung of the degradation ladder: the same
+    /// model under another account is the cheapest way past a spent balance,
+    /// and it changes no premise of the task.
+    ///
+    /// Renamed explicitly: the serde default would spell it `account`, while
+    /// the body field a client actually sends is `account_id`. The two names
+    /// must be the same string or a surface would enable the wrong key.
+    #[serde(rename = "account_id")]
+    Account,
+    ReasoningEffort,
+    Temperature,
+    ContextWindow,
+    /// The directory the agent works in — part of the task's own premise, so
+    /// it stays the owner's.
+    ///
+    /// Renamed explicitly for the same reason as [`Self::Account`]: the request
+    /// field is `workspace_id`, and a surface that reads `workspace` from
+    /// `config_fields` would enable a key the handler never sees.
+    #[serde(rename = "workspace_id")]
+    Workspace,
+    /// Which tools the agent may reach. Same rule as `Workspace`.
+    ToolPolicy,
+    Title,
+    /// Who else may read the session.
+    Visibility,
+    /// Deleting the session.
+    Delete,
+}
+
+impl ConfigField {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Provider => "provider",
+            Self::Account => "account_id",
+            Self::ReasoningEffort => "reasoning_effort",
+            Self::Temperature => "temperature",
+            Self::ContextWindow => "context_window",
+            Self::Workspace => "workspace_id",
+            Self::ToolPolicy => "tool_policy",
+            Self::Title => "title",
+            Self::Visibility => "visibility",
+            Self::Delete => "delete",
+        }
+    }
+
+    /// Every field, in the order a refusal lists them.
+    pub const ALL: &'static [ConfigField] = &[
+        Self::Model,
+        Self::Provider,
+        Self::Account,
+        Self::ReasoningEffort,
+        Self::Temperature,
+        Self::ContextWindow,
+        Self::Workspace,
+        Self::ToolPolicy,
+        Self::Title,
+        Self::Visibility,
+        Self::Delete,
+    ];
+
+    /// The tier this field needs. `Intervener` for everything that only
+    /// changes *how* the run is executed; `Owner` for everything that
+    /// changes *what* the run is — the premise the requesting agent assumed
+    /// when it dispatched the work.
+    pub fn min_authority(self) -> SessionAuthority {
+        match self {
+            Self::Model
+            | Self::Provider
+            | Self::Account
+            | Self::ReasoningEffort
+            | Self::Temperature
+            | Self::ContextWindow => SessionAuthority::Intervener,
+            Self::Workspace | Self::ToolPolicy | Self::Title | Self::Visibility | Self::Delete => {
+                SessionAuthority::Owner
+            }
+        }
+    }
+}
+
+/// The answer the Runtime serves so no surface has to re-derive it
+/// (`SessionInfo.authority` + `config_fields`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionCapabilities {
+    pub authority: SessionAuthority,
+    /// May append turns (message / retry / stop / continue / card answer /
+    /// approval / cancel-tool). Equal to `authority.may_turn()`, sent as its
+    /// own field so a client never has to know the ladder.
+    pub may_turn: bool,
+    /// The config fields this caller may write, in [`ConfigField::ALL`] order.
+    pub config_fields: Vec<ConfigField>,
+}
+
+impl SessionCapabilities {
+    /// The one place capabilities are computed.
+    pub fn of(authority: SessionAuthority) -> Self {
+        Self {
+            authority,
+            may_turn: authority.may_turn(),
+            config_fields: ConfigField::ALL
+                .iter()
+                .copied()
+                .filter(|f| authority.may(*f))
+                .collect(),
+        }
+    }
+}
+
+
 /// One persisted session, mapped 1:1 onto the `sessions` row.
 ///
 /// `version` is the `conversations/{id}.jsonl` format version the row was
@@ -727,6 +903,32 @@ pub struct SessionMeta {
     /// pre-existing rows deserialise to unchanged behaviour.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub aware_users: Vec<String>,
+
+    /// The human accounts allowed to **intervene** in this session: append
+    /// turns into it and change the run's launch parameters (model /
+    /// provider / reasoning effort), as opposed to merely reading it.
+    ///
+    /// A deliberate second axis beside [`Self::aware_users`], even though
+    /// both are seeded from the same roster today (the owner and guests of
+    /// both participating agents, for agent-to-agent origins only). The two
+    /// capabilities are orthogonal — "may know this run exists" and "may
+    /// steer it" — and collapsing them into one list is the same mistake
+    /// ADR-076 revision fixed for `initiator`; a future origin (a PM task
+    /// session, a cross-tenant shared agent) will need one without the
+    /// other.
+    ///
+    /// Two writers, both single-purpose:
+    ///
+    /// * the Gateway seeds it at creation from the same roster it seeds
+    ///   `aware_users` with (plan §D2), for agent-to-agent origins;
+    /// * the human-join route appends one account when a person is added to
+    ///   the bound Chat as a participant (plan M8) — which is why this list
+    ///   is *not* write-once, unlike `aware_users`.
+    ///
+    /// An empty list (every session created before this field existed)
+    /// grants nothing, so pre-existing rows keep their exact behaviour.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interveners: Vec<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
@@ -824,6 +1026,15 @@ impl SessionMeta {
                 if self.aware_users.iter().any(|u| u == uid) {
                     return true;
                 }
+                // Plan D2: the intervention roster reads what it may steer.
+                // The two lists are seeded from one Gateway fact today, so this
+                // is usually redundant — and it must not stay *implicitly*
+                // redundant: an intervener who cannot read the session is a
+                // grant that cannot be used, since the model it has to change is
+                // reached through this session's own surface.
+                if self.is_intervener(uid) {
+                    return true;
+                }
                 if self.visibility == Some(SessionVisibility::Members) {
                     // Design 27 §8.2: a group execution session is readable
                     // by its owner and by any current participant of the
@@ -903,8 +1114,23 @@ impl SessionMeta {
     /// "look at it as them" case without a write. Local mode keeps full
     /// access — there is no second account to protect a session from.
     pub fn is_writable_by(&self, scope: &SessionScope) -> bool {
+        self.authority_for(scope).may_turn()
+    }
+
+    /// The one place a caller's write **tier** over this session is computed
+    /// (plan §D1). [`Self::is_writable_by`] is its `may_turn()` shorthand; the
+    /// per-field table lives on [`ConfigField::min_authority`].
+    ///
+    /// The `initiator` rule is unchanged (ADR-076 §决策 4): a claimed session
+    /// has exactly one owner, admin included. What is new is the tier below
+    /// it — an `interveners` account may append turns and re-point the run at
+    /// a usable model, and nothing else. Without that tier an agent-to-agent
+    /// run whose launch parameters are unusable is unrecoverable by
+    /// construction: the only writer is the agent that dispatched it, and it
+    /// has already been told the request failed.
+    pub fn authority_for(&self, scope: &SessionScope) -> SessionAuthority {
         match scope {
-            SessionScope::Unfiltered => true,
+            SessionScope::Unfiltered => SessionAuthority::Owner,
             SessionScope::Admin { uid, .. } | SessionScope::User { uid, .. } => {
                 match self.initiator.as_deref() {
                 // Nobody recorded a claim, so there is nobody to protect:
@@ -923,21 +1149,48 @@ impl SessionMeta {
                 // through the chat binding, locked as "shared by another
                 // account" for everyone, admin included, with no way back.
                 None => match self.visibility {
-                    Some(SessionVisibility::Private) => false,
+                    Some(SessionVisibility::Private) => SessionAuthority::ReadOnly,
                     Some(SessionVisibility::Members) => {
-                        matches!(scope, SessionScope::Admin { .. })
+                        if matches!(scope, SessionScope::Admin { .. }) {
+                            SessionAuthority::Owner
+                        } else {
+                            SessionAuthority::ReadOnly
+                        }
                     }
-                    _ => true,
+                    _ => SessionAuthority::Owner,
                 },
-                // A claimed session has exactly one writer — admin included.
+                // A claimed session has exactly one owner — admin included.
                 // `Members` never transfers ownership: chat participants read
                 // the group execution history, their messages enter through
                 // the agent's delivery path, not a direct session write
                 // (design 27 §8.2).
-                Some(initiator) => initiator == uid.as_str(),
+                Some(initiator) => {
+                    if initiator == uid.as_str() {
+                        SessionAuthority::Owner
+                    } else if self.is_intervener(uid) {
+                        SessionAuthority::Intervener
+                    } else {
+                        SessionAuthority::ReadOnly
+                    }
+                }
                 }
             }
         }
+    }
+
+    /// Is `uid` one of this session's human interveners (plan §D2)?
+    ///
+    /// Kept as its own predicate because two call sites need the *fact* rather
+    /// than the tier: the provenance stamp on an intervention turn (who is
+    /// speaking on the initiator's behalf) and the system-block decision that
+    /// tells the responder a human is present.
+    pub fn is_intervener(&self, uid: &str) -> bool {
+        !uid.is_empty() && self.interveners.iter().any(|u| u == uid)
+    }
+
+    /// What `scope` may do to this session, as served on `SessionInfo`.
+    pub fn capabilities_for(&self, scope: &SessionScope) -> SessionCapabilities {
+        SessionCapabilities::of(self.authority_for(scope))
     }
 }
 
@@ -1254,9 +1507,11 @@ mod aware_users_tests {
     }
 
     /// The awareness grant is read-only by construction: `is_writable_by`
-    /// never consults `aware_users`, so an aware account cannot type into an
-    /// execution it did not start. This is what keeps the口子 open for eyes
-    /// only, never for a second hand on the wheel.
+    /// never consults `aware_users`, so an aware account that is not on the
+    /// **intervention** roster cannot type into an execution it did not start.
+    /// The two lists grant two different things on purpose — see
+    /// [`super::SessionMeta::interveners`] — and this test pins the one that
+    /// must never widen by accident.
     #[test]
     fn aware_account_cannot_write() {
         let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &["user-nicholas"]);
@@ -1415,5 +1670,185 @@ mod tool_policy_tests {
 
         let back: SessionToolPolicy = serde_json::from_value(json).expect("deserialise");
         assert_eq!(back, p);
+    }
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use super::{
+        ConfigField, SessionAuthority, SessionCapabilities, SessionMeta, SessionScope,
+        SessionVisibility,
+    };
+
+    /// The name a client sees must be the name a client sends.
+    ///
+    /// `as_str` is what a refusal body and the log speak; the serde name is
+    /// what `SessionInfo.config_fields` carries. These drifted once already
+    /// (`Account` serialised as `account`, the request field is `account_id`),
+    /// which is exactly the "surface enables a key the server ignores" failure
+    /// the table exists to prevent — so the two are pinned against each other
+    /// for every field rather than for the one that broke.
+    #[test]
+    fn every_field_spells_the_same_name_on_the_wire_and_in_a_refusal() {
+        for field in ConfigField::ALL {
+            let serde_name = serde_json::to_value(field).unwrap();
+            assert_eq!(
+                serde_name.as_str(),
+                Some(field.as_str()),
+                "{field:?} is announced as {serde_name} but refused as {}",
+                field.as_str()
+            );
+        }
+    }
+
+    /// Minimal row from JSON, so a test names only the fields it is about —
+    /// every other column (including `interveners`) takes its serde default.
+    fn meta(initiator: Option<&str>, visibility: Option<&str>, interveners: &[&str]) -> SessionMeta {
+        let mut obj = serde_json::Map::new();
+        obj.insert("version".into(), serde_json::json!(3));
+        obj.insert("session_id".into(), serde_json::json!("s-1"));
+        obj.insert("agent_id".into(), serde_json::json!("com.test.agent"));
+        obj.insert("created_at".into(), serde_json::json!("2026-01-01T00:00:00Z"));
+        obj.insert("message_count".into(), serde_json::json!(0));
+        obj.insert("last_active_at".into(), serde_json::json!("2026-01-01T00:00:00Z"));
+        if let Some(u) = initiator {
+            obj.insert("initiator".into(), serde_json::json!(u));
+        }
+        if let Some(v) = visibility {
+            obj.insert("visibility".into(), serde_json::json!(v));
+        }
+        if !interveners.is_empty() {
+            obj.insert(
+                "interveners".into(),
+                serde_json::json!(interveners
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()),
+            );
+        }
+        serde_json::from_value(serde_json::Value::Object(obj)).expect("valid meta")
+    }
+
+    /// The reported defect: an agent-to-agent execution session (initiator is
+    /// an agent instance) has no human writer, so a human could not even change
+    /// the model that made the run fail. The intervention tier is exactly that
+    /// missing writer — and it is a tier, not ownership.
+    #[test]
+    fn intervener_can_steer_but_not_restructure_the_run() {
+        let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &["user-nicholas"]);
+        let scope = SessionScope::user("user-nicholas");
+        let authority = m.authority_for(&scope);
+        assert_eq!(authority, SessionAuthority::Intervener);
+        // The launch parameters that make the run work again.
+        assert!(m.is_writable_by(&scope));
+        assert!(authority.may(ConfigField::Model));
+        assert!(authority.may(ConfigField::Provider));
+        assert!(authority.may(ConfigField::ReasoningEffort));
+        assert!(authority.may(ConfigField::Temperature));
+        assert!(authority.may(ConfigField::ContextWindow));
+        // The task's own premise stays the owner's.
+        assert!(!authority.may(ConfigField::Workspace));
+        assert!(!authority.may(ConfigField::ToolPolicy));
+        assert!(!authority.may(ConfigField::Delete));
+        assert!(!authority.may(ConfigField::Visibility));
+    }
+
+    /// Reading is not steering: an `aware_users` account that is not on the
+    /// intervention roster keeps today's behaviour exactly.
+    #[test]
+    fn awareness_without_intervention_grants_nothing() {
+        let mut m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &[]);
+        m.aware_users = vec!["user-onlooker".to_string()];
+        let scope = SessionScope::user("user-onlooker");
+        assert!(m.is_readable_by(&scope));
+        assert!(!m.is_writable_by(&scope));
+        assert_eq!(m.authority_for(&scope), SessionAuthority::ReadOnly);
+    }
+
+    /// The initiator keeps everything, including the structural fields — the
+    /// intervention tier must not have cost the owner a single capability.
+    #[test]
+    fn initiator_keeps_the_whole_table() {
+        let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &[]);
+        let scope = SessionScope::user("8f7be9a6-agent-instance");
+        assert_eq!(m.authority_for(&scope), SessionAuthority::Owner);
+        for field in ConfigField::ALL {
+            assert!(SessionAuthority::Owner.may(*field), "{field:?}");
+        }
+        assert_eq!(
+            SessionCapabilities::of(SessionAuthority::Owner).config_fields,
+            ConfigField::ALL.to_vec()
+        );
+    }
+
+    /// A stranger is not handed a tier by the new list being absent, and local
+    /// mode is unchanged (one implicit human owns everything).
+    #[test]
+    fn strangers_and_local_mode_are_unchanged() {
+        let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &["user-other"]);
+        assert_eq!(
+            m.authority_for(&SessionScope::user("user-stranger")),
+            SessionAuthority::ReadOnly
+        );
+        assert_eq!(
+            m.authority_for(&SessionScope::Unfiltered),
+            SessionAuthority::Owner
+        );
+    }
+
+    /// Ownerless rows keep the pre-account rule (ADR-076 §决策 4), including
+    /// both exceptions — the ladder must be a re-expression of that rule, not a
+    /// redefinition.
+    #[test]
+    fn ownerless_rows_keep_the_pre_account_rule() {
+        let public = meta(None, None, &[]);
+        assert_eq!(
+            public.authority_for(&SessionScope::user("anyone")),
+            SessionAuthority::Owner
+        );
+
+        let mut private = meta(None, Some("private"), &[]);
+        private.visibility = Some(SessionVisibility::Private);
+        assert_eq!(
+            private.authority_for(&SessionScope::user("anyone")),
+            SessionAuthority::ReadOnly
+        );
+
+        let mut members = meta(None, Some("members"), &[]);
+        members.visibility = Some(SessionVisibility::Members);
+        assert_eq!(
+            members.authority_for(&SessionScope::user("member")),
+            SessionAuthority::ReadOnly
+        );
+        assert_eq!(
+            members.authority_for(&SessionScope::admin("admin-1")),
+            SessionAuthority::Owner
+        );
+    }
+
+    /// The capability payload the Runtime serves is derived from the same
+    /// ladder, so a surface cannot disagree with the backend about which
+    /// config fields are editable.
+    #[test]
+    fn capabilities_list_only_what_the_tier_may_change() {
+        let caps = SessionCapabilities::of(SessionAuthority::Intervener);
+        assert!(caps.may_turn);
+        assert_eq!(
+            caps.config_fields,
+            vec![
+                ConfigField::Model,
+                ConfigField::Provider,
+                // The first rung of the degradation ladder: same model, another
+                // account's key. Adding it to the table is what makes "switch
+                // the account" an intervention rather than an owner action.
+                ConfigField::Account,
+                ConfigField::ReasoningEffort,
+                ConfigField::Temperature,
+                ConfigField::ContextWindow,
+            ]
+        );
+        let read_only = SessionCapabilities::of(SessionAuthority::ReadOnly);
+        assert!(!read_only.may_turn);
+        assert!(read_only.config_fields.is_empty());
     }
 }

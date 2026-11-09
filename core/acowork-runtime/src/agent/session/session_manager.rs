@@ -1464,6 +1464,20 @@ impl SessionManager {
             && let Some(conv) = &handle.conversation
         {
             conv.set_aware_users(aware_users.to_vec());
+            // Plan D2: the same Gateway-resolved roster is also this session's
+            // **intervention** roster. Two columns, one seed today, because the
+            // Gateway's fact is "these humans are party to this delivery" and
+            // the tier that buys (read vs. steer) is core's policy — see
+            // `SessionMeta::authority_for`. Seeding here rather than on the wire
+            // keeps the Intent/MQTT envelope unchanged; a future aware-but-not-
+            // intervening grant has to add the wire field, at which point this
+            // derivation becomes a default instead of the only source.
+            //
+            // The PM task-dispatch path never fills `aware_users`
+            // (`intent_api.rs`, its own `DeliveryRequest` literal), so PM
+            // execution sessions stay closed to intervention — plan §O3 — with
+            // no PM-specific branch here.
+            conv.set_interveners(aware_users.to_vec());
         }
         Ok(sid)
     }
@@ -2944,6 +2958,18 @@ impl SessionManager {
         }
 
         self.config.full_tool_specs = specs;
+    }
+
+    /// Forget every "this model cannot be used" verdict (plan §D7).
+    ///
+    /// The registry is a negative cache, and the fix for what it caches —
+    /// topping up a balance, adding a key — happens outside this process, so
+    /// nothing can invalidate an entry for us. A human pressing Retry is the
+    /// signal that they believe they fixed it; this is where that belief is
+    /// honoured. Agent-wide on purpose: the agent's `AgentCore` template is
+    /// shared by every session, so the verdict never was session-scoped.
+    pub fn clear_model_health(&self) {
+        self.core.model_health.clear();
     }
 
     /// Update the global provider list from a ProviderListUpdate push.
@@ -5961,6 +5987,7 @@ mod tests {
         write_session_meta(
             &conversations_dir,
             &SessionMeta {
+                interveners: Vec::new(),
                 aware_users: Vec::new(),
                 version: 3, // CONVERSATION_FORMAT_VERSION
                 session_id: survivor_id.to_string(),
@@ -6237,7 +6264,7 @@ mod tests {
     /// session's meta and survives to the store row the read path consults.
     #[tokio::test]
     async fn intent_session_stamps_aware_users_on_meta() {
-        use crate::conversation::{SessionScope, read_session_meta};
+        use crate::conversation::{SessionAuthority, ConfigField, SessionScope, read_session_meta};
 
         let mut config = crate::config::RuntimeConfig::default();
         let work_dir = std::env::temp_dir().join(format!("acowork-aware-{}", Uuid::new_v4()));
@@ -6291,15 +6318,38 @@ mod tests {
                 "{u} must read the agent-to-agent session"
             );
         }
-        // …but none can write it — awareness is read-only by construction.
+        // …and each of them may now STEER it (plan D2): append a turn, retry,
+        // answer a card, re-point the run at a usable model. This is the whole
+        // point of the seed — the run's only writer used to be the agent that
+        // dispatched it, and that agent is told "failed" and never retries.
+        assert_eq!(meta.interveners, aware, "the seed doubles as the intervention roster");
         for u in &aware {
             assert!(
-                !meta.is_writable_by(&SessionScope::user(u)),
-                "{u} must not write a session they did not start"
+                meta.is_writable_by(&SessionScope::user(u)),
+                "{u} must be able to rescue the agent-to-agent session"
             );
+            assert!(SessionAuthority::Intervener.may(ConfigField::Model));
+            assert!(SessionAuthority::Intervener.may(ConfigField::ReasoningEffort));
         }
-        // A stranger off the list reads nothing.
+        // Steering stops at the task's premise: the workspace and the tool set
+        // define what the run *is*, and a human changing them mid-flight would
+        // silently rewrite the assignment the initiator asked for.
+        assert!(!SessionAuthority::Intervener.may(ConfigField::Workspace));
+        assert!(!SessionAuthority::Intervener.may(ConfigField::ToolPolicy));
+        assert!(!SessionAuthority::Intervener.may(ConfigField::Delete));
+        assert_eq!(
+            meta.authority_for(&SessionScope::user(&aware[0])),
+            SessionAuthority::Intervener
+        );
+        // A stranger off the list reads nothing and writes nothing.
         assert!(!meta.is_readable_by(&SessionScope::user("stranger")));
+        assert!(!meta.is_writable_by(&SessionScope::user("stranger")));
+        // The dispatching agent stays the owner: intervention adds a tier, it
+        // does not transfer the session.
+        assert_eq!(
+            meta.authority_for(&SessionScope::user("8f7be9a6-agent-instance")),
+            SessionAuthority::Owner
+        );
 
         let _ = std::fs::remove_dir_all(&work_dir);
     }
@@ -7204,6 +7254,7 @@ mod tests {
         let closed = "policy_closed";
         let conversations_dir = dir.path().join("conversations");
         let meta = crate::conversation::SessionMeta {
+            interveners: Vec::new(),
             version: 3, // `CONVERSATION_FORMAT_VERSION` (private to `conversation`)
             session_id: closed.to_string(),
             agent_id: "com.test.policy".to_string(),

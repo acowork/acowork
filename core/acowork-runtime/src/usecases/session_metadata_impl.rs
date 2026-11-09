@@ -150,6 +150,8 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
                 visibility: s.visibility,
                 initiator: s.initiator,
                 can_write: s.can_write,
+                authority: s.authority,
+                config_fields: s.config_fields,
                 // Design 27 §8.2 / ADR-100 D12: the Chat binding is not part
                 // of the scan projection, so it is a point read per row on
                 // this page only (the scan itself already touched every

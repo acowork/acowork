@@ -8,8 +8,18 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::agent::intent_turn::IntentDisplay;
-use crate::conversation::{ConversationEntry, SessionScope, SessionVisibility};
+use crate::conversation::{
+    ConfigField, ConversationEntry, SessionAuthority, SessionScope, SessionVisibility,
+};
 use crate::error::{Result, RuntimeError};
+
+/// Deserialize default for [`SessionSummary::authority`]: a client that has a
+/// cached payload from before the tier existed reads it as the one thing it
+/// already believed — read-only — which disables controls rather than offering
+/// a write the server would refuse.
+fn default_authority() -> SessionAuthority {
+    SessionAuthority::ReadOnly
+}
 
 /// Summary of a single session for list responses (ADR-024 / ADR-028).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +45,19 @@ pub struct SessionSummary {
     /// did not initiate (see `SessionInfo::can_write`). A `false` value means
     /// the execution view is read-only for this caller.
     pub can_write: bool,
+    /// Plan D1: the caller's write tier over this session — `read_only`,
+    /// `intervener` or `owner`. An intervener is a real tier, not a rounding
+    /// error: an agent-to-agent execution session has no human owner, so
+    /// without it the only party that can fix an unusable launch parameter is
+    /// the agent that dispatched the work — which has already been told the
+    /// run failed and never retries.
+    #[serde(default = "default_authority")]
+    pub authority: SessionAuthority,
+    /// Plan D1: which config fields this caller may write, in
+    /// [`ConfigField::ALL`] order. The surface enables exactly these, so a
+    /// field the server would refuse never gets an input that looks live.
+    #[serde(default)]
+    pub config_fields: Vec<ConfigField>,
     /// Design 27 §8.2: the Chat session this execution session was started
     /// from. It is where a turn's *output* goes — the interaction card the run
     /// may stop on, and the terminal echo — never where its input came from:
@@ -151,6 +174,15 @@ pub struct ConversationEntryView<'a> {
     /// existed; a surface then renders `content`, which is the honest fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub display: Option<IntentDisplay>,
+    /// Plan D3: who spoke this row, when that is not the session's initiator.
+    ///
+    /// Resolved server-side like `display`, for the same reason: the client must
+    /// not have to know the metadata key or the "is it usable" rule. `None` on
+    /// an ordinary turn — absence means "nothing to announce", never "unknown
+    /// speaker", so a surface that gets it shows no badge and a surface that
+    /// predates the field renders exactly as before.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speaker: Option<crate::conversation::TurnSpeaker>,
 }
 
 impl<'a> ConversationEntryView<'a> {
@@ -161,6 +193,10 @@ impl<'a> ConversationEntryView<'a> {
                 .metadata
                 .as_ref()
                 .and_then(IntentDisplay::from_metadata),
+            speaker: entry
+                .metadata
+                .as_ref()
+                .and_then(crate::conversation::TurnSpeaker::from_metadata),
             entry,
         }
     }
