@@ -116,10 +116,11 @@ pub struct SearchHit {
     #[serde(default)]
     pub exec_ref: String,
     /// For an `execution_round` hit: the row's durable one-line task name
-    /// (`assignment_brief`, ADR-106 D13). It is the row's own searchable text —
-    /// the `brief` column is FTS-indexed, so a keyword search reaches a round
-    /// through the very label the history row shows — and the fallback label
-    /// when the projection is not (yet) readable. Empty on every other kind.
+    /// (`round_name`, ADR-106 D13; `assignment_brief` on rows written before the
+    /// 2026-11-09 rename). It is the row's own searchable text — the `brief`
+    /// column is FTS-indexed, so a keyword search reaches a round through the
+    /// very label the history row shows — and the fallback label when the
+    /// projection is not (yet) readable. Empty on every other kind.
     #[serde(default)]
     pub brief: String,
 }
@@ -195,12 +196,15 @@ fn exec_ref(m: &SessionMessage) -> String {
 
 /// The row's durable one-line task name, for an `execution_round` hit only.
 /// It is this row's own text column (`brief` is FTS-indexed): a reference row
-/// has no body, so this is what a keyword search reaches it by.
+/// has no body, so this is what a keyword search reaches it by. Reads the name
+/// through [`IntentMeta::round_display_name`] so the pre-2026-11-09 spelling
+/// stays searchable too — the sidecar is rebuilt from the log, and a round whose
+/// name was written before the rename must not become unfindable.
 fn exec_brief(m: &SessionMessage) -> String {
     if normalize_kind(&m.kind, false) != KIND_EXECUTION_ROUND {
         return String::new();
     }
-    m.meta.assignment_brief.clone().unwrap_or_default()
+    m.meta.round_display_name().unwrap_or_default().to_string()
 }
 
 // ── Connection lifecycle ──────────────────────────────────────────────

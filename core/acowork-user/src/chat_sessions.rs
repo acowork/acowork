@@ -362,9 +362,32 @@ pub struct IntentMeta {
     /// straight against the execution surface). Never re-derived afterwards.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub opened_new: Option<bool>,
-    /// ADR-106 D13: the one-line task name a list preview renders for a
-    /// reference row. Written once with the row and never rewritten — the list
-    /// path must not read a projection to name a task (ADR-096).
+    /// ADR-106 D13: the round's one-line name — what the Chat list preview and
+    /// the block header render, because neither may read a projection to name a
+    /// task (ADR-096). Written once with the row and never rewritten.
+    ///
+    /// Registered here because this struct **is** the write-time registry: a key
+    /// it does not declare is *refused* by [`check_write_contract`], not dropped.
+    /// On a reference row that refusal is fatal to the whole turn — the row is a
+    /// precondition of delivery (ADR-106 D3), so the agent never reads its first
+    /// message. Spelled `round_name`, not `assignment_brief`, because the latter
+    /// is the envelope's HIGH-TRUST field (the PM wake-up playbook, which must
+    /// never reach a chat log — design 27 §5.4.5), and one spelling for two facts
+    /// is how a playbook nearly got painted on a project group's list.
+    ///
+    /// The row's shape is pinned in
+    /// [`acowork_core::intent::chat_kinds::EXECUTION_ROUND_META_SAMPLE`] and
+    /// asserted from both ends (producer and registry), because these two crates
+    /// cannot depend on each other and the 2026-11-09 rename proved what happens
+    /// when only one end is edited.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_name: Option<String>,
+    /// The name carried by rows written **before** the 2026-11-09 rename. Still
+    /// declared, never written: these rows are durable history, and a key the
+    /// registry forgets is a name every old transcript loses on the next read
+    /// (the same reason `delivery_failed` stays in
+    /// [`acowork_core::intent::chat_kinds::THREADED_NOTICES`]). Read it as the
+    /// fallback for [`Self::round_name`], never as a second source of truth.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignment_brief: Option<String>,
     /// ADR-106 D6 levels 3 and 5: the sessions an addressing card offers, one
@@ -415,6 +438,24 @@ pub struct IntentMeta {
     /// unknown-and-therefore-a-bug.
     #[serde(flatten)]
     pub unregistered: BTreeMap<String, serde_json::Value>,
+}
+
+impl IntentMeta {
+    /// The round's one-line name, across the 2026-11-09 rename.
+    ///
+    /// The **only** place the legacy spelling may be consulted
+    /// ([`Self::assignment_brief`]): rows written before the rename carry it,
+    /// every live writer carries [`Self::round_name`], and a reader that picks
+    /// one without the other loses either the history or the current transcript.
+    /// Empty strings are absence, not a name — the field is trimmed at the
+    /// producer (a PM dispatch's description can collapse to nothing).
+    pub fn round_display_name(&self) -> Option<&str> {
+        [self.round_name.as_deref(), self.assignment_brief.as_deref()]
+            .into_iter()
+            .flatten()
+            .map(str::trim)
+            .find(|s| !s.is_empty())
+    }
 }
 
 /// One entry of [`IntentMeta::exec_attachments`] (ADR-100 D12).
@@ -2818,8 +2859,9 @@ fn preview_of_message(msg: &SessionMessage) -> String {
     } else if msg.kind == KIND_EXECUTION_ROUND {
         // ADR-106 D13: the reference row's own one-line task name. The list
         // path may not read a projection to name a task (ADR-096), which is why
-        // the brief is written once with the row.
-        msg.meta.assignment_brief.clone().unwrap_or_default()
+        // the name is written once with the row — under `round_name` since the
+        // 2026-11-09 rename, with `assignment_brief` as the pre-rename spelling.
+        msg.meta.round_display_name().unwrap_or_default().to_string()
     } else {
         String::new()
     };
@@ -3777,7 +3819,7 @@ mod tests {
                     "agent_instance_id": "agent-1",
                     "in_reply_to": "m-1",
                     "opened_new": true,
-                    "assignment_brief": "修复分页不满屏",
+                    "round_name": "修复分页不满屏",
                 },
                 "attachment_ids": [],
             }
@@ -3804,12 +3846,16 @@ mod tests {
         assert_eq!(stored.meta.agent_instance_id, "agent-1");
         assert_eq!(stored.meta.in_reply_to, "m-1");
         assert_eq!(stored.meta.opened_new, Some(true));
-        assert_eq!(stored.meta.assignment_brief.as_deref(), Some("修复分页不满屏"));
+        assert_eq!(stored.meta.round_name.as_deref(), Some("修复分页不满屏"));
         // The block renderer reads these back off the wire, not off the struct.
         let out = serde_json::to_value(&stored).unwrap();
         assert_eq!(out["meta"]["round_id"], "r:m-1");
         assert_eq!(out["meta"]["opened_new"], true);
-        assert_eq!(out["meta"]["assignment_brief"], "修复分页不满屏");
+        assert_eq!(out["meta"]["round_name"], "修复分页不满屏");
+        assert!(
+            out["meta"].get("assignment_brief").is_none(),
+            "the pre-rename spelling is history, never a second write"
+        );
 
         // Acceptance 2: the natural key IS the idempotency key, so an MQTT
         // redelivery or a reconnect replay of the same round appends nothing.
@@ -3884,7 +3930,7 @@ mod tests {
         let mut no_brief = req.message.clone();
         no_brief.meta.message_id = "round:r:m-5".to_string();
         no_brief.meta.round_id = "r:m-5".to_string();
-        no_brief.meta.assignment_brief = None;
+        no_brief.meta.round_name = None;
         append_message(&dir, &s.session_id, &no_brief, 8)
             .expect("a reference row needs no brief to be a valid reference");
         assert_eq!(
@@ -3895,6 +3941,79 @@ mod tests {
             Some("分页已修复"),
             "a row that renders no text does not replace the text the list shows"
         );
+    }
+
+    /// The 2026-11-09 outage, pinned as a regression.
+    ///
+    /// The Runtime renamed the round's durable name `assignment_brief` →
+    /// `round_name` and this registry — the only place a chat-row key can be
+    /// declared — kept the old spelling. Nothing in that commit could fail,
+    /// because the producer and the registry share no type; the first evidence
+    /// was production traffic, where `check_write_contract` refused **every**
+    /// reference row with `422 unregistered chat row meta keys: round_name`, and
+    /// because that row is a precondition of delivery, every PM-dispatched turn
+    /// died before the agent read a word.
+    ///
+    /// The fixture is the shared golden row rather than a hand-written one: the
+    /// two ends cannot see each other, so the shape is pinned in `acowork-core`
+    /// and asserted here against the live write contract.
+    #[test]
+    fn the_live_execution_round_row_is_accepted_by_the_write_contract() {
+        let sample = acowork_core::intent::chat_kinds::EXECUTION_ROUND_META_SAMPLE;
+
+        // The registry half: nothing in the producer's row is left over.
+        let meta: IntentMeta = serde_json::from_str(sample).expect("the golden row must parse");
+        assert!(
+            meta.unregistered.is_empty(),
+            "these keys would be refused with a 422: {:?}",
+            meta.unregistered.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(meta.round_name.as_deref(), Some("修复分页不满屏"));
+        assert_eq!(meta.round_id, "r:1f0c");
+        assert_eq!(meta.task_id.as_deref(), Some("t-a4f21dbc"));
+
+        // The contract half: the row goes through the same entry the Gateway's
+        // relay calls, not a looser sibling of it. A row the Runtime posts is
+        // `execution_round`, bodyless, agent-authored, threading under its
+        // question — every rule below is the real one.
+        let row: SessionMessage = serde_json::from_str(&format!(
+            r#"{{"seq":0,"ts":0,"from":"inst-1","kind":"execution_round","body":"","to":"human-1","meta":{sample}}}"#
+        ))
+        .expect("the golden row must be a valid SessionMessage");
+        assert_eq!(
+            check_write_contract(&row),
+            Ok(()),
+            "the row a live Runtime writes must not be refusable"
+        );
+    }
+
+    /// A row written before the rename keeps its name: the registry still
+    /// declares the old spelling, and exactly one reader falls back to it, so
+    /// history does not lose its preview or its search text on upgrade.
+    #[test]
+    fn a_pre_rename_row_keeps_its_name_under_the_old_key() {
+        let legacy: IntentMeta = serde_json::from_str(
+            r#"{"message_id":"round:r:old","round_id":"r:old",
+                "agent_session_id":"sess-old","agent_instance_id":"inst-1",
+                "in_reply_to":"m-old","opened_new":true,
+                "assignment_brief":"旧行的名字"}"#,
+        )
+        .expect("a pre-rename row must still deserialize");
+        assert!(legacy.unregistered.is_empty(), "the old key stays declared");
+        assert_eq!(legacy.round_name, None);
+        assert_eq!(legacy.round_display_name(), Some("旧行的名字"));
+
+        // The live spelling wins when both are present — a row re-written after
+        // the rename must not keep showing the old name.
+        let mut both = legacy.clone();
+        both.round_name = Some("新行的名字".to_string());
+        assert_eq!(both.round_display_name(), Some("新行的名字"));
+
+        // An empty name is absence, not a name: the preview must fall through to
+        // the row above rather than render a blank line.
+        both.round_name = Some("   ".to_string());
+        both.assignment_brief = Some(String::new());
+        assert_eq!(both.round_display_name(), None);
     }
 
     #[test]
@@ -3984,7 +4103,7 @@ mod tests {
         round.meta.round_id = "r:m-1".to_string();
         round.meta.agent_session_id = "sess-9".to_string();
         round.meta.agent_instance_id = "agent-1".to_string();
-        round.meta.assignment_brief = Some("修复分页不满屏".to_string());
+        round.meta.round_name = Some("修复分页不满屏".to_string());
         append_message(&dir, sid, &round, 2).unwrap();
 
         let (hits, _) = search_messages(&dir, sid, Category::Text, "", None, 50).unwrap();

@@ -80,7 +80,7 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 - **入站 id 与活跃轮都没有时，本轮不开轮**（落地时对 D2 的补条）：`mint_round_id("")` 会兜底成随机 UUID，而随机 id 意味着一个谁也无法再寻址、chat 里那条引用行也永远指向不出来的轮——写下去就是一个幻影块。宁缺毋滥：这种回合整轮**不带 stamp**（行照样 durable 进转录，只是不进任何轮次索引、不投影成块）。每个传输都提供入站 id，所以这是退化分支，不是兜底分支；`TurnSurface::new` 与 `run` 两处都守住同一个判据，防止有人在边界之外"补一个 id"。
 - **禁止由顺序推断**，四个反例：上下文压缩（ADR-010/032/061 改写进入的表示）、强制加塞开新轮（pending 队列插队）、DevMode resume/step 重放**同一**轮（ADR-013；`replay` 不开新轮，且重放的条目仍落在原 `round_id` 的 stamp 之下）、`append_message_with_id` 的幂等重投（同 id ⇒ 同 `round_id`，索引 fold 取末次记录，天然覆盖）。任何一条都能让"相邻消息即同轮"的推断错位。
 - **重放共用回合边界**（第 3 个反例的落地点）：`AgentLoop::replay` 与 `run` 用同一对开/闭动作。重放不带 stamp 写行等于把该轮的 `answer` 坐标冻结在暂停前那一行，而那一轮往往已经终态、会被缓存，于是 resume 跑出的真答案在 chat 里永远看不见且无自愈路径。轮 id 优先取写者仍持有的活跃轮（延续轮的 id 不是本次 message_id 的函数），取不到时由 message_id 派生，两者都没有才让这批行不带轮次。
-- **`TurnSurface` 随之收缩**为 `{ chat_session_id, round_id, answerable_by, has_human }`——ADR-100 Rev.6 的"运行时从会话绑定补齐 chat 坐标"这段补丁逻辑保留，但 `trigger_message_id` 从 surface 上消失（引用行自己就是锚点，呈现层不需要反向指向触发行）。**落地修正**：这个事实并没有从系统里消失——D3 的行形状一直要求 `in_reply_to`，所以它改由 `TurnReference` 供应（与 `opened_new` / `assignment_brief` 同一位）。消失的是**镜像写入用它做幂等键 / 做线程指向**的用途，不是它本身。
+- **`TurnSurface` 随之收缩**为 `{ chat_session_id, round_id, answerable_by, has_human }`——ADR-100 Rev.6 的"运行时从会话绑定补齐 chat 坐标"这段补丁逻辑保留，但 `trigger_message_id` 从 surface 上消失（引用行自己就是锚点，呈现层不需要反向指向触发行）。**落地修正**：这个事实并没有从系统里消失——D3 的行形状一直要求 `in_reply_to`，所以它改由 `TurnReference` 供应（与 `opened_new` / `round_name` 同一位）。消失的是**镜像写入用它做幂等键 / 做线程指向**的用途，不是它本身。
 
 ### D3 — `execution_round` 是 chat 唯一的"工作"落盘单位
 
@@ -88,7 +88,7 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 { "kind": "execution_round",
   "in_reply_to": "<触发它的 user_message id>",
   "meta": { "round_id": "…", "agent_session_id": "…", "agent_instance_id": "…",
-            "opened_new": true, "assignment_brief": "…(可空，仅 new)" } }
+            "opened_new": true, "round_name": "…(可空，派单文本或对端摘要)" } }
 ```
 
 - **无 `body`**：引用行不承载执行内容。呈现层的任务名来自 D4 投影（+ 会话标题）。
@@ -96,7 +96,7 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 - **一致性等级显式化**：引用行是**前置型**（写成功才允许投递；失败即返回错误，人类消息退回未投递状态，不产生"投了但看不见"的轮）。通道回执与人类消息行同为前置型。exec→chat 方向不再有第三种，因为不再有写。
 - **`turn_routed` 退役**：它的对话事实（"你的消息去了哪里 / 新任务还是继续"）由引用行本身表达（有引用行 = 去了某会话；`opened_new` = 新/续）。ADR-100 Rev.3 恢复这一行的动机（"有来有回"）由 D9 的块呈现满足，而且比一条空正文通知更诚实。
 - **写入者是 Runtime**，走 Gateway 的唯一 chat 写入口；不新增写入口，不触 ADR-009 §5 的 fs 红线（`dev/ci.sh` 的 `run_gateway_fs_redline` 仍绿）。
-- **唯一写入点在 `AgentLoop::run` 的轮边界，不在传输层**（落地确认，"六站点收敛为一站"的确切落点）：引用行必须写在这一轮即将使用的 `round_id` 之下，而 D2 的答卡续跑规则让那个 id **不再是本轮入站消息的函数**——只有轮边界知道自己正要开哪一轮，传输层写就必然在续跑分支上指错轮。传输层因此只供事实（`TurnReference{trigger_message_id, opened_new, assignment_brief}`），不写行。Runtime 侧 `append_chat_row` 的调用点全仓只有这一处，这是"写入站点从 6 个变 1 个"的可验证形式。
+- **唯一写入点在 `AgentLoop::run` 的轮边界，不在传输层**（落地确认，"六站点收敛为一站"的确切落点）：引用行必须写在这一轮即将使用的 `round_id` 之下，而 D2 的答卡续跑规则让那个 id **不再是本轮入站消息的函数**——只有轮边界知道自己正要开哪一轮，传输层写就必然在续跑分支上指错轮。传输层因此只供事实（`TurnReference{trigger_message_id, opened_new, round_name}`），不写行。Runtime 侧 `append_chat_row` 的调用点全仓只有这一处，这是"写入站点从 6 个变 1 个"的可验证形式。
 - **前置失败即拒绝开轮**：引用行写失败、或执行会话连自己的 `session_id` 都没有（引用行的形状要求 `agent_session_id`，一个读者解析不出的引用不如不存在）时，回合在第一个 token 花出去之前就返回 `Err`——既不铸造轮，也不落 user 行。"投了但看不见"在这一层就是不可构造的。
 
 ### D4 — 读时投影：Runtime 拥有"一轮"的计算，暴露轮次读接口
@@ -203,8 +203,8 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 
 ### D13 — 搜索、预览、未读、标题的重新归属
 
-- **列表预览 / 乐观标题**：引用行的 `assignment_brief`（或首轮的一行摘要，由 Runtime 在写引用行时一并给出，一次性、不改写）足够。**Rev. 2026-11-06**：这一行的来源必须是"人类可读的派单文本"（`acowork-pm` 的 `build_dispatch_message`），**不得**取信封里同名的高信任 `assignment_brief`——后者是唤醒 playbook，`acowork-pm` 明确"never persisted, never displayed on a chat surface"，而 Runtime 曾把同名两个事实当成一个，于是 playbook 落库成行名、并在群聊列表预览与轮次行上屏。禁止为渲染列表去读投影（ADR-096）。**Rev. 2026-11-08**：该禁令的对象是**要为每一行预先取投影**的列表形态（侧边栏会话列表、乐观标题）；而会话内历史对话框是用户主动打开、只为**当前已加载可见行**、按页合并成**一次**投影读的面，不属于禁令对象——它不写 `search.sqlite`，也不把执行正文拷到别处缓存。
-- **全局搜索 / chat 内搜索**（ADR-097 / ADR-081）：`search.sqlite` 索引 chat 自有行 + 引用行的 `assignment_brief`（**Rev. 2026-11-08**：引用行没有正文，`assignment_brief` 就是它唯一的可检索文本，因此它是 `search.sqlite` 的**全文列**而非仅存一列——只存不索引，用户在历史列表里看得见的那行字反而搜不到它自己）；**不索引投影缓存**——那会让一份可弃拷贝进入另一个可弃索引，删除语义变成两跳，且 exec 侧本就有 conversation index（ADR-082 / ADR-095）负责正文检索。跨会话正文搜索走 exec 索引，命中的是"某会话的某轮"，跳转路径已存在（D4 的"查看执行"）。
+- **列表预览 / 乐观标题**：引用行的 `round_name`（或首轮的一行摘要，由 Runtime 在写引用行时一并给出，一次性、不改写）足够。**Rev. 2026-11-06**：这一行的来源必须是"人类可读的派单文本"（`acowork-pm` 的 `build_dispatch_message`），**不得**取信封里同名的高信任 `assignment_brief`——后者是唤醒 playbook，`acowork-pm` 明确"never persisted, never displayed on a chat surface"，而 Runtime 曾把同名两个事实当成一个，于是 playbook 落库成行名、并在群聊列表预览与轮次行上屏。禁止为渲染列表去读投影（ADR-096）。**Rev. 2026-11-08**：该禁令的对象是**要为每一行预先取投影**的列表形态（侧边栏会话列表、乐观标题）；而会话内历史对话框是用户主动打开、只为**当前已加载可见行**、按页合并成**一次**投影读的面，不属于禁令对象——它不写 `search.sqlite`，也不把执行正文拷到别处缓存。**Rev. 2026-11-09**：引用行的持久化键由 `assignment_brief` 改名为 `round_name`。理由是这里真有一处歧义：信封的 `assignment_brief` 是高信任唤醒 playbook（`acowork-pm` 明确 "never persisted, never displayed on a chat surface"，设计 27 §5.4.5），而引用行这个同名的键装的是给人类看的一行任务名——一个名字两个事实，正是 2026-11-06 "playbook 上屏"的同源陷阱，故把引用行这一侧改名。**代价与硬规则**：改名在 Runtime / Desktop / Mobile 三处改完就上线了，而键的**登记方**——user 服务的 `IntentMeta`（唯一能声明 chat 行键的地方；未声明的键被 `check_write_contract` 硬拒 422）——漏改；又因为引用行是**前置型**（D3），拒绝它等于拒绝整轮投递：所有 PM 派发在首轮即死、任务永远停在 `pending`、下游依赖任务全部阻塞。所以从此这条键集合按跨进程契约对待：改名或新增必须在**同一变更**里动生产端、`IntentMeta` 声明和两端共用的黄金行 fixture（[`EXECUTION_ROUND_META_SAMPLE`](../../../core/acowork-core/src/intent.rs)）；rename 之前写下的行保留旧键，且只允许在 `IntentMeta::round_display_name()` **一处**回读。
+- **全局搜索 / chat 内搜索**（ADR-097 / ADR-081）：`search.sqlite` 索引 chat 自有行 + 引用行的 `round_name`（**Rev. 2026-11-08**：引用行没有正文，`round_name` 就是它唯一的可检索文本，因此它是 `search.sqlite` 的**全文列**而非仅存一列——只存不索引，用户在历史列表里看得见的那行字反而搜不到它自己）；**不索引投影缓存**——那会让一份可弃拷贝进入另一个可弃索引，删除语义变成两跳，且 exec 侧本就有 conversation index（ADR-082 / ADR-095）负责正文检索。跨会话正文搜索走 exec 索引，命中的是"某会话的某轮"，跳转路径已存在（D4 的"查看执行"）。
 - **未读**：只算 chat 自有行；块的"等待人类"态作为独立的徽标位（来自投影的 `card != null`），不混入未读计数。
 
 ### D14 — 废止与保留清单
@@ -245,7 +245,7 @@ ADR-100 D1 删的是 `ExecSessionStatusCard`——在 chat 转录里**读时投�
 | --- | --- |
 | 继续做卫生工程（类型化 `ChatWrite`、统一幂等键、best-effort 写进 outbox 重试） | 治的是症状：写入站点从 6 个变 1 个才是根因。outbox 重试仍然要处理"跨进程写一个不存在于自己存储里的东西"这一整类失败模式 |
 | 每个 exec session 在 chat 里只有**一行**引用（session 级而非轮级） | 时间线说谎：会话跨天推进后，块停在第一次出现的位置。"session 作为整体"是**渲染**目标（按 session 分组），不是**存储**单位（必须 per-round） |
-| 引用行里冗余一份最终答案摘要（"轻量镜像"） | 立刻回到镜像：摘要需要更新，更新就是跨进程写，写失败就是谎。列表预览改用一次性 `assignment_brief` 满足，摘要不进 transcript |
+| 引用行里冗余一份最终答案摘要（"轻量镜像"） | 立刻回到镜像：摘要需要更新，更新就是跨进程写，写失败就是谎。列表预览改用一次性 `round_name` 满足，摘要不进 transcript |
 | 缓存放 Gateway 自己的数据目录 | 生命周期与 chat 删除脱钩（隐私残留），且诱导 Gateway 持有转录数据。ADR-084 已把 chat 数据面归 acowork-user |
 | 缓存放前端（IndexedDB / localStorage） | 违反"Desktop 仅呈现、无状态持久化"约定，且每端各存一份 |
 | 不缓存，每次渲染远程读 | 首屏 N 个块 = N 次跨机 RTT；Runtime 重启后所有块变成空洞；离线/弱网不可读。用户明确要求落盘 |
@@ -343,7 +343,7 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 
 **修订一：折叠规则按 `opened_new` 分叉（呈现契约）**。缺陷形状：新开执行会话的那条用户消息被折叠进块后，独立气泡消失——新会话恰好出现在创造它的那句话旁边却没有可见的成对关系，块读起来像自说自话的孤儿，而不是"一问一答、有前因后果"的交换；续投轮没有这个问题，它的前因就是同一会话上一轮的输出。
 
-因此：引用行 `meta.opened_new === true` 且有触发行时，其 `user_message` **不**被块认领，保留为独立用户气泡，与块构成"问题 → 块"的成对布局；续投轮（`opened_new` 为假或缺省）维持折叠，"一句话只出现在一个地方"的纪律两个分支都不破——opener 轮在块内的行摘要改以 `assignment_brief`（D13：它本就是呈现提示）领头，不再画问题面板重涂触发行原文；无 brief 时回落轮次投影的 `user.body` 截断。块头任务名派生照旧用触发行正文（布局层仍保留 `triggerRow` 引用，只供标题派生）；定位映射里 opener 触发行的 seq 指向它自己的气泡而非块。数据层零改动：`user_message` 行本就由 Gateway 在路由前置盘，分叉只发生在呈现层。实现落点：Desktop 与 Mobile 的 `chatTranscriptGroups` 新增显式标记 `questionOnTranscript`（与 fan-out 的 `showUserLine = false` 区分：两者都是"不在块内重画"，但理由不同），认领集合、块 seq 表与定位映射随之前者；pinned 窗口逻辑（"永不隐藏携带本 chat 问题的轮"）对 opener 不再依赖折叠——原句已在转录独立可见。两端同一规则，防止契约漂移。
+因此：引用行 `meta.opened_new === true` 且有触发行时，其 `user_message` **不**被块认领，保留为独立用户气泡，与块构成"问题 → 块"的成对布局；续投轮（`opened_new` 为假或缺省）维持折叠，"一句话只出现在一个地方"的纪律两个分支都不破——opener 轮在块内的行摘要改以 `round_name`（D13：它本就是呈现提示）领头，不再画问题面板重涂触发行原文；无 brief 时回落轮次投影的 `user.body` 截断。块头任务名派生照旧用触发行正文（布局层仍保留 `triggerRow` 引用，只供标题派生）；定位映射里 opener 触发行的 seq 指向它自己的气泡而非块。数据层零改动：`user_message` 行本就由 Gateway 在路由前置盘，分叉只发生在呈现层。实现落点：Desktop 与 Mobile 的 `chatTranscriptGroups` 新增显式标记 `questionOnTranscript`（与 fan-out 的 `showUserLine = false` 区分：两者都是"不在块内重画"，但理由不同），认领集合、块 seq 表与定位映射随之前者；pinned 窗口逻辑（"永不隐藏携带本 chat 问题的轮"）对 opener 不再依赖折叠——原句已在转录独立可见。两端同一规则，防止契约漂移。
 
 **修订二：D6 的 act 空间更名为 `exec_session_*` 族**。`new_task` → `exec_session_create`，`propose_existing` → `exec_session_propose_continue`：名字描述的是操作对象（执行会话），不是模型的主观判断；两个 act 的授权边界一字不变（前者仍是唯一允许的投递且只能新建，后者仍只提议、确认卡、`why` 必填、级别 5 廉价出口照旧）。旧名连同初代 `dispatch` 进 `RETIRED_ACT_NAMES` 漂移守卫，内核 prompt 不得再出现它们；确认卡的 wire 字段 `allow_new_task` 是协议形状不是工具名，不改。
 
