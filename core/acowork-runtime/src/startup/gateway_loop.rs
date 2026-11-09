@@ -1764,6 +1764,9 @@ async fn deliver_intent_turn(
                     &crate::agent::session_state::preview_source(
                         params.get("message").and_then(|v| v.as_str()).unwrap_or(""),
                         &context_refs,
+                        // The queue is a human surface: it names the waiting
+                        // turn the way the round it opens will.
+                        display.as_ref(),
                     ),
                 ),
                 from_chat: true,
