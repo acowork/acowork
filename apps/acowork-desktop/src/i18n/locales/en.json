@@ -281,6 +281,7 @@
     "readOnlyBanner": "You have view-only access to this resource; changes cannot be saved. Contact the owner to request permission."
   },
   "chatPanel": {
+    "speakerOnBehalfOf": "{{author}} on behalf of {{target}}",
     "modelTagResponses": "Responses",
     "sessionLoadFailed": "Session failed to load",
     "agentStopped": "{{name}} is stopped",
@@ -1994,7 +1995,8 @@
 "generic": "Reference"
   },
   "chatError": {
-    "contextOverflow": "Context overflow: model capability info is missing, so context usage cannot be computed accurately. Check that the model name matches exactly (case-sensitive)."
+    "contextOverflow": "Context overflow: model capability info is missing, so context usage cannot be computed accurately. Check that the model name matches exactly (case-sensitive).",
+    "retry": "Retry"
   },
   "harnessLsp": {
     "tabLsp": "LSP",

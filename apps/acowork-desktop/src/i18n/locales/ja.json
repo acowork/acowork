@@ -297,6 +297,7 @@
     "readOnlyBanner": "このリソースは閲覧権限のみのため、変更は保存されません。必要な場合は所有者に権限を依頼してください。"
   },
   "chatPanel": {
+    "speakerOnBehalfOf": "{{author}} が {{target}} の代理で発言",
     "modelTagResponses": "Responses",
     "sessionLoadFailed": "セッションの読み込みに失敗しました",
     "agentStopped": "{{name}} は停止しています",
@@ -1506,7 +1507,8 @@
 "generic": "参照"
   },
   "chatError": {
-    "contextOverflow": "コンテキストオーバーフロー：モデル能力情報が見つからないため、コンテキスト使用量を正確に計算できません。モデル名が正確であるか（大文字小文字を区別）を確認してください。"
+    "contextOverflow": "コンテキストオーバーフロー：モデル能力情報が見つからないため、コンテキスト使用量を正確に計算できません。モデル名が正確であるか（大文字小文字を区別）を確認してください。",
+    "retry": "再試行"
   },
   "codeBlock": {
     "ariaLabelCopy": "コードをコピー"

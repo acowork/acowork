@@ -3913,6 +3913,11 @@ export function convertConversationEntry(
     // so the client never has to know the key or the "is it usable" rule. The
     // bubble renders it in place of `content` (see `MessageBubble`).
     display: entry.display,
+    // Same contract as `display`: the Runtime resolved the provenance from the
+    // row's metadata, so the bubble never reads `metadata.speaker` itself. Left
+    // undefined on an ordinary turn, which is the whole point of the disclosure
+    // (`speakerProvenance.ts` renders nothing without a substitution).
+    speaker: entry.speaker,
   };
 
   if (entry.role === "user") {

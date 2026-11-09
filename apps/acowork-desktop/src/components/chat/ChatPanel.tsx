@@ -23,7 +23,7 @@ import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { useInitiatorIdentity } from "../../lib/sessionInitiator";
 import type { SpeakerKind } from "./speakerBubble";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock, RefreshCw } from "lucide-react";
 import type { ChatMessage, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
@@ -2323,18 +2323,45 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                       </details>
                     )}
                   </div>
-                  <button
-                    onClick={() => {
-                      if (selectedAgentId && currentSessionId) {
-                        clearServerError(selectedAgentId, currentSessionId);
-                      }
-                    }}
-                    className="ml-auto flex w-fit items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
-                    style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
-                  >
-                    <X className="h-3 w-3" />
-                    <span>Dismiss</span>
-                  </button>
+                  <div className="ml-auto flex w-fit items-center gap-1">
+                    {/* The one control that gets a failed turn moving again.
+                        Every other action here resumes something that is still
+                        alive; this one re-runs a turn that already ended, which
+                        is the only way back from a bad model or an exhausted
+                        quota — the case an agent-to-agent execution session
+                        cannot recover from on its own, because the dispatching
+                        agent was told "failed" and will not retry. */}
+                    <button
+                      onClick={() => {
+                        if (!selectedAgentId || !currentSessionId) return;
+                        const sid = currentSessionId;
+                        const aid = selectedAgentId;
+                        void sessionControl
+                          .retryTurn(aid, sid)
+                          .then(() => clearServerError(aid, sid))
+                          .catch((err: unknown) => {
+                            log.warn("[ChatPanel] retry failed:", err);
+                          });
+                      }}
+                      className="flex w-fit items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
+                      style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
+                    >
+                      <RefreshCw className="h-3 w-3" />
+                      <span>{t("chatError.retry")}</span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        if (selectedAgentId && currentSessionId) {
+                          clearServerError(selectedAgentId, currentSessionId);
+                        }
+                      }}
+                      className="flex w-fit items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
+                      style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
+                    >
+                      <X className="h-3 w-3" />
+                      <span>Dismiss</span>
+                    </button>
+                  </div>
                 </div>
               </div>
             )}

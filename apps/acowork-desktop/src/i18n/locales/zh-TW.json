@@ -297,6 +297,7 @@
     "readOnlyBanner": "你目前只有檢視權限,修改不會被儲存。如需權限請聯絡資源擁有者。"
   },
   "chatPanel": {
+    "speakerOnBehalfOf": "{{author}} 代 {{target}} 發言",
     "modelTagResponses": "Responses",
     "sessionLoadFailed": "工作階段載入失敗",
     "agentStopped": "{{name}} 已停止",
@@ -1497,7 +1498,8 @@
 "generic": "引用"
   },
   "chatError": {
-    "contextOverflow": "上下文溢出：模型能力資訊缺失，無法準確計算上下文用量。請檢查模型名稱是否正確（區分大小寫）。"
+    "contextOverflow": "上下文溢出：模型能力資訊缺失，無法準確計算上下文用量。請檢查模型名稱是否正確（區分大小寫）。",
+    "retry": "重試"
   },
   "codeBlock": {
     "ariaLabelCopy": "複製程式碼"

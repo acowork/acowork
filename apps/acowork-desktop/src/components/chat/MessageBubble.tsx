@@ -31,6 +31,7 @@ import {
   speakerRendersMarkdown,
   type SpeakerKind,
 } from "./speakerBubble";
+import { speakerDisclosure } from "./speakerProvenance";
 
 // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -141,6 +142,9 @@ const MessageBubble = React.memo(function MessageBubble({
   // The avatar and name deliberately keep following `speakerKind` — who SENT
   // the turn is a separate fact the projection does not carry yet.
   const speaker: SpeakerKind = message.display ? "agent" : speakerKind;
+  // Plan D3: whose voice this line is in. `null` for the ordinary turn, so the
+  // row below renders exactly what it rendered before provenance existed.
+  const disclosure = speakerDisclosure(message.speaker);
   const asAgentSpeech = speakerRendersMarkdown(speaker);
   // Narrowed once, so the avatar branch below has a non-null instance id.
   const senderAgent = speakerKind === "agent" ? senderAgentId : null;
@@ -318,6 +322,19 @@ const MessageBubble = React.memo(function MessageBubble({
           <div className="min-w-0 flex-1 flex flex-col items-end">
             {liveUserName && (
               <span className="mt-[2px] text-xs text-text-tertiary ">{liveUserName}</span>
+            )}
+            {/* Plan D3: these words are voiced as somebody else — say so, on its
+                own line above the bubble. It sits beside the name rather than
+                replacing it because both facts matter: a person typed this, and
+                the run still reads as the party whose task it is. Nothing renders
+                for an ordinary turn (`disclosure === null`). */}
+            {disclosure && (
+              <span className="mt-[2px] text-xs text-text-tertiary">
+                {t("chatPanel.speakerOnBehalfOf", {
+                  author: disclosure.author,
+                  target: disclosure.standsInFor,
+                })}
+              </span>
             )}
             {message.content && (
               // Timestamp rendered as a sibling BELOW the bubble
