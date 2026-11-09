@@ -69,7 +69,7 @@ vi.mock("../../stores/chatStore", () => {
 });
 
 const AGENTS_STATE = {
-  agents: { [AGENT]: { meta: { display_name: "Agent A", name: "agent-a" } } },
+  agents: { [AGENT]: { meta: { name: "Agent A" } } },
 };
 vi.mock("../../stores/agentStore", () => ({
   useAgentStore: Object.assign(

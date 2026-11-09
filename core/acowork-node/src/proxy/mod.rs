@@ -166,10 +166,11 @@ async fn proxy_agent(
         Ok(response) => {
             let status = StatusCode::from_u16(response.status().as_u16())
                 .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            // ADR-009 §5: `PUT avatar-config` is the one Runtime write
-            // whose result the retained inventory mirrors
-            // (`overrides_json`). Refresh it, otherwise the durable copy
-            // keeps the pre-write value until this node reconnects.
+            // `PUT avatar-config` is the one Runtime write the retained
+            // inventory mirrors (`identity` — name + avatar, read back
+            // from the instance's `agent_config.json`). Refresh it: the
+            // inventory is the only source for a stopped agent, and every
+            // human-facing surface reads it.
             if status.is_success() && method == Method::PUT && rest == "avatar-config" {
                 crate::package::republish_installed_info(&state, &id).await;
             }

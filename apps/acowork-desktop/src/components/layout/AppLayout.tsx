@@ -358,10 +358,11 @@ export function AppLayout() {
   const activeIsDm = useProjectGroupStore(
     (s) => s.activeGroupId != null && s.dms.some((d) => d.session_id === s.activeGroupId),
   );
-  // ADR-009 §V-Q: the name is server-side (Runtime `.overrides.json`,
-  // mirrored into the Gateway's list view) — no local override.
-  const agentDisplayName = selectedAgent
-    ? (selectedAgent.display_name ?? selectedAgent.name)
+  // The name is server-side: the Runtime owns it in the instance's
+  // `agent_config.json`, the Gateway mirrors it into its list view. No
+  // local fallback — a second source is how the two names drifted apart.
+  const agentName = selectedAgent
+    ? selectedAgent.name
     : null;
   // Context usage for the bottom status bar.
   // (Session count was removed — see PR-3 follow-up: users found it noisy
@@ -1396,12 +1397,12 @@ export function AppLayout() {
             </button>
           </Tooltip>
         )}
-        {(rightPanelCollapsed || activeTab !== "status") && selectedAgent?.alive && agentDisplayName && (
+        {(rightPanelCollapsed || activeTab !== "status") && selectedAgent?.alive && agentName && (
           <span className="flex items-center gap-2 truncate">
             <span className="flex items-center gap-1 pl-1 pr-4 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
               <Bot className="h-3 w-3 text-text-tertiary " aria-hidden="true" />
               <span className="text-text-tertiary ">{t("statusBar.agent")}: </span>
-              <span className="font-medium text-text-tertiary ">{agentDisplayName}</span>
+              <span className="font-medium text-text-tertiary ">{agentName}</span>
             </span>
             {contextUsage && (
               <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">

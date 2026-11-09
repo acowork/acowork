@@ -396,8 +396,6 @@ pub struct ManifestDraft {
     pub agent_id: String,
     pub name: String,
     #[serde(default)]
-    pub display_name: Option<String>,
-    #[serde(default)]
     pub role: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
@@ -500,7 +498,6 @@ impl ManifestDraft {
             agent_id,
             version,
             name,
-            display_name: self.display_name.clone().filter(|s| !s.trim().is_empty()),
             role: self.role.clone().filter(|s| !s.trim().is_empty()),
             avatar: None,
             builtin_avatar: None,
@@ -599,11 +596,15 @@ pub struct AgentManifest {
     pub agent_id: String,
     /// Semantic version (e.g., "1.0.0")
     pub version: String,
-    /// Human-readable name
+    /// Human-readable name.
+    ///
+    /// Two roles, deliberately: it names the **package** (package list,
+    /// marketplace, publish/clone, logs) and it is the **initial value**
+    /// materialized into a new instance's `agent_config.json` `name`.
+    /// After that first boot the instance's name is the user's, held in
+    /// its own config file — an upgrade never rewrites it. There is no
+    /// second, package-level "display name": one package, one name.
     pub name: String,
-    /// Short display name for chat UI (defaults to `name` if absent)
-    #[serde(default)]
-    pub display_name: Option<String>,
     /// Agent role / job title (e.g. "Project Manager")
     #[serde(default)]
     pub role: Option<String>,
@@ -1465,7 +1466,6 @@ mod tests {
     #[test]
     fn draft_build_carries_every_v2_section() {
         let mut d = draft();
-        d.display_name = Some("Deep Researcher".to_string());
         d.role = Some("researcher".to_string());
         d.labels = vec!["research".to_string(), "web".to_string()];
         d.config = Some(ManifestConfigDefaults {

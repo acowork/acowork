@@ -186,13 +186,15 @@ pub fn load_compaction_prompt(package_dir: &Path) -> Option<String> {
 /// session-scoped file and never reads this one. Best-effort: a read-only
 /// package dir (or a package with no `prompts/`) simply keeps using the
 /// built-in default.
-pub fn seed_chat_prompt(
-    package_dir: &Path,
-    display_name: Option<&str>,
-    name: &str,
-    role: Option<&str>,
-    description: &str,
-) {
+///
+/// The seeded text names the agent as `{{agent_name}}`, **not** as its
+/// current name. `prompts/chat.md` is package content (one file for every
+/// install of the package, replaced on upgrade), while a name belongs to
+/// one instance and changes when the user renames it. Writing the name in
+/// literally is how a renamed agent ends up with a prompt that opens
+/// "You are SSE" and later mentions "the front desk of SSE.Kevin" — two
+/// names, neither wrong, in one prompt.
+pub fn seed_chat_prompt(package_dir: &Path, role: Option<&str>, description: &str) {
     let prompts_dir = package_dir.join("prompts");
     if !prompts_dir.is_dir() {
         return;
@@ -203,8 +205,9 @@ pub fn seed_chat_prompt(
     }
     let persona = crate::agent::chat_router::prompt::default_persona(
         &crate::agent::chat_router::prompt::PersonaSource {
-            display_name,
-            name,
+            // Substituted per turn by `build_block_a` — see this function's
+            // docs for why the name is not written literally.
+            name: "{{agent_name}}",
             role,
             description,
         },
@@ -672,17 +675,20 @@ Be friendly and welcoming.
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(dir.join("prompts")).unwrap();
 
-        seed_chat_prompt(&dir, Some("Vera"), "vera", Some("Architect"), "Reviews decisions.");
+        seed_chat_prompt(&dir, Some("Architect"), "Reviews decisions.");
         let path = dir.join("prompts").join("chat.md");
         let seeded = fs::read_to_string(&path).unwrap();
-        // The whole built-in prompt for the 1:1 surface, with the manifest
-        // persona rendered in — not just a persona file.
-        assert!(seeded.contains("You are Vera, Architect. Reviews decisions."));
+        // The whole built-in prompt for the 1:1 surface, with the persona
+        // rendered in — not just a persona file.
+        assert!(seeded.contains("You are {{agent_name}}, Architect. Reviews decisions."));
         assert!(seeded.contains(acowork_core::chat_prompt::SCENARIO_DM));
+        // The name is a placeholder, never a literal: this file is package
+        // content shared by every instance and must survive a rename.
+        assert!(!seeded.contains("Vera"));
 
         // An existing file belongs to the user: never clobbered on the next boot.
         fs::write(&path, "Mine.").unwrap();
-        seed_chat_prompt(&dir, Some("Vera"), "vera", Some("Architect"), "Reviews decisions.");
+        seed_chat_prompt(&dir, Some("Architect"), "Reviews decisions.");
         assert_eq!(fs::read_to_string(&path).unwrap(), "Mine.");
 
         let _ = fs::remove_dir_all(&dir);
@@ -697,7 +703,7 @@ Be friendly and welcoming.
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
 
-        seed_chat_prompt(&dir, None, "n", None, "d");
+        seed_chat_prompt(&dir, None, "d");
         assert!(!dir.join("prompts").exists());
 
         let _ = fs::remove_dir_all(&dir);

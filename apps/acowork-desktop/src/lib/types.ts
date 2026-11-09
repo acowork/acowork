@@ -51,8 +51,13 @@ export interface AgentListResponse {
    *  Gateway-local case uses `local_node_id()` ("local"). Display-only
    *  metadata — never a registry key. */
   node_id: string;
+  /** The instance's **name** — what the user calls this agent and what the
+   *  agent is told about itself. The only field that distinguishes several
+   *  installs of one package. */
   name: string;
-  display_name: string | null;
+  /** `manifest.name` — the package it was installed from. Package-level, so
+   *  identical across instances; never a label. */
+  package_name: string;
   role: string | null;
   avatar: string | null;
   builtin_avatar?: string;
@@ -258,7 +263,7 @@ export interface AgentInfo {
    */
   node_id?: string;
   name: string;
-  display_name?: string;
+  package_name?: string;
   role?: string;
   avatar?: string;
   /**
@@ -336,7 +341,7 @@ export interface AgentDetail {
   /** ADR-073: current location (mutable on migration). */
   node_id?: string;
   name: string;
-  display_name?: string;
+  package_name?: string;
   role?: string;
   avatar?: string;
   /**
@@ -2428,8 +2433,10 @@ export interface DraftCapabilityPayload {
  */
 export interface CreateAgentDraftPayload {
   agent_id: string;
+  /** The package name. It doubles as the initial name of every instance
+   *  created from this package — a user renames an instance afterwards, and
+   *  that rename is stored in the instance's own config, not here. */
   name: string;
-  display_name?: string | null;
   role?: string | null;
   version?: string | null;
   author?: string | null;
@@ -2923,11 +2930,10 @@ export interface AvatarConfigResponse {
   avatar: string | null;
   /** Effective builtin avatar icon ID (e.g. "icon-05"). Null when none. */
   builtin_avatar: string | null;
-  /** Effective display name: server-side override > `manifest.display_name`.
-   *  Null when neither is set (callers fall back to `manifest.name`). */
-  display_name: string | null;
-  /** Source of the effective value: "overrides" | "manifest" | "fallback" */
-  source: "overrides" | "manifest" | "fallback";
+  /** The instance's name — the same string the agent is told about itself. */
+  name: string;
+  /** Source of the effective avatar: "config" | "manifest" | "fallback" */
+  source: "config" | "manifest" | "fallback";
 }
 
 /** PUT request body for PUT /api/agents/:id/avatar-config */
@@ -2936,9 +2942,9 @@ export interface UpdateAvatarConfigRequest {
   avatar?: string;
   /** Set to an icon ID to select, "" to clear, omit to leave unchanged */
   builtin_avatar?: string;
-  /** Rename the agent (stored server-side, ADR-009 §V-Q). "" clears it
-   *  back to `manifest.display_name`; omit to leave unchanged. */
-  display_name?: string;
+  /** Rename the agent. Omit to leave unchanged; "" is rejected (an agent
+   *  always has a name). */
+  name?: string;
 }
 
 /** A single avatar asset file in the install directory */

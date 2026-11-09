@@ -208,17 +208,18 @@ pub struct BootstrapState {
 pub struct GatewayState {
     /// Installed agents (agent_id → AgentInfo)
     pub installed_agents: HashMap<String, AgentInfo>,
-    /// ADR-009 §5: user-preference overrides per **instance**, keyed by
-    /// `instance_id` (same key as [`Self::installed_agents`]).
+    /// Each instance's **identity** — its one name plus the avatar the user
+    /// picked — keyed by `instance_id` (same key as
+    /// [`Self::installed_agents`]).
     ///
     /// Kept deliberately **out of** [`AgentInfo`]: `manifest` is rebuilt
-    /// from scratch every time a node re-publishes its retained
-    /// inventory ([`Self::upsert_installed_from_node`]), so merging the
-    /// overrides into it would make them vanish on every Node restart /
-    /// install / upgrade. Source of truth is the instance's
-    /// `.overrides.json`, owned by the Runtime (no Gateway fs access);
-    /// this map only carries the values the Node reported.
-    pub agent_overrides: HashMap<String, acowork_core::AgentOverrides>,
+    /// from scratch every time a node re-publishes its retained inventory
+    /// ([`Self::upsert_installed_from_node`]), so an identity merged into
+    /// it would vanish on every Node restart / install / upgrade. Source
+    /// of truth is the instance's `agent_config.json`, written by the
+    /// Runtime (no Gateway fs access); this map only carries what the Node
+    /// last projected from it.
+    pub agent_identity: HashMap<String, acowork_core::mqtt_proto::AgentIdentity>,
     /// Running agents (agent_id → RunningAgentInfo)
     pub running_agents: HashMap<String, RunningAgentInfo>,
     /// Vault facade for key storage and distribution
@@ -398,7 +399,7 @@ impl GatewayState {
     pub fn new(vault_dir: &str) -> Self {
         Self {
             installed_agents: HashMap::new(),
-            agent_overrides: HashMap::new(),
+            agent_identity: HashMap::new(),
             running_agents: HashMap::new(),
             vault: VaultFacade::new(vault_dir),
             budget_tracker: None,
@@ -541,9 +542,9 @@ impl GatewayState {
     /// (ADR-073 table key); a package id never matches.
     pub fn remove_installed(&mut self, id: &str) -> Option<AgentInfo> {
         let removed = self.installed_agents.remove(id);
-        // ADR-009 §5: drop the instance's overrides with the instance —
-        // a stopped agent can never re-report them.
-        self.agent_overrides.remove(id);
+        // Drop the instance's identity with the instance — a stopped agent
+        // can never re-report it.
+        self.agent_identity.remove(id);
         if let Some(info) = &removed {
             // S4.2.3: Unregister capabilities on uninstall (instance-scoped).
             self.capability_registry.unregister_instance(&info.instance_id);
@@ -614,29 +615,39 @@ impl GatewayState {
             node_id: node_id.to_string(),
         };
         self.add_installed(info);
-        // ADR-009 §5: the entry carries the instance's
-        // `.overrides.json` verbatim. Record it OUTSIDE the manifest so
-        // the next re-publish cannot wipe it. An empty / malformed
-        // payload degrades to "no overrides".
-        self.set_overrides(&instance_id, acowork_core::AgentOverrides::from_json(&entry.overrides_json));
+        // The entry carries the instance's identity (its name and avatar),
+        // projected by the Node from the instance's own
+        // `agent_config.json`. Record it OUTSIDE the manifest so the next
+        // re-publish cannot wipe it; an absent payload means "not
+        // materialized yet".
+        self.set_identity(
+            &instance_id,
+            entry
+                .identity
+                .clone()
+                .unwrap_or_default(),
+        );
         Some(instance_id)
     }
 
-    /// ADR-009 §5: record an instance's user-preference overrides.
-    /// An empty override set removes the entry (no orphan map growth
-    /// across uninstall / re-install cycles).
-    pub fn set_overrides(&mut self, instance_id: &str, overrides: acowork_core::AgentOverrides) {
-        if overrides.is_empty() {
-            self.agent_overrides.remove(instance_id);
+    /// Record an instance's identity. An all-empty identity removes the
+    /// entry (no orphan map growth across uninstall / re-install cycles).
+    pub fn set_identity(
+        &mut self,
+        instance_id: &str,
+        identity: acowork_core::mqtt_proto::AgentIdentity,
+    ) {
+        if identity.name.is_empty() && identity.avatar.is_empty() && identity.builtin_avatar.is_empty()
+        {
+            self.agent_identity.remove(instance_id);
         } else {
-            self.agent_overrides
-                .insert(instance_id.to_string(), overrides);
+            self.agent_identity.insert(instance_id.to_string(), identity);
         }
     }
 
-    /// ADR-009 §5: user-preference overrides for an instance, if any.
-    pub fn overrides_of(&self, instance_id: &str) -> Option<&acowork_core::AgentOverrides> {
-        self.agent_overrides.get(instance_id)
+    /// An instance's identity, if the Node has reported one.
+    pub fn identity_of(&self, instance_id: &str) -> Option<&acowork_core::mqtt_proto::AgentIdentity> {
+        self.agent_identity.get(instance_id)
     }
 
     /// Add a running agent. ADR-073: keyed by instance identity.

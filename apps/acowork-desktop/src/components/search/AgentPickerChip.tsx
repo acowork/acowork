@@ -120,7 +120,7 @@ export function AgentPickerChip({ agents, value, onChange }: AgentPickerChipProp
                                 />
                                 <div className="min-w-0 flex-1">
                                     <div className="truncate font-medium text-text">
-                                        {a.display_name || a.name || a.instance_id}
+                                        {a.name || a.instance_id}
                                     </div>
                                     <div className="truncate font-mono text-10 text-text-tertiary">
                                         {a.agent_id}

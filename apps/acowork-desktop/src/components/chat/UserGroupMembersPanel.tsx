@@ -99,7 +99,7 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
       if (ag) {
         return {
           id,
-          name: ag.display_name || ag.name || id,
+          name: ag.name || id,
           isAgent: true,
           avatarUrl: ag.avatar ?? null,
           builtinAvatarId: ag.builtin_avatar ?? null,
@@ -561,7 +561,7 @@ function InviteDialog({
       if (!members.has(a.meta.instance_id)) {
         rows.push({
           id: a.meta.instance_id,
-          name: a.meta.display_name || a.meta.name || a.meta.instance_id,
+          name: a.meta.name || a.meta.instance_id,
           isAgent: true,
           avatarUrl: a.meta.avatar ?? null,
           builtinAvatarId: a.meta.builtin_avatar ?? null,

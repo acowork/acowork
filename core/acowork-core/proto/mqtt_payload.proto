@@ -506,11 +506,17 @@ enum AgentLifecycleState {
 message AgentMeta {
   /// Package identity (from manifest).
   string agent_id = 1;
+  /// **Package** name (from `manifest.name`), not the instance's name.
+  /// An instance's name is user-owned and lives in its
+  /// `agent_config.json`, published to the Gateway through
+  /// `InstalledAgentInfo.identity` — deliberately NOT duplicated here:
+  /// two carriers for one fact is how the two names drifted apart.
   string name = 2;
   string version = 3;
   // Fields 4/5 (avatar, builtin_avatar) are unused since ADR-009
-  // §V-Q: the avatar is resolved server-side (the Gateway
-  // `list_agents` merge). Kept for wire compatibility — always empty.
+  // §V-Q: the avatar is resolved server-side from the instance identity
+  // (`InstalledAgentInfo.identity`). Kept for wire compatibility —
+  // always empty.
   string avatar = 4;
   string builtin_avatar = 5;
   /// ADR-073: instance identity (UUID v4, immutable).
@@ -1392,13 +1398,36 @@ message InstalledAgentInfo {
   /// install time; the Node receives it in the install command and
   /// MUST use it verbatim, never self-generate).
   string instance_id = 6;
-  /// ADR-009 §5 / ADR-073: raw content of the instance's
-  /// `{instance_id}.overrides.json` (user-preference overrides —
-  /// avatar, builtin avatar, display name). Opaque to the Node: it
-  /// reads the sibling file verbatim and never parses it, exactly like
-  /// `manifest_toml`. The Gateway parses it for display; the Runtime
-  /// owns writes. Empty = no overrides (or a pre-upgrade entry).
-  string overrides_json = 7;
+  /// The instance's own identity: the ONE name a human and the agent
+  /// itself both see, plus the avatar the user picked.
+  ///
+  /// Read by the Node from the instance's
+  /// `{workspace}/config/agent_config.json` — the same file the Runtime
+  /// writes and renders its own system prompt from. That shared origin is
+  /// the whole point: there is no second place a name can come from, so
+  /// "what the human calls me" and "what I call myself" cannot drift.
+  ///
+  /// `name` is empty until the Runtime has booted once and materialized
+  /// it (the file did not exist yet); the Gateway then falls back to the
+  /// package name. Empty therefore means "not materialized", never
+  /// "no name".
+  AgentIdentity identity = 7;
+}
+
+/// One instance's identity, as published in the node inventory.
+///
+/// Deliberately flat and small: this is a *projection* of
+/// `agent_config.json`, not a second config surface. Adding a field here
+/// means the Gateway needs it to render an agent it cannot query (the
+/// Runtime is stopped); anything else belongs in the config file, which
+/// the Gateway reads over HTTP when the agent is up.
+message AgentIdentity {
+  /// The instance's name — user-chosen, defaults to the package name.
+  string name = 1;
+  /// User-picked packaged avatar path (`"assets/avatar-02.png"`).
+  string avatar = 2;
+  /// User-picked builtin icon id (`"icon-05"`).
+  string builtin_avatar = 3;
 }
 
 /// Gateway → Node command.

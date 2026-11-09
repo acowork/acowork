@@ -105,8 +105,10 @@ pub fn agent_routes() -> Router<AppState> {
         // mutate the in-memory manifest — a second writer of agent-private
         // data, and (worse) a writer whose value nothing ever pushed into
         // the Runtime, so a new avatar never survived an agent restart.
-        // The Runtime now persists the pick to the instance's
-        // `.overrides.json` (which also survives upgrades).
+        // The Runtime now persists the pick to the instance's own
+        // `workspace/config/agent_config.json` — the same file its system
+        // prompt is rendered from, so the name a human reads here is the
+        // name the agent is told about itself.
         // ADR-055 §6.7 (Phase 4): resolve the LSP relay endpoint of the
         // node hosting this agent, for Desktop code-editing features.
         .route(
@@ -146,8 +148,15 @@ pub struct AgentListResponse {
     /// ADR-073: current location (node hosting this instance; mutable
     /// on migration). Positional metadata only — never a registry key.
     pub node_id: String,
+    /// The instance's **name** — what the user calls this agent and what the
+    /// agent is told about itself. Sourced from the instance's
+    /// `agent_config.json` (via the Node inventory); falls back to
+    /// [`Self::package_name`] only for an instance that has never booted.
     pub name: String,
-    pub display_name: Option<String>,
+    /// `manifest.name` — the **package** name. Not a display name: an
+    /// installed agent is displayed by [`Self::name`], and the two differ
+    /// as soon as the user renames one instance of a package.
+    pub package_name: String,
     pub role: Option<String>,
     pub avatar: Option<String>,
     /// Builtin avatar index declared in the manifest (e.g. "icon-05").
@@ -234,8 +243,11 @@ pub struct AgentDetailResponse {
     pub agent_id: String,
     /// ADR-073: current location (mutable on migration).
     pub node_id: String,
+    /// The instance's **name** (see [`AgentListResponse::name`]).
     pub name: String,
-    pub display_name: Option<String>,
+    /// `manifest.name` — the package name (see
+    /// [`AgentListResponse::package_name`]).
+    pub package_name: String,
     pub role: Option<String>,
     pub avatar: Option<String>,
     /// Builtin avatar index declared in the manifest (e.g. "icon-05").
@@ -422,30 +434,19 @@ pub async fn list_agents(
             let last_interaction_at = gw
                 .get_interaction(&info.instance_id)
                 .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
-            // ADR-009 §5: user preference first, packaged default second.
-            // Both halves are local now — the override came from the Node's
-            // retained inventory (stopped agents) or from the Runtime's
-            // avatar-config response (running ones), so listing never needs
-            // a per-agent HTTP round trip.
-            let overrides = gw.overrides_of(&info.instance_id);
-            let (eff_avatar, eff_builtin, _) = match overrides {
-                Some(ov) if ov.avatar.is_some() || ov.builtin_avatar.is_some() => {
-                    (ov.avatar.clone(), ov.builtin_avatar.clone(), "overrides")
-                }
-                _ => resolve_avatar_from_manifest(&info.manifest),
-            };
-            let eff_display_name = overrides
-                .and_then(|ov| ov.display_name.clone())
-                .or_else(|| info.manifest.display_name.clone());
+            // Both halves are local: the identity came from the Node's
+            // retained inventory, so listing never needs a per-agent HTTP
+            // round trip.
+            let identity = resolve_identity(gw.identity_of(&info.instance_id), &info.manifest);
             let resp = AgentListResponse {
                 instance_id: info.instance_id.clone(),
                 agent_id: info.agent_id.clone(),
                 node_id: info.node_id.clone(),
-                name: info.name.clone(),
-                display_name: eff_display_name,
+                name: identity.name,
+                package_name: info.manifest.name.clone(),
                 role: info.manifest.role.clone(),
-                avatar: eff_avatar,
-                builtin_avatar: eff_builtin,
+                avatar: identity.avatar,
+                builtin_avatar: identity.builtin_avatar,
                 version: info.version.clone(),
                 labels: info.manifest.labels.clone(),
                 alive,
@@ -577,27 +578,18 @@ pub async fn get_agent_detail(
     } else {
         acowork_core::mqtt_proto::AgentLifecycleState::Offline
     });
-    // ADR-009 §5: same override-first resolution as `list_agents` — the
-    // detail panel and the sidebar must not disagree about the name.
-    let overrides = gw.overrides_of(&info.instance_id);
-    let (eff_avatar, eff_builtin, _) = match overrides {
-        Some(ov) if ov.avatar.is_some() || ov.builtin_avatar.is_some() => {
-            (ov.avatar.clone(), ov.builtin_avatar.clone(), "overrides")
-        }
-        _ => resolve_avatar_from_manifest(&info.manifest),
-    };
-    let eff_display_name = overrides
-        .and_then(|ov| ov.display_name.clone())
-        .or_else(|| info.manifest.display_name.clone());
+    // Same resolution as `list_agents` — the detail panel and the sidebar
+    // cannot disagree about a name because they call the same function.
+    let identity = resolve_identity(gw.identity_of(&info.instance_id), &info.manifest);
     let resp = AgentDetailResponse {
         instance_id: info.instance_id.clone(),
         agent_id: info.agent_id.clone(),
         node_id: info.node_id.clone(),
-        name: info.name.clone(),
-        display_name: eff_display_name,
+        name: identity.name,
+        package_name: info.manifest.name.clone(),
         role: info.manifest.role.clone(),
-        avatar: eff_avatar,
-        builtin_avatar: eff_builtin,
+        avatar: identity.avatar,
+        builtin_avatar: identity.builtin_avatar,
         version: info.version.clone(),
         description: info.manifest.description.clone(),
         author: info.manifest.author.clone(),
@@ -632,17 +624,50 @@ pub async fn get_agent_detail(
 
 // ── ADR-073: route variable → instance identity ────────────────
 
-/// Resolve an agent's effective avatar from its manifest only.
+/// The instance's identity as every human-facing response reports it.
+pub(crate) struct ResolvedIdentity {
+    /// The instance's one name.
+    pub name: String,
+    pub avatar: Option<String>,
+    pub builtin_avatar: Option<String>,
+}
+
+/// Resolve one instance's identity — **the** place a name is decided on the
+/// Gateway side.
 ///
-/// Returns `(avatar, builtin_avatar, source)`. The per-instance
-/// `.overrides.json` layer is applied by the callers.
-pub(crate) fn resolve_avatar_from_manifest(
+/// Two inputs, in this order:
+/// 1. `identity` — the Node's projection of the instance's own
+///    `agent_config.json` (name + avatar), reported in the retained
+///    inventory. Absent only when the instance has never booted.
+/// 2. `manifest` — the package defaults. `manifest.name` is the
+///    materialization source for a brand-new instance, so using it here
+///    yields exactly the value first boot writes; it is never a *different*
+///    name, only an earlier one.
+///
+/// Callers must not re-derive any part of this: a second derivation site is
+/// how the sidebar and the detail panel ended up disagreeing before.
+pub(crate) fn resolve_identity(
+    identity: Option<&acowork_core::mqtt_proto::AgentIdentity>,
     manifest: &AgentManifest,
-) -> (Option<String>, Option<String>, &'static str) {
-    if manifest.avatar.is_some() || manifest.builtin_avatar.is_some() {
-        return (manifest.avatar.clone(), manifest.builtin_avatar.clone(), "manifest");
+) -> ResolvedIdentity {
+    let name = identity
+        .map(|i| i.name.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(manifest.name.trim())
+        .to_string();
+    let picked = identity.filter(|i| !i.avatar.is_empty() || !i.builtin_avatar.is_empty());
+    match picked {
+        Some(i) => ResolvedIdentity {
+            name,
+            avatar: Some(i.avatar.clone()).filter(|s| !s.is_empty()),
+            builtin_avatar: Some(i.builtin_avatar.clone()).filter(|s| !s.is_empty()),
+        },
+        None => ResolvedIdentity {
+            name,
+            avatar: manifest.avatar.clone(),
+            builtin_avatar: manifest.builtin_avatar.clone(),
+        },
     }
-    (None, None, "fallback")
 }
 
 /// Resolve an HTTP route variable (`{id}`) to the canonical instance
@@ -2772,7 +2797,6 @@ mod tests {
             agent_id: agent_id.to_string(),
             version: "1.0.0".to_string(),
             name: "Test Agent".to_string(),
-            display_name: None,
             role: None,
             avatar: None,
             builtin_avatar: None,
@@ -3586,7 +3610,7 @@ mod tests {
             agent_id: "com.example.weather".to_string(),
             node_id: "local".to_string(),
             name: "Weather Agent".to_string(),
-            display_name: None,
+            package_name: "Weather Agent".to_string(),
             role: None,
             avatar: None,
             builtin_avatar: Some("icon-05".to_string()),
@@ -3689,7 +3713,7 @@ mod tests {
             agent_id: id.to_string(),
             node_id: "local".to_string(),
             name: name.to_string(),
-            display_name: None,
+            package_name: name.to_string(),
             role: None,
             avatar: None,
             builtin_avatar: None,

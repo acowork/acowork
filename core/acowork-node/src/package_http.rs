@@ -13,11 +13,12 @@
 //!    Runtime either (review §V-H…V-J, §V-R).
 //!
 //! Scope is narrow by design: package content only (`manifest.avatar`,
-//! `assets/avatar*`) plus the manifest's avatar fields. User
-//! **preferences** (`{instance_id}.overrides.json`) are deliberately NOT
-//! read here — that file belongs to the Runtime (ADR-009 §5) and the
-//! Node treats it as opaque. The Runtime resolves the effective avatar
-//! for `avatar-config`; the Gateway merges it for display.
+//! `assets/avatar*`) plus the manifest's avatar fields. The instance's own
+//! pick — `avatar` / `builtin_avatar` / `name` in its
+//! `workspace/config/agent_config.json` — is deliberately NOT written here:
+//! that file belongs to the Runtime. The Runtime resolves the effective
+//! avatar for `avatar-config`; the Node only *reads* the identity out of it
+//! to report what a stopped agent is called.
 //!
 //! Mounted on the node HTTP listener (`:19900`) next to the Runtime
 //! reverse proxy, so the Gateway has one address for both.
@@ -33,7 +34,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use acowork_core::agent_overrides::{AVATAR_EXTENSIONS, has_avatar_extension};
+use acowork_core::avatar::{AVATAR_EXTENSIONS, has_avatar_extension};
 
 use crate::state::NodeHttpState;
 

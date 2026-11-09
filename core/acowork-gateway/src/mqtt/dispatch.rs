@@ -2768,8 +2768,7 @@ mod tests {
                         agent_id: "com.acowork.architect".to_string(),
                         version: "1.0.0".to_string(),
                         name: "Architect".to_string(),
-                        display_name: None,
-                        role: None,
+                                role: None,
                         avatar: None,
                         builtin_avatar: None,
                         description: "test".to_string(),
@@ -2827,7 +2826,6 @@ mod tests {
                 agent_id: "com.acowork.architect".to_string(),
                 version: "1.0.0".to_string(),
                 name: "Architect".to_string(),
-                display_name: None,
                 role: None,
                 avatar: None,
                 builtin_avatar: None,
@@ -2961,8 +2959,7 @@ mod tests {
                         agent_id: "com.acowork.architect".to_string(),
                         version: "1.0.0".to_string(),
                         name: "Architect".to_string(),
-                        display_name: None,
-                        role: None,
+                                role: None,
                         avatar: None,
                         builtin_avatar: None,
                         description: "test".to_string(),
@@ -3224,7 +3221,7 @@ mod tests {
             install_path: "/tmp/pkg/abc".to_string(),
             manifest_toml: manifest_toml.to_string(),
             instance_id: "1a1a1a1a-0000-4000-8000-000000000099".to_string(),
-            overrides_json: String::new(),
+            identity: None,
         };
         let envelope = acowork_core::mqtt_proto::DataEnvelope {
             version: 1,
@@ -3320,8 +3317,7 @@ mod tests {
                     agent_id: "com.acowork.to-remove".to_string(),
                     version: "1.0.0".to_string(),
                     name: "To Remove".to_string(),
-                    display_name: None,
-                    role: None,
+                        role: None,
                     avatar: None,
                     builtin_avatar: None,
                     description: String::new(),
@@ -3431,7 +3427,7 @@ mod tests {
                 name = \"Test\"\ndescription = \"\"\nauthor = \"\"\nruntime_version = \"0.1.0\""
                 .to_string(),
             instance_id: "1a1a1a1a-0000-4000-8000-0000000000ab".to_string(),
-            overrides_json: String::new(),
+            identity: None,
         };
         let envelope = acowork_core::mqtt_proto::DataEnvelope {
             version: 1,
@@ -3484,7 +3480,7 @@ mod tests {
                 name = \"Test\"\ndescription = \"\"\nauthor = \"\"\nruntime_version = \"0.1.0\""
                 .to_string(),
             instance_id: "1a1a1a1a-0000-4000-8000-0000000000cd".to_string(),
-            overrides_json: String::new(),
+            identity: None,
         };
         let envelope = acowork_core::mqtt_proto::DataEnvelope {
             version: 1,

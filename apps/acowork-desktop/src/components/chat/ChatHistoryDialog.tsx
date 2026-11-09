@@ -249,7 +249,7 @@ export function ChatHistoryDialog({
   const registryName = useCallback(
     (id: string) => {
       const agent = agentsMap[id]?.meta;
-      if (agent) return agent.display_name ?? agent.name ?? id;
+      if (agent) return agent.name ?? id;
       if (account && id === account.user_id) return account.display_name || account.username;
       return id;
     },

@@ -4,7 +4,6 @@
 agent_id = "com.acowork.project-manager"
 version = "1.0.0"
 name = "PM"
-display_name = "PM"
 role = "Project Manager"
 description = "A professional project manager skilled in requirements analysis, task decomposition, progress tracking, risk assessment, and team coordination."
 author = "ACowork Team"

@@ -662,21 +662,22 @@ async fn lookup_agent_meta(
 }
 
 /// 把 `instance_id` 字符串 + 元信息投影成
-/// `{instance_id, agent_id, name, display_name, role}`。
+/// `{instance_id, agent_id, name, package_name, role}`。
 ///
 /// `instance_id` 为 `None` 或元信息为 `None`（Agent 已卸载 / Noop 目录）
 /// 时返回 `Value::Null`，让 LLM 拿到清晰的 null 而不是空字符串。
 ///
-/// `display_name` / `role` 无值时投影为 JSON `null`（字段保留），调用方按
-/// `display_name ?? name` 渲染 —— 与 Desktop 的 `agent.display_name ?? agent.name`
-/// 同一套 fallback，避免任务/项目视图与左侧 Agent 列表出现两套命名。
+/// `name` 是**实例名**（`SSE.Kevin`）——人看到的名字、agent 自己上下文里的
+/// 名字、PM 引用它时该用的人名，三者同一个字符串，不需要任何 fallback。
+/// `package_name` 是包名（`SSE`），只回答"这是哪种 agent"。
+/// `package_name` / `role` 缺失时投影为 JSON `null`（字段保留），保持 schema 稳定。
 fn agent_ref_value(instance_id: Option<&str>, info: Option<&AgentInfo>) -> Value {
     match (instance_id, info) {
         (Some(id), Some(info)) => json!({
             "instance_id": id,
             "agent_id": info.agent_id,
             "name": info.name,
-            "display_name": info.display_name,
+            "package_name": info.package_name,
             "role": info.role,
         }),
         _ => Value::Null,
@@ -932,10 +933,11 @@ async fn pm_get_project(state: &McpState, args: Value) -> Result<Value> {
             "instance_id": m.instance_id,
             "kind": m.kind,
             "agent_id": info.map(|i| &i.agent_id),
+            // The instance's own name (`SSE.Kevin`): the only field telling
+            // two installs of one package apart, and the name the agent
+            // itself answers to.
             "name": info.map(|i| &i.name),
-            // Per-instance label: the only field telling two installs of one
-            // package apart (`SSE.Cassie` vs `SSE.Kevin` are both `SSE`).
-            "display_name": info.and_then(|i| i.display_name.as_ref()),
+            "package_name": info.map(|i| &i.package_name),
             "role": info.and_then(|i| i.role.as_ref()),
             "added_at": m.added_at,
         }));
@@ -1361,14 +1363,14 @@ async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<V
     // `query` when they want the complete roster.
     if let Some(q) = a.query.as_deref().map(|s| s.to_lowercase()) {
         rows.retain(|r| {
+            // `name` is the instance label a human actually types ("kevin") and
+            // must match; `package_name` ("SSE") matches every instance of the
+            // package, which is the right answer for "who is an SSE".
             let name = r.info.as_ref().map(|i| i.name.as_str()).unwrap_or("");
-            // `display_name` is the label a human actually types ("kevin"), so
-            // it must be searchable — `name` is the package name ("SSE") and
-            // matches every instance of that package.
-            let display = r
+            let package_name = r
                 .info
                 .as_ref()
-                .and_then(|i| i.display_name.as_deref())
+                .and_then(|i| i.package_name.as_deref())
                 .unwrap_or("");
             let role = r
                 .info
@@ -1377,7 +1379,7 @@ async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<V
                 .unwrap_or("");
             let pkg = r.info.as_ref().map(|i| i.agent_id.as_str()).unwrap_or("");
             name.to_lowercase().contains(&q)
-                || display.to_lowercase().contains(&q)
+                || package_name.to_lowercase().contains(&q)
                 || role.to_lowercase().contains(&q)
                 || pkg.to_lowercase().contains(&q)
         });
@@ -1388,17 +1390,15 @@ async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<V
     // sort): unordered input plus `limit` truncation means the same question
     // returns different people twice, and an agent reads that as "the
     // directory changed". The key is the label the caller will actually read —
-    // `display_name ?? name` — because `name` alone is identical across
-    // instances of one package and leaves the order looking arbitrary within
-    // that group. Rows without metadata compare as the empty string and sort
-    // first — they are the least dispatch-like entries and belong where they
-    // get noticed.
+    // the instance name — which is also what distinguishes two installs of one
+    // package ("SSE.Cassie" / "SSE.Kevin"). Rows without metadata compare as
+    // the empty string and sort first — they are the least dispatch-like
+    // entries and belong where they get noticed.
     let sort_key = |r: &Row| {
         r.info
             .as_ref()
-            .map(|i| i.display_name.as_deref().unwrap_or(i.name.as_str()))
-            .unwrap_or("")
-            .to_string()
+            .map(|i| i.name.clone())
+            .unwrap_or_default()
     };
     rows.sort_by(|x, y| {
         sort_key(x)
@@ -1418,13 +1418,12 @@ async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<V
                 "kind": r.kind,
                 // Display-only; never valid as `assignee`.
                 "agent_id": r.info.as_ref().map(|i| i.agent_id.clone()),
+                // The instance's own name (`"SSE.Kevin"`) — what a human calls
+                // this agent, and what the agent calls itself. Quote it
+                // verbatim when talking about the agent; `package_name` is the
+                // only package-level field.
                 "name": r.info.as_ref().map(|i| i.name.clone()),
-                // Per-instance label (`"SSE.Kevin"`). `name` / `role` are
-                // package-level and identical across instances of one package,
-                // so without this a caller cannot tell two installs apart.
-                // Always emitted, `null` when absent — same schema-stability
-                // rule as `role`.
-                "display_name": r.info.as_ref().and_then(|i| i.display_name.clone()),
+                "package_name": r.info.as_ref().map(|i| i.package_name.clone()),
                 "role": r.info.as_ref().and_then(|i| i.role.clone()),
                 // ADR-085 liveness as the Gateway reports it. Informational
                 // only — intent delivery wakes a stopped target itself.
@@ -1533,7 +1532,7 @@ async fn pm_add_project_member(state: &McpState, actor: &str, args: Value) -> Re
             "kind": a.kind,
             "agent_id": info.as_ref().map(|i| i.agent_id.clone()),
             "name": info.as_ref().map(|i| i.name.clone()),
-            "display_name": info.as_ref().and_then(|i| i.display_name.clone()),
+            "package_name": info.as_ref().map(|i| i.package_name.clone()),
             "role": info.as_ref().and_then(|i| i.role.clone()),
         },
         "member_count": updated.members.len(),

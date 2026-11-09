@@ -624,20 +624,20 @@ export function AgentSetupTab() {
 
   // ── Avatar selection handlers ──────────────────────────────────────
 
-  // ── Display-name handler (ADR-009 §V-Q) ────────────────────────────
+  // ── Name handler ──────────────────────────────────────────────────
   //
   // Committed on blur / Enter: the Runtime persists it into the instance's
-  // `.overrides.json` and the node republishes its inventory, which is what
-  // refreshes the sidebar. `nameDraft === null` means "show the server
+  // own `agent_config.json` and the node republishes its inventory, which is
+  // what refreshes the sidebar. `nameDraft === null` means "show the server
   // value".
   const commitAgentName = async () => {
     if (!selectedAgentId || !selectedAgent || nameDraft === null) return;
     const next = nameDraft.trim();
     setNameDraft(null);
-    const current = selectedAgent.display_name ?? "";
+    const current = selectedAgent.name;
     if (next === current) return;
     try {
-      await updateAvatarConfig(selectedAgentId, { display_name: next });
+      await updateAvatarConfig(selectedAgentId, { name: next });
       await fetchAgents();
     } catch (err) {
       log.warn("[AgentSetup] Rename agent failed:", err);
@@ -736,10 +736,10 @@ export function AgentSetupTab() {
     );
   }
 
-  // ADR-009 §V-Q: the display name lives on the server (Runtime
-  // `.overrides.json`, mirrored into the Gateway's list view), so it is
+  // The agent's name lives on the server (the instance's
+  // `agent_config.json`, mirrored into the Gateway's list view), so it is
   // read from the agent meta — never from a local profile override.
-  const agentName = selectedAgent.display_name ?? selectedAgent.name ?? selectedAgentId;
+  const agentName = selectedAgent.name || selectedAgentId;
 
   // Derived once so the slider thumb and the numeric badge can never
   // disagree (bug: previously the slider used `?? 0.9` while the badge
@@ -1130,7 +1130,7 @@ export function AgentSetupTab() {
             </label>
             <StyledInput
               type="text"
-              value={nameDraft ?? selectedAgent.display_name ?? selectedAgent.name ?? ""}
+              value={nameDraft ?? selectedAgent.name ?? ""}
               onChange={(e) => setNameDraft(e.target.value)}
               onBlur={() => void commitAgentName()}
               onKeyDown={(e) => {

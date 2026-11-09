@@ -15,16 +15,18 @@
  * 1. The agent store ALREADY holds the effective avatar synchronously.
  *    `AgentInfo.avatar` / `AgentInfo.builtin_avatar` come from
  *    `GET /api/agents`, and the Gateway resolves them with the *same*
- *    override-first rule the Runtime's avatar-config endpoint uses
- *    (`core/acowork-gateway/src/http/agents.rs::list_agents` →
- *    `overrides_of()` → else `resolve_avatar_from_manifest()`). The
- *    sidebar (`AgentList.tsx`) renders from exactly these fields and has
- *    never flashed, because it never waits on a second request.
+ *    rule the Runtime's avatar-config endpoint uses
+ *    (`core/acowork-gateway/src/http/agents.rs::resolve_identity`:
+ *    the instance's pick from `agent_config.json`, else the package's
+ *    manifest default). The sidebar (`AgentList.tsx`) renders from
+ *    exactly these fields and has never flashed, because it never waits
+ *    on a second request.
  *
- * 2. The async `avatarConfig` is still the authoritative source — it also
- *    carries `display_name` / `source`, and it is what the picker's
- *    "currently selected" markers read. Dropping it would trade a flash
- *    for a staleness bug whenever an override lands out-of-band.
+ * 2. The async `avatarConfig` is still the authoritative source — it is
+ *    what the picker's "currently selected" markers read, and it is the
+ *    only surface that distinguishes "the user picked nothing yet".
+ *    Dropping it would trade a flash for a staleness bug whenever the
+ *    pick lands out-of-band (another window, the agent's own rename).
  *
  * So the two are not in conflict: the store is the **synchronous seed**,
  * the response is the **refinement**. `null` for the response means

@@ -4,7 +4,6 @@
 agent_id = "com.acowork.software-architect"
 version = "1.0.0"
 name = "Architect"
-display_name = "Architect"
 role = "Software Architect"
 description = "A principal-level software architect skilled in requirements analysis, system design, architecture review, module boundaries, interface contracts, scalability, security, and technical planning."
 author = "ACowork Team"

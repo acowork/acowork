@@ -32,8 +32,8 @@ import type { AgentStorage } from "../../stores/agentStore";
 
 const ME = "u-me";
 
-function agent(id: string, display_name: string): AgentStorage {
-  return { meta: { instance_id: id, agent_id: id, name: id, display_name } } as unknown as AgentStorage;
+function agent(id: string, name: string): AgentStorage {
+  return { meta: { instance_id: id, agent_id: id, name } } as unknown as AgentStorage;
 }
 
 beforeEach(() => {

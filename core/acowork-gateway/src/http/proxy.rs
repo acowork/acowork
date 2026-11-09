@@ -26,7 +26,6 @@ use axum::{
 };
 use tokio::sync::RwLock;
 
-use crate::http::agents::resolve_avatar_from_manifest;
 use crate::http::routes::{ApiError, AppState};
 
 /// Maximum body size the Gateway will accept for any reverse-proxy
@@ -299,10 +298,11 @@ pub fn proxy_routes() -> Router<AppState> {
             "/api/agents/{id}/manifest/file",
             post(proxy_upload_agent_file),
         )
-        // ADR-009 §5: avatar/display-name preferences — the Runtime owns
-        // the instance's `.overrides.json`. The PUT additionally mirrors
-        // the result into the Gateway's list view (see
-        // `forward_avatar_config_put`).
+        // Instance identity (avatar + name): the Runtime owns it in the
+        // instance's `workspace/config/agent_config.json`. The PUT
+        // additionally refreshes the Gateway's cached inventory entry, so
+        // the list view shows the new name without waiting for a node
+        // republish (see `forward_avatar_config_put`).
         .route(
             "/api/agents/{id}/avatar-config",
             get(proxy_get_avatar_config).put(proxy_put_avatar_config),
@@ -1488,14 +1488,11 @@ async fn proxy_delete_avatar_file(
     let effective_avatar = {
         let gw = state.gateway_state.read().await;
         gw.installed(&id).and_then(|info| {
-            let overrides = gw.overrides_of(info.instance_id.as_str());
-            let (avatar, _, _) = match overrides {
-                Some(ov) if ov.avatar.is_some() || ov.builtin_avatar.is_some() => {
-                    (ov.avatar.clone(), ov.builtin_avatar.clone(), "overrides")
-                }
-                _ => resolve_avatar_from_manifest(&info.manifest),
-            };
-            avatar
+            crate::http::agents::resolve_identity(
+                gw.identity_of(info.instance_id.as_str()),
+                &info.manifest,
+            )
+            .avatar
         })
     };
 
@@ -1540,11 +1537,11 @@ async fn proxy_delete_avatar_file(
     response
 }
 
-// ── ADR-009 §5: user-preference overrides (avatar + display name) ─────
+// ── Instance identity (avatar + name) ────────────────────────────────
 //
-// The Runtime owns the instance's `.overrides.json`; the Gateway only
-// forwards and mirrors. See `forward_avatar_config_put` for why the PUT
-// is not a plain `proxy_to_runtime_with_method`.
+// The Runtime owns the instance's `agent_config.json`; the Gateway only
+// forwards. See `forward_avatar_config_put` for why the PUT is not a
+// plain `proxy_to_runtime_with_method`.
 
 /// Reverse-proxy `GET /api/agents/{id}/avatar-config` to the Runtime.
 async fn proxy_get_avatar_config(
@@ -1556,8 +1553,7 @@ async fn proxy_get_avatar_config(
     proxy_to_runtime(&state, &id, &path, "", &headers).await
 }
 
-/// Reverse-proxy `PUT /api/agents/{id}/avatar-config` to the Runtime and
-/// mirror the persisted overrides into the Gateway's agent list.
+/// Reverse-proxy `PUT /api/agents/{id}/avatar-config` to the Runtime.
 async fn proxy_put_avatar_config(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -1566,24 +1562,15 @@ async fn proxy_put_avatar_config(
     forward_avatar_config_put(&state, &id, body.to_vec()).await
 }
 
-/// The subset of the Runtime's avatar-config response the Gateway mirrors.
-/// Everything else in that response is passed through untouched — the
-/// Gateway deliberately does not own the full DTO.
-#[derive(serde::Deserialize)]
-struct AvatarConfigMirror {
-    #[serde(default)]
-    overrides: Option<acowork_core::AgentOverrides>,
-}
-
-/// PUT the user's avatar/display-name preference to the Runtime (the
-/// owner of the instance's `.overrides.json`, ADR-009 §5) and update the
-/// Gateway's list view from what the Runtime actually persisted.
+/// PUT the user's avatar/name preference to the Runtime — the owner of the
+/// instance's `agent_config.json`.
 ///
-/// This is the live half of the two-source design: a **stopped** agent's
-/// values come from the Node's retained inventory, a **running** one's
-/// from here. The Gateway intentionally does not decide what the new
-/// value is — it stores the Runtime's answer verbatim, so the two sources
-/// can never disagree.
+/// The Gateway does **not** mirror the response. The write reaches the
+/// list view the same way every other identity change does: the Node
+/// re-reads the file and re-publishes the instance's inventory, the
+/// Gateway records it, and the next list response reflects it. One source
+/// (the file), one projection (the inventory) — no second copy that could
+/// hold a different name, and nothing to keep in sync in two places.
 pub(crate) async fn forward_avatar_config_put(
     state: &AppState,
     id: &str,
@@ -1610,30 +1597,7 @@ pub(crate) async fn forward_avatar_config_put(
         return response;
     }
 
-    let (parts, body) = response.into_parts();
-    let bytes = match axum::body::to_bytes(body, 256 * 1024).await {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            tracing::warn!(agent_id = id, error = %e, "avatar-config: cannot read Runtime response");
-            return (
-                parts.status,
-                Json(serde_json::json!({ "error": "unreadable upstream response" })),
-            )
-                .into_response();
-        }
-    };
-    match serde_json::from_slice::<AvatarConfigMirror>(&bytes) {
-        Ok(mirror) => {
-            let mut gw = state.gateway_state.write().await;
-            gw.set_overrides(id, mirror.overrides.unwrap_or_default());
-        }
-        Err(e) => tracing::warn!(
-            agent_id = id,
-            error = %e,
-            "avatar-config: Runtime response not mirrorable — list view stays stale until the next inventory publish"
-        ),
-    }
-    Response::from_parts(parts, axum::body::Body::from(bytes))
+    response
 }
 
 // ── ADR-063: package-level LLM prompt overrides ──────────────────────
