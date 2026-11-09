@@ -5,11 +5,20 @@
  * `+` menu and an empty node group) open THIS component; the target node is
  * chosen in the footer, not in the menu (D4).
  *
- * Two tabs:
+ * Two tabs (PRD §14 / D9):
+ *   - "本地" is the machine's agent FILE LIBRARY and the default tab: one row
+ *     per `.agent` in the user's library directory, plus a fixed trailing
+ *     "+ add an agent file" row. It is rendered from a local directory read, so
+ *     it opens with no network request at all (REQ-021/A2).
  *   - "Agent 库" renders the Hub catalog, which only Rust ever fetches
- *     (lib/agentHub.ts explains the content-type trap).
- *   - "本地文件" is a landing pad for a `.agent` on disk — the same shape as
- *     the Import Skills dialog: click to pick, or drop.
+ *     (lib/agentHub.ts explains the content-type trap). Its load is kicked off
+ *     when the dialog opens and is never awaited (REQ-022) — a dead Hub must
+ *     not delay or break the Local tab.
+ *
+ * The trailing add row keeps the v0.1 pick-a-file path unchanged: the picked
+ * file is installed straight from disk through `/install` and is NOT copied
+ * into the library (A5). Only rows that are already in the library go through
+ * `ensure` (REQ-026).
  *
  * Drop handling rides the window-level `desktop://file-drop` channel rather
  * than HTML5 `dataTransfer`, because the install path reads a file from an
@@ -18,7 +27,7 @@
  * does not ALSO land in the chat as an attachment (lib/fileDropClaim.ts).
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { AlertTriangle, FolderPlus, Loader2, MoreHorizontal, Search, ShieldAlert, X } from "lucide-react";
+import { AlertTriangle, Loader2, MoreHorizontal, Search, ShieldAlert, X } from "lucide-react";
 import { open as openFilePicker } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { cn } from "../../lib/utils";
@@ -34,6 +43,7 @@ import { ContextMenu, useContextMenu, type ContextMenuItem } from "../common/Con
 import { claimFileDrop, releaseFileDrop } from "../../lib/fileDropClaim";
 import {
   countInstancesOnNode,
+  ensureLocalAgent,
   fetchHubIndex,
   formatSizeBytes,
   highRiskItemsOf,
@@ -42,15 +52,26 @@ import {
   hubChipsOf,
   hubDeprecationOf,
   hubDisplayNameOf,
-  hubSignatureStatusKey,
   installFromHub,
   inspectLocalPackage,
+  listLocalAgentPackages,
   searchHubAgents,
   type HubAgent,
+  type LocalAgentList,
+  type LocalAgentRow,
   type LocalPackageInfo,
 } from "../../lib/agentHub";
+import { LocalAgentLibrary } from "./LocalAgentLibrary";
 
 type Tab = "library" | "local";
+
+/**
+ * What a row's "⋯" menu acts on. The Hub card and the local file row choose
+ * the same item (`installAnother`) through different APIs — `/install` from the
+ * catalog entry, and the file path from the library — so the payload has to
+ * keep them apart.
+ */
+type RowMenuPayload = { kind: "hub"; agentId: string } | { kind: "local"; path: string };
 
 /** Identity for this dialog in the window-level drop registry. */
 const DROP_OWNER = "agent-library-dialog";
@@ -84,7 +105,9 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   const selectAgent = useAgentStore((s) => s.selectAgent);
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
 
-  const [tab, setTab] = useState<Tab>("library");
+  // D9 / REQ-021: Local is the default — the first screen must not depend on
+  // a network round-trip.
+  const [tab, setTab] = useState<Tab>("local");
   const [query, setQuery] = useState("");
 
   // Catalog: `null` = never loaded, `[]` = loaded and genuinely empty.
@@ -105,10 +128,18 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   const [localPath, setLocalPath] = useState<string | null>(null);
   const [localInfo, setLocalInfo] = useState<LocalPackageInfo | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  // The library listing: `null` = not answered yet, so the first paint can be
+  // a skeleton instead of a premature "empty" (REQ-028).
+  const [libraryList, setLibraryList] = useState<LocalAgentList | null>(null);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  // `path` of the library row whose ensure is in flight.
+  const [installingPath, setInstallingPath] = useState<string | null>(null);
 
   const libraryTabRef = useRef<HTMLButtonElement>(null);
   const localTabRef = useRef<HTMLButtonElement>(null);
-  const cardMenu = useContextMenu<{ agentId: string }>();
+  // One menu instance serves both tabs; the payload says which kind of row
+  // produced it (a Hub card or a local file row).
+  const cardMenu = useContextMenu<RowMenuPayload>();
   // Stable identity (the hook memoizes `close`), so the reset effect below can
   // depend on it without re-running on every render.
   const cardMenuClose = cardMenu.close;
@@ -136,7 +167,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   // target node (REQ-007).
   useEffect(() => {
     if (!open) return;
-    setTab("library");
+    setTab("local");
     setQuery("");
     setActionError(null);
     setCatalogError(null);
@@ -144,6 +175,8 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     setLocalPath(null);
     setLocalInfo(null);
     setLocalError(null);
+    setLibraryError(null);
+    setInstallingPath(null);
     setConfirmTarget(null);
     setInstallingId(null);
     cardMenuClose();
@@ -214,6 +247,29 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
       })),
     [agentsMap],
   );
+
+  // ── Local library (REQ-021..032) ──────────────────────────────────────
+  // One enumeration per open (REQ-032; no watcher, no polling). The command
+  // also seeds the directory, so the very first open of a fresh install shows
+  // the shipped packages.
+  const loadLibrary = useCallback(async () => {
+    setLibraryError(null);
+    try {
+      setLibraryList(await listLocalAgentPackages());
+    } catch (e) {
+      // IPC-level failure (not a per-file one): keep the empty state and show
+      // the raw reason rather than a blank panel (REQ-028).
+      setLibraryList({ rows: [], warning: null });
+      setLibraryError(String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!open) return;
+    // `null` while in flight so the first paint is a skeleton, not "empty".
+    setLibraryList(null);
+    void loadLibrary();
+  }, [open, loadLibrary]);
 
   // ── Install ───────────────────────────────────────────────────────────
   const finishInstall = useCallback(
@@ -326,6 +382,69 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     [t],
   );
 
+  // A library row's primary button: idempotent `/ensure` for the file at
+  // `row.path`. Re-clicking converges on the instance that is already there
+  // instead of adding another (D11 / REQ-026) — `already_present` comes from
+  // the Gateway, so the toast is its answer, not a guess.
+  const runLibraryEnsure = useCallback(
+    async (row: LocalAgentRow) => {
+      if (busy || targetBlocked) return;
+      setBusy(true);
+      setInstallingPath(row.path);
+      setActionError(null);
+      try {
+        const result = await ensureLocalAgent({ packagePath: row.path, nodeId: targetNodeId });
+        // ADR-073 / F8: select the instance the ack named. The package id is
+        // ambiguous as soon as the node hosts two instances.
+        await finishInstall(result.instance_id);
+        const name = row.name ?? row.file_name;
+        addToast({
+          type: result.already_present ? "info" : "success",
+          message: result.already_present
+            ? t("agentHub.alreadyPresent", { name })
+            : t("agentHub.installed", { name }),
+        });
+        onClose();
+      } catch (e) {
+        setActionError(t("agentHub.errorInstall", { error: String(e) }));
+      } finally {
+        setBusy(false);
+        setInstallingPath(null);
+      }
+    },
+    [addToast, busy, finishInstall, onClose, targetBlocked, targetNodeId, t],
+  );
+
+  // A library row's "⋯ → install another instance": the NON-idempotent path
+  // (REQ-027). Same file, same `install_agent` call the v0.1 local flow used —
+  // multi-instance is legal (ADR-073), so this is the one action that is
+  // *supposed* to multiply.
+  const runLibraryInstallAnother = useCallback(
+    async (row: LocalAgentRow) => {
+      if (busy || targetBlocked) return;
+      setBusy(true);
+      setInstallingPath(row.path);
+      setActionError(null);
+      try {
+        const instanceId = await useAgentStore
+          .getState()
+          .installAgent(row.path, targetNodeId ?? undefined);
+        if (instanceId) selectAgent(instanceId);
+        addToast({
+          type: "success",
+          message: t("agentHub.installed", { name: row.name ?? row.file_name }),
+        });
+        onClose();
+      } catch (e) {
+        setActionError(t("agentHub.errorInstall", { error: String(e) }));
+      } finally {
+        setBusy(false);
+        setInstallingPath(null);
+      }
+    },
+    [addToast, busy, onClose, selectAgent, targetBlocked, targetNodeId, t],
+  );
+
   const pickLocalFile = useCallback(async () => {
     if (busy || targetBlocked) return;
     const selected = await openFilePicker({
@@ -387,24 +506,50 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     };
   }, [open]);
 
-  // ── Card "⋯" menu (D2: `/install` for an extra instance) ──────────────
-  const menuAgent = cardMenu.payload?.agentId
-    ? (catalog ?? []).find((a) => a.agent_id === cardMenu.payload?.agentId)
-    : undefined;
-  const menuItems = useMemo<ContextMenuItem<{ agentId: string }>[]>(() => {
-    const agent = menuAgent;
-    if (!agent) return [];
+  // ── Row "⋯" menu (D2: `/install` for an extra instance) ───────────────
+  const menuPayload = cardMenu.payload;
+  const menuAgent =
+    menuPayload?.kind === "hub"
+      ? (catalog ?? []).find((a) => a.agent_id === menuPayload.agentId)
+      : undefined;
+  const menuRow =
+    menuPayload?.kind === "local"
+      ? (libraryList?.rows ?? []).find((r) => r.path === menuPayload.path)
+      : undefined;
+  const menuItems = useMemo<ContextMenuItem<RowMenuPayload>[]>(() => {
+    if (menuRow) {
+      return [
+        {
+          key: "installAnother",
+          label: t("agentHub.installAnother"),
+          // A broken file cannot be installed at all — the row says why.
+          disabled: busy || targetBlocked || menuRow.error !== null,
+          title: targetBlockReason ?? menuRow.error ?? undefined,
+          onClick: () => void runLibraryInstallAnother(menuRow),
+        },
+      ];
+    }
+    if (!menuAgent) return [];
     return [
       {
         key: "installAnother",
         label: t("agentHub.installAnother"),
-        disabled: busy || targetBlocked || !agent.package,
+        disabled: busy || targetBlocked || !menuAgent.package,
         title: targetBlockReason ?? undefined,
-        onClick: () => requestHubInstall(agent, false),
+        onClick: () => requestHubInstall(menuAgent, false),
       },
     ];
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [menuAgent, busy, targetBlocked, targetBlockReason, requestHubInstall, t]);
+  }, [
+    menuAgent,
+    menuRow,
+    busy,
+    targetBlocked,
+    targetBlockReason,
+    requestHubInstall,
+    runLibraryInstallAnother,
+    t,
+  ]);
 
   if (!open) return null;
 
@@ -535,7 +680,9 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                         disabled={busy || targetBlocked}
                         disabledReason={targetBlockReason ?? undefined}
                         onInstall={() => requestHubInstall(agent, instanceCount === 0)}
-                        onMore={(e) => cardMenu.openAt(e, { agentId: agent.agent_id })}
+                        onMore={(e) =>
+                          cardMenu.openAt(e, { kind: "hub", agentId: agent.agent_id })
+                        }
                       />
                     );
                   })}
@@ -543,12 +690,41 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
               )}
             </div>
           ) : (
-            <LocalPane
-              info={localInfo}
-              error={localError}
-              onPick={() => void pickLocalFile()}
-              dragEnabled={!busy && !targetBlocked}
-            />
+            <div className="flex flex-col gap-3">
+              <LocalAgentLibrary
+                list={libraryList}
+                loadError={libraryError}
+                disabled={busy || targetBlocked}
+                disabledReason={targetBlockReason ?? undefined}
+                busyPath={installingPath}
+                onInstall={(row) => void runLibraryEnsure(row)}
+                onInstallAnother={(row, e) =>
+                  cardMenu.openAt(e, { kind: "local", path: row.path })
+                }
+                onAddFile={() => void pickLocalFile()}
+                pending={
+                  localInfo ? (
+                    <PickedFileCard
+                      info={localInfo}
+                      busy={installingId === LOCAL_INSTALL_KEY}
+                      disabled={busy || targetBlocked}
+                      disabledReason={targetBlockReason ?? undefined}
+                      onInstall={() => void runLocalInstall()}
+                      onClear={() => {
+                        setLocalPath(null);
+                        setLocalInfo(null);
+                      }}
+                    />
+                  ) : null
+                }
+              />
+              {localError && (
+                <div className="flex items-start gap-2 rounded-md bg-red-50 p-2 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300">
+                  <X className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                  {localError}
+                </div>
+              )}
+            </div>
           )}
         </div>
 
@@ -591,40 +767,19 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
               {targetBlockReason}
             </span>
           )}
-          {/* The Library tab installs from the card; the Local tab needs an
-              explicit commit because its drop zone is only a selector. */}
-          {tab === "library" && (
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={busy || confirmTarget !== null}
-              className="ml-auto rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
-            >
-              {t("common.close")}
-            </button>
-          )}
-          {tab === "local" && (
-            <div className="ml-auto flex items-center gap-2">
-              <button
-                type="button"
-                onClick={onClose}
-                disabled={busy || confirmTarget !== null}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
-              >
-                {t("common.cancel")}
-              </button>
-              <button
-                type="button"
-                onClick={() => void runLocalInstall()}
-                disabled={busy || !localPath || targetBlocked}
-                title={targetBlockReason ?? (localPath ? undefined : t("agentHub.localPickFirst"))}
-                className="btn-accent flex items-center gap-2 rounded px-3 py-1.5 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                {installingId === LOCAL_INSTALL_KEY && <Loader2 className="h-3 w-3 animate-spin" />}
-                {installingId === LOCAL_INSTALL_KEY ? t("agentHub.installing") : t("agentHub.install")}
-              </button>
-            </div>
-          )}
+          {/* Every install commits from the surface it belongs to — a Hub card,
+              a library row, or the pending picked-file card — so the footer is
+              the dismiss control for both tabs (no second "Install" here: two
+              buttons with the same label in one dialog do not say which file
+              they commit). */}
+          <button
+            type="button"
+            onClick={onClose}
+            disabled={busy || confirmTarget !== null}
+            className="ml-auto rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+          >
+            {t("common.close")}
+          </button>
         </div>
       </div>
 
@@ -644,7 +799,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
         }}
       />
 
-      <ContextMenu<{ agentId: string }>
+      <ContextMenu<RowMenuPayload>
         isOpen={cardMenu.isOpen}
         menuProps={cardMenu.menuProps}
         items={menuItems}
@@ -738,7 +893,6 @@ function HubAgentCard({
   const avatarSrc = hubAssetUrl(baseUrl, agent.avatar);
   const chips = hubChipsOf(agent);
   const deprecation = hubDeprecationOf(agent);
-  const channel = hubSignatureStatusKey(agent);
   const noPackage = agent.package === null;
   const blocked = disabled || noPackage;
   // A target-node refusal and an uninstallable entry are different reasons;
@@ -788,9 +942,6 @@ function HubAgentCard({
       <div className="mt-auto flex items-center justify-between gap-3 border-t border-border-outer pt-2">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-10 text-text-tertiary">
           {agent.package && <span>{formatSizeBytes(agent.package.size_bytes)}</span>}
-          {channel !== "unknown" && (
-            <span>{t(channel === "official" ? "agentHub.channelOfficial" : "agentHub.channelThirdParty")}</span>
-          )}
           {agent.version && <span>v{agent.version}</span>}
           {instanceCount > 0 && (
             <span>{t("agentHub.instancesOnNode", { count: instanceCount })}</span>
@@ -840,74 +991,64 @@ function HubAvatar({ src, initial, name }: { src: string | null; initial: string
   );
 }
 
-interface LocalPaneProps {
-  info: LocalPackageInfo | null;
-  error: string | null;
-  dragEnabled: boolean;
-  onPick: () => void;
-}
-
-function LocalPane({ info, error, dragEnabled, onPick }: LocalPaneProps) {
+/**
+ * The file picked through the trailing "+ add an agent file" row (or dropped).
+ *
+ * v0.1 behaviour, unchanged (A5): the picked file is installed straight from
+ * its own path through `/install` — it is NOT copied into the library, so the
+ * library's file count does not move. It is rendered as a pending row above the
+ * add entry, and it installs from its own button: the footer is the dismiss
+ * control for both tabs, so no install is committed there.
+ */
+function PickedFileCard({
+  info,
+  busy,
+  disabled,
+  disabledReason,
+  onInstall,
+  onClear,
+}: {
+  info: LocalPackageInfo;
+  busy: boolean;
+  disabled: boolean;
+  disabledReason?: string;
+  onInstall: () => void;
+  onClear: () => void;
+}) {
   const { t } = useTranslation();
-  const [dragOver, setDragOver] = useState(false);
   return (
-    <div className="flex flex-col gap-3">
-      <p className="text-xs text-text-tertiary">{t("agentHub.localDesc")}</p>
-
-      <div
-        role="button"
-        tabIndex={0}
-        onClick={() => dragEnabled && onPick()}
-        onKeyDown={(e) => {
-          if (e.key === "Enter" || e.key === " ") {
-            e.preventDefault();
-            if (dragEnabled) onPick();
-          }
-        }}
-        // Visual affordance only: the real drop is the window-level
-        // `desktop://file-drop` channel, which is the only one that carries an
-        // absolute path (`dataTransfer` never does, and `dataTransfer.path` is
-        // not a standard field WebView2 populates). `preventDefault` stops the
-        // browser navigating to the dropped file instead.
-        onDragOver={(e) => {
-          e.preventDefault();
-          if (dragEnabled) setDragOver(true);
-        }}
-        onDragLeave={() => setDragOver(false)}
-        onDrop={(e) => {
-          e.preventDefault();
-          setDragOver(false);
-        }}
-        className={cn(
-          "cursor-pointer rounded-md border-2 border-dashed p-6 text-center transition-colors",
-          info ? "border-[var(--color-accent)]/40" : "border-zinc-300 hover:border-zinc-400 dark:border-zinc-600 dark:hover:border-zinc-500",
-          dragOver && "border-[var(--color-accent)]/60",
-        )}
-        style={info ? { backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)" } : undefined}
-      >
-        {info ? (
-          <div className="text-xs">
-            <div className="mb-1 font-medium" style={{ color: "var(--color-accent)" }}>
-              {info.file_name}
-            </div>
-            <div className="text-text-tertiary">
-              {formatSizeBytes(info.size_bytes)} · {info.agent_id}
-            </div>
-          </div>
-        ) : (
-          <div className="text-xs text-text-tertiary">
-            <FolderPlus className="mx-auto mb-2 h-6 w-6" />
-            <div>{t("agentHub.localDropHint")}</div>
-          </div>
-        )}
-      </div>
-
-      {error && (
-        <div className="flex items-start gap-2 rounded-md bg-red-50 p-2 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300">
-          <X className="mt-0.5 h-3.5 w-3.5 shrink-0" />
-          {error}
+    <div
+      className="flex items-start gap-3 rounded-md border border-[var(--color-accent)]/40 p-3"
+      style={{ backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)" }}
+    >
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-xs font-medium" style={{ color: "var(--color-accent)" }}>
+          {info.file_name}
         </div>
-      )}
+        <div className="text-10 text-text-tertiary">
+          {formatSizeBytes(info.size_bytes)} · {info.agent_id}
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1">
+        <button
+          type="button"
+          onClick={onInstall}
+          disabled={disabled || busy}
+          title={disabledReason}
+          className="btn-accent flex items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {busy && <Loader2 className="h-3 w-3 animate-spin" />}
+          {busy ? t("agentHub.installing") : t("agentHub.install")}
+        </button>
+        <button
+          type="button"
+          onClick={onClear}
+          aria-label={t("common.close")}
+          className="rounded p-1 text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </div>
     </div>
   );
 }

@@ -2,7 +2,15 @@
  * Agent library dialog (PRD docs/prd/zh/prd-agent-hub-install-dialog.md).
  *
  * Pinned behaviours:
- *   - REQ-002 / D5: opens on the Library tab; the Local tab is a second tab.
+ *   - REQ-021 / D9: opens on the LOCAL tab (the machine's file library) and
+ *     renders it from a single local command; the Hub catalog is warmed in the
+ *     background and never awaited (REQ-022).
+ *   - REQ-023..030: one row per `.agent` file, fields from the manifest, a
+ *     broken file only breaks its own row, two versions stay two rows.
+ *   - REQ-025 / A5: the trailing "+ add agent file" row keeps the v0.1
+ *     pick-and-install path and does NOT copy the file into the library.
+ *   - REQ-026 / REQ-027: the row primary button is `ensure`; the row menu is
+ *     the non-idempotent `/install`.
  *   - REQ-004: one card per catalog entry.
  *   - D2 / F8 / Plan A: the primary button is `ensure` only while the target
  *     node holds no instance of the package; once it does, the click lands
@@ -101,6 +109,33 @@ const ONLINE_NODE = {
   can_manage: true,
 };
 
+/** A row as `list_local_agent_packages` returns it (manifest-derived). */
+const LOCAL_ROW = {
+  file_name: "com.acowork.demo-1.0.0.agent",
+  path: "C:\lib\com.acowork.demo-1.0.0.agent",
+  agent_id: "com.acowork.demo",
+  name: "Demo",
+  version: "1.0.0",
+  description: "A demo agent",
+  size_bytes: 4096,
+  permissions: ["network", "filesystem:read"],
+  error: null,
+};
+
+const LOCAL_ROW_V2 = { ...LOCAL_ROW, file_name: "com.acowork.demo-1.1.0.agent", path: "C:\lib\com.acowork.demo-1.1.0.agent", version: "1.1.0" };
+
+const LOCAL_ROW_BROKEN = {
+  file_name: "broken.agent",
+  path: "C:\lib\broken.agent",
+  agent_id: null,
+  name: null,
+  version: null,
+  description: null,
+  size_bytes: 9,
+  permissions: [],
+  error: "Not a valid .agent package (ZIP): invalid Zip archive",
+};
+
 function mockCatalog(agents: unknown[]) {
   h.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
     if (command === "fetch_hub_index") {
@@ -111,6 +146,10 @@ function mockCatalog(agents: unknown[]) {
     }
     if (command === "inspect_local_package") {
       return { file_name: "picked.agent", size_bytes: 4096, agent_id: "com.acowork.local" };
+    }
+    if (command === "list_local_agent_packages") return { rows: [], warning: null };
+    if (command === "ensure_local_agent") {
+      return { agent_id: "com.acowork.demo", instance_id: "inst-ensured", already_present: false };
     }
     if (command === "install_agent") return { ok: true };
     throw new Error(`unexpected command: ${command}`);
@@ -126,6 +165,17 @@ function renderOpen(props: { initialNodeId?: string; onClose?: () => void } = {}
       onClose={props.onClose ?? (() => closed.push("closed"))}
     />,
   );
+  return closed;
+}
+
+/**
+ * Open the dialog and switch to the Hub catalog tab. Only the Hub tests need
+ * this: the dialog opens on Local (REQ-021), so every assertion about cards has
+ * to get there first.
+ */
+async function renderLibraryTab(props: { initialNodeId?: string; onClose?: () => void } = {}) {
+  const closed = renderOpen(props);
+  fireEvent.click(await screen.findByRole("tab", { name: "agentHub.tabLibrary" }));
   return closed;
 }
 
@@ -147,19 +197,31 @@ beforeEach(() => {
 });
 
 describe("tabs", () => {
-  it("opens on the Library tab and renders one card per entry", async () => {
+  // REQ-021: the default tab must not depend on a network round-trip.
+  it("opens on the Local tab and warms the catalog in the background", async () => {
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "list_local_agent_packages") return { rows: [LOCAL_ROW], warning: null };
+      if (command === "fetch_hub_index") {
+        return { schema_version: 2, base_url: "https://hub.acowork.ai", agents: [SAFE_AGENT] };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
     renderOpen();
-    expect((await screen.findByRole("tab", { name: "agentHub.tabLibrary" })).getAttribute("aria-selected")).toBe(
+
+    expect((await screen.findByRole("tab", { name: "agentHub.tabLocal" })).getAttribute("aria-selected")).toBe(
       "true",
     );
-    await screen.findByText("Safe Agent");
-    await screen.findByText("Risky Agent");
+    // The list is rendered from the local command alone…
+    expect(await screen.findByText("Demo")).toBeDefined();
+    // …and the Hub warm-up was fired anyway (REQ-022), without blocking it.
+    await waitFor(() => expect(h.invoke).toHaveBeenCalledWith("fetch_hub_index"));
   });
 
-  it("switches to the Local tab, which offers the drop zone", async () => {
-    renderOpen();
-    fireEvent.click(await screen.findByRole("tab", { name: "agentHub.tabLocal" }));
-    expect(screen.getByText("agentHub.localDropHint")).toBeDefined();
+  it("switches to the Library tab and renders one card per entry", async () => {
+    await renderLibraryTab();
+    fireEvent.click(await screen.findByRole("tab", { name: "agentHub.tabLibrary" }));
+    await screen.findByText("Safe Agent");
+    await screen.findByText("Risky Agent");
   });
 });
 
@@ -173,7 +235,7 @@ describe("footer close button", () => {
   }
 
   it("sits in the Library tab footer and closes the dialog", async () => {
-    const closed = renderOpen();
+    const closed = await renderLibraryTab();
     await screen.findByText("Safe Agent");
 
     const button = footerClose();
@@ -192,7 +254,7 @@ describe("footer close button", () => {
         release = () => resolve({ agent_id: "com.acowork.safe", instance_id: "inst-1", already_present: false });
       });
     });
-    renderOpen();
+    await renderLibraryTab();
     fireEvent.click(await screen.findByRole("button", { name: "agentHub.install" }));
     await waitFor(() => expect(footerClose().hasAttribute("disabled")).toBe(true));
     release();
@@ -201,7 +263,7 @@ describe("footer close button", () => {
 
 describe("hub install", () => {
   it("sends the primary button as an idempotent ensure and selects the acked instance", async () => {
-    renderOpen();
+    await renderLibraryTab();
     const cards = await screen.findAllByRole("button", { name: "agentHub.install" });
     fireEvent.click(cards[0]);
 
@@ -219,7 +281,7 @@ describe("hub install", () => {
       }
       return { agent_id: "com.acowork.safe", instance_id: "inst-existing", already_present: true };
     });
-    renderOpen();
+    await renderLibraryTab();
     fireEvent.click(await screen.findByRole("button", { name: "agentHub.install" }));
 
     await waitFor(() => expect(h.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "info" })));
@@ -228,7 +290,7 @@ describe("hub install", () => {
 
   it("does not submit a high-risk package until the confirmation is accepted", async () => {
     h.agent.nodes = [ONLINE_NODE];
-    renderOpen();
+    await renderLibraryTab();
     await screen.findByText("Safe Agent");
 
     // The risky card is the second one.
@@ -249,7 +311,7 @@ describe("hub install", () => {
   });
 
   it("closes the dialog on success", async () => {
-    const closed = renderOpen();
+    const closed = await renderLibraryTab();
     const buttons = await screen.findAllByRole("button", { name: "agentHub.install" });
     fireEvent.click(buttons[0]);
     await waitFor(() => expect(closed).toContain("closed"));
@@ -259,7 +321,7 @@ describe("hub install", () => {
   // entry is the only way to create a second instance. Without coverage here
   // a regression to `ensure: true` would silently remove that capability.
   it("sends the card menu entry as a non-idempotent install", async () => {
-    renderOpen();
+    await renderLibraryTab();
     const triggers = await screen.findAllByRole("button", { name: "agentHub.moreActions" });
     fireEvent.click(triggers[0]);
     // The menu portals with `visibility: hidden` until a size measurement that
@@ -294,7 +356,7 @@ describe("hub install", () => {
       }
       return await pending;
     });
-    renderOpen();
+    await renderLibraryTab();
     const buttons = await screen.findAllByRole("button", { name: "agentHub.install" });
     fireEvent.click(buttons[0]);
 
@@ -314,6 +376,8 @@ describe("hub install", () => {
   it("does not carry a pending confirmation into the next opening", async () => {
     h.agent.nodes = [ONLINE_NODE];
     const { rerender } = render(<AgentLibraryDialog open initialNodeId="n1" onClose={() => {}} />);
+    // The dialog opens on Local (REQ-021); the cards live behind the other tab.
+    fireEvent.click(await screen.findByRole("tab", { name: "agentHub.tabLibrary" }));
     await screen.findByText("Safe Agent");
     const buttons = await screen.findAllByRole("button", { name: "agentHub.install" });
     fireEvent.click(buttons[1]);
@@ -322,6 +386,7 @@ describe("hub install", () => {
     rerender(<AgentLibraryDialog open={false} initialNodeId="n1" onClose={() => {}} />);
     rerender(<AgentLibraryDialog open initialNodeId="n1" onClose={() => {}} />);
 
+    fireEvent.click(await screen.findByRole("tab", { name: "agentHub.tabLibrary" }));
     await screen.findByText("Safe Agent");
     expect(screen.queryByRole("alertdialog")).toBeNull();
   });
@@ -338,7 +403,7 @@ describe("multi-instance routing", () => {
   it("sends ensure:false and relabels the button when the node already holds an instance", async () => {
     h.agent.nodes = [ONLINE_NODE];
     h.agent.agents = installedEntry("com.acowork.safe", "inst-old", "n1");
-    renderOpen({ initialNodeId: "n1" });
+    await renderLibraryTab({ initialNodeId: "n1" });
 
     const again = await screen.findByRole("button", { name: "agentHub.installAnother" });
     fireEvent.click(again);
@@ -355,7 +420,7 @@ describe("multi-instance routing", () => {
     // Local mode with nothing enrolled: targetNodeId stays null and the
     // Gateway inventory anchors own-machine instances on "local" (ADR-075 D6).
     h.agent.agents = installedEntry("com.acowork.safe", "inst-old", "local");
-    renderOpen();
+    await renderLibraryTab();
 
     fireEvent.click(await screen.findByRole("button", { name: "agentHub.installAnother" }));
     await waitFor(() =>
@@ -367,7 +432,7 @@ describe("multi-instance routing", () => {
 describe("install target (REQ-008 / REQ-009)", () => {
   it("blocks every install and says why when a remote Gateway has no online node", async () => {
     h.settings.gatewayMode = "remote";
-    renderOpen();
+    await renderLibraryTab();
     expect(await screen.findByText("agentHub.noOnlineNode")).toBeDefined();
     for (const button of await screen.findAllByRole("button", { name: "agentHub.install" })) {
       expect(button.hasAttribute("disabled")).toBe(true);
@@ -379,7 +444,7 @@ describe("install target (REQ-008 / REQ-009)", () => {
   it("blocks installs to a node the caller cannot manage", async () => {
     h.settings.gatewayMode = "remote";
     h.agent.nodes = [{ ...ONLINE_NODE, can_manage: false }];
-    renderOpen();
+    await renderLibraryTab();
     expect(await screen.findByText("agentHub.nodeNotManageable")).toBeDefined();
     const buttons = await screen.findAllByRole("button", { name: "agentHub.install" });
     for (const button of buttons) expect(button.hasAttribute("disabled")).toBe(true);
@@ -388,7 +453,7 @@ describe("install target (REQ-008 / REQ-009)", () => {
   it("pre-selects the node the entry point came from when several are online", async () => {
     h.settings.gatewayMode = "remote";
     h.agent.nodes = [ONLINE_NODE, { ...ONLINE_NODE, node_id: "n2", node_name: "Server" }];
-    renderOpen({ initialNodeId: "n2" });
+    await renderLibraryTab({ initialNodeId: "n2" });
     const select = await screen.findByRole("combobox", { name: "agentHub.targetNode" });
     expect((select as HTMLSelectElement).value).toBe("n2");
   });
@@ -398,30 +463,215 @@ describe("catalog failure (REQ-012)", () => {
   it("shows a retry instead of an empty library", async () => {
     h.invoke.mockImplementation(async (command: string) => {
       if (command === "fetch_hub_index") throw new Error("Hub answered text/html");
+      if (command === "list_local_agent_packages") return { rows: [], warning: null };
       throw new Error(`unexpected command: ${command}`);
     });
-    renderOpen();
+    await renderLibraryTab();
     expect(await screen.findByText(/Hub answered text\/html/)).toBeDefined();
     expect(screen.getByRole("button", { name: "agentHub.retry" })).toBeDefined();
   });
 
+  // REQ-022 / A2: a dead Hub must not touch the Local tab — it is a directory
+  // read, and the warm-up failure is not surfaced as a dialog toast.
   it("keeps the Local tab usable while the Hub is unreachable", async () => {
     h.invoke.mockImplementation(async (command: string) => {
       if (command === "fetch_hub_index") throw new Error("offline");
+      if (command === "list_local_agent_packages") return { rows: [LOCAL_ROW], warning: null };
       if (command === "inspect_local_package") {
         return { file_name: "picked.agent", size_bytes: 4096, agent_id: "com.acowork.local" };
       }
       throw new Error(`unexpected command: ${command}`);
     });
     renderOpen();
-    fireEvent.click((await screen.findByRole("tab", { name: "agentHub.tabLocal" })));
-    fireEvent.click(screen.getByText("agentHub.localDropHint"));
+    await screen.findByText("Demo");
+    expect(h.addToast).not.toHaveBeenCalled();
 
+    fireEvent.click(screen.getByText("agentHub.localAddFile"));
     await waitFor(() => expect(h.open).toHaveBeenCalled());
-    h.open.mockResolvedValue("C:\\pkgs\\picked.agent");
-    fireEvent.click(screen.getByText("agentHub.localDropHint"));
+    h.open.mockResolvedValue("C:\pkgs\picked.agent");
+    fireEvent.click(screen.getByText("agentHub.localAddFile"));
     await waitFor(() => expect(screen.getByText("picked.agent")).toBeDefined());
-    expect(screen.getByRole("button", { name: "agentHub.install" }).hasAttribute("disabled")).toBe(false);
+    // The pending card is the last install button in the body; the row above it
+    // belongs to the library file.
+    const installs = screen.getAllByRole("button", { name: "agentHub.install" });
+    expect(installs.at(-1)!.hasAttribute("disabled")).toBe(false);
+  });
+});
+
+describe("local agent library (REQ-021..032)", () => {
+  function mockLibrary(rows: unknown[], warning: string | null = null) {
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "fetch_hub_index") throw new Error("offline");
+      if (command === "list_local_agent_packages") return { rows, warning };
+      if (command === "inspect_local_package") {
+        return { file_name: "picked.agent", size_bytes: 4096, agent_id: "com.acowork.local" };
+      }
+      if (command === "ensure_local_agent") {
+        return { agent_id: "com.acowork.demo", instance_id: "inst-ensured", already_present: false };
+      }
+      if (command === "install_agent") return { ok: true };
+      throw new Error(`unexpected command: ${command}`);
+    });
+  }
+
+  // F13: N files, ONE invoke.
+  it("enumerates the library with a single command call", async () => {
+    mockLibrary([LOCAL_ROW, LOCAL_ROW_V2]);
+    renderOpen();
+    await screen.findAllByText("Demo");
+
+    const calls = h.invoke.mock.calls.filter(([command]) => command === "list_local_agent_packages");
+    expect(calls).toHaveLength(1);
+    expect(h.invoke).not.toHaveBeenCalledWith("inspect_local_package", expect.anything());
+  });
+
+  // REQ-024: the row shows the manifest's own identity, not the filename.
+  it("renders name, version, agent id, size and permission count per row", async () => {
+    mockLibrary([LOCAL_ROW]);
+    renderOpen();
+
+    expect(await screen.findByText("Demo")).toBeDefined();
+    expect(screen.getByText("v1.0.0")).toBeDefined();
+    expect(screen.getByText("com.acowork.demo")).toBeDefined();
+    expect(screen.getByText("com.acowork.demo-1.0.0.agent")).toBeDefined();
+    expect(screen.getByText("4.0 KB")).toBeDefined();
+    expect(screen.getByText("agentHub.localPermissionCount")).toBeDefined();
+  });
+
+  // REQ-030 / F15 / A9: two versions of one package are two rows.
+  it("keeps two versions of the same agent as separate rows", async () => {
+    mockLibrary([LOCAL_ROW, LOCAL_ROW_V2]);
+    renderOpen();
+    await screen.findByText("v1.0.0");
+    expect(screen.getByText("v1.1.0")).toBeDefined();
+    expect(screen.getAllByRole("button", { name: "agentHub.install" })).toHaveLength(2);
+  });
+
+  // REQ-026 / D11: the primary button is the idempotent ensure, and the
+  // instance it selects is the one the Gateway acked (ADR-073).
+  it("installs a row through ensure and selects the acked instance", async () => {
+    mockLibrary([LOCAL_ROW]);
+    const closed = renderOpen();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.install" }));
+
+    await waitFor(() =>
+      expect(h.invoke).toHaveBeenCalledWith("ensure_local_agent", {
+        packagePath: LOCAL_ROW.path,
+        nodeId: null,
+      }),
+    );
+    // Never the non-idempotent path.
+    expect(h.invoke).not.toHaveBeenCalledWith("install_agent", expect.anything());
+    await waitFor(() => expect(h.agent.selectAgent).toHaveBeenCalledWith("inst-ensured"));
+    expect(h.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "success" }));
+    expect(closed).toContain("closed");
+  });
+
+  // A6: the row button is disabled while its own install is in flight, so a
+  // double click cannot queue a second ensure. Two independent guards apply —
+  // the disabled attribute and the serialized install lock — which is why the
+  // assertion is on the command count, not on the DOM.
+  it("ignores a second click on the same row while the install is in flight", async () => {
+    let release: () => void = () => {};
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "fetch_hub_index") throw new Error("offline");
+      if (command === "list_local_agent_packages") return { rows: [LOCAL_ROW], warning: null };
+      if (command === "ensure_local_agent") {
+        return new Promise((resolve) => {
+          release = () =>
+            resolve({ agent_id: "com.acowork.demo", instance_id: "inst-ensured", already_present: false });
+        });
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderOpen();
+
+    const install = await screen.findByRole("button", { name: "agentHub.install" });
+    fireEvent.click(install);
+    await waitFor(() => expect(install.hasAttribute("disabled")).toBe(true));
+    fireEvent.click(install);
+
+    release();
+    await waitFor(() => expect(h.agent.selectAgent).toHaveBeenCalledWith("inst-ensured"));
+    const ensures = h.invoke.mock.calls.filter(([command]) => command === "ensure_local_agent");
+    expect(ensures).toHaveLength(1);
+  });
+
+  it("reports an already-present package as info instead of a new install", async () => {
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "fetch_hub_index") throw new Error("offline");
+      if (command === "list_local_agent_packages") return { rows: [LOCAL_ROW], warning: null };
+      if (command === "ensure_local_agent") {
+        return { agent_id: "com.acowork.demo", instance_id: "inst-existing", already_present: true };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderOpen();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.install" }));
+
+    await waitFor(() => expect(h.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "info" })));
+    expect(h.agent.selectAgent).toHaveBeenCalledWith("inst-existing");
+  });
+
+  // REQ-027: the row menu is the non-idempotent path — that is where a second
+  // instance is allowed to come from.
+  it("installs another instance from the row menu through /install", async () => {
+    mockLibrary([LOCAL_ROW]);
+    renderOpen();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.moreActions" }));
+
+    const item = await waitFor(() => {
+      const el = document.querySelector<HTMLButtonElement>(".context-menu-item");
+      if (!el) throw new Error("row menu did not render");
+      return el;
+    });
+    fireEvent.click(item);
+
+    await waitFor(() => expect(h.agent.installAgent).toHaveBeenCalledWith(LOCAL_ROW.path, undefined));
+    expect(h.invoke).not.toHaveBeenCalledWith("ensure_local_agent", expect.anything());
+  });
+
+  // A8 / PRD §14.4: one unreadable file marks its own row; the others stay
+  // usable and the reason is shown verbatim.
+  it("marks a broken file and keeps the other rows installable", async () => {
+    mockLibrary([LOCAL_ROW_BROKEN, LOCAL_ROW]);
+    renderOpen();
+
+    expect(await screen.findByText("agentHub.localBrokenFile")).toBeDefined();
+    const installs = screen.getAllByRole("button", { name: "agentHub.install" });
+    // The broken row keeps its button (disabled, titled with the reason); the
+    // readable row is still installable.
+    expect(installs.filter((b) => !b.hasAttribute("disabled"))).toHaveLength(1);
+    // The broken row has no identity to show, but it is listed: the user put
+    // that file there and has to be able to see it.
+    expect(screen.getByText("broken.agent")).toBeDefined();
+  });
+
+  // REQ-028 / A4: an empty library explains itself and still offers the entry.
+  it("shows the empty state with the raw reason and the add entry", async () => {
+    mockLibrary([], "C:\lib does not exist: 系统找不到指定的文件。 (os error 2)");
+    renderOpen();
+
+    expect(await screen.findByText("agentHub.localEmpty")).toBeDefined();
+    expect(screen.getByText(/os error 2/)).toBeDefined();
+    const add = screen.getByText("agentHub.localAddFile").closest("button")!;
+    expect(add.hasAttribute("disabled")).toBe(false);
+  });
+
+  // REQ-032: one enumeration per open, no watcher, no polling.
+  it("re-enumerates when the dialog is reopened", async () => {
+    mockLibrary([LOCAL_ROW]);
+    const { rerender } = render(<AgentLibraryDialog open onClose={() => {}} />);
+    await screen.findByText("Demo");
+
+    rerender(<AgentLibraryDialog open={false} onClose={() => {}} />);
+    rerender(<AgentLibraryDialog open onClose={() => {}} />);
+
+    await waitFor(() =>
+      expect(
+        h.invoke.mock.calls.filter(([command]) => command === "list_local_agent_packages"),
+      ).toHaveLength(2),
+    );
   });
 });
 

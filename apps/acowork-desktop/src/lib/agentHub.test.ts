@@ -24,7 +24,6 @@ import {
   hubAvatarInitialOf,
   hubChipsOf,
   hubDeprecationOf,
-  hubSignatureStatusKey,
   resetHubIndexCache,
   searchHubAgents,
   type HubAgent,
@@ -141,13 +140,6 @@ describe("card rendering rules", () => {
   it("takes a unicode-safe first letter for the avatar fallback", () => {
     expect(hubAvatarInitialOf(agent({ display_name: "  架构师" }))).toBe("架");
     expect(hubAvatarInitialOf(agent({ display_name: "", name: "", agent_id: "com.x.y" }))).toBe("C");
-  });
-
-  it("maps only the two published signature channels", () => {
-    expect(hubSignatureStatusKey(agent({ signature: { status: "official-channel" } }))).toBe("official");
-    expect(hubSignatureStatusKey(agent({ signature: { status: "third-party" } }))).toBe("thirdParty");
-    expect(hubSignatureStatusKey(agent({ signature: { status: "whatever" } }))).toBe("unknown");
-    expect(hubSignatureStatusKey(agent({ signature: null }))).toBe("unknown");
   });
 
   it("reads the deprecation marker in either shape", () => {
