@@ -544,7 +544,7 @@ runtime_version = "0.1.0"
         use std::io::Write as _;
         let source = packages.child("com.example.demo-1.0.0.agent");
         let mut file = std::fs::OpenOptions::new().append(true).open(&source).unwrap();
-        file.write_all(b"    ").unwrap();
+        file.write_all(b"\x00\x00\x00\x00").unwrap();
         drop(file);
         let rebuilt_len = std::fs::metadata(&source).unwrap().len();
         assert!(rebuilt_len > first_len);
