@@ -13,8 +13,8 @@ use crate::conversation::{self, SessionScope};
 use crate::error::{Result, RuntimeError};
 use crate::usecases::agent_token::AgentTokenService;
 use crate::usecases::session_metadata::{
-    ChatListingScope, MessagesResponse, SessionDetail, SessionMetadataService, SessionSummary,
-    SessionsListResponse, TokenStatsResponse,
+    ChatListingScope, ConversationEntryView, MessagesResponse, SessionDetail,
+    SessionMetadataService, SessionSummary, SessionsListResponse, TokenStatsResponse,
 };
 
 pub struct RuntimeSessionMetadataService {
@@ -264,7 +264,10 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
                 if entry.role == "tool_result" {
                     entry.content = truncate_tool_result(&entry.content);
                 }
-                serde_json::to_value(&entry).unwrap_or(serde_json::Value::Null)
+                // The wire shape is the stored row plus its human projection; the
+                // panel never resolves `metadata.intent` itself.
+                serde_json::to_value(ConversationEntryView::new(&entry))
+                    .unwrap_or(serde_json::Value::Null)
             })
             .collect();
         let count = messages.len();
