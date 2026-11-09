@@ -399,13 +399,16 @@ function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: 
     projection?.user?.display?.body ||
     projection?.user?.body ||
     ''
-  // The expanded panel shows the full text, not the row's one-liner.
-  const questionBody =
-    projection?.user?.display?.body ||
-    (round.showUserLine ? (round.triggerRow?.body ?? '') : '') ||
-    projection?.user?.body ||
-    ''
   const display = projection?.user?.display ?? null
+  // The expanded panel shows the full text, not the row's one-liner. A display
+  // PRESENT is a decision, not a hint: its empty `body` means the producer wrote
+  // only a one-line `summary`, and falling through to `user.body` there painted
+  // the machine envelope into the panel the display exists to replace.
+  const questionBody = display
+    ? display.body || display.summary
+    : (round.showUserLine ? (round.triggerRow?.body ?? '') : '') ||
+      projection?.user?.body ||
+      ''
   // The machine format, reachable but never painted by default.
   const rawEnvelope = display ? (projection?.user?.body ?? '') : ''
   // The brief is the OPENER round's line and nothing else (ADR-106 revision
