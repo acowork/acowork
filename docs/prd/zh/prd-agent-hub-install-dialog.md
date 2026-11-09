@@ -232,7 +232,7 @@ graph TD
 | --- | --- | --- |
 | F1 | Cloudflare Pages 对未知路径返回 **200 + HTML**（实测 `/data/nope.json`） | 必须校验 content-type 或 JSON 解析失败即报错；不能只看 status code |
 | F2 | ~~桌面端**没有** `ensure` 的客户端方法~~ **已过期（v0.2 订正）** | `GatewayClient::ensure_agent` 已存在（[gateway_client.rs:558](../../../apps/acowork-desktop/src-tauri/src/gateway_client.rs#L558)，Hub 安装链路 [`hub.rs:126`](../../../apps/acowork-desktop/src-tauri/src/commands/hub.rs#L126) 已在用）。**缺的只是 Local 路径的 Tauri 命令**（`ensure_local_agent`），不要再"新增"一个已存在的客户端方法 |
-| F3 | 客户端 multipart 的 `dev_mode` 字段被 Gateway 丢弃 | `read_agent_upload`（`agents.rs:1197`）只解析 `package` / `node_id` / `expected_version`；实际取值来自 `gateway_dev_mode`（`agents.rs:786`）。`agentStore.ts:904` 的 `devMode: true` 与 `install_form`（`gateway_client.rs:325`）发出的字段**都不决定验签强度** |
+| F3 | 客户端 multipart 的 `dev_mode` 字段被 Gateway 丢弃 | `read_agent_upload`（`agents.rs:1197`）只解析 `package` / `node_id` / `expected_version`；实际取值来自 `gateway_dev_mode`（`agents.rs:786`）。`install_form`（`gateway_client.rs:325`）发出的字段**不决定验签强度**；`agentStore.installAgent` 的 `devMode: true` 已按 F17 删除，`install_agent` 这个 Tauri 命令也不再暴露该参数 |
 | F4 | 两处注释称"installAgent → `/api/agents/ensure`" | `SplashScreen.tsx:95` 与 `src-tauri/src/lib.rs:23`；实际打的是 `/install`（`gateway_client.rs:498`）。**属过期注释**，本版顺手修正，避免后来者据此判断 |
 | F5 | `onboarding` 的 `install_bundled_agent` 同样走 `/install` | `commands/agent.rs:271` → `client.install_agent`。重跑引导会给每个推荐 agent 多落一个实例。**不在本 PRD 范围**，作为独立 issue 记录（是否改 `ensure` 需产品确认） |
 | F6 | 安装是异步的（202 + OperationAck），单节点一并发 | 需客户端串行化 + 进行中禁用（REQ-014）；等待窗口现为 180s（`commands/agent.rs:29`） |
@@ -420,7 +420,7 @@ flowchart LR
 | F14 | 播种必须幂等且**不覆盖** | 每次启动全量复制的写法会导致：用户改过的包被回滚、用户删掉的种子每次复活 |
 | F15 | 产物名 `{agent_id}-{version}.agent`（[publish.rs:410](../../../core/acowork-node/src/package/publish.rs#L410)） | 同版本重发 = 覆盖同名文件（正常）；不同版本 = 两行，禁止按 `agent_id` 去重（REQ-030） |
 | F16 | Gateway `dev_mode` 默认 `true`（[config.rs:894](../../../core/acowork-gateway/src/config.rs#L894)），验签失败只 `tracing::warn`（[install.rs:58](../../../core/acowork-node/src/package/install.rs#L58)） | D13 的"错误翻译"在默认配置下几乎不触发；它是配置收敛到严格模式后唯一的失败文案，不要因为暂时用不上就删 |
-| F17 | 桌面端 `installAgent` 传的 `devMode: true` 是死参数（[agentStore.ts:940](../../../apps/acowork-desktop/src/stores/agentStore.ts#L940)；Gateway `read_agent_upload` 的 `_ => {}` 丢弃，[agents.rs:1234](../../../core/acowork-gateway/src/http/agents.rs#L1234)） | 同一个 PR 里删掉或显式标注，否则后来者会以为它能调验签强度 |
+| F17 | ~~桌面端 `installAgent` 传的 `devMode: true` 是死参数~~ **已订正（Local 库卡）**：选"删掉传参" | 原 `devMode: true` 被 Gateway `read_agent_upload` 的 `_ => {}` 丢弃（[agents.rs:1234](../../../core/acowork-gateway/src/http/agents.rs#L1234)）。已从 `agentStore.installAgent` 的 invoke 参数中删除，并从 `install_agent` 命令签名里去掉 `dev_mode`（唯一调用方是本前端，无人能选）。验签强度只由 Gateway 的 `dev_mode` 配置决定（F3/F16）。`GatewayClient::install_agent` 仍保留 `dev_mode` 形参，因为 `install_bundled_agent`（F5）与 Hub 安装链路在用 |
 
 ### 14.6 非目标（v0.2 明确不做）
 
