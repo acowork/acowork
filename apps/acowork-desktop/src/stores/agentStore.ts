@@ -1009,9 +1009,12 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
 
   installAgent: async (packagePath, nodeId) => {
     try {
+      // No `devMode` argument: the Gateway ignores the multipart field
+      // (`read_agent_upload` drops unknown names, PRD §14.5 F17) and decides
+      // signature strictness from its own `dev_mode` config. Sending it here
+      // only made the client look like it could weaken verification.
       const ack = await invoke<{ instance_id?: string }>("install_agent", {
         packagePath,
-        devMode: true,
         nodeId: nodeId ?? null,
       });
       await get().fetchAgents();

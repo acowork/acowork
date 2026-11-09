@@ -205,11 +205,14 @@ pub async fn get_agent_detail(
 /// bootstrapping it answers HTTP 409 `dependency_not_ready` instead — we
 /// wait for bootstrap phase READY and resubmit up to `INSTALL_MAX_ATTEMPTS`
 /// times.
+// Signature strictness is NOT a client-side knob: the Gateway drops the
+// multipart `dev_mode` field and reads its own `dev_mode` config instead
+// (PRD §9 F3 / §14.5 F17). The parameter was therefore always either ignored
+// or — worse — read as if it worked, so it is gone from this command's surface.
 #[tauri::command]
 pub async fn install_agent(
     state: State<'_, AppState>,
     package_path: String,
-    dev_mode: Option<bool>,
     node_id: Option<String>,
 ) -> Result<OperationAck, String> {
     // Read the .agent file into memory on the Desktop App side
@@ -232,11 +235,11 @@ pub async fn install_agent(
         let state = state_for_op.clone();
         let package_bytes = package_bytes.clone();
         let node_id = node_id.clone();
-        let dev_mode = dev_mode.unwrap_or(false);
         async move {
             let client = state.gateway.read().await;
+            // Historical default; see the command's doc comment.
             client
-                .install_agent(&package_bytes, dev_mode, node_id.as_deref())
+                .install_agent(&package_bytes, false, node_id.as_deref())
                 .await
         }
     })
