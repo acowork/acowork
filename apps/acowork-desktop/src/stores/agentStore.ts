@@ -610,7 +610,7 @@ interface AgentStoreState {
    *  `debug_state` is writable because the debug flow (exit DevMode)
    *  may need to align the local cache to the Gateway's confirmed
    *  state when a refresh fails. */
-  patchAgentMeta: (agentId: string, meta: Partial<Pick<AgentInfo, "name" | "version" | "avatar" | "builtin_avatar" | "display_name" | "role" | "debug_state">>) => void;
+  patchAgentMeta: (agentId: string, meta: Partial<Pick<AgentInfo, "name" | "version" | "avatar" | "builtin_avatar" | "role" | "debug_state">>) => void;
 
   // ── Profile actions ──
 

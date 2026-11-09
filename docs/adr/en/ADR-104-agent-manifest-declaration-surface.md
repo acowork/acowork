@@ -244,7 +244,7 @@ Shown only when a `required = true` entry has a state ∉ {`active`, `dismissed`
 
 | Step | Declares | May advance when |
 |---|---|---|
-| 1 Basic | `agent_id`, `name`, `display_name`, `role`, `version`, `author`, `description`, **`labels`** | reverse-domain id + non-empty name + ≤12 labels |
+| 1 Basic | `agent_id`, `name`, `role`, `version`, `author`, `description`, **`labels`** | reverse-domain id + non-empty name + ≤12 labels |
 | 2 Model & params | the five `[config]` fields | every filled field is in range (all-empty is legal) |
 | 3 Tools & MCP | `[[tools]]` + `[[mcp_servers]]` | always (everything here is optional) |
 | 4 Skills & capabilities | skill ZIPs + `[capabilities.*]` (action / description / skills / optional JSON schema) | every ZIP parsed, action names valid and unique, JSON valid |

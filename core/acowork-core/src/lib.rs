@@ -56,8 +56,8 @@ pub mod mqtt_proto {
 pub mod account;
 pub mod addr;
 pub mod agent_instance_id;
-pub mod agent_overrides;
 pub mod auth;
+pub mod avatar;
 pub mod budget;
 pub mod chat_prompt;
 pub mod crlf;
@@ -95,7 +95,6 @@ pub mod workspace;
 
 // Re-exports for convenience
 pub use agent_instance_id::{AgentInstanceId, InstanceIdError};
-pub use agent_overrides::{AgentOverrides, overrides_path};
 pub use lsp::{
     LSP_INSTALL_OUTPUT_LIMIT, LSP_REGISTRY_VERSION, LspInstallRecord, LspInstallState,
     LspRegistryFile, LspRuntimeEntry, LspServerEntry, LspServersConfig, LspSource,

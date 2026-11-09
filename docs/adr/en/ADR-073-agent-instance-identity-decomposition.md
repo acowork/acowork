@@ -5,7 +5,7 @@
 
 ## Status
 
-Accepted
+Accepted — **partially superseded by [ADR-111](./ADR-111-one-agent-one-name-one-file.md)**: the "rename through `display_name`" clause in §1.3, `InstalledAgentInfo.overrides_json`, and the `{instance_id}.overrides.json` file. An instance now has exactly one name, stored in its own `workspace/config/agent_config.json`.
 
 ## Date
 

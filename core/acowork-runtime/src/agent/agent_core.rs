@@ -245,10 +245,25 @@ pub struct AgentCore {
     /// ADR-099: optional Chat Router persona (`prompts/chat.md`). Replaces
     /// ONLY the persona section of the chat-layer system prompt — the
     /// Runtime-owned role / tool contract / decision rules stay built-in.
-    /// `None` falls back to the manifest's `display_name` / `role` /
+    /// `None` falls back to the manifest's `name` / `role` /
     /// `description`. Populated in Phase B and hot-reloadable via
     /// `reload_prompts_into_core`; never folded into the execute prompt.
     pub(crate) chat_persona: Arc<std::sync::RwLock<Option<String>>>,
+
+    /// **The instance's name** — the one name this agent is called by.
+    ///
+    /// Read by every site that makes the agent talk about itself
+    /// (`{{agent_name}}` in Block A, the memory identity node, the rename
+    /// hot path), so the name in the prompt and the name in the sidebar are
+    /// the *same string*. Seeded from `agent_config.json` at boot (Phase B
+    /// materializes it from the package name on first start) and rewritten
+    /// only by an explicit rename (`http::avatar`).
+    ///
+    /// `Arc<RwLock<..>>`, not `String`, for the usual ADR-063 §3.7.5 reason:
+    /// `Clone for AgentCore` must share it, otherwise a rename would reach
+    /// only the canonical core while running sessions kept the old name —
+    /// exactly the drift this field exists to prevent.
+    pub(crate) instance_name: Arc<std::sync::RwLock<String>>,
 
     /// The Runtime-local SQLite store (ADR-082 §4, revised by ADR-101).
     ///
@@ -408,6 +423,23 @@ impl AgentCore {
         self.chat_persona.read().unwrap().clone()
     }
 
+    /// The instance's name — what the human sees and what the agent is told
+    /// about itself.
+    pub fn instance_name(&self) -> String {
+        self.instance_name.read().unwrap().clone()
+    }
+
+    /// Rename this instance (single writer: `http::avatar`). An empty name is
+    /// ignored — an agent always has one, and the package name is a better
+    /// answer than a blank.
+    pub fn set_instance_name(&self, name: impl Into<String>) {
+        let name = name.into();
+        if name.trim().is_empty() {
+            return;
+        }
+        *self.instance_name.write().unwrap() = name;
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new_with_observer(
         config: RuntimeConfig,
@@ -424,6 +456,9 @@ impl AgentCore {
         // `[llm]` keys), so `[config]` and `[llm]` cannot disagree.
         let manifest_defaults = manifest.config_defaults();
         let manifest_temperature = manifest_defaults.temperature;
+        // The package name is the pre-materialization instance name (see the
+        // `instance_name` field's docs).
+        let manifest_name = manifest.name.clone();
         let manifest_context_window = manifest_defaults.context_window;
         tracing::debug!(
             ?manifest_temperature,
@@ -484,6 +519,10 @@ impl AgentCore {
             // ADR-099: chat router persona — same lazy-fill pattern; the
             // fallback (manifest metadata) is resolved at prompt build time.
             chat_persona: Arc::new(std::sync::RwLock::new(None)),
+            // The package name is the pre-materialization value: it is what
+            // Phase B writes into `agent_config.json` on first boot, so an
+            // instance that has not booted yet still answers to a name.
+            instance_name: Arc::new(std::sync::RwLock::new(manifest_name)),
             sqlite_store: None,
             rag_provider: None,
             debug_observer: observer,
@@ -1444,6 +1483,7 @@ impl Clone for AgentCore {
             title_prompt: Arc::clone(&self.title_prompt),
             abstention_prompt: Arc::clone(&self.abstention_prompt),
             chat_persona: Arc::clone(&self.chat_persona),
+            instance_name: Arc::clone(&self.instance_name),
             sqlite_store: self.sqlite_store.clone(),
             rag_provider: self.rag_provider.clone(),
             debug_observer: self.debug_observer.clone_production(),
@@ -2249,6 +2289,29 @@ mod tests {
         .unwrap();
         let provider = Arc::new(MockProvider::single_text("test"));
         AgentCore::new(config, manifest, provider, vec![])
+    }
+
+    /// The instance name is one value shared by every session clone, so a
+    /// rename reaches the prompt of an already-running session.
+    ///
+    /// This is the mechanism behind "the human's name and the agent's name are
+    /// the same name": the file is durable, the core is live, and sessions are
+    /// clones of the core. A per-clone `String` would leave a renamed agent
+    /// introducing itself by its old name for the rest of the session.
+    #[test]
+    fn an_instance_name_is_shared_across_session_clones() {
+        let core = make_minimal_core();
+        // Un-materialized: the package name stands in, so the prompt is never
+        // nameless.
+        assert_eq!(core.instance_name(), "Cache counter test");
+
+        let session_clone = core.clone();
+        core.set_instance_name("SSE.Kevin");
+        assert_eq!(session_clone.instance_name(), "SSE.Kevin");
+
+        // An agent always has a name — blank input is not a rename.
+        core.set_instance_name("   ");
+        assert_eq!(session_clone.instance_name(), "SSE.Kevin");
     }
 
     /// Basic cache accumulation: four counters all advance correctly

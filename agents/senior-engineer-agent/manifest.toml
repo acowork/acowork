@@ -4,7 +4,6 @@
 agent_id = "com.acowork.senior-engineer"
 version = "1.0.0"
 name = "SSE"
-display_name = "SSE"
 role = "Senior Software Engineer"
 description = "An experienced senior software engineer capable of code review, architecture design, debugging, refactoring, testing, and documentation."
 author = "ACowork Team"

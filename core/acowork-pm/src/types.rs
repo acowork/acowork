@@ -416,7 +416,8 @@ pub struct Task {
     pub priority: Priority,
     /// 责任人：`human` 或 `agent_instance_id`（UUID，ADR-073 §1.3 不变量 1）。
     ///
-    /// 解析为显示名时，由调用方按 `instance_id` 查 agent directory（`meta.display_name ?? meta.name`）。
+    /// 解析为名字时，由调用方按 `instance_id` 查 agent directory 的 `meta.name`
+    /// （实例名，ADR-111）；`meta.package_name` 是包名，两者不可互相 fallback。
     #[serde(default)]
     pub assignee: Option<String>,
     /// 截止时间（可选）。

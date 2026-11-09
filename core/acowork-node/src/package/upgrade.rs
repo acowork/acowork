@@ -2,7 +2,23 @@
 //! ADR-055 §6.20).
 //!
 //! Upgrade flow: verify new package → check signature consistency →
-//! preserve data/ and config/ → replace rest.
+//! preserve `workspace/` → replace everything else.
+//!
+//! The instance directory has exactly two halves, and the split is the
+//! whole point of the two-level layout (ADR-073):
+//!
+//! ```text
+//! {install_dir}/{agent_id}/{instance_id}/
+//!     manifest.toml assets/ prompts/ skills/   <- package content: REPLACED
+//!     workspace/                               <- instance data:  PRESERVED
+//! ```
+//!
+//! `workspace/` is the Runtime's work dir — sessions, the private SQLite
+//! store, `config/agent_config.json` (the user's settings *and* the
+//! instance's name), files, logs. It is the instance's only durable state
+//! and must survive an upgrade untouched. Preserving a hardcoded pair of
+//! `data/` + `config/` (the pre-`workspace/` layout) silently deleted all
+//! of it.
 
 use super::install::install_package;
 use std::io::Read;
@@ -49,37 +65,64 @@ pub fn upgrade_package(
         )));
     }
 
-    // Preserve data/ and config/ directories
+    // Preserve the instance data directory (the Runtime's work dir).
+    //
+    // This is the ONLY thing that survives an upgrade. Everything else in
+    // the instance dir is package content and is replaced wholesale — that
+    // is what "upgrade" means: new code/assets/prompts, same instance.
     let old_install_path = Path::new(&old_info.install_path);
-    let data_dir = old_install_path.join("data");
-    let config_dir = old_install_path.join("config");
+    let workspace_dir = acowork_core::workspace::workspace_dir(old_install_path);
 
-    // Remove old install directory (except preserved dirs)
+    // Remove old install directory (except the preserved workspace)
     if old_install_path.exists() {
         let temp_base =
             std::env::temp_dir().join(format!("acowork-upgrade-{}", key.replace('.', "-")));
         std::fs::create_dir_all(&temp_base).ok();
 
-        if data_dir.exists() {
-            std::fs::rename(&data_dir, temp_base.join("data")).ok();
-        }
-        if config_dir.exists() {
-            std::fs::rename(&config_dir, temp_base.join("config")).ok();
+        let mut preserved = false;
+        if workspace_dir.exists() {
+            match std::fs::rename(&workspace_dir, temp_base.join(acowork_core::workspace::WORKSPACE_DIR))
+            {
+                Ok(()) => preserved = true,
+                // Refusing to "upgrade" is the only safe answer here: the
+                // next line deletes the directory that holds the user's
+                // sessions and settings. Losing the package is recoverable,
+                // losing `workspace/` is not.
+                Err(e) => {
+                    let _ = std::fs::remove_dir_all(&temp_base);
+                    return Err(NodeError::Package(format!(
+                        "Upgrade aborted: cannot preserve instance data at {}: {}",
+                        workspace_dir.display(),
+                        e
+                    )));
+                }
+            }
         }
 
         // Remove old install dir
         std::fs::remove_dir_all(old_install_path)
             .map_err(|e| NodeError::Package(format!("Failed to remove old install: {}", e)))?;
 
-        // Re-create and restore preserved dirs (ADR-073 two-level layout)
+        // Re-create and restore the preserved workspace (ADR-073 two-level layout)
         let new_install_path = install_dir.join(agent_id).join(&key);
         std::fs::create_dir_all(&new_install_path).ok();
 
-        if temp_base.join("data").exists() {
-            std::fs::rename(temp_base.join("data"), new_install_path.join("data")).ok();
-        }
-        if temp_base.join("config").exists() {
-            std::fs::rename(temp_base.join("config"), new_install_path.join("config")).ok();
+        if preserved {
+            let restored = temp_base.join(acowork_core::workspace::WORKSPACE_DIR);
+            if let Err(e) = std::fs::rename(
+                &restored,
+                acowork_core::workspace::workspace_dir(&new_install_path),
+            ) {
+                // Same reasoning as above, one step later: the old tree is
+                // already gone, so the preserved copy in `temp_base` is now
+                // the only one. Report its location instead of leaving the
+                // caller to guess where the data went.
+                return Err(NodeError::Package(format!(
+                    "Upgrade aborted: cannot restore instance data from {}: {}",
+                    restored.display(),
+                    e
+                )));
+            }
         }
 
         // Cleanup temp
@@ -155,6 +198,91 @@ mod tests {
         zip.write_all(manifest.as_bytes()).unwrap();
         zip.finish().unwrap();
         zip_path
+    }
+
+    #[test]
+    fn upgrade_preserves_instance_workspace() {
+        let temp_dir = std::env::temp_dir().join(format!(
+            "acowork-test-upgrade-workspace-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+        let install_dir = temp_dir.join("installed");
+
+        let instance_dir = install_dir.join("com.test.weather").join("inst-weather");
+        let workspace = acowork_core::workspace::workspace_dir(&instance_dir);
+        std::fs::create_dir_all(workspace.join("config")).unwrap();
+        std::fs::create_dir_all(workspace.join("conversations")).unwrap();
+        // Two kinds of instance data: the user's settings file and a
+        // session log. A regression that deletes `workspace/` takes both.
+        std::fs::write(
+            workspace.join("config").join("agent_config.json"),
+            r#"{"name":"Weather.West","temperature":0.7}"#,
+        )
+        .unwrap();
+        std::fs::write(workspace.join("conversations").join("s1.jsonl"), "{}\n").unwrap();
+        // Package content of the OLD version, which the upgrade must replace.
+        std::fs::create_dir_all(instance_dir.join("prompts")).unwrap();
+        std::fs::write(instance_dir.join("prompts").join("old_only.md"), "v1").unwrap();
+
+        let mut state = NodeState::new(16);
+        state.add_installed(InstalledAgent {
+            instance_id: "inst-weather".to_string(),
+            agent_id: "com.test.weather".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Weather".to_string(),
+            install_path: instance_dir.to_string_lossy().to_string(),
+            manifest: acowork_core::AgentManifest::from_toml(
+                r#"
+                agent_id = "com.test.weather"
+                version = "1.0.0"
+                name = "Weather"
+                description = "Test"
+                author = "test"
+                runtime_version = "0.1.0"
+                [llm]
+                provider = "openai"
+                model = "gpt-4"
+            "#,
+            )
+            .unwrap(),
+        });
+
+        let zip_path = create_test_zip(&temp_dir, "com.test.weather", "2.0.0");
+        upgrade_package(
+            "inst-weather",
+            "com.test.weather",
+            &zip_path,
+            &install_dir,
+            &mut state,
+            true,
+        )
+        .expect("upgrade should succeed");
+
+        let new_instance_dir = install_dir.join("com.test.weather").join("inst-weather");
+        let new_workspace = acowork_core::workspace::workspace_dir(&new_instance_dir);
+
+        assert_eq!(
+            std::fs::read_to_string(new_workspace.join("config").join("agent_config.json")).unwrap(),
+            r#"{"name":"Weather.West","temperature":0.7}"#,
+            "instance settings (including the agent name) must survive an upgrade"
+        );
+        assert!(
+            new_workspace.join("conversations").join("s1.jsonl").exists(),
+            "sessions must survive an upgrade"
+        );
+        assert!(
+            !new_instance_dir.join("prompts").join("old_only.md").exists(),
+            "package content must be replaced by the new version"
+        );
+        assert!(
+            std::fs::read_to_string(new_instance_dir.join("manifest.toml"))
+                .unwrap()
+                .contains("2.0.0"),
+            "manifest.toml must come from the new package"
+        );
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 
     #[test]

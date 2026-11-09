@@ -35,14 +35,25 @@ use serde_json::{json, Map, Value};
 const MEMORY_MCP_NAME: &str = "memory";
 
 /// What one hand-off attempt achieved.
+///
+/// The service **converges** rather than seeding once (ADR-111 D7): a start
+/// whose declared facts are already stored reports `written = 0, updated = 0`,
+/// and a start after a rename reports `written = 0, updated = 1` — the counters
+/// are how a rename is confirmed to have reached the agent's self-knowledge.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct BootstrapOutcome {
-    /// Identity nodes the service wrote (agent_id / name / description / …).
+    /// Identity facts the service created (agent_id / name / description / …).
     pub identity_written: usize,
-    /// Capability nodes the service wrote.
+    /// Identity facts the service refreshed in place because their declared
+    /// value changed (a rename, a re-published description).
+    pub identity_updated: usize,
+    /// Capability facts the service created.
     pub capability_written: usize,
-    /// True when the service skipped the import because Identity nodes
-    /// already exist (idempotency).
+    /// Capability facts refreshed in place.
+    pub capability_updated: usize,
+    /// True when the store already agreed with every declared fact, so nothing
+    /// had to be written. **Not** an error and not "already bootstrapped
+    /// forever": the next rename still converges.
     pub skipped_existing: bool,
     /// True when the request reached the service and answered 2xx.
     ///
@@ -81,12 +92,13 @@ pub async fn import_manifest(
     instance_id: &str,
     node_token: &str,
     manifest: &AgentManifest,
+    instance_name: &str,
 ) -> BootstrapOutcome {
     let url = format!("{base}/admin/bootstrap");
     let mut req = client
         .post(&url)
         .query(&[("instance_id", instance_id)])
-        .json(&body_from_manifest(manifest));
+        .json(&body_from_manifest(manifest, instance_name));
     if !node_token.trim().is_empty() {
         // ADR-076: the admin route sits behind the Gateway's auth middleware;
         // the node credential is what lets a machine actor through.
@@ -108,13 +120,17 @@ pub async fn import_manifest(
     let body: Value = resp.json().await.unwrap_or(Value::Null);
     let outcome = BootstrapOutcome {
         identity_written: body["identity_written"].as_u64().unwrap_or(0) as usize,
+        identity_updated: body["identity_updated"].as_u64().unwrap_or(0) as usize,
         capability_written: body["capability_written"].as_u64().unwrap_or(0) as usize,
+        capability_updated: body["capability_updated"].as_u64().unwrap_or(0) as usize,
         skipped_existing: body["skipped_existing"].as_bool().unwrap_or(false),
         delivered: true,
     };
     tracing::info!(
         identity_count = outcome.identity_written,
+        identity_updated = outcome.identity_updated,
         capability_count = outcome.capability_written,
+        capability_updated = outcome.capability_updated,
         skipped_existing = outcome.skipped_existing,
         "memory bootstrap hand-off finished"
     );
@@ -126,7 +142,13 @@ pub async fn import_manifest(
 /// Deliberately narrower than `AgentManifest`: the service must not grow a
 /// dependency on packaging surface it does not read. Blank values are dropped
 /// — an empty statement is not a memory.
-fn body_from_manifest(manifest: &AgentManifest) -> Value {
+///
+/// `instance_name` is the instance's own name (`agent_config.json`), not
+/// `manifest.name`: the memory service's Identity node is how the agent
+/// recognizes *itself* in recall, and that has to be the name the people it
+/// talks to use — the package name would make it a stranger to its own
+/// history.
+fn body_from_manifest(manifest: &AgentManifest, instance_name: &str) -> Value {
     let mut capabilities = Map::new();
     for (key, cap) in &manifest.capabilities {
         capabilities.insert(
@@ -136,11 +158,8 @@ fn body_from_manifest(manifest: &AgentManifest) -> Value {
     }
     let mut body = Map::new();
     body.insert("agent_id".into(), json!(manifest.agent_id));
-    body.insert("name".into(), json!(manifest.name));
+    body.insert("name".into(), json!(instance_name));
     body.insert("description".into(), json!(manifest.description));
-    if let Some(ref dn) = manifest.display_name {
-        body.insert("display_name".into(), json!(dn));
-    }
     if let Some(ref role) = manifest.role {
         body.insert("role".into(), json!(role));
     }
@@ -253,7 +272,6 @@ mod tests {
     #[test]
     fn body_carries_identity_capabilities_and_policy() {
         let mut manifest = test_manifest();
-        manifest.display_name = Some("Tester".into());
         manifest.capabilities.insert(
             "search".into(),
             acowork_core::manifest::CapabilityDef {
@@ -274,10 +292,11 @@ mod tests {
             min_importance: None,
         });
 
-        let body = body_from_manifest(&manifest);
+        let body = body_from_manifest(&manifest, "Weather.West");
         assert_eq!(body["agent_id"], "com.acowork.test");
+        // The identity node carries the instance's name, not the package's.
+        assert_eq!(body["name"], "Weather.West");
         assert_eq!(body["description"], "desc");
-        assert_eq!(body["display_name"], "Tester");
         assert_eq!(body["capabilities"]["search"]["description"], "searches things");
         assert_eq!(body["memory"]["distiller"]["enabled"], true);
         // Minutes are converted to the service's seconds-based patch.
@@ -292,8 +311,7 @@ mod tests {
     #[test]
     fn body_omits_absent_optional_fields() {
         let manifest = test_manifest();
-        let body = body_from_manifest(&manifest);
-        assert!(body.get("display_name").is_none());
+        let body = body_from_manifest(&manifest, "Weather.West");
         assert!(body.get("role").is_none());
         assert!(body.get("memory").is_none());
     }

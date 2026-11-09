@@ -156,14 +156,16 @@ impl HttpAgentDirectory {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            // Per-instance label (`"SSE.Kevin"`), Gateway-resolved as
-            // override-first / manifest-second. Package-level fields (`name`,
-            // `role`) are identical across instances of one package, so this is
-            // the only value that lets a caller tell them apart; dropping it
-            // makes `pm_list_agents` return indistinguishable rows.
-            let display_name = a
-                .get("display_name")
+            // `package_name` (`manifest.name`, e.g. "SSE") — package-level and
+            // therefore identical across instances of one package. `name`
+            // above is the *instance* label ("SSE.Kevin"); it is the only
+            // field that tells two installs of one package apart, and it is
+            // the name the agent itself answers to.
+            let package_name = a
+                .get("package_name")
                 .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
                 .map(str::to_string);
             // `role` 来自 manifest 顶层（`AgentListResponse.role`，Gateway 已
             // 透出）。缺失 / 未声明 → `None`，不阻塞存在性校验（与
@@ -185,7 +187,7 @@ impl HttpAgentDirectory {
             let entry = (!agent_id.is_empty()).then_some(AgentInfo {
                 agent_id,
                 name,
-                display_name,
+                package_name,
                 role,
                 online,
             });
@@ -240,13 +242,15 @@ impl HttpAgentDirectory {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        // Same fallback semantics as the list path: absent → `None`, callers
-        // render `display_name ?? name`. Must not be dropped here either —
-        // otherwise a cache-miss fallback would return a row that is *poorer*
-        // than the cached one for the same instance.
-        let display_name = body
-            .get("display_name")
+        // Same shape as the list path: `name` is the instance label,
+        // `package_name` the package's. Dropping either here would make a
+        // cache-miss fallback return a row *poorer* than the cached one for
+        // the same instance.
+        let package_name = body
+            .get("package_name")
             .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
             .map(str::to_string);
         // 详情响应里 role 来自 manifest 顶层（`AgentDetailResponse` 透出），
         // 缺失 / 未声明 → None，不影响存在性兜底。
@@ -260,7 +264,7 @@ impl HttpAgentDirectory {
         Some(AgentInfo {
             agent_id,
             name,
-            display_name,
+            package_name,
             role,
             online,
         })
@@ -743,15 +747,15 @@ mod tests {
         );
     }
 
-    /// `display_name` 在 refresh 路径透传（listing 层可区分同包多实例）。
+    /// 实例名（`name`）在 refresh 路径透传（listing 层可区分同包多实例）。
     ///
     /// Two instances of ONE package (`com.acowork.senior-engineer`) share
-    /// `agent_id`, `name` and `role` verbatim — `display_name` (`SSE.Cassie` /
-    /// `SSE.Kevin`, Gateway-resolved override-first) is the only value that
-    /// tells them apart. Dropping it made `pm_list_agents` answer with two
-    /// identical rows, and a caller had to guess.
+    /// `agent_id`, `package_name` and `role` verbatim — `name` (`SSE.Cassie` /
+    /// `SSE.Kevin`, the instance's own name) is the only value that tells them
+    /// apart. Dropping it made `pm_list_agents` answer with two identical
+    /// rows, and a caller had to guess.
     #[tokio::test]
-    async fn fetch_agents_passes_display_name_through() {
+    async fn fetch_agents_passes_instance_name_through() {
         let renamed = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
         let plain = "a91b07e4-c2d3-4f8b-a91b-07e4c2d34f8b";
 
@@ -764,11 +768,11 @@ mod tests {
                     serde_json::json!({
                         "instance_id": renamed,
                         "agent_id": "com.acowork.senior-engineer",
-                        "name": "SSE",
-                        "display_name": "SSE.Kevin",
+                        "name": "SSE.Kevin",
+                        "package_name": "SSE",
                         "role": "Senior Software Engineer",
                     }),
-                    // 旧版 Gateway / 未设 display_name 的包 — 字段缺失不崩
+                    // 包未声明 package_name — 字段缺失不崩
                     serde_json::json!({
                         "instance_id": plain,
                         "agent_id": "com.acowork.legacy",
@@ -788,30 +792,34 @@ mod tests {
         let info = dir
             .agent_info(renamed)
             .await
-            .expect("cached meta for display_name-bearing instance");
+            .expect("cached meta for the renamed instance");
         assert_eq!(
-            info.display_name.as_deref(),
-            Some("SSE.Kevin"),
-            "fetch_agents must extract display_name from /api/agents"
+            info.name, "SSE.Kevin",
+            "fetch_agents must extract the instance name from /api/agents"
         );
-        assert_eq!(info.name, "SSE", "package name stays untouched");
+        assert_eq!(
+            info.package_name.as_deref(),
+            Some("SSE"),
+            "the package name stays available for 'what kind of agent is this'"
+        );
 
         let info = dir
             .agent_info(plain)
             .await
-            .expect("cached meta even when display_name is absent");
+            .expect("cached meta even when package_name is absent");
+        assert_eq!(info.name, "Legacy");
         assert!(
-            info.display_name.is_none(),
-            "missing display_name must map to None, not an empty string — callers fall back to name"
+            info.package_name.is_none(),
+            "a missing package_name degrades to None, never to the instance name"
         );
     }
 
-    /// 详情兜底路径（缓存 miss → `query_gateway_info`）同样不能丢 `display_name`。
+    /// 详情兜底路径（缓存 miss → `query_gateway_info`）同样不能丢实例名。
     ///
     /// A fallback row poorer than the cached one would make the same instance
     /// render differently depending on cache state.
     #[tokio::test]
-    async fn query_gateway_info_passes_display_name_through() {
+    async fn query_gateway_info_passes_instance_name_through() {
         let instance = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -822,8 +830,8 @@ mod tests {
                 axum::Json(serde_json::json!({
                     "instance_id": instance,
                     "agent_id": "com.acowork.senior-engineer",
-                    "name": "SSE",
-                    "display_name": "SSE.Cassie",
+                    "name": "SSE.Cassie",
+                    "package_name": "SSE",
                     "role": "Senior Software Engineer",
                 }))
             }),
@@ -841,10 +849,10 @@ mod tests {
             .await
             .expect("fallback should populate meta from /api/agents/{id}");
         assert_eq!(
-            info.display_name.as_deref(),
-            Some("SSE.Cassie"),
-            "query_gateway_info must pass display_name through"
+            info.name, "SSE.Cassie",
+            "query_gateway_info must pass the instance name through"
         );
+        assert_eq!(info.package_name.as_deref(), Some("SSE"));
     }
 
     /// ADR-085 liveness reaches `pm_list_agents` from both directory paths,

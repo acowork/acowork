@@ -38,11 +38,27 @@
 | # | 入口 | 写入目标 | 触发方式 |
 |---|------|---------|---------|
 | A | `memory_store` 工具 | **Episodic**（Episode + knowledge_subtype，不直写沉淀层） | LLM 主动调用 |
-| D | manifest 引导（bootstrap） | Autobiographical Identity/Capability（source="manifest"，权威导入） | 启动时 |
+| D | manifest 引导（bootstrap） | Autobiographical Identity/Capability（source="manifest"，权威导入） | 每次启动时**收敛同步**，见下 |
 | E | HTTP 管理 API | 任意节点 | 外部客户端 |
 | F | `EpisodicDistiller`（consolidation 后台流水线，opt-in） | Knowledge / Procedural / Autobiographical（含 promotion_metadata 审计） | 后台周期任务，`[memory.distiller].enabled` 门控 |
 
 > 入口 C 已上表“已废弃通道”（原“会话蒸馏”一行属 2026-09 之前的遗留描述，与代码不符）。
+
+### 入口 D 的语义：收敛同步，不是一次性播种
+
+调用方（Runtime）每次启动都会把同一份声明事实发给 `POST /admin/bootstrap`，服务端负责让存储**收敛**到这些事实：
+
+- 键不存在 → 创建（`source="manifest"`）；
+- 键已存在且 `source="manifest"`、值不同 → 原地更新（**不新增节点**）；
+- 键已存在且 `source="manifest"`、值相同 → 不写（避免每次启动都抬 `updated_at`）；
+- 键已存在但 `source` 非 `manifest`（蒸馏器 `self_evaluation`、legacy 导入等）→ **不动**：声明是默认值，观察才是结论；
+- 调用方不再声明的键 → **不删除**：bootstrap 只拥有它声明的键，不拥有"缺席"的含义。
+
+为什么必须收敛而不是只播种一次：其中的 `name` 是**实例名**，权威位置在实例自己的 `workspace/config/agent_config.json`，
+所有者随时可以改名。一次性播种会让 Agent 继续用旧名字自称，而人看到的是新名字——这正是 ADR-073 禁止的"鸡同鸭讲"。
+
+包的 `[memory]` 策略仍是**仅首次导入**生效：一旦用户在面板上改动过，重启不得覆盖（`consolidation.json` 是权威）。
+
 
 ## 影响面
 

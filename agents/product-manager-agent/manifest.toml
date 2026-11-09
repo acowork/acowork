@@ -4,7 +4,6 @@
 agent_id = "com.acowork.product-manager"
 version = "1.0.0"
 name = "Product"
-display_name = "Product"
 role = "Product Manager"
 description = "A product manager agent skilled in product strategy, user research, PRD writing, roadmap prioritization, Figma design review, feature acceptance, and launch planning."
 author = "ACowork Team"

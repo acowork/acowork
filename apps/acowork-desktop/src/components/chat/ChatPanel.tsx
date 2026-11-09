@@ -922,7 +922,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const vmlRef = useRef<VirtualMessageListHandle | null>(null);
 
   // ADR-009 §V-Q: server-side name only (no localStorage override).
-  const agentDisplayName = selectedAgent?.display_name ?? selectedAgent?.name;
+  const agentName = selectedAgent?.name;
 
   // Read saved scroll snapshot for data-driven restoration.
   // The snapshot carries { atBottom, firstVisibleBlockId } and is consumed
@@ -2002,7 +2002,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                 )}
               </button>
             </Tooltip>
-            <p className="mt-3 text-xs text-text-tertiary ">{t("chatPanel.agentStopped", { name: agentDisplayName ?? "" })}</p>
+            <p className="mt-3 text-xs text-text-tertiary ">{t("chatPanel.agentStopped", { name: agentName ?? "" })}</p>
           </div>
         </div>
       </div>
@@ -2162,7 +2162,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               pendingApproval={pendingApproval}
               currentSessionId={currentSessionId}
               selectedAgentId={selectedAgentId}
-              agentDisplayName={agentDisplayName}
+              agentName={agentName}
               selectedAgent={selectedAgent}
               userDisplayName={userDisplayName}
               userAvatarUrl={userAvatarUrl}

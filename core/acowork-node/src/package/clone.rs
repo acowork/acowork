@@ -263,9 +263,7 @@ pub fn clone_agent(
 
     // 7. Register cloned agent. Name handling:
     //
-    //    - If the caller supplied a non-empty `new_name`, it wins and
-    //      `display_name` is cleared so the UI falls back to `name`
-    //      instead of showing the SOURCE's display_name on the clone.
+    //    - If the caller supplied a non-empty `new_name`, it wins.
     //    - Otherwise the source name is suffixed "(clone)" so the
     //      clone is recognisable in the list without forcing a rename.
     //
@@ -279,7 +277,6 @@ pub fn clone_agent(
         new_name.trim().to_string()
     };
     new_manifest.name = clone_name.clone();
-    new_manifest.display_name = None;
     let info = InstalledAgent {
         instance_id: new_instance_id,
         agent_id: new_agent_id.to_string(),
@@ -421,7 +418,6 @@ mod tests {
             agent_id = "{}"
             version = "1.0.0"
             name = "Test Agent"
-            display_name = "Source Display"
             description = "Test"
             author = "test"
             runtime_version = "0.1.0"
@@ -521,14 +517,11 @@ mod tests {
         let info = result.unwrap();
         assert_eq!(info.agent_id, "com.test.weather-clone");
         assert!(info.manifest.dev, "Cloned agent should have dev=true");
-        // Name comes from the caller, display_name is per-instance cosmetics
-        // that must not ride along into a new instance.
+        // Name comes from the caller — a clone gets a package named after
+        // the new agent, and its instances start out with that name (the
+        // first boot materializes it into their own `agent_config.json`).
         assert_eq!(info.manifest.name, "Weather Copy");
         assert_eq!(info.name, "Weather Copy");
-        assert!(
-            info.manifest.display_name.as_deref().unwrap_or("").is_empty(),
-            "clone must not inherit the source display_name"
-        );
         // ADR-073: the target is a fresh instance under {agent_id}/{uuid}/
         assert!(state.is_installed(&info.instance_id));
 

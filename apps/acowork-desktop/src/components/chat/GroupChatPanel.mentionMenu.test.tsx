@@ -70,7 +70,7 @@ vi.mock("../../stores/chatStore", () => ({
 // listing slice, so the mock carries that too — including `chatListKey`, the one
 // spelling of the key both writer and reader must agree on.
 const AGENT_STORAGE = vi.hoisted(() => ({
-  meta: { display_name: "Agent A", name: "agent-a" },
+  meta: { name: "Agent A" },
   sessions: [],
   pagination: { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 10 },
   isLoading: false,

@@ -63,8 +63,8 @@ vi.mock("../../stores/agentStore", () => ({
     (selector: (state: unknown) => unknown) =>
       selector({
         agents: {
-          [AGENT_A]: { meta: { display_name: "Agent A", name: "agent-a" } },
-          [AGENT_B]: { meta: { display_name: "Agent B", name: "agent-b" } },
+          [AGENT_A]: { meta: { name: "Agent A" } },
+          [AGENT_B]: { meta: { name: "Agent B" } },
         },
       }),
     { getState: () => ({ selectAgent: vi.fn() }) },

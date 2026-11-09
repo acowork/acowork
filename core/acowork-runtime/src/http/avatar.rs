@@ -1,11 +1,21 @@
-//! Avatar preference routes — ADR-009 §5.
+//! Instance identity routes: the avatar the user picked and the name this
+//! agent is called by.
 //!
-//! The Runtime is the **owner** and only writer of the instance's
-//! user-preference overrides ([`acowork_core::agent_overrides`]): the
-//! avatar the user picked and its display name are agent-private data, so
-//! the Runtime — not the Gateway — reads and writes them. They live in a
-//! sibling of the package dir (`{agent_id}/{instance_id}.overrides.json`)
-//! so an upgrade, which replaces the instance dir, cannot wipe them.
+//! # Where the data lives
+//!
+//! `{work_dir}/config/agent_config.json` — the instance's own settings
+//! file, written by the Runtime and by nothing else. `{work_dir}` is the
+//! Runtime's work dir (`{packages}/{agent_id}/{instance_id}/workspace`),
+//! so the avatar and the name sit next to the temperature and the context
+//! window they are configured beside, in a file an upgrade cannot touch
+//! (upgrade replaces the package content and preserves `workspace/`).
+//!
+//! This module used to own a separate `{instance_id}.overrides.json`
+//! **sibling of the package dir**. Two problems with that: a settings file
+//! outside the directory of the thing it configures, and a second place a
+//! name could come from — the "display name" override — which is exactly
+//! how an agent ended up called one thing by humans and another by itself.
+//! One settings file, one name.
 //!
 //! | Method | Path                          | Handler               |
 //! |--------|-------------------------------|-----------------------|
@@ -14,13 +24,11 @@
 //!
 //! Serving the image **bytes** is NOT here: the package (`assets/*`,
 //! `manifest.avatar`) belongs to the node, which is the package manager
-//! and is up whether or not this process is (review §7.1 / V-P). A second
-//! copy of those reads here would be a second code path to keep in sync —
-//! the mistake this module's history is made of.
+//! and is up whether or not this process is. A second copy of those reads
+//! here would be a second code path to keep in sync — the mistake this
+//! module's history is made of.
 
-use std::path::PathBuf;
-
-use acowork_core::agent_overrides::{AVATAR_EXTENSIONS, has_avatar_extension};
+use acowork_core::avatar::{AVATAR_EXTENSIONS, has_avatar_extension};
 use axum::{
     Json, Router,
     extract::{Path, State},
@@ -30,13 +38,17 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::agent_config::{load_agent_config, save_agent_config};
 use crate::http::server::HttpState;
 
 // ── Wire types ────────────────────────────────────────────────────────
 
 /// `GET/PUT /agents/{id}/avatar-config` response — the **effective**
-/// avatar/display name (what the UI renders) plus the **raw** overrides
-/// (so the Gateway can mirror them without re-deriving the merge).
+/// avatar and name (what the UI renders), plus where the avatar came from.
+///
+/// `name` is the instance's one name (`agent_config.json` `name`,
+/// materialized from the package name on first boot) — the same string the
+/// agent is told about itself and the same one every peer sees.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AvatarConfigResponse {
     pub agent_id: String,
@@ -44,22 +56,18 @@ pub struct AvatarConfigResponse {
     pub avatar: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub builtin_avatar: Option<String>,
-    /// Effective display name: override > `manifest.display_name`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub display_name: Option<String>,
-    /// `"overrides"` | `"manifest"` | `"fallback"`.
+    /// The instance's name. Always present: it is materialized on first
+    /// boot, so an empty value here can only mean "the config file is
+    /// missing", which this route reports rather than hides.
+    pub name: String,
+    /// `"config"` | `"manifest"` | `"fallback"` — where the avatar came from.
     pub source: String,
-    /// The raw `.overrides.json` content this response was resolved from.
-    /// Opaque to everyone but the Runtime — the Gateway stores it verbatim
-    /// (ADR-009 §5) and never interprets it.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub overrides: Option<acowork_core::AgentOverrides>,
 }
 
 /// `PUT /agents/{id}/avatar-config` body.
 ///
 /// Semantics per field: absent/`null` = leave unchanged; `""` = clear the
-/// override (fall back to the manifest); any other value = set it.
+/// pick (fall back to the package default); any other value = set it.
 /// Setting `avatar` clears `builtin_avatar` and vice versa.
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct UpdateAvatarConfigRequest {
@@ -67,8 +75,11 @@ pub struct UpdateAvatarConfigRequest {
     pub avatar: Option<String>,
     #[serde(default)]
     pub builtin_avatar: Option<String>,
+    /// Replaces the instance's name. Absent = unchanged; `""` is rejected
+    /// (an agent always has a name — there is no unnamed instance to fall
+    /// back to).
     #[serde(default)]
-    pub display_name: Option<String>,
+    pub name: Option<String>,
 }
 
 // ── Router ────────────────────────────────────────────────────────────
@@ -83,8 +94,7 @@ pub(crate) fn avatar_routes() -> Router<HttpState> {
 
 // ── Handlers ──────────────────────────────────────────────────────────
 
-/// `GET /agents/{id}/avatar-config` — effective avatar + display name,
-/// resolved from the overrides file with the manifest as fallback.
+/// `GET /agents/{id}/avatar-config` — effective avatar + name.
 async fn get_avatar_config(State(state): State<HttpState>, Path(id): Path<String>) -> Response {
     if !state.instance_matches(&id) {
         return instance_mismatch(&state, &id);
@@ -97,10 +107,10 @@ async fn get_avatar_config(State(state): State<HttpState>, Path(id): Path<String
 
 /// `PUT /agents/{id}/avatar-config` — persist the user's pick.
 ///
-/// ADR-009 §5: this route is the **only** writer of
-/// `{instance_id}.overrides.json`. The Gateway reverse-proxies it and
-/// mirrors the raw `overrides` it returns into its list view; the Gateway
-/// never writes the file itself.
+/// The single writer of the avatar/name fields in `agent_config.json`. The
+/// Gateway reverse-proxies this route and does not choose the value: it
+/// re-reads the instance's inventory (which the Node rebuilds from this
+/// same file) for its list view. One file, one writer, one projection.
 async fn put_avatar_config(
     State(state): State<HttpState>,
     Path(id): Path<String>,
@@ -110,14 +120,17 @@ async fn put_avatar_config(
         return instance_mismatch(&state, &id);
     }
 
-    let mut ov = load_overrides(&state);
+    let mut cfg = load_agent_config(&state.work_dir)
+        .map_err(|e| error(StatusCode::INTERNAL_SERVER_ERROR, "internal_error", e))
+        .unwrap_or_default()
+        .unwrap_or_default();
 
     // `avatar` and `builtin_avatar` are mutually exclusive — selecting one
     // clears the other, otherwise a stale lower-priority value would
     // resurrect as soon as the newer one is cleared.
     match normalize(&req.avatar) {
         Field::Unchanged => {}
-        Field::Clear => ov.avatar = None,
+        Field::Clear => cfg.avatar = None,
         Field::Set(value) => {
             if !has_avatar_extension(&value) {
                 return error(
@@ -129,13 +142,13 @@ async fn put_avatar_config(
                     ),
                 );
             }
-            ov.avatar = Some(value);
-            ov.builtin_avatar = None;
+            cfg.avatar = Some(value);
+            cfg.builtin_avatar = None;
         }
     }
     match normalize(&req.builtin_avatar) {
         Field::Unchanged => {}
-        Field::Clear => ov.builtin_avatar = None,
+        Field::Clear => cfg.builtin_avatar = None,
         Field::Set(value) => {
             if !is_plausible_builtin_avatar_id(&value) {
                 return error(
@@ -144,35 +157,56 @@ async fn put_avatar_config(
                     format!("Invalid builtin_avatar '{value}': expected 'icon-NN' or 1-99"),
                 );
             }
-            ov.builtin_avatar = Some(value);
-            ov.avatar = None;
+            cfg.builtin_avatar = Some(value);
+            cfg.avatar = None;
         }
     }
-    match normalize(&req.display_name) {
+    match normalize(&req.name) {
         Field::Unchanged => {}
-        Field::Clear => ov.display_name = None,
+        Field::Clear => {
+            return error(
+                StatusCode::BAD_REQUEST,
+                "bad_request",
+                "name cannot be cleared: an agent always has a name".to_string(),
+            );
+        }
         Field::Set(value) => {
-            if value.chars().count() > MAX_DISPLAY_NAME_CHARS {
+            if value.chars().count() > MAX_NAME_CHARS {
                 return error(
                     StatusCode::BAD_REQUEST,
                     "bad_request",
                     format!(
-                        "display_name too long ({} > {MAX_DISPLAY_NAME_CHARS} chars)",
+                        "name too long ({} > {MAX_NAME_CHARS} chars)",
                         value.chars().count()
                     ),
                 );
             }
-            ov.display_name = Some(value);
+            cfg.name = Some(value);
         }
     }
 
-    if let Err(e) = save_overrides(&state, &ov) {
-        tracing::warn!(error = %e, "avatar-config: failed to persist overrides");
+    if let Err(e) = save_agent_config(&state.work_dir, &cfg) {
+        tracing::warn!(error = %e, "avatar-config: failed to persist agent_config.json");
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "internal_error",
-            format!("Failed to persist overrides: {e}"),
+            format!("Failed to persist agent_config.json: {e}"),
         );
+    }
+
+    // Push the new name into the live core: the file is the durable record,
+    // the core is what the next turn's `{{agent_name}}` reads. Without this
+    // a rename would take effect in the sidebar immediately and in the
+    // agent's own prompt only after a restart — the two-name drift again,
+    // just spread over time.
+    if let Some(name) = cfg.name.clone()
+        && let Some(core) = state
+            .agent_core
+            .read()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(std::sync::Arc::clone))
+    {
+        core.set_instance_name(name);
     }
 
     match effective_config(&state) {
@@ -181,12 +215,12 @@ async fn put_avatar_config(
     }
 }
 
-// ── User-preference overrides (ADR-009 §5) ────────────────────────────
+// ── Resolution ────────────────────────────────────────────────────────
 
-/// Reject absurd display names at the trust boundary. Generous enough for
-/// any real name; the point is to stop an unbounded string from reaching
-/// the file and every list response.
-const MAX_DISPLAY_NAME_CHARS: usize = 100;
+/// Reject absurd names at the trust boundary. Generous enough for any real
+/// name; the point is to stop an unbounded string from reaching the file
+/// and every list response.
+const MAX_NAME_CHARS: usize = 100;
 
 /// Tri-state for one incoming field: absent, explicitly cleared (`""`), or set.
 enum Field {
@@ -214,92 +248,37 @@ fn is_plausible_builtin_avatar_id(value: &str) -> bool {
     }
 }
 
-/// Absolute path of this instance's overrides file.
-fn overrides_path_for(state: &HttpState) -> Result<PathBuf, String> {
-    acowork_core::overrides_path(&state.package_dir, &state.instance_id).ok_or_else(|| {
-        format!(
-            "package dir {} has no parent — cannot locate the overrides file",
-            state.package_dir.display()
-        )
-    })
-}
-
-/// Load the overrides. A missing / unreadable / malformed file means "no
-/// overrides": a corrupt preference degrades to the manifest default,
-/// never to an unusable agent.
-fn load_overrides(state: &HttpState) -> acowork_core::AgentOverrides {
-    let path = match overrides_path_for(state) {
-        Ok(path) => path,
-        Err(e) => {
-            tracing::warn!(error = %e, "overrides: cannot locate file");
-            return acowork_core::AgentOverrides::default();
-        }
-    };
-    match std::fs::read_to_string(&path) {
-        Ok(raw) => acowork_core::AgentOverrides::from_json(&raw),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            acowork_core::AgentOverrides::default()
-        }
-        Err(e) => {
-            tracing::warn!(path = %path.display(), error = %e, "overrides: read failed");
-            acowork_core::AgentOverrides::default()
-        }
-    }
-}
-
-/// Persist the overrides atomically (tmp + rename). An empty override set
-/// removes the file instead of writing `{}` — "no overrides" has exactly
-/// one representation on disk.
-fn save_overrides(state: &HttpState, ov: &acowork_core::AgentOverrides) -> Result<(), String> {
-    let path = overrides_path_for(state)?;
-    if ov.is_empty() {
-        return match std::fs::remove_file(&path) {
-            Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(e) => Err(format!("Failed to remove {}: {e}", path.display())),
-        };
-    }
-    let json = serde_json::to_string_pretty(ov).map_err(|e| format!("serialize overrides: {e}"))?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, json).map_err(|e| format!("Failed to write {}: {e}", tmp.display()))?;
-    std::fs::rename(&tmp, &path).map_err(|e| {
-        let _ = std::fs::remove_file(&tmp);
-        format!("Failed to commit {}: {e}", path.display())
-    })
-}
-
-/// The effective avatar / display name for this instance.
+/// The effective avatar / name for this instance.
 fn effective_config(state: &HttpState) -> Result<AvatarConfigResponse, String> {
     let manifest = crate::package::loader::load_manifest(&state.package_dir)
         .map_err(|e| format!("package manifest unavailable: {e}"))?;
-    let overrides = load_overrides(state);
-    let (avatar, builtin_avatar, source) = resolve_effective_avatar(&overrides, &manifest);
-    let display_name = overrides
-        .display_name
-        .clone()
-        .or_else(|| manifest.display_name.clone());
+    let cfg = load_agent_config(&state.work_dir)
+        .map_err(|e| format!("agent_config.json unreadable: {e}"))?
+        .unwrap_or_default();
+    let (avatar, builtin_avatar, source) = resolve_effective_avatar(&cfg, &manifest);
     Ok(AvatarConfigResponse {
         agent_id: state.instance_id.clone(),
         avatar,
         builtin_avatar,
-        display_name,
+        // An unmaterialized name (a config file that exists but predates the
+        // field) reports the package name — the same value first boot would
+        // have written, so the answer is identical either side of that write.
+        name: cfg
+            .name
+            .clone()
+            .unwrap_or_else(|| manifest.name.clone()),
         source: source.to_string(),
-        overrides: (!overrides.is_empty()).then_some(overrides),
     })
 }
 
 /// User pick first, packaged default second, deterministic client-side
 /// fallback last. Returns `(avatar, builtin_avatar, source)`.
 fn resolve_effective_avatar(
-    overrides: &acowork_core::AgentOverrides,
+    cfg: &crate::agent_config::AgentConfig,
     manifest: &acowork_core::AgentManifest,
 ) -> (Option<String>, Option<String>, &'static str) {
-    if overrides.avatar.is_some() || overrides.builtin_avatar.is_some() {
-        return (
-            overrides.avatar.clone(),
-            overrides.builtin_avatar.clone(),
-            "overrides",
-        );
+    if cfg.avatar.is_some() || cfg.builtin_avatar.is_some() {
+        return (cfg.avatar.clone(), cfg.builtin_avatar.clone(), "config");
     }
     if manifest.avatar.is_some() || manifest.builtin_avatar.is_some() {
         return (
@@ -344,5 +323,49 @@ mod tests {
         assert!(has_avatar_extension("avatar-01.webp"));
         assert!(!has_avatar_extension("assets/evil.sh"));
         assert!(!has_avatar_extension("assets/noext"));
+    }
+
+    #[test]
+    fn avatar_pick_beats_manifest_and_reports_its_source() {
+        let mut cfg = crate::agent_config::AgentConfig::default();
+        let mut manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.weather"
+            version = "1.0.0"
+            name = "Weather"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+            avatar = "assets/avatar.jpg"
+            [llm]
+            provider = "openai"
+            model = "gpt-4"
+        "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_effective_avatar(&cfg, &manifest),
+            (
+                Some("assets/avatar.jpg".to_string()),
+                None,
+                "manifest"
+            )
+        );
+
+        cfg.avatar = Some("assets/avatar-02.png".to_string());
+        assert_eq!(
+            resolve_effective_avatar(&cfg, &manifest),
+            (
+                Some("assets/avatar-02.png".to_string()),
+                None,
+                "config"
+            )
+        );
+
+        // No packaged default and no pick: the client's own fallback applies.
+        manifest.avatar = None;
+        cfg.avatar = None;
+        assert_eq!(resolve_effective_avatar(&cfg, &manifest), (None, None, "fallback"));
     }
 }

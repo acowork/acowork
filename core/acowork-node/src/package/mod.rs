@@ -33,36 +33,65 @@ pub fn build_installed_info(installed: &InstalledAgent) -> Option<acowork_core::
         name: installed.name.clone(),
         install_path: installed.install_path.clone(),
         manifest_toml,
-        overrides_json: read_overrides_json(installed),
+        identity: Some(read_identity(installed)),
     })
 }
 
-/// Read the instance's `{instance_id}.overrides.json` **verbatim**.
+/// Read the instance's identity — the name a human sees and the avatar the
+/// user picked — out of its own settings file.
 ///
-/// ADR-009 §5: the file is written by the Runtime and is opaque to the
-/// Node — we copy the bytes into the retained inventory so a stopped
-/// agent still reports the user's avatar / display name (the Runtime
-/// has no process to ask). An unreadable file degrades to "no
-/// overrides" so a permissions problem can never block an install from
-/// being reported.
-fn read_overrides_json(installed: &InstalledAgent) -> String {
-    let Some(path) = acowork_core::overrides_path(
-        Path::new(&installed.install_path),
-        &installed.instance_id,
-    ) else {
-        return String::new();
-    };
-    match std::fs::read_to_string(&path) {
+/// `{install_path}/workspace/config/agent_config.json` is written by the
+/// Runtime (the only writer) and read here, on the Node side, for exactly
+/// one reason: a **stopped** agent has no process to ask, and its entry in
+/// the retained inventory still has to say what it is called. There is no
+/// second file and no second name — the Gateway, the Desktop, a peer agent
+/// and the Runtime's own system prompt all read this one value.
+///
+/// An unreadable or absent file degrades to an empty identity ("not
+/// materialized yet" — the instance has never booted), never to a failed
+/// install: a permissions problem must not make an agent unlistable.
+fn read_identity(installed: &InstalledAgent) -> acowork_core::mqtt_proto::AgentIdentity {
+    let path = acowork_core::workspace::workspace_dir(&installed.install_path)
+        .join("config")
+        .join("agent_config.json");
+    let raw = match std::fs::read_to_string(&path) {
         Ok(raw) => raw,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return acowork_core::mqtt_proto::AgentIdentity::default();
+        }
         Err(e) => {
             tracing::warn!(
                 path = %path.display(),
                 error = %e,
-                "Cannot read instance overrides — publishing empty overrides"
+                "Cannot read agent_config.json — publishing an empty identity"
             );
-            String::new()
+            return acowork_core::mqtt_proto::AgentIdentity::default();
         }
+    };
+    let value: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(value) => value,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "agent_config.json is not valid JSON — publishing an empty identity"
+            );
+            return acowork_core::mqtt_proto::AgentIdentity::default();
+        }
+    };
+    let field = |key: &str| {
+        value
+            .get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or_default()
+            .to_string()
+    };
+    acowork_core::mqtt_proto::AgentIdentity {
+        name: field("name"),
+        avatar: field("avatar"),
+        builtin_avatar: field("builtin_avatar"),
     }
 }
 
@@ -86,7 +115,7 @@ pub fn build_installed_info_fresh(installed: &InstalledAgent) -> Option<Installe
 
 /// Re-publish this instance's retained inventory entry (ADR-055 §6.5).
 ///
-/// That entry carries `manifest_toml` + `overrides_json` — the durable
+/// That entry carries `manifest_toml` + `identity` — the durable
 /// copy the Gateway rebuilds its agent list from, and the only copy for
 /// a **stopped** agent. Every write that changes either must refresh
 /// it, otherwise the Gateway (and a Gateway restart) keeps reading the

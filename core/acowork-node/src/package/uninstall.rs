@@ -42,14 +42,6 @@ pub fn uninstall_package(
             .map_err(|e| NodeError::Package(format!("Failed to remove install dir: {}", e)))?;
     }
 
-    // Remove the user-preference overrides file too. It is a *sibling*
-    // of the instance dir (ADR-009 §5: survives upgrade), so the
-    // `remove_dir_all` above does not touch it; leaving it behind
-    // orphans the file for every re-install under a new instance id.
-    if let Some(path) = acowork_core::overrides_path(agent_dir, &info.instance_id) {
-        let _ = std::fs::remove_file(&path);
-    }
-
     // Remove from state
     state.remove_installed(&key);
 

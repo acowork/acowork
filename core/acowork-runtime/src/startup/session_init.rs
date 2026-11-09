@@ -505,6 +505,7 @@ pub(crate) async fn phase_b_init_session(
             let instance_id = config.agent_instance_id.clone();
             let node_token = config.mqtt_password.clone().unwrap_or_default();
             let manifest = ctx.loaded.manifest.clone();
+            let instance_name = c.instance_name();
             tokio::spawn(async move {
                 crate::agent::bootstrap_autobio::import_manifest(
                     &client,
@@ -512,6 +513,7 @@ pub(crate) async fn phase_b_init_session(
                     &instance_id,
                     &node_token,
                     &manifest,
+                    &instance_name,
                 )
                 .await;
             });
@@ -657,9 +659,9 @@ pub(crate) async fn phase_b_init_session(
         // Fields intentionally NOT auto-resolved:
         //   system_prompt_override — None = "use compiled manifest prompt"
         //   max_output_tokens      — None = "use each model's native limit"
-        //   avatar / display name  — NOT part of this file at all; they are
-        //     user preferences in `AgentOverrides` (ADR-009 §5), resolved by
-        //     `http::avatar` as overrides > manifest.
+        //   avatar — NOT a manifest knob; it is the instance's own pick in
+        //     this same file (`http::avatar` writes it), with the package
+        //     default as the pre-pick value.
         {
             let mut updated = agent_cfg.clone();
             let mut dirty = false;
@@ -711,6 +713,22 @@ pub(crate) async fn phase_b_init_session(
             c.max_output_tokens_override =
                 updated.max_output_tokens.map(|v| v.min(u32::MAX as u64) as u32);
             c.temperature_override = updated.temperature;
+
+            // ── name: the instance's identity, materialized exactly once ──
+            // This is the ONLY writer of `name` besides an explicit rename
+            // (`http::avatar`). From here on the instance owns it: an upgrade
+            // replaces the package and leaves `workspace/` alone, so the
+            // package can never rename an agent that already has a name. The
+            // value written here is also what `manifest.name` would have
+            // answered before, so no surface changes at the moment of the
+            // first boot.
+            if updated.name.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                updated.name = Some(ctx.loaded.manifest.name.clone());
+                dirty = true;
+            }
+            if let Some(name) = updated.name.as_deref() {
+                c.set_instance_name(name);
+            }
 
             // ── max_iterations: RuntimeConfig.max_iterations (200) ──
             if updated.max_iterations.is_none() {

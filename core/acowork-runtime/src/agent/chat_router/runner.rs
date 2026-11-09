@@ -623,10 +623,12 @@ async fn run_turn(
             .map(str::trim)
             .filter(|s| !s.is_empty());
         let package_persona = core.chat_persona();
+        // The instance's name, not the package's: the agent must call itself
+        // what the human calling it sees, or the two drift apart mid-dialogue.
+        let instance_name = core.instance_name();
         let block_a = build_block_a(
             &PersonaSource {
-                display_name: core.manifest.display_name.as_deref(),
-                name: &core.manifest.name,
+                name: &instance_name,
                 role: core.manifest.role.as_deref(),
                 description: &core.manifest.description,
             },

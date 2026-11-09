@@ -90,7 +90,7 @@ vi.mock("../../stores/agentStore", () => ({
   useAgentStore: (selector: (state: unknown) => unknown) =>
     selector({
       agents: {
-        [AGENT]: { meta: { display_name: "Agent A", name: "agent-a", role: agentRole } },
+        [AGENT]: { meta: { name: "Agent A", role: agentRole } },
       },
     }),
 }));

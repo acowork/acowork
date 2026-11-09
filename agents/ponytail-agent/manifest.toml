@@ -4,7 +4,6 @@
 agent_id = "github.ponytail"
 version = "1.0.0"
 name = "Ponytail"
-display_name = "Ponytail"
 role = "Senior Software Engineer"
 description = "The best code is the code you never wrote."
 author = "DietrichGebert"

@@ -162,11 +162,8 @@ export function ChatNoticeEventRow({
     // The card's author IS the agent whose runs are on offer, so the identity is
     // the agent instance on the row — resolved exactly like the execution block
     // resolves it, so the header cannot shift when the card becomes the block.
-    const displayName =
-      authorName?.trim() ||
-      author?.display_name ||
-      author?.name ||
-      row.from;
+    // One name per participant: the author's own `name`, else the raw id.
+    const displayName = authorName?.trim() || author?.name || row.from;
 
     /** Is this option the one being delivered right now? */
     const isPendingOption = (sessionId?: string) =>

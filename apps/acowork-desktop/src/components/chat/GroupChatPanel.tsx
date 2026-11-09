@@ -179,7 +179,7 @@ function useParticipantNamer(directory: DirectoryUser[]) {
       const agent = agentsMap[id]?.meta;
       if (agent) {
         return {
-          name: agent.display_name ?? agent.name ?? id,
+          name: agent.name || id,
           isAgent: true,
           avatarUrl: agent.avatar ?? null,
           builtinAvatarId: agent.builtin_avatar ?? null,
@@ -961,7 +961,7 @@ export function GroupChatPanel() {
       if (!meta) return [];
       out.push({
         id,
-        displayName: meta.display_name ?? meta.name ?? id,
+        displayName: meta.name || id,
         role: meta.role ?? null,
         avatarUrl: meta.avatar ?? null,
         builtinAvatarId: meta.builtin_avatar ?? null,

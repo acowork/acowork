@@ -429,11 +429,10 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
         .find((body) => body.trim() !== "") ?? "",
     ) ||
     t("chatView.block.unnamedRun");
-  const displayName =
-    authorName?.trim() ||
-    meta?.display_name ||
-    meta?.name ||
-    instanceId;
+  // The author's one name: their own `name`, or the raw id when the row
+  // carries no metadata at all. No second, "display" candidate to fall back
+  // to — a fallback chain is how two names for one participant appear.
+  const displayName = authorName?.trim() || meta?.name || instanceId;
   // The task coordinate (ADR-106 D13): it rides the ROUND, not the utterance, and
   // the header is where a reader looks for "which piece of work is this". A
   // session bound to a task carries the same id on every round, so the first one

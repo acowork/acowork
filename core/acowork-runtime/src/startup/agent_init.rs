@@ -629,8 +629,6 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
     // file keeps the built-in default in force.
     crate::package::prompt_builder::seed_chat_prompt(
         &loaded.package_dir,
-        loaded.manifest.display_name.as_deref(),
-        &loaded.manifest.name,
         loaded.manifest.role.as_deref(),
         &loaded.manifest.description,
     );

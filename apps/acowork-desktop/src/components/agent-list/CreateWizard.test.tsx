@@ -110,7 +110,7 @@ const back = () => screen.getByRole("button", { name: /Back|上一步/ });
 
 async function fillBasics(agentId = "com.example.agent", name = "Agent") {
   fireEvent.change(screen.getByLabelText("Agent ID"), { target: { value: agentId } });
-  fireEvent.change(screen.getByLabelText("Display Name"), { target: { value: name } });
+  fireEvent.change(screen.getByLabelText("Name"), { target: { value: name } });
 }
 
 beforeEach(async () => {
@@ -139,13 +139,13 @@ describe("CreateWizard — step 1: identity and labels", () => {
     renderWizard();
     // Nothing is flagged before the user acts — an empty form is not an error.
     expect(screen.queryByText(/Agent ID must be reverse-domain/)).toBeNull();
-    expect(screen.queryByText(/A display name is required/)).toBeNull();
+    expect(screen.queryByText(/A name is required/)).toBeNull();
 
     fireEvent.click(next());
     // Still on step 1, and now the problems are spelled out.
     expect(screen.getByLabelText("Agent ID")).toBeTruthy();
     expect(screen.getByText(/Agent ID must be reverse-domain/)).toBeTruthy();
-    expect(screen.getByText(/A display name is required/)).toBeTruthy();
+    expect(screen.getByText(/A name is required/)).toBeTruthy();
 
     await fillBasics("not-a-domain", "Agent");
     fireEvent.click(next());
