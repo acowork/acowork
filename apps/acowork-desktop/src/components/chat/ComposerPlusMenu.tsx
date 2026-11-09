@@ -14,6 +14,7 @@ import { cn } from "../../lib/utils";
 import { computeDropdownPlacement, DROPDOWN_EDGE_GAP } from "../../lib/dropdownPosition";
 import { menuItemHover, toolbarIconButton } from "../../lib/ui-styles";
 import { Tooltip } from "../common/Tooltip";
+import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { Switch } from "../common/Switch";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -474,7 +475,11 @@ export function ComposerPlusMenu({
                 saving={policyEntry.saving || policyEntry.loading}
               />
 
-              <div className="min-h-0 flex-1 overflow-y-auto px-1.5 pb-1.5">
+              {/* The menu body is the only part that can overflow (the panel is
+                  capped at `min(380px, 60vh)`), so it gets the app's floating
+                  overlay thumb instead of an OS scrollbar — it is strictly
+                  inside the panel's `overflow-hidden` rounded frame. */}
+              <OverlayScrollbar fill="flex" className="px-1.5 pb-1.5">
                 {/* The policy groups' switches stay disabled until the session
                     layer has been read — say so instead of leaving a wall of
                     dead switches unexplained. */}
@@ -614,7 +619,7 @@ export function ComposerPlusMenu({
                     })}
                   </>
                 )}
-              </div>
+              </OverlayScrollbar>
 
               {policyEntry.error && (
                 <HintLine text={policyEntry.error} tone="error" />
