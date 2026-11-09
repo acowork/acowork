@@ -1,29 +1,29 @@
 //! Regression guard for the shipped example agent packages (ADR-104).
 //!
-//! `examples/` is documentation *and* a smoke corpus: every example manifest
+//! `agents/` is documentation *and* a smoke corpus: every example manifest
 //! must stay parseable, pass `AgentManifest::validate()`, and keep its
 //! declaration references honest — a `capabilities.*.skills` entry must name a
 //! skill directory the package actually ships, and every `[[mcp_servers]]`
 //! entry must resolve to a single source kind.
 //!
 //! This lives in `tests/` rather than beside the unit tests because it depends
-//! on the repository layout (`../../examples`), not on the crate itself.
+//! on the repository layout (`../../agents`), not on the crate itself.
 
 use std::path::Path;
 
 use acowork_core::manifest::{AgentManifest, McpSourceKind};
 
-/// Repository `examples/` directory, resolved from the crate root.
-fn examples_dir() -> std::path::PathBuf {
+/// Repository `agents/` directory, resolved from the crate root.
+fn agents_dir() -> std::path::PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("examples")
+        .join("agents")
 }
 
-/// Every `examples/<package>/manifest.toml`, sorted for a stable failure order.
+/// Every `agents/<package>/manifest.toml`, sorted for a stable failure order.
 fn manifest_paths() -> Vec<std::path::PathBuf> {
-    let root = examples_dir();
+    let root = agents_dir();
     let mut out: Vec<_> = std::fs::read_dir(&root)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", root.display()))
         .filter_map(|e| e.ok())

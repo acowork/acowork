@@ -60,7 +60,7 @@ git checkout -b fix/<short-slug>
 | Rust core | Bug fixes, error handling, new API surface | `core/acowork-*/src/` |
 | Desktop / Mobile UI | React components, i18n fixes, perf work | `apps/acowork-desktop/src/`, `apps/acowork-mobile/src/` |
 | i18n | Adding a locale, fixing a missing key | `apps/acowork-desktop/src/i18n/locales/` |
-| Agent packages | New example agents, better skill docs | `examples/` |
+| Agent packages | New example agents, better skill docs | `agents/` |
 | Docs | ADR translations, protocol reference corrections | `docs/` |
 
 ---
@@ -152,7 +152,7 @@ apps/
   acowork-mobile/      Tauri v2 mobile app
 
 docs/                  Architecture docs — design, ADR, PRD, protocols, runbooks
-examples/              Example .agent packages
+agents/                Agent packages shipped with the app
 dev/                   Build, packaging, CI, deployment scripts
 ```
 
@@ -372,7 +372,7 @@ numbers are preserved, supersession notices are preserved verbatim.
 
 `desktop`, `runtime`, `chat`, `gateway`, `adr`, `user`, `pm`, `mobile`, `memory`, `mcp`,
 `providers`, `node`, `core`, `session`, `doc`, `relay`, `sign`, `protocol`, `runbook`,
-`plan`, `design`, `dev`, `examples`, `assets`, `ui`
+`plan`, `design`, `dev`, `agents`, `assets`, `ui`
 
 > `AGENTS.md` lists a narrower scope set. The history shows the wider set above is the
 > de-facto convention — `chat`, `adr`, `mcp` and `relay` all appear regularly. Use the
@@ -424,7 +424,7 @@ change — not as a follow-up.
 
 ## Adding or changing an agent package
 
-Agent packages live in `examples/` and are declarative: `manifest.toml` + `prompts/` +
+Agent packages live in `agents/` and are declarative: `manifest.toml` + `prompts/` +
 `skills/` + `assets/`. They contain **no executable code**.
 
 ```bash
@@ -439,9 +439,9 @@ verifies the signature.
 ### Signing rules
 
 - **Never commit a private key.** See [`SECURITY.md`](SECURITY.md). The signing keys used
-  by `dev/common/build-agent.*` land in `examples/.signing-keys/` — that directory is
+  by `dev/common/build-agent.*` land in `agents/.signing-keys/` — that directory is
   git-ignored and generated per machine, so regenerate it with
-  `cargo run --bin acowork-keygen -- --type developer --output-dir examples/.signing-keys`
+  `cargo run --bin acowork-keygen -- --type developer --output-dir agents/.signing-keys`
   rather than committing it.
 - Signing keys are generated per machine by `acowork-keygen`. The developer key type
   signs for local development; the platform key type is reserved for official builds.

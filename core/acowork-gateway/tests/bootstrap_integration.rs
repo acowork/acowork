@@ -73,7 +73,7 @@ const NODE_ID: &str = "verify-node";
 /// bundled System Agent, which previously served as the fixture.)
 ///
 /// Resolves from `CARGO_MANIFEST_DIR` (core/acowork-gateway) up to the
-/// workspace root, then down into `examples/agent-packages/`. Keeps the
+/// workspace root, then down into `agents/agent-packages/`. Keeps the
 /// test runnable on any machine (previously hardcoded to a Windows path).
 fn bundled_package_path() -> std::path::PathBuf {
     let manifest_dir = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -82,7 +82,7 @@ fn bundled_package_path() -> std::path::PathBuf {
         .expect("core/")
         .parent()
         .expect("workspace root")
-        .join("examples/agent-packages/com.acowork.senior-engineer.agent")
+        .join("agents/agent-packages/com.acowork.senior-engineer.agent")
 }
 
 /// Pick a fresh MQTT port per test invocation (broker threads never

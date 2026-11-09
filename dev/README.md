@@ -100,7 +100,7 @@ which would clobber the hand-written signing block.
 
 | Script | What it does |
 |---|---|
-| [`build-agent.ps1`](common/build-agent.ps1) · [`build-agent.sh`](common/build-agent.sh) | Zip an `.agent` directory into a signed package, generating signing keys on first use. Pass an agent directory, or use `-All` to build every agent under `examples/`. |
+| [`build-agent.ps1`](common/build-agent.ps1) · [`build-agent.sh`](common/build-agent.sh) | Zip an `.agent` directory into a signed package, generating signing keys on first use. Pass an agent directory, or use `-All` to build every agent under `agents/`. |
 
 ## CI and tests
 

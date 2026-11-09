@@ -93,7 +93,7 @@ docs/                  # Public architecture docs
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   runbooks/            # Operator runbooks
 
-examples/              # Example .agent packages
+agents/                # Agent packages shipped with the app (`agent-packages/*.agent`)
 dev/                   # Build / package / CI scripts
 ```
 

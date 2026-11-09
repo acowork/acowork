@@ -5,7 +5,7 @@
 > 关联设计：[`21-pm-project-management.md`](./21-pm-project-management.md)（§6 本文修订其工具面）、[`20-doc-online-document.md`](./20-doc-online-document.md)（§6 同）
 > 关联 ADR：[`ADR-073-agent-instance-identity-decomposition`](../../adr/zh/ADR-073-agent-instance-identity-decomposition.md)（instance_id 唯一身份）· [`ADR-098-unified-standard-group-model`](../../adr/zh/ADR-098-unified-standard-group-model.md)（项目群聊）· [`ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain`](../../adr/zh/ADR-102-turnorigin-vocabulary-and-pm-dispatch-chain.md)（PM 派工链）· [`ADR-104-agent-manifest-declaration-surface`](../../adr/zh/ADR-104-agent-manifest-declaration-surface.md)（manifest 声明面）
 > 关联 PRD：[`docs/prd/zh/prd-doc-pm.md`](../../prd/zh/prd-doc-pm.md)
-> 实现落点：[`core/acowork-pm/src/mcp/`](../../../core/acowork-pm/src/mcp/) · [`core/acowork-doc/src/mcp/`](../../../core/acowork-doc/src/mcp/) · [`examples/project-manager-agent/`](../../../examples/project-manager-agent/) · [`examples/document-manager-agent/`](../../../examples/document-manager-agent/)
+> 实现落点：[`core/acowork-pm/src/mcp/`](../../../core/acowork-pm/src/mcp/) · [`core/acowork-doc/src/mcp/`](../../../core/acowork-doc/src/mcp/) · [`agents/project-manager-agent/`](../../../agents/project-manager-agent/) · [`agents/document-manager-agent/`](../../../agents/document-manager-agent/)
 > 执行计划：[`docs/plan/zh/pm-doc-mcp-agent-integration-plan.md`](../../plan/zh/pm-doc-mcp-agent-integration-plan.md)
 >
 > **一句话**：PM MCP 从 12 工具重整为 **14**（合并 3、增强 2、新增 5），Doc MCP 补 4 个缺口，两个官方 agent 的 prompt + 14 个 skill 全部改写到这套工具面上——当前它们对 `pm_*` / `doc_*` 的引用是 **0 处**。
@@ -17,11 +17,11 @@
 ### 1.1 现状证据
 
 ```
-grep -rniE 'pm_[a-z]+|doc_[a-z]+|mcp' examples/project-manager-agent examples/document-manager-agent
+grep -rniE 'pm_[a-z]+|doc_[a-z]+|mcp' agents/project-manager-agent agents/document-manager-agent
 → 74 处命中，全部为 mcp_memory__*；pm_* / doc_* 命中 0 处
 ```
 
-14 个 `SKILL.md` 的 `tool_deps` 清一色 `file_read / file_write / mcp_memory__*`。两个 agent 在 manifest 里**已经**声明了 `hosted = "pm"` / `hosted = "doc"`（[project-manager manifest.toml:119](../../../examples/project-manager-agent/manifest.toml#L119)、[document-manager manifest.toml:119](../../../examples/document-manager-agent/manifest.toml#L119)）——**工具在手上，prompt 里没有它们**。
+14 个 `SKILL.md` 的 `tool_deps` 清一色 `file_read / file_write / mcp_memory__*`。两个 agent 在 manifest 里**已经**声明了 `hosted = "pm"` / `hosted = "doc"`（[project-manager manifest.toml:119](../../../agents/project-manager-agent/manifest.toml#L119)、[document-manager manifest.toml:119](../../../agents/document-manager-agent/manifest.toml#L119)）——**工具在手上，prompt 里没有它们**。
 
 后果不是「用得不够好」，而是**用错了地方**：
 
@@ -267,7 +267,7 @@ PM 的规划产出落文档库，固定形态：
 | **D1** | `pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 与主工具语义重叠 | §3.1 | 合并 + deprecated 别名 |
 | **D2** | **manifest / 代码 schema 漂移**：`pm_update_task` 的 `Args` 接受 `type` 与 `depends_on`，manifest 未声明 → LLM 永远用不到 | [tools.rs:637,650](../../../core/acowork-pm/src/mcp/tools.rs#L637) vs [manifest.rs](../../../core/acowork-pm/src/mcp/manifest.rs) | 补声明；**测试从「6 字段抽查」升级为「`Args` 结构体字段集 ⊆ manifest properties」强断言**（现测试只比 `start_at/due_at/title/description/priority/assignee`，故漂移静默通过） |
 | **D3** | `pm_submit_task` 接受 `attachment_ids`，但 MCP 面**无任何途径创建附件**（上传只在 REST `POST /tasks/{tid}/attachments`）→ 死参数 | [routes.rs](../../../core/acowork-pm/src/api/routes.rs) vs manifest | **从 manifest 移除该参数**（Q2 定稿），description 注明「附件由人类在 Desktop 上传；agent 产出走文档库路径引用」。**不加 `pm_upload_attachment`**：那会在文档库之外长出第二套二进制体系，需要另做去重/保留/ACL，方向错误 |
-| **D4** | 两个 manifest 注释写 `# No shell tools — … does not hold a Shell permission.`，紧接着声明 `bash`/`powershell`/`shell` | [pm manifest:36-59](../../../examples/project-manager-agent/manifest.toml#L36)、[doc manifest:36-59](../../../examples/document-manager-agent/manifest.toml#L36) | **只改注释，声明保留**（Q3 已决）。注释改为说明「shell 为跨平台探测项，非核心工作流依赖」 |
+| **D4** | 两个 manifest 注释写 `# No shell tools — … does not hold a Shell permission.`，紧接着声明 `bash`/`powershell`/`shell` | [pm manifest:36-59](../../../agents/project-manager-agent/manifest.toml#L36)、[doc manifest:36-59](../../../agents/document-manager-agent/manifest.toml#L36) | **只改注释，声明保留**（Q3 已决）。注释改为说明「shell 为跨平台探测项，非核心工作流依赖」 |
 | **D5** | 设计文档 [21 §6](./21-pm-project-management.md) 工具表与代码不一致（缺 `pm_reparent_task`/`pm_check_task` 完整参数、`pm_list_tasks` 缺 `only_blocked`） | 21 §6 | 21 §6 改为指向本文；保留机制叙述，工具表以代码 manifest 为准 |
 | **D6** | **M7（成员闸）从未出现在任何面向 agent 的文档里**：[21 §6](./21-pm-project-management.md) 工具表未提，`pm_create_task` 的 manifest description 只说「must exist in the Gateway agent directory」 | [manifest.rs `assignee`](../../../core/acowork-pm/src/mcp/manifest.rs) vs [tree.rs:620](../../../core/acowork-pm/src/store/tree.rs#L620) | **manifest description 补写成员要求 + 错误码**，并加 `pm_add_project_member` 指引。这是本次调研发现的**文档与实现不一致**，比缺工具更危险：它让 agent 的错误看起来像平台 bug |
 | **D7** | **人类成员在三层之间不一致，MCP 面的「可指派」承诺是假的**：store 的成员闸只比 `instance_id`、**接受人类账号**（`assignee ∈ project.members` 成立），而 ① `pm_create_task` 要求 assignee 在 Gateway Agent 目录中存在、② 派工扫描器把 `task.assignee` 当 intent 目标投递，人类账号会得到 `target_not_installed`。三层各说各话的后果是「任务建成功了，但永远不会被派出去」——比直接报错难诊断一个数量级 | [tree.rs `ensure_assignee_is_member`](../../../core/acowork-pm/src/store/tree.rs#L620) vs [tools.rs `pm_create_task`](../../../core/acowork-pm/src/mcp/tools.rs) vs [dispatch.rs:191,232](../../../core/acowork-pm/src/dispatch.rs#L191) + [delivery.rs `wake_and_deliver`](../../../core/acowork-gateway/src/intent/delivery.rs#L168) | **P0 内收紧工具面承诺**：`pm_list_agents(project_id)` 只把 **agent 成员**放进指派集，人类成员以 `human_member_count` 显式计数上报（不静默隐藏），description 写明「人类成员由 Desktop 侧指派」。**不做**「让 agent 给人类派工」——那要改派工投递的目标解析与重试语义，是独立设计，见计划 §7 范围外 |

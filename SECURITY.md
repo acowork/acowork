@@ -169,10 +169,10 @@ If you run ACowork for yourself or for a team:
 - **Never commit a private key, a credential, or a `.env` file.** Check
   `git diff --cached` before committing. If you have committed a private key, **rotate
   it** — removing the file in a later commit does not remove it from history.
-  - The developer signing key (`examples/.signing-keys/`) is generated per machine by
+  - The developer signing key (`agents/.signing-keys/`) is generated per machine by
     `acowork-keygen`, so the whole directory is ignored by `.gitignore` and reproducible
     with `cargo run --bin acowork-keygen -- --type developer --output-dir
-    examples/.signing-keys`. An earlier revision of this repository did commit
+    agents/.signing-keys`. An earlier revision of this repository did commit
     `developer.key`; since the signature only proves that the bytes were not tampered
     with — never the identity of the signer — that key was never a trust anchor and
     needs no rotation. Treat any key that *is* a trust anchor (platform key, TLS

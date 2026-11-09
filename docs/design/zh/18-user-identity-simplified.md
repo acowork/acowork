@@ -450,8 +450,8 @@ message ServerMessage {
 
 | 项目 | 处理 |
 |------|------|
-| `examples/system-agent/manifest.toml` | 移除 `identity:query`/`identity:observe` capabilities |
-| `examples/system-agent/prompts/system.md` | 移除 identity management 相关职责描述 |
+| `agents/system-agent/manifest.toml` | 移除 `identity:query`/`identity:observe` capabilities |
+| `agents/system-agent/prompts/system.md` | 移除 identity management 相关职责描述 |
 | `docs/design/07-system-agent.md` | 已删除（本文档替代） |
 | `docs/design/12-tool-system.md` | `identity_store`/`identity_query`/`identity_observe` 标记为 **已废弃**，指向本文档 |
 | `docs/design/06-communication.md` §1.2 | `identity_delivery` 标记 deprecated，替换为 `user_identity` |

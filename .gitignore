@@ -81,6 +81,7 @@ dev/tmp/
 # Never commit: the developer key signs local dev packages, and the whole
 # directory is reproducible from `acowork-keygen --type developer`.
 examples/.signing-keys/
+agents/.signing-keys/
 
 # Local scratch at the repo root (probe/debug scripts)
 dev-tmp/

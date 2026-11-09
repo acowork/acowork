@@ -35,7 +35,7 @@ acowork-ai/
 ├── docs/                         # 设计文档（公开）
 ├── docs/_internal/               # 本地归档（gitignored：plan / review / reference / 内部诊断）
 ├── tests/                        # 集成测试
-└── examples/                     # 示例 Agent 包
+└── agents/                     # 示例 Agent 包
 ```
 
 ### 2.1 Workspace Cargo.toml

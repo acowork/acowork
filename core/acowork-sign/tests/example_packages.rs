@@ -1,6 +1,6 @@
 //! Shipped `.agent` packages must match the source they were built from.
 //!
-//! `examples/agent-packages/*.agent` is a build artifact (ADR-104), and the
+//! `agents/agent-packages/*.agent` is a build artifact (ADR-104), and the
 //! repository has already paid for that twice: once when the packages still
 //! said "No shell tools" after the manifests stopped saying it, and once when
 //! the two benchmark agents were rewritten while users kept installing the
@@ -15,7 +15,7 @@
 //! wrong as a stale body).
 //!
 //! The fix is always the same:
-//! `dev/common/build-agent.sh examples/<agent-dir>` (or `.ps1` on Windows),
+//! `dev/common/build-agent.sh agents/<agent-dir>` (or `.ps1` on Windows),
 //! then commit the rebuilt `.agent`.
 
 use std::collections::BTreeMap;
@@ -23,12 +23,12 @@ use std::path::{Path, PathBuf};
 
 use zip::ZipArchive;
 
-/// Repository `examples/` directory, resolved from the crate root.
-fn examples_dir() -> PathBuf {
+/// Repository `agents/` directory, resolved from the crate root.
+fn agents_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
-        .join("examples")
+        .join("agents")
 }
 
 /// Directories whose contents belong to the agent and must be published
@@ -70,7 +70,7 @@ fn walk(dir: &Path, base: &Path, out: &mut BTreeMap<String, Vec<u8>>) {
 
 #[test]
 fn shipped_packages_match_their_source_tree() {
-    let root = examples_dir();
+    let root = agents_dir();
     let packages = root.join("agent-packages");
 
     let mut checked = 0usize;
