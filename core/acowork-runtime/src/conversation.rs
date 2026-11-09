@@ -4196,18 +4196,51 @@ pub(crate) fn read_entries_indexed(
 
 // ── ADR-021: Incremental read with line-number coordinates ─────────────────
 
-/// Read the first persisted `user` entry of a session's JSONL log.
+/// The session's first human-authored turn, as the auto-title needs it.
 ///
-/// Session-title generation uses this instead of the current turn's message:
-/// the title must always describe the conversation's FIRST user turn. After a
-/// Stop the async title task may still be running, and a follow-up message
-/// typed into the same session must never become the title — neither through
-/// a second generation task nor through a session restored from disk (a
-/// rebuilt session has no in-memory title cache).
+/// One row, two audiences: on an agent-origin turn `body` is the machine envelope
+/// (`[intent:2f3c…:analyze] {"title":…}`) the model reads, and `display_summary` is
+/// the one-line human projection written beside it. They travel together because
+/// they come from the SAME row — reading the log once per field would let the title
+/// task see a row the other read missed (the two reads were not atomic) for no gain.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstUserTurn {
+    /// The row body as stored.
+    pub body: String,
+    /// The human projection's one-liner, when the row carries a usable one.
+    pub display_summary: Option<String>,
+}
+
+impl FirstUserTurn {
+    /// What the auto-title should describe.
+    ///
+    /// The human projection wins: an agent-origin turn named by its envelope is
+    /// what made an execution tab read `[intent:2f3c…:analyze] …`. `None` when
+    /// neither text says anything (a first turn that was attachments only) — the
+    /// caller then falls back to the current message.
+    pub fn title_seed(&self) -> Option<&str> {
+        self.display_summary
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| Some(self.body.as_str()).filter(|s| !s.trim().is_empty()))
+    }
+}
+
+/// The first persisted `user` entry of a session's JSONL log.
 ///
-/// Internal runtime artifacts (output-budget nudges and the like) are
-/// skipped — they are not user input. `None` when the log has no user row yet.
-pub fn read_first_user_message(path: &Path) -> Option<String> {
+/// Session-title generation uses this instead of the current turn's message: the
+/// title must always describe the conversation's FIRST user turn. After a Stop the
+/// async title task may still be running, and a follow-up message typed into the
+/// same session must never become the title — neither through a second generation
+/// task nor through a session restored from disk (a rebuilt session has no
+/// in-memory title cache).
+///
+/// Internal runtime artifacts (output-budget nudges and the like) are skipped —
+/// they are not user input. `None` when the log has no user row yet.
+///
+/// The one reader of "the session's first user row": both title facts come from it
+/// (see [`FirstUserTurn`]), so the pagination loop exists once.
+pub fn read_first_user_turn(path: &Path) -> Option<FirstUserTurn> {
     // The first user row sits at the head of the log; a couple of pages cover
     // the session-init / system rows that may precede it. Pages are only
     // walked when a log is unusually header-heavy.
@@ -4221,7 +4254,18 @@ pub fn read_first_user_message(path: &Path) -> Option<String> {
             .into_iter()
             .find(|e| e.role == "user" && !e.is_internal())
         {
-            return Some(entry.content);
+            // The display projection's own rule says what "usable" means; this
+            // reader must not keep a second copy of the key or the predicate.
+            let display_summary = entry
+                .metadata
+                .as_ref()
+                .and_then(crate::agent::intent_turn::IntentDisplay::from_metadata)
+                .map(|display| display.summary.trim().to_string())
+                .filter(|summary| !summary.is_empty());
+            return Some(FirstUserTurn {
+                body: entry.content,
+                display_summary,
+            });
         }
         if page.limit == 0 {
             return None;
@@ -4234,48 +4278,9 @@ pub fn read_first_user_message(path: &Path) -> Option<String> {
     None
 }
 
-/// What the auto-title should describe for a session whose first turn was an
-/// agent-origin Intent.
-///
-/// `read_first_user_message` returns the row body, which for those turns is the
-/// **machine envelope** (`[intent:2f3c…:analyze] {"title":…}`) — so the title was
-/// an LLM's summary of a JSON blob. The human display projection the row carries
-/// under `metadata.intent` says the same thing in words, and naming the session
-/// after that is both cheaper to read and the same sentence the Chat block shows.
-///
-/// `None` for a row with no display (a human turn, or any row written before the
-/// projection existed) — the caller falls back to the body, i.e. to today's
-/// behaviour.
-pub fn read_first_user_display_summary(path: &Path) -> Option<String> {
-    const PAGE: u32 = 16;
-    const MAX_PAGES: u8 = 32;
-    let mut offset = 0u64;
-    for _ in 0..MAX_PAGES {
-        let page = read_messages_paginated(path, offset, PAGE, false).ok()?;
-        if let Some(entry) = page
-            .messages
-            .into_iter()
-            .find(|e| e.role == "user" && !e.is_internal())
-        {
-            return entry
-                .metadata
-                .as_ref()
-                .and_then(|m| m.get(crate::agent::intent_turn::META_KEY_INTENT_DISPLAY))
-                .and_then(|d| d.get("summary"))
-                .and_then(|s| s.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(str::to_string);
-        }
-        if page.limit == 0 {
-            return None;
-        }
-        offset += u64::from(page.limit);
-        if offset >= page.total {
-            return None;
-        }
-    }
-    None
+/// The first user row's body, for callers that want nothing else.
+pub fn read_first_user_message(path: &Path) -> Option<String> {
+    read_first_user_turn(path).map(|turn| turn.body)
 }
 
 /// Read messages from a JSONL file since a given line-number coordinate.
@@ -6725,16 +6730,37 @@ mod tests {
             make_entry("a1", "assistant", "reply"),
         ];
         let path = write_test_jsonl(&dir, "title-seed", &entries);
-        assert_eq!(
-            read_first_user_display_summary(&path).as_deref(),
-            Some("审计 usecase 分层")
-        );
+        let turn = read_first_user_turn(&path).expect("first user turn");
+        assert_eq!(turn.display_summary.as_deref(), Some("审计 usecase 分层"));
+        assert_eq!(turn.title_seed(), Some("审计 usecase 分层"));
+        // The envelope is still there — the model's copy, not the title's.
+        assert!(turn.body.starts_with("[intent:inst-a:analyze]"));
 
-        // A human first turn has no display projection: the caller falls back to
+        // A human first turn has no display projection: the title falls back to
         // the row body, i.e. exactly today's behaviour.
         let human = vec![make_entry("u1", "user", "修复分页")];
         let path = write_test_jsonl(&dir, "title-seed-human", &human);
-        assert_eq!(read_first_user_display_summary(&path), None);
+        let turn = read_first_user_turn(&path).expect("first user turn");
+        assert_eq!(turn.display_summary, None);
+        assert_eq!(turn.title_seed(), Some("修复分页"));
+    }
+
+    #[test]
+    fn a_first_turn_with_nothing_to_name_has_no_title_seed() {
+        // A session opened by uploading files without typing: the body holds
+        // attachment context, not words. The caller falls back to the current
+        // message rather than titling the tab with whitespace.
+        let dir = TempDir::new().unwrap();
+        let mut blank = make_entry("u1", "user", "  
+ ");
+        blank.metadata = Some(serde_json::json!({
+            "intent": { "origin": "request", "action": "analyze", "summary": " ", "body": "
+" }
+        }));
+        let path = write_test_jsonl(&dir, "title-seed-blank", &[blank]);
+        let turn = read_first_user_turn(&path).expect("first user turn");
+        assert_eq!(turn.display_summary, None, "whitespace is not a projection");
+        assert_eq!(turn.title_seed(), None);
     }
 
     #[test]

@@ -1351,19 +1351,17 @@ impl AgentLoop {
                     // beside the machine envelope (`metadata.intent`); titling
                     // the session from the envelope is what made an execution
                     // tab read `[intent:2f3c…:analyze] …`. One row, two
-                    // audiences — the title belongs to the human one.
-                    let first_user_display = self.session.conversation.as_ref().and_then(|conv| {
-                        crate::conversation::read_first_user_display_summary(conv.session_path())
-                    });
-                    let first_user_message = first_user_display.or_else(|| {
-                        self.session
-                            .conversation
-                            .as_ref()
-                            .and_then(|conv| {
-                                crate::conversation::read_first_user_message(conv.session_path())
-                            })
-                            .filter(|s| !s.trim().is_empty())
-                    });
+                    // audiences — the title belongs to the human one, and the
+                    // reader picks between them so this call site does not have
+                    // to read the log twice to see both.
+                    let first_user_message = self
+                        .session
+                        .conversation
+                        .as_ref()
+                        .and_then(|conv| {
+                            crate::conversation::read_first_user_turn(conv.session_path())
+                        })
+                        .and_then(|turn| turn.title_seed().map(str::to_string));
                     let title_input_owned = first_user_message
                         .unwrap_or_else(|| raw_user_message.unwrap_or("").to_string());
                     let title_input = title_input_owned.as_str();
