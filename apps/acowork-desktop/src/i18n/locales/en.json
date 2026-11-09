@@ -251,7 +251,8 @@
       "refCount": "{{count}} / {{max}} referenced",
       "done": "Done",
       "blockNotLoaded": "That task block is not in the loaded history",
-      "refLimit": "A message can reference up to {{max}} runs"
+      "refLimit": "A message can reference up to {{max}} runs",
+      "notAddressable": "This agent is no longer part of this chat, so it cannot be mentioned"
     },
     "execSessionGone": "This execution session has been deleted"
   },
