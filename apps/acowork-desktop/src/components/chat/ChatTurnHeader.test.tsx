@@ -102,4 +102,35 @@ describe("ChatTurnHeader", () => {
     const { container } = render(<ChatTurnHeader identities={[]} text="working" />);
     expect(container.innerHTML).toBe("");
   });
+
+  it("puts the claim's word in the content column, not under the name and role", () => {
+    // The word used to be a THIRD line inside the identity column. Two things
+    // went wrong there: the column grew and the `items-center` row pulled the
+    // name and role up off the avatar's axis, and when the block landed the
+    // word had to jump sideways into the block's content column — the
+    // re-layout ADR-106 决策四 forbids ("接管只消失状态词，位置不动").
+    render(
+      <ChatTurnHeader identities={[{ ...A, role: "资深工程师" }]} text="working" />,
+    );
+    const header = document.querySelector("[data-turn-header]")!;
+    const word = screen.getByText("working");
+
+    // 1. The identity column — the one holding name and role — does not
+    //    contain the word. `closest` walks up from the role, so this fails if
+    //    the word is ever nested there again.
+    const identityColumn = screen.getByText("资深工程师").parentElement!;
+    expect(identityColumn.textContent).toContain("Agent A");
+    expect(identityColumn.textContent).not.toContain("working");
+
+    // 2. The word starts on the block's own content column: a row whose first
+    //    child is the same 40px spacer `ChatExecutionBlock` pads its body
+    //    with, and the word row is a SIBLING of the identity row rather than
+    //    a child of it.
+    const wordRow = word.parentElement!.parentElement!;
+    const spacer = wordRow.firstElementChild as HTMLElement;
+    expect(spacer.className).toContain("w-10");
+    expect(spacer.nextElementSibling?.contains(word)).toBe(true);
+    expect(identityColumn.contains(wordRow)).toBe(false);
+    expect(header.contains(wordRow)).toBe(true);
+  });
 });
