@@ -1832,6 +1832,10 @@
     "stepDistribute": "分发",
     "statusSigned": "已签名 ✓",
     "statusUnsigned": "未签名",
+    "librarySaved": "已保存到本地库：{{file}}",
+    "librarySaveFailed": "保存到本地库失败：{{error}}",
+    "libraryRemoteSkipped": "发布在节点 {{node}} 上执行，{{file}} 留在该节点。本地列表只索引这台电脑，因此没有复制。",
+    "libraryRemoteNodeUnknown": "另一台电脑",
     "buttonClose": "关闭",
     "ariaLabelRemoveAvatar": "移除打包的头像"
   },

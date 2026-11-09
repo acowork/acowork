@@ -97,6 +97,16 @@ export interface LocalAgentRow {
   version: string | null;
   description: string | null;
   size_bytes: number | null;
+  /** Package role / job title — the line the Hub card shows next to the name. */
+  role: string | null;
+  /** Discovery labels (`labels` in the manifest). */
+  labels: string[];
+  /** Capability keys (`[capabilities.*]` table names), sorted. */
+  capabilities: string[];
+  /** `skills/<name>/SKILL.md` entries of the archive — the manifest has no list. */
+  skills: string[];
+  /** The package's own avatar inlined as a `data:` URL, or `null` when absent. */
+  avatar: string | null;
   /** Declared permissions — only counted, never confirmed (REQ-007 boundary). */
   permissions: string[];
   error: string | null;
@@ -173,19 +183,45 @@ function haystackOf(agent: HubAgent): string {
  * Card chips (REQ-004): at most 4, labels first because they are the
  * human-curated axis, capability keys as the filler.
  */
-export function hubChipsOf(agent: HubAgent, limit = 4): string[] {
+/**
+ * The card chip row, in the one order both tabs use: labels first (the author's
+ * discovery words), then capability keys, then skill names, de-duplicated
+ * case-insensitively and capped.
+ *
+ * Shared by the Hub card and the Local row so the two tabs cannot drift into
+ * showing different chip sets for the same package — a local `.agent` and its
+ * published Hub entry describe the same artifact.
+ */
+export function chipsOf(sources: Array<Array<string | null | undefined> | undefined>, limit = 4): string[] {
   const chips: string[] = [];
   const seen = new Set<string>();
-  const push = (value?: string | null) => {
-    const v = (value ?? "").trim();
-    if (!v || seen.has(v.toLowerCase())) return;
-    seen.add(v.toLowerCase());
-    chips.push(v);
-  };
-  (agent.labels ?? []).forEach(push);
-  (agent.capabilities ?? []).forEach((c) => push(c.key));
-  (agent.skills ?? []).forEach(push);
-  return chips.slice(0, limit);
+  for (const source of sources) {
+    for (const value of source ?? []) {
+      const v = (value ?? "").trim();
+      if (!v || seen.has(v.toLowerCase())) continue;
+      seen.add(v.toLowerCase());
+      chips.push(v);
+      if (chips.length === limit) return chips;
+    }
+  }
+  return chips;
+}
+
+export function hubChipsOf(agent: HubAgent, limit = 4): string[] {
+  return chipsOf(
+    [agent.labels, (agent.capabilities ?? []).map((c) => c.key), agent.skills],
+    limit,
+  );
+}
+
+/**
+ * The same chip row for a library file. Same sources, same order, same cap —
+ * `labels` / `[capabilities.*]` keys / `skills/*` directories all come out of
+ * the archive, so a local row can look like its Hub card without inventing
+ * fields.
+ */
+export function localChipsOf(row: LocalAgentRow, limit = 4): string[] {
+  return chipsOf([row.labels, row.capabilities, row.skills], limit);
 }
 
 export function hubDisplayNameOf(agent: HubAgent): string {
@@ -358,4 +394,41 @@ export function ensureLocalAgent(input: {
     packagePath: input.packagePath,
     nodeId: input.nodeId,
   });
+}
+
+/**
+ * Outcome of the publish wizard's library write-back (REQ-029 / D12).
+ *
+ * Two legal outcomes, and the second one is **not** a failure:
+ *
+ *  - `saved`          — a single-machine deployment: the artifact the node
+ *                       built was copied into the library, `path` is its new
+ *                       home. A same-named file is replaced (one version is one
+ *                       row); a different version lands beside it.
+ *  - `remote_skipped` — the Gateway (and therefore the node that built the
+ *                       package) is on another machine, so the artifact is not
+ *                       readable here. D12 scopes the write-back to local
+ *                       mode and PRD §14.6 makes remote transfer a non-goal, so
+ *                       the wizard names the node and copies nothing.
+ */
+export type SaveToLibraryStatus = "saved" | "remote_skipped";
+
+export interface SaveToLibraryResult {
+  status: SaveToLibraryStatus;
+  /** Absolute path inside the library — `null` for `remote_skipped`. */
+  path: string | null;
+  /** `{agent_id}-{version}.agent`, known in both outcomes. */
+  file_name: string;
+}
+
+/**
+ * Copy the package the publish build just produced into the local library.
+ *
+ * `packagePath` is the node-local `output_path` the Gateway returned. The
+ * command re-validates it (it must be a direct `.agent` file inside the node's
+ * `packages_dir`) and refuses `remote`/`relay` deployments without copying —
+ * the frontend never decides that policy itself.
+ */
+export function savePublishToLibrary(packagePath: string): Promise<SaveToLibraryResult> {
+  return invoke<SaveToLibraryResult>("save_publish_to_library", { packagePath });
 }

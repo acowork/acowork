@@ -1604,6 +1604,10 @@
     "stepDistribute": "分發",
     "statusSigned": "已簽章 ✓",
     "statusUnsigned": "未簽章",
+    "librarySaved": "已儲存到本機庫：{{file}}",
+    "librarySaveFailed": "儲存到本機庫失敗：{{error}}",
+    "libraryRemoteSkipped": "發佈在節點 {{node}} 上執行，{{file}} 留在該節點。本機列表只索引這台電腦，因此沒有複製。",
+    "libraryRemoteNodeUnknown": "另一台電腦",
     "buttonClose": "關閉",
     "ariaLabelRemoveAvatar": "移除打包的頭像"
   },

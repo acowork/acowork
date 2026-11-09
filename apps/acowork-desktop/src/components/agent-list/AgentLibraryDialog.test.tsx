@@ -110,6 +110,8 @@ const ONLINE_NODE = {
 };
 
 /** A row as `list_local_agent_packages` returns it (manifest-derived). */
+const LOCAL_AVATAR = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==";
+
 const LOCAL_ROW = {
   file_name: "com.acowork.demo-1.0.0.agent",
   path: "C:\lib\com.acowork.demo-1.0.0.agent",
@@ -118,6 +120,11 @@ const LOCAL_ROW = {
   version: "1.0.0",
   description: "A demo agent",
   size_bytes: 4096,
+  role: "Demo Manager",
+  labels: ["demo", "testing"],
+  capabilities: ["demo_run"],
+  skills: ["demo-skill", "demo-extra"],
+  avatar: LOCAL_AVATAR,
   permissions: ["network", "filesystem:read"],
   error: null,
 };
@@ -132,6 +139,11 @@ const LOCAL_ROW_BROKEN = {
   version: null,
   description: null,
   size_bytes: 9,
+  role: null,
+  labels: [],
+  capabilities: [],
+  skills: [],
+  avatar: null,
   permissions: [],
   error: "Not a valid .agent package (ZIP): invalid Zip archive",
 };
@@ -565,6 +577,36 @@ describe("local agent library (REQ-021..032)", () => {
     await waitFor(() => expect(h.agent.selectAgent).toHaveBeenCalledWith("inst-ensured"));
     expect(h.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "success" }));
     expect(closed).toContain("closed");
+  });
+
+  // The Local card is the Hub card's skeleton — avatar, name + role, chip row —
+  // with the same chip sources read out of the archive, so the two tabs read as
+  // one list in two sources rather than two designs.
+  it("renders the role, the packed avatar and the chip row like a Hub card", async () => {
+    mockLibrary([LOCAL_ROW]);
+    renderOpen();
+
+    expect(await screen.findByText("Demo Manager")).toBeDefined();
+    // labels → capability keys → skill names, capped at four.
+    expect(screen.getByText("demo")).toBeDefined();
+    expect(screen.getByText("testing")).toBeDefined();
+    expect(screen.getByText("demo_run")).toBeDefined();
+    expect(screen.getByText("demo-skill")).toBeDefined();
+    // Capped: the fifth source never renders.
+    expect(screen.queryByText("demo-extra")).toBeNull();
+
+    const avatar = screen.getByRole("img", { name: "Demo" }) as HTMLImageElement;
+    expect(avatar.getAttribute("src")).toBe(LOCAL_AVATAR);
+  });
+
+  // No avatar in the package → the same letter block the Hub card falls back to.
+  it("falls back to the letter block when the package has no avatar", async () => {
+    mockLibrary([{ ...LOCAL_ROW, avatar: null }]);
+    renderOpen();
+
+    await screen.findByText("Demo");
+    expect(screen.queryByRole("img", { name: "Demo" })).toBeNull();
+    expect(screen.getByLabelText("Demo").textContent).toBe("D");
   });
 
   // A6: the row button is disabled while its own install is in flight, so a
