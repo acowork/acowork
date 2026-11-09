@@ -29,6 +29,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::agent::intent_turn::IntentDisplay;
 use crate::conversation::{ConversationEntry, read_messages_paginated};
 use crate::error::Result;
 
@@ -663,42 +664,12 @@ pub struct RoundUserRow {
     /// `None` on every human turn (its body already is the person's words) and on
     /// every row written before the projection existed — a surface that gets
     /// `None` renders `body`, which is the honest fallback rather than a blank.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub display: Option<RoundUserDisplay>,
-}
-
-/// The human rendering of an agent-origin turn, as the Chat surfaces read it.
-///
-/// Shape owned by the producer (`intent_turn::IntentDisplay` serialises these
-/// fields); the extra keys it carries (`origin`, `action`) are not needed here and
-/// are ignored on read.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RoundUserDisplay {
-    /// One line: a block header, a round row, a list preview.
-    #[serde(default)]
-    pub summary: String,
-    /// Markdown the reader gets in place of the envelope.
-    #[serde(default)]
-    pub body: String,
-    /// `body` was cut by the producer; the raw `RoundUserRow::body` still holds
-    /// everything.
-    #[serde(default)]
-    pub truncated: bool,
-}
-
-impl RoundUserDisplay {
-    /// The display on a round's user row, when the row carries a usable one.
     ///
-    /// A row with an empty body and no summary is treated as absent: painting an
-    /// empty panel is worse than falling back to the stored row.
-    fn from_entry(entry: &ConversationEntry) -> Option<Self> {
-        let raw = entry
-            .metadata
-            .as_ref()
-            .and_then(|m| m.get(crate::agent::intent_turn::META_KEY_INTENT_DISPLAY))?;
-        let display: Self = serde_json::from_value(raw.clone()).ok()?;
-        (!display.body.trim().is_empty() || !display.summary.trim().is_empty()).then_some(display)
-    }
+    /// The type and the "is it usable" rule are the producer's, not a
+    /// projection-local subset ([`IntentDisplay::from_metadata`]): a second shape
+    /// here would let the metadata key and the emptiness rule drift per read model.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display: Option<IntentDisplay>,
 }
 
 /// The agent half of a round. Its terminal state is carried by the enclosing
@@ -796,7 +767,10 @@ pub fn project(jsonl: &Path, rec: &RoundRecord) -> Result<Option<RoundProjection
     Ok(Some(RoundProjection {
         round_id: rec.round_id.clone(),
         user: Some(RoundUserRow {
-            display: RoundUserDisplay::from_entry(&user),
+            display: user
+                .metadata
+                .as_ref()
+                .and_then(IntentDisplay::from_metadata),
             body: user.content,
             ts: user.ts,
             attachments,
