@@ -3909,6 +3909,10 @@ export function convertConversationEntry(
     content: entry.content,
     timestamp: new Date(entry.ts).getTime(),
     isStreaming: entry.is_streaming,
+    // Carried, not derived: the Runtime resolved this from the row's metadata,
+    // so the client never has to know the key or the "is it usable" rule. The
+    // bubble renders it in place of `content` (see `MessageBubble`).
+    display: entry.display,
   };
 
   if (entry.role === "user") {

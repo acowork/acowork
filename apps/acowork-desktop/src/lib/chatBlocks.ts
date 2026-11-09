@@ -16,6 +16,7 @@
  */
 
 import { getGatewayUrl } from "./config";
+import type { IntentDisplay } from "./types";
 import { useAuthStore } from "../stores/authStore";
 
 /** The card a round is parked on (ADR-106 D8): what the round is waiting for,
@@ -34,17 +35,16 @@ export interface BlockCard {
 
 /** The **human** rendering of an agent-origin turn (design 27 §5.4.5).
  *
- *  A round's `user.body` is the machine envelope (`[intent:…] {params}` plus the
- *  reply coordinates) because the model reads it. This is the same turn written
- *  for the reader: `summary` is one line, `body` is Markdown. Absent on a human
- *  turn — its body already is the person's words — and on every row written
- *  before the projection existed, where the surfaces keep their old rendering. */
-export interface RoundUserDisplay {
-  summary: string;
-  body: string;
-  /** The producer cut `body`; `user.body` still holds everything. */
-  truncated?: boolean;
-}
+ *  A turn's machine text (`RoundProjection.user.body`, a bubble's `content`) is
+ *  the envelope (`[intent:…] {params}` plus the reply coordinates) because the
+ *  model reads it. This is the same turn written for the reader: `summary` is one
+ *  line, `body` is Markdown. Absent on a human turn — its body already is the
+ *  person's words — and on every row written before the projection existed, where
+ *  the surfaces keep their old rendering.
+ *
+ *  Declared once, in `types.ts` ({@link IntentDisplay}): the producer, both read
+ *  models and every surface speak this one shape. */
+export type RoundUserDisplay = IntentDisplay;
 
 /** One round's projected content, verbatim from the execution session. */
 export interface RoundProjection {
