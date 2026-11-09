@@ -1127,6 +1127,10 @@ async fn run_turn(
                                     &crate::agent::session_state::preview_source(
                                         &content,
                                         &context_refs,
+                                        // This path carries the human's own
+                                        // words, never an agent envelope, so
+                                        // there is no projection to prefer.
+                                        None,
                                     ),
                                 ),
                                 from_chat: true,
