@@ -18,6 +18,8 @@ import { useFileEditorStore } from "../../stores/fileEditorStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { SetiIcon } from "../common/SetiIcon";
+import { OverlayScrollTarget } from "../common/OverlayScrollbar";
+import { OVERLAY_SCROLL_HOST_CLASS, OVERLAY_SCROLL_VIEWPORT_CLASS } from "../common/overlayScrollThumb";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
 
 /* ─── Types ────────────────────────────────────────────────────────────────── */
@@ -269,22 +271,8 @@ export function GoToFilePalette({ agentId, workspaceId, onClose }: GoToFilePalet
 
     const openFile = useFileEditorStore.getState().openFile;
 
-    /* ── Scrollbar CSS ─────────────────────────────────────────────── */
-    const scrollStyle = `
-        .g2f-list::-webkit-scrollbar { width: var(--ui-scrollbar-size); }
-        .g2f-list::-webkit-scrollbar-track { background: transparent; }
-        .g2f-list::-webkit-scrollbar-thumb {
-            background: var(--ui-scrollbar-thumb);
-            border-radius: 3px;
-        }
-        .g2f-list::-webkit-scrollbar-thumb:hover {
-            background: var(--ui-scrollbar-thumb-hover);
-        }
-    `;
-
     return (
         <>
-            <style>{scrollStyle}</style>
             {/* Backdrop — absolute within editor container */}
             <div
                 style={{ position: "absolute", inset: 0, zIndex: 2549 }}
@@ -355,9 +343,13 @@ export function GoToFilePalette({ agentId, workspaceId, onClose }: GoToFilePalet
                 </div>
 
                 {/* ── List ───────────────────────────────────────────── */}
+                {/* The palette is an absolute overlay over the editor, so the
+                    scroller is hosted (positioned wrapper + hover reveal) and
+                    the floating thumb is attached to the list itself. */}
+                <div className={OVERLAY_SCROLL_HOST_CLASS}>
                 <div
                     ref={listRef}
-                    className="g2f-list"
+                    className={`g2f-list ${OVERLAY_SCROLL_VIEWPORT_CLASS}`}
                     style={{ maxHeight: 20 * 22, overflowY: "auto", lineHeight: "22px", paddingBottom: 5 }}
                 >
                     {loading ? (
@@ -430,6 +422,8 @@ export function GoToFilePalette({ agentId, workspaceId, onClose }: GoToFilePalet
                             );
                         })
                     )}
+                </div>
+                <OverlayScrollTarget targetRef={listRef} />
                 </div>
             </div>
         </>

@@ -162,7 +162,7 @@ const DEBOUNCE_BY_FIELD: Record<WiredField, number> = {
 export function AgentSetupTab() {
   const { t } = useTranslation();
   const { addToast } = useToast();
-  const { agents, selectedAgentId, fetchAgents } = useAgentStore();
+  const { agents, selectedAgentId, applyAgentIdentity } = useAgentStore();
   const { getProfile, setProfile, resetProfile } = useAgentStore();
 
   const storage = selectedAgentId ? agents[selectedAgentId] : null;
@@ -624,6 +624,35 @@ export function AgentSetupTab() {
 
   // ── Avatar selection handlers ──────────────────────────────────────
 
+  /**
+   * Push a just-confirmed `avatar-config` response into the agent list.
+   *
+   * The Runtime answers this route because it owns `agent_config.json`, so
+   * its response is the effective identity — not a draft to be validated by
+   * a second read. The list view reaches the same facts on a *different*,
+   * asynchronous path (the Node re-reads the file, republishes its
+   * inventory, the Gateway upserts, `acowork/desktop/inventory` fires and
+   * `AgentList` refetches on `inventoryVersion`). Refetching here instead
+   * would race that round-trip and, on a clean run, repaint the previous
+   * avatar in between — the flash this helper exists to remove.
+   *
+   * So the confirmed value is written now (sidebar and every transcript
+   * agree immediately) and the inventory signal's refetch becomes a
+   * convergence check that finds nothing to change.
+   *
+   * Every field the response owns is passed explicitly, including "none":
+   * the two avatar slots are mutually exclusive upstream, so a partial patch
+   * would leave the slot that was just cleared on screen.
+   */
+  const applyConfirmedIdentity = (cfg: AvatarConfigResponse) => {
+    if (!selectedAgentId) return;
+    applyAgentIdentity(selectedAgentId, {
+      name: cfg.name,
+      avatar: cfg.avatar ?? undefined,
+      builtin_avatar: cfg.builtin_avatar ?? undefined,
+    });
+  };
+
   // ── Name handler ──────────────────────────────────────────────────
   //
   // Committed on blur / Enter: the Runtime persists it into the instance's
@@ -637,8 +666,8 @@ export function AgentSetupTab() {
     const current = selectedAgent.name;
     if (next === current) return;
     try {
-      await updateAvatarConfig(selectedAgentId, { name: next });
-      await fetchAgents();
+      const cfg = await updateAvatarConfig(selectedAgentId, { name: next });
+      applyConfirmedIdentity(cfg);
     } catch (err) {
       log.warn("[AgentSetup] Rename agent failed:", err);
     }
@@ -650,7 +679,7 @@ export function AgentSetupTab() {
     try {
       const cfg = await updateAvatarConfig(selectedAgentId, { avatar: relativePath, builtin_avatar: "" });
       setAvatarConfig(cfg);
-      await fetchAgents();
+      applyConfirmedIdentity(cfg);
     } catch (err) {
       log.warn("[AgentSetup] Select custom avatar failed:", err);
     } finally {
@@ -665,7 +694,7 @@ export function AgentSetupTab() {
     try {
       const cfg = await updateAvatarConfig(selectedAgentId, { avatar: "", builtin_avatar: iconId });
       setAvatarConfig(cfg);
-      await fetchAgents();
+      applyConfirmedIdentity(cfg);
     } catch (err) {
       log.warn("[AgentSetup] Select builtin avatar failed:", err);
     } finally {
@@ -719,7 +748,9 @@ export function AgentSetupTab() {
       ]);
       setAvatarAssets(assetsResp.assets);
       setAvatarConfig(cfg);
-      await fetchAgents();
+      // The delete route clears the reference server-side, so the re-read
+      // config is the confirmation for the list view too.
+      applyConfirmedIdentity(cfg);
     } catch (err) {
       log.warn("[AgentSetup] Delete avatar failed:", err);
     } finally {

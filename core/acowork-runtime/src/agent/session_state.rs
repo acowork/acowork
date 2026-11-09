@@ -135,12 +135,30 @@ pub fn pending_preview(text: &str) -> String {
 
 /// What the queue preview should be written from (ADR-107).
 ///
-/// The preview is the only thing the human sees for a message waiting on a busy
-/// session, so it must not read as empty: a turn that carried no words (the
-/// human attached a file and typed nothing) falls back to the first reference
-/// block, and only then to the empty string — a queue row with a blank preview
-/// looks like a bug in the queue rather than like a message with no text.
-pub fn preview_source(content: &str, refs: &[acowork_core::MessageRef]) -> String {
+/// The preview is only ever a [`pending_preview`] excerpt of this, and it is the
+/// only thing the human sees for a message waiting on a busy session, so it must
+/// not read as empty: a turn that carried no words (the human attached a file and
+/// typed nothing) falls back to the first reference block, and only then to the
+/// empty string — a queue row with a blank preview looks like a bug in the queue
+/// rather than like a message with no text.
+///
+/// An agent-origin turn is named by its display projection first, exactly as its
+/// bubble and its round row are ([`crate::agent::intent_turn::reference_name`]):
+/// the queue is a human surface too, and reading `params` there would make one
+/// turn speak the envelope's words in the queue and the display's words in the
+/// round it opens. Pass `None` when the caller has no projection (a human-origin
+/// turn, which has nothing to project).
+pub fn preview_source(
+    content: &str,
+    refs: &[acowork_core::MessageRef],
+    display: Option<&crate::agent::intent_turn::IntentDisplay>,
+) -> String {
+    if let Some(summary) = display
+        .map(|d| d.summary.trim())
+        .filter(|s| !s.is_empty())
+    {
+        return summary.to_string();
+    }
     if !content.trim().is_empty() {
         return content.to_string();
     }
@@ -675,6 +693,42 @@ mod tests {
         // exactly the cap characters + the ellipsis marker, no split char
         assert_eq!(out.chars().count(), PENDING_INTENT_PREVIEW_CHARS + 1);
         assert!(out.ends_with('…'));
+    }
+
+    fn bg_ref() -> acowork_core::MessageRef {
+        acowork_core::MessageRef::chat_background("the chat tail")
+    }
+
+    #[test]
+    fn the_queue_preview_speaks_the_display_and_nothing_else_when_it_can() {
+        use crate::agent::intent_turn::{render_intent_display, IntentDisplay};
+        let d = render_intent_display(
+            "request",
+            "analyze",
+            &serde_json::json!({ "message": "审计 usecase 分层" }),
+        )
+        .expect("display");
+        // The display names the turn even when the envelope's prose would too:
+        // one turn, one sentence, on every human surface.
+        assert_eq!(
+            preview_source("审计 usecase 分层", &[], Some(&d)),
+            "审计 usecase 分层"
+        );
+        // A structured payload has no prose to fall back to — the projection is
+        // then the only source that says anything at all.
+        let structured = IntentDisplay {
+            origin: "response".into(),
+            action: "notify".into(),
+            summary: "收尾完成".into(),
+            body: String::new(),
+            truncated: false,
+        };
+        assert_eq!(preview_source("", &[], Some(&structured)), "收尾完成");
+        assert_eq!(preview_source("", &[bg_ref()], Some(&structured)), "收尾完成");
+        // No projection: the pre-existing order, unchanged.
+        assert_eq!(preview_source("hi", &[bg_ref()], None), "hi");
+        assert_eq!(preview_source("  ", &[bg_ref()], None), "the chat tail");
+        assert_eq!(preview_source("  ", &[], None), "");
     }
 
     #[test]

@@ -426,8 +426,11 @@ export interface ChatMessageRow {
     /** ADR-106 D6: the round opened a NEW session rather than continuing one;
      *  absent when the turn could not say. */
     opened_new?: boolean
-    /** The router's one-line statement of what the round was asked to do
-     *  (ADR-106 D13) — a presentation hint, never a routing decision. */
+    /** The round's one-line name (ADR-106 D13) — a presentation hint, never a
+     *  routing decision. From the Runtime's `reference_name`. */
+    round_name?: string
+    /** Legacy spelling of {@link round_name} on rows written before the rename.
+     *  Read as a fallback, never written. */
     assignment_brief?: string
     /** ADR-106 D13: the PM task this round works on, read off the routing
      *  contract by the Runtime. Rendered as a chip on the block header. */

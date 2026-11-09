@@ -62,7 +62,8 @@ import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { UserAvatar } from "../common/UserAvatar";
-import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { OverlayScrollbar, OverlayScrollTarget } from "../common/OverlayScrollbar";
+import { OVERLAY_SCROLL_HOST_CLASS, OVERLAY_SCROLL_VIEWPORT_CLASS } from "../common/overlayScrollThumb";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { ChatUsageIcon } from "./ChatUsageIcon";
 import { openChatAttachment } from "../../lib/openChatAttachment";
@@ -2051,79 +2052,88 @@ export function GroupChatPanel() {
               </div>
             )}
             <div className="flex items-end gap-2 px-3 pb-2 pt-1">
-              <textarea
-                ref={textareaRef}
-                value={draft}
-                onChange={(e) => {
-                  const v = e.target.value;
-                  setDraft(v);
-                  syncMention(v, e.target.selectionStart ?? v.length);
-                }}
-                onSelect={(e) => {
-                  const ta = e.currentTarget;
-                  syncCaret(ta.value, ta.selectionStart ?? ta.value.length);
-                }}
-                onKeyDown={(e) => {
-                  // A second level left open is a question on the screen: Enter
-                  // closes it instead of sending, or the send would go out
-                  // un-addressed while the human believed they were naming a
-                  // session.
-                  if (addressStage) {
+              {/* The textarea is a flex item here, so the overlay host takes
+                  over its flex sizing (`min-w-0 flex-1`) — a bare `relative`
+                  div would shrink the composer to its content width. */}
+              <div className={cn(OVERLAY_SCROLL_HOST_CLASS, "min-w-0 flex-1")}>
+                <textarea
+                  ref={textareaRef}
+                  value={draft}
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    setDraft(v);
+                    syncMention(v, e.target.selectionStart ?? v.length);
+                  }}
+                  onSelect={(e) => {
+                    const ta = e.currentTarget;
+                    syncCaret(ta.value, ta.selectionStart ?? ta.value.length);
+                  }}
+                  onKeyDown={(e) => {
+                    // A second level left open is a question on the screen: Enter
+                    // closes it instead of sending, or the send would go out
+                    // un-addressed while the human believed they were naming a
+                    // session.
+                    if (addressStage) {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        setAddressStage(null);
+                      }
+                      return;
+                    }
+                    // While the picker is open it owns Enter / arrows / Tab / Esc
+                    // — Enter picks the highlighted member instead of sending.
+                    if (mention && mentionCandidates.length > 0) {
+                      if (e.key === "ArrowDown") {
+                        e.preventDefault();
+                        setMentionActive(
+                          (i) => (i + 1) % mentionCandidates.length,
+                        );
+                        return;
+                      }
+                      if (e.key === "ArrowUp") {
+                        e.preventDefault();
+                        setMentionActive(
+                          (i) =>
+                            (i - 1 + mentionCandidates.length) %
+                            mentionCandidates.length,
+                        );
+                        return;
+                      }
+                      if (e.key === "Enter" || e.key === "Tab") {
+                        e.preventDefault();
+                        const pick =
+                          mentionCandidates[mentionActive] ??
+                          mentionCandidates[0];
+                        if (pick) pickMention(pick);
+                        return;
+                      }
+                      if (e.key === "Escape") {
+                        e.preventDefault();
+                        setMention(null);
+                        return;
+                      }
+                    }
                     if (e.key === "Enter" && !e.shiftKey) {
                       e.preventDefault();
-                      setAddressStage(null);
+                      void submit();
                     }
-                    return;
+                  }}
+                  placeholder={
+                    agentParticipants.length
+                      ? t("groupChat.placeholderWithMentions")
+                      : t("groupChat.placeholder")
                   }
-                  // While the picker is open it owns Enter / arrows / Tab / Esc
-                  // — Enter picks the highlighted member instead of sending.
-                  if (mention && mentionCandidates.length > 0) {
-                    if (e.key === "ArrowDown") {
-                      e.preventDefault();
-                      setMentionActive(
-                        (i) => (i + 1) % mentionCandidates.length,
-                      );
-                      return;
-                    }
-                    if (e.key === "ArrowUp") {
-                      e.preventDefault();
-                      setMentionActive(
-                        (i) =>
-                          (i - 1 + mentionCandidates.length) %
-                          mentionCandidates.length,
-                      );
-                      return;
-                    }
-                    if (e.key === "Enter" || e.key === "Tab") {
-                      e.preventDefault();
-                      const pick =
-                        mentionCandidates[mentionActive] ??
-                        mentionCandidates[0];
-                      if (pick) pickMention(pick);
-                      return;
-                    }
-                    if (e.key === "Escape") {
-                      e.preventDefault();
-                      setMention(null);
-                      return;
-                    }
-                  }
-                  if (e.key === "Enter" && !e.shiftKey) {
-                    e.preventDefault();
-                    void submit();
-                  }
-                }}
-                placeholder={
-                  agentParticipants.length
-                    ? t("groupChat.placeholderWithMentions")
-                    : t("groupChat.placeholder")
-                }
-                aria-label={t("groupChat.send")}
-                disabled={composerLocked}
-                onPaste={handlePaste}
-                className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"
-                style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
-              />
+                  aria-label={t("groupChat.send")}
+                  disabled={composerLocked}
+                  onPaste={handlePaste}
+                  className={cn(
+                    "w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]",
+                    OVERLAY_SCROLL_VIEWPORT_CLASS,
+                  )}
+                  style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+                />
+                <OverlayScrollTarget targetRef={textareaRef} />
+              </div>
             </div>
             {/* Toolbar row — textarea on top, actions grouped at the bottom
                 right: Paperclip immediately left of Send, the same cluster

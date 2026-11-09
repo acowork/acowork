@@ -290,6 +290,22 @@ export interface AgentStorage {
 /** The agent's whole session history, as the sidebar pages it. */
 const DEFAULT_PAGINATION = { currentPage: 1, totalPages: 1, totalCount: 0, pageSize: 20 };
 
+/**
+ * An identity patch confirmed by the backend (`applyAgentIdentity`).
+ *
+ * Field semantics match the inventory's `identity` projection and
+ * `AgentInfo` itself: a value present means "use this", absent/`null` means
+ * "this instance has none". Pass only the fields the confirmation actually
+ * spoke about — an absent field here is a no-op, not a clear, which is why
+ * callers building one from a response must spell out every field it owns
+ * (see `AgentSetupTab`'s avatar handlers).
+ */
+export interface AgentIdentityPatch {
+  name?: string;
+  avatar?: string;
+  builtin_avatar?: string;
+}
+
 /** The `@` address picker's page: shorter than the sidebar's, because the picker
  *  is a tap-away overlay that shows a handful of addresses above the composer,
  *  not a browsable history. */
@@ -464,6 +480,33 @@ interface AgentStoreState {
   // ── Agent meta actions ──
 
   fetchAgents: () => Promise<void>;
+  /**
+   * Apply an identity the backend just confirmed, without waiting for the
+   * inventory round-trip.
+   *
+   * `PUT /api/agents/{id}/avatar-config` is answered by the Runtime — the
+   * only writer of `agent_config.json` — so its response is already the
+   * authoritative effective name/avatar. What it is NOT is the list view's
+   * source: the sidebar and every chat avatar read `meta` from
+   * `GET /api/agents`, which the Gateway builds from the Node's retained
+   * inventory. That path is asynchronous (Node re-reads the file →
+   * republishes → Gateway upserts → `acowork/desktop/inventory` →
+   * `inventoryVersion` → `fetchAgents`), so waiting for it leaves the old
+   * avatar on screen for the whole round-trip and repaints it as a flash on
+   * the next fetch.
+   *
+   * Writing the confirmed value here closes that window: the panels agree
+   * the moment the PUT returns, and the inventory doorbell's refetch is a
+   * convergence check that finds nothing to change. Identity-preserving by
+   * construction — a patch that matches what the row already holds returns
+   * the previous state object, so a converged refetch repaints nothing
+   * (AGENTS.md: identity-preserving store updates).
+   *
+   * `null` / omitted means "no value" for that field: the effective avatar
+   * has no third state, so a cleared pick must clear the row too — falling
+   * back per field would resurrect the avatar that was just cleared.
+   */
+  applyAgentIdentity: (instanceId: string, identity: AgentIdentityPatch) => void;
   /** Refetch the node topology from the Gateway. Failure keeps the
    *  previous snapshot (a transient Gateway blip shouldn't empty the
    *  remote-mode sidebar groups); the rise edge / `bootstrapVersion`
@@ -761,6 +804,37 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
     } catch (e) {
       set({ error: String(e), loading: false });
     }
+  },
+
+  applyAgentIdentity: (instanceId, identity) => {
+    set((state) => {
+      // ADR-073: callers hold either identity, so resolve like every other
+      // patch path here does.
+      const key = storageKeyFor(state, instanceId);
+      if (!key) return {};
+      const meta = state.agents[key].meta;
+      // A field the caller did not mention is a no-op; a field it did
+      // mention wins, including when the value is "this instance has none".
+      const nextName = identity.name ?? meta.name;
+      const nextAvatar = "avatar" in identity ? identity.avatar : meta.avatar;
+      const nextBuiltin =
+        "builtin_avatar" in identity ? identity.builtin_avatar : meta.builtin_avatar;
+      // Converged: hand back the previous state so neither the map nor the
+      // row changes identity and no subscriber repaints.
+      if (
+        nextName === meta.name &&
+        nextAvatar === meta.avatar &&
+        nextBuiltin === meta.builtin_avatar
+      ) {
+        return {};
+      }
+      const next: AgentInfo = { ...meta, name: nextName };
+      if (nextAvatar === undefined) delete next.avatar;
+      else next.avatar = nextAvatar;
+      if (nextBuiltin === undefined) delete next.builtin_avatar;
+      else next.builtin_avatar = nextBuiltin;
+      return patchAgent(state, key, { meta: next });
+    });
   },
 
   fetchNodes: async () => {

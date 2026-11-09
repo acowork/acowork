@@ -208,7 +208,7 @@ describe("ChatExecutionBlock", () => {
       ref: REF1,
       roundRow: {
         ...base,
-        meta: { ...base.meta, opened_new: true, assignment_brief: "Fix the pagination bug" },
+        meta: { ...base.meta, opened_new: true, round_name: "Fix the pagination bug" },
       },
       triggerRow: triggerRow(1, "修复分页不满屏"),
       showUserLine: false,
@@ -238,7 +238,32 @@ describe("ChatExecutionBlock", () => {
     expect(container.querySelector('pre[data-seq="1"]')).toBeNull();
   });
 
-  /** ADR-106 D13 + design 27 §5.4.2: the reference row's `assignment_brief` names
+  /** The round-name key was renamed off `assignment_brief` (the envelope's
+   *  HIGH-TRUST PM-playbook field). Transcripts recorded before the rename
+   *  carry the old spelling, and their block line must still be named. */
+  it("names a round from the legacy key on a row written before the rename", () => {
+    const base = roundRow(3, "r1");
+    const opener: RoundItem = {
+      ref: REF1,
+      roundRow: {
+        ...base,
+        meta: { ...base.meta, opened_new: true, assignment_brief: "Fix the pagination bug" },
+      },
+      triggerRow: triggerRow(1, "修复分页不满屏"),
+      showUserLine: false,
+      questionOnTranscript: true,
+    };
+    const { container } = renderBlock(
+      { [REF1]: entryOf({ projection: undefined }) },
+      {},
+      blockOf([opener]),
+    );
+    expect(container.querySelector('[data-seq="3"]')?.textContent).toContain(
+      "Fix the pagination bug",
+    );
+  });
+
+  /** ADR-106 D13 + design 27 §5.4.2: the reference row's `round_name` names
    *  a round's LINE, never the block's title — a row written before the Runtime
    *  guarded that field carries the PM wake-up playbook, and a header that fell
    *  back to it would print the claim/submit instructions as the task's name.
@@ -253,7 +278,7 @@ describe("ChatExecutionBlock", () => {
         meta: {
           ...base.meta,
           opened_new: true,
-          assignment_brief:
+          round_name:
             'You are being woken to execute PM task "t-1". Follow this workflow exactly:\n1. Claim it first',
         },
       },
@@ -1077,7 +1102,7 @@ describe("ChatExecutionBlock action row", () => {
       ref: REF1,
       roundRow: {
         ...base,
-        meta: { ...base.meta, opened_new: true, assignment_brief: "审计 usecase 分层" },
+        meta: { ...base.meta, opened_new: true, round_name: "审计 usecase 分层" },
       },
       showUserLine: false,
       questionOnTranscript: true,
@@ -1116,6 +1141,45 @@ describe("ChatExecutionBlock action row", () => {
     expect(details?.hasAttribute("open")).toBe(false);
     // ...and the round's line names the work, not the payload.
     expect(container.textContent).toContain("审计 usecase 分层");
+  });
+
+  /** A display with a summary and no body is the producer's honest shape for
+   *  a payload with no words (every field is `serde(default)`). The panel must
+   *  show that summary — falling through to `user.body` would paint the machine
+   *  envelope into the one surface the display exists to replace. */
+  it("a display with no body falls back to its own summary, never to the envelope", () => {
+    const base = roundRow(3, "r1");
+    const peer: RoundItem = {
+      ref: REF1,
+      roundRow: { ...base, meta: { ...base.meta, opened_new: true } },
+      showUserLine: false,
+      questionOnTranscript: true,
+    };
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            user: {
+              body: '[intent:inst-a:notify] {"status":"done"}',
+              ts: "1",
+              display: { summary: "收尾完成", body: "" },
+            },
+            answer: { body: "done", ts: "2" },
+            card: null,
+          },
+        }),
+      },
+      {},
+      blockOf([peer]),
+    );
+    expect(screen.getAllByTestId("md")[0]!.textContent).toContain("收尾完成");
+    // The envelope stays reachable, folded — and out of the panel.
+    const details = container.querySelector("details");
+    expect(details?.textContent).toContain("[intent:inst-a:notify]");
+    expect(container.querySelector('pre[data-seq="1"]')).toBeNull();
   });
 
   it("a legacy round without a display still renders its stored row", () => {

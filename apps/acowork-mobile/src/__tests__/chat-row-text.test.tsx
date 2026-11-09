@@ -140,6 +140,16 @@ describe('Bubble: a display projection overrides both the role and `literal`', (
     expect(html).toContain('<summary>')
   })
 
+  it('paints the summary when the projection carries no body', () => {
+    // A payload with no words: the producer writes a summary, every other field
+    // defaults. An empty panel beside a folded envelope would say nothing.
+    const html = renderToStaticMarkup(
+      <Bubble msg={intentMsg({ ...DISPLAY, body: '' })} literal />,
+    )
+    expect(html).toContain('拆解 v0.2 任务')
+    expect(html).not.toContain('### 拆解')
+  })
+
   it('falls back to `literal` for a row with no projection', () => {
     const html = renderToStaticMarkup(<Bubble msg={intentMsg(undefined)} literal />)
     expect(html).toContain('[intent:inst-a:create_dev_tasks]')

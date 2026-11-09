@@ -42,7 +42,9 @@ export function Bubble({ msg, literal = false }: { msg: ChatMessage; literal?: b
     return (
       <div className={`bubble${self ? ' bubble-self' : ' bubble-peer'}`}>
         <div className="bubble-text">
-          {renderMarkdown(display.body)}
+          {/* `body` empty is a shape the producer may write (a payload with no
+              words); the summary is then the only human text there is. */}
+          {renderMarkdown(display.body || display.summary)}
           {display.truncated ? (
             <span className="chat-run-note">正文已截断，完整内容见原始信封</span>
           ) : null}

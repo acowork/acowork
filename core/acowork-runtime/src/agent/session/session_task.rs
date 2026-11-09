@@ -1620,7 +1620,7 @@ impl SessionTask {
                         // only when it is NOT the playbook, and a peer round is
                         // named by its display projection — see
                         // `reference_name`.
-                        assignment_brief: crate::agent::intent_turn::reference_name(
+                        round_name: crate::agent::intent_turn::reference_name(
                             &kind,
                             brief,
                             &content,
