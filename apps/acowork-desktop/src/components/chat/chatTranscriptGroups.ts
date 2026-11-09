@@ -22,7 +22,7 @@
  * bubble. A new session otherwise appears beside the words that created it with
  * no visible pairing at all — "a question and an answer, back and forth" is
  * what makes the block read as an exchange rather than an orphan. The block's
- * line for that round then leads with the router's `assignment_brief`, which is
+ * line for that round then leads with the reference row's `round_name`, which is
  * what the execution session actually received — not a second copy of the raw
  * sentence.
  *

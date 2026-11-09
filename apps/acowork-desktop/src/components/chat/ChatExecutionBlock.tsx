@@ -197,12 +197,12 @@ function summarize(text: string, max = 60): string {
  * The order is the transcript's own: a round that shows its own user line leads
  * with what the human wrote there; a round whose sentence already stands on the
  * transcript as its own bubble (the opener) leads with the reference row's
- * one-line `assignment_brief` — NOT with the projection's stored question, which
+ * one-line `round_name` — NOT with the projection's stored question, which
  * is the *delivered prompt* and carries ADR-107's reference parts
  * (`[user message]` + the raw sentence) verbatim.
  *
- * `assignment_brief` is therefore the opener's line by contract, and the Runtime
- * owns what may be written there: `reference_brief` refuses the PM wake-up
+ * `round_name` is therefore the opener's line by contract, and the Runtime
+ * owns what may be written there: `reference_name` refuses the PM wake-up
  * playbook (a system slot, design 27 §5.4.2) and names a dispatch by its own
  * text. The header's name chain does not read the brief at all, so a row written
  * before that guard cannot put the playbook on the block's title.
@@ -214,7 +214,11 @@ function questionOf(
   return (
     (round.showUserLine ? (round.triggerRow?.body ?? "") : "") ||
     (round.questionOnTranscript
-      ? (round.roundRow.meta?.assignment_brief ?? "")
+      ? (round.roundRow.meta?.round_name ??
+          // Rows written before the rename carry the same fact under the key it
+          // borrowed from the envelope's PM playbook. Read, never written.
+          round.roundRow.meta?.assignment_brief ??
+          "")
       : "") ||
     // An agent-origin round (design 27 §5.4.5): the row body is the machine
     // envelope, and the display projection beside it is the sentence a human
