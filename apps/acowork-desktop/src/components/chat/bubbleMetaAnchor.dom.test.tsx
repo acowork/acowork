@@ -83,7 +83,7 @@ vi.mock("../../stores/chatStore", () => ({
 vi.mock("../../stores/agentStore", () => ({
   useAgentStore: Object.assign(
     (selector: (state: unknown) => unknown) =>
-      selector({ agents: { [AGENT]: { meta: { display_name: "Agent A", name: "agent-a" } } } }),
+      selector({ agents: { [AGENT]: { meta: { name: "Agent A" } } } }),
     { getState: () => ({ selectAgent: vi.fn() }) },
   ),
 }));

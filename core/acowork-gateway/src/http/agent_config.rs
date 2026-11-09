@@ -4,11 +4,13 @@
 //! ({work_dir}/config/agent_config.json). Gateway only defines the
 //! request/response DTOs and forwards queries to Runtime over HTTP.
 //!
-//! ADR-009 §5: avatar config is agent-private data. The Runtime owns it
-//! (per-instance `{instance_id}.overrides.json`, see
-//! [`acowork_core::agent_overrides`]); the Gateway reaches it only through
-//! the reverse proxy. The former Gateway-owned `avatar_cache.json` was
-//! removed with that boundary — it was a second writer of the same fact.
+//! The avatar and the instance's name are agent-private data. The Runtime
+//! owns them: they are fields of this same `agent_config.json` (the file
+//! this module only defines DTOs for), written by `PUT /avatar-config` and
+//! read by everything else. The Gateway reaches them only through the
+//! reverse proxy, or through the Node's inventory projection when the agent
+//! is stopped. The former Gateway-owned `avatar_cache.json` was removed with
+//! that boundary — it was a second writer of the same fact.
 
 use serde::{Deserialize, Serialize};
 

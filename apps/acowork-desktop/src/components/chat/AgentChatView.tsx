@@ -189,7 +189,7 @@ const RowView = memo(function RowView({
   const { t } = useTranslation();
   const agent = useAgentStore((s) => s.agents[agentId]?.meta);
   const profile = useUserProfileStore((s) => s.profile);
-  const agentName = agent?.display_name ?? agent?.name ?? "";
+  const agentName = agent?.name ?? "";
 
   if (row.kind === "execution_round") {
     // A reference row that names no round (a missing coordinate) has no block to
@@ -523,7 +523,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
 
   // The agent's own name, for the line that says it is working on this turn.
   const agentMeta = useAgentStore((s) => s.agents[agentId]?.meta);
-  const agentName = agentMeta?.display_name ?? agentMeta?.name ?? "";
+  const agentName = agentMeta?.name ?? "";
 
   const [input, setInput] = useState("");
   const [replyTarget, setReplyTarget] = useState<ReplyTarget | null>(null);

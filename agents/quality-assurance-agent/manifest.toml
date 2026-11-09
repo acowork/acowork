@@ -4,7 +4,6 @@
 agent_id = "com.acowork.quality-assurance"
 version = "1.0.0"
 name = "QA"
-display_name = "QA"
 role = "Quality Assurance Manager"
 description = "A quality assurance and quality management agent skilled in quality strategy, test planning, test case design, defect triage, regression management, release acceptance, and continuous quality improvement."
 author = "ACowork Team"

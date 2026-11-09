@@ -63,8 +63,8 @@ interface VirtualMessageListProps {
   onCancelTool?: (toolCallId: string) => void;
   /** Current agent ID (for AgentAvatar). */
   selectedAgentId: string | null;
-  /** Agent display name (for AgentAvatar). */
-  agentDisplayName: string | undefined;
+  /** The agent's name — the one name the human and the agent both see. */
+  agentName: string | undefined;
   /** Agent metadata (for AgentAvatar). */
   selectedAgent: {
     avatar?: string | null;
@@ -198,7 +198,7 @@ export const VirtualMessageList = React.forwardRef<
     thinkingContent,
     thinkingStartTime,
     selectedAgentId,
-    agentDisplayName,
+    agentName,
     selectedAgent,
     userDisplayName,
     userAvatarUrl,
@@ -625,7 +625,7 @@ export const VirtualMessageList = React.forwardRef<
                   <div className="flex items-center gap-2 mb-2 mt-1">
                     <AgentAvatar
                       agentId={selectedAgentId ?? ""}
-                      displayName={agentDisplayName}
+                      displayName={agentName}
                       avatarUrl={selectedAgent?.avatar}
                       version={selectedAgent?.version}
                       builtinAvatarId={selectedAgent?.builtin_avatar ?? null}
@@ -634,7 +634,7 @@ export const VirtualMessageList = React.forwardRef<
                     />
                     <div className="flex flex-col">
                       <span className="text-xs font-medium text-text-tertiary ">
-                        {agentDisplayName}
+                        {agentName}
                       </span>
                       {selectedAgent?.role && (
                         <span className="text-10 leading-tight text-text-tertiary ">
@@ -747,7 +747,7 @@ export const VirtualMessageList = React.forwardRef<
                   <div className="flex items-center gap-2 mb-2 mt-1">
                     <AgentAvatar
                       agentId={selectedAgentId ?? ""}
-                      displayName={agentDisplayName}
+                      displayName={agentName}
                       avatarUrl={selectedAgent?.avatar}
                       version={selectedAgent?.version}
                       builtinAvatarId={selectedAgent?.builtin_avatar ?? null}
@@ -756,7 +756,7 @@ export const VirtualMessageList = React.forwardRef<
                     />
                     <div className="flex flex-col">
                       <span className="text-xs font-medium text-text-tertiary ">
-                        {agentDisplayName}
+                        {agentName}
                       </span>
                       {selectedAgent?.role && (
                         <span className="text-10 leading-tight text-text-tertiary ">

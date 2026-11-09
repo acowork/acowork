@@ -318,7 +318,7 @@ function getAgentSenderInfo(agentId: string): { senderDisplayName?: string; send
   const agent = store.agents[agentId]?.meta;
   return {
     // ADR-009 §V-Q: name is server-side — no localStorage overlay.
-    senderDisplayName: agent?.display_name ?? agent?.name,
+    senderDisplayName: agent?.name,
     senderRole: agent?.role,
   };
 }

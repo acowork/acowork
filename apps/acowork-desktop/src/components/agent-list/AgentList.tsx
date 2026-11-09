@@ -452,7 +452,7 @@ export function AgentList({ width }: AgentListProps) {
             kind: "agent",
             // Instance key (ADR-073) — the ownership row is keyed by it.
             id: payload.agentId,
-            name: contextAgent.display_name ?? contextAgent.name,
+            name: contextAgent.name,
           });
         },
       });
@@ -471,7 +471,7 @@ export function AgentList({ width }: AgentListProps) {
           // for naming/display only.
           agentId: aid,
           packageId: contextAgent.agent_id,
-          agentName: contextAgent.display_name ?? contextAgent.name,
+          agentName: contextAgent.name,
         });
       },
     });
@@ -485,7 +485,7 @@ export function AgentList({ width }: AgentListProps) {
           // ADR-073: publish prepare/execute and avatar upload are
           // instance-scoped routes — use the row's instance key (aid).
           agentId: aid,
-          agentName: contextAgent.display_name ?? contextAgent.name,
+          agentName: contextAgent.name,
         });
       },
     });
@@ -605,14 +605,14 @@ export function AgentList({ width }: AgentListProps) {
       >
         {/* Avatar */}
         <Tooltip
-          content={isCollapsed ? (agent.display_name ?? agent.name) : ""}
+          content={isCollapsed ? (agent.name) : ""}
           variant="plain"
           position="right"
           delayMs={0}
         >
           <AgentAvatar
             agentId={id}
-            displayName={agent.display_name ?? agent.name}
+            displayName={agent.name}
             avatarUrl={agent.avatar}
             version={agent.version}
             builtinAvatarId={agent.builtin_avatar}
@@ -631,7 +631,7 @@ export function AgentList({ width }: AgentListProps) {
                     renders its row name at `text-xs`, and the agent name was
                     the lone 14px outlier, so the chat column read as a
                     different scale from the rest of the nav. */}
-                <span className={cn("truncate font-medium text-xs", selectedAgentId === id ? "text-white" : agent.alive ? "text-text-secondary " : "text-text-tertiary ")}>{agent.display_name ?? agent.name}</span>
+                <span className={cn("truncate font-medium text-xs", selectedAgentId === id ? "text-white" : agent.alive ? "text-text-secondary " : "text-text-tertiary ")}>{agent.name}</span>
                 <span
                   title={busyAgentIds.has(id) && agent.alive ? t("agentList.dotBusy") : agent.alive ? t("agentList.dotOnline") : t("agentList.dotOffline")}
                   aria-label={busyAgentIds.has(id) && agent.alive ? t("agentList.dotBusy") : agent.alive ? t("agentList.dotOnline") : t("agentList.dotOffline")}

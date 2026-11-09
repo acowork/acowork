@@ -65,8 +65,7 @@ function meta(over: Partial<AgentInfo> = {}): AgentInfo {
   return {
     instance_id: "inst-1",
     agent_id: AGENT,
-    name: "tester",
-    display_name: "Tester",
+    name: "Tester",
     version: "1.0.0",
     alive: true,
     ...over,

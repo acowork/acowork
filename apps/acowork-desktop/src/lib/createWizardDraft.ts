@@ -87,7 +87,6 @@ export interface DraftCapabilityWire {
 export interface CreateAgentDraftWire {
   agent_id: string;
   name: string;
-  display_name?: string;
   role?: string;
   version?: string;
   author?: string;
@@ -174,7 +173,6 @@ export interface SkillEntry {
 export interface WizardState {
   agentId: string;
   name: string;
-  displayName: string;
   role: string;
   version: string;
   author: string;
@@ -190,7 +188,6 @@ export interface WizardState {
 export const EMPTY_WIZARD_STATE: WizardState = {
   agentId: "",
   name: "",
-  displayName: "",
   role: "",
   version: "0.1.0",
   author: "",
@@ -377,8 +374,6 @@ export function toCreateAgentDraft(state: WizardState): CreateAgentDraftWire {
     capabilities: capabilitiesFromInput(state.capabilities),
     skill_files: state.skills.map((s) => s.bytes),
   };
-  const displayName = opt(state.displayName);
-  if (displayName) draft.display_name = displayName;
   const role = opt(state.role);
   if (role) draft.role = role;
   const version = opt(state.version);

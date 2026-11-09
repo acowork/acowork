@@ -91,7 +91,7 @@ export function AgentPage() {
   }
 
   const chatSessionId = st.chatSessionId;
-  const agentName = agentMeta?.display_name ?? agentMeta?.name ?? "";
+  const agentName = agentMeta?.name ?? "";
 
   return (
     <div className={cn(SHELL_CN, "flex min-h-0 flex-col")}>

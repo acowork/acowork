@@ -4,7 +4,6 @@
 agent_id = "com.acowork.document-manager"
 version = "1.0.0"
 name = "Docs"
-display_name = "Docs"
 role = "Document Manager"
 description = "A document management agent skilled in collecting, organizing, archiving, writing, reviewing, converting, and maintaining documentation and knowledge bases."
 author = "ACowork Team"

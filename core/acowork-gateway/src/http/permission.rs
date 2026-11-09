@@ -907,7 +907,6 @@ mod tests {
                 agent_id: "com.example.x".to_string(),
                 version: "1.0.0".to_string(),
                 name: "X".to_string(),
-                display_name: None,
                 role: None,
                 avatar: None,
                 builtin_avatar: None,

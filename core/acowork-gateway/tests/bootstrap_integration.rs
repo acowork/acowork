@@ -842,7 +842,7 @@ async fn concurrent_installs_unique_ids_and_aggregate_inventory() {
             // when it landed the package.
             instance_id: instance_id.to_string(),
             // ADR-009 §5: no user-preference overrides in this fixture.
-            overrides_json: String::new(),
+            identity: None,
         };
         node.publish(
             node_agent_installed_topic(NODE_ID, instance_id),

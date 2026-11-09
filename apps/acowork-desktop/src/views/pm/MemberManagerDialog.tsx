@@ -158,8 +158,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
       Object.values(agents)
         .filter((a) => !memberIds.has(a.meta.instance_id))
         .sort((a, b) =>
-          (a.meta.display_name || a.meta.name || "").localeCompare(
-            b.meta.display_name || b.meta.name || "",
+          (a.meta.name || "").localeCompare(b.meta.name || "",
           ),
         ),
     [agents, memberIds],
@@ -288,14 +287,14 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
                   >
                     <AgentAvatar
                       agentId={a.meta.instance_id}
-                      displayName={a.meta.display_name ?? a.meta.name}
+                      displayName={a.meta.name}
                       avatarUrl={a.meta.avatar ?? null}
                       builtinAvatarId={a.meta.builtin_avatar ?? null}
                       size={24}
                     />
                     <div className="min-w-0 flex-1">
                       <div className="truncate text-xs text-text ">
-                        {a.meta.display_name ?? a.meta.name ?? a.meta.agent_id}
+                        {a.meta.name || a.meta.agent_id}
                       </div>
                       <div className="truncate text-10 text-text-tertiary">{a.meta.instance_id}</div>
                     </div>

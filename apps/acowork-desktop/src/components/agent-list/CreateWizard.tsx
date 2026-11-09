@@ -672,7 +672,11 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
                 />
               </Field>
               <div className="grid grid-cols-2 gap-3">
-                <Field label={t("createWizard.fieldName")} required>
+                <Field
+                  label={t("createWizard.fieldName")}
+                  hint={t("createWizard.fieldNameHint")}
+                  required
+                >
                   <StyledInput
                     type="text"
                     value={state.name}

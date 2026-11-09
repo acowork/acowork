@@ -95,7 +95,7 @@ export function NewGroupDialog({ onClose }: NewGroupDialogProps) {
     for (const a of Object.values(agents)) {
       rows.push({
         id: a.meta.instance_id,
-        name: a.meta.display_name || a.meta.name || a.meta.instance_id,
+        name: a.meta.name || a.meta.instance_id,
         isAgent: true,
         avatarUrl: a.meta.avatar ?? null,
         builtinAvatarId: a.meta.builtin_avatar ?? null,

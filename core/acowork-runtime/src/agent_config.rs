@@ -175,6 +175,35 @@ impl AgentMcpConfig {
 /// `agent_*.json` naming convention for per-agent config snapshots.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AgentConfig {
+    // ── Identity (owned by the instance, not by the package) ──────────
+    /// The instance's **name** — the one name this agent has.
+    ///
+    /// This is the only name a human ever sees for this instance, and the
+    /// only name the agent is told about itself (`{{agent_name}}` in the
+    /// system prompt, the memory identity node, group-chat attribution).
+    /// One value, one writer (this file), so "what the human calls me" and
+    /// "what I call myself" cannot diverge.
+    ///
+    /// `None` means **not materialized yet**: the instance has never
+    /// booted, so there is no user choice to record. The Runtime
+    /// materializes it from the package name on first start
+    /// (`startup::session_init`), and after that nothing but an explicit
+    /// rename writes it — an upgrade does not, because this file lives in
+    /// `workspace/` and the package cannot reach it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+
+    /// User-picked avatar: a packaged image path relative to the instance
+    /// dir (`"assets/avatar-02.png"`). Takes priority over
+    /// [`Self::builtin_avatar`]... except the two are mutually exclusive
+    /// on write, so at most one is ever set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
+
+    /// User-picked builtin avatar icon id (e.g. `"icon-05"`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub builtin_avatar: Option<String>,
+
     /// Max output tokens per request (None = use global default).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<u64>,
@@ -226,13 +255,6 @@ pub struct AgentConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_sessions: Option<usize>,
 
-    // NOTE: the avatar did NOT live here. ADR-009 §5 moved the user's
-    // avatar / display-name pick into `AgentOverrides`
-    // (`{instance_id}.overrides.json`, sibling of the package dir) — see
-    // `acowork_core::agent_overrides` and `http::avatar`. Putting it back
-    // in `agent_config.json` would (a) make it the Gateway's business
-    // again and (b) lose it on every upgrade, since `work_dir` sits
-    // inside the instance dir.
     /// Approval timeout in seconds for loop approval. None = use system default (300).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval_timeout_secs: Option<u64>,

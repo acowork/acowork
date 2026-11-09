@@ -73,8 +73,7 @@ beforeEach(() => {
         meta: {
           instance_id: AGENT_INSTANCE,
           agent_id: "com.acowork.senior-engineer",
-          name: "senior-engineer",
-          display_name: "Senior Engineer",
+          name: "Senior Engineer",
         },
       } as unknown as AgentStorage,
     },
