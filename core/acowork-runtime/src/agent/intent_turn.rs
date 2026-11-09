@@ -483,18 +483,27 @@ const INLINE_VALUE_MAX: usize = 200;
 ///
 /// Human origins produce none: a `user_message` / `pm_task` turn's content is
 /// already the person's own words.
+///
+/// Every field is `#[serde(default)]` so a partially written row (a producer
+/// ahead of this reader, or a truncated write) reads leniently instead of failing
+/// the whole round; emptiness is then judged once, by
+/// [`IntentDisplay::from_metadata`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IntentDisplay {
     /// Wire `kind` the display came from (`request` / `response`) — the only
     /// two origins that have one.
+    #[serde(default)]
     pub origin: String,
     /// The action the sender named (`analyze`, `notify`, …), kept as the summary
     /// fallback for a payload with no words in it.
+    #[serde(default)]
     pub action: String,
     /// One line for a block header, a list preview, a round row.
+    #[serde(default)]
     pub summary: String,
     /// Markdown the human reads: the sender's own prose when it has any, plus
     /// the structured remainder as a detail list.
+    #[serde(default)]
     pub body: String,
     /// `body` was cut at [`DISPLAY_BODY_MAX_BYTES`]; the machine envelope still
     /// holds the whole thing.
@@ -706,6 +715,26 @@ pub fn intent_display_meta(display: &IntentDisplay) -> Value {
         map.insert(META_KEY_INTENT_DISPLAY.to_string(), value);
     }
     Value::Object(map)
+}
+
+impl IntentDisplay {
+    /// The display a row's `metadata` carries, when it carries a usable one.
+    ///
+    /// The **only** reader of [`META_KEY_INTENT_DISPLAY`] and the only place that
+    /// decides what "usable" means: every display surface (round projection,
+    /// session-message view, …) comes through here, so a change to the key or to
+    /// the emptiness rule cannot reach one surface and miss another.
+    ///
+    /// `None` folds three honest absences into one answer — a human turn (no
+    /// display layer), a row written before the projection existed, and a
+    /// projection whose producer could not print anything. Every caller renders
+    /// the stored row body for `None`: that is the fallback, not a blank panel.
+    pub fn from_metadata(metadata: &Value) -> Option<Self> {
+        let raw = metadata.get(META_KEY_INTENT_DISPLAY)?;
+        let display: Self = serde_json::from_value(raw.clone()).ok()?;
+        let usable = !display.body.trim().is_empty() || !display.summary.trim().is_empty();
+        usable.then_some(display)
+    }
 }
 
 /// POST a Runtime-owned chat row through the Gateway relay
@@ -1495,6 +1524,50 @@ mod tests {
         assert_eq!(meta[META_KEY_INTENT_DISPLAY]["body"], "done");
         assert_eq!(meta[META_KEY_INTENT_DISPLAY]["origin"], "response");
         assert_eq!(meta.as_object().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn the_writer_and_the_reader_round_trip() {
+        // The producer serialises a display into the row's metadata and every read
+        // model parses it back with `from_metadata`. Nothing else asserts that the
+        // two agree, so a renamed field on either side would strand the projection
+        // on every surface at once.
+        let d = render_intent_display(
+            "request",
+            "analyze",
+            &serde_json::json!({ "title": "审计 usecase 分层", "request": "检查接口" }),
+        )
+        .expect("display");
+        let meta = intent_display_meta(&d);
+        assert_eq!(IntentDisplay::from_metadata(&meta), Some(d));
+    }
+
+    #[test]
+    fn a_partial_display_reads_leniently_and_an_empty_one_is_absent() {
+        // A producer ahead of this reader (or a truncated write) must not fail the
+        // whole round: missing fields default, and only an empty payload is judged
+        // unusable.
+        let partial = serde_json::json!({ META_KEY_INTENT_DISPLAY: { "summary": "审计" } });
+        let read = IntentDisplay::from_metadata(&partial).expect("partial display still reads");
+        assert_eq!(read.summary, "审计");
+        assert_eq!(read.body, "");
+        assert!(!read.truncated);
+
+        // Whitespace is not content: an empty panel is worse than the stored row.
+        let blank = serde_json::json!({ META_KEY_INTENT_DISPLAY: { "summary": " ", "body": "
+" } });
+        assert_eq!(IntentDisplay::from_metadata(&blank), None);
+
+        // Absence has one answer, whether the key, the value or the shape is wrong.
+        assert_eq!(IntentDisplay::from_metadata(&serde_json::json!({})), None);
+        assert_eq!(
+            IntentDisplay::from_metadata(&serde_json::json!({ META_KEY_INTENT_DISPLAY: null })),
+            None
+        );
+        assert_eq!(
+            IntentDisplay::from_metadata(&serde_json::json!({ META_KEY_INTENT_DISPLAY: "junk" })),
+            None
+        );
     }
 
     #[test]
