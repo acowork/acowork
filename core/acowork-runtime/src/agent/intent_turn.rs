@@ -307,27 +307,7 @@ pub fn brief_for_system_block<'a>(kind: &str, brief: &'a str) -> &'a str {
 
 /// The one-line name a round's reference row carries for the **human** surfaces
 /// (ADR-106 D13: the Chat list preview and the block header, neither of which
-/// may read a projection to name a task).
-///
-/// The envelope field it comes from is the one field with two meanings: for a
-/// [`TurnOrigin::PmTask`] delivery it is the wake-up playbook — a HIGH-TRUST
-/// system-slot value that must never be painted on a chat surface or persisted
-/// with the chat log (design 27 §5.4.2 / §5.4.5). So a PM dispatch names its
-/// round with the dispatch text itself (what the human wrote into the task),
-/// and every other origin names it with the brief as given.
-///
-/// The failure this prevents, measured on a real project group: the playbook was
-/// stamped onto the reference row, so the group's list preview read "You are
-/// being woken to execute PM task …" and a block that had no projection read yet
-/// printed the claim/submit instructions as the round's question.
-///
-/// The split is the producer's, not this function's invention: `acowork-pm`
-/// builds the two facts separately — `build_dispatch_message` ("what the project
-/// group chat shows") and `build_assignment_brief` ("the wake-up playbook …
-/// never persisted, never displayed on a chat surface"). The Runtime read the
-/// second one into the row field of the same name.
-/// The one name a round's reference row carries for the human surfaces, for
-/// **every** origin.
+/// may read a projection to name a task — ADR-096).
 ///
 /// Two producers of a human name, one gate:
 ///
@@ -339,6 +319,21 @@ pub fn brief_for_system_block<'a>(kind: &str, brief: &'a str) -> &'a str {
 ///   `[intent:2f3c…:analyze] {"title":…}`.
 /// - a **human** origin keeps [`reference_brief`]'s rule (the dispatch text for a
 ///   PM task, the router's brief for a chat turn, never the wake-up playbook).
+///
+/// The envelope field both arms read is the one field with two meanings: for a
+/// [`TurnOrigin::PmTask`] delivery it is the wake-up playbook — a HIGH-TRUST
+/// system-slot value that must never be painted on a chat surface or persisted
+/// with the chat log (design 27 §5.4.2 / §5.4.5) — while for every other origin
+/// it is the sender's own brief. The split is the producer's, not this
+/// function's invention: `acowork-pm` builds the two facts separately —
+/// `build_dispatch_message` ("what the project group chat shows") and
+/// `build_assignment_brief` ("the wake-up playbook … never persisted, never
+/// displayed on a chat surface").
+///
+/// The failure this prevents, measured on a real project group: the playbook was
+/// stamped onto the reference row, so the group's list preview read "You are
+/// being woken to execute PM task …" and a block that had no projection read yet
+/// printed the claim/submit instructions as the round's question.
 pub fn reference_name(
     kind: &str,
     brief: &str,
@@ -1809,6 +1804,31 @@ mod tests {
             execution_round_meta("r:m-44", &reference("m-44", None, None, None), "s-1", "inst-a")
                 .get("opened_new")
                 .is_none()
+        );
+    }
+
+    /// The producer's half of the cross-process contract, and the regression for
+    /// 2026-11-09: the row built here is refused by the user service's registry
+    /// unless every key is declared there, and a refused reference row kills the
+    /// whole turn (it is a precondition of delivery, ADR-106 D3). The two crates
+    /// share no type, so the shape is pinned once in `acowork-core` and this test
+    /// is exact equality — not a subset check, which would let a key the registry
+    /// has never seen escape into production again.
+    #[test]
+    fn execution_round_meta_is_the_registered_golden_row() {
+        let produced = execution_round_meta(
+            "r:1f0c",
+            &reference("m-1", Some(true), Some("修复分页不满屏"), Some("t-a4f21dbc")),
+            "20260101_000000_abcdef",
+            "inst-1",
+        );
+        let golden: serde_json::Value =
+            serde_json::from_str(acowork_core::intent::chat_kinds::EXECUTION_ROUND_META_SAMPLE)
+                .expect("the fixture must be JSON");
+        assert_eq!(
+            produced, golden,
+            "the row this builder writes must be the row the registry is asserted against \
+             (acowork_core::intent::chat_kinds::EXECUTION_ROUND_META_SAMPLE)"
         );
     }
 

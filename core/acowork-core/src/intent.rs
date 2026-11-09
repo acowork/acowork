@@ -336,6 +336,44 @@ pub mod chat_kinds {
     pub fn is_card_notice(notice_type: &str) -> bool {
         CARD_NOTICES.contains(&notice_type)
     }
+
+    /// The `meta` of a live `execution_round` row with every optional coordinate
+    /// present — the golden row of the one chat row a Runtime writes (ADR-106 D3).
+    ///
+    /// Three processes meet on this shape and none of them can see the others'
+    /// types: the Runtime's `execution_round_meta` **produces** it, the user
+    /// service's `IntentMeta` is the write-time **registry** that refuses any key
+    /// it does not declare (design 31 §5.2), and the two surfaces read it back by
+    /// key. The registry and the producer live in crates that must not depend on
+    /// each other, so nothing checks them against one another — and a rename on
+    /// the producing side that misses the registry is not a refactor but an
+    /// outage: the reference row is a *precondition* of delivery (ADR-106 D3), so
+    /// a refused key kills the turn before the agent reads a word. That is
+    /// exactly what `round_name` did on 2026-11-09: renamed across the Runtime,
+    /// the Desktop and the Mobile app, and not registered on the fourth process,
+    /// which greeted every PM dispatch with `422 unregistered chat row meta keys`.
+    ///
+    /// So the row is pinned here, once, and asserted from both ends: the Runtime's
+    /// builder must produce **exactly** this object, and this object must
+    /// deserialize into `IntentMeta` leaving `unregistered` empty. Adding a key
+    /// therefore costs a deliberate edit to the fixture, the builder and the
+    /// registry in one change — which is the point of putting it here instead of
+    /// in either end.
+    ///
+    /// Values are representative, not meaningful; only the key set and the value
+    /// *types* are contractual (`opened_new` is a bool, the coordinates strings),
+    /// because a type mismatch is refused by serde just as fatally as a missing
+    /// declaration.
+    pub const EXECUTION_ROUND_META_SAMPLE: &str = r#"{
+        "message_id": "round:r:1f0c",
+        "round_id": "r:1f0c",
+        "agent_session_id": "20260101_000000_abcdef",
+        "agent_instance_id": "inst-1",
+        "in_reply_to": "m-1",
+        "opened_new": true,
+        "round_name": "修复分页不满屏",
+        "task_id": "t-a4f21dbc"
+    }"#;
 }
 
 #[cfg(test)]
@@ -359,6 +397,26 @@ mod tests {
         // became a row, so it cannot be threaded (design 31 §9-3).
         assert!(!chat_kinds::is_threaded_notice("budget_exhausted"));
         assert!(!chat_kinds::is_card_notice("delivery_failed"));
+    }
+
+    /// The golden `execution_round` row is a fixture two other crates assert
+    /// against, so it must at least be the JSON object it claims to be: an
+    /// unparseable or accidentally-empty fixture would let both ends "pass"
+    /// against nothing.
+    #[test]
+    fn the_execution_round_fixture_is_a_non_trivial_object() {
+        let row: serde_json::Value = serde_json::from_str(chat_kinds::EXECUTION_ROUND_META_SAMPLE)
+            .expect("the fixture must parse as JSON");
+        let map = row.as_object().expect("the fixture must be a JSON object");
+        // The three coordinates a reference row cannot exist without
+        // (`check_write_contract`) plus the name it carries for the surfaces.
+        for key in ["message_id", "round_id", "agent_session_id", "round_name"] {
+            assert!(map.contains_key(key), "the fixture must carry {key}");
+        }
+        assert!(
+            map.values().all(|v| !v.is_null()),
+            "a fixture value may be absent from a live row, never null: null is a type mismatch"
+        );
     }
 
     /// Design 31 §7 P3: the write-contract classes are exhaustive and
