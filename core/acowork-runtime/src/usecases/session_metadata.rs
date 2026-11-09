@@ -7,7 +7,8 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::conversation::{SessionScope, SessionVisibility};
+use crate::agent::intent_turn::IntentDisplay;
+use crate::conversation::{ConversationEntry, SessionScope, SessionVisibility};
 use crate::error::{Result, RuntimeError};
 
 /// Summary of a single session for list responses (ADR-024 / ADR-028).
@@ -130,6 +131,41 @@ pub struct MessagesResponse {
     pub count: usize,
 }
 
+/// One entry of [`MessagesResponse`]: the persisted row verbatim, plus the human
+/// rendering the row carries.
+///
+/// The persisted row *is* the stored shape ([`ConversationEntry`]) and stays the
+/// only source of it: `#[serde(flatten)]` means a field added to the row later
+/// reaches this wire shape without anyone remembering to copy it here. What this
+/// view adds is exactly one thing the stored shape cannot declare — `display`, the
+/// projection for the human reader, resolved by the producer's own rule.
+///
+/// That resolution belongs here, at the transport boundary, and not in the
+/// clients: a surface that had to read `metadata.intent` itself would own a copy
+/// of the key name and of the "is it usable" predicate, per surface, forever.
+#[derive(Debug, Serialize)]
+pub struct ConversationEntryView<'a> {
+    #[serde(flatten)]
+    pub entry: &'a ConversationEntry,
+    /// `None` on every human turn and on every row written before the projection
+    /// existed; a surface then renders `content`, which is the honest fallback.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display: Option<IntentDisplay>,
+}
+
+impl<'a> ConversationEntryView<'a> {
+    /// The wire shape of one stored row.
+    pub fn new(entry: &'a ConversationEntry) -> Self {
+        Self {
+            display: entry
+                .metadata
+                .as_ref()
+                .and_then(IntentDisplay::from_metadata),
+            entry,
+        }
+    }
+}
+
 /// Response for `token_stats` — agent-scoped per-(provider, model) token
 /// aggregate read straight off the `token_stats` table (O(#models)).
 ///
@@ -198,5 +234,64 @@ pub trait SessionMetadataService: Send + Sync {
         Err(RuntimeError::Core(acowork_core::AcoworkError::Memory(
             "token_stats not supported by this session-metadata backend".to_string(),
         )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn row(metadata: Option<serde_json::Value>) -> ConversationEntry {
+        ConversationEntry {
+            id: "m1".to_string(),
+            ts: "2026-11-09T08:00:00.000Z".to_string(),
+            role: "user".to_string(),
+            content: "[intent:abc:create_dev_tasks] {\"project_id\":\"p-1\"}".to_string(),
+            metadata,
+            kind: None,
+        }
+    }
+
+    #[test]
+    fn the_wire_shape_is_the_stored_row_plus_display() {
+        // The panel reads `content` for the machine text and `display` for the
+        // human one. Every stored field must survive the view (`flatten`), and the
+        // projection must arrive parsed — a client that had to read
+        // `metadata.intent` itself would own a copy of the key and of the
+        // usability rule.
+        let display = serde_json::json!({
+            "origin": "request",
+            "action": "create_dev_tasks",
+            "summary": "布署需求",
+            "body": "### 布署需求\n\n- **project_id**: p-1",
+            "truncated": false
+        });
+        let entry = row(Some(serde_json::json!({ "round_id": "r-1", "intent": display })));
+        let wire = serde_json::to_value(ConversationEntryView::new(&entry)).unwrap();
+
+        assert_eq!(wire["id"], "m1");
+        assert_eq!(wire["role"], "user");
+        assert_eq!(wire["ts"], "2026-11-09T08:00:00.000Z");
+        assert_eq!(wire["content"], entry.content);
+        assert_eq!(
+            wire["metadata"][crate::agent::intent_turn::META_KEY_INTENT_DISPLAY],
+            display
+        );
+        assert_eq!(wire["display"]["summary"], "布署需求");
+        assert_eq!(wire["display"]["body"], "### 布署需求\n\n- **project_id**: p-1");
+        assert_eq!(wire["display"]["truncated"], false);
+        assert!(wire.get("kind").is_none());
+    }
+
+    #[test]
+    fn a_row_without_a_usable_display_keeps_todays_wire_shape() {
+        // Human turns and pre-projection rows: the key is absent, not `null`, so an
+        // older client sees exactly the payload it saw before.
+        for metadata in [None, Some(serde_json::json!({ "round_id": "r-1" }))] {
+            let entry = row(metadata);
+            let wire = serde_json::to_value(ConversationEntryView::new(&entry)).unwrap();
+            assert!(wire.get("display").is_none(), "wire: {wire}");
+            assert_eq!(wire["content"], entry.content);
+        }
     }
 }
