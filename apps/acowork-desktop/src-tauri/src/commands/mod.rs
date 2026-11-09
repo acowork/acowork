@@ -1,6 +1,7 @@
 //! Tauri commands module — exposes Gateway API to the frontend
 
 pub mod agent;
+pub mod agent_library;
 pub mod chat;
 pub mod chat_mqtt;
 pub mod clipboard;
