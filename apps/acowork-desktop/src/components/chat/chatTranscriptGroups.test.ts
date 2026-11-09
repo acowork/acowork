@@ -214,7 +214,7 @@ describe("buildTranscriptItems", () => {
     const { items, keyOfSeq } = buildTranscriptItems(
       [
         ask(1, "fix the bug", A),
-        round(2, A, "s1", "r1", "u1", { opened_new: true, assignment_brief: "Fix the pagination bug" }),
+        round(2, A, "s1", "r1", "u1", { opened_new: true, round_name: "Fix the pagination bug" }),
         ask(3, "also add tests", A),
         round(4, A, "s1", "r2", "u3", { opened_new: false }),
       ],

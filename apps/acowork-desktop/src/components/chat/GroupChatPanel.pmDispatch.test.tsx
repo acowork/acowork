@@ -155,7 +155,7 @@ function dispatchMessage(seq: number, from = ME): ChatMessageRow {
 /** The round's reference row: contentless, threaded under the dispatch row it
  *  answers (`triggerId`) — or, for a row written before the rev, under a mailbox
  *  id no chat row carries. `legacyBrief` is what those older rows put in
- *  `assignment_brief`: the wake-up playbook. */
+ *  `round_name`: the wake-up playbook. */
 function dispatchRound(
   seq: number,
   opts: { legacyBrief?: boolean; triggerId?: string } = {},
@@ -176,7 +176,7 @@ function dispatchRound(
       in_reply_to: opts.triggerId ?? `pm-${seq}`,
       opened_new: true,
       task_id: TASK,
-      assignment_brief: opts.legacyBrief ? PLAYBOOK : `${TITLE}\n${DESCRIPTION}`,
+      round_name: opts.legacyBrief ? PLAYBOOK : `${TITLE}\n${DESCRIPTION}`,
     },
   };
 }
@@ -241,7 +241,7 @@ describe("GroupChatPanel: a PM dispatch in the project group", () => {
 
   it("never paints the PM playbook as the round's question", () => {
     // A row written before `reference_brief` carries the wake-up playbook in
-    // its `assignment_brief`, and this projection could not be read. Design 27
+    // its `round_name`, and this projection could not be read. Design 27
     // §5.4.2: the playbook reaches the system block and no chat surface.
     tail = [dispatchRound(1, { legacyBrief: true })];
     blocks = { [`${AGENT}|exec-1|r:pm-1`]: entryOf("r:pm-1", null) };

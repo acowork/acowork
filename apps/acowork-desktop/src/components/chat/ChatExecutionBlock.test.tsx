@@ -208,7 +208,7 @@ describe("ChatExecutionBlock", () => {
       ref: REF1,
       roundRow: {
         ...base,
-        meta: { ...base.meta, opened_new: true, assignment_brief: "Fix the pagination bug" },
+        meta: { ...base.meta, opened_new: true, round_name: "Fix the pagination bug" },
       },
       triggerRow: triggerRow(1, "修复分页不满屏"),
       showUserLine: false,
@@ -238,7 +238,32 @@ describe("ChatExecutionBlock", () => {
     expect(container.querySelector('pre[data-seq="1"]')).toBeNull();
   });
 
-  /** ADR-106 D13 + design 27 §5.4.2: the reference row's `assignment_brief` names
+  /** The round-name key was renamed off `assignment_brief` (the envelope's
+   *  HIGH-TRUST PM-playbook field). Transcripts recorded before the rename
+   *  carry the old spelling, and their block line must still be named. */
+  it("names a round from the legacy key on a row written before the rename", () => {
+    const base = roundRow(3, "r1");
+    const opener: RoundItem = {
+      ref: REF1,
+      roundRow: {
+        ...base,
+        meta: { ...base.meta, opened_new: true, assignment_brief: "Fix the pagination bug" },
+      },
+      triggerRow: triggerRow(1, "修复分页不满屏"),
+      showUserLine: false,
+      questionOnTranscript: true,
+    };
+    const { container } = renderBlock(
+      { [REF1]: entryOf({ projection: undefined }) },
+      {},
+      blockOf([opener]),
+    );
+    expect(container.querySelector('[data-seq="3"]')?.textContent).toContain(
+      "Fix the pagination bug",
+    );
+  });
+
+  /** ADR-106 D13 + design 27 §5.4.2: the reference row's `round_name` names
    *  a round's LINE, never the block's title — a row written before the Runtime
    *  guarded that field carries the PM wake-up playbook, and a header that fell
    *  back to it would print the claim/submit instructions as the task's name.
@@ -253,7 +278,7 @@ describe("ChatExecutionBlock", () => {
         meta: {
           ...base.meta,
           opened_new: true,
-          assignment_brief:
+          round_name:
             'You are being woken to execute PM task "t-1". Follow this workflow exactly:\n1. Claim it first',
         },
       },
@@ -1077,7 +1102,7 @@ describe("ChatExecutionBlock action row", () => {
       ref: REF1,
       roundRow: {
         ...base,
-        meta: { ...base.meta, opened_new: true, assignment_brief: "审计 usecase 分层" },
+        meta: { ...base.meta, opened_new: true, round_name: "审计 usecase 分层" },
       },
       showUserLine: false,
       questionOnTranscript: true,

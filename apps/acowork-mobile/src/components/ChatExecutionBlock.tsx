@@ -378,7 +378,7 @@ function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: 
   const [open, setOpen] = useState(defaultOpen)
   const projection = entry?.projection
   // An opener round's sentence stands on the transcript as its own bubble —
-  // the block's line leads with the reference row's one-line `assignment_brief`,
+  // the block's line leads with the reference row's one-line `round_name`,
   // never with a second copy of the raw text and never with the projection's
   // stored question (that one is the delivered prompt, reference parts and all).
   // The Runtime's `reference_name` owns what may be written there: a PM dispatch
@@ -386,7 +386,13 @@ function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: 
   // round is named by its display projection.
   const question =
     (round.showUserLine ? round.triggerRow?.body : '') ||
-    (round.questionOnTranscript ? round.roundRow.meta?.assignment_brief ?? '' : '') ||
+    (round.questionOnTranscript
+      ? (round.roundRow.meta?.round_name ??
+          // Rows written before the rename carry the fact under the key it
+          // borrowed from the envelope's PM playbook. Read, never written.
+          round.roundRow.meta?.assignment_brief ??
+          '')
+      : '') ||
     // A peer round (design 27 §5.4.5): `user.body` is the machine envelope, and
     // the display projection beside it is the sentence a human reads.
     projection?.user?.display?.summary ||

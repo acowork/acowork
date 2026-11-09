@@ -197,8 +197,13 @@ export interface ChatMessageRow {
     /** ADR-106 D6: the reference row opened a NEW session rather than
      *  continuing one; absent when the turn could not say. */
     opened_new?: boolean;
-    /** The router's one-line statement of what the round was asked to do
-     *  (ADR-106 D13), carried on the reference row for the drill tooltip. */
+    /** The round's one-line name (ADR-106 D13), carried on the reference row: the
+     *  Chat list line and the block header read it without touching a projection.
+     *  From the Runtime's `reference_name`, so for a PM dispatch it is the
+     *  dispatch text and for a peer round the sender's own summary. */
+    round_name?: string;
+    /** Legacy spelling of {@link round_name} on rows written before the rename.
+     *  Read as a fallback, never written. */
     assignment_brief?: string;
     /** On a `session_choice` / `confirm_continue` notice (ADR-106 D6 levels 3
      *  and 5): the sessions the human may pick, plus the always-offered escape

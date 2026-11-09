@@ -165,10 +165,16 @@ pub struct TurnReference {
     /// `None` — it must not be faked as `Some(false)`, or every locally composed
     /// turn would read as "continues an existing task".
     pub opened_new: Option<bool>,
-    /// The dispatch brief, which names the round in the Chat list and on the
-    /// block header (D13). Written once with the row and never rewritten —
-    /// reading the projection to name a list item is the ADR-096 red line.
-    pub assignment_brief: Option<String>,
+    /// The round's one-line name, which the Chat list and the block header read
+    /// (D13). Written once with the row and never rewritten — reading the
+    /// projection to name a list item is the ADR-096 red line.
+    ///
+    /// Deliberately NOT named `assignment_brief`: that is the envelope's
+    /// HIGH-TRUST field (the PM wake-up playbook, see
+    /// [`extract_assignment_brief`]), and for a peer origin this slot carries the
+    /// *sender's own* summary instead ([`reference_name`]). One name, one producer
+    /// — the two facts sharing a key is how a playbook nearly reached a chat log.
+    pub round_name: Option<String>,
     /// The PM task this round works on, when the delivery came in through a task
     /// conversation. The block renders it as a task chip (D13), which is why it
     /// is durable on the reference rather than read back from the projection.
@@ -794,8 +800,8 @@ pub const KIND_EXECUTION_ROUND: &str = "execution_round";
 /// from the execution session's projection (D4). What stays durable here is the
 /// reference — which round, in which session, on which instance — plus the two
 /// presentation hints the Chat may render without a projection read
-/// (`assignment_brief` and `task_id`; D13 forbids reading the projection to
-/// paint a list).
+/// (`round_name` and `task_id`; D13 forbids reading the projection to paint a
+/// list).
 ///
 /// The idempotency key is the round's own natural key, `round:{round_id}`.
 /// `round_id` is a deterministic function of the inbound message id (D2), so a
@@ -832,13 +838,15 @@ pub fn execution_round_meta(
     if let Some(new) = reference.opened_new {
         meta["opened_new"] = serde_json::Value::Bool(new);
     }
-    if let Some(brief) = reference
-        .assignment_brief
+    // The durable key states the fact it holds: this is the round's name for
+    // every origin, not the envelope's PM playbook (see `TurnReference::round_name`).
+    if let Some(name) = reference
+        .round_name
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
-        meta["assignment_brief"] = serde_json::Value::String(brief.to_string());
+        meta["round_name"] = serde_json::Value::String(name.to_string());
     }
     if let Some(task) = reference
         .task_id
@@ -1763,7 +1771,7 @@ mod tests {
         TurnReference {
             trigger_message_id: trigger.to_string(),
             opened_new,
-            assignment_brief: brief.map(str::to_string),
+            round_name: brief.map(str::to_string),
             task_id: task_id.map(str::to_string),
         }
     }
@@ -1820,11 +1828,11 @@ mod tests {
             "s-1",
             "inst-a",
         );
-        assert_eq!(with_brief["assignment_brief"], "draft the release note");
+        assert_eq!(with_brief["round_name"], "draft the release note");
         assert_eq!(with_brief["task_id"], "t-083", "the chip's coordinate");
         for blank in [Some(""), Some("   "), None] {
             let m = execution_round_meta("r:m-46", &reference("m-46", None, blank, blank), "s-1", "inst-a");
-            for key in ["assignment_brief", "task_id"] {
+            for key in ["round_name", "task_id"] {
                 assert!(
                     m.get(key).filter(|v| v.as_str() != Some("")).is_none(),
                     "a blank {key} must not be written as a task name: {m}"
