@@ -776,6 +776,10 @@
     "stepDistribute": "Distribute",
     "statusSigned": "Signed ✓",
     "statusUnsigned": "Unsigned",
+    "librarySaved": "Saved to the local library: {{file}}",
+    "librarySaveFailed": "Could not save to the local library: {{error}}",
+    "libraryRemoteSkipped": "Publish ran on node {{node}} — {{file}} stays there. The Local tab only indexes this computer, so nothing was copied.",
+    "libraryRemoteNodeUnknown": "another computer",
     "buttonClose": "Close",
     "ariaLabelRemoveAvatar": "Remove packaged avatar"
   },

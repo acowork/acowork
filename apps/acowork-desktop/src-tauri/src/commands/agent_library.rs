@@ -71,6 +71,27 @@ pub struct LocalAgentRow {
     pub version: Option<String>,
     pub description: Option<String>,
     pub size_bytes: Option<u64>,
+    /// Package role / job title (`role` in the manifest) — the same field the
+    /// Hub card renders next to the name.
+    pub role: Option<String>,
+    /// Discovery labels (`labels` in the manifest), trimmed.
+    pub labels: Vec<String>,
+    /// Capability keys (`[capabilities.*]` table names), sorted. Keys only: the
+    /// descriptions are prose and the card shows chips.
+    pub capabilities: Vec<String>,
+    /// Skill names, taken from the package's `skills/<name>/SKILL.md` entries.
+    /// The manifest does not list them (`[skills]` is only an injection mode
+    /// flag), so the archive is the only truthful source — the Hub index reads
+    /// the published artifact the same way.
+    pub skills: Vec<String>,
+    /// The package's own `assets/avatar.*`, inlined as a `data:` URL.
+    ///
+    /// `None` when the package declares no avatar, points outside the archive,
+    /// is not an image the webview renders, or is too large — the card then
+    /// falls back to the same letter block the Hub card uses. Inlined rather
+    /// than extracted to a cache directory because the list is small and a
+    /// temp-file lifetime would add a second thing to invalidate.
+    pub avatar: Option<String>,
     /// Declared permissions, used **only** to render "N 项权限" (PRD REQ-007
     /// keeps the high-risk confirmation on the Hub card; a file row has no
     /// catalogue classification to confirm against).
@@ -203,17 +224,22 @@ pub(crate) fn seed_if_missing(app: &AppHandle) -> Result<usize, String> {
 /// `{agent_id}-{version}.agent` is the same artifact and must replace the old
 /// one — unlike seeding, "overwrite" is correct here because the caller is
 /// producing the file, not restoring a default.
-// Called by the publish wizard's "copy the build output into the library"
-// step (plan §3 T2). Nothing in this card calls it, and keeping it here rather
-// than writing it twice is the point of the seam (plan §1).
-#[allow(dead_code)]
+///
+/// The only caller is `commands::publish::save_publish_to_library`, which owns
+/// the "is this really a publish artifact on this machine" question; this
+/// function stays a plain file copy so that policy and I/O cannot drift apart
+/// (plan §1: one shared seam, not two implementations).
 pub(crate) fn copy_into_library(app: &AppHandle, src: &Path) -> Result<PathBuf, String> {
     let library = library_dir(app)?;
     copy_into(&library, src)
 }
 
-#[allow(dead_code)]
-fn copy_into(library: &Path, src: &Path) -> Result<PathBuf, String> {
+/// The path-level half of [`copy_into_library`], without the `AppHandle`.
+///
+/// `pub(crate)` so the publish write-back's tests can prove the on-disk
+/// contract (overwrite one version, keep two versions side by side) without a
+/// Tauri app — the `AppHandle` wrapper only adds `library_dir()`.
+pub(crate) fn copy_into(library: &Path, src: &Path) -> Result<PathBuf, String> {
     let file_name = src
         .file_name()
         .ok_or_else(|| format!("{} has no file name", src.display()))?;
@@ -261,7 +287,11 @@ fn package_paths(
     Ok(paths)
 }
 
-fn has_package_extension(path: &Path) -> bool {
+/// Is this a `.agent` package by file name (case-insensitive)?
+///
+/// Shared with the publish write-back: the wizard copies a file the node just
+/// built, so the same one-definition-of-"a package" applies on both paths.
+pub(crate) fn has_package_extension(path: &Path) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case(PACKAGE_EXT))
@@ -283,6 +313,11 @@ fn read_row(path: &Path) -> LocalAgentRow {
         version: None,
         description: None,
         size_bytes: None,
+        role: None,
+        labels: Vec::new(),
+        capabilities: Vec::new(),
+        skills: Vec::new(),
+        avatar: None,
         permissions: Vec::new(),
         error: None,
     };
@@ -295,32 +330,80 @@ fn read_row(path: &Path) -> LocalAgentRow {
         }
     }
 
-    match read_manifest(path) {
-        Ok(manifest) => {
+    match read_package(path) {
+        Ok(facts) => {
+            let manifest = facts.manifest;
             row.agent_id = Some(manifest.agent_id);
             row.name = Some(manifest.name);
             row.version = Some(manifest.version);
             row.description = Some(manifest.description);
+            row.role = manifest.role.filter(|r| !r.trim().is_empty());
+            row.labels = manifest
+                .labels
+                .iter()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            row.capabilities = {
+                let mut keys: Vec<String> = manifest.capabilities.keys().cloned().collect();
+                keys.sort();
+                keys
+            };
             row.permissions = manifest
                 .permissions
                 .iter()
                 .map(|p| p.to_permission_string())
                 .collect();
+            row.skills = facts.skills;
+            row.avatar = facts.avatar;
         }
         Err(e) => row.error = Some(e),
     }
     row
 }
 
-/// Parse `manifest.toml` out of a `.agent` ZIP through the shared domain type,
-/// so the row shows exactly what the Runtime will read (`AgentManifest`), not a
-/// second hand-rolled TOML schema.
-fn read_manifest(path: &Path) -> Result<AgentManifest, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
+/// Everything the card needs from one `.agent` file, read in **one** archive
+/// pass: the manifest, the packaged avatar, the skill names.
+///
+/// One pass keeps the three derived fields impossible to disagree with each
+/// other — they all come from a single view of the same file — and avoids
+/// re-opening the ZIP per field for every package on every dialog open
+/// (REQ-032).
+pub(crate) struct PackageFacts {
+    pub manifest: AgentManifest,
+    /// `data:` URL, see [`LocalAgentRow::avatar`].
+    pub avatar: Option<String>,
+    /// `skills/<name>/SKILL.md` directories, sorted and de-duplicated.
+    pub skills: Vec<String>,
+}
+
+/// Largest avatar we inline. The shipped avatars are tens of KB; the cap keeps
+/// a pathological package from turning the list response into megabytes.
+const MAX_AVATAR_BYTES: u64 = 256 * 1024;
+
+type Archive = zip::ZipArchive<std::io::Cursor<Vec<u8>>>;
+
+/// Read one `.agent` archive into the fields a row shows.
+pub(crate) fn read_package(path: &Path) -> Result<PackageFacts, String> {
+    let bytes =
+        std::fs::read(path).map_err(|e| format!("Failed to read {}: {e}", path.display()))?;
     let reader = std::io::Cursor::new(bytes);
-    let mut archive = zip::ZipArchive::new(reader)
+    let mut archive = Archive::new(reader)
         .map_err(|e| format!("Not a valid .agent package (ZIP): {e}"))?;
+
+    let manifest = read_manifest_from(&mut archive)?;
+    let avatar = read_avatar(&mut archive, manifest.avatar.as_deref());
+    let skills = read_skill_names(&archive);
+    Ok(PackageFacts {
+        manifest,
+        avatar,
+        skills,
+    })
+}
+
+/// `manifest.toml` through the shared domain type, so a row shows exactly what
+/// the Runtime will read (`AgentManifest`) and not a second hand-rolled schema.
+fn read_manifest_from(archive: &mut Archive) -> Result<AgentManifest, String> {
     let mut manifest_file = archive
         .by_name("manifest.toml")
         .map_err(|e| format!("manifest.toml not found in package: {e}"))?;
@@ -329,6 +412,68 @@ fn read_manifest(path: &Path) -> Result<AgentManifest, String> {
         .read_to_string(&mut manifest_str)
         .map_err(|e| format!("Failed to read manifest.toml: {e}"))?;
     AgentManifest::from_toml(&manifest_str).map_err(|e| format!("Invalid manifest.toml: {e}"))
+}
+
+/// Inline the package's own avatar as a `data:` URL.
+///
+/// Every failure is `None`, never a row error: a package with a missing,
+/// oversized or unrecognised avatar is still installable, and the card has a
+/// letter-block fallback. The declared path is treated as untrusted — no
+/// absolute path, no `..`, no directory entry — because it comes out of a file
+/// the user copied in from anywhere.
+fn read_avatar(archive: &mut Archive, declared: Option<&str>) -> Option<String> {
+    let declared = declared.map(str::trim).filter(|p| !p.is_empty())?;
+    let mime = avatar_mime(declared)?;
+    let normalised = declared.replace('\\', "/");
+    if normalised.starts_with('/') || normalised.split('/').any(|seg| seg == "..") {
+        return None;
+    }
+    let mut entry = archive.by_name(&normalised).ok()?;
+    if entry.is_dir() || entry.size() > MAX_AVATAR_BYTES {
+        return None;
+    }
+    let mut buf = Vec::with_capacity(entry.size() as usize);
+    entry.read_to_end(&mut buf).ok()?;
+    if buf.is_empty() {
+        return None;
+    }
+    let encoded = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &buf);
+    Some(format!("data:{mime};base64,{encoded}"))
+}
+
+/// Image types the webview renders without a converter. Anything else is
+/// skipped rather than handed to an `<img>` that cannot decode it.
+fn avatar_mime(path: &str) -> Option<&'static str> {
+    let ext = Path::new(path)
+        .extension()
+        .and_then(|e| e.to_str())?
+        .to_ascii_lowercase();
+    match ext.as_str() {
+        "png" => Some("image/png"),
+        "jpg" | "jpeg" => Some("image/jpeg"),
+        "webp" => Some("image/webp"),
+        "gif" => Some("image/gif"),
+        _ => None,
+    }
+}
+
+/// `skills/<name>/SKILL.md` → `<name>`.
+///
+/// Taken from the archive's entry names rather than the manifest: `[skills]`
+/// only carries the injection mode, so the package's skill directory is the
+/// only truthful source (the Hub index lists the same set).
+fn read_skill_names(archive: &Archive) -> Vec<String> {
+    let mut names: Vec<String> = archive
+        .file_names()
+        .filter_map(|name| {
+            let rest = name.strip_prefix("skills/")?;
+            let (skill, tail) = rest.split_once('/')?;
+            (tail == "SKILL.md" && !skill.is_empty()).then(|| skill.to_string())
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Enumerate a library directory into rows, plus the reason it is empty when
@@ -840,6 +985,168 @@ type = "FilesystemRead"
                 "[probe]   {} | {:?} | {:?} | {:?} | err={:?}",
                 row.file_name, row.agent_id, row.name, row.version, row.error
             );
+        }
+    }
+
+    /// A manifest that declares the discovery fields the card renders.
+    const RICH_MANIFEST: &str = r#"
+agent_id = "com.example.rich"
+version = "2.3.4"
+name = "Rich"
+role = "Senior Reviewer"
+description = "Carries every field the card shows"
+author = "acowork"
+runtime_version = "0.1.0"
+avatar = "assets/avatar.png"
+labels = ["review", "legacy-code"]
+
+[[permissions]]
+type = "Network"
+
+[capabilities.review_code]
+description = "Reviews code"
+
+[capabilities.audit_debt]
+description = "Audits debt"
+"#;
+
+    /// Build a package with extra archive entries. `[u8]` payloads keep the
+    /// fixture honest: the avatar is copied byte-for-byte, so a wrong path or a
+    /// wrong extension really does change the outcome.
+    fn write_package_with(path: &Path, manifest: &str, entries: &[(&str, &[u8])]) {
+        use std::io::Write as _;
+        let file = std::fs::File::create(path).unwrap();
+        let mut zip = zip::ZipWriter::new(file);
+        zip.start_file("manifest.toml", zip::write::SimpleFileOptions::default())
+            .unwrap();
+        zip.write_all(manifest.as_bytes()).unwrap();
+        for (name, body) in entries {
+            zip.start_file(*name, zip::write::SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(body).unwrap();
+        }
+        zip.finish().unwrap();
+    }
+
+    /// The 1×1 transparent PNG every browser decodes.
+    const PNG: &[u8] = &[
+        0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44,
+        0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00, 0x00, 0x1F,
+        0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41, 0x54, 0x78, 0x9C, 0x63, 0x00,
+        0x01, 0x00, 0x00, 0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00, 0x00, 0x00, 0x00, 0x49,
+        0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+    ];
+
+    /// The card reads role / labels / capability keys / skill names / avatar
+    /// out of the archive — one fixture, all five fields, so a future refactor
+    /// that drops one of them fails here instead of silently thinning the card.
+    #[test]
+    fn the_row_carries_every_field_the_card_shows() {
+        let scratch = Scratch::new("rich");
+        let library = scratch.path();
+        write_package_with(
+            &library.join("rich.agent"),
+            RICH_MANIFEST,
+            &[
+                ("assets/avatar.png", PNG),
+                ("skills/reviewing/SKILL.md", b"# Reviewing"),
+                ("skills/auditing/SKILL.md", b"# Auditing"),
+                ("skills/auditing/notes.md", b"not a skill entry"),
+            ],
+        );
+
+        let row = &list_rows(library).rows[0];
+        assert_eq!(row.error, None);
+        assert_eq!(row.role.as_deref(), Some("Senior Reviewer"));
+        assert_eq!(row.labels, vec!["review", "legacy-code"]);
+        // Sorted keys, so the chip order does not depend on HashMap iteration.
+        assert_eq!(row.capabilities, vec!["audit_debt", "review_code"]);
+        // Directory names only: the nested notes.md is not a second entry, and
+        // the manifest cannot supply these at all.
+        assert_eq!(row.skills, vec!["auditing", "reviewing"]);
+        let avatar = row.avatar.as_deref().expect("avatar inlined");
+        assert!(avatar.starts_with("data:image/png;base64,"), "{avatar}");
+    }
+
+    /// A package without an avatar keeps `avatar: None` — the card's letter
+    /// block is the fallback, not an error.
+    #[test]
+    fn a_package_without_an_avatar_has_none() {
+        let scratch = Scratch::new("no-avatar");
+        write_package(&scratch.child("plain.agent"), MANIFEST);
+        let row = &list_rows(scratch.path()).rows[0];
+        assert_eq!(row.avatar, None);
+        assert_eq!(row.error, None, "a missing avatar is not a broken package");
+        assert!(row.skills.is_empty());
+        assert!(row.labels.is_empty());
+    }
+
+    /// Only image extensions are inlined: an `<img>` pointed at a `.txt` would
+    /// fail to decode and show a broken-image icon instead of the initial.
+    #[test]
+    fn a_non_image_avatar_is_skipped() {
+        let scratch = Scratch::new("txt-avatar");
+        let manifest = RICH_MANIFEST.replace("assets/avatar.png", "assets/avatar.txt");
+        write_package_with(
+            &scratch.child("txt.agent"),
+            &manifest,
+            &[("assets/avatar.txt", b"i am not a picture")],
+        );
+        let row = &list_rows(scratch.path()).rows[0];
+        assert_eq!(row.error, None);
+        assert_eq!(row.avatar, None);
+    }
+
+    /// The declared path comes out of a file the user copied in from anywhere,
+    /// so it is treated as untrusted even though it only ever opens one archive
+    /// entry. A traversal-shaped path yields no avatar, not an error.
+    #[test]
+    fn an_avatar_path_outside_the_archive_is_refused() {
+        let scratch = Scratch::new("traversal-avatar");
+        let manifest = RICH_MANIFEST.replace("assets/avatar.png", "../../evil.png");
+        write_package_with(
+            &scratch.child("evil.agent"),
+            &manifest,
+            &[("../../evil.png", PNG), ("assets/avatar.png", PNG)],
+        );
+        let row = &list_rows(scratch.path()).rows[0];
+        assert_eq!(row.error, None);
+        assert_eq!(row.avatar, None);
+    }
+
+    /// A manifest that names an avatar the archive does not contain is still a
+    /// perfectly installable package: the row stays healthy.
+    #[test]
+    fn a_declared_avatar_missing_from_the_archive_is_not_a_row_error() {
+        let scratch = Scratch::new("ghost-avatar");
+        write_package_with(&scratch.child("ghost.agent"), RICH_MANIFEST, &[]);
+        let row = &list_rows(scratch.path()).rows[0];
+        assert_eq!(row.error, None);
+        assert_eq!(row.avatar, None);
+        assert_eq!(row.role.as_deref(), Some("Senior Reviewer"));
+    }
+
+    /// The shipped packages carry all of it in the archive — this is the
+    /// evidence that the Local card shows real fields rather than blanks.
+    #[test]
+    fn the_shipped_packages_carry_role_labels_capabilities_and_skills() {
+        let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../agents/agent-packages");
+        if !bundled.exists() {
+            eprintln!("skipped: {} is not present in this checkout", bundled.display());
+            return;
+        }
+        for row in &list_rows(&bundled).rows {
+            assert_eq!(row.error, None, "{} reported an error", row.file_name);
+            assert!(row.role.is_some(), "{} has no role", row.file_name);
+            assert!(!row.labels.is_empty(), "{} has no labels", row.file_name);
+            assert!(
+                !row.capabilities.is_empty(),
+                "{} has no capability keys",
+                row.file_name
+            );
+            assert!(!row.skills.is_empty(), "{} has no skills", row.file_name);
+            let avatar = row.avatar.as_deref().unwrap_or_default();
+            assert!(avatar.starts_with("data:image/"), "{} has no avatar", row.file_name);
         }
     }
 

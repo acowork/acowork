@@ -402,6 +402,23 @@ pub struct SystemStatusInfo {
     pub mqtt_password: Option<String>,
 }
 
+/// Minimal mirror of Gateway's `ConfigResponse` (`GET /api/config`).
+///
+/// Only `packages_dir` is typed: it is the Node Agent artifact root the
+/// publish write-back has to validate against (plan §3 T2), and the Gateway
+/// already uses the same value to read a built package back
+/// (`publish_api.rs::export_package`). Every other field of the payload is
+/// deliberately ignored — the Desktop must not grow a second opinion about
+/// Gateway configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayConfigInfo {
+    /// `{node_home}/packages` unless the Gateway was started with an explicit
+    /// `--packages-dir`. `default` so a Gateway predating/renaming the field
+    /// degrades to the documented default instead of failing the call.
+    #[serde(default)]
+    pub packages_dir: String,
+}
+
 impl GatewayClient {
     /// Create a new GatewayClient with the default base URL
     pub fn new() -> Self {
@@ -505,6 +522,15 @@ impl GatewayClient {
     pub async fn list_agents(&self) -> Result<Vec<AgentListEntry>> {
         let resp = self
             .send(|| Ok(self.client.get(format!("{}/api/agents", self.base_url))))
+            .await?;
+        parse_gateway_response(resp).await
+    }
+
+    /// `GET /api/config` — Gateway configuration (only `packages_dir` is
+    /// mirrored, see [`GatewayConfigInfo`]).
+    pub async fn get_config(&self) -> Result<GatewayConfigInfo> {
+        let resp = self
+            .send(|| Ok(self.client.get(format!("{}/api/config", self.base_url))))
             .await?;
         parse_gateway_response(resp).await
     }

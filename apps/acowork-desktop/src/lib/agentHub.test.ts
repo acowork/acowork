@@ -24,6 +24,7 @@ import {
   hubAvatarInitialOf,
   hubChipsOf,
   hubDeprecationOf,
+  localChipsOf,
   resetHubIndexCache,
   searchHubAgents,
   type HubAgent,
@@ -114,6 +115,46 @@ describe("high risk permissions", () => {
   it("falls back to the known-risky set when the Hub omits it", () => {
     const a = agent({ permissions: ["Shell", "FilesystemWrite", "Read"], high_risk_permissions: [] });
     expect(highRiskItemsOf(a).sort()).toEqual(["FilesystemWrite", "Shell"]);
+  });
+});
+
+describe("localChipsOf", () => {
+  const row = (over: Partial<Parameters<typeof localChipsOf>[0]> = {}) => ({
+    file_name: "a.agent",
+    path: "C:/lib/a.agent",
+    agent_id: "com.x.y",
+    name: "X",
+    version: "1.0.0",
+    description: "",
+    size_bytes: 1,
+    role: null,
+    labels: [],
+    capabilities: [],
+    skills: [],
+    avatar: null,
+    permissions: [],
+    error: null,
+    ...over,
+  });
+
+  it("uses the same sources in the same order as the Hub card", () => {
+    expect(localChipsOf(row({ labels: ["l1"], capabilities: ["c1"], skills: ["s1"] }))).toEqual([
+      "l1",
+      "c1",
+      "s1",
+    ]);
+  });
+
+  it("de-duplicates case-insensitively and caps at four", () => {
+    expect(
+      localChipsOf(
+        row({ labels: ["Review", "review"], capabilities: ["a", "b", "c"], skills: ["d"] }),
+      ),
+    ).toEqual(["Review", "a", "b", "c"]);
+  });
+
+  it("drops blank entries", () => {
+    expect(localChipsOf(row({ labels: ["  ", "real"] }))).toEqual(["real"]);
   });
 });
 

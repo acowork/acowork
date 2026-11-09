@@ -1613,6 +1613,10 @@
     "stepDistribute": "配布",
     "statusSigned": "署名済み ✓",
     "statusUnsigned": "未署名",
+    "librarySaved": "ローカルライブラリに保存しました: {{file}}",
+    "librarySaveFailed": "ローカルライブラリへの保存に失敗しました: {{error}}",
+    "libraryRemoteSkipped": "パブリッシュはノード {{node}} で実行され、{{file}} はそのノードに残ります。ローカルタブはこのコンピューターのみを対象とするため、コピーは行っていません。",
+    "libraryRemoteNodeUnknown": "別のコンピューター",
     "buttonClose": "閉じる",
     "ariaLabelRemoveAvatar": "パッケージされたアバターを削除"
   },

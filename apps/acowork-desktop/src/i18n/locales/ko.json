@@ -1614,6 +1614,10 @@
     "stepDistribute": "배포",
     "statusSigned": "서명됨 ✓",
     "statusUnsigned": "서명 안 됨",
+    "librarySaved": "로컬 라이브러리에 저장했습니다: {{file}}",
+    "librarySaveFailed": "로컬 라이브러리에 저장하지 못했습니다: {{error}}",
+    "libraryRemoteSkipped": "게시가 노드 {{node}}에서 실행되었고 {{file}}은(는) 해당 노드에 남습니다. 로컬 탭은 이 컴퓨터만 대상으로 하므로 복사하지 않았습니다.",
+    "libraryRemoteNodeUnknown": "다른 컴퓨터",
     "buttonClose": "닫기",
     "ariaLabelRemoveAvatar": "패키지된 아바타 제거"
   },

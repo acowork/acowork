@@ -1,9 +1,11 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { cn } from "../../lib/utils";
 import { useTranslation } from "../../i18n/useTranslation";
 import { ErrorBox } from "../common/ErrorBox";
+import { savePublishToLibrary } from "../../lib/agentHub";
+import { useAgentStore } from "../../stores/agentStore";
 import type {
   PreparePublishResponse,
   BuildPublishResponse,
@@ -27,6 +29,7 @@ import {
   Loader2,
   ExternalLink,
   ImagePlus,
+  RotateCcw,
   X as XIcon,
 } from "lucide-react";
 
@@ -38,6 +41,23 @@ interface PublishWizardProps {
 }
 
 type WizardStep = "check" | "clean" | "build" | "sign" | "distribute";
+
+/**
+ * State of the REQ-029 write-back ("copy the built package into the Local
+ * library"). It is kept separate from `busy` on purpose: a slow or failed copy
+ * must never block the wizard from closing, because the package itself is
+ * already finished and lives on the node either way.
+ *
+ * `remote_skipped` is a success, not a failure — D12 scopes the copy to a
+ * single-machine deployment, so in remote/relay mode the wizard's job is to
+ * say which node holds the artifact (B5).
+ */
+type LibrarySave =
+  | { status: "idle" }
+  | { status: "saving" }
+  | { status: "saved"; path: string; fileName: string }
+  | { status: "remote_skipped"; fileName: string }
+  | { status: "failed"; message: string };
 
 /**
  * Source of the avatar that will be baked into the published package.
@@ -84,8 +104,13 @@ export function PublishWizard({
   // Export result
   const [exportResult, setExportResult] = useState<ExportPackageResponse | null>(null);
 
-  // Agent detail (loaded on open to seed the avatar selection)
-  const [, setAgentDetail] = useState<AgentDetail | null>(null);
+  // REQ-029 write-back state (see `LibrarySave`)
+  const [librarySave, setLibrarySave] = useState<LibrarySave>({ status: "idle" });
+
+  // Agent detail (loaded on open to seed the avatar selection, and to know
+  // which node owns the artifact when the write-back cannot reach it)
+  const [agentDetail, setAgentDetail] = useState<AgentDetail | null>(null);
+  const nodes = useAgentStore((s) => s.nodes);
 
   // Avatar selection — initialised from agentDetail once it loads, then
   // mutated by the user. `dirty` is true when the current selection differs
@@ -104,6 +129,7 @@ export function PublishWizard({
       setBuildResult(null);
       setSignResult(null);
       setExportResult(null);
+      setLibrarySave({ status: "idle" });
       setAgentDetail(null);
       setAvatar({ kind: "none" });
       setAvatarDirty(false);
@@ -159,6 +185,43 @@ export function PublishWizard({
   // Close on Escape — see CreateWizard; `busy` is read at keydown time so a
   // spinner flip no longer re-subscribes the listener.
   useEscapeClose(open, onClose, !busy);
+
+  /**
+   * REQ-029 / D12 / plan §3: copy the artifact the node just built into the
+   * Local library.
+   *
+   * Deliberately fire-and-forget from `runSign`: it never sets `busy`, never
+   * throws and never blocks the wizard from closing. The command (not this
+   * component) decides whether a copy is even legal — in remote/relay mode it
+   * answers `remote_skipped` instead of trying to read another machine's disk,
+   * and a genuine failure only costs the library row, which is what the retry
+   * button is for.
+   */
+  const copyIntoLibrary = useCallback(async (packagePath: string) => {
+    setLibrarySave({ status: "saving" });
+    try {
+      const result = await savePublishToLibrary(packagePath);
+      setLibrarySave(
+        result.status === "saved"
+          ? { status: "saved", path: result.path ?? "", fileName: result.file_name }
+          : { status: "remote_skipped", fileName: result.file_name },
+      );
+    } catch (e) {
+      setLibrarySave({ status: "failed", message: String(e) });
+    }
+  }, []);
+
+  /**
+   * Display name of the node that owns this agent, for the `remote_skipped`
+   * message (B5). Falls back to the node id, and to a generic label when the
+   * node list has not loaded yet — the sentence must still read correctly.
+   */
+  const owningNodeLabel = useMemo(() => {
+    const nodeId = agentDetail?.node_id;
+    if (!nodeId) return null;
+    const node = nodes.find((n) => n.node_id === nodeId);
+    return node?.node_name || nodeId;
+  }, [agentDetail, nodes]);
 
   const runCheck = async () => {
     setBusy(true);
@@ -229,6 +292,10 @@ export function PublishWizard({
       });
       setSignResult(result);
       setStep("distribute");
+      // REQ-029: the signed build is the artifact the user should be able to
+      // install from the Local tab. Started after the step flips so the panel
+      // renders its "saving" state instead of appearing frozen.
+      void copyIntoLibrary(result.output_path);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -469,7 +536,7 @@ export function PublishWizard({
             </div>
           )}
 
-          {/* Distribute step - manual actions */}
+          {/* Distribute step - the library write-back + manual export */}
           {step === "distribute" && (
             <div className="space-y-3">
               <h3 className="text-xs font-medium text-text-secondary ">
@@ -478,6 +545,60 @@ export function PublishWizard({
               <p className="text-xs text-text-tertiary ">
                 The package is ready. You can export it or install it locally.
               </p>
+
+              {/*
+                REQ-029 / D12: the outcome of copying the artifact into the
+                Local library. `remote_skipped` is a success (the package is on
+                another machine — nothing to copy, nothing to retry); only a
+                real failure offers a retry, and none of these states disable
+                Close.
+              */}
+              {librarySave.status === "saving" && (
+                <div className="flex items-center gap-2 rounded-md bg-panel-block px-3 py-2 text-xs text-text-tertiary">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  <span>{t("common.saving")}</span>
+                </div>
+              )}
+
+              {librarySave.status === "saved" && (
+                <div className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
+                  <p className="flex items-center gap-1.5">
+                    <Check className="h-3.5 w-3.5" />
+                    <span>
+                      {t("publishWizard.librarySaved", { file: librarySave.fileName })}
+                    </span>
+                  </p>
+                  <p className="mt-0.5">
+                    <span className="font-mono">{librarySave.path}</span>
+                  </p>
+                </div>
+              )}
+
+              {librarySave.status === "remote_skipped" && (
+                <div className="rounded-md bg-yellow-50 px-3 py-2 text-xs text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-400">
+                  <p>
+                    {t("publishWizard.libraryRemoteSkipped", {
+                      node: owningNodeLabel ?? t("publishWizard.libraryRemoteNodeUnknown"),
+                      file: librarySave.fileName,
+                    })}
+                  </p>
+                </div>
+              )}
+
+              {librarySave.status === "failed" && (
+                <div className="rounded-md bg-yellow-50 px-3 py-2 text-xs text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-400">
+                  <p>{t("publishWizard.librarySaveFailed", { error: librarySave.message })}</p>
+                  <button
+                    onClick={() => void copyIntoLibrary(signResult?.output_path ?? "")}
+                    disabled={!signResult || busy}
+                    className="mt-1.5 flex items-center gap-1.5 rounded-md border border-border-outer px-2 py-1 font-medium transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:hover:bg-zinc-700"
+                  >
+                    <RotateCcw className="h-3 w-3" />
+                    {t("common.retry")}
+                  </button>
+                </div>
+              )}
+
               <button
                 onClick={runExport}
                 disabled={busy}

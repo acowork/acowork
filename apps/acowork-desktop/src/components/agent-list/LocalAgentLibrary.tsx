@@ -17,10 +17,18 @@
  *
  * The row primary button is `ensure` (idempotent); the row menu's "install
  * another instance" is `/install` (multi-instance is legal, ADR-073).
+ *
+ * The row is drawn with the Hub card's skeleton — avatar block, name + role,
+ * two-line description, chip row, divider, action bar — because the two tabs are
+ * one list with two sources, not two designs. Every field it needs is read out
+ * of the package itself (`manifest.toml` + the archive's `assets/` and
+ * `skills/`), so the Local card is not the poorer one: a shipped `.agent`
+ * carries the same things its published Hub entry does (see `read_package`).
  */
-import { MoreHorizontal, Plus, X } from "lucide-react";
+import { useState } from "react";
+import { AlertTriangle, Loader2, MoreHorizontal, Plus, X } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { formatSizeBytes, type LocalAgentList, type LocalAgentRow } from "../../lib/agentHub";
+import { formatSizeBytes, localChipsOf, type LocalAgentList, type LocalAgentRow } from "../../lib/agentHub";
 import { cn } from "../../lib/utils";
 
 interface LocalAgentLibraryProps {
@@ -132,60 +140,29 @@ function LocalAgentCard({
   const blockedReason = disabledReason ?? (broken ? row.error ?? undefined : undefined);
   const displayName = row.name ?? row.file_name;
   const permissionCount = row.permissions.length;
+  const chips = localChipsOf(row);
 
   return (
-    <article
-      className={cn(
-        "flex items-start gap-3 rounded-md border bg-panel-block p-3",
-        broken ? "border-border-outer opacity-80" : "border-border-outer",
-      )}
-    >
-      <div className="min-w-0 flex-1">
-        <div className="flex items-baseline gap-2">
-          <h4 className="truncate text-sm font-semibold text-text">{displayName}</h4>
-          {row.version && <span className="shrink-0 text-10 text-text-tertiary">v{row.version}</span>}
+    // Same skeleton as the Hub card, on purpose: avatar block, name + role,
+    // two-line description, chip row, then a divider and the action bar. The
+    // Local tab is not a lesser surface — it lists the packages that ship with
+    // the app — so the two must read as one list in two sources, not two
+    // designs. The only structural addition is the identifiers line (REQ-024),
+    // which has no Hub counterpart because a catalogue entry never shows a file
+    // name.
+    <article className="flex flex-col gap-2 rounded-md border border-border-outer bg-panel-block p-3">
+      <div className="flex items-start gap-3">
+        <LocalAvatar src={row.avatar} initial={avatarInitialOf(displayName)} name={displayName} />
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2">
+            <h4 className="truncate text-sm font-semibold text-text">{displayName}</h4>
+            {row.role && <span className="shrink-0 truncate text-xs text-text-tertiary">{row.role}</span>}
+            {row.version && <span className="shrink-0 text-10 text-text-tertiary">v{row.version}</span>}
+          </div>
+          {row.description && (
+            <p className="mt-0.5 line-clamp-2 text-xs text-text-tertiary">{row.description}</p>
+          )}
         </div>
-
-        {/* REQ-024: the file name is shown because it is what the user sees in
-            the folder; the package id is shown because it is what the Gateway
-            keys on. Both are labels — neither is parsed to derive the other.
-            Skipped when the manifest has no name (a broken file): the heading
-            above already *is* the file name there, and repeating it reads like
-            two different things. */}
-        {row.name && row.name !== row.file_name && (
-          <p className="truncate text-10 text-text-tertiary">{row.file_name}</p>
-        )}
-        {row.agent_id && <p className="truncate text-10 text-text-tertiary">{row.agent_id}</p>}
-
-        {row.description && (
-          <p className="mt-1 line-clamp-2 text-xs text-text-tertiary">{row.description}</p>
-        )}
-
-        {broken ? (
-          <div className="mt-1.5 flex items-start gap-1.5 rounded bg-red-50 px-2 py-1 text-10 text-red-700 dark:bg-red-900/20 dark:text-red-300">
-            <X className="mt-0.5 h-3 w-3 shrink-0" />
-            <span className="break-all">{t("agentHub.localBrokenFile", { error: row.error ?? "" })}</span>
-          </div>
-        ) : (
-          <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-10 text-text-tertiary">
-            {row.size_bytes !== null && <span>{formatSizeBytes(row.size_bytes)}</span>}
-            {permissionCount > 0 && (
-              <span>{t("agentHub.localPermissionCount", { count: permissionCount })}</span>
-            )}
-          </div>
-        )}
-      </div>
-
-      <div className="flex shrink-0 items-center gap-1">
-        <button
-          type="button"
-          onClick={onInstall}
-          disabled={blocked || busy}
-          title={blockedReason ?? (busy ? t("agentHub.installing") : undefined)}
-          className="btn-accent rounded px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {busy ? t("agentHub.installing") : t("agentHub.install")}
-        </button>
         <button
           type="button"
           onClick={onMore}
@@ -193,13 +170,96 @@ function LocalAgentCard({
           title={blockedReason}
           aria-label={t("agentHub.moreActions")}
           aria-haspopup="menu"
-          className="rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-40 dark:hover:bg-zinc-700"
+          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-40 dark:hover:bg-zinc-700"
         >
           <MoreHorizontal className="h-4 w-4" />
         </button>
       </div>
+
+      {/* REQ-024: the file name is what the user sees in the folder and the
+          package id is what the Gateway keys on. Both stay visible — neither is
+          parsed to derive the other — but they belong under the identity, not
+          competing with it. Skipped when the manifest is unreadable: the heading
+          above is already the file name there, and printing it twice reads like
+          two different things. */}
+      {row.name && (
+        <p className="truncate text-10 text-text-tertiary" title={`${row.file_name}\n${row.agent_id ?? ""}`}>
+          {row.file_name}
+          {row.agent_id && <span className="text-text-quaternary"> · </span>}
+          {row.agent_id && <span className="text-text-quaternary">{row.agent_id}</span>}
+        </p>
+      )}
+
+      {chips.length > 0 && (
+        <div className="flex flex-wrap gap-1">
+          {chips.map((chip) => (
+            <span key={chip} className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700">
+              {chip}
+            </span>
+          ))}
+        </div>
+      )}
+
+      {broken && (
+        <div className="flex items-start gap-1.5 rounded-md bg-red-50 px-2 py-1 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300">
+          <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+          <span className="break-all">{t("agentHub.localBrokenFile", { error: row.error ?? "" })}</span>
+        </div>
+      )}
+
+      <div className="mt-auto flex items-center justify-between gap-3 border-t border-border-outer pt-2">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-10 text-text-tertiary">
+          {row.size_bytes !== null && <span>{formatSizeBytes(row.size_bytes)}</span>}
+          {permissionCount > 0 && (
+            <span>{t("agentHub.localPermissionCount", { count: permissionCount })}</span>
+          )}
+        </div>
+        <button
+          type="button"
+          onClick={onInstall}
+          disabled={blocked}
+          title={blockedReason}
+          className="btn-accent flex shrink-0 items-center gap-1.5 rounded px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {busy ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
+          {busy ? t("agentHub.installing") : t("agentHub.install")}
+        </button>
+      </div>
     </article>
   );
+}
+
+/**
+ * The packaged avatar, or the letter block the Hub card also falls back to.
+ *
+ * `row.avatar` is already a `data:` URL produced by Rust from the archive, so
+ * there is no fetch, no cache and no failure window beyond a corrupt image — in
+ * which case the initial is the honest thing to show.
+ */
+function LocalAvatar({ src, initial, name }: { src: string | null; initial: string; name: string }) {
+  const [failed, setFailed] = useState(false);
+  if (!src || failed) {
+    return (
+      <div
+        aria-label={name}
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-zinc-100 text-sm font-semibold text-text-secondary dark:bg-zinc-700"
+      >
+        {initial}
+      </div>
+    );
+  }
+  return (
+    <img
+      src={src}
+      alt={name}
+      onError={() => setFailed(true)}
+      className="h-9 w-9 shrink-0 rounded-md object-cover"
+    />
+  );
+}
+
+function avatarInitialOf(name: string): string {
+  return name.trim().charAt(0).toUpperCase() || "?";
 }
 
 function Notice({ tone, message }: { tone: "error"; message: string }) {
