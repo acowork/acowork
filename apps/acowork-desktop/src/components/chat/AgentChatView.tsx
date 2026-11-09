@@ -68,7 +68,8 @@ import { useStickToBottom } from "../../lib/stickToBottom";
 import { Tooltip } from "../common/Tooltip";
 import { UserAvatar } from "../common/UserAvatar";
 import { AgentAvatar } from "../common/AgentAvatar";
-import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { OverlayScrollbar, OverlayScrollTarget } from "../common/OverlayScrollbar";
+import { OVERLAY_SCROLL_HOST_CLASS, OVERLAY_SCROLL_VIEWPORT_CLASS } from "../common/overlayScrollThumb";
 import { ChatAttachmentChip } from "./ChatAttachmentChip";
 import { openChatAttachment } from "../../lib/openChatAttachment";
 import { ExecAttachmentLabels } from "./ExecAttachmentLabels";
@@ -238,7 +239,7 @@ const RowView = memo(function RowView({
               builtinAvatarId={agent?.builtin_avatar ?? null}
               size={40}
               className="shrink-0"
-            />
+          />
             <div className="flex flex-col">
               <span className="text-xs font-medium text-text-tertiary ">
                 {agentName}
@@ -371,7 +372,7 @@ const RowView = memo(function RowView({
             <ExecAttachmentLabels
               labels={row.meta?.exec_attachments}
               agentId={agentId}
-            />
+          />
             {row.body && (
               <div className="max-w-full rounded-md rounded-br-sm bg-chat-user text-chat-user-text select-text">
                 <div className="px-4 py-2.5 whitespace-pre-wrap break-words">
@@ -1487,47 +1488,53 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             ))}
           </div>
         )}
-        <textarea
-          ref={textareaRef}
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder={t("chatView.address.composerHint")}
-          disabled={composerLocked}
-          className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"
-          style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
-          onKeyDown={(e) => {
-            /** Typing `@` at the start of a word opens the same task list the
-             *  toolbar button opens (ADR-106 D7) — one gesture on both chats.
-             *  The character is NOT inserted: here the address rides the chip
-             *  above the composer, not the message text, so a leftover `@`
-             *  would be noise the model has to read. A mid-word `@` (an email)
-             *  stays literal, the rule the group's `detectMention` uses. */
-            if (
-              e.key === "@" &&
-              !e.ctrlKey &&
-              !e.metaKey &&
-              !e.altKey &&
-              !e.nativeEvent.isComposing
-            ) {
-              const caret = e.currentTarget.selectionStart ?? input.length;
-              const prev = input[caret - 1];
-              if (!prev || /\s/.test(prev)) {
-                e.preventDefault();
-                setAddressStage("typed");
-                return;
+        <div className={OVERLAY_SCROLL_HOST_CLASS}>
+          <textarea
+            ref={textareaRef}
+            value={input}
+            onChange={(e) => setInput(e.target.value)}
+            placeholder={t("chatView.address.composerHint")}
+            disabled={composerLocked}
+            className={cn(
+              "w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]",
+              OVERLAY_SCROLL_VIEWPORT_CLASS,
+            )}
+            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+            onKeyDown={(e) => {
+              /** Typing `@` at the start of a word opens the same task list the
+               *  toolbar button opens (ADR-106 D7) — one gesture on both chats.
+               *  The character is NOT inserted: here the address rides the chip
+               *  above the composer, not the message text, so a leftover `@`
+               *  would be noise the model has to read. A mid-word `@` (an email)
+               *  stays literal, the rule the group's `detectMention` uses. */
+              if (
+                e.key === "@" &&
+                !e.ctrlKey &&
+                !e.metaKey &&
+                !e.altKey &&
+                !e.nativeEvent.isComposing
+              ) {
+                const caret = e.currentTarget.selectionStart ?? input.length;
+                const prev = input[caret - 1];
+                if (!prev || /\s/.test(prev)) {
+                  e.preventDefault();
+                  setAddressStage("typed");
+                  return;
+                }
               }
-            }
-            if (e.key !== "Enter" || e.shiftKey) return;
-            const elapsed = Date.now() - lastCompositionEndRef.current;
-            if (elapsed < 300) return; // IME confirmation — do not send
-            e.preventDefault();
-            handleSend();
-          }}
-          onCompositionEnd={() => {
-            lastCompositionEndRef.current = Date.now();
-          }}
-          onPaste={handlePaste}
-        />
+              if (e.key !== "Enter" || e.shiftKey) return;
+              const elapsed = Date.now() - lastCompositionEndRef.current;
+              if (elapsed < 300) return; // IME confirmation — do not send
+              e.preventDefault();
+              handleSend();
+            }}
+            onCompositionEnd={() => {
+              lastCompositionEndRef.current = Date.now();
+            }}
+            onPaste={handlePaste}
+          />
+          <OverlayScrollTarget targetRef={textareaRef} />
+        </div>
         {/* Bottom toolbar — same layout as the execution composer. Model /
             reasoning / workspace are WRITABLE: a pick becomes a per-message
             draft that seeds the execution session on send (design 27 §4.5).
@@ -1613,7 +1620,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               agentIds={[agentId]}
               chatSessionId={sessionId}
               editableAgentId={agentId}
-            />
+          />
             <Tooltip content={t("chatPanel.attach")} variant="plain">
               <button
                 className={cn(toolbarIconButton, uploading && "opacity-50")}

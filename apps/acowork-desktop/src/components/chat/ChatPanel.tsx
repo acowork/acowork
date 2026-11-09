@@ -31,7 +31,8 @@ import { blockIndexOfRawMessage } from "./messageFolder";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
-import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { OverlayScrollbar, OverlayScrollTarget } from "../common/OverlayScrollbar";
+import { OVERLAY_SCROLL_HOST_CLASS, OVERLAY_SCROLL_VIEWPORT_CLASS } from "../common/overlayScrollThumb";
 import { useLiveStream, getChatAdapterSession, releaseAdapterSession } from "./chatAdapterStore";
 import { useChatListAdapter } from "./chatListAdapter";
 import { useScrollController } from "./useScrollController";
@@ -2701,44 +2702,55 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
             effectiveConnection={effectiveConnection}
             staleSince={mqttStaleSince}
           />
-          {/* Textarea area — borderless, transparent background */}
-          <textarea
-            ref={textareaRef}
-            value={session.inputValue}
-            onChange={(e) => session.setInputValue(e.target.value)}
-            placeholder={readOnlySession
-              ? t("chatPanel.readOnlySessionPlaceholder")
-              : t(
-                  `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill, sending)}`,
-                )}
-            disabled={inputDisabled || readOnlySession}
-            className="w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]"
-            style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
-            onKeyDown={(e) => {
-              if (e.key !== "Enter" || e.shiftKey) return;
-              // On macOS, compositionEnd fires before keydown(Enter) when the user
-              // presses Enter to confirm an IME selection. isComposing is already
-              // false by then, so we check a time window instead.
-              const elapsed = Date.now() - lastCompositionEndRef.current;
-              if (elapsed < 300) return; // IME confirmation — do not send
-              e.preventDefault();
-              // Enter is ALWAYS a send action — never a stop.
-              // To stop, the user MUST click the Stop button (handleStop).
-              // Rationale: spurious Enter events (macOS keyboard repeat, WKWebView
-              // focus/keyboard quirks during window resize, accidental keypresses)
-              // previously triggered urgent_stop and silently killed the stream.
-              if (!sending) {
-                handleSend();
-                return;
-              }
-              queueCurrentInput();
-            }}
-            onCompositionEnd={() => {
-              lastCompositionEndRef.current = Date.now();
-            }}
-            onPaste={handlePaste}
-            onContextMenu={handleTextareaContextMenu}
-          />
+          {/* Textarea area — borderless, transparent background.
+              A `<textarea>` scrolls its own content, so the wrapper form of
+              the overlay scrollbar cannot own it: the host div supplies the
+              positioning context and the `:hover` reveal, the viewport class
+              on the textarea hides the OS bar, and `OverlayScrollTarget`
+              paints the same floating thumb the rest of the app uses. */}
+          <div className={OVERLAY_SCROLL_HOST_CLASS}>
+            <textarea
+              ref={textareaRef}
+              value={session.inputValue}
+              onChange={(e) => session.setInputValue(e.target.value)}
+              placeholder={readOnlySession
+                ? t("chatPanel.readOnlySessionPlaceholder")
+                : t(
+                    `chatPanel.${getInputPlaceholderKey(gatewayStatus, effectiveConnection, !!activeSkill, sending)}`,
+                  )}
+              disabled={inputDisabled || readOnlySession}
+              className={cn(
+                "w-full resize-none border-0 bg-transparent p-3 pb-2 outline-none placeholder:text-text-disabled  disabled:cursor-not-allowed disabled:opacity-50 max-h-48 overflow-y-auto min-h-[5rem]",
+                OVERLAY_SCROLL_VIEWPORT_CLASS,
+              )}
+              style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
+              onKeyDown={(e) => {
+                if (e.key !== "Enter" || e.shiftKey) return;
+                // On macOS, compositionEnd fires before keydown(Enter) when the user
+                // presses Enter to confirm an IME selection. isComposing is already
+                // false by then, so we check a time window instead.
+                const elapsed = Date.now() - lastCompositionEndRef.current;
+                if (elapsed < 300) return; // IME confirmation — do not send
+                e.preventDefault();
+                // Enter is ALWAYS a send action — never a stop.
+                // To stop, the user MUST click the Stop button (handleStop).
+                // Rationale: spurious Enter events (macOS keyboard repeat, WKWebView
+                // focus/keyboard quirks during window resize, accidental keypresses)
+                // previously triggered urgent_stop and silently killed the stream.
+                if (!sending) {
+                  handleSend();
+                  return;
+                }
+                queueCurrentInput();
+              }}
+              onCompositionEnd={() => {
+                lastCompositionEndRef.current = Date.now();
+              }}
+              onPaste={handlePaste}
+              onContextMenu={handleTextareaContextMenu}
+            />
+            <OverlayScrollTarget targetRef={textareaRef} />
+          </div>
           {/* Custom right-click menu — Tauri WebViews don't render the
               browser's native textarea menu, so we mount our own. */}
           <ContextMenu
@@ -2768,7 +2780,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                 readOnly={readOnlySession}
                 disabled={!selectedAgentId || !currentSessionId}
                 onPickAttachments={() => void handleFileUpload()}
-              />
+            />
              {/* Model switcher — shown for any configured model(s); the
                   button doubles as the current-model indicator (ADR:
                   single-model setups still need to SEE which model is in
