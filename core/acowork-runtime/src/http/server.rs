@@ -4388,7 +4388,8 @@ mod tests {
             &jsonl_path,
             "{\"id\":\"m1\",\"ts\":\"2026-01-01T12:00:00.500Z\",\"role\":\"user\",\"content\":\"Hello\"}\n\
              {\"id\":\"m2\",\"ts\":\"2026-01-01T12:00:00.800Z\",\"role\":\"assistant\",\"content\":\"Hi there!\"}\n\
-             {\"id\":\"m3\",\"ts\":\"2026-01-01T12:00:01.000Z\",\"role\":\"system\",\"content\":\"Done\"}\n",
+             {\"id\":\"m3\",\"ts\":\"2026-01-01T12:00:01.000Z\",\"role\":\"system\",\"content\":\"Done\"}\n\
+             {\"id\":\"m4\",\"ts\":\"2026-01-01T12:00:01.200Z\",\"role\":\"user\",\"content\":\"[intent:inst-a:notify] done\",\"metadata\":{\"intent\":{\"origin\":\"response\",\"action\":\"notify\",\"summary\":\"done\",\"body\":\"done\",\"truncated\":false}}}\n",
         )
         .unwrap();
 
@@ -4479,13 +4480,23 @@ mod tests {
         );
         let response = reqwest::get(&url).await.unwrap();
         let body: serde_json::Value = response.json().await.unwrap();
-        assert_eq!(body["count"], 3);
+        assert_eq!(body["count"], 4);
         assert_eq!(body["messages"][0]["content"], "Hello");
         assert_eq!(body["messages"][0]["role"], "user");
+        // A plain row: the human projection key is absent, not null, so a client
+        // that predates it sees exactly the payload it saw before.
+        assert!(body["messages"][0].get("display").is_none());
         assert_eq!(body["messages"][1]["content"], "Hi there!");
         assert_eq!(body["messages"][1]["role"], "assistant");
         assert_eq!(body["messages"][2]["content"], "Done");
         assert_eq!(body["messages"][2]["role"], "system");
+        // An agent-origin turn: the machine envelope stays in `content` (the model
+        // reads it, and it carries the reply coordinates) and the human projection
+        // arrives parsed, so no panel has to read `metadata.intent` itself.
+        assert_eq!(body["messages"][3]["content"], "[intent:inst-a:notify] done");
+        assert_eq!(body["messages"][3]["display"]["summary"], "done");
+        assert_eq!(body["messages"][3]["display"]["body"], "done");
+        assert_eq!(body["messages"][3]["display"]["origin"], "response");
 
         std::fs::remove_dir_all(&temp_dir).ok();
     }
