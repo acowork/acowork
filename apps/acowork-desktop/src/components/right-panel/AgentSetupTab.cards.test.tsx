@@ -73,10 +73,10 @@ function meta(over: Partial<AgentInfo> = {}): AgentInfo {
   } as AgentInfo;
 }
 
-function seedAgent() {
+function seedAgent(profile: Record<string, unknown> = {}) {
   useAgentStore.setState({
     agents: {
-      [AGENT]: { meta: meta(), profile: {}, sessions: [] },
+      [AGENT]: { meta: meta(), profile, sessions: [] },
     } as unknown as Record<string, AgentStorage>,
     selectedAgentId: AGENT,
   });
@@ -225,5 +225,60 @@ describe("AgentSetupTab card composition", () => {
     await waitFor(() =>
       expect(screen.getAllByLabelText(i18n.t("debugFiles.title"))).toHaveLength(1),
     );
+  });
+});
+
+/**
+ * The Model Parameters card's default-reasoning list.
+ *
+ * ADR-110's first draft offered TWO options whose label said 自动 — "" (follow
+ * the model's own default) and "auto" (an explicit value that suppresses it and
+ * sends no reasoning parameter). Same word in one list twice, so the deletion
+ * is pinned here: a fresh profile is offered exactly one, and a config that
+ * already persisted `auto` still renders it (the runtime honours it: persisted
+ * `auto` wins the first level of `resolve_effective_reasoning_effort`) with a
+ * localized label instead of the raw wire token.
+ */
+describe("AgentSetupTab default reasoning effort options", () => {
+  const inheritLabel = () => i18n.t("agentSetup.defaultReasoningInherit");
+  const autoLabel = () => i18n.t("chatPanel.reasoningAuto");
+
+  /** The default-reasoning <select>: the one carrying the "no default" row. */
+  function effortSelect(): HTMLSelectElement {
+    const sel = Array.from(document.querySelectorAll<HTMLSelectElement>("select")).find(
+      (s) => Array.from(s.options).some((o) => (o.textContent ?? "") === inheritLabel()),
+    );
+    if (!sel) throw new Error("default-reasoning select not found");
+    return sel;
+  }
+
+  const optionLabels = (): string[] =>
+    Array.from(effortSelect().options).map((o) => o.textContent ?? "");
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.clearAllMocks();
+  });
+
+  it("offers no second 自动 next to 「自动（跟随模型默认）」", async () => {
+    seedAgent();
+    stubFetch();
+    render(<AgentSetupTab />);
+    await waitFor(() => expect(cardHeaders().length).toBe(7));
+
+    // Exact match on the removed option's label: a substring check would
+    // also hit 「自动（跟随模型默认）」 and pass no matter what.
+    expect(optionLabels()).not.toContain(autoLabel());
+    expect(optionLabels()).toContain(inheritLabel());
+  });
+
+  it("still renders a legacy `auto` default, with a readable label", async () => {
+    seedAgent({ defaultReasoningEffort: "auto" });
+    stubFetch();
+    render(<AgentSetupTab />);
+
+    await waitFor(() => expect(effortSelect().value).toBe("auto"));
+    // Not the raw token the option list would otherwise append unchanged.
+    expect(effortSelect().selectedOptions[0]?.textContent).toBe(autoLabel());
   });
 });

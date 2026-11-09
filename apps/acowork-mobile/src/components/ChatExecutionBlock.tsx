@@ -230,7 +230,12 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   const asked0 =
     question0.trim() ||
     block.rounds
-      .map((r) => entries[r.ref]?.projection?.user?.body ?? '')
+      .map((r) => {
+        const user = entries[r.ref]?.projection?.user
+        // A peer round's `user.body` is the machine envelope; the display
+        // projection is the sentence that names the work (design 27 §5.4.5).
+        return user?.display?.summary || user?.display?.body || user?.body || ''
+      })
       .find((body) => body.trim() !== '') ||
     ''
   const name = runTitle?.trim() || summarize(asked0, 24) || '执行会话'
@@ -376,13 +381,27 @@ function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: 
   // the block's line leads with the reference row's one-line `assignment_brief`,
   // never with a second copy of the raw text and never with the projection's
   // stored question (that one is the delivered prompt, reference parts and all).
-  // The Runtime's `reference_brief` owns what may be written there: a PM dispatch
-  // is named by its own text, never by the wake-up playbook.
+  // The Runtime's `reference_name` owns what may be written there: a PM dispatch
+  // is named by its own text, never by the wake-up playbook, and an agent-origin
+  // round is named by its display projection.
   const question =
     (round.showUserLine ? round.triggerRow?.body : '') ||
     (round.questionOnTranscript ? round.roundRow.meta?.assignment_brief ?? '' : '') ||
+    // A peer round (design 27 §5.4.5): `user.body` is the machine envelope, and
+    // the display projection beside it is the sentence a human reads.
+    projection?.user?.display?.summary ||
+    projection?.user?.display?.body ||
     projection?.user?.body ||
     ''
+  // The expanded panel shows the full text, not the row's one-liner.
+  const questionBody =
+    projection?.user?.display?.body ||
+    (round.showUserLine ? (round.triggerRow?.body ?? '') : '') ||
+    projection?.user?.body ||
+    ''
+  const display = projection?.user?.display ?? null
+  // The machine format, reachable but never painted by default.
+  const rawEnvelope = display ? (projection?.user?.body ?? '') : ''
   // The brief is the OPENER round's line and nothing else (ADR-106 revision
   // 2026-11-04). As a fallback for any round it published the PM wake-up
   // playbook as a round's question whenever the projection could not be read —
@@ -429,6 +448,25 @@ function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: 
       {open ? (
         <div className="chat-run-detail">
           {round.showUserLine && question ? <div className="chat-run-question">{question}</div> : null}
+          {/* An agent-origin round has no bubble of its own on the transcript
+              (ADR-106 D12), so this is the only place its question appears — as
+              the display projection the turn carried, with the machine envelope
+              one tap away. Painting `projection.user.body` here is what made a
+              block read `[intent:2f3c…:analyze] {"title":…}`. */}
+          {!round.showUserLine && display && questionBody ? (
+            <div className="chat-run-question">
+              {renderMarkdown(questionBody)}
+              {display.truncated ? (
+                <span className="chat-run-note">正文已截断，完整内容见原始信封</span>
+              ) : null}
+              {rawEnvelope ? (
+                <details className="chat-run-raw">
+                  <summary>原始信封（机器格式）</summary>
+                  <pre>{rawEnvelope}</pre>
+                </details>
+              ) : null}
+            </div>
+          ) : null}
           <RoundBody
             entry={entry}
             chatSessionId={chatSessionId}

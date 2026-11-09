@@ -6,14 +6,14 @@
 | 作者 | Product |
 | 日期 | 2026-06 |
 | 涉及仓库 | `ACoworkWebSite`（页面）、`ACowork`（数据源与打包脚本） |
-| 关联 | Roadmap Phase 7「remote `.agent` registry / Agent store」（Planning）；`dev/common/build-agent.sh`；`examples/agent-packages/` |
+| 关联 | Roadmap Phase 7「remote `.agent` registry / Agent store」（Planning）；`dev/common/build-agent.sh`；`agents/agent-packages/` |
 | 非目标声明 | 本文档不覆盖 skills 目录、付费分发、在线试用 |
 
 ---
 
 ## 1. 问题定义
 
-**用户侧**：ACowork 处于 alpha，官方已经写好 7 个可直接用的 agent（Product / PM / QA / Architect / Senior Engineer / Docs / Ponytail），并且已经产出了签好名的 `.agent` 包。但今天**没有任何地方能让一个人看到"ACowork 有哪些现成 agent、各自能干什么、要什么权限、怎么装"**。想用的唯一路径是知道 `examples/agent-packages/` 这个目录的存在——这是一个只有源码读者才知道的路径。
+**用户侧**：ACowork 处于 alpha，官方已经写好 7 个可直接用的 agent（Product / PM / QA / Architect / Senior Engineer / Docs / Ponytail），并且已经产出了签好名的 `.agent` 包。但今天**没有任何地方能让一个人看到"ACowork 有哪些现成 agent、各自能干什么、要什么权限、怎么装"**。想用的唯一路径是知道 `agents/agent-packages/` 这个目录的存在——这是一个只有源码读者才知道的路径。
 
 **平台侧**：Agent 是 ACowork 的核心分发单元（等价于 Chrome 的扩展、VS Code 的插件），但它的分发目前完全依赖 git clone。生态能不能起来，取决于第三方作者有没有一个"发布有地方去、用户有地方找"的锚点。
 
@@ -74,7 +74,7 @@
 
 ### D3：`.agent` 二进制放站点同源目录，但放独立子目录
 
-**决定**：`agents/downloads/*.agent`，由脚本从 `ACowork/examples/agent-packages/` 拷入。
+**决定**：`agents/downloads/*.agent`，由脚本从 `ACowork/agents/agent-packages/` 拷入。
 
 **理由与权衡**：
 
@@ -90,7 +90,7 @@
 
 ### D4：元数据必须生成，禁止手抄
 
-**决定**：`agents.json` 由脚本从 `examples/*/manifest.toml` 解析生成。
+**决定**：`agents.json` 由脚本从 `agents/*/manifest.toml` 解析生成。
 
 **理由**：手抄第二份元数据 = 制造第一份必然过期的文档。manifest 是 agent 的唯一真相源，Hub 只是它的一个投影。这条同时保证了未来 Desktop App 的 registry 与网页看到的是同一份数据。
 
@@ -107,7 +107,7 @@
 **理由**：
 
 1. **原判据本身是伪造的**。`tier` 由 `agent_id` 前缀 `com.acowork.` 推导——任何人把自己的包命名成 `com.acowork.sybil` 就能骗到官方徽章。而现有签名体系里 `identity_type` 由签名方自行填写、`verify_chain` 对两种 key_type 恒返回 true（[certificate.rs:38-57](../../core/acowork-sign/src/certificate.rs#L38)），**没有任何可验证的信任根**。在 CA 落地前，任何等级标签都是无法兑现的承诺。
-2. **现状是全量同源**。7 个包全部来自 `ACowork/examples/`，"社区"仅因 `github.ponytail` 的 id 不以 `com.acowork.` 开头而被区分——标签传达的并非真实差异。
+2. **现状是全量同源**。7 个包全部来自 `ACowork/agents/`，"社区"仅因 `github.ponytail` 的 id 不以 `com.acowork.` 开头而被区分——标签传达的并非真实差异。
 3. **替代信息更诚实也更充分**。`author` 字段（"ACowork Team" / "DietrichGebert"）是 manifest 里的事实，不需要信任根即可核对；它同时满足 R2 搜索（作者可检索）和 R4 详情展示。
 
 **影响**：搜索索引去掉 `tier`；排序去掉 tier 优先级；`?sort=featured` 旧链接回落为 `name`；CSS 删除 `.ah-tag*` 死规则。**未来若 CA 与信任链落地**，等级标签可作为独立能力重新引入，届时依据是**签名链**，不是 id 字符串前缀。
@@ -156,7 +156,7 @@
 {
   "schema_version": 2,
   "generated_at": "2026-06-01T00:00:00Z",
-  "source": { "repo": "acowork/ACowork", "ref": "<sha>", "path": "examples/" },
+  "source": { "repo": "acowork/ACowork", "ref": "<sha>", "path": "agents/" },
   "agents": [{
     "agent_id": "com.acowork.product-manager",
     "version": "1.0.0",

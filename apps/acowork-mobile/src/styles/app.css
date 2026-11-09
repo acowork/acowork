@@ -2188,6 +2188,25 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+/* The machine envelope behind a peer round's human rendering (design 27
+   §5.4.5): a disclosure, closed by default, so programmatic data keeps its own
+   format without ever being what a human reads first. */
+.chat-run-raw {
+  margin-top: 6px;
+  font-size: 12px;
+  color: var(--color-text-dim, #888);
+}
+.chat-run-raw summary {
+  cursor: pointer;
+}
+.chat-run-raw pre {
+  margin: 4px 0 0;
+  padding: 8px;
+  border-radius: var(--radius-sm);
+  background: var(--color-bubble-peer);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
 /* A hole is stated as a hole (D5): inventing content would be writing history. */
 .chat-run-note {
   padding: 8px 10px;

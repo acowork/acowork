@@ -15,6 +15,7 @@ use std::time::Duration;
 use acowork_core::defaults::GATEWAY_HTTP_PORT;
 
 use super::inbound::IntentEnvelope;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Bound on the best-effort Gateway writes. All three calls below are
@@ -319,6 +320,34 @@ pub fn brief_for_system_block<'a>(kind: &str, brief: &'a str) -> &'a str {
 /// group chat shows") and `build_assignment_brief` ("the wake-up playbook …
 /// never persisted, never displayed on a chat surface"). The Runtime read the
 /// second one into the row field of the same name.
+/// The one name a round's reference row carries for the human surfaces, for
+/// **every** origin.
+///
+/// Two producers of a human name, one gate:
+///
+/// - an **agent** origin has a display projection ([`IntentDisplay`]) — its
+///   `summary` is the sentence the sender's own envelope yields (a title, else
+///   the prose it opened with, else the action), and that is what names the
+///   round. Without this arm a peer round had no human name at all, so every
+///   surface fell through to the envelope body and the block read
+///   `[intent:2f3c…:analyze] {"title":…}`.
+/// - a **human** origin keeps [`reference_brief`]'s rule (the dispatch text for a
+///   PM task, the router's brief for a chat turn, never the wake-up playbook).
+pub fn reference_name(
+    kind: &str,
+    brief: &str,
+    human_text: &str,
+    display: Option<&IntentDisplay>,
+) -> Option<String> {
+    if let Some(summary) = display
+        .map(|d| d.summary.trim())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(summary.to_string());
+    }
+    reference_brief(kind, brief, human_text)
+}
+
 pub fn reference_brief(kind: &str, brief: &str, human_text: &str) -> Option<String> {
     // The source is chosen FIRST: a dispatch whose playbook is missing still has
     // its dispatch text, and that is what names the row. Testing `brief` for
@@ -405,6 +434,278 @@ pub fn render_intent_message(
         rendered.push_str(&format!("\n(repo: {repo})"));
     }
     rendered
+}
+
+/// Longest Markdown body one display projection may carry.
+///
+/// The display text rides the turn's user row as `metadata.intent`, next to the
+/// machine envelope that row body already holds, so it is storage the transcript
+/// pays twice for. 16 KiB is the point where "the human's whole request is
+/// readable" stops being the common case: an inbound `params` beyond it is
+/// carrying payload (documents, code) rather than words, and the raw envelope is
+/// still there behind the display for whoever needs it.
+pub const DISPLAY_BODY_MAX_BYTES: usize = 16 * 1024;
+
+/// Bound on the one-line `summary`. Matches `reference_brief`'s cap: both name
+/// a round on the same surfaces, and two different lengths would let the row
+/// and the block header shorten the same sentence differently.
+pub const DISPLAY_SUMMARY_MAX_CHARS: usize = 240;
+
+/// `params` keys that already carry the sender's words, in the order a reader
+/// wants them. A peer's `params` object is free-form (`intent_send` schemas it
+/// as "key-value data"), so this is a preference list, not a contract: the first
+/// key present wins and everything else becomes the detail list.
+const PROSE_KEYS: [&str; 6] = ["message", "request", "description", "prompt", "question", "text"];
+
+/// `params` keys that name the work. Rendered as the body's heading, never
+/// repeated in the detail list.
+const TITLE_KEYS: [&str; 3] = ["title", "subject", "name"];
+
+/// A value longer than this (or carrying a newline) is rendered as its own
+/// block instead of an inline `- **key**: …` bullet. Long enough for a sentence
+/// or a path, too short to swallow a paragraph into a bullet.
+const INLINE_VALUE_MAX: usize = 200;
+
+/// The **human** rendering of one inbound Intent envelope.
+///
+/// [`render_intent_message`] is model-facing prompt material: the reply
+/// coordinates have to be in it (design 27 §3.2) and `params` prints as a single
+/// line of compact JSON. Since ADR-106 that same string is also the durable user
+/// row of the execution session — the *only* content every human surface has for
+/// an agent-origin round — so a block used to read
+/// `[intent:2f3c…:analyze] {"title":…}`.
+///
+/// This type is the other audience: a one-line `summary` and a Markdown `body`,
+/// both derived from the envelope *facts* and never from the rendered prompt. It
+/// is produced once, at the transport boundary, and carried as data
+/// (`metadata.intent` on the user row → `RoundProjection.user.display`) so the
+/// human surfaces stop having to interpret a machine format.
+///
+/// Human origins produce none: a `user_message` / `pm_task` turn's content is
+/// already the person's own words.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IntentDisplay {
+    /// Wire `kind` the display came from (`request` / `response`) — the only
+    /// two origins that have one.
+    pub origin: String,
+    /// The action the sender named (`analyze`, `notify`, …), kept as the summary
+    /// fallback for a payload with no words in it.
+    pub action: String,
+    /// One line for a block header, a list preview, a round row.
+    pub summary: String,
+    /// Markdown the human reads: the sender's own prose when it has any, plus
+    /// the structured remainder as a detail list.
+    pub body: String,
+    /// `body` was cut at [`DISPLAY_BODY_MAX_BYTES`]; the machine envelope still
+    /// holds the whole thing.
+    #[serde(default)]
+    pub truncated: bool,
+}
+
+/// Build the human rendering of an envelope (see [`IntentDisplay`]).
+///
+/// `None` for a human origin (no display layer needed) and for an envelope whose
+/// `params` hold nothing printable at all — a surface that gets `None` keeps
+/// today's behaviour, which is the honest degrade rather than an empty panel.
+pub fn render_intent_display(kind: &str, action: &str, params: &Value) -> Option<IntentDisplay> {
+    let origin = acowork_core::intent::TurnOrigin::parse(kind);
+    if !origin.policy().render_envelope {
+        return None;
+    }
+    let (body, headline) = intent_display_body(params);
+    if body.trim().is_empty() {
+        return None;
+    }
+    let summary = display_summary(headline.as_deref().unwrap_or_default(), action);
+    let (body, truncated) = truncate_display_body(&body);
+    Some(IntentDisplay {
+        origin: kind.trim().to_string(),
+        action: action.trim().to_string(),
+        summary,
+        body,
+        truncated,
+    })
+}
+
+/// The Markdown body of an envelope's `params`, plus the phrase that should name
+/// the round: its `title` if it has one, else the prose it opened with.
+///
+/// Shape, in the order a reader needs it: the sender's value for
+/// [`TITLE_KEYS`] as a heading, then its value for [`PROSE_KEYS`] verbatim (it is
+/// usually already Markdown — a `response`'s `message` is the peer's whole
+/// answer), then every other key as a detail bullet. That last part is what
+/// keeps a structured request (`workspace` / `scope` / `requirements`) from
+/// collapsing into one undifferentiated line, which is the JSON problem in a
+/// different costume.
+fn intent_display_body(params: &Value) -> (String, Option<String>) {
+    let Value::Object(map) = params else {
+        // Non-object params are the whole payload: a string renders as itself,
+        // anything structured renders as the machine form it is.
+        return match params {
+            Value::String(s) => (s.trim().to_string(), Some(s.trim().to_string())),
+            Value::Null => (String::new(), None),
+            other => (fenced_json(other, ""), None),
+        };
+    };
+
+    let title_key = TITLE_KEYS
+        .iter()
+        .copied()
+        .find(|k| non_empty_str(map.get(*k)).is_some());
+    let prose_key = PROSE_KEYS
+        .iter()
+        .copied()
+        .find(|k| non_empty_str(map.get(*k)).is_some());
+    let title = title_key.and_then(|k| non_empty_str(map.get(k)));
+    let prose = prose_key.and_then(|k| non_empty_str(map.get(k)));
+    let headline = title.or(prose).map(str::to_string);
+
+    let mut out = String::new();
+    if let Some(title) = title {
+        out.push_str(&format!("### {}\n\n", one_line(title)));
+    }
+    if let Some(prose) = prose {
+        out.push_str(prose.trim());
+        out.push_str("\n\n");
+    }
+    let mut details = String::new();
+    for (key, value) in map {
+        if Some(key.as_str()) == title_key || Some(key.as_str()) == prose_key {
+            continue;
+        }
+        write_detail(&mut details, key, value);
+    }
+    out.push_str(&details);
+    (out.trim_end().to_string(), headline)
+}
+
+/// One `params` entry as a detail-list item.
+fn write_detail(out: &mut String, key: &str, value: &Value) {
+    match value {
+        Value::Null => {}
+        Value::String(s) => {
+            let s = s.trim();
+            if s.is_empty() {
+                return;
+            }
+            if s.len() <= INLINE_VALUE_MAX && !s.contains('\n') {
+                out.push_str(&format!("- **{key}**: {s}\n"));
+            } else {
+                // A paragraph keeps its own line breaks: indenting by two
+                // spaces makes it part of the bullet instead of a new block.
+                out.push_str(&format!("- **{key}**:\n\n{}\n\n", indent(s, "  ")));
+            }
+        }
+        Value::Number(_) | Value::Bool(_) => {
+            out.push_str(&format!("- **{key}**: {value}\n"));
+        }
+        Value::Array(items) if items.iter().all(Value::is_string) && !items.is_empty() => {
+            out.push_str(&format!("- **{key}**:\n"));
+            for item in items {
+                if let Some(s) = non_empty_str(Some(item)) {
+                    out.push_str(&format!("  - {}\n", one_line(s)));
+                }
+            }
+        }
+        other => {
+            out.push_str(&format!("- **{key}**:\n\n{}\n\n", fenced_json(other, "  ")));
+        }
+    }
+}
+
+/// A JSON value as a fenced block, every line prefixed with `indent` so the
+/// fence stays inside the list item it belongs to.
+fn fenced_json(value: &Value, indent_by: &str) -> String {
+    let pretty = serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
+    let mut out = String::new();
+    out.push_str(&format!("{indent_by}```json\n"));
+    for line in pretty.lines() {
+        out.push_str(indent_by);
+        out.push_str(line);
+        out.push('\n');
+    }
+    out.push_str(&format!("{indent_by}```"));
+    out
+}
+
+fn indent(text: &str, by: &str) -> String {
+    text.lines()
+        .map(|line| if line.is_empty() { String::new() } else { format!("{by}{line}") })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn non_empty_str(value: Option<&Value>) -> Option<&str> {
+    value
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn one_line(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The one-line name of a round, cut from the phrase that should name it.
+///
+/// The caller passes the envelope's own headline (its `title`, else the prose it
+/// opened with) — not the rendered body — so a payload that carries no words is
+/// named by its `action` instead of by whichever machine key happened to sort
+/// first.
+fn display_summary(headline: &str, action: &str) -> String {
+    let line = headline
+        .lines()
+        .map(|l| l.trim().trim_start_matches('#').trim())
+        .find(|l| !l.is_empty() && !l.starts_with("```"));
+    let folded = one_line(line.unwrap_or_default());
+    if folded.is_empty() {
+        return one_line(action);
+    }
+    if folded.chars().count() > DISPLAY_SUMMARY_MAX_CHARS {
+        let cut: String = folded.chars().take(DISPLAY_SUMMARY_MAX_CHARS - 1).collect();
+        return format!("{}…", cut.trim_end());
+    }
+    folded
+}
+
+/// Cut a display body at [`DISPLAY_BODY_MAX_BYTES`] on a line boundary when one
+/// is close enough, so a list or fence is not severed mid-token. The marker is
+/// the same one [`truncate_response_body`] writes: two spellings of "there is
+/// more" would be two things for the surfaces to know.
+fn truncate_display_body(body: &str) -> (String, bool) {
+    if body.len() <= DISPLAY_BODY_MAX_BYTES {
+        return (body.to_string(), false);
+    }
+    let mut end = DISPLAY_BODY_MAX_BYTES;
+    while end > 0 && !body.is_char_boundary(end) {
+        end -= 1;
+    }
+    if let Some(nl) = body[..end].rfind('\n')
+        && nl > DISPLAY_BODY_MAX_BYTES / 2
+    {
+        end = nl;
+    }
+    (format!("{}\n[truncated]", &body[..end]), true)
+}
+
+/// The `metadata.intent` object a turn's user row carries for the human surfaces.
+///
+/// Keyed under one member (`intent`) rather than spread over the row's metadata:
+/// the row's metadata is a shared bag (`round_id`, `internal`, tool fields), and
+/// a display that could be mistaken for one of those would change their meaning.
+pub const META_KEY_INTENT_DISPLAY: &str = "intent";
+
+/// Wrap a display for the user row's `metadata`.
+///
+/// Serialization cannot fail for this shape (four strings and a bool); the `Null`
+/// arm keeps the signature total rather than panicking on a value only a schema
+/// change could produce.
+pub fn intent_display_meta(display: &IntentDisplay) -> Value {
+    let mut map = serde_json::Map::new();
+    if let Ok(value) = serde_json::to_value(display) {
+        map.insert(META_KEY_INTENT_DISPLAY.to_string(), value);
+    }
+    Value::Object(map)
 }
 
 /// POST a Runtime-owned chat row through the Gateway relay
@@ -1059,6 +1360,141 @@ mod tests {
         assert!(t.ends_with("[truncated]"));
         assert!(s.starts_with(&t[..t.len() - "\n[truncated]".len()]));
         assert_eq!(truncate_response_body(s, 100), s);
+    }
+
+    // ── Human display projection (M1) ──────────────────────────────────────
+
+    #[test]
+    fn a_response_displays_as_the_peers_own_markdown() {
+        // The whole point of the response side: `params.message` is the peer's
+        // answer, already Markdown. It must reach the human verbatim — no JSON
+        // wrapper, no escaped `\n`.
+        let answer = "# 结论\n\n- 第一项\n- 第二项\n\n| a | b |\n|---|---|\n| 1 | 2 |";
+        let d = render_intent_display("response", "notify", &serde_json::json!({ "message": answer }))
+            .expect("a response with a body has a display");
+        assert_eq!(d.body, answer);
+        assert_eq!(d.summary, "结论", "the heading names the round");
+        assert!(!d.truncated);
+        assert!(!d.body.contains('{'), "no machine envelope in the human body");
+        assert_eq!(d.origin, "response");
+        assert_eq!(d.action, "notify");
+    }
+
+    #[test]
+    fn a_structured_request_keeps_its_shape() {
+        // A peer request is free-form JSON. The reader still needs the prose to
+        // lead and the structure to survive as a list — not one line of JSON,
+        // and not a prose blob that drops `scope` / `requirements`.
+        let d = render_intent_display(
+            "request",
+            "analyze",
+            &serde_json::json!({
+                "title": "审计 usecase 分层",
+                "workspace": "E:/projects/tranxon/ACowork",
+                "request": "检查 runtime 的 HTTP / MQTT 接口是否统一走 usecase。",
+                "scope": ["HTTP handlers", "MQTT topics"],
+                "requirements": ["给出 file:line 证据", "统计口径要可解释"],
+                "budget_days": 3,
+                "attached_items": [{ "kind": "file", "path": "a.rs" }],
+            }),
+        )
+        .expect("a request with content has a display");
+        assert!(d.body.starts_with("### 审计 usecase 分层\n\n"), "{}", d.body);
+        assert!(d.body.contains("检查 runtime 的 HTTP / MQTT 接口是否统一走 usecase。"));
+        assert!(d.body.contains("- **workspace**: E:/projects/tranxon/ACowork"));
+        assert!(d.body.contains("- **scope**:\n  - HTTP handlers\n  - MQTT topics\n"));
+        assert!(d.body.contains("- **requirements**:\n  - 给出 file:line 证据"));
+        assert!(d.body.contains("- **budget_days**: 3"));
+        // Structured leftovers ride a fence rather than an inline blob.
+        assert!(d.body.contains("- **attached_items**:\n\n  ```json\n"));
+        // The heading is not repeated as a detail bullet.
+        assert!(!d.body.contains("- **title**"));
+        assert_eq!(d.summary, "审计 usecase 分层", "a title names the round");
+    }
+
+    #[test]
+    fn a_payload_with_no_words_falls_back_to_its_action() {
+        // `intent_send` schemas `params` as arbitrary data: a sender can ship
+        // only machine keys. The round still needs a name — the action is the
+        // only human-meaningful fact left.
+        let d = render_intent_display("request", "schedule", &serde_json::json!({ "at": "2026-11-09T10:00:00Z" }))
+            .expect("a non-empty payload still displays");
+        assert_eq!(d.summary, "schedule");
+        assert!(d.body.contains("- **at**: 2026-11-09T10:00:00Z"));
+    }
+
+    #[test]
+    fn an_eventless_payload_has_no_display() {
+        // Nothing printable: a surface that gets `None` keeps today's rendering,
+        // which is the honest degrade rather than an empty panel.
+        assert_eq!(render_intent_display("request", "ping", &serde_json::json!({})), None);
+        assert_eq!(render_intent_display("request", "ping", &serde_json::json!({ "x": null })), None);
+    }
+
+    #[test]
+    fn human_origins_get_no_display_layer() {
+        // A `user_message` / `pm_task` turn's content IS the person's words; a
+        // display projection on top of it would be a second paraphrase.
+        for kind in ["user_message", "pm_task"] {
+            assert_eq!(
+                render_intent_display(kind, "notify", &serde_json::json!({ "message": "hi" })),
+                None,
+                "{kind} must not get a display projection"
+            );
+        }
+    }
+
+    #[test]
+    fn an_oversized_body_is_cut_on_a_line_boundary() {
+        let long = "x".repeat(DISPLAY_BODY_MAX_BYTES);
+        let body = format!("first line\n{}\nlast line", long);
+        let d = render_intent_display("response", "notify", &serde_json::json!({ "message": body }))
+            .expect("oversized still displays");
+        assert!(d.truncated);
+        assert!(d.body.ends_with("[truncated]"));
+        assert!(
+            d.body.len() <= DISPLAY_BODY_MAX_BYTES + "\n[truncated]".len(),
+            "the marker is the only overflow: {} bytes",
+            d.body.len()
+        );
+        assert_eq!(d.summary, "first line", "the summary is cut from what survives");
+    }
+
+    #[test]
+    fn a_peer_round_is_named_by_its_display_summary() {
+        // The reference row is the ONE name a chat surface may print without
+        // reading a projection (D13). A peer round used to have no name here, so
+        // the surfaces fell through to the envelope body.
+        let display = render_intent_display(
+            "request",
+            "analyze",
+            &serde_json::json!({ "title": "审计 usecase 分层", "request": "检查接口" }),
+        );
+        assert_eq!(
+            reference_name("request", "", "[intent:…] {}", display.as_ref()).as_deref(),
+            Some("审计 usecase 分层")
+        );
+        // No display (legacy / empty payload): today's behaviour, unchanged.
+        assert_eq!(reference_name("request", "", "the brief", None).as_deref(), None);
+        // A human origin still cannot be named by the high-trust playbook.
+        assert_eq!(
+            reference_name("pm_task", "claim it first", "修复分页", None).as_deref(),
+            Some("修复分页")
+        );
+    }
+
+    #[test]
+    fn the_display_meta_is_keyed_under_one_member() {
+        // The user row's metadata is a shared bag (`round_id`, `internal`, tool
+        // fields). Nesting under one key is what keeps a display from being read
+        // as one of those.
+        let d = render_intent_display("response", "notify", &serde_json::json!({ "message": "done" }))
+            .expect("display");
+        let meta = intent_display_meta(&d);
+        assert_eq!(meta[META_KEY_INTENT_DISPLAY]["summary"], "done");
+        assert_eq!(meta[META_KEY_INTENT_DISPLAY]["body"], "done");
+        assert_eq!(meta[META_KEY_INTENT_DISPLAY]["origin"], "response");
+        assert_eq!(meta.as_object().unwrap().len(), 1);
     }
 
     #[test]

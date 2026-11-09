@@ -899,9 +899,17 @@ export function AgentSetupTab() {
   }, [availableModels, profile.defaultModel, profile.defaultProvider]);
 
   const defaultEffortDropdownOptions = useMemo(() => {
+    // No explicit `auto` entry. An earlier revision offered one beside
+    // 「自动（跟随模型默认）」, which put the same word in one list twice and left
+    // the user to work out that "" and "auto" are different facts ("" = no
+    // opinion, so the model's own `default_reasoning_effort` decides; "auto" =
+    // an explicit value that suppresses it and sends no reasoning parameter).
+    // Two options cannot share one name, and the one worth keeping is the
+    // honest one: this is a SEED for new sessions, and "no opinion" is what
+    // the runtime already does when the field is absent. The per-session
+    // composer still offers 自动, where forcing it is a per-plan choice.
     const opts: { value: string; label: string }[] = [
       { value: "", label: t("agentSetup.defaultReasoningInherit") },
-      { value: "auto", label: t("chatPanel.reasoningAuto") },
       { value: "off", label: t("chatPanel.reasoningOff") },
     ];
     for (const level of reasoningLevelsFor(defaultReasoningLevels)) {
@@ -915,9 +923,20 @@ export function AgentSetupTab() {
     // A persisted level the current model does not declare (user changed the
     // model after picking) stays selectable so the select never renders a
     // value that is not in its option list.
+    //
+    // `auto` falls in this bucket now that it is no longer offered: configs
+    // written before the option was removed still carry it, and the runtime
+    // still honours it (persisted `auto` wins at the first level of
+    // `resolve_effective_reasoning_effort` → `ReasoningEffort::Auto`). It
+    // keeps a localized label rather than surfacing the raw wire token; one
+    // pick of 「自动（跟随模型默认）」 moves the config onto the state the panel
+    // actually offers, and the extra row disappears for good.
     const cur = profile.defaultReasoningEffort;
     if (cur && !opts.some((o) => o.value === cur)) {
-      opts.push({ value: cur, label: cur });
+      opts.push({
+        value: cur,
+        label: cur === "auto" ? t("chatPanel.reasoningAuto") : cur,
+      });
     }
     return opts;
   }, [defaultReasoningLevels, profile.defaultReasoningEffort, t]);

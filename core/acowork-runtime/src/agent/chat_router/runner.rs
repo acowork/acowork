@@ -1178,6 +1178,11 @@ async fn run_turn(
                                 // ADR-107: the router's framing, delivered as a
                                 // reference part of the human's turn.
                                 context_refs,
+                                // A router dispatch is always a Chat-originated
+                                // turn (`policy.router_eligible`), and a human
+                                // turn's content is already the person's words —
+                                // there is no envelope to re-render for a human.
+                                display: None,
                             },
                         );
                         (Ok((session_id, opened_new)), sent)

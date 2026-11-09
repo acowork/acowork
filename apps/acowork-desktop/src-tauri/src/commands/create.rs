@@ -146,8 +146,8 @@ struct SkillFrontmatterSlim {
 /// half-filled manifest.
 ///
 /// Deliberate limitations (matches real SKILL.md formatting we have
-/// shipped so far — `examples/agnes-document-skills/.../SKILL.md`,
-/// `examples/document-manager-agent/.../*.md`):
+/// shipped so far — `agents/agnes-document-skills/.../SKILL.md`,
+/// `agents/document-manager-agent/.../*.md`):
 /// - values must be a single physical line
 /// - values may be wrapped in single or double quotes (which we strip)
 /// - block scalars (`description: |` / `description: >`) are rejected

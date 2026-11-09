@@ -522,7 +522,7 @@ RUN-04~06, RUN-10~12, RUN-13a, MEM-04~06, MEM-08, MEM-10~12, TOL-06, TOL-10, GTW
 
 ## 5. 核心用户场景
 
-> §5 描述的是平台能力所支撑的典型场景（示意），不要求与 `examples/` 中实际打包的 Agent 一一对应。当前 `examples/` 下的示例 Agent 偏企业研发协作：Architect / SSE / QA / PM / Product / Docs / Document Manager 等。天气 / 日历类个人 Agent 未打包，但平台能力已具备——用户或开发者可自行打包并安装。
+> §5 描述的是平台能力所支撑的典型场景（示意），不要求与 `agents/` 中实际打包的 Agent 一一对应。当前 `agents/` 下的示例 Agent 偏企业研发协作：Architect / SSE / QA / PM / Product / Docs / Document Manager 等。天气 / 日历类个人 Agent 未打包，但平台能力已具备——用户或开发者可自行打包并安装。
 
 ### 5.1 个人用户日常场景
 

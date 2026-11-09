@@ -52,7 +52,7 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "../../../examples/agent-packages": "agent-packages",
+      "../../../agents/agent-packages": "agent-packages",
       "../../../assets/offline_providers.json": "offline_providers.json",
       "../../../assets/offline_embedding_providers.json": "offline_embedding_providers.json",
       "../../../assets/lsp_install": "lsp_install",

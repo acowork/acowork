@@ -21,8 +21,8 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Default values
-OUTPUT_DIR="${PROJECT_ROOT}/examples/agent-packages"
-KEY_DIR="${PROJECT_ROOT}/examples/.signing-keys"
+OUTPUT_DIR="${PROJECT_ROOT}/agents/agent-packages"
+KEY_DIR="${PROJECT_ROOT}/agents/.signing-keys"
 
 # Parse arguments
 if [ $# -lt 1 ]; then

@@ -75,68 +75,85 @@ export function ChatTurnHeader({ identities, text, className }: ChatTurnHeaderPr
       data-turn-header=""
       role="status"
       aria-live="polite"
-      className={cn("flex items-center gap-2 px-4 py-1", className)}
+      className={cn("px-4 py-1", className)}
     >
-      {single ? (
-        <AgentAvatar
-          agentId={identities[0].id}
-          displayName={identities[0].displayName}
-          avatarUrl={identities[0].avatarUrl ?? null}
-          version={identities[0].version ?? null}
-          builtinAvatarId={identities[0].builtinAvatarId ?? null}
-          size={40}
-          className="shrink-0"
-        />
-      ) : (
-        // Fan-out: each face after the first slides under the one before it,
-        // and the earlier face paints on top. The footprint is 40px + 16px per
-        // extra responder — it grows, but the stack's LEFT edge stays where
-        // the block header takes over, which is the anchor the handover rule
-        // is about. The layer and the offset are a function of the position,
-        // so they are inline styles rather than a class table that would stop
-        // working at the fourth mention. The rounding and the hairline ring
-        // come from `AgentAvatar` itself: this is the same face the transcript
-        // already wears, not a second avatar style.
-        <span className="flex shrink-0">
-          {identities.map((p, i) => (
-            <span
-              key={p.id}
-              className="relative"
-              style={{ zIndex: identities.length - i, marginLeft: i === 0 ? 0 : -24 }}
-            >
-              <AgentAvatar
-                agentId={p.id}
-                displayName={p.displayName}
-                avatarUrl={p.avatarUrl ?? null}
-                version={p.version ?? null}
-                builtinAvatarId={p.builtinAvatarId ?? null}
-                size={40}
-              />
-            </span>
-          ))}
-        </span>
-      )}
-      <div className="flex min-w-0 flex-col">
-        <span className="truncate text-xs font-medium text-text-tertiary">{names}</span>
-        {/* The agent's role, on the tier the block header gives it: the whole
-            point of the takeover is that this column becomes that column, so
-            the role has to be in place BEFORE the block lands, or the handover
-            inserts a line above the anchor instead of shifting nothing.
-            One identity only: a fan-out's names are a list, and a joined list
-            of roles names no one in particular — the faces already say
-            "several". A claim with no role paints no line rather than an empty
-            one, exactly as the block header does. */}
-        {single && identities[0].role ? (
-          <span className="truncate text-10 leading-tight text-text-tertiary">
-            {identities[0].role}
+      {/* Identity row — the block header's own classes (`ChatExecutionBlock`),
+          not a lookalike: the handover at the first answering row must swap
+          NOTHING above the claim's word, so the avatar/name/role geometry has
+          to be identical before and after it. */}
+      <div className="mb-2 mt-1 flex items-center gap-2">
+        {single ? (
+          <AgentAvatar
+            agentId={identities[0].id}
+            displayName={identities[0].displayName}
+            avatarUrl={identities[0].avatarUrl ?? null}
+            version={identities[0].version ?? null}
+            builtinAvatarId={identities[0].builtinAvatarId ?? null}
+            size={40}
+            className="shrink-0"
+          />
+        ) : (
+          // Fan-out: each face after the first slides under the one before it,
+          // and the earlier face paints on top. The footprint is 40px + 16px per
+          // extra responder — it grows, but the stack's LEFT edge stays where
+          // the block header takes over, which is the anchor the handover rule
+          // is about. The layer and the offset are a function of the position,
+          // so they are inline styles rather than a class table that would stop
+          // working at the fourth mention. The rounding and the hairline ring
+          // come from `AgentAvatar` itself: this is the same face the transcript
+          // already wears, not a second avatar style.
+          <span className="flex shrink-0">
+            {identities.map((p, i) => (
+              <span
+                key={p.id}
+                className="relative"
+                style={{ zIndex: identities.length - i, marginLeft: i === 0 ? 0 : -24 }}
+              >
+                <AgentAvatar
+                  agentId={p.id}
+                  displayName={p.displayName}
+                  avatarUrl={p.avatarUrl ?? null}
+                  version={p.version ?? null}
+                  builtinAvatarId={p.builtinAvatarId ?? null}
+                  size={40}
+                />
+              </span>
+            ))}
           </span>
-        ) : null}
-        {/* The claim's word, in the execution surface's phase-line grammar
-            (ADR-049): a pulsing dot + shimmering text at the UI font size —
-            "someone is busy" must read the same on both surfaces, which is
-            what this revision is for. The dot wears the `waiting` hue: the
-            claim asserts a send the transcript has not answered yet, not a
-            phase the run reported (that word arrives with the block). */}
+        )}
+        <div className="flex min-w-0 flex-col">
+          <span className="truncate text-xs font-medium text-text-tertiary">{names}</span>
+          {/* The agent's role, on the tier the block header gives it: the whole
+              point of the takeover is that this column becomes that column, so
+              the role has to be in place BEFORE the block lands, or the handover
+              inserts a line above the anchor instead of shifting nothing.
+              One identity only: a fan-out's names are a list, and a joined list
+              of roles names no one in particular — the faces already say
+              "several". A claim with no role paints no line rather than an empty
+              one, exactly as the block header does. */}
+          {single && identities[0].role ? (
+            <span className="truncate text-10 leading-tight text-text-tertiary">
+              {identities[0].role}
+            </span>
+          ) : null}
+        </div>
+      </div>
+
+      {/* The claim's word, in the block's CONTENT column: the same `flex
+          items-start gap-2` + 40px spacer the block body opens with, which is
+          where its own rows ("Explored", the round list) start. It belongs
+          here and NOT in the identity column above: inside that column it
+          became a THIRD line under the name and role, so the `items-center`
+          row grew and pulled both of them up — and when the block landed the
+          word would have had to jump sideways into this column, which is the
+          re-layout ADR-106 决策四 forbids ("接管只消失状态词，位置不动").
+          Grammar is the execution surface's phase line (ADR-049): a pulsing
+          dot + shimmering text at the UI font size, so "someone is busy" reads
+          the same on both surfaces. The dot wears the `waiting` hue: the claim
+          asserts a send the transcript has not answered yet, not a phase the
+          run reported (that word arrives with the block). */}
+      <div className="flex items-start gap-2">
+        <div className="w-10 shrink-0" />
         <span className="flex items-center gap-1.5">
           <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
           <span

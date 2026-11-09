@@ -1,11 +1,12 @@
-# PRD：Desktop「安装 Agent」对话框（Agent 库 / 本地文件 双 Tab）
+# PRD：Desktop「安装 Agent」对话框（Agent 库 / 本地 双 Tab）
 
 | 项 | 内容 |
 | --- | --- |
-| 状态 | 待评审（v0.1 草案） |
+| 状态 | 待评审（v0.2 草案，v0.1 决策见 §14 的取代关系） |
 | 作者 | Product |
-| 日期 | 2026-11-04 |
-| 涉及仓库 | `ACowork`（`apps/acowork-desktop` 为主；Gateway / Node / acowork-sign **无改动**） |
+| 日期 | 2026-11-04（v0.2 增补：2026-11-07） |
+| 变更 | v0.2 把 Local tab 从"选文件的落地页"改为"本机 agent 文件库"（§14）：默认 tab 改为 Local、文件根改为用户数据目录 + 首次播种、publish 产物回写、签名不再展示、`examples/` 更名 `agents/` |
+| 涉及仓库 | `ACowork`（`apps/acowork-desktop` 为主；`core/acowork-node` 仅一处默认 key 目录常量随目录改名同步，[publish.rs:432](../../../core/acowork-node/src/package/publish.rs#L432)；`dev/common/build-agent.*` 与三个示例包测试同步改名；Gateway HTTP 契约**无改动**） |
 | 关联 | [prd-agent-hub.md](./prd-agent-hub.md)（官网 Hub 页）、[ADR-055](../../adr/zh/ADR-055-remote-runtime-node-topology.md) §6.13.3（多节点安装）、[ADR-073](../../adr/zh/ADR-073-agent-instance-identity-decomposition.md)（实例身份 / `ensure`）、[ADR-087](../../adr/zh/ADR-087-node-agent-owner-permissions.md)（节点 manage 门禁） |
 | 明确不含 | 「已安装」聚合 Tab、版本比对与升级动作 —— 见 §11，另开任务 |
 
@@ -88,6 +89,8 @@ ACowork 装机后的第一个真实问题不是"怎么用"，而是"能装什么
 
 ### D1 双 Tab，默认 Agent 库
 
+> **v0.2 起默认 tab 改为 Local**（§14 D9 / REQ-022）：库依赖网络、Local 是本地同步读，默认落在要等的地方会把首屏变成一次网络请求。双 Tab 结构不变。
+
 本地安装是"我已经有文件"的路径，属于少数派；默认落在库上，才能承接"我不知道装什么"的多数派。Local tab 永远可用，Hub 不可达不影响它（§7）。
 
 ### D2 主按钮走 `/api/agents/ensure`，「再装一个实例」走 `/api/agents/install`
@@ -113,6 +116,8 @@ ADR-073 下**多实例合法**，`/install` 永远多落一个实例。用户在
 
 ### D5 Local Tab 是落地页，不是触发器
 
+> **v0.2 起被 §14 D9 取代**：Local 不再是一块"选文件"的落地页，而是一份本机 agent 文件列表。原文保留：切 tab 即弹系统文件框仍然是坏交互，这条约束不变。
+
 切到 Local 就弹出系统文件框是坏交互（用户只是切 tab，却被夺走焦点）。Local tab 是一块静态区域：选择文件按钮 + 一句来源说明（拖放见 REQ-020 / F11，验证通过再加）。
 
 ### D6 数据从 Rust 侧拉，不从 webview `fetch`
@@ -120,6 +125,8 @@ ADR-073 下**多实例合法**，`/install` 永远多落一个实例。用户在
 Cloudflare Pages 对不存在的路径返回 **200 + HTML**（实测 `/data/nope.json` → `200 text/html`）。webview 侧难以可靠区分"JSON"与"SPA fallback"，而 Rust 侧可用 `reqwest` 校验 content-type + 解析失败即报错，还能顺带做 sha256 校验与超时控制。`reqwest` 已是 `src-tauri` 依赖。
 
 ### D7 签名渠道如实展示，不造 Official 徽章
+
+> **v0.2 起被 §14 D13 取代**：卡片与文件行都不再展示签名信息。原文保留作决策史。
 
 对齐 [prd-agent-hub.md](./prd-agent-hub.md) R6：只显示 `signature.status` 的原始语义（`official-channel` / `third-party`），不出现"官方认证/未经审核"这类等级措辞。App 内更要克制——用户在这里点的是"装到我机器上"，一次点击的后果比在网页上重。
 
@@ -224,7 +231,7 @@ graph TD
 | # | 事实 | 影响 |
 | --- | --- | --- |
 | F1 | Cloudflare Pages 对未知路径返回 **200 + HTML**（实测 `/data/nope.json`） | 必须校验 content-type 或 JSON 解析失败即报错；不能只看 status code |
-| F2 | 桌面端**没有** `ensure` 的客户端方法 | `src-tauri/src/gateway_client.rs:412` 自述"an endpoint this client has no method for (`/api/agents/ensure`)"。本版需新增 `GatewayClient::ensure_agent` + Tauri 命令 + `lib.rs` 注册 |
+| F2 | ~~桌面端**没有** `ensure` 的客户端方法~~ **已过期（v0.2 订正）** | `GatewayClient::ensure_agent` 已存在（[gateway_client.rs:558](../../../apps/acowork-desktop/src-tauri/src/gateway_client.rs#L558)，Hub 安装链路 [`hub.rs:126`](../../../apps/acowork-desktop/src-tauri/src/commands/hub.rs#L126) 已在用）。**缺的只是 Local 路径的 Tauri 命令**（`ensure_local_agent`），不要再"新增"一个已存在的客户端方法 |
 | F3 | 客户端 multipart 的 `dev_mode` 字段被 Gateway 丢弃 | `read_agent_upload`（`agents.rs:1197`）只解析 `package` / `node_id` / `expected_version`；实际取值来自 `gateway_dev_mode`（`agents.rs:786`）。`agentStore.ts:904` 的 `devMode: true` 与 `install_form`（`gateway_client.rs:325`）发出的字段**都不决定验签强度** |
 | F4 | 两处注释称"installAgent → `/api/agents/ensure`" | `SplashScreen.tsx:95` 与 `src-tauri/src/lib.rs:23`；实际打的是 `/install`（`gateway_client.rs:498`）。**属过期注释**，本版顺手修正，避免后来者据此判断 |
 | F5 | `onboarding` 的 `install_bundled_agent` 同样走 `/install` | `commands/agent.rs:271` → `client.install_agent`。重跑引导会给每个推荐 agent 多落一个实例。**不在本 PRD 范围**，作为独立 issue 记录（是否改 `ensure` 需产品确认） |
@@ -291,3 +298,141 @@ graph TD
 - **回退**：删入口即可，无迁移、无数据残留；已安装的 agent 不受影响。
 - **文档**：落地后更新 `apps/acowork-desktop/README`（若存在相关段落）与本 PRD 状态；[prd-agent-hub.md](./prd-agent-hub.md) §2 G4 可标注"已由 Desktop Agent 库满足"。
 - **支持**：已知误解点写进文案 —— 重复点"安装"不会多装（`ensure`），要多个实例请用 `⋯` → 「再装一个实例」。
+
+## 14. v0.2 增补：Local tab 改为「本机 agent 文件库」
+
+### 14.0 与 v0.1 的取代关系
+
+| v0.1 | v0.2 处理 |
+| --- | --- |
+| D1 默认 Agent 库 | D9 / REQ-021：默认 Local，库在后台预热 |
+| D5 Local 是落地页 | D9：Local 是文件列表 + 末行添加入口（"切 tab 不夺焦点"仍然成立） |
+| D7 签名渠道如实展示 | D13：不展示任何签名状态；REQ-004 的 `signature.status` 字段随之删除 |
+| REQ-002 默认选中 Agent 库 | REQ-021 + REQ-022 |
+| REQ-004 卡片含 `signature.status` | 去掉该字段（REQ-031） |
+| REQ-011 Local 只有"选择文件" | REQ-023 ~ REQ-025 |
+| §11「已安装」状态不做 | **不变**。本版不引入已安装徽章，重复点击靠 `ensure` 收敛（D11） |
+
+### 14.1 问题
+
+装完 Desktop，7 个已签名的 agent 包就已经躺在安装目录（`tauri.conf.json` 把 `agents/agent-packages` 映射成 `resource_dir/agent-packages`，[tauri.conf.json:55](../../../apps/acowork-desktop/src-tauri/tauri.conf.json#L55)），但产品里**没有任何入口把它们列出来**：用户唯一的本地路径是"我手上刚好有一个 `.agent` 文件"（[AgentLibraryDialog.tsx:850](../../../apps/acowork-desktop/src/components/agent-list/AgentLibraryDialog.tsx#L850) 的 `LocalPane` 只有一个 pick/drop 区）。出厂内容用户看不见，等于没出厂。
+
+同时 `install_bundled_agent` 已经能按名字装这些包（[agent.rs:276](../../../apps/acowork-desktop/src-tauri/src/commands/agent.rs#L276)），但名字→文件是一张硬编码 match（[agent.rs:384](../../../apps/acowork-desktop/src-tauri/src/commands/agent.rs#L384)），且只有 onboarding 在用。**数据在一处、入口在另一处、命名在第三处。**
+
+### 14.2 决策
+
+#### D9 Local tab 是本机 agent 文件库（列表 + 末行添加入口）
+
+Local = 一份"这台机器上现成的 agent 文件"列表，最后一行固定是「+ 添加 agent 文件」，保留现有一切手动安装场景（含拖放 REQ-020）。不再是落地页。排序按文件名升序（稳定、可预测），末行入口不参与排序。
+
+默认 tab 改为 Local，理由不是"库慢"而是**默认不该落在一次网络请求上**：Local 是同步读目录，Library 依赖 `hub.acowork.ai`。库的预热带走——对话框 `open` 时 `void fetchHubIndex()` 不 await，切到 Library 命中会话缓存直接渲染（[agentHub.ts:252](../../../apps/acowork-desktop/src/lib/agentHub.ts#L252) 已有 session 缓存与并发合流，只需提前点火）；未命中保留骨架屏；预热失败**静默**，错误只在 Library tab 内联显示（对齐 REQ-012）。
+
+Tab 文案 `本地文件` → `本地`（zh）/ `Local`（en）：它现在是列表，不是一个文件对话框。
+
+#### D10 文件根 = 用户数据目录，首次启动从内置包播种
+
+| 候选 | 判定 |
+| --- | --- |
+| `{app_local_data_dir}/agent-library`（`%LOCALAPPDATA%\com.acowork.desktop\agent-library`） | ✅ **采用** |
+| 安装目录 `resource_dir/agent-packages` | ❌ `targets: all` 含 MSI（perMachine）时装在 `Program Files`，普通用户写不进；macOS 往 `.app` 里写会破坏 bundle 签名；应用升级整目录覆盖会吞掉用户文件；dev 下它是 `target/debug` |
+| node 自己的 `packages_dir`（默认 `{gateway base_dir}/packages`） | ❌ 只在 local 单机成立，remote 模式读不到；且把 node 的内部目录布局变成 UI 契约（ADR-009 §5 边界） |
+
+播种：首次启动（或目录不存在时）把 `resource_dir/agent-packages/*.agent` 复制进去。**幂等规则**：按文件名逐个判断，目标已存在则跳过（不比字节、不覆盖）。因此用户删掉的种子不会在下次启动复活，用户改过的包不会被回滚。
+
+#### D11 列表主按钮走 `ensure`，「再装一个实例」走 `/install`
+
+与 D2 完全一致，只是入口从卡片换成文件行。**不引入"已安装"徽章**（D3 不变）：存在性由服务端 `ensure` 回答，客户端不算状态。这样"自己 publish 的文件也在列表里"不会变成"点一下就多一个实例"——重复点击收敛到已有实例。
+
+#### D12 publish 产物回写 = 复制进库目录
+
+publish 侧不新增任何写盘能力：`build_publish` 已经返回 `output_path`（node 侧写 `{agent_id}-{version}.agent`，[publish.rs:410](../../../core/acowork-node/src/package/publish.rs#L410)；Gateway 传空 `output_dir` 让它落在 node 的 `packages_dir`，[publish_api.rs:111](../../../core/acowork-gateway/src/http/publish_api.rs#L111)）。向导走到 distribute 步骤时，Desktop 把该文件**复制**进库目录，随后 toast「已出现在本地列表」。
+
+选复制、而不是给 node 传 `output_dir` 让它直接写库目录：node 写桌面端目录等于跨进程猜路径，而复制是桌面端对自己文件系统的操作，边界干净、失败也可控。
+
+范围限制：**只在 local 单机模式成立**。remote 模式下产物在远端 node 上，桌面端读不到——按非目标处理（§14.6）。
+
+#### D13 不展示任何签名状态
+
+签名只回答"这个包的字节有没有被改过"，不回答"谁做的、可不可信"：验签用的是**包内嵌的公钥**做自洽校验（[verify.rs](../../../core/acowork-sign/src/verify.rs) 取 `signer.certificates[0]` 直接 `VerifyingKey::from_bytes`），全仓没有 trusted-keys / allowlist / CA 校验。任何人在自己机器上 keygen 一把钥匙签出来的包，在任何机器上都验签通过。
+
+- 卡片与文件行**都不显示**已签名 / 未签名 / 渠道标注 —— 在没有信任根的前提下，任何签名标识都会被读成"可信等级"。
+- 只在**安装失败**时把验签错误翻译成人话（如"这个包可能被修改过或下载不完整"），不做前置判断。
+- 「信任根是谁」（Hub channel key / 本地 developer key / 用户导入的 key）是 ADR 级决策，另开任务，不塞进本 PRD。
+
+#### D14 `examples/` 更名为 `agents/`（已执行）
+
+理由：这个目录的出厂内容是"我们随包发布的 agent"，不是"示例"；更名后与 ACoworkAgentHub 的已发布源树 `agents/<publisher>/<agent>/` 命名对齐。
+
+范围：功能性命中 + 现行文档改，**ADR 正文保原样**（ADR 里写的 `agents/...` 是决策当时的事实，改写等于篡改历史）。子目录 `agent-packages/` 名字不变（产物路径被 ADR-104 定死，改名只放大 churn）。
+
+数据流：
+
+```mermaid
+flowchart LR
+    subgraph BOOT["首次启动"]
+        B1["resource_dir/agent-packages<br/>7 个内置包"] -->|"复制，已存在则跳过"| B2["库目录<br/>app_local_data_dir/agent-library"]
+    end
+    B2 --> L["Local 列表（默认 tab）"]
+    B3["publish 向导 build"] -->|"复制产物"| B2
+    B4["拖放 / 选择文件<br/>不落库"] --> L
+    L --> R["末行：+ 添加 agent 文件"]
+    L -->|"主按钮"| E["ensure（幂等）"]
+    L -->|"⋯ 再装一个实例"| I["install（多实例合法）"]
+    O["打开对话框"] -->|"不 await"| P["后台预热 Hub index"]
+    O --> L
+```
+
+### 14.3 需求与验收标准（v0.2 增量）
+
+| ID | 需求 | 优先级 | 验收标准 |
+| --- | --- | --- | --- |
+| REQ-021 | 对话框默认选中 Local | P0 | 打开即见文件列表或空态，不发任何网络请求即可用；键盘可切 tab |
+| REQ-022 | 打开对话框即后台预热 Hub index（不 await） | P0 | 打开后立即渲染 Local；切到 Library 时命中缓存直接出卡片；预热失败不弹任何 toast |
+| REQ-023 | Local 列表渲染库目录下全部 `*.agent`，按文件名升序 | P0 | 7 个内置包首屏全出；非 `.agent` 文件不出现 |
+| REQ-024 | 每行含：文件名、`agent_id`、`version`、`name`、大小、权限项数，`description` 两行截断 | P0 | 全部字段来自包内 `manifest.toml`，**不靠文件名猜身份** |
+| REQ-025 | 末行固定「+ 添加 agent 文件」，走现有选择文件路径 | P0 | 列表为空时仍可见、可点；选中后的行为与 v0.1 REQ-011 一致 |
+| REQ-026 | 行主按钮调 `ensure`（目标节点） | P0 | 连点两次不产生第二个实例；`already_present` 时选中已有实例并提示"已在本节点" |
+| REQ-027 | 行 `⋯` →「再装一个实例」调 `/install` | P0 | 实例数 +1；多实例合法，不报错 |
+| REQ-028 | 空目录（播种失败 / 被清空）显示空态 + 添加入口 + 原因 | P0 | 不出现空白页；原因用 IO 原文，不写猜测式文案；"重新播种"按钮 P1 |
+| REQ-029 | publish 向导 distribute 步骤把产物复制进库目录 | P1 | 复制成功后列表刷新一次即出现；同 `agent_id` 同 `version` 覆盖同名文件 |
+| REQ-030 | 同 `agent_id` 不同 `version` 的文件分别成行 | P0 | 禁止按 `agent_id` 去重（否则新发布的版本被旧文件藏掉） |
+| REQ-031 | 不渲染任何签名状态 | P0 | 卡片与行均无签名 / 渠道字样；组件内 grep「已签名 / official-channel / third-party」无命中 |
+| REQ-032 | 列表刷新时机：打开对话框时、publish 复制后，各一次 | P0 | 不轮询，不引文件系统 watcher |
+| REQ-033 | `examples/` → `agents/`（已执行），功能性命中与现行文档同步 | P0 | 三个示例包测试通过（`example_manifests` / `example_packages` / `bootstrap_integration`）；打包资源映射指向 `agents/agent-packages` |
+| REQ-034 | 改名记录进 README / 本 PRD，ADR 正文不动 | P0 | 改动清单里 ADR 文件数为 0 |
+
+### 14.4 状态与边界（补充 §7）
+
+| 状态 | 行为 |
+| --- | --- |
+| 库目录不存在 / 播种失败 | 空态 + 添加入口 + 原因说明（REQ-028） |
+| 单个文件损坏（不是合法 zip） | 该行标记不可安装并给出原因，**不移除**——用户拷进来的坏文件要让用户自己看见 |
+| 文件正被 publish 覆盖 | 复制完成后重新枚举一次，不做增量 patch |
+| 播种进行中 | 短同步操作不出进度条；>200ms 才出骨架 |
+| 非 local 模式 | 列表照常可读（文件在本机），publish 回写不可用（D12） |
+
+### 14.5 工程地雷（补充 §9）
+
+| # | 事实 | 影响 |
+| --- | --- | --- |
+| F12 | `bundled_agent_package_path` 是硬编码 match（[agent.rs:384](../../../apps/acowork-desktop/src-tauri/src/commands/agent.rs#L384)） | 列表化后必须改成枚举目录，否则新增一个内置包要改两处（打包 + match），必漏 |
+| F13 | `inspect_local_package` 只返回 `file_name` / `size_bytes` / `agent_id`（[hub.rs:66](../../../apps/acowork-desktop/src-tauri/src/commands/hub.rs#L66)、[agentHub.ts:76](../../../apps/acowork-desktop/src/lib/agentHub.ts#L76)） | 画行需要 `name` / `version` / `description` / `permissions`，须新增**批量**命令一次读完 N 个 `manifest.toml`；不要在前端 N 次 invoke |
+| F14 | 播种必须幂等且**不覆盖** | 每次启动全量复制的写法会导致：用户改过的包被回滚、用户删掉的种子每次复活 |
+| F15 | 产物名 `{agent_id}-{version}.agent`（[publish.rs:410](../../../core/acowork-node/src/package/publish.rs#L410)） | 同版本重发 = 覆盖同名文件（正常）；不同版本 = 两行，禁止按 `agent_id` 去重（REQ-030） |
+| F16 | Gateway `dev_mode` 默认 `true`（[config.rs:894](../../../core/acowork-gateway/src/config.rs#L894)），验签失败只 `tracing::warn`（[install.rs:58](../../../core/acowork-node/src/package/install.rs#L58)） | D13 的"错误翻译"在默认配置下几乎不触发；它是配置收敛到严格模式后唯一的失败文案，不要因为暂时用不上就删 |
+| F17 | 桌面端 `installAgent` 传的 `devMode: true` 是死参数（[agentStore.ts:940](../../../apps/acowork-desktop/src/stores/agentStore.ts#L940)；Gateway `read_agent_upload` 的 `_ => {}` 丢弃，[agents.rs:1234](../../../core/acowork-gateway/src/http/agents.rs#L1234)） | 同一个 PR 里删掉或显式标注，否则后来者会以为它能调验签强度 |
+
+### 14.6 非目标（v0.2 明确不做）
+
+- 远端 node 的包列表（需 node 侧新增 list 能力 + Gateway 端点，另开任务）
+- 列表内删除 / 重命名 / 在文件夹中显示（P2）
+- 文件系统 watcher 实时刷新（REQ-032 用一次枚举取代）
+- 信任根与"已验证"语义（D13）
+- 「已安装」徽章（D3 不变）
+- 移动端同步
+
+### 14.7 发布与回退
+
+- **灰度**：不需要。纯新增只读列表 + 一次复制，不动数据模型、不动 Gateway 契约。
+- **回退**：删掉列表渲染即回到 v0.1 的落地页；库目录里遗留的文件无害（只是没人列出来）。播种逻辑可单独关。
+- **支持话术**：「本地」= 这台机器上现成的 agent 文件；「Agent 库」= 从 hub.acowork.ai 拉取；重复点击不会多装，要多个实例用 `⋯`。

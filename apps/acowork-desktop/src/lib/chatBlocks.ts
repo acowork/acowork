@@ -32,12 +32,31 @@ export interface BlockCard {
   options?: string[];
 }
 
+/** The **human** rendering of an agent-origin turn (design 27 §5.4.5).
+ *
+ *  A round's `user.body` is the machine envelope (`[intent:…] {params}` plus the
+ *  reply coordinates) because the model reads it. This is the same turn written
+ *  for the reader: `summary` is one line, `body` is Markdown. Absent on a human
+ *  turn — its body already is the person's words — and on every row written
+ *  before the projection existed, where the surfaces keep their old rendering. */
+export interface RoundUserDisplay {
+  summary: string;
+  body: string;
+  /** The producer cut `body`; `user.body` still holds everything. */
+  truncated?: boolean;
+}
+
 /** One round's projected content, verbatim from the execution session. */
 export interface RoundProjection {
   round_id: string;
   /** The Chat this round's session is bound to — checked server-side (D10). */
   chat_session_id?: string;
-  user?: { body: string; ts: string } | null;
+  user?: {
+    body: string;
+    ts: string;
+    /** What a human reads instead of `body`; see {@link RoundUserDisplay}. */
+    display?: RoundUserDisplay | null;
+  } | null;
   answer?: { body: string; ts: string } | null;
   card?: BlockCard | null;
   terminal: boolean;

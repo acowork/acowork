@@ -450,8 +450,8 @@ message ServerMessage {
 
 | Item | Handling |
 |------|----------|
-| `examples/system-agent/manifest.toml` | Remove `identity:query`/`identity:observe` capabilities |
-| `examples/system-agent/prompts/system.md` | Remove identity management-related responsibilities |
+| `agents/system-agent/manifest.toml` | Remove `identity:query`/`identity:observe` capabilities |
+| `agents/system-agent/prompts/system.md` | Remove identity management-related responsibilities |
 | `docs/design/07-system-agent.md` | Deleted (this document replaces it) |
 | `docs/design/12-tool-system.md` | `identity_store`/`identity_query`/`identity_observe` marked **deprecated**, pointing to this document |
 | `docs/design/06-communication.md` §1.2 | `identity_delivery` marked deprecated, replaced by `user_identity` |

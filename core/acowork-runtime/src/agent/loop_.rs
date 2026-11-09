@@ -529,6 +529,20 @@ pub struct AgentLoop {
     /// turn end so a turn that never reaches its user-row write (a replay, an
     /// early failure) cannot leave a reference to be attached to the next one.
     pub(crate) turn_message_refs: Vec<acowork_core::MessageRef>,
+
+    /// The `metadata` of this turn's own `user` row — the display projection an
+    /// agent-origin Intent carries (`intent_turn::intent_display_meta`), or
+    /// `None` for a turn whose text is already human text.
+    ///
+    /// It cannot ride `raw_user_message`: that string *is* the row body, and the
+    /// row body is what the model reads back after a restart (the restorer
+    /// rebuilds history from the JSONL). Trading the envelope for prose there
+    /// would cost a later turn its reply coordinates. Metadata is the side of the
+    /// row the prompt never reads, so both audiences keep their format.
+    ///
+    /// Set per turn by the arm that dequeued the message, consumed once at the
+    /// user-row write; cleared at turn end like the other turn-scoped facts.
+    pub(crate) turn_user_row_meta: Option<serde_json::Value>,
 }
 
 impl AgentLoop {
@@ -602,6 +616,7 @@ impl AgentLoop {
             open_interactions: Vec::new(),
             turn_reference: Default::default(),
             turn_message_refs: Vec::new(),
+            turn_user_row_meta: None,
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -677,6 +692,7 @@ impl AgentLoop {
             open_interactions: Vec::new(),
             turn_reference: Default::default(),
             turn_message_refs: Vec::new(),
+            turn_user_row_meta: None,
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -1233,10 +1249,15 @@ impl AgentLoop {
             // binary contract for legacy tests stays intact.
             let persisted_user_message: &str = raw_user_message.unwrap_or(user_message);
             if let Some(ref conversation) = self.session.conversation {
+                // The row's metadata is the machine-side of the same message: the
+                // display projection an agent-origin Intent carries (see
+                // `turn_user_row_meta`). Taken here — exactly once per turn — so a
+                // later turn cannot inherit a previous one's display.
+                let user_row_meta = self.turn_user_row_meta.take();
                 conversation.append_message_with_id(
                     "user",
                     persisted_user_message,
-                    None,
+                    user_row_meta,
                     message_id,
                 );
             }
@@ -1326,14 +1347,23 @@ impl AgentLoop {
                     // uploaded files without typing text), the fallback below
                     // extracts filenames from <attached_document> tags in the
                     // current message.
-                    let first_user_message = self
-                        .session
-                        .conversation
-                        .as_ref()
-                        .and_then(|conv| {
-                            crate::conversation::read_first_user_message(conv.session_path())
-                        })
-                        .filter(|s| !s.trim().is_empty());
+                    // An agent-origin first turn has a human display projection
+                    // beside the machine envelope (`metadata.intent`); titling
+                    // the session from the envelope is what made an execution
+                    // tab read `[intent:2f3c…:analyze] …`. One row, two
+                    // audiences — the title belongs to the human one.
+                    let first_user_display = self.session.conversation.as_ref().and_then(|conv| {
+                        crate::conversation::read_first_user_display_summary(conv.session_path())
+                    });
+                    let first_user_message = first_user_display.or_else(|| {
+                        self.session
+                            .conversation
+                            .as_ref()
+                            .and_then(|conv| {
+                                crate::conversation::read_first_user_message(conv.session_path())
+                            })
+                            .filter(|s| !s.trim().is_empty())
+                    });
                     let title_input_owned = first_user_message
                         .unwrap_or_else(|| raw_user_message.unwrap_or("").to_string());
                     let title_input = title_input_owned.as_str();

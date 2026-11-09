@@ -485,6 +485,8 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 
 **修订（2026-11-08b·角色行）**：轮次头在名字**下面**补一行 `role`（取自 agent 目录的同一份 meta，与块头 `ChatExecutionBlock` / 常规 agent 消息头同层级同字段），于是它是"头像 + 名字 + role + 状态词"。理由是决策四的接管不变式：块头渲染名字 + role，若 claim 窗口只有名字，接管时就要在名字下**插入**一行、整列下移；先摆好 role，接管只消失状态词，位置不动。多目标 fan-out **不渲染** role 行——拼接出的 role 列表不对应任何单一响应者，头像堆本身已经表达"多人"。
 
+**修订（2026-11-08c·状态词位置）**：轮次头的状态词从身份列（名字 + role 那一列）**移出**，落到块的**内容列**——与块体开头的 40px 空槽同行，也就是 `ChatExecutionBlock` 里"已探索"行所在的那一列。原实现把状态词当成身份列的第三行，两处都违反决策四：`items-center` 的行因该列多一行而变高，名字与 role 被顶离头像轴线；块落地时状态词还要横向跳进内容列，正是"接管只消失状态词，位置不动"所禁止的重排。身份行改用块头逐字相同的类（`mb-2 mt-1 flex items-center gap-2`），于是接管前后头像 / 名字 / role 的几何完全一致，被替换的只有内容列里那一行词。
+
 **不变量保留**：终态收口（`aborted` / `failed` / `timeout` / `waiting`）仍是居中平台行，不套头像——停止不是 agent 的话；`block.notFound` 等空洞类文案同理。三条 D9 不变量（终态居中行、live 仅呈现层、不可达 ≠ 进行中）原样成立。
 
 **范围**。Desktop 两个主面（`AgentChatView`、`GroupChatPanel`）与 Mobile 1:1 面同批切换；新增共享组件与单点响应者解析函数（`resolveExpectedResponders`），claim 元数据（预期响应者实例 id 列表）由 `armTurn` 在发送时携带、随 claim 清除。纯呈现层：无新网络接口、无 proto 字段、无存储写入。设计细节与交付分期见设计 33（`docs/design/zh/33-chat-turn-header.md`）。

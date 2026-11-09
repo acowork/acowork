@@ -8,11 +8,11 @@
 .PARAMETER AgentDir
     Path to a single agent directory. If omitted with -All, builds all agents.
 .PARAMETER OutputDir
-    Output directory for .agent packages (default: examples/agent-packages)
+    Output directory for .agent packages (default: agents/agent-packages)
 .PARAMETER All
-    Build all agents in the examples/ directory.
+    Build all agents in the agents/ directory.
 .EXAMPLE
-    .\dev\common\build-agent.ps1 examples\senior-engineer-agent
+    .\dev\common\build-agent.ps1 agents\senior-engineer-agent
 .EXAMPLE
     .\dev\common\build-agent.ps1 -All
 #>
@@ -35,9 +35,9 @@ $ProjectRoot = Split-Path -Parent (Split-Path -Parent $ScriptDir)
 # ── Defaults ────────────────────────────────────────────────────────
 
 if (-not $OutputDir) {
-    $OutputDir = Join-Path $ProjectRoot "examples\agent-packages"
+    $OutputDir = Join-Path $ProjectRoot "agents\agent-packages"
 }
-$KeyDir = Join-Path $ProjectRoot "examples\.signing-keys"
+$KeyDir = Join-Path $ProjectRoot "agents\.signing-keys"
 
 # ── Colors ──────────────────────────────────────────────────────────
 
@@ -50,8 +50,8 @@ function Write-Subtle { Write-Host $args -ForegroundColor Gray }
 # ── Resolve agent directories ───────────────────────────────────────
 
 function Get-AgentDirs {
-    $examplesDir = Join-Path $ProjectRoot "examples"
-    Get-ChildItem -Path $examplesDir -Directory |
+    $agentsDir = Join-Path $ProjectRoot "agents"
+    Get-ChildItem -Path $agentsDir -Directory |
         Where-Object { Test-Path (Join-Path $_.FullName "manifest.toml") } |
         ForEach-Object { $_.FullName }
 }
@@ -60,7 +60,7 @@ $agentDirs = @()
 if ($All) {
     $agentDirs = @(Get-AgentDirs)
     if ($agentDirs.Count -eq 0) {
-        Write-Error_ "No agent directories found with manifest.toml in examples/"
+        Write-Error_ "No agent directories found with manifest.toml in agents/"
         exit 1
     }
 } elseif ($AgentDir) {

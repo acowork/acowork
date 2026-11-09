@@ -523,7 +523,7 @@ RUN‑04~06, RUN‑10~12, RUN‑13a, MEM‑04~06, MEM‑08, MEM‑10~12, TOL‑0
 
 ## 5. Core User Scenarios
 
-> §5 describes representative scenarios supported by platform capabilities (illustrative), not requiring one‑to‑one mapping with Agents in `examples/`. Current `examples/` Agents are enterprise R&D‑oriented: Architect / SSE / QA / PM / Product / Docs / Document Manager etc. Personal Agents like weather/calendar are not packaged, but platform capabilities exist – users or developers can package and install them.
+> §5 describes representative scenarios supported by platform capabilities (illustrative), not requiring one‑to‑one mapping with Agents in `agents/`. Current `agents/` Agents are enterprise R&D‑oriented: Architect / SSE / QA / PM / Product / Docs / Document Manager etc. Personal Agents like weather/calendar are not packaged, but platform capabilities exist – users or developers can package and install them.
 
 ### 5.1 Personal User Daily Scenario
 

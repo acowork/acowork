@@ -428,8 +428,8 @@ pub fn build_package(
     let mut signed = false;
     if sign {
         let key_dir = key_dir.unwrap_or_else(|| {
-            // Default: use dev key from examples/.signing-keys/
-            Path::new("examples/.signing-keys")
+            // Default: use dev key from agents/.signing-keys/
+            Path::new("agents/.signing-keys")
         });
         let signed_path = output_dir.join(format!("{}-{}-signed.agent", agent_id, info.version));
 

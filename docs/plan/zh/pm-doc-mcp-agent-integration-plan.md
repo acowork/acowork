@@ -102,14 +102,14 @@ graph LR
 
 | ID | 任务 | 落点 | DoD |
 |---|---|---|---|
-| **T3-1** | PM `system.md` 重写 | [system.md](../../../examples/project-manager-agent/prompts/system.md) | 新增设计 §5.1 状态机 / §5.2 派工模型 / §5.4 ID 纪律 / §5.5 路径约定四节；`todo_write` 明确降级为「会话内临时清单」，跨会话或需他人履约一律落 PM 服务 |
-| **T3-2** | PM `manifest.toml` | [manifest.toml](../../../examples/project-manager-agent/manifest.toml) | 补 `[[mcp_servers]] hosted = "doc"`；`tool_deps` 声明 `pm_*` / `doc_*`；**修 D4 矛盾注释，shell 三件套保留**；`capabilities` 指向新 skill |
-| **T3-3** | PM 7 skill 改写 | [skills/](../../../examples/project-manager-agent/skills/) | 每个 skill `tool_deps` 含具体 `pm_*`/`doc_*`；步骤写明用哪个工具替代原 memory/file 叙述 |
+| **T3-1** | PM `system.md` 重写 | [system.md](../../../agents/project-manager-agent/prompts/system.md) | 新增设计 §5.1 状态机 / §5.2 派工模型 / §5.4 ID 纪律 / §5.5 路径约定四节；`todo_write` 明确降级为「会话内临时清单」，跨会话或需他人履约一律落 PM 服务 |
+| **T3-2** | PM `manifest.toml` | [manifest.toml](../../../agents/project-manager-agent/manifest.toml) | 补 `[[mcp_servers]] hosted = "doc"`；`tool_deps` 声明 `pm_*` / `doc_*`；**修 D4 矛盾注释，shell 三件套保留**；`capabilities` 指向新 skill |
+| **T3-3** | PM 7 skill 改写 | [skills/](../../../agents/project-manager-agent/skills/) | 每个 skill `tool_deps` 含具体 `pm_*`/`doc_*`；步骤写明用哪个工具替代原 memory/file 叙述 |
 | **T3-4** | PM 新增 2 skill | `task-dispatch` / `project-setup` | `task-dispatch` 覆盖 M1/M2/M4/M5/M7 全链路，含「非成员 → 邀请」「未批准 → 等待而非重试」两个显式分支；`project-setup` 建项目 + `项目管理/{project_id}/` 目录树 + README + 名册 |
-| **T3-5** | Doc `system.md` 重写 | [system.md](../../../examples/document-manager-agent/prompts/system.md) | 新增 §5.3 写入纪律 / §5.4 ID 路径纪律；确立「库是事实源，workspace 只是导入源」；**显式声明 `项目管理/**` 为 PM 产出区，不得随意搬动**（§5.5 路径依赖） |
-| **T3-6** | Doc `manifest.toml` | [manifest.toml](../../../examples/document-manager-agent/manifest.toml) | `tool_deps` 声明 `doc_*`；修 D4 注释；shell 保留 |
-| **T3-7** | Doc 7 skill 改写 + 新增 1 | [skills/](../../../examples/document-manager-agent/skills/) | `document-collection` 走 `doc_write(mode=create, source_workspace, source_path)`；`document-organization` 用 `doc_mkdir`/`doc_move`(含目录)；新增 `review-tracking` |
-| **T3-8** | 重新打包 | [examples/agent-packages/](../../../examples/agent-packages/) | `com.acowork.project-manager.agent` / `com.acowork.document-manager.agent` 同步重建并可安装 |
+| **T3-5** | Doc `system.md` 重写 | [system.md](../../../agents/document-manager-agent/prompts/system.md) | 新增 §5.3 写入纪律 / §5.4 ID 路径纪律；确立「库是事实源，workspace 只是导入源」；**显式声明 `项目管理/**` 为 PM 产出区，不得随意搬动**（§5.5 路径依赖） |
+| **T3-6** | Doc `manifest.toml` | [manifest.toml](../../../agents/document-manager-agent/manifest.toml) | `tool_deps` 声明 `doc_*`；修 D4 注释；shell 保留 |
+| **T3-7** | Doc 7 skill 改写 + 新增 1 | [skills/](../../../agents/document-manager-agent/skills/) | `document-collection` 走 `doc_write(mode=create, source_workspace, source_path)`；`document-organization` 用 `doc_mkdir`/`doc_move`(含目录)；新增 `review-tracking` |
+| **T3-8** | 重新打包 | [agents/agent-packages/](../../../agents/agent-packages/) | `com.acowork.project-manager.agent` / `com.acowork.document-manager.agent` 同步重建并可安装 |
 
 **P3 验收**：`grep -rniE 'pm_[a-z]+|doc_[a-z]+'` 在两个 agent 目录的命中数从 **0** 升至每 skill ≥ 3；两个 agent 在干净实例上跑通 §5 场景脚本。
 
@@ -136,7 +136,7 @@ graph LR
 | **ADR-102 派工链** | [intent_turn.rs:1162](../../../core/acowork-runtime/src/agent/intent_turn.rs#L1162) 与 [dispatch.rs `build_assignment_brief`](../../../core/acowork-pm/src/dispatch.rs) 显式指示调 `pm_claim_task` | **`pm_claim_task` 不合并、不改名**（设计 §3.1 据此否决了一次合并） |
 | **REST 面** | 无变更 | 人类与 Desktop 路径零影响；新工具全部复用既有 service 方法 |
 | **MCP 入参兼容** | `pm_submit_task.attachment_ids` 从 manifest 移除，但旧 agent 可能仍传 | dispatch 侧**继续容忍**该入参（T0-6），只从 LLM 可见面消失 |
-| **`examples/agent-packages/*.agent`** | 打包产物过期 | T3-8 重建 |
+| **`agents/agent-packages/*.agent`** | 打包产物过期 | T3-8 重建 |
 | **文档库既有内容** | 新约定 `项目管理/{project_id}/` 可能与历史目录冲突 | 首次创建时若同名非目录节点存在，`doc_mkdir` 返回明确错误，由 agent 报告人类——**不自动改名、不静默复用** |
 
 ---

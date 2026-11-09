@@ -4234,6 +4234,50 @@ pub fn read_first_user_message(path: &Path) -> Option<String> {
     None
 }
 
+/// What the auto-title should describe for a session whose first turn was an
+/// agent-origin Intent.
+///
+/// `read_first_user_message` returns the row body, which for those turns is the
+/// **machine envelope** (`[intent:2f3c…:analyze] {"title":…}`) — so the title was
+/// an LLM's summary of a JSON blob. The human display projection the row carries
+/// under `metadata.intent` says the same thing in words, and naming the session
+/// after that is both cheaper to read and the same sentence the Chat block shows.
+///
+/// `None` for a row with no display (a human turn, or any row written before the
+/// projection existed) — the caller falls back to the body, i.e. to today's
+/// behaviour.
+pub fn read_first_user_display_summary(path: &Path) -> Option<String> {
+    const PAGE: u32 = 16;
+    const MAX_PAGES: u8 = 32;
+    let mut offset = 0u64;
+    for _ in 0..MAX_PAGES {
+        let page = read_messages_paginated(path, offset, PAGE, false).ok()?;
+        if let Some(entry) = page
+            .messages
+            .into_iter()
+            .find(|e| e.role == "user" && !e.is_internal())
+        {
+            return entry
+                .metadata
+                .as_ref()
+                .and_then(|m| m.get(crate::agent::intent_turn::META_KEY_INTENT_DISPLAY))
+                .and_then(|d| d.get("summary"))
+                .and_then(|s| s.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
+        if page.limit == 0 {
+            return None;
+        }
+        offset += u64::from(page.limit);
+        if offset >= page.total {
+            return None;
+        }
+    }
+    None
+}
+
 /// Read messages from a JSONL file since a given line-number coordinate.
 ///
 /// ADR-021: This is the Runtime-side handler for incremental poll requests.
@@ -6661,6 +6705,36 @@ mod tests {
             Some("第一条用户消息"),
             "must return the first real user row, not the internal nudge"
         );
+    }
+
+    #[test]
+    fn the_title_seed_prefers_the_human_display_over_the_envelope() {
+        // An agent-origin first turn: the row body is the machine envelope, and
+        // `metadata.intent.summary` is the sentence the Chat block already shows.
+        // Titling the session from the envelope made an exec tab read
+        // `[intent:2f3c…:analyze] …`.
+        let dir = TempDir::new().unwrap();
+        let mut agent_turn = make_entry("u1", "user", "[intent:inst-a:analyze] {\"title\":\"x\"}");
+        agent_turn.metadata = Some(serde_json::json!({
+            "round_id": "r:u1",
+            "intent": { "origin": "request", "action": "analyze", "summary": "审计 usecase 分层", "body": "…" }
+        }));
+        let entries = vec![
+            make_entry("sys", "system", "session init"),
+            agent_turn,
+            make_entry("a1", "assistant", "reply"),
+        ];
+        let path = write_test_jsonl(&dir, "title-seed", &entries);
+        assert_eq!(
+            read_first_user_display_summary(&path).as_deref(),
+            Some("审计 usecase 分层")
+        );
+
+        // A human first turn has no display projection: the caller falls back to
+        // the row body, i.e. exactly today's behaviour.
+        let human = vec![make_entry("u1", "user", "修复分页")];
+        let path = write_test_jsonl(&dir, "title-seed-human", &human);
+        assert_eq!(read_first_user_display_summary(&path), None);
     }
 
     #[test]

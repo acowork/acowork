@@ -52,6 +52,9 @@ async fn end_turn_obligations(
     // ADR-107: a turn that ended without persisting its parts (an abort before
     // the user-row write) must not hand them to the next turn.
     agent_loop.turn_message_refs.clear();
+    // Same rule for the display projection: an abort before the user-row write
+    // must not paint the next turn's row.
+    agent_loop.turn_user_row_meta = None;
     (ctx, outcome)
 }
 
@@ -66,7 +69,15 @@ pub struct PulledAttachment {
 }
 
 /// Messages that can be sent to a SessionTask.
+///
+/// `large_enum_variant` is allowed on purpose: the widest variant is the Intent
+/// envelope, and design 27 §3.2 puts the sender, the action, the Chat
+/// coordinates and the attachment union on that one wire message. This is a
+/// channel message — cloned once per delivery and never held in a collection —
+/// so the size gap the lint measures buys nothing to remove (boxing a field only
+/// moves the same bytes to the heap and hides the envelope from its readers).
 #[derive(Clone)]
+#[allow(clippy::large_enum_variant)]
 pub enum SessionMessage {
     /// User chat message to process
     ChatMessage {
@@ -291,6 +302,17 @@ pub enum SessionMessage {
         /// `context_ref` rows beside the `user` row. Empty for every origin
         /// that has no such context.
         context_refs: Vec<acowork_core::MessageRef>,
+        /// The **human** rendering of the same envelope
+        /// (`intent_turn::render_intent_display`), or `None` when the origin has
+        /// none — a human turn's `content` already is the person's words.
+        ///
+        /// Two audiences, two formats, one wire: `content` stays the
+        /// machine-facing prompt (reply coordinates in it, `params` as compact
+        /// JSON) because the model must read those coordinates, while this rides
+        /// the turn's user row as `metadata.intent` for every surface that draws
+        /// pixels. Without it those surfaces have no text but the prompt, which
+        /// is how a block came to read `[intent:2f3c…:analyze] {"title":…}`.
+        display: Option<crate::agent::intent_turn::IntentDisplay>,
     },
     // ADR-035 Phase 3: EnableNotify/DisableNotify removed — push drives all
     // streaming, the front/back suppression mechanism is gone.
@@ -1448,6 +1470,7 @@ impl SessionTask {
                     task_id,
                     opened_new,
                     context_refs,
+                    display,
                 }) => {
                     // A PM dispatch's playbook joins Block A for this
                     // session's remaining requests: constant per task, so
@@ -1529,10 +1552,14 @@ impl SessionTask {
                         // D13: the round's one-line task name, written once with
                         // the reference and never rewritten. `brief` is the
                         // system slot (the PM playbook), so it may name a row
-                        // only when it is NOT the playbook — see
-                        // `reference_brief`.
-                        assignment_brief: crate::agent::intent_turn::reference_brief(
-                            &kind, brief, &content,
+                        // only when it is NOT the playbook, and a peer round is
+                        // named by its display projection — see
+                        // `reference_name`.
+                        assignment_brief: crate::agent::intent_turn::reference_name(
+                            &kind,
+                            brief,
+                            &content,
+                            display.as_ref(),
                         ),
                         // D13: the chip's coordinate, stated once with the row. The
                         // transport parsed it off the conversation key, so an empty
@@ -1562,6 +1589,12 @@ impl SessionTask {
                     // the auto-title) is the human's message, not the router's
                     // paraphrase of it.
                     agent_loop.turn_message_refs = context_refs;
+                    // The row's other side: this turn's human display projection
+                    // rides `metadata.intent`, next to the machine envelope the
+                    // row body already carries. `None` for a human origin, whose
+                    // body is already the person's words.
+                    agent_loop.turn_user_row_meta =
+                        display.as_ref().map(crate::agent::intent_turn::intent_display_meta);
                     let mut llm_message = crate::agent::intent_turn::render_user_turn(
                         &content,
                         &agent_loop.turn_message_refs,
