@@ -1653,7 +1653,8 @@
     "navForward": "Forward",
     "navRefresh": "Refresh",
     "iframeBlockedHint": "This site does not support in-app preview",
-    "htmlPreviewTsModuleWarning": "This HTML references TypeScript/TSX module entry files. Static Preview can load files but cannot compile TS/TSX. For Vite/React apps, run the dev server and open the localhost URL preview instead."
+    "htmlPreviewFailed": "Could not open this page",
+    "htmlPreviewRetry": "Try again"
   },
   "fileStatus": {
     "languageFallback": "plain text",

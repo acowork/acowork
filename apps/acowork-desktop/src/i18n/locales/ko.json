@@ -1138,7 +1138,8 @@
     "navForward": "앞으로",
     "navRefresh": "새로고침",
     "iframeBlockedHint": "이 사이트는 앱 내 미리보기를 지원하지 않습니다",
-    "htmlPreviewTsModuleWarning": "TypeScript/TSX 모듈 엔트리 파일이 감지되었습니다. Static Preview는 파일을 로드할 수 있지만 TS/TSX를 컴파일할 수 없습니다. Vite/React 앱은 dev server를 실행한 뒤 localhost URL 미리보기를 여세요."
+    "htmlPreviewFailed": "이 페이지를 열 수 없습니다",
+    "htmlPreviewRetry": "다시 시도"
   },
   "fileStatus": {
     "languageFallback": "일반 텍스트",

@@ -14,7 +14,6 @@ import { useReportFilePanelBounds } from "../../hooks/useReportFilePanelBounds";
 import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
 import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../common/capsule";
-import { getGatewayUrl } from "../../lib/config";
 import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Code2, Locate, RefreshCw, XSquare, Files, AlertCircle } from "lucide-react";
 import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
 import { initMonaco } from "../../lib/monacoBootstrap";
@@ -32,7 +31,7 @@ import {
 } from "../common/ContextMenu";
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { UrlPreviewView } from "./UrlPreviewView";
-import { HtmlPreviewView } from "./HtmlPreviewView";
+import { WorkspaceHtmlPreview } from "./WorkspaceHtmlPreview";
 import { ImageViewer } from "./ImageViewer";
 import type { ImagePoint, ImageRect } from "./imageViewerGeometry";
 import { GitVirtualNav } from "./GitVirtualNav";
@@ -2100,9 +2099,11 @@ export function FileEditorPanel({ width }: { width: number }) {
                         />
                     )
                 ) : activeFile.mode === "preview" && activeFile.mimeType === "text/html" ? (
-                    <HtmlPreviewView
-                        content={activeFile.content}
-                        gatewayUrl={getGatewayUrl()}
+                    // ADR-112: served as a real HTTP document through the
+                    // address-bar browser — the browser itself resolves CSS /
+                    // JS / font sub-resources (a Blob + `<base href>` could not
+                    // authenticate them: they 401'd).
+                    <WorkspaceHtmlPreview
                         agentId={activeFile.agentId}
                         workspaceId={activeFile.workspaceId}
                         relPath={activeFile.relPath}
