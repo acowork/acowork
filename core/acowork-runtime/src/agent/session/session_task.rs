@@ -524,46 +524,6 @@ pub(crate) struct SessionTask {
 // the JSONL metadata. The Runtime no longer reads uploaded file bytes
 // or assembles complex prompt prefixes — see ADR-046 §2.4.
 
-/// ADR-047: apply deferred LLM-side effects when the session config
-/// version has advanced since the last poll.
-///
-/// Called (a) at the top of the SessionTask main loop — the original
-/// turn-boundary site — and (b) immediately before processing any
-/// inbound message that can drive an agent-loop run (ChatMessage,
-/// ContinueExecution, debug replay). Without (b), a config change
-/// (model_switch / reasoning_effort / workspace_switch) landing while
-/// the task is blocked in `select!` was only applied AFTER the next
-/// run finished — every LLM call of that run still used the stale
-/// provider ("switched model but usage still hits the old provider").
-fn apply_pending_config_effects(
-    agent_loop: &mut AgentLoop,
-    context_builder: &mut ContextBuilder,
-    session_id: &str,
-    last_config_version: &mut u64,
-    last_config_snapshot: &mut crate::agent::session_config::SessionConfigSnapshot,
-) {
-    if let Some(conv) = agent_loop.session.conversation.as_ref() {
-        let current_version = conv.config_version();
-        if current_version != *last_config_version {
-            let snapshot = conv.config_snapshot();
-            tracing::info!(
-                session_id = %session_id,
-                old_version = *last_config_version,
-                new_version = current_version,
-                "SessionTask: config version changed, applying LLM-side effects"
-            );
-            crate::agent::session_config::llm_effects::apply_llm_effects(
-                agent_loop,
-                context_builder,
-                &snapshot,
-                last_config_snapshot,
-            );
-            *last_config_snapshot = snapshot;
-            *last_config_version = current_version;
-        }
-    }
-}
-
 /// ADR-083: surface a manual-compaction error to the frontend as an error
 /// chunk — UNLESS it is a cancellation.
 ///
@@ -931,35 +891,13 @@ impl SessionTask {
         // replays the agent loop with this saved message.
         let mut last_user_message: Option<(String, String)> = None;
 
-        // ADR-047: config version polling state.
-        //
-        // SessionTask polls the config version at turn boundaries.
-        // If config was mutated during the previous inference turn
-        // (via SessionManager -> ConversationSession::apply_config),
-        // the version will have changed and we apply deferred LLM-side
-        // effects before processing the next message.
-        //
-        // Bug B fix: initialise `last_config_version = 0` and
-        // `last_config_snapshot = Default` (instead of reading the
-        // current version) so the FIRST iteration of the main loop
-        // always takes the "version changed" branch and calls
-        // `apply_llm_effects` once at startup. Without this, when the
-        // session was created with `provider = None` (cache empty at
-        // phase_b during onboarding) and Desktop's later
-        // `model_switch` -> `apply_config` already advanced
-        // `config_version` to e.g. 3, the loop's first poll sees
-        // `current_version == last_config_version` and never applies
-        // the LLM-side effects — the agent loop fires its first
-        // `chat_message` against the stale `noop` provider and
-        // surfaces "No LLM provider configured" to the user. The
-        // second chat succeeds because the failed iteration re-enters
-        // the loop, observes the version drift, and finally rebuilds
-        // the LLM provider. Cost of the always-on initial
-        // apply: one extra `build_provider_for` per SessionTask
-        // startup (idempotent, ms-scale).
-        let mut last_config_version: u64 = 0;
-        let mut last_config_snapshot =
-            crate::agent::session_config::SessionConfigSnapshot::default();
+        // ADR-047 (amended): config version polling state lives on the
+        // AgentLoop now (`last_config_version` / `last_config_snapshot`) so
+        // `run_inner` can poll it at iteration boundaries too — a settings
+        // change must take effect WITHOUT stopping a long-running turn.
+        // The startup apply (Bug B fix: version initialised to 0 so the first
+        // poll always applies and rebuilds a provider created against an
+        // empty cache) is documented on the fields in loop_.rs.
 
         loop {
             // ── ADR-047: Check if config was mutated during previous turn ──
@@ -968,13 +906,7 @@ impl SessionTask {
             // before `match msg`), so a config change landing while the task
             // waits in `select!` is picked up BEFORE the next run starts —
             // not after it finishes.
-            apply_pending_config_effects(
-                &mut agent_loop,
-                &mut context_builder,
-                &session_id,
-                &mut last_config_version,
-                &mut last_config_snapshot,
-            );
+            agent_loop.apply_pending_config_effects(&mut context_builder);
 
             // Use tokio::select! to await inbound messages, rewind
             // notifications, and resume notifications — all sourced
@@ -1020,13 +952,7 @@ impl SessionTask {
                                 // landed while the run was paused before
                                 // replaying (same rationale as the
                                 // ChatMessage path).
-                                apply_pending_config_effects(
-                                    &mut agent_loop,
-                                    &mut context_builder,
-                                    &session_id,
-                                    &mut last_config_version,
-                                    &mut last_config_snapshot,
-                                );
+                                agent_loop.apply_pending_config_effects(&mut context_builder);
                                 // Apply rewind/patches before run
                                 agent_loop.core.debug_observer.apply_rewind_and_patches(
                                     &session_id,
@@ -1103,13 +1029,7 @@ impl SessionTask {
             // `select!` must be applied before the next run (ChatMessage /
             // ContinueExecution / debug replay) — otherwise the run still
             // executes against the stale LLM provider.
-            apply_pending_config_effects(
-                &mut agent_loop,
-                &mut context_builder,
-                &session_id,
-                &mut last_config_version,
-                &mut last_config_snapshot,
-            );
+            agent_loop.apply_pending_config_effects(&mut context_builder);
 
             // Note: msg is now Option<SessionMessage> directly (no
             // Ok/Err wrapper from the old timeout pattern).
@@ -2206,13 +2126,7 @@ impl SessionTask {
                     // just picked, and a config change lands as a pending effect
                     // applied before the next run — so apply them first, exactly
                     // as the ChatMessage path does before its run.
-                    apply_pending_config_effects(
-                        &mut agent_loop,
-                        &mut context_builder,
-                        &session_id,
-                        &mut last_config_version,
-                        &mut last_config_snapshot,
-                    );
+                    agent_loop.apply_pending_config_effects(&mut context_builder);
                     agent_loop.supersede_pause_cards();
                     // A retry is not a Chat-composed turn: it answers no row and
                     // owes no card to one. Leaving the previous surface in place

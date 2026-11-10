@@ -103,6 +103,74 @@ impl AgentLoop {
         let _ = provider_id;
     }
 
+    /// ADR-047 (amended): apply the deferred LLM-side effects when the
+    /// session-config version has advanced since the last poll.
+    ///
+    /// The Gateway persists `PUT /sessions/{sid}/config` immediately (which
+    /// bumps `ConversationSession::config_version`), but the runtime side —
+    /// provider rebuild, reasoning_effort sync, context-window refresh — must
+    /// land at a safe point. There are two kinds of safe point and this method
+    /// is called at both:
+    ///
+    /// - the **turn boundary**: the top of the SessionTask main loop and every
+    ///   pre-run site (inbound handling, debug resume, RetryTurn). This also
+    ///   covers the startup poll that rebuilds a provider created against an
+    ///   empty cache (the Bug B fix — `last_config_version` starts at 0, so
+    ///   the first poll always applies).
+    /// - the **iteration boundary**: the top of `run_inner`'s loop, so a
+    ///   model / provider / effort change made WHILE a long turn is running
+    ///   reaches the next LLM call. Before this, the only way to apply a
+    ///   setting mid-turn was to stop the turn — and stopping an
+    ///   intent-responder turn ends it as `aborted` and permanently closes the
+    ///   peer's mailbox request, breaking the intent exchange.
+    ///
+    /// "Next LLM call" means the next ITERATION's call: an in-flight request,
+    /// its retry sequence, or a long-running tool execution finishes on the
+    /// provider it started with — the swap point is deliberately where no
+    /// request is outstanding.
+    ///
+    /// Idempotent: a no-op while the version is unchanged, which costs one
+    /// atomic load — cheap enough to poll every iteration. Workspace switches
+    /// are NOT handled here by design: they arrive on the separate
+    /// `SetWorkDir` channel and stay turn-scoped.
+    pub(crate) fn apply_pending_config_effects(
+        &mut self,
+        context_builder: &mut ContextBuilder,
+    ) {
+        // Hot path (unchanged version): read through a shared borrow — no
+        // `Arc` clone, just one atomic load and an integer compare.
+        let Some(conv) = self.session.conversation.as_ref() else {
+            return;
+        };
+        let current_version = conv.config_version();
+        if current_version == self.last_config_version {
+            return;
+        }
+        let snapshot = conv.config_snapshot();
+        let session_id = self
+            .session_core
+            .session_id
+            .clone()
+            .unwrap_or_default();
+        tracing::info!(
+            session_id = %session_id,
+            old_version = self.last_config_version,
+            new_version = current_version,
+            "config version changed, applying LLM-side effects"
+        );
+        // `prev` is taken out (the snapshot is `Default`) so `apply_llm_effects`
+        // can hold `&mut self` without aliasing the tracked snapshot.
+        let prev = std::mem::take(&mut self.last_config_snapshot);
+        crate::agent::session_config::llm_effects::apply_llm_effects(
+            self,
+            context_builder,
+            &snapshot,
+            &prev,
+        );
+        self.last_config_snapshot = snapshot;
+        self.last_config_version = current_version;
+    }
+
     /// Apply runtime config overrides from Gateway.
     pub fn apply_runtime_config(&mut self, overrides: &RuntimeConfigOverrides) {
         self.core.apply_runtime_config(overrides);
