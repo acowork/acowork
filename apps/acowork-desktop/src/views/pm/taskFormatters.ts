@@ -21,3 +21,50 @@ export function formatBytes(n: number): string {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
   return `${(n / (1024 * 1024)).toFixed(1)} MB`;
 }
+
+/**
+ * 截止日期短格式：本年内 `MM-DD`，跨年带年份。
+ *
+ * 列表视图的截止日期列用这个（看板卡片里是同一份规则的私有实现）。
+ */
+export function formatDueDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  const sameYear = d.getFullYear() === new Date().getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return sameYear ? `${mm}-${dd}` : `${d.getFullYear()}-${mm}-${dd}`;
+}
+
+/**
+ * 逾期判定：终态任务（已完成 / 已取消 / 已驳回）不算逾期。
+ *
+ * 与看板卡片同规则 —— 一个已完成的历史任务挂着红字是噪音。
+ */
+export function isDueOverdue(iso: string, status: string): boolean {
+  if (status === "done" || status === "cancelled" || status === "rejected") return false;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return false;
+  const today = new Date();
+  const endOfToday = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+    23,
+    59,
+    59,
+    999,
+  );
+  return d.getTime() < endOfToday.getTime();
+}
+
+/** 距截止还有几天（负数 = 已逾期 N 天）；无截止 → `null`。 */
+export function dueDaysLeft(iso: string | null): number | null {
+  if (!iso) return null;
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return null;
+  const today = new Date();
+  const a = new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+  const b = new Date(today.getFullYear(), today.getMonth(), today.getDate()).getTime();
+  return Math.round((a - b) / 86_400_000);
+}
