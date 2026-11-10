@@ -25,6 +25,18 @@
  *   already runs; no chat row is written for the decision.
  * - a hole is drawn as a hole: a round that cannot be read says so, instead of
  *   the transcript inventing an outcome for it (D3/D5).
+ *
+ * What the reader sees without clicking, and why:
+ * - the block AND its rounds start FOLDED. Reading the work is a deliberate
+ *   gesture; watching a session iterate is not what a Chat is for. The one
+ *   thing that opens the block on its own is an unanswered card (D8): an
+ *   answerable control behind a fold is not answerable, so the block and the
+ *   parked round open together.
+ * - the run's latest answer is drawn BELOW the block as an ordinary assistant
+ *   bubble (`data-run-answer`). That is the Chat's own grammar — the agent's
+ *   newest words sit in the transcript — while the rounds stay one click away.
+ *   The text is the same projected `answer` the collapsed round shows: no
+ *   second read, no new row, no invented content.
  */
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
@@ -86,11 +98,6 @@ interface ChatExecutionBlockProps {
   /** Who ran the session, as this surface names them. Falls back to the agent's
    *  own display name. */
   authorName?: string;
-  /** Something follows this block in the transcript. This is `ExploreBlock`'s
-   *  `hasFollowUpReply` — the ONE condition that auto-collapses: while the run is
-   *  the freshest thing on screen it stays open, and once the conversation has
-   *  moved past it it folds up. */
-  hasFollowUp?: boolean;
   /** Drill into the execution session that owns these rounds. */
   onJumpToExec?: (agentInstanceId: string, execSid: string) => void;
   /** Address the composer to one round (D6 level 1) — what a `pause` card's
@@ -276,7 +283,6 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   chatSessionId,
   showHeader,
   authorName,
-  hasFollowUp,
   onJumpToExec,
   onReplyToRound,
   onContinueRound,
@@ -343,8 +349,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   // with may simply not have reached this Chat as a reference row yet. So the
   // live word wins; the read-derived word is what the header falls back to.
   // What the live state may NOT do is create liveness out of nothing — the
-  // spinner and the auto-expand below stay tied to this block's own pending read
-  // (D9).
+  // spinner stays tied to this block's own pending read (D9).
   const shownState =
     (sessionStatus && isProcessing(sessionStatus)
       ? stateText(t, sessionStatus)
@@ -378,23 +383,18 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   const shown = shownIndices.map((i) => block.rounds[i]!);
   const hiddenOlder = block.rounds.length - shownIndices.length;
 
-  // `ExploreBlock`'s state machine, on the same conditions: open while it is the
-  // freshest thing on screen, fold once the conversation moves past it, and never
-  // re-open over a reader who collapsed it by hand.
-  const [expanded, setExpanded] = useState(!hasFollowUp);
-  const manuallyCollapsed = useRef(false);
+  // Folded by default, and it stays folded until the human opens it. A run that
+  // is still working does not unfold itself either: the freshest answer is
+  // drawn below the block as a bubble, so watching the session iterate is not a
+  // precondition for reading it. The ONE condition that opens the block on its
+  // own is an unanswered card — an answerable control behind a fold is not
+  // answerable (D8) — and it is not a "default", it is the human being asked.
+  const [expanded, setExpanded] = useState(false);
   const contentRef = useRef<HTMLDivElement | null>(null);
-
-  useEffect(() => {
-    if ((inProgress || hasOpenCard) && !manuallyCollapsed.current) {
-      setExpanded(true);
-    }
-  }, [inProgress, hasOpenCard]);
 
   useEffect(() => {
     if (hasOpenCard) {
       // The answer buttons have to be on screen, not just in the pane.
-      manuallyCollapsed.current = false;
       setExpanded(true);
       setTimeout(() => {
         if (contentRef.current) {
@@ -403,13 +403,6 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
       }, 0);
     }
   }, [hasOpenCard]);
-
-  useEffect(() => {
-    if (hasFollowUp && !inProgress && !hasOpenCard) {
-      setExpanded(false);
-      manuallyCollapsed.current = false;
-    }
-  }, [hasFollowUp, inProgress, hasOpenCard]);
 
   const name =
     runName?.trim() ||
@@ -484,6 +477,20 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
       }),
     [block, entries, name, t],
   );
+
+  // The run's last word, drawn OUTSIDE the fold (the bubble at the tail of this
+  // component). It is read from the very projection the collapsed rounds carry,
+  // so nothing new is fetched and no row is invented; a round still working has
+  // not spoken yet, so the newest round WITH an answer is the run's latest
+  // utterance. It re-renders whenever the block read lands a newer answer — the
+  // block store's re-read of a `pending` ref is what makes that live.
+  const latestAnswer = useMemo(() => {
+    for (let i = block.rounds.length - 1; i >= 0; i -= 1) {
+      const body = entries[block.rounds[i]!.ref]?.projection?.answer?.body.trim();
+      if (body) return body;
+    }
+    return "";
+  }, [block, entries]);
 
   return (
     <div className={`px-4 py-1 ${className ?? ""}`}>
@@ -574,11 +581,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
             />
             <div className="max-w-full" style={{ fontSize: BLOCK_FONT_SIZE }}>
               <button
-                onClick={() => {
-                  const next = !expanded;
-                  setExpanded(next);
-                  manuallyCollapsed.current = next ? false : true;
-                }}
+                onClick={() => setExpanded((v) => !v)}
                 aria-expanded={expanded}
                 // Stable hook for "the block's own collapse header": the action
                 // row above now carries `aria-expanded` too (its drawer), so a
@@ -647,10 +650,6 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                          *  so a pinned round above the window keeps its own
                          *  number instead of being renumbered by the window. */
                         index={shownIndices[i]!}
-                        /** The freshest round of an open block shows its pair;
-                         *  earlier ones fold to one line, the way a long run's
-                         *  older tool calls do. */
-                        defaultOpen={shownIndices[i] === block.rounds.length - 1}
                         chatSessionId={chatSessionId}
                         instanceId={instanceId}
                         execSid={execSid}
@@ -665,6 +664,29 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                 </OverlayScrollbar>
               )}
             </div>
+            {/* The run's latest answer, in the transcript's own assistant-bubble
+                skin — under the block, never inside the fold. This is what keeps
+                the surface reading as a conversation: the agent's newest words
+                are on screen while the rounds stay one click away.
+                It is the SAME projected `answer` the newest answered round
+                carries (`latestAnswer`), so nothing here can say anything the
+                block would not; a run that has not answered yet paints nothing
+                instead of an empty bubble. */}
+            {latestAnswer && (
+              <div
+                data-run-answer=""
+                // The transcript's own bubble skin, and its own measure: this
+                // sits in the block column (`items-start`), so it hugs its text
+                // up to the column's `--content-max-width` exactly as an agent
+                // row does, and it inherits the Chat's font scale — the block's
+                // 0.9× step is the sibling div above, not this one. A message
+                // type with two sizes depending on the surface is how a Chat
+                // stops reading as one conversation.
+                className="mt-2 min-w-0 max-w-full rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 select-text break-words"
+              >
+                <ChatMarkdown content={latestAnswer} />
+              </div>
+            )}
           </div>
           {/* The router's question about this run, drawn at the run's tail and
               outside the collapse: an unanswerable thing behind a fold is the
@@ -697,7 +719,6 @@ interface RoundItemProps {
   round: RunBlock["rounds"][number];
   /** Position in the session's round list (1-based) — the row's label. */
   index: number;
-  defaultOpen: boolean;
   chatSessionId: string;
   instanceId: string;
   execSid: string;
@@ -709,11 +730,12 @@ interface RoundItemProps {
 }
 
 /** One round: a question line that opens into the question/answer pair, in
- *  `ExploreBlock`'s row-plus-two-panels chrome. */
+ *  `ExploreBlock`'s row-plus-two-panels chrome. Folded like the block itself —
+ *  the run's answer is already on screen below it (`data-run-answer`), and the
+ *  pair is what a reader opens when they want the question beside it. */
 function RoundItem({
   round,
   index,
-  defaultOpen,
   chatSessionId,
   instanceId,
   execSid,
@@ -724,7 +746,7 @@ function RoundItem({
   onContinueRound,
 }: RoundItemProps) {
   const { t } = useTranslation();
-  const [open, setOpen] = useState(defaultOpen);
+  const [open, setOpen] = useState(false);
   const projection = entry?.projection;
   // One answer for the row's line and the copy export (`questionOf`), one for
   // the expanded panel (`questionBodyOf`): an opener round's sentence already
@@ -813,7 +835,11 @@ function RoundItem({
         ) : (
           <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-zinc-300 dark:bg-zinc-500" />
         )}
-        <button onClick={() => setOpen((v) => !v)} aria-label={t("chatView.block.toggleRound")}>
+        <button
+          onClick={() => setOpen((v) => !v)}
+          aria-label={t("chatView.block.toggleRound")}
+          aria-expanded={open}
+        >
           {open ? (
             <ChevronDown className="h-3 w-3 shrink-0 text-text-tertiary" />
           ) : (
