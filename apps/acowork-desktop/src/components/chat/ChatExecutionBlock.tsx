@@ -61,7 +61,6 @@ import { useChatSessionStore } from "../../stores/chatSessionStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useSessionTitle } from "../../lib/useSessionTitle";
 import { SpeakerBadge } from "./speakerNames";
-import { speakerDisclosure } from "./speakerProvenance";
 import { sendAnswer, sendApproval } from "../../lib/session-control";
 import { deriveSessionTitle } from "../../lib/sessionConfigMapper";
 import { getProcessingPhase, isProcessing, type SessionStatus } from "../../lib/types";
@@ -765,9 +764,9 @@ function RoundItem({
   // initiator says so here too. The Chat's block is the second surface that
   // shows these words, and a disclosure on the bubble but not here would let the
   // same sentence read as the agent's on one side of the app and as a person's on
-  // the other. The badge says NAMES, not the ids the record carries (resolved
-  // in `speakerNames.ts`).
-  const disclosure = speakerDisclosure(projection?.user?.speaker);
+  // the other. `SpeakerBadge` says NAMES, not the ids the record carries
+  // (resolved in `speakerNames.ts`), and renders nothing when there is no
+  // disclosure to make.
   // The words of a turn composed in the execution view: it has no Chat row to
   // pair with, so `showUserLine` is true with nothing to show
   // (`triggerRow` absent) and the block used to fall through to "no question".
@@ -881,12 +880,10 @@ function RoundItem({
               className="rounded bg-[var(--color-accent)]/10 p-2 text-text-secondary"
               style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
             >
-              {disclosure && (
-                <SpeakerBadge
-                  speaker={projection?.user?.speaker}
-                  className="mb-1 block text-text-tertiary"
-                />
-              )}
+              <SpeakerBadge
+                speaker={projection?.user?.speaker}
+                className="mb-1 block text-text-tertiary"
+              />
               <IntentDisplayBody display={display} envelope={rawEnvelope} />
             </div>
           )}
@@ -901,12 +898,10 @@ function RoundItem({
               className="rounded bg-[var(--color-accent)]/10 p-2 text-text-secondary"
               style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
             >
-              {disclosure && (
-                <SpeakerBadge
-                  speaker={projection?.user?.speaker}
-                  className="mb-1 block text-text-tertiary"
-                />
-              )}
+              <SpeakerBadge
+                speaker={projection?.user?.speaker}
+                className="mb-1 block text-text-tertiary"
+              />
               <pre className="whitespace-pre-wrap break-words">{userBody}</pre>
             </div>
           )}

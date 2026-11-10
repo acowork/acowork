@@ -7,22 +7,34 @@
  * path verified — but "babea202-… 代 31839e13-… 发言" tells a reader
  * nothing, so the ids are resolved to names before they are painted.
  *
- * The lookups are the ones the app already owns:
- *   - the agent registry (`agentStore.agents`, keyed by instance id) for an
- *     agent — the same registry the initiator resolution reads
- *     (`lib/sessionInitiator.ts`);
- *   - the account directory (`/api/users/directory`) for a person;
- *   - the signed-in account for the author of a turn the viewer wrote.
+ * The resolution is NOT a second lookup chain: `resolveInitiatorIdentity`
+ * (`lib/sessionInitiator.ts`) already owns "agent → person → short id", and
+ * two chains that must agree drift apart. This module only decides WHICH id
+ * is the "me" case — the one the resolver deliberately answers with `null` —
+ * and names it from the profile store.
  *
- * A name that cannot be resolved falls back to a SHORT id (`slice(0, 8)`) —
- * the same degradation `resolveInitiatorIdentity` uses, so an unknown party
- * is still identifiable without being unreadable.
+ * Why the name comes from the profile store and not from
+ * `authStore.account.display_name`: the account is written once, at login, so
+ * its `display_name` goes stale the moment the user renames themselves
+ * (`ProfileTab` writes only the profile store). Every other surface that
+ * names "you" reads the profile store for the same reason. The account's
+ * `user_id` is still the right source for the ID — it never changes.
+ *
+ * Why the agent registry is consulted before the account directory: an
+ * agent instance id is not a user id, and the directory answers only for
+ * people — so an initiator that is an Agent resolves in the registry, and
+ * the directory request is not paid for at all on an agent-initiated run.
  */
 import { useMemo } from "react";
 import { speakerDisclosure, type TurnSpeaker } from "./speakerProvenance";
-import { useUserDirectory } from "../../lib/sessionInitiator";
+import {
+  resolveInitiatorIdentity,
+  useUserDirectory,
+} from "../../lib/sessionInitiator";
+import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useAuthStore } from "../../stores/authStore";
 import { useAgentStore } from "../../stores/agentStore";
+import type { DirectoryUser } from "../../lib/types";
 import { useTranslation } from "../../i18n/useTranslation";
 
 /** The names of a disclosure's author and of the party it speaks for. */
@@ -37,7 +49,8 @@ export interface SpeakerNames {
 export interface SpeakerNameSources {
   /** The signed-in account id (the viewer's own id), if any. */
   me?: string | null;
-  /** The signed-in account's display name. */
+  /** The viewer's display name — the profile store's, which a rename
+   *  updates live. */
   myName?: string | null;
   /** The agent registry, keyed by INSTANCE id. */
   agents: Record<
@@ -45,16 +58,7 @@ export interface SpeakerNameSources {
     { meta?: { name?: string; display_name?: string; agent_id?: string } }
   >;
   /** The account directory. */
-  directory: readonly {
-    user_id: string;
-    username?: string;
-    display_name?: string;
-  }[];
-}
-
-/** Shorten an id that no registry answered for. */
-function shortId(id: string): string {
-  return id.slice(0, 8);
+  directory: readonly DirectoryUser[];
 }
 
 /**
@@ -70,28 +74,30 @@ export function resolveSpeakerNames(
   const disclosure = speakerDisclosure(speaker);
   if (!disclosure) return null;
 
-  const agentName = (id: string): string | undefined => {
-    const meta = src.agents[id]?.meta;
-    return meta?.display_name || meta?.name || meta?.agent_id || undefined;
-  };
-  const personName = (id: string): string | undefined => {
-    const user = src.directory.find((u) => u.user_id === id);
-    return user?.display_name || user?.username || undefined;
+  // ONE lookup, shared with the initiator resolution: an agent answers from
+  // the registry, a person from the directory, and an id neither registry
+  // knows degrades to a short id rather than to nothing.
+  const nameOf = (id: string): string => {
+    const identity = resolveInitiatorIdentity(
+      id,
+      null,
+      src.directory,
+      (aid) => {
+        const meta = src.agents[aid]?.meta;
+        return meta ? { name: meta.name, display_name: meta.display_name } : undefined;
+      },
+    );
+    return identity?.displayName ?? id.slice(0, 8);
   };
 
   // The author is whichever kind of party the record says wrote the row: a
   // person (usually the signed-in account) or an agent instance.
   const author =
     (src.me && disclosure.author === src.me ? src.myName : undefined) ||
-    agentName(disclosure.author) ||
-    personName(disclosure.author) ||
-    shortId(disclosure.author);
+    nameOf(disclosure.author);
 
   // The target is the session's initiator — an agent instance or a person.
-  const target =
-    agentName(disclosure.standsInFor) ||
-    personName(disclosure.standsInFor) ||
-    shortId(disclosure.standsInFor);
+  const target = nameOf(disclosure.standsInFor);
 
   return { author, target };
 }
@@ -107,14 +113,9 @@ export function useSpeakerNames(
   speaker?: TurnSpeaker | null,
 ): SpeakerNames | null {
   const me = useAuthStore((s) => s.account?.user_id ?? null);
-  const myName = useAuthStore((s) => s.account?.display_name ?? null);
+  const myName = useUserProfileStore((s) => s.profile.displayName);
   const agents = useAgentStore((s) => s.agents);
-  // The directory is the LAST resort (the agent registry and the signed-in
-  // account answer first), so it is only FETCHED when a lookup actually needs
-  // it — an ordinary turn, or a disclosure whose both sides the registry
-  // already names, never pays for the request.
-  const needDirectory = needsDirectory(speaker, { me, myName, agents });
-  const directory = useUserDirectory(needDirectory);
+  const directory = useUserDirectory();
 
   return useMemo(
     () => resolveSpeakerNames(speaker, { me, myName, agents, directory }),
@@ -123,36 +124,11 @@ export function useSpeakerNames(
 }
 
 /**
- * Would a lookup need the account directory to answer?
- *
- * The agent registry and the signed-in account are synchronous; the directory
- * is a network round-trip. This asks whether either side is still unnamed
- * after those two, which is exactly when the directory is worth fetching.
- */
-function needsDirectory(
-  speaker: TurnSpeaker | null | undefined,
-  src: Omit<SpeakerNameSources, "directory">,
-): boolean {
-  const disclosure = speakerDisclosure(speaker);
-  if (!disclosure) return false;
-  const agentName = (id: string): string | undefined => {
-    const meta = src.agents[id]?.meta;
-    return meta?.display_name || meta?.name || meta?.agent_id || undefined;
-  };
-  const authorNamed =
-    (src.me && disclosure.author === src.me ? src.myName : undefined) ||
-    agentName(disclosure.author);
-  const targetNamed = agentName(disclosure.standsInFor);
-  return !authorNamed || !targetNamed;
-}
-
-/**
  * The badge that says WHO spoke and WHOSE voice it is in.
  *
  * Its own component so the registries are only consulted when a disclosure
  * exists: an ordinary turn — the overwhelming majority of rows — mounts
- * nothing, and the directory fetch is not paid for by every bubble in the
- * transcript.
+ * nothing and pays nothing.
  */
 export function SpeakerBadge({
   speaker,

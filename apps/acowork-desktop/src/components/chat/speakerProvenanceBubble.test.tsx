@@ -22,7 +22,17 @@ import { MessageBubble } from "./MessageBubble";
 import { UserWithAttachmentsBubble } from "./UserWithAttachmentsBubble";
 import { useAgentStore } from "../../stores/agentStore";
 import { useAuthStore } from "../../stores/authStore";
+import { useUserProfileStore } from "../../stores/userProfileStore";
 import type { ChatMessage, TurnSpeaker } from "../../lib/types";
+
+// The account directory is a NETWORK fetch; this suite is about what the
+// badge SAYS, not about how the directory arrives. Stubbed with the real
+// resolver kept intact — the badge calls `resolveInitiatorIdentity`.
+vi.mock("../../lib/sessionInitiator", async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import("../../lib/sessionInitiator")>();
+  return { ...actual, useUserDirectory: () => [] };
+});
 
 vi.mock("../common/AgentAvatar", () => ({
   AgentAvatar: () => <span data-testid="agent-avatar" />,
@@ -55,8 +65,14 @@ const STAND_IN: TurnSpeaker = {
  * its user id, the agent by its INSTANCE id.
  */
 function seedRegistries() {
+  // The ID comes from the account (it never changes); the NAME comes from the
+  // profile store, because that is the one a rename updates live
+  // (`authStore.account.display_name` is written once, at login).
   useAuthStore.setState({
-    account: { user_id: "u-nicholas", display_name: "Nicholas" } as never,
+    account: { user_id: "u-nicholas" } as never,
+  });
+  useUserProfileStore.setState({
+    profile: { ...useUserProfileStore.getState().profile, displayName: "Nicholas" },
   });
   useAgentStore.setState({
     agents: {

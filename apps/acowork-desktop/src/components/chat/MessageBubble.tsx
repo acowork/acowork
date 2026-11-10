@@ -32,7 +32,6 @@ import {
   type SpeakerKind,
 } from "./speakerBubble";
 import { SpeakerBadge } from "./speakerNames";
-import { speakerDisclosure } from "./speakerProvenance";
 
 // ── Utilities ─────────────────────────────────────────────────────────
 
@@ -143,11 +142,9 @@ const MessageBubble = React.memo(function MessageBubble({
   // The avatar and name deliberately keep following `speakerKind` — who SENT
   // the turn is a separate fact the projection does not carry yet.
   const speaker: SpeakerKind = message.display ? "agent" : speakerKind;
-  // Plan D3: whose voice this line is in. `null` for the ordinary turn, so the
-  // row below renders exactly what it rendered before provenance existed.
-  // The badge itself says NAMES, not the ids the record carries (resolved in
-  // `speakerNames.ts`).
-  const disclosure = speakerDisclosure(message.speaker);
+  // Plan D3: whose voice this line is in — `SpeakerBadge` decides whether
+  // there is anything to say (nothing, for an ordinary turn), and says NAMES
+  // rather than the ids the record carries (resolved in `speakerNames.ts`).
   const asAgentSpeech = speakerRendersMarkdown(speaker);
   // Narrowed once, so the avatar branch below has a non-null instance id.
   const senderAgent = speakerKind === "agent" ? senderAgentId : null;
@@ -330,13 +327,11 @@ const MessageBubble = React.memo(function MessageBubble({
                 own line above the bubble. It sits beside the name rather than
                 replacing it because both facts matter: a person typed this, and
                 the run still reads as the party whose task it is. Nothing renders
-                for an ordinary turn (`disclosure === null`). */}
-            {disclosure && (
-              <SpeakerBadge
-                speaker={message.speaker}
-                className="mt-[2px] text-xs text-text-tertiary"
-              />
-            )}
+                for an ordinary turn. */}
+            <SpeakerBadge
+              speaker={message.speaker}
+              className="mt-[2px] text-xs text-text-tertiary"
+            />
             {message.content && (
               // Timestamp rendered as a sibling BELOW the bubble
               // (not absolutely positioned above) so it can never
