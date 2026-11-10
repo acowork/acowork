@@ -73,6 +73,8 @@ import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/re
 import { AgentLibraryDialog } from "./AgentLibraryDialog";
 import { resetHubIndexCache } from "../../lib/agentHub";
 import { isFileDropClaimed } from "../../lib/fileDropClaim";
+import { pickDeterministicBuiltinIconId } from "../../lib/avatar";
+import { BUILTIN_ICONS } from "../../lib/builtinIcons";
 
 const SAFE_AGENT = {
   agent_id: "com.acowork.safe",
@@ -124,7 +126,7 @@ const LOCAL_ROW = {
   labels: ["demo", "testing"],
   capabilities: ["demo_run"],
   skills: ["demo-skill", "demo-extra"],
-  avatar: LOCAL_AVATAR,
+  avatar: { kind: "packaged", data_url: LOCAL_AVATAR },
   permissions: ["network", "filesystem:read"],
   error: null,
 };
@@ -675,18 +677,45 @@ describe("local agent library (REQ-021..032)", () => {
     // Capped: the fifth source never renders.
     expect(screen.queryByText("demo-extra")).toBeNull();
 
-    const avatar = screen.getByRole("img", { name: "Demo" }) as HTMLImageElement;
+    const avatar = screen.getByRole("img", { name: "com.acowork.demo" }) as HTMLImageElement;
     expect(avatar.getAttribute("src")).toBe(LOCAL_AVATAR);
   });
 
-  // No avatar in the package → the same letter block the Hub card falls back to.
-  it("falls back to the letter block when the package has no avatar", async () => {
+  // Regression: a published package that keeps its builtin icon declares
+  // `builtin_avatar = "icon-15"` and ships no `assets/`. The row must draw that
+  // icon — it used to arrive as "no avatar" and render a letter block.
+  it("draws a builtin avatar instead of a letter block", async () => {
+    mockLibrary([{ ...LOCAL_ROW, avatar: { kind: "builtin", icon_id: "icon-15" } }]);
+    renderOpen();
+
+    await screen.findByText("Demo");
+    const avatar = screen.getByRole("img", { name: "icon-15" }) as HTMLImageElement;
+    expect(avatar.getAttribute("src")).toBe(BUILTIN_ICONS["icon-15"]);
+    // The letter block is not used for an identified row.
+    expect(screen.queryByLabelText("Demo")).toBeNull();
+  });
+
+  // No avatar at all → ADR-017's last step, the deterministic icon keyed by
+  // `agent_id` — the same picture the Hub card shows for that agent.
+  it("falls back to the deterministic icon when the package has no avatar", async () => {
     mockLibrary([{ ...LOCAL_ROW, avatar: null }]);
     renderOpen();
 
     await screen.findByText("Demo");
-    expect(screen.queryByRole("img", { name: "Demo" })).toBeNull();
-    expect(screen.getByLabelText("Demo").textContent).toBe("D");
+    const avatar = screen.getByRole("img") as HTMLImageElement;
+    expect(avatar.getAttribute("src")).toBe(
+      BUILTIN_ICONS[pickDeterministicBuiltinIconId("com.acowork.demo") ?? "icon-01"],
+    );
+  });
+
+  // An unreadable file has no `agent_id`, so there is no identity to key an icon
+  // by — the letter block is the honest placeholder.
+  it("uses the letter block only when the file could not be parsed", async () => {
+    mockLibrary([LOCAL_ROW_BROKEN]);
+    renderOpen();
+
+    expect(await screen.findByLabelText("broken.agent")).toBeDefined();
+    expect(screen.getByLabelText("broken.agent").textContent).toBe("B");
   });
 
   // A6: the row button is disabled while its own install is in flight, so a

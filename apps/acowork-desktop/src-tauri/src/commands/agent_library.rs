@@ -53,6 +53,40 @@ const PACKAGE_EXT: &str = "agent";
 
 // ── Data model ─────────────────────────────────────────────────────────────
 
+/// The avatar declared by one `.agent` file, as the card can draw it.
+///
+/// The manifest has two mutually exclusive ways to name an avatar
+/// (`AgentManifest::avatar` and `builtin_avatar`, the same pair the Runtime's
+/// avatar endpoint reports), and they are **not** interchangeable: one is a file
+/// inside the archive, the other is a bare id owned by the Desktop's icon set.
+/// Flattening both into one nullable string is what made a published package
+/// with `builtin_avatar = "icon-15"` and no `assets/` entry render as a letter
+/// block — the row said "no avatar" when the truth was "a builtin one".
+///
+/// So the row carries the resolved form, tag and all: exactly one of them can be
+/// in effect, and the UI renders per tag instead of re-deriving priority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LocalAvatar {
+    /// `avatar = "assets/avatar.png"` — the package's own image, inlined as a
+    /// `data:` URL. Inlined rather than extracted to a cache directory because
+    /// the list is small and a temp-file lifetime would add a second thing to
+    /// invalidate.
+    Packaged {
+        /// `data:image/...;base64,...`
+        data_url: String,
+    },
+    /// `builtin_avatar = "icon-15"` — nothing is inlined: the id indexes the
+    /// Desktop's own icon set (`BUILTIN_ICONS`), so the row must hand it over
+    /// untouched and let the renderer pick the asset.
+    Builtin {
+        /// The id as declared, e.g. `icon-15`. Not validated here: an unknown id
+        /// is a rendering-capability question, and the card already falls back
+        /// to the deterministic icon for one it does not own.
+        icon_id: String,
+    },
+}
+
 /// One row of the Local list.
 ///
 /// `file_name` / `path` are always known; everything else comes from
@@ -84,14 +118,14 @@ pub struct LocalAgentRow {
     /// flag), so the archive is the only truthful source — the Hub index reads
     /// the published artifact the same way.
     pub skills: Vec<String>,
-    /// The package's own `assets/avatar.*`, inlined as a `data:` URL.
+    /// The avatar the manifest declares, resolved to **the one thing the card
+    /// can draw** (see [`LocalAvatar`]).
     ///
-    /// `None` when the package declares no avatar, points outside the archive,
-    /// is not an image the webview renders, or is too large — the card then
-    /// falls back to the same letter block the Hub card uses. Inlined rather
-    /// than extracted to a cache directory because the list is small and a
-    /// temp-file lifetime would add a second thing to invalidate.
-    pub avatar: Option<String>,
+    /// `None` when the manifest declares neither form, or declares a packaged
+    /// image that cannot be used (outside the archive, not an image the webview
+    /// renders, too large) — the card then falls back to the same deterministic
+    /// icon the Hub card uses.
+    pub avatar: Option<LocalAvatar>,
     /// Declared permissions, used **only** to render "N 项权限" (PRD REQ-007
     /// keeps the high-risk confirmation on the Hub card; a file row has no
     /// catalogue classification to confirm against).
@@ -371,8 +405,8 @@ fn read_row(path: &Path) -> LocalAgentRow {
 /// (REQ-032).
 pub(crate) struct PackageFacts {
     pub manifest: AgentManifest,
-    /// `data:` URL, see [`LocalAgentRow::avatar`].
-    pub avatar: Option<String>,
+    /// See [`LocalAvatar`].
+    pub avatar: Option<LocalAvatar>,
     /// `skills/<name>/SKILL.md` directories, sorted and de-duplicated.
     pub skills: Vec<String>,
 }
@@ -392,13 +426,35 @@ pub(crate) fn read_package(path: &Path) -> Result<PackageFacts, String> {
         .map_err(|e| format!("Not a valid .agent package (ZIP): {e}"))?;
 
     let manifest = read_manifest_from(&mut archive)?;
-    let avatar = read_avatar(&mut archive, manifest.avatar.as_deref());
+    let avatar = resolve_avatar(&mut archive, &manifest);
     let skills = read_skill_names(&archive);
     Ok(PackageFacts {
         manifest,
         avatar,
         skills,
     })
+}
+
+/// Which of the manifest's two avatar declarations the card gets, if any.
+///
+/// A packaged image wins when it is declared **and** usable — that is the same
+/// precedence the Runtime applies (`resolve_effective_avatar`: `manifest.avatar`
+/// is what the instance will actually show). A declared-but-unusable packaged
+/// image yields `None` rather than silently promoting `builtin_avatar`: the
+/// package really will render the deterministic icon at install time, so the row
+/// must not promise a different picture than the one it will get.
+fn resolve_avatar(archive: &mut Archive, manifest: &AgentManifest) -> Option<LocalAvatar> {
+    if let Some(declared) = manifest.avatar.as_deref() {
+        return read_avatar(archive, declared).map(|data_url| LocalAvatar::Packaged { data_url });
+    }
+    manifest
+        .builtin_avatar
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(|icon_id| LocalAvatar::Builtin {
+            icon_id: icon_id.to_string(),
+        })
 }
 
 /// `manifest.toml` through the shared domain type, so a row shows exactly what
@@ -414,15 +470,16 @@ fn read_manifest_from(archive: &mut Archive) -> Result<AgentManifest, String> {
     AgentManifest::from_toml(&manifest_str).map_err(|e| format!("Invalid manifest.toml: {e}"))
 }
 
-/// Inline the package's own avatar as a `data:` URL.
+/// Inline a packaged avatar (`avatar = "assets/avatar.png"`) as a `data:` URL.
 ///
-/// Every failure is `None`, never a row error: a package with a missing,
-/// oversized or unrecognised avatar is still installable, and the card has a
-/// letter-block fallback. The declared path is treated as untrusted — no
-/// absolute path, no `..`, no directory entry — because it comes out of a file
-/// the user copied in from anywhere.
-fn read_avatar(archive: &mut Archive, declared: Option<&str>) -> Option<String> {
-    let declared = declared.map(str::trim).filter(|p| !p.is_empty())?;
+/// Only the packaged form is handled here — the builtin form names an id, not a
+/// file (see [`resolve_avatar`]). Every failure is `None`, never a row error: a
+/// package with a missing, oversized or unrecognised avatar is still
+/// installable. The declared path is treated as untrusted — no absolute path,
+/// no `..`, no directory entry — because it comes out of a file the user copied
+/// in from anywhere.
+fn read_avatar(archive: &mut Archive, declared: &str) -> Option<String> {
+    let declared = declared.trim();
     let mime = avatar_mime(declared)?;
     let normalised = declared.replace('\\', "/");
     if normalised.starts_with('/') || normalised.split('/').any(|seg| seg == "..") {
@@ -981,9 +1038,19 @@ type = "FilesystemRead"
             library.display()
         );
         for row in &list.rows {
+            // The avatar column prints the *resolved form*, which is the whole
+            // point of `LocalAvatar`: `packaged` (inlined bytes), `builtin` (an
+            // icon id this row expects the Desktop to own) or none.
+            let avatar = match &row.avatar {
+                Some(LocalAvatar::Packaged { data_url }) => {
+                    format!("packaged({} bytes)", data_url.len())
+                }
+                Some(LocalAvatar::Builtin { icon_id }) => format!("builtin({icon_id})"),
+                None => "none".to_string(),
+            };
             println!(
-                "[probe]   {} | {:?} | {:?} | {:?} | err={:?}",
-                row.file_name, row.agent_id, row.name, row.version, row.error
+                "[probe]   {} | {:?} | {:?} | {:?} | avatar={} | err={:?}",
+                row.file_name, row.agent_id, row.name, row.version, avatar, row.error
             );
         }
     }
@@ -1064,12 +1131,87 @@ description = "Audits debt"
         // Directory names only: the nested notes.md is not a second entry, and
         // the manifest cannot supply these at all.
         assert_eq!(row.skills, vec!["auditing", "reviewing"]);
-        let avatar = row.avatar.as_deref().expect("avatar inlined");
-        assert!(avatar.starts_with("data:image/png;base64,"), "{avatar}");
+        let LocalAvatar::Packaged { data_url } = row.avatar.as_ref().expect("avatar inlined")
+        else {
+            panic!("a declared assets/avatar.png must resolve to Packaged");
+        };
+        assert!(data_url.starts_with("data:image/png;base64,"), "{data_url}");
     }
 
-    /// A package without an avatar keeps `avatar: None` — the card's letter
-    /// block is the fallback, not an error.
+    /// Regression: a manifest that declares `builtin_avatar` (and no packaged
+    /// image) must report that **as an avatar**. This is the shape the publish
+    /// wizard produces when the user keeps the agent's builtin icon, and it used
+    /// to arrive at the card as `None`, drawn as a letter block.
+    #[test]
+    fn a_builtin_avatar_is_reported_as_an_avatar() {
+        let scratch = Scratch::new("builtin-avatar");
+        let manifest = MANIFEST.replace(
+            "version = \"1.0.0\"",
+            "version = \"1.0.0\"
+builtin_avatar = \"icon-15\"",
+        );
+        assert!(manifest.contains("builtin_avatar"), "fixture edit missed");
+        write_package(&scratch.child("builtin.agent"), &manifest);
+
+        let row = &list_rows(scratch.path()).rows[0];
+        assert_eq!(row.error, None);
+        assert_eq!(
+            row.avatar,
+            Some(LocalAvatar::Builtin {
+                icon_id: "icon-15".to_string()
+            })
+        );
+    }
+
+    /// The packaged form wins when both are declared — the same precedence the
+    /// Runtime applies when it answers `/avatar` for the installed instance.
+    #[test]
+    fn a_packaged_avatar_wins_over_a_builtin_one() {
+        let scratch = Scratch::new("both-avatars");
+        let manifest = RICH_MANIFEST.replace(
+            "avatar = \"assets/avatar.png\"",
+            "avatar = \"assets/avatar.png\"
+builtin_avatar = \"icon-15\"",
+        );
+        write_package_with(
+            &scratch.child("both.agent"),
+            &manifest,
+            &[("assets/avatar.png", PNG)],
+        );
+
+        let row = &list_rows(scratch.path()).rows[0];
+        assert!(
+            matches!(row.avatar, Some(LocalAvatar::Packaged { .. })),
+            "{:?}",
+            row.avatar
+        );
+    }
+
+    /// A declared packaged avatar that cannot be inlined is `None`, **not** a
+    /// promotion of `builtin_avatar`: the installed instance will render the
+    /// deterministic icon, so the row must not promise a different picture.
+    #[test]
+    fn an_unusable_packaged_avatar_does_not_fall_back_to_the_builtin_one() {
+        let scratch = Scratch::new("broken-packaged");
+        let manifest = RICH_MANIFEST
+            .replace("assets/avatar.png", "assets/avatar.txt")
+            .replace(
+                "avatar = \"assets/avatar.txt\"",
+                "avatar = \"assets/avatar.txt\"
+builtin_avatar = \"icon-15\"",
+            );
+        write_package_with(
+            &scratch.child("broken.agent"),
+            &manifest,
+            &[("assets/avatar.txt", b"i am not a picture")],
+        );
+
+        let row = &list_rows(scratch.path()).rows[0];
+        assert_eq!(row.avatar, None);
+    }
+
+    /// A package without an avatar keeps `avatar: None` — the card's
+    /// deterministic-icon fallback, not an error.
     #[test]
     fn a_package_without_an_avatar_has_none() {
         let scratch = Scratch::new("no-avatar");
@@ -1145,8 +1287,10 @@ description = "Audits debt"
                 row.file_name
             );
             assert!(!row.skills.is_empty(), "{} has no skills", row.file_name);
-            let avatar = row.avatar.as_deref().unwrap_or_default();
-            assert!(avatar.starts_with("data:image/"), "{} has no avatar", row.file_name);
+            let Some(LocalAvatar::Packaged { data_url }) = row.avatar.as_ref() else {
+                panic!("{} has no packaged avatar", row.file_name)
+            };
+            assert!(data_url.starts_with("data:image/"), "{} has no avatar", row.file_name);
         }
     }
 
