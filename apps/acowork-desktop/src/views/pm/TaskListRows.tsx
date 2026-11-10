@@ -55,6 +55,10 @@ interface TaskListRowProps {
   onToggleSelect: (taskId: string) => void;
   onToggleCollapse: (taskId: string) => void;
   onOpenStatus: (e: React.MouseEvent<HTMLElement>) => void;
+  /** 行内改优先级（点优先级格子弹菜单）。 */
+  onOpenPriority: (e: React.MouseEvent<HTMLElement>) => void;
+  /** 行内改负责人（点负责人格子弹菜单）。 */
+  onOpenAssignee: (e: React.MouseEvent<HTMLElement>) => void;
 }
 
 export function TaskListRow({
@@ -73,6 +77,8 @@ export function TaskListRow({
   onToggleSelect,
   onToggleCollapse,
   onOpenStatus,
+  onOpenPriority,
+  onOpenAssignee,
 }: TaskListRowProps) {
   const { t } = useTranslation();
   const task = row.task;
@@ -89,7 +95,9 @@ export function TaskListRow({
       )}
       style={{ height: ROW_HEIGHT }}
     >
-      <td className={cn(TD_BASE_CN, "px-2")} onClick={(e) => e.stopPropagation()}>
+      {/* 复选框列 `pl-3 pr-0`：与表头同一列、同一内边距，两行复选框上下
+          对齐；12px 左边距与工具栏 / 页脚的 `px-3` 一致。 */}
+      <td className={cn(TD_BASE_CN, "pl-3 pr-0")} onClick={(e) => e.stopPropagation()}>
         <input
           type="checkbox"
           aria-label={t("pm.list.selectRow", { title: task.title })}
@@ -129,13 +137,17 @@ export function TaskListRow({
               member={member}
               assigneeLabel={assigneeLabel}
               creatorLabel={creatorLabel}
+              offline={offline}
+              onOpenPriority={onOpenPriority}
+              onOpenAssignee={onOpenAssignee}
             />
           )}
         </td>
       ))}
 
-      {/* 表头「＋」列对应的占位格（保持 colgroup 与 td 数量一致）。 */}
-      <td className={TD_BASE_CN} />
+      {/* 表头「＋」列对应的占位格（保持 colgroup 与 td 数量一致）。
+          `pr-3 pl-0` 与表头末列同内边距。 */}
+      <td className={cn(TD_BASE_CN, "pr-3 pl-0")} />
     </tr>
   );
 }
@@ -171,7 +183,7 @@ function TitleCell({
           if (hasChildren) onToggleCollapse(task.id);
         }}
         className={cn(
-          "shrink-0 rounded px-0.5 text-9 leading-none",
+          "shrink-0 rounded px-0.5 text-10 leading-none",
           hasChildren
             ? "cursor-pointer text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700"
             : "cursor-default opacity-30",
@@ -180,11 +192,14 @@ function TitleCell({
       >
         ▾
       </button>
-      <TaskTypeIcon type={task.type} className="shrink-0 text-10 leading-none" />
+      {/* 类型图标与标题同字号（12px）：它属于标题的一部分，不是元信息。 */}
+      <TaskTypeIcon type={task.type} className="shrink-0 text-xs leading-none" />
       <span className="min-w-0 truncate font-medium text-text">{task.title}</span>
-      <span className="shrink-0 font-mono text-9 text-text-tertiary">{task.id}</span>
+      {/* 任务 id 是元信息（`text-10`），不是标题的一部分 —— 比标题小一档，
+          但不低于 10px。 */}
+      <span className="shrink-0 font-mono text-10 text-text-tertiary">{task.id}</span>
       {task.is_blocked && (
-        <span className="shrink-0 text-9" title={t("pm.list.col.blocked")} aria-hidden>
+        <span className="shrink-0 text-10" title={t("pm.list.col.blocked")} aria-hidden>
           🔒
         </span>
       )}
@@ -222,7 +237,7 @@ function StatusCell({
       }}
       title={offline ? t("pm.offlineReadonlyHint") : t("pm.list.changeStatus")}
       className={cn(
-        "inline-flex max-w-full items-center gap-1 rounded px-1.5 py-px text-10 leading-tight",
+        "inline-flex max-w-full items-center gap-1 rounded px-1.5 py-px text-11 leading-tight",
         STATUS_PILL_CLASS[task.status],
         offline ? "cursor-default" : "cursor-pointer hover:brightness-95",
       )}
@@ -245,6 +260,9 @@ function PlainCell({
   member,
   assigneeLabel,
   creatorLabel,
+  offline,
+  onOpenPriority,
+  onOpenAssignee,
 }: {
   columnKey: string;
   task: PmTaskResponse;
@@ -253,23 +271,63 @@ function PlainCell({
   member?: ResolvedMember;
   assigneeLabel: string;
   creatorLabel: string;
+  /** 离线只读：行内改值的入口全部禁用。 */
+  offline: boolean;
+  onOpenPriority: (e: React.MouseEvent<HTMLElement>) => void;
+  onOpenAssignee: (e: React.MouseEvent<HTMLElement>) => void;
 }) {
   const { t } = useTranslation();
   const dash = <span className="text-text-tertiary">—</span>;
-  const mono = "font-mono text-10";
+  /* 元信息列（日期 / 计数 / id）用 `text-11`（11px）：比标题小一档，
+     但不再掉到 `text-10`（10px）—— 10px 在 12px 的标题旁边太碎。 */
+  const mono = "font-mono text-11";
 
   switch (columnKey) {
     case "priority":
-      return <PriorityBadge priority={task.priority} />;
-    case "assignee":
-      if (!task.assignee) {
-        return <span className="text-text-tertiary">{t("pm.task.unassigned")}</span>;
-      }
+      // 行内改优先级：与状态同一套语义（点格子弹菜单改）。
+      // 离线只读时退化成纯展示（徽章不可点）。
       return (
-        <span className="flex min-w-0 items-center gap-1">
-          {member && <MemberAvatar member={member} size={16} className="shrink-0" />}
-          <span className="min-w-0 truncate">{assigneeLabel || task.assignee}</span>
-        </span>
+        <button
+          type="button"
+          disabled={offline}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenPriority(e);
+          }}
+          title={offline ? t("pm.offlineReadonlyHint") : t("pm.list.changePriority")}
+          className={cn(
+            "inline-flex max-w-full items-center rounded",
+            !offline && "cursor-pointer hover:opacity-80",
+          )}
+        >
+          <PriorityBadge priority={task.priority} />
+        </button>
+      );
+    case "assignee":
+      // 行内改负责人：同上。未指派也是一个可点的入口（点了才能指派出去）。
+      return (
+        <button
+          type="button"
+          disabled={offline}
+          onClick={(e) => {
+            e.stopPropagation();
+            onOpenAssignee(e);
+          }}
+          title={offline ? t("pm.offlineReadonlyHint") : t("pm.list.changeAssignee")}
+          className={cn(
+            "flex min-w-0 items-center gap-1 rounded text-left",
+            !offline && "cursor-pointer hover:opacity-80",
+          )}
+        >
+          {!task.assignee ? (
+            <span className="text-text-tertiary">{t("pm.task.unassigned")}</span>
+          ) : (
+            <>
+              {member && <MemberAvatar member={member} size={16} className="shrink-0" />}
+              <span className="min-w-0 truncate">{assigneeLabel || task.assignee}</span>
+            </>
+          )}
+        </button>
       );
     case "due_at": {
       if (!task.due_at) return dash;
@@ -402,12 +460,12 @@ export function TaskListGroupHeaderRow({
     <tr>
       <td
         colSpan={colCount}
-        className="sticky-none border-b border-border-divider bg-panel-inset px-2 py-1"
+        className="sticky-none border-b border-border-divider bg-panel-inset px-3 py-1"
       >
-        <span className="flex items-center gap-1.5 text-10 font-medium text-text-secondary">
+        <span className="flex items-center gap-1.5 text-11 font-medium text-text-secondary">
           <span aria-hidden>▾</span>
           <span className="min-w-0 truncate">{label}</span>
-          <span className="rounded bg-zinc-200 px-1 tabular-nums text-9 text-text-tertiary dark:bg-zinc-800">
+          <span className="rounded bg-zinc-200 px-1 tabular-nums text-10 text-text-tertiary dark:bg-zinc-800">
             {count}
           </span>
         </span>

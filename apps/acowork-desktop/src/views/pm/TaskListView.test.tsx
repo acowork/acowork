@@ -15,7 +15,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { TaskListView } from "./TaskListView";
 import { showToast } from "../../components/common/ToastProvider";
-import { createTask } from "../../lib/pm-api";
+import { createTask, deleteTask, updateTask } from "../../lib/pm-api";
 import { DEFAULT_PM_LIST_COLUMNS } from "../../lib/pm-list-columns";
 import type { PmProject, PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 
@@ -27,6 +27,7 @@ const state = vi.hoisted(() => ({
   moveTask: vi.fn(),
   reviewTask: vi.fn(),
   upsertTask: vi.fn(),
+  removeTask: vi.fn(),
 }));
 
 vi.mock("../../i18n/useTranslation", () => ({
@@ -42,6 +43,7 @@ vi.mock("../../stores/pm/boardStore", () => ({
       moveTask: state.moveTask,
       reviewTask: state.reviewTask,
       upsertTask: state.upsertTask,
+      removeTask: state.removeTask,
     }),
 }));
 vi.mock("../../stores/pm/healthStore", () => ({
@@ -68,6 +70,7 @@ vi.mock("./pmMembers", () => ({
 vi.mock("../../lib/pm-api", () => ({
   createTask: vi.fn(),
   updateTask: vi.fn(),
+  deleteTask: vi.fn(),
 }));
 
 const PROJECT: PmProject = {
@@ -133,6 +136,14 @@ const renderedIds = (container: HTMLElement) =>
 
 const button = (container: HTMLElement, ariaLabel: string) =>
   container.querySelector(`[aria-label="${ariaLabel}"]`) as HTMLButtonElement | null;
+
+/** The confirm button inside the delete confirmation dialog (role=alertdialog). */
+const confirmDeleteButton = () => {
+  const dialog = document.querySelector('[role="alertdialog"]');
+  const btn = dialog?.querySelector("button.btn-accent") as HTMLButtonElement | null;
+  if (!btn) throw new Error("no confirm dialog");
+  return btn;
+};
 
 const input = (container: HTMLElement, ariaLabel: string) =>
   container.querySelector(`input[aria-label="${ariaLabel}"]`) as HTMLInputElement;
@@ -389,6 +400,120 @@ describe("bulk edit failure accounting", () => {
       message: "pm.list.bulkDone",
     });
     expect(input(container, "pm.list.selectAll").checked).toBe(false);
+  });
+});
+
+describe("row-level inline field editing", () => {
+  it("changes the priority from the row's own priority cell", async () => {
+    state.tasks = [task("t-1")];
+    (updateTask as unknown as ReturnType<typeof vi.fn>).mockResolvedValue({
+      ...task("t-1"),
+      priority: "urgent",
+    });
+    const { container } = view();
+    // 优先级格（徽章）就在这一行里：点它弹菜单，不该触发打开任务详情。
+    const row = container.querySelector('[data-task-id="t-1"]') as HTMLElement;
+    const badge = within(row).getByText("MEDIUM");
+    fireEvent.click(badge);
+    fireEvent.click(await screen.findByText("pm.priority.urgent"));
+    await act(async () => {});
+    expect(updateTask).toHaveBeenCalledWith("t-1", { priority: "urgent" });
+  });
+
+  it("changes the assignee from the row's own assignee cell", async () => {
+    state.tasks = [task("t-1")];
+    (updateTask as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(task("t-1"));
+    const { container } = view();
+    const row = container.querySelector('[data-task-id="t-1"]') as HTMLElement;
+    // 未指派也是一个可点入口（点了才能指派出去）。
+    fireEvent.click(within(row).getByText("pm.task.unassigned"));
+    // 弹层里的「未指派」项：选它等于清空负责人。
+    const unassignedItem = (await screen.findAllByText("pm.task.unassigned")).find(
+      (el) => el.closest(".context-menu") !== null,
+    );
+    expect(unassignedItem).toBeTruthy();
+    fireEvent.click(unassignedItem!);
+    await act(async () => {});
+    expect(updateTask).toHaveBeenCalledWith("t-1", { assignee: null });
+  });
+});
+
+describe("bulk delete", () => {
+  it("asks for confirmation before deleting the selected rows", async () => {
+    state.tasks = [task("t-1"), task("t-2")];
+    (deleteTask as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    const { container } = view();
+    fireEvent.click(input(container, "pm.list.selectAll"));
+    const bar = container.querySelector('[aria-label="pm.list.bulkTitle"]') as HTMLElement;
+    fireEvent.click(button(bar, "pm.list.bulkDelete")!);
+    // 确认之前不能删。
+    expect(await screen.findByText("pm.list.bulkDeleteTitle")).toBeTruthy();
+    expect(deleteTask).not.toHaveBeenCalled();
+
+    fireEvent.click(confirmDeleteButton());
+    await act(async () => {});
+    expect(deleteTask).toHaveBeenCalledTimes(2);
+  });
+
+  it("removes the deleted rows from the store", async () => {
+    state.tasks = [task("t-1"), task("t-2")];
+    (deleteTask as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    const { container } = view();
+    fireEvent.click(input(container, "pm.list.selectAll"));
+    const bar = container.querySelector('[aria-label="pm.list.bulkTitle"]') as HTMLElement;
+    fireEvent.click(button(bar, "pm.list.bulkDelete")!);
+    fireEvent.click(confirmDeleteButton());
+    await act(async () => {});
+    expect(state.removeTask).toHaveBeenCalledWith("t-1");
+    expect(state.removeTask).toHaveBeenCalledWith("t-2");
+  });
+
+  it("also removes the subtasks the server cascades away", async () => {
+    // 服务端 `delete_task` 连子树一起删（P1 无视 cascade 标志），
+    // 本地也必须把子孙摘掉，否则留下服务端已不存在的行。
+    state.tasks = [
+      task("r1"),
+      task("r1c1", { parent_id: "r1", depth: 1 }),
+      task("r1c2", { parent_id: "r1", depth: 1 }),
+      task("r2"),
+    ];
+    (deleteTask as unknown as ReturnType<typeof vi.fn>).mockResolvedValue(undefined);
+    const { container } = view();
+    fireEvent.click(input(container, "pm.list.selectAll"));
+    const bar = container.querySelector('[aria-label="pm.list.bulkTitle"]') as HTMLElement;
+    fireEvent.click(button(bar, "pm.list.bulkDelete")!);
+    fireEvent.click(confirmDeleteButton());
+    await act(async () => {});
+    const removed = (state.removeTask as unknown as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => c[0],
+    );
+    expect(removed).toContain("r1");
+    expect(removed).toContain("r1c1");
+    expect(removed).toContain("r1c2");
+    expect(removed).toContain("r2");
+  });
+
+  it("keeps the failed rows selected and reports the real numbers", async () => {
+    state.tasks = [task("t-1"), task("t-2")];
+    (deleteTask as unknown as ReturnType<typeof vi.fn>).mockImplementation(async (id: string) => {
+      if (id === "t-2") throw new Error("boom");
+    });
+    const { container } = view();
+    fireEvent.click(input(container, "pm.list.selectAll"));
+    const bar = container.querySelector('[aria-label="pm.list.bulkTitle"]') as HTMLElement;
+    fireEvent.click(button(bar, "pm.list.bulkDelete")!);
+    fireEvent.click(confirmDeleteButton());
+    await act(async () => {});
+    expect(showToast).toHaveBeenCalledWith({
+      type: "warning",
+      message: "pm.list.bulkDeletePartial",
+    });
+    // 失败的那条保持选中，用户可以原地重试。
+    const boxes = [...container.querySelectorAll('input[aria-label="pm.list.selectRow"]')] as (
+      | HTMLInputElement
+      | null
+    )[];
+    expect(boxes.map((b) => b?.checked)).toEqual([false, true]);
   });
 });
 

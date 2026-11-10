@@ -13,9 +13,21 @@ import type { PmListColumn, PmColumnWidths } from "../../lib/pm-list-columns";
 
 /** 行高（紧凑表格的唯一起算值；表头同高，滚动时 sticky 贴顶）。 */
 export const ROW_HEIGHT = 34;
-/** 行首复选框列宽（不参与字段配置，恒定第一列）。 */
-export const CHECK_COL_WIDTH = 30;
-/** 表头末尾「＋」（打开字段弹层）列宽。 */
+/**
+ * 行首复选框列宽（不参与字段配置，恒定第一列）。
+ *
+ * 「左内边距 12px + 复选框 14px」= 26px：12px 让列表的第一列与上方工具栏
+ * 的 `px-3` 左右对齐（工具栏、页脚都是 12px 边距，列表窄一点就会显得
+ * 整个版面左边贴边、右边却空着一大截）。列再宽一点，复选框与任务标题之间
+ * 就多出一段看不懂的空白。
+ */
+export const CHECK_COL_WIDTH = 26;
+/**
+ * 表头末尾「＋」（打开字段弹层）列宽。
+ *
+ * 36px 按钮 + 12px 右侧留白 = 48px：与左侧 12px 对称，末列内容因此和页脚
+ * 右端的「6 列」文字落在同一条竖线上。
+ */
 export const ADD_COL_WIDTH = 36;
 /** 子任务每层缩进。 */
 export const INDENT_PER_DEPTH = 13;
@@ -63,13 +75,27 @@ export const REVIEW_LABEL_KEY: Record<ReviewStatus, string> = {
   rejected: "pm.list.review.rejected",
 };
 
-/** 表头单元格的公共 class（sticky + 发丝下沿 + 面板底色）。 */
+/**
+ * 表头单元格的公共 class（sticky + 发丝下沿 + 面板底色）。
+ *
+ * `align-middle`：表格单元格的默认 `vertical-align` 是 baseline，基线对齐
+ * 会让行内的表单控件（复选框）挂在文字基线上而不是行心，于是表头那枚
+ * 全选框看上去贴着上边框、和下面的数据行复选框也不在同一条水平线上。
+ * 显式居中，表头与数据行才共用同一条中线。
+ */
 export const TH_BASE_CN =
-  "sticky top-0 z-[2] border-b border-border-divider bg-panel-block px-2 text-left font-medium text-text-tertiary hover:text-text";
+  "sticky top-0 z-[2] align-middle border-b border-border-divider bg-panel-block px-2 text-left font-medium text-text-tertiary hover:text-text";
 
-/** 数据行的公共 class：hover 底色 + 发丝下沿 + 单行不换行。 */
+/**
+ * 数据行的公共 class：hover 底色 + 发丝下沿 + 单行不换行。
+ *
+ * 行分隔线用 `--color-border-divider`（内部分隔线的既有 token），**不是**
+ * `border-border-soft`：后者在本项目里没有声明，对应的自定义属性取不到值
+ * 时 `border-color` 会回落到 `currentColor` —— 也就是行文字色，于是每条
+ * 行分隔线都变成一条高对比亮线。
+ */
 export const TD_BASE_CN =
-  "overflow-hidden whitespace-nowrap border-b border-border-soft px-2 text-text-secondary";
+  "overflow-hidden whitespace-nowrap align-middle border-b border-border-divider px-2 text-text-secondary";
 
 /**
  * 表格最小宽度估算（`table-layout: fixed` + `min-width` 让列很多时横向滚动，

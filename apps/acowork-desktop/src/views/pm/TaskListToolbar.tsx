@@ -14,7 +14,7 @@ import { cn } from "../../lib/utils";
 import type { PmListFilters, PmListGroupBy } from "../../lib/pm-list-columns";
 
 const BTN_CN =
-  "inline-flex h-[26px] shrink-0 items-center gap-1 rounded-md border border-border-outer bg-panel-block px-2 text-11 text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-800";
+  "inline-flex h-[26px] shrink-0 items-center gap-1 rounded-md border border-border-outer bg-panel-block px-2 text-xs text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-800";
 
 const BTN_ACTIVE_CN =
   "border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 text-[var(--color-accent)]";
@@ -61,7 +61,7 @@ export function TaskListToolbar({
           onChange={(e) => onQueryChange(e.target.value)}
           placeholder={t("pm.list.searchPlaceholder")}
           aria-label={t("pm.list.searchPlaceholder")}
-          className="h-full w-full rounded-md border border-border-outer bg-panel-block pl-6 pr-2 text-11 text-text outline-none placeholder:text-text-tertiary focus:border-[var(--color-accent)]"
+          className="h-full w-full rounded-md border border-border-outer bg-panel-block pl-6 pr-2 text-xs text-text outline-none placeholder:text-text-tertiary focus:border-[var(--color-accent)]"
         />
       </label>
 
@@ -84,7 +84,7 @@ export function TaskListToolbar({
         <button
           type="button"
           onClick={onClearFilters}
-          className="inline-flex h-[26px] shrink-0 items-center rounded-md px-2 text-11 text-[var(--color-accent)] hover:bg-zinc-100 dark:hover:bg-zinc-800"
+          className="inline-flex h-[26px] shrink-0 items-center rounded-md px-2 text-xs text-[var(--color-accent)] hover:bg-zinc-100 dark:hover:bg-zinc-800"
         >
           {t("pm.list.clearFilters")}
         </button>
