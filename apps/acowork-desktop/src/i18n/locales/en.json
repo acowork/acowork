@@ -648,8 +648,6 @@
     "noOnlineNode": "No online node",
     "nodeNotManageable": "You cannot manage this node",
     "localDesc": "Agent files on this machine. Click Install to add one, or use \"Add agent file\" to pick a file from elsewhere.",
-    "localDropHint": "Click to select or drop a .agent file",
-    "localPickFirst": "Select a .agent file first",
     "localAddFile": "Add agent file",
     "localEmpty": "No agent files here yet",
     "localBrokenFile": "This file cannot be read: {{error}}",
