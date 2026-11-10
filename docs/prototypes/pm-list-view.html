@@ -1,0 +1,1486 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>ACowork PM · 任务视图（卡片 / 列表）原型</title>
+<style>
+/* ══ 设计令牌：与 Desktop app globals.css 对齐 ══════════════════════ */
+:root{
+  --page-bg:#ffffff;
+  --panel-block:hsl(0 0% 98%);
+  --panel-inset:#ffffff;
+  --border-outer:hsl(240 5.9% 90.6%);
+  --border-divider:hsl(240 5.9% 88%);
+  --border-soft:hsl(240 5.9% 94%);
+  --text:hsl(240 10% 10%);
+  --text-2:hsl(0 0% 25%);
+  --text-3:hsl(0 0% 40%);
+  --text-4:hsl(0 0% 58%);
+  --accent:#3B82F6;
+  --accent-soft:hsl(213 100% 96%);
+  --hover:#f6f7f9;
+  --row-h:34px;
+}
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:#e9ebee;color:var(--text);
+  font:12px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei","PingFang SC",sans-serif;
+  /* 注意：这里不能用 align-items:center —— 内容比视口高时 flex 居中会把
+     上下两端都裁掉（顶部先没），而且滚不回去。窗口用 margin:auto 居中。 */
+  display:flex;padding:20px;overflow:auto;
+  -webkit-font-smoothing:antialiased;
+}
+button{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer}
+::selection{background:#cfe3ff}
+
+/* ══ 窗口外壳 ════════════════════════════════════════════════════ */
+.window{
+  /* 高度跟着视口走：矮屏不裁、宽屏不超过 920px（桌面 App 的常见窗口高度） */
+  width:1440px;max-width:100%;height:min(920px, calc(100vh - 40px));min-height:420px;
+  margin:auto;background:var(--page-bg);
+  border:1px solid var(--border-outer);border-radius:10px;overflow:hidden;
+  display:flex;box-shadow:0 20px 60px rgba(16,24,40,.18);
+}
+
+/* ── 左侧项目栏（现状组件，原型中只做静态呈现） ───────────────── */
+.sidebar{
+  width:214px;flex:0 0 214px;background:var(--panel-block);
+  border-right:1px solid var(--border-outer);display:flex;flex-direction:column;
+}
+.sidebar .sb-head{padding:12px 12px 8px;display:flex;align-items:center;gap:6px}
+.sidebar .sb-title{font-size:11px;font-weight:600;color:var(--text-3);letter-spacing:.04em}
+.sb-list{padding:0 6px;overflow:auto;flex:1}
+.sb-item{
+  display:flex;align-items:center;gap:7px;height:30px;padding:0 8px;border-radius:6px;
+  color:var(--text-2);font-size:12px;cursor:default;
+}
+.sb-item:hover{background:#f0f1f4}
+.sb-item.on{background:#e7eefb;color:var(--text);font-weight:600}
+.sb-item .av{
+  width:16px;height:16px;border-radius:4px;flex:0 0 16px;display:grid;place-items:center;
+  font-size:9px;font-weight:700;color:#fff;background:#8b93a7;
+}
+.sb-item .cnt{margin-left:auto;font-size:10px;color:var(--text-4);font-weight:500}
+
+/* ── 主区 ──────────────────────────────────────────────────────── */
+.pane{flex:1;min-width:0;display:flex;flex-direction:column;background:var(--page-bg)}
+
+/* ── 项目头部 ──────────────────────────────────────────────────── */
+.proj-head{border-bottom:1px solid var(--border-divider);padding:11px 16px 10px;flex:0 0 auto}
+.ph-top{display:flex;align-items:flex-start;gap:10px}
+.ph-av{
+  width:22px;height:22px;border-radius:6px;background:#3f4a63;color:#fff;
+  display:grid;place-items:center;font-size:11px;font-weight:700;flex:0 0 22px;margin-top:1px;
+}
+.ph-main{min-width:0;flex:1}
+.ph-title{font-size:15px;font-weight:650;letter-spacing:-.01em;line-height:1.25}
+.ph-desc{font-size:11px;color:var(--text-3);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ph-side{display:flex;align-items:center;gap:8px;flex:0 0 auto}
+
+/* 视图切换 segmented */
+.viewswitch{
+  display:flex;align-items:center;background:#f1f2f5;border:1px solid var(--border-outer);
+  border-radius:7px;padding:2px;gap:2px;
+}
+.viewswitch button{
+  display:flex;align-items:center;gap:5px;height:24px;padding:0 9px;border-radius:5px;
+  font-size:11.5px;font-weight:550;color:var(--text-3);white-space:nowrap;
+}
+.viewswitch button:hover{color:var(--text)}
+.viewswitch button.on{
+  background:#fff;color:var(--text);box-shadow:0 1px 2px rgba(16,24,40,.10),0 0 0 1px rgba(16,24,40,.05);
+}
+.viewswitch svg{width:13px;height:13px;flex:0 0 13px}
+
+.btn-new{
+  display:flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:6px;
+  background:var(--accent);color:#fff;font-size:12px;font-weight:550;
+  box-shadow:0 1px 2px rgba(59,130,246,.35);
+}
+.btn-new:hover{background:#2f74e0}
+.ph-stats{display:flex;align-items:center;gap:14px;margin-top:7px;font-size:11px;color:var(--text-3)}
+.ph-stats b{color:var(--text);font-weight:600}
+
+/* ── 列表视图工具栏 ────────────────────────────────────────────── */
+.toolbar{
+  flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:7px 12px;
+  border-bottom:1px solid var(--border-divider);background:var(--page-bg);
+}
+.search{position:relative;display:flex;align-items:center}
+.search svg{position:absolute;left:7px;width:12px;height:12px;color:var(--text-4)}
+.search input{
+  width:190px;height:26px;padding:0 8px 0 24px;border:1px solid var(--border-outer);
+  border-radius:6px;background:#fff;font:inherit;font-size:12px;color:var(--text);outline:none;
+}
+.search input::placeholder{color:var(--text-4)}
+.search input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(59,130,246,.14)}
+.tbtn{
+  display:flex;align-items:center;gap:5px;height:26px;padding:0 8px;border-radius:6px;
+  border:1px solid transparent;font-size:11.5px;color:var(--text-2);white-space:nowrap;
+}
+.tbtn:hover{background:#f1f2f5}
+.tbtn.bordered{border-color:var(--border-outer);background:#fff}
+.tbtn.bordered:hover{background:var(--hover)}
+.tbtn.active{background:var(--accent-soft);border-color:#bfd9fe;color:#1d4ed8}
+.tbtn .chev{width:9px;height:9px;opacity:.5}
+.tbtn .fcount{
+  font-size:10px;font-weight:700;background:var(--accent);color:#fff;border-radius:99px;
+  min-width:14px;height:14px;display:grid;place-items:center;padding:0 3px;
+}
+.tb-sep{width:1px;height:16px;background:var(--border-divider);margin:0 3px}
+.tb-right{margin-left:auto;display:flex;align-items:center;gap:6px}
+.tb-hint{font-size:10.5px;color:var(--text-4);margin-right:2px}
+
+/* ── 表格 ──────────────────────────────────────────────────────── */
+.table-wrap{flex:1;min-height:0;overflow:auto;position:relative}
+table.grid{width:100%;border-collapse:separate;border-spacing:0;table-layout:fixed}
+table.grid thead th{
+  position:sticky;top:0;z-index:3;height:29px;padding:0 8px;text-align:left;
+  font-size:11px;font-weight:550;color:var(--text-3);background:#fbfbfc;
+  box-shadow:inset 0 -1px 0 var(--border-divider);
+  user-select:none;white-space:nowrap;overflow:hidden;
+}
+table.grid thead th:hover{background:#f5f6f8;color:var(--text-2)}
+table.grid thead th .th-inner{display:flex;align-items:center;gap:4px;height:100%}
+table.grid thead th .th-inner .lbl{overflow:hidden;text-overflow:ellipsis}
+table.grid thead th.num .th-inner{justify-content:flex-end}
+th .sorti{font-size:9px;color:var(--accent);font-weight:700}
+th .th-more{
+  margin-left:auto;width:14px;height:14px;border-radius:3px;display:none;place-items:center;
+  color:var(--text-3);font-size:12px;line-height:1;
+}
+th:hover .th-more{display:grid}
+th .th-more:hover{background:#e6e8ec}
+.col-resizer{
+  position:absolute;right:-2px;top:0;width:5px;height:100%;cursor:col-resize;z-index:4;
+}
+.col-resizer:hover{background:rgba(59,130,246,.35)}
+th{position:sticky}
+
+/* 行 */
+tr.row{height:var(--row-h);cursor:default}
+tr.row td{
+  padding:0 8px;border-bottom:1px solid var(--border-soft);overflow:hidden;
+  white-space:nowrap;text-overflow:ellipsis;vertical-align:middle;
+}
+tr.row:hover td{background:var(--hover)}
+tr.row.sel td{background:var(--accent-soft)}
+tr.row.sel:hover td{background:#e6f0fe}
+tr.row.blocked .cellTitle .tname{color:var(--text-2)}
+.cellCheck,.cellTail{text-align:center;padding:0!important}
+.chk{
+  appearance:none;width:13px;height:13px;border:1px solid #c4c8d0;border-radius:3px;
+  background:#fff;cursor:pointer;vertical-align:middle;position:relative;top:1px;
+}
+.chk:hover{border-color:#98a0ad}
+.chk:checked{background:var(--accent);border-color:var(--accent)}
+.chk:checked::after{
+  content:"";position:absolute;left:3.4px;top:.6px;width:3.5px;height:6.5px;
+  border:1.6px solid #fff;border-top:0;border-left:0;transform:rotate(42deg);
+}
+
+/* 标题单元格 */
+.cellTitle{display:flex;align-items:center;gap:6px;min-width:0}
+.treecaret{
+  width:14px;height:14px;flex:0 0 14px;display:grid;place-items:center;border-radius:3px;
+  color:var(--text-4);font-size:8px;transition:transform .12s;
+}
+.treecaret:hover{background:#e6e8ec;color:var(--text-2)}
+.treecaret.collapsed{transform:rotate(-90deg)}
+.treecaret.leaf{visibility:hidden}
+.ticon{flex:0 0 auto;font-size:11.5px;line-height:1}
+.tname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:12px;color:var(--text)}
+tr.row.done .tname{color:var(--text-3)}
+.tid{font-size:10.5px;color:var(--text-4);flex:0 0 auto;font-variant-numeric:tabular-nums}
+.tflag{font-size:10px;flex:0 0 auto}
+
+/* 状态 pill */
+.pill{
+  display:inline-flex;align-items:center;gap:4px;height:18px;padding:0 6px;border-radius:99px;
+  font-size:11px;font-weight:500;border:1px solid transparent;
+}
+.pill .dot{width:5px;height:5px;border-radius:99px;flex:0 0 5px}
+.st-pending{background:#f3f4f6;color:#52596b;border-color:#e4e6ea}
+.st-pending .dot{background:#8b93a7}
+.st-in_progress{background:#eff6ff;color:#1d4ed8;border-color:#d3e4fd}
+.st-in_progress .dot{background:#3B82F6}
+.st-submitted{background:#fffbeb;color:#b45309;border-color:#fce8b6}
+.st-submitted .dot{background:#f59e0b}
+.st-done{background:#f0fdf4;color:#15803d;border-color:#cdeed8}
+.st-done .dot{background:#22c55e}
+.st-rejected{background:#fef2f2;color:#b91c1c;border-color:#fbd5d5}
+.st-rejected .dot{background:#ef4444}
+.st-cancelled{background:#f7f7f8;color:#8b93a7;border-color:#e8e9ec}
+.st-cancelled .dot{background:#c4c8d0}
+
+/* 优先级 */
+.prio{font-size:10.5px;font-weight:650;padding:1px 5px;border-radius:3px;letter-spacing:.02em}
+.p-urgent{background:#fee2e2;color:#b91c1c}
+.p-high{background:#ffedd5;color:#c2410c}
+.p-normal{background:#dbeafe;color:#1d4ed8}
+.p-low{background:#f1f2f5;color:#52596b}
+
+/* 负责人 / 人 */
+.who{display:inline-flex;align-items:center;gap:5px;min-width:0;max-width:100%}
+.av{
+  width:16px;height:16px;border-radius:99px;flex:0 0 16px;display:grid;place-items:center;
+  font-size:8.5px;font-weight:700;color:#fff;background:#8b93a7;letter-spacing:0;
+}
+.who .nm{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.unassigned{color:var(--text-4);font-size:11px}
+
+/* 其他 */}
+.mono{font-variant-numeric:tabular-nums;font-size:11.5px;color:var(--text-2)}
+.overdue{color:#dc2626;font-weight:600}
+.date-warn{color:#b45309}
+.muted{color:var(--text-4);font-size:11px}
+.tag{
+  display:inline-flex;align-items:center;gap:3px;height:17px;padding:0 5px;border-radius:3px;
+  font-size:10.5px;background:#f3f4f6;color:var(--text-2);border:1px solid #e8e9ec;
+}
+.tag.lock{background:#fef2f2;color:#b91c1c;border-color:#fbd5d5}
+.cellnote{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--text-3);font-size:11.5px}
+.num{text-align:right;font-variant-numeric:tabular-nums;color:var(--text-2)}
+
+/* 末尾列（hover 的操作按钮） */
+.rowacts{display:flex;align-items:center;justify-content:flex-end;gap:1px;opacity:0}
+tr.row:hover .rowacts{opacity:1}
+.rowacts button{
+  width:18px;height:18px;border-radius:3px;display:grid;place-items:center;
+  color:var(--text-3);font-size:12px;
+}
+.rowacts button:hover{background:#e6e8ec;color:var(--text)}
+
+/* 分组标题行 */
+tr.grouprow td{
+  height:30px;padding:0 8px;background:#f9fafb;border-bottom:1px solid var(--border-divider);
+  border-top:1px solid var(--border-divider);
+}
+.groupinner{display:flex;align-items:center;gap:6px;font-size:11.5px;font-weight:600;color:var(--text-2)}
+.groupinner .gcaret{font-size:8px;color:var(--text-4)}
+.groupinner .gcount{
+  font-size:10px;font-weight:600;color:var(--text-3);background:#eceef2;border-radius:99px;
+  padding:1px 5px;
+}
+.groupinner .gbar{width:6px;height:6px;border-radius:99px;background:#8b93a7}
+
+/* 新建任务行 */
+tr.newrow td{padding:0 8px;height:32px;border-bottom:1px solid var(--border-soft)}
+.newrow-btn{
+  display:flex;align-items:center;gap:6px;color:var(--text-4);font-size:12px;height:24px;
+  padding:0 4px;border-radius:5px;width:100%;
+}
+.newrow-btn:hover{color:var(--accent)}
+.newrow-input{
+  width:100%;height:26px;border:1px solid var(--accent);border-radius:5px;padding:0 8px;
+  font:inherit;font-size:12px;outline:none;box-shadow:0 0 0 2px rgba(59,130,246,.14);
+}
+
+/* 空状态 */
+.empty-state{padding:56px 20px;text-align:center;color:var(--text-3)}
+.empty-state .big{font-size:22px;opacity:.5}
+.empty-state p{margin:8px 0 0;font-size:12px}
+
+/* 底部统计条 */
+.statusbar{
+  flex:0 0 auto;display:flex;align-items:center;gap:10px;height:26px;padding:0 14px;
+  border-top:1px solid var(--border-divider);background:#fbfbfc;font-size:10.5px;color:var(--text-3);
+}
+.statusbar .sb-r{margin-left:auto;display:flex;gap:12px}
+
+/* ══ 卡片（看板）视图 —— 现状布局的简化还原 ══════════════════════ */
+.board{flex:1;min-height:0;display:flex;gap:10px;padding:10px;background:#fbfbfc;overflow:auto}
+.bcol{
+  flex:1 1 0;min-width:220px;display:flex;flex-direction:column;background:var(--panel-block);
+  border:1px solid var(--border-outer);border-radius:8px;overflow:hidden;
+}
+.bcol-head{
+  display:flex;align-items:center;gap:6px;height:30px;padding:0 9px;flex:0 0 auto;
+  border-bottom:1px solid var(--border-outer);background:#fff;
+}
+.bcol-head .nm{font-size:11.5px;font-weight:600}
+.bcol-head .n{
+  font-size:10px;color:var(--text-3);background:#f1f2f5;border-radius:99px;padding:1px 5px;font-weight:600;
+}
+.bcol-body{padding:7px;display:flex;flex-direction:column;gap:6px;overflow:auto;flex:1}
+.kcard{
+  background:#fff;border:1px solid var(--border-outer);border-radius:6px;overflow:hidden;
+  box-shadow:0 1px 1px rgba(16,24,40,.03);
+}
+.kcard:hover{border-color:#c9ced6}
+.kcard .kc-head{padding:6px 8px 5px;display:flex;align-items:flex-start;gap:5px}
+.kcard .kc-title{font-size:11.5px;line-height:1.35;color:var(--text);overflow:hidden;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}
+.kcard .kc-body{
+  padding:5px 8px;border-top:1px solid var(--border-soft);display:flex;align-items:center;gap:6px;
+  font-size:10.5px;color:var(--text-3);
+}
+.kcard .kc-body .sp{margin-left:auto}
+.demo-note{
+  flex:0 0 auto;display:flex;align-items:center;gap:7px;padding:6px 12px;font-size:10.5px;
+  color:#92400e;background:#fffbeb;border-bottom:1px solid #fce8b6;
+}
+.demo-note b{font-weight:650}
+
+/* ══ 弹层 ══════════════════════════════════════════════════════ */
+.popover{
+  position:fixed;z-index:1000;background:#fff;border:1px solid var(--border-outer);border-radius:8px;
+  box-shadow:0 10px 30px rgba(16,24,40,.14),0 2px 6px rgba(16,24,40,.06);
+  padding:5px;max-height:70vh;overflow:auto;
+}
+.pop-sec{
+  padding:5px 7px 3px;font-size:10px;font-weight:650;color:var(--text-4);letter-spacing:.04em;
+  display:flex;align-items:center;gap:6px;
+}
+.pop-sec .line{flex:1;height:1px;background:var(--border-soft)}
+.pop-item{
+  display:flex;align-items:center;gap:7px;height:26px;padding:0 7px;border-radius:5px;
+  font-size:12px;color:var(--text-2);cursor:pointer;user-select:none;
+}
+.pop-item:hover{background:#f1f2f5}
+.pop-item .grip{width:8px;color:#cfd3da;font-size:9px;flex:0 0 8px;cursor:grab}
+.pop-item .fname{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pop-item .fhint{font-size:10px;color:var(--text-4)}
+.pop-item .mark{width:14px;height:14px;flex:0 0 14px;display:grid;place-items:center;color:var(--accent);font-size:11px;font-weight:700}
+.pop-item.on{color:var(--text)}
+.pop-item.disabled{opacity:.55;cursor:default}
+.pop-item .sw{
+  width:22px;height:12px;border-radius:99px;background:#d7dae0;position:relative;flex:0 0 22px;transition:background .12s;
+}
+.pop-item .sw::after{
+  content:"";position:absolute;left:1.5px;top:1.5px;width:9px;height:9px;border-radius:99px;background:#fff;
+  transition:transform .12s;box-shadow:0 1px 1px rgba(0,0,0,.2);
+}
+.pop-item.on .sw{background:var(--accent)}
+.pop-item.on .sw::after{transform:translateX(10px)}
+.pop-search{padding:3px 3px 5px}
+.pop-search input{
+  width:100%;height:26px;border:1px solid var(--border-outer);border-radius:5px;padding:0 7px;
+  font:inherit;font-size:12px;outline:none;
+}
+.pop-search input:focus{border-color:var(--accent)}
+.pop-foot{
+  border-top:1px solid var(--border-soft);margin-top:4px;padding:5px 4px 1px;display:flex;gap:6px;
+}
+.pop-foot button{font-size:11px;color:var(--text-3);padding:4px 7px;border-radius:5px}
+.pop-foot button:hover{background:#f1f2f5;color:var(--text)}
+.pop-foot .primary{margin-left:auto;color:var(--accent);font-weight:600}
+.checkrow{display:flex;align-items:center;gap:7px;height:26px;padding:0 7px;border-radius:5px;font-size:12px;cursor:pointer}
+.checkrow:hover{background:#f1f2f5}
+.checkrow .cnt{margin-left:auto;font-size:10px;color:var(--text-4)}
+.checkrow .bx{
+  width:13px;height:13px;border:1px solid #c4c8d0;border-radius:3px;display:grid;place-items:center;
+  color:#fff;font-size:9px;flex:0 0 13px;
+}
+.checkrow.on .bx{background:var(--accent);border-color:var(--accent)}
+
+/* 批量操作悬浮条 */
+.bulkbar{
+  position:fixed;left:50%;transform:translate(-50%,14px);bottom:26px;z-index:900;
+  display:flex;align-items:center;gap:8px;background:#1f2430;color:#fff;
+  padding:7px 8px 7px 12px;border-radius:9px;box-shadow:0 10px 28px rgba(16,24,40,.28);
+  font-size:12px;opacity:0;pointer-events:none;transition:.16s;
+}
+.bulkbar.show{opacity:1;transform:translate(-50%,0);pointer-events:auto}
+.bulkbar .bcount{font-weight:600;margin-right:2px}
+.bulkbar .bl{width:1px;height:16px;background:rgba(255,255,255,.18)}
+.bulkbar button{
+  height:24px;padding:0 8px;border-radius:5px;font-size:11.5px;color:#e8eaf0;display:flex;align-items:center;gap:4px;
+}
+.bulkbar button:hover{background:rgba(255,255,255,.12)}
+.bulkbar .bx-close{color:#9aa2b1;padding:0 6px}
+.bulkbar .bx-close:hover{background:rgba(255,255,255,.12);color:#fff}
+
+/* toast */
+.toast{
+  position:fixed;left:50%;top:22px;transform:translate(-50%,-8px);z-index:1200;
+  background:#1f2430;color:#fff;font-size:12px;padding:7px 12px;border-radius:7px;
+  box-shadow:0 8px 24px rgba(16,24,40,.24);opacity:0;transition:.16s;pointer-events:none;
+  max-width:60vw;
+}
+.toast.show{opacity:1;transform:translate(-50%,0)}
+</style>
+</head>
+<body>
+<div class="window">
+
+  <!-- 左侧项目栏（现状，静态） -->
+  <aside class="sidebar">
+    <div class="sb-head"><span class="sb-title">项目</span></div>
+    <div class="sb-list">
+      <div class="sb-item on"><span class="av" style="background:#3f4a63">AC</span>ACowork<span class="cnt">13</span></div>
+      <div class="sb-item"><span class="av" style="background:#7c5cd6">PM</span>PM 服务重构<span class="cnt">6</span></div>
+      <div class="sb-item"><span class="av" style="background:#0f9d8f">DC</span>文档中心<span class="cnt">4</span></div>
+      <div class="sb-item"><span class="av" style="background:#d97706">MB</span>移动端 v1<span class="cnt">9</span></div>
+    </div>
+  </aside>
+
+  <!-- 右侧主区 -->
+  <main class="pane">
+
+    <!-- 项目头部：标题 + 视图切换 + 新建 -->
+    <header class="proj-head">
+      <div class="ph-top">
+        <div class="ph-av">AC</div>
+        <div class="ph-main">
+          <div class="ph-title">ACowork</div>
+          <div class="ph-desc">去中心化 AI Agent 运行时平台 · Agent 与人类协作的主项目</div>
+        </div>
+        <div class="ph-side">
+          <!-- ★ 新增：视图切换 -->
+          <div class="viewswitch" id="viewswitch">
+            <button type="button" data-view="board" title="卡片视图（现状：四列状态卡片）">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.8" y="2.4" width="3.4" height="11.2" rx="1"/><rect x="6.3" y="2.4" width="3.4" height="8" rx="1"/><rect x="10.8" y="2.4" width="3.4" height="5.4" rx="1"/></svg>
+              卡片
+            </button>
+            <button type="button" data-view="list" class="on" title="列表视图（新增：一行一个任务）">
+              <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4"><path d="M2 4h12M2 8h12M2 12h8"/></svg>
+              列表
+            </button>
+          </div>
+          <button class="btn-new" id="btnNew">
+            <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+            新建任务
+          </button>
+        </div>
+      </div>
+      <div class="ph-stats" id="phStats"></div>
+    </header>
+
+    <!-- 列表视图工具栏（随视图切换显隐） -->
+    <div class="toolbar" id="toolbar">
+      <div class="search">
+        <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="7" cy="7" r="4.2"/><path d="M10.2 10.2 14 14"/></svg>
+        <input id="searchInput" type="text" placeholder="搜索任务…" />
+      </div>
+      <button class="tbtn bordered" id="fStatus" data-pop-anchor>状态<span class="chev">▾</span></button>
+      <button class="tbtn bordered" id="fPriority" data-pop-anchor>优先级<span class="chev">▾</span></button>
+      <button class="tbtn bordered" id="fAssignee" data-pop-anchor>负责人<span class="chev">▾</span></button>
+      <button class="tbtn" id="clearFilters" style="display:none;color:#1d4ed8">清除筛选</button>
+      <span class="tb-sep"></span>
+      <button class="tbtn bordered" id="groupBtn" data-pop-anchor>
+        分组<span class="chev">▾</span><span id="groupLabel">无</span>
+      </button>
+      <div class="tb-right">
+        <span class="tb-hint" id="fieldHint"></span>
+        <button class="tbtn bordered" id="fieldsBtn" data-pop-anchor>
+          <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="1.8" y="2.6" width="12.4" height="10.8" rx="1.4"/><path d="M1.8 6.2h12.4M6.4 6.2v7.2"/></svg>
+          字段
+        </button>
+      </div>
+    </div>
+
+    <!-- 看板视图里的提示条 -->
+    <div class="demo-note" id="demoNote" style="display:none">
+      <b>现状视图（本次不改动）</b> — 四列状态卡片，每列一个任务列表；这里只用于和列表视图做对比。
+    </div>
+
+    <!-- 表格容器 -->
+    <div class="table-wrap" id="tableWrap">
+      <table class="grid" id="grid">
+        <colgroup id="colgroup"></colgroup>
+        <thead id="thead"></thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+
+    <!-- 看板容器 -->
+    <div class="board" id="board" style="display:none"></div>
+
+    <footer class="statusbar">
+      <span id="sbLeft"></span>
+      <div class="sb-r">
+        <span id="sbRight"></span>
+      </div>
+    </footer>
+  </main>
+</div>
+
+<div class="bulkbar" id="bulkbar">
+  <span class="bcount" id="bulkCount">已选 0 项</span>
+  <span class="bl"></span>
+  <button id="bulkStatus" data-pop-anchor>状态 ▾</button>
+  <button id="bulkPriority" data-pop-anchor>优先级 ▾</button>
+  <button id="bulkAssign" data-pop-anchor>负责人 ▾</button>
+  <span class="bl"></span>
+  <button id="bulkDone">标记完成</button>
+  <button class="bx-close" id="bulkClear">✕</button>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+/* ════════════════════════════════════════════════════════════════════
+   A. 枚举 / 字段定义 / 样例数据
+   ════════════════════════════════════════════════════════════════════ */
+const STATUS_LABEL = { pending:'待处理', in_progress:'进行中', submitted:'待审核', done:'已完成', rejected:'已拒绝', cancelled:'已取消' };
+const STATUS_ORDER = ['pending','in_progress','submitted','done','rejected','cancelled'];
+const PRIO_LABEL   = { urgent:'紧急', high:'高', normal:'中', low:'低' };
+const PRIO_ORDER   = ['urgent','high','normal','low'];
+const TYPE_ICON    = { bug:'🐛', feature:'✨', chore:'🧹', task:'📋', checkpoint:'🚩', milestone:'🏁' };
+const TYPE_LABEL   = { bug:'Bug', feature:'需求', chore:'杂务', task:'任务', checkpoint:'检查点', milestone:'里程碑' };
+const REVIEW_LABEL = { not_required:'无需审核', pending:'待审核', approved:'已通过', rejected:'已驳回' };
+const ASSIGNEE_OPTS = ['SSE.Kevin','SSE.Lisa','PM.Nicholas','Doc.Mary','QA.Tom'];
+const PEOPLE = {
+  'SSE.Kevin':{c:'#4f6bed'}, 'SSE.Lisa':{c:'#0f9d8f'}, 'PM.Nicholas':{c:'#7c5cd6'},
+  'Doc.Mary':{c:'#d97706'}, 'QA.Tom':{c:'#e05a7d'}, '__none__':{c:'#9aa2b1'},
+};
+
+/* ── 字段定义（key 对齐 pm-types.ts PmTaskResponse） ─────────────── */
+const FIELDS = [
+  {key:'title',        label:'任务',     w:330, required:true, def:true, align:'left', desc:'标题 + 类型图标 + 任务 ID'},
+  {key:'status',       label:'状态',     w:104, def:true,  align:'left',  desc:'待处理 / 进行中 / 待审核 / 已完成…',
+     sortVal:t=>STATUS_ORDER.indexOf(t.status)},
+  {key:'priority',     label:'优先级',   w:84,  def:true,  align:'left',  desc:'紧急 / 高 / 中 / 低',
+     sortVal:t=>PRIO_ORDER.indexOf(t.priority)},
+  {key:'assignee',     label:'负责人',   w:142, def:true,  align:'left',  desc:'Agent 实例或人类成员',
+     sortVal:t=>t.assignee||'\uffff'},
+  {key:'due_at',       label:'截止日期', w:104, def:true,  align:'left',  desc:'逾期标红',
+     sortVal:t=>t.due_at||'\uffff'},
+  {key:'type',         label:'类型',     w:92,  align:'left', desc:'任务 / 需求 / Bug / 检查点 / 里程碑', sortVal:t=>t.type},
+  {key:'review_status',label:'审核状态', w:100, align:'left', desc:'人类验收门禁状态', sortVal:t=>t.review_status},
+  {key:'start_at',     label:'开始时间', w:132, align:'left', desc:'到期后派发扫描器唤醒 assignee', sortVal:t=>t.start_at||'\uffff'},
+  {key:'created_by',   label:'创建人',   w:130, align:'left', desc:'谁创建了这个任务', sortVal:t=>t.created_by},
+  {key:'parent',       label:'父任务',   w:190, align:'left', desc:'子任务的上级标题', sortVal:t=>t.parent_title||'\uffff'},
+  {key:'children',     label:'子任务',   w:76,  align:'right',desc:'已完成 / 全部', sortVal:t=>t.children_n||0},
+  {key:'depends',      label:'依赖',     w:76,  align:'right',desc:'被依赖任务数', sortVal:t=>(t.depends_on||[]).length},
+  {key:'blocked',      label:'阻塞',     w:76,  align:'left', desc:'is_blocked / blocked_by', sortVal:t=>(t.blocked_by||[]).length},
+  {key:'attachments',  label:'附件',     w:70,  align:'right',desc:'附件数量', sortVal:t=>t.attachments||0},
+  {key:'submitted_at', label:'提交时间', w:132, align:'left', desc:'Agent 交付时间', sortVal:t=>t.submitted_at||'\uffff'},
+  {key:'created_at',   label:'创建时间', w:132, align:'left', desc:'', sortVal:t=>t.created_at},
+  {key:'updated_at',   label:'更新时间', w:132, align:'left', desc:'', sortVal:t=>t.updated_at},
+  {key:'dispatch',     label:'派发重试', w:84,  align:'right',desc:'dispatch_attempts（≥5 放弃）', sortVal:t=>t.dispatch_attempts||0},
+  {key:'id',           label:'任务 ID',  w:96,  align:'left', desc:'t-xxxxxx', sortVal:t=>t.id},
+  {key:'description',  label:'描述',     w:280, align:'left', desc:'单行截断展示', sortVal:t=>t.description||''},
+];
+const FIELD_MAP = Object.fromEntries(FIELDS.map(f=>[f.key,f]));
+const DEFAULT_VISIBLE = FIELDS.filter(f=>f.def).map(f=>f.key);
+
+/* ── 时间工具 ─────────────────────────────────────────────────────── */
+const p2 = n => String(n).padStart(2,'0');
+const NOW = new Date();
+function dAdd(n){ const d=new Date(NOW); d.setDate(d.getDate()+n);
+  return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())}`; }
+function tAdd(n){ const d=new Date(NOW); d.setDate(d.getDate()+n); d.setHours(10+n%6, 24, 0, 0);
+  return `${d.getFullYear()}-${p2(d.getMonth()+1)}-${p2(d.getDate())} ${p2(d.getHours())}:${p2(d.getMinutes())}`; }
+const hhmm = s => s ? s.slice(5,10) + ' ' + s.slice(11,16) : '';
+const ymd  = s => s ? s.slice(0,10) : '';
+function daysLeft(s){
+  const a=new Date(s+'T00:00:00'), b=new Date(dAdd(0)+'T00:00:00');
+  return Math.round((a-b)/86400000);
+}
+
+/* ── 样例数据（结构与 acowork-pm 返回一致） ───────────────────────── */
+function mt(o){
+  return Object.assign({
+    parent_id:null, review_status:'not_required', depends_on:[], blocked_by:[],
+    attachments:0, dispatch_attempts:0, submitted_at:null, due_at:null, start_at:null,
+    description:'', result:false,
+  }, o);
+}
+let TASKS = [
+  mt({ id:'t-1a2b3c', title:'任务列表视图：卡片 / 列表双视图切换', type:'feature', status:'in_progress',
+       priority:'high', assignee:'SSE.Kevin', created_by:'PM.Nicholas', due_at:dAdd(3), start_at:tAdd(-2),
+       created_at:tAdd(-6), updated_at:tAdd(0), attachments:2,
+       description:'顶部加视图切换，列表视图一行一个任务，默认只显示核心字段',
+       depends_on:[{task_id:'t-2f4g5h',kind:'relates'}] }),
+  mt({ id:'t-1a2b3d', parent_id:'t-1a2b3c', title:'列表视图：字段列配置弹层（添加 / 隐藏 / 排序）', type:'task',
+       status:'pending', priority:'high', assignee:'SSE.Kevin', created_by:'SSE.Kevin', due_at:dAdd(2),
+       created_at:tAdd(-4), updated_at:tAdd(-1) }),
+  mt({ id:'t-1a2b3e', parent_id:'t-1a2b3c', title:'列表视图：列宽拖拽 + 列头点击排序', type:'task',
+       status:'pending', priority:'normal', assignee:null, created_by:'SSE.Kevin', due_at:dAdd(4),
+       created_at:tAdd(-4), updated_at:tAdd(-2) }),
+  mt({ id:'t-2f4g5h', title:'视图切换 UI（顶部 segmented 控件）', type:'feature', status:'pending',
+       priority:'normal', assignee:'PM.Nicholas', created_by:'PM.Nicholas', due_at:dAdd(5),
+       created_at:tAdd(-3), updated_at:tAdd(-1),
+       description:'看板 / 列表 二选一，记住上次选择' }),
+  mt({ id:'t-3c6d7e', title:'看板卡片在窄列下标题被裁成一行', type:'bug', status:'in_progress',
+       priority:'normal', assignee:'SSE.Lisa', created_by:'QA.Tom', due_at:dAdd(-1), start_at:tAdd(-1),
+       created_at:tAdd(-9), updated_at:tAdd(0), attachments:1,
+       description:'列宽 < 240px 时标题应折到两行' }),
+  mt({ id:'t-4e8f9a', title:'任务详情抽屉的评审记录分页', type:'task', status:'done', priority:'normal',
+       assignee:'SSE.Lisa', created_by:'PM.Nicholas', due_at:dAdd(-4), submitted_at:tAdd(-3),
+       review_status:'approved', created_at:tAdd(-14), updated_at:tAdd(-3), result:true }),
+  mt({ id:'t-5a0b1c', title:'list_project_tasks 支持 order_by=due_at', type:'feature', status:'submitted',
+       priority:'high', assignee:'SSE.Kevin', created_by:'PM.Nicholas', due_at:dAdd(1), submitted_at:tAdd(-1),
+       review_status:'pending', created_at:tAdd(-7), updated_at:tAdd(-1), attachments:3, result:true,
+       description:'分页 + 排序参数透传到存储层' }),
+  mt({ id:'t-6b2c3d', title:'依赖解析在循环引用下死锁', type:'bug', status:'pending', priority:'urgent',
+       assignee:'PM.Nicholas', created_by:'QA.Tom', due_at:dAdd(1), created_at:tAdd(-2),
+       updated_at:tAdd(0), blocked_by:['t-2f4g5h'], dispatch_attempts:3,
+       depends_on:[{task_id:'t-2f4g5h',kind:'blocks'}],
+       description:'A 依赖 B、B 依赖 A 时派发扫描器空转' }),
+  mt({ id:'t-7c4d5e', title:'MCP 工具描述文案统一（pm_* 前缀）', type:'chore', status:'rejected',
+       priority:'low', assignee:'Doc.Mary', created_by:'PM.Nicholas', due_at:dAdd(-2),
+       submitted_at:tAdd(-2), review_status:'rejected', created_at:tAdd(-11), updated_at:tAdd(-2), result:true }),
+  mt({ id:'t-8d6e7f', title:'doc_search 命中关键词高亮', type:'feature', status:'done', priority:'low',
+       assignee:'Doc.Mary', created_by:'Doc.Mary', due_at:dAdd(-8), submitted_at:tAdd(-9),
+       review_status:'approved', created_at:tAdd(-20), updated_at:tAdd(-8), result:true }),
+  mt({ id:'t-9e8f0a', title:'用户目录 join 角色的兜底显示', type:'task', status:'cancelled',
+       priority:'low', assignee:'QA.Tom', created_by:'PM.Nicholas', created_at:tAdd(-16), updated_at:tAdd(-5) }),
+  mt({ id:'t-a0f1b2', title:'列表视图：J / K 键盘上下移动选中行', type:'task', status:'pending',
+       priority:'low', assignee:null, created_by:'SSE.Kevin', due_at:dAdd(9), created_at:tAdd(-1), updated_at:tAdd(-1) }),
+  mt({ id:'t-b2c3d4', title:'任务列表 CSV 导出（用于周报）', type:'task', status:'pending',
+       priority:'normal', assignee:'SSE.Kevin', created_by:'PM.Nicholas', due_at:dAdd(12),
+       created_at:tAdd(-1), updated_at:tAdd(-1),
+       depends_on:[{task_id:'t-5a0b1c',kind:'relates'}], attachments:1 }),
+  mt({ id:'t-c4d5e6', title:'v1.2 发布：PM 列表视图 + 文档协作', type:'milestone', status:'pending',
+       priority:'urgent', assignee:'PM.Nicholas', created_by:'PM.Nicholas', due_at:dAdd(20),
+       created_at:tAdd(-5), updated_at:tAdd(-1) }),
+];
+
+/* 派生字段：父任务标题 / 子任务计数 */
+function decorate(){
+  const byId = Object.fromEntries(TASKS.map(t=>[t.id,t]));
+  for (const t of TASKS){
+    t.parent_title = t.parent_id && byId[t.parent_id] ? byId[t.parent_id].title : null;
+    const kids = TASKS.filter(x=>x.parent_id===t.id);
+    t.children_n = kids.length;
+    t.children_done = kids.filter(x=>x.status==='done').length;
+  }
+}
+decorate();
+
+/* ════════════════════════════════════════════════════════════════════
+   B. 状态
+   ════════════════════════════════════════════════════════════════════ */
+const LS_KEY = 'acowork.pm.listproto.v2';
+const persisted = (()=>{ try{ return JSON.parse(localStorage.getItem(LS_KEY)||'{}'); }catch{ return {}; } })();
+
+const state = {
+  view: persisted.view || 'list',
+  visible: (persisted.visible||DEFAULT_VISIBLE).filter(k=>FIELD_MAP[k]),
+  // 只记录「用户拖过」的列宽；没记录的列用字段默认宽（title 列留 auto 吸收剩余空间）
+  widths: Object.assign({}, persisted.widths||{}),
+  sort: { key:null, dir:0 },
+  group: persisted.group || 'none',
+  q: '',
+  filters: { status:new Set(), priority:new Set(), assignee:new Set() },
+  selected: new Set(),
+  collapsed: new Set(persisted.collapsed || []),
+};
+
+function persist(){
+  try{
+    localStorage.setItem(LS_KEY, JSON.stringify({
+      view: state.view, visible: state.visible, widths: state.widths,
+      group: state.group, collapsed: [...state.collapsed],
+    }));
+  }catch{}
+}
+
+const visibleFields = () => state.visible.map(k=>FIELD_MAP[k]).filter(Boolean);
+
+/* ════════════════════════════════════════════════════════════════════
+   C. 筛选 / 排序 / 分组 / 树展开
+   ════════════════════════════════════════════════════════════════════ */
+function filtered(){
+  const q = state.q.trim().toLowerCase();
+  return TASKS.filter(t=>{
+    if (q && !(t.title.toLowerCase().includes(q) || t.id.includes(q)
+        || (t.description||'').toLowerCase().includes(q)
+        || (t.assignee||'').toLowerCase().includes(q))) return false;
+    if (state.filters.status.size && !state.filters.status.has(t.status)) return false;
+    if (state.filters.priority.size && !state.filters.priority.has(t.priority)) return false;
+    if (state.filters.assignee.size){
+      const k = t.assignee || '__none__';
+      if (!state.filters.assignee.has(k)) return false;
+    }
+    return true;
+  });
+}
+
+function sortTasks(list){
+  const { key, dir } = state.sort;
+  if (!key || !dir) return list.slice();
+  const f = FIELD_MAP[key];
+  const val = t => (f.sortVal ? f.sortVal(t) : t[key]);
+  return list.slice().sort((a,b)=>{
+    const va = val(a), vb = val(b);
+    if (va === vb) return 0;
+    return (va > vb ? 1 : -1) * dir;
+  });
+}
+
+/** 扁平化成表格行：父任务后面紧跟（未折叠的）子任务 */
+function toRows(list){
+  const ids = new Set(list.map(t=>t.id));
+  const byParent = {};
+  for (const t of list) if (t.parent_id && ids.has(t.parent_id)) (byParent[t.parent_id] ||= []).push(t);
+  const roots = list.filter(t=>!t.parent_id || !ids.has(t.parent_id));
+  const out = [];
+  const walk = (t, depth) => {
+    out.push({ task:t, depth });
+    if (!state.collapsed.has(t.id)){
+      const kids = byParent[t.id] || [];
+      if (kids.length) sortTasks(kids).forEach(c=>walk(c, depth+1));
+    }
+  };
+  sortTasks(roots).forEach(t=>walk(t,0));
+  return out;
+}
+
+const GROUP_DEFS = {
+  none:     { label:'无' },
+  status:   { label:'状态',   get:t=>STATUS_LABEL[t.status], order:t=>STATUS_ORDER.indexOf(t.status) },
+  priority: { label:'优先级', get:t=>PRIO_LABEL[t.priority], order:t=>PRIO_ORDER.indexOf(t.priority) },
+  assignee: { label:'负责人', get:t=>t.assignee||'未分配', order:t=>t.assignee?0:1 },
+  type:     { label:'类型',   get:t=>TYPE_LABEL[t.type], order:t=>t.type },
+};
+
+/* ════════════════════════════════════════════════════════════════════
+   D. 单元格渲染
+   ════════════════════════════════════════════════════════════════════ */
+const esc = s => String(s??'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+
+function avatar(name){
+  if (!name) return '';
+  const p = PEOPLE[name] || {c:'#8b93a7'};
+  return `<i class="av" style="background:${p.c}">${esc(name.replace(/^.*[.]/,'').charAt(0).toUpperCase())}</i>`;
+}
+function who(name){
+  if (!name) return '<span class="unassigned">未分配</span>';
+  return `<span class="who">${avatar(name)}<span class="nm">${esc(name)}</span></span>`;
+}
+function dueCell(t){
+  if (!t.due_at) return '<span class="muted">—</span>';
+  const n = daysLeft(t.due_at);
+  const finished = t.status==='done' || t.status==='cancelled';
+  const cls = (!finished && n < 0) ? 'mono overdue' : (n <= 1 && !finished ? 'mono date-warn' : 'mono');
+  const tip = finished ? '' : (n < 0 ? ` title="逾期 ${-n} 天"` : ` title="剩余 ${n} 天"`);
+  return `<span class="${cls}"${tip}>${ymd(t.due_at)}</span>`;
+}
+
+function cellHTML(f, row){
+  const t = row.task;
+  switch (f.key){
+    case 'status':
+      return `<button class="pill st-${t.status}" data-act="status" title="点击修改状态"><i class="dot"></i>${STATUS_LABEL[t.status]}</button>`;
+    case 'priority':
+      return `<span class="prio p-${t.priority}">${PRIO_LABEL[t.priority]}</span>`;
+    case 'assignee': return who(t.assignee);
+    case 'due_at':   return dueCell(t);
+    case 'type':     return `<span class="tag">${TYPE_ICON[t.type]} ${TYPE_LABEL[t.type]}</span>`;
+    case 'review_status':{
+      const pending = t.review_status==='pending';
+      return `<span class="muted"${pending?' style="color:#b45309;font-weight:600"':''}>${REVIEW_LABEL[t.review_status]}</span>`;
+    }
+    case 'start_at':     return t.start_at ? `<span class="mono">${hhmm(t.start_at)}</span>` : '<span class="muted">立即</span>';
+    case 'created_by':   return who(t.created_by);
+    case 'parent':       return t.parent_title ? `<span class="cellnote">${esc(t.parent_title)}</span>` : '<span class="muted">—</span>';
+    case 'children':
+      return t.children_n ? `<span class="mono">${t.children_done}/${t.children_n}</span>` : '<span class="muted">—</span>';
+    case 'depends':{
+      const n = (t.depends_on||[]).length;
+      return n ? `<span class="tag">⇢ ${n}</span>` : '<span class="muted">—</span>';
+    }
+    case 'blocked':
+      return (t.blocked_by||[]).length
+        ? `<span class="tag lock" title="被 ${t.blocked_by.join(', ')} 阻塞">🔒 阻塞</span>`
+        : '<span class="muted">—</span>';
+    case 'attachments':
+      return t.attachments ? `<span class="mono">📎 ${t.attachments}</span>` : '<span class="muted">—</span>';
+    case 'submitted_at': return t.submitted_at ? `<span class="mono">${hhmm(t.submitted_at)}</span>` : '<span class="muted">—</span>';
+    case 'created_at':   return `<span class="mono">${hhmm(t.created_at)}</span>`;
+    case 'updated_at':   return `<span class="mono">${hhmm(t.updated_at)}</span>`;
+    case 'dispatch':
+      if (!t.dispatch_attempts) return '<span class="muted">—</span>';
+      const danger = t.dispatch_attempts >= 3;
+      return `<span class="mono"${danger?' style="color:#b91c1c;font-weight:600"':''}>${t.dispatch_attempts}</span>`;
+    case 'id':          return `<span class="mono muted">${t.id}</span>`;
+    case 'description': return `<span class="cellnote">${esc(t.description||'—')}</span>`;
+    default:            return '';
+  }
+}
+
+function titleCell(row){
+  const t = row.task;
+  const hasKids = t.children_n > 0;
+  const collapsed = state.collapsed.has(t.id);
+  const caret = hasKids
+    ? `<button class="treecaret ${collapsed?'collapsed':''}" data-act="fold" title="折叠 / 展开子任务">▾</button>`
+    : `<span class="treecaret leaf">▾</span>`;
+  const blockedIcon = (t.blocked_by||[]).length ? '<span class="tflag" title="被阻塞">🔒</span>' : '';
+  const reviewIcon = t.review_status==='pending' ? '<span class="tflag" title="等待人类审核" style="color:#f59e0b">●</span>' : '';
+  return `<div class="cellTitle" style="padding-left:${row.depth*13}px">
+    ${caret}<span class="ticon">${TYPE_ICON[t.type]}</span>
+    <span class="tname" title="${esc(t.title)}">${esc(t.title)}</span>
+    <span class="tid">${t.id}</span>${blockedIcon}${reviewIcon}
+  </div>`;
+}
+
+
+/* ════════════════════════════════════════════════════════════════════
+   E. 表格渲染
+   ════════════════════════════════════════════════════════════════════ */
+const $ = s => document.querySelector(s);
+const colgroup = $('#colgroup'), thead = $('#thead'), tbody = $('#tbody'), grid = $('#grid');
+
+function thHTML(f){
+  const sorted = state.sort.key === f.key && state.sort.dir;
+  const icon = sorted ? (state.sort.dir === 1 ? '▲' : '▼') : '';
+  return `<th data-key="${f.key}" class="${f.align==='right'?'num':''}">
+    <div class="th-inner">
+      <span class="lbl">${f.label}</span>
+      ${icon ? `<span class="sorti">${icon}</span>` : ''}
+      <button class="th-more" data-act="colmore" title="列设置">⋮</button>
+    </div>
+    <span class="col-resizer" data-resize="${f.key}"></span>
+  </th>`;
+}
+
+function rowHTML(row){
+  const t = row.task;
+  const sel = state.selected.has(t.id);
+  const cls = ['row'];
+  if (sel) cls.push('sel');
+  if (t.status === 'done' || t.status === 'cancelled') cls.push('done');
+  if ((t.blocked_by||[]).length) cls.push('blocked');
+
+  const cells = visibleFields().map(f=>{
+    if (f.key === 'title') return `<td>${titleCell(row)}</td>`;
+    return `<td class="${f.align==='right'?'num':''}">${cellHTML(f,row)}</td>`;
+  }).join('');
+
+  return `<tr class="${cls.join(' ')}" data-id="${t.id}">
+    <td class="cellCheck"><input class="chk" type="checkbox" data-act="sel" ${sel?'checked':''}></td>
+    ${cells}
+    <td class="cellTail"><div class="rowacts">
+      <button data-act="more" title="更多操作">⋯</button>
+    </div></td>
+  </tr>`;
+}
+
+function renderTable(){
+  const cols = visibleFields();
+  const colCount = cols.length + 2;
+
+  colgroup.innerHTML = `<col style="width:30px">`
+    + cols.map(f=>{
+        const w = state.widths[f.key];
+        if (!w && f.key === 'title') return `<col data-col="title">`; // auto：吃掉剩余宽度
+        return `<col data-col="${f.key}" style="width:${w || f.w}px">`;
+      }).join('')
+    + `<col style="width:36px">`;
+
+  thead.innerHTML = `<tr>
+    <th class="cellCheck"><input class="chk" type="checkbox" id="chkAll"></th>
+    ${cols.map(thHTML).join('')}
+    <th class="cellTail">
+      <button class="th-add" data-act="addfield" title="添加展示字段">＋</button>
+    </th>
+  </tr>`;
+
+  const rows = toRows(filtered());
+  const allSelected = rows.length > 0 && rows.every(r=>state.selected.has(r.task.id));
+
+  let html = '';
+  if (!rows.length){
+    html = `<tr><td colspan="${colCount}">
+      <div class="empty-state"><div class="big">🔍</div>
+        <p>没有匹配的任务</p>
+        <p style="color:var(--text-4);font-size:11px">试试调整筛选条件，或清除“字段里被隐藏”的筛选</p>
+      </div></td></tr>`;
+  } else if (state.group === 'none'){
+    html = rows.map(rowHTML).join('');
+  } else {
+    const def = GROUP_DEFS[state.group];
+    const buckets = new Map();
+    for (const r of rows){
+      const key = def.get(r.task);
+      if (!buckets.has(key)) buckets.set(key, []);
+      buckets.get(key).push(r);
+    }
+    const ordered = [...buckets.entries()].sort((a,b)=>def.order(a[1][0].task) - def.order(b[1][0].task));
+    for (const [label, list] of ordered){
+      html += `<tr class="grouprow"><td colspan="${colCount}">
+        <div class="groupinner"><span class="gcaret">▾</span><span class="gbar"></span>${esc(label)}
+        <span class="gcount">${list.length}</span></div></td></tr>`;
+      html += list.map(rowHTML).join('');
+    }
+  }
+
+  // 底部「新建任务」行
+  html += `<tr class="newrow"><td colspan="${colCount}">
+    <button class="newrow-btn" data-act="newrow">
+      <svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M8 3.2v9.6M3.2 8h9.6"/></svg>
+      新建任务
+    </button></td></tr>`;
+
+  tbody.innerHTML = html;
+  const chkAll = $('#chkAll');
+  if (chkAll) chkAll.checked = allSelected;
+
+  $('#sbLeft').textContent = `显示 ${rows.length} / ${TASKS.length} 个任务`;
+  $('#sbRight').textContent = `${cols.length} 列 · 分组：${GROUP_DEFS[state.group].label} · 列配置已保存到本地`;
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   F. 卡片（看板）视图 —— 现状的简化还原，仅用于对比
+   ════════════════════════════════════════════════════════════════════ */
+function cardHTML(t){
+  const blocked = (t.blocked_by||[]).length;
+  return `<div class="kcard">
+    <div class="kc-head">
+      <span class="ticon">${TYPE_ICON[t.type]}</span>
+      <span class="kc-title">${esc(t.title)}</span>
+      ${blocked?'<span class="tflag">🔒</span>':''}
+    </div>
+    <div class="kc-body">
+      <span class="prio p-${t.priority}">${PRIO_LABEL[t.priority]}</span>
+      ${t.assignee ? `<span class="who">${avatar(t.assignee)}<span class="nm">${esc(t.assignee.split('.')[1]||t.assignee)}</span></span>` : '<span class="unassigned">未分配</span>'}
+      <span class="sp mono"${t.due_at && daysLeft(t.due_at)<0 && t.status!=='done' ? ' style="color:#dc2626;font-weight:600"' : ''}>${t.due_at?ymd(t.due_at).slice(5):''}</span>
+    </div>
+  </div>`;
+}
+
+function renderBoard(){
+  const cols = [
+    {st:'pending',     label:'待处理'},
+    {st:'in_progress', label:'进行中'},
+    {st:'submitted',   label:'待审核'},
+    {st:'done',        label:'已完成'},
+  ];
+  const dotColor = {pending:'#8b93a7', in_progress:'#3B82F6', submitted:'#f59e0b', done:'#22c55e'};
+  $('#board').innerHTML = cols.map(c=>{
+    const list = TASKS.filter(t=>t.status===c.st);
+    return `<div class="bcol">
+      <div class="bcol-head">
+        <i class="dot" style="width:6px;height:6px;border-radius:99px;background:${dotColor[c.st]}"></i>
+        <span class="nm">${c.label}</span><span class="n">${list.length}</span>
+      </div>
+      <div class="bcol-body">${list.map(cardHTML).join('') || '<div class="muted" style="padding:6px;font-size:11px">暂无任务</div>'}</div>
+    </div>`;
+  }).join('');
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   G. 弹层基础
+   ════════════════════════════════════════════════════════════════════ */
+let currentPop = null, popAnchor = null;
+function closePop(){ if (currentPop){ currentPop.remove(); currentPop = null; popAnchor = null; } }
+
+function openPop(anchor, html, opts = {}){
+  // 同一个锚点再次触发 = 收起（toggle）
+  if (currentPop && popAnchor === anchor){ closePop(); return null; }
+  closePop();
+  const el = document.createElement('div');
+  el.className = 'popover';
+  el.style.width = (opts.width || 230) + 'px';
+  el.innerHTML = html;
+  document.body.appendChild(el);
+  const r = anchor.getBoundingClientRect();
+  const pr = el.getBoundingClientRect();
+  let left = opts.align === 'right' ? r.right - pr.width : r.left;
+  left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8));
+  let top = opts.place === 'up' ? r.top - pr.height - 6 : r.bottom + 6;
+  if (top + pr.height > window.innerHeight - 8) top = Math.max(8, window.innerHeight - pr.height - 8);
+  if (top < 8) top = 8;
+  el.style.left = left + 'px';
+  el.style.top = top + 'px';
+  currentPop = el; popAnchor = anchor;
+  if (opts.mount) opts.mount(el);
+  return el;
+}
+
+document.addEventListener('click', e=>{
+  if (!currentPop) return;
+  // 弹层内条目的点击往往会在自己的处理器里重渲染弹层内容，
+  // 冒泡到这里时 e.target 已脱离文档 —— 此时不能当成「点击外部」。
+  if (!e.target.isConnected) return;
+  if (currentPop.contains(e.target)) return;
+  // 触发弹层的锚点自己负责开/关，不能在这里再判一次「点了外部」
+  if (popAnchor && popAnchor.contains(e.target)) return;
+  if (e.target.closest('[data-pop-anchor]')) return;
+  closePop();
+});
+
+let toastTimer = null;
+function toast(msg){
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(()=>el.classList.remove('show'), 1900);
+}
+
+/* ── 字段选择器 ──────────────────────────────────────────────────── */
+let fpQ = '';
+function fieldPickerHTML(){
+  const ql = fpQ.trim().toLowerCase();
+  const match = f => !ql || f.label.includes(fpQ.trim()) || f.key.includes(ql);
+  const vis = state.visible.map(k=>FIELD_MAP[k]).filter(Boolean).filter(match);
+  const hid = FIELDS.filter(f=>!state.visible.includes(f.key)).filter(match);
+
+  const visRows = vis.map(f=>`
+    <div class="pop-item on" draggable="true" data-fkey="${f.key}" title="拖动可调整列顺序">
+      <span class="grip">⠿</span>
+      <span class="fname">${f.label}</span>
+      ${f.required ? '<span class="fhint">必选</span>' : '<span class="mark">✓</span>'}
+    </div>`).join('') || '<div class="pop-item disabled">无匹配字段</div>';
+
+  const hidRows = hid.map(f=>`
+    <div class="pop-item" data-fkey="${f.key}">
+      <span class="grip" style="visibility:hidden">⠿</span>
+      <span class="fname">${f.label}</span>
+      <span class="fhint" style="max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(f.desc||'')}</span>
+      <span class="mark" style="color:#c4c8d0">＋</span>
+    </div>`).join('') || '<div class="pop-item disabled">无更多字段</div>';
+
+  return `
+    <div class="pop-search"><input id="fpq" placeholder="搜索字段…" /></div>
+    <div class="pop-sec">已显示<span class="line"></span>${state.visible.length}</div>
+    ${visRows}
+    <div class="pop-sec">可添加<span class="line"></span>${FIELDS.length - state.visible.length}</div>
+    ${hidRows}
+    <div class="pop-foot">
+      <button id="fpReset">重置为默认列</button>
+      <button class="primary" id="fpClose">完成</button>
+    </div>`;
+}
+
+let dragFromIdx = -1;
+function renderFieldPicker(el){
+  el.innerHTML = fieldPickerHTML();
+  const inp = el.querySelector('#fpq');
+  inp.value = fpQ;
+  inp.addEventListener('input', ()=>{
+    fpQ = inp.value;
+    renderFieldPicker(el);
+    const i2 = el.querySelector('#fpq');
+    i2.focus();
+    i2.setSelectionRange(i2.value.length, i2.value.length);
+  });
+  inp.addEventListener('keydown', e=>{ if (e.key === 'Escape') closePop(); });
+
+  el.querySelectorAll('[data-fkey]').forEach(node=>{
+    node.addEventListener('click', ()=>{
+      const key = node.dataset.fkey;
+      const f = FIELD_MAP[key];
+      if (f.required) { toast('「任务」列是锚点列，不能隐藏'); return; }
+      if (state.visible.includes(key)) state.visible = state.visible.filter(k=>k!==key);
+      else state.visible.push(key);
+      renderFieldPicker(el);
+      refresh();
+    });
+  });
+
+  // 拖动排序已显示的列
+  el.querySelectorAll('[data-fkey][draggable="true"]').forEach(node=>{
+    node.addEventListener('dragstart', e=>{
+      dragFromIdx = state.visible.indexOf(node.dataset.fkey);
+      e.dataTransfer.effectAllowed = 'move';
+      node.style.opacity = '.45';
+    });
+    node.addEventListener('dragend', ()=>{ node.style.opacity = ''; });
+    node.addEventListener('dragover', e=>{ e.preventDefault(); });
+    node.addEventListener('drop', e=>{
+      e.preventDefault();
+      const to = state.visible.indexOf(node.dataset.fkey);
+      if (dragFromIdx < 0 || to < 0 || dragFromIdx === to) return;
+      const moved = state.visible.splice(dragFromIdx,1)[0];
+      state.visible.splice(to,0,moved);
+      dragFromIdx = -1;
+      renderFieldPicker(el);
+      refresh();
+    });
+  });
+
+  el.querySelector('#fpReset').addEventListener('click', ()=>{
+    state.visible = DEFAULT_VISIBLE.slice();
+    renderFieldPicker(el);
+    refresh();
+  });
+  el.querySelector('#fpClose').addEventListener('click', closePop);
+
+  // 高度变化后重新夹紧到底部边界内
+  const bottom = el.getBoundingClientRect().bottom;
+  if (bottom > window.innerHeight - 8) el.style.top = Math.max(8, window.innerHeight - el.offsetHeight - 8) + 'px';
+}
+
+function openFieldPicker(anchor){
+  openPop(anchor, fieldPickerHTML(), { width:292, align:'right', mount: renderFieldPicker });
+}
+
+/* ── 列菜单 ──────────────────────────────────────────────────────── */
+function openColMenu(th, key, anchor){
+  const f = FIELD_MAP[key];
+  openPop(anchor, `
+    <div class="pop-sec">${f.label}<span class="line"></span></div>
+    <div class="pop-item" data-m="asc">${state.sort.key===key&&state.sort.dir===1?'<span class="mark">✓</span>':'<span class="mark"></span>'}升序排列</div>
+    <div class="pop-item" data-m="desc">${state.sort.key===key&&state.sort.dir===-1?'<span class="mark">✓</span>':'<span class="mark"></span>'}降序排列</div>
+    ${f.required?'':'<div class="pop-item" data-m="hide"><span class="mark"></span>隐藏此列</div>'}
+  `, { width:180, mount(el){
+    el.querySelectorAll('[data-m]').forEach(n=>n.onclick = ()=>{
+      const m = n.dataset.m;
+      if (m === 'hide') state.visible = state.visible.filter(k=>k!==key);
+      else state.sort = { key, dir: m==='asc'?1:-1 };
+      closePop(); refresh();
+    });
+  }});
+}
+
+/* ── 内联状态编辑 ────────────────────────────────────────────────── */
+function openStatusMenu(anchor, task){
+  openPop(anchor, `
+    <div class="pop-sec">修改状态<span class="line"></span></div>
+    ${STATUS_ORDER.map(s=>`<div class="pop-item ${task.status===s?'on':''}" data-s="${s}">
+      <span class="pill st-${s}"><i class="dot"></i>${STATUS_LABEL[s]}</span>
+      ${task.status===s?'<span class="mark">✓</span>':''}</div>`).join('')}
+  `, { width:170, mount(el){
+    el.querySelectorAll('[data-s]').forEach(n=>n.onclick = ()=>{
+      task.status = n.dataset.s;
+      task.updated_at = tAdd(0);
+      closePop(); refresh();
+      toast(`「${task.title.slice(0,14)}…」→ ${STATUS_LABEL[task.status]}（调用 pm_update_task）`);
+    });
+  }});
+}
+
+/* ── 行「⋯」菜单 ─────────────────────────────────────────────────── */
+function openRowMenu(anchor, task){
+  openPop(anchor, `
+    <div class="pop-item" data-m="open"><span class="mark">↗</span>打开任务详情</div>
+    <div class="pop-item" data-m="copy"><span class="mark">⧉</span>复制任务 ID</div>
+    <div class="pop-item" data-m="status"><span class="mark">◔</span>修改状态…</div>
+    <div class="pop-item" data-m="delete" style="color:#b91c1c"><span class="mark" style="color:#b91c1c">✕</span>删除任务</div>
+  `, { width:180, align:'right', mount(el){
+    el.querySelectorAll('[data-m]').forEach(n=>n.onclick = ()=>{
+      const m = n.dataset.m;
+      closePop();
+      if (m === 'open')   toast(`打开任务详情：${task.id}（TaskEditDialog）`);
+      if (m === 'copy')   toast(`已复制 ${task.id}`);
+      if (m === 'status') return openStatusMenu(anchor, task);
+      if (m === 'delete'){
+        TASKS = TASKS.filter(t=>t.id!==task.id && t.parent_id!==task.id);
+        state.selected.delete(task.id);
+        decorate(); refresh();
+        toast(`已删除 ${task.id}（调用 pm_delete_task）`);
+      }
+    });
+  }});
+}
+
+/* ── 筛选弹层 ────────────────────────────────────────────────────── */
+function openFilterPop(anchor, kind){
+  const cfg = {
+    status:   { title:'状态',   opts:STATUS_ORDER.map(s=>[s, STATUS_LABEL[s]]), get:t=>t.status },
+    priority: { title:'优先级', opts:PRIO_ORDER.map(p=>[p, PRIO_LABEL[p]]),     get:t=>t.priority },
+    assignee: { title:'负责人', opts:ASSIGNEE_OPTS.map(a=>[a,a]).concat([['__none__','未分配']]), get:t=>t.assignee||'__none__' },
+  }[kind];
+  const set = state.filters[kind];
+
+  const html = () => cfg.opts.map(([v,label])=>{
+    const n = TASKS.filter(t=>cfg.get(t)===v).length;
+    const on = set.has(v);
+    return `<div class="checkrow ${on?'on':''}" data-fv="${v}">
+      <span class="bx">${on?'✓':''}</span><span>${esc(label)}</span><span class="cnt">${n}</span></div>`;
+  }).join('');
+
+  openPop(anchor, `<div class="pop-sec">${cfg.title}<span class="line"></span></div>${html()}
+    <div class="pop-foot"><button id="fClear">清除%s</button></div>`.replace('%s',''), { width:198, mount(el){
+    el.querySelectorAll('[data-fv]').forEach(n=>n.onclick = (ev)=>{
+      ev.stopPropagation();
+      const v = n.dataset.fv;
+      set.has(v) ? set.delete(v) : set.add(v);
+      n.classList.toggle('on', set.has(v));
+      n.querySelector('.bx').textContent = set.has(v) ? '✓' : '';
+      refresh();
+    });
+    el.querySelector('#fClear').onclick = ()=>{
+      set.clear();
+      el.querySelectorAll('[data-fv]').forEach(n=>{ n.classList.remove('on'); n.querySelector('.bx').textContent=''; });
+      refresh();
+    };
+  }});
+}
+
+/* ── 分组弹层 ────────────────────────────────────────────────────── */
+function openGroupPop(anchor){
+  openPop(anchor, `
+    <div class="pop-sec">按字段分组<span class="line"></span></div>
+    ${Object.entries(GROUP_DEFS).map(([k,d])=>`<div class="pop-item ${state.group===k?'on':''}" data-g="${k}">
+      <span class="mark">${state.group===k?'✓':''}</span>${d.label}</div>`).join('')}
+  `, { width:180, mount(el){
+    el.querySelectorAll('[data-g]').forEach(n=>n.onclick = ()=>{
+      state.group = n.dataset.g;
+      closePop(); refresh();
+    });
+  }});
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   H. 汇总渲染
+   ════════════════════════════════════════════════════════════════════ */
+const FILTER_BTNS = [
+  ['#fStatus',   'status',   '状态'],
+  ['#fPriority', 'priority', '优先级'],
+  ['#fAssignee', 'assignee', '负责人'],
+];
+
+function renderStats(){
+  const c = s => TASKS.filter(t=>t.status===s).length;
+  $('#phStats').innerHTML = `
+    <span>总任务 <b>${TASKS.length}</b></span>
+    <span>进行中 <b>${c('in_progress')}</b></span>
+    <span>待审核 <b style="color:#b45309">${c('submitted')}</b></span>
+    <span>已完成 <b style="color:#15803d">${c('done')}</b></span>
+    <span>成员 <b>${ASSIGNEE_OPTS.length + 1}</b></span>`;
+}
+
+function paintToolbar(){
+  let any = false;
+  for (const [sel, kind, label] of FILTER_BTNS){
+    const n = state.filters[kind].size;
+    if (n) any = true;
+    const btn = $(sel);
+    btn.classList.toggle('active', n > 0);
+    btn.innerHTML = `${label}${n ? `<span class="fcount">${n}</span>` : ''}<span class="chev">▾</span>`;
+  }
+  $('#clearFilters').style.display = any ? '' : 'none';
+  $('#groupLabel').textContent = GROUP_DEFS[state.group].label;
+  $('#groupBtn').classList.toggle('active', state.group !== 'none');
+  $('#fieldHint').textContent = `已显示 ${state.visible.length} / ${FIELDS.length} 个字段`;
+}
+
+function renderBulk(){
+  const n = state.selected.size;
+  const bar = $('#bulkbar');
+  bar.classList.toggle('show', n > 0);
+  $('#bulkCount').textContent = `已选 ${n} 项`;
+}
+
+function refresh(){
+  decorate();
+  const isList = state.view === 'list';
+  $('#toolbar').style.display = isList ? '' : 'none';
+  $('#demoNote').style.display = isList ? 'none' : '';
+  $('#tableWrap').style.display = isList ? '' : 'none';
+  $('#board').style.display = isList ? 'none' : '';
+  document.querySelectorAll('#viewswitch button')
+    .forEach(b=>b.classList.toggle('on', b.dataset.view === state.view));
+
+  renderStats();
+  paintToolbar();
+  if (isList) renderTable(); else renderBoard();
+  renderBulk();
+  persist();
+}
+
+/* ════════════════════════════════════════════════════════════════════
+   I. 事件
+   ════════════════════════════════════════════════════════════════════ */
+
+/* 视图切换 */
+$('#viewswitch').addEventListener('click', e=>{
+  const b = e.target.closest('button[data-view]');
+  if (!b) return;
+  state.view = b.dataset.view;
+  refresh();
+});
+
+/* 工具栏：搜索 */
+$('#searchInput').addEventListener('input', e=>{
+  state.q = e.target.value;
+  if (state.view === 'list') renderTable();
+});
+
+/* 工具栏：筛选 / 分组 / 字段 */
+$('#fStatus').addEventListener('click', e=>{ e.stopPropagation(); openFilterPop(e.currentTarget, 'status'); });
+$('#fPriority').addEventListener('click', e=>{ e.stopPropagation(); openFilterPop(e.currentTarget, 'priority'); });
+$('#fAssignee').addEventListener('click', e=>{ e.stopPropagation(); openFilterPop(e.currentTarget, 'assignee'); });
+$('#groupBtn').addEventListener('click', e=>{ e.stopPropagation(); openGroupPop(e.currentTarget); });
+$('#fieldsBtn').addEventListener('click', e=>{ e.stopPropagation(); fpQ=''; openFieldPicker(e.currentTarget); });
+$('#clearFilters').addEventListener('click', ()=>{
+  for (const k of ['status','priority','assignee']) state.filters[k].clear();
+  refresh();
+});
+
+/* 表头：排序 / 列菜单 / 列宽拖拽 / 全选 */
+thead.addEventListener('mousedown', e=>{
+  const h = e.target.closest('.col-resizer');
+  if (!h) return;
+  e.preventDefault(); e.stopPropagation();
+  const key = h.dataset.resize;
+  const col = colgroup.querySelector(`col[data-col="${key}"]`);
+  const startX = e.clientX;
+  const startW = Math.round(col.getBoundingClientRect().width) || parseFloat(col.style.width) || 120;
+  const move = ev=>{
+    const w = Math.max(56, Math.round(startW + ev.clientX - startX));
+    col.style.width = w + 'px';
+    state.widths[key] = w;
+  };
+  const up = ()=>{
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    persist();
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+});
+
+thead.addEventListener('click', e=>{
+  if (e.target.closest('.col-resizer')) return;
+
+  if (e.target.id === 'chkAll'){
+    const on = e.target.checked;
+    const rows = toRows(filtered());
+    state.selected.clear();
+    if (on) rows.forEach(r=>state.selected.add(r.task.id));
+    renderTable(); renderBulk();
+    return;
+  }
+
+  const th = e.target.closest('th[data-key]');
+  if (!th) {
+    if (e.target.closest('[data-act="addfield"]')){
+      fpQ = '';
+      openFieldPicker(e.target.closest('.th-add'));
+    }
+    return;
+  }
+  const key = th.dataset.key;
+  if (e.target.closest('[data-act="colmore"]')) { openColMenu(th, key, e.target.closest('.th-more')); return; }
+
+  // 列头点击：无 → 升 → 降 → 无
+  if (state.sort.key !== key) state.sort = { key, dir: 1 };
+  else if (state.sort.dir === 1) state.sort = { key, dir: -1 };
+  else state.sort = { key:null, dir:0 };
+  refresh();
+});
+
+/* 表体：行内交互 */
+tbody.addEventListener('click', e=>{
+  const actEl = e.target.closest('[data-act]');
+  const tr = e.target.closest('tr[data-id]');
+  const task = tr ? TASKS.find(t=>t.id === tr.dataset.id) : null;
+
+  if (actEl){
+    const act = actEl.dataset.act;
+
+    if (act === 'sel'){
+      if (!task) return;
+      actEl.checked ? state.selected.add(task.id) : state.selected.delete(task.id);
+      tr.classList.toggle('sel', actEl.checked);
+      renderBulk();
+      const all = toRows(filtered());
+      const chkAll = $('#chkAll');
+      if (chkAll) chkAll.checked = all.length > 0 && all.every(r=>state.selected.has(r.task.id));
+      return;
+    }
+
+    if (act === 'fold'){
+      if (!task) return;
+      state.collapsed.has(task.id) ? state.collapsed.delete(task.id) : state.collapsed.add(task.id);
+      renderTable(); persist();
+      return;
+    }
+
+    if (act === 'status' && task){ openStatusMenu(actEl, task); return; }
+    if (act === 'more' && task){ openRowMenu(actEl, task); return; }
+    if (act === 'newrow'){ startNewRow(actEl); return; }
+    if (act === 'addfield'){ fpQ=''; openFieldPicker(actEl); return; }
+    return;
+  }
+
+  if (tr && tr.dataset.id) toast(`打开任务详情：${tr.dataset.id}（TaskEditDialog）`);
+});
+
+/* 行内新建任务 */
+function startNewRow(btn){
+  const td = btn.parentElement;
+  const inp = document.createElement('input');
+  inp.className = 'newrow-input';
+  inp.placeholder = '任务标题…  回车创建 · Esc 取消';
+  td.innerHTML = '';
+  td.appendChild(inp);
+  inp.focus();
+  inp.addEventListener('keydown', e=>{
+    if (e.key === 'Escape'){ refresh(); return; }
+    if (e.key !== 'Enter') return;
+    const title = inp.value.trim();
+    if (!title){ refresh(); return; }
+    const id = 't-' + Math.random().toString(16).slice(2, 8);
+    TASKS.unshift(mt({
+      id, title, type:'task', status:'pending', priority:'normal', assignee:null,
+      created_by:'PM.Nicholas', due_at:dAdd(7), created_at:tAdd(0), updated_at:tAdd(0),
+    }));
+    refresh();
+    toast(`已创建「${title.slice(0,12)}」（调用 pm_create_task）`);
+  });
+  inp.addEventListener('blur', ()=>{ if (!inp.value.trim()) refresh(); });
+}
+
+/* 头部「新建任务」→ 聚焦底部新建行 */
+$('#btnNew').addEventListener('click', ()=>{
+  if (state.view !== 'list'){ state.view = 'list'; refresh(); }
+  const b = tbody.querySelector('[data-act="newrow"]');
+  if (b) startNewRow(b);
+});
+
+/* 批量操作条 */
+$('#bulkClear').addEventListener('click', ()=>{
+  state.selected.clear();
+  refresh();
+});
+$('#bulkDone').addEventListener('click', ()=>{
+  TASKS.forEach(t=>{ if (state.selected.has(t.id)){ t.status='done'; t.updated_at=tAdd(0); } });
+  toast(`已把 ${state.selected.size} 个任务标记完成`);
+  refresh();
+});
+
+function openBulkSet(kind, anchor){
+  const cfg = {
+    status:   { title:'批量改状态',   opts:STATUS_ORDER.map(s=>[s, STATUS_LABEL[s]]), apply:(t,v)=>{ t.status=v; } },
+    priority: { title:'批量改优先级', opts:PRIO_ORDER.map(p=>[p, PRIO_LABEL[p]]),     apply:(t,v)=>{ t.priority=v; } },
+    assignee: { title:'批量改负责人', opts:ASSIGNEE_OPTS.map(a=>[a,a]).concat([['__none__','未分配']]),
+                apply:(t,v)=>{ t.assignee = v==='__none__' ? null : v; } },
+  }[kind];
+
+  openPop(anchor, `<div class="pop-sec">${cfg.title}<span class="line"></span></div>
+    ${cfg.opts.map(([v,label])=>`<div class="pop-item" data-bv="${v}">
+      <span class="fname">${esc(label)}</span><span class="mark">›</span></div>`).join('')}`,
+    { width:180, place:'up', mount(el){
+      el.querySelectorAll('[data-bv]').forEach(n=>n.onclick = ()=>{
+        const v = n.dataset.bv;
+        TASKS.forEach(t=>{ if (state.selected.has(t.id)){ cfg.apply(t, v); t.updated_at = tAdd(0); } });
+        closePop();
+        toast(`已更新 ${state.selected.size} 个任务（调用 pm_update_task）`);
+        refresh();
+      });
+    }});
+}
+$('#bulkStatus').addEventListener('click', e=>{ e.stopPropagation(); openBulkSet('status', e.currentTarget); });
+$('#bulkPriority').addEventListener('click', e=>{ e.stopPropagation(); openBulkSet('priority', e.currentTarget); });
+$('#bulkAssign').addEventListener('click', e=>{ e.stopPropagation(); openBulkSet('assignee', e.currentTarget); });
+
+/* 键盘：Esc 关弹层、⌘/Ctrl+K 聚焦搜索 */
+document.addEventListener('keydown', e=>{
+  if (e.key === 'Escape') closePop();
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k'){
+    e.preventDefault();
+    if (state.view !== 'list'){ state.view = 'list'; refresh(); }
+    $('#searchInput').focus();
+  }
+});
+
+/* ════════════════════════════════════════════════════════════════════
+   J. 启动
+   ════════════════════════════════════════════════════════════════════ */
+refresh();
+</script>
+
+<style>
+/* 运行时补充样式（原型专用，不进入产品代码） */
+button.pill{ cursor:pointer; font:inherit; font-size:11px; font-weight:500; }
+button.pill:hover{ filter:brightness(.97); }
+.th-add{
+  width:22px; height:20px; border-radius:4px; display:grid; place-items:center;
+  color:var(--text-3); font-size:13px; margin:0 auto; line-height:1;
+}
+.th-add:hover{ background:#e6e8ec; color:var(--text); }
+tr.row td:first-child{ position:relative; }
+.cellCheck .chk{ margin:0 auto; display:block; }
+</style>
+</body>
+</html>
