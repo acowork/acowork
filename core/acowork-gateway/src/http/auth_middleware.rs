@@ -183,6 +183,18 @@ fn is_public_path(path: &str) -> bool {
     ) {
         return true;
     }
+    // ADR-112: workspace static-asset preview. The capability ticket in the
+    // path **is** the credential, verified in the handler
+    // (`workspace_preview::verify_ticket`) before a single byte is proxied.
+    // It has to be exempt here because this prefix is loaded by the browser as
+    // the preview iframe's document *and* as every CSS / JS / font sub-
+    // resource — none of which can carry an `Authorization` header. The
+    // bearer-gated `/workspace-files/…` route stays exactly as it was; this is
+    // an additional, narrower entry point (GET, read-only, TTL, bound to one
+    // agent + workspace).
+    if path.starts_with(crate::http::workspace_preview::PREVIEW_PATH_PREFIX) {
+        return true;
+    }
     // `/api/providers/{id}/logo` — a public brand mark (a models.dev SVG), no
     // user data in it. It has to be reachable without a token because the
     // Desktop renders it via `<img src>`, and an `<img>` cannot carry an
@@ -542,6 +554,30 @@ mod tests {
             "/api/agents",
             "/api/users",
             "/api/agents/foo/sessions",
+        ] {
+            assert!(!is_public_path(p), "{p} must require auth");
+        }
+    }
+
+    #[test]
+    fn workspace_preview_prefix_is_public_for_exactly_that_prefix() {
+        // ADR-112: the preview iframe's document *and* its CSS / JS / font
+        // sub-resources are plain browser loads — no header, no token. The
+        // capability ticket in the path is the credential, so the middleware
+        // must let the whole prefix through and the handler must verify.
+        for p in [
+            "/workspace-preview/v1.1000.00112233445566778899aabbccddeeff/agent-1/ws-1/index.html",
+            "/workspace-preview/v1.1000.00112233445566778899aabbccddeeff/agent-1/ws-1/styles.css",
+            "/workspace-preview/",
+        ] {
+            assert!(is_public_path(p), "{p} should be public");
+        }
+        // The bearer-gated asset route must NOT have been widened with it.
+        for p in [
+            "/workspace-files/agent-1/ws-1/index.html",
+            "/ws-files/agent-1/index.html",
+            "/workspace-preview",
+            "/workspace-previewer/x",
         ] {
             assert!(!is_public_path(p), "{p} must require auth");
         }
