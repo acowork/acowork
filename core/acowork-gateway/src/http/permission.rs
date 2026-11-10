@@ -250,6 +250,17 @@ pub fn classify(method: &Method, rest: &str) -> (Op, Tier) {
     // Workspace *definition* is config (`manage` to create/delete/switch);
     // reading the tree / file content is working-data, so `use` (same 方案 G
     // rationale as files/git).
+    //
+    // ADR-112: minting a preview ticket must sit at exactly the same tier as
+    // reading the file it will serve (`GET …/workspaces/file` = `use`).
+    // A ticket is not a new privilege — it is the same read right re-expressed
+    // in a form a browser can carry — so a guest who can already read the JSON
+    // must also be able to render the page, and an owner loses nothing.
+    // Bumping this to `manage` would make HTML previews owner-only while every
+    // other preview kept working.
+    if method == Method::POST && rest == "workspaces/preview-ticket" {
+        return (Op::Use, Tier::Agent);
+    }
     if head == "workspaces" {
         return if matches!(method, &Method::GET | &Method::HEAD) {
             (Op::Use, Tier::Agent)
@@ -758,6 +769,18 @@ mod tests {
         // working-data -> `use`.
         assert_eq!(classify(&Method::GET, "workspaces/file"), agent(Op::Use));
         assert_eq!(classify(&Method::PUT, "workspaces/current"), agent(Op::Manage));
+        // ADR-112: a preview ticket is the same read right in browser-carryable
+        // form, so it rides `use` — not `manage`. Pinned here because widening
+        // it to `manage` silently makes HTML previews owner-only.
+        assert_eq!(
+            classify(&Method::POST, "workspaces/preview-ticket"),
+            agent(Op::Use)
+        );
+        assert_eq!(
+            classify(&Method::GET, "workspaces/preview-ticket"),
+            agent(Op::Use),
+            "a GET on the mint path is not a real route; it must not widen either"
+        );
 
         // Lifecycle: `start` is `use` (wake a stopped agent), the rest
         // that mutate/replace the agent are `manage`.

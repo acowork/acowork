@@ -102,6 +102,19 @@ export function answerWithChoice(
   };
 }
 
+/** The `system_notice` types that carry an ADDRESSING QUESTION — the router
+ *  ("which task did you mean?" / "continue this one?") asking the human to place
+ *  their own words. One vocabulary, because three places must agree on it: the
+ *  renderer that draws the card, the surfaces that hand it an answer, and the
+ *  layout that decides which card belongs at a run's tail. A drift between them
+ *  is a card nobody can answer. */
+export const CARD_NOTICES = ["session_choice", "confirm_continue"] as const;
+
+/** Is this `notice_type` an answering card? (Absent type = not a card.) */
+export function isCardNotice(noticeType: string | undefined): boolean {
+  return (CARD_NOTICES as readonly string[]).includes(noticeType ?? "");
+}
+
 /** Whether this human may answer the card (ADR-106 D10). The card asks the
  *  person who spoke — `to` is them — so a bystander gets the question without
  *  the answer. An empty `me` is local mode, where the surface cannot resolve an

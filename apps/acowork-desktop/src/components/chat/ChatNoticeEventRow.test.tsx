@@ -35,7 +35,7 @@ describe("ChatNoticeEventRow", () => {
     (noticeType) => {
       // ADR-100 revision: history records conversation, not progress. An old
       // transcript still carrying a milestone must not put it back on screen.
-      const { container } = render(<ChatNoticeEventRow row={noticeRow(noticeType)} />);
+      const { container } = render(<ChatNoticeEventRow row={noticeRow(noticeType)} identity="own" />);
       expect(container.innerHTML).toBe("");
     },
   );
@@ -58,7 +58,7 @@ describe("ChatNoticeEventRow", () => {
       "delivery_failed",
     ]) {
       const { container, unmount } = render(
-        <ChatNoticeEventRow row={noticeRow(noticeType, "Routed to a new task")} />,
+        <ChatNoticeEventRow row={noticeRow(noticeType, "Routed to a new task")} identity="own" />,
       );
       expect(container.innerHTML, noticeType).toBe("");
       unmount();
@@ -70,9 +70,9 @@ describe("ChatNoticeEventRow", () => {
     // choose, nothing chosen. Painting it as a centered "Continue this task?"
     // put a question into the transcript that the agent never asked and nobody
     // could answer — the naked line was the most visible thing on the screen.
-    const { container } = render(<ChatNoticeEventRow row={noticeRow("confirm_continue")} />);
+    const { container } = render(<ChatNoticeEventRow row={noticeRow("confirm_continue")} identity="own" />);
     expect(container.innerHTML).toBe("");
-    const { container: choice } = render(<ChatNoticeEventRow row={noticeRow("session_choice")} />);
+    const { container: choice } = render(<ChatNoticeEventRow row={noticeRow("session_choice")} identity="own" />);
     expect(choice.innerHTML).toBe("");
   });
 
@@ -94,7 +94,7 @@ describe("ChatNoticeEventRow", () => {
         allow_new_task: true,
       },
     };
-    const { container } = render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    const { container } = render(<ChatNoticeEventRow row={row} identity="own" onChoose={() => {}} />);
     expect(container.innerHTML).toBe("");
   });
 
@@ -118,7 +118,7 @@ describe("ChatNoticeEventRow", () => {
         allow_new_task: true,
       },
     };
-    const { container } = render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    const { container } = render(<ChatNoticeEventRow row={row} identity="own" onChoose={() => {}} />);
     expect(container.innerHTML).toBe("");
   });
 
@@ -138,7 +138,7 @@ describe("ChatNoticeEventRow", () => {
         allow_new_task: true,
       },
     };
-    render(<ChatNoticeEventRow row={row} />);
+    render(<ChatNoticeEventRow row={row} identity="own" />);
     expect(screen.queryByRole("button")).toBeNull();
     expect(screen.getByText("整理报表")).toBeTruthy();
     expect(screen.getByText("chatView.block.answeredByOwner")).toBeTruthy();
@@ -160,7 +160,7 @@ describe("ChatNoticeEventRow", () => {
         allow_new_task: true,
       },
     };
-    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    render(<ChatNoticeEventRow row={row} identity="own" onChoose={() => {}} />);
     const buttons = screen.getAllByRole("button");
     expect(buttons).toHaveLength(3); // two candidates + the escape
     expect(buttons[0].textContent).toContain("整理报表");
@@ -190,7 +190,7 @@ describe("ChatNoticeEventRow", () => {
         allow_new_task: true,
       },
     };
-    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    render(<ChatNoticeEventRow row={row} identity="own" onChoose={() => {}} />);
     expect(screen.getByText("发了个用户消息给SSE.kevin的chat session")).toBeTruthy();
     expect(screen.getByText("这是最近活跃的执行 session（4 分钟前刚收尾）")).toBeTruthy();
     // The blind wording is gone from the labelled case.
@@ -210,7 +210,7 @@ describe("ChatNoticeEventRow", () => {
         allow_new_task: false,
       },
     };
-    render(<ChatNoticeEventRow row={row} onChoose={() => {}} />);
+    render(<ChatNoticeEventRow row={row} identity="own" onChoose={() => {}} />);
     // The session id is the last honest handle before the generic wording.
     expect(screen.getByText("exec-7")).toBeTruthy();
   });
@@ -218,24 +218,24 @@ describe("ChatNoticeEventRow", () => {
   it("folds a retired card-resolution receipt into nothing (the block paints it)", () => {
     // ADR-106 D12: no writer for this notice is left, and an old transcript must
     // not narrate a card that is now shown inside the round's block.
-    const { container } = render(<ChatNoticeEventRow row={noticeRow("interaction_resolved")} />);
+    const { container } = render(<ChatNoticeEventRow row={noticeRow("interaction_resolved")} identity="own" />);
     expect(container.innerHTML).toBe("");
   });
 
   it("still renders a genuine channel receipt's body", () => {
-    render(<ChatNoticeEventRow row={noticeRow("budget_exhausted", "Out of budget")} />);
+    render(<ChatNoticeEventRow row={noticeRow("budget_exhausted", "Out of budget")} identity="own" />);
     expect(screen.getByText("Out of budget")).toBeTruthy();
   });
 
   it("falls back to the status field when the body is empty", () => {
     const row = noticeRow("unavailable");
     row.meta = { ...row.meta, status: "agent unavailable" };
-    render(<ChatNoticeEventRow row={row} />);
+    render(<ChatNoticeEventRow row={row} identity="own" />);
     expect(screen.getByText("agent unavailable")).toBeTruthy();
   });
 
   it("paints no hole when there is neither text nor status", () => {
-    const { container } = render(<ChatNoticeEventRow row={noticeRow("")} />);
+    const { container } = render(<ChatNoticeEventRow row={noticeRow("")} identity="own" />);
     expect(container.innerHTML).toBe("");
   });
 
@@ -255,24 +255,62 @@ describe("ChatNoticeEventRow", () => {
     return row;
   }
 
-  it("speaks as the agent: avatar, name and role above the question", () => {
-    // The card is the agent's own question about its own runs, not a channel
-    // receipt, so it is painted as that agent's message — same header, same
-    // offsets as the execution block that replaces it once the human picks.
-    // Anything else made the answer arrive under a name that had never spoken.
+  it("speaks as the agent on its OWN line: avatar, name and role above the question", () => {
+    // Standing alone in the transcript, the card is the agent's own question
+    // about its own runs, not a channel receipt, so it is painted as that
+    // agent's message — same header, same offsets as the execution block that
+    // replaces it once the human picks. Anything else made the answer arrive
+    // under a name that had never spoken.
+    //
+    // `identity` is what states that: the identity belongs to the thing that
+    // OWNS the line, and a card hung at a block's tail inherits the block's
+    // (case below). Painting it unconditionally is what put two avatars over
+    // one question and pushed the card 64px right of the block it belonged to.
     const { container } = render(
-      <ChatNoticeEventRow row={answerableCard()} authorName="SSE" onChoose={() => {}} />,
+      <ChatNoticeEventRow
+        row={answerableCard()}
+        authorName="SSE"
+        identity="own"
+        onChoose={() => {}}
+      />,
     );
     expect(screen.getByText("SSE")).toBeTruthy();
     // An avatar, in the header, before the card.
     const avatar = container.querySelector("img, span.rounded-lg, div[style*='40px']");
     expect(avatar).toBeTruthy();
+    expect(screen.getByTestId("chat-card-author")).toBeTruthy();
     const card = screen.getByTestId("chat-card-options");
     // The card sits in the same 40px gutter the agent bubble and the execution
     // block use, so the question and the run that follows start on one line.
     expect(card.querySelector(".w-10")).toBeTruthy();
     // The author is the row's `from` — the agent instance the projection named.
     expect(container.textContent).toContain("SSE");
+  });
+
+  it("inherits the host's identity when it is hung at a run's tail", () => {
+    // ADR-106 D6 level 5 puts the question under the block it asks about. The
+    // block already wears the agent's header, so the card must add no second
+    // avatar, no second name, and no second 40px gutter — that is exactly the
+    // "neither fish nor fowl" card: one question, two faces, indented into the
+    // middle of the block's own column.
+    render(
+      <ChatNoticeEventRow
+        row={answerableCard()}
+        authorName="SSE"
+        identity="inherited"
+        onChoose={() => {}}
+      />,
+    );
+    // The name is passed in and still must NOT be painted: the block above it
+    // is the line that owns this identity.
+    expect(screen.queryByTestId("chat-card-author")).toBeNull();
+    const card = screen.getByTestId("chat-card-options");
+    expect(card.textContent).not.toContain("SSE");
+    // No gutter of its own: the host's column already positioned the card.
+    expect(card.querySelector(".w-10")).toBeNull();
+    // ...and no horizontal column padding either — the block's `px-4` is the
+    // one gutter both the card and the rounds share.
+    expect(card.className).not.toContain("px-4");
   });
 
   it("keeps the card busy from the click until the answer lands", async () => {
@@ -283,7 +321,7 @@ describe("ChatNoticeEventRow", () => {
     const row = answerableCard();
     let release: (v: boolean) => void = () => {};
     const onChoose = vi.fn(() => new Promise<boolean>((r) => (release = r)));
-    render(<ChatNoticeEventRow row={row} onChoose={onChoose} />);
+    render(<ChatNoticeEventRow row={row} identity="own" onChoose={onChoose} />);
 
     const buttons = screen.getAllByRole("button");
     fireEvent.click(buttons[0]);
@@ -309,7 +347,7 @@ describe("ChatNoticeEventRow", () => {
     // "nothing was delivered", and the buttons come back.
     const row = answerableCard();
     const onChoose = vi.fn(async () => false);
-    render(<ChatNoticeEventRow row={row} onChoose={onChoose} />);
+    render(<ChatNoticeEventRow row={row} identity="own" onChoose={onChoose} />);
     fireEvent.click(screen.getAllByRole("button")[1]); // the "new task" escape
     expect(onChoose).toHaveBeenCalledWith({ forceNew: true });
     await waitFor(() => {
@@ -325,6 +363,7 @@ describe("ChatNoticeEventRow", () => {
     render(
       <ChatNoticeEventRow
         row={row}
+        identity="own"
         onChoose={() => Promise.reject(new Error("gateway down"))}
       />,
     );

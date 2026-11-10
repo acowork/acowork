@@ -12,6 +12,10 @@
  *     enabled, because the package itself is already finished on the node.
  *   - Nothing is copied before the sign step (the unsigned build artifact is not
  *     what the user distributes).
+ *   - The avatar the picker shows is the avatar the artifact gets: the manifest
+ *     is written before **every** build, not only after the user moves the
+ *     picker (`get_agent_detail` seeds from the instance's effective avatar,
+ *     which outranks the package manifest's default).
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -69,6 +73,9 @@ function mockPublishFlow(
           instance_id: "inst-1",
           agent_id: AGENT_ID,
           node_id: "node-1",
+          // The *effective* avatar: `agent_config.json` wins over the package
+          // manifest's default, and it is what the picker displays.
+          builtin_avatar: "icon-16",
           name: "Demo",
           version: "1.0.0",
           description: "A demo agent",
@@ -139,6 +146,58 @@ describe("PublishWizard library write-back", () => {
       await screen.findByText(/publishWizard\.librarySaved file=com\.example\.demo-1\.0\.0\.agent/),
     ).toBeTruthy();
     expect(screen.getByText(LIBRARY_PATH)).toBeTruthy();
+  });
+
+  // Regression (real run): the picker showed `icon-16` (the instance's config)
+  // while the artifact baked `icon-15` (the package manifest default), because
+  // the manifest was only written when the user moved the picker in this
+  // session. The build must write the selection it displays.
+  it("writes the displayed avatar to the manifest before building, untouched", async () => {
+    mockPublishFlow(async () => ({
+      status: "saved",
+      path: LIBRARY_PATH,
+      file_name: "com.example.demo-1.0.0.agent",
+    }));
+
+    await runToDistribute();
+
+    const writes = h.invoke.mock.calls.filter(
+      ([command]) => command === "update_agent_manifest_avatar",
+    );
+    // One write for build + sign together: the selection did not change.
+    expect(writes).toHaveLength(1);
+    expect(writes[0][1]).toEqual({
+      agentId: AGENT_ID,
+      avatar: null,
+      builtinAvatar: "icon-16",
+    });
+    // …and it happened before the package was built, not after.
+    const order = h.invoke.mock.calls.map(([command]) => command);
+    expect(order.indexOf("update_agent_manifest_avatar")).toBeLessThan(
+      order.indexOf("build_publish"),
+    );
+  });
+
+  // The guard on the other side: a detail call that never answered leaves the
+  // picker on its `none` placeholder, and writing that would clear an avatar
+  // the user never touched.
+  it("writes nothing when the avatar selection was never seeded", async () => {
+    mockPublishFlow(async () => ({
+      status: "saved",
+      path: LIBRARY_PATH,
+      file_name: "com.example.demo-1.0.0.agent",
+    }));
+    const base = h.invoke.getMockImplementation();
+    h.invoke.mockImplementation(async (command: string, args?: Record<string, unknown>) => {
+      if (command === "get_agent_detail") throw new Error("detail unavailable");
+      return base?.(command, args);
+    });
+
+    await runToDistribute();
+
+    expect(
+      h.invoke.mock.calls.filter(([command]) => command === "update_agent_manifest_avatar"),
+    ).toHaveLength(0);
   });
 
   it("does not copy anything before the sign step", async () => {

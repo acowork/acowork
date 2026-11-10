@@ -1653,7 +1653,8 @@
     "navForward": "Forward",
     "navRefresh": "Refresh",
     "iframeBlockedHint": "This site does not support in-app preview",
-    "htmlPreviewTsModuleWarning": "This HTML references TypeScript/TSX module entry files. Static Preview can load files but cannot compile TS/TSX. For Vite/React apps, run the dev server and open the localhost URL preview instead."
+    "htmlPreviewFailed": "Could not open this page",
+    "htmlPreviewRetry": "Try again"
   },
   "fileStatus": {
     "languageFallback": "plain text",
@@ -2150,6 +2151,98 @@
       "pagePrev": "Previous page",
       "pageNext": "Next page",
       "pageRange": "{{start}}–{{end}} of {{total}}"
+    },
+    "view": {
+      "ariaLabel": "Task view",
+      "board": "Board",
+      "boardHint": "Card view - four status columns",
+      "list": "List",
+      "listHint": "List view - one task per row",
+      "saveFailed": "Failed to save the view for this project"
+    },
+    "list": {
+      "searchPlaceholder": "Search title, ID, description, assignee",
+      "clearFilters": "Clear filters",
+      "groupBy": "Group",
+      "group": {
+        "none": "No grouping",
+        "status": "Status",
+        "priority": "Priority",
+        "assignee": "Assignee",
+        "type": "Type"
+      },
+      "fields": {
+        "title": "Fields",
+        "open": "Configure columns",
+        "count_one": "{{count}} column",
+        "count_other": "{{count}} columns",
+        "shown": "Shown",
+        "addable": "Add a field",
+        "searchPlaceholder": "Search fields",
+        "reset": "Reset to default columns",
+        "done": "Done",
+        "moveUp": "Move left",
+        "moveDown": "Move right",
+        "titleLocked": "The task column cannot be hidden"
+      },
+      "col": {
+        "title": "Task",
+        "status": "Status",
+        "priority": "Priority",
+        "assignee": "Assignee",
+        "dueAt": "Due date",
+        "type": "Type",
+        "reviewStatus": "Review",
+        "startAt": "Start",
+        "createdBy": "Created by",
+        "parent": "Parent task",
+        "children": "Subtasks",
+        "depends": "Dependencies",
+        "blocked": "Blocked",
+        "attachments": "Attachments",
+        "submittedAt": "Submitted",
+        "createdAt": "Created",
+        "updatedAt": "Updated",
+        "dispatch": "Dispatches",
+        "id": "ID",
+        "description": "Description"
+      },
+      "review": {
+        "notRequired": "No review",
+        "pending": "Pending review",
+        "approved": "Approved",
+        "rejected": "Review rejected"
+      },
+      "columnMenu": "Column options",
+      "sortAsc": "Sort ascending",
+      "sortDesc": "Sort descending",
+      "changeStatus": "Change status",
+      "sortHint": "Click to sort",
+      "hideColumn": "Hide this column",
+      "selectAll": "Select all",
+      "selectRow": "Select {{title}}",
+      "shownCount": "{{shown}} of {{total}} tasks",
+      "columnCount_one": "{{count}} column",
+      "columnCount_other": "{{count}} columns",
+      "empty": "No tasks in this project yet",
+      "noMatch": "No tasks match the filters",
+      "statusNoTransition": "No other status is reachable from here",
+      "bulkTitle": "Bulk edit",
+      "bulkSelected": "{{count}} selected",
+      "bulkClear": "Clear selection",
+      "bulkDone_one": "Updated {{count}} task",
+      "bulkDone_other": "Updated {{count}} tasks",
+      "bulkPartial": "{{applied}} updated, {{failed}} failed",
+      "createRowFailed": "Failed to create the task: {{error}}",
+      "newRowPlaceholder": "Task title - press Enter to create",
+      "newRowHint": "Create a task in this project",
+      "columnsSaveFailed": "Failed to save the columns for this project",
+      "pageSizeSaveFailed": "Failed to save the page size for this project",
+      "page": {
+        "range": "{{start}}-{{end}} of {{total}}",
+        "size": "Rows per page",
+        "perPage": "{{count}} / page"
+      }
     },
     "activity": {
       "title": "Submissions",

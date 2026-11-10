@@ -54,26 +54,49 @@ pub async fn serve_ws_file(
     .await
 }
 
+/// Reverse-proxy one workspace file's raw bytes to the caller.
+///
+/// The **single implementation** behind every static-asset entry point
+/// (ADR-112 §决策 3). Callers differ only in how they authenticated the
+/// request — a bearer header on the legacy `/workspace-files/…` route, a
+/// capability ticket on `/workspace-preview/…` — so the byte path itself
+/// (path encoding, `workspace_id` forwarding, Runtime-side traversal guard)
+/// must not be written twice.
+pub async fn proxy_workspace_file(
+    state: &AppState,
+    agent_id: &str,
+    workspace_id: &str,
+    file_rel_path: &str,
+    headers: &HeaderMap,
+) -> axum::response::Response {
+    let path = format!("/workspaces/raw/{}", encode_path_segments(file_rel_path));
+    let query = format!("workspace_id={}", urlencoding::encode(workspace_id));
+    proxy_to_runtime_with_method(
+        state,
+        agent_id,
+        &path,
+        &query,
+        reqwest::Method::GET,
+        None,
+        headers,
+    )
+    .await
+}
+
 /// `GET /workspace-files/{agent_id}/{workspace_id}/{*path}` — serve a
 /// workspace file as a static asset (reverse-proxied to the Runtime raw
 /// endpoint; `workspace_id` is forwarded for Runtime-side resolution).
+///
+/// Bearer-gated: this route is **not** in `is_public_path`. Browsers cannot
+/// attach a token to a sub-resource load, so workspace HTML is served through
+/// [`crate::http::workspace_preview`] instead (ADR-112); this route stays for
+/// fetch-based callers (the Desktop's blob previews, Rust-side downloads).
 pub async fn serve_workspace_ws_file(
     State(state): State<AppState>,
     Path((agent_id, workspace_id, file_rel_path)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let path = format!("/workspaces/raw/{}", encode_path_segments(&file_rel_path));
-    let query = format!("workspace_id={}", urlencoding::encode(&workspace_id));
-    proxy_to_runtime_with_method(
-        &state,
-        &agent_id,
-        &path,
-        &query,
-        reqwest::Method::GET,
-        None,
-        &headers,
-    )
-    .await
+    proxy_workspace_file(&state, &agent_id, &workspace_id, &file_rel_path, &headers).await
 }
 
 /// Static-asset routes for the workspace browser's HTML preview iframe.

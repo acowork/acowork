@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { BUILTIN_ICONS } from "./UserAvatar";
 import { AuthedImage } from "./AuthedImage";
 import {
@@ -141,4 +141,62 @@ function DeterministicBuiltinAvatar({
     return <BuiltinIconAvatar iconId="icon-01" size={size} className={className} />;
   }
   return <BuiltinIconAvatar iconId={fallbackIconId} size={size} className={className} />;
+}
+
+// ── In-hand avatar (no fetch) ───────────────────────────────────────────
+
+/**
+ * ADR-017's resolution chain for a caller that **already holds the bytes**:
+ * the image itself, then the manifest's builtin id, then the deterministic icon
+ * keyed by `agentId`.
+ *
+ * `AgentAvatar` covers the installed-agent case, where the avatar is a path
+ * served over HTTP and the bytes need the bearer token (`AuthedImage`); it takes
+ * a URL, so it cannot be used for an inlined `data:` URL. What is shared here is
+ * the *policy* — one place that knows a broken image degrades to the builtin
+ * icon and then to the deterministic one, rather than each surface inventing its
+ * own fallback (the Local tab used to fall straight to a letter block, which is
+ * how a package with `builtin_avatar` ended up looking avatar-less).
+ *
+ * `agentId` is required: the deterministic icon is keyed by it, and a caller
+ * without one (an unreadable file) should render its own placeholder instead of
+ * pretending to know whose icon this is.
+ */
+export function InlinedAgentAvatar({
+  agentId,
+  dataUrl,
+  builtinAvatarId,
+  size = 32,
+  className,
+}: {
+  agentId: string;
+  /** `data:` URL of an image already in memory, or `null` when none is declared. */
+  dataUrl?: string | null;
+  /** Builtin icon id from the manifest, e.g. `icon-15`. */
+  builtinAvatarId?: string | null;
+  size?: number;
+  className?: string;
+}) {
+  // A corrupt/undecodable image must fall through to the next step of the
+  // chain, not render a broken-image box.
+  const [failed, setFailed] = useState(false);
+
+  if (dataUrl && !failed) {
+    return (
+      <img
+        src={dataUrl}
+        alt={agentId}
+        draggable={false}
+        onError={() => setFailed(true)}
+        className={`rounded-lg object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
+        style={{ width: size, height: size }}
+      />
+    );
+  }
+
+  if (builtinAvatarId && BUILTIN_ICONS[builtinAvatarId]) {
+    return <BuiltinIconAvatar iconId={builtinAvatarId} size={size} className={className} />;
+  }
+
+  return <DeterministicBuiltinAvatar seed={agentId} size={size} className={className} />;
 }

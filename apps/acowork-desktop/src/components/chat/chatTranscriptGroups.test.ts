@@ -13,7 +13,7 @@
  *      (ADR-097) would scroll to nothing.
  */
 import { describe, expect, it } from "vitest";
-import { buildTranscriptItems } from "./chatTranscriptGroups";
+import { buildTranscriptItems, cardAnswerFor } from "./chatTranscriptGroups";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
 
 const A = "agent-a";
@@ -375,5 +375,73 @@ describe("buildTranscriptItems", () => {
       const { items } = buildTranscriptItems(rows, keyOf);
       expect(items.map((i) => i.kind)).toEqual(["row", "row"]);
     });
+  });
+});
+
+/** ADR-106 D6/D10: the answer a surface hands a card.
+ *
+ *  One gate, both item shapes. The reported defect lived exactly here: the 1:1
+ *  panel built the handler for standalone ROWS only, so a question hung at a
+ *  run's tail reached the block with `undefined` and was painted without a
+ *  single button — a card that could not be answered by anybody. The gate is a
+ *  property of the card (`to` names the person it asked), never of the shape the
+ *  layout happened to give it. */
+describe("cardAnswerFor", () => {
+  const handler = () => undefined;
+  const card = (to?: string): ChatMessageRow => ({
+    seq: 7,
+    ts: 7,
+    from: A,
+    kind: "system_notice",
+    body: "",
+    to: to ?? ME,
+    meta: { message_id: "confirm_continue:u1", notice_type: "confirm_continue" },
+  });
+
+  it("answers a question hung on a run — the shape that had no button", () => {
+    const item = {
+      kind: "run" as const,
+      instanceId: A,
+      execSessionId: "s1",
+      rounds: [],
+      anchorRow: round(1, A, "s1", "r1", "u1"),
+      pendingAsk: card(ME),
+    };
+    expect(cardAnswerFor(item, ME, handler)).toBe(handler);
+  });
+
+  it("answers a question standing on its own line", () => {
+    expect(cardAnswerFor({ kind: "row", row: card(ME) }, ME, handler)).toBe(
+      handler,
+    );
+  });
+
+  it("answers nothing when the card asked somebody else (D10)", () => {
+    const item = {
+      kind: "run" as const,
+      instanceId: A,
+      execSessionId: "s1",
+      rounds: [],
+      anchorRow: round(1, A, "s1", "r1", "u1"),
+      pendingAsk: card("another-person"),
+    };
+    expect(cardAnswerFor(item, ME, handler)).toBeUndefined();
+  });
+
+  it("answers nothing on a run nobody asked about", () => {
+    const item = {
+      kind: "run" as const,
+      instanceId: A,
+      execSessionId: "s1",
+      rounds: [],
+      anchorRow: round(1, A, "s1", "r1", "u1"),
+    };
+    expect(cardAnswerFor(item, ME, handler)).toBeUndefined();
+  });
+
+  it("stays absent when the surface may not answer at all (read-only)", () => {
+    expect(
+      cardAnswerFor({ kind: "row", row: card(ME) }, ME, undefined),
+    ).toBeUndefined();
   });
 });

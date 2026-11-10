@@ -113,11 +113,16 @@ export function PublishWizard({
   const nodes = useAgentStore((s) => s.nodes);
 
   // Avatar selection — initialised from agentDetail once it loads, then
-  // mutated by the user. `dirty` is true when the current selection differs
-  // from what's persisted in manifest.toml.
+  // mutated by the user.
   const [avatar, setAvatar] = useState<AvatarSelection>({ kind: "none" });
-  const [avatarDirty, setAvatarDirty] = useState(false);
-  const initialAvatarRef = useRef<AvatarSelection | null>(null);
+  /**
+   * Whether `avatar` came from `get_agent_detail` (as opposed to still being
+   * the `none` placeholder). The selection is only trustworthy — and therefore
+   * only writable — once the real one has been seeded; see `persistAvatar`.
+   */
+  const [avatarSeeded, setAvatarSeeded] = useState(false);
+  /** Selection last written to the manifest, so a build does not rewrite it. */
+  const persistedAvatarRef = useRef<string | null>(null);
 
   // Reset on open
   useEffect(() => {
@@ -132,8 +137,8 @@ export function PublishWizard({
       setLibrarySave({ status: "idle" });
       setAgentDetail(null);
       setAvatar({ kind: "none" });
-      setAvatarDirty(false);
-      initialAvatarRef.current = null;
+      setAvatarSeeded(false);
+      persistedAvatarRef.current = null;
     }
   }, [open]);
 
@@ -147,8 +152,7 @@ export function PublishWizard({
         setAgentDetail(detail);
         const seed = deriveAvatarFromManifest(detail.avatar, detail.builtin_avatar);
         setAvatar(seed);
-        initialAvatarRef.current = seed;
-        setAvatarDirty(false);
+        setAvatarSeeded(true);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -160,9 +164,31 @@ export function PublishWizard({
     };
   }, [open, agentId]);
 
-  // Persist the avatar selection to manifest.toml. Returns true on success.
+  /**
+   * Write the picker's selection into the package manifest — the file the build
+   * actually reads — before a build. Returns true when the manifest now agrees
+   * with what the picker shows.
+   *
+   * Called on **every** build, not only after the user moved the picker. The
+   * seed comes from `get_agent_detail`, which reports the instance's *effective*
+   * avatar: the Gateway's `resolve_identity` prefers the instance's
+   * `agent_config.json` (the pick made in the agent's own settings) over the
+   * package manifest's default. So an untouched picker can legitimately display
+   * one avatar while the manifest still holds a different, packaged default —
+   * building on that bakes a picture the user never chose in this wizard. That
+   * is the publish-time avatar mismatch reported from a real run (`icon-16` in
+   * the config, `icon-15` in the artifact).
+   *
+   * Two guards keep this from doing harm:
+   *   - nothing is written until the seed has loaded, because the placeholder
+   *     selection would otherwise **clear** an avatar the user never touched;
+   *   - nothing is written twice for the same selection, so the build→sign
+   *     pair costs one write.
+   */
   const persistAvatar = useCallback(async (): Promise<boolean> => {
-    if (!avatarDirty) return true;
+    if (!avatarSeeded) return true;
+    const key = JSON.stringify(avatar);
+    if (persistedAvatarRef.current === key) return true;
     try {
       const avatarField =
         avatar.kind === "packaged" ? avatar.relativePath : avatar.kind === "none" ? "" : null;
@@ -174,13 +200,13 @@ export function PublishWizard({
         avatar: avatarField,
         builtinAvatar: builtinField,
       });
-      setAvatarDirty(false);
+      persistedAvatarRef.current = key;
       return true;
     } catch (err) {
       setError(`Failed to save avatar selection: ${err instanceof Error ? err.message : String(err)}`);
       return false;
     }
-  }, [agentId, avatar, avatarDirty]);
+  }, [agentId, avatar, avatarSeeded]);
 
   // Close on Escape — see CreateWizard; `busy` is read at keydown time so a
   // spinner flip no longer re-subscribes the listener.
@@ -261,13 +287,12 @@ export function PublishWizard({
     setBusy(true);
     setError(null);
     try {
-      // Persist avatar first so the package reflects the user's choice.
-      if (avatarDirty) {
-        const ok = await persistAvatar();
-        if (!ok) {
-          setBusy(false);
-          return;
-        }
+      // Persist the avatar first so the package reflects the selection the
+      // picker shows (see `persistAvatar` for why this is not gated on the user
+      // having moved it in this session).
+      if (!(await persistAvatar())) {
+        setBusy(false);
+        return;
       }
       const result = await invoke<BuildPublishResponse>("build_publish", {
         agentId,
@@ -286,6 +311,13 @@ export function PublishWizard({
     setBusy(true);
     setError(null);
     try {
+      // This build produces the artifact the user distributes (and the one the
+      // library write-back copies), so it must not depend on `runBuild` having
+      // persisted first; the second call is a no-op for the same selection.
+      if (!(await persistAvatar())) {
+        setBusy(false);
+        return;
+      }
       const result = await invoke<BuildPublishResponse>("build_publish", {
         agentId,
         sign: true,
@@ -468,13 +500,7 @@ export function PublishWizard({
               <AvatarPickerSubForm
                 agentId={agentId}
                 value={avatar}
-                onChange={(next) => {
-                  setAvatar(next);
-                  setAvatarDirty(
-                    !initialAvatarRef.current ||
-                      JSON.stringify(next) !== JSON.stringify(initialAvatarRef.current),
-                  );
-                }}
+                onChange={setAvatar}
                 disabled={busy}
               />
               {buildResult && (

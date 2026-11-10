@@ -65,7 +65,7 @@ import { CAPSULE_PANE_CN } from "../common/capsule";
 import { log } from "../../lib/logger";
 // Pane floors and the overflow ladder live in panelClamp.ts so the drag
 // ceiling, the effect below and the tests all rank the same numbers.
-import { CHROME_WIDTH, MIN_CHAT_WIDTH, MIN_FILE_WIDTH, MIN_RIGHT_WIDTH, fitPanesToViewport } from "./panelClamp";
+import { MIN_CHAT_WIDTH, MIN_FILE_WIDTH, MIN_RIGHT_WIDTH, clampFileWidth, filePaneCeiling, fitPanesToViewport, initialFileWidth } from "./panelClamp";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -79,9 +79,27 @@ const MAX_RIGHT_WIDTH = 600;
 const DEFAULT_RIGHT_WIDTH = 340;
 const RIGHT_WIDTH_KEY = "acowork-right-width";
 
-const MAX_FILE_WIDTH = 900;
+// A default, not a limit: the pane has no fixed ceiling (`filePaneCeiling`),
+// and on the first open a width the user dragged to is restored in preference
+// to any fallback (`initialFileWidth`). This number only applies to a pane
+// that was never sized by hand.
 const DEFAULT_FILE_WIDTH = 450;
 const FILE_WIDTH_KEY = "acowork-file-width";
+
+/**
+ * Width the user last chose for the file pane.
+ *
+ * Written by the two paths that change the width the user is actually looking
+ * at — the drag (`handleMouseUpFile`) and the proportional window-resize
+ * scaling. The first-open auto-size deliberately does NOT write it: that would
+ * turn a fallback into a restored "preference" the user never picked.
+ */
+function readStoredFileWidth(): number | null {
+  const stored = localStorage.getItem(FILE_WIDTH_KEY);
+  if (!stored) return null;
+  const parsed = parseInt(stored, 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
 
 export function AppLayout() {
   // ADR-087 follow-up: remote mode — resume this machine's enrolled local
@@ -142,9 +160,23 @@ export function AppLayout() {
     const stored = localStorage.getItem(RIGHT_WIDTH_KEY);
     return stored ? Math.min(Math.max(parseInt(stored, 10), MIN_RIGHT_WIDTH), MAX_RIGHT_WIDTH) : DEFAULT_RIGHT_WIDTH;
   });
+  // Resolved before the file pane's width so *every* width computation below
+  // budgets against the same number. It used to sit ~200 lines down, which left
+  // the mount / first-open paths guessing "right panel collapsed ⇒ it costs
+  // nothing" — a narrower bound than the drag path, for the same policy.
+  const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
+  // Width the right panel actually occupies in the chat-view row. Mirrors the
+  // render condition on `<RightPanel>` below (`!rightPanelCollapsed &&
+  // selectedAgentId`) — counting it while it is not mounted would clamp the
+  // file pane against ~340px that nothing is using.
+  const rightPaneWidth = !rightPanelCollapsed && selectedAgentId ? rightWidth : 0;
   const [fileWidth, setFileWidth] = useState(() => {
-    const stored = localStorage.getItem(FILE_WIDTH_KEY);
-    return stored ? Math.min(Math.max(parseInt(stored, 10), MIN_FILE_WIDTH), MAX_FILE_WIDTH) : DEFAULT_FILE_WIDTH;
+    if (typeof window === "undefined") return DEFAULT_FILE_WIDTH;
+    return initialFileWidth({
+      storedWidth: readStoredFileWidth(),
+      ceiling: filePaneCeiling({ windowWidth: window.innerWidth, sidebarWidth, rightWidth: rightPaneWidth }),
+      fallbackWidth: DEFAULT_FILE_WIDTH,
+    });
   });
   const hasOpenFiles = useFileEditorStore((s) => s.openFiles.length > 0);
   const fileWidthInitialized = useRef(false);
@@ -200,21 +232,35 @@ export function AppLayout() {
   const rightPanelCollapsedRef = useRef(rightPanelCollapsed);
   rightPanelCollapsedRef.current = rightPanelCollapsed;
 
-  // Auto-size file panel to half available area on first open
+  // Size the file pane on the first open after the last tab closed.
+  //
+  // This used to overwrite the width unconditionally with half the budget, then
+  // persist that — so closing every tab and reopening a file silently threw
+  // away a width the user had dragged to. That was near-invisible while the
+  // pane was capped at 900px; with the cap gone the lost width is hundreds of
+  // pixels, so the recorded drag wins and the 50/50 split is only the fallback
+  // for a pane that was never dragged.
+  //
+  // Nothing is written back here: the key records *user intent*, and an
+  // auto-sized width is not a decision the user made. Only the drag persists.
   useEffect(() => {
     if (hasOpenFiles && !fileWidthInitialized.current) {
       fileWidthInitialized.current = true;
-      const available = window.innerWidth - CHROME_WIDTH - sidebarWidth - (rightPanelCollapsed ? 0 : rightWidth);
-      const halfWidth = Math.min(Math.max(Math.round(available / 2), MIN_FILE_WIDTH), MAX_FILE_WIDTH);
-      // Always recalculate on first open to respect current window size,
-      // preventing the stored width from obscuring the session panel
-      setFileWidth(halfWidth);
-      localStorage.setItem(FILE_WIDTH_KEY, String(halfWidth));
+      const ceiling = filePaneCeiling({ windowWidth: window.innerWidth, sidebarWidth, rightWidth: rightPaneWidth });
+      setFileWidth(
+        initialFileWidth({
+          storedWidth: readStoredFileWidth(),
+          ceiling,
+          // `ceiling + MIN_CHAT_WIDTH` is exactly the budget the pane shares
+          // with ChatPanel; halving it keeps neither surface at its floor.
+          fallbackWidth: (ceiling + MIN_CHAT_WIDTH) / 2,
+        }),
+      );
     }
     if (!hasOpenFiles) {
       fileWidthInitialized.current = false;
     }
-  }, [hasOpenFiles, sidebarWidth, rightWidth, rightPanelCollapsed]);
+  }, [hasOpenFiles, sidebarWidth, rightPaneWidth]);
 
   const gatewayStatus = useGatewayStore((s) => s.status);
   const gatewayAlive = useGatewayStore((s) => s.gatewayAlive);
@@ -339,15 +385,11 @@ export function AppLayout() {
   // ADR-048 follow-up: key off `debug_state` (current capability), not
   // `dev_mode` (startup intent) — DevMode can be flipped on at runtime
   // via POST /api/agents/{id}/debug/enable without restarting the agent.
-  const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
+  // (`selectedAgentId` / `rightPaneWidth` are resolved further up, next to the
+  // pane widths they feed.)
   const agents = useAgentStore((s) => s.agents);
   const selectedAgent = selectedAgentId ? (agents[selectedAgentId]?.meta ?? null) : null;
   const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.alive;
-  // Width the right panel actually occupies in the chat-view row. Mirrors the
-  // render condition on `<RightPanel>` below (`!rightPanelCollapsed &&
-  // selectedAgentId`) — counting it while it is not mounted would clamp the
-  // file pane against ~340px that nothing is using.
-  const rightPaneWidth = !rightPanelCollapsed && selectedAgentId ? rightWidth : 0;
   // Middle-panel routing: agent session wins; otherwise an open group / DM
   // chat session takes the pane. An explicit empty state at the bottom
   // handles "neither".
@@ -874,7 +916,14 @@ export function AppLayout() {
       // This preserves the same proportion of file vs session within the available space.
       const hasFiles = useFileEditorStore.getState().openFiles.length > 0;
       if (hasFiles) {
-        const newFile = Math.min(Math.max(Math.round(fileWidthValueRef.current * ratio), MIN_FILE_WIDTH), MAX_FILE_WIDTH);
+        const newFile = clampFileWidth(
+          fileWidthValueRef.current * ratio,
+          filePaneCeiling({
+            windowWidth: newWindowWidth,
+            sidebarWidth: sidebarWidthRef.current,
+            rightWidth: rightPanelCollapsedRef.current ? 0 : rightWidthRef.current,
+          }),
+        );
         setFileWidth(newFile);
         localStorage.setItem(FILE_WIDTH_KEY, String(newFile));
       }
@@ -1024,14 +1073,16 @@ export function AppLayout() {
     document.addEventListener("mouseup", handleMouseUpRight);
   }, [handleMouseMoveRight, handleMouseUpRight, rightWidth]);
 
-  // File panel resize handlers — dynamic max width to keep ChatPanel visible
-  const maxFileWidthRef = useRef(MAX_FILE_WIDTH);
+  // File panel resize handlers — the drag ceiling is ChatPanel's floor, not a
+  // fixed pixel cap (see `filePaneCeiling` in panelClamp.ts).
+  /** Captured on mousedown, before any mousemove can read it. */
+  const maxFileWidthRef = useRef(MIN_FILE_WIDTH);
 
   const handleMouseMoveFile = useCallback((e: MouseEvent) => {
     e.preventDefault();
     if (!isResizingFile.current) return;
     const delta = e.clientX - startXFile.current;
-    const newWidth = Math.min(Math.max(startWidthFile.current - delta, MIN_FILE_WIDTH), maxFileWidthRef.current);
+    const newWidth = clampFileWidth(startWidthFile.current - delta, maxFileWidthRef.current);
     currentWidthRefFile.current = newWidth;
     setFileWidth(newWidth);
   }, []);
@@ -1052,12 +1103,11 @@ export function AppLayout() {
     startXFile.current = e.clientX;
     startWidthFile.current = fileWidth;
     currentWidthRefFile.current = fileWidth;
-    // Ceiling for the drag: everything left after the rigid panes and the
-    // ChatPanel minimum. Uses the same CHROME_WIDTH as the overflow clamp
-    // below — it used to subtract only the 48px nav bar, which let a drag
-    // grow the file pane past the 40px right rail and overflow the row.
-    const dynamicMax = Math.max(windowWidth - CHROME_WIDTH - sidebarWidth - rightPaneWidth - MIN_CHAT_WIDTH, MIN_FILE_WIDTH);
-    maxFileWidthRef.current = Math.min(MAX_FILE_WIDTH, dynamicMax);
+    // Ceiling for the drag: whatever the row can spare once ChatPanel has its
+    // floor — the same function the overflow ladder agrees with (that
+    // equivalence is asserted in panelClamp.test.ts), so a drag can no longer
+    // produce a width the ladder would immediately take back.
+    maxFileWidthRef.current = filePaneCeiling({ windowWidth, sidebarWidth, rightWidth: rightPaneWidth });
     document.addEventListener("mousemove", handleMouseMoveFile);
     document.addEventListener("mouseup", handleMouseUpFile);
   }, [handleMouseMoveFile, handleMouseUpFile, fileWidth, sidebarWidth, rightPaneWidth, windowWidth]);

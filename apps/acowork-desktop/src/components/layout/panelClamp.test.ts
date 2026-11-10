@@ -27,7 +27,10 @@ import {
   MIN_CHAT_WIDTH,
   MIN_FILE_WIDTH,
   MIN_RIGHT_WIDTH,
+  clampFileWidth,
+  filePaneCeiling,
   fitPanesToViewport,
+  initialFileWidth,
 } from "./panelClamp";
 
 /** Rigid-panes total plus chrome must never exceed the viewport. */
@@ -99,5 +102,103 @@ describe("fitPanesToViewport", () => {
     const r = fitPanesToViewport({ windowWidth: 600, sidebarWidth: 400, fileWidth: 900, rightWidth: 600 });
     expect(r.fileWidth).toBe(MIN_FILE_WIDTH);
     expect(r.rightWidth).toBe(MIN_RIGHT_WIDTH);
+  });
+});
+
+/**
+ * The file pane's upper bound (`filePaneCeiling`).
+ *
+ * Bug being fixed: the pane was capped at a hand-picked 900px on top of the
+ * row's own math, so on a 2560px display a web preview inside the pane wrapped
+ * into a phone-like column although 600px of the row were unclaimed. The cap
+ * was duplicated (initial state, first-open auto-size, resize scaling, drag)
+ * with four slightly different formulas.
+ *
+ * Properties verified:
+ *   1. No fixed ceiling — a wide window gives a wide pane, well past 900.
+ *   2. The ceiling is exactly the width `fitPanesToViewport` leaves untouched,
+ *      i.e. the two share one contract instead of drifting apart.
+ *   3. The right panel is only paid for when it is actually rendered.
+ *   4. A window too narrow for the row still yields the floor, never a
+ *      negative or above-floor bound.
+ *   5. `clampFileWidth` is the only place a candidate becomes a width:
+ *      rounding, floor, ceiling, and a corrupt stored value.
+ */
+describe("filePaneCeiling", () => {
+  it("has no fixed pixel cap — a 2560px window yields a pane far past 900px", () => {
+    const ceiling = filePaneCeiling({ windowWidth: 2560, sidebarWidth: 240, rightWidth: 340 });
+    expect(ceiling).toBe(2560 - CHROME_WIDTH - 240 - 340 - MIN_CHAT_WIDTH);
+    expect(ceiling).toBeGreaterThan(900 * 1.5);
+  });
+
+  it("is the width the overflow ladder leaves alone", () => {
+    const input = { windowWidth: 1920, sidebarWidth: 240, rightWidth: 340 };
+    const ceiling = filePaneCeiling(input);
+    expect(fitPanesToViewport({ ...input, fileWidth: ceiling })).toEqual({
+      fileWidth: ceiling,
+      rightWidth: 340,
+    });
+    // One pixel wider is by definition an overflow, and the ladder takes it
+    // out of the file pane again.
+    expect(fitPanesToViewport({ ...input, fileWidth: ceiling + 1 }).fileWidth).toBe(ceiling);
+  });
+
+  it("does not pay for a right panel that is not rendered", () => {
+    const hidden = filePaneCeiling({ windowWidth: 1920, sidebarWidth: 240, rightWidth: 0 });
+    const shown = filePaneCeiling({ windowWidth: 1920, sidebarWidth: 240, rightWidth: MIN_RIGHT_WIDTH });
+    expect(hidden - shown).toBe(MIN_RIGHT_WIDTH);
+  });
+
+  it("never returns a bound below the floor, however narrow the window", () => {
+    expect(filePaneCeiling({ windowWidth: 600, sidebarWidth: 400, rightWidth: 340 })).toBe(MIN_FILE_WIDTH);
+    expect(filePaneCeiling({ windowWidth: 0, sidebarWidth: 0, rightWidth: 0 })).toBe(MIN_FILE_WIDTH);
+  });
+});
+
+describe("clampFileWidth", () => {
+  it("rounds and respects the ceiling", () => {
+    expect(clampFileWidth(1200.6, 1542)).toBe(1201);
+    expect(clampFileWidth(4000, 1542)).toBe(1542);
+  });
+
+  it("never goes below the floor", () => {
+    expect(clampFileWidth(10, 1542)).toBe(MIN_FILE_WIDTH);
+    // A ceiling below the floor cannot invert the range.
+    expect(clampFileWidth(500, 50)).toBe(MIN_FILE_WIDTH);
+  });
+
+  it("collapses a corrupt stored value to the floor", () => {
+    expect(clampFileWidth(Number.NaN, 1542)).toBe(MIN_FILE_WIDTH);
+    expect(clampFileWidth(Number.POSITIVE_INFINITY, 1542)).toBe(MIN_FILE_WIDTH);
+  });
+});
+
+/**
+ * `initialFileWidth` — what the pane should be when the surface is rebuilt.
+ *
+ * Bug being fixed: the first open after the last tab closed replaced the width
+ * with half the budget unconditionally, so a width the user had dragged to was
+ * silently discarded. Invisible while a 900px cap made every drag land at 900;
+ * with the cap gone it costs hundreds of pixels.
+ */
+describe("initialFileWidth", () => {
+  const ceiling = 1542;
+
+  it("gives back the width the user chose", () => {
+    expect(initialFileWidth({ storedWidth: 1200, ceiling, fallbackWidth: 450 })).toBe(1200);
+  });
+
+  it("falls back only when nothing was recorded", () => {
+    expect(initialFileWidth({ storedWidth: null, ceiling, fallbackWidth: 450 })).toBe(450);
+    expect(initialFileWidth({ storedWidth: Number.NaN, ceiling, fallbackWidth: 940 })).toBe(940);
+  });
+
+  it("bounds a width restored from a wider window by the current row", () => {
+    // Dragged to 2200 on a 2560 display, reopened on a 1920 one.
+    expect(initialFileWidth({ storedWidth: 2200, ceiling: 902, fallbackWidth: 450 })).toBe(902);
+  });
+
+  it("still never goes below the floor", () => {
+    expect(initialFileWidth({ storedWidth: 40, ceiling, fallbackWidth: 450 })).toBe(MIN_FILE_WIDTH);
   });
 });

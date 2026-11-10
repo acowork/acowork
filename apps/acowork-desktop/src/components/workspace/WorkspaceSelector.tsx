@@ -291,14 +291,17 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
     (w.alias && w.alias.toLowerCase().includes(searchQuery.toLowerCase())),
   );
 
+  // The label is NOT pre-truncated here: a fixed character budget ignores the
+  // panel's actual width, so a 24-char name still overflows a narrow panel
+  // and lands on the action buttons. The trigger's CSS `truncate` cuts it to
+  // the width that is really available, ellipsis included.
   const currentWsName = currentWsId === "__agent_home__"
     ? "Agent Home"
     : currentWsId
       ? (() => {
         const w = workspaces.find((ws) => ws.id === currentWsId);
         if (!w) return t("workspace.defaultWorkspaceName");
-        const name = workspaceDisplayName(w);
-        return name.length > 24 ? name.slice(0, 24) + "..." : name;
+        return workspaceDisplayName(w);
       })()
       : t("workspace.defaultWorkspaceName");
 

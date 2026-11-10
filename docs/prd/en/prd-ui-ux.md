@@ -95,7 +95,7 @@ The current implementation **does not use CSS media query breakpoints**. Panel w
 |-------|---------|-----|-----|-----------------|
 | Agent List (sidebar) | 240px | 100px (collapses to 64px avatar‑only when dragged below 100px) | 400px | `acowork-sidebar-width` |
 | Results Panel (right) | 340px | 200px | 600px | `acowork-right-width` |
-| File Editor | 450px | 200px | 900px (dynamic upper bound to keep chat ≥288px) | `acowork-file-width` |
+| File Editor | 450px | 200px | No fixed cap (dynamic: window − sidebar − right panel − chat minimum 338px) | `acowork-file-width` |
 
 On window resize: sidebar and Results Panel maintain absolute widths; Chat Panel and File Editor scale proportionally (changes <5% ignored to avoid jitter).
 
@@ -415,7 +415,7 @@ Only the **first 3** cards start expanded; the rest start collapsed (order and d
 ### 4.5 File Editor (`FileEditorPanel.tsx`, optional)
 
 - **Only rendered when there are open files** (`openFiles.length > 0`)
-- Default width 450px (first‑open auto‑calculated as 50% of available space), drag‑resizable 200–900px
+- Default width 450px; on first open the last dragged width is restored when one exists, otherwise the pane splits the available space 50/50 with the chat. Drag‑resizable from 200px with no fixed cap (bound: see §2.3 — window − sidebar − right panel − chat minimum 338px)
 - Based on Monaco Editor; supports multi‑file tabs, Markdown/image/HTML preview, LSP, global search, symbol search, GoToFile
 - Bottom status cluster shows cursor/selection/LSP status (absolutely positioned above the global status bar)
 

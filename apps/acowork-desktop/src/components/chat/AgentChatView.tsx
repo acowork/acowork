@@ -89,7 +89,7 @@ import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import { ChatUsageIcon } from "./ChatUsageIcon";
 import { AttachedContextChips } from "./AttachedContextChips";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
-import { type TranscriptItem } from "./chatTranscriptGroups";
+import { cardAnswerFor, type TranscriptItem } from "./chatTranscriptGroups";
 import { useRevealPendingAsk } from "./useRevealPendingAsk";
 import { useTranscriptLayout } from "./useTranscriptLayout";
 import {
@@ -100,7 +100,7 @@ import {
 import {
   answerWithChoice,
   directCardAddress,
-  mayAnswerCard,
+  isCardNotice,
   type CardAnswerHandler,
   type CardChoice,
 } from "../../lib/chatCardAnswer";
@@ -209,15 +209,23 @@ const RowView = memo(function RowView({
     // Delivery receipts, the budget receipt, and the addressing questions
     // (ADR-106 D6): quiet centered lines, never agent speech. The routing
     // milestones this branch used to synthesize into a bubble are gone.
-    const noticeType = row.meta?.notice_type;
+    //
+    // Whether the viewer may ANSWER is not decided here any more: `item`-level
+    // `cardAnswerFor` already gated it (the same gate the block-hosted card
+    // gets), so this branch only has to bind the row the answer belongs to.
+    // The card stands in the transcript as its own line here, so it owns the
+    // identity above it.
     const choose =
-      (noticeType === "session_choice" ||
-        noticeType === "confirm_continue") &&
-      onChooseCard
+      isCardNotice(row.meta?.notice_type) && onChooseCard
         ? (choice: CardChoice) => onChooseCard(row, choice)
         : undefined;
     return (
-      <ChatNoticeEventRow row={row} className="px-4" onChoose={choose} />
+      <ChatNoticeEventRow
+        row={row}
+        className="px-4"
+        identity="own"
+        onChoose={choose}
+      />
     );
   }
 
@@ -434,14 +442,10 @@ const RowView = memo(function RowView({
  */
 interface ItemProps extends Omit<RowProps, "row"> {
   item: TranscriptItem;
-  /** Something follows this block in the transcript — `ExploreBlock`'s
-   *  `hasFollowUpReply`, the one condition that auto-collapses a settled run. */
-  hasFollowUp: boolean;
 }
 
 const ItemView = memo(function ItemView({
   item,
-  hasFollowUp,
   ...rowProps
 }: ItemProps) {
   if (item.kind === "run") {
@@ -450,7 +454,6 @@ const ItemView = memo(function ItemView({
         block={item}
         chatSessionId={rowProps.chatSessionId}
         showHeader={rowProps.showHeader}
-        hasFollowUp={hasFollowUp}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
         onContinueRound={rowProps.onContinueRound}
@@ -1280,7 +1283,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             renderItem={(item, i) => (
               <ItemView
                 item={item}
-                hasFollowUp={i < items.length - 1}
                 agentId={agentId}
                 chatSessionId={sessionId}
                 showHeader={
@@ -1295,11 +1297,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 onReplyToRound={handleReplyToRound}
                 onContinueRound={handleContinueRound}
                 onReferenceRun={handleReferenceRun}
-                onChooseCard={
-                  item.kind === "row" && mayAnswerCard(item.row, me)
-                    ? answerCard
-                    : undefined
-                }
+                onChooseCard={cardAnswerFor(item, me, answerCard)}
                 onLocateRef={handleLocateRef}
                 focusBlockSessionId={focusBlockSessionId ?? undefined}
               />

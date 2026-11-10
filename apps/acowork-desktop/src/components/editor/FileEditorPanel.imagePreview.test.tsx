@@ -144,7 +144,7 @@ vi.mock("../../hooks/useWorkspaceFileBlob", () => ({
 vi.mock("./LspDocumentTracker", () => ({ LspDocumentTracker: () => null }));
 vi.mock("./MarkdownPreviewView", () => ({ MarkdownPreviewView: () => null }));
 vi.mock("./UrlPreviewView", () => ({ UrlPreviewView: () => null }));
-vi.mock("./HtmlPreviewView", () => ({ HtmlPreviewView: () => null }));
+vi.mock("./WorkspaceHtmlPreview", () => ({ WorkspaceHtmlPreview: () => null }));
 vi.mock("./GoToFilePalette", () => ({ GoToFilePalette: () => null }));
 vi.mock("./SymbolSearchPanel", () => ({ SymbolSearchPanel: () => null }));
 vi.mock("../common/ScrollableTabBar", () => ({ ScrollableTabBar: () => null }));

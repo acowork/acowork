@@ -101,6 +101,10 @@ pub struct AppState {
     /// derived metadata with a TTL, not configuration: nothing here is
     /// persisted, and a restart simply re-probes.
     pub probe_cache: Arc<crate::probe::ProbeCache>,
+    /// ADR-112: HMAC key for workspace preview tickets. Random per process
+    /// and never persisted — a restart invalidates every outstanding preview
+    /// link, which is the intended blast-radius bound for a capability URL.
+    pub workspace_preview_secret: crate::http::workspace_preview::SharedPreviewTicketSecret,
 }
 
 impl AppState {
@@ -127,6 +131,9 @@ impl AppState {
             pending_installs: None,
             enrollment_tokens: None,
             probe_cache: Arc::new(crate::probe::ProbeCache::new()),
+            workspace_preview_secret: Arc::new(
+                crate::http::workspace_preview::PreviewTicketSecret::random(),
+            ),
         }
     }
 }
@@ -173,7 +180,13 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
     let method = req.method().clone();
     // ADR-089 D2: a WS upgrade may carry `?access_token=` (browser
     // WebSockets cannot set headers) — never write it into the log.
-    let uri = redact_access_token(req.uri().clone());
+    // ADR-112: a workspace-preview capability ticket rides in the *path*, and
+    // a page load makes one request per sub-resource — same rule, so it is
+    // redacted here too rather than leaking an 8-hour credential into a log
+    // the user is asked to hand over.
+    let uri = crate::http::workspace_preview::redact_preview_ticket(redact_access_token(
+        req.uri().clone(),
+    ));
     let msg = format!(
         "HTTP request: origin={} method={} uri={}",
         origin, method, uri
@@ -310,6 +323,12 @@ pub fn build_router(state: AppState) -> Router {
         .merge(crate::http::memory_api::memory_routes())
         .merge(crate::http::skills_api::skills_routes())
         .merge(crate::http::workspaces::workspace_routes())
+        // ADR-112: workspace static-asset preview. The mint route is a normal
+        // bearer-gated `/api/*` route; the serve route is deliberately public
+        // at the middleware level and authenticates per request via its
+        // path-embedded capability ticket (a browser cannot attach a header to
+        // a sub-resource load — see `workspace_preview`'s module docs).
+        .merge(crate::http::workspace_preview::workspace_preview_routes())
         .merge(crate::http::publish_api::publish_routes())
         .merge(crate::http::mcp_catalog_api::mcp_catalog_routes())
         // ADR-104: the curated MCP preset registry moved out of the Desktop
