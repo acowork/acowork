@@ -543,6 +543,28 @@ pub struct AgentLoop {
     /// Set per turn by the arm that dequeued the message, consumed once at the
     /// user-row write; cleared at turn end like the other turn-scoped facts.
     pub(crate) turn_user_row_meta: Option<serde_json::Value>,
+
+    /// ADR-047 (amended): session-config polling state — the last applied
+    /// `ConversationSession::config_version` and the snapshot that was applied.
+    ///
+    /// These were SessionTask loop locals, so the deferred LLM-side effects of
+    /// a config change (provider rebuild, reasoning_effort sync, context-window
+    /// refresh) could only be applied at *turn* boundaries. A long-running
+    /// intent-responder turn never reaches that boundary, so switching the model
+    /// mid-turn required the human to press stop — and stopping ends the turn as
+    /// `aborted` and permanently closes the peer's mailbox request, breaking the
+    /// intent exchange with no protocol path to resume it.
+    ///
+    /// Living on the loop lets BOTH boundaries — SessionTask's turn boundary and
+    /// [`Self::run_inner`]'s iteration boundary — poll one shared state through
+    /// [`Self::apply_pending_config_effects`], so a settings change takes effect
+    /// on the next LLM call without interrupting the running turn.
+    ///
+    /// Initialized to version 0 so the FIRST poll always applies (the startup
+    /// provider rebuild for sessions created against an empty provider cache —
+    /// the Bug B fix, which these fields replace verbatim).
+    pub(crate) last_config_version: u64,
+    pub(crate) last_config_snapshot: crate::agent::session_config::SessionConfigSnapshot,
 }
 
 impl AgentLoop {
@@ -617,6 +639,9 @@ impl AgentLoop {
             turn_reference: Default::default(),
             turn_message_refs: Vec::new(),
             turn_user_row_meta: None,
+            last_config_version: 0,
+            last_config_snapshot:
+                crate::agent::session_config::SessionConfigSnapshot::default(),
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -693,6 +718,9 @@ impl AgentLoop {
             turn_reference: Default::default(),
             turn_message_refs: Vec::new(),
             turn_user_row_meta: None,
+            last_config_version: 0,
+            last_config_snapshot:
+                crate::agent::session_config::SessionConfigSnapshot::default(),
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -1485,6 +1513,14 @@ impl AgentLoop {
 
         loop {
             iteration += 1;
+            // ADR-047 (amended): iteration-boundary config poll. A settings
+            // change (model / provider / reasoning effort / context window)
+            // made while this turn is running must reach the NEXT LLM call —
+            // see `Self::apply_pending_config_effects` for why the turn
+            // boundary alone is not enough (it pushed users to stop long
+            // intent-responder turns, which breaks the peer's mailbox
+            // exchange irreversibly). No-op when nothing changed.
+            self.apply_pending_config_effects(context_builder);
             // Resolve current model name for this iteration — model_switch
             // may update override_model mid-session, so compute it fresh each loop.
             // `mut`: a capacity failure may degrade the model mid-iteration
@@ -5160,6 +5196,199 @@ mod tests {
             agent_loop.session.history.messages().last().map(|m| &m.role),
             Some(MessageRole::Assistant)
         ));
+    }
+
+    // ── ADR-047 (amended): config hot-update at iteration boundaries ──
+
+    /// A test tool that, when executed, records a model-switch config change
+    /// on the session — simulating the human switching the model in the
+    /// settings panel WHILE a long turn is still running.
+    struct SwitchModelTool {
+        conversation: Arc<ConversationSession>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for SwitchModelTool {
+        fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
+            acowork_core::tools::traits::ToolSpec {
+                name: "switch_model".to_string(),
+                description: "Records a session model-switch config change".to_string(),
+                input_schema: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _work_dir: Option<&str>,
+        ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            self.conversation.apply_config(
+                &crate::agent::session_config::SessionConfigDelta {
+                    model: Some("switched-model".to_string()),
+                    ..Default::default()
+                },
+            );
+            Ok(acowork_core::tools::traits::ToolResult {
+                ok: true,
+                content: "model switched".to_string(),
+                error: None,
+                token_usage: None,
+            })
+        }
+    }
+
+    fn switch_test_manifest() -> acowork_core::AgentManifest {
+        acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.cfgswitch"
+            version = "1.0.0"
+            name = "Config Switch Test"
+            description = "Test"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "mock-model"
+
+            [[tools]]
+            name = "switch_model"
+            "#,
+        )
+        .unwrap()
+    }
+
+    fn test_conversation(session_id: &str, work_dir: &std::path::Path) -> Arc<ConversationSession> {
+        let config = crate::conversation::SessionConfig {
+            agent_id: "com.test.cfgswitch".to_string(),
+            workspace_id: None,
+            model: None,
+            provider: None,
+        };
+        let committed = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (conversation, _config_rx, _state_rx) =
+            ConversationSession::new(work_dir, session_id, config, 0, committed).unwrap();
+        Arc::new(conversation)
+    }
+
+    #[tokio::test]
+    async fn config_change_landed_mid_turn_applies_at_next_iteration() {
+        use tempfile::tempdir;
+        // A config change that lands while a long-running turn is executing
+        // must reach the NEXT LLM call. Before the poll state moved onto the
+        // AgentLoop, only turn boundaries applied it — so the only way to
+        // make a setting take effect mid-turn was pressing stop, which ends
+        // an intent-responder turn as `aborted` and permanently closes the
+        // peer's mailbox request (the intent exchange cannot resume).
+        let dir = tempdir().unwrap();
+        let conversation = test_conversation("test-midturn-config", dir.path());
+        // Pre-set a title so the async title-generation task takes its
+        // skip path — otherwise it fires a THIRD call at the same
+        // MockProvider and overwrites `last_request` (race).
+        conversation.set_title("mid-turn config test");
+
+        let provider = Arc::new(MockProvider::tool_call_then_text(
+            "switch_model",
+            "{}",
+            "done after switch",
+        ));
+        let tools = entries(vec![Arc::new(SwitchModelTool {
+            conversation: conversation.clone(),
+        })]);
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            switch_test_manifest(),
+            provider.clone(),
+            tools,
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+
+        let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
+        context_builder.set_override_model("old-model".to_string());
+
+        let result = agent_loop
+            .run(
+                "switch the model mid turn",
+                &mut context_builder,
+                None,
+                Some("msg-1".to_string()),
+                None,
+                None,
+            )
+            .await;
+        assert!(result.is_ok(), "run() should succeed: {result:?}");
+
+        // Iteration 1 executed the tool that bumped `config_version`; the
+        // iteration-boundary poll must have applied the switch before
+        // iteration 2 built its request. Without the fix, this request — and
+        // every later call of the same turn — still carried `old-model`.
+        assert_eq!(provider.call_count(), 2, "tool round + final answer");
+        let last = provider
+            .last_request()
+            .expect("provider should have seen the requests");
+        assert_eq!(
+            last.model, "switched-model",
+            "the iteration after the config change must use the new model"
+        );
+        assert_eq!(agent_loop.session.model(), Some("switched-model"));
+        assert_eq!(context_builder.override_model(), Some("switched-model"));
+        assert_eq!(
+            agent_loop.last_config_version,
+            conversation.config_version()
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_pending_config_effects_is_noop_when_version_unchanged() {
+        use tempfile::tempdir;
+        // The poll now runs EVERY iteration; it must be idempotent — with an
+        // unchanged version it must not re-apply effects (which would roll
+        // back runtime state other paths legitimately advanced).
+        let dir = tempdir().unwrap();
+        let conversation = test_conversation("test-cfg-poll", dir.path());
+        conversation.apply_config(&crate::agent::session_config::SessionConfigDelta {
+            model: Some("model-a".to_string()),
+            ..Default::default()
+        });
+
+        let (mut agent_loop, _inbound_tx) = AgentLoop::new(
+            RuntimeConfig::default(),
+            switch_test_manifest(),
+            Arc::new(MockProvider::single_text("ok")),
+            entries(vec![]),
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+        let mut context_builder = ContextBuilder::new("sys".to_string());
+
+        // First poll applies the pending change (startup-apply semantics:
+        // the loop tracks version 0, the conversation is already at 1).
+        agent_loop.apply_pending_config_effects(&mut context_builder);
+        assert_eq!(
+            agent_loop.last_config_version,
+            conversation.config_version()
+        );
+        assert_eq!(agent_loop.session.model(), Some("model-a"));
+
+        // Out-of-band runtime state change; a second poll with no version
+        // change must NOT roll it back.
+        agent_loop.session.set_model("manual".to_string());
+        agent_loop.apply_pending_config_effects(&mut context_builder);
+        assert_eq!(agent_loop.session.model(), Some("manual"));
+
+        // A new version must be picked up again.
+        conversation.apply_config(&crate::agent::session_config::SessionConfigDelta {
+            model: Some("model-b".to_string()),
+            ..Default::default()
+        });
+        agent_loop.apply_pending_config_effects(&mut context_builder);
+        assert_eq!(agent_loop.session.model(), Some("model-b"));
+        assert_eq!(
+            agent_loop.last_config_version,
+            conversation.config_version()
+        );
     }
 
 }
