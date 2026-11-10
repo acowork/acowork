@@ -10,12 +10,21 @@
 //! (PRD §14 D12 / REQ-029, plan §3).
 //!
 //! Scope limit, deliberately encoded below (D12 / B5): the returned
-//! `output_path` is a **node-local** path. In a single-machine (`local`)
-//! deployment that is this very filesystem and the copy is possible; in
-//! `remote`/`relay` mode the artifact lives on another machine, so the wizard
-//! reports which node holds it and copies nothing. Pulling the file over the
-//! network is an explicit non-goal (PRD §14.6), as is teaching the node to
-//! write into a Desktop-owned directory.
+//! `output_path` is a **node-local** path, so whether the write-back can happen
+//! is a **filesystem fact**, not a configuration flag: if this Desktop can read
+//! the artifact under the node `packages_dir`, it copies it; if it cannot, the
+//! artifact is on another machine and the wizard reports which node holds it
+//! and copies nothing. The deployment mode only chooses how an unreadable
+//! artifact is explained — a `local` Gateway that cannot see its own node's file
+//! is a real failure worth retrying, while `remote`/`relay` is the documented
+//! limitation. Pulling the file over the network is an explicit non-goal
+//! (PRD §14.6), as is teaching the node to write into a Desktop-owned directory.
+//!
+//! Why not `mode == Local` as the gate: a Desktop can legitimately be
+//! configured `remote` with a URL on this very machine (the dev setup, and any
+//! user who types their own LAN IP), and then the artifact *is* here and must
+//! still reach the Local tab. The mode is a description of intent; reachability
+//! is the fact.
 
 use std::path::{Path, PathBuf};
 
@@ -114,11 +123,14 @@ fn file_name_of(path: &Path) -> String {
 /// Save the artifact the publish build just produced into the Local library.
 ///
 /// Three steps, in this order (the order is the security property):
-/// 1. **Decide from the deployment mode** (see [`plan_save`]): remote/relay
-///    never touches the filesystem, local mode must pass the guard below.
-/// 2. **Validate** the path is a direct `.agent` file inside the node's
+/// 1. **Look the artifact up on this machine** (see [`plan_save`]): reachable →
+///    it must pass the guard; unreachable → `remote_skipped` (B5) or, when the
+///    Desktop believes the Gateway is local, a retryable error.
+/// 2. **Guard** the path: it must be a direct `.agent` file inside the node's
 ///    `packages_dir` — the frontend hands this value straight back from an IPC
-///    response, so it must not become an arbitrary-file-copy primitive.
+///    response, so it must not become an arbitrary-file-copy primitive. A
+///    reachable file that fails the guard is always an error, never a silent
+///    skip.
 /// 3. **Copy** through `agent_library::copy_into_library`, which overwrites a
 ///    same-named file (B2: republishing one version replaces that row; B3: a
 ///    new version is a new row — nothing is de-duplicated by `agent_id`).
@@ -129,23 +141,21 @@ pub async fn save_publish_to_library(
     package_path: String,
 ) -> Result<SaveToLibraryResult, String> {
     let mode = *state.gateway_mode.read().await;
-    // Resolved only in local mode: `plan_save` short-circuits before using it
-    // otherwise, and asking the Gateway where its packages dir is has no
-    // meaning for an artifact that lives on another machine.
-    let packages_dir = match mode {
-        GatewayMode::Local => {
-            let client = state.gateway.read().await;
-            resolve_packages_dir(&client).await
-        }
-        GatewayMode::Remote | GatewayMode::Relay => PathBuf::new(),
+    // Always resolved: a `remote`-configured Desktop may still be talking to a
+    // Gateway on this very machine, in which case the artifact is right here and
+    // the guard has to be checked against the real root.
+    let packages_dir = {
+        let client = state.gateway.read().await;
+        resolve_packages_dir(&client).await
     };
 
     let plan = plan_save(mode, &package_path, &packages_dir)?;
     let SavePlan::Copy(artifact) = plan else {
         tracing::info!(
-            "[PUBLISH] write-back skipped for {}: the gateway is not local ({})",
+            "[PUBLISH] write-back skipped for {}: not readable on this machine (mode {}, node packages dir {})",
             package_path,
-            mode.as_str()
+            mode.as_str(),
+            packages_dir.display()
         );
         return Ok(SaveToLibraryResult::remote_skipped(&package_path));
     };
@@ -164,79 +174,112 @@ pub async fn save_publish_to_library(
 }
 
 /// The decision the command makes, as data — no `AppHandle`, no async, so the
-/// two acceptance-critical rules are unit-testable.
+/// acceptance-critical rules are unit-testable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum SavePlan {
-    /// Local mode and the artifact passed the guard; canonicalized absolute
-    /// path to copy.
+    /// The artifact is readable on this machine and passed the guard;
+    /// canonicalized absolute path to copy.
     Copy(PathBuf),
-    /// Remote/relay mode: the artifact is on another machine (D12 / B5).
+    /// The artifact is **not on this filesystem** — the node that built it is
+    /// another machine (D12 / B5). Nothing is copied and nothing failed.
     RemoteSkip,
 }
 
-/// Decide what to do with `package_path` without performing any I/O in the
-/// remote case.
+/// How far the lookup of the artifact got.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Lookup {
+    /// Readable here, canonicalized, and inside the node package dir.
+    Local(PathBuf),
+    /// Readable here, but it violates the guard (wrong directory, not a file,
+    /// not a package). Always an error: a reachable file is never "somewhere
+    /// else", so it must not be reported as a remote skip.
+    Rejected(String),
+    /// Not readable here: the file — or the node's package dir — is not on this
+    /// filesystem. That is the only honest signal we have for "the artifact is
+    /// on another machine", and it cannot be faked by the caller.
+    Unreachable(String),
+}
+
+fn canonical_or_none(path: &Path) -> Option<PathBuf> {
+    std::fs::canonicalize(path).ok()
+}
+
+/// Locate `candidate` relative to `packages_dir`, distinguishing "not readable
+/// here" from "here, but wrong".
 ///
-/// `remote`/`relay` is answered from the mode alone — prove that by passing a
-/// root that does not exist: the function still returns [`SavePlan::RemoteSkip`]
-/// instead of failing, because it must not even try to read a path that cannot
-/// be on this filesystem.
+/// Canonicalizing both sides first means `..` segments, symlinks/junctions and
+/// Windows' verbatim prefix cannot disguise an escape — a path that merely
+/// looks contained after string concatenation does not pass.
+pub(crate) fn look_up_artifact(candidate: &Path, packages_dir: &Path) -> Lookup {
+    let Some(root) = canonical_or_none(packages_dir) else {
+        return Lookup::Unreachable(format!(
+            "The node package directory {} is not readable on this machine",
+            packages_dir.display()
+        ));
+    };
+    let Some(path) = canonical_or_none(candidate) else {
+        return Lookup::Unreachable(format!(
+            "The published package {} is not readable on this machine",
+            candidate.display()
+        ));
+    };
+    match check_artifact(&path, &root) {
+        Ok(()) => Lookup::Local(path),
+        Err(e) => Lookup::Rejected(e),
+    }
+}
+
+/// Decide what to do with `package_path`.
+///
+/// The copy is gated on **reachability**, not on the mode flag: a Desktop
+/// configured `remote` may still point at a Gateway on this machine (dev runs,
+/// or a user-entered localhost/LAN URL), and then the artifact is right here and
+/// belongs in the Local tab. Reachability cannot be faked by the caller — it is
+/// a `canonicalize` of the path the Gateway reported — while the mode only
+/// decides *how to explain* an unreachable artifact:
+///
+///   - `local` Gateway that cannot see its own node's file → a real failure the
+///     user can retry, never a silent skip;
+///   - `remote`/`relay` → the documented D12 limitation (B5).
 pub(crate) fn plan_save(
     mode: GatewayMode,
     package_path: &str,
     packages_dir: &Path,
 ) -> Result<SavePlan, String> {
-    match mode {
-        GatewayMode::Remote | GatewayMode::Relay => Ok(SavePlan::RemoteSkip),
-        GatewayMode::Local => Ok(SavePlan::Copy(validate_publish_artifact(
-            Path::new(package_path),
-            packages_dir,
-        )?)),
+    match look_up_artifact(Path::new(package_path), packages_dir) {
+        Lookup::Local(path) => Ok(SavePlan::Copy(path)),
+        Lookup::Rejected(why) => Err(why),
+        Lookup::Unreachable(why) => match mode {
+            GatewayMode::Local => Err(why),
+            GatewayMode::Remote | GatewayMode::Relay => Ok(SavePlan::RemoteSkip),
+        },
     }
 }
 
-/// Guard: `candidate` must be an existing `.agent` file **directly inside**
-/// `packages_dir`.
+/// Guard on already-canonicalized paths: `path` must be an `.agent` file
+/// **directly inside** `root`.
 ///
-/// Both sides are canonicalized first, so `..` segments, symlinks/junctions and
-/// Windows' verbatim prefix cannot disguise an escape — a path that merely
-/// looks contained after string concatenation is rejected. "Direct child"
-/// (rather than any descendant) mirrors what the node actually writes
-/// (`output_dir.join(filename)`) and keeps the accepted set as small as the
-/// real one.
-pub(crate) fn validate_publish_artifact(
-    candidate: &Path,
-    packages_dir: &Path,
-) -> Result<PathBuf, String> {
-    let root = std::fs::canonicalize(packages_dir).map_err(|e| {
-        format!(
-            "The node package directory {} is not readable on this machine: {e}",
-            packages_dir.display()
-        )
-    })?;
-    let path = std::fs::canonicalize(candidate).map_err(|e| {
-        format!(
-            "The published package {} is not readable on this machine: {e}",
-            candidate.display()
-        )
-    })?;
+/// "Direct child" (rather than any descendant) mirrors what the node actually
+/// writes (`output_dir.join(filename)`) and keeps the accepted set as small as
+/// the real one.
+pub(crate) fn check_artifact(path: &Path, root: &Path) -> Result<(), String> {
     if !path.is_file() {
         return Err(format!("{} is not a file", path.display()));
     }
-    if path.parent() != Some(root.as_path()) {
+    if path.parent() != Some(root) {
         return Err(format!(
             "Refusing to copy {}: only files directly inside the node package directory {} are accepted",
             path.display(),
             root.display()
         ));
     }
-    if !has_package_extension(&path) {
+    if !has_package_extension(path) {
         return Err(format!(
             "Refusing to copy {}: not an .agent package",
             path.display()
         ));
     }
-    Ok(path)
+    Ok(())
 }
 
 /// The node's `packages_dir` — where `build_package` wrote the artifact,
@@ -308,15 +351,27 @@ mod tests {
         }
     }
 
+    /// Convenience for the guard tests: the rejection message, or a panic when
+    /// the guard unexpectedly accepted the path.
+    fn rejection(path: &Path, root: &Path) -> String {
+        match look_up_artifact(path, root) {
+            Lookup::Rejected(why) => why,
+            other => panic!("expected a rejection, got {other:?}"),
+        }
+    }
+
     /// B1: the file the node just wrote, as the Gateway reports it, is accepted.
     #[test]
     fn a_built_package_in_the_node_dir_is_accepted() {
         let packages = Scratch::new("packages");
         let built = packages.write("com.example.demo-1.0.0.agent");
 
-        let accepted = validate_publish_artifact(&built, packages.path()).unwrap();
-
-        assert_eq!(accepted, std::fs::canonicalize(&built).unwrap());
+        match look_up_artifact(&built, packages.path()) {
+            Lookup::Local(accepted) => {
+                assert_eq!(accepted, std::fs::canonicalize(&built).unwrap())
+            }
+            other => panic!("expected the artifact to be accepted, got {other:?}"),
+        }
     }
 
     /// The guard exists so the IPC argument cannot become "copy any file".
@@ -329,7 +384,7 @@ mod tests {
         let elsewhere = Scratch::new("elsewhere");
         let outside = elsewhere.write("com.example.demo-1.0.0.agent");
 
-        let err = validate_publish_artifact(&outside, &packages).unwrap_err();
+        let err = rejection(&outside, &packages);
         assert!(err.contains("only files directly inside"), "{err}");
 
         // `..` traversal: canonicalization resolves it before the comparison,
@@ -338,18 +393,18 @@ mod tests {
         let sneaky = packages.join("..").join(
             sibling.file_name().expect("file name"),
         );
-        let err = validate_publish_artifact(&sneaky, &packages).unwrap_err();
+        let err = rejection(&sneaky, &packages);
         assert!(err.contains("only files directly inside"), "{err}");
 
         // A nested file is not a build artifact (`output_dir.join(name)`).
         std::fs::create_dir_all(packages.join("nested")).unwrap();
         let nested = packages.join("nested").join("com.example.demo-1.0.0.agent");
         std::fs::write(&nested, b"PK\x03\x04").unwrap();
-        let err = validate_publish_artifact(&nested, &packages).unwrap_err();
+        let err = rejection(&nested, &packages);
         assert!(err.contains("only files directly inside"), "{err}");
 
         // The directory itself is not a package.
-        let err = validate_publish_artifact(&packages, &packages).unwrap_err();
+        let err = rejection(&packages, &packages);
         assert!(err.contains("is not a file"), "{err}");
     }
 
@@ -358,7 +413,7 @@ mod tests {
         let packages = Scratch::new("ext");
         let other = packages.write("notes.txt");
 
-        let err = validate_publish_artifact(&other, packages.path()).unwrap_err();
+        let err = rejection(&other, packages.path());
         assert!(err.contains("not an .agent package"), "{err}");
     }
 
@@ -367,8 +422,14 @@ mod tests {
         let packages = Scratch::new("missing");
         let gone = packages.child("com.example.demo-1.0.0.agent");
 
-        let err = validate_publish_artifact(&gone, packages.path()).unwrap_err();
-        assert!(err.contains("is not readable on this machine"), "{err}");
+        // Unreadable here is the *remote* signal, not a guard rejection: the
+        // panel must be able to tell the two apart.
+        match look_up_artifact(&gone, packages.path()) {
+            Lookup::Unreachable(why) => {
+                assert!(why.contains("is not readable on this machine"), "{why}")
+            }
+            other => panic!("expected an unreachable verdict, got {other:?}"),
+        }
     }
 
     /// B5 / D12: remote and relay modes answer "skipped" without touching the
@@ -385,6 +446,25 @@ mod tests {
             )
             .unwrap();
             assert_eq!(plan, SavePlan::RemoteSkip, "{mode:?}");
+        }
+    }
+
+    /// Regression (dev-run bug): a Desktop configured `remote` that points at a
+    /// Gateway on *this* machine must still copy. The mode flag describes the
+    /// deployment, not the filesystem — gating the copy on it silently dropped
+    /// every artifact produced by a localhost Gateway (B1 failed in `tauri dev`).
+    #[test]
+    fn remote_mode_with_a_reachable_artifact_still_copies() {
+        let packages = Scratch::new("remote-but-local");
+        let built = packages.write("com.example.demo-1.0.0.agent");
+
+        for mode in [GatewayMode::Remote, GatewayMode::Relay] {
+            let plan = plan_save(mode, &built.to_string_lossy(), packages.path()).unwrap();
+            assert_eq!(
+                plan,
+                SavePlan::Copy(std::fs::canonicalize(&built).unwrap()),
+                "{mode:?}"
+            );
         }
     }
 
