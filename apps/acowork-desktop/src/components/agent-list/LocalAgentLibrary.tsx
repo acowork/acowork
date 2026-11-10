@@ -3,10 +3,11 @@
  *
  * PRD: docs/prd/zh/prd-agent-hub-install-dialog.md §14 (D9–D14,
  * REQ-021–032). The tab renders the library directory (`list_local_agent_packages`
- * returns all rows in one call, F13) and ends with a fixed
- * "+ add an agent file" row that keeps the v0.1 pick-a-file path alive
- * (REQ-025 / A5: it installs the picked file directly and does **not** copy it
- * into the library).
+ * returns all rows in one call, F13) as a two-column grid whose **first cell** is
+ * the "+ add an agent file" tile — the v0.1 pick-a-file path, which installs the
+ * picked file directly and does **not** copy it into the library (REQ-025 / A5).
+ * First, not last: the library grows with use, and an entry pinned to the bottom
+ * is out of view exactly when there are enough files to need it.
  *
  * Deliberately absent, and not to be added here:
  *   - any signature / channel wording (D13 / REQ-031 / A10);
@@ -91,41 +92,60 @@ export function LocalAgentLibrary({
 
       {/* Same container as the Hub tab (`grid-cols-1 lg:grid-cols-2`): one agent
           per cell, two per row once the dialog is wide enough. The two tabs show
-          the same kind of card, so they must pack the same way — and the pending
-          picked-file card is a card too, whether or not the library has rows
-          (REQ-025 works on an empty library). */}
-      {(rows.length > 0 || pending) && (
-        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-          {rows.map((row) => (
-            <LocalAgentCard
-              key={row.path}
-              row={row}
-              busy={busyPath === row.path}
-              disabled={disabled}
-              disabledReason={disabledReason}
-              onInstall={() => onInstall(row)}
-              onMore={(e) => onInstallAnother(row, e)}
-            />
-          ))}
-          {pending}
-        </div>
-      )}
-
-      {/* REQ-025: the trailing row is always present — it is the only way back
-          to "I have a file on disk", including when the library is empty. It is
-          not a grid cell: it is an action, not one of the agents, so it stays a
-          full-width row under the two-column grid. */}
-      <button
-        type="button"
-        onClick={onAddFile}
-        disabled={disabled}
-        title={disabledReason}
-        className="flex items-center justify-center gap-1.5 rounded-md border border-dashed border-zinc-300 px-3 py-2.5 text-xs text-text-secondary transition-colors hover:border-[var(--color-accent)]/60 hover:text-text disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600"
-      >
-        <Plus className="h-3.5 w-3.5" />
-        {t("agentHub.localAddFile")}
-      </button>
+          the same kind of card, so they must pack the same way. */}
+      <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+        {/* REQ-025: the add entry is the FIRST cell, not a trailing row. The
+            library grows with use, so an entry pinned to the bottom slides out of
+            view exactly when a user has enough files to need it; as a tile it
+            keeps a fixed, findable position. It is also the only cell that is
+            always present — an empty library still shows it. */}
+        <AddAgentCard onClick={onAddFile} disabled={disabled} disabledReason={disabledReason} />
+        {pending}
+        {rows.map((row) => (
+          <LocalAgentCard
+            key={row.path}
+            row={row}
+            busy={busyPath === row.path}
+            disabled={disabled}
+            disabledReason={disabledReason}
+            onInstall={() => onInstall(row)}
+            onMore={(e) => onInstallAnother(row, e)}
+          />
+        ))}
+      </div>
     </div>
+  );
+}
+
+/**
+ * The "+ add an agent file" tile.
+ *
+ * A card, not a row, because it lives in the grid: same cell as an agent, so it
+ * scrolls and packs with the list instead of being pinned to its end. Dashed
+ * border is the only visual difference — it holds no package, so it has nothing
+ * to describe.
+ */
+function AddAgentCard({
+  onClick,
+  disabled,
+  disabledReason,
+}: {
+  onClick: () => void;
+  disabled: boolean;
+  disabledReason?: string;
+}) {
+  const { t } = useTranslation();
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={disabledReason}
+      className="flex h-full min-h-[7rem] flex-col items-center justify-center gap-1.5 rounded-md border border-dashed border-zinc-300 p-3 text-xs text-text-secondary transition-colors hover:border-[var(--color-accent)]/60 hover:text-text disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600"
+    >
+      <Plus className="h-4 w-4" />
+      {t("agentHub.localAddFile")}
+    </button>
   );
 }
 
