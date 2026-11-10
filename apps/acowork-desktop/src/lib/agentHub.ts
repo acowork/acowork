@@ -80,6 +80,20 @@ export interface LocalPackageInfo {
 }
 
 /**
+ * The avatar a library file declares — mirror of `commands::agent_library::
+ * LocalAvatar`.
+ *
+ * The manifest names an avatar in one of two ways and they are not
+ * interchangeable: `packaged` is an image inside the archive (already inlined as
+ * a `data:` URL, so nothing to fetch), `builtin` is an id in the Desktop's own
+ * icon set. A tagged union rather than two nullable fields, because exactly one
+ * form is in effect and the renderer should not have to re-derive the priority.
+ */
+export type LocalAgentAvatar =
+  | { kind: "packaged"; data_url: string }
+  | { kind: "builtin"; icon_id: string };
+
+/**
  * One row of the Local tab's file library (`list_local_agent_packages`).
  *
  * Mirror of `commands::agent_library::LocalAgentRow`. Identity comes from the
@@ -105,8 +119,12 @@ export interface LocalAgentRow {
   capabilities: string[];
   /** `skills/<name>/SKILL.md` entries of the archive — the manifest has no list. */
   skills: string[];
-  /** The package's own avatar inlined as a `data:` URL, or `null` when absent. */
-  avatar: string | null;
+  /**
+   * The avatar the manifest declares, resolved server-side to the one form the
+   * card can draw — `null` when it declares none, or declares a packaged image
+   * that cannot be inlined.
+   */
+  avatar: LocalAgentAvatar | null;
   /** Declared permissions — only counted, never confirmed (REQ-007 boundary). */
   permissions: string[];
   error: string | null;

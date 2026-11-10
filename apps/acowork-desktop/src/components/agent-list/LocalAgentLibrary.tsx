@@ -26,10 +26,16 @@
  * `skills/`), so the Local card is not the poorer one: a shipped `.agent`
  * carries the same things its published Hub entry does (see `read_package`).
  */
-import { useState } from "react";
 import { AlertTriangle, Loader2, MoreHorizontal, Plus, X } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { formatSizeBytes, localChipsOf, type LocalAgentList, type LocalAgentRow } from "../../lib/agentHub";
+import {
+  formatSizeBytes,
+  localChipsOf,
+  type LocalAgentAvatar,
+  type LocalAgentList,
+  type LocalAgentRow,
+} from "../../lib/agentHub";
+import { InlinedAgentAvatar } from "../common/AgentAvatar";
 import { cn } from "../../lib/utils";
 
 interface LocalAgentLibraryProps {
@@ -182,7 +188,12 @@ function LocalAgentCard({
     // name.
     <article className="flex flex-col gap-2 rounded-md border border-border-outer bg-panel-block p-3">
       <div className="flex items-start gap-3">
-        <LocalAvatar src={row.avatar} initial={avatarInitialOf(displayName)} name={displayName} />
+        <LocalAvatar
+          avatar={row.avatar}
+          agentId={row.agent_id}
+          initial={avatarInitialOf(displayName)}
+          name={displayName}
+        />
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h4 className="truncate text-sm font-semibold text-text">{displayName}</h4>
@@ -260,15 +271,31 @@ function LocalAgentCard({
 }
 
 /**
- * The packaged avatar, or the letter block the Hub card also falls back to.
+ * The avatar block: whatever the package declared, drawn through the same
+ * ADR-017 chain the Hub card uses — the image, then the builtin icon id, then
+ * the deterministic icon keyed by `agent_id`.
  *
- * `row.avatar` is already a `data:` URL produced by Rust from the archive, so
- * there is no fetch, no cache and no failure window beyond a corrupt image — in
- * which case the initial is the honest thing to show.
+ * Nothing is fetched: `avatar` was resolved out of the archive by Rust
+ * (`list_local_agent_packages`), so there is no bearer token, no cache and no
+ * failure window beyond a corrupt image.
+ *
+ * The letter block is the one branch this file owns, because it is the one the
+ * shared chain cannot answer: an unreadable file has no `agent_id`, so there is
+ * no identity to key an icon by, and guessing one would put a random face on a
+ * package nobody can identify.
  */
-function LocalAvatar({ src, initial, name }: { src: string | null; initial: string; name: string }) {
-  const [failed, setFailed] = useState(false);
-  if (!src || failed) {
+function LocalAvatar({
+  avatar,
+  agentId,
+  initial,
+  name,
+}: {
+  avatar: LocalAgentAvatar | null;
+  agentId: string | null;
+  initial: string;
+  name: string;
+}) {
+  if (!agentId) {
     return (
       <div
         aria-label={name}
@@ -279,11 +306,12 @@ function LocalAvatar({ src, initial, name }: { src: string | null; initial: stri
     );
   }
   return (
-    <img
-      src={src}
-      alt={name}
-      onError={() => setFailed(true)}
-      className="h-9 w-9 shrink-0 rounded-md object-cover"
+    <InlinedAgentAvatar
+      agentId={agentId}
+      dataUrl={avatar?.kind === "packaged" ? avatar.data_url : null}
+      builtinAvatarId={avatar?.kind === "builtin" ? avatar.icon_id : null}
+      size={36}
+      className="shrink-0"
     />
   );
 }
