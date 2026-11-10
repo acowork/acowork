@@ -612,6 +612,20 @@ describe("local agent library (REQ-021..032)", () => {
   // REQ-025 amended: the add entry is the first cell of the grid. Pinned by
   // position, because the whole point is that it does not drift to the end of a
   // list that keeps growing.
+  // Same surface as an agent cell: it sits in the same grid, so a tile with no
+  // fill reads as a gap in the list rather than an entry.
+  it("gives the add entry the same card surface as an agent", async () => {
+    mockLibrary([LOCAL_ROW]);
+    renderOpen();
+
+    const addEntry = await screen.findByRole("button", { name: /agentHub.localAddFile/ });
+    const agentCard = (await screen.findAllByRole("article"))[0];
+    for (const cls of ["bg-panel-block", "rounded-md", "border"]) {
+      expect(addEntry.className).toContain(cls);
+      expect(agentCard.className).toContain(cls);
+    }
+  });
+
   it("puts the add entry in the first cell, ahead of every agent", async () => {
     mockLibrary([LOCAL_ROW, LOCAL_ROW_V2]);
     renderOpen();
