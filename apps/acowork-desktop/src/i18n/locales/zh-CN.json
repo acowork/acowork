@@ -648,8 +648,6 @@
     "noOnlineNode": "没有在线节点",
     "nodeNotManageable": "你没有该节点的管理权限",
     "localDesc": "这台机器上现成的 agent 文件。点「安装」即可添加，或用「添加 agent 文件」从别处选择文件。",
-    "localDropHint": "点击选择，或拖入 .agent 文件",
-    "localPickFirst": "先选择 .agent 文件",
     "localAddFile": "添加 agent 文件",
     "localEmpty": "这里还没有 agent 文件",
     "localBrokenFile": "这个文件读不出来：{{error}}",
