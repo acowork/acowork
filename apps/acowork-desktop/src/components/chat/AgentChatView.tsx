@@ -77,6 +77,7 @@ import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { detectPaste } from "./pasteDetect";
 import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { CollapsibleChatContent } from "./CollapsibleChatContent";
 import {
   VirtualRowList,
   type VirtualRowListHandle,
@@ -301,7 +302,16 @@ const RowView = memo(function RowView({
                 the contract Mobile's `.bubble` has always had. */}
               {(row.body || !row.attachments?.length) && (
                 <div className="inline-block max-w-full rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words">
-                  {row.body && <ChatMarkdown content={row.body} />}
+                  {/* Agent speech is folded: an agent's answer is usually
+                    LONG, and an unclamped bubble turns the transcript into a
+                    wall of text — the shape of the conversation is what the
+                    reader is paging through. The fold shows the first ten
+                    lines and a chevron that opens the rest. */}
+                  {row.body && (
+                    <CollapsibleChatContent text={row.body}>
+                      <ChatMarkdown content={row.body} />
+                    </CollapsibleChatContent>
+                  )}
                   {/* A bodyless row with no attachments has nothing to say; the
                     placeholder keeps it from collapsing into an empty bubble. */}
                   {!row.body && !row.attachments?.length && (

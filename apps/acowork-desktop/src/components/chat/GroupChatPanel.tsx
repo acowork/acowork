@@ -92,6 +92,7 @@ import {
 } from "./ChatAddressPicker";
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { CollapsibleChatContent } from "./CollapsibleChatContent";
 import {
   VirtualRowList,
   type VirtualRowListHandle,
@@ -566,10 +567,18 @@ const GroupRowView = memo(function GroupRowView({
                     {row.body}
                   </div>
                 ) : (
-                  <ChatMarkdown
-                    content={row.body}
-                    components={chatBlockComponents}
-                  />
+                  /* Agent speech is folded: an agent's answer is usually
+                    LONG — a PM's task message to a group is the common case
+                    — and an unclamped bubble under every row turns the
+                    transcript into a wall of text, so paging through the
+                    conversation means scrolling past one. The fold shows the
+                    first ten lines and a chevron that opens the rest. */
+                  <CollapsibleChatContent text={row.body}>
+                    <ChatMarkdown
+                      content={row.body}
+                      components={chatBlockComponents}
+                    />
+                  </CollapsibleChatContent>
                 )
               ) : (
                 <span className="text-xs text-text-tertiary italic">

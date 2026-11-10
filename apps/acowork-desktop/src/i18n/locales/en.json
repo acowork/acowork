@@ -214,6 +214,8 @@
       "olderRounds_other": "Show {{count}} earlier rounds",
       "roundN": "Round {{n}}",
       "toggleRound": "Toggle round details",
+      "expandAnswer": "Show the full answer",
+      "collapseAnswer": "Collapse the answer",
       "unnamedRun": "Execution session",
       "noQuestion": "(no question recorded for this round)",
       "state": {

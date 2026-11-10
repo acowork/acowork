@@ -36,7 +36,10 @@
  *   bubble (`data-run-answer`). That is the Chat's own grammar — the agent's
  *   newest words sit in the transcript — while the rounds stay one click away.
  *   The text is the same projected `answer` the collapsed round shows: no
- *   second read, no new row, no invented content.
+ *   second read, no new row, no invented content. The bubble itself is folded
+ *   to ten lines (`RunAnswerBubble`): an agent's answer is usually long, and an
+ *   unclamped bubble under every block turns the transcript into a wall of
+ *   text — the conversation's shape is what the reader is paging through.
  */
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
@@ -68,6 +71,7 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { RunBlockActionRow } from "./RunBlockActionRow";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { RunAnswerBubble } from "./RunAnswerBubble";
 import { IntentDisplayBody } from "./IntentDisplayBody";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import { InteractionCardShell } from "./InteractionCardShell";
@@ -672,21 +676,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                 carries (`latestAnswer`), so nothing here can say anything the
                 block would not; a run that has not answered yet paints nothing
                 instead of an empty bubble. */}
-            {latestAnswer && (
-              <div
-                data-run-answer=""
-                // The transcript's own bubble skin, and its own measure: this
-                // sits in the block column (`items-start`), so it hugs its text
-                // up to the column's `--content-max-width` exactly as an agent
-                // row does, and it inherits the Chat's font scale — the block's
-                // 0.9× step is the sibling div above, not this one. A message
-                // type with two sizes depending on the surface is how a Chat
-                // stops reading as one conversation.
-                className="mt-2 min-w-0 max-w-full rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5 select-text break-words"
-              >
-                <ChatMarkdown content={latestAnswer} />
-              </div>
-            )}
+            {latestAnswer && <RunAnswerBubble content={latestAnswer} />}
           </div>
           {/* The router's question about this run, drawn at the run's tail and
               outside the collapse: an unanswerable thing behind a fold is the

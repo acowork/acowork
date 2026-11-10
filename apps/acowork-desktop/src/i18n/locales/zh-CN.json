@@ -308,6 +308,8 @@
       "olderRounds_other": "查看更早 {{count}} 轮",
       "roundN": "第 {{n}} 轮",
       "toggleRound": "展开 / 收起本轮详情",
+      "expandAnswer": "展开完整回复",
+      "collapseAnswer": "收起回复",
       "unnamedRun": "执行会话",
       "noQuestion": "（本轮没有记录提问）",
       "state": {
