@@ -88,8 +88,11 @@ export function useTranscriptLayout(
     (item: TranscriptItem) => rowKeyOf(itemOf(item)),
     [rowKeyOf, itemOf],
   );
-  // A block is a header plus one line per visible round; collapsed it is a pill.
-  // `measureElement` corrects the estimate on mount and the shell caches it.
+  // A block starts folded: its pill plus the run's latest-answer bubble under it.
+  // Neither height is knowable from the rows alone (the answer comes from the
+  // block read), so this stays a coarse guess — round lines as the upper bound of
+  // what the fold would have cost. `measureElement` corrects it on first mount and
+  // the shell's cache keeps the real height after.
   const virtualEstimate = useCallback(
     (item: TranscriptItem) =>
       item.kind === "run"

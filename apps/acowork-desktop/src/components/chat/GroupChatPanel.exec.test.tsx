@@ -197,6 +197,14 @@ function userRow(seq: number, body: string): ChatMessageRow {
  * Every assertion below therefore queries by accessible name — a `getByText`
  * would pass on a regression that silently stopped drawing the control.
  */
+/** Open the run the way a reader does: the block, then its newest round. Both
+ *  start folded (`ChatExecutionBlock`'s contract) so a case about what is INSIDE
+ *  has to ask for it. */
+function openBlockAndNewestRound() {
+  fireEvent.click(document.querySelector("[data-run-header]")!);
+  fireEvent.click(screen.getByLabelText("chatView.block.toggleRound"));
+}
+
 describe("GroupChatPanel 查看执行 affordance", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -241,6 +249,9 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     };
     render(<GroupChatPanel />);
     expect(screen.queryByRole("button", { name: "chatView.viewRun" })).toBeTruthy();
+    // The outcome lives on the round, and the round is folded by default
+    // (`ChatExecutionBlock`'s own contract), so the reader opens both.
+    openBlockAndNewestRound();
     // An outcome is reported whether or not there is a body to show.
     expect(screen.getByText("chatView.notice.interrupted")).toBeTruthy();
   });
@@ -268,6 +279,8 @@ describe("GroupChatPanel 查看执行 affordance", () => {
     blockEntry = { ...entryOf(AGENT, "exec-7", "r2"), status: "unreachable", projection: undefined, detail: "refused" };
     render(<GroupChatPanel />);
     expect(screen.queryByRole("button", { name: "chatView.viewRun" })).toBeTruthy();
+    // The retry is inside the fold: the block starts collapsed.
+    openBlockAndNewestRound();
     expect(screen.getByText("chatView.block.unreachable")).toBeTruthy();
     expect(screen.getByText("chatView.block.retry")).toBeTruthy();
   });

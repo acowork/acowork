@@ -442,14 +442,10 @@ const RowView = memo(function RowView({
  */
 interface ItemProps extends Omit<RowProps, "row"> {
   item: TranscriptItem;
-  /** Something follows this block in the transcript — `ExploreBlock`'s
-   *  `hasFollowUpReply`, the one condition that auto-collapses a settled run. */
-  hasFollowUp: boolean;
 }
 
 const ItemView = memo(function ItemView({
   item,
-  hasFollowUp,
   ...rowProps
 }: ItemProps) {
   if (item.kind === "run") {
@@ -458,7 +454,6 @@ const ItemView = memo(function ItemView({
         block={item}
         chatSessionId={rowProps.chatSessionId}
         showHeader={rowProps.showHeader}
-        hasFollowUp={hasFollowUp}
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
         onContinueRound={rowProps.onContinueRound}
@@ -1288,7 +1283,6 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             renderItem={(item, i) => (
               <ItemView
                 item={item}
-                hasFollowUp={i < items.length - 1}
                 agentId={agentId}
                 chatSessionId={sessionId}
                 showHeader={

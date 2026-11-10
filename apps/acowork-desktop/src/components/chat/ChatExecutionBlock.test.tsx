@@ -138,14 +138,39 @@ function entryOf(over: Partial<ChatBlockEntry>): ChatBlockEntry {
   };
 }
 
-/** Entries by ref; a ref absent from the map is the loading hole. */
+/**
+ * Entries by ref; a ref absent from the map is the loading hole.
+ *
+ * The component starts FOLDED — the block and its rounds both (that contract is
+ * pinned on its own below, see "starts folded"). Almost every case here is about
+ * what is INSIDE the fold, so the helper performs the reader's own two clicks:
+ * open the block, then its newest round. `{ folded: true }` keeps it shut for
+ * the cases that are about the closed state itself.
+ */
 function renderBlock(
   entries: Record<string, ChatBlockEntry | undefined>,
   props: Partial<React.ComponentProps<typeof ChatExecutionBlock>> = {},
   block: RunBlock = blockOf([roundOf("r1", 3)]),
+  opts: { folded?: boolean } = {},
 ) {
   useChatBlocks.mockReturnValue(entries);
-  return render(<ChatExecutionBlock block={block} chatSessionId="c1" {...props} />);
+  const view = render(
+    <ChatExecutionBlock block={block} chatSessionId="c1" {...props} />,
+  );
+  if (!opts.folded) {
+    // Only when it is still shut: an unanswered card opens the block (and its
+    // round) on its own, and a click would fold the thing under test away.
+    const header = document.querySelector("[data-run-header]");
+    if (header?.getAttribute("aria-expanded") === "false") {
+      fireEvent.click(header);
+    }
+    const roundToggles = screen.queryAllByLabelText("chatView.block.toggleRound");
+    const newestRound = roundToggles[roundToggles.length - 1];
+    if (newestRound?.getAttribute("aria-expanded") === "false") {
+      fireEvent.click(newestRound);
+    }
+  }
+  return view;
 }
 
 /** The collapse header's own copy. The count and the state sit in one span with
@@ -181,6 +206,138 @@ describe("ChatExecutionBlock", () => {
     expect(document.querySelectorAll("[data-run-header]")).toHaveLength(1);
     expect(headerText(container)).toContain("chatView.block.roundCount");
     expect(screen.getAllByText("chatView.block.roundN")).toHaveLength(2);
+  });
+
+  /**
+   * Design decision (the chat's grammar, not the execution surface's): a Chat
+   * shows what the agent SAID; the rounds are the work behind it. So the block
+   * and its rounds both start folded, and the run's latest answer is drawn
+   * outside the fold as an ordinary assistant bubble — that is what makes the
+   * surface read as a conversation while the detail stays one click away.
+   */
+  it("starts folded, and still shows the run's latest answer outside the fold", () => {
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            answer: { body: "done", ts: "1" },
+          },
+        }),
+      },
+      {},
+      blockOf([roundOf("r1", 3)]),
+      { folded: true },
+    );
+    expect(
+      container.querySelector("[data-run-header]")?.getAttribute("aria-expanded"),
+    ).toBe("false");
+    // A real fold: no round row is painted at all...
+    expect(screen.queryAllByLabelText("chatView.block.toggleRound")).toHaveLength(0);
+    // ...and the answer is on screen anyway, in the transcript's own bubble.
+    const answer = container.querySelector("[data-run-answer]") as HTMLElement;
+    expect(answer.textContent).toBe("done");
+    expect(answer.className).toContain("bg-chat-bubble");
+  });
+
+  it("a round's pair stays folded until the reader opens the row", () => {
+    const round = { ...roundOf("r1", 3), triggerRow: triggerRow(2, "go") };
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            answer: { body: "done", ts: "1" },
+          },
+        }),
+      },
+      {},
+      blockOf([round]),
+      { folded: true },
+    );
+    fireEvent.click(container.querySelector("[data-run-header]")!);
+    const toggle = screen.getByLabelText("chatView.block.toggleRound");
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    // One line until asked: the question panel its seq addresses is not painted.
+    expect(container.querySelector('pre[data-seq="2"]')).toBeNull();
+    fireEvent.click(toggle);
+    expect(container.querySelector('pre[data-seq="2"]')).not.toBeNull();
+  });
+
+  it("the outside bubble speaks the newest round that HAS answered", () => {
+    // A round still working has not said anything yet, so the run's latest
+    // utterance is the newest round with an answer — the agent's last words stay
+    // on screen instead of the bubble blanking out for the length of a run.
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            answer: { body: "first", ts: "1" },
+          },
+        }),
+        [REF2]: entryOf({
+          ref: REF2,
+          round_id: "r2",
+          status: "pending",
+          projection: {
+            round_id: "r2",
+            terminal: false,
+            status: "in_progress",
+            answer: null,
+          },
+        }),
+      },
+      {},
+      blockOf([roundOf("r1", 2), roundOf("r2", 4)]),
+      { folded: true },
+    );
+    expect(container.querySelector("[data-run-answer]")?.textContent).toBe("first");
+  });
+
+  it("paints no outside bubble for a run that has not answered", () => {
+    const { container } = renderBlock(
+      { [REF1]: entryOf({}) },
+      {},
+      blockOf([roundOf("r1", 3)]),
+      { folded: true },
+    );
+    // An empty bubble would be an invented message; the header already says what
+    // the run is doing.
+    expect(container.querySelector("[data-run-answer]")).toBeNull();
+  });
+
+  it("an unanswered card is the one thing that opens the block on its own (D8)", () => {
+    // The fold is the default, not a promise: a question waiting on the human
+    // must be answerable from where it is drawn.
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          status: "pending",
+          projection: {
+            round_id: "r1",
+            terminal: false,
+            status: "waiting",
+            card: { kind: "approval", request_id: "a1", prompt: "Approve?" },
+          },
+        }),
+      },
+      {},
+      blockOf([roundOf("r1", 3)]),
+      { folded: true },
+    );
+    expect(
+      container.querySelector("[data-run-header]")?.getAttribute("aria-expanded"),
+    ).toBe("true");
+    // The approval buttons are on screen, so the question is answerable from
+    // where it is drawn.
+    expect(screen.getByText("chatView.cardApprove")).toBeTruthy();
   });
 
   it("a folded round renders its own question line, addressable by its seq", () => {
@@ -349,7 +506,11 @@ describe("ChatExecutionBlock", () => {
       { authorName: "Ada", showHeader: true },
       blockOf([round]),
     );
-    expect(screen.getByTestId("md").textContent).toBe("done");
+    // The answer PANEL of the round is what goes through the Markdown renderer.
+    // (The run's latest answer is also drawn outside the fold as the transcript
+    // bubble — pinned below — so the query is scoped to the round's own row.)
+    const panel = container.querySelector('[data-seq="3"] [data-testid="md"]');
+    expect(panel?.textContent).toBe("done");
     expect(screen.getByText("Ada")).toBeTruthy();
     expect(headerText(container)).toContain("chatView.block.completed");
     // D13: the task rides the round, and the header is where it is stated.
@@ -705,7 +866,9 @@ describe("ChatExecutionBlock", () => {
     expect(question.className).toContain("--color-accent");
     // A reply wearing the highlight read as the speaker who is not the reader:
     // the answer takes the agent bubble's fill and nothing of the accent.
-    const answer = screen.getByTestId("md").parentElement as HTMLElement;
+    const answer = question.parentElement?.querySelector(
+      '[data-testid="md"]',
+    )?.parentElement as HTMLElement;
     expect(answer.className).toContain("bg-chat-bubble");
     expect(answer.className).not.toContain("--color-accent");
   });
@@ -1102,8 +1265,8 @@ describe("ChatExecutionBlock action row", () => {
 
   it("keeps the question visible while the block is collapsed", () => {
     // D8's rule in this chrome: a fold must not hide the thing waiting on the
-    // human. The block collapses once the conversation moves past it, which is
-    // exactly when an unanswered proposal needs answering.
+    // human. The block is folded by default, which is exactly the state an
+    // unanswered proposal needs answering from.
     const ask: ChatMessageRow = {
       seq: 9,
       ts: 9,
@@ -1119,8 +1282,9 @@ describe("ChatExecutionBlock action row", () => {
     };
     renderBlock(
       { [REF1]: entryOf({}) },
-      { hasFollowUp: true },
+      {},
       { ...blockOf([roundOf("r1", 3)]), pendingAsk: ask },
+      { folded: true },
     );
     expect(
       document.querySelector("[data-run-header]")?.getAttribute("aria-expanded"),

@@ -630,9 +630,6 @@ const GroupRowView = memo(function GroupRowView({
 
 interface GroupItemProps extends Omit<RowProps, "row"> {
   item: TranscriptItem;
-  /** Something follows this item in the transcript — `ExploreBlock`'s
-   *  `hasFollowUpReply`, the one condition that auto-collapses a settled run. */
-  hasFollowUp: boolean;
 }
 
 /**
@@ -651,7 +648,6 @@ interface GroupItemProps extends Omit<RowProps, "row"> {
  */
 const GroupItemView = memo(function GroupItemView({
   item,
-  hasFollowUp,
   ...rowProps
 }: GroupItemProps) {
   if (item.kind === "run") {
@@ -669,7 +665,6 @@ const GroupItemView = memo(function GroupItemView({
         // A block always starts a new turn on this surface, which shows an
         // avatar and name above every utterance — so the run wears one too.
         showHeader
-        hasFollowUp={hasFollowUp}
         authorName={nameOf(item.anchorRow.from).name}
         canAnswer={!readOnly}
         onJumpToExec={rowProps.onJumpToExec}
@@ -1829,12 +1824,11 @@ export function GroupChatPanel() {
                   "bg-[var(--color-accent)]/10",
               )
             }
-            renderItem={(item, i) => {
+            renderItem={(item) => {
               const row = item.kind === "row" ? item.row : null;
               return (
                 <GroupItemView
                   item={item}
-                  hasFollowUp={i < items.length - 1}
                   me={me}
                   chatSessionId={activeGroupId}
                   nameOf={nameOf}
