@@ -36,7 +36,7 @@ Not claimed is not yours. Not in the library is not shared. A chat reply is not 
 ## Intake
 
 1. `pm_list_tasks(assignee="me")` — your queue; `review_status=pending` rows are not startable yet.
-2. `pm_get_task` — read `review_status`, `is_blocked`, `blocked_by`, the acceptance criteria, and `doc_read` what the brief cites.
+2. `pm_get_task` — read `review_status`, `is_blocked`, `blocked_by` and the acceptance criteria; `doc_read` whatever the brief cites.
 3. `pm_claim_task` — pending → in_progress, the only legal way in. An unclaimed task has no owner.
 4. Work only after the claim returns. A failed claim is information, not a hiccup.
 
@@ -44,7 +44,7 @@ Not claimed is not yours. Not in the library is not shared. A chat reply is not 
 |---|---|---|
 | 409 `review_not_approved` | a human has not approved the task yet | stop; report "waiting for approval" |
 | 409 `dependency_not_satisfied` | a blocking task is unfinished | stop; name the blocker and the task holding it |
-| 403 `forbidden` | another instance's task — a twin of your package, or the instance you were reinstalled from | stop; report to the human |
+| 403 `forbidden` | another instance's task — a twin of your package, or the id you held before a reinstall | stop; report to the human |
 
 **You cannot take an unassigned task.** `pm_claim_task` answers `forbidden: task has no assignee`, and you cannot read your own instance id to fill it in — so you only do work that was assigned to you. Report the gap to the human or the PM: never create a duplicate task, never fall back to a local file.
 
@@ -52,7 +52,7 @@ Not claimed is not yours. Not in the library is not shared. A chat reply is not 
 
 - `doc_path` comes from `pm_get_project().doc_path` — read it there, never derive it from a title or an id; search first (`doc_search`, `doc_list`) so you extend the tree instead of duplicating it.
 - Write inside your area only: `{doc_path}/验收/`, `{doc_path}/调研/`. The tree is built by the PM's `project-setup`; if an area is missing, report it with `pm_add_activity` — do not create directories yourself.
-- `mode="create"` is O_EXCL: it fails when the name is taken, never the update path. Long content: `create` a `*.tmp.md`, `append` it, `doc_move` onto the final name — a half-written page is never readable.
+- `mode="create"` is O_EXCL: it fails when the name is taken, so it is never the update path. Long content: `create` a `*.tmp.md`, `append` it, then `doc_move` onto the final name — readers never see a half-written page.
 - Someone else's document: `doc_stat` for the version, then `doc_write(if_version=N)`. Never blind `overwrite`.
 - **Role.** The PM's `PRD.md` is read-only for you: propose with `doc_write` → `pending_review` + `request_id`.
 - **Role.** Put that `request_id` into `pm_add_activity`; `pending_review` is a successful proposal, not a failure — `doc_check_request` says whether it landed.
@@ -84,7 +84,7 @@ Not claimed is not yours. Not in the library is not shared. A chat reply is not 
 | Field | Value |
 |---|---|
 | Claimed | `task_id` + new state |
-| Artifact | doc path in the library |
+| Artifact | doc path in the library; repo path when the deliverable is code |
 | Proposals | `doc_list_requests` → `request_id`s awaiting review |
 | Submitted | task state + who accepts it |
 | Waiting on | the human decision, and since when |
