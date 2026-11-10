@@ -18,7 +18,6 @@ import {
   type SpeakerKind,
 } from "./speakerBubble";
 import { SpeakerBadge } from "./speakerNames";
-import { speakerDisclosure } from "./speakerProvenance";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import type { AttachedItem, ChatMessage } from "../../lib/types";
 import { useChatStore } from "../../stores/chatStore";
@@ -161,12 +160,10 @@ export function UserWithAttachmentsBubble({
   const asAgentSpeech = speakerRendersMarkdown(speakerKind);
   // Narrowed once, so the avatar branch below has a non-null instance id.
   const senderAgent = speakerKind === "agent" ? senderAgentId : null;
-  // Plan D3: this row's voice, decided by the same pure rule as the plain user
-  // bubble (`speakerProvenance.ts`) — the two paths must not disagree about who
-  // spoke, and they must agree about staying silent on an ordinary turn.
-  // Whether this turn is voiced as somebody else — the badge says NAMES,
-  // not the ids the record carries (resolved in `speakerNames.ts`).
-  const disclosure = speakerDisclosure(userMessage.speaker);
+  // Plan D3: this row's voice. `SpeakerBadge` decides whether there is
+  // anything to say (nothing, for an ordinary turn) and says NAMES rather
+  // than the ids the record carries — the same pure rule as the plain user
+  // bubble, so the two paths cannot disagree.
 
   const attachments = parts.filter(isAttachmentPart);
   const refs = parts.filter(isMessageRefPart);
@@ -179,12 +176,10 @@ export function UserWithAttachmentsBubble({
             {liveUserName}
           </span>
         )}
-        {disclosure && (
-          <SpeakerBadge
-            speaker={userMessage.speaker}
-            className="mt-[2px] text-xs text-text-tertiary"
-          />
-        )}
+        <SpeakerBadge
+          speaker={userMessage.speaker}
+          className="mt-[2px] text-xs text-text-tertiary"
+        />
 
         {/* Attachment chips — rendered above the text bubble */}
         {attachments.length > 0 && (

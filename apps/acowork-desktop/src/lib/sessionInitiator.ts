@@ -141,19 +141,10 @@ export function loadDirectory(): Promise<DirectoryUser[]> {
   return directoryOnce;
 }
 
-/**
- * The account directory, fetched once per process. Empty while loading.
- *
- * `enabled = false` skips the fetch entirely: a caller that only needs the
- * directory for SOME of its lookups (the speaker badge, which resolves the
- * agent registry first) should not pay for the request on rows that never
- * need it. The flag only gates the FETCH — the cache stays warm for the
- * callers that do want it.
- */
-export function useUserDirectory(enabled = true): DirectoryUser[] {
+/** The account directory, fetched once per process. Empty while loading. */
+export function useUserDirectory(): DirectoryUser[] {
   const [directory, setDirectory] = useState<DirectoryUser[]>([]);
   useEffect(() => {
-    if (!enabled) return;
     let alive = true;
     void loadDirectory().then((d) => {
       if (alive) setDirectory(d);
@@ -161,7 +152,7 @@ export function useUserDirectory(enabled = true): DirectoryUser[] {
     return () => {
       alive = false;
     };
-  }, [enabled]);
+  }, []);
   return directory;
 }
 
