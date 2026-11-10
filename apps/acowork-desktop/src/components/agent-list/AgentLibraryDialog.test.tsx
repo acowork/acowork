@@ -579,6 +579,58 @@ describe("local agent library (REQ-021..032)", () => {
     expect(closed).toContain("closed");
   });
 
+  // The two tabs pack identically: one agent per cell, two cells per row once
+  // the dialog is wide. Pinned as an equality of the container class, because
+  // the point is that the two lists cannot drift apart — re-tuning one grid
+  // must re-tune the other.
+  it("packs the rows in the same grid as the Hub tab", async () => {
+    // Both commands answer from the start: the Hub index is warmed on open
+    // (REQ-022), so a mock installed later would arrive after its fetch.
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "fetch_hub_index") {
+        return { schema_version: 2, base_url: "https://hub.acowork.ai", agents: [SAFE_AGENT] };
+      }
+      if (command === "list_local_agent_packages") {
+        return { rows: [LOCAL_ROW, LOCAL_ROW_V2], warning: null };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderOpen();
+
+    const localCards = await screen.findAllByRole("article");
+    expect(localCards).toHaveLength(2);
+    const localGrid = localCards[0].parentElement as HTMLElement;
+    expect(localGrid.className).toContain("grid-cols-1");
+    expect(localGrid.className).toContain("lg:grid-cols-2");
+
+    // Same dialog, other tab: the catalog's cards must sit in the same grid.
+    fireEvent.click(screen.getByRole("tab", { name: "agentHub.tabLibrary" }));
+    const hubCards = await screen.findAllByRole("article");
+    expect((hubCards[0].parentElement as HTMLElement).className).toBe(localGrid.className);
+  });
+
+  // REQ-025 on an empty library: the picked file still has a card, inside the
+  // same grid — the pending row must not depend on there being library rows.
+  it("shows the pending picked file even when the library is empty", async () => {
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "fetch_hub_index") throw new Error("offline");
+      if (command === "list_local_agent_packages") return { rows: [], warning: null };
+      if (command === "inspect_local_package") {
+        return { file_name: "picked.agent", size_bytes: 4096, agent_id: "com.acowork.local" };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    renderOpen();
+
+    await screen.findByText("agentHub.localEmpty");
+    h.open.mockResolvedValue("C:\pkgs\picked.agent");
+    fireEvent.click(await screen.findByRole("button", { name: /agentHub.localAddFile/ }));
+
+    expect(await screen.findByText("picked.agent")).toBeDefined();
+    const pendingCard = screen.getByText("picked.agent").closest("div.grid");
+    expect(pendingCard?.className).toContain("lg:grid-cols-2");
+  });
+
   // The Local card is the Hub card's skeleton — avatar, name + role, chip row —
   // with the same chip sources read out of the archive, so the two tabs read as
   // one list in two sources rather than two designs.

@@ -71,15 +71,15 @@ export function LocalAgentLibrary({
   const emptyReason = list?.warning ?? null;
 
   return (
-    <div className="flex flex-col gap-2">
+    <div className="flex flex-col gap-3">
       <p className="text-xs text-text-tertiary">{t("agentHub.localDesc")}</p>
 
       {loadError && <Notice tone="error" message={loadError} />}
 
       {list === null && !loadError ? (
-        <div className="flex flex-col gap-2" aria-busy="true">
-          {Array.from({ length: 3 }, (_, i) => (
-            <div key={i} className="h-16 animate-pulse rounded-md border border-border-outer bg-panel-block" />
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2" aria-busy="true">
+          {Array.from({ length: 4 }, (_, i) => (
+            <div key={i} className="h-32 animate-pulse rounded-md border border-border-outer bg-panel-block" />
           ))}
         </div>
       ) : rows.length === 0 && !loadError ? (
@@ -87,24 +87,34 @@ export function LocalAgentLibrary({
           <p className="text-xs font-medium text-text-secondary">{t("agentHub.localEmpty")}</p>
           {emptyReason && <p className="max-w-md text-10 text-text-tertiary">{emptyReason}</p>}
         </div>
-      ) : (
-        rows.map((row) => (
-          <LocalAgentCard
-            key={row.path}
-            row={row}
-            busy={busyPath === row.path}
-            disabled={disabled}
-            disabledReason={disabledReason}
-            onInstall={() => onInstall(row)}
-            onMore={(e) => onInstallAnother(row, e)}
-          />
-        ))
+      ) : null}
+
+      {/* Same container as the Hub tab (`grid-cols-1 lg:grid-cols-2`): one agent
+          per cell, two per row once the dialog is wide enough. The two tabs show
+          the same kind of card, so they must pack the same way — and the pending
+          picked-file card is a card too, whether or not the library has rows
+          (REQ-025 works on an empty library). */}
+      {(rows.length > 0 || pending) && (
+        <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+          {rows.map((row) => (
+            <LocalAgentCard
+              key={row.path}
+              row={row}
+              busy={busyPath === row.path}
+              disabled={disabled}
+              disabledReason={disabledReason}
+              onInstall={() => onInstall(row)}
+              onMore={(e) => onInstallAnother(row, e)}
+            />
+          ))}
+          {pending}
+        </div>
       )}
 
-      {pending}
-
       {/* REQ-025: the trailing row is always present — it is the only way back
-          to "I have a file on disk", including when the library is empty. */}
+          to "I have a file on disk", including when the library is empty. It is
+          not a grid cell: it is an action, not one of the agents, so it stays a
+          full-width row under the two-column grid. */}
       <button
         type="button"
         onClick={onAddFile}
