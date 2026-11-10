@@ -126,8 +126,13 @@ function InlineTooltip({
   }, []);
 
   return (
+    // `min-w-0 max-w-full`: this wrapper is a flex item of the trigger's
+    // flex root, and a flex item's `min-width:auto` resolves to its content
+    // width — so without this the trigger keeps its full intrinsic width and
+    // overflows onto whatever sits next to it. The tooltip bubble itself is
+    // `position:absolute`, so constraining this box never clips it.
     <div
-      className="relative inline-flex"
+      className="relative inline-flex min-w-0 max-w-full"
       onMouseEnter={handleEnter}
       onMouseLeave={handleLeave}
     >
@@ -255,9 +260,13 @@ function PortalTooltip({
   }, []);
 
   return (
+    // Same reasoning as InlineTooltip: as a flex item this box's
+    // `min-width:auto` would keep the trigger at its content width and let
+    // it overlap its neighbours. The bubble is portalled to body, so
+    // constraining this box never clips it.
     <div
       ref={triggerRef}
-      className="relative inline-flex"
+      className="relative inline-flex min-w-0 max-w-full"
       onMouseEnter={handleEnter}
       onMouseLeave={handleLeave}
     >

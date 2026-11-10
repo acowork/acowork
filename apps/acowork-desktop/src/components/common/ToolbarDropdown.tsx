@@ -67,10 +67,17 @@ export function ToolbarDropdownTrigger({
     disabled?: boolean;
 }) {
     return (
+        // `flex` (not `inline-block`): as a flex item the root's
+        // `min-width:auto` would still resolve to the content width, so the
+        // label could never shrink and the trigger would overlap whatever
+        // sits next to it (the workspace panel's three action buttons).
+        // `flex` + `min-w-0` lets the row squeeze the trigger, and the
+        // inner `min-w-0` wrapper propagates that squeeze through the
+        // Tooltip's `inline-flex` box down to the truncating label.
         <div
             ref={wrapperRef}
             data-toolbar-btn={btnId}
-            className="relative inline-block min-w-0"
+            className="relative flex min-w-0"
         >
             <Tooltip content={tooltip ?? label} tipClass={tipClass}>
                 <button
@@ -80,7 +87,7 @@ export function ToolbarDropdownTrigger({
                     aria-disabled={disabled || undefined}
                     className={cn(
                         toolbarButton,
-                        "min-w-0",
+                        "min-w-0 max-w-full",
                         open && "bg-zinc-200 dark:bg-zinc-700 text-text ",
                         buttonClassName,
                     )}
