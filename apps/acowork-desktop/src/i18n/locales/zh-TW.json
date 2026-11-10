@@ -1127,7 +1127,8 @@
     "navForward": "前進",
     "navRefresh": "重新整理",
     "iframeBlockedHint": "此網站不支援在應用程式內預覽",
-    "htmlPreviewTsModuleWarning": "偵測到 TypeScript/TSX 模組入口。靜態 Preview 可以載入檔案，但不能編譯 TS/TSX。對於 Vite/React 專案，請執行 dev server 後開啟 localhost URL 預覽。"
+    "htmlPreviewFailed": "無法開啟此頁面",
+    "htmlPreviewRetry": "重試"
   },
   "fileStatus": {
     "languageFallback": "純文字",

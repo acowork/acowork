@@ -1346,7 +1346,8 @@
     "navForward": "前进",
     "navRefresh": "刷新",
     "iframeBlockedHint": "此网站不支持在应用内预览",
-    "htmlPreviewTsModuleWarning": "检测到 TypeScript/TSX 模块入口。静态 Preview 可以加载文件，但不能编译 TS/TSX。对于 Vite/React 项目，请运行 dev server 后打开 localhost URL 预览。"
+    "htmlPreviewFailed": "无法打开此页面",
+    "htmlPreviewRetry": "重试"
   },
   "fileStatus": {
     "languageFallback": "纯文本",
