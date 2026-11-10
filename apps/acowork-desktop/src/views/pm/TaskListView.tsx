@@ -40,6 +40,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { showToast } from "../../components/common/ToastProvider";
+import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { TaskFieldPicker } from "./TaskFieldPicker";
 import { PmPopover, PmPopoverItem, PmPopoverSection } from "./pmPopover";
 import { PmColumnResizer } from "./PmColumnResizer";
@@ -356,6 +357,13 @@ export function TaskListView({
    * 把服务端那一行**合并**回原行 —— `PATCH /tasks/:tid` 返回的是 `Task`，
    * 不含派生字段（`is_blocked` / `depth` / `parent_id`），整体替换会拆掉
    * 父子树，所以这里必须是 `{ ...prev, ...updated }`。
+   *
+   * 失败语义：一批 N 条就是 N 个独立请求，任何一条都不能改变其余条的结局，
+   * 所以这里逐条记账（`applied` / `failed`），最后只报真实数字。之前的写法
+   * 有两个洞 —— 状态分支丢掉 `moveTask` 的布尔返回值（它失败时已回滚并自己
+   * 弹错误，但循环照跑，结尾仍报"已更新 N 个任务"），异常分支直接 `return`
+   * （前面已经改掉的行留在库里，用户看到的是一次"失败"而无从知道改了几条）。
+   * 失败的那批保留选中态，原地重试即可，不必重新筛。
    */
   const applyBulk = useCallback(
     async (patch: {
@@ -366,12 +374,18 @@ export function TaskListView({
       close();
       const ids = [...selected];
       if (!ids.length) return;
+      let applied = 0;
+      const failed: string[] = [];
       for (const id of ids) {
         if (patch.status) {
-          await moveTask(id, patch.status);
+          // 必须接住返回值：`moveTask` 失败时回滚本地并返回 false。
+          if (await moveTask(id, patch.status)) applied += 1;
+          else failed.push(id);
           continue;
         }
         const prev = byId.get(id);
+        // 行已经被别处删掉：既没改成，也不该留在选中态里（否则批量条上挂着
+        // 一个不存在 id 的"已选 1 项"）。它不计入 applied，也不计入 failed。
         if (!prev) continue;
         try {
           const updated = await updateTask(id, {
@@ -379,18 +393,21 @@ export function TaskListView({
             assignee: patch.assignee,
           });
           upsertTask({ ...prev, ...updated });
-        } catch (e) {
-          showToast({
-            type: "error",
-            message: t("pm.list.bulkFailed", {
-              error: e instanceof Error ? e.message : String(e),
-            }),
-          });
-          return;
+          applied += 1;
+        } catch {
+          failed.push(id);
         }
       }
-      setSelected(new Set());
-      showToast({ type: "success", message: t("pm.list.bulkDone", { count: ids.length }) });
+      if (!failed.length) {
+        setSelected(new Set());
+        showToast({ type: "success", message: t("pm.list.bulkDone", { count: applied }) });
+        return;
+      }
+      setSelected(new Set(failed));
+      showToast({
+        type: "warning",
+        message: t("pm.list.bulkPartial", { applied, failed: failed.length }),
+      });
     },
     [selected, byId, close, moveTask, t, upsertTask],
   );
@@ -469,7 +486,13 @@ export function TaskListView({
         onClearFilters={() => setFilters(EMPTY_PM_LIST_FILTERS)}
       />
 
-      <div className="min-h-0 flex-1 overflow-auto">
+      {/* 表格的滚动视口。这里必须是 app 唯一的那根滚动条（`OverlayScrollbar`），
+          不能是裸 `overflow-auto`：`overlayScrollCoverage.test.ts` 会扫全仓，
+          裸滚动容器在主题化表面里会露出系统滚动条（Chromium 121+ 之后
+          `::-webkit-scrollbar` 那套皮肤在标准属性非 auto 时整族失效）。
+          `showXThumb` + `overflow-x-auto`：列多时要横向滚动，而视口默认是
+          `overflow-x-hidden`，横向那根只能显式要。 */}
+      <OverlayScrollbar fill="flex" showXThumb className="overflow-x-auto">
         <table
           className="w-full border-separate border-spacing-0 text-11"
           style={{
@@ -509,20 +532,28 @@ export function TaskListView({
                 <th
                   key={c.key}
                   data-column={c.key}
-                  className={cn(
-                    TH_BASE_CN,
-                    "group/th cursor-pointer",
-                    c.align === "right" && "text-right",
-                  )}
-                  onClick={() => handleSort(c.key)}
+                  aria-sort={
+                    sort.key === c.key && sort.dir !== 0
+                      ? sort.dir === 1
+                        ? "ascending"
+                        : "descending"
+                      : "none"
+                  }
+                  className={cn(TH_BASE_CN, "group/th", c.align === "right" && "text-right")}
                   title={t("pm.list.sortHint")}
                 >
+                  {/* 排序挂在内容层，**不是** `<th>` 上：列宽手柄也是 `<th>` 的
+                      直接子元素，浏览器把 `click` 派发在 mousedown / mouseup
+                      两个目标的共同祖先上 —— 手柄拖几百像素在同列内松手，共同
+                      祖先就是这个 `<th>`，`mousedown` 的 `preventDefault()` 又
+                      抑制不了 `click`，于是每次调列宽都顺带改一次排序。 */}
                   <span
                     className={cn(
-                      "flex items-center gap-1",
+                      "flex cursor-pointer select-none items-center gap-1",
                       c.align === "right" ? "justify-end" : "justify-start",
                       sort.key === c.key && "text-text",
                     )}
+                    onClick={() => handleSort(c.key)}
                   >
                     <span className="min-w-0 truncate">{t(c.labelKey)}</span>
                     {sort.key === c.key && sort.dir !== 0 && (
@@ -649,7 +680,7 @@ export function TaskListView({
             </tr>
           </tbody>
         </table>
-      </div>
+      </OverlayScrollbar>
 
       <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-border-divider px-3 py-1 text-10 text-text-tertiary">
         <span>{t("pm.list.shownCount", { shown: rows.length, total: tasks.length })}</span>
@@ -797,7 +828,10 @@ export function TaskListView({
           return (
             <PmPopover anchor={open.anchor} onClose={close} width={210}>
               <PmPopoverSection>{t(`pm.list.col.${field}`)}</PmPopoverSection>
-              <div className="max-h-64 overflow-y-auto">
+              {/* 长列表（状态/优先级/负责人可选项很多时）要有界滚动，且必须走
+                  那根公共滚动条 —— 裸 `max-h-* overflow-y-auto` 会被
+                  `overlayScrollCoverage` 判成未绑定容器。 */}
+              <OverlayScrollbar maxHeight={256}>
                 {options.map((o) => (
                   <PmPopoverItem
                     key={o.value}
@@ -825,7 +859,7 @@ export function TaskListView({
                     {o.label}
                   </PmPopoverItem>
                 ))}
-              </div>
+              </OverlayScrollbar>
             </PmPopover>
           );
         })()}

@@ -23,7 +23,7 @@
 
 import {
   useCallback,
-  useEffect,
+  useMemo,
   useState,
   type Dispatch,
   type SetStateAction,
@@ -49,6 +49,14 @@ import { KanbanBoard } from "./KanbanBoard";
 import { TaskListView } from "./TaskListView";
 import type { PmProject } from "../../lib/pm-types";
 
+/**
+ * 一条乐观写出去的项目偏好：值 + 它属于哪个项目。
+ *
+ * 带项目身份是为了切项目时当场作废（见组件内注释）。`writePref` 撤销镜像时
+ * 比较的是这个对象的引用，所以同一次写入只能构造一次。
+ */
+type PrefMirror<T> = { projectId: string; value: T } | null;
+
 interface ProjectBoardProps {
   project: PmProject | null;
   loading?: boolean;
@@ -73,20 +81,34 @@ export function ProjectBoard({
   const newTask = onNewTask ?? (() => {});
 
   // 服务端真值（metadata）+ 本地乐观镜像。镜像优先，直到 metadata 追上或写失败。
-  const [pendingView, setPendingView] = useState<PmViewMode | null>(null);
-  const [pendingColumns, setPendingColumns] = useState<PmListColumnKey[] | null>(null);
-  const [pendingPageSize, setPendingPageSize] = useState<number | null>(null);
+  //
+  // 镜像必须带项目身份：清镜像的 `useEffect` 要等 commit+paint 之后才跑，
+  // 从 A 切到 B 的那一帧会用 A 的偏好去渲染 B（列表/看板白闪一下，还白挂载
+  // 一次错的视图）。带 id 比较是同步的，切项目当场生效。
+  const [pendingView, setPendingView] = useState<PrefMirror<PmViewMode>>(null);
+  const [pendingColumns, setPendingColumns] = useState<PrefMirror<PmListColumnKey[]>>(null);
+  const [pendingPageSize, setPendingPageSize] = useState<PrefMirror<number>>(null);
 
-  const view = pendingView ?? parsePmView(project?.metadata);
-  const columns = pendingColumns ?? parsePmListColumns(project?.metadata);
-  const pageSize = pendingPageSize ?? parsePmListPageSize(project?.metadata);
+  const projectId = project?.id;
+  // 列配置每次解析都会产生新数组身份，不 memo 的话 `TaskListView` 里所有
+  // 依赖 `columns` 的 memo 每帧重算、memo 化子组件跟着重渲染。
+  const persistedColumns = useMemo(
+    () => parsePmListColumns(project?.metadata),
+    [project?.metadata],
+  );
 
-  // 换项目：本地镜像作废，视图配置跟着新项目的 metadata 走。
-  useEffect(() => {
-    setPendingView(null);
-    setPendingColumns(null);
-    setPendingPageSize(null);
-  }, [project?.id]);
+  const view =
+    pendingView && pendingView.projectId === projectId
+      ? pendingView.value
+      : parsePmView(project?.metadata);
+  const columns =
+    pendingColumns && pendingColumns.projectId === projectId
+      ? pendingColumns.value
+      : persistedColumns;
+  const pageSize =
+    pendingPageSize && pendingPageSize.projectId === projectId
+      ? pendingPageSize.value
+      : parsePmListPageSize(project?.metadata);
 
   /**
    * 乐观写项目偏好的公共通道（视图 / 显示列 / 每页行数三处共用）。
@@ -94,42 +116,46 @@ export function ProjectBoard({
    * 合并语义不在这里：`merge` 必须是 `lib/pm-view-settings` 的 `with*` 函数，
    * 否则 metadata 的兄弟字段（图标、`boardPageSize`…）会被整体覆盖清掉。
    * 本函数只管三件事：先立镜像、发一次 PATCH、按身份撤销自己那一次镜像。
+   *
+   * 失败文案是**调用点传进来的字面量 `t(...)`**，不是键名：`check-i18n` 是静态
+   * 扫描，`t(variable)` 落在它的视野之外，键写错要等到运行时才炸。
    */
   const writePref = useCallback(
     async <T,>(
       next: T,
-      mirror: Dispatch<SetStateAction<T | null>>,
+      mirror: Dispatch<SetStateAction<PrefMirror<T>>>,
       merge: (metadata: Record<string, unknown> | null | undefined, value: T) => Record<string, unknown>,
-      failedKey: string,
+      failedMessage: string,
     ) => {
       if (!project) return;
-      mirror(next);
+      const stamped: { projectId: string; value: T } = { projectId: project.id, value: next };
+      mirror(stamped);
       const ok = await updateProjectMeta(project.id, { metadata: merge(project.metadata, next) });
       // 只撤销"自己那一次"：连点两下时先返回的请求不能把后一次的切换抹掉。
-      mirror((cur) => (cur === next ? null : cur));
-      if (!ok) showToast({ type: "error", message: t(failedKey) });
+      mirror((cur) => (cur === stamped ? null : cur));
+      if (!ok) showToast({ type: "error", message: failedMessage });
     },
-    [project, updateProjectMeta, t],
+    [project, updateProjectMeta],
   );
 
   const changeView = useCallback(
     async (next: PmViewMode) => {
       if (next === view) return;
-      await writePref(next, setPendingView, withPmView, "pm.view.saveFailed");
+      await writePref(next, setPendingView, withPmView, t("pm.view.saveFailed"));
     },
-    [view, writePref],
+    [view, writePref, t],
   );
 
   const changeColumns = useCallback(
     (next: PmListColumnKey[]) =>
-      writePref(next, setPendingColumns, withPmListColumns, "pm.list.columnsSaveFailed"),
-    [writePref],
+      writePref(next, setPendingColumns, withPmListColumns, t("pm.list.columnsSaveFailed")),
+    [writePref, t],
   );
 
   const changePageSize = useCallback(
     (next: number) =>
-      writePref(next, setPendingPageSize, withPmListPageSize, "pm.list.pageSizeSaveFailed"),
-    [writePref],
+      writePref(next, setPendingPageSize, withPmListPageSize, t("pm.list.pageSizeSaveFailed")),
+    [writePref, t],
   );
 
   // 未选中项目 → 空提示

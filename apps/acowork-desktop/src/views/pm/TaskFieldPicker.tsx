@@ -18,6 +18,7 @@
 
 import { useMemo, useState } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
+import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { PmPopover, PmPopoverItem, PmPopoverSection } from "./pmPopover";
 import {
   PM_LIST_COLUMNS,
@@ -87,68 +88,72 @@ export function TaskFieldPicker({
         />
       </div>
 
-      <PmPopoverSection count={shown.length}>
-        {t("pm.list.fields.shown")}
-      </PmPopoverSection>
-      {shown.length === 0 && (
-        <p className="px-3 py-1 text-10 text-text-tertiary">{t("pm.list.noMatch")}</p>
-      )}
-      {shown.map((key, index) => {
-        const col = pmListColumn(key);
-        if (!col) return null;
-        return (
-          <div key={key} className="flex items-center">
-            <div className="min-w-0 flex-1">
-              <PmPopoverItem
-                checked
-                onClick={() => toggle(key)}
-                disabled={col.required}
-                title={col.required ? t("pm.list.fields.titleLocked") : undefined}
-              >
-                {t(col.labelKey)}
-              </PmPopoverItem>
+      {/* 两段字段列表整体可滚动：20 个可选字段全展开时面板比视口还高，没有
+          滚动就把「重置 / 完成」顶出屏幕。上限用视口比例，窄屏也不会溢出。 */}
+      <OverlayScrollbar maxHeight="min(50vh, 360px)">
+        <PmPopoverSection count={shown.length}>
+          {t("pm.list.fields.shown")}
+        </PmPopoverSection>
+        {shown.length === 0 && (
+          <p className="px-3 py-1 text-10 text-text-tertiary">{t("pm.list.noMatch")}</p>
+        )}
+        {shown.map((key, index) => {
+          const col = pmListColumn(key);
+          if (!col) return null;
+          return (
+            <div key={key} className="flex items-center">
+              <div className="min-w-0 flex-1">
+                <PmPopoverItem
+                  checked
+                  onClick={() => toggle(key)}
+                  disabled={col.required}
+                  title={col.required ? t("pm.list.fields.titleLocked") : undefined}
+                >
+                  {t(col.labelKey)}
+                </PmPopoverItem>
+              </div>
+              <div className="flex shrink-0 items-center pr-2">
+                <button
+                  type="button"
+                  onClick={() => move(key, -1)}
+                  disabled={col.required || index <= 1 || index === 0}
+                  title={t("pm.list.fields.moveUp")}
+                  aria-label={t("pm.list.fields.moveUp")}
+                  className="rounded px-1 text-10 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+                >
+                  ▲
+                </button>
+                <button
+                  type="button"
+                  onClick={() => move(key, 1)}
+                  disabled={col.required || index === shown.length - 1}
+                  title={t("pm.list.fields.moveDown")}
+                  aria-label={t("pm.list.fields.moveDown")}
+                  className="rounded px-1 text-10 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+                >
+                  ▼
+                </button>
+              </div>
             </div>
-            <div className="flex shrink-0 items-center pr-2">
-              <button
-                type="button"
-                onClick={() => move(key, -1)}
-                disabled={col.required || index <= 1 || index === 0}
-                title={t("pm.list.fields.moveUp")}
-                aria-label={t("pm.list.fields.moveUp")}
-                className="rounded px-1 text-10 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
-              >
-                ▲
-              </button>
-              <button
-                type="button"
-                onClick={() => move(key, 1)}
-                disabled={col.required || index === shown.length - 1}
-                title={t("pm.list.fields.moveDown")}
-                aria-label={t("pm.list.fields.moveDown")}
-                className="rounded px-1 text-10 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
-              >
-                ▼
-              </button>
-            </div>
-          </div>
-        );
-      })}
+          );
+        })}
 
-      <PmPopoverSection count={addable.length}>
-        {t("pm.list.fields.addable")}
-      </PmPopoverSection>
-      {addable.length === 0 && (
-        <p className="px-3 py-1 text-10 text-text-tertiary">{t("pm.list.noMatch")}</p>
-      )}
-      {addable.map((key) => {
-        const col = pmListColumn(key);
-        if (!col) return null;
-        return (
-          <PmPopoverItem key={key} onClick={() => toggle(key)}>
-            {t(col.labelKey)}
-          </PmPopoverItem>
-        );
-      })}
+        <PmPopoverSection count={addable.length}>
+          {t("pm.list.fields.addable")}
+        </PmPopoverSection>
+        {addable.length === 0 && (
+          <p className="px-3 py-1 text-10 text-text-tertiary">{t("pm.list.noMatch")}</p>
+        )}
+        {addable.map((key) => {
+          const col = pmListColumn(key);
+          if (!col) return null;
+          return (
+            <PmPopoverItem key={key} onClick={() => toggle(key)}>
+              {t(col.labelKey)}
+            </PmPopoverItem>
+          );
+        })}
+      </OverlayScrollbar>
 
       <div className="mt-1 flex items-center justify-between border-t border-border-divider px-2 py-1.5">
         <button

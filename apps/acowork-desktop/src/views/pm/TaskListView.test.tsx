@@ -12,8 +12,9 @@
  * `el.disabled`、`queryByText(...) === null`。
  */
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { TaskListView } from "./TaskListView";
+import { showToast } from "../../components/common/ToastProvider";
 import { createTask } from "../../lib/pm-api";
 import { DEFAULT_PM_LIST_COLUMNS } from "../../lib/pm-list-columns";
 import type { PmProject, PmTaskResponse, TaskStatus } from "../../lib/pm-types";
@@ -140,6 +141,9 @@ beforeEach(() => {
   state.tasks = [];
   state.loading = false;
   state.healthy = true;
+  // 批量用例会把 moveTask 换成带成败编排的实现；每个用例都从默认桩重新开始，
+  // 否则实现会漏给后面的用例（`clearAllMocks` 只清调用记录，不清实现）。
+  state.moveTask = vi.fn();
   vi.clearAllMocks();
 });
 
@@ -308,5 +312,105 @@ describe("offline", () => {
     ) as HTMLSelectElement;
     expect(select.disabled).toBe(false);
     expect(input(container, "pm.list.searchPlaceholder").disabled).toBe(false);
+  });
+});
+
+describe("column header: sort vs resize", () => {
+  /** 拖宽手柄后浏览器会补一个 `click`，派发点在 mousedown/mouseup 的共同祖先。 */
+  const dragThenClickHeader = (container: HTMLElement, column: string) => {
+    const th = container.querySelector(`[data-column="${column}"]`) as HTMLElement;
+    const handle = container.querySelector(`[data-resize-column="${column}"]`) as HTMLElement;
+    fireEvent.mouseDown(handle, { clientX: 100 });
+    fireEvent.mouseMove(document, { clientX: 160 });
+    fireEvent.mouseUp(document, { clientX: 160 });
+    fireEvent.click(th);
+    return th;
+  };
+
+  it("does not sort when a column width drag ends inside the header", () => {
+    state.tasks = [task("t-1"), task("t-2"), task("t-3")];
+    const { container } = view();
+    const th = dragThenClickHeader(container, "status");
+    // 调列宽只是调列宽：排序状态必须还是 none（曾经会顺带排一次序）。
+    expect(th.getAttribute("aria-sort")).toBe("none");
+  });
+
+  it("sorts when the header label itself is clicked", () => {
+    state.tasks = [task("t-1"), task("t-2"), task("t-3")];
+    const { container } = view();
+    const th = container.querySelector(`[data-column="status"]`) as HTMLElement;
+    fireEvent.click(within(th).getByText("pm.list.col.status"));
+    expect(th.getAttribute("aria-sort")).toBe("ascending");
+    fireEvent.click(within(th).getByText("pm.list.col.status"));
+    expect(th.getAttribute("aria-sort")).toBe("descending");
+  });
+});
+
+describe("bulk edit failure accounting", () => {
+  /** 勾选全部 → 批量条 → 状态 → done。 */
+  async function bulkStatus(container: HTMLElement) {
+    fireEvent.click(input(container, "pm.list.selectAll"));
+    const bar = container.querySelector('[aria-label="pm.list.bulkTitle"]') as HTMLElement;
+    fireEvent.click(within(bar).getByText("pm.list.col.status"));
+    fireEvent.click(await screen.findByText("pm.board.done"));
+    await act(async () => {});
+  }
+
+  it("reports partial failure truthfully and keeps the failed rows selected", async () => {
+    state.tasks = [task("t-1"), task("t-2"), task("t-3")];
+    // 第二条改状态失败：moveTask 自己回滚并返回 false。
+    state.moveTask = vi.fn(async (id: string) => id !== "t-2");
+    const { container } = view();
+    await bulkStatus(container);
+
+    expect(showToast).toHaveBeenCalledWith({
+      type: "warning",
+      message: "pm.list.bulkPartial",
+    });
+    // 关键：不能再出现那条谎报的"已更新 3 个任务"。
+    expect(showToast.mock.calls.some((c) => (c[0] as { type: string }).type === "success")).toBe(
+      false,
+    );
+    const boxes = [...container.querySelectorAll('input[aria-label="pm.list.selectRow"]')] as (
+      | HTMLInputElement
+      | null
+    )[];
+    expect(boxes.map((b) => b?.checked)).toEqual([false, true, false]);
+  });
+
+  it("reports success only when every row went through", async () => {
+    state.tasks = [task("t-1"), task("t-2")];
+    state.moveTask = vi.fn(async () => true);
+    const { container } = view();
+    await bulkStatus(container);
+
+    expect(showToast).toHaveBeenCalledWith({
+      type: "success",
+      message: "pm.list.bulkDone",
+    });
+    expect(input(container, "pm.list.selectAll").checked).toBe(false);
+  });
+});
+
+describe("anchored popover dismissal", () => {
+  const openColumnMenu = (container: HTMLElement) => {
+    fireEvent.click(button(container, "pm.list.columnMenu")!);
+    return screen.queryByText("pm.list.sortAsc");
+  };
+
+  it("closes on Escape", () => {
+    state.tasks = [task("t-1")];
+    const { container } = view();
+    expect(openColumnMenu(container)).toBeTruthy();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByText("pm.list.sortAsc")).toBeNull();
+  });
+
+  it("closes on a mousedown outside the panel and the anchor", () => {
+    state.tasks = [task("t-1")];
+    const { container } = view();
+    expect(openColumnMenu(container)).toBeTruthy();
+    fireEvent.mouseDown(document.body);
+    expect(screen.queryByText("pm.list.sortAsc")).toBeNull();
   });
 });

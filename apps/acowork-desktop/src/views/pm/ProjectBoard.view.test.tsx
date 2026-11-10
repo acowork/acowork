@@ -70,9 +70,9 @@ vi.mock("./TaskListView", () => ({
   },
 }));
 
-function project(metadata: Record<string, unknown> | null): PmProject {
+function project(metadata: Record<string, unknown> | null, id = "p-1"): PmProject {
   return {
-    id: "p-1",
+    id,
     title: "Demo",
     description: "",
     status: "active",
@@ -168,6 +168,25 @@ describe("view switch", () => {
     render(<ProjectBoard project={project({ pmView: "list" })} />);
     fireEvent.click(screen.getByText("pm.view.list"));
     expect(state.updateProjectMeta).not.toHaveBeenCalled();
+  });
+
+  it("drops the in-flight mirror when the project changes", async () => {
+    // A 的切换请求还在飞，用户已经点到 B：B 从没选过视图，那一帧就必须是看板。
+    // 镜像曾经不带项目身份（靠 useEffect 事后清），这一用例会看到 A 的列表。
+    let resolveWrite: (ok: boolean) => void = () => {};
+    state.updateProjectMeta = vi.fn().mockReturnValue(new Promise<boolean>((r) => (resolveWrite = r)));
+    const { rerender } = render(<ProjectBoard project={project(null, "p-a")} />);
+    fireEvent.click(screen.getByText("pm.view.list"));
+    expect(screen.getByTestId("list")).toBeTruthy();
+
+    rerender(<ProjectBoard project={project(null, "p-b")} />);
+    expect(screen.queryByTestId("list")).toBeNull();
+    expect(screen.getByTestId("kanban")).toBeTruthy();
+
+    // 迟到回来的那次写入也不能把 B 翻成列表。
+    resolveWrite(true);
+    await waitFor(() => expect(screen.getByTestId("kanban")).toBeTruthy());
+    expect(screen.queryByTestId("list")).toBeNull();
   });
 });
 
