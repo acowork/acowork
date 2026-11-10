@@ -609,6 +609,20 @@ describe("local agent library (REQ-021..032)", () => {
     expect((hubCards[0].parentElement as HTMLElement).className).toBe(localGrid.className);
   });
 
+  // REQ-025 amended: the add entry is the first cell of the grid. Pinned by
+  // position, because the whole point is that it does not drift to the end of a
+  // list that keeps growing.
+  it("puts the add entry in the first cell, ahead of every agent", async () => {
+    mockLibrary([LOCAL_ROW, LOCAL_ROW_V2]);
+    renderOpen();
+
+    const firstCard = (await screen.findAllByRole("article"))[0];
+    const grid = firstCard.parentElement as HTMLElement;
+    const addEntry = screen.getByRole("button", { name: /agentHub.localAddFile/ });
+    expect(addEntry.parentElement).toBe(grid);
+    expect(grid.firstElementChild).toBe(addEntry);
+  });
+
   // REQ-025 on an empty library: the picked file still has a card, inside the
   // same grid — the pending row must not depend on there being library rows.
   it("shows the pending picked file even when the library is empty", async () => {
