@@ -74,7 +74,7 @@ import { DeliveryAlertLine } from "./DeliveryAlertLine";
 import {
   answerWithChoice,
   groupCardAddress,
-  mayAnswerCard,
+  isCardNotice,
   type CardAnswerHandler,
   type CardChoice,
 } from "../../lib/chatCardAnswer";
@@ -82,7 +82,7 @@ import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
 import { turnInflight, resolveExpectedResponders } from "../../lib/chatTurnInflight";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
-import type { TranscriptItem } from "./chatTranscriptGroups";
+import { cardAnswerFor, type TranscriptItem } from "./chatTranscriptGroups";
 import { useRevealPendingAsk } from "./useRevealPendingAsk";
 import { useTranscriptLayout } from "./useTranscriptLayout";
 import {
@@ -363,23 +363,21 @@ const GroupRowView = memo(function GroupRowView({
   }
 
   if (row.kind === "system_notice") {
-    // A notice is a fact about the channel, not an utterance, so it never wears
-    // an avatar. (A failed send is not one of these rows any more: it is a live
-    // alert rendered on the human's own row, see `DeliveryAlertLine`.)
-    const noticeType = row.meta?.notice_type;
-    // The card asks the person who spoke — `to` is them — so a viewer who is
-    // not that person gets the question without the answer (D10).
+    // A notice is a fact about the channel, not an utterance; the addressing
+    // card is the agent's own question and stands here as its own line.
+    // Whether the viewer may ANSWER was decided once, for every item shape, by
+    // `cardAnswerFor` at the render site (D10 — only the person the card asked).
+    // This branch only binds the row the answer belongs to, and states that the
+    // card stands here as its own line — so it owns the identity above it.
     const choose =
-      (noticeType === "session_choice" ||
-        noticeType === "confirm_continue") &&
-      onChooseCard &&
-      mayAnswerCard(row, me)
+      isCardNotice(row.meta?.notice_type) && onChooseCard
         ? (choice: CardChoice) => onChooseCard(row, choice)
         : undefined;
     return (
       <ChatNoticeEventRow
         row={row}
         className="px-4"
+        identity="own"
         onChoose={choose}
         authorName={nameOf(row.from).name}
       />
@@ -677,16 +675,10 @@ const GroupItemView = memo(function GroupItemView({
         onJumpToExec={rowProps.onJumpToExec}
         onReplyToRound={rowProps.onReplyToRound}
         onReferenceRun={rowProps.onReferenceRun}
-        // The router's question about this run is drawn at the block's tail, so
-        // the block needs the same answerer gate the standalone card row has:
-        // the person the card asked (`to`), not just anyone in the group (D10).
-        onChooseCard={
-          rowProps.onChooseCard &&
-          item.pendingAsk &&
-          mayAnswerCard(item.pendingAsk, rowProps.me)
-            ? rowProps.onChooseCard
-            : undefined
-        }
+        // The router's question about this run is drawn at the block's tail and
+        // answers through the same handler a standalone card row gets — the gate
+        // (the person the card asked, D10) already ran in `cardAnswerFor`.
+        onChooseCard={rowProps.onChooseCard}
         focusInput={
           !!focusBlockSessionId && item.execSessionId === focusBlockSessionId
         }
@@ -1856,7 +1848,9 @@ export function GroupChatPanel() {
                   }
                   readOnly={!canPost}
                   onMentionContextMenu={handleMentionContextMenu}
-                  onChooseCard={canPost ? answerCard : undefined}
+                  onChooseCard={
+                    canPost ? cardAnswerFor(item, me, answerCard) : undefined
+                  }
                   onLocateRef={handleLocateRef}
                   focusBlockSessionId={focusBlockSessionId ?? undefined}
                 />

@@ -17,11 +17,23 @@
  * own runs: empty-bodied, its options and its answered-ness arriving as the
  * service's projection (`row.delivery.question`, design 31 §6) so the surfaces
  * render that verbatim instead of reading `meta` and re-deriving whether the
- * question is still open. Because the author is the agent, the card wears the
- * agent's identity — the same avatar + name header, at the same 40px gutter, as
- * the execution block that replaces it once the human picks an option. The
- * exchange then reads as one continuous answer: the agent asked, the human
- * chose, the agent went to work, and only the card under the name changed.
+ * question is still open.
+ *
+ * IDENTITY BELONGS TO THE LINE, NOT TO THE CARD. The same question is drawn in
+ * two places, and only one of them is the agent's own line:
+ *  - a standalone transcript row (`identity="own"`): nothing above it names the
+ *    author, so the card wears the agent's avatar + name at the 40px gutter the
+ *    execution block uses — the answer then replaces the question under one
+ *    name, and the exchange reads as one continuous turn;
+ *  - the tail of the run it asks about (`identity="inherited"`): the block
+ *    already painted that avatar, that name and that gutter, so the card adds
+ *    none of them. It starts exactly where the block's content starts.
+ * Painting the header unconditionally is the 2026-11-06 defect: a card hung on a
+ * block arrived with a second face over the same question, its body 64px (px-4 +
+ * gap + the 40px gutter) to the right of the block's own content — neither a
+ * standalone card nor a block part. Which one it is, is the HOST's fact, so the
+ * host states it, and the prop has no default: a surface that has not decided
+ * where its card sits has not decided who speaks.
  *
  * Everything the runtime used to write as progress (dispatch / round-open
  * milestones, the router-fallback receipt, the card-resolution receipt) is gone
@@ -42,6 +54,7 @@ import { InteractionCardShell } from "./InteractionCardShell";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { RETIRED_NOTICES } from "../../lib/retiredNotices";
+import { isCardNotice } from "../../lib/chatCardAnswer";
 import { cn } from "../../lib/utils";
 import type { CardChooseHandler, CardChoice } from "../../lib/chatCardAnswer";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
@@ -72,7 +85,10 @@ function statusTone(status?: string | null): string {
 
 interface ChatNoticeEventRowProps {
   row: ChatMessageRow;
-  /** Surface column gutter so the line lines up with the stream. */
+  /** Surface column gutter, for a line that is not the card's own (a channel
+   *  receipt, `ChatEventText`'s centred line). On the CARD it composes AFTER the
+   *  identity's `px-4`, so a host that passes its own gutter wins (`cn` is a
+   *  tailwind merge) — `identity` sets the default, the host keeps the last word. */
   className?: string;
   /** Answering an addressing card. Absent means the row is not answerable here:
    *  a read-only viewer never gets the action (ADR-106 D10 — only the person who
@@ -86,12 +102,22 @@ interface ChatNoticeEventRowProps {
    *  precedence as `ChatExecutionBlock`: this first, the catalog second, the
    *  instance id last. */
   authorName?: string;
+  /** Who owns the identity over this card — the line it sits on, never the card
+   *  itself. `"own"`: it IS a transcript line (a standalone row), so it paints
+   *  the agent's avatar + name and the 40px gutter above the question.
+   *  `"inherited"`: it hangs at the tail of the run it asks about, whose block
+   *  already painted all three, so the card adds none and starts where the
+   *  block's content starts. Required, and deliberately so: a second identity
+   *  over one question ("one card, two faces") is the defect this states, and a
+   *  surface that has not decided where its card sits must not guess. */
+  identity: "own" | "inherited";
 }
 
 export function ChatNoticeEventRow({
   row,
   className,
   authorName,
+  identity,
   onChoose,
 }: ChatNoticeEventRowProps) {
   const { t } = useTranslation();
@@ -113,7 +139,7 @@ export function ChatNoticeEventRow({
   // chevron), and one quiet escape. The language is `AskQuestionCard`'s, so the
   // same question does not change costume between the chat surface and the
   // execution surface.
-  if (noticeType === "session_choice" || noticeType === "confirm_continue") {
+  if (isCardNotice(noticeType)) {
     const confirm = noticeType === "confirm_continue";
     const question = t(
       confirm ? "chatView.block.confirmSession" : "chatView.block.chooseSession",
@@ -202,140 +228,166 @@ export function ChatNoticeEventRow({
       );
     };
 
-    return (
-      <div className={cn("px-4 py-1", className)} data-testid="chat-card-options">
-        {/* The author's identity, at the same offsets `ChatExecutionBlock` paints
-            its header: the answer replaces the question under one name. */}
-        <div className="mb-2 mt-1 flex items-center gap-2">
-          <AgentAvatar
-            agentId={row.from}
-            displayName={displayName}
-            avatarUrl={author?.avatar ?? null}
-            version={author?.version}
-            builtinAvatarId={author?.builtin_avatar ?? null}
-            size={40}
-            className="shrink-0"
-          />
-          <div className="flex flex-col">
-            <span className="text-xs font-medium text-text-tertiary">{displayName}</span>
-            {author?.role && (
-              <span className="text-10 leading-tight text-text-tertiary">{author.role}</span>
-            )}
-          </div>
-        </div>
-        {/* The same 40px gutter the agent bubble and the execution block use, so
-            the question and the run that follows start on one line. */}
-        <div className="flex items-start gap-2">
-          <div className="w-10 shrink-0" />
-          <div className="flex min-w-0 flex-1 flex-col items-start">
-            {/* The shared card chrome — the same shell `AskQuestionCard`
-                wears, so a question does not change costume between
-                surfaces. The body is a full-width ruled list, so the card's
-                own surface replaces the default bubble fill. */}
-            <InteractionCardShell
-              icon={confirm ? CornerDownRight : ListTree}
-              title={question}
-              className="w-fit min-w-[18rem] max-w-[32rem]"
-              bodyClassName="bg-surface p-0"
-              headerRight={
-                onChoose ? (
-                  <span className="shrink-0 text-10 font-normal text-text-tertiary">
-                    {busy ? t("chatView.block.choosing") : t("chatView.block.unanswered")}
-                  </span>
-                ) : undefined
-              }
-            >
-              {/* One row per candidate. The whole row is the button: a bordered
-                  box holding two lines of text reads as a disabled field, not as
-                  something to press. */}
-              <div className="divide-y divide-border-divider">
-                {options.map((option) => {
-                  const label = labelOf(option);
-                  const why = option.why?.trim();
-                  const sending = isPendingOption(option.session_id);
-                  const row = (
-                    <>
-                      {sending ? (
-                        <Loader2 className="h-3 w-3 shrink-0 animate-spin text-text-tertiary" />
-                      ) : (
-                        <span
-                          className={cn(
-                            "h-1.5 w-1.5 shrink-0 rounded-full",
-                            statusTone(option.status),
-                          )}
-                          aria-hidden="true"
-                        />
-                      )}
-                      <span className="min-w-0 flex-1">
-                        <span className="block truncate text-11 font-medium text-text">
-                          {label}
-                        </span>
-                        {why && (
-                          <span className="block truncate text-10 text-text-tertiary">
-                            {why}
-                          </span>
-                        )}
-                      </span>
-                    </>
-                  );
-                  // A viewer who may not decide (ADR-106 D10) sees the options
-                  // but not a button: the question is a fact about the channel,
-                  // the click is the speaker's.
-                  if (!onChoose) {
-                    return (
-                      <div
-                        key={option.session_id}
-                        className="flex items-center gap-2 px-2.5 py-1.5"
-                        title={why ? `${label} — ${why}` : label}
-                      >
-                        {row}
-                      </div>
-                    );
-                  }
-                  return (
-                    <button
-                      key={option.session_id}
-                      type="button"
-                      disabled={busy}
-                      onClick={() => choose({ sessionId: option.session_id })}
-                      title={why ? `${label} — ${why}` : label}
-                      className="group flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-nav-item-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-accent)] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
-                    >
-                      {row}
-                      {!sending && (
-                        <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform group-hover:translate-x-0.5" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-              {/* D6's cheap escape, demoted to a footer action: "new task" is the
-                  way OUT of the suggestion, never a second candidate. */}
-              {card?.allow_new_task && onChoose && (
-                <div className="border-t border-border-divider bg-surface">
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => choose({ forceNew: true })}
-                    className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-text-secondary disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
-                  >
-                    {pending?.forceNew ? (
-                      <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
-                    ) : (
-                      <Plus className="h-3.5 w-3.5 shrink-0" />
+    // The shared card chrome — the same shell `AskQuestionCard` wears, so a
+    // question does not change costume between surfaces. The body is a
+    // full-width ruled list, so the card's own surface replaces the default
+    // bubble fill.
+    const cardBody = (
+      <InteractionCardShell
+        icon={confirm ? CornerDownRight : ListTree}
+        title={question}
+        className="w-fit min-w-[18rem] max-w-[32rem]"
+        bodyClassName="bg-surface p-0"
+        headerRight={
+          onChoose ? (
+            <span className="shrink-0 text-10 font-normal text-text-tertiary">
+              {busy ? t("chatView.block.choosing") : t("chatView.block.unanswered")}
+            </span>
+          ) : undefined
+        }
+      >
+        {/* One row per candidate. The whole row is the button: a bordered
+            box holding two lines of text reads as a disabled field, not as
+            something to press. */}
+        <div className="divide-y divide-border-divider">
+          {options.map((option) => {
+            const label = labelOf(option);
+            const why = option.why?.trim();
+            const sending = isPendingOption(option.session_id);
+            const row = (
+              <>
+                {sending ? (
+                  <Loader2 className="h-3 w-3 shrink-0 animate-spin text-text-tertiary" />
+                ) : (
+                  <span
+                    className={cn(
+                      "h-1.5 w-1.5 shrink-0 rounded-full",
+                      statusTone(option.status),
                     )}
-                    {t("chatView.block.newTask")}
-                  </button>
+                    aria-hidden="true"
+                  />
+                )}
+                <span className="min-w-0 flex-1">
+                  <span className="block truncate text-11 font-medium text-text">
+                    {label}
+                  </span>
+                  {why && (
+                    <span className="block truncate text-10 text-text-tertiary">
+                      {why}
+                    </span>
+                  )}
+                </span>
+              </>
+            );
+            // A viewer who may not decide (ADR-106 D10) sees the options
+            // but not a button: the question is a fact about the channel,
+            // the click is the speaker's.
+            if (!onChoose) {
+              return (
+                <div
+                  key={option.session_id}
+                  className="flex items-center gap-2 px-2.5 py-1.5"
+                  title={why ? `${label} — ${why}` : label}
+                >
+                  {row}
                 </div>
-              )}
-              {!onChoose && (
-                <div className="border-t border-border-divider px-2.5 py-1.5 text-10 text-text-tertiary">
-                  {t("chatView.block.answeredByOwner")}
-                </div>
-              )}
-            </InteractionCardShell>
-          </div>
+              );
+            }
+            return (
+              <button
+                key={option.session_id}
+                type="button"
+                disabled={busy}
+                onClick={() => choose({ sessionId: option.session_id })}
+                title={why ? `${label} — ${why}` : label}
+                className="group flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-nav-item-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-accent)] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+              >
+                {row}
+                {!sending && (
+                  <ChevronRight className="h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform group-hover:translate-x-0.5" />
+                )}
+              </button>
+            );
+          })}
         </div>
+        {/* D6's cheap escape, demoted to a footer action: "new task" is the
+            way OUT of the suggestion, never a second candidate. */}
+        {card?.allow_new_task && onChoose && (
+          <div className="border-t border-border-divider bg-surface">
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => choose({ forceNew: true })}
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-text-secondary disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+            >
+              {pending?.forceNew ? (
+                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />
+              ) : (
+                <Plus className="h-3.5 w-3.5 shrink-0" />
+              )}
+              {t("chatView.block.newTask")}
+            </button>
+          </div>
+        )}
+        {!onChoose && (
+          <div className="border-t border-border-divider px-2.5 py-1.5 text-10 text-text-tertiary">
+            {t("chatView.block.answeredByOwner")}
+          </div>
+        )}
+      </InteractionCardShell>
+    );
+
+    // The identity over a card belongs to whatever OWNS the line it sits on —
+    // the rule the file comment states. Standing in the transcript the card is
+    // the agent's own line, so it wears the agent's avatar, name and gutter.
+    // Hung at a run's tail it wears neither: the block above already said who
+    // is asking, and a second face over the same question is how one card ended
+    // up duplicated and inset into the middle of the block's own column.
+    return (
+      <div
+        className={cn("py-1", identity === "own" && "px-4", className)}
+        data-testid="chat-card-options"
+      >
+        {identity === "own" && (
+          <div
+            data-testid="chat-card-author"
+            className="mb-2 mt-1 flex items-center gap-2"
+          >
+            <AgentAvatar
+              agentId={row.from}
+              displayName={displayName}
+              avatarUrl={author?.avatar ?? null}
+              version={author?.version}
+              builtinAvatarId={author?.builtin_avatar ?? null}
+              size={40}
+              className="shrink-0"
+            />
+            <div className="flex flex-col">
+              <span className="text-xs font-medium text-text-tertiary">
+                {displayName}
+              </span>
+              {author?.role && (
+                <span className="text-10 leading-tight text-text-tertiary">
+                  {author.role}
+                </span>
+              )}
+            </div>
+          </div>
+        )}
+        {identity === "own" ? (
+          // The same 40px gutter the agent bubble and the execution block use,
+          // so the question and the run that follows start on one line.
+          <div className="flex items-start gap-2">
+            <div className="w-10 shrink-0" />
+            <div className="flex min-w-0 flex-1 flex-col items-start">
+              {cardBody}
+            </div>
+          </div>
+        ) : (
+          // In a block's column: the host owns the gutter, so the card starts
+          // exactly where the block's own content starts.
+          <div className="flex min-w-0 flex-col items-start">{cardBody}</div>
+        )}
       </div>
     );
   }

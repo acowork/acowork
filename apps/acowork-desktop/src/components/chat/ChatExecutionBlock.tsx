@@ -669,11 +669,16 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
           {/* The router's question about this run, drawn at the run's tail and
               outside the collapse: an unanswerable thing behind a fold is the
               one shape D8 forbids, and the human has to be able to answer it
-              from the block it belongs to. */}
+              from the block it belongs to.
+              `identity="inherited"`: the block's own header, right above, already
+              wears this agent's face and name at the 40px gutter, so the card
+              adds neither and starts where the rounds start. A second avatar
+              over one question is what made this card look misplaced. */}
           {pendingAsk && (
             <div className="mt-1">
               <ChatNoticeEventRow
                 row={pendingAsk}
+                identity="inherited"
                 onChoose={
                   canAnswer && onChooseCard
                     ? (choice: CardChoice) => onChooseCard(pendingAsk, choice)

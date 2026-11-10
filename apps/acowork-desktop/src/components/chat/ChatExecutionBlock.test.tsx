@@ -1064,6 +1064,42 @@ describe("ChatExecutionBlock action row", () => {
     expect(onChooseCard).toHaveBeenCalledWith(ask, { sessionId: "s1" });
   });
 
+  it("hangs the tail question under the block's own name — no second avatar", () => {
+    // The card is drawn INSIDE the block, one line under the header that already
+    // says who is asking. So it inherits that identity: no avatar, no name, and
+    // no 40px gutter of its own — the report was a card with a duplicated face,
+    // inset into the middle of the block's column instead of starting where the
+    // rounds start.
+    const ask: ChatMessageRow = {
+      seq: 9,
+      ts: 9,
+      from: "ag",
+      kind: "system_notice",
+      body: "",
+      to: "me",
+      meta: { message_id: "confirm_continue:u1", notice_type: "confirm_continue" },
+      delivery: {
+        answered: false,
+        question: {
+          answered: false,
+          options: [{ session_id: "s1", label: "fix pagination" }],
+          allow_new_task: true,
+        },
+      },
+    };
+    renderBlock(
+      { [REF1]: entryOf({}) },
+      { onChooseCard: vi.fn(), showHeader: true },
+      { ...blockOf([roundOf("r1", 3)]), pendingAsk: ask },
+    );
+    expect(document.querySelector('[data-testid="chat-card-author"]')).toBeNull();
+    const card = screen.getByTestId("chat-card-options");
+    expect(card.querySelector(".w-10")).toBeNull();
+    expect(card.className).not.toContain("px-4");
+    // The question itself is still there, and still answerable from here.
+    expect(screen.getByRole("button", { name: /fix pagination/ })).toBeTruthy();
+  });
+
   it("keeps the question visible while the block is collapsed", () => {
     // D8's rule in this chrome: a fold must not hide the thing waiting on the
     // human. The block collapses once the conversation moves past it, which is
