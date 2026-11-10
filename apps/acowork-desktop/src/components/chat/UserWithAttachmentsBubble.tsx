@@ -17,8 +17,8 @@ import {
   speakerRendersMarkdown,
   type SpeakerKind,
 } from "./speakerBubble";
+import { SpeakerBadge } from "./speakerNames";
 import { speakerDisclosure } from "./speakerProvenance";
-import { useTranslation } from "../../i18n/useTranslation";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import type { AttachedItem, ChatMessage } from "../../lib/types";
 import { useChatStore } from "../../stores/chatStore";
@@ -128,7 +128,6 @@ export function UserWithAttachmentsBubble({
   senderAgentId = null,
   senderAgentVersion = null,
 }: UserWithAttachmentsBubbleProps) {
-  const { t } = useTranslation();
   const removeMessageAttachment = useChatStore((s) => s.removeMessageAttachment);
 
   const handleChipRemove = useCallback(
@@ -165,6 +164,8 @@ export function UserWithAttachmentsBubble({
   // Plan D3: this row's voice, decided by the same pure rule as the plain user
   // bubble (`speakerProvenance.ts`) — the two paths must not disagree about who
   // spoke, and they must agree about staying silent on an ordinary turn.
+  // Whether this turn is voiced as somebody else — the badge says NAMES,
+  // not the ids the record carries (resolved in `speakerNames.ts`).
   const disclosure = speakerDisclosure(userMessage.speaker);
 
   const attachments = parts.filter(isAttachmentPart);
@@ -179,12 +180,10 @@ export function UserWithAttachmentsBubble({
           </span>
         )}
         {disclosure && (
-          <span className="mt-[2px] text-xs text-text-tertiary">
-            {t("chatPanel.speakerOnBehalfOf", {
-              author: disclosure.author,
-              target: disclosure.standsInFor,
-            })}
-          </span>
+          <SpeakerBadge
+            speaker={userMessage.speaker}
+            className="mt-[2px] text-xs text-text-tertiary"
+          />
         )}
 
         {/* Attachment chips — rendered above the text bubble */}
