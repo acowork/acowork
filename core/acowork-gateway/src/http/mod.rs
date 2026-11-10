@@ -48,4 +48,5 @@ pub mod services_api;
 pub mod settings_api;
 pub mod skills_api;
 pub mod vault_api;
+pub mod workspace_preview;
 pub mod workspaces;
