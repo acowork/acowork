@@ -162,6 +162,7 @@ vi.mock("./ChatExecutionBlock", () => ({
     showHeader?: boolean;
     onJumpToExec?: (agentInstanceId: string, execSid: string) => void;
     onReplyToRound?: (rowId: string, quote: string) => void;
+    onChooseCard?: (card: ChatMessageRow, choice: { sessionId?: string; forceNew?: boolean }) => unknown;
   }) => (
     <div
       data-testid="exec-block"
@@ -170,6 +171,14 @@ vi.mock("./ChatExecutionBlock", () => ({
       data-row={props.block.anchorRow.meta?.message_id}
       data-refs={props.block.rounds.map((r) => r.ref).join(",")}
       data-header={props.showHeader ? "yes" : "no"}
+      // The card the layout handed this block as its tail question (D6 level 5).
+      data-ask={props.block.pendingAsk?.seq ?? ""}
+      // Whether the surface handed the block an answer for the question it
+      // hangs at its tail. Echoed, not clicked: the card's own behaviour is
+      // pinned in ChatExecutionBlock.test.tsx / ChatNoticeEventRow.test.tsx —
+      // what this file owns is the WIRING, and a missing handler here is a card
+      // with no button at all.
+      data-choose={props.onChooseCard ? "yes" : "no"}
     >
       {props.block.rounds.map((r) => (
         <span key={r.ref} data-testid="block-question">
@@ -591,8 +600,10 @@ describe("AgentChatView event-log wiring", () => {
     expect(card.textContent).toContain("chatView.block.unanswered");
     const option = screen.getByRole("button", { name: /Fix the bug/ });
     expect(option.textContent).toContain("same task");
-    // Still chrome, never speech: a question about addressing is not the agent
-    // talking to the human, so it wears no identity.
+    // The identity above a standalone card is the ROW's author, never the
+    // Chat's peer: this row's `from` carries no catalog metadata in this
+    // fixture, so it paints the raw id — what it must not do is borrow the
+    // Chat agent's face and speak under a name that never asked.
     expect(screen.queryByText("Agent A")).toBeNull();
     // D6's cheap escape rides in the same card, as a footer action rather than a
     // second candidate of equal weight.
@@ -643,6 +654,30 @@ describe("AgentChatView event-log wiring", () => {
       targetSession: "exec-9",
       messageId: "u1",
     }, [AGENT]);
+  });
+
+  it("hands the run's tail question the same answer handler as a standalone card (D6/D10)", () => {
+    // The reported defect: the router asked "continue this task?" on a run, the
+    // card was drawn at the block's tail — and had no button at all. The block
+    // renders the card read-only unless it is handed `onChooseCard`, and this
+    // surface only ever built one for a standalone `row` item, so every
+    // block-hosted question was dead chrome. The gate is the CARD's (`to`), not
+    // the item's shape: a run item answers through the question hung on it.
+    windows = windowOf(
+      userRow(1, "继续刚才那个"),
+      roundRow(2),
+      notice(
+        3,
+        { notice_type: "confirm_continue" },
+        cardDelivery([{ session_id: "exec-9", label: "Fix the bug", status: "idle" }]),
+      ),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const block = screen.getByTestId("exec-block");
+    // The card folded into the block it asks about — not left standing as a row
+    // (the row path would reach the surface as its own `row` item instead).
+    expect(block.getAttribute("data-ask")).toBe("3");
+    expect(block.getAttribute("data-choose")).toBe("yes");
   });
 
   it("an answered card leaves the transcript to the round's block", () => {

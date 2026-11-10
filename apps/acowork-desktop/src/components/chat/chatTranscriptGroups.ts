@@ -34,6 +34,8 @@
  */
 
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
+import { isCardNotice, mayAnswerCard } from "../../lib/chatCardAnswer";
+import type { CardAnswerHandler } from "../../lib/chatCardAnswer";
 
 /** One round as the block sees it. */
 export interface RoundItem {
@@ -85,6 +87,30 @@ export interface PlainItem {
 }
 
 export type TranscriptItem = RunBlock | PlainItem;
+
+/**
+ * The answer a surface may hand the card a transcript item carries, or
+ * `undefined` when there is nothing this viewer may answer there.
+ *
+ * ONE gate for both chat surfaces (1:1 and group). The question can arrive in
+ * two shapes — a standalone row, or hung at the tail of the run it asks about
+ * (D6 level 5) — and the answer is the same re-delivery either way. Which shape
+ * an item is, is a layout fact; whether the card is answerable at all is the
+ * card's own vocabulary (`isCardNotice`) and `mayAnswerCard`'s (`to` names the
+ * person it asked). Keeping those gates at the call sites is how the 1:1 panel
+ * once ended up building a handler for rows only, which left every block-hosted
+ * question with no button at all.
+ */
+export function cardAnswerFor(
+  item: TranscriptItem,
+  me: string,
+  handler: CardAnswerHandler | undefined,
+): CardAnswerHandler | undefined {
+  if (!handler) return undefined;
+  const card = item.kind === "run" ? item.pendingAsk : item.row;
+  if (!card || !isCardNotice(card.meta?.notice_type)) return undefined;
+  return mayAnswerCard(card, me) ? handler : undefined;
+}
 
 export interface TranscriptLayout {
   items: TranscriptItem[];
