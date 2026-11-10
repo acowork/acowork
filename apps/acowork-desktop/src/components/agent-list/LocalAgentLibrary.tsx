@@ -141,7 +141,7 @@ function AddAgentCard({
       onClick={onClick}
       disabled={disabled}
       title={disabledReason}
-      className="flex h-full min-h-[7rem] flex-col items-center justify-center gap-1.5 rounded-md border border-dashed border-zinc-300 p-3 text-xs text-text-secondary transition-colors hover:border-[var(--color-accent)]/60 hover:text-text disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600"
+      className="flex h-full min-h-[7rem] flex-col items-center justify-center gap-1.5 rounded-md border border-dashed border-zinc-300 bg-panel-block p-3 text-xs text-text-secondary transition-colors hover:border-[var(--color-accent)]/60 hover:text-text disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600"
     >
       <Plus className="h-4 w-4" />
       {t("agentHub.localAddFile")}
