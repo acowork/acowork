@@ -647,7 +647,7 @@
     "targetThisComputer": "本机",
     "noOnlineNode": "没有在线节点",
     "nodeNotManageable": "你没有该节点的管理权限",
-    "localDesc": "这台机器上现成的 agent 文件。点「安装」即可添加，最后一行可选择其他地方的文件。",
+    "localDesc": "这台机器上现成的 agent 文件。点「安装」即可添加，或用「添加 agent 文件」从别处选择文件。",
     "localDropHint": "点击选择，或拖入 .agent 文件",
     "localPickFirst": "先选择 .agent 文件",
     "localAddFile": "添加 agent 文件",
