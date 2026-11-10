@@ -61,6 +61,85 @@ export const MIN_CHAT_WIDTH = 338;
  */
 export const CHROME_WIDTH = 100;
 
+/**
+ * ── The file pane's upper bound ────────────────────────────────────────────
+ *
+ * There is deliberately **no fixed pixel ceiling**. The file pane holds
+ * previews of things that were sized for a browser window — an `https://` page
+ * or a workspace `.html` in the address-bar browser (ADR-112) — and a hard cap
+ * makes those render narrower than the window can afford: content reflows into
+ * a phone-like column while 1000px of desktop sits unused. A 900px cap was
+ * exactly that bug.
+ *
+ * What must stay readable is only ChatPanel, so the bound is what remains once
+ * every other fixed part of the row has been paid for: `MIN_CHAT_WIDTH` is the
+ * entire budget of pressure the file pane may apply. Drag the pane wider than
+ * that and the ceiling stops it — not a number picked by hand.
+ *
+ * Keep every write path on this one function (initial state, first-open
+ * auto-size, window-resize scaling, drag, and the overflow ladder above): the
+ * cap used to be duplicated in four places with four slightly different
+ * formulas, which is how it drifted.
+ */
+export interface FileCeilingInput {
+  /** Live viewport width in CSS pixels. */
+  windowWidth: number;
+  sidebarWidth: number;
+  /**
+   * Width the right panel actually occupies. Pass 0 when it is not rendered —
+   * the caller owns that condition, same as for `fitPanesToViewport`.
+   */
+  rightWidth: number;
+}
+
+/** Widest the file pane may get: everything but ChatPanel's floor is spoken for. */
+export function filePaneCeiling({ windowWidth, sidebarWidth, rightWidth }: FileCeilingInput): number {
+  return Math.max(
+    windowWidth - CHROME_WIDTH - sidebarWidth - rightWidth - MIN_CHAT_WIDTH,
+    MIN_FILE_WIDTH,
+  );
+}
+
+/**
+ * Clamp a candidate file-pane width into `[MIN_FILE_WIDTH, ceiling]`.
+ *
+ * A non-finite candidate (a corrupt or absent `localStorage` value) collapses
+ * to the floor — callers that have a default should test for it first and use
+ * the default, because "200px" is a valid width but rarely the intended one.
+ */
+export function clampFileWidth(candidate: number, ceiling: number): number {
+  if (!Number.isFinite(candidate)) return MIN_FILE_WIDTH;
+  return Math.min(Math.max(Math.round(candidate), MIN_FILE_WIDTH), Math.max(ceiling, MIN_FILE_WIDTH));
+}
+
+export interface InitialFileWidthInput {
+  /** Width the user last dragged to, or null when nothing was recorded. */
+  storedWidth: number | null;
+  /** The row's budget — `filePaneCeiling` for the current window. */
+  ceiling: number;
+  /** What to use when there is no recorded width. */
+  fallbackWidth: number;
+}
+
+/**
+ * How wide to make the file pane when the surface is (re)built: on mount, and
+ * again on the first file opened after the last tab closed.
+ *
+ * Order of preference, and why it is not "whatever was stored":
+ *   - **A width the user dragged to wins.** It is the only recorded intent,
+ *     and with the fixed cap gone that intent spans hundreds of pixels, so
+ *     silently substituting the default is a visible loss.
+ *   - **Otherwise the caller's fallback** — 450 on mount, and half of the row
+ *     the pane shares with ChatPanel on a first open.
+ *
+ * Either way the row's ceiling applies last, so restoring a width from a wider
+ * window can never reach the overflow ladder's doorstep.
+ */
+export function initialFileWidth({ storedWidth, ceiling, fallbackWidth }: InitialFileWidthInput): number {
+  const wanted = storedWidth != null && Number.isFinite(storedWidth) ? storedWidth : fallbackWidth;
+  return clampFileWidth(wanted, ceiling);
+}
+
 export interface PaneFitInput {
   /** Live viewport width in CSS pixels. */
   windowWidth: number;
