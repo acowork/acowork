@@ -653,6 +653,11 @@ function ProvidersTab() {
                 </div>
               )}
 
+              {/* Hairline between functional areas — the whole dialog is a
+                  stack of unrelated forms (keys / endpoint / models), and the
+                  `space-y-2` gaps alone read as one continuous list. */}
+              {!isLocalProvider(showEditDialog) && <div className="border-t border-border-divider" />}
+
               {(
                 <div>
                   <label className="mb-1 block text-xs text-text-tertiary">{t("harness.baseUrl")}</label>
@@ -665,6 +670,8 @@ function ProvidersTab() {
                   />
                 </div>
               )}
+
+              <div className="border-t border-border-divider" />
 
               {/* Model selection (shared multi-select component) */}
               {(() => {

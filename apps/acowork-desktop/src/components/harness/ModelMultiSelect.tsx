@@ -371,7 +371,7 @@ export function ModelMultiSelect({
         expandedModels &&
         onExpandedToggle &&
         selected.length > 0 && (
-        <div className="mt-2">
+        <div className="mt-3 border-t border-border-divider pt-2">
           <label className="mb-1 block text-xs text-text-tertiary">
             {showModelCapEditor ? t("harness.modelCapabilities") : t("harness.protocolSection")}
             {showModelCapEditor && (
@@ -468,7 +468,7 @@ export function ModelMultiSelect({
 
       {/* Compact model selector */}
       {showCompactModel && onCompactModelChange && selected.length > 0 && (
-        <div className="mt-2">
+        <div className="mt-3 border-t border-border-divider pt-2">
           <label className="mb-1 block text-xs text-text-tertiary">
             {t("harness.compactModel")}
           </label>
