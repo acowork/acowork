@@ -13,6 +13,7 @@
  * `ROW_HEIGHT`，不允许被内容撑开。
  */
 
+import { Minus, Plus } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { PriorityBadge } from "./PriorityBadge";
 import { TaskTypeIcon } from "./TaskTypeIcon";
@@ -42,7 +43,7 @@ interface TaskListRowProps {
   columns: PmListColumn[];
   selected: boolean;
   collapsed: boolean;
-  /** 该任务有没有子任务（决定折叠三角是否可点）。 */
+  /** 该任务有没有子任务（决定折叠开关是 + / − 可点按钮，还是淡化的 − 占位）。 */
   hasChildren: boolean;
   childStats?: { total: number; done: number };
   parentTitle: string;
@@ -107,10 +108,15 @@ export function TaskListRow({
         />
       </td>
 
-      {columns.map((column) => (
+      {columns.map((column, i) => (
         <td
           key={column.key}
-          className={cn(TD_BASE_CN, column.align === "right" && "text-right")}
+          /* 末列 `pr-3`：表头右侧不再有「＋」占位列，右边界由最后一列收住。 */
+          className={cn(
+            TD_BASE_CN,
+            column.align === "right" && "text-right",
+            i === columns.length - 1 && "pr-3",
+          )}
           title={cellTooltip(column.key, task, { parentTitle, assigneeLabel, creatorLabel })}
         >
           {column.key === "title" ? (
@@ -144,15 +150,14 @@ export function TaskListRow({
           )}
         </td>
       ))}
-
-      {/* 表头「＋」列对应的占位格（保持 colgroup 与 td 数量一致）。
-          `pr-3 pl-0` 与表头末列同内边距。 */}
-      <td className={cn(TD_BASE_CN, "pr-3 pl-0")} />
     </tr>
   );
 }
 
-/** 任务列：折叠三角 + 类型图标 + 标题 + 任务 ID + 阻塞 / 待审标记。 */
+/** 任务列：折叠开关（+ / −）+ 类型图标 + 标题 + 阻塞 / 待审标记。
+ *
+ * 任务 id 不拼在标题后面：它有自己的列（`pmListColumn("id")`，字段弹层可勾选），
+ * 拼一份进标题既重复又让长标题提前被截断。 */
 function TitleCell({
   task,
   depth,
@@ -175,29 +180,35 @@ function TitleCell({
       className="flex min-w-0 items-center gap-1"
       style={{ paddingLeft: depth * INDENT_PER_DEPTH }}
     >
-      <button
-        type="button"
-        aria-label={collapsed ? t("pm.task.expand") : t("pm.task.collapse")}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (hasChildren) onToggleCollapse(task.id);
-        }}
-        className={cn(
-          "shrink-0 rounded px-0.5 text-10 leading-none",
-          hasChildren
-            ? "cursor-pointer text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700"
-            : "cursor-default opacity-30",
-          collapsed && "-rotate-90",
-        )}
-      >
-        ▾
-      </button>
+      {/* 折叠开关用 + / −（树形控件的通用语法），不用 10px 的 ▾：小字号三角
+          在 34px 行里只剩一个小点，看不出"能不能点"。
+          − = 已展开，+ = 已收起；无子任务的行给同样大小的 − 占位（淡化、
+          不进 Tab 序），缩进列宽因此恒定，标题不会逐行左右错位。 */}
+      {hasChildren ? (
+        <button
+          type="button"
+          aria-label={collapsed ? t("pm.task.expand") : t("pm.task.collapse")}
+          aria-expanded={!collapsed}
+          onClick={(e) => {
+            e.stopPropagation();
+            onToggleCollapse(task.id);
+          }}
+          className="shrink-0 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-text-secondary dark:hover:bg-zinc-700"
+        >
+          {collapsed ? (
+            <Plus className="h-3 w-3" aria-hidden />
+          ) : (
+            <Minus className="h-3 w-3" aria-hidden />
+          )}
+        </button>
+      ) : (
+        <span className="shrink-0 p-0.5 text-text-tertiary opacity-25" aria-hidden>
+          <Minus className="h-3 w-3" />
+        </span>
+      )}
       {/* 类型图标与标题同字号（12px）：它属于标题的一部分，不是元信息。 */}
       <TaskTypeIcon type={task.type} className="shrink-0 text-xs leading-none" />
       <span className="min-w-0 truncate font-medium text-text">{task.title}</span>
-      {/* 任务 id 是元信息（`text-10`），不是标题的一部分 —— 比标题小一档，
-          但不低于 10px。 */}
-      <span className="shrink-0 font-mono text-10 text-text-tertiary">{task.id}</span>
       {task.is_blocked && (
         <span className="shrink-0 text-10" title={t("pm.list.col.blocked")} aria-hidden>
           🔒
@@ -533,7 +544,7 @@ export function TaskListSkeletonRows({
       {Array.from({ length: rows }, (_, i) => (
         <tr key={i} style={{ height: ROW_HEIGHT }}>
           <td className={TD_BASE_CN} />
-          <td colSpan={colCount - 2} className={TD_BASE_CN}>
+          <td colSpan={colCount - 1} className={TD_BASE_CN}>
             <div
               className="h-3 w-2/3 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800"
               aria-label="loading"

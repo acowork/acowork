@@ -21,7 +21,7 @@ import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { TaskCard } from "./TaskCard";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
-import { CAPSULE_PANE_CN } from "../../components/common/capsule";
+import { CAPSULE_PANE_CN, SURFACE_PANEL_CN } from "../../components/common/capsule";
 import { cn } from "../../lib/utils";
 import { boardPageBounds, boardPageSlice } from "../../lib/pm-board-settings";
 import { COUNT_BADGE_BASE_CN } from "../../components/common/sidebarCountBadge";
@@ -124,7 +124,8 @@ export function KanbanColumn({
         // CAPSULE_PANE_CN（rounded-xl + 外发丝线 + overflow-hidden）+ right-panel
         // 底色；里面的任务才是 ListBox 卡片（panel-block + panel-inset 正文）。
         CAPSULE_PANE_CN,
-        "min-w-0 flex-1 bg-right-panel",
+        "min-w-0 flex-1",
+        SURFACE_PANEL_CN,
         active && "border-[var(--color-accent)] bg-[var(--color-accent)]/5",
       )}
       aria-label={t(i18nKey)}
