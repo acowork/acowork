@@ -185,7 +185,7 @@ export function AgentChatScreen() {
     stickNow()
     void useChatSessionStore
       .getState()
-      .sendText(sessionId, text, inReplyTo, attachmentIds, addr, resolveExpectedResponders(agentId))
+      .sendText(sessionId, text, inReplyTo, attachmentIds, addr, resolveExpectedResponders({ peer: agentId }))
   }
 
   const send = () => {

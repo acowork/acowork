@@ -414,6 +414,11 @@ export interface ChatMessageRow {
     status?: string
     repo?: string
     notice_type?: string
+    /** The group `@` fan-out: the participant ids this human row addressed
+     *  (design 27 §5.3.1). The client resolves `@Name` text into this list at
+     *  send time; the service stores it, and the surface paints a chip per id.
+     *  Empty/absent = nobody was named (the default-responder or archive path). */
+    mentions?: string[]
     /** ADR-106 D3: the round this reference row names. With `agent_session_id`
      *  + `agent_instance_id` it is the block's address — missing any of the
      *  three and there is no block to read. */
@@ -542,12 +547,32 @@ export interface ChatCandidateOption {
 /** `GET /api/chat-sessions/default` response envelope (the pair's session). */
 export interface ChatSessionInfo {
   session_id: string
+  /** `agent_user` (the 1:1 pair), `project_group` (a project's channel),
+   *  `user_group` (a human-founded group), `user_user` (the DM twin). The
+   *  group surfaces render the last two through the same panel (design 27 §4.4). */
   kind: string
   title: string
   project_id?: string
   created_at: number
   last_active_at: number
   message_count: number
+  /** The session's roster as the user service knows it (PM-synced for a
+   *  `project_group`, managed through the member routes for a `user_group`).
+   *  `identity` tags each entry `agent` | `human`; absent on older servers,
+   *  where the client resolves the id against its own directory instead. */
+  participants?: Array<{ id: string; identity?: string }>
+  /** `participant_id -> unread count` (design 27 §4.6). Only the list
+   *  endpoint (`GET /api/chat-sessions/{me}`) fills it — the row a pair
+   *  resolve returns without it. */
+  unread?: Record<string, number>
+  /** Sidebar meta line for a `project_group` row — the last message's text
+   *  (the service owns the truncation). Mirrors the Desktop field. */
+  last_message_preview?: string
+  /** ADR-105: the agent instance an un-addressed message in this group is
+   *  routed to. Absent = the group has no default and such a row archives. */
+  default_responder?: string
+  /** Group owner for a `user_group` (ADR-098 governance). */
+  owner?: string
 }
 
 /** ADR-100 D12: one display label for something a composer handed to the task

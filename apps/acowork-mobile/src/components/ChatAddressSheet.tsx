@@ -59,6 +59,11 @@ interface ChatAddressSheetProps {
   instanceId: string
   /** Part of the address, not a filter: the listing is narrowed per chat. */
   chatSessionId: string
+  /** Which surface asked. The Runtime's permission rule differs: a 1:1 chat
+   *  lists this chat's runs plus the human's own hand-started ones; a group
+   *  lists what the group may name (ADR-106 D7). The narrowing runs
+   *  server-side, so the client states where it is asking from. */
+  surface?: 'direct' | 'group'
   onPick: (pick: AddressPick) => void
   /** "去续投": ask the host to locate this run's block and focus its input. A
    *  navigation, so it is separate from the reference commit. */
@@ -66,7 +71,7 @@ interface ChatAddressSheetProps {
   onClose: () => void
 }
 
-export function ChatAddressSheet({ instanceId, chatSessionId, onPick, onLocate, onClose }: ChatAddressSheetProps) {
+export function ChatAddressSheet({ instanceId, chatSessionId, surface = 'direct', onPick, onLocate, onClose }: ChatAddressSheetProps) {
   const [rows, setRows] = useState<SessionInfo[] | null>(null)
   const [hasMore, setHasMore] = useState(false)
   const [failed, setFailed] = useState(false)
@@ -89,7 +94,7 @@ export function ChatAddressSheet({ instanceId, chatSessionId, onPick, onLocate, 
     setRows(null)
     setHasMore(false)
     page.current = 1
-    fetchChatSessions(instanceId, chatSessionId, 'direct', 1)
+    fetchChatSessions(instanceId, chatSessionId, surface, 1)
       .then((res) => {
         if (gen !== generation.current) return
         setRows(res.items)
@@ -98,12 +103,12 @@ export function ChatAddressSheet({ instanceId, chatSessionId, onPick, onLocate, 
       .catch(() => {
         if (gen === generation.current) setFailed(true)
       })
-  }, [instanceId, chatSessionId, attempt])
+  }, [instanceId, chatSessionId, surface, attempt])
 
   const loadMore = () => {
     const gen = generation.current
     setLoadingMore(true)
-    fetchChatSessions(instanceId, chatSessionId, 'direct', page.current + 1)
+    fetchChatSessions(instanceId, chatSessionId, surface, page.current + 1)
       .then((res) => {
         if (gen !== generation.current) return
         page.current += 1

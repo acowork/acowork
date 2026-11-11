@@ -2812,3 +2812,58 @@
   color: var(--color-label-secondary);
   background: rgba(120, 120, 128, 0.1);
 }
+
+/* The group composer's `@` autocomplete: a compact list hung above the
+   composer (the mobile shape of Desktop's anchored popup — §6.5: no hover,
+   so the picker is a plain tappable list, not a caret-following bubble). */
+.group-mention-picker {
+  flex: none;
+  max-height: 220px;
+  overflow-y: auto;
+  border-top: 1px solid var(--color-separator);
+  background: var(--color-bg-elevated, var(--color-bg));
+}
+.group-mention-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  border: none;
+  background: none;
+  color: var(--color-label);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.group-mention-row:active {
+  background: rgba(120, 120, 128, 0.14);
+}
+.group-mention-avatar {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.group-mention-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.group-mention-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-mention-tag {
+  flex: none;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--color-label-secondary);
+  font-size: 10px;
+}

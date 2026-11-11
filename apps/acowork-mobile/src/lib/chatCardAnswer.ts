@@ -96,3 +96,15 @@ export function directCardAddress(answer: CardAnswer): ChatAddress {
     : { forceNew: true, messageId: answer.messageId }
   return answer.refs?.length ? { ...base, refs: answer.refs } : base
 }
+
+/** The group form of the answer's address: the card names ONE agent, so the
+ *  delivery (or the refusal) is keyed by that instance id — the first level of
+ *  the `@` is the mention list, not degenerate. The answer's agent must be a
+ *  target of the re-delivery it rides (the Gateway refuses an address that is
+ *  not); the group surface owns that pairing, this function only shapes it. */
+export function groupCardAddress(answer: CardAnswer): ChatAddress {
+  const base: ChatAddress = answer.sessionId
+    ? { targetSessions: { [answer.agentId]: answer.sessionId }, messageId: answer.messageId }
+    : { forceNewFor: [answer.agentId], messageId: answer.messageId }
+  return answer.refs?.length ? { ...base, refs: answer.refs } : base
+}

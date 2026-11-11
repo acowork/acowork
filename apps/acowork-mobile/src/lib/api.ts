@@ -609,6 +609,22 @@ export async function fetchDefaultChatSession(agentId: string): Promise<ChatSess
 }
 
 /**
+ * `GET /api/chat-sessions/{me}` — every Chat session this account is a
+ * participant of, with the caller's unread counts and preview context
+ * (design 27 §4.4/§4.6). The group inbox reads this; the 1:1 pair session
+ * stays on `fetchDefaultChatSession` (the pair rule is idempotent-resolve,
+ * not list-scan). The kinds arrive mixed (`agent_user`, `project_group`,
+ * `user_group`, `user_user`) — the caller filters, same as Desktop's
+ * `projectGroupStore`.
+ */
+export async function fetchMyChatSessions(me: string): Promise<ChatSessionInfo[]> {
+  return req<ChatSessionInfo[]>(
+    'GET',
+    `/api/chat-sessions/${encodeURIComponent(me)}`,
+  )
+}
+
+/**
  * One page of a Chat session. `offset` counts BACK from the newest row, so
  * `offset=0` is the newest window in ascending order and `offset=loaded`
  * is the next-older page — identical to Desktop's `chatSessionStore` paging.
@@ -775,6 +791,60 @@ export async function sendChatMessage(
     ...(attachmentIds && attachmentIds.length > 0 ? { attachment_ids: attachmentIds } : {}),
     ...(address?.targetSession ? { target_session: address.targetSession } : {}),
     ...(address?.forceNew ? { force_new: true } : {}),
+    ...(address?.messageId ? { message_id: address.messageId } : {}),
+    ...(() => {
+      const wireRefs = toWireRefs(address?.refs)
+      return wireRefs ? { refs: wireRefs } : {}
+    })(),
+  })
+}
+
+/** `POST /api/intents/mentions` response: the ONE `user_message` row's id
+ *  (what every outcome threads to), plus one delivery result per target it
+ *  woke. `routed: "archived"` carries an empty `results` — nobody was asked. */
+export interface MentionSendResponse {
+  message_id: string
+  routed?: string
+  results?: Array<{ target?: string; message_id?: string; status?: string }>
+}
+
+/**
+ * The group send entry (design 27 §5.3.1, ADR-105): the Gateway writes the
+ * ONE `user_message` row and routes a turn per target — so a group send must
+ * NOT also post the message.
+ *
+ * An EMPTY `targets` is the "nobody was addressed" case, and it is a real
+ * instruction, not a missing one: the Gateway resolves the group's default
+ * responder (or archives the row when the group has none). Routing an
+ * un-addressed message is a server decision, not a client one — the same
+ * entry serves both, which is what keeps an un-addressed reply from vanishing.
+ */
+export async function fanoutMentions(
+  me: string,
+  chatSessionId: string,
+  text: string,
+  targets: string[],
+  attachmentIds?: string[],
+  address?: ChatAddress,
+): Promise<MentionSendResponse> {
+  const targetSessions = address?.targetSessions ?? {}
+  // A refusal to continue is only ever sent for a target with no address: the
+  // two are contradictory instructions, and the Gateway answers the pair with
+  // a 400 rather than picking one.
+  const forceNewFor = [
+    ...(address?.forceNew ? targets : []),
+    ...(address?.forceNewFor ?? []),
+  ].filter((t) => !targetSessions[t])
+  return req<MentionSendResponse>('POST', '/api/intents/mentions', {
+    chat_session_id: chatSessionId,
+    from_user: me,
+    targets,
+    text,
+    attachment_ids: attachmentIds ?? [],
+    // An empty map is not sent as `{}`-noise: absence of the field is what
+    // "the human named no session" means on the wire.
+    ...(Object.keys(targetSessions).length > 0 ? { target_sessions: targetSessions } : {}),
+    ...(forceNewFor.length > 0 ? { force_new_for: forceNewFor } : {}),
     ...(address?.messageId ? { message_id: address.messageId } : {}),
     ...(() => {
       const wireRefs = toWireRefs(address?.refs)
