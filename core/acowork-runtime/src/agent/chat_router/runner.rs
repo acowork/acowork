@@ -153,15 +153,13 @@ pub enum Outcome {
     PassThrough,
     /// The router failed to decide: write nothing, use the legacy path. The
     /// caller still delivers the user's message, so the turn is never lost.
-    /// `chat_excerpt` is a bounded tail of the conversation the router had
-    /// already read: a degraded `fresh` route has no LLM-composed brief, so
-    /// the caller attaches the excerpt to the new session's first message
-    /// (mechanical context, no model involved — strictly better than raw
-    /// text alone). `None` when the router never got history this turn.
-    Fallback {
-        reason: String,
-        chat_excerpt: Option<String>,
-    },
+    ///
+    /// A degraded turn carries **no background**. A mechanical tail of the
+    /// conversation was tried and removed: it read as context but said nothing
+    /// about the message at hand, so it spent a fresh session's attention on a
+    /// previous task's leftovers. "No background" is the honest state — the
+    /// human's words alone.
+    Fallback { reason: String },
 }
 
 /// Entry point: decide whether this envelope is a router turn and run it.
@@ -548,9 +546,10 @@ fn candidate_surface(chat_kind: &str) -> CandidateSurface {
 struct Prepared {
     block_a: String,
     candidates: Vec<SessionCandidate>,
-    provider: Arc<dyn Provider>,
-    model: String,
-    provider_label: String,
+    /// The router model chain: the configured model first, the user's compact
+    /// models as call-phase fallbacks after it (see
+    /// [`router_llm_candidates`]). Never empty.
+    models: Vec<(Arc<dyn Provider>, String)>,
     /// The read-only information tools enabled for this agent, resolved off
     /// the dispatch list (`all_tools` is already the enabled-builtin subset,
     /// so the agent-level toggle governs the router too).
@@ -652,7 +651,7 @@ async fn run_turn(
                 cfg.max_candidates(),
             )
         };
-        let (provider, model) = router_llm(&core, cfg);
+        let models = router_llm_candidates(&core, cfg);
         // The router only ever runs the two read-only lookups, resolved by
         // name off the enabled dispatch list. A disabled or missing tool is
         // neither exposed nor executed.
@@ -671,9 +670,7 @@ async fn run_turn(
         Prepared {
             block_a,
             candidates,
-            provider_label: provider.name().to_string(),
-            provider,
-            model,
+            models,
             info_tools,
         }
     };
@@ -791,8 +788,29 @@ async fn run_turn(
     messages.push(system);
     messages.extend(block_b.messages.iter().cloned());
     messages.push(ChatMessage::user(turn_view));
+    // `router_llm_candidates` always yields at least one entry; the empty case
+    // is handled as a fallback rather than an index so a future change to that
+    // invariant degrades the turn instead of panicking on the drain task.
+    let Some((primary_provider, primary_model)) = prepared.models.first().cloned() else {
+        return degrade(envelope, &chat_id, "no router model configured".to_string()).await;
+    };
     let mut request = ChatRequest {
-        model: prepared.model.clone(),
+        // Cache affinity — the fix for the measured 20%-vs-98% gap.
+        //
+        // A chat turn is sparse: one message, then a gap of minutes or hours.
+        // Prompt caching on the OpenAI line of APIs is partitioned per
+        // backend, so with no key each turn is free to land on a different
+        // replica and find its own prefix uncached. The 2026-11 log showed
+        // exactly that: reads pinned at ~186 tokens *regardless of history
+        // length*, alternating turn to turn within one chat on one model. An
+        // execution session never shows this, because its turns are dense
+        // enough to stay on one hot replica — which is the whole of the
+        // difference between its 98% and this router's 20%.
+        //
+        // The chat id is the right key: stable across every turn of one
+        // conversation, distinct between conversations, and already opaque
+        // (a UUID — nothing about the user crosses the wire in it).
+        model: primary_model.clone(),
         messages,
         temperature: Some(0.0),
         // `cfg.max_output_tokens()`, not a constant: the ceiling must cover a
@@ -810,8 +828,8 @@ async fn run_turn(
         chat_id: &chat_id,
         message_id: &envelope.message_id,
         chat_kind: &chat_kind,
-        model: &prepared.model,
-        provider: &prepared.provider_label,
+        model: request.model.clone(),
+        provider: primary_provider.name().to_string(),
         candidates: lines.iter().map(|c| c.alias.clone()).collect(),
         prefix_hash: prefix_hash(&prepared.block_a, &tools_json, &block_b.messages),
         anchor_seq: block_b.anchor_seq as usize,
@@ -825,24 +843,65 @@ async fn run_turn(
         info_rounds: 0,
     };
 
-    let calls = ModelCalls {
+    let mut calls = ModelCalls {
         deps,
         chat_id: &chat_id,
         chat_kind: &chat_kind,
-        provider: &prepared.provider,
-        provider_label: &prepared.provider_label,
-        model: &prepared.model,
+        provider_label: primary_provider.name().to_string(),
+        provider: primary_provider,
+        model: primary_model,
         timeout_ms: cfg.timeout_ms(),
         // The window this turn projected — the budget's occupancy.
         history_tokens: Some(block_b.token_len as u64),
     };
 
-    let mut response = match calls.call(request.clone()).await {
-        Ok(r) => r,
-        Err(reason) => {
-            trace.write("fallback", None, "error", Some(reason.clone()), None);
-            return degrade(deps, envelope, &chat_id, reason, &rows).await;
+    // First call: walk the chain. One model refusing is not the turn's verdict
+    // — a router model out of quota (a routine 429, see `router_llm_candidates`)
+    // must not cost the chat its decision while cheaper configured models are
+    // sitting right there. Only when every candidate fails does the turn
+    // degrade. The winner is pinned: the information rounds and the invalid-act
+    // retry below keep sending `request.model`, so a turn never switches models
+    // mid-thought.
+    //
+    // ponytail: no deadline for the chain as a whole — worst case is
+    // `MAX_ROUTER_CANDIDATES × chat_router.timeout_ms` (3 × 60 s by default), and
+    // only a *hanging* provider pays it: a 429 or a refused connection fails in
+    // milliseconds. The blast radius is this chat's `ChatSlot`, not the runtime.
+    // Upgrade path if that ever shows up as a stall: a turn-wide deadline that
+    // the per-candidate timeout is clamped against.
+    let mut response = None;
+    let mut last_error = String::new();
+    for (provider, model) in prepared.models.iter().cloned() {
+        request.model = model.clone();
+        calls.switch(provider, model);
+        // The decision log names the model that answered — or, on a fallback,
+        // the last one that refused.
+        trace.model = request.model.clone();
+        trace.provider = calls.provider_label.clone();
+        match calls.call(request.clone()).await {
+            Ok(r) => {
+                response = Some(r);
+                break;
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    chat_id = %chat_id,
+                    model = %request.model,
+                    error = %reason,
+                    "chat router: router model failed, trying the next candidate"
+                );
+                last_error = reason;
+            }
         }
+    }
+    let Some(mut response) = response else {
+        let reason = if last_error.is_empty() {
+            "no router model available".to_string()
+        } else {
+            last_error
+        };
+        trace.write("fallback", None, "error", Some(reason.clone()), None);
+        return degrade(envelope, &chat_id, reason).await;
     };
 
     // ── Information rounds ────────────────────────────────────────────
@@ -905,7 +964,7 @@ async fn run_turn(
             Ok(r) => r,
             Err(reason) => {
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
-                return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                return degrade(envelope, &chat_id, reason).await;
             }
         };
     }
@@ -938,14 +997,14 @@ async fn run_turn(
                                     let reason =
                                         format!("invalid act twice: {}", again.message());
                                     trace.write("fallback", None, "error", Some(reason.clone()), None);
-                                    return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                                    return degrade(envelope, &chat_id, reason).await;
                                 }
                             }
                         }
                     }
                     Err(reason) => {
                         trace.write("fallback", None, "error", Some(reason.clone()), None);
-                        return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                        return degrade(envelope, &chat_id, reason).await;
                     }
                 }
             }
@@ -973,7 +1032,7 @@ async fn run_turn(
                     cfg.max_output_tokens()
                 );
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
-                return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                return degrade(envelope, &chat_id, reason).await;
             }
             let body = response.content.trim().to_string();
             // Some Anthropic-compatible endpoints hand the tool call back inside
@@ -989,7 +1048,7 @@ async fn run_turn(
                     "tool call written as message text (no structured act)".to_string()
                 };
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
-                return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                return degrade(envelope, &chat_id, reason).await;
             }
             // ADR-106 D12: the router's own answer is a chat-native row, so it
             // is written here and not carried back through an intent response —
@@ -1015,7 +1074,7 @@ async fn run_turn(
                 }
                 Err(e) => {
                     trace.write("fallback", None, "error", Some(e.clone()), None);
-                    degrade(deps, envelope, &chat_id, format!("reply write-back failed: {e}"), &rows).await
+                    degrade(envelope, &chat_id, format!("reply write-back failed: {e}")).await
                 }
             }
         }
@@ -1076,7 +1135,7 @@ async fn run_turn(
                     // continue.
                     let reason = format!("proposal card write failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows).await
+                    degrade(envelope, &chat_id, reason).await
                 }
             }
         }
@@ -1210,12 +1269,12 @@ async fn run_turn(
                 (Ok(_), Err(e)) => {
                     let reason = format!("exec_session_create delivery failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows).await
+                    degrade(envelope, &chat_id, reason).await
                 }
                 (Err(e), _) => {
                     let reason = format!("exec_session_create session creation failed: {e}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows).await
+                    degrade(envelope, &chat_id, reason).await
                 }
             }
         }
@@ -1274,8 +1333,22 @@ async fn read_history(
 }
 
 /// Model resolution (ADR-099 D)-3): explicit `chat_router.model` first, then
-/// the agent's compact-model chain, then the agent default.
-fn router_llm(core: &AgentCore, cfg: &ChatRouterConfig) -> (Arc<dyn Provider>, String) {
+/// the agent's compact-model chain.
+///
+/// The chain exists because a router model can be *temporarily* unusable while
+/// the agent is perfectly fine: a 429 "token plan exhausted" is a routine,
+/// self-clearing state, and it used to cost the turn its decision outright. Any
+/// configured compact model can make the same decision, so the call walks the
+/// chain before giving up. Capped at [`MAX_ROUTER_CANDIDATES`]: each candidate
+/// pays the full per-call timeout when its provider is unreachable, so an
+/// unbounded chain would turn one dead provider into a turn that never returns.
+const MAX_ROUTER_CANDIDATES: usize = 3;
+
+fn router_llm_candidates(
+    core: &AgentCore,
+    cfg: &ChatRouterConfig,
+) -> Vec<(Arc<dyn Provider>, String)> {
+    let mut chain: Vec<(Arc<dyn Provider>, String)> = Vec::new();
     if let Some(model) = cfg
         .model
         .as_deref()
@@ -1287,10 +1360,30 @@ fn router_llm(core: &AgentCore, cfg: &ChatRouterConfig) -> (Arc<dyn Provider>, S
             .as_deref()
             .map(str::trim)
             .filter(|p| !p.is_empty());
-        return core.summary_llm_snapshot(provider, Some(model));
+        chain.push(core.summary_llm_snapshot(provider, Some(model)));
+    } else {
+        let (provider, model, _tier) = core.resolve_summary_llm(None, None);
+        chain.push((provider, model));
     }
-    let (provider, model, _tier) = core.resolve_summary_llm(None, None);
-    (provider, model)
+    for (pid, mid) in core.compact_model_candidates() {
+        if chain.len() >= MAX_ROUTER_CANDIDATES {
+            break;
+        }
+        let Some(provider) = core.build_compact_provider(&pid) else {
+            continue;
+        };
+        // The configured router model is often itself a compact candidate;
+        // retrying the same (provider, model) that just refused buys nothing
+        // but another timeout.
+        if chain
+            .iter()
+            .any(|(p, m)| m == &mid && p.name() == provider.name())
+        {
+            continue;
+        }
+        chain.push((provider, mid));
+    }
+    chain
 }
 
 /// The one path from a turn to the provider: make the call, then book it.
@@ -1305,13 +1398,17 @@ fn router_llm(core: &AgentCore, cfg: &ChatRouterConfig) -> (Arc<dyn Provider>, S
 /// A Provider that reported no usage at all folds as "no measurement" —
 /// skipped, never fabricated (ADR-027). The ledger is the chat's own row; the
 /// agent totals are fed even when the ledger store is unavailable.
+///
+/// The model pair is owned and swappable ([`ModelCalls::switch`]) so one turn
+/// can walk the fallback chain: the ledger row must name the model that was
+/// actually billed, and the follow-up calls must keep using it.
 struct ModelCalls<'a> {
     deps: &'a RouterDeps,
     chat_id: &'a str,
     chat_kind: &'a str,
-    provider: &'a Arc<dyn Provider>,
-    provider_label: &'a str,
-    model: &'a str,
+    provider: Arc<dyn Provider>,
+    provider_label: String,
+    model: String,
     timeout_ms: u64,
     /// Tokens the projected history window (Block B) cost on this turn.
     ///
@@ -1325,15 +1422,25 @@ struct ModelCalls<'a> {
 }
 
 impl ModelCalls<'_> {
+    /// Point this turn at the next candidate in the chain. Both the transport
+    /// (provider) and the booking identity (label + model) move together, or
+    /// the ledger would bill the model that refused instead of the one that
+    /// answered.
+    fn switch(&mut self, provider: Arc<dyn Provider>, model: String) {
+        self.provider_label = provider.name().to_string();
+        self.provider = provider;
+        self.model = model;
+    }
+
     async fn call(&self, request: ChatRequest) -> Result<ChatResponse, String> {
-        let response = call_provider(self.provider, request, self.timeout_ms).await?;
+        let response = call_provider(&self.provider, request, self.timeout_ms).await?;
         if let Some(usage) = response.usage.as_ref() {
             self.deps.chat_usage.record_chat_llm_usage(
                 self.chat_id,
                 self.chat_kind,
                 usage,
-                self.provider_label,
-                self.model,
+                &self.provider_label,
+                &self.model,
                 self.history_tokens,
             );
         }
@@ -1701,22 +1808,15 @@ fn task_label(conversation_id: &str) -> Option<String> {
 /// user's message is still delivered — degradation costs latency, never the
 /// message.
 ///
-/// `rows` are the chat rows this turn had already read (empty when history
-/// itself failed): they become a bounded excerpt the caller attaches to the
-/// degraded route's first message, so a fresh session is not left with raw
-/// text alone.
-///
 /// ADR-106: no receipt row is written for the degradation. The fallback route
 /// runs a round, and that round's reference row is the record the human needs;
 /// a `system_notice` announcing "the router could not decide" is a progress
 /// fact about a component, not a channel fact, and it used to key off the
 /// retired `rf:` prefix.
 async fn degrade(
-    deps: &RouterDeps,
     envelope: &IntentEnvelope,
     chat_id: &str,
     reason: String,
-    rows: &[ChatRow],
 ) -> Outcome {
     tracing::warn!(
         chat_id = %chat_id,
@@ -1724,53 +1824,7 @@ async fn degrade(
         reason = %reason,
         "chat router degraded to the deterministic route"
     );
-    Outcome::Fallback {
-        reason,
-        chat_excerpt: chat_tail_excerpt(rows, &deps.instance_id),
-    }
-}
-
-/// How many recent chat rows a degraded turn may hand to the fresh session.
-const FALLBACK_EXCERPT_ROWS: usize = 6;
-/// Byte ceiling of the same excerpt (per row and total) — the excerpt must
-/// stay a footnote to the user's message, never a second context window.
-const FALLBACK_EXCERPT_ROW_BYTES: usize = 512;
-const FALLBACK_EXCERPT_TOTAL_BYTES: usize = 2048;
-
-/// Mechanical tail of the conversation for the degraded `fresh` route: the
-/// last few rows, oldest first, each sender-tagged and byte-bounded. No LLM
-/// is involved — this is what the router already saw, not what it concluded.
-/// `None` when nothing but the trigger message itself would remain.
-fn chat_tail_excerpt(rows: &[ChatRow], agent_instance: &str) -> Option<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut bytes = 0usize;
-    for row in rows.iter().rev() {
-        if lines.len() >= FALLBACK_EXCERPT_ROWS || bytes >= FALLBACK_EXCERPT_TOTAL_BYTES {
-            break;
-        }
-        // The trigger message rides along verbatim on the legacy route;
-        // notices and cards are routing chrome, not conversation.
-        if !matches!(row.kind.as_str(), "user_message" | "agent_message" | "text" | "") {
-            continue;
-        }
-        let body = truncate_body(row.body.trim(), FALLBACK_EXCERPT_ROW_BYTES);
-        if body.is_empty() {
-            continue;
-        }
-        let role = if !agent_instance.is_empty() && row.from == agent_instance {
-            "agent"
-        } else {
-            "user"
-        };
-        let line = format!("[{role}] {body}");
-        bytes += line.len();
-        lines.push(line);
-    }
-    if lines.is_empty() {
-        return None;
-    }
-    lines.reverse();
-    Some(lines.join("\n"))
+    Outcome::Fallback { reason }
 }
 
 /// Decision-log context for one turn. Holds borrows only, so writing the
@@ -1780,8 +1834,11 @@ struct TurnTrace<'a> {
     chat_id: &'a str,
     message_id: &'a str,
     chat_kind: &'a str,
-    model: &'a str,
-    provider: &'a str,
+    /// Owned, not borrowed: the call-phase fallback chain can move the turn to
+    /// another model, and the record must name the one that answered (or the
+    /// last one that refused).
+    model: String,
+    provider: String,
     candidates: Vec<String>,
     prefix_hash: String,
     anchor_seq: usize,
@@ -2002,9 +2059,9 @@ mod tests {
                 deps: d,
                 chat_id: "cs-1",
                 chat_kind: "group",
-                provider,
-                provider_label: "mock|mock-model",
-                model: "mock-model",
+                provider: Arc::clone(provider),
+                provider_label: "mock|mock-model".to_string(),
+                model: "mock-model".to_string(),
                 timeout_ms: 5_000,
                 history_tokens: None,
             }
@@ -2026,6 +2083,49 @@ mod tests {
         }]));
         assert!(calls(&failing, &d).call(request()).await.is_err());
         assert_eq!(ledger.records.lock().unwrap().len(), 2);
+    }
+
+    /// ADR-107 revision 2026-11-11: the router walks a candidate chain, so the
+    /// ledger row has to name the model that ANSWERED, not the configured one.
+    /// `switch` and `call` are separate steps — pin the pairing: the call after
+    /// a switch reaches the new provider and books the new `(label, model)`.
+    #[tokio::test]
+    async fn switching_candidate_reaches_and_books_the_model_that_answered() {
+        let ledger = Arc::new(CountingChatUsage::default());
+        let mut d = deps();
+        d.chat_usage = ledger.clone();
+        let first: Arc<dyn Provider> = Arc::new(MockProvider::with_usage("first", 10, 2));
+        let fallback: Arc<dyn Provider> = Arc::new(MockProvider::with_usage("fallback", 11, 3));
+        let request = ChatRequest {
+            model: "primary-model".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            reasoning_effort: None,
+            thinking_mode: None,
+        };
+        let mut calls = ModelCalls {
+            deps: &d,
+            chat_id: "cs-1",
+            chat_kind: "group",
+            provider_label: first.name().to_string(),
+            provider: Arc::clone(&first),
+            model: "primary-model".to_string(),
+            timeout_ms: 5_000,
+            history_tokens: None,
+        };
+
+        assert_eq!(calls.call(request.clone()).await.unwrap().content, "first");
+        calls.switch(fallback, "fallback-model".to_string());
+        assert_eq!(calls.call(request).await.unwrap().content, "fallback");
+        assert_eq!(
+            ledger.records.lock().unwrap().as_slice(),
+            &[
+                "cs-1|group|mock|primary-model".to_string(),
+                "cs-1|group|mock|fallback-model".to_string(),
+            ]
+        );
     }
 
     /// Params carrying (or not carrying) an explicit session address.
@@ -3046,39 +3146,6 @@ mod tests {
         assert_eq!(truncate_info_result("fine"), "fine");
     }
 
-    #[test]
-    fn chat_tail_excerpt_keeps_recent_conversation_and_drops_chrome() {
-        let row = |kind: &str, from: &str, body: &str, seq: u64| ChatRow {
-            seq,
-            kind: kind.to_string(),
-            from: from.to_string(),
-            body: body.to_string(),
-            ..Default::default()
-        };
-        let rows = vec![
-            row("user_message", "u-1", "first", 1),
-            row("system_notice", "agent-1", "routing chrome", 2),
-            row("agent_message", "agent-1", "answer one", 3),
-            row("user_message", "u-1", "and the deploy script?", 4),
-        ];
-        let excerpt = chat_tail_excerpt(&rows, "agent-1").expect("conversation rows exist");
-        // Oldest first, sender-tagged, notices excluded.
-        assert_eq!(
-            excerpt,
-            "[user] first\n[agent] answer one\n[user] and the deploy script?"
-        );
-
-        // Nothing but the trigger row itself (or empty bodies) -> no excerpt.
-        assert!(chat_tail_excerpt(&[row("user_message", "u-1", "  ", 1)], "agent-1").is_none());
-        assert!(chat_tail_excerpt(&[], "agent-1").is_none());
-
-        // Byte cap: a huge newest row is clipped, the older rows survive.
-        let big = row("user_message", "u-1", &"x".repeat(4000), 5);
-        let excerpt = chat_tail_excerpt(&[rows[0].clone(), big.clone()], "agent-1").unwrap();
-        assert!(excerpt.starts_with("[user] first\n[user] xxx"));
-        assert!(excerpt.len() < 4000);
-        assert!(!excerpt.ends_with('y')); // clipped, not copied whole
-    }
 
     /// A truncated response is not a decision. The production failure this
     /// pins: an `exec_session_create` brief ran past `max_output_tokens`, the provider cut

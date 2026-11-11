@@ -1365,38 +1365,6 @@ fn spawn_chat_router_drain(
     });
 }
 
-/// The degraded route's background reference for a fresh execution session
-/// (ADR-107).
-///
-/// The router could not decide, so there is no composed background — but it did
-/// read the conversation before it failed, and that bounded mechanical tail is
-/// what it saw. Handing it over as a **reference part** (not as the message)
-/// keeps the human's words as the turn's message: the session records what the
-/// person asked, and reads the tail as context.
-///
-/// `None` means "there is nothing to say": the router captured no excerpt, or
-/// the turn had neither words nor files — the caller then sends no reference at
-/// all. A turn that carried files but no text still gets the tail: the router
-/// failing to decide may not degrade into an execution session that was told
-/// nothing, because a human who attached something instead of typing still
-/// asked for work.
-fn degraded_background(
-    text: &str,
-    has_attachments: bool,
-    excerpt: Option<&str>,
-) -> Option<acowork_core::MessageRef> {
-    const NOTE: &str =
-        "(the routing assistant was unavailable; this is the raw tail of the conversation)";
-    let excerpt = excerpt?;
-    if text.trim().is_empty() && !has_attachments {
-        return None;
-    }
-    Some(acowork_core::MessageRef::chat_background(format!(
-        "{NOTE}
-{excerpt}"
-    )))
-}
-
 /// Deliver a queued turn according to what the router decided.
 ///
 /// The router owns a turn it `Handled` — it either answered it or dispatched it.
@@ -1412,7 +1380,7 @@ pub(crate) async fn finish_chat_turn(
     session_manager: &Arc<tokio::sync::Mutex<crate::agent::session::SessionManager>>,
     outcome: crate::agent::chat_router::runner::Outcome,
     designated_session_id: &str,
-    mut envelope: Box<crate::agent::inbound::IntentEnvelope>,
+    envelope: Box<crate::agent::inbound::IntentEnvelope>,
     work_dir: &std::path::Path,
 ) -> crate::error::Result<()> {
     use crate::agent::chat_router::runner::Outcome;
@@ -1423,47 +1391,18 @@ pub(crate) async fn finish_chat_turn(
             route_intent_legacy(session_manager, designated_session_id, envelope, false, work_dir)
                 .await
         }
-        Outcome::Fallback {
-            reason,
-            chat_excerpt,
-        } => {
+        Outcome::Fallback { reason } => {
             tracing::info!(
                 reason = %reason,
                 "Chat Router fell back to the deterministic route"
             );
-            // The degraded route has no LLM-composed background — but when the
-            // router HAD read the conversation before it failed, that bounded
-            // mechanical tail is what it saw, not what it concluded, so the new
-            // session can use it without re-introducing another task's noise.
+            // No background is attached (ADR-107 revision 2026-11-11). The
+            // degraded route used to carry a mechanical tail of the chat; in a
+            // chat where each message is its own task that tail was five
+            // unrelated requests, and a session reads noise as context at least
+            // as readily as it reads signal. "Nothing" is honest: the human's
+            // words are the whole turn.
             //
-            // ADR-107: it rides `params.context_refs`, never `params.message`.
-            // `message` is the human's own words and stays exactly as
-            // delivered — overwriting it (the old behaviour) put the router's
-            // framing into the persisted `user` row and therefore into the
-            // auto-title. An attachment-only turn needs no special case here:
-            // its message is legitimately empty and the reference is the
-            // context the model reads.
-            //
-            // Straight through the router's own reader rather than a second
-            // reading of the raw param: the raw array and "did this turn carry
-            // files?" disagree on a degenerate element (`[{}]`), and Block C,
-            // the decision log and this reference must never disagree about it.
-            let has_attachments =
-                !crate::agent::chat_router::runner::turn_attachments(&envelope).is_empty();
-            let text = envelope
-                .params
-                .get("message")
-                .and_then(|m| m.as_str())
-                .unwrap_or_default()
-                .to_string();
-            if let Some(background) = degraded_background(&text, has_attachments, chat_excerpt.as_deref())
-                && let Some(map) = envelope.params.as_object_mut()
-            {
-                map.insert(
-                    "context_refs".to_string(),
-                    serde_json::json!([background]),
-                );
-            }
             // ADR-099 revision: a chat-sourced human message degraded by the
             // router gets a FRESH execution session, not the mapped one — the
             // mapping is not a semantic verdict and continuing an unrelated old
@@ -1924,39 +1863,6 @@ mod tests {
     use crate::agent::inbound::InboundMessage;
     use crate::mqtt::control_handler::ControlAction;
 
-    /// A router that fell back still owes the fresh execution session the
-    /// context it could not compose. The turn that most needs it is the one
-    /// with no text at all: the human attached a file and typed nothing, so
-    /// "tail only" is the difference between a briefed session and a session
-    /// that was told nothing.
-    ///
-    /// ADR-107: the tail is a REFERENCE, not the message. The old shape wrote
-    /// the tail into `params.message` with the human's words glued in front of
-    /// it — which is what made the persisted row, and the auto-title, open with
-    /// the router's sentence instead of the person's.
-    #[test]
-    fn a_degraded_turn_carries_the_chat_tail_as_a_reference() {
-        let background = degraded_background("", true, Some("U: (nothing)
-A: hi")).unwrap();
-        assert_eq!(background.kind, acowork_core::REF_KIND_CHAT_BACKGROUND);
-        assert!(background.content.starts_with('('), "{}", background.content);
-        assert!(background.content.ends_with("A: hi"));
-        assert!(!background.content.contains("fix the build"));
-
-        // Text on the turn is not copied into the reference — it is the
-        // message, and the reference only says what the router could not.
-        let background = degraded_background("fix the build", false, Some("tail")).unwrap();
-        assert!(!background.content.contains("fix the build"), "{}", background.content);
-        assert!(background.content.ends_with("tail"));
-        // Whitespace is not text.
-        assert!(degraded_background("  
- ", true, Some("tail")).is_some());
-
-        // Nothing to say: no excerpt captured, or no excerpt and no files.
-        assert!(degraded_background("hello", false, None).is_none());
-        assert!(degraded_background("   ", false, Some("tail")).is_none());
-    }
-
     /// ADR-076 §决策 4: after the second wave of the HTTP migration the MQTT
     /// control plane holds exactly one variant — `Intent` — and it is
     /// not a user action. A session-scoped command cannot be expressed
@@ -2376,7 +2282,6 @@ A: hi")).unwrap();
             Outcome::PassThrough,
             Outcome::Fallback {
                 reason: "stub: model unavailable".to_string(),
-                chat_excerpt: None,
             },
         ] {
             let chat = match &outcome {

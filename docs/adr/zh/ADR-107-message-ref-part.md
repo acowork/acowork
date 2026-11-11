@@ -1,7 +1,7 @@
 # ADR-107：引用部件——chat 背景随行，`user` 行只留人的原话
 
 - **编号**：ADR-107
-- **状态**：提议（待架构评审）——**已落地**：`acowork-core` 的 `MessageRef`、Runtime 的 `params.context_refs` 解析 / 模型侧渲染 / `context_ref` 条目持久化、Chat Router 的 `exec_session_create(background)` 与降级路径、Desktop 的 `user_with_parts` 折叠与引用块 markdown 渲染，均有单测钉住。
+- **状态**：提议（待架构评审）——**已落地**：`acowork-core` 的 `MessageRef`、Runtime 的 `params.context_refs` 解析 / 模型侧渲染 / `context_ref` 条目持久化、Chat Router 的 `exec_session_create(background)` 与降级路径、Desktop 的 `user_with_parts` 折叠与引用块 markdown 渲染，均有单测钉住。**修订 2026-11-11**：降级路径不再产出引用部件；路由模型改为候选链（配置模型 → 精简模型兜底），链全挂才降级，见 D7 修订。
 - **日期**：2026-11-04
 - **决策者**：ACowork 架构组
 - **关联**：[ADR-046](./ADR-046-unified-attachment-entries.md)（统一附件条目——本 ADR 的引用部件与之平行）、[ADR-099](./ADR-099-chat-session-llm-router.md)（Router 分层）、[ADR-106](./ADR-106-chat-execution-reference-projection.md)（chat/execute 边界）、[ADR-060](./ADR-060-prompt-cache-friendly-context-block-reorg.md)（稳定前缀 + 末尾追加）、设计 27 §5、设计 29 §11
@@ -97,7 +97,16 @@ ADR-046 规定附件是**部件**：`user` 行之后新增 `role="system"` 的�
 
 ### D7　降级路径产出同样的部件
 
-`degraded_brief` → `degraded_background`：不再拼字符串，而是产出 `Some(MessageRef::chat_background(...))`，正文以"router 不可用，以下是对话尾部"开头（这句对模型的判断有用，必须保留），填入 `params.context_refs`。`params.message` 保持不动。两条路径在前端与持久化上的形状因此完全一致。
+`degraded_brief` → `degraded_background`：不再拼字符串，而是产出 `Some(MessageRef::chat_background(...))`，正文以"router 不可用，以下是对话尾部"开头（这句对模型的判断有用，必须保留），填入 `params.context_refs`。`params.message` 保持不动。两条路径在前端与持久化上的形状因此完全一致。**（本单元的"降级也产出部件"已被下方 2026-11-11 修订取代。）**
+
+> **修订（2026-11-11）：降级不再携带机械尾部——先换模型，全挂才降级，且不带背景。**
+>
+> D7 的"降级也产出引用部件"在实使用中被否决。`chat_tail_excerpt` 给出的是最近 6 行、每行 ≤512 B、总长 ≤2 KB 的机械尾部，在"一条消息一个任务"的 chat 里它等于**上一批任务**：2026-11-10 实测的一条降级投递，背景卡片内容是一轮线路图转写 + 4 条互不相关的 UI 修复请求 + 用户消息自身的复读（`memory_id` 同名的那条已在 `params.message` 里）。新执行会话把噪声当上下文读，副作用大于"零背景"——**聊天历史只有被判断过才是上下文**，没被判断过的历史只是别人的话题。
+>
+> 因此两处改动：
+>
+> 1. **让 LLM 起作用。** 路由模型调用改为候选链：`chat_router.model`（带其 provider）排第一，其后接用户的精简模型链（`AgentCore::compact_model_candidates`，与压缩/蒸馏共用同一过滤；provider 用 `build_compact_provider` 构造），按序试到有模型回答为止；**上限 3 个候选**——每个候选最坏付一次 `chat_router.timeout_ms`，不封顶就把一个不可达的 provider 变成永不返回的回合。配额耗尽（429）这类"临时不可用"由此不再等于"Router 放弃判断"。全部候选失败才降级。
+> 2. **降级不带背景。** `degraded_background`、`chat_tail_excerpt` 与三个 `FALLBACK_EXCERPT_*` 常量已删除；`Outcome::Fallback` 只带 `reason`，`params.message` 原话照发，`params.context_refs` 不再写入。D7 的其余契约（部件形状、`params.message` 不动、两条路径在持久化上的一致形状）不变，只是降级路径不再产生部件。
 
 ### D8　引用正文里不出现机器标识：名称与 ID 一起交给模型
 
@@ -145,6 +154,7 @@ Block C 的 `draft:` 行因此**同时给名称与 ID**：`workspace="ACoworkDev
 | 持久化 | [conversation.rs](../../../core/acowork-runtime/src/conversation.rs) `MessagePartMeta` / `ContextRefMeta` / `MESSAGE_PART_TYPE_CONTEXT_REF`；`loop_persist::write_message_refs` | `{"type":"context_ref","kind":…}` + 正文在 `content` |
 | 回合 | `loop_.rs` | `turn_message_refs` 在 `user` 行之后、附件之前落盘；标题输入仍取 `raw_user_message` |
 | Router | [chat_router/runner.rs](../../../core/acowork-runtime/src/agent/chat_router/runner.rs) `dispatch_parts`、[chat_router/tool.rs](../../../core/acowork-runtime/src/agent/chat_router/tool.rs) schema、[chat_prompt.rs](../../../core/acowork-core/src/chat_prompt.rs) | 入参 `background`；新会话产出 `(原话, [ref])`，续会话产出 `(原话, [])`；背景与原话同文时丢弃 |
-| 降级 | [startup/gateway_loop.rs](../../../core/acowork-runtime/src/startup/gateway_loop.rs) | `degraded_background` 产出引用部件，`params.message` 不动 |
+| 降级 | [startup/gateway_loop.rs](../../../core/acowork-runtime/src/startup/gateway_loop.rs) | 降级**不产出**引用部件（2026-11-11 修订）；`Outcome::Fallback` 只带 `reason`，`params.message` 不动 |
+| 路由模型链 | [chat_router/runner.rs](../../../core/acowork-runtime/src/agent/chat_router/runner.rs) `router_llm_candidates`、[agent_core.rs](../../../core/acowork-runtime/src/agent/agent_core.rs) `compact_model_candidates` | 配置模型 → 精简模型链，最多 3 个候选；单测钉住候选过滤（不可用 provider / 未登记模型被丢弃） |
 | 词表（D8） | [tools/workspace_resolver.rs](../../../core/acowork-runtime/src/tools/workspace_resolver.rs) `display_name`、[chat_router/runner.rs](../../../core/acowork-runtime/src/agent/chat_router/runner.rs) `RouterDeps::workspace_display_name` + `draft_label` | ID→名称只有一条规则（`alias` → 目录末段 → `None`）；Block C 的名称与 ID 同出，解析不到只留 ID |
 | 前端 | [messageParts.ts](../../../apps/acowork-desktop/src/components/chat/messageParts.ts)（部件类型唯一判据）、[messageFolder.ts](../../../apps/acowork-desktop/src/components/chat/messageFolder.ts) `user_with_parts`、[MessageRefBlock.tsx](../../../apps/acowork-desktop/src/components/chat/MessageRefBlock.tsx)、`chatStore.convertConversationEntry`（保留部件 metadata） | 折叠 + 折叠卡片 markdown；`messageRefPart.test.tsx` 钉 7 条契约（折叠、字面、默认收起、展开 markdown、无原话仍渲染、载入链保留 metadata、附件不回归） |
