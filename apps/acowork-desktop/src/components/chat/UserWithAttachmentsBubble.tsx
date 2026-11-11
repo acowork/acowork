@@ -17,6 +17,7 @@ import {
   speakerRendersMarkdown,
   type SpeakerKind,
 } from "./speakerBubble";
+import { isPmDispatchTurn } from "./pmDispatch";
 import { SpeakerBadge } from "./speakerNames";
 import { AttachmentChipRow } from "./AttachmentChipRow";
 import type { AttachedItem, ChatMessage } from "../../lib/types";
@@ -157,7 +158,14 @@ export function UserWithAttachmentsBubble({
   const fontSizeStyle: React.CSSProperties = { fontSize: "var(--ui-font-size, 0.875rem)" };
   // Renderer + skin both follow the SPEAKER, decided once so the two cannot
   // be configured apart (`speakerBubble.ts`).
-  const asAgentSpeech = speakerRendersMarkdown(speakerKind);
+  //
+  // A PM dispatch is the one case the speaker alone cannot express: its words
+  // are the PM's generated Markdown, spoken in the task owner's name — nobody
+  // typed them, so they are speech (and wear the speech skin), not literal
+  // text. The avatar and the name still follow `speakerKind`: the row speaks
+  // in the owner's name, whoever wrote the words.
+  const speaker: SpeakerKind = isPmDispatchTurn(userMessage) ? "agent" : speakerKind;
+  const asAgentSpeech = speakerRendersMarkdown(speaker);
   // Narrowed once, so the avatar branch below has a non-null instance id.
   const senderAgent = speakerKind === "agent" ? senderAgentId : null;
   // Plan D3: this row's voice. `SpeakerBadge` decides whether there is
@@ -232,7 +240,7 @@ export function UserWithAttachmentsBubble({
           >
             {userMessage.content && (
               <div
-                className={`w-fit max-w-full rounded-md rounded-br-sm ${speakerBubbleClass(speakerKind)} px-4 py-2.5 select-text break-words`}
+                className={`w-fit max-w-full rounded-md rounded-br-sm ${speakerBubbleClass(speaker)} px-4 py-2.5 select-text break-words`}
                 style={fontSizeStyle}
               >
                 {/* Uncapped — see MessageBubble's user branch. The renderer

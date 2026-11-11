@@ -31,6 +31,7 @@ import {
   speakerRendersMarkdown,
   type SpeakerKind,
 } from "./speakerBubble";
+import { isPmDispatchTurn } from "./pmDispatch";
 import { SpeakerBadge } from "./speakerNames";
 
 // ── Utilities ─────────────────────────────────────────────────────────
@@ -141,7 +142,13 @@ const MessageBubble = React.memo(function MessageBubble({
   // markdown inside the accent bubble is the "user text turned black" defect.
   // The avatar and name deliberately keep following `speakerKind` — who SENT
   // the turn is a separate fact the projection does not carry yet.
-  const speaker: SpeakerKind = message.display ? "agent" : speakerKind;
+  //
+  // A PM dispatch settles it the same way, for the same reason: its words are
+  // the PM's generated Markdown, spoken in the task owner's name — nobody typed
+  // them, so they are speech (and wear the speech skin), not literal text.
+  const speaker: SpeakerKind = message.display || isPmDispatchTurn(message)
+    ? "agent"
+    : speakerKind;
   // Plan D3: whose voice this line is in — `SpeakerBadge` decides whether
   // there is anything to say (nothing, for an ordinary turn), and says NAMES
   // rather than the ids the record carries (resolved in `speakerNames.ts`).

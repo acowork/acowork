@@ -94,6 +94,7 @@ import {
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { CollapsibleChatContent } from "./CollapsibleChatContent";
+import { isPmDispatchChatRow } from "./pmDispatch";
 import {
   VirtualRowList,
   type VirtualRowListHandle,
@@ -387,6 +388,12 @@ const GroupRowView = memo(function GroupRowView({
   }
 
   const own = row.kind === "user_message" && row.from === me;
+  // The PM's dispatch speaks in the task creator's name, but its words are the
+  // PM's: the task title and description, written as Markdown by the PM
+  // service. `meta.task_id` is the dispatch's own marker (the human send path
+  // never sets it), so this is the one `user_message` that is not something a
+  // person typed.
+  const pmDispatch = isPmDispatchChatRow(row);
   const who: ParticipantWho = own
     ? { name: profile.displayName, isAgent: false, avatarUrl: null, builtinAvatarId: null }
     : nameOf(row.from);
@@ -548,7 +555,15 @@ const GroupRowView = memo(function GroupRowView({
               className={cn(
                 "max-w-full rounded-md px-4 py-2.5 leading-relaxed break-words select-text",
                 own
-                  ? "rounded-br-sm bg-chat-user text-chat-user-text"
+                  ? pmDispatch
+                    // Markdown wears the NEUTRAL bubble: the prose palette is
+                    // painted for that backdrop, and the accent one is what the
+                    // human typed. A dispatch's Markdown in the accent bubble
+                    // paints near-black on a blue field — the "user bubble text
+                    // turned black" defect, one level up. The side (right, own
+                    // avatar) still says "this is mine".
+                    ? "rounded-br-sm bg-chat-bubble text-text-primary"
+                    : "rounded-br-sm bg-chat-user text-chat-user-text"
                   : "rounded-bl-sm bg-chat-bubble text-text-primary",
               )}
             >
@@ -561,9 +576,12 @@ const GroupRowView = memo(function GroupRowView({
                 its own wrapper, which beats the white `text-chat-user-text`
                 the accent-filled own-bubble inherits — the "user bubble text
                 turned black" defect. It also made `**bold**` render bold in
-                a group chat while reading as literal text in the 1:1 chat. */}
+                a group chat while reading as literal text in the 1:1 chat.
+                The PM's dispatch is the one exception: nobody typed its
+                words, they are generated Markdown, and they belong to the
+                PM — so they render as speech (see `pmDispatch.ts`). */}
               {row.body ? (
-                row.kind === "user_message" ? (
+                row.kind === "user_message" && !pmDispatch ? (
                   <div className="whitespace-pre-wrap break-words">
                     {row.body}
                   </div>

@@ -1578,8 +1578,14 @@ impl SessionTask {
                     // rides `metadata.intent`, next to the machine envelope the
                     // row body already carries. `None` for a human origin, whose
                     // body is already the person's words.
+                    //
+                    // A PM dispatch is the one human origin whose words are NOT
+                    // the person's: they are the PM's generated Markdown, spoken
+                    // in the owner's name. The row says so (`metadata.turn_origin`),
+                    // so a surface can render them as markdown instead of
+                    // painting their syntax as characters (design 27 §5.4.4).
                     agent_loop.turn_user_row_meta =
-                        display.as_ref().map(crate::agent::intent_turn::intent_display_meta);
+                        crate::agent::intent_turn::turn_row_meta(&kind, display.as_ref());
                     let mut llm_message = crate::agent::intent_turn::render_user_turn(
                         &content,
                         &agent_loop.turn_message_refs,

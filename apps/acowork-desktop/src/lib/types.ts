@@ -916,6 +916,12 @@ export interface ChatMessage {
    *  it renders no disclosure and everything else is unchanged.
    *  See {@link TurnSpeaker} and `speakerProvenance.ts`. */
   speaker?: TurnSpeaker;
+  /** The turn's origin, when the Runtime resolved one: `"pm_task"` for a PM
+   *  task dispatch. Its words are the PM's generated Markdown spoken in the
+   *  task owner's name, so they render as markdown, not as literal text.
+   *  Absent on every other turn — absence means "a person typed this".
+   *  See `pmDispatch.ts` for the two markers and why each store needs its own. */
+  turnOrigin?: string;
   /** Raw metadata from the JSONL entry. Used by system entries to carry
    *  attachment metadata (ADR-046 §2.5: 5 metadata.type branches). */
   metadata?: Record<string, unknown>;
@@ -1875,6 +1881,13 @@ export interface ConversationEntry {
    *  means "nothing to announce", never "unknown speaker".
    *  See {@link TurnSpeaker}. */
   speaker?: TurnSpeaker;
+  /** The turn's origin, when the Runtime resolved one: `"pm_task"` for a PM
+   *  task dispatch. A dispatch's words are the **PM's** generated Markdown,
+   *  spoken in the task owner's name — not something a person typed — so a
+   *  surface renders them as markdown rather than as literal text.
+   *  Absent on every other turn: absence means "a person typed this".
+   *  The Runtime resolves it — no client reads the row's metadata itself. */
+  turn_origin?: string;
   /** Entry kind. `undefined`/`"message"` denotes a regular role-based message.
    *  `"compaction"` denotes an LLM-driven compaction summary event whose
    *  `content` is the summary text and `metadata` is `CompactionEventMeta`. */
