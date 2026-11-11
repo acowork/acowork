@@ -501,6 +501,20 @@ Landing: `core/acowork-runtime/src/rounds.rs` (`forced_closure` / `repair_on_ope
 
 **Invariants kept**: the one thing that still opens the block or a round on its own is an unanswered card (D8: something answerable behind a fold is not answerable); `pending` is still the only positive evidence of "in progress" (D9), its re-read driven by the round-state doorbell and driving the bubble's updates; a hole or an outage is still an explicit placeholder. Pure presentation: both Desktop surfaces (`AgentChatView`, `GroupChatPanel`) switch in step, Mobile is untouched this round. Design 27 v3.5 §5.5.5 is the contract of record.
 
+## Amendment (2026-11-11, the addressing card docks at the bottom): `confirm_continue` no longer lands at the block's tail — it floats at the bottom of the chat surface (presentation layer, D4 contract)
+
+**Motivation**. The previous amendment (2026-11-06) hung `confirm_continue` at the tail of the run it asks about, because "the card must sit next to its subject". Once the anchor moved to the exchange's FIRST row, that reasoning inverted: a card drawn at the run's tail can sit hundreds of rows above the composer — and the transcript does not scroll on its own. The human typed at the bottom and saw nothing happen. A card drawn where the reader cannot see it is the same defect as a card drawn away from its subject.
+
+**Decision 1: a single-target `confirm_continue` is docked in a floating overlay at the bottom of the chat surface.** It floats over the composer's edge (with a safe gap, never covering the input), belongs to the surface rather than to the transcript's scroll position. It is the same card (`ChatNoticeEventRow`), the same wording and the same answer path (a re-delivery; answerability still decided by `mayAnswerCard`) — only the position changed. A multi-candidate `session_choice` has no single subject and stays where it is.
+
+**Decision 2: the run being asked about wears a light highlight and a badge.** The card and its subject now live apart, so the run carries the visual link: a light accent wash plus a "waiting for a choice" badge (`chatView.block.unanswered`). The badge is a state, not a second control.
+
+**Decision 3: the block's tail does not draw the card a second time.** The host tells the block that its question is docked (`pendingAskDocked`) and the tail stays empty — one card, one place.
+
+**Invariants kept**: the answer protocol is unchanged (answering a card is a re-delivery of the original words to the chosen address, carrying the original row's `message_id`); the layout mapping is unchanged (`keyOfSeq` / `blockSeqs` still resolve the card's seq to the run it asks about, so a locate does not drift); the viewport reveal (`useRevealPendingAsk`) is kept — it takes the reader to the run being asked about, which now wears the badge.
+
+**Scope**: both Desktop chat surfaces (1:1 `AgentChatView`, group `GroupChatPanel`) switch in step; Mobile's 1:1 surface still draws its addressing card as a row of its own (its card renderer is a separate branch) and is untouched here. The "hang it at the block's tail" clause of the 2026-11-06 amendment is void for Desktop only.
+
 ## References
 
 - [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md) — the complete disposable side-table pattern: write-time incrementals, warn-only failures, watermark/first-touch rebuild, the Windows handle ordering contract. Decision 5 adopts it clause by clause.

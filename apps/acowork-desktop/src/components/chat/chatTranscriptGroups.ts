@@ -70,13 +70,17 @@ export interface RunBlock {
   /** The addressing question this session is waiting on, when the router asked
    *  and the human has not answered (ADR-106 D6 level 5).
    *
-   *  Hung on the block instead of standing at its own transcript position. The
-   *  card asks about THIS run ("continue in S?"), so drawing it anywhere else
-   *  separates the question from the thing it is about: at the bottom of the
-   *  transcript the reader answers a question about a block they cannot see, and
-   *  with the block now anchored where the exchange started (rather than at its
-   *  newest row) that distance only grows. Its seq still resolves to the block,
-   *  so a locate on the card lands where the card is drawn. */
+   *  Hung on the block instead of standing at its own transcript position: the
+   *  card asks about THIS run ("continue in S?"), so the run is what locates
+   *  it. Its seq still resolves to the block, so a locate on the card lands on
+   *  the run it is about.
+   *
+   *  Where it is DRAWN is the host's fact (ADR-106 revision 2026-11-11): the
+   *  block is anchored where its exchange started, so a card drawn at the run's
+   *  tail can sit hundreds of rows above the composer, in a list that does not
+   *  scroll on its own — the human saw nothing happen. The host docks the
+   *  question at the bottom of the surface and marks the run it belongs to
+   *  (`activeAsk`), so the card is on screen AND still has a subject. */
   pendingAsk?: ChatMessageRow;
 }
 
@@ -110,6 +114,29 @@ export function cardAnswerFor(
   const card = item.kind === "run" ? item.pendingAsk : item.row;
   if (!card || !isCardNotice(card.meta?.notice_type)) return undefined;
   return mayAnswerCard(card, me) ? handler : undefined;
+}
+
+/**
+ * The one open question a surface docks at the bottom (ADR-106 revision
+ * 2026-11-11).
+ *
+ * The router asks about one run at a time, so the newest open question is the
+ * one the human is waiting on. It is picked by the CARD's seq — the row's own
+ * place in the transcript — and not by the block's position: a block is anchored
+ * where its exchange STARTED, so the last block in the list is not the last
+ * question.
+ */
+export function activeAsk(items: TranscriptItem[]): RunBlock | null {
+  let active: RunBlock | null = null;
+  let seq = -1;
+  for (const item of items) {
+    if (item.kind !== "run" || !item.pendingAsk) continue;
+    if (item.pendingAsk.seq > seq) {
+      active = item;
+      seq = item.pendingAsk.seq;
+    }
+  }
+  return active;
 }
 
 export interface TranscriptLayout {

@@ -82,7 +82,8 @@ import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
 import { turnInflight, resolveExpectedResponders } from "../../lib/chatTurnInflight";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
-import { cardAnswerFor, type TranscriptItem } from "./chatTranscriptGroups";
+import { cardAnswerFor, activeAsk, type TranscriptItem } from "./chatTranscriptGroups";
+import { ChatAskDock } from "./ChatAskDock";
 import { useRevealPendingAsk } from "./useRevealPendingAsk";
 import { useTranscriptLayout } from "./useTranscriptLayout";
 import {
@@ -639,6 +640,9 @@ const GroupRowView = memo(function GroupRowView({
 
 interface GroupItemProps extends Omit<RowProps, "row"> {
   item: TranscriptItem;
+  /** This run's question is docked at the bottom of the surface, so the run
+   *  must not draw it at its tail as well. */
+  pendingAskDocked?: boolean;
 }
 
 /**
@@ -657,6 +661,7 @@ interface GroupItemProps extends Omit<RowProps, "row"> {
  */
 const GroupItemView = memo(function GroupItemView({
   item,
+  pendingAskDocked,
   ...rowProps
 }: GroupItemProps) {
   if (item.kind === "run") {
@@ -682,7 +687,9 @@ const GroupItemView = memo(function GroupItemView({
         // The router's question about this run is drawn at the block's tail and
         // answers through the same handler a standalone card row gets — the gate
         // (the person the card asked, D10) already ran in `cardAnswerFor`.
+        // Unless the host docked it, in which case the tail stays empty.
         onChooseCard={rowProps.onChooseCard}
+        pendingAskDocked={pendingAskDocked}
         focusInput={
           !!focusBlockSessionId && item.execSessionId === focusBlockSessionId
         }
@@ -986,6 +993,11 @@ export function GroupChatPanel() {
     virtualAttrs,
     seqsByItem,
   } = useTranscriptLayout(rows, activeGroupId ?? "");
+  // The router's open question, and the run it asks about (ADR-106 revision
+  // 2026-11-11): it is docked at the bottom of this surface, and the run wears
+  // a badge so the question still has a subject.
+  const askBlock = useMemo(() => activeAsk(items), [items]);
+  const askSeq = askBlock?.pendingAsk?.seq ?? null;
   // A question the router asks about a run is drawn at that run's block, which
   // stays where the exchange began — this is what brings the reader there.
   // Declared AFTER the follow hook, the same rule `useLocateMessage` follows
@@ -1637,6 +1649,21 @@ export function GroupChatPanel() {
   // Reading is allowed (server-side admin bypass), posting is not — hide the
   // composer and card actions for anyone who isn't a participant.
   const canPost = participants.some((p) => p.id === me);
+  // The docked question's answer path — the same gate as everywhere else
+  // (`cardAnswerFor`): only the person the card asked may answer it (D10), and
+  // on this surface only a participant may answer anything at all — the same
+  // read/write split the blocks get (`readOnly`). Stable identities, so the
+  // dock does not re-render on every keystroke.
+  const askHandler =
+    canPost && askBlock ? cardAnswerFor(askBlock, me, answerCard) : undefined;
+  const askChoose = useCallback(
+    (choice: CardChoice) => {
+      if (askHandler && askBlock?.pendingAsk) {
+        askHandler(askBlock.pendingAsk, choice);
+      }
+    },
+    [askBlock, askHandler],
+  );
 
   // Right-click on an agent's avatar / name → the "@name" menu. No menu
   // without a composer: a read-only viewer has nowhere to put the mention.
@@ -1854,6 +1881,11 @@ export function GroupChatPanel() {
                   onChooseCard={
                     canPost ? cardAnswerFor(item, me, answerCard) : undefined
                   }
+                  pendingAskDocked={
+                    askSeq !== null &&
+                    item.kind === "run" &&
+                    item.pendingAsk?.seq === askSeq
+                  }
                   onLocateRef={handleLocateRef}
                   focusBlockSessionId={focusBlockSessionId ?? undefined}
                 />
@@ -1927,7 +1959,15 @@ export function GroupChatPanel() {
         )}
       </div>
 
-      <div className="shrink-0">
+      {/* The composer area. `relative` so the router's open question can be
+          docked over its edge (ADR-106 revision 2026-11-11) — the reader sees
+          it without hunting for the run it asks about, and the input stays
+          clear. */}
+      <div className="relative shrink-0">
+        <ChatAskDock
+          card={askBlock?.pendingAsk ?? null}
+          onChoose={askHandler ? askChoose : undefined}
+        />
         {!canPost ? (
           <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg px-3 py-2 text-center text-10 text-text-tertiary">
             {t("groupChat.readOnly")}

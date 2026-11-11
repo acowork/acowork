@@ -1292,6 +1292,38 @@ describe("ChatExecutionBlock action row", () => {
     expect(screen.getByText("chatView.block.confirmSession")).toBeTruthy();
   });
 
+  /** ADR-106 revision 2026-11-11: the question is docked at the bottom of the
+   *  surface, so the run's tail must stay empty — one question, one place — and
+   *  the run wears the badge that names it as the question's subject. */
+  it("a docked question is not drawn at the tail; the run wears a badge instead", () => {
+    const ask: ChatMessageRow = {
+      seq: 9,
+      ts: 9,
+      from: "ag",
+      kind: "system_notice",
+      body: "",
+      to: "me",
+      meta: { message_id: "confirm_continue:u1", notice_type: "confirm_continue" },
+      delivery: {
+        answered: false,
+        question: { answered: false, options: [{ session_id: "s1", label: "fix pagination" }] },
+      },
+    };
+    renderBlock(
+      { [REF1]: entryOf({}) },
+      { onChooseCard: vi.fn(), pendingAskDocked: true },
+      { ...blockOf([roundOf("r1", 3)]), pendingAsk: ask },
+    );
+    // The dock owns the card: the tail draws nothing.
+    expect(screen.queryByTestId("chat-card-options")).toBeNull();
+    expect(screen.queryByText("chatView.block.confirmSession")).toBeNull();
+    // The run still says that a question about it is open — the badge is what
+    // keeps the docked question attached to its subject.
+    expect(screen.getByTestId("exec-block-ask-badge").textContent).toBe(
+      "chatView.block.unanswered",
+    );
+  });
+
   /** Design 27 §5.4.5: one row, two audiences. The row body is the machine
    *  envelope the model reads; the display projection beside it is what a human
    *  reads. Before this, a peer round printed `[intent:2f3c…:analyze] {"title":…}`

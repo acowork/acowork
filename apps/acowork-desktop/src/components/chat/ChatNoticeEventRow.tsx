@@ -28,6 +28,10 @@
  *  - the tail of the run it asks about (`identity="inherited"`): the block
  *    already painted that avatar, that name and that gutter, so the card adds
  *    none of them. It starts exactly where the block's content starts.
+ *  - the bottom dock (`identity="floating"`): the question is parked over the
+ *    composer's edge, outside the transcript altogether. No line owns it, so it
+ *    wears the author's face and name itself — but no 40px gutter, because
+ *    there is no bubble column to line up with.
  * Painting the header unconditionally is the 2026-11-06 defect: a card hung on a
  * block arrived with a second face over the same question, its body 64px (px-4 +
  * gap + the 40px gutter) to the right of the block's own content — neither a
@@ -107,10 +111,13 @@ interface ChatNoticeEventRowProps {
    *  the agent's avatar + name and the 40px gutter above the question.
    *  `"inherited"`: it hangs at the tail of the run it asks about, whose block
    *  already painted all three, so the card adds none and starts where the
-   *  block's content starts. Required, and deliberately so: a second identity
-   *  over one question ("one card, two faces") is the defect this states, and a
-   *  surface that has not decided where its card sits must not guess. */
-  identity: "own" | "inherited";
+   *  block's content starts. `"floating"`: it is docked over the composer's
+   *  edge, outside the transcript — no line owns it, so it names its author
+   *  itself, but it wears no gutter (there is no bubble column to line up
+   *  with). Required, and deliberately so: a second identity over one question
+   *  ("one card, two faces") is the defect this states, and a surface that has
+   *  not decided where its card sits must not guess. */
+  identity: "own" | "inherited" | "floating";
 }
 
 export function ChatNoticeEventRow({
@@ -343,12 +350,16 @@ export function ChatNoticeEventRow({
     // Hung at a run's tail it wears neither: the block above already said who
     // is asking, and a second face over the same question is how one card ended
     // up duplicated and inset into the middle of the block's own column.
+    // Docked at the bottom it owns no line at all, so it names its author
+    // itself — but keeps the gutter out of it: there is no bubble column there
+    // to line up with.
+    const namesAuthor = identity === "own" || identity === "floating";
     return (
       <div
         className={cn("py-1", identity === "own" && "px-4", className)}
         data-testid="chat-card-options"
       >
-        {identity === "own" && (
+        {namesAuthor && (
           <div
             data-testid="chat-card-author"
             className="mb-2 mt-1 flex items-center gap-2"
