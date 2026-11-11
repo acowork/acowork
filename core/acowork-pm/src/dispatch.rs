@@ -8,14 +8,21 @@
 //!
 //! New single trigger source: a periodic scan. Every tick the scanner takes
 //! the in-memory index (no disk reads for filtering), selects tasks that are
-//! `pending` + agent-assigned + creation-approved + undispatched +
-//! `start_at` reached, and pushes a wake-up intent per task. On delivery the
+//! `pending` + assigned (agent or human) + creation-approved + undispatched +
+//! `start_at` reached, and pushes one dispatch per task. On delivery the
 //! task is stamped `dispatched_at` (idempotence); the stamp is cleared
 //! whenever the task leaves `pending` or is reassigned, so a rollback to
 //! `pending` re-dispatches naturally.
 //!
+//! One dispatch, two shapes, decided by the Gateway from the target's type in
+//! the project group roster: an **agent** gets the group-chat sentence plus a
+//! wake-up intent; a **human** gets the sentence alone — an account id has no
+//! Runtime to wake, and the message in the project group chat is the whole
+//! delivery (`intent_api::dispatch_task`). Both answer `delivered`, so the
+//! scanner does not have to know which one it triggered.
+//!
 //! The lifecycle this closes:
-//! create (pending, undispatched) → scanner wakes assignee at `start_at` →
+//! create (pending, undispatched) → scanner dispatches at `start_at` →
 //! agent `pm_claim_task` (pending → in_progress) → work → `pm_submit_task`
 //! (→ submitted) → human review (→ done). The wake-up splits in two: the
 //! human-readable task body rides the chat row / user message, the tool-call

@@ -58,6 +58,20 @@ impl ParticipantRef {
             } if identity == "agent"
         )
     }
+
+    /// Is this a **typed** human participant? The mirror of [`Self::is_agent`]:
+    /// the user service types an id it finds in its account table as `human`
+    /// (see `typed_participants`), so this is what tells a task dispatch that
+    /// it has nothing to wake — the group-chat sentence is the whole delivery.
+    pub fn is_human(&self) -> bool {
+        matches!(
+            self,
+            ParticipantRef::Typed {
+                identity: Some(identity),
+                ..
+            } if identity == "human"
+        )
+    }
 }
 
 impl SessionInfo {

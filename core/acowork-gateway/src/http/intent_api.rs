@@ -448,45 +448,52 @@ async fn dispatch_task(
         .map_err(|e| ApiError::not_found(&format!("chat session not loadable: {e}")))?;
     let repo = session.repo.clone().unwrap_or_default();
 
-    let target_info = {
-        let gw = state.gateway_state.read().await;
-        gw.resolve_installed_key(&req.target_agent)
-            .and_then(|k| gw.installed(&k).cloned())
-    };
-    let Some(target_info) = target_info else {
-        return Ok(Json(serde_json::json!({
-            "status": "failed", "error_code": "target_not_installed",
-        })));
-    };
-    if intent_enforce_permissions(&state).await
-        && !target_info.manifest.permissions.iter().any(|p| {
-            use acowork_core::Permission;
-            match p {
-                Permission::IntentReceive(None) => true,
-                Permission::IntentReceive(Some(s)) => {
-                    s == &target_info.manifest.agent_id
-                        || s == &target_info.instance_id
-                        || s == &req.owner
-                }
-                _ => false,
-            }
-        })
-    {
-        return Ok(Json(serde_json::json!({
-            "status": "failed", "error_code": "not_authorized",
-        })));
-    }
+    // A human assignee is never woken: an account id has no Runtime behind it,
+    // and `target_not_installed` was the old answer to a perfectly legal
+    // assignment. The group-chat sentence below IS the delivery — the same
+    // sentence an agent dispatch writes, minus the wake. Which kind the target
+    // is comes from the roster the user service types (an id it finds in its
+    // account table is `human`), so PM needs no new wire field and every
+    // caller of this route gets the behaviour for free. A target the roster
+    // does not hold is not evidence of a human, so it falls through to the
+    // agent path below and is refused there as `target_not_installed` —
+    // right either way: an untyped id has no Runtime, and a row written for
+    // someone who is not in the group is a message nobody reads.
+    let target_is_human = session
+        .participants
+        .iter()
+        .any(|p| p.id() == req.target_agent && p.is_human());
 
-    let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {
-        return Err(ApiError::internal("Gateway MQTT control plane is not available"));
-    };
-    let ctx = DeliveryContext {
-        state: &state.gateway_state,
-        registry,
-        node_control: node_control.as_ref(),
-        mqtt: Some(mqtt),
-        mailbox: mailbox.as_deref(),
-    };
+    if !target_is_human {
+        let target_info = {
+            let gw = state.gateway_state.read().await;
+            gw.resolve_installed_key(&req.target_agent)
+                .and_then(|k| gw.installed(&k).cloned())
+        };
+        let Some(target_info) = target_info else {
+            return Ok(Json(serde_json::json!({
+                "status": "failed", "error_code": "target_not_installed",
+            })));
+        };
+        if intent_enforce_permissions(&state).await
+            && !target_info.manifest.permissions.iter().any(|p| {
+                use acowork_core::Permission;
+                match p {
+                    Permission::IntentReceive(None) => true,
+                    Permission::IntentReceive(Some(s)) => {
+                        s == &target_info.manifest.agent_id
+                            || s == &target_info.instance_id
+                            || s == &req.owner
+                    }
+                    _ => false,
+                }
+            })
+        {
+            return Ok(Json(serde_json::json!({
+                "status": "failed", "error_code": "not_authorized",
+            })));
+        }
+    }
 
     // §6.2: the task IS the conversation. Follow-up dispatches on the same
     // task share the conversation (and its §6.5 R4 request budget).
@@ -555,6 +562,26 @@ async fn dispatch_task(
         })));
     }
 
+    // The human branch ends here: the row above is the whole delivery. There
+    // is no mailbox entry, no acceptance receipt and no `target_in_group`
+    // refusal to make — nothing is being woken, so nothing can refuse to wake.
+    // `delivered` is the same receipt the agent path returns, which is what
+    // makes PM stamp `dispatched_at` instead of retrying with backoff.
+    if target_is_human {
+        tracing::info!(
+            task_id = %req.task_id,
+            target = %req.target_agent,
+            message_id = %message_id,
+            "task assigned to a human in the project group chat (no wake)"
+        );
+        return Ok(Json(serde_json::json!({
+            "message_id": message_id,
+            "status": "delivered",
+            "conversation_id": conversation_id,
+            "chat_session_id": chat_session_id,
+        })));
+    }
+
     // Registered before the publish, after every early exit above (see the
     // wait below): a warm Runtime can answer within microseconds, and a
     // listener attached afterwards would miss it and degrade a good answer
@@ -586,6 +613,18 @@ async fn dispatch_task(
             ),
         })));
     }
+    // Past the last early exit that can refuse a dispatch: from here the
+    // delivery needs the control plane that carries it.
+    let (Some(mqtt), Some(registry)) = (mqtt.as_ref(), registry.as_ref()) else {
+        return Err(ApiError::internal("Gateway MQTT control plane is not available"));
+    };
+    let ctx = DeliveryContext {
+        state: &state.gateway_state,
+        registry,
+        node_control: node_control.as_ref(),
+        mqtt: Some(mqtt),
+        mailbox: mailbox.as_deref(),
+    };
     let chat_grant = chat_grant(&chat_session_id, target_in_group, Some(true));
     let dreq = delivery::DeliveryRequest {
         message_id: message_id.clone(),
@@ -4131,6 +4170,164 @@ mod project_group_deleted_route_tests {
         )
         .await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    }
+}
+
+/// A task assigned to a **human** is a sentence in the project group chat and
+/// nothing else — an account id has no Runtime to wake. Before this, the
+/// Gateway answered `target_not_installed` (an account is not in the agent
+/// directory), PM recorded it as `dispatch_error` and the Desktop showed
+/// "派发失败" for a perfectly legal assignment.
+///
+/// The whole branch is exercised here because the decision is one boolean over
+/// the roster's typed participants, and the two shapes that must NOT change
+/// (an agent target still needs to be installed, an unknown id is still
+/// refused) sit right next to it.
+#[cfg(test)]
+mod task_dispatch_human_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::response::IntoResponse;
+    use crate::gateway::state::GatewayState;
+    use crate::http::auth::HttpAuth;
+    use std::sync::{Arc, Mutex};
+    use tower::ServiceExt;
+
+    /// The project group's roster: one agent (the PM that files tasks), one
+    /// human member, and an agent that is a member but not installed here.
+    const ROSTER: &str = r#"{
+        "session_id": "cs-h",
+        "kind": "project_group",
+        "participants": [
+            {"id": "pm-agent", "identity": "agent"},
+            {"id": "u-dana", "identity": "human"},
+            {"id": "agent-gone", "identity": "agent"}
+        ]
+    }"#;
+
+    /// A stub user service: serves the roster and records every appended row.
+    async fn state() -> (AppState, Arc<Mutex<Vec<serde_json::Value>>>) {
+        let rows: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&rows);
+        let app = axum::Router::new()
+            .route(
+                "/internal/chat-sessions/{sid}",
+                axum::routing::get(|| async move {
+                    (
+                        StatusCode::OK,
+                        [("content-type", "application/json")],
+                        ROSTER,
+                    )
+                        .into_response()
+                }),
+            )
+            .route(
+                "/internal/chat-sessions/messages",
+                axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+                    let sink = Arc::clone(&sink);
+                    async move {
+                        sink.lock().unwrap().push(body);
+                        axum::Json(serde_json::json!([])).into_response()
+                    }
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = std::env::temp_dir().join(format!(
+            "acowork-test-dispatch-human-{}",
+            std::process::id()
+        ));
+        let mut gw = GatewayState::new(&dir.to_string_lossy());
+        gw.internal_service_token = Some("svc-token".to_string());
+        gw.user_process = Some(crate::lifecycle::user_supervisor::UserProcessState {
+            pid: 0,
+            port,
+            ready: true,
+        });
+        (
+            AppState::new(
+                Arc::new(tokio::sync::RwLock::new(gw)),
+                Arc::new(HttpAuth::new(false)),
+            ),
+            rows,
+        )
+    }
+
+    async fn dispatch(
+        state: AppState,
+        target: &str,
+    ) -> (StatusCode, serde_json::Value) {
+        let body = serde_json::json!({
+            "project_id": "p-1",
+            "task_id": "t-1",
+            "target_agent": target,
+            "owner": "pm-agent",
+            "project_owner": "u-owner",
+            "message": "## 背景\n把这页做出来",
+            "assignment_brief": "claim → work → submit",
+            "chat_session_id": "cs-h",
+            "message_id": "pm-human-1",
+        });
+        let resp = intent_routes()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/intents/task-dispatch")
+                    .header("content-type", "application/json")
+                    .header("authorization", "Bearer svc-token")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = resp.status();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+    }
+
+    #[tokio::test]
+    async fn human_assignee_gets_one_group_row_and_a_delivered_receipt() {
+        let (state, rows) = state().await;
+        let (status, body) = dispatch(state, "u-dana").await;
+        assert_eq!(status, StatusCode::OK, "dispatch: {body}");
+        assert_eq!(body["status"], "delivered", "PM stamps `dispatched_at` on: {body}");
+
+        let rows = rows.lock().unwrap();
+        assert_eq!(rows.len(), 1, "one sentence, one row: {rows:?}");
+        let msg = &rows[0]["message"];
+        assert_eq!(msg["from"], "pm-agent", "the voice is the task's creator: {msg}");
+        assert_eq!(msg["to"], "u-dana", "the assignment names the human: {msg}");
+        assert_eq!(msg["kind"], "agent_message", "PM speaks as an agent: {msg}");
+        assert_eq!(msg["body"], "## 背景\n把这页做出来");
+        assert_eq!(
+            msg["meta"]["task_id"], "t-1",
+            "the row stays the task's thread origin (markdown rendering keys on it)"
+        );
+        assert_eq!(msg["meta"]["message_id"], "pm-human-1");
+    }
+
+    #[tokio::test]
+    async fn agent_assignee_still_needs_an_installed_target() {
+        // The install gate is only bypassed for humans: an agent member that is
+        // not installed must still fail, so PM's backoff/surfacing is unchanged.
+        let (state, rows) = state().await;
+        let (status, body) = dispatch(state, "agent-gone").await;
+        assert_eq!(status, StatusCode::OK, "dispatch: {body}");
+        assert_eq!(body["error_code"], "target_not_installed", "{body}");
+        assert!(rows.lock().unwrap().is_empty(), "a failed dispatch writes no row");
+    }
+
+    #[tokio::test]
+    async fn unknown_target_is_not_treated_as_a_human() {
+        // Neither typed human nor installed: the old refusal, not a silent row.
+        let (state, rows) = state().await;
+        let (_, body) = dispatch(state, "u-stranger").await;
+        assert_eq!(body["error_code"], "target_not_installed", "{body}");
+        assert!(rows.lock().unwrap().is_empty());
     }
 }
 
