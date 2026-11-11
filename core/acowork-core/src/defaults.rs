@@ -6,6 +6,17 @@
 /// Default Gateway HTTP listen port
 pub const GATEWAY_HTTP_PORT: u16 = 19876;
 
+/// The Gateway HTTP port this process should call back into.
+/// [`GATEWAY_HTTP_PORT`] by default; `ACOWORK_GATEWAY_HTTP_PORT` overrides
+/// it so a process-level test can boot a private Gateway on a free port
+/// instead of colliding with the well-known one a desktop instance holds.
+pub fn gateway_http_port() -> u16 {
+    std::env::var("ACOWORK_GATEWAY_HTTP_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(GATEWAY_HTTP_PORT)
+}
+
 /// Default Gateway HTTP listen host (localhost only)
 pub const GATEWAY_HTTP_HOST: &str = "127.0.0.1";
 

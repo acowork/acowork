@@ -110,6 +110,19 @@ pub struct DecisionRecord {
     /// why.
     #[serde(default)]
     pub continuation_refused: bool,
+    /// `exec_session_route_confirm` only: milliseconds the turn waited on the
+    /// human's click before the card resolved or timed out.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_wait_ms: Option<u64>,
+    /// `exec_session_route_confirm` only: how the parked turn ended —
+    /// `continue` (the human confirmed), `new_task` (the human refused and
+    /// the turn went on to create), or `timeout` (nobody clicked; the card
+    /// stays open and a later click takes the ladder). Absent when no card
+    /// was parked. This is what makes the 2026-11-11 defect visible in the
+    /// log: a proposal whose card was never answered wrote no trace of the
+    /// wait, because the old act ended the turn at the card.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirm_result: Option<String>,
 }
 
 impl DecisionRecord {
@@ -184,6 +197,8 @@ mod tests {
             attachment_only: false,
             continuation_refused: false,
             info_rounds: Some(1),
+            confirm_wait_ms: None,
+            confirm_result: None,
             prompt_tokens: Some(3120),
             completion_tokens: Some(48),
             cache_read_tokens: Some(2816),

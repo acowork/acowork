@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use acowork_core::defaults::GATEWAY_HTTP_PORT;
+use acowork_core::defaults::gateway_http_port;
 
 use super::inbound::IntentEnvelope;
 use serde::{Deserialize, Serialize};
@@ -755,7 +755,7 @@ pub async fn append_chat_row(
     body: &str,
     meta: serde_json::Value,
 ) -> Result<(), String> {
-    let url = format!("http://{gateway_host}:{GATEWAY_HTTP_PORT}/api/intents/chat-append");
+    let url = format!("http://{gateway_host}:{}/api/intents/chat-append", gateway_http_port());
     let payload = serde_json::json!({
         "from": instance_id,
         "chat_session_id": chat_session_id,
@@ -965,7 +965,7 @@ pub async fn post_intent_response(
     body: &str,
 ) -> Result<(), String> {
     let url = format!(
-        "http://{gateway_host}:{GATEWAY_HTTP_PORT}/api/intents/{}/response",
+        "http://{gateway_host}:{}/api/intents/{}/response", gateway_http_port(),
         ctx.request_id
     );
     let payload = serde_json::json!({
@@ -1105,7 +1105,7 @@ pub async fn pull_chat_attachment(
     message_id: &str,
 ) -> Result<(String, String, Vec<u8>), String> {
     let url = format!(
-        "http://{gateway_host}:{GATEWAY_HTTP_PORT}/api/intents/chat-attachments/{target_instance}/{chat_session_id}/{attachment_id}/{message_id}"
+        "http://{gateway_host}:{}/api/intents/chat-attachments/{target_instance}/{chat_session_id}/{attachment_id}/{message_id}", gateway_http_port()
     );
     let mut req = reqwest::Client::new()
         .get(&url)
