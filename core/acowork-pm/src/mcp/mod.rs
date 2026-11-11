@@ -4100,6 +4100,118 @@ mod tests {
     }
 
 
+    // ── G6: updated_since — the delta query (plan §7) ────────────────────
+
+    /// "What changed since my last read" without re-reading everything.
+    /// The boundary is inclusive (`updated_at >= since`): a caller that
+    /// re-sends its own last-seen timestamp loses nothing, and a duplicate
+    /// row is cheaper than a silently dropped task.
+    #[tokio::test]
+    async fn list_tasks_updated_since_returns_only_recently_changed() {
+        let router = test_router().await;
+        let actor = "pm-delta";
+        let pid = project_with_owner(&router, actor, "Delta").await;
+        create_task(
+            &router,
+            actor,
+            2,
+            json!({ "project_id": pid, "title": "untouched" }),
+        )
+        .await;
+        create_task(
+            &router,
+            actor,
+            3,
+            json!({ "project_id": pid, "title": "touched" }),
+        )
+        .await;
+
+        // A timestamp in the near past: both rows are newer than it.
+        let recent = (chrono::Utc::now() - chrono::Duration::seconds(5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "updated_since": recent }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["total"], 2, "recent window: {v}");
+
+        // A timestamp in the future: nothing changed after it.
+        let future = (chrono::Utc::now() + chrono::Duration::seconds(3600))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "updated_since": future }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["total"], 0, "empty delta is a legal answer: {v}");
+
+        // The delta composes with the other filters — a status filter on
+        // the same window still answers from the index, not a re-read.
+        let v = call_tool(
+            &router,
+            Some(actor),
+            7,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "updated_since": recent, "status": "pending" }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["total"], 2, "composed filters: {v}");
+    }
+
+    /// An unparseable timestamp must be refused loudly — silently ignoring
+    /// `updated_since` would turn a delta read into a full dump, the exact
+    /// cost the field exists to avoid.
+    #[tokio::test]
+    async fn list_tasks_updated_since_rejects_a_malformed_timestamp() {
+        let router = test_router().await;
+        let actor = "pm-delta-bad";
+        let pid = project_with_owner(&router, actor, "DeltaBad").await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            2,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "updated_since": "yesterday" }),
+        )
+        .await;
+        assert!(
+            v["error"].is_object(),
+            "a malformed RFC3339 must not be ignored: {v}"
+        );
+    }
+
+    /// Cross-project scoping: `updated_since` narrows on its own — the
+    /// question "everything updated since X" is exactly the cross-project
+    /// question the field exists to answer.
+    #[tokio::test]
+    async fn list_tasks_updated_since_alone_narrows_a_cross_project_scan() {
+        let router = test_router().await;
+        let actor = "pm-delta-x";
+        project_with_owner(&router, actor, "DeltaX").await;
+        let recent = (chrono::Utc::now() - chrono::Duration::seconds(5))
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+        let v = call_tool(
+            &router,
+            Some(actor),
+            2,
+            "pm_list_tasks",
+            json!({ "updated_since": recent }),
+        )
+        .await;
+        assert_eq!(
+            v["error"]["code"].as_i64(),
+            None,
+            "updated_since is a narrowing filter: {v}"
+        );
+    }
+
     // ── T1-2: pm_update_task owns the tree position ──────────────────────
 
     #[tokio::test]

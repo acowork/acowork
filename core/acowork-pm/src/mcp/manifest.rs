@@ -111,6 +111,11 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           },
           "only_roots": { "type": "boolean", "default": false },
           "order_by": { "type": "string", "enum": ["created_at", "updated_at", "due_at", "priority"] },
+          "updated_since": {
+            "type": "string",
+            "format": "date-time",
+            "description": "RFC3339 delta filter: only tasks whose updated_at is at or after this instant (\"what changed since my last read\"). Composes with every other filter; an unparseable value returns bad_request."
+          },
           "offset": { "type": "integer", "minimum": 0, "default": 0 },
           "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
         }

@@ -1208,6 +1208,12 @@ impl PmStore for TreePmStore {
                             return false;
                         }
                     }
+                    // G6 delta filter — index-resident, like every gate above.
+                    if let Some(since) = filter.updated_since
+                        && e.updated_at < since
+                    {
+                        return false;
+                    }
                     true
                 })
                 .map(|(id, _)| id.clone())

@@ -829,6 +829,14 @@ pub struct TaskFilter {
     /// `parent_task_id`, enforced by the caller-facing layer, not here.
     #[serde(default)]
     pub only_roots: bool,
+    /// Delta query (plan §7 G6): keep only tasks whose `updated_at` is at
+    /// or after this instant — "what changed since my last read". Index
+    /// field, so the sweep stays in memory. Inclusive of the boundary
+    /// value: a caller that re-sends its own last-seen timestamp loses
+    /// nothing, and a duplicate row is cheaper than a silently dropped
+    /// task.
+    #[serde(default)]
+    pub updated_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]

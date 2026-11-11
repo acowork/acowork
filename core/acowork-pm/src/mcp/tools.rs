@@ -372,6 +372,10 @@ struct ListTasksArgs {
     only_roots: bool,
     #[serde(default)]
     order_by: Option<String>,
+    /// Delta query (plan §7 G6): RFC3339 instant; return only tasks whose
+    /// `updated_at` is at or after it. Composes with every other filter.
+    #[serde(default)]
+    updated_since: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
     limit: Option<usize>,
     #[serde(default)]
@@ -391,6 +395,7 @@ impl ListTasksArgs {
         "parent_task_id",
         "only_roots",
         "order_by",
+        "updated_since",
         "limit",
         "offset",
     ];
@@ -910,12 +915,16 @@ async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Re
         || a.query.is_some()
         || a.parent_task_id.is_some()
         || a.only_roots
-        || a.only_blocked;
+        || a.only_blocked
+        // G6: the delta filter narrows on its own — "everything updated
+        // since X across all projects" is exactly the cross-project
+        // question it exists to answer.
+        || a.updated_since.is_some();
     // Without a project scope this walks the whole index; the filter is what
     // keeps it from becoming a disk sweep of every task on the machine.
     if a.project_id.is_none() && !narrowed {
         return Err(PmError::BadRequest(
-            "cross-project pm_list_tasks needs at least one narrowing filter (status / assignee / review_status / type / query / parent_task_id / only_roots / only_blocked), or a project_id".to_string(),
+            "cross-project pm_list_tasks needs at least one narrowing filter (status / assignee / review_status / type / query / parent_task_id / only_roots / only_blocked / updated_since), or a project_id".to_string(),
         ));
     }
     if a.parent_task_id.is_some() && a.only_roots {
@@ -958,6 +967,7 @@ async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Re
         query: a.query,
         parent_task_id: a.parent_task_id,
         only_roots: a.only_roots,
+        updated_since: a.updated_since,
     };
     let tasks = state.store.find_tasks(&filter).await?;
     let total = tasks.len();
