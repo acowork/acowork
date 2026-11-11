@@ -1,7 +1,7 @@
 ---
 name: architecture-design
 description: Design system architecture through context discovery, requirements clarification, alternatives, approval gates, module decomposition, and implementation handoff
-version: "1.1.0"
+version: "1.2.0"
 author: developer
 triggers:
   - design
@@ -11,7 +11,9 @@ triggers:
   - 架构设计
 tool_deps:
   - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -28,7 +30,7 @@ Architecture is trade-off management. Always document the choice, rejected alter
 
 1. **Explore project context**
    - Use `mcp_memory__memory_recall` to retrieve prior architectural decisions, constraints, conventions, and known risks
-   - Use `file_read` to inspect existing docs, source structure, module boundaries, interfaces, tests, and deployment assumptions
+   - Use `doc_read` and `doc_search` to inspect the existing docs, and `file_read` to inspect source structure, module boundaries, interfaces, tests, and deployment assumptions
    - Identify whether this is a new system, an extension, a migration, or a redesign
    - If the request spans multiple independent subsystems, propose decomposition before designing details
 
@@ -65,7 +67,7 @@ Architecture is trade-off management. Always document the choice, rejected alter
    - If rollback is unclear, mark the design incomplete
 
 7. **Write and self-review the design**
-   - Use `file_write` to save the architecture document when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist accepted decisions, rejected alternatives, risks, and assumptions
    - Self-review the design for placeholders, contradictions, ambiguous requirements, missing tests, and oversized scope
    - If the design has unresolved material questions, surface them before implementation planning

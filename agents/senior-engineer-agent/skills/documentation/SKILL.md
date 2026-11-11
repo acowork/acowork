@@ -1,7 +1,7 @@
 ---
 name: documentation
 description: Write clear, accurate technical documentation including API docs, guides, and architecture records
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - document
@@ -11,8 +11,9 @@ triggers:
   - README
   - guide
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
   - mcp_memory__memory_recall
 ---
 
@@ -21,7 +22,7 @@ tool_deps:
 ## Execution Steps
 
 1. **Understand what needs documentation**
-   - Use `file_read` to examine the code or system that needs documentation
+   - Use `doc_read` and `doc_search` to examine the existing documentation and design notes for the system that needs documenting
    - Use `mcp_memory__memory_recall` to retrieve any prior documentation decisions, style guides, or templates
    - Determine the documentation type:
      - **API Reference**: Auto-generated from code annotations (rustdoc, JSDoc, docstrings)
@@ -40,7 +41,7 @@ tool_deps:
    - Plan examples and code snippets — these are often more valuable than prose
 
 3. **Write the content**
-   - Use `file_write` to create or update the document
+   - Use `doc_write` to create or update the document
    - Follow the Diátaxis framework when applicable:
      - *Tutorial*: Learning-oriented, safely guides the reader
      - *How-to Guide*: Problem-oriented, helps the reader accomplish a goal
@@ -61,7 +62,7 @@ tool_deps:
    - Verify that all code examples actually work — run them if possible
    - Check that cross-references and links are valid
    - Ensure the document follows the project's documentation style
-   - Use `file_write` to save the final version
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
 
 ## Output Format
 

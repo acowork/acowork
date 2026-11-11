@@ -1,7 +1,7 @@
 ---
 name: defect-management
 description: Triage, classify, prioritize, assign, track, verify, and learn from defects with clear severity, priority, reproduction, and closure criteria
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - defect
@@ -10,8 +10,12 @@ triggers:
   - 缺陷管理
   - 缺陷分析
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
+  - pm_get_task
+  - pm_add_activity
+  - pm_create_task
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +30,7 @@ Do not accept or close a defect without evidence. A defect needs reproduction, i
 
 1. **Collect defect evidence**
    - Use `mcp_memory__memory_recall` to retrieve similar defects, known issues, release risks, and prior root causes
-   - Use `file_read` to inspect bug reports, logs, screenshots, test results, requirements, and related code or docs when available
+   - Use `doc_read` and `doc_search` to inspect bug reports, logs, screenshots, test results, requirements, and related docs when available
    - Capture environment, build/version, steps to reproduce, expected behavior, actual behavior, frequency, and impact
    - If reproduction is missing, request it before prioritization unless impact requires immediate escalation
 
@@ -51,7 +55,7 @@ Do not accept or close a defect without evidence. A defect needs reproduction, i
 5. **Analyze trends**
    - Group defects by component, severity, root cause, phase introduced, phase detected, and escape reason
    - Identify prevention actions: requirement clarification, test coverage, automation, code review checklist, monitoring
-   - Use `file_write` to save triage report when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist defect trends and prevention actions
 
 ## Output Format

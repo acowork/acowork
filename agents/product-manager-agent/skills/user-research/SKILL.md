@@ -1,7 +1,7 @@
 ---
 name: user-research
 description: Plan and synthesize user research, interviews, surveys, personas, journeys, pain points, opportunities, and product recommendations
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - user research
@@ -10,8 +10,9 @@ triggers:
   - persona
   - journey map
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +27,7 @@ Research output must distinguish evidence from interpretation. Do not treat one 
 
 1. **Define research objective**
    - Use `mcp_memory__memory_recall` to retrieve prior research, personas, segments, product decisions, and open assumptions
-   - Use `file_read` to inspect PRDs, analytics, support tickets, feedback, interview notes, and roadmap questions
+   - Use `doc_read` and `doc_search` to inspect PRDs, analytics, support tickets, feedback, interview notes, and roadmap questions
    - Define research question, target segment, decision to inform, and confidence needed
 
 2. **Plan research method**
@@ -46,7 +47,7 @@ Research output must distinguish evidence from interpretation. Do not treat one 
    - Define follow-up validation where confidence is low
 
 5. **Persist learnings**
-   - Use `file_write` to save research summary when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist insights, personas, journey pain points, and product recommendations
 
 ## Output Format

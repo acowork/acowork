@@ -1,7 +1,7 @@
 ---
 name: testing
 description: Design and write behavior-focused tests using TDD, red-green-refactor, regression coverage, and deterministic validation
-version: "1.1.0"
+version: "1.2.0"
 author: developer
 triggers:
   - test

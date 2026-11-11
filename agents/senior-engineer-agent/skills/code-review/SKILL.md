@@ -1,7 +1,7 @@
 ---
 name: code-review
 description: Perform a thorough code review with severity-ranked findings covering correctness, security, tests, architecture boundaries, performance, maintainability, and rollout risk
-version: "1.1.0"
+version: "1.2.0"
 author: developer
 triggers:
   - review
@@ -10,6 +10,8 @@ triggers:
   - PR review
 tool_deps:
   - file_read
+  - doc_read
+  - doc_search
   - mcp_memory__memory_recall
   - mcp_memory__memory_store
 ---
@@ -26,7 +28,7 @@ Critical and Important issues must be resolved before proceeding unless the user
 
 1. **Understand scope and intent**
    - Use `mcp_memory__memory_recall` to retrieve project-specific coding standards, architectural boundaries, and prior review feedback
-   - Use `file_read` to inspect changed files, surrounding context, tests, docs, and relevant interfaces
+   - Use `file_read` to inspect changed files, surrounding context, tests, and relevant interfaces, and `doc_read`/`doc_search` for the docs they cite
    - Identify change type: bug fix, feature, refactor, config, dependency, docs, or generated artifact
    - Identify claimed behavior and acceptance criteria from the request, commit message, or PR description
    - If scope is too large or mixed, recommend splitting before deep review

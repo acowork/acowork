@@ -1,7 +1,7 @@
 ---
 name: debugging
 description: Systematically debug and troubleshoot issues with root-cause analysis, evidence gathering, failing regression tests, and verified fixes
-version: "1.1.0"
+version: "1.2.0"
 author: developer
 triggers:
   - debug
@@ -12,6 +12,8 @@ triggers:
 tool_deps:
   - file_read
   - file_write
+  - doc_read
+  - doc_search
   - shell
   - mcp_memory__memory_recall
   - mcp_memory__memory_store
@@ -29,7 +31,7 @@ If you cannot explain why the bug happens, do not change production code except 
 
 1. **Reproduce and capture facts**
    - Use `mcp_memory__memory_recall` to check whether a similar issue, convention, or known failure mode exists
-   - Use `file_read` to inspect relevant source, tests, configuration, and docs
+   - Use `file_read` to inspect relevant source, tests, and configuration, and `doc_read`/`doc_search` for the docs it depends on
    - Use `shell` to run the exact failing command or scenario
    - Record environment, inputs, expected behavior, actual behavior, logs, stack traces, and frequency
    - If the issue is not reproducible, gather more evidence instead of guessing

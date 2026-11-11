@@ -1,7 +1,7 @@
 ---
 name: regression-management
 description: Manage regression scope, suites, prioritization, automation, flaky tests, change impact, and maintenance based on risk and defect history
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - regression
@@ -10,8 +10,11 @@ triggers:
   - regression suite
   - flaky tests
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
+  - pm_get_task
+  - pm_add_activity
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -28,7 +31,7 @@ Prioritize tests that protect critical user journeys, high-change areas, high-de
 
 1. **Load regression context**
    - Use `mcp_memory__memory_recall` to retrieve defect history, flaky tests, release escapes, critical paths, and prior regression scope
-   - Use `file_read` to inspect test plan, test reports, automation suite, changelog, PR list, release scope, and known issues
+   - Use `doc_read` and `doc_search` to inspect test plan, test reports, automation suite, changelog, PR list, release scope, and known issues
    - Identify changed areas and impacted user journeys
 
 2. **Perform change impact analysis**
@@ -53,7 +56,7 @@ Prioritize tests that protect critical user journeys, high-change areas, high-de
 5. **Define execution and reporting**
    - Specify owners, environments, data needs, commands/tools, and reporting format
    - Define pass/fail criteria and escalation for failures
-   - Use `file_write` to save the regression plan when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist suite changes, flaky tests, retired tests, and regression learnings
 
 ## Output Format
