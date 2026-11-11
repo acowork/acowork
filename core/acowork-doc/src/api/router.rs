@@ -28,6 +28,7 @@
 //! - `POST   /trash/{id}/restore`
 //! - `DELETE /trash/{id}`     purge forever
 //! - `GET    /search?keyword=` cross-directory search
+//! - `POST   /refs/validate`  batch doc-reference validation (G4)
 //! - `GET    /permissions/{kind}/{id}` node ACL view (design §9)
 //! - `PUT    /permissions/{kind}/{id}` replace node ACL (creator/admin)
 
@@ -37,6 +38,7 @@ use axum::Router;
 use crate::api::dirs as d;
 use crate::api::docs as c;
 use crate::api::permissions as p;
+use crate::api::refs as rf;
 use crate::api::requests as r;
 use crate::api::search as s;
 use crate::api::trash as t;
@@ -73,6 +75,8 @@ pub fn doc_router(state: DocState) -> Router {
         .route("/trash/{trash_id}", delete(t::purge_trash))
         // ── search ──────────────────────────────────────────────────
         .route("/search", get(s::search))
+        // ── reference validation (G4: `pm_submit_task` doc_refs) ───
+        .route("/refs/validate", post(rf::validate_refs))
         // ── permissions (design §9) ───────────────────────────────────
         .route("/permissions/{kind}/{id}", get(p::get_permissions))
         .route("/permissions/{kind}/{id}", put(p::put_permissions))

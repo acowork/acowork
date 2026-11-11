@@ -139,6 +139,15 @@ pub enum PmError {
     #[error("directory unavailable: {0}")]
     DirectoryUnavailable(String),
 
+    /// Plan §7 G4: `pm_submit_task` carried `doc_refs` but the doc service
+    /// (through the Gateway) could not validate them — unreachable, refused,
+    /// or simply not connected (dev mode). Distinct from
+    /// [`PmError::BadRequest`]: the refs may be perfectly fine, the platform
+    /// just could not check them, and the correct caller action is "retry
+    /// later", not "fix the path". HTTP 503, transient.
+    #[error("doc service unavailable: {0}")]
+    DocServiceUnavailable(String),
+
     // ── 基础设施（自动 From 转换）───────────────────────────────────
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -201,6 +210,8 @@ impl PmError {
 
             PmError::DirectoryUnavailable(_) => 503,
 
+            PmError::DocServiceUnavailable(_) => 503,
+
             PmError::Forbidden(_) => 403,
 
             PmError::Io(_) | PmError::Json(_) | PmError::Multipart(_) | PmError::Image(_) => 500,
@@ -237,6 +248,7 @@ impl PmError {
             PmError::ReviewNotApproved { .. } => "review_not_approved",
             PmError::Unauthenticated(_) => "unauthenticated",
             PmError::DirectoryUnavailable(_) => "directory_unavailable",
+            PmError::DocServiceUnavailable(_) => "doc_service_unavailable",
             PmError::Forbidden(_) => "forbidden",
             PmError::Io(_) => "io_error",
             PmError::Json(_) => "json_error",

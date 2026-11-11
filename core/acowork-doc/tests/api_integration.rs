@@ -556,3 +556,67 @@ async fn update_and_submit_share_the_document_ceiling() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{resp}");
     assert_eq!(TestServer::error_code(&resp), "payload_too_large");
 }
+
+// ── refs/validate: batch reference validation (plan §7 G4) ─────────────
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_refs_resolves_ids_and_paths_and_reports_missing() {
+    let srv = spawn().await;
+    let root = acowork_doc::types::ROOT_DIR_ID;
+    let dir = srv.mkdir(root, "研发").await;
+    let doc = srv.mkdoc(&dir, "纪要", "内容").await;
+
+    // A doc id, a library path, a missing path, and a malformed ref go in
+    // together; each gets its own honest answer, in input order.
+    let (status, resp) = srv
+        .post(
+            "/refs/validate",
+            json!({ "refs": [doc.as_str(), "研发/纪要.md", "研发/不存在.md", "无后缀"] }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    let results = resp["results"].as_array().unwrap();
+    assert_eq!(results.len(), 4);
+    assert_eq!(results[0]["status"], "found");
+    assert_eq!(results[0]["doc_id"], doc.as_str());
+    assert_eq!(results[0]["path"], "研发/纪要.md");
+    assert_eq!(results[1]["status"], "found");
+    assert_eq!(results[1]["doc_id"], doc.as_str());
+    // The path form reports the canonical path the panel links against.
+    assert_eq!(results[1]["path"], "研发/纪要.md");
+    assert_eq!(results[2]["status"], "not_found");
+    assert!(results[2].get("doc_id").is_none());
+    assert_eq!(results[3]["status"], "invalid");
+    assert_eq!(resp["all_found"], false);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_refs_root_path_and_empty_batch() {
+    let srv = spawn().await;
+    let root = acowork_doc::types::ROOT_DIR_ID;
+    srv.mkdoc(root, "顶层", "x").await;
+
+    // A root-level path (no directory chain) resolves.
+    let (status, resp) = srv
+        .post("/refs/validate", json!({ "refs": ["顶层.md"] }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(resp["results"][0]["status"], "found");
+    assert_eq!(resp["results"][0]["path"], "顶层.md");
+    assert_eq!(resp["all_found"], true);
+
+    // An empty batch is legal and answers with an empty list — the PM side
+    // never calls with zero refs, but the endpoint must not error.
+    let (status, resp) = srv.post("/refs/validate", json!({ "refs": [] })).await;
+    assert_eq!(status, StatusCode::OK, "{resp}");
+    assert_eq!(resp["results"].as_array().unwrap().len(), 0);
+    assert_eq!(resp["all_found"], true);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn validate_refs_rejects_oversized_batch() {
+    let srv = spawn().await;
+    let refs: Vec<String> = (0..51).map(|i| format!("doc-{i}")).collect();
+    let (status, resp) = srv.post("/refs/validate", json!({ "refs": refs })).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
+}

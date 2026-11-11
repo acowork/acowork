@@ -234,7 +234,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_submit_task",
-      "description": "Submit work results for a claimed task. Transitions in_progress → submitted. If task type is checkpoint/bug, enters pending review; otherwise auto-approved → done. Put everything the reviewer needs in `text`, including links to documents in the doc library — there is no file-upload path from an agent: `attachment_ids` is accepted by the API but only a human can upload through the Desktop task panel.",
+      "description": "Submit work results for a claimed task. Transitions in_progress → submitted. If task type is checkpoint/bug, enters pending review; otherwise auto-approved → done. Put everything the reviewer needs in `text`. Deliverables that live in the doc library go in `doc_refs` (doc id `doc-…` or library path `…/技术方案/x.md`) — the doc service validates each ref at submit time and an unresolved ref fails the submission (`doc_refs_unresolved`) rather than being dropped, so the task panel can always render them as working links. There is no file-upload path from an agent: `attachment_ids` is accepted by the API but only a human can upload through the Desktop task panel.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id", "text"],
@@ -245,6 +245,12 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "type": "array",
             "items": { "type": "string" },
             "description": "Optional attachment ids. There is no upload path from an agent (a human attaches files in the Desktop task panel), so leave this out and put what the reviewer needs in `text`."
+          },
+          "doc_refs": {
+            "type": "array",
+            "items": { "type": "string", "maxLength": 512 },
+            "maxItems": 50,
+            "description": "Doc-library artifacts this submission delivers: doc ids (`doc-…`) or library paths (`项目管理/p-…/技术方案/x.md`). Every ref is validated against the doc service BEFORE the transition — a missing or unreadable ref returns `doc_refs_unresolved` and the task stays in_progress. Omit (default) and the submission behaves exactly as before."
           }
         }
       }

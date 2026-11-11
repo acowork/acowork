@@ -153,6 +153,7 @@ pub trait PmStore: Send + Sync {
         id: &TaskId,
         text: &str,
         attachment_ids: Vec<AttachmentId>,
+        doc_refs: Vec<String>,
         actor: &str,
     ) -> Result<Task>;
     /// 人类审核。`comment` 是审核正文（拒绝理由 / 批准附言），进活动流。
@@ -1542,6 +1543,7 @@ impl PmStore for TreePmStore {
         id: &TaskId,
         text: &str,
         attachment_ids: Vec<AttachmentId>,
+        doc_refs: Vec<String>,
         actor: &str,
     ) -> Result<Task> {
         let entry = self
@@ -1563,6 +1565,7 @@ impl PmStore for TreePmStore {
         let result = TaskResult {
             text: text.to_string(),
             attachment_ids,
+            doc_refs,
             // ADR-073: submitted_by 是 agent_instance_id（X-MCP-Actor 注入）
             submitted_by: actor.to_string(),
             submitted_at: now,
@@ -1950,8 +1953,10 @@ impl TreePmStore {
 
     /// The scanner's candidate set, computed entirely from the index (no
     /// `task.json` reads, no entry clones): pending + past the approval
-    /// gate + `start_at` due + undispatched + agent-assigned + not
-    /// abandoned (attempt bound) + every Blocks prerequisite already
+    /// gate + `start_at` due + undispatched + assigned (agent **or** human —
+    /// a human assignee gets the sentence in the group chat, no wake; only
+    /// the legacy `"human"` sentinel, which addresses nobody, is skipped) +
+    /// not abandoned (attempt bound) + every Blocks prerequisite already
     /// Done/Cancelled. Sorted by priority then due time; truncated to
     /// `limit` so a large backlog costs one bounded probe per tick.
     pub fn dispatch_due_ids(&self, now: DateTime<Utc>, limit: usize) -> Vec<TaskId> {
@@ -2315,7 +2320,7 @@ mod tests {
         assert_eq!(claimed.status, TaskStatus::InProgress);
 
         let submitted = store
-            .submit_task(&t.id, "done", vec![], instance)
+            .submit_task(&t.id, "done", vec![], vec![], instance)
             .await
             .unwrap();
         assert_eq!(submitted.status, TaskStatus::Submitted);
@@ -2351,7 +2356,7 @@ mod tests {
 
         store.claim_task(&t.id, instance).await.unwrap();
         store
-            .submit_task(&t.id, "第一版结果", vec![], instance)
+            .submit_task(&t.id, "第一版结果", vec![], vec![], instance)
             .await
             .unwrap();
         store
@@ -2362,7 +2367,7 @@ mod tests {
         // 驳回后 Agent 重做并再次提交（设计 D-1 路径）
         store.claim_task(&t.id, instance).await.unwrap();
         store
-            .submit_task(&t.id, "第二版结果", vec![], instance)
+            .submit_task(&t.id, "第二版结果", vec![], vec![], instance)
             .await
             .unwrap();
         store
@@ -2421,7 +2426,7 @@ mod tests {
             .unwrap();
         store.claim_task(&t.id, "human").await.unwrap();
         let submitted = store
-            .submit_task(&t.id, "上线前的提交", vec![], "human")
+            .submit_task(&t.id, "上线前的提交", vec![], vec![], "human")
             .await
             .unwrap();
 
@@ -2554,7 +2559,7 @@ mod tests {
             .unwrap();
         store.claim_task(&child.id, "human").await.unwrap();
         store
-            .submit_task(&child.id, "child result", vec![], "human")
+            .submit_task(&child.id, "child result", vec![], vec![], "human")
             .await
             .unwrap();
 
@@ -2703,7 +2708,7 @@ mod tests {
         let claimed = store.claim_task(&t0.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.unwrap();
         assert_eq!(claimed.status, TaskStatus::InProgress);
         let submitted = store
-            .submit_task(&t0.id, "done", vec![], "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
+            .submit_task(&t0.id, "done", vec![], vec![], "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
             .await
             .unwrap();
         assert_eq!(submitted.status, TaskStatus::Submitted);
@@ -3583,7 +3588,7 @@ mod tests {
 
         // 任务走完生命周期（claim → submit → review done）后可移除
         store.claim_task(&t.id, inst).await.unwrap();
-        store.submit_task(&t.id, "done", vec![], inst).await.unwrap();
+        store.submit_task(&t.id, "done", vec![], vec![], inst).await.unwrap();
         store.review_task(&t.id, true, "human", None).await.unwrap();
         let updated = store.remove_project_member(&p.id, inst).await.unwrap();
         // ADR-076 §决策 11: 移除 inst 后仅剩创建者（human）成员。

@@ -2483,7 +2483,7 @@ mod tests {
         let tid_a_typed = TaskId(tid_a.clone());
         store.claim_task(&tid_a_typed, agent).await.unwrap();
         store
-            .submit_task(&tid_a_typed, "done by agent", vec![], agent)
+            .submit_task(&tid_a_typed, "done by agent", vec![], vec![], agent)
             .await
             .unwrap();
         store.review_task(&tid_a_typed, true, "human", None).await.unwrap();
@@ -4593,5 +4593,224 @@ mod tests {
         assert_eq!(tool_text(&v)["status"], "done", "the chain must close: {v}");
 
         shutdown.request();
+    }
+
+    // ── G4: `pm_submit_task` doc_refs (plan §7) ──────────────────────────
+
+    /// Agent-created tasks need human approval before claim, and there is
+    /// no approve tool on the MCP surface — a test that needs a claimable
+    /// task drives the store directly, exactly like [`approve_creation`].
+    async fn approve_task(store: &Arc<TreePmStore>, tid: &str) {
+        store
+            .review_task(&TaskId(tid.to_string()), true, "human", None)
+            .await
+            .unwrap();
+    }
+
+    /// Stub doc service for `GatewayClient::validate_doc_refs`: refs in
+    /// `found` resolve, everything else comes back `not_found`.
+    async fn stub_doc(found: &[&'static str]) -> String {
+        let found: Vec<String> = found.iter().map(|s| s.to_string()).collect();
+        let app = Router::new().route(
+            "/api/doc/api/refs/validate",
+            post(move |Json(body): Json<Value>| {
+                let found = found.clone();
+                async move {
+                    let refs = body["refs"].as_array().cloned().unwrap_or_default();
+                    let results: Vec<Value> = refs
+                        .iter()
+                        .map(|r| {
+                            let s = r.as_str().unwrap_or_default();
+                            if found.iter().any(|f| f == s) {
+                                json!({"ref": s, "status": "found", "doc_id": s, "path": s})
+                            } else {
+                                json!({"ref": s, "status": "not_found"})
+                            }
+                        })
+                        .collect();
+                    let all = results.iter().all(|o| o["status"] == "found");
+                    axum::Json(json!({"results": results, "all_found": all}))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        format!("http://{addr}")
+    }
+
+    /// MCP state wired to a gateway URL (the doc-validation stub), with the
+    /// store handle exposed — G4 tests need both the tool surface and the
+    /// human-side store operations the tool surface deliberately lacks.
+    async fn mcp_state_with_gateway(gateway_url: String) -> (Router, Arc<TreePmStore>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = PmConfig {
+            data_dir: tmp.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        };
+        let store = Arc::new(TreePmStore::new(cfg).await.unwrap());
+        let state = McpState {
+            store: store.clone(),
+            agent_dir: Arc::new(NoopAgentDirectory),
+            gateway: Some((gateway_url, None)),
+        };
+        let router = Router::new()
+            .route("/mcp", post(jsonrpc_endpoint))
+            .with_state(state);
+        // The tempdir must outlive this function (the store writes into it
+        // for the rest of the test); leaking it is the test-module's
+        // cheapest honest lifetime management.
+        std::mem::forget(tmp);
+        (router, store)
+    }
+
+    /// Claimable task for `actor`: created, assigned to self, human-approved.
+    async fn claimable_task(
+        router: &Router,
+        store: &Arc<TreePmStore>,
+        actor: &str,
+        id: u64,
+    ) -> String {
+        let pid = project_with_owner(router, actor, "G4").await;
+        let tid = create_task(
+            router,
+            actor,
+            id,
+            json!({ "project_id": pid, "title": "t", "assignee": actor }),
+        )
+        .await;
+        approve_task(store, &tid).await;
+        tid
+    }
+
+    /// G4 happy path: validated refs are recorded and readable back from
+    /// `pm_get_task` (`result.doc_refs`) — that read-back is what lets the
+    /// desktop panel render the deliverables as links.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn submit_with_doc_refs_records_and_reads_back() {
+        let (router, store) = mcp_state_with_gateway(stub_doc(&["项目管理/p-1/技术方案/x.md"]).await).await;
+        let actor = "g4-eng";
+        let tid = claimable_task(&router, &store, actor, 2).await;
+
+        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert!(v["error"].is_null(), "claim: {v}");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_submit_task",
+            json!({
+                "task_id": tid,
+                "text": "delivered",
+                "doc_refs": ["项目管理/p-1/技术方案/x.md"],
+            }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "submit: {v}");
+        assert_eq!(
+            tool_text(&v)["result"]["doc_refs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let v = call_tool(&router, Some(actor), 5, "pm_get_task", json!({ "task_id": tid })).await;
+        let chk = tool_text(&v);
+        assert_eq!(chk["status"], "submitted");
+        assert_eq!(chk["result"]["doc_refs"][0], "项目管理/p-1/技术方案/x.md");
+    }
+
+    /// G4 refusal: an unresolved ref fails the submission loudly — it is
+    /// never silently dropped — and the task state is untouched (the
+    /// validation happens before the transition).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn submit_with_unresolved_doc_ref_is_refused() {
+        let (router, store) = mcp_state_with_gateway(stub_doc(&[]).await).await;
+        let actor = "g4-eng2";
+        let tid = claimable_task(&router, &store, actor, 2).await;
+        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert!(v["error"].is_null(), "claim: {v}");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_submit_task",
+            json!({ "task_id": tid, "text": "x", "doc_refs": ["不存在的.md"] }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "bad_request", "msg: {msg}");
+        assert!(msg.contains("doc_refs_unresolved"), "msg: {msg}");
+        assert!(
+            msg.contains("不存在的.md"),
+            "the offending ref must be named: {msg}"
+        );
+
+        let v = call_tool(&router, Some(actor), 5, "pm_get_task", json!({ "task_id": tid })).await;
+        assert_eq!(
+            tool_text(&v)["status"],
+            "in_progress",
+            "refusal must not transition"
+        );
+    }
+
+    /// G4 without a Gateway connection (dev mode): `doc_refs` cannot be
+    /// validated at all — refuse explicitly rather than accept unchecked.
+    #[tokio::test]
+    async fn submit_doc_refs_without_gateway_is_refused() {
+        let (router, store) = test_router_and_store().await;
+        let actor = "g4-noweb";
+        let tid = claimable_task(&router, &store, actor, 2).await;
+        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert!(v["error"].is_null(), "claim: {v}");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_submit_task",
+            json!({ "task_id": tid, "text": "x", "doc_refs": ["a.md"] }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "doc_service_unavailable", "msg: {msg}");
+    }
+
+    /// G4 backward compatibility: a submission without `doc_refs` behaves
+    /// exactly as before — no doc call, and the recorded result carries the
+    /// field as an empty list.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn submit_without_doc_refs_is_unchanged() {
+        // The stub would refuse any ref; a refs-less submit must never reach
+        // it, so a green submit here IS the assertion.
+        let (router, store) = mcp_state_with_gateway(stub_doc(&[]).await).await;
+        let actor = "g4-legacy";
+        let tid = claimable_task(&router, &store, actor, 2).await;
+        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert!(v["error"].is_null(), "claim: {v}");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_submit_task",
+            json!({ "task_id": tid, "text": "plain result" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "legacy submit: {v}");
+        assert_eq!(tool_text(&v)["status"], "submitted");
+        assert_eq!(
+            tool_text(&v)["result"]["doc_refs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            0
+        );
     }
 }

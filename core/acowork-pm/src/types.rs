@@ -415,6 +415,10 @@ pub struct UpdateProject {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Task {
+    // `doc_refs` was added to `TaskResult` (plan §7 G4) with
+    // `serde(default)`: a pre-G4 `task.json` deserializes unchanged, and the
+    // store's write path re-emits the field. The round-trip test in
+    // `tests/g4_store.rs` is the gate that keeps this exemption honest.
     pub id: TaskId,
     pub project_id: ProjectId,
     pub title: String,
@@ -534,6 +538,17 @@ pub struct TaskResult {
     pub text: String,
     #[serde(default)]
     pub attachment_ids: Vec<AttachmentId>,
+    /// Structured references to doc-library artifacts (plan §7 G4).
+    ///
+    /// Each entry is a doc id (`doc-…`) or a library path
+    /// (`项目管理/p-…/技术方案/x.md`) **validated by the doc service at
+    /// submit time** (`POST /refs/validate`) — a ref that does not resolve
+    /// fails the submission instead of being dropped, because the desktop
+    /// panel renders every entry as a link and a dead link is indistinguishable
+    /// from a deleted document. `serde(default)`: results written before G4
+    /// deserialize unchanged, so old `task.json` files stay readable.
+    #[serde(default)]
+    pub doc_refs: Vec<String>,
     /// 提交者：`agent_instance_id`（UUID，ADR-073），由 `X-MCP-Actor` 注入。
     pub submitted_by: String,
     pub submitted_at: DateTime<Utc>,
@@ -584,6 +599,11 @@ pub struct TaskActivity {
     /// 提交引用的附件（仅 `Submitted` 有意义）。
     #[serde(default)]
     pub attachment_ids: Vec<AttachmentId>,
+    /// 提交引用的文档库产物（仅 `Submitted` 有意义，plan §7 G4）。与
+    /// [`TaskResult::doc_refs`] 同源：由 [`TaskActivity::submitted`] 从同一次
+    /// 提交派生，两者不可能漂移。`serde(default)` 保证存量 activity 可读。
+    #[serde(default)]
+    pub doc_refs: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -597,6 +617,7 @@ impl TaskActivity {
             actor_kind: MemberKind::from_actor(actor),
             text: text.into(),
             attachment_ids: Vec::new(),
+            doc_refs: Vec::new(),
             created_at: Utc::now(),
         }
     }
@@ -613,6 +634,7 @@ impl TaskActivity {
             actor_kind: MemberKind::from_actor(&result.submitted_by),
             text: result.text.clone(),
             attachment_ids: result.attachment_ids.clone(),
+            doc_refs: result.doc_refs.clone(),
             created_at: result.submitted_at,
         }
     }

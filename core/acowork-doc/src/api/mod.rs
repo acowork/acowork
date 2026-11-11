@@ -22,6 +22,7 @@ pub mod dirs;
 pub mod docs;
 pub mod dto;
 pub mod permissions;
+pub mod refs;
 pub mod requests;
 pub mod router;
 pub mod search;

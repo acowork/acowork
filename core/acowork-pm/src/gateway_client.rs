@@ -220,6 +220,11 @@ impl GatewayClient {
     /// logged, never surfaced (the agent can still claim/poll the task the
     /// traditional way; the push is an accelerator).
     ///
+    /// A **human** assignee goes through this same call: the Gateway sees an
+    /// account id in the group roster, writes the row and returns
+    /// `delivered` without waking anything (an account has no Runtime). PM
+    /// does not branch — one endpoint, one receipt.
+    ///
     /// Returns `Ok(message_id)` on delivery, `Err(reason)` otherwise —
     /// the reason feeds the scanner's give-up log; each failed attempt is
     /// already `warn`-logged here with the Gateway's full body.
@@ -350,5 +355,52 @@ impl GatewayClient {
                 tracing::warn!(error = %e, task_id, "task context close unreachable");
             }
         }
+    }
+
+    /// Plan §7 G4: validate `pm_submit_task`'s `doc_refs` against the doc
+    /// service, through the Gateway's doc reverse proxy
+    /// (`POST /api/doc/api/refs/validate`). The doc side owns the fact of
+    /// whether a reference resolves; PM only asks and refuses.
+    ///
+    /// Returns `Err(reason)` for a transport / non-2xx answer (the caller
+    /// must refuse the submission — an unvalidated ref is a dead link by
+    /// default), and `Ok(outcomes)` on a well-formed response. The caller
+    /// inspects `status` per ref: only `"found"` may be submitted.
+    pub async fn validate_doc_refs(&self, refs: &[String]) -> Result<Vec<serde_json::Value>, String> {
+        let mut req = self.client.post(format!(
+            "{}/api/doc/api/refs/validate",
+            self.gateway_url
+        ));
+        if let Some(token) = &self.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = match req.json(&serde_json::json!({ "refs": refs })).send().await {
+            Ok(r) => r,
+            Err(e) => return Err(format!("doc service unreachable: {e}")),
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(format!("doc validation rejected: {status} {body}"));
+        }
+        let value: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => return Err(format!("doc validation malformed response: {e}")),
+        };
+        let results = value["results"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        // One outcome per input ref, in order — the contract of the
+        // endpoint. A shorter array means the doc side broke it; refuse
+        // rather than silently approving the refs that went unreported.
+        if results.len() != refs.len() {
+            return Err(format!(
+                "doc validation returned {} outcomes for {} refs",
+                results.len(),
+                refs.len()
+            ));
+        }
+        Ok(results)
     }
 }

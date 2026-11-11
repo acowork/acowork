@@ -530,11 +530,17 @@ struct SubmitTaskArgs {
     text: String,
     #[serde(default)]
     attachment_ids: Vec<crate::types::AttachmentId>,
+    /// Doc-library artifacts this submission delivers (plan §7 G4). Each
+    /// entry is a doc id (`doc-…`) or a library path (`…/技术方案/x.md`).
+    /// Validated against the doc service before the submission is recorded;
+    /// an unresolved ref fails the call loudly instead of being dropped.
+    #[serde(default)]
+    doc_refs: Vec<String>,
 }
 
 #[cfg(test)]
 impl SubmitTaskArgs {
-    const FIELDS: &'static [&'static str] = &["task_id", "text", "attachment_ids"];
+    const FIELDS: &'static [&'static str] = &["task_id", "text", "attachment_ids", "doc_refs"];
 }
 
 /// Tool → the **wire field names** its implementation accepts.
@@ -1293,11 +1299,66 @@ async fn pm_submit_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         .ok_or_else(|| PmError::TaskNotFound(a.task_id.to_string()))?;
     ensure_assignee(&task, actor)?;
 
+    // G4: refs are validated **before** the state transition. A submission
+    // that records `submitted` and then discovers a dead deliverable link
+    // would leave the reviewer approving a task whose artifacts do not
+    // exist; refusing first keeps the task exactly where the agent left it.
+    // An empty `doc_refs` skips the call entirely — old clients that never
+    // send the field see the old behavior (and old network failures cannot
+    // newly break them).
+    if !a.doc_refs.is_empty() {
+        validate_doc_refs(&state.gateway, &a.doc_refs).await?;
+    }
+
     let task = state
         .store
-        .submit_task(&a.task_id, &a.text, a.attachment_ids, actor)
+        .submit_task(&a.task_id, &a.text, a.attachment_ids, a.doc_refs, actor)
         .await?;
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
+}
+
+/// Ask the doc service whether every submitted ref resolves (plan §7 G4).
+///
+/// Three distinct refusals, because the agent's next action differs:
+/// * `doc_refs_unresolved` — the ref is wrong (missing / denied / malformed):
+///   fix the path or write the document, then resubmit;
+/// * `doc_service_unavailable` — the validation could not run: resubmit
+///   later, the task state is untouched;
+/// * no gateway configured (dev mode without the Gateway) — the doc library
+///   is not reachable at all, so `doc_refs` cannot mean anything.
+async fn validate_doc_refs(
+    gateway: &Option<(String, Option<String>)>,
+    refs: &[String],
+) -> Result<()> {
+    let Some((url, token)) = gateway.as_ref() else {
+        return Err(PmError::DocServiceUnavailable(
+            "doc_refs require the Gateway doc service, which this PM instance is not connected to"
+                .to_string(),
+        ));
+    };
+    let client = crate::gateway_client::GatewayClient::new(url.clone(), token.clone());
+    let outcomes = client
+        .validate_doc_refs(refs)
+        .await
+        .map_err(PmError::DocServiceUnavailable)?;
+    let unresolved: Vec<String> = outcomes
+        .iter()
+        .filter(|o| o["status"].as_str() != Some("found"))
+        .map(|o| {
+            format!(
+                "{} ({})",
+                o["ref"].as_str().unwrap_or("?"),
+                o["status"].as_str().unwrap_or("?")
+            )
+        })
+        .collect();
+    if !unresolved.is_empty() {
+        return Err(PmError::BadRequest(format!(
+            "doc_refs_unresolved: [{}] — write or fix each artifact before submitting",
+            unresolved.join(", ")
+        )));
+    }
+    Ok(())
 }
 
 // ── Dispatch prerequisites (design 32 §3.3) ────────────────────────────
@@ -1359,12 +1420,13 @@ async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<V
             .await?
             .ok_or_else(|| PmError::ProjectNotFound(pid.to_string()))?;
         // Agent members only. The store's M7 gate would accept a human member
-        // as `assignee`, but the MCP path cannot deliver on it: `pm_create_task`
-        // requires the assignee to exist in the agent directory (design 21
-        // §9.1), and the dispatch scanner wakes `task.assignee` through intent
-        // delivery, which fails with `target_not_installed` for an account id —
-        // so a human assignee would create a task that silently never
-        // dispatches. Listing humans here would be a false promise about the
+        // as `assignee`, but the MCP create path cannot deliver on it:
+        // `pm_create_task` requires the assignee to exist in the agent
+        // directory (design 21 §9.1), so the MCP roster stays the set an MCP
+        // caller can actually assign. (The Desktop REST path does assign to
+        // humans, and dispatch handles it — a human assignee gets the task
+        // sentence in the project group chat instead of a wake-up intent.)
+        // Listing humans here would be a false promise about this tool's own
         // assignable set; they stay visible in pm_get_project's roster, and the
         // count is reported instead of being hidden (D7).
         human_member_count = project
