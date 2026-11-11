@@ -50,6 +50,11 @@ prost-build = { workspace = true }
 protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
+# SKILL.md frontmatter parsing for the participation-contract tests
+# (`tests/agent_participation_contract.rs`) — test-only, the crate itself
+# stays frontmatter-free by design (manifest.rs: the SKILL.md parser lives in
+# the Runtime, which core must not depend on).
+serde_yaml = { workspace = true }
 
 # Process-tree containment for the idle-timeout kill path (process/tree.rs):
 # Job Object APIs on Windows; Unix uses the already-present `libc`.
