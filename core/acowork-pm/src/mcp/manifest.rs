@@ -98,7 +98,11 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "enum": ["not_required", "pending", "approved", "rejected"],
             "description": "Approval gate state; \"pending\" = waiting on a human"
           },
-          "type": { "type": "string", "enum": ["task", "bug", "feature", "epic", "checkpoint"] },
+          "type": {
+            "type": "string",
+            "enum": ["task", "bug", "feature", "chore", "checkpoint", "milestone"],
+            "description": "Task kind filter — the same six values pm_create_task / pm_update_task accept (plan §7 G7). `epic` was never a TaskType variant and deserialized to a parse error; it is removed here rather than added to the store so no value is ever accepted in one call and refused in another."
+          },
           "query": { "type": "string", "description": "Case-insensitive substring over the task title" },
           "parent_task_id": {
             "type": "string",
@@ -353,6 +357,64 @@ pub fn manifest_tools() -> Vec<serde_json::Value> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+
+    /// Plan §7 G7: the `type` enum must be **one set across the three
+    /// surfaces** (create / update / list-filter) and equal to what the
+    /// implementation can actually deserialize — `TaskType`'s serde wire
+    /// values. The pre-G7 state: create declared `epic` (which is not a
+    /// `TaskType` variant: the call died in `parse_args`) and omitted
+    /// `chore`/`milestone` (which work); list/update carried the real six.
+    /// A schema that promises a value the parser refuses is the D2 defect
+    /// in the other direction — declared-but-unacceptable.
+    #[test]
+    fn type_enum_is_one_set_across_create_update_list() {
+        use crate::types::TaskType;
+        let wire = |t: TaskType| -> String {
+            serde_json::to_value(t).unwrap().as_str().unwrap().to_string()
+        };
+        let impl_values: BTreeSet<String> = [
+            TaskType::Task,
+            TaskType::Bug,
+            TaskType::Feature,
+            TaskType::Chore,
+            TaskType::Checkpoint,
+            TaskType::Milestone,
+        ]
+        .into_iter()
+        .map(wire)
+        .collect();
+
+        let v: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
+        let type_enum_of = |tool: &str| -> BTreeSet<String> {
+            let t = v["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|t| t["name"].as_str() == Some(tool))
+                .unwrap_or_else(|| panic!("tool {tool} missing from the manifest"));
+            let e = t["inputSchema"]["properties"]["type"]["enum"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{tool} declares no type enum"));
+            e.iter()
+                .map(|s| s.as_str().unwrap().to_string())
+                .collect()
+        };
+
+        for tool in ["pm_create_task", "pm_update_task", "pm_list_tasks"] {
+            let declared = type_enum_of(tool);
+            assert_eq!(
+                declared, impl_values,
+                "{tool} type enum drifted from TaskType wire values"
+            );
+        }
+        // The removed phantom: `epic` must not come back without a variant.
+        for tool in ["pm_create_task", "pm_update_task", "pm_list_tasks"] {
+            assert!(
+                !type_enum_of(tool).contains("epic"),
+                "{tool} declares `epic`, which TaskType cannot deserialize"
+            );
+        }
+    }
 
     #[test]
     fn manifest_is_valid_json() {
