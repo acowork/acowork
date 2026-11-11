@@ -14,6 +14,8 @@ tool_deps:
   - file_read
   - doc_read
   - doc_search
+  - pm_get_task
+  - pm_add_activity
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
