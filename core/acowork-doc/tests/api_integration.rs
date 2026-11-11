@@ -620,3 +620,169 @@ async fn validate_refs_rejects_oversized_batch() {
     let (status, resp) = srv.post("/refs/validate", json!({ "refs": refs })).await;
     assert_eq!(status, StatusCode::BAD_REQUEST, "{resp}");
 }
+
+// ── G5: review receipt push to the Gateway (plan §7) ──────────────────
+
+/// A stub Gateway that records every `POST /api/intents/doc-review` body.
+/// A doc server pointed at it answers reviews with a receipt push.
+struct StubGateway {
+    base: String,
+    seen: Arc<std::sync::Mutex<Vec<Value>>>,
+}
+
+async fn stub_gateway() -> StubGateway {
+    let seen: Arc<std::sync::Mutex<Vec<Value>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&seen);
+    let app = axum::Router::new().route(
+        "/api/intents/doc-review",
+        axum::routing::post(move |axum::Json(b): axum::Json<Value>| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().unwrap().push(b);
+                axum::Json(json!({ "status": "delivered" }))
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    StubGateway {
+        base: format!("http://{addr}"),
+        seen,
+    }
+}
+
+/// Boot a doc server whose `gateway_url` points at `gw`.
+async fn spawn_with_gateway(gw_url: &str) -> TestServer {
+    let data = TempDir::new().unwrap();
+    let config = DocConfig {
+        data_dir: data.path().to_path_buf(),
+        gateway_url: Some(gw_url.to_string()),
+        gateway_token: Some("svc-token".to_string()),
+        ..DocConfig::default()
+    };
+    let svc = Arc::new(DocService::new(config).await.unwrap());
+    let addr: SocketAddr = svc
+        .clone()
+        .serve(SocketAddr::from(([127, 0, 0, 1], 0)))
+        .await
+        .unwrap();
+    TestServer {
+        base: format!("http://{addr}"),
+        client: reqwest::Client::new(),
+        _data: data,
+    }
+}
+
+async fn wait_for_receipts(seen: &Arc<std::sync::Mutex<Vec<Value>>>, n: usize) -> Vec<Value> {
+    for _ in 0..100 {
+        let got = seen.lock().unwrap().clone();
+        if got.len() >= n {
+            return got;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    panic!("receipt push did not arrive within 5s (have {n} expected)");
+}
+
+/// Submit a proposal from an agent-addressable `submitted_by` and approve it.
+async fn approve_one(srv: &TestServer) -> String {
+    let doc = srv.mkdoc("root", "方案", "# v1").await;
+    let (_, body) = srv
+        .post(
+            "/requests",
+            json!({
+                "doc_id": doc,
+                "base_version": 1,
+                "content": "# v2",
+                "submitted_by": "422c3696-c762-4e19-b8fd-bdec5eb6b1bb",
+            }),
+        )
+        .await;
+    let request_id = body["request_id"].as_str().unwrap().to_string();
+    let (status, body) = srv
+        .post(
+            &format!("/requests/{request_id}/approve"),
+            json!({ "reviewed_by": "human:zhang", "note": "合理" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    request_id
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn approve_pushes_receipt_with_request_id_path_and_result() {
+    let gw = stub_gateway().await;
+    let srv = spawn_with_gateway(&gw.base).await;
+    let request_id = approve_one(&srv).await;
+
+    let receipts = wait_for_receipts(&gw.seen, 1).await;
+    let r = &receipts[0];
+    // The three fields the card requires: request_id + target path + result.
+    assert_eq!(r["request_id"], request_id);
+    assert_eq!(r["result"], "approved");
+    assert_eq!(r["path"], "方案.md");
+    assert_eq!(r["submitted_by"], "422c3696-c762-4e19-b8fd-bdec5eb6b1bb");
+    assert_eq!(r["reviewed_by"], "human:zhang");
+    assert_eq!(r["review_note"], "合理");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn reject_pushes_receipt_with_rejected_result() {
+    let gw = stub_gateway().await;
+    let srv = spawn_with_gateway(&gw.base).await;
+    let doc = srv.mkdoc("root", "方案", "# v1").await;
+    let (_, body) = srv
+        .post(
+            "/requests",
+            json!({
+                "doc_id": doc,
+                "base_version": 1,
+                "content": "# v2",
+                "submitted_by": "422c3696-c762-4e19-b8fd-bdec5eb6b1bb",
+            }),
+        )
+        .await;
+    let request_id = body["request_id"].as_str().unwrap().to_string();
+    let (status, _) = srv
+        .post(
+            &format!("/requests/{request_id}/reject"),
+            json!({ "reviewed_by": "human:zhang", "note": "口径不对" }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let receipts = wait_for_receipts(&gw.seen, 1).await;
+    assert_eq!(receipts[0]["request_id"], request_id);
+    assert_eq!(receipts[0]["result"], "rejected");
+    assert_eq!(receipts[0]["review_note"], "口径不对");
+}
+
+/// The receipt is fire-and-forget: a Gateway that refuses (500) must not
+/// turn the completed human review into an error response.
+#[tokio::test(flavor = "multi_thread")]
+async fn receipt_push_failure_does_not_break_approve() {
+    let app = axum::Router::new().route(
+        "/api/intents/doc-review",
+        axum::routing::post(|| async { (StatusCode::INTERNAL_SERVER_ERROR, "boom") }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+    let srv = spawn_with_gateway(&format!("http://{addr}")).await;
+    // `approve_one` asserts the 200 + merged version inside its own calls —
+    // the point here is that a dead receipt push never surfaces as a
+    // review error to the human.
+    let request_id = approve_one(&srv).await;
+    let (_, body) = srv.get(&format!("/requests/{request_id}")).await;
+    assert_eq!(body["status"], "approved");
+}
+
+/// Without a Gateway configured (standalone doc), approve works and simply
+/// pushes nothing — the pre-G5 behavior, unchanged.
+#[tokio::test(flavor = "multi_thread")]
+async fn approve_without_gateway_configured_still_works() {
+    let srv = spawn().await; // gateway_url = None
+    approve_one(&srv).await;
+}

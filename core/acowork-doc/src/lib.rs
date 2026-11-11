@@ -37,6 +37,7 @@ pub mod api;
 pub mod cli;
 pub mod config;
 pub mod error;
+pub mod gateway_notify;
 pub mod health;
 pub mod limit;
 pub mod mcp;

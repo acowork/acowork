@@ -141,6 +141,11 @@ pub async fn approve_request(
         .approve(&request_id, &body.reviewed_by, body.note.as_deref())
         .await
         .map_err(ApiError::from)?;
+    // Plan §7 G5: the decision is durable — wake the proposer. Fire-and-
+    // forget: a Gateway that cannot be reached must not turn a completed
+    // human review into an error response (`gateway_notify` warns; the
+    // agent-side `doc_check_request` poll still converges).
+    crate::gateway_notify::spawn_review_receipt(&state, &outcome.request, "approved");
     Ok(Json(ApproveDto {
         request: outcome.request,
         doc_version: outcome.doc_version,
@@ -174,6 +179,9 @@ pub async fn reject_request(
         .reject(&request_id, &body.reviewed_by, body.note.as_deref())
         .await
         .map_err(ApiError::from)?;
+    // Plan §7 G5: same receipt rule as approve — rejection is the outcome
+    // the proposer is waiting on, not an error to hide.
+    crate::gateway_notify::spawn_review_receipt(&state, &req, "rejected");
     Ok(Json(req.into()))
 }
 

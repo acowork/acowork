@@ -43,6 +43,19 @@ pub struct DocState {
     pub search: Arc<LibrarySearchService>,
     /// Node-level view/edit permissions + ACL management (design §9).
     pub acl: Arc<AclService>,
+    /// Gateway HTTP endpoint for the review receipt push (plan §7 G5).
+    /// `None` = standalone doc without a Gateway — receipts are dropped
+    /// (warn-logged), the `doc_check_request` poll remains the fallback.
+    pub gateway: Option<GatewayEndpoint>,
+}
+
+/// Resolved Gateway address for service-initiated HTTP calls.
+#[derive(Debug, Clone)]
+pub struct GatewayEndpoint {
+    pub url: String,
+    pub token: Option<String>,
+    /// Shared client (connection pool lives as long as the process).
+    pub client: reqwest::Client,
 }
 
 impl DocState {
@@ -75,6 +88,18 @@ impl DocState {
         let search = Arc::new(LibrarySearchService::new(store.clone()));
         let acl = Arc::new(AclService::new(store.clone()));
         trash.purge_expired().await?;
+        // Gateway HTTP endpoint for the review receipt push (plan §7 G5).
+        // The token arrives via env `ACOWORK_DOC_GATEWAY_TOKEN` (never
+        // argv), same channel as PM's `ACOWORK_PM_GATEWAY_TOKEN`.
+        let gateway = config.gateway_url.as_ref().map(|url| GatewayEndpoint {
+            url: url.trim_end_matches('/').to_string(),
+            token: std::env::var("ACOWORK_DOC_GATEWAY_TOKEN")
+                .ok()
+                .map(|t| t.trim().to_string())
+                .filter(|t| !t.is_empty())
+                .or_else(|| config.gateway_token.clone()),
+            client: reqwest::Client::new(),
+        });
         Ok(Self {
             config: Arc::new(config),
             actor: None,
@@ -84,6 +109,7 @@ impl DocState {
             trash,
             search,
             acl,
+            gateway,
         })
     }
 }

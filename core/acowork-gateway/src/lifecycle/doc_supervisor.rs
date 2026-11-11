@@ -68,6 +68,14 @@ pub struct DocSupervisorConfig {
     /// which the broker admits `doc:service` with (ADR-084 §决策 4b).
     /// `None` (auth off, the default) forwards nothing.
     pub mqtt_password: Option<String>,
+    /// Gateway HTTP base URL forwarded via `--gateway-url` so the doc
+    /// process can push review receipts (plan §7 G5). `None` disables the
+    /// push (standalone runs).
+    pub gateway_url: Option<String>,
+    /// Internal-service Bearer token passed via env
+    /// `ACOWORK_DOC_GATEWAY_TOKEN` (never argv — same channel as PM's
+    /// `ACOWORK_PM_GATEWAY_TOKEN`).
+    pub gateway_token: Option<String>,
 }
 
 /// Spawn the doc supervisor task. Non-fatal: if doc cannot start, the
@@ -241,6 +249,18 @@ async fn spawn_doc(cfg: &DocSupervisorConfig) -> Result<(tokio::process::Child, 
     }
     if let Some(ttl) = cfg.request_ttl_hours {
         cmd.arg("--request-ttl-hours").arg(ttl.to_string());
+    }
+
+    // Plan §7 G5: the review receipt push needs the Gateway HTTP address.
+    // The token goes through env, not argv (secrets never on the command
+    // line — same rule as the PM supervisor's `ACOWORK_PM_GATEWAY_TOKEN`).
+    // Failure to deliver a receipt is the doc side's warn-log, never a
+    // review error: no retry machinery here by design.
+    if let Some(gw_url) = &cfg.gateway_url {
+        cmd.arg("--gateway-url").arg(gw_url);
+    }
+    if let Some(token) = &cfg.gateway_token {
+        cmd.env("ACOWORK_DOC_GATEWAY_TOKEN", token);
     }
 
     // On Unix, create a new process group so a Gateway shutdown does not

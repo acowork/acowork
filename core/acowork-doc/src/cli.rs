@@ -60,6 +60,19 @@ pub struct Cli {
     #[arg(long)]
     pub request_ttl_hours: Option<u32>,
 
+    /// Gateway HTTP base URL (plan §7 G5): forwarded by the supervisor so
+    /// the doc process can push review receipts to
+    /// `POST /api/intents/doc-review`. `None` (standalone) drops the push —
+    /// the agent-side `doc_check_request` poll is the fallback.
+    #[arg(long)]
+    pub gateway_url: Option<String>,
+
+    /// Internal-service Bearer token for Gateway HTTP calls. Env-only by
+    /// design (`ACOWORK_DOC_GATEWAY_TOKEN`, same channel as PM's
+    /// `ACOWORK_PM_GATEWAY_TOKEN`); the CLI flag exists for manual runs.
+    #[arg(long, env = "ACOWORK_DOC_GATEWAY_TOKEN")]
+    pub gateway_token: Option<String>,
+
     /// Log level.
     #[arg(long, default_value = "info")]
     pub log_level: String,
