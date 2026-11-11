@@ -374,6 +374,9 @@ struct ListTasksArgs {
     order_by: Option<String>,
     /// Delta query (plan §7 G6): RFC3339 instant; return only tasks whose
     /// `updated_at` is at or after it. Composes with every other filter.
+    /// Covers task-record rewrites only — reparent moves and activity
+    /// comments do not change `updated_at` and are outside this window
+    /// (see [`crate::types::TaskFilter::updated_since`]).
     #[serde(default)]
     updated_since: Option<chrono::DateTime<chrono::Utc>>,
     #[serde(default)]
@@ -539,6 +542,9 @@ struct SubmitTaskArgs {
     /// entry is a doc id (`doc-…`) or a library path (`…/技术方案/x.md`).
     /// Validated against the doc service before the submission is recorded;
     /// an unresolved ref fails the call loudly instead of being dropped.
+    /// What gets recorded is the **canonical doc id** the validation
+    /// resolved — not the caller's string — so stored links survive a later
+    /// rename and duplicate names of one document collapse to one entry.
     #[serde(default)]
     doc_refs: Vec<String>,
 }
@@ -1316,30 +1322,42 @@ async fn pm_submit_task(state: &McpState, actor: &str, args: Value) -> Result<Va
     // An empty `doc_refs` skips the call entirely — old clients that never
     // send the field see the old behavior (and old network failures cannot
     // newly break them).
-    if !a.doc_refs.is_empty() {
-        validate_doc_refs(&state.gateway, &a.doc_refs).await?;
-    }
+    // The recorded value is what the doc service resolved, not the caller's
+    // input string (G4 review): a submitted path would rot on the next
+    // rename while the canonical `doc_id` never does, and two refs naming
+    // one document collapse into one entry.
+    let doc_refs = if a.doc_refs.is_empty() {
+        Vec::new()
+    } else {
+        validate_doc_refs(&state.gateway, &a.doc_refs).await?
+    };
 
     let task = state
         .store
-        .submit_task(&a.task_id, &a.text, a.attachment_ids, a.doc_refs, actor)
+        .submit_task(&a.task_id, &a.text, a.attachment_ids, doc_refs, actor)
         .await?;
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
-/// Ask the doc service whether every submitted ref resolves (plan §7 G4).
+/// Ask the doc service whether every submitted ref resolves (plan §7 G4),
+/// and return the **canonical doc ids** the validation resolved.
 ///
 /// Three distinct refusals, because the agent's next action differs:
 /// * `doc_refs_unresolved` — the ref is wrong (missing / denied / malformed):
 ///   fix the path or write the document, then resubmit;
+/// * `bad_request` — the doc service answered the validation call itself a
+///   4xx (oversized batch, malformed body): a broken call, retrying it
+///   unchanged fails unchanged;
 /// * `doc_service_unavailable` — the validation could not run: resubmit
-///   later, the task state is untouched;
-/// * no gateway configured (dev mode without the Gateway) — the doc library
-///   is not reachable at all, so `doc_refs` cannot mean anything.
+///   later, the task state is untouched.
+///
+/// No gateway configured (dev mode without the Gateway) is the third case:
+/// the doc library is not reachable at all, so `doc_refs` cannot mean
+/// anything.
 async fn validate_doc_refs(
     gateway: &Option<(String, Option<String>)>,
     refs: &[String],
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let Some((url, token)) = gateway.as_ref() else {
         return Err(PmError::DocServiceUnavailable(
             "doc_refs require the Gateway doc service, which this PM instance is not connected to"
@@ -1347,28 +1365,40 @@ async fn validate_doc_refs(
         ));
     };
     let client = crate::gateway_client::GatewayClient::new(url.clone(), token.clone());
-    let outcomes = client
-        .validate_doc_refs(refs)
-        .await
-        .map_err(PmError::DocServiceUnavailable)?;
-    let unresolved: Vec<String> = outcomes
-        .iter()
-        .filter(|o| o["status"].as_str() != Some("found"))
-        .map(|o| {
-            format!(
+    let outcomes = client.validate_doc_refs(refs).await.map_err(|e| match e {
+        crate::gateway_client::RefValidationFailure::Rejected(m) => PmError::BadRequest(m),
+        crate::gateway_client::RefValidationFailure::Unavailable(m) => {
+            PmError::DocServiceUnavailable(m)
+        }
+    })?;
+    let mut canonical = Vec::new();
+    let mut unresolved: Vec<String> = Vec::new();
+    for o in &outcomes {
+        if o["status"].as_str() == Some("found") {
+            let id = o["doc_id"].as_str().unwrap_or_default().to_string();
+            // `found` without a doc id is the doc side breaking its own
+            // contract — there is nothing canonical to record, so treat it
+            // as unresolved rather than storing an empty link.
+            if id.is_empty() {
+                unresolved.push(format!("{} (found without doc_id)", o["ref"].as_str().unwrap_or("?")));
+            } else if !canonical.contains(&id) {
+                canonical.push(id);
+            }
+        } else {
+            unresolved.push(format!(
                 "{} ({})",
                 o["ref"].as_str().unwrap_or("?"),
                 o["status"].as_str().unwrap_or("?")
-            )
-        })
-        .collect();
+            ));
+        }
+    }
     if !unresolved.is_empty() {
         return Err(PmError::BadRequest(format!(
             "doc_refs_unresolved: [{}] — write or fix each artifact before submitting",
             unresolved.join(", ")
         )));
     }
-    Ok(())
+    Ok(canonical)
 }
 
 // ── Dispatch prerequisites (design 32 §3.3) ────────────────────────────

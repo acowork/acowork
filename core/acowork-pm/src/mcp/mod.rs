@@ -4719,10 +4719,17 @@ mod tests {
             .unwrap();
     }
 
-    /// Stub doc service for `GatewayClient::validate_doc_refs`: refs in
-    /// `found` resolve, everything else comes back `not_found`.
-    async fn stub_doc(found: &[&'static str]) -> String {
-        let found: Vec<String> = found.iter().map(|s| s.to_string()).collect();
+    /// Stub doc service for `GatewayClient::validate_doc_refs`: each entry
+    /// is `(ref, canonical_doc_id)` — refs not listed come back
+    /// `not_found`. The canonical id deliberately **differs** from the
+    /// submitted path: the G4 fix records what the doc service resolved,
+    /// and a stub that echoed the input could not tell that apart from the
+    /// old store-the-string behavior.
+    async fn stub_doc(found: &[(&'static str, &'static str)]) -> String {
+        let found: Vec<(String, String)> = found
+            .iter()
+            .map(|(r, id)| (r.to_string(), id.to_string()))
+            .collect();
         let app = Router::new().route(
             "/api/doc/api/refs/validate",
             post(move |Json(body): Json<Value>| {
@@ -4733,16 +4740,38 @@ mod tests {
                         .iter()
                         .map(|r| {
                             let s = r.as_str().unwrap_or_default();
-                            if found.iter().any(|f| f == s) {
-                                json!({"ref": s, "status": "found", "doc_id": s, "path": s})
-                            } else {
-                                json!({"ref": s, "status": "not_found"})
+                            match found.iter().find(|(f, _)| f == s) {
+                                Some((_, id)) => json!({
+                                    "ref": s, "status": "found", "doc_id": id, "path": s
+                                }),
+                                None => json!({"ref": s, "status": "not_found"}),
                             }
                         })
                         .collect();
                     let all = results.iter().all(|o| o["status"] == "found");
                     axum::Json(json!({"results": results, "all_found": all}))
                 }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.ok();
+        });
+        format!("http://{addr}")
+    }
+
+    /// Stub that answers the validation call itself a 4xx — the doc side
+    /// refusing the request (oversized batch, malformed body), which is a
+    /// broken call, not an outage.
+    async fn stub_doc_rejecting() -> String {
+        let app = Router::new().route(
+            "/api/doc/api/refs/validate",
+            post(|| async {
+                (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    axum::Json(json!({"error": "too many refs: 51 (max 50)"})),
+                )
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4798,12 +4827,16 @@ mod tests {
         tid
     }
 
-    /// G4 happy path: validated refs are recorded and readable back from
-    /// `pm_get_task` (`result.doc_refs`) — that read-back is what lets the
-    /// desktop panel render the deliverables as links.
+    /// G4 happy path: validated refs are recorded **as the canonical doc
+    /// ids the doc service resolved** and readable back from `pm_get_task`
+    /// (`result.doc_refs`) — that read-back is what lets the desktop panel
+    /// render the deliverables as links that survive a rename.
     #[tokio::test(flavor = "multi_thread")]
     async fn submit_with_doc_refs_records_and_reads_back() {
-        let (router, store) = mcp_state_with_gateway(stub_doc(&["项目管理/p-1/技术方案/x.md"]).await).await;
+        let (router, store) = mcp_state_with_gateway(
+            stub_doc(&[("项目管理/p-1/技术方案/x.md", "doc-4f2a")]).await,
+        )
+        .await;
         let actor = "g4-eng";
         let tid = claimable_task(&router, &store, actor, 2).await;
 
@@ -4834,7 +4867,73 @@ mod tests {
         let v = call_tool(&router, Some(actor), 5, "pm_get_task", json!({ "task_id": tid })).await;
         let chk = tool_text(&v);
         assert_eq!(chk["status"], "submitted");
-        assert_eq!(chk["result"]["doc_refs"][0], "项目管理/p-1/技术方案/x.md");
+        assert_eq!(
+            chk["result"]["doc_refs"][0], "doc-4f2a",
+            "the canonical id is recorded, not the submitted path"
+        );
+    }
+
+    /// G4 review fix: two refs naming one document (the path and its id)
+    /// collapse into one recorded entry — the panel must not render the
+    /// same deliverable twice because the submitter spelled it two ways.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn submit_doc_refs_collapse_to_canonical_ids() {
+        let (router, store) = mcp_state_with_gateway(
+            stub_doc(&[
+                ("项目管理/p-1/技术方案/x.md", "doc-4f2a"),
+                ("doc-4f2a", "doc-4f2a"),
+            ])
+            .await,
+        )
+        .await;
+        let actor = "g4-eng-dup";
+        let tid = claimable_task(&router, &store, actor, 2).await;
+        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert!(v["error"].is_null(), "claim: {v}");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_submit_task",
+            json!({
+                "task_id": tid,
+                "text": "delivered",
+                "doc_refs": ["项目管理/p-1/技术方案/x.md", "doc-4f2a"],
+            }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "submit: {v}");
+        let refs = tool_text(&v)["result"]["doc_refs"].as_array().unwrap().clone();
+        assert_eq!(refs, vec![json!("doc-4f2a")], "one doc, one entry");
+    }
+
+    /// G4 review fix: a 4xx from the doc validation call is a broken call,
+    /// not an outage — it must surface as `bad_request`, never as the
+    /// "retry later" `doc_service_unavailable` (retrying identical input
+    /// fails identically).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn submit_doc_refs_validation_rejection_is_bad_request() {
+        let (router, store) = mcp_state_with_gateway(stub_doc_rejecting().await).await;
+        let actor = "g4-eng-4xx";
+        let tid = claimable_task(&router, &store, actor, 2).await;
+        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert!(v["error"].is_null(), "claim: {v}");
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            4,
+            "pm_submit_task",
+            json!({ "task_id": tid, "text": "x", "doc_refs": ["a.md"] }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "bad_request", "msg: {msg}");
+        assert!(msg.contains("too many refs"), "doc's own text must survive: {msg}");
+
+        let v = call_tool(&router, Some(actor), 5, "pm_get_task", json!({ "task_id": tid })).await;
+        assert_eq!(tool_text(&v)["status"], "in_progress", "refusal must not transition");
     }
 
     /// G4 refusal: an unresolved ref fails the submission loudly — it is

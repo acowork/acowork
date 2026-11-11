@@ -114,7 +114,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           "updated_since": {
             "type": "string",
             "format": "date-time",
-            "description": "RFC3339 delta filter: only tasks whose updated_at is at or after this instant (\"what changed since my last read\"). Composes with every other filter; an unparseable value returns bad_request."
+            "description": "RFC3339 delta filter: only tasks whose updated_at is at or after this instant (\"what changed since my last read\"). Covers task-record rewrites (edits, status, submit/review, attachments); reparent moves and activity comments do not change updated_at and are NOT in this window. Composes with every other filter; an unparseable value returns bad_request."
           },
           "offset": { "type": "integer", "minimum": 0, "default": 0 },
           "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 }
@@ -259,7 +259,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "type": "array",
             "items": { "type": "string", "maxLength": 512 },
             "maxItems": 50,
-            "description": "Doc-library artifacts this submission delivers: doc ids (`doc-…`) or library paths (`项目管理/p-…/技术方案/x.md`). Every ref is validated against the doc service BEFORE the transition — a missing or unreadable ref returns `doc_refs_unresolved` and the task stays in_progress. Omit (default) and the submission behaves exactly as before."
+            "description": "Doc-library artifacts this submission delivers: doc ids (`doc-…`) or library paths (`项目管理/p-…/技术方案/x.md`). Every ref is validated against the doc service BEFORE the transition — a missing or unreadable ref returns `doc_refs_unresolved` and the task stays in_progress. What is recorded (and readable back via pm_get_task) is the resolved canonical doc id, not your input string, so a later rename or move cannot rot the link; refs naming the same document collapse into one entry. Omit (default) and the submission behaves exactly as before."
           }
         }
       }

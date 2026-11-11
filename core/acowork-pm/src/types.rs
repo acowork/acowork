@@ -835,6 +835,15 @@ pub struct TaskFilter {
     /// value: a caller that re-sends its own last-seen timestamp loses
     /// nothing, and a duplicate row is cheaper than a silently dropped
     /// task.
+    ///
+    /// Coverage is exactly "the task record was rewritten": field edits,
+    /// status transitions, submit/review, attachment register/delete all
+    /// bump `updated_at`. Two mutations deliberately do NOT, and are
+    /// invisible to this filter: a reparent is a positional directory
+    /// move (0-file-write by design — the task content is unchanged), and
+    /// an activity comment appends to the sidecar `activity.json`, not to
+    /// the task. Callers that must see those poll `pm_list_activity` or
+    /// read the tree, not this window.
     #[serde(default)]
     pub updated_since: Option<DateTime<Utc>>,
 }

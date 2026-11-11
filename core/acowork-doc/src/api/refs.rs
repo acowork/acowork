@@ -117,12 +117,15 @@ async fn validate_one(
                     reason: Some("document exists but the caller may not view it".into()),
                 };
             }
-            let path = human_path(state, &doc_id).await.unwrap_or_default();
+            // A path that fails to render is reported as absent, not as
+            // the empty string: a caller that stored `Some("")` as a link
+            // target would hand the panel a dead anchor that looks valid.
+            let path = human_path(state, &doc_id).await.ok();
             RefOutcome {
                 r#ref: trimmed,
                 status: "found".into(),
                 doc_id: Some(doc_id),
-                path: Some(path),
+                path,
                 reason: None,
             }
         }
