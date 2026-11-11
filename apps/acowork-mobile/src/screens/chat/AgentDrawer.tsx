@@ -34,6 +34,7 @@ import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
 import { ListRow, Banner } from '../../components/ui'
 import type { SessionInfo } from '../../lib/types'
+import { attentionLabel, attentionReason } from '../../lib/sessionAttention'
 
 const TABS = [
   { id: 'status', label: '状态' },
@@ -293,6 +294,7 @@ function ConfigTab({ agentId }: { agentId: string }) {
 function SessionsTab({ agentId, onClose }: { agentId: string; onClose: () => void }) {
   const sessions = useAgentStore((s) => s.agents[agentId]?.sessions) ?? []
   const activeId = useChatStore((s) => s.agentStates[agentId]?.activeSessionId ?? null)
+  const sessionStatuses = useAgentStore((s) => s.sessionStatuses[agentId])
   const openSession = useChatStore((s) => s.openSession)
   const loadMore = useAgentStore((s) => s.loadMoreSessions)
   const hasMore = useAgentStore((s) => s.sessionsHasMore[agentId] ?? true)
@@ -307,6 +309,14 @@ function SessionsTab({ agentId, onClose }: { agentId: string; onClose: () => voi
               onClose()
               if (s.session_id !== activeId) void openSession(agentId, s.session_id)
             }}
+            // The active session is suppressed: its card is on the screen
+            // behind this drawer, and a dot beside the row you are already
+            // inside is noise, not a signal (same rule as Desktop's tab bar).
+            attention={
+              s.session_id === activeId
+                ? undefined
+                : attentionLabel(attentionReason(sessionStatuses?.[s.session_id]))
+            }
             label={<span className="row-title">{s.title}</span>}
             value={
               s.session_id === activeId ? (

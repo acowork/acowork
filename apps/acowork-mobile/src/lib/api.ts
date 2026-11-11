@@ -302,6 +302,7 @@ export function mapSessionRow(r: SessionRow): SessionInfo {
     visibility: r.visibility ?? 'public',
     updated_at: isoToMs(r.last_active_at),
     message_count: r.message_count,
+    is_active: r.is_active,
   }
 }
 

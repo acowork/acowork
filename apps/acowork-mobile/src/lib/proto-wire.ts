@@ -55,7 +55,7 @@ const EV_DONE = 6, EV_ERROR = 7, EV_STOPPED = 8, EV_QUESTION = 9, EV_APPROVAL = 
 const EV_ROUND_STATE = 34
 
 export type RealtimeEvent =
-  | { kind: 'state'; status: string; messageCount: number }
+  | { kind: 'state'; status: string; reason?: string; retry?: boolean; messageCount: number }
   | { kind: 'done' }
   | { kind: 'error'; error: string }
   | { kind: 'stopped' }
@@ -109,22 +109,55 @@ function decodeSessionState(buf: Uint8Array): RealtimeEvent {
     if (f.no === 3) status = s(f.val)
     if (f.no === 4) count = n(f.val)
   }
-  return { kind: 'state', status: unwrapStatus(status), messageCount: count }
+  const parsed = parseStatus(status)
+  return {
+    kind: 'state',
+    status: parsed.status,
+    reason: parsed.reason,
+    retry: parsed.retry,
+    messageCount: count,
+  }
+}
+
+/** The facts a session-state publish carries that a *surface* can act on: the
+ *  tagged status name and, for `paused`, why it paused plus whether the pause
+ *  is a provider retry. Split out because the name alone cannot tell a 429 retry
+ *  wait (the Runtime resumes it) from an iteration-limit pause (a human must
+ *  decide), and a badge drawn from "paused" is a badge that starts lying. */
+export interface ParsedStatus {
+  status: string
+  reason?: string
+  /** `true` for a 429 retry wait — the Runtime resumes it by itself. */
+  retry?: boolean
 }
 
 /** The wire's `SessionState.status` is a serde tagged-enum JSON string
  * (`{"status":"tool_executing",...}`), not a bare enum name — Desktop's
  * Rust layer parses it before emitting, so every consumer here matches
  * on the inner name. Tolerates a bare string in case the publisher ever
- * changes. */
-function unwrapStatus(raw: string): string {
-  if (!raw.startsWith('{')) return raw
+ * changes.
+ *
+ * The `paused` reason (`iteration_limit` / `loop_detected` / `debug`) is kept
+ * alongside the name: the name alone cannot tell a 429 retry wait (the Runtime
+ * resumes it by itself) from an iteration-limit pause (a human must decide), so
+ * a badge drawn from "paused" alone would start lying. An unparseable payload
+ * degrades to the raw string as its name and no reason — "unknown", never a
+ * guessed verdict. */
+export function parseStatus(raw: string): ParsedStatus {
+  if (!raw.startsWith('{')) return { status: raw }
   try {
     const v: unknown = JSON.parse(raw)
-    return v && typeof v === 'object' && typeof (v as { status?: unknown }).status === 'string'
-      ? (v as { status: string }).status
-      : raw
-  } catch { return raw }
+    if (!v || typeof v !== 'object') return { status: raw }
+    const name = (v as { status?: unknown }).status
+    if (typeof name !== 'string') return { status: raw }
+    const detail = (v as { detail?: unknown }).detail
+    const d = detail && typeof detail === 'object' ? (detail as Record<string, unknown>) : undefined
+    const reason = d && typeof d.reason === 'string' ? d.reason : undefined
+    // `retry_info` is present exactly while the provider is rate-limiting; the
+    // detail object is what distinguishes it from an iteration-limit pause.
+    const retry = d !== undefined && d.retry_info !== undefined && d.retry_info !== null
+    return { status: name, reason, retry: retry || undefined }
+  } catch { return { status: raw } }
 }
 
 /** DataEnvelope{version=1, payload oneof: session_message=15, session_state=18}. */

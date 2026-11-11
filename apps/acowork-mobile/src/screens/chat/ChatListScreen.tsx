@@ -18,6 +18,14 @@
  * server-side read cursor, so its count is a NUMBER. An agent session has
  * none, so it gets no count at all — only a green dot while it is working,
  * which is the single status signal the Desktop sidebar shows too.
+ *
+ * One exception, and it is not a count either: an agent row gets a RED dot when
+ * one of its sessions is holding a turn open for the reader (a tool approval,
+ * an `ask_user_question`, or a turn paused at the iteration limit). Those cards
+ * expire on their own and the Runtime then answers on the human's behalf, so a
+ * parked agent that looks exactly like a busy one is how a decision gets made
+ * for you. Same rule as Desktop's `lib/sessionAttention`, applied to the same
+ * `.../sessions/+/state` fact — the two inboxes must not disagree.
  */
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
@@ -33,6 +41,7 @@ import { formatListTime } from '../../lib/time'
 import { ListSection, ListRow } from '../../components/ui'
 import { AuthImage } from '../../components/AuthImage'
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from '../../lib/builtinIcons'
+import { attentionByAgent, attentionLabel, workingAgentIds } from '../../lib/sessionAttention'
 import type { NodeRow } from '../../lib/types'
 
 /** Pick a stable builtin icon ID for a given seed (same as Desktop). */
@@ -131,11 +140,15 @@ export function ChatListScreen() {
   const users = useAgentStore((s) => s.users)
   const nodes = useAgentStore((s) => s.nodes)
   const sessionsByAgent = useAgentStore((s) => s.agents)
-  const busySessions = useAgentStore((s) => s.busySessions)
+  const sessionStatuses = useAgentStore((s) => s.sessionStatuses)
   const refreshInbox = useAgentStore((s) => s.refreshInbox)
   const loading = useAgentStore((s) => s.directoryLoading)
   const startingAgentIds = useAgentStore((s) => s.startingAgentIds)
   const push = useNavStore((s) => s.push)
+  // One fact, two readings, both derived here (never cached in the store) — so
+  // the green dot and the red dot cannot disagree about the same session.
+  const workingIds = useMemo(() => workingAgentIds(sessionStatuses), [sessionStatuses])
+  const attentionIds = useMemo(() => attentionByAgent(sessionStatuses), [sessionStatuses])
   const baseUrl = useAuthStore((s) => s.baseUrl)
 
   const chats = useUserChatStore((s) => s.chats)
@@ -283,6 +296,12 @@ export function ChatListScreen() {
                 key={a.id}
                 avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
                 onClick={() => void openAgent(a.id)}
+                // Nothing in this list is "the session you are looking at", so
+                // there is nothing to suppress: an agent parked on a card gets
+                // its dot whether or not it is the last one you opened. An
+                // offline agent holds no obligation (applyPresence drops its
+                // facts), so the presence check is belt-and-braces.
+                attention={attentionLabel(a.status === 'offline' ? undefined : attentionIds.get(a.id))}
                 label={
                   <span className="row-title">
                     {a.name}
@@ -295,7 +314,7 @@ export function ChatListScreen() {
                         // `.../sessions/+/state` pushes — the same signal
                         // Desktop's `busyAgentIds` reads (the directory and
                         // the AgentStatus wire never carry `busy`).
-                        const working = busySessions[a.id]?.size ? a.status !== 'offline' : false
+                        const working = a.status !== 'offline' && workingIds.has(a.id)
                         const cls =
                           a.status === 'offline'
                             ? 'dot dot-offline'

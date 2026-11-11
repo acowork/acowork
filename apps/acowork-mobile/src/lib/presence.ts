@@ -41,6 +41,7 @@ import {
 } from './mqtt-wire'
 import { decodeEnvelope, decodePresence, decodeRoundSignal, type PresenceUpdate, type RoundSignal } from './proto-wire'
 import type { WebSocketLike } from './realtime'
+import type { SessionStatusFact } from './sessionAttention'
 
 /** One wildcard filter for the whole fleet (QoS 1: the status topic is QoS 1). */
 export const PRESENCE_TOPIC = 'acowork/agents/+/status'
@@ -78,9 +79,10 @@ export interface PresenceDeps {
   connectOpts?(): Promise<ConnectOpts | null>
   /** One agent's verdict flipped. Called for every status publish. */
   onUpdate(agentId: string, update: PresenceUpdate): void
-  /** One session's lifecycle status pushed/retained (`.../sessions/{sid}/state`).
-   *  Raw Runtime status string; the store decides busy vs idle. */
-  onSessionState?(agentId: string, sessionId: string, status: string): void
+  /** One session's lifecycle fact from the fleet-wide state filter: its status
+   *  name plus, for `paused`, why — the pair an inbox row needs to tell "working"
+   *  from "waiting for you" (see `lib/sessionAttention`). */
+  onSessionState?(agentId: string, sessionId: string, status: SessionStatusFact): void
   /** A round of some execution session changed state. `agentId`/`sessionId` come
    *  from the topic (the execution coordinates); the signal's own
    *  `chatSessionId` names the Chat that owes the block a re-read. Deciding
@@ -278,7 +280,13 @@ function handlePacket(d: Decoded, s: WebSocketLike): void {
         const seg = p.topic.split('/')
         const agentId = seg[2]
         const sessionId = seg[4]
-        if (agentId && sessionId) deps.onSessionState?.(agentId, sessionId, ev.status)
+        if (agentId && sessionId) {
+          deps.onSessionState?.(agentId, sessionId, {
+            status: ev.status,
+            reason: ev.reason,
+            retry: ev.retry,
+          })
+        }
       }
       return
     }

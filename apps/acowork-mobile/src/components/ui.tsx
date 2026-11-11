@@ -37,6 +37,7 @@ export function ListRow({
   icon,
   iconColor,
   selected,
+  attention,
 }: {
   label: ReactNode
   value?: ReactNode
@@ -68,6 +69,17 @@ export function ListRow({
    *  but the class is the same as the desktop's "active entry" so the
    *  styling wins regardless. */
   selected?: boolean
+  /** Red dot meaning "this row is blocked on YOU" — an agent session parked on
+   *  a tool approval / `ask_user_question` card, or paused at the iteration
+   *  limit, all of which expire on their own if nobody answers. The value is
+   *  the accessible label ("等待你确认"), never a count.
+   *
+   *  Three signals, three different truths — do not merge them: `badge` is a
+   *  count the server reported, the dot beside the name is presence/working,
+   *  and this one is an obligation. It sits on the avatar's corner when the
+   *  row has one (it outranks the working dot the way "needs you" outranks
+   *  "busy") and in the trail when it does not. */
+  attention?: string
 }) {
   const Tag = onClick ? 'button' : 'div'
   // Two-line (label + hint) is the default. Single-line collapses to the
@@ -91,6 +103,9 @@ export function ListRow({
           {badge && badge > 0 ? (
             <span className="avatar-unread-count">{badge > 99 ? '99+' : badge}</span>
           ) : null}
+          {attention ? (
+            <span className="avatar-attention-dot" role="img" aria-label={attention} title={attention} />
+          ) : null}
         </div>
       ) : null}
       {icon && !avatar ? (
@@ -106,6 +121,9 @@ export function ListRow({
         {hint ? <div className="list-row-hint">{hint}</div> : null}
       </div>
       <div className="list-row-trail">
+        {attention && !avatar ? (
+          <span className="trail-attention-dot" role="img" aria-label={attention} title={attention} />
+        ) : null}
         {badge && badge > 0 && !avatar ? (
           <span className="badge-count">{badge > 99 ? '99+' : badge}</span>
         ) : null}

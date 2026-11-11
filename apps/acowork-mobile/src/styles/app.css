@@ -436,6 +436,33 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* The obligation dot: "this row is blocked on you" (a tool approval /
+ * `ask_user_question` card is open, or the turn paused at the iteration limit).
+ * Deliberately NOT the accent color — accent reads as "selected" — and
+ * deliberately not a count: there is nothing to count, there is something to
+ * answer before it times out. Same corner and size as a messaging app's unread
+ * dot, because that is the affordance people already read as "there". */
+.avatar-attention-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--color-destructive);
+  border: 2px solid var(--color-bg-elevated);
+  box-sizing: content-box;
+  pointer-events: none;
+}
+/* Rows without an avatar (session history) put the same dot in the trail, so
+ * one meaning never grows two different looks. */
+.trail-attention-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--color-destructive);
+}
 .list-row-avatar {
   width: var(--avatar-size);
   height: var(--avatar-size);

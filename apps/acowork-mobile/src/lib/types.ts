@@ -27,6 +27,18 @@ export interface SessionInfo {
    */
   message_count?: number
   /**
+   * Whether the Runtime holds this session in memory right now (ADR-038:
+   * present in the in-memory session map; `close_session` removes the key).
+   *
+   * It is the staleness check the status push cannot do alone: a turn parked on
+   * an approval card is a loop blocked mid-iteration, so it is necessarily
+   * resident — and a row that says it is NOT, while the inbox still shows a red
+   * dot for it, is reporting a retained publish from a Runtime that has since
+   * died or closed the session. Absent on an older Runtime, which proves
+   * nothing (see `isStaleParkedFact`).
+   */
+  is_active?: boolean
+  /**
    * ADR-100: the Chat session this execution session came from, when it did
    * (design 27 §8.2). History, not a routing flag: ADR-100 Rev. 8 (D14)
    * canceled the chat mirror, so the composer always writes to this session
@@ -186,6 +198,8 @@ export interface SessionRow {
   message_count: number
   visibility?: SessionVisibility | null
   can_write: boolean
+  /** ADR-038 residency — see `SessionInfo.is_active`. Absent on an older Runtime. */
+  is_active?: boolean
 }
 
 /** `GET .../sessions` envelope. */
