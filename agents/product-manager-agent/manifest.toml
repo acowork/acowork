@@ -40,6 +40,12 @@ type = "Network"
 # (ADR-069).
 
 # --- Filesystem ---
+# `file_read` is declared because the skills that inspect repository sources
+# really do read them (plan §4.4 allowlist); deliverables are published with
+# `doc_write`, not written locally, so `file_write` is NOT declared here.
+[[tools]]
+name = "file_read"
+
 [[tools]]
 name = "file_edit"
 
@@ -120,7 +126,29 @@ why = "Remember product context, stakeholders and past decisions across sessions
 
 [[mcp_servers]]
 hosted = "pm"
-why = "File requirements and roadmap items as tasks the team can pick up"
+why = "Claim, work and submit project tasks — the participation surface, not the management one"
+# ADR-104: the whitelist is the initial enabled set, so it is exactly the set the
+# package's skills declare in `tool_deps` (plan §4.3). Deliberately absent are the
+# management-plane tools — `pm_update_task`, `pm_create_project`,
+# `pm_update_project`, `pm_add_project_member`, `pm_list_agents` (plan D-1): the
+# boundary is enforced by the whitelist, not by skill prose.
+tools = [
+  "pm_list_tasks", "pm_get_task", "pm_get_project", "pm_claim_task",
+  "pm_submit_task", "pm_add_activity", "pm_list_activity", "pm_create_task",
+]
+
+[[mcp_servers]]
+hosted = "doc"
+why = "Deliverables go into the shared project document tree instead of local files"
+# Same rule as `pm` above. `doc_remove` / `doc_rmdir` are absent because deleting
+# is the owner's right (plan D-5), and `doc_mkdir` is absent because the project
+# tree has exactly one governor — the PM agent (plan D-2 / D-7): a participant
+# that mkdirs an area directory would end up the only one able to rename or prune
+# it. A missing area is reported through `pm_add_activity`, not self-created.
+tools = [
+  "doc_list", "doc_search", "doc_read", "doc_stat", "doc_write", "doc_move",
+  "doc_list_requests", "doc_check_request",
+]
 
 [[mcp_servers]]
 preset = "figma"
@@ -158,3 +186,11 @@ skills = ["feature-acceptance"]
 description = "Plan product launches with rollout, communication, analytics, support readiness, risks, and post-launch learning"
 skills = ["launch-planning"]
 
+# The participation capability is listed last because it is the one the other
+# six run inside: a project task is claimed, its deliverable published to the
+# project document tree, and its result submitted through PM. Declaring it is
+# what makes `validate_capability_skills` check `project-participation` at
+# packaging time and what makes it show in the capability panel (ADR-104).
+[capabilities.project_participation]
+description = "Claim, publish and submit work in a project: accept a dispatched task, publish its deliverable to the project document tree, record blockers and handoffs as activity, and submit the result"
+skills = ["project-participation"]
