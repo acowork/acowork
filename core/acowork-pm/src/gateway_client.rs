@@ -39,16 +39,43 @@ pub struct GatewayClient {
     client: reqwest::Client,
 }
 
+/// Process-wide HTTP client. `reqwest::Client` is `Arc`-backed and meant to
+/// be reused — the connection pool and TLS context live inside it — while a
+/// per-request `.timeout()` still overrides the default. Building a fresh
+/// client per call (the G4 review found `validate_doc_refs` doing exactly
+/// that on every submitted task) throws the pool away each time.
+fn shared_client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(Duration::from_secs(10))
+            .build()
+            .expect("reqwest client build")
+    })
+}
+
+/// How a doc-ref validation call failed, split by the caller's next action
+/// (G4 review): the two halves mean opposite things and must not collapse
+/// into one "try later" answer.
+#[derive(Debug)]
+pub enum RefValidationFailure {
+    /// The doc service answered a 4xx: the request itself is wrong (oversized
+    /// batch, malformed body). Retrying identical input fails identically —
+    /// the caller must fix the call, not wait.
+    Rejected(String),
+    /// The validation could not run, or answered 5xx / broke its response
+    /// contract: a platform fact, the input may be perfectly fine. The
+    /// correct caller action is to retry later.
+    Unavailable(String),
+}
+
 impl GatewayClient {
     /// `gateway_url` is the Gateway HTTP base (no `/api` suffix).
     pub fn new(gateway_url: String, auth_token: Option<String>) -> Self {
         Self {
             gateway_url: gateway_url.trim_end_matches('/').to_string(),
             auth_token,
-            client: reqwest::Client::builder()
-                .timeout(Duration::from_secs(10))
-                .build()
-                .expect("reqwest client build"),
+            client: shared_client().clone(),
         }
     }
 
@@ -220,6 +247,11 @@ impl GatewayClient {
     /// logged, never surfaced (the agent can still claim/poll the task the
     /// traditional way; the push is an accelerator).
     ///
+    /// A **human** assignee goes through this same call: the Gateway sees an
+    /// account id in the group roster, writes the row and returns
+    /// `delivered` without waking anything (an account has no Runtime). PM
+    /// does not branch — one endpoint, one receipt.
+    ///
     /// Returns `Ok(message_id)` on delivery, `Err(reason)` otherwise —
     /// the reason feeds the scanner's give-up log; each failed attempt is
     /// already `warn`-logged here with the Gateway's full body.
@@ -350,5 +382,70 @@ impl GatewayClient {
                 tracing::warn!(error = %e, task_id, "task context close unreachable");
             }
         }
+    }
+
+    /// Plan §7 G4: validate `pm_submit_task`'s `doc_refs` against the doc
+    /// service, through the Gateway's doc reverse proxy
+    /// (`POST /api/doc/api/refs/validate`). The doc side owns the fact of
+    /// whether a reference resolves; PM only asks and refuses.
+    ///
+    /// Returns `Err(reason)` for a transport / non-2xx answer (the caller
+    /// must refuse the submission — an unvalidated ref is a dead link by
+    /// default), and `Ok(outcomes)` on a well-formed response. The caller
+    /// inspects `status` per ref: only `"found"` may be submitted.
+    /// Ask the doc service whether every submitted ref resolves (plan §7 G4).
+    /// The failure carries its kind: a 4xx from doc is a broken call
+    /// ([`RefValidationFailure::Rejected`]), anything else is the platform
+    /// not answering ([`RefValidationFailure::Unavailable`]) — collapsing the
+    /// two into "retry later" tells the agent to wait forever on a bug it
+    /// must fix (G4 review).
+    pub async fn validate_doc_refs(
+        &self,
+        refs: &[String],
+    ) -> Result<Vec<serde_json::Value>, RefValidationFailure> {
+        let mut req = self.client.post(format!(
+            "{}/api/doc/api/refs/validate",
+            self.gateway_url
+        ));
+        if let Some(token) = &self.auth_token {
+            req = req.bearer_auth(token);
+        }
+        let resp = match req.json(&serde_json::json!({ "refs": refs })).send().await {
+            Ok(r) => r,
+            Err(e) => return Err(RefValidationFailure::Unavailable(format!("doc service unreachable: {e}"))),
+        };
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            let msg = format!("doc validation rejected: {status} {body}");
+            return Err(if status.is_client_error() {
+                RefValidationFailure::Rejected(msg)
+            } else {
+                RefValidationFailure::Unavailable(msg)
+            });
+        }
+        let value: serde_json::Value = match resp.json().await {
+            Ok(v) => v,
+            Err(e) => {
+                return Err(RefValidationFailure::Unavailable(format!(
+                    "doc validation malformed response: {e}"
+                )))
+            }
+        };
+        let results = value["results"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        // One outcome per input ref, in order — the contract of the
+        // endpoint. A shorter array means the doc side broke it; refuse
+        // rather than silently approving the refs that went unreported.
+        if results.len() != refs.len() {
+            return Err(RefValidationFailure::Unavailable(format!(
+                "doc validation returned {} outcomes for {} refs",
+                results.len(),
+                refs.len()
+            )));
+        }
+        Ok(results)
     }
 }

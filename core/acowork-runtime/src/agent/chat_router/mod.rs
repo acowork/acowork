@@ -12,7 +12,7 @@
 //! - [`prompt`] — Block A, the byte-stable system prompt;
 //! - [`context`] — Block B (history projection) and Block C (this turn's view);
 //! - [`tool`] — the delivery acts (`exec_session_create`,
-//!   `exec_session_propose_continue`), the read-only information tools
+//!   `exec_session_route_confirm`), the read-only information tools
 //!   (`memory_recall`, GET-only `http_request`, `exec_session_read_round`),
 //!   and their validation;
 //! - [`decision`] — the append-only decision log;
@@ -97,6 +97,36 @@ struct ChatQueue {
 pub struct ChatSessionManager {
     slots: Mutex<HashMap<String, Arc<AsyncMutex<ChatSlot>>>>,
     queues: Mutex<HashMap<String, ChatQueue>>,
+    cards: Mutex<HashMap<String, PendingCard>>,
+}
+
+/// The human's answer to a live `exec_session_route_confirm` card, read off
+/// the re-delivery the click sends (ADR-106 D6 rev. 2026-11-12).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RouteAnswer {
+    /// The human confirmed the proposal. The parked turn delivers the message
+    /// into that session itself — addressing is settled, no model call reopens
+    /// it.
+    Continue { session_id: String },
+    /// The human chose "new task". The parked turn feeds this back to the
+    /// model as the confirm call's tool result: the refusal needs a
+    /// `background` brief, and only the model can write one.
+    NewTask,
+}
+
+/// A router turn parked on the `exec_session_route_confirm` card it emitted:
+/// the durable row the card asks about — the coordinate the answer's
+/// re-delivery carries back — and the waker for the parked turn.
+///
+/// One live card per chat: router turns are serialized per chat (the queue +
+/// slot claim), and a card parks its own turn, so a second registration can
+/// only mean the first turn ended — its `drop_card`/replacement is then
+/// correct, not a leak.
+pub struct PendingCard {
+    /// `chat_row_id` of the turn that emitted the card — the row the card
+    /// threads under and the id a card answer re-delivery keeps.
+    asked_row_id: String,
+    responder: tokio::sync::oneshot::Sender<RouteAnswer>,
 }
 
 impl std::fmt::Debug for ChatSessionManager {
@@ -104,6 +134,7 @@ impl std::fmt::Debug for ChatSessionManager {
         f.debug_struct("ChatSessionManager")
             .field("slots", &self.slot_count())
             .field("queued_chats", &self.queued_chats())
+            .field("live_cards", &self.live_cards())
             .finish()
     }
 }
@@ -184,6 +215,94 @@ impl ChatSessionManager {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .contains_key(chat_session_id)
+    }
+
+    // ── Live `exec_session_route_confirm` cards ──────────────────────
+    //
+    // A confirm call parks its turn on this registry instead of ending it
+    // (ADR-106 D6 rev. 2026-11-12). The answer is the SAME re-delivery the
+    // surfaces already send — the original row's words, now addressed, keyed
+    // by the original row id — so `claim_card_answer` reads the click off the
+    // envelope and wakes the parked turn before the ladder ever sees it. A
+    // turn that is not a card answer (a fresh message, a block reply, any
+    // other row id) claims nothing and takes the ladder unchanged: the
+    // registry is a fast path for a live turn, never a gate on delivery.
+
+    /// Park the calling turn on the card it just emitted. Replaces any stale
+    /// entry for this chat (turns are serialized per chat, so a live second
+    /// card means the first turn ended without cleaning up — the replacement
+    /// is the repair).
+    pub fn register_card(
+        &self,
+        chat_session_id: &str,
+        asked_row_id: &str,
+        responder: tokio::sync::oneshot::Sender<RouteAnswer>,
+    ) {
+        let mut cards = self.cards.lock().unwrap_or_else(|e| e.into_inner());
+        cards.insert(
+            chat_session_id.to_string(),
+            PendingCard {
+                asked_row_id: asked_row_id.to_string(),
+                responder,
+            },
+        );
+    }
+
+    /// Release the chat's live card, but only if it is still the one the
+    /// caller registered — a timed-out turn must not drop the card a newer
+    /// turn parked in its place.
+    pub fn drop_card(&self, chat_session_id: &str, asked_row_id: &str) {
+        let mut cards = self.cards.lock().unwrap_or_else(|e| e.into_inner());
+        if cards
+            .get(chat_session_id)
+            .is_some_and(|c| c.asked_row_id == asked_row_id)
+        {
+            cards.remove(chat_session_id);
+        }
+    }
+
+    /// Claim an inbound envelope as the answer to this chat's live card.
+    ///
+    /// The match is the row the card asks about: a card answer re-delivery
+    /// keeps the original row id (that is what makes it one message, not two),
+    /// and nothing else carries it as its own `chat_row_id`. The address is
+    /// read off the Gateway's stamps — a named session is a confirmation,
+    /// `force_new` is the refusal. No live card, a different row, or an
+    /// envelope with no address claims nothing (`false` = take the ladder).
+    pub fn claim_card_answer(&self, envelope: &IntentEnvelope) -> Option<RouteAnswer> {
+        let asked = envelope.chat_row_id.as_str();
+        if asked.is_empty() || envelope.source_chat_session_id.is_empty() {
+            return None;
+        }
+        let answer = if let Some(session_id) =
+            crate::agent::chat_router::runner::addressed_session(envelope)
+        {
+            RouteAnswer::Continue { session_id }
+        } else if crate::agent::chat_router::runner::force_new(envelope) {
+            RouteAnswer::NewTask
+        } else {
+            return None;
+        };
+        let mut cards = self.cards.lock().unwrap_or_else(|e| e.into_inner());
+        if cards
+            .get(envelope.source_chat_session_id.as_str())
+            .is_some_and(|c| c.asked_row_id == asked)
+        {
+            let card = cards.remove(envelope.source_chat_session_id.as_str())?;
+            // The receiver lives on the parked turn's stack; a turn that
+            // vanished with the process is not here to be woken, and the
+            // envelope must then fall to the ladder rather than be swallowed.
+            if card.responder.send(answer.clone()).is_err() {
+                return None;
+            }
+            return Some(answer);
+        }
+        None
+    }
+
+    /// Chats holding a live card (diagnostics / tests).
+    pub fn live_cards(&self) -> usize {
+        self.cards.lock().map(|c| c.len()).unwrap_or(0)
     }
 
     /// Chats with a dispatch queue entry (diagnostics / Debug only).
@@ -390,5 +509,120 @@ mod tests {
         let slot = manager.begin_turn("busy").await;
         assert_eq!(slot.anchor_seq, 0);
         assert!(manager.slot_count() <= MAX_SLOTS + 1);
+    }
+
+    // ── route-confirm card registry (ADR-106 D6 rev. 2026-11-12) ──────────
+
+    /// An envelope shaped like a card-answer re-delivery: the original row
+    /// id as `chat_row_id`, plus the address the click stamped.
+    fn card_click(chat: &str, asked_row: &str, params: serde_json::Value) -> IntentEnvelope {
+        let mut env = pending(chat, asked_row).envelope;
+        env.chat_row_id = asked_row.to_string();
+        env.params = params;
+        *env
+    }
+
+    /// The click a live card answers wakes the parked turn with the address
+    /// the human chose — and the entry is gone, so a redelivered second
+    /// click cannot wake anything twice.
+    #[tokio::test]
+    async fn a_card_click_wakes_the_parked_turn_once() {
+        let manager = ChatSessionManager::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        manager.register_card("chat-1", "row-1", tx);
+
+        let answer = manager.claim_card_answer(&card_click(
+            "chat-1",
+            "row-1",
+            serde_json::json!({ acowork_core::protocol::TARGET_SESSION_PARAM: "sess-9" }),
+        ));
+        assert_eq!(answer, Some(RouteAnswer::Continue { session_id: "sess-9".into() }));
+        assert_eq!(rx.await.unwrap(), RouteAnswer::Continue { session_id: "sess-9".into() });
+        assert_eq!(manager.live_cards(), 0);
+
+        // The same click redelivered (retry, group fan-out) claims nothing:
+        // the ladder takes it, exactly as any addressed turn does.
+        assert!(manager
+            .claim_card_answer(&card_click(
+                "chat-1",
+                "row-1",
+                serde_json::json!({ acowork_core::protocol::TARGET_SESSION_PARAM: "sess-9" }),
+            ))
+            .is_none());
+    }
+
+    /// "New task" on the card reads as the refusal, and an unaddressed
+    /// envelope is not a card answer at all — it must reach the router as
+    /// the new turn it is.
+    #[tokio::test]
+    async fn a_card_click_reads_new_task_and_ignores_unaddressed_turns() {
+        let manager = ChatSessionManager::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        manager.register_card("chat-1", "row-1", tx);
+        let answer = manager.claim_card_answer(&card_click(
+            "chat-1",
+            "row-1",
+            serde_json::json!({ acowork_core::protocol::FORCE_NEW_PARAM: true }),
+        ));
+        assert_eq!(answer, Some(RouteAnswer::NewTask));
+        assert_eq!(rx.await.unwrap(), RouteAnswer::NewTask);
+
+        let manager = ChatSessionManager::new();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        manager.register_card("chat-1", "row-1", tx);
+        assert!(manager.claim_card_answer(&card_click("chat-1", "row-1", serde_json::json!({ "message": "hi" }))).is_none());
+        assert_eq!(manager.live_cards(), 1, "a non-answer must not consume the card");
+    }
+
+    /// The match is the row the card asks about: a click on a stale card
+    /// (another row) or a message in another chat claims nothing — one
+    /// human's open question must not swallow another's turn.
+    #[test]
+    fn only_the_asked_row_claims_a_card() {
+        let manager = ChatSessionManager::new();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        manager.register_card("chat-1", "row-1", tx);
+        let addressed = serde_json::json!({ acowork_core::protocol::TARGET_SESSION_PARAM: "sess-9" });
+
+        // Different row, same chat.
+        assert!(manager.claim_card_answer(&card_click("chat-1", "row-2", addressed.clone())).is_none());
+        // Same row shape, different chat.
+        assert!(manager.claim_card_answer(&card_click("chat-2", "row-1", addressed.clone())).is_none());
+        // Empty row id (a transport that declared none) claims nothing.
+        assert!(manager.claim_card_answer(&card_click("chat-1", "", addressed)).is_none());
+        assert_eq!(manager.live_cards(), 1);
+    }
+
+    /// A parked turn that died with the process leaves a dead sender; the
+    /// click must NOT be swallowed — it falls to the ladder (the slow path),
+    /// where the message is still routed. This is the restart case.
+    #[tokio::test]
+    async fn a_click_on_a_dead_parked_turn_falls_to_the_ladder() {
+        let manager = ChatSessionManager::new();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        drop(rx); // the parked turn is gone
+        manager.register_card("chat-1", "row-1", tx);
+        let answer = manager.claim_card_answer(&card_click(
+            "chat-1",
+            "row-1",
+            serde_json::json!({ acowork_core::protocol::TARGET_SESSION_PARAM: "sess-9" }),
+        ));
+        assert!(answer.is_none(), "the envelope must reach the ladder, not be swallowed");
+        assert_eq!(manager.live_cards(), 0, "the dead card was reclaimed on the way");
+    }
+
+    /// A timed-out turn clears its own card; a newer turn's card survives
+    /// that cleanup, so the newer question stays answerable.
+    #[test]
+    fn drop_card_only_removes_its_own_card() {
+        let manager = ChatSessionManager::new();
+        let (tx1, _rx1) = tokio::sync::oneshot::channel();
+        manager.register_card("chat-1", "row-1", tx1);
+        let (tx2, _rx2) = tokio::sync::oneshot::channel();
+        manager.register_card("chat-1", "row-2", tx2);
+        manager.drop_card("chat-1", "row-1");
+        assert_eq!(manager.live_cards(), 1, "the older turn's cleanup must not drop the newer card");
+        manager.drop_card("chat-1", "row-2");
+        assert_eq!(manager.live_cards(), 0);
     }
 }

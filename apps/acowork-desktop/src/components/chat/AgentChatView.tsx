@@ -77,6 +77,7 @@ import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { detectPaste } from "./pasteDetect";
 import { useChatComposerBridge } from "../../hooks/useChatComposerBridge";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { CollapsibleChatContent } from "./CollapsibleChatContent";
 import {
   VirtualRowList,
   type VirtualRowListHandle,
@@ -89,7 +90,8 @@ import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import { ChatUsageIcon } from "./ChatUsageIcon";
 import { AttachedContextChips } from "./AttachedContextChips";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
-import { cardAnswerFor, type TranscriptItem } from "./chatTranscriptGroups";
+import { cardAnswerFor, activeAsk, type TranscriptItem } from "./chatTranscriptGroups";
+import { ChatAskDock } from "./ChatAskDock";
 import { useRevealPendingAsk } from "./useRevealPendingAsk";
 import { useTranscriptLayout } from "./useTranscriptLayout";
 import {
@@ -301,7 +303,16 @@ const RowView = memo(function RowView({
                 the contract Mobile's `.bubble` has always had. */}
               {(row.body || !row.attachments?.length) && (
                 <div className="inline-block max-w-full rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words">
-                  {row.body && <ChatMarkdown content={row.body} />}
+                  {/* Agent speech is folded: an agent's answer is usually
+                    LONG, and an unclamped bubble turns the transcript into a
+                    wall of text — the shape of the conversation is what the
+                    reader is paging through. The fold shows the first ten
+                    lines and a chevron that opens the rest. */}
+                  {row.body && (
+                    <CollapsibleChatContent text={row.body}>
+                      <ChatMarkdown content={row.body} />
+                    </CollapsibleChatContent>
+                  )}
                   {/* A bodyless row with no attachments has nothing to say; the
                     placeholder keeps it from collapsing into an empty bubble. */}
                   {!row.body && !row.attachments?.length && (
@@ -442,10 +453,14 @@ const RowView = memo(function RowView({
  */
 interface ItemProps extends Omit<RowProps, "row"> {
   item: TranscriptItem;
+  /** This run's question is docked at the bottom of the surface, so the run
+   *  must not draw it at its tail as well. */
+  pendingAskDocked?: boolean;
 }
 
 const ItemView = memo(function ItemView({
   item,
+  pendingAskDocked,
   ...rowProps
 }: ItemProps) {
   if (item.kind === "run") {
@@ -459,6 +474,7 @@ const ItemView = memo(function ItemView({
         onContinueRound={rowProps.onContinueRound}
         onReferenceRun={rowProps.onReferenceRun}
         onChooseCard={rowProps.onChooseCard}
+        pendingAskDocked={pendingAskDocked}
         focusInput={
           !!rowProps.focusBlockSessionId &&
           item.execSessionId === rowProps.focusBlockSessionId
@@ -666,6 +682,13 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   } = useTranscriptLayout(rows, sessionId);
   const isBubble = (item: TranscriptItem | undefined) =>
     item?.kind === "row" && item.row.kind === "agent_message";
+  // The router's open question, and the run it asks about (ADR-106 revision
+  // 2026-11-11). It is docked at the bottom of this surface — the run it hangs
+  // on is anchored where its exchange started, so a question drawn at that
+  // run's tail is a question the human never sees — and the run wears a badge
+  // so the two stay attached.
+  const askBlock = useMemo(() => activeAsk(items), [items]);
+  const askSeq = askBlock?.pendingAsk?.seq ?? null;
   // Optimistic exec-session title seed (ADR-099). A Router-created execute
   // session has no list row and often no open tab, so it would read "Untitled"
   // until the backend's generated title arrives over MQTT. The round's
@@ -882,6 +905,20 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
       return true;
     },
     [sendText, sessionId, t, agentId],
+  );
+
+  // The docked question's answer path — the same one the run's tail used, and
+  // the same gate (`cardAnswerFor`): only the person the card asked may answer
+  // it (D10). Stable identities, so the dock does not re-render on every
+  // keystroke in the composer.
+  const askHandler = askBlock ? cardAnswerFor(askBlock, me, answerCard) : undefined;
+  const askChoose = useCallback(
+    (choice: CardChoice) => {
+      if (askHandler && askBlock?.pendingAsk) {
+        askHandler(askBlock.pendingAsk, choice);
+      }
+    },
+    [askBlock, askHandler],
   );
 
   const handleSend = () => {
@@ -1298,6 +1335,11 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
                 onContinueRound={handleContinueRound}
                 onReferenceRun={handleReferenceRun}
                 onChooseCard={cardAnswerFor(item, me, answerCard)}
+                pendingAskDocked={
+                  askSeq !== null &&
+                  item.kind === "run" &&
+                  item.pendingAsk?.seq === askSeq
+                }
                 onLocateRef={handleLocateRef}
                 focusBlockSessionId={focusBlockSessionId ?? undefined}
               />
@@ -1377,6 +1419,13 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
           so the address picker floats above the card like the group's `@`
           popup does. */}
       <div className="relative mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg">
+        {/* The router's open question, docked over the composer's edge
+            (ADR-106 revision 2026-11-11): always on screen, never covering
+            the input. */}
+        <ChatAskDock
+          card={askBlock?.pendingAsk ?? null}
+          onChoose={askHandler ? askChoose : undefined}
+        />
         <input
           ref={fileInputRef}
           type="file"

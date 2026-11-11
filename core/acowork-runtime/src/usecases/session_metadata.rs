@@ -74,6 +74,24 @@ pub struct SessionSummary {
     /// is never cached client-side (`chatStore.adoptRuntimeTabs`).
     #[serde(default)]
     pub is_active: bool,
+    /// The session's live lifecycle status, when it is resident in memory.
+    ///
+    /// This is the *pull* half of the same fact the retained
+    /// `sessions/{sid}/state` MQTT topic pushes (ADR-043), and it exists
+    /// because a list reader has to be able to answer "does this session need
+    /// a human right now?" (`waiting_approval`, `paused{iteration_limit}`)
+    /// without first having opened the session, caught a retained publish, or
+    /// received a push while it was awake. The Desktop's ADR-014 pull repair
+    /// (`agentStore.fetchSessions`) and the mobile inbox both read this field,
+    /// and both degrade to "unknown" when it is absent.
+    ///
+    /// `None` means "no in-memory snapshot" (the session was never opened in
+    /// this Runtime process, or it has been closed) — deliberately the same
+    /// answer as a status this DTO cannot represent (see [`Self::status`]'s
+    /// parse note in the implementation), because a wrong status would flip a
+    /// badge; a missing one only leaves the last pushed value in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<acowork_core::SessionStatusDto>,
 }
 
 /// Response for `list_sessions` — paginated session list.
@@ -183,6 +201,17 @@ pub struct ConversationEntryView<'a> {
     /// predates the field renders exactly as before.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub speaker: Option<crate::conversation::TurnSpeaker>,
+    /// The turn's origin, when the row carries one — `"pm_task"` for a PM
+    /// dispatch.
+    ///
+    /// The one fact a surface cannot guess: a dispatch's words are the **PM's**
+    /// generated Markdown, spoken in the task owner's name, so they are not
+    /// "something a person typed" and must not be rendered as literal text.
+    /// Resolved server-side like `display` and `speaker`, for the same reason:
+    /// the client must not have to know the metadata key or the "is it usable"
+    /// rule. `None` on every other turn — absence means "a person typed this".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_origin: Option<String>,
 }
 
 impl<'a> ConversationEntryView<'a> {
@@ -197,6 +226,10 @@ impl<'a> ConversationEntryView<'a> {
                 .metadata
                 .as_ref()
                 .and_then(crate::conversation::TurnSpeaker::from_metadata),
+            turn_origin: entry
+                .metadata
+                .as_ref()
+                .and_then(crate::agent::intent_turn::turn_origin_from_metadata),
             entry,
         }
     }
@@ -329,5 +362,21 @@ mod tests {
             assert!(wire.get("display").is_none(), "wire: {wire}");
             assert_eq!(wire["content"], entry.content);
         }
+    }
+
+    #[test]
+    fn a_dispatch_row_carries_its_origin_on_the_wire() {
+        // The one fact a surface cannot guess: a dispatch's words are the PM's
+        // generated Markdown, spoken in the owner's name. It is resolved HERE,
+        // so no client owns a copy of the metadata key.
+        let entry = row(Some(serde_json::json!({ "turn_origin": "pm_task" })));
+        let wire = serde_json::to_value(ConversationEntryView::new(&entry)).unwrap();
+        assert_eq!(wire["turn_origin"], "pm_task");
+
+        // Absent — not null — on every other turn: absence means "a person
+        // typed this", which is what the literal rendering assumes.
+        let entry = row(Some(serde_json::json!({ "round_id": "r-1" })));
+        let wire = serde_json::to_value(ConversationEntryView::new(&entry)).unwrap();
+        assert!(wire.get("turn_origin").is_none(), "wire: {wire}");
     }
 }

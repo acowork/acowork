@@ -13,6 +13,7 @@ import { ChatListScreen } from './screens/chat/ChatListScreen'
 import { ChatDetailScreen } from './screens/chat/ChatDetailScreen'
 import { AgentChatScreen } from './screens/chat/AgentChatScreen'
 import { UserChatScreen } from './screens/chat/UserChatScreen'
+import { GroupChatScreen } from './screens/chat/GroupChatScreen'
 import { ProjectListScreen } from './screens/projects/ProjectListScreen'
 import { BoardScreen } from './screens/projects/BoardScreen'
 import { TaskDetailScreen } from './screens/projects/TaskDetailScreen'
@@ -35,6 +36,7 @@ export const ROUTES: Record<string, ScreenComponent> = {
   'chat/detail': ChatDetailScreen,
   'chat/agent': AgentChatScreen,
   'chat/user': UserChatScreen,
+  'chat/group': GroupChatScreen,
 
   'projects/list': ProjectListScreen,
   'projects/board': BoardScreen,

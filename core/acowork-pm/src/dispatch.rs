@@ -8,14 +8,21 @@
 //!
 //! New single trigger source: a periodic scan. Every tick the scanner takes
 //! the in-memory index (no disk reads for filtering), selects tasks that are
-//! `pending` + agent-assigned + creation-approved + undispatched +
-//! `start_at` reached, and pushes a wake-up intent per task. On delivery the
+//! `pending` + assigned (agent or human) + creation-approved + undispatched +
+//! `start_at` reached, and pushes one dispatch per task. On delivery the
 //! task is stamped `dispatched_at` (idempotence); the stamp is cleared
 //! whenever the task leaves `pending` or is reassigned, so a rollback to
 //! `pending` re-dispatches naturally.
 //!
+//! One dispatch, two shapes, decided by the Gateway from the target's type in
+//! the project group roster: an **agent** gets the group-chat sentence plus a
+//! wake-up intent; a **human** gets the sentence alone — an account id has no
+//! Runtime to wake, and the message in the project group chat is the whole
+//! delivery (`intent_api::dispatch_task`). Both answer `delivered`, so the
+//! scanner does not have to know which one it triggered.
+//!
 //! The lifecycle this closes:
-//! create (pending, undispatched) → scanner wakes assignee at `start_at` →
+//! create (pending, undispatched) → scanner dispatches at `start_at` →
 //! agent `pm_claim_task` (pending → in_progress) → work → `pm_submit_task`
 //! (→ submitted) → human review (→ done). The wake-up splits in two: the
 //! human-readable task body rides the chat row / user message, the tool-call
@@ -45,22 +52,31 @@ pub fn build_dispatch_message(task: &Task) -> String {
 
 /// The wake-up playbook, sent as the envelope's `assignment_brief` and
 /// injected into the model's system block — never persisted, never
-/// displayed on a chat surface. Four elements, in order:
+/// displayed on a chat surface. Five elements, in order:
 /// 1. the `task_id` coordinate the tools require (`project_id` is
 ///    deliberately absent: claim/submit take only the task id, and
 ///    echoing it inside a project group is noise);
 /// 2. the claim → work → submit playbook with exact tool names;
-/// 3. the 409 branch (review gate / dependency gate) so a rejected claim
+/// 3. the doc leg: the deliverable goes into the `doc_path` that
+///    `pm_get_project` returns, never a path composed from the title —
+///    this is the most prominent instruction an agent gets, so it is also
+///    where "results belong in a local file" must not be implied;
+/// 4. the 409 branch (review gate / dependency gate) so a rejected claim
 ///    degrades to "report and stop" instead of a retry loop;
-/// 4. delivery contract: results go through `pm_submit_task`, not chat text.
+/// 5. delivery contract: results go through `pm_submit_task` with that
+///    `doc_path` in the text; no `doc_path` means saying so, not writing
+///    local files instead.
 pub fn build_assignment_brief(task: &Task) -> String {
     let tid = task.id.as_str();
     format!(
         "You are being woken to execute PM task \"{tid}\". Follow this workflow exactly:\n\
          1. Claim it first: call the MCP tool `pm_claim_task` with task_id=\"{tid}\".\n\
             Until the claim succeeds the task is NOT yours and you must not start work.\n\
-         2. Do the work in the repository attached to this conversation.\n\
-         3. Deliver with the MCP tool `pm_submit_task` (task_id=\"{tid}\", text=<result summary>).\n\
+         2. Do the work; publish the deliverable into the `doc_path` that `pm_get_project` returns\n\
+            (read it from the tool; never compose it from the project title).\n\
+         3. Deliver with the MCP tool `pm_submit_task` (task_id=\"{tid}\", text=<result summary that includes that doc_path>).\n\
+            No `doc_path` (task outside a project, or project without a document directory)? Say \"no doc_path\" in the text.\n\
+            Never fall back to writing local files.\n\
             A chat reply alone is NOT a delivery; the human approves the submitted result to close the task.\n\
          \n\
          If `pm_claim_task` fails:\n\
@@ -362,7 +378,28 @@ mod tests {
         assert!(brief.contains("t-test1"), "task_id must appear");
         assert!(brief.contains("pm_claim_task"), "claim step must appear");
         assert!(brief.contains("pm_submit_task"), "submit step must appear");
-        assert!(brief.contains("review_not_approved"), "409 branch must appear");
+        assert!(brief.contains("review_not_approved"), "review gate branch must appear");
+        assert!(
+            brief.contains("409 dependency_not_satisfied"),
+            "dependency gate branch must appear"
+        );
+        // The doc leg: the deliverable path is read from the tool, and an
+        // absent path is reported rather than replaced by a local file.
+        assert!(brief.contains("pm_get_project"), "doc_path source must be named");
+        assert!(brief.contains("`doc_path`"), "doc_path must be named");
+        assert!(brief.contains("no doc_path"), "the no-path branch must appear");
+        assert!(
+            brief.contains("Never fall back to writing local files"),
+            "the local-file fallback must be forbidden in so many words"
+        );
+        // The regression this pins: the brief used to send every dispatched
+        // agent into "the repository attached to this conversation", which is
+        // how deliverables ended up as local files instead of doc library
+        // entries (plan §7-G3 / evidence E4).
+        assert!(
+            !brief.contains("repository attached to this conversation"),
+            "the repo-as-delivery-venue instruction must be gone: {brief}"
+        );
         assert!(!brief.contains("p-test1"), "project_id is not needed to claim");
     }
 

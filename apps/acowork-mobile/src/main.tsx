@@ -11,6 +11,7 @@ import { blockRefOf } from './lib/chatBlocks'
 import { noteRoundState } from './stores/chatBlockStore'
 import { setChatPushChannel, wakeUserChat } from './stores/userChatStore'
 import { wakeAgentChat } from './stores/chatSessionStore'
+import { wakeGroupChat } from './stores/projectGroupStore'
 import { startSafeAreaSync } from './lib/safeArea'
 import type { ConnectOpts } from './lib/mqtt-wire'
 import { useAuthStore } from './stores/authStore'
@@ -97,6 +98,9 @@ setPresenceDeps({
     // Same doorbell, second consumer: an agent-chat row write lands here too
     // (design 27 §6.5 — the signal is content-free, every watcher re-reads).
     wakeAgentChat()
+    // Third consumer: the group inbox's previews and unread counts, and the
+    // open group's window, ride the same signal (design 27 §4.4).
+    void wakeGroupChat()
   },
   onChatChannel: setChatPushChannel,
 })

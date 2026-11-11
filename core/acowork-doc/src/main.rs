@@ -40,6 +40,15 @@ async fn main() {
     if let Some(ttl) = cli.request_ttl_hours {
         config.request_ttl_hours = ttl;
     }
+    // Plan §7 G5: Gateway endpoint for review receipts. The token rides
+    // env (supervisor sets `ACOWORK_DOC_GATEWAY_TOKEN`); clap already reads
+    // it into `cli.gateway_token` via the `env` attribute.
+    if cli.gateway_url.is_some() {
+        config.gateway_url = cli.gateway_url.clone();
+    }
+    if cli.gateway_token.is_some() {
+        config.gateway_token = cli.gateway_token.clone();
+    }
     if let Err(e) = config.validate() {
         tracing::error!(error = %e, "Invalid acowork-doc config");
         std::process::exit(1);

@@ -1,7 +1,7 @@
 ---
 name: feature-acceptance
 description: Validate implemented features against PRD, Figma/design, acceptance criteria, analytics, edge cases, and release readiness
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - feature acceptance
@@ -10,8 +10,11 @@ triggers:
   - 验收
   - 产品验收
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
+  - pm_get_task
+  - pm_add_activity
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +29,7 @@ Do not accept a feature by impression. Acceptance requires evidence against PRD,
 
 1. **Load acceptance basis**
    - Use `mcp_memory__memory_recall` to retrieve PRD decisions, Figma review findings, known risks, and accepted trade-offs
-   - Use `file_read` to inspect PRD, acceptance criteria, design specs, test reports, release notes, and known issues
+   - Use `doc_read` and `doc_search` to inspect PRD, acceptance criteria, design specs, test reports, release notes, and known issues
    - Identify in-scope requirements and non-goals
 
 2. **Validate requirement coverage**
@@ -44,7 +47,7 @@ Do not accept a feature by impression. Acceptance requires evidence against PRD,
 4. **Make acceptance recommendation**
    - Accept, Accept with follow-ups, Conditional Accept, or Reject
    - For conditional acceptance, define exact conditions, owner, and deadline
-   - Use `file_write` to save acceptance report when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist acceptance decision, gaps, follow-ups, and rationale
 
 ## Output Format

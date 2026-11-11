@@ -366,12 +366,16 @@ export function ModelMultiSelect({
 
       {/* Per-model cards: capability editor (local/custom providers only) and
           the ADR-103 D11 protocol editor (every provider — a built-in provider
-          can host a Responses-capable model too). */}
+          can host a Responses-capable model too).
+
+          `-mx-5 px-5` = a full-bleed hairline (both host dialogs pad their
+          body by px-5, so the negative margin reaches the panel edge while
+          the positive one keeps the content aligned). */}
       {(showModelCapEditor || protocols) &&
         expandedModels &&
         onExpandedToggle &&
         selected.length > 0 && (
-        <div className="mt-2">
+        <div className="mt-3 -mx-5 border-t border-border-divider px-5 pt-2">
           <label className="mb-1 block text-xs text-text-tertiary">
             {showModelCapEditor ? t("harness.modelCapabilities") : t("harness.protocolSection")}
             {showModelCapEditor && (
@@ -468,7 +472,7 @@ export function ModelMultiSelect({
 
       {/* Compact model selector */}
       {showCompactModel && onCompactModelChange && selected.length > 0 && (
-        <div className="mt-2">
+        <div className="mt-3 -mx-5 border-t border-border-divider px-5 pt-2">
           <label className="mb-1 block text-xs text-text-tertiary">
             {t("harness.compactModel")}
           </label>

@@ -253,7 +253,7 @@ stateDiagram-v2
     cancelled --> [*]
 ```
 
-- **pending**：所有任务创建后的初始状态；Agent 创建的 `review_status=pending` 需人类 `review` 通过才进入正式流转（`pm_check_task` 可查审核状态），human 创建的 `review_status=not_required` 直接可被 claim。
+- **pending**：所有任务创建后的初始状态；Agent 创建的 `review_status=pending` 需人类 `review` 通过才进入正式流转（`pm_get_task` 可查审核状态），human 创建的 `review_status=not_required` 直接可被 claim。
 - **in_progress**：由 Agent `pm_claim_task` 自领（`pending → in_progress`，仅限 assignee）；依赖未满足返回 `DependencyNotSatisfied`。
 - **submitted**：Agent `pm_submit_task` 提交结果后进入（写入 `result`），等待人类 review。
 - **done / rejected**：人类 `review(approved)` 决定（`submitted → done` 或 `submitted → rejected`）。

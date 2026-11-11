@@ -14,7 +14,7 @@
 //! 3. history read over node-auth HTTP (bounded by a timeout — it is the only
 //!    network hop before the model);
 //! 4. Block B projection + Block C tail, model call(s) — the two acts
-//!    (`exec_session_create`, `exec_session_propose_continue`) plus read-only
+//!    (`exec_session_create`, `exec_session_route_confirm`) plus read-only
 //!    information tools (`memory_recall`, GET-only `http_request`,
 //!    `exec_session_read_round`); information rounds stay inside
 //!    one turn so a full user → assistant → tool_call → tool_result → assistant
@@ -31,7 +31,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use acowork_core::defaults::GATEWAY_HTTP_PORT;
+use acowork_core::defaults::gateway_http_port;
 use acowork_core::providers::traits::{
     CacheControl, ChatMessage, ChatRequest, ChatResponse, Provider, ToolCall,
 };
@@ -46,12 +46,12 @@ use super::context::{
 use super::decision::{append_decision, DecisionRecord};
 use super::prompt::{build_block_a, surface_label, PersonaSource};
 use super::tool::{
-    memory_recall_tool_name, parse_exec_session_create, parse_exec_session_propose_continue,
+    memory_recall_tool_name, parse_exec_session_create, parse_exec_session_route_confirm,
     parse_exec_session_read_round, router_tools, Act, ActError, AliasTable,
-    EXEC_SESSION_CREATE_TOOL, EXEC_SESSION_PROPOSE_CONTINUE_TOOL, EXEC_SESSION_READ_ROUND_TOOL,
+    EXEC_SESSION_CREATE_TOOL, EXEC_SESSION_READ_ROUND_TOOL, EXEC_SESSION_ROUTE_CONFIRM_TOOL,
     HTTP_REQUEST_TOOL, Target,
 };
-use super::ChatSlot;
+use super::{ChatSessionManager, ChatSlot, RouteAnswer};
 use crate::agent::agent_core::AgentCore;
 use crate::agent::inbound::IntentEnvelope;
 use crate::agent::session::chat_candidates::{
@@ -66,6 +66,15 @@ use crate::agent_config::ChatRouterConfig;
 /// runaway HTTP body must not swamp the router request. The truncation
 /// marker keeps the round structurally complete.
 const INFO_RESULT_MAX_BYTES: usize = 8 * 1024;
+
+/// How long a live `exec_session_route_confirm` card parks its turn waiting
+/// for the click (ADR-106 D6 rev. 2026-11-12). Generous for a human at the
+/// keyboard, bounded because the chat's drain task waits with it: every later
+/// message of this chat queues behind the answer. A click after the deadline
+/// still works — it takes the ladder, where the prose guard on a refused turn
+/// honours the refusal either way — so the deadline costs the chat latency,
+/// never the decision, and a parked chat is bounded.
+const CARD_ANSWER_WAIT: Duration = Duration::from_secs(120);
 
 /// Everything a turn needs from the Runtime process, snapshotted once so the
 /// `SessionManager` lock is not held across the HTTP/LLM calls.
@@ -153,15 +162,13 @@ pub enum Outcome {
     PassThrough,
     /// The router failed to decide: write nothing, use the legacy path. The
     /// caller still delivers the user's message, so the turn is never lost.
-    /// `chat_excerpt` is a bounded tail of the conversation the router had
-    /// already read: a degraded `fresh` route has no LLM-composed brief, so
-    /// the caller attaches the excerpt to the new session's first message
-    /// (mechanical context, no model involved — strictly better than raw
-    /// text alone). `None` when the router never got history this turn.
-    Fallback {
-        reason: String,
-        chat_excerpt: Option<String>,
-    },
+    ///
+    /// A degraded turn carries **no background**. A mechanical tail of the
+    /// conversation was tried and removed: it read as context but said nothing
+    /// about the message at hand, so it spent a fresh session's attention on a
+    /// previous task's leftovers. "No background" is the honest state — the
+    /// human's words alone.
+    Fallback { reason: String },
 }
 
 /// Entry point: decide whether this envelope is a router turn and run it.
@@ -196,7 +203,16 @@ pub async fn handle_intent(
     // Per-chat serialization: two messages of one chat must not both read the
     // same anchor and then race on the write-back.
     let mut slot = manager.begin_turn(&envelope.source_chat_session_id).await;
-    run_turn(session_manager, &mut slot, &cfg, &deps, envelope, &text).await
+    run_turn(
+        session_manager,
+        manager,
+        &mut slot,
+        &cfg,
+        &deps,
+        envelope,
+        &text,
+    )
+    .await
 }
 
 /// Is this envelope a turn the Chat Router takes? Pure shape test — no disk,
@@ -548,9 +564,10 @@ fn candidate_surface(chat_kind: &str) -> CandidateSurface {
 struct Prepared {
     block_a: String,
     candidates: Vec<SessionCandidate>,
-    provider: Arc<dyn Provider>,
-    model: String,
-    provider_label: String,
+    /// The router model chain: the configured model first, the user's compact
+    /// models as call-phase fallbacks after it (see
+    /// [`router_llm_candidates`]). Never empty.
+    models: Vec<(Arc<dyn Provider>, String)>,
     /// The read-only information tools enabled for this agent, resolved off
     /// the dispatch list (`all_tools` is already the enabled-builtin subset,
     /// so the agent-level toggle governs the router too).
@@ -559,6 +576,7 @@ struct Prepared {
 
 async fn run_turn(
     session_manager: &Arc<AsyncMutex<SessionManager>>,
+    manager: &ChatSessionManager,
     slot: &mut ChatSlot,
     cfg: &ChatRouterConfig,
     deps: &RouterDeps,
@@ -585,7 +603,7 @@ async fn run_turn(
     //
     // The refusal is therefore turned into DATA, not a prompt hint: no rows are
     // scanned, no candidates are offered, and the alias table below stays
-    // empty — a `exec_session_propose_continue` call then has no alias it could
+    // empty — an `exec_session_route_confirm` call then has no alias it could
     // name, so the act cannot be honoured even if the model tries. Reading the
     // sessions we may not continue would also be work for nothing.
     let continuation_refused = force_new(envelope);
@@ -652,7 +670,7 @@ async fn run_turn(
                 cfg.max_candidates(),
             )
         };
-        let (provider, model) = router_llm(&core, cfg);
+        let models = router_llm_candidates(&core, cfg);
         // The router only ever runs the two read-only lookups, resolved by
         // name off the enabled dispatch list. A disabled or missing tool is
         // neither exposed nor executed.
@@ -671,9 +689,7 @@ async fn run_turn(
         Prepared {
             block_a,
             candidates,
-            provider_label: provider.name().to_string(),
-            provider,
-            model,
+            models,
             info_tools,
         }
     };
@@ -791,8 +807,29 @@ async fn run_turn(
     messages.push(system);
     messages.extend(block_b.messages.iter().cloned());
     messages.push(ChatMessage::user(turn_view));
+    // `router_llm_candidates` always yields at least one entry; the empty case
+    // is handled as a fallback rather than an index so a future change to that
+    // invariant degrades the turn instead of panicking on the drain task.
+    let Some((primary_provider, primary_model)) = prepared.models.first().cloned() else {
+        return degrade(envelope, &chat_id, "no router model configured".to_string()).await;
+    };
     let mut request = ChatRequest {
-        model: prepared.model.clone(),
+        // Cache affinity — the fix for the measured 20%-vs-98% gap.
+        //
+        // A chat turn is sparse: one message, then a gap of minutes or hours.
+        // Prompt caching on the OpenAI line of APIs is partitioned per
+        // backend, so with no key each turn is free to land on a different
+        // replica and find its own prefix uncached. The 2026-11 log showed
+        // exactly that: reads pinned at ~186 tokens *regardless of history
+        // length*, alternating turn to turn within one chat on one model. An
+        // execution session never shows this, because its turns are dense
+        // enough to stay on one hot replica — which is the whole of the
+        // difference between its 98% and this router's 20%.
+        //
+        // The chat id is the right key: stable across every turn of one
+        // conversation, distinct between conversations, and already opaque
+        // (a UUID — nothing about the user crosses the wire in it).
+        model: primary_model.clone(),
         messages,
         temperature: Some(0.0),
         // `cfg.max_output_tokens()`, not a constant: the ceiling must cover a
@@ -810,8 +847,8 @@ async fn run_turn(
         chat_id: &chat_id,
         message_id: &envelope.message_id,
         chat_kind: &chat_kind,
-        model: &prepared.model,
-        provider: &prepared.provider_label,
+        model: request.model.clone(),
+        provider: primary_provider.name().to_string(),
         candidates: lines.iter().map(|c| c.alias.clone()).collect(),
         prefix_hash: prefix_hash(&prepared.block_a, &tools_json, &block_b.messages),
         anchor_seq: block_b.anchor_seq as usize,
@@ -823,26 +860,69 @@ async fn run_turn(
         continuation_refused,
         started,
         info_rounds: 0,
+        confirm_wait_ms: None,
+        confirm_result: None,
     };
 
-    let calls = ModelCalls {
+    let mut calls = ModelCalls {
         deps,
         chat_id: &chat_id,
         chat_kind: &chat_kind,
-        provider: &prepared.provider,
-        provider_label: &prepared.provider_label,
-        model: &prepared.model,
+        provider_label: primary_provider.name().to_string(),
+        provider: primary_provider,
+        model: primary_model,
         timeout_ms: cfg.timeout_ms(),
         // The window this turn projected — the budget's occupancy.
         history_tokens: Some(block_b.token_len as u64),
     };
 
-    let mut response = match calls.call(request.clone()).await {
-        Ok(r) => r,
-        Err(reason) => {
-            trace.write("fallback", None, "error", Some(reason.clone()), None);
-            return degrade(deps, envelope, &chat_id, reason, &rows).await;
+    // First call: walk the chain. One model refusing is not the turn's verdict
+    // — a router model out of quota (a routine 429, see `router_llm_candidates`)
+    // must not cost the chat its decision while cheaper configured models are
+    // sitting right there. Only when every candidate fails does the turn
+    // degrade. The winner is pinned: the information rounds and the invalid-act
+    // retry below keep sending `request.model`, so a turn never switches models
+    // mid-thought.
+    //
+    // ponytail: no deadline for the chain as a whole — worst case is
+    // `MAX_ROUTER_CANDIDATES × chat_router.timeout_ms` (3 × 60 s by default), and
+    // only a *hanging* provider pays it: a 429 or a refused connection fails in
+    // milliseconds. The blast radius is this chat's `ChatSlot`, not the runtime.
+    // Upgrade path if that ever shows up as a stall: a turn-wide deadline that
+    // the per-candidate timeout is clamped against.
+    let mut response = None;
+    let mut last_error = String::new();
+    for (provider, model) in prepared.models.iter().cloned() {
+        request.model = model.clone();
+        calls.switch(provider, model);
+        // The decision log names the model that answered — or, on a fallback,
+        // the last one that refused.
+        trace.model = request.model.clone();
+        trace.provider = calls.provider_label.clone();
+        match calls.call(request.clone()).await {
+            Ok(r) => {
+                response = Some(r);
+                break;
+            }
+            Err(reason) => {
+                tracing::warn!(
+                    chat_id = %chat_id,
+                    model = %request.model,
+                    error = %reason,
+                    "chat router: router model failed, trying the next candidate"
+                );
+                last_error = reason;
+            }
         }
+    }
+    let Some(mut response) = response else {
+        let reason = if last_error.is_empty() {
+            "no router model available".to_string()
+        } else {
+            last_error
+        };
+        trace.write("fallback", None, "error", Some(reason.clone()), None);
+        return degrade(envelope, &chat_id, reason).await;
     };
 
     // ── Information rounds ────────────────────────────────────────────
@@ -905,16 +985,16 @@ async fn run_turn(
             Ok(r) => r,
             Err(reason) => {
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
-                return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                return degrade(envelope, &chat_id, reason).await;
             }
         };
     }
 
     // ── Act ────────────────────────────────────────────────────────────
-    let mut act: Option<(Act, String)> = None;
+    let mut act: Option<(Act, String, ToolCall)> = None;
     if let Some(call) = act_call(&response) {
         match parse_act(&call, &aliases) {
-            Ok(parsed) => act = Some((parsed, call_label(&call))),
+            Ok(parsed) => act = Some((parsed, call_label(&call), call.clone())),
             Err(err) => {
                 // Exactly one retry with the validation error fed back as a
                 // tool result (ADR-099 §5). A second failure degrades — a
@@ -933,19 +1013,19 @@ async fn run_turn(
                         response = retry;
                         if let Some(second) = act_call(&response) {
                             match parse_act(&second, &aliases) {
-                                Ok(parsed) => act = Some((parsed, call_label(&second))),
+                                Ok(parsed) => act = Some((parsed, call_label(&second), second.clone())),
                                 Err(again) => {
                                     let reason =
                                         format!("invalid act twice: {}", again.message());
                                     trace.write("fallback", None, "error", Some(reason.clone()), None);
-                                    return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                                    return degrade(envelope, &chat_id, reason).await;
                                 }
                             }
                         }
                     }
                     Err(reason) => {
                         trace.write("fallback", None, "error", Some(reason.clone()), None);
-                        return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                        return degrade(envelope, &chat_id, reason).await;
                     }
                 }
             }
@@ -973,7 +1053,7 @@ async fn run_turn(
                     cfg.max_output_tokens()
                 );
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
-                return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                return degrade(envelope, &chat_id, reason).await;
             }
             let body = response.content.trim().to_string();
             // Some Anthropic-compatible endpoints hand the tool call back inside
@@ -989,7 +1069,90 @@ async fn run_turn(
                     "tool call written as message text (no structured act)".to_string()
                 };
                 trace.write("fallback", None, "error", Some(reason.clone()), None);
-                return degrade(deps, envelope, &chat_id, reason, &rows).await;
+                return degrade(envelope, &chat_id, reason).await;
+            }
+            // ADR-106 D6 rev. 2026-11-12 — the hard guard. A turn whose
+            // human refused continuation was offered no candidates, so the
+            // only act that honours it is `exec_session_create`; prose is
+            // not. Measured 2026-11-11: after the human clicked "new task"
+            // on a live card, the follow-up turn answered in prose, and the
+            // reply row landed BESIDE the still-open card — a reply is not
+            // an execution round, so `question_answered` can never close
+            // the card, and the click reads as dead. The tool change makes
+            // that shape structurally rare; this guard makes it impossible
+            // on the paths the tool does not cover (a click that arrives
+            // after the parked turn timed out takes the ladder as a fresh
+            // refused turn, and a model that still answers prose there must
+            // not write the row). One feedback retry, then degrade to the
+            // deterministic new-session route: the human's message is
+            // delivered either way, only the router's `background` can be
+            // lost — never the card's closability.
+            if continuation_refused {
+                request.messages.push(ChatMessage::assistant(response.content.clone()));
+                request.messages.push(ChatMessage::user(
+                    "Plain text is not a legal answer on this turn. The human refused to continue any existing task and asked for a new one; a text reply leaves their request undelivered and leaves a routing card open beside it. Call `exec_session_create` now, with a `background` that tells the new session what this conversation is about."
+                        .to_string(),
+                ));
+                return match calls.call(request.clone()).await {
+                    Err(reason) => {
+                        trace.write("fallback", None, "error", Some(reason.clone()), None);
+                        degrade(envelope, &chat_id, reason).await
+                    }
+                    Ok(retry) => {
+                        let created = act_call(&retry)
+                            .filter(|c| c.function.name == EXEC_SESSION_CREATE_TOOL)
+                            .and_then(|c| match parse_act(&c, &aliases) {
+                                Ok(Act::ExecSessionCreate(args)) => Some(args),
+                                _ => None,
+                            });
+                        match created {
+                            Some(args) => {
+                                let seed = args
+                                    .seed
+                                    .clone()
+                                    .or_else(|| SessionSeed::from_json(&envelope.session_config_json));
+                                match deliver_turn(
+                                    session_manager,
+                                    &chat_id,
+                                    RouteDelivery {
+                                        target: Target::New,
+                                        seed,
+                                        background: Some(args.background.clone()),
+                                    },
+                                    envelope,
+                                    text,
+                                    &referenced_rounds,
+                                )
+                                .await
+                                {
+                                    Ok((session_id, _opened_new)) => {
+                                        let usage = retry.usage.clone();
+                                        trace.write(
+                                            "exec_session_create:after_refusal",
+                                            Some(&session_id),
+                                            "ok",
+                                            None,
+                                            usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)),
+                                        );
+                                        Outcome::Handled
+                                    }
+                                    Err(e) => {
+                                        let reason = format!("exec_session_create {e}");
+                                        trace.write("fallback", None, "error", Some(reason.clone()), None);
+                                        degrade(envelope, &chat_id, reason).await
+                                    }
+                                }
+                            }
+                            None => {
+                                let reason =
+                                    "refused continuation answered without a create (second attempt also not an act)"
+                                        .to_string();
+                                trace.write("fallback", None, "error", Some(reason.clone()), None);
+                                degrade(envelope, &chat_id, reason).await
+                            }
+                        }
+                    }
+                };
             }
             // ADR-106 D12: the router's own answer is a chat-native row, so it
             // is written here and not carried back through an intent response —
@@ -1015,19 +1178,29 @@ async fn run_turn(
                 }
                 Err(e) => {
                     trace.write("fallback", None, "error", Some(e.clone()), None);
-                    degrade(deps, envelope, &chat_id, format!("reply write-back failed: {e}"), &rows).await
+                    degrade(envelope, &chat_id, format!("reply write-back failed: {e}")).await
                 }
             }
         }
-        Some((Act::ProposeContinue(proposal), label)) => {
-            // The act IS the question. Nothing is delivered: continuing a
-            // session is addressing, and addressing belongs to the human
-            // (ADR-106 D6). The card names the candidate, the router's reason
-            // for proposing it, and the "new task" escape beside it.
+        Some((Act::RouteConfirm(proposal), label, call)) => {
+            // The act asks the question and WAITS for the answer inside this
+            // same turn (ADR-106 D6 rev. 2026-11-12). The card row is written
+            // exactly as the terminal proposal wrote it — same notice type,
+            // same anchor (`chat_row_id`), same idempotency key — so the
+            // surfaces and the answeredness projection are untouched. What
+            // changed is where the click goes: a live card claims its answer
+            // on the inbound loop (`ChatSessionManager::claim_card_answer`)
+            // and this turn acts on it with the proposal's own reasoning
+            // still in hand. The retired shape ended the turn here and re-ran
+            // the whole ladder as a fresh turn that had lost that reasoning —
+            // and a model that has lost it answers the human's "new task"
+            // click with prose (measured 2026-11-11: a `reply` decision ten
+            // seconds after the card it was supposed to close, the card left
+            // "unanswered" forever, the click looking dead).
             //
             // A turn whose human refused continuation (`force_new`) never gets
             // here: it was offered no candidates, so its alias table is empty
-            // and `parse_exec_session_propose_continue` refuses every target as
+            // and `parse_exec_session_route_confirm` refuses every target as
             // an unknown alias — the action degrades to a fresh session instead
             // of re-asking the question the human already answered.
             //
@@ -1063,141 +1236,189 @@ async fn run_turn(
                 vec![option],
             )
             .await;
-            match asked {
-                Ok(()) => {
+            if let Err(e) = asked {
+                // A question that could not be written must not be answered
+                // by delivering after all — that is the act this arm refuses
+                // to perform. The deterministic route is honest instead: it
+                // continues a session only when there is exactly one to
+                // continue.
+                let reason = format!("proposal card write failed: {e}");
+                trace.write(&label, None, "error", Some(reason.clone()), None);
+                return degrade(envelope, &chat_id, reason).await;
+            }
+            // Park the turn on the click. The entry is keyed by the chat and
+            // matched by the row the card asks about, so only THIS card's
+            // answer wakes it; anything else this human sends takes the
+            // ladder untouched.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            manager.register_card(&chat_id, &envelope.chat_row_id, tx);
+            let waited = Instant::now();
+            let answer = tokio::time::timeout(CARD_ANSWER_WAIT, rx).await;
+            // The claimed path already removed the entry; this is the
+            // timeout/cancel cleanup, a no-op when a newer card replaced it.
+            manager.drop_card(&chat_id, &envelope.chat_row_id);
+            trace.confirm_wait_ms = Some(waited.elapsed().as_millis() as u64);
+            match answer {
+                // Nobody clicked in time — or the parked turn's sender was
+                // dropped out from under it, which reads the same. The card
+                // stays in the log and a later click takes the ladder, where
+                // the prose guard on a refused turn honours the refusal; the
+                // question remains open, so this turn is done.
+                Err(_) | Ok(Err(_)) => {
+                    trace.confirm_result = Some("timeout".to_string());
                     trace.write(&label, Some(&proposal.session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)));
                     Outcome::Handled
                 }
-                Err(e) => {
-                    // A question that could not be written must not be answered
-                    // by delivering after all — that is the act this arm refuses
-                    // to perform. The deterministic route is honest instead: it
-                    // continues a session only when there is exactly one to
-                    // continue.
-                    let reason = format!("proposal card write failed: {e}");
-                    trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows).await
+                Ok(Ok(RouteAnswer::Continue { session_id })) => {
+                    // Confirmed: the runtime delivers, and the model gets no
+                    // second call. Addressing was never the model's decision
+                    // to make twice (ADR-106 D6) — the click is the whole
+                    // content of the answer, and continuing a session needs
+                    // nothing the turn has not already settled.
+                    trace.confirm_result = Some("continue".to_string());
+                    let seed = SessionSeed::from_json(&envelope.session_config_json);
+                    match deliver_turn(
+                        session_manager,
+                        &chat_id,
+                        RouteDelivery {
+                            target: Target::Existing(session_id.clone()),
+                            seed,
+                            background: None,
+                        },
+                        envelope,
+                        text,
+                        &referenced_rounds,
+                    )
+                    .await
+                    {
+                        Ok(_) => {
+                            trace.write(&label, Some(&session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)));
+                            Outcome::Handled
+                        }
+                        Err(e) => {
+                            let reason = format!("confirmed continuation not delivered: {e}");
+                            trace.write(&label, Some(&session_id), "error", Some(reason.clone()), None);
+                            degrade(envelope, &chat_id, reason).await
+                        }
+                    }
+                }
+                Ok(Ok(RouteAnswer::NewTask)) => {
+                    // Refused: the human's answer is THIS call's tool result,
+                    // and the only act that honours it is
+                    // `exec_session_create`. The turn keeps its context — the
+                    // brief for the new session is written from what the model
+                    // already read, which is the whole point of waiting inside
+                    // the turn instead of ending it.
+                    trace.confirm_result = Some("new_task".to_string());
+                    request.messages.push(ChatMessage::assistant_with_tools(
+                        response.content.clone(),
+                        vec![call],
+                    ));
+                    request.messages.push(ChatMessage::tool(
+                        proposal.call_id.clone(),
+                        format!(
+                            "The human refused the continuation and chose \"new task\". \
+                             Call `{EXEC_SESSION_CREATE_TOOL}` now: open the session they \
+                             asked for, with the `background` this conversation supplies."
+                        ),
+                    ));
+                    match calls.call(request.clone()).await {
+                        Err(reason) => {
+                            trace.write("fallback", None, "error", Some(reason.clone()), None);
+                            degrade(envelope, &chat_id, reason).await
+                        }
+                        Ok(retry) => {
+                            response = retry;
+                            // Only a create is accepted here. Prose would
+                            // override the click; a second proposal would
+                            // re-ask a question the human has just answered;
+                            // an invalid create is not worth a third call.
+                            let created = act_call(&response)
+                                .filter(|c| c.function.name == EXEC_SESSION_CREATE_TOOL)
+                                .and_then(|c| match parse_act(&c, &aliases) {
+                                    Ok(Act::ExecSessionCreate(args)) => Some(args),
+                                    _ => None,
+                                });
+                            match created {
+                                None => {
+                                    let reason = "human chose new task; the router did not \
+                                     answer the refusal with a create"
+                                        .to_string();
+                                    trace.write("fallback", None, "error", Some(reason.clone()), None);
+                                    degrade(envelope, &chat_id, reason).await
+                                }
+                                Some(args) => {
+                                    let usage = response.usage.clone();
+                                    let seed = args
+                                        .seed
+                                        .clone()
+                                        .or_else(|| SessionSeed::from_json(&envelope.session_config_json));
+                                    match deliver_turn(
+                                        session_manager,
+                                        &chat_id,
+                                        RouteDelivery {
+                                            target: Target::New,
+                                            seed,
+                                            background: Some(args.background.clone()),
+                                        },
+                                        envelope,
+                                        text,
+                                        &referenced_rounds,
+                                    )
+                                    .await
+                                    {
+                                        Ok((session_id, _opened_new)) => {
+                                            trace.write(
+                                                "exec_session_create:after_refusal",
+                                                Some(&session_id),
+                                                "ok",
+                                                None,
+                                                usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)),
+                                            );
+                                            Outcome::Handled
+                                        }
+                                        Err(e) => {
+                                            let reason = format!(
+                                                "exec_session_create delivery failed: {e}"
+                                            );
+                                            trace.write("fallback", None, "error", Some(reason.clone()), None);
+                                            degrade(envelope, &chat_id, reason).await
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
-        Some((Act::ExecSessionCreate(args), label)) => {
+        Some((Act::ExecSessionCreate(args), label, _call)) => {
             // An `exec_session_create` without `session_config` still honours the user's
             // draft configuration — that is the whole point of not forcing a
             // new session on a config change.
-            let seed = args
-                .seed
-                .clone()
-                .or_else(|| SessionSeed::from_json(&envelope.session_config_json));
             // `opened_new` is read back from the dispatch rather than assumed:
             // `Target::New` creates, and the background must not be dropped if
             // that ever stops being true — the new session would open on the
             // human's words alone, with nothing to resolve them against.
-            let background = Some(args.background.clone());
-            let delivered = {
-                let mut guard = session_manager.lock().await;
-                match guard
-                    .chat_dispatch(&chat_id, Target::New, seed, Some(envelope.from.as_str()))
-                    .await
-                {
-                    Ok((session_id, opened_new)) => {
-                        let (content, context_refs) =
-                            dispatch_parts(opened_new, background.as_deref(), text, &referenced_rounds);
-                        // §5.5.5 pending queue: record BEFORE delivering. The
-                        // only place that drops this row is the SessionTask
-                        // dequeue, which can run only once the send below has
-                        // happened — so recording first guarantees the row is
-                        // present when removal fires. Recording after the send
-                        // raced: an idle session woke and started the turn at
-                        // once, its empty removal ran first, and the row pushed
-                        // right after (the session now `is_active`) sat in the
-                        // queue forever. A busy session is active now (row
-                        // recorded, cleared at dequeue); an idle one is not
-                        // (record is a no-op — it starts immediately).
-                        guard.record_pending_intent(
-                            &session_id,
-                            crate::agent::session_state::PendingIntent {
-                                message_id: envelope.message_id.clone(),
-                                from: envelope.from.clone(),
-                                // The queue row is the only place the human
-                                // reads what is waiting on a busy session, so
-                                // it falls back to the background when the turn
-                                // carried no words of its own (an
-                                // attachment-only message).
-                                preview: crate::agent::session_state::pending_preview(
-                                    &crate::agent::session_state::preview_source(
-                                        &content,
-                                        &context_refs,
-                                        // This path carries the human's own
-                                        // words, never an agent envelope, so
-                                        // there is no projection to prefer.
-                                        None,
-                                    ),
-                                ),
-                                from_chat: true,
-                            },
-                        );
-                        let sent = guard.send_to_session(
-                            &session_id,
-                            SessionMessage::Intent {
-                                content,
-                                message_id: envelope.message_id.clone(),
-                                surface: crate::agent::intent_turn::TurnSurface::new(
-                                    chat_id.clone(),
-                                    &envelope.message_id,
-                                    &envelope.from,
-                                    envelope.has_human,
-                                ),
-                                from: envelope.from.clone(),
-                                action: envelope.action.clone(),
-                                repo: envelope.repo.clone(),
-                                kind: envelope.kind.clone(),
-                                chat_attachment_ids: envelope.chat_attachment_ids.clone(),
-                                // Same arm the execution surface's own write
-                                // fills on its `ChatMessage`: a workspace reference means one
-                                // thing whichever transport carried the turn.
-                                attached_items: crate::agent::intent_turn::attached_items_from_params(
-                                    &envelope.params,
-                                )
-                                .unwrap_or_default(),
-                                in_reply_to: envelope.in_reply_to.clone(),
-                                // ADR-106 D3: the Chat row this turn answers, as
-                                // declared by the Gateway. A router-bound turn
-                                // always has one (the row it was handed), and it
-                                // is what the block hangs under.
-                                chat_row_id: envelope.chat_row_id.clone(),
-                                // The router only takes Chat-originated
-                                // turns (policy.router_eligible); a PM
-                                // dispatch's brief never arrives here. The task
-                                // id is still parsed off the conversation key so
-                                // the two transports state the same fact the same
-                                // way — empty for a chat conversation.
-                                assignment_brief: String::new(),
-                                task_id: acowork_core::intent::task_id_from_conversation(
-                                    &envelope.conversation_id,
-                                )
-                                .unwrap_or_default(),
-                                // ADR-106 D3: the routing's own verdict, carried
-                                // to the round's reference row because the loop
-                                // cannot see it — it replaces the retired
-                                // `turn_routed` reaction row.
-                                opened_new: Some(opened_new),
-                                // ADR-107: the router's framing, delivered as a
-                                // reference part of the human's turn.
-                                context_refs,
-                                // A router dispatch is always a Chat-originated
-                                // turn (`policy.router_eligible`), and a human
-                                // turn's content is already the person's words —
-                                // there is no envelope to re-render for a human.
-                                display: None,
-                            },
-                        );
-                        (Ok((session_id, opened_new)), sent)
-                    }
-                    Err(e) => (Err(e.to_string()), Ok(())),
-                }
-            };
-            match delivered {
-                (Ok((session_id, _opened_new)), Ok(())) => {
+            let seed = args
+                .seed
+                .clone()
+                .or_else(|| SessionSeed::from_json(&envelope.session_config_json));
+            match deliver_turn(
+                session_manager,
+                &chat_id,
+                RouteDelivery {
+                    target: Target::New,
+                    seed,
+                    background: Some(args.background.clone()),
+                },
+                envelope,
+                text,
+                &referenced_rounds,
+            )
+            .await
+            {
+                Ok((session_id, _opened_new)) => {
                     // ADR-106 D3: no reaction row is written here. "Your message
                     // went to a new task / continues task X" is now stated by the
                     // round's reference row (`opened_new` on it), which the
@@ -1207,15 +1428,10 @@ async fn run_turn(
                     trace.write(&label, Some(&session_id), "ok", None, usage.as_ref().map(|u| (u.prompt_tokens, u.completion_tokens, u.cache_read_tokens, u.cache_write_tokens)));
                     Outcome::Handled
                 }
-                (Ok(_), Err(e)) => {
-                    let reason = format!("exec_session_create delivery failed: {e}");
+                Err(reason) => {
+                    let reason = format!("exec_session_create {reason}");
                     trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows).await
-                }
-                (Err(e), _) => {
-                    let reason = format!("exec_session_create session creation failed: {e}");
-                    trace.write(&label, None, "error", Some(reason.clone()), None);
-                    degrade(deps, envelope, &chat_id, reason, &rows).await
+                    degrade(envelope, &chat_id, reason).await
                 }
             }
         }
@@ -1240,7 +1456,7 @@ async fn read_history(
 ) -> Result<(Vec<ChatRow>, bool), String> {
     let url = format!(
         "http://{}:{}/api/intents/chat-history",
-        deps.gateway_host, GATEWAY_HTTP_PORT
+        deps.gateway_host, gateway_http_port()
     );
     let mut req = reqwest::Client::new()
         .get(&url)
@@ -1274,8 +1490,22 @@ async fn read_history(
 }
 
 /// Model resolution (ADR-099 D)-3): explicit `chat_router.model` first, then
-/// the agent's compact-model chain, then the agent default.
-fn router_llm(core: &AgentCore, cfg: &ChatRouterConfig) -> (Arc<dyn Provider>, String) {
+/// the agent's compact-model chain.
+///
+/// The chain exists because a router model can be *temporarily* unusable while
+/// the agent is perfectly fine: a 429 "token plan exhausted" is a routine,
+/// self-clearing state, and it used to cost the turn its decision outright. Any
+/// configured compact model can make the same decision, so the call walks the
+/// chain before giving up. Capped at [`MAX_ROUTER_CANDIDATES`]: each candidate
+/// pays the full per-call timeout when its provider is unreachable, so an
+/// unbounded chain would turn one dead provider into a turn that never returns.
+const MAX_ROUTER_CANDIDATES: usize = 3;
+
+fn router_llm_candidates(
+    core: &AgentCore,
+    cfg: &ChatRouterConfig,
+) -> Vec<(Arc<dyn Provider>, String)> {
+    let mut chain: Vec<(Arc<dyn Provider>, String)> = Vec::new();
     if let Some(model) = cfg
         .model
         .as_deref()
@@ -1287,10 +1517,30 @@ fn router_llm(core: &AgentCore, cfg: &ChatRouterConfig) -> (Arc<dyn Provider>, S
             .as_deref()
             .map(str::trim)
             .filter(|p| !p.is_empty());
-        return core.summary_llm_snapshot(provider, Some(model));
+        chain.push(core.summary_llm_snapshot(provider, Some(model)));
+    } else {
+        let (provider, model, _tier) = core.resolve_summary_llm(None, None);
+        chain.push((provider, model));
     }
-    let (provider, model, _tier) = core.resolve_summary_llm(None, None);
-    (provider, model)
+    for (pid, mid) in core.compact_model_candidates() {
+        if chain.len() >= MAX_ROUTER_CANDIDATES {
+            break;
+        }
+        let Some(provider) = core.build_compact_provider(&pid) else {
+            continue;
+        };
+        // The configured router model is often itself a compact candidate;
+        // retrying the same (provider, model) that just refused buys nothing
+        // but another timeout.
+        if chain
+            .iter()
+            .any(|(p, m)| m == &mid && p.name() == provider.name())
+        {
+            continue;
+        }
+        chain.push((provider, mid));
+    }
+    chain
 }
 
 /// The one path from a turn to the provider: make the call, then book it.
@@ -1305,13 +1555,17 @@ fn router_llm(core: &AgentCore, cfg: &ChatRouterConfig) -> (Arc<dyn Provider>, S
 /// A Provider that reported no usage at all folds as "no measurement" —
 /// skipped, never fabricated (ADR-027). The ledger is the chat's own row; the
 /// agent totals are fed even when the ledger store is unavailable.
+///
+/// The model pair is owned and swappable ([`ModelCalls::switch`]) so one turn
+/// can walk the fallback chain: the ledger row must name the model that was
+/// actually billed, and the follow-up calls must keep using it.
 struct ModelCalls<'a> {
     deps: &'a RouterDeps,
     chat_id: &'a str,
     chat_kind: &'a str,
-    provider: &'a Arc<dyn Provider>,
-    provider_label: &'a str,
-    model: &'a str,
+    provider: Arc<dyn Provider>,
+    provider_label: String,
+    model: String,
     timeout_ms: u64,
     /// Tokens the projected history window (Block B) cost on this turn.
     ///
@@ -1325,15 +1579,25 @@ struct ModelCalls<'a> {
 }
 
 impl ModelCalls<'_> {
+    /// Point this turn at the next candidate in the chain. Both the transport
+    /// (provider) and the booking identity (label + model) move together, or
+    /// the ledger would bill the model that refused instead of the one that
+    /// answered.
+    fn switch(&mut self, provider: Arc<dyn Provider>, model: String) {
+        self.provider_label = provider.name().to_string();
+        self.provider = provider;
+        self.model = model;
+    }
+
     async fn call(&self, request: ChatRequest) -> Result<ChatResponse, String> {
-        let response = call_provider(self.provider, request, self.timeout_ms).await?;
+        let response = call_provider(&self.provider, request, self.timeout_ms).await?;
         if let Some(usage) = response.usage.as_ref() {
             self.deps.chat_usage.record_chat_llm_usage(
                 self.chat_id,
                 self.chat_kind,
                 usage,
-                self.provider_label,
-                self.model,
+                &self.provider_label,
+                &self.model,
                 self.history_tokens,
             );
         }
@@ -1388,7 +1652,7 @@ async fn execute_info_tool(
             .collect::<Vec<_>>()
             .join(", ");
         return format!(
-            "Error: `{name}` is not available on a chat turn — valid tools: {EXEC_SESSION_CREATE_TOOL}, {EXEC_SESSION_PROPOSE_CONTINUE_TOOL}, {EXEC_SESSION_READ_ROUND_TOOL}, {available} (GET only for {HTTP_REQUEST_TOOL})"
+            "Error: `{name}` is not available on a chat turn — valid tools: {EXEC_SESSION_CREATE_TOOL}, {EXEC_SESSION_ROUTE_CONFIRM_TOOL}, {EXEC_SESSION_READ_ROUND_TOOL}, {available} (GET only for {HTTP_REQUEST_TOOL})"
         );
     };
     let raw: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
@@ -1577,7 +1841,7 @@ fn act_call(response: &ChatResponse) -> Option<ToolCall> {
     let calls = response.tool_calls.as_ref()?;
     calls
         .iter()
-        .find(|call| call.function.name == EXEC_SESSION_PROPOSE_CONTINUE_TOOL)
+        .find(|call| call.function.name == EXEC_SESSION_ROUTE_CONFIRM_TOOL)
         .or_else(|| {
             calls
                 .iter()
@@ -1589,7 +1853,7 @@ fn act_call(response: &ChatResponse) -> Option<ToolCall> {
 /// Either act name — the information-round filter must not run an act as a
 /// lookup, and a refusal text must name what the model may actually call.
 fn is_act(name: &str) -> bool {
-    name == EXEC_SESSION_CREATE_TOOL || name == EXEC_SESSION_PROPOSE_CONTINUE_TOOL
+    name == EXEC_SESSION_CREATE_TOOL || name == EXEC_SESSION_ROUTE_CONFIRM_TOOL
 }
 
 /// True when the provider stopped because it ran out of output budget rather
@@ -1623,14 +1887,15 @@ fn looks_like_tool_call_envelope(body: &str) -> bool {
 
 fn parse_act(call: &ToolCall, aliases: &AliasTable) -> Result<Act, ActError> {
     let args: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
-    if call.function.name == EXEC_SESSION_PROPOSE_CONTINUE_TOOL {
-        parse_exec_session_propose_continue(&args, aliases).map(Act::ProposeContinue)
+    if call.function.name == EXEC_SESSION_ROUTE_CONFIRM_TOOL {
+        parse_exec_session_route_confirm(&args, aliases, call.id.clone())
+            .map(Act::RouteConfirm)
     } else {
         parse_exec_session_create(&args).map(Act::ExecSessionCreate)
     }
 }
 
-/// `exec_session_create` / `exec_session_propose_continue:S3` — the decision
+/// `exec_session_create` / `exec_session_route_confirm:S3` — the decision
 /// label for the log.
 fn call_label(call: &ToolCall) -> String {
     let raw: Value = serde_json::from_str(&call.function.arguments).unwrap_or(Value::Null);
@@ -1701,22 +1966,15 @@ fn task_label(conversation_id: &str) -> Option<String> {
 /// user's message is still delivered — degradation costs latency, never the
 /// message.
 ///
-/// `rows` are the chat rows this turn had already read (empty when history
-/// itself failed): they become a bounded excerpt the caller attaches to the
-/// degraded route's first message, so a fresh session is not left with raw
-/// text alone.
-///
 /// ADR-106: no receipt row is written for the degradation. The fallback route
 /// runs a round, and that round's reference row is the record the human needs;
 /// a `system_notice` announcing "the router could not decide" is a progress
 /// fact about a component, not a channel fact, and it used to key off the
 /// retired `rf:` prefix.
 async fn degrade(
-    deps: &RouterDeps,
     envelope: &IntentEnvelope,
     chat_id: &str,
     reason: String,
-    rows: &[ChatRow],
 ) -> Outcome {
     tracing::warn!(
         chat_id = %chat_id,
@@ -1724,53 +1982,7 @@ async fn degrade(
         reason = %reason,
         "chat router degraded to the deterministic route"
     );
-    Outcome::Fallback {
-        reason,
-        chat_excerpt: chat_tail_excerpt(rows, &deps.instance_id),
-    }
-}
-
-/// How many recent chat rows a degraded turn may hand to the fresh session.
-const FALLBACK_EXCERPT_ROWS: usize = 6;
-/// Byte ceiling of the same excerpt (per row and total) — the excerpt must
-/// stay a footnote to the user's message, never a second context window.
-const FALLBACK_EXCERPT_ROW_BYTES: usize = 512;
-const FALLBACK_EXCERPT_TOTAL_BYTES: usize = 2048;
-
-/// Mechanical tail of the conversation for the degraded `fresh` route: the
-/// last few rows, oldest first, each sender-tagged and byte-bounded. No LLM
-/// is involved — this is what the router already saw, not what it concluded.
-/// `None` when nothing but the trigger message itself would remain.
-fn chat_tail_excerpt(rows: &[ChatRow], agent_instance: &str) -> Option<String> {
-    let mut lines: Vec<String> = Vec::new();
-    let mut bytes = 0usize;
-    for row in rows.iter().rev() {
-        if lines.len() >= FALLBACK_EXCERPT_ROWS || bytes >= FALLBACK_EXCERPT_TOTAL_BYTES {
-            break;
-        }
-        // The trigger message rides along verbatim on the legacy route;
-        // notices and cards are routing chrome, not conversation.
-        if !matches!(row.kind.as_str(), "user_message" | "agent_message" | "text" | "") {
-            continue;
-        }
-        let body = truncate_body(row.body.trim(), FALLBACK_EXCERPT_ROW_BYTES);
-        if body.is_empty() {
-            continue;
-        }
-        let role = if !agent_instance.is_empty() && row.from == agent_instance {
-            "agent"
-        } else {
-            "user"
-        };
-        let line = format!("[{role}] {body}");
-        bytes += line.len();
-        lines.push(line);
-    }
-    if lines.is_empty() {
-        return None;
-    }
-    lines.reverse();
-    Some(lines.join("\n"))
+    Outcome::Fallback { reason }
 }
 
 /// Decision-log context for one turn. Holds borrows only, so writing the
@@ -1780,8 +1992,11 @@ struct TurnTrace<'a> {
     chat_id: &'a str,
     message_id: &'a str,
     chat_kind: &'a str,
-    model: &'a str,
-    provider: &'a str,
+    /// Owned, not borrowed: the call-phase fallback chain can move the turn to
+    /// another model, and the record must name the one that answered (or the
+    /// last one that refused).
+    model: String,
+    provider: String,
     candidates: Vec<String>,
     prefix_hash: String,
     anchor_seq: usize,
@@ -1806,6 +2021,14 @@ struct TurnTrace<'a> {
     /// Information-tool rounds this turn ran before deciding (audit
     /// surface for "the router looked things up instead of routing").
     info_rounds: u64,
+    /// `exec_session_route_confirm` only: how long the turn waited on the
+    /// human's click, in milliseconds. Absent when no card was parked.
+    confirm_wait_ms: Option<u64>,
+    /// `exec_session_route_confirm` only: what the wait ended in —
+    /// `continue` / `new_task` / `timeout`. The routing defect this tool
+    /// replaced was invisible precisely because the old proposal wrote its
+    /// card and ended the turn: the log could not show that nobody answered.
+    confirm_result: Option<String>,
 }
 
 impl TurnTrace<'_> {
@@ -1839,6 +2062,8 @@ impl TurnTrace<'_> {
             attachment_only: self.attachment_only,
             continuation_refused: self.continuation_refused,
             info_rounds: (self.info_rounds > 0).then_some(self.info_rounds),
+            confirm_wait_ms: self.confirm_wait_ms,
+            confirm_result: self.confirm_result.clone(),
             prompt_tokens: usage.map(|u| u.0),
             completion_tokens: usage.map(|u| u.1),
             cache_read_tokens: usage.map(|u| u.2),
@@ -1909,6 +2134,140 @@ fn dispatch_parts(
     (content, refs)
 }
 
+/// Where a decided turn goes, and what the session gets with it. The three
+/// fields are always chosen together (a `New` target carries a `background`,
+/// an `Existing` one never does), so they travel as one value rather than as
+/// three arguments the caller has to keep consistent by eye.
+struct RouteDelivery {
+    target: Target,
+    seed: Option<SessionSeed>,
+    background: Option<String>,
+}
+
+/// Deliver this turn's message into `target`, exactly once, with the
+/// pending-queue record written before the send (§5.5.5) and the router's
+/// framing attached when the session physically opened (ADR-107).
+///
+/// Shared by the create act and by a confirmed continuation: the two differ
+/// only in the `Target` and whether a background rides along, while the
+/// sequencing rules — dispatch under the manager lock, record before send,
+/// no reaction row (ADR-106 D3) — are identical and must not drift into two
+/// copies. The `Err` string is a reason fragment for the decision log; the
+/// caller prefixes it with the act it came from.
+async fn deliver_turn(
+    session_manager: &Arc<AsyncMutex<SessionManager>>,
+    chat_id: &str,
+    delivery: RouteDelivery,
+    envelope: &IntentEnvelope,
+    text: &str,
+    referenced_rounds: &[String],
+) -> Result<(String, bool), String> {
+    let RouteDelivery {
+        target,
+        seed,
+        background,
+    } = delivery;
+    let mut guard = session_manager.lock().await;
+    let (session_id, opened_new) = guard
+        .chat_dispatch(chat_id, target, seed, Some(envelope.from.as_str()))
+        .await
+        .map_err(|e| format!("session creation failed: {e}"))?;
+    let (content, context_refs) =
+        dispatch_parts(opened_new, background.as_deref(), text, referenced_rounds);
+    // §5.5.5 pending queue: record BEFORE delivering. The
+    // only place that drops this row is the SessionTask
+    // dequeue, which can run only once the send below has
+    // happened — so recording first guarantees the row is
+    // present when removal fires. Recording after the send
+    // raced: an idle session woke and started the turn at
+    // once, its empty removal ran first, and the row pushed
+    // right after (the session now `is_active`) sat in the
+    // queue forever. A busy session is active now (row
+    // recorded, cleared at dequeue); an idle one is not
+    // (record is a no-op — it starts immediately).
+    guard.record_pending_intent(
+        &session_id,
+        crate::agent::session_state::PendingIntent {
+            message_id: envelope.message_id.clone(),
+            from: envelope.from.clone(),
+            // The queue row is the only place the human
+            // reads what is waiting on a busy session, so
+            // it falls back to the background when the turn
+            // carried no words of its own (an
+            // attachment-only message).
+            preview: crate::agent::session_state::pending_preview(
+                &crate::agent::session_state::preview_source(
+                    &content,
+                    &context_refs,
+                    // This path carries the human's own
+                    // words, never an agent envelope, so
+                    // there is no projection to prefer.
+                    None,
+                ),
+            ),
+            from_chat: true,
+        },
+    );
+    guard
+        .send_to_session(
+            &session_id,
+            SessionMessage::Intent {
+                content,
+                message_id: envelope.message_id.clone(),
+                surface: crate::agent::intent_turn::TurnSurface::new(
+                    chat_id.to_string(),
+                    &envelope.message_id,
+                    &envelope.from,
+                    envelope.has_human,
+                ),
+                from: envelope.from.clone(),
+                action: envelope.action.clone(),
+                repo: envelope.repo.clone(),
+                kind: envelope.kind.clone(),
+                chat_attachment_ids: envelope.chat_attachment_ids.clone(),
+                // Same arm the execution surface's own write
+                // fills on its `ChatMessage`: a workspace reference means one
+                // thing whichever transport carried the turn.
+                attached_items: crate::agent::intent_turn::attached_items_from_params(
+                    &envelope.params,
+                )
+                .unwrap_or_default(),
+                in_reply_to: envelope.in_reply_to.clone(),
+                // ADR-106 D3: the Chat row this turn answers, as
+                // declared by the Gateway. A router-bound turn
+                // always has one (the row it was handed), and it
+                // is what the block hangs under.
+                chat_row_id: envelope.chat_row_id.clone(),
+                // The router only takes Chat-originated
+                // turns (policy.router_eligible); a PM
+                // dispatch's brief never arrives here. The task
+                // id is still parsed off the conversation key so
+                // the two transports state the same fact the same
+                // way — empty for a chat conversation.
+                assignment_brief: String::new(),
+                task_id: acowork_core::intent::task_id_from_conversation(
+                    &envelope.conversation_id,
+                )
+                .unwrap_or_default(),
+                // ADR-106 D3: the routing's own verdict, carried
+                // to the round's reference row because the loop
+                // cannot see it — it replaces the retired
+                // `turn_routed` reaction row.
+                opened_new: Some(opened_new),
+                // ADR-107: the router's framing, delivered as a
+                // reference part of the human's turn.
+                context_refs,
+                // A router dispatch is always a Chat-originated
+                // turn (`policy.router_eligible`), and a human
+                // turn's content is already the person's words —
+                // there is no envelope to re-render for a human.
+                display: None,
+            },
+        )
+        .map_err(|e| format!("delivery failed: {e}"))?;
+    Ok((session_id, opened_new))
+}
+
 // The `SessionStatus` → `CandidateStatus` vocabulary table lives in
 // `chat_candidates` (ADR-099): `SessionManager::resolve_candidates` needs the
 // same mapping, and the session layer must not reach up into the router layer
@@ -1916,7 +2275,7 @@ fn dispatch_parts(
 
 #[cfg(test)]
 mod tests {
-    use super::super::tool::{ExecSessionCreateArgs, ProposeContinueArgs};
+    use super::super::tool::{ExecSessionCreateArgs, RouteConfirmArgs};
     use super::*;
     use crate::agent::session::chat_candidates::{CandidateOrigin, CandidateStatus};
     use acowork_core::providers::mock::{MockProvider, MockResponse};
@@ -2002,9 +2361,9 @@ mod tests {
                 deps: d,
                 chat_id: "cs-1",
                 chat_kind: "group",
-                provider,
-                provider_label: "mock|mock-model",
-                model: "mock-model",
+                provider: Arc::clone(provider),
+                provider_label: "mock|mock-model".to_string(),
+                model: "mock-model".to_string(),
                 timeout_ms: 5_000,
                 history_tokens: None,
             }
@@ -2026,6 +2385,49 @@ mod tests {
         }]));
         assert!(calls(&failing, &d).call(request()).await.is_err());
         assert_eq!(ledger.records.lock().unwrap().len(), 2);
+    }
+
+    /// ADR-107 revision 2026-11-11: the router walks a candidate chain, so the
+    /// ledger row has to name the model that ANSWERED, not the configured one.
+    /// `switch` and `call` are separate steps — pin the pairing: the call after
+    /// a switch reaches the new provider and books the new `(label, model)`.
+    #[tokio::test]
+    async fn switching_candidate_reaches_and_books_the_model_that_answered() {
+        let ledger = Arc::new(CountingChatUsage::default());
+        let mut d = deps();
+        d.chat_usage = ledger.clone();
+        let first: Arc<dyn Provider> = Arc::new(MockProvider::with_usage("first", 10, 2));
+        let fallback: Arc<dyn Provider> = Arc::new(MockProvider::with_usage("fallback", 11, 3));
+        let request = ChatRequest {
+            model: "primary-model".into(),
+            messages: vec![],
+            temperature: None,
+            max_tokens: None,
+            tools: None,
+            reasoning_effort: None,
+            thinking_mode: None,
+        };
+        let mut calls = ModelCalls {
+            deps: &d,
+            chat_id: "cs-1",
+            chat_kind: "group",
+            provider_label: first.name().to_string(),
+            provider: Arc::clone(&first),
+            model: "primary-model".to_string(),
+            timeout_ms: 5_000,
+            history_tokens: None,
+        };
+
+        assert_eq!(calls.call(request.clone()).await.unwrap().content, "first");
+        calls.switch(fallback, "fallback-model".to_string());
+        assert_eq!(calls.call(request).await.unwrap().content, "fallback");
+        assert_eq!(
+            ledger.records.lock().unwrap().as_slice(),
+            &[
+                "cs-1|group|mock|primary-model".to_string(),
+                "cs-1|group|mock|fallback-model".to_string(),
+            ]
+        );
     }
 
     /// Params carrying (or not carrying) an explicit session address.
@@ -2505,21 +2907,22 @@ mod tests {
             id: "call-1".into(),
             call_type: "function".into(),
             function: acowork_core::providers::traits::FunctionCall {
-                name: super::super::tool::EXEC_SESSION_PROPOSE_CONTINUE_TOOL.into(),
+                name: super::super::tool::EXEC_SESSION_ROUTE_CONFIRM_TOOL.into(),
                 arguments: r#"{"target":"S1","why":"same login bug"}"# .into(),
             },
         };
         assert_eq!(
             parse_act(&proposal, &aliases).unwrap(),
-            Act::ProposeContinue(ProposeContinueArgs {
+            Act::RouteConfirm(RouteConfirmArgs {
                 alias: "S1".into(),
                 session_id: "sess-1".into(),
                 why: "same login bug".into(),
+                call_id: "call-1".into(),
             })
         );
         assert_eq!(
             call_label(&proposal),
-            "exec_session_propose_continue:S1"
+            "exec_session_route_confirm:S1"
         );
 
         let task = ToolCall {
@@ -2571,7 +2974,7 @@ mod tests {
             id: "call-1".into(),
             call_type: "function".into(),
             function: acowork_core::providers::traits::FunctionCall {
-                name: super::super::tool::EXEC_SESSION_PROPOSE_CONTINUE_TOOL.into(),
+                name: super::super::tool::EXEC_SESSION_ROUTE_CONFIRM_TOOL.into(),
                 arguments: r#"{"target":"S1","why":"same login bug"}"#.into(),
             },
         };
@@ -3034,6 +3437,251 @@ mod tests {
         assert!(!out.starts_with("Error:"), "got: {out}");
     }
 
+
+    // ── the refused turn and the parked card (ADR-106 D6 rev. 2026-11-12) ──
+
+    use acowork_core::providers::traits::FunctionCall;
+
+    fn act_response(tool: &str, args: serde_json::Value, call_id: &str) -> MockResponse {
+        MockResponse::ToolCalls {
+            tool_calls: vec![ToolCall {
+                id: call_id.into(),
+                call_type: "function".into(),
+                function: FunctionCall {
+                    name: tool.into(),
+                    arguments: args.to_string(),
+                },
+            }],
+            content: String::new(),
+        }
+    }
+
+    /// A session row bound to this chat, so the turn has one candidate to
+    /// name — the shape the 2026-11-11 defect ran against.
+    fn bound_meta(sid: &str) -> (String, acowork_core::session_meta::SessionMeta) {
+        use acowork_core::session_meta::SessionMeta;
+        let meta = SessionMeta {
+            version: 3,
+            session_id: sid.into(),
+            agent_id: "com.test.cw".into(),
+            created_at: "2026-11-01T00:00:00+00:00".into(),
+            initiator: Some("user-1".into()),
+            visibility: None,
+            chat_session_id: Some("cs-1".into()),
+            aware_users: Vec::new(),
+            interveners: Vec::new(),
+            title: Some("login bug work".into()),
+            workspace_id: None,
+            model: None,
+            provider: None,
+            account_id: None,
+            reasoning_effort: None,
+            temperature: None,
+            context_window: None,
+            todos: None,
+            tool_policy: None,
+            message_count: 4,
+            last_active_at: "2026-11-11T00:00:00+00:00".into(),
+            tokens: None,
+            model_usage: None,
+            llm_call_counter: None,
+            perf: None,
+            model_ratio: None,
+            last_compaction_offset: None,
+            corrupted: false,
+        };
+        (sid.into(), meta)
+    }
+
+    struct TurnHarness {
+        session_manager: Arc<AsyncMutex<SessionManager>>,
+        manager: Arc<ChatSessionManager>,
+        provider: Arc<MockProvider>,
+        work_dir: std::path::PathBuf,
+    }
+
+    async fn turn_harness(
+        responses: Vec<MockResponse>,
+        candidates: Vec<(String, acowork_core::session_meta::SessionMeta)>,
+    ) -> TurnHarness {
+        let work_dir = std::env::temp_dir().join(format!(
+            "acowork-router-turn-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let conv_dir = work_dir.join("conversations");
+        std::fs::create_dir_all(&conv_dir).unwrap();
+        for (sid, meta) in &candidates {
+            crate::conversation::write_session_meta(&conv_dir, meta).unwrap();
+            // The meta store is the scan source; no transcript file is
+            // needed for a candidate to exist.
+            let _ = sid;
+        }
+        let provider = Arc::new(MockProvider::new(responses));
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.cw"
+            version = "1.0.0"
+            name = "Test CW"
+            description = "router turn test"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let config = crate::config::RuntimeConfig {
+            work_dir: work_dir.display().to_string(),
+            ..Default::default()
+        };
+        let core = AgentCore::new(config, manifest, provider.clone(), vec![]);
+        let mut manager = SessionManager::new(
+            Arc::new(core),
+            crate::agent::session::SessionManagerConfig::default(),
+        );
+        // Session creation takes the workspace-context path, whose hard
+        // precondition is a resolver (the production startup sets one; a
+        // bare test manager must too).
+        manager.set_resolver(Arc::new(std::sync::RwLock::new(
+            crate::tools::workspace_resolver::WorkspaceResolver::new_for_test(Vec::new()),
+        )));
+        let session_manager = Arc::new(AsyncMutex::new(manager));
+        TurnHarness {
+            session_manager,
+            manager: Arc::new(ChatSessionManager::new()),
+            provider,
+            work_dir,
+        }
+    }
+
+    impl Drop for TurnHarness {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.work_dir);
+        }
+    }
+
+    /// The 2026-11-11 defect, pinned at the turn boundary: the human clicked
+    /// "new task" on a card, the follow-up turn reached the router with the
+    /// refusal, the model answered in prose, and the prose was PUBLISHED as
+    /// an agent message beside the still-open card — the card can only close
+    /// under an execution round, so the click read as dead. A refused turn
+    /// may now answer with prose once (it gets one feedback retry); a second
+    /// prose answer degrades the turn instead of writing the row.
+    #[tokio::test]
+    async fn a_refused_turn_never_publishes_prose_beside_a_card() {
+        let h = turn_harness(
+            vec![
+                MockResponse::Text {
+                    content: "Sure, I will start a new task for that.".into(),
+                },
+                MockResponse::Text {
+                    content: "Still not calling the tool.".into(),
+                },
+            ],
+            vec![bound_meta("sess-old")],
+        )
+        .await;
+        let mut env = envelope(
+            "user_message",
+            "cs-1",
+            serde_json::json!({ "message": "do it as a new task" }),
+        );
+        env.params
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                acowork_core::protocol::FORCE_NEW_PARAM.to_string(),
+                serde_json::json!(true),
+            );
+        let outcome = handle_intent(&h.session_manager, &h.manager, &env, "").await;
+        // Degraded to the deterministic route — the human's message is still
+        // delivered by the caller — and NOT Handled with a prose row.
+        assert!(
+            matches!(outcome, Outcome::Fallback { .. }),
+            "a refused turn that answers prose twice must degrade, got {outcome:?}"
+        );
+        // Two model calls: the answer, then exactly one feedback retry.
+        assert_eq!(h.provider.call_count(), 2);
+    }
+
+    /// The refused turn's legitimate shape: prose once, then the feedback
+    /// line, then `exec_session_create` — the brief survives, the card
+    /// closes under the round the create opens.
+    #[tokio::test]
+    async fn a_refused_turn_takes_the_create_after_one_feedback() {
+        let h = turn_harness(
+            vec![
+                MockResponse::Text {
+                    content: "I will start a new task for that.".into(),
+                },
+                act_response(
+                    EXEC_SESSION_CREATE_TOOL,
+                    serde_json::json!({"background": "login bug discussion, new session asked for"}),
+                    "call-create",
+                ),
+            ],
+            vec![bound_meta("sess-old")],
+        )
+        .await;
+        let mut env = envelope(
+            "user_message",
+            "cs-1",
+            serde_json::json!({ "message": "new task please" }),
+        );
+        env.params
+            .as_object_mut()
+            .unwrap()
+            .insert(
+                acowork_core::protocol::FORCE_NEW_PARAM.to_string(),
+                serde_json::json!(true),
+            );
+        let outcome = handle_intent(&h.session_manager, &h.manager, &env, "").await;
+        assert!(matches!(outcome, Outcome::Handled), "{outcome:?}");
+        // The feedback line reached the model on the second call.
+        let last = h.provider.last_request().expect("second call recorded");
+        let feedback = last
+            .messages
+            .iter()
+            .filter(|m| m.role == acowork_core::providers::MessageRole::User)
+            .any(|m| m.content.contains("Plain text is not a legal answer"));
+        assert!(feedback, "the refusal feedback line must reach the retry");
+    }
+
+    /// The refusal's tool-result shape: the parked turn accepts only a
+    /// create as the answer to "new task". Pinned at the parse boundary: a
+    /// create parses as a create; a second confirm parses too — which is
+    /// exactly why the runner arm filters on the tool NAME before
+    /// accepting, so a re-ask of the answered question is never an act.
+    #[test]
+    fn the_refusal_answer_accepts_only_a_create() {
+        let aliases = AliasTable::from([("S1".to_string(), "sess-old".to_string())]);
+        let create = ToolCall {
+            id: "c2".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: EXEC_SESSION_CREATE_TOOL.into(),
+                arguments: r#"{"background":"what was decided"}"#.into(),
+            },
+        };
+        assert!(matches!(
+            parse_act(&create, &aliases),
+            Ok(Act::ExecSessionCreate(_))
+        ));
+        let second_confirm = ToolCall {
+            id: "c3".into(),
+            call_type: "function".into(),
+            function: FunctionCall {
+                name: EXEC_SESSION_ROUTE_CONFIRM_TOOL.into(),
+                arguments: r#"{"target":"S1","why":"same login bug"}"#.into(),
+            },
+        };
+        assert!(matches!(
+            parse_act(&second_confirm, &aliases),
+            Ok(Act::RouteConfirm(_))
+        ));
+    }
     #[test]
     fn oversized_info_results_are_cut_on_char_boundaries() {
         let big = "汉".repeat(3000); // 9000 bytes > INFO_RESULT_MAX_BYTES
@@ -3046,39 +3694,6 @@ mod tests {
         assert_eq!(truncate_info_result("fine"), "fine");
     }
 
-    #[test]
-    fn chat_tail_excerpt_keeps_recent_conversation_and_drops_chrome() {
-        let row = |kind: &str, from: &str, body: &str, seq: u64| ChatRow {
-            seq,
-            kind: kind.to_string(),
-            from: from.to_string(),
-            body: body.to_string(),
-            ..Default::default()
-        };
-        let rows = vec![
-            row("user_message", "u-1", "first", 1),
-            row("system_notice", "agent-1", "routing chrome", 2),
-            row("agent_message", "agent-1", "answer one", 3),
-            row("user_message", "u-1", "and the deploy script?", 4),
-        ];
-        let excerpt = chat_tail_excerpt(&rows, "agent-1").expect("conversation rows exist");
-        // Oldest first, sender-tagged, notices excluded.
-        assert_eq!(
-            excerpt,
-            "[user] first\n[agent] answer one\n[user] and the deploy script?"
-        );
-
-        // Nothing but the trigger row itself (or empty bodies) -> no excerpt.
-        assert!(chat_tail_excerpt(&[row("user_message", "u-1", "  ", 1)], "agent-1").is_none());
-        assert!(chat_tail_excerpt(&[], "agent-1").is_none());
-
-        // Byte cap: a huge newest row is clipped, the older rows survive.
-        let big = row("user_message", "u-1", &"x".repeat(4000), 5);
-        let excerpt = chat_tail_excerpt(&[rows[0].clone(), big.clone()], "agent-1").unwrap();
-        assert!(excerpt.starts_with("[user] first\n[user] xxx"));
-        assert!(excerpt.len() < 4000);
-        assert!(!excerpt.ends_with('y')); // clipped, not copied whole
-    }
 
     /// A truncated response is not a decision. The production failure this
     /// pins: an `exec_session_create` brief ran past `max_output_tokens`, the provider cut

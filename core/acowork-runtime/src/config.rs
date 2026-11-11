@@ -71,6 +71,12 @@ pub struct RuntimeConfig {
     /// deployments where the broker is on another host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_host: Option<String>,
+    /// HTTP port of the Gateway this Runtime calls back into; `None` =
+    /// the platform constant (19876). Process-level tests boot a private
+    /// Gateway on a free port and must not collide with the well-known
+    /// one a desktop instance holds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_http_port: Option<u16>,
     /// ADR-055 D3/§6.4: base URL of the Node reverse proxy (injected by
     /// the Node at spawn time). When set, the retained `http_endpoint`
     /// is published as `{base}/agents/{id}` instead of the direct
@@ -255,6 +261,7 @@ impl Default for RuntimeConfig {
             mqtt_port: None,
             http_port: None,
             gateway_host: None,
+            gateway_http_port: None,
             http_advertise_endpoint: None,
             node_id: None,
             mqtt_username: None,
@@ -296,6 +303,7 @@ impl RuntimeConfig {
             mqtt_port: cli.mqtt_port,
             http_port: cli.http_port,
             gateway_host: cli.gateway_host.clone(),
+            gateway_http_port: cli.gateway_http_port,
             http_advertise_endpoint: cli.http_advertise_endpoint.clone(),
             node_id: cli.node_id.clone(),
             mqtt_username: cli.mqtt_username.clone(),

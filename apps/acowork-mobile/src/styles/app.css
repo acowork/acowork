@@ -153,9 +153,14 @@
   color: var(--color-label);
   display: flex;
   align-items: center;
+  gap: 0;
   min-height: 44px;
   min-width: 44px;
   justify-content: flex-start;
+  /* 15px, not the title's 16/600: the back affordance must not out-shout
+   * the centred title it sits beside. The chevron carries the meaning the
+   * text used to spell out. */
+  font-size: 15px;
 }
 
 .navbar-trail {
@@ -215,7 +220,7 @@
 .scroll-chat {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 0;
   /* Tight horizontal padding so the avatar column doesn't strand a wide
    * bubble away from the screen edge. */
   padding: 12px;
@@ -431,6 +436,33 @@
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
 }
+/* The obligation dot: "this row is blocked on you" (a tool approval /
+ * `ask_user_question` card is open, or the turn paused at the iteration limit).
+ * Deliberately NOT the accent color — accent reads as "selected" — and
+ * deliberately not a count: there is nothing to count, there is something to
+ * answer before it times out. Same corner and size as a messaging app's unread
+ * dot, because that is the affordance people already read as "there". */
+.avatar-attention-dot {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--color-destructive);
+  border: 2px solid var(--color-bg-elevated);
+  box-sizing: content-box;
+  pointer-events: none;
+}
+/* Rows without an avatar (session history) put the same dot in the trail, so
+ * one meaning never grows two different looks. */
+.trail-attention-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--color-destructive);
+}
 .list-row-avatar {
   width: var(--avatar-size);
   height: var(--avatar-size);
@@ -550,7 +582,10 @@
 /* --- Bubbles --- */
 
 .bubble {
-  max-width: 100%;
+  /* 85% of the stack, not 100%: at 16px a full-width peer bubble fits 19
+   * CJK glyphs per line — a wall of text. ~16 is the readable band, and
+   * short messages still shrink-wrap. */
+  max-width: 85%;
   padding: 10px 14px;
   border-radius: 6px;
   font-size: 16px;
@@ -715,12 +750,15 @@
   cursor: pointer;
 }
 
-/* ── Unified button style (ADR parity with Desktop .btn-accent family) ──
- * Mobile was pure-text in most places (logout-btn, drawer-close, tab
- * labels). One accent-tinted outline keeps the surface honest — a button
- * that doesn't look like a button isn't a button. Use .btn-filled for
- * the primary action of a screen (composer-send already inlines the same
- * look; this is the variant callers reach for). */
+/* ── Unified button style — the SAME closed vocabulary as Desktop ──
+ * Desktop retired every bordered button (`btn-outline` was deleted with
+ * zero callers; the contract is pinned in its buttonVariants.test.ts).
+ * Two solid tones exist and no third may creep in at a call site:
+ *   .btn-solid  — neutral fill, secondary actions
+ *   .btn-accent — accent fill, the one primary/confirm action
+ * Both are borderless; the fill IS the affordance. (The old default here
+ * was an accent-tinted OUTLINE whose comment claimed desktop parity — the
+ * parity had drifted the other way; this rewrite is the correction.) */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -728,36 +766,32 @@
   gap: 6px;
   min-height: var(--touch-min);
   padding: 0 16px;
+  border: none;
   border-radius: var(--radius-sm);
-  border: 1px solid var(--color-accent);
   background: transparent;
-  color: var(--color-accent);
+  color: var(--color-label);
   font: inherit;
   font-size: var(--font-md);
   cursor: pointer;
-  transition: background 0.12s;
-}
-.btn:hover:not(:disabled),
-.btn:active:not(:disabled) {
-  /* 12% accent wash — strong enough to read as "pressed" on both the
-   * iOS-blue and WeChat-green themes without inventing a separate
-   * pressed token. */
-  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  transition: background 0.12s, filter 0.12s;
 }
 .btn:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
-.btn-filled {
-  background: var(--color-accent);
-  color: var(--color-on-accent);
+.btn-solid {
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--color-label);
 }
-.btn-filled:hover:not(:disabled),
-.btn-filled:active:not(:disabled) {
-  background: color-mix(in srgb, var(--color-accent) 88%, #000 0%);
-  /* The wash above drops the saturation slightly. This nudges it back
-   * down so the filled button still pops on the lighter hover bg. */
-  filter: brightness(0.95);
+.btn-solid:active:not(:disabled) {
+  background: rgba(120, 120, 128, 0.26);
+}
+.btn-accent {
+  background: var(--color-tint);
+  color: #ffffff;
+}
+.btn-accent:active:not(:disabled) {
+  filter: brightness(0.9);
 }
 .btn-sm {
   min-height: 32px;
@@ -1361,7 +1395,7 @@
 
 .time-sep {
   align-self: center;
-  margin: 16px 0 8px;
+  margin: 8px 0 8px;
   font-size: 12px;
   color: var(--color-tabbar-inactive);
 }
@@ -1381,9 +1415,18 @@
    * peer turns read as "left" and self turns as "right" (Discord / Slack
    * column chat idiom). The horizontal mirror of the IM-row layout felt
    * visually displaced — avatar at one edge, bubble shifted toward centre
-   * — and made long agent bubbles look stranded. */
-  margin: 6px 0;
+   * — and made long agent bubbles look stranded.
+   * Rhythm is two-tier (measured against the old 6+6+6=18px flex-margin
+   * stack): a speaker RUN separates from its neighbour by 16px; a
+   * continuation inside the same run by 6px. `.scroll-chat` carries no gap
+   * so these margins are the whole truth. */
+  margin: 0 0 16px;
   gap: 4px;
+}
+/* A continuation row (same speaker as the item above, header suppressed by
+ * the consecutive-message grouping) rides tighter than a new turn. */
+.msg-group.msg-group-cont {
+  margin-bottom: 6px;
 }
 .msg-group-peer {
   align-items: flex-start;
@@ -1655,21 +1698,29 @@
    * so the explore block hugs the surrounding bubbles (desktop cohesion). */
   margin: 0;
 }
+/* The card's header row. The card is ONE surface (`--color-bg-elevated`,
+ * radius-md, no border — the fill separates it from the gray page); the
+ * toggle is not a second object painted on top of it. */
 .explore-toggle {
   display: grid;
   grid-template-columns: auto auto 1fr auto;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
-  padding: 8px var(--space-3);
+  padding: 10px var(--space-3);
   border: none;
-  border-radius: var(--radius-sm);
-  background: rgba(120, 120, 128, 0.12);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
   color: var(--color-label-secondary);
   font: inherit;
   font-size: 13px;
   text-align: left;
   cursor: pointer;
+}
+/* Opened, the toggle and the body are the same card: the bottom corners
+ * move to the body and a hairline separates header from content. */
+.chat-run:has(.explore-body) .explore-toggle {
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
 }
 .explore-toggle-icon {
   font-size: 12px;
@@ -1691,10 +1742,13 @@
   color: var(--color-label-secondary);
 }
 .explore-body {
-  margin-top: 2px;
-  padding: 4px var(--space-3) 8px;
-  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
-  background: rgba(120, 120, 128, 0.08);
+  /* The card's content half — the same face as the header row above. */
+  margin-top: 0;
+  padding: 8px var(--space-3) 10px;
+  border: none;
+  border-top: 0.5px solid var(--color-separator);
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: var(--color-bg-elevated);
 }
 .explore-item {
   display: flex;
@@ -1959,6 +2013,26 @@
   text-align: left;
 }
 
+/* On the accent-filled self bubble the page tokens (black ink, gray border)
+ * are unreadable — the chip speaks the bubble's language: white ink,
+ * translucent face. (Measured on device: `--color-label` black on
+ * `--color-tint-strong` — the complaint the screenshot made obvious.) */
+.bubble-self .chat-attachment-chip {
+  border-color: rgba(255, 255, 255, 0.45);
+  background: rgba(255, 255, 255, 0.14);
+  color: #ffffff;
+}
+.bubble-self .chat-attachment-size {
+  color: rgba(255, 255, 255, 0.72);
+}
+.bubble-self .chat-attachment-tappable:active {
+  background: rgba(255, 255, 255, 0.24);
+}
+.bubble-self .chat-attachment-label {
+  border-color: rgba(255, 255, 255, 0.4);
+  opacity: 0.9;
+}
+
 /* An uploaded file is tappable (desktop parity: the same attachment opens on
    both surfaces). A real <button>, so the platform gives it press feedback and
    a screen reader gives it a name; the icon slot stays 12pt to keep the glyph
@@ -2082,26 +2156,88 @@
 .chat-run {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   width: 100%;
-  margin: 8px 0;
+  margin: 0 0 16px;
 }
-/* The drill keeps its own chrome and sits ABOVE the block: it opens the
-   execution session, a different object from the rounds listed inside it. */
-.chat-run-drill {
-  align-self: flex-start;
-  margin-bottom: 4px;
-  padding: 6px 12px;
+/* The block's own header row is inside the turn's rhythm already — the
+ * transcript-level margin must not double up here. */
+.chat-run .msg-group {
+  margin-bottom: 0;
+}
+/* The block's affordance row — the mobile twin of the desktop
+ * `RunBlockActionRow`: icon-only, ghost chrome, the accent wash appears on
+ * press (and lives in `title`/`aria-label`, which the markup carries). */
+.chat-run-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+.chat-run-action {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
   border: none;
-  border-radius: 999px;
-  background: rgba(120, 120, 128, 0.12);
+  border-radius: 50%;
+  background: transparent;
   color: var(--color-label-secondary);
-  font: inherit;
-  font-size: 12px;
   cursor: pointer;
+  transition: background 0.12s, color 0.12s;
 }
-.chat-run-drill:active {
-  background: rgba(120, 120, 128, 0.2);
+.chat-run-action:active {
+  background: color-mix(in srgb, var(--color-tint) 12%, transparent);
+  color: var(--color-tint);
+}
+.chat-run-action svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* --- Folded run answer -------------------------------------------------
+ * The run's latest answer sits under the block in the transcript's own peer
+ * skin (the desktop `RunAnswerBubble`, copied). The clip animates its
+ * ceiling — a fold, not a page jump; the double-chevron toggle lives outside
+ * the clipped box so the thumb can always reach it. */
+.chat-fold-clip {
+  overflow: hidden;
+  transition-property: max-height;
+  transition-timing-function: ease-out;
+}
+.chat-fold-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 28px;
+  margin-top: 4px;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--color-label-secondary);
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+.chat-fold-toggle:active {
+  background: color-mix(in srgb, var(--color-label) 5%, transparent);
+  color: var(--color-label);
+}
+.chat-fold-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+/* The card is collapsed by default; its answer bubble belongs to the block
+ * column, so it wears the peer skin at the card's measure, not the 85% a
+ * chat row takes. */
+.run-answer-bubble {
+  max-width: 100%;
+  align-self: stretch;
+}
+.run-answer-content {
+  font-size: 16px;
+  line-height: 1.5;
 }
 /* Older rounds stay in the block, one tap away — a long run must not push the
    rest of the transcript off the device. */
@@ -2110,7 +2246,7 @@
   padding: 4px 0;
   border: none;
   background: transparent;
-  color: var(--color-accent, #0ea5e9);
+  color: var(--color-tint);
   font-size: 12px;
   text-decoration: underline;
   text-underline-offset: 2px;
@@ -2120,7 +2256,7 @@
    question/answer pair. The glyph is the round's own state, so the list reads as
    a run of steps rather than a run of messages. */
 .chat-run-round {
-  padding: 4px 0;
+  padding: 2px 0;
   font-size: 12px;
   line-height: 1.4;
 }
@@ -2133,7 +2269,7 @@
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 6px 0;
+  padding: 4px 0;
   border: none;
   background: transparent;
   color: inherit;
@@ -2237,9 +2373,12 @@
    behind a tap) and on the agent bubble's fill — the same surface the same
    words get in the thread. */
 .chat-block-answer {
+  /* `--color-bubble-peer` is #ffffff in light mode — on the white card it
+   * was invisible. The answer is an inset well, not a second bubble
+   * competing with the transcript's own. */
   padding: 8px 10px;
   border-radius: var(--radius-sm);
-  background: var(--color-bubble-peer);
+  background: rgba(120, 120, 128, 0.08);
   font-size: 14px;
   line-height: 1.5;
   color: var(--color-label);
@@ -2338,7 +2477,7 @@
   gap: 8px;
   /* The transcript scroll already pads 12px; the card must not pad twice or it
      strands itself away from the bubble column. */
-  margin: 8px 0;
+  margin: 0 0 16px;
   padding: 10px 12px;
   border: 1px solid var(--color-border, rgba(128, 128, 128, 0.25));
   border-radius: 12px;
@@ -2373,18 +2512,9 @@
 }
 /* The row's action: a real button with its own hit area, never a label. */
 .chat-notice-card-go {
+  /* Chrome comes from `.btn .btn-accent .btn-sm`. */
   flex: none;
-  display: inline-flex;
-  align-items: center;
   gap: 2px;
-  padding: 5px 12px;
-  border: none;
-  border-radius: 999px;
-  background: var(--color-tint-strong);
-  color: #ffffff;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
 }
 .chat-notice-card-go:active {
   transform: scale(0.98);
@@ -2394,7 +2524,7 @@
 .chat-notice {
   display: flex;
   justify-content: center;
-  margin: 8px 0;
+  margin: 0 0 16px;
 }
 .chat-notice-pill {
   padding: 3px 12px;
@@ -2471,7 +2601,7 @@
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 6px 0;
+  margin: 0 0 16px;
 }
 /* The claim's word inside the turn header: the execution surface's
    `.status-line` grammar (pulse dot + 13px secondary text), kept as its own
@@ -2491,12 +2621,20 @@
 .chat-scroll-pill {
   position: sticky;
   bottom: var(--space-2);
-  align-self: center;
+  /* Bottom-right corner, 44px circle, icon-only: a centred pill sat ON the
+   * reader's text (measured: y=596 over the transcript). The corner is the
+   * one place the overlap reads as chrome, not as an accident. */
+  align-self: flex-end;
   flex: none;
   z-index: 2;
-  padding: 6px 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 44px;
+  height: 44px;
+  padding: 0;
   border: 1px solid var(--color-separator, rgba(128, 128, 128, 0.3));
-  border-radius: 999px;
+  border-radius: 22px;
   background: var(--color-bg-elevated);
   color: var(--color-label-secondary, #888);
   font-size: var(--font-sm);
@@ -2665,7 +2803,9 @@
 .navbar-action {
   border: none;
   background: transparent;
-  color: var(--color-accent, #0ea5e9);
+  /* `--color-tint`, the family the bubbles and the drill already speak —
+   * a second accent (`--color-accent`) on the same bar read as a clash. */
+  color: var(--color-tint, var(--color-accent, #0ea5e9));
   font-size: 14px;
   padding: 6px 4px;
 }
@@ -2772,9 +2912,9 @@
   display: flex;
   align-items: flex-end;
   gap: 8px;
-  margin-top: 10px;
-  padding-top: 8px;
-  border-top: 1px solid var(--color-border, rgba(128, 128, 128, 0.2));
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 0.5px solid var(--color-separator);
 }
 .chat-block-reply-input {
   flex: 1;
@@ -2789,18 +2929,9 @@
   font-family: inherit;
 }
 .chat-block-reply-send {
+  /* Filled variant of the unified family; the old rule carried an orange
+   * `#f59e0b` fallback that no other control in the app speaks. */
   flex: none;
-  padding: 8px 14px;
-  border: none;
-  border-radius: 10px;
-  background: var(--color-tint-strong, #f59e0b);
-  color: #fff;
-  font-size: 13px;
-  font-weight: 600;
-  cursor: pointer;
-}
-.chat-block-reply-send:disabled {
-  opacity: 0.5;
 }
 
 /* A locate that found no block says so once, briefly, above the composer. */
@@ -2811,4 +2942,59 @@
   text-align: center;
   color: var(--color-label-secondary);
   background: rgba(120, 120, 128, 0.1);
+}
+
+/* The group composer's `@` autocomplete: a compact list hung above the
+   composer (the mobile shape of Desktop's anchored popup — §6.5: no hover,
+   so the picker is a plain tappable list, not a caret-following bubble). */
+.group-mention-picker {
+  flex: none;
+  max-height: 220px;
+  overflow-y: auto;
+  border-top: 1px solid var(--color-separator);
+  background: var(--color-bg-elevated, var(--color-bg));
+}
+.group-mention-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 14px;
+  border: none;
+  background: none;
+  color: var(--color-label);
+  font-size: 14px;
+  text-align: left;
+  cursor: pointer;
+}
+.group-mention-row:active {
+  background: rgba(120, 120, 128, 0.14);
+}
+.group-mention-avatar {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+.group-mention-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.group-mention-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-mention-tag {
+  flex: none;
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(120, 120, 128, 0.16);
+  color: var(--color-label-secondary);
+  font-size: 10px;
 }

@@ -1,7 +1,7 @@
 ---
 name: launch-planning
 description: Plan product launch with rollout strategy, positioning, communication, analytics, support readiness, risks, experiments, and post-launch learning
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - launch
@@ -10,8 +10,9 @@ triggers:
   - 发布计划
   - 上线计划
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +27,7 @@ A launch is not complete when code ships. It is complete when target users can d
 
 1. **Load launch context**
    - Use `mcp_memory__memory_recall` to retrieve product strategy, prior launches, stakeholder preferences, known risks, and metric baselines
-   - Use `file_read` to inspect PRD, roadmap, acceptance report, release readiness, support docs, analytics plan, and communication drafts
+   - Use `doc_read` and `doc_search` to inspect PRD, roadmap, acceptance report, release readiness, support docs, analytics plan, and communication drafts
    - Confirm target users, launch scope, release date, channels, and decision owner
 
 2. **Define launch goals and audience**
@@ -47,7 +48,7 @@ A launch is not complete when code ships. It is complete when target users can d
 5. **Define learning loop**
    - Define analytics events, dashboards, feedback channels, experiment design, and decision thresholds
    - Define post-launch actions: iterate, scale, pause, rollback, or retire
-   - Use `file_write` to save launch plan when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist launch plan, decisions, metric baselines, and post-launch learnings
 
 ## Output Format

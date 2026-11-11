@@ -41,7 +41,7 @@
  */
 
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
-import { AtSign, Quote, Send } from 'lucide-react'
+import { AtSign, ChevronDown, ChevronLeft, Quote, Send } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
 import { useAgentStore } from '../../stores/agentStore'
@@ -58,7 +58,7 @@ import { ChatAttachmentCapsule } from '../../components/ChatAttachmentCapsule'
 import { ChatExecutionBlock } from '../../components/ChatExecutionBlock'
 import { ChatNoticeRow } from '../../components/ChatNoticeRow'
 import { DeliveryAlertLine } from '../../components/DeliveryAlertLine'
-import { ChatAddressSheet, type AddressPick } from '../../components/ChatAddressSheet'
+import { ChatAddressSheet, MAX_PICK_REFS, type AddressPick } from '../../components/ChatAddressSheet'
 import { answerWithChoice, directCardAddress, mayAnswerCard, type CardChoice } from '../../lib/chatCardAnswer'
 import { fetchCardAnswer } from '../../lib/api'
 import { turnInflight, resolveExpectedResponders } from '../../lib/chatTurnInflight'
@@ -185,7 +185,7 @@ export function AgentChatScreen() {
     stickNow()
     void useChatSessionStore
       .getState()
-      .sendText(sessionId, text, inReplyTo, attachmentIds, addr, resolveExpectedResponders(agentId))
+      .sendText(sessionId, text, inReplyTo, attachmentIds, addr, resolveExpectedResponders({ peer: agentId }))
   }
 
   const send = () => {
@@ -230,6 +230,26 @@ export function AgentChatScreen() {
   const replyToRound = (rowId: string, quote: string) => {
     setReplyTo({ id: rowId, quote })
     setAddress(null)
+  }
+
+  /** The block's `@` action: quote this run into the draft as material —
+   *  the same `AddressPick.refs` channel the `@` sheet commits through
+   *  (ADR-106 D7), so the chip row and the send wire already speak it. The
+   *  sheet's ceiling applies here too: the fifth pick answers at the tap,
+   *  not at a Gateway 400. */
+  const referenceRun = (ref: { instanceId: string; execSessionId: string; name: string }) => {
+    const key = `${ref.instanceId}|${ref.execSessionId}`
+    const refs = address?.refs ?? []
+    if (refs.some((r) => `${r.agentInstanceId}|${r.sessionId}` === key)) return
+    if (refs.length >= MAX_PICK_REFS) {
+      setTransientHint(`一条消息最多引用 ${MAX_PICK_REFS} 个任务`)
+      return
+    }
+    setAddress({
+      refs: [...refs, { agentInstanceId: ref.instanceId, sessionId: ref.execSessionId }],
+      labels: { ...(address?.labels ?? {}), [key]: ref.name },
+      forceNew: address?.forceNew,
+    })
   }
 
   /** ADR-106 revision 2026-11-04: "去续投" / a source-chip click locate the run's
@@ -319,7 +339,7 @@ export function AgentChatScreen() {
       <EdgeSwipe onBack={() => pop()}>
         <div className="screen">
           <header className="navbar">
-            <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回">返回</button>
+            <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
             <span className="navbar-title">会话</span>
             <span className="navbar-trail" />
           </header>
@@ -335,7 +355,7 @@ export function AgentChatScreen() {
     <EdgeSwipe onBack={() => pop()}>
       <div className="screen">
         <header className="navbar">
-          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回">返回</button>
+          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
           <span className="navbar-title">{agent?.name ?? agentId}</span>
           <span className="navbar-trail">
             <button type="button" className="navbar-action" onClick={() => void openHistory()} aria-label="历史会话">
@@ -362,11 +382,21 @@ export function AgentChatScreen() {
             const row = item.kind === 'run' ? item.anchorRow : item.row
             const prev = i > 0 ? itemOf(items[i - 1]!) : null
             const sep = prev ? daySeparator(prev.ts, row.ts) ?? timeGapSeparator(prev.ts, row.ts) : null
+            // Consecutive-message grouping (IM convention): a speaker run
+            // wears its avatar+name once, at its head. A later item from the
+            // same speaker is a continuation — no header, tighter rhythm. A
+            // time separator breaks the run: the header returns, because the
+            // gap the reader sees is now the separator's, not the group's.
+            const speaker = speakerOf(item, me?.user_id)
+            const prevSpeaker = prev != null ? speakerOf(items[i - 1]!, me?.user_id) : null
+            const showHeader = prev == null || sep != null || prevSpeaker !== speaker
             return (
               <Fragment key={rowKeyOf(row)}>
                 {sep ? <div className="time-sep">{sep}</div> : null}
                 <ItemView
                   item={item}
+                  showHeader={showHeader}
+                  onReferenceRun={referenceRun}
                   hasFollowUp={i < items.length - 1}
                   chatSessionId={sessionId ?? ''}
                   isSelf={row.from === me?.user_id}
@@ -450,7 +480,7 @@ export function AgentChatScreen() {
               onClick={stickNow}
               aria-label="回到底部"
             >
-              回到底部 ↓
+              <ChevronDown size={20} aria-hidden />
             </button>
           ) : null}
         </div>
@@ -596,8 +626,22 @@ export function AgentChatScreen() {
 /* Item rendering — the folded transcript (ADR-106 D1/D3/D4)            */
 /* ------------------------------------------------------------------ */
 
+/** Whose voice a transcript item carries — the input to consecutive-message
+ *  grouping. A run block speaks as the agent; notices and interactions speak
+ *  as neither side, so they always break a speaker run. */
+function speakerOf(item: TranscriptItem, meId: string | undefined): 'self' | 'agent' | 'other' {
+  if (item.kind === 'run') return 'agent'
+  const row = item.row
+  if (row.kind === 'user_message') return row.from === meId ? 'self' : 'agent'
+  if (row.kind === 'agent_message') return 'agent'
+  return 'other'
+}
+
 export interface RowProps {
   row: ChatMessageRow
+  /** Consecutive-message grouping: `false` on a continuation row — the speaker
+   *  already showed its face and name at the head of the run. Default `true`. */
+  showHeader?: boolean
   /** The Chat this row belongs to: the block read is participation-checked
    *  against it (ADR-106 D10), so it is part of the address, not a filter. */
   chatSessionId: string
@@ -607,6 +651,8 @@ export interface RowProps {
   agentAvatar: ReactNode
   agentName: string
   onJumpToExec: (agentInstanceId: string, execSid: string) => void
+  /** The block row's `@`: quote the run into the draft (see `referenceRun`). */
+  onReferenceRun?: (ref: { instanceId: string; execSessionId: string; name: string }) => void
   onReplyToRound: (rowId: string, quote: string) => void
   /** Answer an addressing card (D6 levels 3 and 5) by re-delivering the
    *  utterance it asks about, now addressed. Handed only to the person the card
@@ -629,6 +675,7 @@ export interface RowProps {
 export function RowView(props: RowProps) {
   const {
     row,
+    showHeader = true,
     isSelf,
     selfAvatar,
     selfName,
@@ -674,13 +721,15 @@ export function RowView(props: RowProps) {
     // A message that continues a round (`in_reply_to` = the reference row) needs
     // no quote above it: the block it answers is the row directly beneath.
     return (
-      <div className={`msg-group${isSelf ? ' msg-group-self' : ' msg-group-peer'}`}>
-        <div className="msg-header">
-          <div className="msg-avatar">{isSelf ? selfAvatar : fromAgent ? agentAvatar : '?'}</div>
-          <div className="msg-sender">
-            <span className="msg-sender-name">{isSelf ? selfName : agentName}</span>
+      <div className={`msg-group${isSelf ? ' msg-group-self' : ' msg-group-peer'}${showHeader ? '' : ' msg-group-cont'}`}>
+        {showHeader ? (
+          <div className="msg-header">
+            <div className="msg-avatar">{isSelf ? selfAvatar : fromAgent ? agentAvatar : '?'}</div>
+            <div className="msg-sender">
+              <span className="msg-sender-name">{isSelf ? selfName : agentName}</span>
+            </div>
           </div>
-        </div>
+        ) : null}
         <div className="msg-stack">
           <div className={`bubble${isSelf ? ' bubble-self' : ' bubble-peer'}`}>
             {/* Only the Chat Router's own answer is written as `agent_message`
@@ -778,13 +827,15 @@ export function ItemView({ item, hasFollowUp, ...rowProps }: ItemProps) {
       <ChatExecutionBlock
         block={item}
         chatSessionId={rowProps.chatSessionId}
-        // A block always starts a new turn, so it wears the avatar and name a
-        // bubble wears — the run speaks as the agent, not as the transcript.
-        showHeader
+        // A block wears the avatar and name a bubble wears — the run speaks as
+        // the agent — unless it continues a speaker run that already showed
+        // its header (consecutive-message grouping, same rule as RowView).
+        showHeader={rowProps.showHeader ?? true}
         hasFollowUp={hasFollowUp}
         agentAvatar={rowProps.agentAvatar}
         agentName={rowProps.agentName}
         onJumpToExec={rowProps.onJumpToExec}
+        onReferenceRun={rowProps.onReferenceRun}
         onReplyToRound={rowProps.onReplyToRound}
         focusInput={
           !!rowProps.focusBlockSessionId &&

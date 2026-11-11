@@ -18,6 +18,7 @@ import {
 } from '../lib/presence'
 import type { WebSocketLike } from '../lib/realtime'
 import { setDirectorySource, useAgentStore } from '../stores/agentStore'
+import { attentionByAgent, workingAgentIds } from '../lib/sessionAttention'
 import type { AgentSummary, SessionInfo, UserSummary } from '../lib/types'
 
 /* ---------------- envelope reader ---------------- */
@@ -224,7 +225,13 @@ describe('presence channel', () => {
     // A session-state publish routes to onSessionState, NOT to the presence
     // decoder (its envelope is field 18, not 9 — decodePresence would null it).
     sock.emit(statePublish('i-1', 's-1', 'tool_executing'))
-    expect(onSessionState).toHaveBeenCalledWith('i-1', 's-1', 'tool_executing')
+    // The fact, not the name: a consumer has to be able to tell a 429 retry
+    // wait from an iteration-limit pause, and the name alone cannot.
+    expect(onSessionState).toHaveBeenCalledWith('i-1', 's-1', {
+      status: 'tool_executing',
+      reason: undefined,
+      retry: undefined,
+    })
     expect(onUpdate).toHaveBeenCalledTimes(2)
   })
 
@@ -521,30 +528,106 @@ function seedAgents(list: AgentSummary[]) {
   useAgentStore.getState().setAgents(list)
 }
 
-describe('applySessionState (working dot)', () => {
-  afterEach(() => useAgentStore.setState({ agents: {}, agentList: [], users: [], busySessions: {} }))
+describe('applySessionState (the session-status fact)', () => {
+  afterEach(() => useAgentStore.setState({ agents: {}, agentList: [], users: [], sessionStatuses: {} }))
 
-  it('marks the agent busy on a non-idle status and clears it on idle', () => {
-    useAgentStore.getState().applySessionState('i-1', 's-1', 'tool_executing')
-    expect(useAgentStore.getState().busySessions['i-1']?.has('s-1')).toBe(true)
-    useAgentStore.getState().applySessionState('i-1', 's-1', 'idle')
-    expect(useAgentStore.getState().busySessions['i-1']).toBeUndefined()
+  it('records a non-idle status and drops the entry on idle', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'tool_executing' })
+    expect(useAgentStore.getState().sessionStatuses['i-1']?.['s-1']).toEqual({ status: 'tool_executing' })
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'idle' })
+    // No tombstone: the map only ever holds "something is true right now".
+    expect(useAgentStore.getState().sessionStatuses['i-1']).toBeUndefined()
   })
 
-  it('keeps the agent busy while any session is mid-turn', () => {
-    useAgentStore.getState().applySessionState('i-1', 's-1', 'llm_streaming')
-    useAgentStore.getState().applySessionState('i-1', 's-2', 'thinking')
-    useAgentStore.getState().applySessionState('i-1', 's-1', 'idle')
-    const busy = useAgentStore.getState().busySessions['i-1']
-    expect(busy?.has('s-1')).toBe(false)
-    expect(busy?.has('s-2')).toBe(true)
+  it('keeps one entry per session, so one going idle leaves the other alone', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'llm_streaming' })
+    useAgentStore.getState().applySessionState('i-1', 's-2', { status: 'thinking' })
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'idle' })
+    expect(useAgentStore.getState().sessionStatuses['i-1']).toEqual({ 's-2': { status: 'thinking' } })
   })
 
-  it("an offline verdict drops the agent's stale busy sessions", () => {
+  it('keeps a re-published identical status referentially stable', () => {
+    // The state topic is retained: every reconnect replays it. A replay must
+    // not repaint the inbox.
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'waiting_approval' })
+    const before = useAgentStore.getState().sessionStatuses
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'waiting_approval' })
+    expect(useAgentStore.getState().sessionStatuses).toBe(before)
+  })
+
+  it('replaces the entry when only the paused reason changes', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'paused', retry: true })
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'paused', reason: 'iteration_limit' })
+    expect(useAgentStore.getState().sessionStatuses['i-1']?.['s-1']).toEqual({
+      status: 'paused',
+      reason: 'iteration_limit',
+    })
+  })
+
+  it("an offline verdict drops the agent's stale session facts", () => {
     seedAgents([{ id: 'i-1', name: 'Senior', node_id: 'n-1', status: 'idle' }])
-    useAgentStore.getState().applySessionState('i-1', 's-1', 'tool_executing')
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'waiting_approval' })
     useAgentStore.getState().applyPresence('i-1', 'offline')
-    expect(useAgentStore.getState().busySessions['i-1']).toBeUndefined()
+    expect(useAgentStore.getState().sessionStatuses['i-1']).toBeUndefined()
+  })
+})
+
+describe('the inbox dots derived from one fact', () => {
+  afterEach(() => useAgentStore.setState({ agents: {}, agentList: [], users: [], sessionStatuses: {} }))
+
+  it('a parked session is both working and alerting', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'waiting_approval' })
+    const all = useAgentStore.getState().sessionStatuses
+    expect(workingAgentIds(all).has('i-1')).toBe(true)
+    expect(attentionByAgent(all).get('i-1')).toBe('approval')
+  })
+
+  it('a 429 retry wait is working but must NOT alert — the Runtime resumes it', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'paused', retry: true })
+    const all = useAgentStore.getState().sessionStatuses
+    expect(workingAgentIds(all).has('i-1')).toBe(true)
+    expect(attentionByAgent(all).has('i-1')).toBe(false)
+  })
+
+  it('an idle agent is neither working nor alerting', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'idle' })
+    const all = useAgentStore.getState().sessionStatuses
+    expect(workingAgentIds(all).has('i-1')).toBe(false)
+    expect(attentionByAgent(all).has('i-1')).toBe(false)
+  })
+})
+
+describe('the listing retires facts the Runtime cannot back up', () => {
+  afterEach(() => useAgentStore.setState({ agents: {}, agentList: [], users: [], sessionStatuses: {} }))
+
+  const row = (session_id: string, is_active?: boolean): SessionInfo =>
+    ({ session_id, title: 'x', can_write: true, is_active }) as SessionInfo
+
+  it('drops a parked fact for a session the listing says is not resident', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'waiting_approval' })
+    useAgentStore.getState().setSessions('i-1', [row('s-1', false)])
+    expect(useAgentStore.getState().sessionStatuses['i-1']).toBeUndefined()
+  })
+
+  it('keeps the fact when the session is resident', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'waiting_approval' })
+    useAgentStore.getState().setSessions('i-1', [row('s-1', true)])
+    expect(useAgentStore.getState().sessionStatuses['i-1']?.['s-1']).toEqual({ status: 'waiting_approval' })
+  })
+
+  it('keeps the fact when the Runtime does not report residency at all', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-1', { status: 'waiting_approval' })
+    const before = useAgentStore.getState().sessionStatuses
+    useAgentStore.getState().setSessions('i-1', [row('s-1')])
+    // Absence proves nothing — and an inbox refresh must not even change
+    // identity, or every refresh repaints the list.
+    expect(useAgentStore.getState().sessionStatuses).toBe(before)
+  })
+
+  it('repairs the paged merge path too, not just the first page', () => {
+    useAgentStore.getState().applySessionState('i-1', 's-2', { status: 'paused', reason: 'iteration_limit' })
+    useAgentStore.getState().mergeSessions('i-1', [row('s-2', false)])
+    expect(useAgentStore.getState().sessionStatuses['i-1']).toBeUndefined()
   })
 })
 

@@ -23,6 +23,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse } from "../../lib/types";
 import { startAgentAndSyncUI } from "../../lib/agent-start";
 import { partitionAgentsByNode, nodeDisplayName } from "./partitionAgentsByNode";
+import { attentionByAgent } from "../../lib/sessionAttention";
 import { UserList, type UserListHandle } from "../user-list/UserList";
 import { GroupAvatarStack } from "../chat/GroupAvatarStack";
 import { NewGroupDialog } from "../chat/NewGroupDialog";
@@ -76,6 +77,35 @@ export function AgentList({ width }: AgentListProps) {
     }
     return ids;
   }, [sessionStatesByAgent]);
+
+  // The RED dot — "this agent is holding a turn open waiting for you", which is
+  // a different fact from the emerald working dot above and is why it lives in
+  // a different place (the avatar's corner, the slot the group-unread badge
+  // uses). A parked approval / ask_question / iteration-limit pause expires on
+  // its own, so an agent the user is not looking at has to announce it; the
+  // emerald dot cannot, because streaming looks identical.
+  //
+  // Source and rules: [lib/sessionAttention.ts](../../lib/sessionAttention.ts).
+  // Suppression is per (agent, session): the pending card of the session already
+  // on screen needs no badge, while a sibling parked session still gets one.
+  // Offline agents are excluded — their retained state is the last thing they
+  // published, and a dead Runtime cannot be waiting for an answer.
+  const attentionByAgentId = useMemo(() => {
+    const visible = selectedAgentId
+      ? {
+          agentId: selectedAgentId,
+          sessionId: sessionStatesByAgent[selectedAgentId]?.activeSessionId ?? null,
+        }
+      : undefined;
+    const derived = attentionByAgent(sessionStatesByAgent, visible);
+    // Liveness is the sidebar row's own fact (`agent.alive`, the Gateway's MQTT
+    // verdict), so it is applied here rather than inside the pure rule.
+    const isLive = (agentId: string) => agentsMap[agentId]?.meta?.alive === true;
+    for (const agentId of [...derived.keys()]) {
+      if (!isLive(agentId)) derived.delete(agentId);
+    }
+    return derived;
+  }, [sessionStatesByAgent, selectedAgentId, agentsMap]);
 
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
 
@@ -579,6 +609,8 @@ export function AgentList({ width }: AgentListProps) {
     const sessionTitle = latestLiveTitle?.trim() ? latestLiveTitle : agentsMap[id]?.sessionTitle;
     // ADR-087: set when the Gateway refused this agent's session calls.
     const accessDenied = agentsMap[id]?.accessDenied === true;
+    // Why this row wears the red corner dot (null = it does not).
+    const attention = attentionByAgentId.get(id) ?? null;
 
     return (
       <div
@@ -603,23 +635,38 @@ export function AgentList({ width }: AgentListProps) {
         onContextMenu={(e) => handleContextMenu(e, id)}
         role="listitem"
       >
-        {/* Avatar */}
-        <Tooltip
-          content={isCollapsed ? (agent.name) : ""}
-          variant="plain"
-          position="right"
-          delayMs={0}
-        >
-          <AgentAvatar
-            agentId={id}
-            displayName={agent.name}
-            avatarUrl={agent.avatar}
-            version={agent.version}
-            builtinAvatarId={agent.builtin_avatar}
-            size={40}
-            className={isCollapsed ? "mx-auto" : ""}
-          />
-        </Tooltip>
+        {/* Avatar — the attention badge rides its top-right corner, so the
+            signal survives the collapsed sidebar (where the whole content
+            column is width-0) and stays out of the emerald presence dot's slot.
+            Same position and colour as the group rows' unread badge: on this
+            surface a red corner dot already means "there is something here for
+            you". */}
+        <span className={cn("relative shrink-0", isCollapsed && "mx-auto")}>
+          <Tooltip
+            content={isCollapsed ? (agent.name) : ""}
+            variant="plain"
+            position="right"
+            delayMs={0}
+          >
+            <AgentAvatar
+              agentId={id}
+              displayName={agent.name}
+              avatarUrl={agent.avatar}
+              version={agent.version}
+              builtinAvatarId={agent.builtin_avatar}
+              size={40}
+              className={isCollapsed ? "mx-auto" : ""}
+            />
+          </Tooltip>
+          {attention && (
+            <span
+              data-testid="agent-attention-dot"
+              className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-red-500"
+              title={t("agentList.dotAttention")}
+              aria-label={t("agentList.dotAttention")}
+            />
+          )}
+        </span>
 
         {/* Content area — width-collapsed when sidebar is collapsed to preserve item height */}
         <div className={cn("min-w-0 overflow-hidden", isCollapsed ? "w-0" : "flex-1")}>

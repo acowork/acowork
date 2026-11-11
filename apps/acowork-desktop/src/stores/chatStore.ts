@@ -3918,6 +3918,11 @@ export function convertConversationEntry(
     // undefined on an ordinary turn, which is the whole point of the disclosure
     // (`speakerProvenance.ts` renders nothing without a substitution).
     speaker: entry.speaker,
+    // Same contract again: the Runtime resolved the turn's origin, so the
+    // bubble never reads the row's metadata key. `"pm_task"` means the words
+    // are the PM's generated Markdown in the owner's name, not something a
+    // person typed (`pmDispatch.ts`).
+    turnOrigin: entry.turn_origin,
   };
 
   if (entry.role === "user") {

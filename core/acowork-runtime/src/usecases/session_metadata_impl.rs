@@ -17,6 +17,56 @@ use crate::usecases::session_metadata::{
     SessionMetadataService, SessionSummary, SessionsListResponse, TokenStatsResponse,
 };
 
+/// The `Active` set and each resident session's stored status, from ONE read.
+///
+/// `Active` is "present in the in-memory map" (ADR-038 lifecycle;
+/// `close_session` removes the key); the status is that same snapshot's
+/// `status` field, still in its stored JSON form. Both come from the same
+/// acquisition on purpose: a row that says `is_active: true` but carries a
+/// status from a different instant would let the client believe a session is
+/// still working after it parked, which is exactly the fact this listing
+/// exists to report.
+///
+/// A poisoned per-session guard yields an empty status string — "no readable
+/// status", not "not active": the key is the lifecycle fact and the parse step
+/// turns the empty string into `None`.
+fn resident_snapshots(
+    snapshots: &SharedSessionSnapshots,
+) -> (
+    std::collections::HashSet<String>,
+    std::collections::HashMap<String, String>,
+) {
+    let mut active = std::collections::HashSet::new();
+    let mut statuses = std::collections::HashMap::new();
+    if let Ok(map) = snapshots.read() {
+        for (sid, snap) in map.iter() {
+            active.insert(sid.clone());
+            let json = snap
+                .read()
+                .map(|guard| guard.status.clone())
+                .unwrap_or_default();
+            statuses.insert(sid.clone(), json);
+        }
+    }
+    (active, statuses)
+}
+
+/// Parse one snapshot's stored status JSON into the wire DTO.
+///
+/// The stored string is the serde JSON of the runtime `SessionStatus`
+/// (`{"status":"waiting_approval","detail":{...}}`), which the retained
+/// `sessions/{sid}/state` topic ships verbatim and both frontends already
+/// decode. It is parsed into the DTO rather than passed through so this API
+/// stays typed, and a variant the DTO does not model (`errored`) degrades to
+/// `None`: an error needs no click, and inventing a status the client cannot
+/// name would flip a badge from a guess.
+fn parse_live_status(json: &str) -> Option<acowork_core::SessionStatusDto> {
+    if json.is_empty() {
+        return None;
+    }
+    serde_json::from_str(json).ok()
+}
+
 pub struct RuntimeSessionMetadataService {
     work_dir: PathBuf,
     agent_token: Arc<dyn AgentTokenService>,
@@ -60,11 +110,12 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
         // the in-memory map (ADR-038 lifecycle; close_session removes the
         // key). Two uses, one read — the `active=true` pre-pagination filter
         // and the per-row `is_active` flag must see the same snapshot.
-        let active_ids: std::collections::HashSet<String> = self
-            .session_snapshots
-            .read()
-            .map(|m| m.keys().cloned().collect())
-            .unwrap_or_default();
+        //
+        // The same read also carries each resident session's live status, so
+        // the rows below can report `waiting_approval` / `paused` without a
+        // second lock acquisition per row (the status is a field of the very
+        // snapshot whose presence defines `is_active`).
+        let (active_ids, live_status) = resident_snapshots(&self.session_snapshots);
 
         let conversations = self.work_dir.join("conversations");
         // ADR-106 D7: the Chat-scoped read rule, handed to the scan as a row
@@ -139,6 +190,9 @@ impl SessionMetadataService for RuntimeSessionMetadataService {
             .into_iter()
             .map(|s| SessionSummary {
                 is_active: active_ids.contains(&s.session_id),
+                status: live_status
+                    .get(&s.session_id)
+                    .and_then(|json| parse_live_status(json)),
                 session_id: s.session_id.clone(),
                 title: s.title,
                 created_at: s.created_at,
@@ -314,4 +368,98 @@ pub(crate) fn truncate_tool_result(content: &str) -> String {
     let mut truncated = lines.into_iter().take(5).collect::<Vec<_>>().join("\n");
     truncated.push_str("\n...(truncated)");
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent::session_state::SessionRuntimeSnapshot;
+    use acowork_core::protocol::{PauseReasonDto, SessionStatusDto};
+
+    /// A resident session snapshot carrying `status_json` verbatim, exactly as
+    /// `emit_session_state` stores it.
+    fn resident(
+        session_id: &str,
+        status_json: &str,
+    ) -> Arc<std::sync::RwLock<SessionRuntimeSnapshot>> {
+        Arc::new(std::sync::RwLock::new(SessionRuntimeSnapshot {
+            session_id: session_id.to_string(),
+            status: status_json.to_string(),
+            model: None,
+            provider: None,
+            account_id: None,
+            ratio: None,
+            todos_json: None,
+            context_usage: None,
+        }))
+    }
+
+    fn snapshots(
+        entries: Vec<Arc<std::sync::RwLock<SessionRuntimeSnapshot>>>,
+    ) -> SharedSessionSnapshots {
+        let mut map = std::collections::HashMap::new();
+        for snap in entries {
+            let sid = snap.read().unwrap().session_id.clone();
+            map.insert(sid, snap);
+        }
+        Arc::new(std::sync::RwLock::new(map))
+    }
+
+    const WAITING: &str = r#"{"status":"waiting_approval","detail":{"request_id":"req-1"}}"#;
+    const ITERATION_LIMIT: &str =
+        r#"{"status":"paused","detail":{"iteration":12,"max_iterations":12,"reason":"iteration_limit"}}"#;
+
+    #[test]
+    fn one_read_yields_both_the_active_set_and_the_stored_status() {
+        // The listing's two per-row facts (`is_active`, `status`) come from the
+        // same acquisition, so a row can never pair a live key with a status
+        // from another instant.
+        let snaps = snapshots(vec![resident("s-1", WAITING)]);
+        let (active, live_status) = resident_snapshots(&snaps);
+        assert!(active.contains("s-1"));
+        assert_eq!(live_status.get("s-1").map(String::as_str), Some(WAITING));
+    }
+
+    #[test]
+    fn a_parked_session_reports_the_request_id_its_card_answers() {
+        // This is the fact the sidebar badge and the Desktop's ADR-014 pull
+        // repair read: a resident session blocked on a human.
+        assert_eq!(
+            parse_live_status(WAITING),
+            Some(SessionStatusDto::WaitingApproval {
+                request_id: "req-1".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn an_iteration_limit_pause_keeps_its_reason_through_the_parse() {
+        // "paused" alone is ambiguous: with `iteration_limit` (or
+        // `loop_detected` / `debug`) a human must decide, with `retry_info`
+        // (429) the Runtime resumes on its own. The reason is what tells the
+        // surfaces which of the two they are looking at.
+        match parse_live_status(ITERATION_LIMIT) {
+            Some(SessionStatusDto::Paused { reason, .. }) => {
+                assert_eq!(reason, Some(PauseReasonDto::IterationLimit));
+            }
+            other => panic!("expected an iteration-limit pause, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_status_the_wire_cannot_model_degrades_to_none() {
+        // `errored` has no DTO arm. Reporting no status is honest (the pushed
+        // retained value stays in place); inventing one would flip a badge from
+        // a guess.
+        assert_eq!(
+            parse_live_status(r#"{"status":"errored","detail":{"reason":"x","message":"y","recoverable":false}}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn a_session_without_a_readable_status_reports_none() {
+        // Empty = never resident / poisoned guard. Not an error, not a status.
+        assert_eq!(parse_live_status(""), None);
+    }
 }

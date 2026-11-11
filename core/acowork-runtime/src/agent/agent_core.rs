@@ -1072,6 +1072,43 @@ impl AgentCore {
         (provider, model)
     }
 
+    /// The usable entries of the global `default_compact_models` list, in the
+    /// user's order: provider available AND model present in the capabilities
+    /// map. **Ids only** — provider construction reads the key vault and builds
+    /// an HTTP client, which is why this returns the ids and leaves building to
+    /// the caller that will actually call them: `resolve_summary_llm` builds the
+    /// first, the chat router its whole (capped) chain.
+    ///
+    /// The one filter behind [`Self::resolve_summary_llm`] (first entry wins)
+    /// and the chat router's call-phase fallback chain (walks the whole list
+    /// when a candidate's model call fails), so the two cannot drift. Same
+    /// contract as `resolve_distill_model`, minus the context-window gate: the
+    /// router prompt and the summary prompt are both bounded by construction,
+    /// so a candidate that fits the capability map fits any window.
+    pub(crate) fn compact_model_candidates(&self) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for (pid, mid) in self.default_compact_models.read().unwrap().clone() {
+            if !self.is_compact_provider_available(&pid) {
+                tracing::debug!(
+                    provider_id = %pid,
+                    model_id = %mid,
+                    "compact candidate: provider unavailable, skipping"
+                );
+                continue;
+            }
+            if self.get_model_capabilities(&mid).is_none() {
+                tracing::debug!(
+                    provider_id = %pid,
+                    model_id = %mid,
+                    "compact candidate: model not in capabilities, skipping"
+                );
+                continue;
+            }
+            out.push((pid, mid));
+        }
+        out
+    }
+
     /// ADR-093 follow-up: resolve the `(Provider, model)` to use for the
     /// `POST /search/summary` LLM call, in priority order:
     ///
@@ -1104,32 +1141,15 @@ impl AgentCore {
         // Level 1: global compact-model candidate list, in user order.
         // Same filtering contract as `resolve_distill_model` (provider
         // availability + capability lookup) but no context-window gate.
-        let globals: Vec<(String, String)> =
-            self.default_compact_models.read().unwrap().clone();
-        for (pid, mid) in &globals {
-            if !self.is_compact_provider_available(pid) {
-                tracing::debug!(
-                    provider_id = %pid,
-                    model_id = %mid,
-                    "summary: global compact candidate provider unavailable, skipping"
-                );
-                continue;
-            }
-            if self.get_model_capabilities(mid).is_none() {
-                tracing::debug!(
-                    model_id = %mid,
-                    "summary: global compact candidate model not in capabilities, skipping"
-                );
-                continue;
-            }
-            if let Some(provider) = self.build_compact_provider(pid) {
+        for (pid, mid) in self.compact_model_candidates() {
+            if let Some(provider) = self.build_compact_provider(&pid) {
                 tracing::info!(
                     provider_id = %pid,
                     model_id = %mid,
                     tier = "global_default",
                     "summary: using global default compact model"
                 );
-                return (provider, mid.clone(), SummaryModelTier::GlobalDefault);
+                return (provider, mid, SummaryModelTier::GlobalDefault);
             }
             tracing::debug!(
                 provider_id = %pid,
@@ -1153,7 +1173,11 @@ impl AgentCore {
     /// Same construction as `SessionCore::build_provider_for` but without
     /// session retry-UX wiring (the background pipeline has no session to
     /// render retry state into).
-    fn build_compact_provider(
+    ///
+    /// `pub(crate)`: the chat router builds its fallback chain from
+    /// [`Self::compact_model_candidates`] and must construct each candidate
+    /// the same way compaction does.
+    pub(crate) fn build_compact_provider(
         &self,
         provider_id: &str,
     ) -> Option<Arc<dyn acowork_core::providers::traits::Provider>> {
@@ -3086,6 +3110,26 @@ mod tests {
         let (_provider, model, tier) = core.resolve_summary_llm(None, None);
         assert_eq!(tier, SummaryModelTier::GlobalDefault);
         assert_eq!(model, "qwen-7b");
+    }
+
+    /// The chat router builds its call-phase fallback chain from this list
+    /// (`chat_router::runner::router_llm_candidates`), so it must be exactly
+    /// the entries whose model call could actually succeed: an available
+    /// provider AND a model the capability map knows. Anything else in the list
+    /// would burn a per-call timeout on a model that cannot answer.
+    #[test]
+    fn compact_model_candidates_drops_unusable_entries_in_user_order() {
+        let core = make_core_with_ollama_candidate("ollama-local", "qwen-7b", 32_000);
+        *core.default_compact_models.write().unwrap() = vec![
+            ("missing-pid".to_string(), "missing-model".to_string()),
+            ("ollama-local".to_string(), "model-not-listed".to_string()),
+            ("ollama-local".to_string(), "qwen-7b".to_string()),
+        ];
+
+        assert_eq!(
+            core.compact_model_candidates(),
+            vec![("ollama-local".to_string(), "qwen-7b".to_string())]
+        );
     }
 
     #[test]

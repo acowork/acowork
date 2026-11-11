@@ -41,6 +41,11 @@ import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { showToast } from "../../components/common/ToastProvider";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
+import {
+  CAPSULE_PANE_CN,
+  SURFACE_CONTENT_CN,
+  SURFACE_PANEL_CN,
+} from "../../components/common/capsule";
 import { TaskFieldPicker } from "./TaskFieldPicker";
 import { PmPopover, PmPopoverItem, PmPopoverSection } from "./pmPopover";
 import { PmColumnResizer } from "./PmColumnResizer";
@@ -56,21 +61,25 @@ import {
 import {
   resolveActorLabel,
   resolveMembers,
+  MemberAvatar,
   usePmDirectoryUsers,
   useSelfAccount,
   withOwner,
 } from "./pmMembers";
 import { STATUS_TRANSITIONS } from "./TaskStatusMove";
+import { PriorityBadge } from "./PriorityBadge";
 import {
-  ADD_COL_WIDTH,
   CHECK_COL_WIDTH,
+  ROW_HEIGHT,
   STATUS_DOT_CLASS,
   STATUS_LABEL_KEY,
+  STATUS_PILL_CLASS,
   TH_BASE_CN,
   estimateTableWidth,
 } from "./taskListLabels";
 import { cn } from "../../lib/utils";
-import { createTask, updateTask } from "../../lib/pm-api";
+import { createTask, deleteTask, updateTask } from "../../lib/pm-api";
+import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import {
   DEFAULT_PM_LIST_COLUMNS,
   EMPTY_PM_LIST_FILTERS,
@@ -121,6 +130,10 @@ type OpenPopoverSpec =
   | ToolbarPopoverSpec
   | { kind: "columnMenu"; column: PmListColumnKey }
   | { kind: "statusMenu"; taskId: string }
+  /** 行内改优先级（点行里的优先级格）。 */
+  | { kind: "priorityMenu"; taskId: string }
+  /** 行内改负责人（点行里的负责人格）。 */
+  | { kind: "assigneeMenu"; taskId: string }
   | { kind: "bulk"; field: BulkField };
 
 type OpenPopover = OpenPopoverSpec & { anchor: HTMLElement };
@@ -139,6 +152,7 @@ export function TaskListView({
   const moveTask = usePmBoardStore((s) => s.moveTask);
   const reviewTask = usePmBoardStore((s) => s.reviewTask);
   const upsertTask = usePmBoardStore((s) => s.upsertTask);
+  const removeTask = usePmBoardStore((s) => s.removeTask);
   const healthy = usePmHealthStore((s) => s.healthy);
   const offline = healthy === false;
 
@@ -154,6 +168,9 @@ export function TaskListView({
   const [creating, setCreating] = useState(false);
   const [createTitle, setCreateTitle] = useState("");
   const [savingRow, setSavingRow] = useState(false);
+  /** 批量删除的确认弹窗（选中行数写进文案）。 */
+  const [confirmBulkDelete, setConfirmBulkDelete] = useState(false);
+  const [deletingRows, setDeletingRows] = useState(false);
 
   // 切项目：视图状态归零。显示列跟着项目走（metadata），不在这里重置。
   useEffect(() => {
@@ -351,6 +368,77 @@ export function TaskListView({
   );
 
   /**
+   * 行内改优先级 / 负责人。
+   *
+   * 与 `applyStatus` 同一套语义：单行就地改，走 PATCH。
+   *
+   * `PATCH /tasks/:tid` 返回的是 `PmTask`（不含派生字段 `is_blocked` /
+   * `depth` / `parent_id`），整体替换会拆掉父子树，所以这里必须是
+   * `{ ...prev, ...updated }` —— 与批量路径同一个坑。
+   */
+  const applyField = useCallback(
+    async (task: PmTaskResponse, patch: { priority?: Priority; assignee?: string | null }) => {
+      close();
+      try {
+        const updated = await updateTask(task.id, patch);
+        upsertTask({ ...task, ...updated });
+      } catch (e) {
+        showToast({
+          type: "error",
+          message: t("pm.list.updateRowFailed", {
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        });
+      }
+    },
+    [close, t, upsertTask],
+  );
+
+  /**
+   * 批量删除选中的行。
+   *
+   * 两处必须小心：
+   *
+   * 1. **服务端级联**：P1 阶段的 `delete_task` 无视 `cascade` 标志，总是连同
+   *    子树一起删（`core/acowork-pm/src/store/tree.rs:1319`）。所以删一条父
+   *    任务，它的所有子孙也一起没了 —— 本地 store 必须把整棵子树摘掉，
+   *    否则列表会留下一批服务端已经不存在的行。
+   * 2. **逐条记账**：一批 N 条就是 N 个独立请求，任何一条失败都不能改变
+   *    其余条的结局，所以逐条记账、最后只报真实数字；失败的保留选中态，
+   *    原地重试即可。
+   */
+  const applyBulkDelete = useCallback(async () => {
+    setConfirmBulkDelete(false);
+    const ids = [...selected];
+    if (!ids.length || deletingRows) return;
+    setDeletingRows(true);
+    let deleted = 0;
+    const failed: string[] = [];
+    for (const id of ids) {
+      try {
+        await deleteTask(id);
+        deleted += 1;
+        // 本地摘掉这一行和它的子树（服务端已经级联删了）。
+        const subtree = tasks.filter((task) => isDescendantOf(task, id, byId));
+        for (const task of subtree) removeTask(task.id);
+      } catch {
+        failed.push(id);
+      }
+    }
+    setDeletingRows(false);
+    if (!failed.length) {
+      setSelected(new Set());
+      showToast({ type: "success", message: t("pm.list.bulkDeleted", { count: deleted }) });
+      return;
+    }
+    setSelected(new Set(failed));
+    showToast({
+      type: "warning",
+      message: t("pm.list.bulkDeletePartial", { deleted, failed: failed.length }),
+    });
+  }, [selected, tasks, byId, removeTask, t, deletingRows]);
+
+  /**
    * 批量改字段。
    *
    * 状态走 `moveTask`（与看板同一套乐观 + 回滚）；优先级 / 负责人 PATCH 后
@@ -461,7 +549,7 @@ export function TaskListView({
 
   const filtersActive = hasActivePmListFilters(filters);
   const allSelected = rows.length > 0 && rows.every((r) => selected.has(r.task.id));
-  const colCount = visibleColumns.length + 2;
+  const colCount = visibleColumns.length + 1;
 
   const groupLabelOf = useCallback(
     (id: string): string => {
@@ -475,7 +563,16 @@ export function TaskListView({
   );
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col bg-page-bg">
+    // 整块列表 = 一枚大胶囊，与看板的列同一个外壳（`CAPSULE_PANE_CN`）：头部是
+    // 工具栏、尾部是页码、中间是行。留白（p-3）由 `ProjectBoard` 给，看板的 p-3
+    // 在 `KanbanBoard` 里，两者在窗口里的位置一致。`relative` 留在这一层：批量
+    // 操作条是胶囊内的绝对定位浮条。
+    //
+    // 表面三层，与看板一一对应（`capsule.ts` 的 SURFACE_* 阶梯）：
+    //   页面 `page-bg` → 胶囊 = 看板的"列" `SURFACE_PANEL_CN`（工具条 / 页脚 /
+    //   表头露出这层）→ 表格 = 看板的"卡片" `SURFACE_CONTENT_CN`（见下面
+    //   `<table>`，行 / 空态 / 新建行 / 骨架行全在表格盒内，一处上色就够）。
+    <div className={cn(CAPSULE_PANE_CN, "relative h-full", SURFACE_PANEL_CN)}>
       <TaskListToolbar
         filters={filters}
         filtersActive={filtersActive}
@@ -491,10 +588,21 @@ export function TaskListView({
           裸滚动容器在主题化表面里会露出系统滚动条（Chromium 121+ 之后
           `::-webkit-scrollbar` 那套皮肤在标准属性非 auto 时整族失效）。
           `showXThumb` + `overflow-x-auto`：列多时要横向滚动，而视口默认是
-          `overflow-x-hidden`，横向那根只能显式要。 */}
-      <OverlayScrollbar fill="flex" showXThumb className="overflow-x-auto">
+          `overflow-x-hidden`，横向那根只能显式要。
+
+          `px-3` 左右各留 12px：表头 / 表体的底色块在胶囊里内缩一圈，两侧露出
+          胶囊自己的底色，胶囊才是一整枚（否则色块顶到边框上、把圆角切开，看着
+          像两个并排的方块）。12px 与工具栏 / 页脚的 `px-3` 同一条竖线。 */}
+      <OverlayScrollbar fill="flex" showXThumb className="overflow-x-auto px-3">
         <table
-          className="w-full border-separate border-spacing-0 text-11"
+          /* `text-xs`（12px）而不是 `text-11`（11px）：列表的任务标题要和
+             看板卡片（`TaskCard` 的 `text-xs`）是同一个字号，否则同一个任务在
+             两种视图里大小不同、像两套 UI。12px 与全局 `--ui-text-size`
+             （列表 / 工具栏这一档）也一致。行高 34px 放得下 12px 单行文本。 */
+          /* 表格整盒 = 看板卡片的底色（`SURFACE_CONTENT_CN`）：数据行 / 空态 /
+             新建行 / 骨架行都是它的子节点，一处上色；行自己不上底色，`tr` 的
+             hover 与选中高亮才能透出来。表头单独用下一档（见 `TH_BASE_CN`）。 */
+          className={cn("w-full border-separate border-spacing-0 text-xs", SURFACE_CONTENT_CN)}
           style={{
             tableLayout: "fixed",
             minWidth: estimateTableWidth(visibleColumns, widths),
@@ -514,21 +622,30 @@ export function TaskListView({
                 }}
               />
             ))}
-            <col style={{ width: ADD_COL_WIDTH }} />
           </colgroup>
 
           <thead>
-            <tr>
-              <th className={cn(TH_BASE_CN, "px-2")} aria-label={t("pm.list.selectAll")}>
+            {/* 表头与数据行同高（`ROW_HEIGHT`）：表头不定高时它的行高由内容决定，
+                而数据行是固定 34px，两者一高一矮，表头那枚全选框看上去就贴在
+                上边框线上、和下面的复选框不在同一条水平线上。 */}
+            <tr style={{ height: ROW_HEIGHT }}>
+              {/* 复选框列用 `pl-3 pr-0`（不是 `px-3`）：`table-layout: fixed` 下
+                  列宽是给定的，padding 不计入其中 —— 左右各 12px 会把内容盒
+                  压到 2px，14px 的复选框就溢到标题列上去了。列宽 26px
+                  = 12px 左边距 + 14px 复选框，12px 与上方工具栏 / 页脚的
+                  `px-3` 对齐，列表第一列就不再贴边。 */}
+              <th className={cn(TH_BASE_CN, "pl-3 pr-0")} aria-label={t("pm.list.selectAll")}>
                 <input
                   type="checkbox"
                   aria-label={t("pm.list.selectAll")}
                   checked={allSelected}
                   onChange={toggleSelectAll}
-                  className="ml-1 h-3.5 w-3.5 cursor-pointer accent-[var(--color-accent)]"
+                  /* 不加 `ml-*`：数据行的复选框同样贴着列首内边距，
+                     表头多一个外边距就会和下面那列复选框错开一条缝。 */
+                  className="h-3.5 w-3.5 cursor-pointer accent-[var(--color-accent)]"
                 />
               </th>
-              {visibleColumns.map((c) => (
+              {visibleColumns.map((c, i) => (
                 <th
                   key={c.key}
                   data-column={c.key}
@@ -539,7 +656,14 @@ export function TaskListView({
                         : "descending"
                       : "none"
                   }
-                  className={cn(TH_BASE_CN, "group/th", c.align === "right" && "text-right")}
+                  /* 末列 `pr-3`：表格右边界不再有「＋」占位列兜着，由最后一列
+                     自己收住 12px，与左侧复选框列的 `pl-3` / 工具栏 `px-3` 对称。 */
+                  className={cn(
+                    TH_BASE_CN,
+                    "group/th",
+                    c.align === "right" && "text-right",
+                    i === visibleColumns.length - 1 && "pr-3",
+                  )}
                   title={t("pm.list.sortHint")}
                 >
                   {/* 排序挂在内容层，**不是** `<th>` 上：列宽手柄也是 `<th>` 的
@@ -576,17 +700,10 @@ export function TaskListView({
                   />
                 </th>
               ))}
-              <th className={cn(TH_BASE_CN, "cursor-default px-1")}>
-                <button
-                  type="button"
-                  aria-label={t("pm.list.fields.open")}
-                  title={t("pm.list.fields.open")}
-                  onClick={openAt({ kind: "fields" })}
-                  className="rounded px-1 text-text-tertiary hover:bg-zinc-200 hover:text-text dark:hover:bg-zinc-700"
-                >
-                  ＋
-                </button>
-              </th>
+              {/* 表头里不再挂「＋」字段入口：它和工具栏右端的「字段」打开同一个
+                  `TaskFieldPicker`，而列表的列是固定注册字段、没有"就地新建字段"
+                  这回事，那个 ＋ 只是同一弹层的第二个门。表格的右边界由最后一个
+                  可见列自己的 `pr-3` 收住（pl-3 的复选框列对称），与页脚右端对齐。 */}
             </tr>
           </thead>
 
@@ -636,6 +753,8 @@ export function TaskListView({
                         onToggleSelect={toggleSelected}
                         onToggleCollapse={toggleCollapsed}
                         onOpenStatus={openAt({ kind: "statusMenu", taskId: task.id })}
+                        onOpenPriority={openAt({ kind: "priorityMenu", taskId: task.id })}
+                        onOpenAssignee={openAt({ kind: "assigneeMenu", taskId: task.id })}
                       />
                     );
                   })}
@@ -644,7 +763,7 @@ export function TaskListView({
             )}
 
             <tr>
-              <td colSpan={colCount} className="border-b border-border-divider px-2 py-0.5">
+              <td colSpan={colCount} className="border-b border-border-divider px-3 py-0.5">
                 {creating ? (
                   <input
                     autoFocus
@@ -682,7 +801,9 @@ export function TaskListView({
         </table>
       </OverlayScrollbar>
 
-      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-border-divider px-3 py-1 text-10 text-text-tertiary">
+      {/* 页脚文字用 `text-xs`（12px）：与工具栏、表格同一档。
+          `px-3` 的 12px 边距也就是列表左右两侧的留白基准。 */}
+      <footer className="flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-1 border-t border-border-divider px-3 py-1 text-xs text-text-tertiary">
         <span>{t("pm.list.shownCount", { shown: rows.length, total: tasks.length })}</span>
         {/* 分页：装箱按子树来，所以页脚报的是累计行号 + 页码，不是"每页 N 条"。 */}
         {rows.length > 0 && (
@@ -775,15 +896,76 @@ export function TaskListView({
               )}
               {targets.map((s) => (
                 <PmPopoverItem key={s} onClick={() => void applyStatus(task, s)}>
-                  <span className="flex items-center gap-1.5">
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-white",
+                      STATUS_PILL_CLASS[s],
+                    )}
+                  >
                     <span
-                      className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[s])}
+                      className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS)}
                       aria-hidden
                     />
                     {t(STATUS_LABEL_KEY[s])}
                   </span>
                 </PmPopoverItem>
               ))}
+            </PmPopover>
+          );
+        })()}
+
+      {open?.kind === "priorityMenu" &&
+        (() => {
+          const task = byId.get(open.taskId);
+          if (!task) return null;
+          return (
+            <PmPopover anchor={open.anchor} onClose={close} width={170}>
+              <PmPopoverSection>{t("pm.list.col.priority")}</PmPopoverSection>
+              {(["urgent", "high", "normal", "low"] as Priority[]).map((p) => (
+                <PmPopoverItem
+                  key={p}
+                  checked={task.priority === p}
+                  onClick={() => void applyField(task, { priority: p })}
+                >
+                  <PriorityBadge priority={p} className="px-1.5 py-0.5 text-xs" />
+                </PmPopoverItem>
+              ))}
+            </PmPopover>
+          );
+        })()}
+
+      {open?.kind === "assigneeMenu" &&
+        (() => {
+          const task = byId.get(open.taskId);
+          if (!task) return null;
+          return (
+            <PmPopover anchor={open.anchor} onClose={close} width={210}>
+              <PmPopoverSection>{t("pm.list.col.assignee")}</PmPopoverSection>
+              <OverlayScrollbar maxHeight={256}>
+                {assigneeOptions.map((o) => {
+                  const member = memberById.get(o.value);
+                  return (
+                    <PmPopoverItem
+                      key={o.value}
+                      checked={task.assignee === o.value}
+                      prefix={
+                        member ? (
+                          <MemberAvatar member={member} size={16} className="shrink-0" />
+                        ) : undefined
+                      }
+                      onClick={() => void applyField(task, { assignee: o.value })}
+                    >
+                      {o.label}
+                    </PmPopoverItem>
+                  );
+                })}
+                <PmPopoverItem
+                  checked={task.assignee === null}
+                  onClick={() => void applyField(task, { assignee: null })}
+                >
+                  <span className="text-text-tertiary">{t("pm.task.unassigned")}</span>
+                </PmPopoverItem>
+              </OverlayScrollbar>
             </PmPopover>
           );
         })()}
@@ -832,33 +1014,64 @@ export function TaskListView({
                   那根公共滚动条 —— 裸 `max-h-* overflow-y-auto` 会被
                   `overlayScrollCoverage` 判成未绑定容器。 */}
               <OverlayScrollbar maxHeight={256}>
-                {options.map((o) => (
-                  <PmPopoverItem
-                    key={o.value}
-                    checked={!isBulk && active.has(o.value)}
-                    onClick={() => {
-                      if (isBulk) {
-                        if (field === "status") void applyBulk({ status: o.value as TaskStatus });
-                        else if (field === "priority")
-                          void applyBulk({ priority: o.value as Priority });
-                        else
-                          void applyBulk({
-                            assignee: o.value === UNASSIGNED ? null : o.value,
-                          });
-                        return;
+                {options.map((o) => {
+                  // 与列表行内的 value 同一套视觉：状态胶囊 / 优先级徽章 / 头像。
+                  const member = field === "assignee" ? memberById.get(o.value) : undefined;
+                  return (
+                    <PmPopoverItem
+                      key={o.value}
+                      checked={!isBulk && active.has(o.value)}
+                      prefix={
+                        member ? (
+                          <MemberAvatar member={member} size={16} className="shrink-0" />
+                        ) : undefined
                       }
-                      setFilters((prev) => {
-                        const cur = prev[field] as string[];
-                        const next = cur.includes(o.value)
-                          ? cur.filter((v) => v !== o.value)
-                          : [...cur, o.value];
-                        return { ...prev, [field]: next } as PmListFilters;
-                      });
-                    }}
-                  >
-                    {o.label}
-                  </PmPopoverItem>
-                ))}
+                      onClick={() => {
+                        if (isBulk) {
+                          if (field === "status") void applyBulk({ status: o.value as TaskStatus });
+                          else if (field === "priority")
+                            void applyBulk({ priority: o.value as Priority });
+                          else
+                            void applyBulk({
+                              assignee: o.value === UNASSIGNED ? null : o.value,
+                            });
+                          return;
+                        }
+                        setFilters((prev) => {
+                          const cur = prev[field] as string[];
+                          const next = cur.includes(o.value)
+                            ? cur.filter((v) => v !== o.value)
+                            : [...cur, o.value];
+                          return { ...prev, [field]: next } as PmListFilters;
+                        });
+                      }}
+                    >
+                      {field === "status" ? (
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-white",
+                            STATUS_PILL_CLASS[o.value as TaskStatus],
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "h-1.5 w-1.5 shrink-0 rounded-full",
+                              STATUS_DOT_CLASS,
+                            )}
+                            aria-hidden
+                          />
+                          {o.label}
+                        </span>
+                      ) : field === "priority" ? (
+                        <PriorityBadge priority={o.value as Priority} className="px-1.5 py-0.5 text-xs" />
+                      ) : member ? (
+                        o.label
+                      ) : (
+                        <span className="text-text-tertiary">{o.label}</span>
+                      )}
+                    </PmPopoverItem>
+                  );
+                })}
               </OverlayScrollbar>
             </PmPopover>
           );
@@ -868,11 +1081,47 @@ export function TaskListView({
         <TaskListBulkBar
           count={selected.size}
           onOpen={(field) => openAt({ kind: "bulk", field })}
+          onDelete={() => setConfirmBulkDelete(true)}
           onClear={() => setSelected(new Set())}
         />
       )}
+
+      {/* 批量删除的确认 —— 不可逆操作必须有确认，且文案要说清数量与级联。 */}
+      <ConfirmDialog
+        open={confirmBulkDelete}
+        title={t("pm.list.bulkDeleteTitle")}
+        message={`${t("pm.list.bulkDeleteDesc", { count: selected.size })}`}
+        confirmLabel={t("common.delete")}
+        destructive
+        onConfirm={() => void applyBulkDelete()}
+        onCancel={() => setConfirmBulkDelete(false)}
+      />
     </div>
   );
+}
+
+/**
+ * `task` 是否在 `rootId` 的子树里（含 `task` 自己）。
+ *
+ * 服务端删除是级联的（父任务一删，子孙全没），本地摘行必须用同一套
+ * 范围，否则会留下一批服务端已经不存在的行。
+ *
+ * 用 `parent_id` 链往上走，不用 `depth`：服务端返回的 `depth` 只在树形
+ * 完整时可靠，链式判定对任何输入都成立。
+ */
+function isDescendantOf(
+  task: PmTaskResponse,
+  rootId: string,
+  byId: Map<string, PmTaskResponse>,
+): boolean {
+  let cursor: PmTaskResponse | undefined = task;
+  // 父链是有向无环的（服务端拒绝成环），但加一个上限兜底 —— 万一数据
+  // 里有环，这里不会把整棵树扫死。
+  for (let hops = 0; cursor && hops < 64; hops += 1) {
+    if (cursor.id === rootId) return true;
+    cursor = cursor.parent_id ? byId.get(cursor.parent_id) : undefined;
+  }
+  return false;
 }
 
 /**

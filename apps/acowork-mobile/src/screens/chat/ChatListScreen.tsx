@@ -3,8 +3,12 @@
  *
  * Desktop splits this into an AgentList and a UserList side by side. On a
  * 390pt-wide screen there is no room for two lists, and IM users expect
- * ONE inbox. So agents and contacts become two `ListSection` groups inside
- * a single scroll view — same data, one column, native grouping.
+ * ONE inbox. So agents, groups and contacts become `ListSection` groups
+ * inside a single scroll view — same data, one column, native grouping.
+ *
+ * Section order mirrors the Desktop sidebar: the node-grouped agent list
+ * first, then the project-group banner (which on Desktop sits below the
+ * agents), then the contacts.
  *
  * Ordering is recency, active conversations first. A contact with no thread
  * yet is still listed (starting one is the point of the directory), sorted
@@ -14,13 +18,22 @@
  * server-side read cursor, so its count is a NUMBER. An agent session has
  * none, so it gets no count at all — only a green dot while it is working,
  * which is the single status signal the Desktop sidebar shows too.
+ *
+ * One exception, and it is not a count either: an agent row gets a RED dot when
+ * one of its sessions is holding a turn open for the reader (a tool approval,
+ * an `ask_user_question`, or a turn paused at the iteration limit). Those cards
+ * expire on their own and the Runtime then answers on the human's behalf, so a
+ * parked agent that looks exactly like a busy one is how a decision gets made
+ * for you. Same rule as Desktop's `lib/sessionAttention`, applied to the same
+ * `.../sessions/+/state` fact — the two inboxes must not disagree.
  */
 
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
-import { Monitor, Users } from 'lucide-react'
+import { Monitor, Users, UsersRound } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useChatSessionStore } from '../../stores/chatSessionStore'
+import { useProjectGroupStore } from '../../stores/projectGroupStore'
 import { useUserChatStore } from '../../stores/userChatStore'
 import { useNavStore } from '../../stores/navStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -28,6 +41,7 @@ import { formatListTime } from '../../lib/time'
 import { ListSection, ListRow } from '../../components/ui'
 import { AuthImage } from '../../components/AuthImage'
 import { BUILTIN_ICONS, BUILTIN_ICON_IDS } from '../../lib/builtinIcons'
+import { attentionByAgent, attentionLabel, workingAgentIds } from '../../lib/sessionAttention'
 import type { NodeRow } from '../../lib/types'
 
 /** Pick a stable builtin icon ID for a given seed (same as Desktop). */
@@ -106,28 +120,54 @@ function ContactsTitle() {
   return <GroupTitle icon={<Users className="group-title-icon" aria-hidden />} name="联系人" />
 }
 
+/** Group header for the project-group section (design 27 §4.4). Like the
+ *  contacts header: no aggregate state to advertise, so no dot. */
+function GroupsTitle() {
+  return <GroupTitle icon={<UsersRound className="group-title-icon" aria-hidden />} name="群聊" />
+}
+
+/** A group row's avatar: a deterministic builtin keyed by the title — the
+ *  same rule an unnamed contact gets. There is no per-group icon on the
+ *  wire, and inventing one client-side would put the truth in two places. */
+function GroupAvatar({ title }: { title: string }) {
+  const picked = pickIconId(title)
+  const src = picked ? BUILTIN_ICONS[picked] : undefined
+  return src ? <img src={src} alt="" /> : <span>{title.charAt(0) || '群'}</span>
+}
+
 export function ChatListScreen() {
   const agents = useAgentStore((s) => s.agentList)
   const users = useAgentStore((s) => s.users)
   const nodes = useAgentStore((s) => s.nodes)
   const sessionsByAgent = useAgentStore((s) => s.agents)
-  const busySessions = useAgentStore((s) => s.busySessions)
+  const sessionStatuses = useAgentStore((s) => s.sessionStatuses)
   const refreshInbox = useAgentStore((s) => s.refreshInbox)
   const loading = useAgentStore((s) => s.directoryLoading)
   const startingAgentIds = useAgentStore((s) => s.startingAgentIds)
   const push = useNavStore((s) => s.push)
+  // One fact, two readings, both derived here (never cached in the store) — so
+  // the green dot and the red dot cannot disagree about the same session.
+  const workingIds = useMemo(() => workingAgentIds(sessionStatuses), [sessionStatuses])
+  const attentionIds = useMemo(() => attentionByAgent(sessionStatuses), [sessionStatuses])
   const baseUrl = useAuthStore((s) => s.baseUrl)
 
   const chats = useUserChatStore((s) => s.chats)
   const refreshChats = useUserChatStore((s) => s.refreshChats)
 
+  const groups = useProjectGroupStore((s) => s.groups)
+  const fetchGroups = useProjectGroupStore((s) => s.fetchGroups)
+  const meId = useAuthStore((s) => s.me?.user_id ?? '')
+
   const [query, setQuery] = useState('')
 
-  // Entering the inbox re-pulls directory + sessions + previews (§8.5).
+  // Entering the inbox re-pulls directory + sessions + previews (§8.5), and
+  // the group list with them: the same IM truth the doorbell keeps warm, read
+  // whole on entry so a badge left elsewhere is gone by the time you look.
   useEffect(() => {
     void refreshInbox()
     void refreshChats()
-  }, [refreshInbox, refreshChats])
+    void fetchGroups()
+  }, [refreshInbox, refreshChats, fetchGroups])
 
   const q = query.trim().toLowerCase()
   const match = (name: string, sub?: string | null) =>
@@ -185,6 +225,16 @@ export function ChatListScreen() {
       .sort((x, y) => (y.chat?.last_active_at ?? 0) - (x.chat?.last_active_at ?? 0))
   }, [users, chatByPeer, q])
 
+  // The group section: the store's list is already recency-sorted; the inbox
+  // only adds the search filter and reads this account's own unread count off
+  // the server's per-participant map (§4.6) — the ONE numeric badge a group
+  // row wears, exactly like the contact rows' server cursor.
+  const groupRows = useMemo(() => {
+    return groups
+      .filter((g) => match(g.title, g.last_message_preview))
+      .map((g) => ({ g, unread: meId ? g.unread?.[meId] ?? 0 : 0 }))
+  }, [groups, meId, q])
+
   const openAgent = async (agentId: string) => {
     // Offline → wake it in place, do NOT open a chat against a stopped
     // Runtime (that was the blank screen). Re-tap once the row goes online.
@@ -210,6 +260,15 @@ export function ChatListScreen() {
     push('chat/user')
   }
 
+  // The group tap: select the session, then open its transcript window
+  // fire-and-forget — the screen gates on the window itself, the same rule
+  // `openAgent` follows for the pair's default session.
+  const openGroup = (sessionId: string) => {
+    useProjectGroupStore.getState().selectGroup(sessionId)
+    void useChatSessionStore.getState().openGroup(sessionId)
+    push('chat/group')
+  }
+
   return (
     <div className="screen">
       <header className="navbar navbar-large">
@@ -221,7 +280,7 @@ export function ChatListScreen() {
           className="searchbar-input"
           type="search"
           inputMode="search"
-          placeholder="搜索 Agent 或联系人"
+          placeholder="搜索群聊、Agent 或联系人"
           aria-label="搜索"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
@@ -237,6 +296,12 @@ export function ChatListScreen() {
                 key={a.id}
                 avatar={<AgentAvatar name={a.name} icon={a.icon} avatar={a.avatar} agentId={a.id} baseUrl={baseUrl} />}
                 onClick={() => void openAgent(a.id)}
+                // Nothing in this list is "the session you are looking at", so
+                // there is nothing to suppress: an agent parked on a card gets
+                // its dot whether or not it is the last one you opened. An
+                // offline agent holds no obligation (applyPresence drops its
+                // facts), so the presence check is belt-and-braces.
+                attention={attentionLabel(a.status === 'offline' ? undefined : attentionIds.get(a.id))}
                 label={
                   <span className="row-title">
                     {a.name}
@@ -249,7 +314,7 @@ export function ChatListScreen() {
                         // `.../sessions/+/state` pushes — the same signal
                         // Desktop's `busyAgentIds` reads (the directory and
                         // the AgentStatus wire never carry `busy`).
-                        const working = busySessions[a.id]?.size ? a.status !== 'offline' : false
+                        const working = a.status !== 'offline' && workingIds.has(a.id)
                         const cls =
                           a.status === 'offline'
                             ? 'dot dot-offline'
@@ -281,6 +346,22 @@ export function ChatListScreen() {
         {onlineGroups.length === 0 && !loading ? (
           <ListSection>
             <ListRow label="暂无 Agent" hint="在桌面端安装后出现在这里" />
+          </ListSection>
+        ) : null}
+
+        {groupRows.length > 0 ? (
+          <ListSection title={<GroupsTitle />}>
+            {groupRows.map(({ g, unread }) => (
+              <ListRow
+                key={g.session_id}
+                avatar={<GroupAvatar title={g.title} />}
+                onClick={() => openGroup(g.session_id)}
+                label={<span className="row-title">{g.title}</span>}
+                value={formatListTime(g.last_active_at * 1000)}
+                hint={g.last_message_preview || '群聊'}
+                badge={unread > 0 ? unread : undefined}
+              />
+            ))}
           </ListSection>
         ) : null}
 

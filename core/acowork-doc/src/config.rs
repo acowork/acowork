@@ -55,6 +55,19 @@ pub struct DocConfig {
     /// Default `2 MiB`. Exceeding returns 413 `payload_too_large`.
     #[serde(default = "default_max_doc_size")]
     pub max_doc_size_bytes: usize,
+
+    /// Gateway HTTP base URL (plan §7 G5), injected by the supervisor via
+    /// `--gateway-url`. `None` (standalone runs) disables the review
+    /// receipt push — the agent-side `doc_check_request` poll still
+    /// converges.
+    #[serde(default)]
+    pub gateway_url: Option<String>,
+
+    /// Internal-service Bearer token for Gateway HTTP calls, from env
+    /// `ACOWORK_DOC_GATEWAY_TOKEN` (never argv — same channel as PM's
+    /// `ACOWORK_PM_GATEWAY_TOKEN`, ADR-064 Phase 3).
+    #[serde(default)]
+    pub gateway_token: Option<String>,
 }
 
 /// Default data directory: `$ACOWORK_DOC_DATA_DIR`, else
@@ -106,6 +119,8 @@ impl Default for DocConfig {
             request_ttl_hours: default_request_ttl_hours(),
             trash_retention_days: default_trash_retention_days(),
             max_doc_size_bytes: default_max_doc_size(),
+            gateway_url: None,
+            gateway_token: None,
         }
     }
 }
@@ -154,6 +169,8 @@ mod tests {
             request_ttl_hours: 24,
             trash_retention_days: 7,
             max_doc_size_bytes: 1024,
+            gateway_url: Some("http://127.0.0.1:19876".to_string()),
+            gateway_token: Some("svc".to_string()),
         };
         let json = serde_json::to_string(&cfg).unwrap();
         let back: DocConfig = serde_json::from_str(&json).unwrap();
@@ -163,6 +180,8 @@ mod tests {
         assert_eq!(back.request_ttl_hours, 24);
         assert_eq!(back.trash_retention_days, 7);
         assert_eq!(back.max_doc_size_bytes, 1024);
+        assert_eq!(back.gateway_url.as_deref(), Some("http://127.0.0.1:19876"));
+        assert_eq!(back.gateway_token.as_deref(), Some("svc"));
     }
 
     #[test]

@@ -217,7 +217,7 @@ pub async fn submit(
         .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
     let task = state
         .store
-        .submit_task(&tid, &input.text, input.attachment_ids, actor)
+        .submit_task(&tid, &input.text, input.attachment_ids, vec![], actor)
         .await?;
     Ok(Json(task))
 }

@@ -29,8 +29,14 @@ interface TaskListPagerProps {
   onNext: () => void;
 }
 
+/**
+ * 翻页箭头的按钮 class。
+ *
+ * 点击区用 `h-6 w-6`（24px）而不是贴着图标的 `p-0.5`（≈16px）—— 16px
+ * 的命中框在页脚这种密集控件里很难点中。图标保持 12px，只把命中区放大。
+ */
 const ARROW_CN =
-  "rounded p-0.5 transition-colors hover:bg-zinc-100 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-zinc-700";
+  "inline-flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-zinc-100 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-zinc-700";
 
 export function TaskListPager({
   page,
@@ -85,7 +91,10 @@ export function TaskListPager({
           onChange={(e) => onPageSizeChange(Number(e.target.value))}
           aria-label={t("pm.list.page.size")}
           className={cn(
-            "h-5 rounded border border-border-outer bg-page-bg px-1 text-10 text-text-secondary",
+            /* 24px 高 + `text-xs`（12px）：`h-5 text-10` 的组合在 14px 基准下
+               只有 10px 字、20px 高，页脚那行几乎读不出来；12px 与表格
+               标题、工具栏按钮同一档。 */
+            "h-6 rounded border border-border-outer bg-page-bg px-1.5 text-xs text-text-secondary",
             "outline-none focus:border-[var(--color-accent)]",
           )}
         >

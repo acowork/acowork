@@ -3,6 +3,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { useAgentStore } from "../../stores/agentStore";
 import { useChatStore } from "../../stores/chatStore";
 import { isProcessing } from "../../lib/types";
+import { needsAttention } from "../../lib/sessionAttention";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
 import {
@@ -749,6 +750,11 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
           const isActive = sessionId === foregroundExecId;
           const status = getStatus(sessionId);
           const isProc = isProcessing(status);
+          // "This tab is parked on a card a human must answer" — the same rule
+          // the sidebar row uses (lib/sessionAttention). Shown only for tabs
+          // that are NOT in front: the active tab's card is on screen, so a dot
+          // there would repeat what the reader already sees.
+          const attention = !isActive && needsAttention(status);
           const rowReadOnly = readOnlyIds.has(sessionId);
 
           return (
@@ -798,6 +804,14 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
                 ))}
               {/* Title — double-click enters inline rename (same action as the
                   right-click "Rename" menu item). */}
+              {attention && (
+                <span
+                  data-testid="session-tab-attention-dot"
+                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500"
+                  title={t("sessionTabBar.attention")}
+                  aria-label={t("sessionTabBar.attention")}
+                />
+              )}
               {renamingSessionId === sessionId ? (
                 <input
                   ref={renameInputRef}

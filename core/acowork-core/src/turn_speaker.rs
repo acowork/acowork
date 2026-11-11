@@ -137,8 +137,8 @@ impl TurnSpeaker {
     ///
     /// A map rather than a bare value so the write point can merge it into the
     /// row's existing metadata (`round_id`, an Intent display) without having to
-    /// know this type's key — the shape [`crate::agent::intent_turn::
-    /// intent_display_meta`] already uses.
+    /// know this type's key — the shape the runtime's
+    /// `agent::intent_turn::turn_row_meta` already uses.
     pub fn to_meta(&self) -> serde_json::Map<String, Value> {
         let mut map = serde_json::Map::new();
         if let Ok(value) = serde_json::to_value(self) {

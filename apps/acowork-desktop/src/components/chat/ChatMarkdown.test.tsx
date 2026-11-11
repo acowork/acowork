@@ -20,6 +20,8 @@
  *      default (which would navigate the chat away);
  *   5. `components` merges over the shared set rather than replacing it, so a
  *      surface can add block typography without silently dropping link routing.
+ *   6. a renderer that throws falls back to the raw text — a bug in an element
+ *      override must not take the bubble with it.
  */
 import { fireEvent, render } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -102,5 +104,21 @@ describe("ChatMarkdown", () => {
     const cls = shellOf(container).className;
     expect(cls).toContain("text-center");
     expect(cls).toContain("prose");
+  });
+
+  it("falls back to the raw text when the renderer throws", () => {
+    // The graceful degradation the PM dispatch path needs: a bug in an element
+    // override must not take the bubble with it. The fallback is the raw
+    // content — what the reader would have seen had the body never been
+    // markdown.
+    const boom = () => {
+      throw new Error("boom");
+    };
+    const { container } = render(
+      <ChatMarkdown content={"**bold** body"} components={{ p: boom }} />,
+    );
+    expect(container.textContent).toContain("**bold** body");
+    expect(container.querySelector("strong")).toBeNull();
+    expect(container.querySelector(".prose")).toBeNull();
   });
 });

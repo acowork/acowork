@@ -1,7 +1,7 @@
 ---
 name: product-strategy
 description: Define product vision, target users, positioning, strategic bets, success metrics, risks, and decision principles
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - product strategy
@@ -10,8 +10,9 @@ triggers:
   - 产品定位
   - strategy
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +27,7 @@ Product strategy must connect user value, business outcome, differentiation, and
 
 1. **Load context**
    - Use `mcp_memory__memory_recall` to retrieve prior product decisions, user segments, metrics, roadmap constraints, and stakeholder preferences
-   - Use `file_read` to inspect product docs, research, analytics exports, roadmap, PRDs, support feedback, and competitive notes
+   - Use `doc_read` and `doc_search` to inspect product docs, research, analytics exports, roadmap, PRDs, support feedback, and competitive notes
    - Separate facts, assumptions, open questions, and decisions already made
 
 2. **Clarify strategic frame**
@@ -45,7 +46,7 @@ Product strategy must connect user value, business outcome, differentiation, and
    - Define risks and assumptions to validate
 
 5. **Persist and hand off**
-   - Use `file_write` to save strategy when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist strategic choices, rejected alternatives, metrics, and assumptions
 
 ## Output Format

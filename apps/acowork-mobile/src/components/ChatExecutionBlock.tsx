@@ -15,8 +15,11 @@
  * under the open row. The only thing invented here is what a row pairs:
  * `user` / `assistant` instead of `tool_call` / `tool_result`, plus the
  * session's live state next to the count. Design 27 §6.5's mobile deltas:
- * - the newest round's answer shows inline — folding a reply behind a tap would
- *   make reading it cost more here than on the surface that owns the transcript;
+ * - the run's latest answer is drawn BELOW the block as an ordinary assistant
+ *   bubble, folded to eight lines with a double-chevron toggle (the desktop
+ *   `RunAnswerBubble`, copied): the card can stay collapsed without the
+ *   agent's newest words disappearing behind a tap — they are on the
+ *   transcript, and the rounds stay one tap away inside the card;
  * - a decision card a round is parked on stays visible even when the block is
  *   folded, and its buttons live in a BOTTOM SHEET: on a thumb-sized screen the
  *   tap that approves a tool call must not be reachable by accident.
@@ -33,6 +36,9 @@
  */
 
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { AtSign } from 'lucide-react'
+import { OutlineBrainIcon } from './BrainIcon'
+import { RunAnswerBubble } from './RunAnswerBubble'
 import { sendAnswer, sendApproval } from '../lib/api'
 import { blockStatusText, isFailureStatus } from '../lib/chatBlocks'
 import type { RunBlock } from '../lib/chatTranscriptGroups'
@@ -67,6 +73,9 @@ interface ChatExecutionBlockProps {
   hasFollowUp?: boolean
   /** Drill into the execution session that owns these rounds. */
   onJumpToExec: (agentInstanceId: string, execSid: string) => void
+  /** Quote this run into the draft as material — the desktop block row's `@`
+   *  action, committing through the composer's own address channel (D7). */
+  onReferenceRun?: (ref: { instanceId: string; execSessionId: string; name: string }) => void
   /** Address the composer at one round (D6 level 1) — what a `pause` card's
    *  "continue" rides. `quote` is the question the human is answering. */
   onReplyToRound: (rowId: string, quote: string) => void
@@ -119,6 +128,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   agentName,
   hasFollowUp,
   onJumpToExec,
+  onReferenceRun,
   onReplyToRound,
   canAnswer = true,
   focusInput = false,
@@ -193,15 +203,18 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   const shown = shownIndices.map((i) => block.rounds[i]!)
   const hiddenOlder = block.rounds.length - shownIndices.length
 
-  // `ExploreBlock`'s state machine, on the same conditions: open while it is the
-  // freshest thing on screen, fold once the conversation moves past it, and never
-  // re-open over a reader who collapsed it by hand.
-  const [open, setOpen] = useState(!hasFollowUp)
+  // The desktop block's state machine, copied: collapsed by default. The ONE
+  // condition that opens the block on its own is an unanswered card — an
+  // answerable control behind a fold is not answerable (D8) — plus an explicit
+  // locate below. It is never re-opened over a reader who collapsed it by
+  // hand, and the run's newest words do not need the fold lifted: they are in
+  // the answer bubble under the card.
+  const [open, setOpen] = useState(false)
   const manuallyCollapsed = useRef(false)
 
   useEffect(() => {
-    if ((inProgress || hasOpenCard) && !manuallyCollapsed.current) setOpen(true)
-  }, [inProgress, hasOpenCard])
+    if (hasOpenCard && !manuallyCollapsed.current) setOpen(true)
+  }, [hasOpenCard])
 
   useEffect(() => {
     if (hasFollowUp && !inProgress && !hasOpenCard) {
@@ -249,6 +262,20 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   // question is still open — the execution side does.
   const parked = block.rounds.filter((r) => !!entries[r.ref]?.projection?.card)
 
+  // The run's last word, drawn OUTSIDE the fold (the bubble at the tail of
+  // this component). It is read from the very projection the rounds carry, so
+  // nothing new is fetched and no row is invented; a round still working has
+  // not spoken yet, so the newest round WITH an answer is the run's latest
+  // utterance. It re-renders whenever the block read lands a newer answer —
+  // the block store's re-read of a `pending` ref is what makes that live.
+  const latestAnswer = useMemo(() => {
+    for (let i = block.rounds.length - 1; i >= 0; i -= 1) {
+      const body = entries[block.rounds[i]!.ref]?.projection?.answer?.body.trim()
+      if (body) return body
+    }
+    return ''
+  }, [block, entries])
+
   return (
     <div className="chat-run" data-testid="exec-block" data-session={`${instanceId}|${execSid}`}>
       {showHeader ? (
@@ -262,16 +289,33 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
         </div>
       ) : null}
 
-      {/* The drill keeps its own chrome and sits ABOVE the block: it opens the
-          execution session, a different object from the rounds listed inside it. */}
-      <button
-        type="button"
-        className="chat-run-drill"
-        title={name}
-        onClick={() => onJumpToExec(instanceId, execSid)}
-      >
-        查看执行
-      </button>
+      {/* The block's affordances, icon-only on one row above it — the mobile
+          twin of the desktop `RunBlockActionRow`: the brain opens the run (a
+          different object from the rounds inside), the `@` quotes it into the
+          draft. Icon-only costs discoverability, so every button keeps its
+          `title`/`aria-label` saying what it does. */}
+      <div className="chat-run-actions">
+        <button
+          type="button"
+          className="chat-run-action"
+          title={name || '查看执行'}
+          aria-label="查看执行"
+          onClick={() => onJumpToExec(instanceId, execSid)}
+        >
+          <OutlineBrainIcon />
+        </button>
+        {onReferenceRun ? (
+          <button
+            type="button"
+            className="chat-run-action"
+            title="引用该任务"
+            aria-label="引用该任务"
+            onClick={() => onReferenceRun({ instanceId, execSessionId: execSid, name })}
+          >
+            <AtSign aria-hidden />
+          </button>
+        ) : null}
+      </div>
 
       <button
         type="button"
@@ -342,6 +386,15 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
           ) : null}
         </div>
       ) : null}
+
+      {/* The run's latest answer, in the transcript's own assistant-bubble
+          skin — under the block, never inside the fold. This is what keeps the
+          surface reading as a conversation: the agent's newest words are on
+          screen while the rounds stay one tap away. It is the SAME projected
+          `answer` the newest answered round carries (`latestAnswer`), so
+          nothing here can say anything the block would not; a run that has not
+          answered yet paints nothing instead of an empty bubble. */}
+      {latestAnswer ? <RunAnswerBubble content={latestAnswer} /> : null}
 
       {parked.map((round) => (
         <BlockCardSurface
@@ -808,7 +861,7 @@ function BlockReplyRow({ rowId, focusSignal, onSend }: BlockReplyRowProps) {
       />
       <button
         type="button"
-        className="chat-block-reply-send"
+        className="btn btn-accent btn-sm chat-block-reply-send"
         data-testid="block-reply-send"
         disabled={!draft.trim() || !rowId}
         onClick={send}

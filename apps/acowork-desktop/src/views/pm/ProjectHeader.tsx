@@ -18,6 +18,7 @@
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Pencil } from "lucide-react";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
@@ -180,16 +181,30 @@ export function ProjectHeader({
               aria-label={t("pm.projectDescEdit")}
             />
           ) : (
-            <p
-              className="mt-1 line-clamp-1 cursor-text text-xs text-text-tertiary hover:text-zinc-400  dark:hover:text-zinc-300"
-              onClick={() => {
-                setDescDraft(project.description);
-                setEditingDesc(true);
-              }}
-              title={t("pm.clickToEdit")}
-            >
-              {project.description || <span className="italic opacity-60">{t("pm.noDescription")}</span>}
-            </p>
+            /* 备注只读：整块点击进编辑太容易误触（一行字 + 它周围的空白全是点击区，
+               进去之后还要点里面再点外面才能退出）。编辑入口收成行尾的一枚铅笔。 */
+            <div className="mt-1 flex items-center gap-1">
+              {/* 不加 `flex-1`：铅笔要跟在文字尾部，而不是被推到行尾 ——
+                  备注只有一两个词时，中间那一大片空白会让它看起来像个孤零零的
+                  控件。长备注靠 `min-w-0` + `line-clamp-1` 截断，铅笔仍在尾部。 */}
+              <p className="min-w-0 line-clamp-1 text-xs text-text-tertiary">
+                {project.description || (
+                  <span className="italic opacity-60">{t("pm.noDescription")}</span>
+                )}
+              </p>
+              <button
+                type="button"
+                onClick={() => {
+                  setDescDraft(project.description);
+                  setEditingDesc(true);
+                }}
+                aria-label={t("pm.projectDescEdit")}
+                title={t("pm.projectDescEdit")}
+                className="shrink-0 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-text dark:hover:bg-zinc-700"
+              >
+                <Pencil className="h-3 w-3" aria-hidden />
+              </button>
+            </div>
           )}
 
           {/* 统计 */}
@@ -244,7 +259,7 @@ export function ProjectHeader({
             type="button"
             onClick={onNewTask}
             disabled={offline}
-            className="rounded-md bg-zinc-800 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+            className="btn-accent rounded-md px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-40"
           >
             + {t("pm.newTask")}
           </button>

@@ -26,6 +26,10 @@
  *      Guessing "agent" would parse a person's typed words.
  *   4. the bubble stays on the initiator's side and keeps its tail corner in
  *      every case — only colors follow the speaker.
+ *   5. a PM dispatch turn is markdown even though it speaks in a human's name:
+ *      the words are the PM's generated Markdown, nobody typed them. The
+ *      Runtime's turn-origin marker (`metadata.turn_origin`) is the only
+ *      difference, and without it the row stays literal.
  */
 import { render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
@@ -61,10 +65,10 @@ function userMessage(content: string): ChatMessage {
   };
 }
 
-function renderBubble(speakerKind: SpeakerKind, content = MARKDOWN_BRIEF) {
+function renderBubble(speakerKind: SpeakerKind, content = MARKDOWN_BRIEF, turnOrigin?: string) {
   return render(
     <MessageBubble
-      message={userMessage(content)}
+      message={{ ...userMessage(content), turnOrigin }}
       currentSessionId="s1"
       liveUserName="PM"
       speakerKind={speakerKind}
@@ -73,10 +77,10 @@ function renderBubble(speakerKind: SpeakerKind, content = MARKDOWN_BRIEF) {
   );
 }
 
-function renderPartsBubble(speakerKind: SpeakerKind, content = MARKDOWN_BRIEF) {
+function renderPartsBubble(speakerKind: SpeakerKind, content = MARKDOWN_BRIEF, turnOrigin?: string) {
   return render(
     <UserWithAttachmentsBubble
-      userMessage={userMessage(content)}
+      userMessage={{ ...userMessage(content), turnOrigin }}
       parts={[]}
       currentSessionId="s1"
       liveUserName="PM"
@@ -134,6 +138,23 @@ describe.each([
     expect(container.querySelector(".prose")).toBeNull();
     expect(container.textContent).toContain("## 需要做的事");
     expect(container.querySelector(".bg-chat-user")).not.toBeNull();
+  });
+
+  it("renders a PM dispatch turn as markdown, even though it speaks in a human's name", () => {
+    // The dispatch's words are the PM's — the task title and description it
+    // generated — spoken in the task owner's name. Nobody typed them, so they
+    // are speech: the initiator being a human does not make them literal text.
+    // The Runtime marks the turn (`metadata.turn_origin`), which is the only
+    // thing that separates this row from something a person typed.
+    const { container } = renderPath("user", MARKDOWN_BRIEF, "pm_task");
+
+    expect(container.querySelector(".prose")).not.toBeNull();
+    expect(container.querySelector("h2")?.textContent).toContain("需要做的事");
+    expect(container.textContent).not.toContain("## 需要做的事");
+    // The speech skin, not the accent one — markdown in the accent bubble is
+    // the "user text turned black" defect.
+    expect(container.querySelector(".bg-chat-bubble")).not.toBeNull();
+    expect(container.querySelector(".bg-chat-user")).toBeNull();
   });
 
   it("draws the initiator with the agent avatar only when the speaker is an Agent", () => {

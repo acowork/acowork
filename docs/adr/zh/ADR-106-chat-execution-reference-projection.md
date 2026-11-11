@@ -501,6 +501,38 @@ D9 落地时把人类行的等待行收缩成"本地在途的那次 POST"（`sen
 
 **不变量保留**：块与轮自己打开的唯一情形仍是停在未答卡片上的轮（D8：藏在折叠后的可答项不可答）；`pending` 仍是"进行中"的唯一正证据（D9），其重读由轮次门铃驱动并驱动气泡更新；空洞 / 不可达仍是显式占位。纯呈现层：Desktop 两个主面（`AgentChatView`、`GroupChatPanel`）同批切换，Mobile 本轮不动。设计 27 v3.5 §5.5.5 为准。
 
+## 修订（2026-11-11·寻址卡停靠底部浮层）：`confirm_continue` 不再落在块尾，改为停靠在聊天面底部（呈现层，D4 呈现契约）
+
+**动机**。上一条修订（2026-11-06）把 `confirm_continue` 挂在它所指会话的块尾，理由是"卡片要贴着它的主语"。锚点前移之后这个理由反了：块锚在这次往来的**第一**行，于是一张画在块尾的卡可能落在合成器上方几百行——而转录不会自己滚动。人在底部发完消息，看到的是"什么都没发生"。卡片被画在他看不见的地方，和它离开主语是同一件事的两面。
+
+**决策一：单目标的 `confirm_continue` 停靠在聊天面底部浮层。**卡片浮在合成器上沿（留出安全间距，不遮输入框），随聊天面存在，不随转录滚动。画的是同一张卡（`ChatNoticeEventRow`）、同一套措辞、同一条应答路径（重投递；可答性仍由 `mayAnswerCard` 判），只有位置变了。多候选的 `session_choice` 没有唯一主语，留在原位不变。
+
+**决策二：被问的那个块带轻微高亮与角标。**卡片与主语分居两处，视觉关联由块承担：淡 accent 底色 + "待选择"角标（`chatView.block.unanswered`）。角标是状态，不是第二个可点控件。
+
+**决策三：块尾不再重复画这张卡。**宿主告诉块"你的问题已停靠"（`pendingAskDocked`），块尾留空——一张卡只画一处。
+
+**不变量保留**：应答协议不变（答卡 = 原文本 + 选定地址的重投递，`message_id` 取原行）；布局映射不变（`keyOfSeq` / `blockSeqs` 仍把卡片的 seq 解析到它所指的块，locate 落点不漂）；视口带位（`useRevealPendingAsk`）保留——它把读者带到被问的那个块，而块上现在带着角标。
+
+**范围**。Desktop 两个聊天主面（1:1 `AgentChatView`、群聊 `GroupChatPanel`）同批接入；Mobile 1:1 面的寻址卡仍以独立行呈现（其卡片渲染器另有分支），本次不动。2026-11-06 那条修订的"块尾挂载"仅对 Desktop 失效。
+
+## 修订（2026-11-11·路由确认工具化）：`exec_session_route_confirm`——点击结果回到模型，纯文本不再是续投轮的合法答案（D6 修订）
+
+**缺陷形状**。级别 5 的确认卡弹出后，人点"开新任务"：下一轮 router 带 `continuation_refused=true` 进入、候选为空，模型（实测 MiniMax-M3）这一轮没调用任何 act，直接写了纯文本。runner 的无-act 分支照旧发布 `agent_message` 行——卡片与回复并存。卡片的消失判据（`question_answered`）要求执行轮次回挂到所询问的行，纯文本不是轮次，卡片于是永远"待选择"。这违反 D6 的二选一契约（要么路由、卡收起；要么直接回复、不出卡）；也证明上下文提示对模型的约束力不够——模型对**工具返回**的遵循度明显强于对提示词段落的遵循度。
+
+**决策一：确认做成挂起式工具**。`exec_session_propose_continue(session, why)` 更名为 `exec_session_route_confirm(target, why)`（旧名进 `RETIRED_ACT_NAMES` 漂移守卫）。模型调用它之后本轮挂起：写卡片行（形状不变，`system_notice` + `notice_type: "confirm_continue"`，幂等键不变），向 `ChatSessionManager` 的卡片注册表登记 oneshot 应答通道，等待上限 120s。三种结局：
+
+- **continue**：alias→session_id 是 runtime 已知数据，直接投递目标会话，不再回模型——多一次模型往返就多一次不遵循的机会；
+- **new task**：拒绝作为 tool result 回到模型，期望模型接着调 `exec_session_create(background)` 写出新会话的简报；若仍不调，degrade 到确定性新建路由——丢 `background`，不丢人的消息；
+- **超时/取消**：卡片从注册表摘除，本轮落回既有阶梯（慢路径），此后人的点击按普通寻址处理。
+
+挂起占用该 chat 的 drain task（per-chat 串行不变量本就一轮一任务），由 120s 封顶；超时走慢路径，后续消息不被一张没人答的卡阻塞。级别 5 表格行的语义随之收窄：`exec_session_route_confirm` 不再是"只提案不投递"——提案被采纳后**由本轮自己投递**，只是投递的触发从模型的第二次调用变成了人的那一次点击。
+
+**决策二：点击在入队前被注册表认领**。inbound 环（`route_intent_inbound`）在进阶梯之前先查 `ChatSessionManager::claim_card_answer`：信封的 `chat_row_id` + `source_chat_session_id` 命中活卡即通过 oneshot 唤醒挂起的轮次并丢弃该信封（不进 ladder，杜绝双重投递）；未命中照常走现有 ladder——重启后注册表为空、卡片已超时、陈旧点击，全部落回修订（2026-11-11·寻址卡停靠底部浮层）与既有的重投递语义。前端零改动：卡片行形状、重投递 transport（`forceNew`/`targetSession`）、`question_answered` 投影、wire 字段 `allow_new_task` 都不动。
+
+**决策三：硬拦截是防御纵深**。`continuation_refused=true` 且模型无-act 时：注入一条反馈消息重试一次；重试仍无-act 则 `degrade()`，绝不写 `agent_message` 行。它守护工具化的残余路径（超时、进程重启、陈旧卡片），与工具化互补而非替代——"卡片与 agent 消息并存"这个状态从此在代码层面不可表示。
+
+**可观测性**。决策日志新增可选列 `confirm_wait_ms`（挂起时长）与 `confirm_result`（`continue`/`new_task`/`timeout`）；`act` 列出现 `exec_session_route_confirm:S_x` 即代表本轮写过卡。
+
 ## 参考
 
 - [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md)（可弃侧表的完整模式：写时增量、失败只 warn、水位/首触重建、Windows 句柄顺序——本 ADR 的 D5 逐条沿用）

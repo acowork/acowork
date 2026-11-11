@@ -20,6 +20,7 @@
 
 import { create } from 'zustand'
 import {
+  fanoutMentions,
   fetchChatMessages,
   fetchDefaultChatSession,
   sendChatMessage,
@@ -68,6 +69,30 @@ interface ChatSessionStore {
   expireTurn(chatSessionId: string, messageId: string): void
 
   openAgent(agentId: string): Promise<void>
+  /** Groups currently on screen (keyed by session id) — the doorbell wakes
+   *  these windows too. The twin of Desktop's `openGroupIds`. */
+  openGroupIds: Record<string, true>
+  /** Open a group's transcript. The window is keyed by the session id, so
+   *  the paging / refresh machinery is shared with the 1:1 surface verbatim. */
+  openGroup(chatSessionId: string): Promise<void>
+  /** Send into a group: every send takes the intent channel, which writes the
+   *  ONE row and routes per target (design 27 §5.3.1). `targets` carries the
+   *  @-ed agents; an EMPTY list is the positive instruction ADR-105 — the
+   *  Gateway delivers to the group's default responder, or archives when the
+   *  group has none. `inReplyTo` (a block's in-place reply, or a round's
+   *  reference row) takes the level-1 `chat-message` branch instead, which the
+   *  backend also accepts for group sessions (design 27 §5.5.4). */
+  sendGroupText(
+    chatSessionId: string,
+    text: string,
+    targets: string[],
+    inReplyTo?: string,
+    attachmentIds?: string[],
+    address?: ChatAddress,
+    /** See Desktop's `sendGroupText` — the ids this send is expected to reach,
+     *  read off the ladder's inputs at send time (ADR-106 revision 2026-11-08). */
+    responders?: string[],
+  ): Promise<boolean>
   refresh(chatSessionId: string): Promise<void>
   loadOlder(chatSessionId: string): Promise<void>
   sendText(
@@ -88,16 +113,28 @@ interface ChatSessionStore {
 const emptyWindow = (): Window => ({ older: [], tail: [], tailLoaded: 0, total: 0, loadingOlder: false })
 
 /** ADR-106 D6/D7's explicit address — the fact the human supplied, which no
- *  client and no model may re-decide. Mobile is 1:1 only, so the first level of
+ *  client and no model may re-decide. On the 1:1 surface the first level of
  *  the `@` is degenerate: the pick is a single session id, or the refusal to
- *  continue anything. It is sent only when the composer (or the answer to a
+ *  continue anything. On the group surface the first level is the mention
+ *  list, so the same fields take their per-agent forms (`targetSessions`,
+ *  `forceNewFor`). It is sent only when the composer (or the answer to a
  *  choice card) actually carries one — an absent address is what puts a turn on
  *  the ladder's lower levels. */
 export interface ChatAddress {
   /** 1:1 form of level 2: the session the human named for this agent. */
   targetSession?: string
+  /** Group form of level 2 (design 27 §5.3.1): agent instance id -> the
+   *  session named for THAT agent. Keys must be inside the send's targets.
+   *  The `@`-revision 2026-11-04 retired the human path off this field for
+   *  typed picks (they are `refs` now); it survives on the addressing-card
+   *  answer, where the human genuinely chooses a delivery. */
+  targetSessions?: Record<string, string>
   /** D6's cheap escape beside every suggestion: continue nothing, new work. */
   forceNew?: boolean
+  /** Group form of the same refusal, per agent instance id: one utterance
+   *  fans out to several agents, and refusing continuation for one must not
+   *  quietly start a new session for the others. */
+  forceNewFor?: string[]
   /** The id of the row being RE-delivered. Answering a `session_choice` /
    *  `confirm_continue` card re-sends the human's own utterance, now addressed,
    *  and the backend dedupes on this id — so the transcript keeps one message
@@ -123,6 +160,7 @@ export interface ChatRefPick {
 
 export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
   byAgent: {},
+  openGroupIds: {},
   windows: {},
   sending: {},
   inflight: {},
@@ -147,6 +185,53 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
         byAgent: { ...s.byAgent, [agentId]: { sessionId: null, resolved: true } },
       }))
     }
+  },
+
+  openGroup: async (chatSessionId) => {
+    set((s) => ({ openGroupIds: { ...s.openGroupIds, [chatSessionId]: true } }))
+    await get().refresh(chatSessionId)
+  },
+
+  sendGroupText: async (chatSessionId, text, targets, inReplyTo, attachmentIds, address, responders) => {
+    const me = useAuthStore.getState().me?.user_id
+    if (!me || get().sending[chatSessionId]) return false
+    set((s) => ({ sending: { ...s.sending, [chatSessionId]: true } }))
+    let ok = false
+    try {
+      // Which row this send owes a claim on, once the response says somebody
+      // took it. `null` for a send nothing was delivered to.
+      let claimed: string | null = null
+      if (inReplyTo) {
+        // Reply to a round's block: the 1:1 channel resolves the reference row
+        // into its agent and execution session (ADR-106 D6 level 1); group
+        // sessions are accepted for exactly this case (design 27 §5.5.4). A
+        // level-2 address cannot ride this branch — level 1 already named the
+        // session, and the backend drops `force_new` wherever an address exists.
+        const resp = await sendChatMessage(me, chatSessionId, text, inReplyTo, attachmentIds, address)
+        if (resp.status === 'delivered') claimed = resp.message_id
+      } else {
+        // Every other group send takes the one entry: `targets` carries the
+        // @-ed agents, and an empty list asks the Gateway to apply the group's
+        // default responder (ADR-105) or archive. Splitting the two cases
+        // client-side is what used to make an un-addressed reply vanish.
+        const resp = await fanoutMentions(me, chatSessionId, text, targets, attachmentIds, address)
+        // One row, N deliveries: the claim is on the ROW's id, and any target
+        // that took the turn owes that row an answer. `archived` (no target)
+        // and an all-failed fan-out owe none — a failed target already wrote
+        // its own receipt server-side, and an archived row is the whole outcome.
+        if ((resp.results ?? []).some((r) => r.status === 'delivered')) {
+          claimed = resp.message_id
+        }
+      }
+      ok = true
+      if (claimed) armTurn(chatSessionId, claimed, responders)
+    } catch (e) {
+      console.warn('[chatSessionStore] group send failed:', e)
+    } finally {
+      set((s) => ({ sending: { ...s.sending, [chatSessionId]: false } }))
+    }
+    if (ok) await get().refresh(chatSessionId)
+    return ok
   },
 
   refresh: async (chatSessionId) => {
@@ -227,9 +312,13 @@ export const useChatSessionStore = create<ChatSessionStore>((set, get) => ({
 
   wake: async () => {
     // The doorbell names nothing (no subscription ACL on the broker), and on
-    // mobile at most one agent chat is ever on screen — refresh its session.
+    // mobile at most one agent chat and one group are ever on screen — refresh
+    // what the store knows is open.
     for (const st of Object.values(get().byAgent)) {
       if (st.sessionId) await get().refresh(st.sessionId)
+    }
+    for (const groupId of Object.keys(get().openGroupIds)) {
+      await get().refresh(groupId)
     }
   },
 }))

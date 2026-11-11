@@ -110,6 +110,10 @@ fn start_supervisor(port: u16) -> (Arc<RwLock<GatewayState>>, tempfile::TempDir)
         request_ttl_hours: None,
         mqtt_port: 19875,
         mqtt_password: None,
+        // Plan §7 G5: standalone test supervisor has no Gateway to push
+        // receipts to — same shape as the pre-G5 process.
+        gateway_url: None,
+        gateway_token: None,
     };
     acowork_gateway::lifecycle::doc_supervisor::start_doc_supervisor(cfg, state.clone());
     (state, tmp)

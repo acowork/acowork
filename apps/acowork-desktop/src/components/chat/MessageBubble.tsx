@@ -31,6 +31,7 @@ import {
   speakerRendersMarkdown,
   type SpeakerKind,
 } from "./speakerBubble";
+import { isPmDispatchTurn } from "./pmDispatch";
 import { SpeakerBadge } from "./speakerNames";
 
 // ── Utilities ─────────────────────────────────────────────────────────
@@ -141,7 +142,13 @@ const MessageBubble = React.memo(function MessageBubble({
   // markdown inside the accent bubble is the "user text turned black" defect.
   // The avatar and name deliberately keep following `speakerKind` — who SENT
   // the turn is a separate fact the projection does not carry yet.
-  const speaker: SpeakerKind = message.display ? "agent" : speakerKind;
+  //
+  // A PM dispatch settles it the same way, for the same reason: its words are
+  // the PM's generated Markdown, spoken in the task owner's name — nobody typed
+  // them, so they are speech (and wear the speech skin), not literal text.
+  const speaker: SpeakerKind = message.display || isPmDispatchTurn(message)
+    ? "agent"
+    : speakerKind;
   // Plan D3: whose voice this line is in — `SpeakerBadge` decides whether
   // there is anything to say (nothing, for an ordinary turn), and says NAMES
   // rather than the ids the record carries (resolved in `speakerNames.ts`).
@@ -542,28 +549,35 @@ const MessageBubble = React.memo(function MessageBubble({
     const meta = message.metadata;
     const metaType = meta?.type as string | undefined;
 
+    // Generic centered, width-bounded notice bubble. Shared by the `!meta`
+    // branch and the unknown-metaType fallback below. Without a max-width and
+    // word-breaking, a long system text (e.g. the model-degradation notice)
+    // fills the whole panel and overflows it; `--content-max-width` is the
+    // same reading-column token every other centered transcript notice uses.
+    const renderSystemNotice = () => (
+      <>
+        <div className="flex justify-center" onContextMenu={onContextMenu}>
+          <div className="max-w-[var(--content-max-width)] break-words rounded bg-chat-bubble px-3 py-1 text-xs text-text-tertiary select-text">
+            {message.content}
+          </div>
+        </div>
+        <ContextMenu
+          isOpen={menu.isOpen}
+          menuProps={menu.menuProps}
+          items={items}
+          payload={undefined}
+          selectionAtOpen={menu.selectionAtOpen}
+          onClose={menu.close}
+          compact
+        />
+      </>
+    );
+
     // ADR-046 §2.5: 5 attachment-type system entries. Each renders a
     // single `AttachmentChipRow` chip. The raw metadata from the JSONL
     // entry is reconstructed into the `AttachedItem` discriminated union.
     if (!meta) {
-      return (
-        <>
-          <div className="flex justify-center" onContextMenu={onContextMenu}>
-            <div className="rounded bg-chat-bubble px-3 py-1 text-xs text-text-tertiary  select-text">
-              {message.content}
-            </div>
-          </div>
-          <ContextMenu
-            isOpen={menu.isOpen}
-            menuProps={menu.menuProps}
-            items={items}
-            payload={undefined}
-            selectionAtOpen={menu.selectionAtOpen}
-            onClose={menu.close}
-            compact
-          />
-        </>
-      );
+      return renderSystemNotice();
     }
 
     if (metaType === "file_upload") {
@@ -723,24 +737,7 @@ const MessageBubble = React.memo(function MessageBubble({
 
     // Fallback: generic system message (non-attachment system entries
     // like session notifications, etc.).
-    return (
-      <>
-        <div className="flex justify-center" onContextMenu={onContextMenu}>
-          <div className="rounded bg-chat-bubble px-3 py-1 text-xs text-text-tertiary  select-text">
-            {message.content}
-          </div>
-        </div>
-        <ContextMenu
-          isOpen={menu.isOpen}
-          menuProps={menu.menuProps}
-          items={items}
-          payload={undefined}
-          selectionAtOpen={menu.selectionAtOpen}
-          onClose={menu.close}
-          compact
-        />
-      </>
-    );
+    return renderSystemNotice();
   }
 
   if (message.type === "compaction") {

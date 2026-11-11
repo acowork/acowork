@@ -23,7 +23,9 @@ import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentChatView } from "./AgentChatView";
 import { GroupChatPanel } from "./GroupChatPanel";
+import { MessageBubble } from "./MessageBubble";
 import type { ChatMessageRow } from "../../stores/chatSessionStore";
+import type { ChatMessage } from "../../lib/types";
 
 const AGENT = "agent-1";
 const ME = "user-me";
@@ -227,5 +229,53 @@ describe("chat bubble width contract", () => {
     const wrappers = container.querySelectorAll(".prose-table-scroll");
     expect(wrappers).toHaveLength(1);
     expect(screen.getByText("@Agent compare these")).toBeTruthy();
+  });
+});
+
+/**
+ * The model-degradation notice (and every other bare system entry) renders
+ * through MessageBubble's generic system fallback: a centered chip that must
+ * stay inside the reading column. Uncapped, a long notice filled the panel
+ * and spilled past its right edge (reported defect: the "Model switched for
+ * this session…" line overflowing the chat panel). Same jsdom strategy as
+ * above — guard the DOM shape: the chip carries the `--content-max-width`
+ * clamp and word-breaking, and its wrapper centers it.
+ */
+describe("system notice width contract", () => {
+  const NOTICE =
+    "Model switched for this session: custom-agnes/agnes-3.0-flash has no remaining balance — running on custom-agnes/agnes-3.0-flash/account 9f944e91 instead (same_provider_other_account).";
+
+  function systemMsg(metadata?: Record<string, unknown>): ChatMessage {
+    return {
+      id: "s1",
+      type: "system",
+      content: NOTICE,
+      timestamp: 1,
+      ...(metadata ? { metadata } : {}),
+    };
+  }
+
+  function noticeChip(): HTMLElement | null {
+    return screen.getByText(NOTICE).closest<HTMLElement>(".bg-chat-bubble");
+  }
+
+  it("clamps a bare system notice to the reading column", () => {
+    render(<MessageBubble message={systemMsg()} currentSessionId={CHAT} />);
+    const chip = noticeChip();
+    expect(chip).not.toBeNull();
+    expect(chip!.className).toContain("max-w-[var(--content-max-width)]");
+    expect(chip!.classList.contains("break-words")).toBe(true);
+    expect(chip!.parentElement?.classList.contains("justify-center")).toBe(true);
+  });
+
+  it("clamps the unknown-metaType fallback the same way", () => {
+    // The Runtime writes degradation notices with a `notice` key, not `type`
+    // — any metadata shape the branch does not recognize lands in the same
+    // generic fallback, so both entry paths must carry the clamp.
+    render(<MessageBubble message={systemMsg({ notice: "model_degraded" })} currentSessionId={CHAT} />);
+    const chip = noticeChip();
+    expect(chip).not.toBeNull();
+    expect(chip!.className).toContain("max-w-[var(--content-max-width)]");
+    expect(chip!.classList.contains("break-words")).toBe(true);
   });
 });

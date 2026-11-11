@@ -153,6 +153,7 @@ pub trait PmStore: Send + Sync {
         id: &TaskId,
         text: &str,
         attachment_ids: Vec<AttachmentId>,
+        doc_refs: Vec<String>,
         actor: &str,
     ) -> Result<Task>;
     /// 人类审核。`comment` 是审核正文（拒绝理由 / 批准附言），进活动流。
@@ -254,6 +255,16 @@ pub struct TreePmStore {
     pub(crate) projects_dir: PathBuf,
     pub(crate) trash_dir: PathBuf,
     pub(crate) index: Arc<RwLock<TaskIndex>>,
+    /// Serializes the read-check-write of `claim_task` so the assignee
+    /// compare-and-set is atomic (G1-b). Two members racing to claim the same
+    /// unassigned task must yield exactly one winner; without this critical
+    /// section both would read `assignee = None` and both would write. This is
+    /// the file-store equivalent of `UPDATE ... WHERE assignee IS NULL` — the
+    /// store has no row-level SQL, so the transaction is a lock. Claims are
+    /// low-frequency human/agent actions, so one global critical section is the
+    /// simplest correct guard; a per-task lock map was rejected (rule-of-three,
+    /// and it introduces an eviction problem for a single call site).
+    claim_lock: tokio::sync::Mutex<()>,
 }
 
 impl TreePmStore {
@@ -272,6 +283,7 @@ impl TreePmStore {
             projects_dir,
             trash_dir,
             index: Arc::new(RwLock::new(TaskIndex::new())),
+            claim_lock: tokio::sync::Mutex::new(()),
         })
     }
 
@@ -613,7 +625,7 @@ impl TreePmStore {
         project: &Project,
         assignee: &str,
     ) -> Result<()> {
-        if project.members.iter().any(|m| m.instance_id == assignee) {
+        if project.has_member(assignee) {
             Ok(())
         } else {
             Err(PmError::AssigneeNotProjectMember {
@@ -1196,6 +1208,12 @@ impl PmStore for TreePmStore {
                             return false;
                         }
                     }
+                    // G6 delta filter — index-resident, like every gate above.
+                    if let Some(since) = filter.updated_since
+                        && e.updated_at < since
+                    {
+                        return false;
+                    }
                     true
                 })
                 .map(|(id, _)| id.clone())
@@ -1457,6 +1475,10 @@ impl PmStore for TreePmStore {
     // ── Lifecycle ──────────────────────────────────────────────────
 
     async fn claim_task(&self, id: &TaskId, actor: &str) -> Result<Task> {
+        // Critical section: the read-check-write below is one transaction so the
+        // assignee compare-and-set is atomic (G1-b / A5). See `claim_lock`.
+        let _claim = self.claim_lock.lock().await;
+
         let entry = self
             .index
             .read()
@@ -1467,6 +1489,23 @@ impl PmStore for TreePmStore {
         let path = entry.dir_path.join("task.json");
         let mut task: Task = read_json(&path).await?;
 
+        // Ownership guard (G1-b / A5 / A6): a task already assigned to someone
+        // else is not up for grabs, whoever the caller is. Checked FIRST so the
+        // loser of a concurrent claim sees "already assigned to X" rather than a
+        // state-machine error for the winner's `pending → in_progress` move.
+        if let Some(current) = &task.assignee
+            && current != actor
+        {
+            return Err(PmError::Forbidden(format!(
+                "task {} is already assigned to instance `{current}`, not `{actor}`; only the assignee can claim an assigned task",
+                task.id
+            )));
+        }
+
+        // Gate order for the two pre-existing gates is unchanged: state machine →
+        // approval → dependency. A member claiming an unapproved agent task
+        // therefore still sees `review_not_approved` (409), and a blocked one
+        // still sees `dependency_not_satisfied` (409), before any assignee write.
         validate_transition(task.status, TaskStatus::InProgress, id)?;
         // 审批闸门：Agent 创建但人类尚未批准 → 不可自领（见 ensure_creation_approved）
         ensure_creation_approved(&task)?;
@@ -1480,16 +1519,25 @@ impl PmStore for TreePmStore {
             });
         }
 
+        // 联动指派：claim 会把 actor 写为 assignee（未指派任务）或确认其归属
+        // （已指派给本人），actor 必须是项目成员。复用与 create/update 同一个
+        // 成员闸（ensure_assignee_is_member → Project::has_member），不新写一套。
+        let project = self.read_project(&entry.project_id).await?;
+        self.ensure_assignee_is_member(&project, actor)?;
+
+        // Conditional assignee write — the CAS. An unassigned task is up for
+        // grabs; the member claiming it becomes the assignee, atomically. The
+        // read above and this write are both under `claim_lock`, so a concurrent
+        // claim cannot slip between them (the file-store equivalent of
+        // `UPDATE ... WHERE assignee IS NULL`). A task already ours is left as-is.
+        if task.assignee.is_none() {
+            task.assignee = Some(actor.to_string());
+        }
+
         task.status = TaskStatus::InProgress;
         task.claimed_at = Some(Utc::now());
         // 离开 pending 生命周期起点：清派发标记，回退后可被重新派发
         task.clear_dispatch_generation();
-        // P3: Agent 自领后即成为责任人（修复 P1 遗留——claim 不更新 assignee）。
-        // MCP 层已校验调用者 instance_id == assignee instance_id（设计 §9.2 / ADR-073）。
-        // 联动指派：claim 会把 actor 写为 assignee，actor 必须是项目成员。
-        let project = self.read_project(&entry.project_id).await?;
-        self.ensure_assignee_is_member(&project, actor)?;
-        task.assignee = Some(actor.to_string());
         task.updated_at = Utc::now();
         atomic_write_json(&path, &task).await?;
         self.refresh_entry(&entry, id, &task);
@@ -1501,6 +1549,7 @@ impl PmStore for TreePmStore {
         id: &TaskId,
         text: &str,
         attachment_ids: Vec<AttachmentId>,
+        doc_refs: Vec<String>,
         actor: &str,
     ) -> Result<Task> {
         let entry = self
@@ -1522,6 +1571,7 @@ impl PmStore for TreePmStore {
         let result = TaskResult {
             text: text.to_string(),
             attachment_ids,
+            doc_refs,
             // ADR-073: submitted_by 是 agent_instance_id（X-MCP-Actor 注入）
             submitted_by: actor.to_string(),
             submitted_at: now,
@@ -1547,7 +1597,7 @@ impl PmStore for TreePmStore {
     /// | Agent 刚创建、未开工（`review_status=pending`） | `pending` | 只翻 `review_status=approved`，**`status` 不动** | `status=rejected` + `review_status=rejected` |
     /// | Agent 已提交结果等验收 | `submitted` | `status=done` + `review_status=approved` | `status=rejected` + `review_status=rejected` |
     ///
-    /// 两种审核都写 `review_status`，因为 MCP `pm_check_task` 用它回答
+    /// 两种审核都写 `review_status`，因为 MCP `pm_get_task` 用它回答
     /// "我建的任务批了吗"（manifest 工具语义），而人类操作面的 `status`
     /// 决定卡片落到哪一列。
     ///
@@ -1909,8 +1959,10 @@ impl TreePmStore {
 
     /// The scanner's candidate set, computed entirely from the index (no
     /// `task.json` reads, no entry clones): pending + past the approval
-    /// gate + `start_at` due + undispatched + agent-assigned + not
-    /// abandoned (attempt bound) + every Blocks prerequisite already
+    /// gate + `start_at` due + undispatched + assigned (agent **or** human —
+    /// a human assignee gets the sentence in the group chat, no wake; only
+    /// the legacy `"human"` sentinel, which addresses nobody, is skipped) +
+    /// not abandoned (attempt bound) + every Blocks prerequisite already
     /// Done/Cancelled. Sorted by priority then due time; truncated to
     /// `limit` so a large backlog costs one bounded probe per tick.
     pub fn dispatch_due_ids(&self, now: DateTime<Utc>, limit: usize) -> Vec<TaskId> {
@@ -2274,7 +2326,7 @@ mod tests {
         assert_eq!(claimed.status, TaskStatus::InProgress);
 
         let submitted = store
-            .submit_task(&t.id, "done", vec![], instance)
+            .submit_task(&t.id, "done", vec![], vec![], instance)
             .await
             .unwrap();
         assert_eq!(submitted.status, TaskStatus::Submitted);
@@ -2310,7 +2362,7 @@ mod tests {
 
         store.claim_task(&t.id, instance).await.unwrap();
         store
-            .submit_task(&t.id, "第一版结果", vec![], instance)
+            .submit_task(&t.id, "第一版结果", vec![], vec![], instance)
             .await
             .unwrap();
         store
@@ -2321,7 +2373,7 @@ mod tests {
         // 驳回后 Agent 重做并再次提交（设计 D-1 路径）
         store.claim_task(&t.id, instance).await.unwrap();
         store
-            .submit_task(&t.id, "第二版结果", vec![], instance)
+            .submit_task(&t.id, "第二版结果", vec![], vec![], instance)
             .await
             .unwrap();
         store
@@ -2380,7 +2432,7 @@ mod tests {
             .unwrap();
         store.claim_task(&t.id, "human").await.unwrap();
         let submitted = store
-            .submit_task(&t.id, "上线前的提交", vec![], "human")
+            .submit_task(&t.id, "上线前的提交", vec![], vec![], "human")
             .await
             .unwrap();
 
@@ -2513,7 +2565,7 @@ mod tests {
             .unwrap();
         store.claim_task(&child.id, "human").await.unwrap();
         store
-            .submit_task(&child.id, "child result", vec![], "human")
+            .submit_task(&child.id, "child result", vec![], vec![], "human")
             .await
             .unwrap();
 
@@ -2662,7 +2714,7 @@ mod tests {
         let claimed = store.claim_task(&t0.id, "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d").await.unwrap();
         assert_eq!(claimed.status, TaskStatus::InProgress);
         let submitted = store
-            .submit_task(&t0.id, "done", vec![], "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
+            .submit_task(&t0.id, "done", vec![], vec![], "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d")
             .await
             .unwrap();
         assert_eq!(submitted.status, TaskStatus::Submitted);
@@ -3368,23 +3420,101 @@ mod tests {
             .unwrap();
         assert!(cleared.assignee.is_none());
 
-        // claim: 非成员 actor → 400（claim 会把 actor 写为 assignee）
+        // claim: 非成员 actor 领一张**未指派**任务 → 400（G1-b 自领路径要求成员；
+        // 已指派给他人的任务则由 ownership guard 先拒，见
+        // `member_cannot_claim_task_assigned_to_another`）
         let t2 = store
-            .create_task(
-                &p.id,
-                CreateTask {
-                    assignee: Some(member.to_string()),
-                    ..create_task_input("t2")
-                },
-                "human",
-            )
+            .create_task(&p.id, create_task_input("t2"), "human")
             .await
             .unwrap();
+        assert!(t2.assignee.is_none(), "t2 is unassigned");
         let err = store.claim_task(&t2.id, outsider).await.unwrap_err();
         assert!(matches!(err, PmError::AssigneeNotProjectMember { .. }));
         // 任务状态未被改变
         let after = store.get_task(&t2.id).await.unwrap().unwrap();
         assert_eq!(after.status, TaskStatus::Pending);
+    }
+
+    /// G1-b / A5: two members racing to claim the same **unassigned** task yield
+    /// exactly one winner. The `claim_lock` makes the read-check-write a single
+    /// transaction (the file-store equivalent of `UPDATE ... WHERE assignee IS
+    /// NULL`), so the loser observes the winner's assignee instead of overwriting
+    /// it, and the task is never double-promoted to `in_progress`.
+    #[tokio::test]
+    async fn concurrent_claim_of_unassigned_task_has_exactly_one_winner() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let a = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let b = "7b2d4c6e-9f01-4a3b-8c5d-6e7f8091a2b3";
+        add_member(&store, &p.id, a).await;
+        add_member(&store, &p.id, b).await;
+        // human-created → review NotRequired, so the approval gate never fires and
+        // the only contention is the assignee compare-and-set.
+        let t = store.create_task(&p.id, create_task_input("race"), "human").await.unwrap();
+        assert!(t.assignee.is_none(), "unassigned before the race");
+
+        let (ra, rb) = tokio::join!(store.claim_task(&t.id, a), store.claim_task(&t.id, b));
+        let winners = [&ra, &rb].iter().filter(|r| r.is_ok()).count();
+        assert_eq!(winners, 1, "exactly one claim must succeed");
+
+        let err = [ra, rb].into_iter().find_map(|r| r.err()).expect("one claim must fail");
+        match err {
+            PmError::Forbidden(msg) => {
+                assert!(msg.contains("already assigned to instance"), "loser msg: {msg}");
+            }
+            other => panic!("expected Forbidden for the loser, got {other:?}"),
+        }
+
+        let final_t = store.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(final_t.status, TaskStatus::InProgress, "task not double-promoted");
+        assert!(
+            final_t.assignee.as_deref() == Some(a) || final_t.assignee.as_deref() == Some(b),
+            "assignee is exactly one winner: {:?}",
+            final_t.assignee
+        );
+    }
+
+    /// G1-b: a member who is **not** the assignee cannot claim a task already
+    /// assigned to another member — the conditional write rejects it and leaves
+    /// the record untouched. (The MCP layer rejects earlier with `ensure_assignee`;
+    /// this is the store-side guard the REST path relies on.)
+    #[tokio::test]
+    async fn member_cannot_claim_task_assigned_to_another() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let a = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let b = "7b2d4c6e-9f01-4a3b-8c5d-6e7f8091a2b3";
+        add_member(&store, &p.id, a).await;
+        add_member(&store, &p.id, b).await;
+        let t = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(a.to_string()), ..create_task_input("owned-by-a") },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        let err = store.claim_task(&t.id, b).await.unwrap_err();
+        match err {
+            PmError::Forbidden(msg) => assert!(msg.contains("already assigned to instance"), "{msg}"),
+            other => panic!("expected Forbidden, got {other:?}"),
+        }
+        let after = store.get_task(&t.id).await.unwrap().unwrap();
+        assert_eq!(after.status, TaskStatus::Pending, "rejected claim must not change status");
+        assert_eq!(after.assignee.as_deref(), Some(a), "assignee unchanged");
     }
 
     /// 作者身份：任务的作者必须能在项目群里说话（ADR-106 D15）——owner 或
@@ -3464,7 +3594,7 @@ mod tests {
 
         // 任务走完生命周期（claim → submit → review done）后可移除
         store.claim_task(&t.id, inst).await.unwrap();
-        store.submit_task(&t.id, "done", vec![], inst).await.unwrap();
+        store.submit_task(&t.id, "done", vec![], vec![], inst).await.unwrap();
         store.review_task(&t.id, true, "human", None).await.unwrap();
         let updated = store.remove_project_member(&p.id, inst).await.unwrap();
         // ADR-076 §决策 11: 移除 inst 后仅剩创建者（human）成员。

@@ -341,6 +341,19 @@ impl Project {
         self.owner_id.as_deref().unwrap_or(&self.created_by)
     }
 
+    /// Whether `instance_id` is a member of this project.
+    ///
+    /// The single source of truth for the membership predicate. The creator /
+    /// owner is always in `members` (seeded at project creation), so "owner or
+    /// member" folds into this one check. Every gate that asks "is this actor a
+    /// member" reads through here — the store's assignee gate
+    /// (`PmTree::ensure_assignee_is_member`) and the MCP self-claim authorization
+    /// alike — so G1-b does not grow a second, drift-prone definition (design 32
+    /// §2 principle 5: one authorization model, many faces).
+    pub fn has_member(&self, instance_id: &str) -> bool {
+        self.members.iter().any(|m| m.instance_id == instance_id)
+    }
+
     /// Whether `actor` may perform a **governance** action on this project
     /// (invite or evict members, transfer ownership, edit project fields).
     ///
@@ -402,6 +415,10 @@ pub struct UpdateProject {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Task {
+    // `doc_refs` was added to `TaskResult` (plan §7 G4) with
+    // `serde(default)`: a pre-G4 `task.json` deserializes unchanged, and the
+    // store's write path re-emits the field. The round-trip test in
+    // `tests/g4_store.rs` is the gate that keeps this exemption honest.
     pub id: TaskId,
     pub project_id: ProjectId,
     pub title: String,
@@ -521,6 +538,17 @@ pub struct TaskResult {
     pub text: String,
     #[serde(default)]
     pub attachment_ids: Vec<AttachmentId>,
+    /// Structured references to doc-library artifacts (plan §7 G4).
+    ///
+    /// Each entry is a doc id (`doc-…`) or a library path
+    /// (`项目管理/p-…/技术方案/x.md`) **validated by the doc service at
+    /// submit time** (`POST /refs/validate`) — a ref that does not resolve
+    /// fails the submission instead of being dropped, because the desktop
+    /// panel renders every entry as a link and a dead link is indistinguishable
+    /// from a deleted document. `serde(default)`: results written before G4
+    /// deserialize unchanged, so old `task.json` files stay readable.
+    #[serde(default)]
+    pub doc_refs: Vec<String>,
     /// 提交者：`agent_instance_id`（UUID，ADR-073），由 `X-MCP-Actor` 注入。
     pub submitted_by: String,
     pub submitted_at: DateTime<Utc>,
@@ -571,6 +599,11 @@ pub struct TaskActivity {
     /// 提交引用的附件（仅 `Submitted` 有意义）。
     #[serde(default)]
     pub attachment_ids: Vec<AttachmentId>,
+    /// 提交引用的文档库产物（仅 `Submitted` 有意义，plan §7 G4）。与
+    /// [`TaskResult::doc_refs`] 同源：由 [`TaskActivity::submitted`] 从同一次
+    /// 提交派生，两者不可能漂移。`serde(default)` 保证存量 activity 可读。
+    #[serde(default)]
+    pub doc_refs: Vec<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -584,6 +617,7 @@ impl TaskActivity {
             actor_kind: MemberKind::from_actor(actor),
             text: text.into(),
             attachment_ids: Vec::new(),
+            doc_refs: Vec::new(),
             created_at: Utc::now(),
         }
     }
@@ -600,6 +634,7 @@ impl TaskActivity {
             actor_kind: MemberKind::from_actor(&result.submitted_by),
             text: result.text.clone(),
             attachment_ids: result.attachment_ids.clone(),
+            doc_refs: result.doc_refs.clone(),
             created_at: result.submitted_at,
         }
     }
@@ -794,6 +829,23 @@ pub struct TaskFilter {
     /// `parent_task_id`, enforced by the caller-facing layer, not here.
     #[serde(default)]
     pub only_roots: bool,
+    /// Delta query (plan §7 G6): keep only tasks whose `updated_at` is at
+    /// or after this instant — "what changed since my last read". Index
+    /// field, so the sweep stays in memory. Inclusive of the boundary
+    /// value: a caller that re-sends its own last-seen timestamp loses
+    /// nothing, and a duplicate row is cheaper than a silently dropped
+    /// task.
+    ///
+    /// Coverage is exactly "the task record was rewritten": field edits,
+    /// status transitions, submit/review, attachment register/delete all
+    /// bump `updated_at`. Two mutations deliberately do NOT, and are
+    /// invisible to this filter: a reparent is a positional directory
+    /// move (0-file-write by design — the task content is unchanged), and
+    /// an activity comment appends to the sidecar `activity.json`, not to
+    /// the task. Callers that must see those poll `pm_list_activity` or
+    /// read the tree, not this window.
+    #[serde(default)]
+    pub updated_since: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]

@@ -646,6 +646,11 @@ impl Gateway {
                 // authenticates as `doc:service` with the shared
                 // internal publisher token.
                 mqtt_password: self.config.mqtt.auth_enabled.then(|| publisher_token.clone()),
+                // Plan §7 G5: the review receipt push needs the Gateway
+                // HTTP address + the internal-service Bearer token (env,
+                // never argv — same channel as PM's token above).
+                gateway_url: Some(format!("http://127.0.0.1:{}", http_config.port)),
+                gateway_token: Some(internal_service_token.clone()),
             };
             crate::lifecycle::doc_supervisor::start_doc_supervisor(
                 supervisor_cfg,

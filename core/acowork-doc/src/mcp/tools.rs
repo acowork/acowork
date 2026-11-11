@@ -139,7 +139,12 @@ async fn resolve_dir(dirs: &dyn DirectoryService, path: &str) -> Result<String> 
 
 /// 文档引用：`doc_id`（`doc-` 前缀）或 path（`"纪要.md"` / `"研发/纪要.md"`）
 /// → `(dir_id, doc_id)`。
-async fn resolve_doc_ref(
+///
+/// `pub(crate)`: the REST validation endpoint (design 32 §3 / plan §7 G4,
+/// `api/refs.rs`) answers "does this ref resolve" with this exact resolution
+/// — one address grammar, one implementation, so the PM side can never be
+/// handed a ref that a later `doc_read` would reject.
+pub(crate) async fn resolve_doc_ref(
     dirs: &dyn DirectoryService,
     docs: &dyn DocumentService,
     reference: &str,

@@ -26,8 +26,9 @@
  *   sweeper's own tick: the turn gets its fallback receipt at about the moment
  *   the client gives up claiming it.
  *
- * Mobile is 1:1 only (design 27 §5.4.4), so there is no @-fan-out row id to key
- * on here — but the outcome set is the same, because the transcript is.
+ * Both chat surfaces key the claim on the row id their own POST answered —
+ * the 1:1 send and the group fan-out row alike — and the outcome set is the
+ * same, because the transcript is.
  */
 
 import type { ChatMessageRow } from './types'
@@ -61,17 +62,66 @@ export interface InflightTurn {
 
 /** The responder ids a send is expected to reach (ADR-106 revision
  *  2026-11-08, design 33 §5) — the mobile twin of Desktop's function of the
- *  same name, and mobile is 1:1 only (design 27 §5.4.4), so the peer is the
- *  whole ladder here: it is the only agent that send can reach. The group
- *  rungs (`@`-mentions, the addressed round, the default responder) live in
- *  the Desktop twin; a surface that gains them calls the same name.
+ *  same name, ladder and all: the 1:1 surface carries `peer`, the group
+ *  surface carries the `@`-mention list, the addressed round, and the group's
+ *  default responder (ADR-105). One rule, both clients — a drift between the
+ *  twins is what makes a turn header name the wrong agent on one screen.
  *
- *  An absent peer (no agent selected) yields no names, which is the same
- *  answer the Desktop surfaces give for an unresolved identity: the header is
- *  an upgrade, and the centered line carries the wait without it.
+ *  An input naming nothing (no peer, no mentions, no resolvable round, no
+ *  default) yields no names, which is the same answer the Desktop surfaces
+ *  give for an unresolved identity: the header is an upgrade, and the centered
+ *  line carries the wait without it.
  */
-export function resolveExpectedResponders(peer?: string | null): string[] {
-  return peer ? [peer] : [];
+/** The delivery decision's inputs, as each surface knows them at send time.
+ *  A 1:1 send carries `peer`; a group send carries `mentions` and, for a
+ *  level-1 reply, the addressed row as the loaded window has it; an
+ *  un-addressed group send carries the group's `defaultResponder`. */
+export interface ExpectedRespondersInput {
+  /** A 1:1 chat's peer — the only agent that send can reach. */
+  peer?: string | null
+  /** The `@`-mention list a group send carries (instance ids). */
+  mentions?: readonly string[]
+  /** The row a group reply addresses (ADR-106 D6 level 1), as this surface can
+   *  see it: the row when the loaded window holds it; `null` when the send
+   *  addresses a row this surface has not loaded — an UNRESOLVED fact, not an
+   *  absent one; `undefined` when this send addresses nothing. */
+  repliedRow?: ChatMessageRow | null
+  /** The group's default responder (ADR-105). */
+  defaultResponder?: string | null
+}
+
+/** The Gateway's `addressed_execution_round` (`http/intent_api.rs`) mirrored:
+ *  only a reference row that names BOTH an agent and a session addresses a
+ *  round. A reply to any other row is an ordinary turn and the ladder falls
+ *  through — which is why the row, not a pre-resolved id, is what the surfaces
+ *  hand to `resolveExpectedResponders`. */
+function addressedRoundAgent(row: ChatMessageRow): string | null {
+  if (row.kind !== 'execution_round') return null
+  const agent = row.meta?.agent_instance_id
+  const session = row.meta?.agent_session_id
+  return agent && session ? agent : null
+}
+
+/**
+ * The responder ids a send is expected to reach (ADR-106 revision 2026-11-08,
+ * design 33 §5) — the ONE place that ladder is written down, so a surface
+ * cannot re-derive it and drift. It mirrors the wire, not a wish: the Gateway
+ * resolves `in_reply_to` against the whole log and, when the row names a round,
+ * delivers to that round's agent ALONE and ignores the mention list beside it;
+ * otherwise the `@`s are the targets; an un-addressed group send goes to the
+ * default responder (ADR-105); none of those, and the row archives — no claim
+ * is armed for it, so an empty list is the honest answer.
+ */
+export function resolveExpectedResponders(input: ExpectedRespondersInput): string[] {
+  if (input.peer) return [input.peer]
+  if (input.repliedRow === null) return []
+  if (input.repliedRow) {
+    const agent = addressedRoundAgent(input.repliedRow)
+    if (agent) return [agent]
+  }
+  const mentions = input.mentions ?? []
+  if (mentions.length > 0) return [...mentions]
+  return input.defaultResponder ? [input.defaultResponder] : []
 }
 
 /** Backstop for a turn whose outcome rows never arrive (a Runtime that died

@@ -66,6 +66,10 @@ pub struct TaskEntry {
     /// Task kind, indexed so `pm_list_tasks(type=...)` can narrow the
     /// candidate set **before** any `task.json` is read.
     pub task_type: TaskType,
+    /// Last state change, indexed for the same reason (plan §7 G6):
+    /// `updated_since` is the delta query — "what changed since my last
+    /// read" — and it must not turn into a disk sweep of every task.
+    pub updated_at: DateTime<Utc>,
     /// Title, indexed for substring search (`pm_list_tasks(query=...)`).
     /// Same reason as `task_type`: a cross-project search must not load every
     /// task on the machine in order to throw most of them away.
@@ -98,6 +102,7 @@ impl TaskEntry {
                 .collect(),
             dispatch_attempts: task.dispatch_attempts,
             task_type: task.task_type,
+            updated_at: task.updated_at,
             title: task.title.clone(),
         }
     }
@@ -227,6 +232,7 @@ mod tests {
                 blocks: vec![],
                 dispatch_attempts: 0,
                 task_type: TaskType::Task,
+                updated_at: chrono::Utc::now(),
                 title: "example task".to_string(),
             },
         );

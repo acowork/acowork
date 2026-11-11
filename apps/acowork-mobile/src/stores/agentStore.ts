@@ -13,23 +13,51 @@
 import { create } from 'zustand'
 import { fetchLastMessage, fetchSessions, startAgent as startAgentApi } from '../lib/api'
 import type { AgentSummary, NodeRow, SessionInfo, UserSummary } from '../lib/types'
+import { isStaleParkedFact, type SessionStatusFact } from '../lib/sessionAttention'
 
 /** Wake-up confirmation: the Runtime's `alive` verdict lands a moment after
  *  `/start` returns (over MQTT), so poll the directory until it flips or a
  *  bounded budget runs out. Cheap (directory-only) and self-terminating. */
 const START_POLL_MS = 1_500
-/** Runtime `SessionStatus` variants that mean "the agent is mid-turn" —
- *  the exact set Desktop's `isProcessing` (ADR-014) treats as non-idle.
- *  `errored` is deliberately OUT: an error is surfaced in the thread, not
- *  as a breathing dot claiming work is in flight. */
-const WORKING_STATUSES = new Set([
-  'llm_awaiting_first_chunk',
-  'thinking',
-  'llm_streaming',
-  'tool_executing',
-  'waiting_approval',
-  'paused',
-])
+/**
+ * Drop the session facts a freshly loaded listing proves stale, for one agent.
+ *
+ * The push half (`.../sessions/+/state`) is RETAINED, so the last status a
+ * Runtime published survives the process that published it — a Runtime killed
+ * mid-approval, or a session closed while its card was open, leaves a red dot
+ * that no answer can ever clear. The listing's `is_active` is what contradicts
+ * it (see `lib/sessionAttention.isStaleParkedFact`), so every page load doubles
+ * as the repair pass. Rows the Runtime never reported residency for are left
+ * exactly as they are.
+ *
+ * Why no session is exempt here, unlike Desktop's repair pass: this sweep runs
+ * when the inbox is entered, and the inbox is a list — no session is on screen
+ * to have a card open in. The one ordering that could wrongly retire a fresh
+ * fact (a push landing between the listing snapshot and its response) costs a
+ * dot that the next push re-establishes, while the ordering it defends against
+ * — a retained publish from a Runtime that has since died — never heals on its
+ * own. The asymmetry is deliberate: retire on the stronger evidence.
+ *
+ * Returns the input reference when nothing changes: an inbox refresh happens on
+ * every entry, and a new object identity per refresh would repaint the list.
+ */
+function pruneStaleFacts(
+  all: Record<string, Record<string, SessionStatusFact> | undefined>,
+  agentId: string,
+  items: SessionInfo[],
+): Record<string, Record<string, SessionStatusFact> | undefined> {
+  const cur = all[agentId]
+  if (!cur) return all
+  const stale = items.filter((i) => isStaleParkedFact(i, cur[i.session_id])).map((i) => i.session_id)
+  if (stale.length === 0) return all
+  const nextSessions = { ...cur }
+  for (const sid of stale) delete nextSessions[sid]
+  const next = { ...all }
+  if (Object.keys(nextSessions).length === 0) delete next[agentId]
+  else next[agentId] = nextSessions
+  return next
+}
+
 const START_POLL_LIMIT = 8
 
 /** Injected by `lib/api.ts` wiring at boot; keeps the store HTTP-free. */
@@ -47,10 +75,18 @@ export function setDirectorySource(d: DirectorySource): void {
 
 interface AgentStore {
   agents: Record<string, { info: AgentSummary; sessions: SessionInfo[] }>
-  /** agentId -> sessionIds currently mid-turn, fed by the presence socket's
-   *  `.../sessions/+/state` subscription (parity with Desktop's
-   *  `busyAgentIds`). The inbox's breathing working dot reads this. */
-  busySessions: Record<string, Set<string>>
+  /**
+   * agentId -> sessionId -> the session's lifecycle FACT, fed by the presence
+   * socket's fleet-wide `.../sessions/+/state` subscription (parity with
+   * Desktop's `chatStore.agentStates[*].sessionStates[*].sessionStatus`).
+   *
+   * The store keeps the fact and nothing derived from it. "is working" and
+   * "is waiting for you" are two readings of the same fact — with different
+   * rules (a 429 retry is working but not waiting) — and they live in
+   * `lib/sessionAttention`, which the inbox applies with `useMemo`. Caching a
+   * derived `Set` here is what made the two dots capable of disagreeing.
+   */
+  sessionStatuses: Record<string, Record<string, SessionStatusFact> | undefined>
   agentList: AgentSummary[]
   users: UserSummary[]
   /** Node topology for the inbox's per-node grouping. The server already
@@ -115,9 +151,10 @@ interface AgentStore {
   /** Prepend/merge a page of session history into the owning agent's slot. */
   mergeSessions: (agentId: string, items: SessionInfo[]) => void
   /** Fleet session-state push (`acowork/agents/+/sessions/+/state` over the
-   *  presence socket). The inbox's working dot reads `busySessions` — the
-   *  same signal Desktop's sidebar derives `busyAgentIds` from. */
-  applySessionState(agentId: string, sessionId: string, status: string): void
+   *  presence socket). Records the FACT; the inbox derives both its breathing
+   *  working dot and its red attention dot from it (`lib/sessionAttention`),
+   *  the same rule Desktop's sidebar applies. */
+  applySessionState(agentId: string, sessionId: string, fact: SessionStatusFact): void
   /** Replace an agent's session list with a freshly loaded page 1. */
   setSessions: (agentId: string, items: SessionInfo[]) => void
   /** Fill the preview text of one session (the server has no such field). */
@@ -130,7 +167,7 @@ interface AgentStore {
 
 export const useAgentStore = create<AgentStore>((set, get) => ({
   agents: {},
-  busySessions: {},
+  sessionStatuses: {},
   agentList: [],
   users: [],
   nodes: [],
@@ -244,6 +281,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // it back, and dropping it would blank the inbox row on every refresh.
       const previews = new Map(slot.sessions.map((x) => [x.session_id, x.last_message]))
       return {
+        sessionStatuses: pruneStaleFacts(s.sessionStatuses, agentId, items),
         agents: {
           ...s.agents,
           [agentId]: {
@@ -269,23 +307,33 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       }
     }),
 
-  applySessionState: (agentId, sessionId, status) =>
+  applySessionState: (agentId, sessionId, fact) =>
     set((s) => {
-      const working = WORKING_STATUSES.has(status)
-      const cur = s.busySessions[agentId]
-      if (!working) {
-        if (!cur || !cur.has(sessionId)) return s
-        const nextSet = new Set(cur)
-        nextSet.delete(sessionId)
-        const next = { ...s.busySessions }
-        if (nextSet.size === 0) delete next[agentId]
-        else next[agentId] = nextSet
-        return { busySessions: next }
+      const cur = s.sessionStatuses[agentId]
+      const prev = cur?.[sessionId]
+      // Identity-preserving: a re-published identical status (the state topic is
+      // retained and replayed on every reconnect) must not repaint the inbox.
+      if (prev && prev.status === fact.status && prev.reason === fact.reason && prev.retry === fact.retry) {
+        return s
       }
-      if (cur?.has(sessionId)) return s
-      const nextSet = new Set(cur ?? [])
-      nextSet.add(sessionId)
-      return { busySessions: { ...s.busySessions, [agentId]: nextSet } }
+      // A session that goes idle holds no obligation, so its entry is dropped
+      // rather than kept as a tombstone — the map only ever holds "something is
+      // true right now", which is what both dots read.
+      if (fact.status === 'idle') {
+        if (!cur || !prev) return s
+        const nextSessions = { ...cur }
+        delete nextSessions[sessionId]
+        const next = { ...s.sessionStatuses }
+        if (Object.keys(nextSessions).length === 0) delete next[agentId]
+        else next[agentId] = nextSessions
+        return { sessionStatuses: next }
+      }
+      return {
+        sessionStatuses: {
+          ...s.sessionStatuses,
+          [agentId]: { ...(cur ?? {}), [sessionId]: fact },
+        },
+      }
     }),
 
   setAgents: (list) =>
@@ -302,23 +350,24 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   applyPresence: (agentId, status) =>
     set((s) => {
       const slot = s.agents[agentId]
-      // An agent that just went offline cannot be working; drop its stale
-      // session states so a mid-turn socket death cannot breathe forever.
-      const dropBusy = status === 'offline' && s.busySessions[agentId] !== undefined
-      const busyPatch = () => {
-        if (!dropBusy) return {}
-        const next = { ...s.busySessions }
+      // An agent that just went offline cannot be mid-turn nor be holding a
+      // card open; drop its stale session facts so a mid-turn socket death
+      // cannot breathe — or badge — forever.
+      const dropStale = status === 'offline' && s.sessionStatuses[agentId] !== undefined
+      const statusPatch = () => {
+        if (!dropStale) return {}
+        const next = { ...s.sessionStatuses }
         delete next[agentId]
-        return { busySessions: next }
+        return { sessionStatuses: next }
       }
-      if (!slot) return busyPatch()
-      if (slot.info.status === status) return dropBusy ? busyPatch() : s
+      if (!slot) return statusPatch()
+      if (slot.info.status === status) return dropStale ? statusPatch() : s
       const info = { ...slot.info, status }
       // A directory refresh can still overwrite this with a verdict polled
       // before the transition — that is bounded (the next poll, and the
       // status topic's own heartbeat, both re-assert it within seconds).
       return {
-        ...busyPatch(),
+        ...statusPatch(),
         agentList: s.agentList.map((a) => (a.id === agentId ? info : a)),
         agents: { ...s.agents, [agentId]: { ...slot, info } },
       }
@@ -342,6 +391,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const slot = s.agents[agentId] ?? { info: { id: agentId, name: agentId, node_id: '' }, sessions: [] }
       const known = new Set(slot.sessions.map((x) => x.session_id))
       return {
+        sessionStatuses: pruneStaleFacts(s.sessionStatuses, agentId, items),
         agents: {
           ...s.agents,
           [agentId]: { ...slot, sessions: [...slot.sessions, ...items.filter((i) => !known.has(i.session_id))] },
@@ -351,12 +401,27 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
   removeSession: (agentId, sessionId) => {
     const remaining = (get().agents[agentId]?.sessions ?? []).filter((s) => s.session_id !== sessionId)
-    set((s) => ({
-      agents: {
-        ...s.agents,
-        [agentId]: { ...(s.agents[agentId] ?? { info: { id: agentId, name: agentId, node_id: '' } }), sessions: remaining },
-      },
-    }))
+    set((s) => {
+      // A deleted session holds no obligation: its fact would otherwise keep a
+      // red dot on an agent no longer running it.
+      const cur = s.sessionStatuses[agentId]
+      let sessionStatuses = s.sessionStatuses
+      if (cur && cur[sessionId]) {
+        const nextSessions = { ...cur }
+        delete nextSessions[sessionId]
+        const next = { ...s.sessionStatuses }
+        if (Object.keys(nextSessions).length === 0) delete next[agentId]
+        else next[agentId] = nextSessions
+        sessionStatuses = next
+      }
+      return {
+        sessionStatuses,
+        agents: {
+          ...s.agents,
+          [agentId]: { ...(s.agents[agentId] ?? { info: { id: agentId, name: agentId, node_id: '' } }), sessions: remaining },
+        },
+      }
+    })
     return remaining
   },
 
