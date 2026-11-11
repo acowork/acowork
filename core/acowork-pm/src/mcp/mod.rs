@@ -869,7 +869,10 @@ mod tests {
         .await;
         assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "update by non-assignee: {v}");
 
-        // 无 assignee 的任务也无法被行动（设计 §9.2）
+        // G1-b: an unassigned task is no longer frozen. A project MEMBER may
+        // claim it; a NON-member still cannot, and the rejection now names the
+        // real reason ("not a member") rather than the old "task has no
+        // assignee". `owner` is a member (creator), `intruder` is not.
         let v = call_tool(
             &router,
             Some(owner),
@@ -879,9 +882,152 @@ mod tests {
         )
         .await;
         let tid2 = tool_text(&v)["id"].as_str().unwrap().to_string();
-        let v = call_tool(&router, Some(owner), 26, "pm_claim_task", json!({ "task_id": tid2 }))
-            .await;
-        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "claim unassigned: {v}");
+        let v = call_tool(
+            &router,
+            Some(intruder),
+            26,
+            "pm_claim_task",
+            json!({ "task_id": tid2 }),
+        )
+        .await;
+        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "claim unassigned by non-member: {v}");
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not a member"),
+            "non-member claim must say why: {v}"
+        );
+    }
+
+    /// G1-b / A1 + A3: a project member may claim an unassigned task, and the
+    /// claim atomically writes `assignee = actor`; the approval gate still fires
+    /// first for an unapproved agent-created task (409, not a silent success).
+    #[tokio::test]
+    async fn e2e_member_claims_unassigned_task() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+
+        let v = call_tool(&router, Some(owner), 40, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            41,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "unassigned" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        assert!(tool_text(&v)["assignee"].is_null(), "fresh task has no assignee: {v}");
+
+        // A3: still awaiting human approval → the approval gate wins over the
+        // new self-claim path.
+        let v = call_tool(&router, Some(owner), 42, "pm_claim_task", json!({ "task_id": tid })).await;
+        let (_, prefix, _) = assert_rpc_error(&v);
+        assert_eq!(prefix, "review_not_approved", "unapproved member claim: {v}");
+
+        // A1: after approval, the member claims it and becomes the assignee.
+        approve_creation(&store, &tid).await;
+        let v = call_tool(&router, Some(owner), 43, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert!(v["error"].is_null(), "member claim of unassigned failed: {v}");
+        let claimed = tool_text(&v);
+        assert_eq!(claimed["status"], "in_progress", "claim → in_progress: {claimed}");
+        assert_eq!(claimed["assignee"], owner, "claim wrote assignee = actor: {claimed}");
+    }
+
+    /// G1-b / A2: a non-member may not claim an unassigned task; the rejection
+    /// names the real reason ("not a member"), never the old "no assignee", and
+    /// the task is left untouched.
+    #[tokio::test]
+    async fn e2e_non_member_cannot_claim_unassigned() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let stranger = "agent-stranger";
+
+        let v = call_tool(&router, Some(owner), 44, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            45,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "unassigned" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        // Approve so the ONLY thing that can reject the stranger is membership.
+        approve_creation(&store, &tid).await;
+
+        let v = call_tool(&router, Some(stranger), 46, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "stranger claim: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("not a member"), "must say not-a-member: {v}");
+        assert!(!msg.contains("no assignee"), "must NOT say no-assignee: {v}");
+
+        let v = call_tool(&router, Some(owner), 47, "pm_get_task", json!({ "task_id": tid })).await;
+        assert!(tool_text(&v)["assignee"].is_null(), "stranger claim must not assign: {v}");
+    }
+
+    /// G1-b / A4: the dependency gate still fires for a member claiming an
+    /// approved, unassigned task that is blocked by an open task.
+    #[tokio::test]
+    async fn e2e_claim_dependency_gate_preserved() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+
+        let v = call_tool(&router, Some(owner), 48, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(&router, Some(owner), 49, "pm_create_task", json!({ "project_id": pid, "title": "blocker" })).await;
+        let blocker = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            50,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "blocked",
+                     "depends_on": [{ "task_id": blocker, "kind": "blocks" }] }),
+        )
+        .await;
+        let blocked = tool_text(&v)["id"].as_str().unwrap().to_string();
+        approve_creation(&store, &blocker).await;
+        approve_creation(&store, &blocked).await;
+
+        let v = call_tool(&router, Some(owner), 51, "pm_claim_task", json!({ "task_id": blocked })).await;
+        let (_, prefix, _) = assert_rpc_error(&v);
+        assert_eq!(prefix, "dependency_not_satisfied", "blocked claim: {v}");
+    }
+
+    /// G1-b / A6: claiming a task assigned to someone else is still forbidden,
+    /// with the unchanged "assigned to instance X" wording.
+    #[tokio::test]
+    async fn e2e_claim_assigned_to_other_still_forbidden() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let other = "agent-other";
+
+        let v = call_tool(&router, Some(owner), 52, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), other, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            53,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "for other", "assignee": other }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        approve_creation(&store, &tid).await;
+
+        // owner is a member but not the assignee → still forbidden, "assigned to".
+        let v = call_tool(&router, Some(owner), 54, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "claim assigned-to-other: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("assigned to instance"), "must name the assignee: {v}");
     }
 
     /// 匿名只读：list/get 允许；写操作 / 自查工具要求身份（401 语义）。

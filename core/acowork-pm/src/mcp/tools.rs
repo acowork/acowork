@@ -8,7 +8,10 @@
 //!    - 状态变更工具要求身份
 //!    - `pm_claim_task` / `pm_submit_task` / `pm_update_task` 要求
 //!      调用者 `instance_id` == 任务 `assignee`（**ADR-073**：`agent_instance_id`
-//!      是唯一身份 key；`agent_id` 仅显示用），否则 403
+//!      是唯一身份 key；`agent_id` 仅显示用），否则 403。例外（**G1-b**）：
+//!      `pm_claim_task` 允许**项目成员**认领一张**未指派**（`assignee = None`）
+//!      的任务，认领时由 store 原子地把 assignee 写成该成员；非成员仍 403，
+//!      且措辞指向「不是成员」。submit / update 无此例外，语义不变。
 //!    - `pm_create_task` 的 `assignee` 必须存在于 Agent 目录（§9.1，
 //!      按 instance_id 校验 `GET /api/agents/{instance_id}`）
 //! 3. 调用 [`PmStore`] trait 业务方法
@@ -187,13 +190,17 @@ fn resolve_assignee_me(
     Ok(Some(actor.to_string()))
 }
 
-/// 要求调用方 == 任务 assignee（设计 §9.2）。`pm_claim_task` /
-/// `pm_submit_task` / `pm_update_task` 使用。
+/// 要求调用方 == 任务 assignee（设计 §9.2）。`pm_submit_task` /
+/// `pm_update_task` 全程使用；`pm_claim_task` 仅对**已指派**任务使用（未指派
+/// 任务走成员自领路径，见 [`pm_claim_task`] 与 G1-b）。
 ///
 /// **ADR-073**：两侧比较的都是 `agent_instance_id`（UUID）——
 /// `actor` 来自 `X-MCP-Actor` header（Gateway 注入 `{instance_id}` 模板，
 /// Runtime 替换为 `self.instance_id`），`task.assignee` 在创建时已按
 /// instance 维度校验存在性（§9.1）。
+///
+/// `assignee = None` 分支现在只由 submit / update 命中：一张没人领的单不能
+/// 被提交或改动，必须先有人（成员 claim 或 owner 指派）成为责任人。
 fn ensure_assignee(task: &Task, actor: &str) -> Result<()> {
     match &task.assignee {
         Some(a) if a == actor => Ok(()),
@@ -1247,7 +1254,12 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
-/// `pm_claim_task` — 自领（pending → in_progress），仅限 assignee；依赖未满足 409。
+/// `pm_claim_task` — 自领（pending → in_progress）。
+///
+/// 已指派的任务仍**仅限 assignee 本人**（设计 §9.2 / ADR-073）。未指派的任务
+/// 允许**项目成员**自领（G1-b）：claim 时由 store 在同一事务里把 assignee
+/// 原子地写成 actor。非成员领未指派任务 → `forbidden`，措辞指向「不是成员」
+/// 而不是旧的「任务没有指派人」。审批闸 / 依赖闸在 store 内，顺序不变。
 async fn pm_claim_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
     let a: ClaimTaskArgs = parse_args("pm_claim_task", args)?;
 
@@ -1256,7 +1268,32 @@ async fn pm_claim_task(state: &McpState, actor: &str, args: Value) -> Result<Val
         .get_task(&a.task_id)
         .await?
         .ok_or_else(|| PmError::TaskNotFound(a.task_id.to_string()))?;
-    ensure_assignee(&task, actor)?;
+
+    match &task.assignee {
+        // Assigned (to me or to someone else): unchanged — only the assignee may
+        // claim it. `ensure_assignee` yields the exact "assigned to instance X"
+        // rejection for a non-assignee (A6).
+        Some(_) => ensure_assignee(&task, actor)?,
+        // Unassigned (G1-b): any project member may claim it. Reject a non-member
+        // here with a Forbidden naming the real reason — "not a member of this
+        // project" — instead of the old "task has no assignee", which told the
+        // caller nothing actionable. The predicate is the one the store enforces
+        // (`Project::has_member`, shared with `ensure_assignee_is_member`); the
+        // store re-checks it and performs the atomic assignee write.
+        None => {
+            let project = state
+                .store
+                .get_project(&task.project_id)
+                .await?
+                .ok_or_else(|| PmError::ProjectNotFound(task.project_id.to_string()))?;
+            if !project.has_member(actor) {
+                return Err(PmError::Forbidden(format!(
+                    "task {} is unassigned and caller `{actor}` is not a member of project {}; only a project member can claim an unassigned task",
+                    task.id, task.project_id
+                )));
+            }
+        }
+    }
 
     let task = state.store.claim_task(&a.task_id, actor).await?;
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await

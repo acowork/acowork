@@ -235,7 +235,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_claim_task",
-      "description": "Claim a task as the current agent. Transitions pending → in_progress. Returns 409 if the task was created by an agent and is still awaiting human approval (review_status=pending), or if blocked by dependencies. Actor is taken from MCP client identity.",
+      "description": "Claim a task as the current agent. Transitions pending → in_progress. For an ASSIGNED task only the assignee may claim it (403 otherwise). For an UNASSIGNED task any project member may claim it, and claiming sets the assignee to you atomically (403 if you are not a member). Returns 409 if the task was created by an agent and is still awaiting human approval (review_status=pending), or if blocked by dependencies. Actor is taken from MCP client identity.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],
