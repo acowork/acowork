@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { BUILTIN_ICON_IDS } from "../components/common/UserAvatar";
 import type { AgentInfo, AgentDetail, SessionInfo, SessionStatus, NodeInfo, AgentLifecycleState, LatestSessionResult, ChatSurface } from "../lib/types";
 import { instanceIdOf, isProcessing } from "../lib/types";
+import { isStaleParkedStatus } from "../lib/sessionAttention";
 import { getGatewayUrl } from "../lib/config";
 import { fetchNodes as fetchNodesApi } from "../lib/gateway-api";
 import { useChatStore } from "./chatStore";
@@ -1304,6 +1305,27 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
               mismatches.set(session.session_id, session.status);
             }
           }
+        } else if (
+          // The other half of the repair, and the one that keeps the badge
+          // honest: a session the Runtime no longer holds in memory cannot be
+          // holding a card open for you. A Runtime that died mid-approval
+          // leaves its last `waiting_approval` publish RETAINED on the broker,
+          // and every reconnect replays it — so the red dot would sit there
+          // forever, unanswerable, because the card it advertises no longer
+          // exists. `is_active: false` is what says so; `status` absent does
+          // not, because an older Runtime omits it either way.
+          //
+          // The session on screen is exempt. A listing snapshot is taken when
+          // the request goes out, so a send that made the session resident
+          // between the snapshot and the response can arrive as
+          // `is_active: false` while its push has already landed — and retiring
+          // a card that is genuinely open is worse than the stale dot this
+          // branch exists to clear. The open session's state comes from
+          // `loadSession`'s own `/state` read anyway.
+          session.session_id !== chatStore.agentStates[agentId]?.activeSessionId &&
+          isStaleParkedStatus(session, chatStore.getSessionState(agentId, session.session_id)?.sessionStatus)
+        ) {
+          mismatches.set(session.session_id, { status: "idle" });
         }
       }
       if (mismatches.size > 0) {

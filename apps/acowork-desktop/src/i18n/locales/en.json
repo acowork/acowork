@@ -388,6 +388,7 @@
   },
   "sessionTabBar": {
     "llmReasoning": "LLM is reasoning",
+    "attention": "Waiting for your confirmation",
     "closeWarning": "Closing will interrupt the ongoing LLM reasoning. Partial content will be preserved.",
     "cancel": "Cancel",
     "confirmClose": "Confirm close",
@@ -576,6 +577,7 @@
     "dotBusy": "This agent is working",
     "dotOnline": "Online",
     "dotOffline": "Offline",
+    "dotAttention": "Waiting for your confirmation",
     "searchPlaceholder": "Search agents...",
     "stopConfirm": "Stop {{agent}}? Current conversation state will be preserved.",
     "uninstallConfirm": "Uninstall {{agent}}? This action cannot be undone.",

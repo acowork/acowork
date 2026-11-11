@@ -482,6 +482,7 @@
   },
   "sessionTabBar": {
     "llmReasoning": "LLM 推理进行中",
+    "attention": "等待你的确认",
     "closeWarning": "关闭此会话将中断正在进行的 LLM 推理。已生成的部分内容将会保留。",
     "cancel": "取消",
     "confirmClose": "确认关闭",
@@ -576,6 +577,7 @@
     "dotBusy": "该 Agent 正在工作",
     "dotOnline": "在线",
     "dotOffline": "离线",
+    "dotAttention": "等待你的确认",
     "searchPlaceholder": "搜索 Agent...",
     "stopConfirm": "确定要停止 {{agent}} 吗？当前对话状态将保留。",
     "uninstallConfirm": "确定要卸载 {{agent}} 吗？此操作不可撤销。",
