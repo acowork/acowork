@@ -3416,6 +3416,12 @@ mod tests {
             msg.contains("assignee instance not found"),
             "the directory gate must still apply to the resolved id: {msg}"
         );
+        // The gate must see the *resolved* id, not the literal: only a
+        // resolution that happens before the check puts the UUID in the error.
+        assert!(
+            msg.contains(actor),
+            "the gate must run on the caller's UUID, not on `me`: {msg}"
+        );
     }
 
     /// The sentinel is normalized, not guessed: `"ME"` and `" me "` mean the

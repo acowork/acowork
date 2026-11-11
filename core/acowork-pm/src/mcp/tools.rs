@@ -156,12 +156,9 @@ fn require_actor(actor: Option<&str>) -> Result<&str> {
     })
 }
 
-/// `"me"` 哨兵：agent **读不到自己的 instance id**（身份在 Gateway 侧，
-/// ADR-073 §1.2），所以除了这个字面量它没法给自己指派。
-const ME_SENTINEL: &str = "me";
-
-/// 把 `assignee` 里可能是 `"me"` 哨兵的值解析成调用方自己的
-/// `agent_instance_id`。
+/// 把 `assignee` 里的 `"me"` 哨兵解析成调用方自己的 `agent_instance_id`
+/// —— agent 读不到自己的 instance id（身份在 Gateway 侧，ADR-073 §1.2），
+/// 这是它唯一能给自己指派的写法。
 ///
 /// **一份实现，所有带 `assignee` 的工具共用**（`pm_list_tasks` /
 /// `pm_create_task`）：哨兵必须在读写两侧是同一个意思，否则用
@@ -179,7 +176,7 @@ fn resolve_assignee_me(
     tool: &str,
 ) -> Result<Option<String>> {
     let Some(raw) = assignee else { return Ok(None) };
-    if !raw.trim().eq_ignore_ascii_case(ME_SENTINEL) {
+    if !raw.trim().eq_ignore_ascii_case("me") {
         return Ok(Some(raw.to_string()));
     }
     let actor = actor.ok_or_else(|| {
