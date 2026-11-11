@@ -3,6 +3,7 @@
  * 对齐 UX 设计 §5.2 / §8.4：不依赖纯颜色传达信息。
  */
 
+import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import type { Priority } from "../../lib/pm-types";
 
@@ -13,7 +14,8 @@ const STYLES: Record<Priority, string> = {
   low: "bg-zinc-100 text-text-secondary dark:bg-zinc-800 ",
 };
 
-const LABELS: Record<Priority, string> = {
+/** 无障碍文案里的英文语义（徽章本身按当前语言渲染）。 */
+const A11Y_LABELS: Record<Priority, string> = {
   urgent: "URGENT",
   high: "HIGH",
   normal: "MEDIUM",
@@ -27,6 +29,7 @@ export function PriorityBadge({
   priority: Priority;
   className?: string;
 }) {
+  const { t } = useTranslation();
   return (
     <span
       className={cn(
@@ -34,9 +37,9 @@ export function PriorityBadge({
         STYLES[priority],
         className,
       )}
-      aria-label={`${LABELS[priority]} priority`}
+      aria-label={`${A11Y_LABELS[priority]} priority`}
     >
-      {LABELS[priority]}
+      {t(`pm.priority.${priority}`)}
     </span>
   );
 }

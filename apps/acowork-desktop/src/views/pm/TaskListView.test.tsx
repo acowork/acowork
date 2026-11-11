@@ -413,7 +413,7 @@ describe("row-level inline field editing", () => {
     const { container } = view();
     // 优先级格（徽章）就在这一行里：点它弹菜单，不该触发打开任务详情。
     const row = container.querySelector('[data-task-id="t-1"]') as HTMLElement;
-    const badge = within(row).getByText("MEDIUM");
+    const badge = within(row).getByText("pm.priority.normal");
     fireEvent.click(badge);
     fireEvent.click(await screen.findByText("pm.priority.urgent"));
     await act(async () => {});

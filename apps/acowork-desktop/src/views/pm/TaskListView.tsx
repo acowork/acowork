@@ -56,17 +56,20 @@ import {
 import {
   resolveActorLabel,
   resolveMembers,
+  MemberAvatar,
   usePmDirectoryUsers,
   useSelfAccount,
   withOwner,
 } from "./pmMembers";
 import { STATUS_TRANSITIONS } from "./TaskStatusMove";
+import { PriorityBadge } from "./PriorityBadge";
 import {
   ADD_COL_WIDTH,
   CHECK_COL_WIDTH,
   ROW_HEIGHT,
   STATUS_DOT_CLASS,
   STATUS_LABEL_KEY,
+  STATUS_PILL_CLASS,
   TH_BASE_CN,
   estimateTableWidth,
 } from "./taskListLabels";
@@ -876,7 +879,12 @@ export function TaskListView({
               )}
               {targets.map((s) => (
                 <PmPopoverItem key={s} onClick={() => void applyStatus(task, s)}>
-                  <span className="flex items-center gap-1.5">
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded px-1.5 py-0.5",
+                      STATUS_PILL_CLASS[s],
+                    )}
+                  >
                     <span
                       className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[s])}
                       aria-hidden
@@ -902,7 +910,7 @@ export function TaskListView({
                   checked={task.priority === p}
                   onClick={() => void applyField(task, { priority: p })}
                 >
-                  {t(`pm.priority.${p}`)}
+                  <PriorityBadge priority={p} className="px-1.5 py-0.5 text-xs" />
                 </PmPopoverItem>
               ))}
             </PmPopover>
@@ -917,20 +925,28 @@ export function TaskListView({
             <PmPopover anchor={open.anchor} onClose={close} width={210}>
               <PmPopoverSection>{t("pm.list.col.assignee")}</PmPopoverSection>
               <OverlayScrollbar maxHeight={256}>
-                {assigneeOptions.map((o) => (
-                  <PmPopoverItem
-                    key={o.value}
-                    checked={task.assignee === o.value}
-                    onClick={() => void applyField(task, { assignee: o.value })}
-                  >
-                    {o.label}
-                  </PmPopoverItem>
-                ))}
+                {assigneeOptions.map((o) => {
+                  const member = memberById.get(o.value);
+                  return (
+                    <PmPopoverItem
+                      key={o.value}
+                      checked={task.assignee === o.value}
+                      prefix={
+                        member ? (
+                          <MemberAvatar member={member} size={16} className="shrink-0" />
+                        ) : undefined
+                      }
+                      onClick={() => void applyField(task, { assignee: o.value })}
+                    >
+                      {o.label}
+                    </PmPopoverItem>
+                  );
+                })}
                 <PmPopoverItem
                   checked={task.assignee === null}
                   onClick={() => void applyField(task, { assignee: null })}
                 >
-                  {t("pm.task.unassigned")}
+                  <span className="text-text-tertiary">{t("pm.task.unassigned")}</span>
                 </PmPopoverItem>
               </OverlayScrollbar>
             </PmPopover>
@@ -981,33 +997,64 @@ export function TaskListView({
                   那根公共滚动条 —— 裸 `max-h-* overflow-y-auto` 会被
                   `overlayScrollCoverage` 判成未绑定容器。 */}
               <OverlayScrollbar maxHeight={256}>
-                {options.map((o) => (
-                  <PmPopoverItem
-                    key={o.value}
-                    checked={!isBulk && active.has(o.value)}
-                    onClick={() => {
-                      if (isBulk) {
-                        if (field === "status") void applyBulk({ status: o.value as TaskStatus });
-                        else if (field === "priority")
-                          void applyBulk({ priority: o.value as Priority });
-                        else
-                          void applyBulk({
-                            assignee: o.value === UNASSIGNED ? null : o.value,
-                          });
-                        return;
+                {options.map((o) => {
+                  // 与列表行内的 value 同一套视觉：状态胶囊 / 优先级徽章 / 头像。
+                  const member = field === "assignee" ? memberById.get(o.value) : undefined;
+                  return (
+                    <PmPopoverItem
+                      key={o.value}
+                      checked={!isBulk && active.has(o.value)}
+                      prefix={
+                        member ? (
+                          <MemberAvatar member={member} size={16} className="shrink-0" />
+                        ) : undefined
                       }
-                      setFilters((prev) => {
-                        const cur = prev[field] as string[];
-                        const next = cur.includes(o.value)
-                          ? cur.filter((v) => v !== o.value)
-                          : [...cur, o.value];
-                        return { ...prev, [field]: next } as PmListFilters;
-                      });
-                    }}
-                  >
-                    {o.label}
-                  </PmPopoverItem>
-                ))}
+                      onClick={() => {
+                        if (isBulk) {
+                          if (field === "status") void applyBulk({ status: o.value as TaskStatus });
+                          else if (field === "priority")
+                            void applyBulk({ priority: o.value as Priority });
+                          else
+                            void applyBulk({
+                              assignee: o.value === UNASSIGNED ? null : o.value,
+                            });
+                          return;
+                        }
+                        setFilters((prev) => {
+                          const cur = prev[field] as string[];
+                          const next = cur.includes(o.value)
+                            ? cur.filter((v) => v !== o.value)
+                            : [...cur, o.value];
+                          return { ...prev, [field]: next } as PmListFilters;
+                        });
+                      }}
+                    >
+                      {field === "status" ? (
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded px-1.5 py-0.5",
+                            STATUS_PILL_CLASS[o.value as TaskStatus],
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "h-1.5 w-1.5 shrink-0 rounded-full",
+                              STATUS_DOT_CLASS[o.value as TaskStatus],
+                            )}
+                            aria-hidden
+                          />
+                          {o.label}
+                        </span>
+                      ) : field === "priority" ? (
+                        <PriorityBadge priority={o.value as Priority} className="px-1.5 py-0.5 text-xs" />
+                      ) : member ? (
+                        o.label
+                      ) : (
+                        <span className="text-text-tertiary">{o.label}</span>
+                      )}
+                    </PmPopoverItem>
+                  );
+                })}
               </OverlayScrollbar>
             </PmPopover>
           );
