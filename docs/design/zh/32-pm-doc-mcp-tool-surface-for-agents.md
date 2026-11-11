@@ -226,7 +226,7 @@ PM 的规划产出落文档库，固定形态：
 | `项目管理/{project_id}/验收/{slug}-验收报告.md` | Product | 产品验收 |
 | `项目管理/{project_id}/调研/{slug}.md` | Product | 用户调研、市场调研 |
 
-路径字符串（含 5 个 area 名）一律由 `acowork_core::doc_layout` 提供（`project_doc_dir` + 5 个 area 常量 + `project_doc_area`）：PM 渲染与 Doc 侧测试引用的是**同一组常量**，代码侧只有一份事实来源。
+词表的代码侧唯一事实来源是 `acowork_core::doc_layout`：项目目录串（`project_doc_dir`）由 PM 渲染进工具响应、Doc 侧测试对同一函数断言；5 个 area 名是同一模块的常量（`DOC_AREA_*` / `DOC_AREAS`），`project_doc_area` 只是沿用同一个拼接规则。注意**目前只有测试消费 area 常量**——建树的执行者仍是 `project-setup` skill 的散文（agent 侧），所以两侧一致性靠「PM 散文照抄这 5 个名字 + 本模块测试钉住形状」，而不是靠类型强制。
 
 **目录名用 `project_id` 而非项目标题**，理由与代价都已权衡：
 
