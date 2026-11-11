@@ -291,7 +291,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_add_activity",
-      "description": "Append a note to a task's activity stream. This is the channel for context that must NOT overwrite the task: blockers, re-scheduling reasons, links to documents in the doc library. Editing `description` for the same purpose destroys the original acceptance criteria — comment instead. Allowed for the task's assignee and its creator (so the PM that dispatched the work can leave context).",
+      "description": "Append a note to a task's activity stream. This is the channel for context that must NOT overwrite the task: blockers, re-scheduling reasons, links to documents in the doc library. Editing `description` for the same purpose destroys the original acceptance criteria — comment instead. Allowed for the task's assignee, its creator, and the project owner (G1-c: the owner who adopts or reassigns a task can record why; the auto-generated `[reassign]` trail carries no reason).",
       "inputSchema": {
         "type": "object",
         "required": ["task_id", "text"],

@@ -3290,6 +3290,61 @@ mod tests {
         assert!(texts.contains(&"blocked on the API contract"), "{got}");
     }
 
+    /// G1-c review F2: the project owner — neither the task's assignee nor
+    /// its creator — may leave the adoption/reassignment reason on the task.
+    /// The auto-generated `[reassign]` trail is reason-free; without this
+    /// right the owner had no channel to explain the hand-over at all.
+    #[tokio::test]
+    async fn pm_add_activity_allows_the_project_owner() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let worker = "agent-worker";
+
+        let v = call_tool(&router, Some(owner), 90, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), worker, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        // The task's creator is `worker`, its assignee is `worker` after the
+        // claim below — `owner` is neither, and must still be able to comment.
+        let v = call_tool(
+            &router,
+            Some(worker),
+            91,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": worker }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        let v = call_tool(
+            &router,
+            Some(owner),
+            92,
+            "pm_add_activity",
+            json!({ "task_id": tid, "text": "reassigning because the worker instance was reinstalled" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "owner comment must be allowed: {v}");
+
+        // And a plain non-member is still refused (wording names all three roles).
+        let v = call_tool(
+            &router,
+            Some("agent-outsider"),
+            93,
+            "pm_add_activity",
+            json!({ "task_id": tid, "text": "injected" }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "forbidden", "outsider comment: {v}");
+        assert!(
+            msg.contains("assignee, the creator, or the project owner"),
+            "refusal must list the three roles: {v}"
+        );
+    }
+
     /// Truncation of the activity stream must be explicit: reading a partial
     /// stream as the whole history is a mistake agents make.
     #[tokio::test]

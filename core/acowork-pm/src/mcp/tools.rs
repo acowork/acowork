@@ -153,8 +153,9 @@ fn resolve_assignee_me(
 /// Runtime 替换为 `self.instance_id`），`task.assignee` 在创建时已按
 /// instance 维度校验存在性（§9.1）。
 ///
-/// `assignee = None` 分支由 submit / claim 与 update 的陌生人路径命中：一张
-/// 没人领的单不能被提交；改动它的人至少得是 owner 或创建者。
+/// `assignee = None` 分支由 submit 与 update 的陌生人路径命中（claim 的未指派
+/// 分支走成员自领路径，不经过本函数）：一张没人领的单不能被提交；改动它的
+/// 人至少得是 owner 或创建者。
 fn ensure_assignee(task: &Task, actor: &str) -> Result<()> {
     match &task.assignee {
         Some(a) if a == actor => Ok(()),
@@ -1212,13 +1213,25 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
 
     // 收养/改派留痕（A8）：只要本调用真正换了责任人就记一条，不区分角色
     // ——owner 收养、owner 改派、assignee 移交、清空指派，事后都可查证。
+    //
+    // 留痕写失败不能裸 `?`：改派此刻**已经落盘**，而调用方重试时
+    // `previous_assignee == task.assignee`，留痕条件不再成立——一次 IO 抖动
+    // 会把审计缺口变成永久的、且第二次调用以成功收尾（响亮失败、静默丢失）。
+    // 因此这里显式失败并给出补救通道：变更已生效，缺的是那条留痕，用
+    // pm_add_activity 人工补记。
     if assignee_provided && task.assignee != previous_assignee {
         let text = format!(
             "[reassign] assignee changed: `{}` -> `{}`",
             previous_assignee.as_deref().unwrap_or("(unassigned)"),
             task.assignee.as_deref().unwrap_or("(unassigned)"),
         );
-        state.store.add_task_comment(&a.task_id, &text, actor).await?;
+        if let Err(e) = state.store.add_task_comment(&a.task_id, &text, actor).await {
+            tracing::error!(task_id = %a.task_id, error = %e, "reassign audit trail write failed");
+            return Err(PmError::Internal(format!(
+                "the reassignment of task {} was applied, but its [reassign] audit trail could not be written: {e}; record it manually with pm_add_activity — a retry of this call will NOT restore the trace",
+                a.task_id
+            )));
+        }
     }
 
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
@@ -1623,13 +1636,20 @@ async fn pm_list_activity(state: &McpState, args: Value) -> Result<Value> {
 
 /// `pm_add_activity` — append a reply to a task (`ActivityKind::Comment`).
 ///
-/// **Write permission = assignee or creator**, one notch wider than
-/// `ensure_assignee`, and that notch is the entire point of this tool: after
-/// dispatching, the PM has to leave context on the task (why it is blocked, why
-/// it was re-scheduled, the doc-library path), and it is neither the assignee
-/// nor the one doing the work. Gating on the assignee alone would silence the
-/// coordinator, and the agent would fall back to editing `description` — a
-/// destructive act that overwrites the acceptance criteria.
+/// **Write permission = assignee, creator, or project owner**, one notch
+/// wider than `ensure_assignee`, and that notch is the entire point of this
+/// tool: after dispatching, the PM has to leave context on the task (why it
+/// is blocked, why it was re-scheduled, the doc-library path), and it is
+/// neither the assignee nor the one doing the work. Gating on the assignee
+/// alone would silence the coordinator, and the agent would fall back to
+/// editing `description` — a destructive act that overwrites the acceptance
+/// criteria.
+///
+/// The owner tier closes the G1-c loop: the `[reassign]` trail is
+/// auto-generated and reason-free, and the owner who adopts an orphaned task
+/// is typically neither its creator nor its assignee — without this right the
+/// "必要时带原因" half of the audit requirement had no channel at all on the
+/// MCP surface.
 ///
 /// Humans ([`HUMAN_CREATOR`] sentinel) go through REST, not this path; no
 /// special allowance here.
@@ -1644,9 +1664,17 @@ async fn pm_add_activity(state: &McpState, actor: &str, args: Value) -> Result<V
 
     let is_assignee = task.assignee.as_deref() == Some(actor);
     let is_creator = task.created_by == actor;
-    if !is_assignee && !is_creator {
+    let is_owner = if is_assignee || is_creator {
+        false
+    } else {
+        match state.store.get_project(&task.project_id).await? {
+            Some(project) => project.can_govern(actor, false),
+            None => false,
+        }
+    };
+    if !is_assignee && !is_creator && !is_owner {
         return Err(PmError::Forbidden(format!(
-            "task {} belongs to project {} as assignee `{}` created_by `{}`; only the assignee or the creator can comment on it. Read it with pm_get_task, or ask its creator to add you to the project",
+            "task {} belongs to project {} as assignee `{}` created_by `{}`; only the assignee, the creator, or the project owner can comment on it. Read it with pm_get_task, or ask its creator to add you to the project",
             task.id,
             task.project_id,
             task.assignee.as_deref().unwrap_or("(unassigned)"),
