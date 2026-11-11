@@ -74,6 +74,24 @@ pub struct SessionSummary {
     /// is never cached client-side (`chatStore.adoptRuntimeTabs`).
     #[serde(default)]
     pub is_active: bool,
+    /// The session's live lifecycle status, when it is resident in memory.
+    ///
+    /// This is the *pull* half of the same fact the retained
+    /// `sessions/{sid}/state` MQTT topic pushes (ADR-043), and it exists
+    /// because a list reader has to be able to answer "does this session need
+    /// a human right now?" (`waiting_approval`, `paused{iteration_limit}`)
+    /// without first having opened the session, caught a retained publish, or
+    /// received a push while it was awake. The Desktop's ADR-014 pull repair
+    /// (`agentStore.fetchSessions`) and the mobile inbox both read this field,
+    /// and both degrade to "unknown" when it is absent.
+    ///
+    /// `None` means "no in-memory snapshot" (the session was never opened in
+    /// this Runtime process, or it has been closed) — deliberately the same
+    /// answer as a status this DTO cannot represent (see [`Self::status`]'s
+    /// parse note in the implementation), because a wrong status would flip a
+    /// badge; a missing one only leaves the last pushed value in place.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<acowork_core::SessionStatusDto>,
 }
 
 /// Response for `list_sessions` — paginated session list.
