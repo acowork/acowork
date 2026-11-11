@@ -74,13 +74,15 @@ directory inside the document library (design §5.5, shape
      | 8 | `{doc_path}/验收` | Product |
      | 9 | `{doc_path}/调研` | Product |
 
-   - **Idempotent: check before you create.** `doc_list` with `path: doc_path`
-     first and `doc_mkdir` only the segments that are missing — a re-run on a
-     half-built tree should create the rest, not lean on errors. `NameConflict`
-     means the directory exists already (another agent got there first, or the
-     tree was built by hand); **use it**, and never invent a suffixed name like
-     `项目管理-2`. Treat `NameConflict` as "already handled", not as a normal
-     path to retry through.
+   - **Idempotent: check before you create.** `doc_list` tells you what already
+     exists, but only of a directory that does — listing a missing one fails
+     with `DirNotFound`. So list `项目管理` to see whether `doc_path` is there,
+     then list `doc_path` to see which of the seven areas are, and `doc_mkdir`
+     only what is missing. A re-run on a half-built tree creates the rest
+     instead of stopping. `NameConflict` means a directory appeared since the
+     listing (another agent got there first, or the tree was built by hand):
+     **use it**, never invent a suffixed name like `项目管理-2`. It is a signal
+     to stop creating, not an error to retry through.
    - **You are the only one who creates directories in this tree.** Participants
      (Product / QA / SSE / Architect) write files but hold no `doc_mkdir` —
      whoever creates a directory governs it (see *Ownership and ACL facts*

@@ -30,7 +30,7 @@ If direct Figma access is unavailable, ask for screenshots, exported frames, pro
 1. **Load product and design context**
    - Use `mcp_memory__memory_recall` to retrieve PRD decisions, user segments, Figma review findings, design standards, and launch constraints
    - Use `doc_read` and `doc_search` to inspect PRD, acceptance criteria, user flow, prior design notes, screenshots, or exported Figma specs
-   - Use `web_fetch` only when a Figma or design reference is available and access is allowed
+   - Fetch a Figma or design reference only when one is available and access is allowed
    - Identify design source: Figma file, prototype, screenshot, exported frames, or written spec
 
 2. **Map design to product intent**

@@ -177,9 +177,10 @@ skills = ["technical-planning"]
 description = "Assess architectural risks, blast radius, reversibility, rollback paths, and operational failure modes"
 skills = ["architecture-risk-assessment"]
 
-# The participation capability is listed last because it is the one the other
-# three run inside: a project task is claimed, its deliverable published to the
-# project document tree, and its result submitted through PM. Declaring it is
+# The participation capability is listed last because it is the one every other
+# capability in this package runs inside: a project task is claimed, its
+# deliverable published to the project document tree, and its result
+# submitted through PM. Declaring it is
 # what makes `validate_capability_skills` check `project-participation` at
 # packaging time and what makes it show in the capability panel (ADR-104).
 [capabilities.project_participation]

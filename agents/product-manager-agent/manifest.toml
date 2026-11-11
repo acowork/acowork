@@ -40,9 +40,11 @@ type = "Network"
 # (ADR-069).
 
 # --- Filesystem ---
-# `file_read` is declared because the skills that inspect repository sources
-# really do read them (plan §4.4 allowlist); deliverables are published with
-# `doc_write`, not written locally, so `file_write` is NOT declared here.
+# `file_read` is declared on all four participants (plan §5.2 / task A2) even
+# though no Product skill names it in `tool_deps` today: the card's acceptance
+# criterion is the declaration, and reading a repository file is inside this
+# role's work (design review against an implementation). `file_write` is NOT
+# declared — Product's deliverables are documents, published with `doc_write`.
 [[tools]]
 name = "file_read"
 
@@ -186,9 +188,10 @@ skills = ["feature-acceptance"]
 description = "Plan product launches with rollout, communication, analytics, support readiness, risks, and post-launch learning"
 skills = ["launch-planning"]
 
-# The participation capability is listed last because it is the one the other
-# six run inside: a project task is claimed, its deliverable published to the
-# project document tree, and its result submitted through PM. Declaring it is
+# The participation capability is listed last because it is the one every other
+# capability in this package runs inside: a project task is claimed, its
+# deliverable published to the project document tree, and its result
+# submitted through PM. Declaring it is
 # what makes `validate_capability_skills` check `project-participation` at
 # packaging time and what makes it show in the capability panel (ADR-104).
 [capabilities.project_participation]
