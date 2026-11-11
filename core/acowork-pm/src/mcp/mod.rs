@@ -3298,6 +3298,187 @@ mod tests {
         assert_eq!(t["tasks"][0]["assignee"], actor);
     }
 
+    // ── G1-a: `pm_create_task(assignee = "me")` ────────────────────────────
+    //
+    // An agent cannot read its own instance id from anywhere (ADR-073 §1.2:
+    // the identity lives in the Gateway, not in the agent's context), so
+    // `"me"` is the only spelling it can use to name itself. What lands in
+    // the task must be its UUID — a stored `"me"` would be a task nobody can
+    // ever claim.
+
+    /// The stored assignee is the caller's UUID, not the literal `"me"`.
+    #[tokio::test]
+    async fn create_task_sentinel_me_stores_the_caller_instance_id() {
+        let router = test_router().await;
+        let actor = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"; // ADR-073 instance_id
+        let pid = project_with_owner(&router, actor, "Self assign").await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            2,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "mine", "assignee": "me" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "create_task(assignee=me) failed: {v}");
+        let task = tool_text(&v);
+        assert_eq!(
+            task["assignee"], actor,
+            "the sentinel must resolve to the caller: {task}"
+        );
+        assert_ne!(task["assignee"], "me", "the literal sentinel must never be stored");
+
+        // The persisted task — not just the response projection — carries the UUID.
+        let tid = task["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["assignee"], actor);
+    }
+
+    /// Closed loop: a task created with `assignee="me"` is findable with
+    /// `pm_list_tasks(assignee="me")`. A self-assign nobody can look up
+    /// again is a write-only fact.
+    #[tokio::test]
+    async fn create_task_sentinel_me_is_found_by_list_tasks_me() {
+        let router = test_router().await;
+        let actor = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, actor, "Closed loop").await;
+        create_task(
+            &router,
+            actor,
+            2,
+            json!({ "project_id": pid, "title": "mine", "assignee": "me" }),
+        )
+        .await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "assignee": "me" }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["total"], 1, "the self-assigned task must be findable: {t}");
+        assert_eq!(t["tasks"][0]["assignee"], actor);
+    }
+
+    /// `"me"` is not a pass. The caller still has to be in the project —
+    /// otherwise the sentinel would be a way around the membership gate.
+    #[tokio::test]
+    async fn create_task_sentinel_me_still_requires_project_membership() {
+        let router = test_router().await;
+        let owner = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let stranger = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, owner, "Members only").await;
+
+        let v = call_tool(
+            &router,
+            Some(stranger),
+            2,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "not mine", "assignee": "me" }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "author_not_project_member", "unexpected: {msg}");
+        assert_eq!(code, INTERNAL_ERROR, "unexpected: {msg}");
+    }
+
+    /// `"me"` is not a pass around the directory gate either: a caller that
+    /// is not installed in the Gateway's agent directory cannot self-assign.
+    #[tokio::test]
+    async fn create_task_sentinel_me_still_passes_the_directory_gate() {
+        // The directory knows nobody, the caller included.
+        let router = test_router_with_dir(Arc::new(WhitelistAgentDirectory::new(&[]))).await;
+        let actor = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, actor, "Directory gate").await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            2,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "mine", "assignee": "me" }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "bad_request", "unexpected: {msg}");
+        assert!(
+            msg.contains("assignee instance not found"),
+            "the directory gate must still apply to the resolved id: {msg}"
+        );
+    }
+
+    /// The sentinel is normalized, not guessed: `"ME"` and `" me "` mean the
+    /// same as `"me"` (instance ids are UUIDs — nothing else can collide).
+    #[tokio::test]
+    async fn create_task_sentinel_me_normalizes_case_and_whitespace() {
+        let router = test_router().await;
+        let actor = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, actor, "Normalized").await;
+
+        for (i, spelling) in ["ME", " me ", "Me"].iter().enumerate() {
+            let v = call_tool(
+                &router,
+                Some(actor),
+                10 + i as u64,
+                "pm_create_task",
+                json!({ "project_id": pid, "title": format!("t{i}"), "assignee": spelling }),
+            )
+            .await;
+            assert!(v["error"].is_null(), "`{spelling}` must resolve: {v}");
+            assert_eq!(
+                tool_text(&v)["assignee"], actor,
+                "`{spelling}` must resolve to the caller"
+            );
+        }
+    }
+
+    /// The sentinel changed nothing about how a bogus assignee is rejected:
+    /// an unknown UUID and a package id both still fail the directory gate.
+    #[tokio::test]
+    async fn create_task_invalid_assignee_still_rejected() {
+        let router = test_router_with_dir(Arc::new(WhitelistAgentDirectory::new(&[
+            "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d",
+        ])))
+        .await;
+        let agent = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, agent, "Gates").await;
+
+        for (i, bogus) in [
+            "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d",
+            "com.acowork.foo",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let v = call_tool(
+                &router,
+                Some(agent),
+                20 + i as u64,
+                "pm_create_task",
+                json!({ "project_id": pid, "title": "t", "assignee": bogus }),
+            )
+            .await;
+            let (code, prefix, msg) = assert_rpc_error(&v);
+            assert_eq!(code, INTERNAL_ERROR, "unexpected: {msg}");
+            assert_eq!(prefix, "bad_request", "unexpected: {msg}");
+            assert!(
+                msg.contains("assignee instance not found"),
+                "msg: {msg}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn list_tasks_type_and_review_status_answer_the_approval_backlog() {
         let router = test_router().await;

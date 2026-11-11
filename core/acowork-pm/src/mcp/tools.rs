@@ -156,6 +156,40 @@ fn require_actor(actor: Option<&str>) -> Result<&str> {
     })
 }
 
+/// `"me"` 哨兵：agent **读不到自己的 instance id**（身份在 Gateway 侧，
+/// ADR-073 §1.2），所以除了这个字面量它没法给自己指派。
+const ME_SENTINEL: &str = "me";
+
+/// 把 `assignee` 里可能是 `"me"` 哨兵的值解析成调用方自己的
+/// `agent_instance_id`。
+///
+/// **一份实现，所有带 `assignee` 的工具共用**（`pm_list_tasks` /
+/// `pm_create_task`）：哨兵必须在读写两侧是同一个意思，否则用
+/// `assignee="me"` 建出来的任务会被 `pm_list_tasks(assignee="me")` 漏掉
+/// —— 建了却查不到，等于没建。
+///
+/// 大小写与空白做**规范化**（`"ME"`、`" me "` 一律按 `"me"` 处理）：LLM
+/// 少打一个键就是它自己，而"agent 目录里没有这个 instance"这种报错教不
+/// 会调用方任何东西。instance id 恒为 UUID，不会与哨兵撞车。
+///
+/// `None`（调用方没给 assignee）原样透传——它要的就是一张没人领的单。
+fn resolve_assignee_me(
+    assignee: Option<&str>,
+    actor: Option<&str>,
+    tool: &str,
+) -> Result<Option<String>> {
+    let Some(raw) = assignee else { return Ok(None) };
+    if !raw.trim().eq_ignore_ascii_case(ME_SENTINEL) {
+        return Ok(Some(raw.to_string()));
+    }
+    let actor = actor.ok_or_else(|| {
+        PmError::Unauthenticated(format!(
+            "{tool}: assignee \"{raw}\" needs an authenticated MCP connection (X-MCP-Actor header)"
+        ))
+    })?;
+    Ok(Some(actor.to_string()))
+}
+
 /// 要求调用方 == 任务 assignee（设计 §9.2）。`pm_claim_task` /
 /// `pm_submit_task` / `pm_update_task` 使用。
 ///
@@ -952,14 +986,7 @@ async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Re
 
     // `me` is resolved server-side from the MCP actor, so a caller never has
     // to know its own instance id (which it cannot read from anywhere else).
-    let assignee = match a.assignee.as_deref() {
-        Some("me") => Some(actor.ok_or_else(|| {
-            PmError::Unauthenticated(
-                "pm_list_tasks: assignee \"me\" needs an authenticated MCP connection".to_string(),
-            )
-        })?.to_string()),
-        other => other.map(|s| s.to_string()),
-    };
+    let assignee = resolve_assignee_me(a.assignee.as_deref(), actor, "pm_list_tasks")?;
 
     let narrowed = a.status.is_some()
         || assignee.is_some()
@@ -1140,11 +1167,19 @@ async fn pm_update_project(state: &McpState, actor: &str, args: Value) -> Result
 /// `pm_create_task` — 创建任务（Agent 创建 → `review_status=pending`，待人类审核）。
 ///
 /// `assignee` 若提供则必须存在于 Agent 目录（§9.1）；不要求是调用者本人（§9.2）。
+/// `assignee: "me"` 是例外中的例外：**解析成调用方自己的 instance id**
+/// （agent 读不到自己的 id，只能这样指名），但照样要过下面两道闸。
 async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
     let a: CreateTaskArgs = parse_args("pm_create_task", args)?;
 
-    // 设计 §9.1：assignee 必须存在（按 instance_id 校验，ADR-073）
-    if let Some(assignee) = &a.assignee
+    // `assignee: "me"` → 调用方自己的 instance id（解析后存的是 UUID，
+    // 不是字符串 "me"）。
+    let assignee = resolve_assignee_me(a.assignee.as_deref(), Some(actor), "pm_create_task")?;
+
+    // 设计 §9.1：assignee 必须存在（按 instance_id 校验，ADR-073）。
+    // 解析成 "me" 之后这里查的是调用方自己的 instance —— 免检会让
+    // "自己"变成一个绕过目录校验的洞。
+    if let Some(assignee) = &assignee
         && !state.agent_dir.agent_exists(assignee).await
     {
         return Err(PmError::BadRequest(format!(
@@ -1160,7 +1195,7 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         parent_task_id: a.parent_task_id,
         depends_on: a.depends_on,
         attachment_ids: vec![],
-        assignee: a.assignee,
+        assignee,
         due_at: a.due_at,
         start_at: a.start_at,
     };
