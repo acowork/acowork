@@ -4071,9 +4071,10 @@ mod tests {
         assert!(message.contains("Fix invoice rounding"), "{message}");
         assert!(message.contains("Round to cents at line level."), "{message}");
 
-        // 3. The brief is the playbook, and it names the exact tools and the
-        //    409 branches — a stripped-down brief is what sends an agent into
-        //    a claim retry loop.
+        // 3. The brief is the playbook: exact tool names, both 409 branches,
+        //    and the doc leg — a stripped-down brief is what sends an agent
+        //    into a claim retry loop, or into writing deliverables to a local
+        //    file instead of the project's document library (plan §7-G3).
         let brief = push["assignment_brief"].as_str().unwrap();
         for needle in [
             tid.as_str(),
@@ -4081,9 +4082,17 @@ mod tests {
             "pm_submit_task",
             "409 review_not_approved",
             "409 dependency_not_satisfied",
+            "pm_get_project",
+            "`doc_path`",
+            "no doc_path",
+            "Never fall back to writing local files",
         ] {
             assert!(brief.contains(needle), "brief is missing `{needle}`: {brief}");
         }
+        assert!(
+            !brief.contains("repository attached to this conversation"),
+            "the repo-as-delivery-venue instruction must be gone: {brief}"
+        );
 
         // 4. Delivery is stamped, so the same generation cannot be pushed
         //    twice — a second tick must stay silent.
