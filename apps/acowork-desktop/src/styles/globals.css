@@ -35,6 +35,27 @@
      every turn rather than once per failure. Contrast on both themes stays
      above AA for body text; the badge keeps the loud token. */
 
+  /* Solid pill fills — background for badges whose text is WHITE (PM status /
+     priority capsules). These are NOT the accent presets' raw hues: the
+     presets (rose #f43f5e, green #00C375, blue #3b82f6) sit at 2.3–3.7:1
+     against white, which fails AA for 11px badge text, so each hue is taken
+     one step down the same family until white clears 4.5:1 — the same
+     foreground/fill split `--color-accent` / `--color-accent-strong` encodes.
+     The .dark block deepens every one by a further step: white text only
+     gains contrast, and the glare of a full-luminance warm chip on a
+     near-black surface goes away. Consumers write `bg-pill-red` /
+     `text-white` with no `dark:` prefix. */
+  --color-pill-red: #e11d48;
+  /* = rose-600 — 4.7:1 with white. Failure / urgency. */
+  --color-pill-green: #047857;
+  /* = emerald-700 — 5.5:1 with white. Success / done. */
+  --color-pill-blue: #2563eb;
+  /* = blue-600 — 5.2:1 with white. Active / in flight. */
+  --color-pill-amber: #b45309;
+  /* = amber-700 — 5.0:1 with white. Awaiting attention. */
+  --color-pill-neutral: #71717a;
+  /* = zinc-500 — 4.8:1 with white. No colour semantics: idle, cancelled, low. */
+
   /* Chat palette — background shades for the message surface and
      nested blocks inside it. Used by:
        - ChatPanel.tsx       (assistant/thought/error/system message bubbles)
@@ -625,6 +646,21 @@
   --color-warning-quiet: #c98a1e;
   /* amber, dimmed for a dark surface — amber-400 at full luminance is a
      glare, not a hint. See the light value's note. */
+
+  /* Solid pill fills (dark) — one step deeper than the light values, so a
+     warm chip does not glare on the near-black surface while white text
+     climbs from 4.7–5.5:1 to 6.3–7.7:1. Same hue family, so the
+     status/priority colour language is unchanged between themes. */
+  --color-pill-red: #be123c;
+  /* = rose-700 */
+  --color-pill-green: #065f46;
+  /* = emerald-800 */
+  --color-pill-blue: #1d4ed8;
+  /* = blue-700 */
+  --color-pill-amber: #92400e;
+  /* = amber-800 */
+  --color-pill-neutral: #52525b;
+  /* = zinc-600 */
 
   /* Chat palette (dark) — auto-flips the @theme light values (6 tokens) */
   --color-chat-bubble: hsl(240 3.8% 15.7% / 0.7);

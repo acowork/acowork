@@ -29,29 +29,27 @@ export const INDENT_PER_DEPTH = 13;
 /**
  * 状态 → Tailwind class 映射。
  *
+ * 实底胶囊 + 白字（`--color-pill-*`，见 globals.css 的 solid pill fills 段）：
+ * 色相仍是全局高亮色体系里的 rose / amber / blue / emerald，只是加深到白字
+ * 在深浅两套主题下都 ≥4.5:1。中性档（pending / cancelled）用 zinc —— 这两档
+ * 没有颜色语义，硬塞进红绿蓝只会让人误读成「失败」或「进行中」。
+ *
  * 与看板列头状态点同一语义（`SubtaskTree` 的 `STATUS_STYLE` 是同一组配色的
  * 另一处投影）：项目里没有公共的状态色常量（`BOARD_COLUMNS` 只带
  * `i18nKey`），所以列表视图自己持一份 **Tailwind class** 映射，写法对齐
- * `PriorityBadge` 的 `STYLES` —— 不写死 hex，深浅色各一档。
+ * `PriorityBadge` 的 `STYLES`。
  */
 export const STATUS_PILL_CLASS: Record<TaskStatus, string> = {
-  pending: "bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300",
-  in_progress: "bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-400",
-  submitted: "bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-400",
-  done: "bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-400",
-  rejected: "bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-400",
-  cancelled: "bg-zinc-100 text-text-tertiary dark:bg-zinc-800",
+  pending: "bg-pill-neutral",
+  in_progress: "bg-pill-blue",
+  submitted: "bg-pill-amber",
+  done: "bg-pill-green",
+  rejected: "bg-pill-red",
+  cancelled: "bg-pill-neutral",
 };
 
-/** 状态点配色（状态菜单里的图例，与胶囊同一组语义）。 */
-export const STATUS_DOT_CLASS: Record<TaskStatus, string> = {
-  pending: "bg-zinc-400",
-  in_progress: "bg-blue-500",
-  submitted: "bg-amber-500",
-  done: "bg-green-500",
-  rejected: "bg-red-500",
-  cancelled: "bg-zinc-400",
-};
+/** 胶囊内的小圆点：底色已经是同一族的颜色，点必须反白才看得见。 */
+export const STATUS_DOT_CLASS = "bg-white/70";
 
 export const STATUS_LABEL_KEY: Record<TaskStatus, string> = {
   pending: "pm.board.pending",

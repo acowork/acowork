@@ -898,12 +898,12 @@ export function TaskListView({
                 <PmPopoverItem key={s} onClick={() => void applyStatus(task, s)}>
                   <span
                     className={cn(
-                      "inline-flex items-center gap-1 rounded px-1.5 py-0.5",
+                      "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-white",
                       STATUS_PILL_CLASS[s],
                     )}
                   >
                     <span
-                      className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[s])}
+                      className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS)}
                       aria-hidden
                     />
                     {t(STATUS_LABEL_KEY[s])}
@@ -1049,14 +1049,14 @@ export function TaskListView({
                       {field === "status" ? (
                         <span
                           className={cn(
-                            "inline-flex items-center gap-1 rounded px-1.5 py-0.5",
+                            "inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-white",
                             STATUS_PILL_CLASS[o.value as TaskStatus],
                           )}
                         >
                           <span
                             className={cn(
                               "h-1.5 w-1.5 shrink-0 rounded-full",
-                              STATUS_DOT_CLASS[o.value as TaskStatus],
+                              STATUS_DOT_CLASS,
                             )}
                             aria-hidden
                           />

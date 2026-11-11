@@ -259,7 +259,7 @@ export function ProjectHeader({
             type="button"
             onClick={onNewTask}
             disabled={offline}
-            className="rounded-md bg-zinc-800 px-2.5 py-1 text-xs font-medium text-white hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+            className="btn-accent rounded-md px-2.5 py-1 text-xs font-medium disabled:cursor-not-allowed disabled:opacity-40"
           >
             + {t("pm.newTask")}
           </button>

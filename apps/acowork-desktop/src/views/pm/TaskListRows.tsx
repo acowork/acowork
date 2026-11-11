@@ -248,13 +248,13 @@ function StatusCell({
       }}
       title={offline ? t("pm.offlineReadonlyHint") : t("pm.list.changeStatus")}
       className={cn(
-        "inline-flex max-w-full items-center gap-1 rounded px-1.5 py-px text-11 leading-tight",
+        "inline-flex max-w-full items-center gap-1 rounded-full px-2 py-0.5 text-11 leading-tight text-white",
         STATUS_PILL_CLASS[task.status],
         offline ? "cursor-default" : "cursor-pointer hover:brightness-95",
       )}
     >
       <span
-        className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[task.status])}
+        className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS)}
         aria-hidden
       />
       <span className="min-w-0 truncate">{label}</span>
