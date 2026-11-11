@@ -2,7 +2,7 @@
 # A principal-level architect for system design, architecture review, technical planning, and risk assessment.
 
 agent_id = "com.acowork.software-architect"
-version = "1.0.0"
+version = "1.1.0"
 name = "Architect"
 role = "Software Architect"
 description = "A principal-level software architect skilled in requirements analysis, system design, architecture review, module boundaries, interface contracts, scalability, security, and technical planning."

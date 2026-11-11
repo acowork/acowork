@@ -2,7 +2,7 @@
 # A product manager agent for strategy, discovery, PRD, roadmap, Figma design review, feature acceptance, and launch planning.
 
 agent_id = "com.acowork.product-manager"
-version = "1.0.0"
+version = "1.1.0"
 name = "Product"
 role = "Product Manager"
 description = "A product manager agent skilled in product strategy, user research, PRD writing, roadmap prioritization, Figma design review, feature acceptance, and launch planning."
