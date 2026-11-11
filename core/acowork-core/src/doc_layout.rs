@@ -46,18 +46,21 @@ pub fn project_doc_dir(project_id: &str) -> String {
 /// the gap through `pm_add_activity` instead of creating it — the project
 /// tree has exactly one governor.
 ///
-/// Both reference points read these constants, not their own copies: the PM
-/// surface renders `doc_path` through [`project_doc_dir`] /
-/// [`project_doc_area`], and the Doc-side tests assert against the same
-/// values (see the `acowork-pm` / `acowork-doc` MCP tests that name
-/// `acowork_core::doc_layout` explicitly).
+/// These are the *documented* vocabulary, not yet a consumed one: the PM
+/// bootstrap that creates the directories is agent-side prose in the
+/// `project-setup` skill, so today the only Rust readers are the tests in
+/// this module. The constants exist so that "a participant artifact has a
+/// place in the tree" is a compiled fact rather than a sentence — the first
+/// Rust consumer (a bootstrap pass, or a Doc-side assertion) reads these
+/// instead of re-typing the names.
 pub const DOC_AREA_TECH_DESIGN: &str = "技术方案";
 pub const DOC_AREA_REVIEW: &str = "评审";
 pub const DOC_AREA_TESTING: &str = "测试";
 pub const DOC_AREA_ACCEPTANCE: &str = "验收";
 pub const DOC_AREA_RESEARCH: &str = "调研";
 
-/// All five areas, in tree order — the enumeration a bootstrap pass walks.
+/// All five areas, in tree order — the enumeration the vocabulary tests walk
+/// (and any future Rust-side bootstrap).
 pub const DOC_AREAS: [&str; 5] = [
     DOC_AREA_TECH_DESIGN,
     DOC_AREA_REVIEW,
@@ -70,9 +73,11 @@ pub const DOC_AREAS: [&str; 5] = [
 /// (`项目管理/p-1a2b3c/技术方案`-style, **without** a trailing slash, same
 /// join rule as [`project_doc_dir`]).
 ///
-/// The `area` argument is one of [`DOC_AREAS`]; free-form strings are
-/// rejected by convention only, which is why the closed vocabulary lives
-/// here as constants rather than as prose.
+/// `area` is a single tree segment. The five participant areas are the
+/// constants above; PM's own subdirectories (`周报`, `会议纪要`) are equally
+/// valid inputs — this function composes any segment under the project
+/// directory and does not validate the vocabulary, which is why the closed
+/// set lives here as constants rather than as a runtime check.
 pub fn project_doc_area(project_id: &str, area: &str) -> String {
     format!("{}/{}", project_doc_dir(project_id), area)
 }

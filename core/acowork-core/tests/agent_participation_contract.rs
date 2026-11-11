@@ -23,6 +23,12 @@
 //!    a skill the package actually ships ([`AgentManifest::validate_capability_skills`]
 //!    is already an error at packaging time; this pins it for the batch).
 //!
+//! Two structural preconditions ride along, because everything above is
+//! vacuous without them: every `SKILL.md` must have frontmatter (no
+//! frontmatter = the Runtime never registers the skill), and its `name` must
+//! equal the skill directory (the packager keys capabilities on the
+//! directory, the Runtime keys the registry on the frontmatter name).
+//!
 //! The packaging guard (plan §8 item 5) is not a test but a `git status`
 //! assertion on `agents/agent-packages/` — see the T5 card.
 
@@ -76,62 +82,113 @@ fn skill_files(agent: &str) -> Vec<PathBuf> {
     out
 }
 
-/// The `tool_deps` of one `SKILL.md`, from its YAML frontmatter.
+/// The frontmatter fields this contract cares about.
+struct SkillFrontmatter {
+    /// The Runtime registers skills by this name (`skills/parser.rs`).
+    name: String,
+    /// Declared tool dependencies — the executable half of the contract.
+    tool_deps: Vec<String>,
+}
+
+/// One `SKILL.md` frontmatter, parsed from the YAML block between the
+/// opening and closing `---`.
 ///
-/// Deliberately minimal (no full frontmatter model): the contract is about
-/// *declared tool dependencies*, and the frontmatter `name` is already
-/// cross-checked against the directory by the packaging pipeline.
-fn frontmatter_tool_deps(skill_md: &Path) -> Vec<String> {
+/// Frontmatter is **required**, and a missing one is a failure rather than
+/// an empty result: the Runtime keys the skill registry on the frontmatter
+/// `name`, so a file without it does not load at all — skipping it would
+/// make every assertion below pass vacuously on a dead skill.
+///
+/// No full frontmatter model is built: the contract is `name` + `tool_deps`,
+/// which is also exactly what `manifest.rs` documents as "the part whoever
+/// owns the package contents must supply" (`SkillDecl`).
+fn frontmatter(skill_md: &Path) -> SkillFrontmatter {
     let text = std::fs::read_to_string(skill_md)
         .unwrap_or_else(|e| panic!("cannot read {}: {e}", skill_md.display()));
     let lines: Vec<&str> = text.lines().collect();
-    // No frontmatter, or a file that does not open with `---`: the skill
-    // simply declares no tool dependencies.
-    let Some(open) = lines.first() else {
-        return Vec::new();
-    };
-    if !open.trim_end().starts_with("---") {
-        return Vec::new();
-    }
-    let Some(end) = lines[1..]
-        .iter()
-        .position(|l| l.trim_end() == "---")
-    else {
-        panic!("{}: frontmatter is not closed by a `---` line", skill_md.display());
+    assert!(
+        lines.first().is_some_and(|l| l.trim_end() == "---"),
+        "{}: no YAML frontmatter — the Runtime cannot load this skill",
+        skill_md.display()
+    );
+    let Some(end) = lines[1..].iter().position(|l| l.trim_end() == "---") else {
+        panic!(
+            "{}: frontmatter is not closed by a `---` line",
+            skill_md.display()
+        );
     };
     let block = lines[1..=end].join("\n");
-    let value: serde_yaml::Value = serde_yaml::from_str(&block)
-        .unwrap_or_else(|e| panic!("{}: frontmatter is not valid YAML: {e}", skill_md.display()));
-    value
+    let value: serde_yaml::Value = serde_yaml::from_str(&block).unwrap_or_else(|e| {
+        panic!("{}: frontmatter is not valid YAML: {e}", skill_md.display())
+    });
+    let name = value
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| {
+            panic!(
+                "{}: frontmatter has no string `name` — the Runtime cannot register this skill",
+                skill_md.display()
+            )
+        })
+        .to_string();
+    let tool_deps = value
         .get("tool_deps")
         .and_then(|v| v.as_sequence())
         .map(|seq| {
             seq.iter()
-                .map(|v| v
-                    .as_str()
-                    .unwrap_or_else(|| {
-                        panic!("{}: tool_deps entry is not a string: {v:?}", skill_md.display())
-                    })
-                    .to_string())
+                .map(|v| {
+                    v.as_str()
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{}: tool_deps entry is not a string: {v:?}",
+                                skill_md.display()
+                            )
+                        })
+                        .to_string()
+                })
                 .collect()
         })
-        .unwrap_or_default()
+        .unwrap_or_default();
+    SkillFrontmatter { name, tool_deps }
+}
+
+/// The directory name of a `SKILL.md`'s skill, and the file itself.
+fn skill_id(skill_md: &Path) -> (String, SkillFrontmatter) {
+    let dir_name = skill_md
+        .parent()
+        .expect("SKILL.md has a parent")
+        .file_name()
+        .expect("skill dir has a name")
+        .to_string_lossy()
+        .into_owned();
+    (dir_name, frontmatter(skill_md))
 }
 
 /// The package's shipped skills as [`SkillDecl`]s, as `validate_graph`
-/// expects (directory name + frontmatter `tool_deps`).
+/// expects (skill name + frontmatter `tool_deps`).
 fn shipped_skills(agent: &str) -> Vec<SkillDecl> {
     skill_files(agent)
         .into_iter()
-        .map(|path| SkillDecl {
-            tool_deps: frontmatter_tool_deps(&path),
-            name: path
-                .parent()
-                .expect("SKILL.md has a parent")
-                .file_name()
-                .expect("skill dir has a name")
-                .to_string_lossy()
-                .into_owned(),
+        .map(|path| {
+            let (dir_name, fm) = skill_id(&path);
+            // Two different layers name a skill: the packager links
+            // capabilities by the `skills/<dir>/` name (`acowork-sign`
+            // `validate_declaration_graph`, which cannot read frontmatter),
+            // the Runtime registers by the frontmatter `name`
+            // (`skills/parser.rs`). Divergence is invisible to both — the
+            // package installs, the capability panel lists the skill, and
+            // `load_skill` resolves nothing. Assert it here, where both
+            // halves are in hand.
+            assert_eq!(
+                dir_name,
+                fm.name,
+                "{}: frontmatter `name` must equal the skill directory name (packager keys on \
+                 the directory, the Runtime keys on the frontmatter)",
+                path.display()
+            );
+            SkillDecl {
+                tool_deps: fm.tool_deps,
+                name: fm.name,
+            }
         })
         .collect()
 }
@@ -155,20 +212,13 @@ fn file_write_is_closed_to_the_three_sse_skills() {
     let mut offenders = Vec::new();
     for agent in PARTICIPANTS {
         for path in skill_files(agent) {
-            let skill = path
-                .parent()
-                .expect("SKILL.md has a parent")
-                .file_name()
-                .expect("skill dir has a name")
-                .to_string_lossy();
-            let skill = skill.as_ref();
-            let deps = frontmatter_tool_deps(&path);
-            if !deps.iter().any(|d| d == "file_write") {
+            let (skill, fm) = skill_id(&path);
+            if !fm.tool_deps.iter().any(|d| d == "file_write") {
                 continue;
             }
             let allowed = FILE_WRITE_ALLOWED
                 .iter()
-                .any(|(a, s)| *a == agent && *s == skill);
+                .any(|(a, s)| *a == agent && s == &skill);
             if !allowed {
                 offenders.push(format!(
                     "{}/skills/{skill} declares `file_write` but is not in the §4.4 allowlist",
@@ -182,6 +232,23 @@ fn file_write_is_closed_to_the_three_sse_skills() {
         "`file_write` leaked outside the three §4.4 skills:\n{}",
         offenders.join("\n")
     );
+
+    // The other direction: an entry that no longer declares the tool is
+    // stale config. "Exactly three" has to mean exactly three — a removed
+    // dependency and its allowlist line move in the same change.
+    for (agent, skill) in FILE_WRITE_ALLOWED {
+        let path = agents_dir()
+            .join(agent)
+            .join("skills")
+            .join(skill)
+            .join("SKILL.md");
+        assert!(path.is_file(), "{} is in the allowlist but ships no such skill", path.display());
+        assert!(
+            frontmatter(&path).tool_deps.iter().any(|d| d == "file_write"),
+            "{agent}/skills/{skill} is in the §4.4 allowlist but no longer declares `file_write` \
+             — remove the stale entry"
+        );
+    }
 }
 
 #[test]
