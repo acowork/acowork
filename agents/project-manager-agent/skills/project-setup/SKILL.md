@@ -1,7 +1,7 @@
 ---
 name: project-setup
 description: Bootstrap a project so work can be dispatched and its deliverables have a home — project record, document directory, README index, and the member roster
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - set up a project
@@ -53,15 +53,40 @@ directory inside the document library (design §5.5, shape
      in one or two sentences (the description is what other agents read first).
    - Keep `id` and `doc_path` from the response.
 
-2. **Create the directory chain — explicitly, in order**
-   - `doc_mkdir` with `项目管理`, then `doc_mkdir` with `doc_path`.
+2. **Create the whole directory tree — in one pass, root first**
    - Parents are **not** created implicitly: `doc_write` into a path whose
      parent is missing fails with `DirNotFound` naming the segment that does
      not exist. That is deliberate — a typo becomes an error instead of a
-     silent parallel tree — so create the chain before the first write.
-   - `NameConflict` on either call means the directory already exists (a
-     re-run, or another agent got there first). Use it. Do not invent a
-     suffixed name like `项目管理-2`.
+     silent parallel tree — so the full chain goes in before the first write.
+   - The tree is **seven directories under `doc_path`**, plus the two above it.
+     Build all of them now, not on demand: a participant has no `doc_mkdir`, so
+     an area you did not create is a gap it can only report back to you.
+
+     | # | `doc_mkdir` path | owner of what lands here |
+     |---|---|---|
+     | 1 | `项目管理` | PM (shared root for every project) |
+     | 2 | `{doc_path}` | PM (`README.md`, `PRD.md`, `风险登记册.md`, `冲刺计划.md`, `复盘.md`) |
+     | 3 | `{doc_path}/周报` | PM |
+     | 4 | `{doc_path}/会议纪要` | PM |
+     | 5 | `{doc_path}/技术方案` | Architect, SSE |
+     | 6 | `{doc_path}/评审` | Architect, SSE |
+     | 7 | `{doc_path}/测试` | QA |
+     | 8 | `{doc_path}/验收` | Product |
+     | 9 | `{doc_path}/调研` | Product |
+
+   - **Idempotent: check before you create.** `doc_list` with `path: doc_path`
+     first and `doc_mkdir` only the segments that are missing — a re-run on a
+     half-built tree should create the rest, not lean on errors. `NameConflict`
+     means the directory exists already (another agent got there first, or the
+     tree was built by hand); **use it**, and never invent a suffixed name like
+     `项目管理-2`. Treat `NameConflict` as "already handled", not as a normal
+     path to retry through.
+   - **You are the only one who creates directories in this tree.** Participants
+     (Product / QA / SSE / Architect) write files but hold no `doc_mkdir` —
+     whoever creates a directory governs it (see *Ownership and ACL facts*
+     below), so a self-made area could later be renamed or pruned only by the
+     agent that made it, and your IA restructuring would be refused with
+     `forbidden`. One tree, one governor.
 
 3. **Write the README index**
    - `doc_write` `{doc_path}/README.md`, `mode: create`, with an H1 that is
@@ -69,6 +94,31 @@ directory inside the document library (design §5.5, shape
    - The directory name is a machine handle; the README is the human face and
      the thing `doc_search` matches. This is why an unreadable directory name
      is acceptable.
+   - The README carries the **ownership table** — the closed vocabulary that
+     tells every participant where its output goes. Without it each agent
+     invents a path, and two agents writing "the same" report into two places
+     is the failure this step exists to prevent. Include this table verbatim
+     (it is the contract, not a suggestion):
+
+     | path | owner | content |
+     |---|---|---|
+     | `README.md` | PM | this file, the project entry point |
+     | `PRD.md` | PM | requirements (participants read-only; changes go through `doc_write` → `pending_review`) |
+     | `风险登记册.md` | PM | risk register |
+     | `冲刺计划.md` | PM | sprint plan |
+     | `复盘.md` | PM | retrospective |
+     | `周报/{YYYY-WW}.md` | PM | weekly report |
+     | `会议纪要/{YYYY-MM-DD}-{slug}.md` | PM | meeting minutes |
+     | `技术方案/{slug}.md` | Architect, SSE | system design, ADR, trade-off analysis |
+     | `评审/{YYYY-MM-DD}-{slug}.md` | Architect, SSE | design review, code review |
+     | `测试/{测试计划\|测试报告\|回归报告}.md` | QA | test-side deliverables |
+     | `验收/{slug}-验收报告.md` | Product | feature acceptance |
+     | `调研/{slug}.md` | Product | user and market research |
+
+   - The vocabulary is **closed**: when a deliverable has no row, the owner of
+     the tree extends the table — a participant does not coin a filename. Add
+     the row here (and in the README) when the request arrives, then tell the
+     requester where to write.
 
 4. **Build the roster**
    - `pm_list_agents` **without** `project_id` → every agent installed on this
@@ -82,7 +132,9 @@ directory inside the document library (design §5.5, shape
 5. **Verify before reporting**
    - `pm_get_project` → `members` contains every instance id you intend to
      dispatch to.
-   - `doc_list` with `path: doc_path` → the README is there.
+   - `doc_list` with `path: doc_path` → the README is there and the seven
+     sub-directories are all present; a missing one is a tree you will have to
+     finish later, when a participant's write fails on it.
    - `mcp_memory__memory_store` the bootstrap facts worth carrying across
      sessions: project id, `doc_path`, roster, and the naming decisions.
 
@@ -119,7 +171,8 @@ These are enforced in code, not conventions:
 ## Project bootstrapped: {title}
 
 - **Project**: `{id}` — {title}
-- **Document directory**: `{doc_path}` (README index written)
+- **Document directory**: `{doc_path}` (README index written, tree complete:
+  `周报` `会议纪要` `技术方案` `评审` `测试` `验收` `调研`)
 - **Roster**: {n} agent(s) — {names with instance ids}
 - **Not done**: {anything you could not complete, and why}
 ```
