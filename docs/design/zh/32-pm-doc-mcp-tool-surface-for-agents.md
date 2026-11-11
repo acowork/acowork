@@ -216,6 +216,18 @@ PM 的规划产出落文档库，固定形态：
 项目管理/{project_id}/会议纪要/{YYYY-MM-DD}-{slug}.md
 ```
 
+参与方（Product / QA / SSE / Architect）的交付物用**同一棵树**，占 5 个受控 area（§5.5 封闭词表的受控修订，计划 §6；决策 D-2：树由 PM 的 `project-setup` **一次建好**，参与方只写文件、不建目录）：
+
+| 路径 | owner | 内容 |
+|---|---|---|
+| `项目管理/{project_id}/技术方案/{slug}.md` | Architect, SSE | 系统设计、ADR、权衡、技术调研 |
+| `项目管理/{project_id}/评审/{YYYY-MM-DD}-{slug}.md` | Architect, SSE | 设计评审、代码评审 |
+| `项目管理/{project_id}/测试/{测试计划\|测试报告\|回归报告}.md` | QA | 测试计划、测试报告、回归报告 |
+| `项目管理/{project_id}/验收/{slug}-验收报告.md` | Product | 产品验收 |
+| `项目管理/{project_id}/调研/{slug}.md` | Product | 用户调研、市场调研 |
+
+路径字符串（含 5 个 area 名）一律由 `acowork_core::doc_layout` 提供（`project_doc_dir` + 5 个 area 常量 + `project_doc_area`）：PM 渲染与 Doc 侧测试引用的是**同一组常量**，代码侧只有一份事实来源。
+
 **目录名用 `project_id` 而非项目标题**，理由与代价都已权衡：
 
 | 要求 | 用 `{project_id}` | 用 `{title-slug}` |
@@ -226,7 +238,7 @@ PM 的规划产出落文档库，固定形态：
 
 丑的问题由 **`README.md` 承担人面**解决：它的 H1 就是项目标题，也是 `doc_search` 的命中面——人进库看到的是文档名，不是目录名。**这是刻意选择：目录是机器把手，README 是人的脸。** 不引入「slug 存在项目 description 首行」这类约定——解析自由文本当外键用，是后续所有迁移事故的源头。
 
-- 词汇表**封闭**：产出物文件名只允许上述集合，agent 不得自造名。新增一类产出须先改本节。
+- 词汇表**封闭**：产出物文件名只允许上述集合（PM 7 类 + 参与方 5 个 area），agent 不得自造名。新增一类产出须先改本节（受控修订先例：计划 §6 的 5 个 area）。
 - 单向依赖：**PM 引用 doc，doc 不知道 PM**。这是两个服务之间唯一的耦合点。
 
 **这条约定以工具响应字段发布，不以 prompt 文案发布**（P3.1 修正）：
@@ -257,6 +269,10 @@ PM 的规划产出落文档库，固定形态：
 | `manifest.toml` | `tool_deps` 声明 `doc_*`；修 D4 注释；shell 保留 |
 | 现有 7 skills | `document-collection` 改为「读 workspace（`file_read`，需在 manifest 声明）→ `doc_write(mode=create, source_workspace, source_path)`」；`document-organization` 用 `doc_mkdir` / `doc_move`（**文档**，目录靠移出 + `doc_rmdir` + `doc_mkdir`）/ `doc_rmdir`；`document-quality-review` 用 `doc_read` + `doc_stat` + 审核队列三件 |
 | 新增 0 skill | ~~`review-tracking`~~：与 `document-quality-review` 能力重复（后者 `tool_deps` 已含 `doc_list_requests` / `doc_check_request`，`System of Record` 段已覆盖 `pending_review` 生命周期），**不建文件**，内容并入既有 skill |
+
+### 6.3 其余原生 Agent：参与契约
+
+Product / QA / SSE / Architect 四个原生 Agent **只参与、不管理**项目：承接（`pm_claim_task`）→ 执行 → 发布（`doc_write` 进 §5.5 的 5 个 area）→ 汇报（`pm_submit_task`），管理面工具（`pm_update_task` / `pm_create_project` / `pm_add_project_member` / `pm_list_agents`）与 `doc_mkdir` 一律不在白名单——边界由 manifest 白名单（ADR-104）强制，不靠文案自律。完整机制（承接流程、必须写进文的 5 条机制、逐 agent 差异、任务卡 T1–T6）见[计划文档 §3–§4](../../plan/zh/pm-doc-agent-participation-plan.md)；§5.5 的 5 个 area 即该计划 §6 的受控修订。
 
 ---
 
@@ -295,3 +311,4 @@ PM 的规划产出落文档库，固定形态：
 | v1.0 | 2026-07-08 | 首版定稿：机制 M1–M7、工具面（PM 12→14 + 3 别名 / Doc 9→12）、缺陷 D1–D6、§8 决策全部关闭 |
 | v1.1 | 2026-07-08 | P0 实施期新增 **D7**（成员闸 / 目录存在性校验 / 派工投递目标三层不一致：人类账号可被存为 assignee 却永远派不出去）与 **Q7**（`pm_list_agents` 两种模式的失败语义不对称；`online` 是信息不是闸门）。据此：roster 模式只列 agent 成员 + `human_member_count` 显式上报；不做 agent→human 派工。 |
 | v1.2 | 2026-07-08 | P1 T1-1：`pm_list_tasks` 收敛为唯一任务查询——`project_id` 可选（省略 = 跨项目，须至少一个过滤条件 + 有限 `limit`）、新增 `parent_task_id`/`type`/`review_status`/`query`/`order_by`/`offset`、`assignee` 接受哨兵 `"me"`（服务端按 actor 解析，agent 无需知道自己的 instance id）；返回统一为 `{total,count,tasks,truncated,next_offset}` 信封。`TaskIndex` 随之携带 `type`/`parent_task_id`，全部过滤走内存索引、不做逐项目扫描。 || v1.3 | 2026-07-08 | P1 T1-2：`pm_update_task` 吸收 `parent_task_id`（三态：省略=不动、`null`=提升为根、给 id=改父），结构移动仍走 store 的 reparent 路径（含防环），字段写入与移动在同一调用内完成。`pm_reparent_task` 待 T1-4 转 deprecated 别名。实施期发现：MCP 的任务投影**不含 `children` 字段**——子树只能由 `pm_list_tasks(parent_task_id=…)` 读出，已在测试与本文注明，避免后续误以为可读。 || v1.4 | 2026-07-08 | P1 T1-3：新增 `pm_update_project`（改名 / 描述 / 归档 / 完成），授权沿用 `Project::can_govern`（与 `PATCH /projects/:id` 同一规则，不新建模型）；`status=completed` 触发设计 27 §2.1 T2-a 的任务上下文收尾。为此把 `close_task_contexts` / `provisioner` 从依赖 `ApiState` 改为依赖 `&Option<(String, Option<String>)>`，MCP 面与大 REST 面共用同一实现（同 P0 的 `sync_group_chat` 手法）。空调用（无可改字段）显式报错而非静默 200。工具数 16→17。 || v1.5 | 2026-07-08 | P1 T1-4：`pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 转为 **deprecated 别名**——参数翻译后调用**同一个** handler，故返回**逐字节相同**的 JSON（只差两次写入必然不同的 `updated_at`），等价测试按此断言。**旧形状明确废弃**：`pm_check_task` 的扁平评审摘要、`pm_list_my_tasks` 的裸数组、`pm_reparent_task` 的 `{ok:true}` 均不再返回；`pm_check_task` 连带不再单独要求 actor（与 `pm_get_task` 同权限）。manifest 加 `version: 0.2.0`，三个别名 description 前缀 `DEPRECATED — use …`。工具数仍为 17（14 主 + 3 别名）。 || v1.6 | 2026-07-08 | P1 T1-6：状态机转移表上移到 `TaskStatus::legal_successors()` 作为单一事实来源，`validate_transition` 与错误消息同读一张表——`InvalidStateTransition` 现在带 `allowed` 字段，消息形如 `invalid state transition for task t-x: in_progress → done; from in_progress you may go to: pending, submitted, cancelled`；终态（`cancelled`）报 `(none — terminal status)` 而非空列表。理由：agent 无法靠重试猜出状态机，第一次报错就得告诉它合法去向。 || v1.7 | 2026-07-08 | P1 T1-5：21 §4 的 Mermaid 状态机与 `legal_successors()` **逐格核对一致**（含易漏的 `rejected → cancelled`）；21 §6 的工具表**删除**，改为指向本文与 manifest 单一事实来源，只保留三条面向 agent 的不变式——复制出的第二份清单必然漂移（迁移前已缺 `type`/`depends_on`/`only_blocked`，并把别名写成"仅创建者可查"）。**P1 收口**：14 主工具 + 3 别名 = 17。 || v1.8 | 2026-07-08 | P2 完成（Doc 面 9→13）：新增 `doc_list_requests`（默认 `pending` 队列，可按文档过滤，`status=all` 取消过滤）、`doc_list_trash`、`doc_restore`（与 REST 同 `check_trashed` 编辑权；**无 purge**）、`doc_rmdir`。**`doc_rmdir` 语义刻意与 REST 不同**：`DELETE /dirs/{id}` 是级联进回收站，而 agent 面只允许删**空目录**、绝不级联——一个路径写错就把整套信息架构扫走，代价与收益不成比例；非空时报出文档数与子目录数。实施期发现：MCP 测试辅助 `raw()` 每次调用新建临时库，**跨调用状态不存在**（此前测试全是单调用形状），故新增 `shared_router()` / `call_shared()` 才能测多步场景（建目录→列表→删除→恢复）。**未做**：`doc_move` 的目录跨父级移动与 `doc_get_acl`/`doc_set_acl`——`DirMeta` 无 `parent` 字段（父子关系即物理嵌套），跨父移动要整体搬迁子树，属独立特性；ACL 面按设计优先级最低。 || v1.9 | 2026-07-08 | P3 完成：两个 agent 的 `prompts/system.md` 增加工作区契约（pm_*/doc_* 是系统记录，memory 不是）；14 个 skill 各增 `System of Record` 段（PM 侧要求"分解完成=任务已建在服务里"，Doc 侧要求 `if_version`/`pending_review`/trash 语义）；`tool_deps` 校正（`file_write`→`doc_write`、`file_read`→`doc_read`，`document-collection` 保留 `file_read`；伪依赖 `network` → `http_request`/`web_fetch`）；**两个 manifest 补推荐对应 hosted MCP**（PM agent 加 `doc`、Doc agent 加 `pm`）——否则 skill 声明了工具但 server 不存在。范围外的 4 个 agent 已回退，未改。 |
+| v1.10 | 2026-11-11 | 新增 §6.3「其余原生 Agent：参与契约」（Product / QA / SSE / Architect 只参与不管理，边界由 manifest 白名单强制，完整机制指向计划 §3–§4）；§5.5 封闭词表受控修订：补 5 个参与方 area（计划 §6 / 决策 D-2，树由 PM `project-setup` 一次建好、参与方只写文件），并注名代码侧单一事实来源 `acowork_core::doc_layout`（5 个 area 常量 + `project_doc_area`）。另：本文缺 en 版本（`docs/design/en/` 从 31 跳到 33）——独立缺口，见计划 §10。 |
