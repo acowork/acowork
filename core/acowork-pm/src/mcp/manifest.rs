@@ -170,7 +170,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_update_task",
-      "description": "Update task fields. Only provided fields are modified. `status` follows the task state machine and is NOT free-form: in_progress can only go to submitted (never straight to done — submit first), cancelled is terminal, rejected can be re-claimed. A task created by an agent cannot enter in_progress until a human approves it (409 review_not_approved). Wrong transitions return `invalid_state_transition` with the legal target — read it instead of retrying.",
+      "description": "Update task fields. Only provided fields are modified. Authorization (G1-c): the assignee may change any field; the project owner may change any field EXCEPT `status` — and is the only role that may set `assignee` on a task the assignee cannot act on (adoption of an unassigned or orphaned task); the task's creator may fix non-status fields (title / description / type / priority / parent_task_id / depends_on / due_at / start_at) but not `assignee` or `status`; anyone else gets `forbidden`. `status` follows the task state machine and is NOT free-form: in_progress can only go to submitted (never straight to done — submit first), cancelled is terminal, rejected can be re-claimed. A task created by an agent cannot enter in_progress until a human approves it (409 review_not_approved). Wrong transitions return `invalid_state_transition` with the legal target — read it instead of retrying.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],
@@ -190,7 +190,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
           "assignee": {
             "type": ["string", "null"],
-            "description": "agent_instance_id (UUID v4) or null to unassign. The assignee MUST already be a member of the task's project — otherwise the call fails with `assignee_not_project_member`. Check with pm_get_project (members[]), invite with pm_add_project_member. Do NOT pass the package id like com.acowork.foo."
+            "description": "agent_instance_id (UUID v4) or null to unassign. Changing it is a project-owner action (G1-c adoption of an unassigned or orphaned task); the assignee themselves may also hand the task over. The new assignee must exist in the agent directory (`assignee_not_found`) AND already be a member of the task's project (`assignee_not_project_member`) — adoption is not an inspection exemption. Check with pm_get_project (members[]), invite with pm_add_project_member. Do NOT pass the package id like com.acowork.foo."
           },
           "due_at": {
             "type": ["string", "null"],

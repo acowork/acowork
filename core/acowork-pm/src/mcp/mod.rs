@@ -1029,6 +1029,397 @@ mod tests {
         assert!(msg.contains("assigned to instance"), "must name the assignee: {v}");
     }
 
+    // ── G1-c: owner-level adoption of unassigned / orphaned tasks ──────
+
+    /// G1-c / A1 + A8: the project owner may set `assignee` on an
+    /// **unassigned** task (adoption), and the hand-over is recorded in the
+    /// activity stream — otherwise "how did this task change hands" is
+    /// unanswerable after the fact.
+    #[tokio::test]
+    async fn e2e_owner_adopts_unassigned_task_with_audit_trail() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let target = "agent-target";
+
+        let v = call_tool(&router, Some(owner), 60, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), target, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            61,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "orphan-by-default" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        assert!(tool_text(&v)["assignee"].is_null());
+
+        // The frozen call from the bug report: same actor, same task, now legal.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            62,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": target }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "owner adoption failed: {v}");
+        assert_eq!(tool_text(&v)["assignee"], target);
+
+        // A8: the reassignment left a trace.
+        let history = store.list_activity(&tid.parse().unwrap()).await.unwrap();
+        let trace = history
+            .iter()
+            .find(|a| a.text.contains("[reassign]"))
+            .expect("adoption must write an activity entry");
+        assert_eq!(trace.actor, owner);
+        assert!(
+            trace.text.contains("(unassigned)") && trace.text.contains(target),
+            "the trace must name old and new owner: {:?}",
+            trace.text
+        );
+    }
+
+    /// G1-c / A3: an **orphaned** task — `assignee` points at an instance the
+    /// directory no longer knows (reinstall changes the UUID, ADR-073) — is
+    /// adoptable by the owner. The old assignee cannot act (it is gone), the
+    /// new instance does not self-claim, so without this path the task is
+    /// frozen forever.
+    #[tokio::test]
+    async fn e2e_owner_adopts_task_orphaned_by_reinstall() {
+        let ghost = "agent-ghost-uninstalled";
+        let target = "agent-target";
+        let (router, store) = test_router_store_with_dir(Arc::new(
+            WhitelistAgentDirectory::new(&["agent-owner", target]),
+        ))
+        .await;
+        let owner = "agent-owner";
+
+        let v = call_tool(&router, Some(owner), 63, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        // Seed the orphan state at the store level: the store's gate is
+        // membership-only, so a since-uninstalled member can still be written
+        // there — exactly the situation a reinstall leaves behind.
+        store
+            .add_project_member(&pid.parse().unwrap(), ghost, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        store
+            .add_project_member(&pid.parse().unwrap(), target, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            64,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "was on the old instance" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .update_task(
+                &tid.parse().unwrap(),
+                crate::types::UpdateTask {
+                    assignee: Some(Some(ghost.to_string())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Owner adopts: assignee moves from the dead instance to a live member.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            65,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": target }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "orphan adoption failed: {v}");
+        assert_eq!(tool_text(&v)["assignee"], target);
+
+        let history = store.list_activity(&tid.parse().unwrap()).await.unwrap();
+        assert!(
+            history.iter().any(|a| a.text.contains(ghost) && a.text.contains(target)),
+            "the trace must show the dead instance being replaced: {history:?}"
+        );
+    }
+
+    /// G1-c / A4: adoption is not an inspection exemption. A new assignee
+    /// that is (a) not in the agent directory → `assignee_not_found`;
+    /// (b) in the directory but not a project member →
+    /// `assignee_not_project_member`.
+    #[tokio::test]
+    async fn e2e_adoption_still_passes_existence_and_membership_gates() {
+        let owner = "agent-owner";
+        let member = "agent-member";
+        let stranger = "agent-stranger-in-directory";
+        let ghost = "agent-not-in-directory";
+        let dir = Arc::new(WhitelistAgentDirectory::new(&[owner, member, stranger]));
+        let (router, store) = test_router_store_with_dir(dir).await;
+
+        let v = call_tool(&router, Some(owner), 66, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), member, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            67,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "adoptable" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // (a) instance not in the directory → assignee_not_found.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            68,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": ghost }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, INTERNAL_ERROR, "not-found gate code: {msg}");
+        assert_eq!(prefix, "assignee_not_found", "unexpected: {v}");
+
+        // (b) in the directory but not a member → assignee_not_project_member.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            69,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": stranger }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "assignee_not_project_member", "unexpected: {v}");
+        assert!(msg.contains(stranger), "must name the rejected instance: {v}");
+
+        // And the task is still unassigned after both refusals.
+        let v = call_tool(&router, Some(owner), 70, "pm_get_task", json!({ "task_id": tid })).await;
+        assert!(tool_text(&v)["assignee"].is_null(), "refused adoption must not half-apply: {v}");
+    }
+
+    /// G1-c / A5: the creator's minimal fix right — non-status fields on
+    /// their own task yes; `assignee` and `status` no.
+    #[tokio::test]
+    async fn e2e_creator_can_fix_nonstatus_fields_only() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let creator = "agent-creator";
+
+        let v = call_tool(&router, Some(owner), 71, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), creator, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        // The creator is a member but NOT the project owner.
+        let v = call_tool(
+            &router,
+            Some(creator),
+            72,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "typo in the brief" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // Positive: title / description / priority / type are the dispatch
+        // brief itself — a typo in them would ride along until closure.
+        let v = call_tool(
+            &router,
+            Some(creator),
+            73,
+            "pm_update_task",
+            json!({ "task_id": tid, "title": "fixed", "description": "corrected brief", "priority": "high" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "creator fix failed: {v}");
+        let t = tool_text(&v);
+        assert_eq!(t["title"], "fixed");
+        assert_eq!(t["description"], "corrected brief");
+        assert_eq!(t["priority"], "high");
+
+        // Negative 1: assignee is an owner action, not a creator action.
+        let v = call_tool(
+            &router,
+            Some(creator),
+            74,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": creator }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "forbidden", "creator must not adopt: {v}");
+        assert!(msg.contains("only the project owner"), "must say who may: {v}");
+
+        // Negative 2: status stays with the assignee and the human surfaces.
+        let v = call_tool(
+            &router,
+            Some(creator),
+            75,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "in_progress" }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "forbidden", "creator must not move status: {v}");
+        assert!(msg.contains("status"), "must name the reserved field: {v}");
+    }
+
+    /// G1-c constraint 4: the owner tier may adopt and edit, but a `status`
+    /// write by a non-assignee is refused — the state machine did not gain
+    /// new actors, only the field set gained new editors.
+    #[tokio::test]
+    async fn e2e_owner_update_refuses_status_but_keeps_assignee_status_path() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let worker = "agent-worker";
+
+        let v = call_tool(&router, Some(owner), 76, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), worker, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            77,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": worker }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // Owner (not the assignee) tries status → forbidden, no half-write.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            78,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "cancelled" }),
+        )
+        .await;
+        let (_, prefix, _) = assert_rpc_error(&v);
+        assert_eq!(prefix, "forbidden", "owner must not drive status: {v}");
+        let v = call_tool(&router, Some(owner), 79, "pm_get_task", json!({ "task_id": tid })).await;
+        assert_eq!(tool_text(&v)["status"], "pending", "refused status write must not apply: {v}");
+
+        // Owner may still rename it (field right, no status in the call).
+        let v = call_tool(
+            &router,
+            Some(owner),
+            80,
+            "pm_update_task",
+            json!({ "task_id": tid, "title": "owner rename" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "owner field update: {v}");
+
+        // The assignee path is untouched: approved + claimed → status moves.
+        approve_creation(&store, &tid).await;
+        call_tool(&router, Some(worker), 81, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(worker),
+            82,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "submitted" }),
+        )
+        .await;
+        // in_progress → submitted is the assignee's legal move (via store FSM).
+        assert!(v["error"].is_null(), "assignee status path must stay open: {v}");
+    }
+
+    /// G1-c / A6: a caller who is neither assignee, owner, nor creator keeps
+    /// the historical rejection with the historical wording, on both the
+    /// assigned and the unassigned branch.
+    #[tokio::test]
+    async fn e2e_stranger_update_wording_unchanged() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let assignee = "agent-assignee";
+        let stranger = "agent-stranger";
+
+        let v = call_tool(&router, Some(owner), 83, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), assignee, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+
+        // Branch 1: task assigned to someone else.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            84,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "taken", "assignee": assignee }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(stranger),
+            85,
+            "pm_update_task",
+            json!({ "task_id": tid, "title": "hijack" }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, CODE_FORBIDDEN, "stranger update: {v}");
+        assert_eq!(prefix, "forbidden");
+        assert_eq!(
+            msg,
+            format!(
+                "forbidden: task {tid} is assigned to instance `{assignee}`, not `{stranger}`; only the assignee instance can perform this action"
+            ),
+            "wording must be byte-identical to the historical message"
+        );
+
+        // Branch 2: unassigned task, stranger still gets the old "no assignee"
+        // wording (owner / creator would get a different, newer answer).
+        let v = call_tool(
+            &router,
+            Some(owner),
+            86,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "free" }),
+        )
+        .await;
+        let tid2 = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(stranger),
+            87,
+            "pm_update_task",
+            json!({ "task_id": tid2, "title": "hijack" }),
+        )
+        .await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default().to_string();
+        assert_eq!(
+            msg,
+            format!(
+                "forbidden: task {tid2} has no assignee; it must be assigned to instance `{stranger}` before it can be acted on"
+            ),
+            "wording must be byte-identical to the historical message"
+        );
+    }
+
+
     /// 匿名只读：list/get 允许；写操作 / 自查工具要求身份（401 语义）。
     #[tokio::test]
     async fn e2e_anonymous_read_only_mutations_rejected() {

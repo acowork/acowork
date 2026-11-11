@@ -47,6 +47,14 @@ pub enum PmError {
     #[error("assignee `{assignee}` is not a member of project {project_id}")]
     AssigneeNotProjectMember { assignee: String, project_id: String },
 
+    /// 收养/改派的存在性闸：新 assignee 必须存在于 Gateway Agent 目录
+    /// （ADR-073 §9.1，与 `pm_create_task` 同一道闸）。G1-c 特意给了
+    /// `assignee_not_project_member` 一个兄弟码：manifest 早已把两道闸分别
+    /// 命名为 `assignee_not_found` / `assignee_not_project_member`，收养路径
+    /// 必须让调用方**从错误码就能分辨**是"去邀请"还是"名字拼错"。
+    #[error("assignee instance `{assignee}` not found in agent directory")]
+    AssigneeNotFound { assignee: String },
+
     /// 作者身份：任务作者必须是项目 owner 或成员。任务的第一次投递是一句
     /// 项目群聊里的话（ADR-106 D15：派单以作者身份发言），没有声音的作者
     /// 既写不出那行、也就派不出去——所以这条权限在**创建**处判，而不是
@@ -172,7 +180,8 @@ impl PmError {
             | PmError::AttachmentTooLarge { .. }
             | PmError::AttachmentMimeRejected(_)
             | PmError::InvalidStateTransition { .. }
-            | PmError::AssigneeNotProjectMember { .. } => 400,
+            | PmError::AssigneeNotProjectMember { .. }
+            | PmError::AssigneeNotFound { .. } => 400,
 
             // 作者身份是**访问控制**，不是请求形状：指派错了一个人，调用者改
             // 参数就能过；作者不在项目里，参数怎么改都过不了，只能去申请成员
@@ -212,6 +221,7 @@ impl PmError {
             PmError::PathTraversal(_) => "path_traversal",
             PmError::ReservedId(_) => "reserved_id",
             PmError::AssigneeNotProjectMember { .. } => "assignee_not_project_member",
+            PmError::AssigneeNotFound { .. } => "assignee_not_found",
             PmError::AuthorNotProjectMember { .. } => "author_not_project_member",
             PmError::CycleDetected { .. } => "cycle_detected",
             PmError::MaxDepthExceeded { .. } => "max_depth_exceeded",
@@ -292,6 +302,11 @@ mod tests {
                 },
                 400,
                 "assignee_not_project_member"
+            ),
+            (
+                PmError::AssigneeNotFound { assignee: "inst-9".into() },
+                400,
+                "assignee_not_found"
             ),
             // ── 403 access control ────────────────────────────────────
             (
@@ -375,10 +390,11 @@ mod tests {
                 expected_code
             );
         }
-        // 29 个错误码（成员与作者身份 5 个：member_not_found /
-        // assignee_not_project_member / author_not_project_member /
+        // 30 个错误码（成员与作者身份 6 个：member_not_found /
+        // assignee_not_project_member / assignee_not_found /
+        // author_not_project_member /
         // member_already_exists / member_has_open_tasks）
-        assert_eq!(seen_codes.len(), 29);
+        assert_eq!(seen_codes.len(), 30);
     }
 
     /// `IntoResponse` 生成的 JSON body 包含 code 与 message。
@@ -418,6 +434,7 @@ mod tests {
                 assignee: "x".into(),
                 project_id: "p".into(),
             },
+            PmError::AssigneeNotFound { assignee: "x".into() },
             PmError::CycleDetected {
                 task_id: "a".into(),
                 parent_id: "b".into(),
