@@ -22,7 +22,7 @@
  * `chatBlockStore.test.ts`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act } from 'react'
+import { act, type ReactNode } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { createRoot, type Root } from 'react-dom/client'
 import { ItemView, RowView, type ItemProps, type RowProps } from '../screens/chat/AgentChatScreen'
@@ -154,9 +154,31 @@ function renderRow(row: ChatMessageRow, over: Partial<RowProps> = {}): string {
 
 /** Render the transcript the surface renders: the layout folds it, so a block is
  *  reached through an item, never by hand. */
+/** The block is COLLAPSED by default (the desktop state machine, copied), so
+ *  a static render no longer shows the rounds. Helpers that assert on the
+ *  BODY therefore mount live and open every folded block the way a reader
+ *  taps it — the fold itself is a separate, explicitly-named subject. */
+function renderOpenHtml(node: ReactNode, open = true): string {
+  const host = document.createElement('div')
+  document.body.append(host)
+  ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
+  const root = createRoot(host)
+  act(() => root.render(node))
+  if (open)
+    act(() => {
+    host
+      .querySelectorAll<HTMLButtonElement>('.explore-toggle[aria-expanded="false"]')
+      .forEach((b) => b.click())
+  })
+  const html = host.innerHTML
+  act(() => root.unmount())
+  host.remove()
+  return html
+}
+
 function renderRows(rows: ChatMessageRow[], over: Partial<ItemProps> = {}): string {
   const layout = buildTranscriptItems(rows, (r) => `k:${r.meta?.message_id}`)
-  return renderToStaticMarkup(
+  return renderOpenHtml(
     <>
       {layout.items.map((item, i) => (
         <ItemView
@@ -183,7 +205,7 @@ function onlyBlock(rows: ChatMessageRow[]): RunBlock {
 /** One block, opened: rendered away from the transcript's follow rule, so the
  *  assertions are about what a round shows rather than whether the block folds. */
 function renderBlock(block: RunBlock, over: Partial<ItemProps> = {}): string {
-  return renderToStaticMarkup(
+  return renderOpenHtml(
     <ItemView
       item={block}
       hasFollowUp={false}
@@ -665,6 +687,8 @@ describe('truncateLabel', () => {
 // block renders `ChatExecutionBlock` in jsdom (the file already mocks the block +
 // chat stores). It is NOT hover-gated like the desktop twin — a phone has no
 // hover — it lives at the bottom of the OPEN body and vanishes when folded.
+// Since the desktop-copied default, a fresh block is FOLDED, so the open-path
+// tests lift the fold the way a reader does: a tap on the collapse header.
 describe('in-place reply row (ADR-106 rev 2026-11-04)', () => {
   let host: HTMLDivElement
   let root: Root
@@ -705,14 +729,28 @@ describe('in-place reply row (ADR-106 rev 2026-11-04)', () => {
 
   const box = () => host.querySelector<HTMLTextAreaElement>('textarea.chat-block-reply-input')
 
+  /** Lift the default fold — the tap a reader makes to reach the rounds. */
+  function openBlock() {
+    act(() => {
+      host
+        .querySelector<HTMLButtonElement>('.explore-toggle[aria-expanded="false"]')
+        ?.click()
+    })
+  }
+
   it('shows the reply row at the bottom of an open block', () => {
     renderExec(onlyBlock([refRow()]))
+    openBlock()
     expect(box()).not.toBeNull()
   })
 
   it('a folded block never shows an input (§6.5)', () => {
-    renderExec(onlyBlock([refRow()]), { hasFollowUp: true })
+    // Folded is the DEFAULT now (the desktop state machine, copied): the
+    // input must not exist until the reader lifts the fold.
+    renderExec(onlyBlock([refRow()]))
     expect(host.querySelector('.chat-block-reply')).toBeNull()
+    openBlock()
+    expect(host.querySelector('.chat-block-reply')).not.toBeNull()
   })
 
   it('typing and sending continues the freshest round straight down level 1', () => {
@@ -720,6 +758,7 @@ describe('in-place reply row (ADR-106 rev 2026-11-04)', () => {
     // answers — not the block's `ag|s1|r1` ref string.
     const onSend = vi.fn()
     renderExec(onlyBlock([refRow({ message_id: 'round:ag|s1|r1' })]), { onSend })
+    openBlock()
     const el = box()!
     const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, 'value')!.set!
     act(() => {
@@ -746,5 +785,93 @@ describe('in-place reply row (ADR-106 rev 2026-11-04)', () => {
     el.blur()
     renderExec(block, { focusInput: true })
     expect(document.activeElement).not.toBe(el)
+  })
+})
+
+describe('collapsed by default, answer bubble under the block (the desktop shape, copied)', () => {
+  /** What the card paints WITHOUT any reader interaction — the honest render
+   *  of the new default. `open: false` mounts (effects run, so D8's
+   *  auto-lift is observable) but never taps the collapse header. */
+  function renderFolded(block: RunBlock): string {
+    return renderOpenHtml(<ItemView item={block} hasFollowUp={false} {...rowProps()} />, false)
+  }
+
+  it('a fresh block is collapsed: the header shows, the rounds do not', () => {
+    seedEntries({ 'ag|s1|r1': entryOf({ ref: 'ag|s1|r1' }) })
+    const html = renderFolded(onlyBlock([triggerRow('u1', '帮我整理报表'), refRow()]))
+    expect(html).toContain('explore-toggle')
+    expect(html).not.toContain('explore-body')
+    expect(html).not.toContain('第 1 轮')
+  })
+
+  it('the run answer sits under the collapsed card, in the peer bubble skin', () => {
+    seedEntries({ 'ag|s1|r1': entryOf({ ref: 'ag|s1|r1' }) })
+    const html = renderFolded(onlyBlock([triggerRow('u1', '帮我整理报表'), refRow()]))
+    // The fold hides the ROUNDS; the agent's newest words are not behind it.
+    expect(html).toContain('data-run-answer')
+    expect(html).toContain('报表已整理好。')
+  })
+
+  it('the bubble carries the newest round WITH an answer, not the newest round', () => {
+    // A round still working has not spoken yet — the previous answer stands.
+    seedEntries({
+      'ag|s1|r1': entryOf({
+        ref: 'ag|s1|r1',
+        projection: {
+          round_id: 'r1',
+          terminal: true,
+          status: 'completed',
+          answer: { body: '旧答案在此。', ts: '1' },
+          card: null,
+        },
+      }),
+      'ag|s1|r2': entryOf({
+        ref: 'ag|s1|r2',
+        round_id: 'r2',
+        status: 'pending',
+        projection: { round_id: 'r2', terminal: false, status: 'running', answer: null, card: null },
+      }),
+    })
+    const html = renderFolded(
+      onlyBlock([
+        triggerRow('u1', '帮我整理报表'),
+        refRow(),
+        triggerRow('u2', '再按月份汇总', 4),
+        refRow({ round_id: 'r2', in_reply_to: 'u2', message_id: 'round:r2' }),
+      ]),
+    )
+    expect(html).toContain('旧答案在此。')
+    expect(html).not.toContain('报表已整理好。')
+  })
+
+  it('a run that has not answered yet paints no bubble', () => {
+    seedEntries({
+      'ag|s1|r1': entryOf({
+        ref: 'ag|s1|r1',
+        status: 'pending',
+        projection: { round_id: 'r1', terminal: false, status: 'running', answer: null, card: null },
+      }),
+    })
+    const html = renderFolded(onlyBlock([triggerRow('u1', '帮我整理报表'), refRow()]))
+    expect(html).not.toContain('data-run-answer')
+  })
+
+  it('an unanswered card lifts the fold on its own (D8: no answerable control behind a fold)', () => {
+    seedEntries({
+      'ag|s1|r1': entryOf({
+        ref: 'ag|s1|r1',
+        status: 'pending',
+        projection: {
+          round_id: 'r1',
+          terminal: false,
+          status: 'waiting',
+          answer: null,
+          card: { kind: 'approval', request_id: 'rq-1', prompt: '允许执行 bash？' },
+        },
+      }),
+    })
+    // Mounted, never tapped: the effect, not the reader, must open this one.
+    const html = renderFolded(onlyBlock([triggerRow('u1', '帮我整理报表'), refRow()]))
+    expect(html).toContain('explore-body')
   })
 })

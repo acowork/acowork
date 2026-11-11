@@ -684,7 +684,7 @@ export function ChatDetailScreen() {
               </span>
               <button
                 type="button"
-                className="btn btn-sm"
+                className="btn btn-sm btn-solid"
                 onClick={() => setActiveSkill(null)}
               >
                 清除

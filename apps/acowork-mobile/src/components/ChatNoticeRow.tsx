@@ -88,7 +88,7 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
         {onChoose ? (
           <button
             type="button"
-            className="chat-notice-card-go"
+            className="btn btn-accent btn-sm chat-notice-card-go"
             onClick={() => setSheet(true)}
           >
             {options.length === 1 ? '确认' : '选择'}

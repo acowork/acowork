@@ -18,7 +18,7 @@
  */
 
 import { Fragment, useEffect, useState, type ReactNode } from 'react'
-import { Send } from 'lucide-react'
+import { ChevronLeft, Send } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
 import { useUserChatStore, setUserChatThreadOnScreen } from '../../stores/userChatStore'
 import { useAuthStore } from '../../stores/authStore'
@@ -136,7 +136,7 @@ export function UserChatScreen() {
       <EdgeSwipe onBack={() => pop()}>
         <div className="screen">
           <header className="navbar">
-            <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回">返回</button>
+            <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
             <span className="navbar-title">联系人</span>
             <span className="navbar-trail" />
           </header>
@@ -150,7 +150,7 @@ export function UserChatScreen() {
     <EdgeSwipe onBack={() => pop()}>
       <div className="screen">
         <header className="navbar">
-          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回">返回</button>
+          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
           <span className="navbar-title">{peerName ?? peer}</span>
           <span className="navbar-trail" />
         </header>
