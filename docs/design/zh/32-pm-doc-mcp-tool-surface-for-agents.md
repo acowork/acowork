@@ -110,16 +110,14 @@ MCP 工具注入只解决**可达性**，不解决**可用性**。这个工具�
 写（需身份）        pm_create_project  pm_update_project  pm_add_project_member
 转移（需 assignee） pm_claim_task  pm_submit_task
 写（需身份/创建者） pm_create_task  pm_update_task  pm_add_activity  pm_list_activity
-                                                          合计 14（+ 3 个临时 deprecated 别名）
+                                                          合计 14
 ```
 
-### 3.5 兼容策略
+### 3.5 兼容策略（无）
 
-工具名**不是内部实现细节，是持久化数据**：Desktop 的 `agent_config.json` 按工具名存开关（[proxy.rs:3043](../../../core/acowork-gateway/src/http/proxy.rs#L3043)），CreateWizard 按工具名渲染 enable 开关（[CreateWizard.test.tsx:73](../../../apps/acowork-desktop/src/components/agent-list/CreateWizard.test.tsx#L73)）。已安装 agent 的配置里可能写着 `pm_list_my_tasks`。
+工具名**不是内部实现细节，是持久化数据**：Desktop 的 `agent_config.json` 按工具名存开关（[proxy.rs:3043](../../../core/acowork-gateway/src/http/proxy.rs#L3043)），CreateWizard 按工具名渲染 enable 开关（[CreateWizard.test.tsx:73](../../../apps/acowork-desktop/src/components/agent-list/CreateWizard.test.tsx#L73)）。
 
-**别名期**：被删的 3 个工具保留为 deprecated 薄别名，dispatch 转发到新路径，manifest description 前缀 `[deprecated: use X]`，仍在 `tools/list` 出现。
-
-**移除机制（Q4 定稿）**：沿用 [agent_config.rs:1097-1113](../../../core/acowork-runtime/src/agent_config.rs#L1097) 已确立的**读时迁移 + 立即回写**模式（旧版 flat `Vec` 格式就是这样自愈的）：加载 `agent_mcp_tools.json` 时按别名表把旧名重写为新名并原子回写。配置一旦被加载即自愈，因此别名删除不再受「某个 agent 从未被启动」阻塞。移除时点与验收见计划文档 P4-T4-5。
+平台未上线，**没有存量配置需要迁移**，因此 §3.1 的三个别名直接删除，不保留 deprecated 别名期、也不实现读时迁移表（原定 T4-2 `MCP_TOOL_ALIASES` 取消）。`tools/list` 即工具面的唯一事实来源：删掉 manifest 条目，Desktop 的开关列表随之消失，无需前端改动。
 
 ---
 
@@ -280,7 +278,7 @@ Product / QA / SSE / Architect 四个原生 Agent **只参与、不管理**项�
 
 | # | 缺陷 | 证据 | 处置 |
 |---|---|---|---|
-| **D1** | `pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 与主工具语义重叠 | §3.1 | 合并 + deprecated 别名 |
+| **D1** | `pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 与主工具语义重叠 | §3.1 | 合并后**直接删除**（无别名期，见 §3.5） |
 | **D2** | **manifest / 代码 schema 漂移**：`pm_update_task` 的 `Args` 接受 `type` 与 `depends_on`，manifest 未声明 → LLM 永远用不到 | [tools.rs:637,650](../../../core/acowork-pm/src/mcp/tools.rs#L637) vs [manifest.rs](../../../core/acowork-pm/src/mcp/manifest.rs) | 补声明；**测试从「6 字段抽查」升级为「`Args` 结构体字段集 ⊆ manifest properties」强断言**（现测试只比 `start_at/due_at/title/description/priority/assignee`，故漂移静默通过） |
 | **D3** | `pm_submit_task` 接受 `attachment_ids`，但 MCP 面**无任何途径创建附件**（上传只在 REST `POST /tasks/{tid}/attachments`）→ 死参数 | [routes.rs](../../../core/acowork-pm/src/api/routes.rs) vs manifest | **从 manifest 移除该参数**（Q2 定稿），description 注明「附件由人类在 Desktop 上传；agent 产出走文档库路径引用」。**不加 `pm_upload_attachment`**：那会在文档库之外长出第二套二进制体系，需要另做去重/保留/ACL，方向错误 |
 | **D4** | 两个 manifest 注释写 `# No shell tools — … does not hold a Shell permission.`，紧接着声明 `bash`/`powershell`/`shell` | [pm manifest:36-59](../../../agents/project-manager-agent/manifest.toml#L36)、[doc manifest:36-59](../../../agents/document-manager-agent/manifest.toml#L36) | **只改注释，声明保留**（Q3 已决）。注释改为说明「shell 为跨平台探测项，非核心工作流依赖」 |

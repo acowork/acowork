@@ -13,7 +13,6 @@
 //! | `pm_update_task` | 更新任务 | `PATCH /api/pm/tasks/:tid` |
 //! | `pm_claim_task` | 认领任务 | `POST /api/pm/tasks/:tid/claim` |
 //! | `pm_submit_task` | 提交结果 | `POST /api/pm/tasks/:tid/submit` |
-//! | `pm_list_my_tasks` | Agent 自查 | `GET /api/pm/tasks?assignee=X` |
 //! | `pm_list_agents` | list installed agent instances | Gateway `GET /api/agents` |
 //! | `pm_add_project_member` | invite a member (= makes it assignable) | `POST /api/pm/projects/:pid/members` |
 //! | `pm_add_activity` | append a reply to a task | `POST /api/pm/tasks/:tid/activity` |
@@ -170,17 +169,6 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
       }
     },
     {
-      "name": "pm_check_task",
-      "description": "DEPRECATED — use `pm_get_task`. Identical answer (it runs the same handler), so read `review_status` from the task you get back — there is no separate `approved` flag, `review_status: \"approved\"` is that same fact. Folded away in the next minor release.",
-      "inputSchema": {
-        "type": "object",
-        "required": ["task_id"],
-        "properties": {
-          "task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" }
-        }
-      }
-    },
-    {
       "name": "pm_update_task",
       "description": "Update task fields. Only provided fields are modified. `status` follows the task state machine and is NOT free-form: in_progress can only go to submitted (never straight to done — submit first), cancelled is terminal, rejected can be re-claimed. A task created by an agent cannot enter in_progress until a human approves it (409 review_not_approved). Wrong transitions return `invalid_state_transition` with the legal target — read it instead of retrying.",
       "inputSchema": {
@@ -228,7 +216,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           },
           "parent_task_id": {
             "type": ["string", "null"],
-            "description": "Move the task in the tree: a task id re-parents it under that task, null promotes it to a project root, omitting the key leaves the position alone. Cycles are rejected (you cannot move a task under its own descendant). This replaces pm_reparent_task."
+            "description": "Move the task in the tree: a task id re-parents it under that task, null promotes it to a project root, omitting the key leaves the position alone. Cycles are rejected (you cannot move a task under its own descendant)."
           }
         }
       }
@@ -257,40 +245,6 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "type": "array",
             "items": { "type": "string" },
             "description": "Optional attachment ids. There is no upload path from an agent (a human attaches files in the Desktop task panel), so leave this out and put what the reviewer needs in `text`."
-          }
-        }
-      }
-    },
-    {
-      "name": "pm_list_my_tasks",
-      "description": "DEPRECATED — use `pm_list_tasks` with `assignee: \"me\"`, which this alias forwards to. The answer is that tool's envelope ({total, tasks[], has_more}), not the bare array this used to return: read `tasks`. Folded away in the next minor release.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "enum": ["pending", "in_progress", "submitted", "done", "rejected", "cancelled"]
-          },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
-          "project_id": {
-            "type": "string",
-            "pattern": "^p-[a-zA-Z0-9-]{1,62}$",
-            "description": "Narrow to one project."
-          }
-        }
-      }
-    },
-    {
-      "name": "pm_reparent_task",
-      "description": "DEPRECATED — use `pm_update_task` with `parent_task_id` (null promotes to a project root), which this alias forwards to; `new_parent` is translated to it. The answer is now the updated task, not {ok:true}. Cycles are still rejected. Folded away in the next minor release.",
-      "inputSchema": {
-        "type": "object",
-        "required": ["task_id", "new_parent"],
-        "properties": {
-          "task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
-          "new_parent": {
-            "type": ["string", "null"],
-            "pattern": "^t-[a-zA-Z0-9-]{1,62}$"
           }
         }
       }
@@ -398,7 +352,7 @@ mod tests {
     fn manifest_is_valid_json() {
         let v: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 14);
         for t in tools {
             assert!(t["name"].is_string());
             assert!(t["inputSchema"].is_object());

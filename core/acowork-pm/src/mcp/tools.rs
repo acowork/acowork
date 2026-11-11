@@ -49,38 +49,6 @@ pub async fn dispatch(
         "pm_list_tasks" => pm_list_tasks(state, actor, args).await,
         "pm_get_task" => pm_get_task(state, args).await,
 
-        // ── 需要身份的只读（自查）───────────────────────────────────
-        // Deprecated alias of `pm_list_tasks(assignee = caller)` — see the
-        // alias note above `pm_check_task`.
-        "pm_list_my_tasks" => {
-            let a = require_actor(actor)?;
-            // Parse the retired shape first (so its own schema is enforced and
-            // reconciled), then translate: the caller never had to spell out
-            // `assignee`, and never could.
-            let my: ListMyTasksArgs = parse_args("pm_list_my_tasks", args)?;
-            let mut forwarded = serde_json::json!({ "assignee": a });
-            if let Some(status) = my.status {
-                forwarded["status"] = serde_json::json!(status);
-            }
-            if let Some(limit) = my.limit {
-                forwarded["limit"] = serde_json::json!(limit);
-            }
-            if let Some(project_id) = my.project_id {
-                forwarded["project_id"] = serde_json::json!(project_id);
-            }
-            pm_list_tasks(state, actor, forwarded).await
-        }
-        // Deprecated alias — sits next to the read tools it shares a family
-        // with, not in the alias block at the bottom. All three aliases
-        // (`pm_check_task`, `pm_list_my_tasks`, `pm_reparent_task`) translate
-        // their arguments and then run the *same* handler as their target, so
-        // the answer is byte-identical by construction: one implementation,
-        // nothing to drift (design 32 §3.1, D1). The old shapes are retired —
-        // a flat review summary, a bare array, `{ok:true}`; callers read the
-        // field they need out of the canonical answer. Folded away in the next
-        // minor (plan §9.3).
-        "pm_check_task" => pm_get_task(state, args).await,
-
         // ── 状态变更（需要身份）──────────────────────────────────────
         "pm_create_project" => {
             let a = require_actor(actor)?;
@@ -102,24 +70,6 @@ pub async fn dispatch(
             let a = require_actor(actor)?;
             pm_submit_task(state, a, args).await
         }
-        // Deprecated alias of `pm_update_task(parent_task_id = …)`.
-        "pm_reparent_task" => {
-            let a = require_actor(actor)?;
-            let r: ReparentTaskArgs = parse_args("pm_reparent_task", args)?;
-            // The old name for the same thing: `new_parent` becomes the
-            // three-state `parent_task_id` (absent / null / a task id).
-            let parent_task_id = match r.new_parent {
-                Some(parent) => serde_json::json!(parent),
-                // Explicit `null`: detach to root.
-                None => serde_json::Value::Null,
-            };
-            let forwarded = serde_json::json!({
-                "task_id": r.task_id,
-                "parent_task_id": parent_task_id,
-            });
-            pm_update_task(state, a, forwarded).await
-        }
-
         // ── Dispatch prerequisites (design 32 §3.3) ────────────────
         "pm_list_agents" => {
             // Requires an actor on purpose: an unauthenticated caller has no
@@ -248,11 +198,7 @@ fn parse_args<T: for<'de> Deserialize<'de>>(name: &str, args: Value) -> Result<T
 // the manifest on the same screen; miss any of the three and
 // `manifest_properties_equal_impl_fields` goes red.
 //
-// Coverage: the 6 tools touched by this change. The rest (`pm_list_projects` /
-// `pm_get_project` / `pm_get_task` / `pm_claim_task` / `pm_reparent_task` /
-// `pm_check_task` / `pm_list_my_tasks` / `pm_submit_task`) join the table when
-// P1 T1-4 touches dispatch — they have few parameters and little drift surface,
-// but they should not stay off the table forever.
+// Coverage: every tool served by `tools/list`; see `MANIFEST_FIELDS`.
 
 /// `pm_create_task` arguments.
 #[derive(Deserialize)]
@@ -323,10 +269,9 @@ struct UpdateTaskArgs {
     /// fields: absent = leave alone, `null` = promote to a project root,
     /// a task id = re-parent under it.
     ///
-    /// This is `pm_reparent_task` folded into the one update tool
-    /// (design 32 §3.1) — a structural move is still "changing a field of
-    /// this task", and two tools for it means two places to get the
-    /// permission and cycle checks right.
+    /// A structural move is still "changing a field of this task"
+    /// (design 32 §3.1), so it lives here rather than in a second tool that
+    /// would need its own permission and cycle checks.
     #[serde(default, deserialize_with = "deserialize_clearable")]
     parent_task_id: Option<Option<TaskId>>,
 }
@@ -534,7 +479,7 @@ impl GetProjectArgs {
     const FIELDS: &'static [&'static str] = &["project_id"];
 }
 
-/// `pm_get_task` (and its `pm_check_task` alias) arguments.
+/// `pm_get_task` arguments.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GetTaskArgs {
@@ -587,46 +532,6 @@ impl SubmitTaskArgs {
     const FIELDS: &'static [&'static str] = &["task_id", "text", "attachment_ids"];
 }
 
-/// `pm_list_my_tasks` — the deprecated alias parses its own (retired) shape
-/// before translating, so its manifest schema is reconciled like any other
-/// tool instead of being whatever the target happens to accept.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListMyTasksArgs {
-    #[serde(default)]
-    status: Option<TaskStatus>,
-    #[serde(default)]
-    limit: Option<usize>,
-    /// Narrowing by project always worked through the alias (it forwarded every
-    /// key to `pm_list_tasks`); the schema never said so. Declared now that the
-    /// alias parses its own shape.
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-}
-
-#[cfg(test)]
-impl ListMyTasksArgs {
-    const FIELDS: &'static [&'static str] = &["status", "limit", "project_id"];
-}
-
-/// `pm_reparent_task` — same rule as [`ListMyTasksArgs`]: parse the old shape,
-/// then translate to `pm_update_task(parent_task_id = …)`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReparentTaskArgs {
-    task_id: TaskId,
-    /// Three states, and all three mean something different: a task id
-    /// reparents, `null` detaches to root, and an **absent** key is a caller bug
-    /// the schema declares `required` — so it is a deserialization error, never
-    /// a silent detach.
-    new_parent: Option<TaskId>,
-}
-
-#[cfg(test)]
-impl ReparentTaskArgs {
-    const FIELDS: &'static [&'static str] = &["task_id", "new_parent"];
-}
-
 /// Tool → the **wire field names** its implementation accepts.
 ///
 /// Its only reason to exist is reconciling the manifest against the
@@ -634,7 +539,7 @@ impl ReparentTaskArgs {
 /// table is a tool left unguarded — whoever adds a field edits `Args` and never
 /// thinks of the schema.
 ///
-/// **Coverage rule**: every tool served by `tools/list` (aliases included) has a
+/// **Coverage rule**: every tool served by `tools/list` has a
 /// row — `manifest_fields_cover_every_tool` fails when one is added and not
 /// registered here. Being on the table is not a nicety: it is the only thing
 /// that stops a schema from drifting, which is exactly how `pm_update_task`'s
@@ -656,11 +561,6 @@ pub(crate) const MANIFEST_FIELDS: &[(&str, &[&str])] = &[
     ("pm_submit_task", SubmitTaskArgs::FIELDS),
     ("pm_add_activity", AddActivityArgs::FIELDS),
     ("pm_list_activity", ListActivityArgs::FIELDS),
-    // Deprecated aliases are reconciled too: their schemas are still served by
-    // `tools/list`, so a caller may still be reading them.
-    ("pm_check_task", GetTaskArgs::FIELDS),
-    ("pm_list_my_tasks", ListMyTasksArgs::FIELDS),
-    ("pm_reparent_task", ReparentTaskArgs::FIELDS),
 ];
 
 // ── 响应序列化辅助 ────────────────────────────────────────────────────────

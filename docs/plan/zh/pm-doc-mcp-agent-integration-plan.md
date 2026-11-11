@@ -213,22 +213,23 @@ P3 首版的交付边界曾如实记为「三个 skill 未建、路径约定只�
 | 12 | T4-1 端到端可在一个 crate 内完成 | 扫描器唯一的外部依赖是一次 HTTP POST，**不需要活体 Gateway**；但「写周报进 doc」那一腿不可能在 pm crate 内做（`core/acowork-pm/Cargo.toml` 不依赖 `acowork-doc`），硬塞等于要求双服务活体环境 | 拆 a/b：T4-1a 在 crate 内用 stub Gateway 断言 brief 四要素、`dispatched_at` 幂等、claim → submit → done（已交付）；T4-1b 改为场景脚本证据，不进 CI |
 | 13 | 只有 2 个 `.agent` 包过期 | 加守卫后实测 **7 个里 5 个** `manifest.toml` 过期（`e55a580b` 改了源码 manifest 未重打），两个标杆 agent 则是 prompt 与 manifest 双双过期 | 全部按 `build-agent.sh` 流程重打（zip → sign → verify）；守卫写成测试：包内 `manifest.toml` / `prompts/**` / `skills/**` 与源码逐字节一致，且不得残留源码已删的文件 |
 
-### 9.3 别名删除 checklist（T4-5，下一 minor）
+### 9.3 别名删除 checklist（T4-5，已执行）
 
-删除 `pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 前逐条确认：
+删除 `pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 的逐条确认：
 
-- [ ] 读时迁移落地：`agent_mcp_tools.json` 与本仓库全部 `.agent` 包内**无** `pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 残留（`grep -r` 为空）
-- [ ] 两个官方 agent 的 `tool_deps` 与正文**无**别名引用（本仓库已满足）
-- [ ] `manifest.rs` 中三条 description 的 `DEPRECATED` 标记已存在满一个 minor（0.2.0 → 0.3.0）
-- [ ] `dispatch` 三个别名分支删除，`tools/list` 数从 17 降至 14
-- [ ] `e2e_deprecated_aliases_answer_exactly_like_their_targets` 删除（它守护的对象已不存在）
-- [ ] 21 §6 / 32 §3.1 的工具数表述同步（17 → 14）
+- [x] 本仓库全部 `.agent` 包与 skill / prompt 内**无** `pm_check_task` / `pm_list_my_tasks` / `pm_reparent_task` 残留（`grep -r` 为空，已重打 `.agent`）
+- [x] 两个官方 agent 的 `tool_deps` 与正文**无**别名引用
+- [x] `dispatch` 三个别名分支与两个旧参数结构删除，`tools/list` 数从 17 降至 14
+- [x] 三个别名等价测试 + `deprecated_aliases_stay_advertised_until_the_read_path_lands` tripwire 删除（守护对象已不存在）
+- [x] 21 §6 / 32 §3.1 / 32 §3.5 的工具数表述同步（17 → 14，兼容策略改为「无」）
+
+**T4-2（`MCP_TOOL_ALIASES` 读时迁移表）取消**：平台尚未上线，不存在写着旧工具名的 `agent_mcp_tools.json` 存量配置，为不存在的迁移写代码没有收益。原「T4-5 冻结至 T4-2 落地」的前提因此消失。
 
 ### 9.4 未做（明确排除，附约束）
 
 - **`review-tracking` skill**：并入 `document-quality-review`，**不建文件**（§9.2 第 11 条）。若日后确实需要独立的"审核跟踪"入口，先说明它比既有 skill 多做什么，再建。
 - **T4-1b（派工链的"写周报进 doc"腿）**：`acowork-pm` 不依赖 `acowork-doc`，放进 CI 等于要求双服务活体环境。改为场景脚本证据：跑 S3 记录 `doc_path` + `doc_write` 结果与截图，进交付记录，不进 CI。
-- **T4-2 别名读时迁移表**（`MCP_TOOL_ALIASES`）：排下个迭代，本批对 `core/acowork-runtime` 零改动。**T4-5（删除三个别名）冻结至 T4-2 落地**，且已加 tripwire（`deprecated_aliases_stay_advertised_until_the_read_path_lands`）——别名消失或 `DEPRECATED` 标记丢失会让测试红，而不是让线上 agent 红。
+- **T4-2 别名读时迁移表**（`MCP_TOOL_ALIASES`）：**取消**。平台未上线，无存量配置可迁移；T4-5 已直接删除三个别名（见 §9.3）。
 - **`doc_move` 跨父移动目录 / `doc_list(recursive=true)` / `doc_get_acl`·`doc_set_acl`**：维持原判断，不立项。`DirMeta` 无 `parent` 字段（父子即物理嵌套），跨父移动是整体搬迁子树，等出现真实失败案例再开。
 - **另外 4 个官方 agent（product-manager / architect / engineer / QA）**：本轮仍未纳入（本批已回退其 skills 改动）。它们的 `.agent` 包因 §9.2 第 13 条的守卫已随源码重打，但 prompt/skill 的 P3 手法未套用；待标杆验证后批量做。
 - **设计 32 en 版**：zh 为源（ADR 约定），en 待补。

@@ -1588,7 +1588,7 @@ impl PmStore for TreePmStore {
     /// | Agent 刚创建、未开工（`review_status=pending`） | `pending` | 只翻 `review_status=approved`，**`status` 不动** | `status=rejected` + `review_status=rejected` |
     /// | Agent 已提交结果等验收 | `submitted` | `status=done` + `review_status=approved` | `status=rejected` + `review_status=rejected` |
     ///
-    /// 两种审核都写 `review_status`，因为 MCP `pm_check_task` 用它回答
+    /// 两种审核都写 `review_status`，因为 MCP `pm_get_task` 用它回答
     /// "我建的任务批了吗"（manifest 工具语义），而人类操作面的 `status`
     /// 决定卡片落到哪一列。
     ///

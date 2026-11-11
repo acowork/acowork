@@ -214,7 +214,5 @@ curl -s -X PATCH http://127.0.0.1:19876/api/pm/tasks/t-child/parent \
 | `pm_update_task` | `PATCH /api/pm/tasks/{tid}` |
 | `pm_claim_task` | `POST /api/pm/tasks/{tid}/claim` |
 | `pm_submit_task` | `POST /api/pm/tasks/{tid}/submit` |
-| `pm_list_my_tasks` | `GET /api/pm/projects/{pid}/tasks?assignee={agent}` |
-| `pm_reparent_task` | `PATCH /api/pm/tasks/{tid}/parent` |
 
 > Agent 不直接调 REST（由 Gateway 注入 `X-Actor` 身份），走 MCP HTTP（`src/mcp/`）。

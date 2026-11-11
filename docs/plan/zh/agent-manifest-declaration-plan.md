@@ -169,7 +169,7 @@ required = true                       # 缺失时以"能力受限"提示，不�
 [[mcp_servers]]
 hosted = "pm"
 why = "任务与项目管理数据"
-tools = ["pm_list_my_tasks", "pm_claim_task", "pm_submit_task", "pm_check_task"]
+tools = ["pm_list_tasks", "pm_claim_task", "pm_submit_task", "pm_get_task"]
 required = true
 
 # 形态 C：内联远程服务器（企业自建 MCP）
@@ -432,7 +432,7 @@ pub struct CreateAgentDraft {
 +[[mcp_servers]]
 +hosted = "pm"
 +why = "任务与项目管理数据"
-+tools = ["pm_list_my_tasks", "pm_claim_task", "pm_submit_task", "pm_check_task"]
++tools = ["pm_list_tasks", "pm_claim_task", "pm_submit_task", "pm_get_task"]
 +required = true
 +
 +[[mcp_servers]]
