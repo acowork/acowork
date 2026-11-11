@@ -163,6 +163,7 @@ vi.mock("./ChatExecutionBlock", () => ({
     onJumpToExec?: (agentInstanceId: string, execSid: string) => void;
     onReplyToRound?: (rowId: string, quote: string) => void;
     onChooseCard?: (card: ChatMessageRow, choice: { sessionId?: string; forceNew?: boolean }) => unknown;
+    pendingAskDocked?: boolean;
   }) => (
     <div
       data-testid="exec-block"
@@ -179,6 +180,10 @@ vi.mock("./ChatExecutionBlock", () => ({
       // what this file owns is the WIRING, and a missing handler here is a card
       // with no button at all.
       data-choose={props.onChooseCard ? "yes" : "no"}
+      // Whether the surface docked this run's question at the bottom of the
+      // surface (ADR-106 revision 2026-11-11) — then the tail must not draw it
+      // a second time.
+      data-docked={props.pendingAskDocked ? "yes" : "no"}
     >
       {props.block.rounds.map((r) => (
         <span key={r.ref} data-testid="block-question">
@@ -678,6 +683,53 @@ describe("AgentChatView event-log wiring", () => {
     // (the row path would reach the surface as its own `row` item instead).
     expect(block.getAttribute("data-ask")).toBe("3");
     expect(block.getAttribute("data-choose")).toBe("yes");
+  });
+
+  it("docks the run's question at the bottom and tells the run it is docked (ADR-106 rev 2026-11-11)", () => {
+    // The run is anchored where its exchange STARTED, so a question drawn at
+    // its tail could sit hundreds of rows above the composer, in a transcript
+    // that does not scroll on its own: the human typed at the bottom and saw
+    // nothing happen. The dock parks the question over the composer's edge,
+    // and the run is told so — its tail must stay empty, one question in one
+    // place.
+    windows = windowOf(
+      userRow(1, "继续刚才那个"),
+      roundRow(2),
+      notice(
+        3,
+        { notice_type: "confirm_continue" },
+        cardDelivery([{ session_id: "exec-9", label: "Fix the bug", status: "idle" }]),
+      ),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    const dock = screen.getByTestId("chat-ask-dock");
+    expect(dock.textContent).toContain("chatView.block.confirmSession");
+    // The card in the dock is the shared one, with its own answer path.
+    expect(dock.querySelector('[data-testid="chat-card-options"]')).not.toBeNull();
+    expect(screen.getByRole("button", { name: /Fix the bug/ })).toBeTruthy();
+    // The dock is not a transcript line: it names the agent asking, but wears
+    // no 40px gutter of its own.
+    expect(dock.querySelector('[data-testid="chat-card-author"]')).not.toBeNull();
+    expect(dock.querySelector(".w-10")).toBeNull();
+    // The run is the question's subject and knows the question is docked.
+    expect(screen.getByTestId("exec-block").getAttribute("data-docked")).toBe("yes");
+  });
+
+  it("a standalone question card stays a transcript line — the dock is for the run's own question", () => {
+    // The multi-candidate card (D6 level 3) has no one run to belong to, so it
+    // keeps standing where it arrived, with the agent's face over it. Only the
+    // run's own question (level 5) is docked.
+    windows = windowOf(
+      userRow(1, "which one"),
+      notice(
+        2,
+        { notice_type: "session_choice", in_reply_to: "u1" },
+        cardDelivery([{ session_id: "exec-9", label: "Fix the bug", status: "idle" }]),
+      ),
+    );
+    render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+    expect(screen.queryByTestId("chat-ask-dock")).toBeNull();
+    expect(screen.getByTestId("chat-card-options")).toBeTruthy();
   });
 
   it("an answered card leaves the transcript to the round's block", () => {

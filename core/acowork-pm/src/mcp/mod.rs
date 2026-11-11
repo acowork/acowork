@@ -782,11 +782,10 @@ mod tests {
 
         // 人类批准创建 → review_status=approved，status 仍为 pending
         approve_creation(&store, &tid).await;
-        let v = call_tool(&router, Some(agent), 13, "pm_check_task", json!({ "task_id": tid }))
+        let v = call_tool(&router, Some(agent), 13, "pm_get_task", json!({ "task_id": tid }))
             .await;
         let chk = tool_text(&v);
-        // The alias returns the task itself now, so approval is read from
-        // `review_status` rather than the retired flat `approved` flag.
+        // Approval is read from `review_status` — there is no separate flag.
         assert_eq!(chk["review_status"], "approved", "approved after review: {chk}");
         assert_eq!(chk["status"], "pending", "creation approval keeps status: {chk}");
 
@@ -809,7 +808,7 @@ mod tests {
         assert_eq!(tool_text(&v)["status"], "submitted");
 
         // 6. check（创建者可查；结果审核尚未发生，review_status 仍为已批准）
-        let v = call_tool(&router, Some(agent), 16, "pm_check_task", json!({ "task_id": tid }))
+        let v = call_tool(&router, Some(agent), 16, "pm_get_task", json!({ "task_id": tid }))
             .await;
         assert!(v["error"].is_null(), "check failed: {v}");
         let chk = tool_text(&v);
@@ -869,7 +868,10 @@ mod tests {
         .await;
         assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "update by non-assignee: {v}");
 
-        // 无 assignee 的任务也无法被行动（设计 §9.2）
+        // G1-b: an unassigned task is no longer frozen. A project MEMBER may
+        // claim it; a NON-member still cannot, and the rejection now names the
+        // real reason ("not a member") rather than the old "task has no
+        // assignee". `owner` is a member (creator), `intruder` is not.
         let v = call_tool(
             &router,
             Some(owner),
@@ -879,10 +881,544 @@ mod tests {
         )
         .await;
         let tid2 = tool_text(&v)["id"].as_str().unwrap().to_string();
-        let v = call_tool(&router, Some(owner), 26, "pm_claim_task", json!({ "task_id": tid2 }))
-            .await;
-        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "claim unassigned: {v}");
+        let v = call_tool(
+            &router,
+            Some(intruder),
+            26,
+            "pm_claim_task",
+            json!({ "task_id": tid2 }),
+        )
+        .await;
+        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "claim unassigned by non-member: {v}");
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("not a member"),
+            "non-member claim must say why: {v}"
+        );
     }
+
+    /// G1-b / A1 + A3: a project member may claim an unassigned task, and the
+    /// claim atomically writes `assignee = actor`; the approval gate still fires
+    /// first for an unapproved agent-created task (409, not a silent success).
+    #[tokio::test]
+    async fn e2e_member_claims_unassigned_task() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+
+        let v = call_tool(&router, Some(owner), 40, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            41,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "unassigned" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        assert!(tool_text(&v)["assignee"].is_null(), "fresh task has no assignee: {v}");
+
+        // A3: still awaiting human approval → the approval gate wins over the
+        // new self-claim path.
+        let v = call_tool(&router, Some(owner), 42, "pm_claim_task", json!({ "task_id": tid })).await;
+        let (_, prefix, _) = assert_rpc_error(&v);
+        assert_eq!(prefix, "review_not_approved", "unapproved member claim: {v}");
+
+        // A1: after approval, the member claims it and becomes the assignee.
+        approve_creation(&store, &tid).await;
+        let v = call_tool(&router, Some(owner), 43, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert!(v["error"].is_null(), "member claim of unassigned failed: {v}");
+        let claimed = tool_text(&v);
+        assert_eq!(claimed["status"], "in_progress", "claim → in_progress: {claimed}");
+        assert_eq!(claimed["assignee"], owner, "claim wrote assignee = actor: {claimed}");
+    }
+
+    /// G1-b / A2: a non-member may not claim an unassigned task; the rejection
+    /// names the real reason ("not a member"), never the old "no assignee", and
+    /// the task is left untouched.
+    #[tokio::test]
+    async fn e2e_non_member_cannot_claim_unassigned() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let stranger = "agent-stranger";
+
+        let v = call_tool(&router, Some(owner), 44, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            45,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "unassigned" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        // Approve so the ONLY thing that can reject the stranger is membership.
+        approve_creation(&store, &tid).await;
+
+        let v = call_tool(&router, Some(stranger), 46, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "stranger claim: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("not a member"), "must say not-a-member: {v}");
+        assert!(!msg.contains("no assignee"), "must NOT say no-assignee: {v}");
+
+        let v = call_tool(&router, Some(owner), 47, "pm_get_task", json!({ "task_id": tid })).await;
+        assert!(tool_text(&v)["assignee"].is_null(), "stranger claim must not assign: {v}");
+    }
+
+    /// G1-b / A4: the dependency gate still fires for a member claiming an
+    /// approved, unassigned task that is blocked by an open task.
+    #[tokio::test]
+    async fn e2e_claim_dependency_gate_preserved() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+
+        let v = call_tool(&router, Some(owner), 48, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(&router, Some(owner), 49, "pm_create_task", json!({ "project_id": pid, "title": "blocker" })).await;
+        let blocker = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            50,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "blocked",
+                     "depends_on": [{ "task_id": blocker, "kind": "blocks" }] }),
+        )
+        .await;
+        let blocked = tool_text(&v)["id"].as_str().unwrap().to_string();
+        approve_creation(&store, &blocker).await;
+        approve_creation(&store, &blocked).await;
+
+        let v = call_tool(&router, Some(owner), 51, "pm_claim_task", json!({ "task_id": blocked })).await;
+        let (_, prefix, _) = assert_rpc_error(&v);
+        assert_eq!(prefix, "dependency_not_satisfied", "blocked claim: {v}");
+    }
+
+    /// G1-b / A6: claiming a task assigned to someone else is still forbidden,
+    /// with the unchanged "assigned to instance X" wording.
+    #[tokio::test]
+    async fn e2e_claim_assigned_to_other_still_forbidden() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let other = "agent-other";
+
+        let v = call_tool(&router, Some(owner), 52, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), other, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            53,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "for other", "assignee": other }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        approve_creation(&store, &tid).await;
+
+        // owner is a member but not the assignee → still forbidden, "assigned to".
+        let v = call_tool(&router, Some(owner), 54, "pm_claim_task", json!({ "task_id": tid })).await;
+        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "claim assigned-to-other: {v}");
+        let msg = v["error"]["message"].as_str().unwrap_or_default();
+        assert!(msg.contains("assigned to instance"), "must name the assignee: {v}");
+    }
+
+    // ── G1-c: owner-level adoption of unassigned / orphaned tasks ──────
+
+    /// G1-c / A1 + A8: the project owner may set `assignee` on an
+    /// **unassigned** task (adoption), and the hand-over is recorded in the
+    /// activity stream — otherwise "how did this task change hands" is
+    /// unanswerable after the fact.
+    #[tokio::test]
+    async fn e2e_owner_adopts_unassigned_task_with_audit_trail() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let target = "agent-target";
+
+        let v = call_tool(&router, Some(owner), 60, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), target, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            61,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "orphan-by-default" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        assert!(tool_text(&v)["assignee"].is_null());
+
+        // The frozen call from the bug report: same actor, same task, now legal.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            62,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": target }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "owner adoption failed: {v}");
+        assert_eq!(tool_text(&v)["assignee"], target);
+
+        // A8: the reassignment left a trace.
+        let history = store.list_activity(&tid.parse().unwrap()).await.unwrap();
+        let trace = history
+            .iter()
+            .find(|a| a.text.contains("[reassign]"))
+            .expect("adoption must write an activity entry");
+        assert_eq!(trace.actor, owner);
+        assert!(
+            trace.text.contains("(unassigned)") && trace.text.contains(target),
+            "the trace must name old and new owner: {:?}",
+            trace.text
+        );
+    }
+
+    /// G1-c / A3: an **orphaned** task — `assignee` points at an instance the
+    /// directory no longer knows (reinstall changes the UUID, ADR-073) — is
+    /// adoptable by the owner. The old assignee cannot act (it is gone), the
+    /// new instance does not self-claim, so without this path the task is
+    /// frozen forever.
+    #[tokio::test]
+    async fn e2e_owner_adopts_task_orphaned_by_reinstall() {
+        let ghost = "agent-ghost-uninstalled";
+        let target = "agent-target";
+        let (router, store) = test_router_store_with_dir(Arc::new(
+            WhitelistAgentDirectory::new(&["agent-owner", target]),
+        ))
+        .await;
+        let owner = "agent-owner";
+
+        let v = call_tool(&router, Some(owner), 63, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        // Seed the orphan state at the store level: the store's gate is
+        // membership-only, so a since-uninstalled member can still be written
+        // there — exactly the situation a reinstall leaves behind.
+        store
+            .add_project_member(&pid.parse().unwrap(), ghost, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        store
+            .add_project_member(&pid.parse().unwrap(), target, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            64,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "was on the old instance" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .update_task(
+                &tid.parse().unwrap(),
+                crate::types::UpdateTask {
+                    assignee: Some(Some(ghost.to_string())),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+
+        // Owner adopts: assignee moves from the dead instance to a live member.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            65,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": target }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "orphan adoption failed: {v}");
+        assert_eq!(tool_text(&v)["assignee"], target);
+
+        let history = store.list_activity(&tid.parse().unwrap()).await.unwrap();
+        assert!(
+            history.iter().any(|a| a.text.contains(ghost) && a.text.contains(target)),
+            "the trace must show the dead instance being replaced: {history:?}"
+        );
+    }
+
+    /// G1-c / A4: adoption is not an inspection exemption. A new assignee
+    /// that is (a) not in the agent directory → `assignee_not_found`;
+    /// (b) in the directory but not a project member →
+    /// `assignee_not_project_member`.
+    #[tokio::test]
+    async fn e2e_adoption_still_passes_existence_and_membership_gates() {
+        let owner = "agent-owner";
+        let member = "agent-member";
+        let stranger = "agent-stranger-in-directory";
+        let ghost = "agent-not-in-directory";
+        let dir = Arc::new(WhitelistAgentDirectory::new(&[owner, member, stranger]));
+        let (router, store) = test_router_store_with_dir(dir).await;
+
+        let v = call_tool(&router, Some(owner), 66, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), member, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            67,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "adoptable" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // (a) instance not in the directory → assignee_not_found.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            68,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": ghost }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, INTERNAL_ERROR, "not-found gate code: {msg}");
+        assert_eq!(prefix, "assignee_not_found", "unexpected: {v}");
+
+        // (b) in the directory but not a member → assignee_not_project_member.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            69,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": stranger }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "assignee_not_project_member", "unexpected: {v}");
+        assert!(msg.contains(stranger), "must name the rejected instance: {v}");
+
+        // And the task is still unassigned after both refusals.
+        let v = call_tool(&router, Some(owner), 70, "pm_get_task", json!({ "task_id": tid })).await;
+        assert!(tool_text(&v)["assignee"].is_null(), "refused adoption must not half-apply: {v}");
+    }
+
+    /// G1-c / A5: the creator's minimal fix right — non-status fields on
+    /// their own task yes; `assignee` and `status` no.
+    #[tokio::test]
+    async fn e2e_creator_can_fix_nonstatus_fields_only() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let creator = "agent-creator";
+
+        let v = call_tool(&router, Some(owner), 71, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), creator, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        // The creator is a member but NOT the project owner.
+        let v = call_tool(
+            &router,
+            Some(creator),
+            72,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "typo in the brief" }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // Positive: title / description / priority / type are the dispatch
+        // brief itself — a typo in them would ride along until closure.
+        let v = call_tool(
+            &router,
+            Some(creator),
+            73,
+            "pm_update_task",
+            json!({ "task_id": tid, "title": "fixed", "description": "corrected brief", "priority": "high" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "creator fix failed: {v}");
+        let t = tool_text(&v);
+        assert_eq!(t["title"], "fixed");
+        assert_eq!(t["description"], "corrected brief");
+        assert_eq!(t["priority"], "high");
+
+        // Negative 1: assignee is an owner action, not a creator action.
+        let v = call_tool(
+            &router,
+            Some(creator),
+            74,
+            "pm_update_task",
+            json!({ "task_id": tid, "assignee": creator }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "forbidden", "creator must not adopt: {v}");
+        assert!(msg.contains("only the project owner"), "must say who may: {v}");
+
+        // Negative 2: status stays with the assignee and the human surfaces.
+        let v = call_tool(
+            &router,
+            Some(creator),
+            75,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "in_progress" }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "forbidden", "creator must not move status: {v}");
+        assert!(msg.contains("status"), "must name the reserved field: {v}");
+    }
+
+    /// G1-c constraint 4: the owner tier may adopt and edit, but a `status`
+    /// write by a non-assignee is refused — the state machine did not gain
+    /// new actors, only the field set gained new editors.
+    #[tokio::test]
+    async fn e2e_owner_update_refuses_status_but_keeps_assignee_status_path() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let worker = "agent-worker";
+
+        let v = call_tool(&router, Some(owner), 76, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), worker, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(owner),
+            77,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": worker }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        // Owner (not the assignee) tries status → forbidden, no half-write.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            78,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "cancelled" }),
+        )
+        .await;
+        let (_, prefix, _) = assert_rpc_error(&v);
+        assert_eq!(prefix, "forbidden", "owner must not drive status: {v}");
+        let v = call_tool(&router, Some(owner), 79, "pm_get_task", json!({ "task_id": tid })).await;
+        assert_eq!(tool_text(&v)["status"], "pending", "refused status write must not apply: {v}");
+
+        // Owner may still rename it (field right, no status in the call).
+        let v = call_tool(
+            &router,
+            Some(owner),
+            80,
+            "pm_update_task",
+            json!({ "task_id": tid, "title": "owner rename" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "owner field update: {v}");
+
+        // The assignee path is untouched: approved + claimed → status moves.
+        approve_creation(&store, &tid).await;
+        call_tool(&router, Some(worker), 81, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(worker),
+            82,
+            "pm_update_task",
+            json!({ "task_id": tid, "status": "submitted" }),
+        )
+        .await;
+        // in_progress → submitted is the assignee's legal move (via store FSM).
+        assert!(v["error"].is_null(), "assignee status path must stay open: {v}");
+    }
+
+    /// G1-c / A6: a caller who is neither assignee, owner, nor creator keeps
+    /// the historical rejection with the historical wording, on both the
+    /// assigned and the unassigned branch.
+    #[tokio::test]
+    async fn e2e_stranger_update_wording_unchanged() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let assignee = "agent-assignee";
+        let stranger = "agent-stranger";
+
+        let v = call_tool(&router, Some(owner), 83, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), assignee, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+
+        // Branch 1: task assigned to someone else.
+        let v = call_tool(
+            &router,
+            Some(owner),
+            84,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "taken", "assignee": assignee }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(stranger),
+            85,
+            "pm_update_task",
+            json!({ "task_id": tid, "title": "hijack" }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(code, CODE_FORBIDDEN, "stranger update: {v}");
+        assert_eq!(prefix, "forbidden");
+        assert_eq!(
+            msg,
+            format!(
+                "forbidden: task {tid} is assigned to instance `{assignee}`, not `{stranger}`; only the assignee instance can perform this action"
+            ),
+            "wording must be byte-identical to the historical message"
+        );
+
+        // Branch 2: unassigned task, stranger still gets the old "no assignee"
+        // wording (owner / creator would get a different, newer answer).
+        let v = call_tool(
+            &router,
+            Some(owner),
+            86,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "free" }),
+        )
+        .await;
+        let tid2 = tool_text(&v)["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(stranger),
+            87,
+            "pm_update_task",
+            json!({ "task_id": tid2, "title": "hijack" }),
+        )
+        .await;
+        let msg = v["error"]["message"].as_str().unwrap_or_default().to_string();
+        assert_eq!(
+            msg,
+            format!(
+                "forbidden: task {tid2} has no assignee; it must be assigned to instance `{stranger}` before it can be acted on"
+            ),
+            "wording must be byte-identical to the historical message"
+        );
+    }
+
 
     /// 匿名只读：list/get 允许；写操作 / 自查工具要求身份（401 语义）。
     #[tokio::test]
@@ -936,18 +1472,6 @@ mod tests {
                 "anonymous {name} should be rejected: {v}"
             );
         }
-
-        // 匿名自查工具（list_my_tasks / check_task）也要身份
-        let v = call_tool(&router, None, 34, "pm_list_my_tasks", json!({})).await;
-        assert_eq!(v["error"]["code"], CODE_UNAUTHENTICATED);
-        // `pm_check_task` is an alias of the read tool `pm_get_task` now, so
-        // it no longer carries the actor requirement the other two keep.
-        let v = call_tool(&router, None, 35, "pm_check_task", json!({ "task_id": tid })).await;
-        assert_eq!(
-            v["error"]["code"],
-            serde_json::Value::Null,
-            "a deprecated read alias must not be stricter than the tool it points at: {v}"
-        );
     }
 
     // ── P3 e2e 补齐：剩余工具 happy path + 边界场景 ───────────────────
@@ -1058,9 +1582,9 @@ mod tests {
         assert_eq!(prefix, "invalid_state_transition", "unexpected: {msg}");
     }
 
-    /// e2e：pm_reparent_task —— 移动到新父 + 提升根 + 防环 409。
+    /// e2e：`pm_update_task(parent_task_id)` —— 移动到新父 + 提升根 + 防环 409。
     #[tokio::test]
-    async fn e2e_reparent_task_happy_and_cycle() {
+    async fn e2e_update_task_parent_move_happy_and_cycle() {
         let router = test_router().await;
         let agent = "agent-reparent";
 
@@ -1104,8 +1628,8 @@ mod tests {
             &router,
             Some(agent),
             51,
-            "pm_reparent_task",
-            json!({ "task_id": tid_a, "new_parent": tid_b }),
+            "pm_update_task",
+            json!({ "task_id": tid_a, "parent_task_id": tid_b }),
         )
         .await;
         let (code, prefix, msg) = assert_rpc_error(&v);
@@ -1116,13 +1640,13 @@ mod tests {
             .await;
         assert_eq!(tool_text(&v)["depth"], 0);
 
-        // 提升 B 为根（new_parent=null）
+        // 提升 B 为根（parent_task_id=null）
         let v = call_tool(
             &router,
             Some(agent),
             53,
-            "pm_reparent_task",
-            json!({ "task_id": tid_b, "new_parent": null }),
+            "pm_update_task",
+            json!({ "task_id": tid_b, "parent_task_id": null }),
         )
         .await;
         assert!(v["error"].is_null(), "reparent to root failed: {v}");
@@ -1132,9 +1656,9 @@ mod tests {
         assert_eq!(tool_text(&v)["parent_id"], Value::Null);
     }
 
-    /// e2e：pm_list_my_tasks —— Agent 自查指派给自己的任务 + status 过滤。
+    /// e2e：`pm_list_tasks(assignee="me")` —— Agent 自查指派给自己的任务 + status 过滤。
     #[tokio::test]
-    async fn e2e_list_my_tasks_happy_path() {
+    async fn e2e_list_tasks_assignee_me_happy_path() {
         let (router, store) = test_router_and_store().await;
         let agent = "agent-self";
         let other = "agent-other";
@@ -1170,7 +1694,14 @@ mod tests {
         }
 
         // 自查：只返回自己的 2 个任务
-        let v = call_tool(&router, Some(agent), 56, "pm_list_my_tasks", json!({})).await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            56,
+            "pm_list_tasks",
+            json!({ "assignee": "me" }),
+        )
+        .await;
         let mine = tool_text(&v);
         assert_eq!(
             mine["tasks"].as_array().unwrap().len(),
@@ -1188,8 +1719,8 @@ mod tests {
             &router,
             Some(agent),
             58,
-            "pm_list_my_tasks",
-            json!({ "status": "pending" }),
+            "pm_list_tasks",
+            json!({ "assignee": "me", "status": "pending" }),
         )
         .await;
         let pending = tool_text(&v);
@@ -1197,175 +1728,6 @@ mod tests {
             pending["tasks"].as_array().unwrap().len(),
             1,
             "pending my_tasks: {pending}"
-        );
-    }
-
-    /// e2e: a deprecated alias returns byte-identical JSON to its target
-    /// (design 32 D1).
-    ///
-    /// This is the guarantee that makes the aliases safe to keep in
-    /// `tools/list` for a release: there is one handler, so no amount of
-    /// later drift on the main tool can leave the alias answering a
-    /// different shape.
-    #[tokio::test]
-    async fn e2e_deprecated_aliases_answer_exactly_like_their_targets() {
-        let router = test_router().await;
-        let creator = "agent-creator";
-        let other = "agent-other";
-
-        let v = call_tool(
-            &router,
-            Some(creator),
-            59,
-            "pm_create_project",
-            json!({ "title": "P" }),
-        )
-        .await;
-        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
-        let v = call_tool(
-            &router,
-            Some(creator),
-            60,
-            "pm_create_task",
-            json!({ "project_id": pid, "title": "T", "assignee": creator }),
-        )
-        .await;
-        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
-
-        // pm_check_task === pm_get_task (a non-creator reads it too: the alias
-        // inherits the read tool's authorization, it does not keep the old
-        // creator-only gate).
-        for actor in [creator, other] {
-            let alias = call_tool(
-                &router,
-                Some(actor),
-                61,
-                "pm_check_task",
-                json!({ "task_id": tid }),
-            )
-            .await;
-            let target = call_tool(&router, Some(actor), 62, "pm_get_task", json!({ "task_id": tid }))
-                .await;
-            assert_eq!(
-                tool_text(&alias),
-                tool_text(&target),
-                "pm_check_task must answer exactly like pm_get_task for {actor}"
-            );
-        }
-
-        // pm_list_my_tasks === pm_list_tasks(assignee="me")
-        let alias = call_tool(&router, Some(creator), 63, "pm_list_my_tasks", json!({})).await;
-        let target = call_tool(
-            &router,
-            Some(creator),
-            64,
-            "pm_list_tasks",
-            json!({ "assignee": "me" }),
-        )
-        .await;
-        assert_eq!(
-            tool_text(&alias),
-            tool_text(&target),
-            "pm_list_my_tasks must answer exactly like pm_list_tasks(assignee=me)"
-        );
-
-        // pm_reparent_task === pm_update_task(parent_task_id=...)
-        let v = call_tool(
-            &router,
-            Some(creator),
-            65,
-            "pm_create_task",
-            json!({ "project_id": pid, "title": "child", "assignee": creator }),
-        )
-        .await;
-        let child = tool_text(&v)["id"].as_str().unwrap().to_string();
-        let alias = call_tool(
-            &router,
-            Some(creator),
-            66,
-            "pm_reparent_task",
-            json!({ "task_id": child, "new_parent": tid }),
-        )
-        .await;
-        // Undo, then do it again through the main tool and compare.
-        call_tool(
-            &router,
-            Some(creator),
-            67,
-            "pm_update_task",
-            json!({ "task_id": child, "parent_task_id": null }),
-        )
-        .await;
-        let target = call_tool(
-            &router,
-            Some(creator),
-            68,
-            "pm_update_task",
-            json!({ "task_id": child, "parent_task_id": tid }),
-        )
-        .await;
-        // `updated_at` necessarily differs: the two calls are two writes. Every
-        // other field, including the new `parent_id` and `depth`, must match.
-        let mut a_val = tool_text(&alias);
-        let mut t_val = tool_text(&target);
-        a_val.as_object_mut().unwrap().remove("updated_at");
-        t_val.as_object_mut().unwrap().remove("updated_at");
-        assert_eq!(
-            a_val, t_val,
-            "pm_reparent_task must answer exactly like pm_update_task"
-        );
-    }
-
-    /// The alias equivalence above is asserted for two *authenticated* actors.
-    /// The anonymous case is the one design 32:70 decided explicitly (reads stay
-    /// open), so pin it: both names answer, with the same body, and the
-    /// write-shaped alias still refuses for lack of an actor.
-    #[tokio::test]
-    async fn e2e_deprecated_aliases_are_equivalent_anonymously() {
-        let router = test_router().await;
-        let v = call_tool(
-            &router,
-            Some("agent-creator"),
-            73,
-            "pm_create_project",
-            json!({ "title": "P" }),
-        )
-        .await;
-        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
-        let v = call_tool(
-            &router,
-            Some("agent-creator"),
-            74,
-            "pm_create_task",
-            json!({ "project_id": pid, "title": "T", "assignee": "agent-creator" }),
-        )
-        .await;
-        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
-
-        // Anonymous reads: the alias inherits the target's openness.
-        let alias = call_tool(&router, None, 75, "pm_check_task", json!({ "task_id": tid })).await;
-        assert!(alias["error"].is_null(), "anonymous alias must read: {alias}");
-        let target = call_tool(&router, None, 76, "pm_get_task", json!({ "task_id": tid })).await;
-        assert_eq!(
-            tool_text(&alias),
-            tool_text(&target),
-            "pm_check_task must answer exactly like pm_get_task when anonymous"
-        );
-
-        // `pm_list_my_tasks` needs to know who "my" is: both names refuse.
-        let alias = call_tool(&router, None, 77, "pm_list_my_tasks", json!({})).await;
-        let target = call_tool(
-            &router,
-            None,
-            78,
-            "pm_list_tasks",
-            json!({ "assignee": "me" }),
-        )
-        .await;
-        assert!(!alias["error"].is_null(), "anonymous my_tasks must refuse: {alias}");
-        assert!(
-            !target["error"].is_null(),
-            "anonymous assignee=me must refuse: {target}"
         );
     }
 
@@ -1763,8 +2125,8 @@ mod tests {
     /// 让 LLM 在 `pm_list_tasks` / `pm_list_projects` 等列表接口中能用
     /// `*_meta.name` 识别谁是谁（不需要反查 members）。
     ///
-    /// 覆盖的接口：`pm_list_projects` / `pm_list_tasks` / `pm_list_my_tasks`
-    /// / `pm_get_task` / `pm_check_task` / `pm_create_project`。
+    /// 覆盖的接口：`pm_list_projects` / `pm_list_tasks` / `pm_get_task`
+    /// / `pm_create_project`。
     #[tokio::test]
     async fn e2e_meta_fields_attach_to_tasks_and_projects() {
         let creator = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
@@ -1858,13 +2220,13 @@ mod tests {
         let projs = list_projects_text.as_array().unwrap();
         assert!(projs.iter().any(|p| p["created_by_meta"]["name"] == "Senior Engineer"));
 
-        // pm_list_my_tasks（worker 自查）：assignee_meta 是自己，created_by_meta 是 creator
+        // pm_list_tasks(assignee="me")（worker 自查）：assignee_meta 是自己，created_by_meta 是 creator
         let v = call_tool(
             &router,
             Some(worker),
             105,
-            "pm_list_my_tasks",
-            json!({}),
+            "pm_list_tasks",
+            json!({ "assignee": "me" }),
         )
         .await;
         let my_text = tool_text(&v);
@@ -1874,12 +2236,12 @@ mod tests {
         assert_eq!(my[0]["assignee_meta"]["name"], "Architect");
         assert_eq!(my[0]["created_by_meta"]["name"], "Senior Engineer");
 
-        // pm_check_task（creator 自查）：带 created_by_meta
+        // pm_get_task（creator 自查）：带 created_by_meta
         let v = call_tool(
             &router,
             Some(creator),
             106,
-            "pm_check_task",
+            "pm_get_task",
             json!({ "task_id": tid }),
         )
         .await;
@@ -2275,9 +2637,9 @@ mod tests {
         assert_eq!(tool_text(&v)["tasks"].as_array().unwrap().len(), 1);
     }
 
-    /// e2e：pm_reparent_task 匿名拒绝（§9.3 匿名仅只读）。
+    /// e2e：`pm_update_task(parent_task_id=null)` 匿名拒绝（§9.3 匿名仅只读）。
     #[tokio::test]
-    async fn e2e_reparent_anonymous_rejected() {
+    async fn e2e_update_task_parent_move_anonymous_rejected() {
         let router = test_router().await;
         let agent = "agent-rp";
 
@@ -2304,8 +2666,8 @@ mod tests {
             &router,
             None,
             83,
-            "pm_reparent_task",
-            json!({ "task_id": tid, "new_parent": null }),
+            "pm_update_task",
+            json!({ "task_id": tid, "parent_task_id": null }),
         )
         .await;
         assert_eq!(v["error"]["code"], CODE_UNAUTHENTICATED, "anonymous reparent: {v}");
@@ -2928,6 +3290,61 @@ mod tests {
         assert!(texts.contains(&"blocked on the API contract"), "{got}");
     }
 
+    /// G1-c review F2: the project owner — neither the task's assignee nor
+    /// its creator — may leave the adoption/reassignment reason on the task.
+    /// The auto-generated `[reassign]` trail is reason-free; without this
+    /// right the owner had no channel to explain the hand-over at all.
+    #[tokio::test]
+    async fn pm_add_activity_allows_the_project_owner() {
+        let (router, store) = test_router_and_store().await;
+        let owner = "agent-owner";
+        let worker = "agent-worker";
+
+        let v = call_tool(&router, Some(owner), 90, "pm_create_project", json!({ "title": "P" })).await;
+        let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
+        store
+            .add_project_member(&pid.parse().unwrap(), worker, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
+        // The task's creator is `worker`, its assignee is `worker` after the
+        // claim below — `owner` is neither, and must still be able to comment.
+        let v = call_tool(
+            &router,
+            Some(worker),
+            91,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "T", "assignee": worker }),
+        )
+        .await;
+        let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
+
+        let v = call_tool(
+            &router,
+            Some(owner),
+            92,
+            "pm_add_activity",
+            json!({ "task_id": tid, "text": "reassigning because the worker instance was reinstalled" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "owner comment must be allowed: {v}");
+
+        // And a plain non-member is still refused (wording names all three roles).
+        let v = call_tool(
+            &router,
+            Some("agent-outsider"),
+            93,
+            "pm_add_activity",
+            json!({ "task_id": tid, "text": "injected" }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "forbidden", "outsider comment: {v}");
+        assert!(
+            msg.contains("assignee, the creator, or the project owner"),
+            "refusal must list the three roles: {v}"
+        );
+    }
+
     /// Truncation of the activity stream must be explicit: reading a partial
     /// stream as the whole history is a mistake agents make.
     #[tokio::test]
@@ -3296,6 +3713,193 @@ mod tests {
         let t = tool_text(&v);
         assert_eq!(t["total"], 1, "sentinel should resolve to the actor: {t}");
         assert_eq!(t["tasks"][0]["assignee"], actor);
+    }
+
+    // ── G1-a: `pm_create_task(assignee = "me")` ────────────────────────────
+    //
+    // An agent cannot read its own instance id from anywhere (ADR-073 §1.2:
+    // the identity lives in the Gateway, not in the agent's context), so
+    // `"me"` is the only spelling it can use to name itself. What lands in
+    // the task must be its UUID — a stored `"me"` would be a task nobody can
+    // ever claim.
+
+    /// The stored assignee is the caller's UUID, not the literal `"me"`.
+    #[tokio::test]
+    async fn create_task_sentinel_me_stores_the_caller_instance_id() {
+        let router = test_router().await;
+        let actor = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"; // ADR-073 instance_id
+        let pid = project_with_owner(&router, actor, "Self assign").await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            2,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "mine", "assignee": "me" }),
+        )
+        .await;
+        assert!(v["error"].is_null(), "create_task(assignee=me) failed: {v}");
+        let task = tool_text(&v);
+        assert_eq!(
+            task["assignee"], actor,
+            "the sentinel must resolve to the caller: {task}"
+        );
+        assert_ne!(task["assignee"], "me", "the literal sentinel must never be stored");
+
+        // The persisted task — not just the response projection — carries the UUID.
+        let tid = task["id"].as_str().unwrap().to_string();
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert_eq!(tool_text(&v)["assignee"], actor);
+    }
+
+    /// Closed loop: a task created with `assignee="me"` is findable with
+    /// `pm_list_tasks(assignee="me")`. A self-assign nobody can look up
+    /// again is a write-only fact.
+    #[tokio::test]
+    async fn create_task_sentinel_me_is_found_by_list_tasks_me() {
+        let router = test_router().await;
+        let actor = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, actor, "Closed loop").await;
+        create_task(
+            &router,
+            actor,
+            2,
+            json!({ "project_id": pid, "title": "mine", "assignee": "me" }),
+        )
+        .await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_list_tasks",
+            json!({ "project_id": pid, "assignee": "me" }),
+        )
+        .await;
+        let t = tool_text(&v);
+        assert_eq!(t["total"], 1, "the self-assigned task must be findable: {t}");
+        assert_eq!(t["tasks"][0]["assignee"], actor);
+    }
+
+    /// `"me"` is not a pass. The caller still has to be in the project —
+    /// otherwise the sentinel would be a way around the membership gate.
+    #[tokio::test]
+    async fn create_task_sentinel_me_still_requires_project_membership() {
+        let router = test_router().await;
+        let owner = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let stranger = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, owner, "Members only").await;
+
+        let v = call_tool(
+            &router,
+            Some(stranger),
+            2,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "not mine", "assignee": "me" }),
+        )
+        .await;
+        let (code, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "author_not_project_member", "unexpected: {msg}");
+        assert_eq!(code, INTERNAL_ERROR, "unexpected: {msg}");
+    }
+
+    /// `"me"` is not a pass around the directory gate either: a caller that
+    /// is not installed in the Gateway's agent directory cannot self-assign.
+    #[tokio::test]
+    async fn create_task_sentinel_me_still_passes_the_directory_gate() {
+        // The directory knows nobody, the caller included.
+        let router = test_router_with_dir(Arc::new(WhitelistAgentDirectory::new(&[]))).await;
+        let actor = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, actor, "Directory gate").await;
+
+        let v = call_tool(
+            &router,
+            Some(actor),
+            2,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "mine", "assignee": "me" }),
+        )
+        .await;
+        let (_, prefix, msg) = assert_rpc_error(&v);
+        assert_eq!(prefix, "bad_request", "unexpected: {msg}");
+        assert!(
+            msg.contains("assignee instance not found"),
+            "the directory gate must still apply to the resolved id: {msg}"
+        );
+        // The gate must see the *resolved* id, not the literal: only a
+        // resolution that happens before the check puts the UUID in the error.
+        assert!(
+            msg.contains(actor),
+            "the gate must run on the caller's UUID, not on `me`: {msg}"
+        );
+    }
+
+    /// The sentinel is normalized, not guessed: `"ME"` and `" me "` mean the
+    /// same as `"me"` (instance ids are UUIDs — nothing else can collide).
+    #[tokio::test]
+    async fn create_task_sentinel_me_normalizes_case_and_whitespace() {
+        let router = test_router().await;
+        let actor = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, actor, "Normalized").await;
+
+        for (i, spelling) in ["ME", " me ", "Me"].iter().enumerate() {
+            let v = call_tool(
+                &router,
+                Some(actor),
+                10 + i as u64,
+                "pm_create_task",
+                json!({ "project_id": pid, "title": format!("t{i}"), "assignee": spelling }),
+            )
+            .await;
+            assert!(v["error"].is_null(), "`{spelling}` must resolve: {v}");
+            assert_eq!(
+                tool_text(&v)["assignee"], actor,
+                "`{spelling}` must resolve to the caller"
+            );
+        }
+    }
+
+    /// The sentinel changed nothing about how a bogus assignee is rejected:
+    /// an unknown UUID and a package id both still fail the directory gate.
+    #[tokio::test]
+    async fn create_task_invalid_assignee_still_rejected() {
+        let router = test_router_with_dir(Arc::new(WhitelistAgentDirectory::new(&[
+            "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d",
+        ])))
+        .await;
+        let agent = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        let pid = project_with_owner(&router, agent, "Gates").await;
+
+        for (i, bogus) in [
+            "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d",
+            "com.acowork.foo",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let v = call_tool(
+                &router,
+                Some(agent),
+                20 + i as u64,
+                "pm_create_task",
+                json!({ "project_id": pid, "title": "t", "assignee": bogus }),
+            )
+            .await;
+            let (code, prefix, msg) = assert_rpc_error(&v);
+            assert_eq!(code, INTERNAL_ERROR, "unexpected: {msg}");
+            assert_eq!(prefix, "bad_request", "unexpected: {msg}");
+            assert!(
+                msg.contains("assignee instance not found"),
+                "msg: {msg}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -3890,9 +4494,10 @@ mod tests {
         assert!(message.contains("Fix invoice rounding"), "{message}");
         assert!(message.contains("Round to cents at line level."), "{message}");
 
-        // 3. The brief is the playbook, and it names the exact tools and the
-        //    409 branches — a stripped-down brief is what sends an agent into
-        //    a claim retry loop.
+        // 3. The brief is the playbook: exact tool names, both 409 branches,
+        //    and the doc leg — a stripped-down brief is what sends an agent
+        //    into a claim retry loop, or into writing deliverables to a local
+        //    file instead of the project's document library (plan §7-G3).
         let brief = push["assignment_brief"].as_str().unwrap();
         for needle in [
             tid.as_str(),
@@ -3900,9 +4505,17 @@ mod tests {
             "pm_submit_task",
             "409 review_not_approved",
             "409 dependency_not_satisfied",
+            "pm_get_project",
+            "`doc_path`",
+            "no doc_path",
+            "Never fall back to writing local files",
         ] {
             assert!(brief.contains(needle), "brief is missing `{needle}`: {brief}");
         }
+        assert!(
+            !brief.contains("repository attached to this conversation"),
+            "the repo-as-delivery-venue instruction must be gone: {brief}"
+        );
 
         // 4. Delivery is stamped, so the same generation cannot be pushed
         //    twice — a second tick must stay silent.
@@ -3980,58 +4593,5 @@ mod tests {
         assert_eq!(tool_text(&v)["status"], "done", "the chain must close: {v}");
 
         shutdown.request();
-    }
-
-    /// **T4-2 freeze tripwire.** Three overlapping tools were turned into
-    /// deprecated aliases (T2-5) and are scheduled for removal once the read
-    /// path (`MCP_TOOL_ALIASES`) lands — T4-2, which is *not* in this patch.
-    /// Until it does, the aliases must stay advertised: deleting them early
-    /// breaks every agent still calling the old name, and the plan's removal
-    /// gate (§9.3) is a checklist entry, i.e. exactly the kind of promise
-    /// that rots silently.
-    ///
-    /// This test is the tripwire. Its failure means either the aliases were
-    /// dropped without T4-2, or a rename lost the `DEPRECATED` marker and
-    /// agents no longer get told where to go.
-    #[tokio::test]
-    async fn deprecated_aliases_stay_advertised_until_the_read_path_lands() {
-        let (state, _tmp) = test_mcp_state().await;
-        let router = Router::new()
-            .route("/mcp", post(jsonrpc_endpoint))
-            .with_state(state);
-
-        let req = axum::http::Request::builder()
-            .method("POST")
-            .uri("/mcp")
-            .header("content-type", "application/json")
-            .body(Body::from(
-                r#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#,
-            ))
-            .unwrap();
-        let resp = router.clone().oneshot(req).await.unwrap();
-        let v = body_to_value(resp).await;
-        let tools = v["result"]["tools"].as_array().unwrap();
-
-        // alias → the tool it now forwards to (the description must name it,
-        // otherwise the marker tells the reader nothing actionable).
-        for (alias, target) in [
-            ("pm_check_task", "pm_get_task"),
-            ("pm_list_my_tasks", "pm_list_tasks"),
-            ("pm_reparent_task", "pm_update_task"),
-        ] {
-            let tool = tools
-                .iter()
-                .find(|t| t["name"] == alias)
-                .unwrap_or_else(|| panic!("`{alias}` must stay advertised until T4-2 lands"));
-            let desc = tool["description"].as_str().unwrap_or_default();
-            assert!(
-                desc.starts_with("DEPRECATED"),
-                "`{alias}` must be marked DEPRECATED: {desc}"
-            );
-            assert!(
-                desc.contains(target),
-                "`{alias}` must name its replacement `{target}`: {desc}"
-            );
-        }
     }
 }

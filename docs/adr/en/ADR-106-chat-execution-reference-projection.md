@@ -501,6 +501,38 @@ Landing: `core/acowork-runtime/src/rounds.rs` (`forced_closure` / `repair_on_ope
 
 **Invariants kept**: the one thing that still opens the block or a round on its own is an unanswered card (D8: something answerable behind a fold is not answerable); `pending` is still the only positive evidence of "in progress" (D9), its re-read driven by the round-state doorbell and driving the bubble's updates; a hole or an outage is still an explicit placeholder. Pure presentation: both Desktop surfaces (`AgentChatView`, `GroupChatPanel`) switch in step, Mobile is untouched this round. Design 27 v3.5 §5.5.5 is the contract of record.
 
+## Amendment (2026-11-11, the addressing card docks at the bottom): `confirm_continue` no longer lands at the block's tail — it floats at the bottom of the chat surface (presentation layer, D4 contract)
+
+**Motivation**. The previous amendment (2026-11-06) hung `confirm_continue` at the tail of the run it asks about, because "the card must sit next to its subject". Once the anchor moved to the exchange's FIRST row, that reasoning inverted: a card drawn at the run's tail can sit hundreds of rows above the composer — and the transcript does not scroll on its own. The human typed at the bottom and saw nothing happen. A card drawn where the reader cannot see it is the same defect as a card drawn away from its subject.
+
+**Decision 1: a single-target `confirm_continue` is docked in a floating overlay at the bottom of the chat surface.** It floats over the composer's edge (with a safe gap, never covering the input), belongs to the surface rather than to the transcript's scroll position. It is the same card (`ChatNoticeEventRow`), the same wording and the same answer path (a re-delivery; answerability still decided by `mayAnswerCard`) — only the position changed. A multi-candidate `session_choice` has no single subject and stays where it is.
+
+**Decision 2: the run being asked about wears a light highlight and a badge.** The card and its subject now live apart, so the run carries the visual link: a light accent wash plus a "waiting for a choice" badge (`chatView.block.unanswered`). The badge is a state, not a second control.
+
+**Decision 3: the block's tail does not draw the card a second time.** The host tells the block that its question is docked (`pendingAskDocked`) and the tail stays empty — one card, one place.
+
+**Invariants kept**: the answer protocol is unchanged (answering a card is a re-delivery of the original words to the chosen address, carrying the original row's `message_id`); the layout mapping is unchanged (`keyOfSeq` / `blockSeqs` still resolve the card's seq to the run it asks about, so a locate does not drift); the viewport reveal (`useRevealPendingAsk`) is kept — it takes the reader to the run being asked about, which now wears the badge.
+
+**Scope**: both Desktop chat surfaces (1:1 `AgentChatView`, group `GroupChatPanel`) switch in step; Mobile's 1:1 surface still draws its addressing card as a row of its own (its card renderer is a separate branch) and is untouched here. The "hang it at the block's tail" clause of the 2026-11-06 amendment is void for Desktop only.
+
+## Revision (2026-11-11, the routing confirmation becomes a tool): `exec_session_route_confirm` — the click answers the model, and plain text is no longer a legal continuation-turn reply (revision of D6)
+
+**The defect shape.** With the level-5 card open, the human clicks "new task": the next router turn runs with `continuation_refused=true` and no candidates, and the model (measured: MiniMax-M3) produced no act at all — it answered with plain prose. The runner's no-act branch published the `agent_message` row as usual, leaving card and reply side by side. The card closes only when an execution round attaches back to the row it asked about (`question_answered`), and prose is not a round, so the card stayed "pending" forever. This breaks D6's either/or contract (route and the card closes, or reply and no card appears) — and it shows that a context hint does not bind the model: compliance with **tool results** is measurably stronger than compliance with prompt paragraphs.
+
+**Decision 1: the confirmation is a suspending tool.** `exec_session_propose_continue(session, why)` is renamed to `exec_session_route_confirm(target, why)` (the old name joins the `RETIRED_ACT_NAMES` drift guard). Calling it parks the turn: the card row is written (unchanged shape — `system_notice` with `notice_type: "confirm_continue"`, same idempotency key), an oneshot responder is registered in the `ChatSessionManager` card registry, and the turn waits up to 120 s. Three endings:
+
+- **continue**: alias→session_id is data the runtime already knows, so the message is delivered straight to the target session without calling the model again — every extra round-trip is another chance to not comply;
+- **new task**: the refusal comes back as a tool result, and the model is expected to call `exec_session_create(background)` so the new session still gets its brief; if it still does not, the turn degrades to the deterministic new-session route — the `background` may be lost, the human's message never is;
+- **timeout / cancel**: the card is dropped from the registry and the turn falls back to the existing ladder (the slow path); later clicks are handled as ordinary addressing.
+
+Parking occupies the chat's drain task (the per-chat serial invariant already runs one turn at a time), capped at 120 s; the timeout keeps a never-answered card from blocking later messages. The level-5 table row's meaning narrows accordingly: `exec_session_route_confirm` is no longer "propose only, deliver nothing" — once the proposal is accepted, **the turn itself delivers**; only the trigger moved, from the model's second call to the human's click.
+
+**Decision 2: clicks are claimed before the ladder.** The inbound loop (`route_intent_inbound`) consults `ChatSessionManager::claim_card_answer` before queueing: an envelope whose `chat_row_id` + `source_chat_session_id` match a live card wakes the parked turn through the oneshot and is dropped (no ladder, no double delivery); anything else takes the existing ladder unchanged — after a restart the registry is empty, cards have timed out, and stale clicks all fall back to the re-delivery semantics of the existing ladder and of the 2026-11-11 docked-card revision. The frontend is untouched: card row shape, the re-delivery transport (`forceNew` / `targetSession`), the `question_answered` projection, and the wire field `allow_new_task` all stay as they are.
+
+**Decision 3: the hard interception is defense in depth.** When `continuation_refused=true` and the model produces no act: one feedback message is injected and the turn retries once; a second no-act degrades — and never writes an `agent_message` row. It guards the residual paths of the tool design (timeout, process restart, stale cards); it complements the tool rather than replacing it. The state "card and agent message coexist" is now unrepresentable at the code level.
+
+**Observability.** The decision log gains the optional columns `confirm_wait_ms` (how long the turn parked) and `confirm_result` (`continue` / `new_task` / `timeout`); an `act` value of `exec_session_route_confirm:S_x` means this turn wrote a card.
+
 ## References
 
 - [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md) — the complete disposable side-table pattern: write-time incrementals, warn-only failures, watermark/first-touch rebuild, the Windows handle ordering contract. Decision 5 adopts it clause by clause.

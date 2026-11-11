@@ -1869,8 +1869,12 @@ input[type="radio"]:checked {
 }
 
 .context-menu-item:hover {
-  background-color: #f4f4f5;
-  /* zinc-100 */
+  /* Same tint family as every other list row in the app — `listRowHover` in
+     lib/ui-styles.ts (`bg-[var(--color-accent)]/10`, /15 in dark). It used to
+     be a neutral grey, so the cursor crossing a dropdown in the pm views read
+     as a different widget from the very row highlight it was switching
+     between. The dangerous / warning variants below keep their own hue. */
+  background-color: color-mix(in oklab, var(--color-accent) 10%, transparent);
 }
 
 .context-menu-item:disabled,
@@ -1890,8 +1894,7 @@ input[type="radio"]:checked {
 }
 
 .dark .context-menu-item:hover {
-  background-color: #3f3f46;
-  /* zinc-700 */
+  background-color: color-mix(in oklab, var(--color-accent) 15%, transparent);
 }
 
 .dark .context-menu-item:disabled:hover,

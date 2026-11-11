@@ -44,6 +44,34 @@ const MENUS = [
   ]],
 ] as const;
 
+describe("the popup cursor highlight", () => {
+  // 光标划过下拉菜单的一行，和划过列表里的一行，必须是同一块颜色 —— 两者在
+  // pm 视图里就是相邻的操作。菜单项走的是 globals.css 的 `.context-menu-item`
+  // （PmPopover / ContextMenu 共用），所以这条规则在那里钉一次就够了。
+  it("is the same accent tint as listRowHover, not a neutral grey", () => {
+    const css = read("styles/globals.css");
+    const hover = css.slice(
+      css.indexOf(".context-menu-item:hover {"),
+      css.indexOf(".context-menu-item:disabled"),
+    );
+    expect(hover).toContain("--color-accent");
+    expect(hover).not.toMatch(/#f4f4f5|#3f3f46|zinc-100|zinc-700/);
+
+    const dark = css.slice(
+      css.indexOf(".dark .context-menu-item:hover {"),
+      css.indexOf(".dark .context-menu-item:disabled"),
+    );
+    expect(dark).toContain("--color-accent");
+    expect(dark).not.toMatch(/#3f3f46|zinc-700/);
+  });
+
+  it("leaves the destructive / warning variants their own hue", () => {
+    const css = read("styles/globals.css");
+    expect(css).toMatch(/--danger:hover \{[^}]*red/);
+    expect(css).toMatch(/--warning:hover \{[^}]*#fffbeb/);
+  });
+});
+
 describe("menuItemSelected", () => {
   it("is a background only — never a text colour", () => {
     // A text-only selection is the first bug this pins; accent text on an

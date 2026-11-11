@@ -167,12 +167,15 @@ export function PmPopoverItem({
   checked,
   disabled,
   title,
+  prefix,
 }: {
   children: ReactNode;
   onClick?: () => void;
   checked?: boolean;
   disabled?: boolean;
   title?: string;
+  /** 对勾与文字之间的视觉标记（头像 / 彩色点）。文字始终可截断。 */
+  prefix?: ReactNode;
 }) {
   return (
     <button
@@ -188,6 +191,7 @@ export function PmPopoverItem({
       <span className="w-3 shrink-0 text-center" aria-hidden>
         {checked ? "✓" : ""}
       </span>
+      {prefix}
       <span className="min-w-0 flex-1 truncate">{children}</span>
     </button>
   );

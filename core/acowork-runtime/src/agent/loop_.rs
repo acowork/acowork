@@ -530,9 +530,10 @@ pub struct AgentLoop {
     /// early failure) cannot leave a reference to be attached to the next one.
     pub(crate) turn_message_refs: Vec<acowork_core::MessageRef>,
 
-    /// The `metadata` of this turn's own `user` row — the display projection an
-    /// agent-origin Intent carries (`intent_turn::intent_display_meta`), or
-    /// `None` for a turn whose text is already human text.
+    /// The `metadata` of this turn's own `user` row — the turn's origin and the
+    /// display projection an agent-origin Intent carries
+    /// (`intent_turn::turn_row_meta`), or `None` for a turn whose text is
+    /// already human text.
     ///
     /// It cannot ride `raw_user_message`: that string *is* the row body, and the
     /// row body is what the model reads back after a restart (the restorer

@@ -129,8 +129,16 @@ interface ChatExecutionBlockProps {
   canAnswer?: boolean;
   /** Answer the router's addressing question about THIS run (ADR-106 D6 level
    *  5). The card is drawn at the block's tail — the layout hangs it here
-   *  (`RunBlock.pendingAsk`) so the question sits where its subject is. */
+   *  (`RunBlock.pendingAsk`) so the question sits where its subject is.
+   *  Unless the host docked it (`pendingAskDocked`), which is the placement
+   *  this surface uses: the question floats at the bottom of the surface and
+   *  the run wears a badge instead. */
   onChooseCard?: CardAnswerHandler;
+  /** The host docked this run's question at the bottom of the surface (ADR-106
+   *  revision 2026-11-11): it is drawn THERE, so the tail must not draw it a
+   *  second time. The run still wears the badge that names it as the
+   *  question's subject. */
+  pendingAskDocked?: boolean;
   /** Group surface only: right-click the author → the panel's "@name" menu. */
   onAuthorContextMenu?: (e: React.MouseEvent) => void;
   /** ADR-106 revision 2026-11-04: the `@` picker's "去续投" located this block
@@ -295,6 +303,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   onAuthorContextMenu,
   focusInput = false,
   onChooseCard,
+  pendingAskDocked = false,
   className,
 }: ChatExecutionBlockProps) {
   const { t } = useTranslation();
@@ -497,7 +506,13 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
   }, [block, entries]);
 
   return (
-    <div className={`px-4 py-1 ${className ?? ""}`}>
+    // The run the router is asking about wears a light accent wash and a
+    // badge. The question itself floats at the bottom of the surface (ADR-106
+    // revision 2026-11-11), so this is what keeps the question and its subject
+    // together — the same accent wash the locate highlight uses.
+    <div
+      className={`px-4 py-1 ${pendingAsk ? "bg-[var(--color-accent)]/10" : ""} ${className ?? ""}`}
+    >
       {showHeader && (
         <div className="mb-2 mt-1 flex items-center gap-2">
           <span onContextMenu={onAuthorContextMenu} className="shrink-0">
@@ -613,6 +628,17 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                     {taskId}
                   </span>
                 )}
+                {/* The question about THIS run is docked at the bottom of the
+                    surface, so the run says so: a reader who sees the badge
+                    knows where the question went, and which run it is about. */}
+                {pendingAsk && (
+                  <span
+                    data-testid="exec-block-ask-badge"
+                    className="shrink-0 rounded bg-[var(--color-accent)]/15 px-1.5 py-0.5 text-[0.8em] text-text-secondary"
+                  >
+                    {t("chatView.block.unanswered")}
+                  </span>
+                )}
                 {inProgress && (
                   <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
                 )}
@@ -685,8 +711,13 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
               `identity="inherited"`: the block's own header, right above, already
               wears this agent's face and name at the 40px gutter, so the card
               adds neither and starts where the rounds start. A second avatar
-              over one question is what made this card look misplaced. */}
-          {pendingAsk && (
+              over one question is what made this card look misplaced.
+
+              The host usually draws it elsewhere — docked at the bottom of the
+              surface (ADR-106 revision 2026-11-11), where the human sees it
+              without hunting for the run. Then the tail stays empty: one
+              question, one place. */}
+          {pendingAsk && !pendingAskDocked && (
             <div className="mt-1">
               <ChatNoticeEventRow
                 row={pendingAsk}

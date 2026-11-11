@@ -1,7 +1,7 @@
 ---
 name: architecture-strategy
 description: Create architecture strategies with requirement analysis, alternatives, trade-offs, decisions, migration path, and rollback plan
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - architecture strategy
@@ -11,8 +11,9 @@ triggers:
   - 架构策略
   - 架构设计
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -23,7 +24,7 @@ tool_deps:
 
 1. **Explore context**
    - Use `mcp_memory__memory_recall` to retrieve prior architecture decisions and project constraints
-   - Use `file_read` to inspect existing structure, docs, interfaces, and conventions
+   - Use `doc_read` and `doc_search` to inspect existing structure, docs, interfaces, and conventions
    - Identify current system shape, integration points, operational constraints, and known pain points
    - Separate facts from assumptions
 
@@ -51,7 +52,7 @@ tool_deps:
    - Define rollback path and blast radius for risky changes
 
 6. **Persist decisions**
-   - Use `file_write` to save the architecture strategy when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist decisions, rejected alternatives, assumptions, and follow-up questions
 
 ## Output Format

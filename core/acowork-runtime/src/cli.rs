@@ -101,6 +101,14 @@ pub struct Cli {
     #[arg(long, env = "ACOWORK_GATEWAY_HOST")]
     pub gateway_host: Option<String>,
 
+    /// HTTP port of the Gateway this Runtime calls back into
+    /// (`chat-append`, the global-resources pull, `intent_send`).
+    /// Defaults to the platform constant `19876`; the flag exists for
+    /// process-level tests, which must boot a private Gateway on a free
+    /// port instead of binding the well-known one the desktop occupies.
+    #[arg(long, env = "ACOWORK_GATEWAY_HTTP_PORT")]
+    pub gateway_http_port: Option<u16>,
+
     /// ADR-055 D3/§6.4: base URL of the Node reverse proxy that fronts
     /// this Runtime's loopback HTTP server (e.g.
     /// `http://{node_advertise}:19900`). When set, the Runtime publishes

@@ -1,7 +1,7 @@
 ---
 name: technical-planning
 description: Convert an approved architecture or spec into a concrete implementation plan with files, boundaries, tests, rollout, and rollback steps
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - implementation plan
@@ -12,7 +12,9 @@ triggers:
   - 实施计划
 tool_deps:
   - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -23,7 +25,7 @@ tool_deps:
 
 1. **Read the approved design**
    - Use `mcp_memory__memory_recall` to retrieve relevant decisions and conventions
-   - Use `file_read` to inspect the design/spec, existing file structure, tests, and implementation patterns
+   - Use `doc_read` and `doc_search` to inspect the design/spec, and `file_read` to inspect existing file structure, tests, and implementation patterns
    - Confirm scope, non-goals, constraints, and acceptance criteria
 
 2. **Map file responsibilities**
@@ -51,7 +53,7 @@ tool_deps:
    - Check that every requirement maps to at least one task
    - Remove placeholders such as TBD, TODO, or "handle edge cases"
    - Check type, interface, and file-name consistency across tasks
-   - Use `file_write` to save the plan when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist key decisions and implementation constraints
 
 ## Output Format

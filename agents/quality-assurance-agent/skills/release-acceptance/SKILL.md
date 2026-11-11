@@ -1,7 +1,7 @@
 ---
 name: release-acceptance
 description: Assess release readiness using quality gates, test evidence, defect status, known issues, operational readiness, rollback, and go/no-go decision criteria
-version: "1.0.0"
+version: "1.1.0"
 author: developer
 triggers:
   - release acceptance
@@ -10,8 +10,11 @@ triggers:
   - 发布验收
   - 发布质量
 tool_deps:
-  - file_read
-  - file_write
+  - doc_read
+  - doc_search
+  - doc_write
+  - pm_get_task
+  - pm_add_activity
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -26,7 +29,7 @@ No release recommendation without evidence. A release decision must state Go, No
 
 1. **Load release context**
    - Use `mcp_memory__memory_recall` to retrieve release history, quality gates, accepted risks, defect trends, and prior rollback issues
-   - Use `file_read` to inspect release plan, test reports, defect list, risk register, monitoring plan, rollback plan, and release notes
+   - Use `doc_read` and `doc_search` to inspect release plan, test reports, defect list, risk register, monitoring plan, rollback plan, and release notes
    - Confirm release scope, target date, stakeholders, and decision-maker
 
 2. **Evaluate quality gates**
@@ -47,7 +50,7 @@ No release recommendation without evidence. A release decision must state Go, No
 5. **Make recommendation**
    - Choose Go, No-Go, or Conditional Go
    - Provide evidence, risks, conditions, decision deadline, and owner acceptance
-   - Use `file_write` to save the release acceptance report when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist release decision, risk acceptance, known issues, and post-release learnings
 
 ## Output Format

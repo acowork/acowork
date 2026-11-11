@@ -1505,7 +1505,7 @@ pub fn load_merged_mcp_configs(work_dir: &Path) -> Vec<McpServerConfigDef> {
 // {
 //   "servers": {
 //     "pm": [
-//       { "name": "pm_list_my_tasks",  "enabled": true,  "description": "..." },
+//       { "name": "pm_list_tasks",     "enabled": true,  "description": "..." },
 //       { "name": "pm_claim_task",     "enabled": true,  "description": "..." },
 //       { "name": "pm_create_project", "enabled": false, "description": "..." }
 //     ]
@@ -2913,7 +2913,7 @@ mod tests {
     }
 
     /// ADR-104: with an empty persisted config, the package-declared
-    /// `[[mcp_servers]].tools` whitelist decides which of the 12 tools a
+    /// `[[mcp_servers]].tools` whitelist decides which of the 9 tools a
     /// server advertises start enabled; `description` comes from the live
     /// `tools/list`. This replaces the old hardcoded
     /// `PM_DEFAULT_ENABLED_TOOLS`.
@@ -2927,12 +2927,9 @@ mod tests {
             "pm_list_tasks",
             "pm_get_task",
             "pm_create_task",
-            "pm_check_task",
             "pm_update_task",
             "pm_claim_task",
             "pm_submit_task",
-            "pm_list_my_tasks",
-            "pm_reparent_task",
         ];
         let mut server_tools: IndexMap<String, Vec<McpToolDescriptor>> = IndexMap::new();
         let defs: Vec<McpToolDescriptor> = names
@@ -2947,7 +2944,7 @@ mod tests {
         let mut recommended: IndexMap<String, Vec<String>> = IndexMap::new();
         recommended.insert(
             "pm".to_string(),
-            ["pm_list_my_tasks", "pm_claim_task", "pm_submit_task", "pm_check_task"]
+            ["pm_list_tasks", "pm_claim_task", "pm_submit_task", "pm_get_task"]
                 .iter()
                 .map(|s| s.to_string())
                 .collect(),
@@ -2955,7 +2952,7 @@ mod tests {
 
         let merged = merge_mcp_tools_config(&persisted, &server_tools, &recommended);
         let pm = merged.servers.get("pm").unwrap();
-        assert_eq!(pm.len(), 12);
+        assert_eq!(pm.len(), 9);
 
         let enabled_names: std::collections::HashSet<&str> = pm
             .iter()
@@ -2965,10 +2962,10 @@ mod tests {
         assert_eq!(
             enabled_names,
             std::collections::HashSet::from([
-                "pm_list_my_tasks",
+                "pm_list_tasks",
                 "pm_claim_task",
                 "pm_submit_task",
-                "pm_check_task",
+                "pm_get_task",
             ])
         );
 
@@ -3031,8 +3028,8 @@ mod tests {
                     description: Some("Create".into()),
                 },
                 McpToolDescriptor {
-                    name: "pm_list_my_tasks".into(),
-                    description: Some("List mine".into()),
+                    name: "pm_get_task".into(),
+                    description: Some("Read one".into()),
                 },
             ],
         );
@@ -3042,7 +3039,7 @@ mod tests {
         assert_eq!(pm.len(), 3);
         assert!(!tool_enabled_in(pm, "pm_claim_task").unwrap());
         assert!(tool_enabled_in(pm, "pm_create_project").unwrap());
-        assert!(tool_enabled_in(pm, "pm_list_my_tasks").unwrap());
+        assert!(tool_enabled_in(pm, "pm_get_task").unwrap());
     }
 
     /// Description is always refreshed from the live `tools/list`.

@@ -6,10 +6,15 @@
 //! - `exec_session_create(message)` — open a fresh execution session. This is
 //!   the only delivery a model may perform, because a new session belongs to
 //!   nobody's prior context, so nothing can be contaminated by a wrong guess;
-//! - `exec_session_propose_continue(target, why)` — say "this looks like a
-//!   continuation of that one" and hand the human a confirmation card. It
-//!   delivers nothing: a proposal is acted on only when the person who typed
-//!   the message confirms it.
+//! - `exec_session_route_confirm(target, why)` — say "this looks like a
+//!   continuation of that one", hand the human a confirmation card, and WAIT
+//!   for the answer inside the same turn (ADR-106 D6 rev. 2026-11-12). A
+//!   confirmed continuation is delivered by the runtime and the turn ends; a
+//!   refusal comes back as the tool result, and the model owes
+//!   `exec_session_create`. The wait is what retired the old terminal
+//!   proposal: the answer used to arrive as a fresh turn that had lost the
+//!   proposal's reasoning, and there the model could — and did — answer with
+//!   prose instead of honouring the click.
 //!
 //! **`dispatch(target = <existing alias>)` is deleted** (ADR-106 D6: "LLM 失去
 //! 静默投递权"). Continuing a session is addressing, and addressing belongs to
@@ -45,8 +50,11 @@ use crate::agent::session::intent_routing::SessionSeed;
 
 /// Tool names, fixed across turns — they are part of the cached prefix.
 pub const EXEC_SESSION_CREATE_TOOL: &str = "exec_session_create";
-/// The proposal act: name a candidate, ask the human to confirm the continue.
-pub const EXEC_SESSION_PROPOSE_CONTINUE_TOOL: &str = "exec_session_propose_continue";
+/// The confirmation act: name a candidate, hand the human a card, and WAIT
+/// for their answer inside the same turn (ADR-106 D6 rev. 2026-11-12). The
+/// call either ends the turn (continuation confirmed — the runtime delivers)
+/// or returns a tool result (refused — the model owes `exec_session_create`).
+pub const EXEC_SESSION_ROUTE_CONFIRM_TOOL: &str = "exec_session_route_confirm";
 /// The read-back act-shaped information tool: report what a candidate session
 /// last said, over the bounded D4 round projection read. Read-only.
 pub const EXEC_SESSION_READ_ROUND_TOOL: &str = "exec_session_read_round";
@@ -61,10 +69,18 @@ pub const HTTP_REQUEST_TOOL: &str = "http_request";
 
 /// Act names a previous prompt generation taught and the wire no longer
 /// offers. ADR-106 D6 retired `dispatch`; the `exec_session_*` renaming
-/// retired `new_task` and `propose_existing`. Any text still naming one
-/// describes a tool the model cannot call, so the drift guard in this
-/// module's tests fails when the kernel prompt teaches one.
-pub const RETIRED_ACT_NAMES: &[&str] = &["dispatch", "new_task", "propose_existing"];
+/// retired `new_task` and `propose_existing`; the 2026-11-12 revision retired
+/// `exec_session_propose_continue` in favour of `exec_session_route_confirm`
+/// (the proposal now WAITS for the human's answer inside the same turn
+/// instead of ending it). Any text still naming a retired one describes a
+/// tool the model cannot call, so the drift guard in this module's tests
+/// fails when the kernel prompt teaches one.
+pub const RETIRED_ACT_NAMES: &[&str] = &[
+    "dispatch",
+    "new_task",
+    "propose_existing",
+    "exec_session_propose_continue",
+];
 
 /// How many most recent rounds one `exec_session_read_round` call may read
 /// back. The read is bounded so a router turn cannot pull a whole execution
@@ -125,11 +141,19 @@ pub fn exec_session_create_tool_spec() -> Value {
     })
 }
 
-/// The `exec_session_propose_continue` schema: which candidate, and the one
+/// The `exec_session_route_confirm` schema: which candidate, and the one
 /// sentence the human reads before deciding. `why` is required because a card
 /// that names a session without a reason asks the human to do the routing work
 /// the proposal was supposed to save them.
-pub fn exec_session_propose_continue_tool_spec() -> Value {
+///
+/// **The call blocks** (ADR-106 D6 rev. 2026-11-12): it shows the card and the
+/// turn waits for the click, so the human's answer arrives as THIS call's tool
+/// result — a model that asked does not get to re-decide the routing in a
+/// fresh turn that has lost its own reasoning. Confirmed continuation is
+/// delivered by the runtime (the result says so; there is nothing left to
+/// call); a refusal says the human chose new work and the only legal next
+/// step is `exec_session_create`.
+pub fn exec_session_route_confirm_tool_spec() -> Value {
     json!({
         "type": "object",
         "properties": {
@@ -164,9 +188,9 @@ pub fn act_tools() -> Vec<Value> {
             "parameters": exec_session_create_tool_spec(),
         }),
         json!({
-            "name": EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
-            "description": "Ask the human whether this turn continues one of the listed sessions. Delivers nothing by itself - the human confirms or refuses a card.",
-            "parameters": exec_session_propose_continue_tool_spec(),
+            "name": EXEC_SESSION_ROUTE_CONFIRM_TOOL,
+            "description": "Ask the human whether this turn continues one of the listed sessions. The call shows a card and WAITS for their answer: a confirmed continuation is delivered by the runtime and the turn is over; the tool result tells you when the human refused and chose new work, and then the only legal next step is exec_session_create.",
+            "parameters": exec_session_route_confirm_tool_spec(),
         }),
     ]
 }
@@ -260,7 +284,7 @@ pub fn http_request_router_spec() -> Value {
 
 /// Assemble the request's `tools` array from the two acts plus the enabled
 /// information tools (order fixed: exec_session_create,
-/// exec_session_propose_continue, memory recall, http_request,
+/// exec_session_route_confirm, memory recall, http_request,
 /// exec_session_read_round).
 ///
 /// `memory_tool` is `None` when the catalog has no official memory server —
@@ -301,8 +325,9 @@ pub enum Target {
 pub enum Act {
     /// Open a new execution session and deliver the turn to it.
     ExecSessionCreate(ExecSessionCreateArgs),
-    /// Offer the human a continuation of one candidate session.
-    ProposeContinue(ProposeContinueArgs),
+    /// Offer the human a continuation of one candidate session and wait for
+    /// their answer inside this turn.
+    RouteConfirm(RouteConfirmArgs),
 }
 
 /// A validated `exec_session_create` call.
@@ -317,9 +342,9 @@ pub struct ExecSessionCreateArgs {
     pub seed: Option<SessionSeed>,
 }
 
-/// A validated `exec_session_propose_continue` call.
+/// A validated `exec_session_route_confirm` call.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ProposeContinueArgs {
+pub struct RouteConfirmArgs {
     /// The alias the model used — kept alongside the resolved id so the
     /// decision log reads the way the model wrote it.
     pub alias: String,
@@ -329,6 +354,11 @@ pub struct ProposeContinueArgs {
     pub session_id: String,
     /// The one sentence shown on the confirmation card.
     pub why: String,
+    /// The tool-call id this act arrived under. The confirmation is no longer
+    /// the turn's last word: when the human refuses, the answer is fed back
+    /// as THIS call's tool result, and a tool result must name the call it
+    /// answers (ADR-106 D6 rev. 2026-11-12).
+    pub call_id: String,
 }
 
 /// A validated `exec_session_read_round` call: the session behind a
@@ -371,7 +401,7 @@ impl ActError {
                 "unknown candidate alias `{alias}` — use one of the aliases from the [candidates] block"
             ),
             Self::MissingWhy => format!(
-                "`{EXEC_SESSION_PROPOSE_CONTINUE_TOOL}` requires a non-empty `why` — the human is deciding on your \
+                "`{EXEC_SESSION_ROUTE_CONFIRM_TOOL}` requires a non-empty `why` — the human is deciding on your \
                  reason, so say in one sentence what makes this session the right one"
             ),
         }
@@ -399,17 +429,22 @@ pub fn parse_exec_session_create(args: &Value) -> Result<ExecSessionCreateArgs, 
     Ok(ExecSessionCreateArgs { background, seed })
 }
 
-/// Parse and validate one `exec_session_propose_continue` call against the
+/// Parse and validate one `exec_session_route_confirm` call against the
 /// turn's alias table.
 ///
 /// The alias must be a known candidate (case-insensitive, as before). The
 /// table is built from the permission-filtered candidate list, so an invented
 /// or out-of-scope alias is refused here and never reaches a card — the human
 /// is only ever offered sessions the filter admitted.
-pub fn parse_exec_session_propose_continue(
+///
+/// `call_id` rides along from the ToolCall: a refused confirmation is fed
+/// back as this call's tool result, and a tool result must name the call it
+/// answers.
+pub fn parse_exec_session_route_confirm(
     args: &Value,
     aliases: &AliasTable,
-) -> Result<ProposeContinueArgs, ActError> {
+    call_id: String,
+) -> Result<RouteConfirmArgs, ActError> {
     let target = args
         .get("target")
         .and_then(Value::as_str)
@@ -428,10 +463,11 @@ pub fn parse_exec_session_propose_continue(
         .filter(|s| !s.is_empty())
         .ok_or(ActError::MissingWhy)?
         .to_string();
-    Ok(ProposeContinueArgs {
+    Ok(RouteConfirmArgs {
         alias,
         session_id,
         why,
+        call_id,
     })
 }
 
@@ -521,9 +557,10 @@ mod tests {
     fn a_proposal_resolves_its_alias_and_keeps_the_reason() {
         // Case-insensitive alias match is unchanged: the model has no reason to
         // know the table is uppercase-keyed.
-        let parsed = parse_exec_session_propose_continue(
+        let parsed = parse_exec_session_route_confirm(
             &json!({ "target": "s1", "why": "same login bug" }),
             &aliases(),
+            "call-1".into(),
         )
         .unwrap();
         assert_eq!(parsed.session_id, "sess-1");
@@ -537,19 +574,19 @@ mod tests {
     #[test]
     fn an_unknown_alias_or_a_missing_reason_is_rejected() {
         assert_eq!(
-            parse_exec_session_propose_continue(&json!({ "target": "S9", "why": "x" }), &aliases()),
+            parse_exec_session_route_confirm(&json!({ "target": "S9", "why": "x" }), &aliases(), "c".into()),
             Err(ActError::UnknownAlias("S9".into()))
         );
         assert_eq!(
-            parse_exec_session_propose_continue(&json!({ "why": "x" }), &aliases()),
+            parse_exec_session_route_confirm(&json!({ "why": "x" }), &aliases(), "c".into()),
             Err(ActError::MissingTarget)
         );
         assert_eq!(
-            parse_exec_session_propose_continue(&json!({ "target": "S1" }), &aliases()),
+            parse_exec_session_route_confirm(&json!({ "target": "S1" }), &aliases(), "c".into()),
             Err(ActError::MissingWhy)
         );
         assert_eq!(
-            parse_exec_session_propose_continue(&json!({ "target": "S1", "why": "  " }), &aliases()),
+            parse_exec_session_route_confirm(&json!({ "target": "S1", "why": "  " }), &aliases(), "c".into()),
             Err(ActError::MissingWhy)
         );
     }
@@ -573,9 +610,10 @@ mod tests {
         // offered no candidates, so every target is an unknown alias.
         for target in ["S1", "S2", "s3"] {
             assert_eq!(
-                parse_exec_session_propose_continue(
+                parse_exec_session_route_confirm(
                     &json!({ "target": target, "why": "same login bug" }),
                     &AliasTable::new(),
+                    "c".into(),
                 ),
                 Err(ActError::UnknownAlias(target.into())),
                 "a forced-new turn must not be able to produce a continuation card"
@@ -647,7 +685,7 @@ mod tests {
         let tools = act_tools();
         assert_eq!(tools.len(), 2);
         assert_eq!(tools[0]["name"], EXEC_SESSION_CREATE_TOOL);
-        assert_eq!(tools[1]["name"], EXEC_SESSION_PROPOSE_CONTINUE_TOOL);
+        assert_eq!(tools[1]["name"], EXEC_SESSION_ROUTE_CONFIRM_TOOL);
         assert!(tools[0].get("function").is_none());
         let new_params = &tools[0]["parameters"];
         assert_eq!(new_params["required"], json!(["background"]));
@@ -675,7 +713,7 @@ mod tests {
             names,
             vec![
                 EXEC_SESSION_CREATE_TOOL,
-                EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
+                EXEC_SESSION_ROUTE_CONFIRM_TOOL,
                 memory.as_str(),
                 HTTP_REQUEST_TOOL,
                 EXEC_SESSION_READ_ROUND_TOOL
@@ -711,7 +749,7 @@ mod tests {
             names,
             vec![
                 EXEC_SESSION_CREATE_TOOL,
-                EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
+                EXEC_SESSION_ROUTE_CONFIRM_TOOL,
                 HTTP_REQUEST_TOOL,
                 EXEC_SESSION_READ_ROUND_TOOL
             ]
@@ -745,7 +783,7 @@ mod tests {
         // is deliberate, so it is asserted rather than left implicit.
         for name in [
             EXEC_SESSION_CREATE_TOOL,
-            EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
+            EXEC_SESSION_ROUTE_CONFIRM_TOOL,
             HTTP_REQUEST_TOOL,
             EXEC_SESSION_READ_ROUND_TOOL,
         ] {
@@ -766,8 +804,8 @@ mod tests {
         for (tool, spec) in [
             (EXEC_SESSION_CREATE_TOOL, exec_session_create_tool_spec()),
             (
-                EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
-                exec_session_propose_continue_tool_spec(),
+                EXEC_SESSION_ROUTE_CONFIRM_TOOL,
+                exec_session_route_confirm_tool_spec(),
             ),
             (
                 EXEC_SESSION_READ_ROUND_TOOL,

@@ -37,7 +37,12 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
-import { CAPSULE_PANE_CN } from "./capsule";
+import {
+  CAPSULE_PANE_CN,
+  SURFACE_CONTENT_CN,
+  SURFACE_HEAD_CN,
+  SURFACE_PANEL_CN,
+} from "./capsule";
 import { EmptyChatPane } from "../chat/EmptyChatPane";
 import { ExtensionsView } from "../../views/ExtensionsView";
 
@@ -106,6 +111,43 @@ describe("empty placeholders are outlined capsules", () => {
     expect(read("components/chat/EmptyChatPane.tsx")).not.toMatch(
       /export function EmptyRightPane/,
     );
+  });
+});
+
+describe("the surface ladder (page -> panel -> head -> content)", () => {
+  // The views drifted apart once because each one re-picked its own grey. The
+  // ladder is now named in one place, so "which fill does this pane wear" has
+  // an answer that isn't a fresh colour choice at the call site. Four steps,
+  // matching the board the user pointed at: page, column, card title strip,
+  // card body.
+  it("names three distinct steps above the page plane", () => {
+    expect(SURFACE_PANEL_CN).toBe("bg-right-panel");
+    expect(SURFACE_HEAD_CN).toBe("bg-panel-block");
+    expect(SURFACE_CONTENT_CN).toBe("bg-panel-inset");
+    const steps = [SURFACE_PANEL_CN, SURFACE_HEAD_CN, SURFACE_CONTENT_CN];
+    expect(new Set(steps).size).toBe(3);
+  });
+
+  it.each([
+    ["the board column is the panel", "views/pm/KanbanColumn.tsx", "SURFACE_PANEL_CN"],
+    ["the board card's title strip is the head", "views/pm/TaskCard.tsx", "SURFACE_HEAD_CN"],
+    ["the board card's detail row is the content", "views/pm/TaskCard.tsx", "SURFACE_CONTENT_CN"],
+    ["the list capsule is the panel", "views/pm/TaskListView.tsx", "SURFACE_PANEL_CN"],
+    ["the table body is the content", "views/pm/TaskListView.tsx", "SURFACE_CONTENT_CN"],
+    ["the table header is the head", "views/pm/taskListLabels.ts", "SURFACE_HEAD_CN"],
+  ])("%s", (_name, rel, token) => {
+    expect(read(rel)).toContain(token);
+  });
+
+  it("never re-picks a surface fill by hand", () => {
+    for (const rel of [
+      "views/pm/KanbanColumn.tsx",
+      "views/pm/TaskCard.tsx",
+      "views/pm/TaskListView.tsx",
+      "views/pm/taskListLabels.ts",
+    ]) {
+      expect(read(rel), rel).not.toMatch(/bg-(panel-block|panel-inset|right-panel)/);
+    }
   });
 });
 

@@ -18,7 +18,7 @@
  * means going through this component so the scope cannot be forgotten again.
  */
 
-import { Children, isValidElement, memo, type CSSProperties } from "react";
+import { Children, isValidElement, memo, type CSSProperties, type ReactNode, Component } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { Components } from "react-markdown";
@@ -117,6 +117,34 @@ interface ChatMarkdownProps {
   className?: string;
 }
 
+/**
+ * A renderer that throws must not take the bubble with it.
+ *
+ * The markdown itself cannot fail — remark parses anything, and what it cannot
+ * parse comes back as text — so the only way this branch is reached is a bug in
+ * an element override (`CodeBlock`, the link resolver). The fallback is the raw
+ * content, which is exactly what the reader would have seen had the body never
+ * been markdown in the first place: a PM dispatch's generated Markdown and a
+ * person's typed words both stay readable.
+ */
+class MarkdownFallback extends Component<
+  { content: string; children: ReactNode },
+  { failed: boolean }
+> {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  render() {
+    if (this.state.failed) {
+      return <div className="whitespace-pre-wrap break-words">{this.props.content}</div>;
+    }
+    return this.props.children;
+  }
+}
+
 export const ChatMarkdown = memo(function ChatMarkdown({
   content,
   components,
@@ -124,14 +152,16 @@ export const ChatMarkdown = memo(function ChatMarkdown({
   className,
 }: ChatMarkdownProps) {
   return (
-    <div className={className ? `${CHAT_MARKDOWN_SHELL_CLASS} ${className}` : CHAT_MARKDOWN_SHELL_CLASS} style={style}>
-      <ReactMarkdown
-        remarkPlugins={REMARK_PLUGINS}
-        urlTransform={markdownUrlTransform}
-        components={components ? { ...chatMarkdownComponents, ...components } : chatMarkdownComponents}
-      >
-        {content}
-      </ReactMarkdown>
-    </div>
+    <MarkdownFallback content={content}>
+      <div className={className ? `${CHAT_MARKDOWN_SHELL_CLASS} ${className}` : CHAT_MARKDOWN_SHELL_CLASS} style={style}>
+        <ReactMarkdown
+          remarkPlugins={REMARK_PLUGINS}
+          urlTransform={markdownUrlTransform}
+          components={components ? { ...chatMarkdownComponents, ...components } : chatMarkdownComponents}
+        >
+          {content}
+        </ReactMarkdown>
+      </div>
+    </MarkdownFallback>
   );
 });

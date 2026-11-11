@@ -8,6 +8,7 @@
  * Tailwind class 一律不进 lib；这里是视图层的样式表。
  */
 
+import { SURFACE_HEAD_CN } from "../../components/common/capsule";
 import type { ReviewStatus, TaskStatus } from "../../lib/pm-types";
 import type { PmListColumn, PmColumnWidths } from "../../lib/pm-list-columns";
 
@@ -22,13 +23,6 @@ export const ROW_HEIGHT = 34;
  * 就多出一段看不懂的空白。
  */
 export const CHECK_COL_WIDTH = 26;
-/**
- * 表头末尾「＋」（打开字段弹层）列宽。
- *
- * 36px 按钮 + 12px 右侧留白 = 48px：与左侧 12px 对称，末列内容因此和页脚
- * 右端的「6 列」文字落在同一条竖线上。
- */
-export const ADD_COL_WIDTH = 36;
 /** 子任务每层缩进。 */
 export const INDENT_PER_DEPTH = 13;
 
@@ -76,15 +70,19 @@ export const REVIEW_LABEL_KEY: Record<ReviewStatus, string> = {
 };
 
 /**
- * 表头单元格的公共 class（sticky + 发丝下沿 + 面板底色）。
+ * 表头单元格的公共 class（sticky + 发丝下沿 + 标题底色）。
+ *
+ * 底色是 `SURFACE_HEAD_CN`（第四级阶梯里的"内容标题带"，与看板卡片的标题条
+ * 同档），行/表体是 `SURFACE_CONTENT_CN`（卡片正文那一档）：表头是一条标题
+ * 带，下面一片数据是它的内容。表头必须不透明，否则滚动的数据行会从 sticky
+ * 表头下面透出来。
  *
  * `align-middle`：表格单元格的默认 `vertical-align` 是 baseline，基线对齐
  * 会让行内的表单控件（复选框）挂在文字基线上而不是行心，于是表头那枚
  * 全选框看上去贴着上边框、和下面的数据行复选框也不在同一条水平线上。
  * 显式居中，表头与数据行才共用同一条中线。
  */
-export const TH_BASE_CN =
-  "sticky top-0 z-[2] align-middle border-b border-border-divider bg-panel-block px-2 text-left font-medium text-text-tertiary hover:text-text";
+export const TH_BASE_CN = `sticky top-0 z-[2] align-middle border-b border-border-divider ${SURFACE_HEAD_CN} px-2 text-left font-medium text-text-tertiary hover:text-text`;
 
 /**
  * 数据行的公共 class：hover 底色 + 发丝下沿 + 单行不换行。
@@ -112,5 +110,5 @@ export function estimateTableWidth(
     const explicit = widths[c.key] ?? c.width;
     return sum + (explicit ?? 240);
   }, 0);
-  return CHECK_COL_WIDTH + body + ADD_COL_WIDTH;
+  return CHECK_COL_WIDTH + body;
 }

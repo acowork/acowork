@@ -474,8 +474,8 @@ async fn multi_instance_same_package_tasks_are_isolated() {
 
     // ── workspace-a 自查：能看到 Task A，看不到 Task B ──────────────
     let v = mcp_call(
-        &client, &base, Some(workspace_a), 1, "pm_list_my_tasks",
-        json!({ "project_id": pid }),
+        &client, &base, Some(workspace_a), 1, "pm_list_tasks",
+        json!({ "project_id": pid, "assignee": "me" }),
     ).await;
     let my_tasks_a: Vec<String> = tool_result(&v)["tasks"]
         .as_array().unwrap().iter()
@@ -486,8 +486,8 @@ async fn multi_instance_same_package_tasks_are_isolated() {
 
     // ── workspace-b 自查：能看到 Task B，看不到 Task A ──────────────
     let v = mcp_call(
-        &client, &base, Some(workspace_b), 2, "pm_list_my_tasks",
-        json!({ "project_id": pid }),
+        &client, &base, Some(workspace_b), 2, "pm_list_tasks",
+        json!({ "project_id": pid, "assignee": "me" }),
     ).await;
     let my_tasks_b: Vec<String> = tool_result(&v)["tasks"]
         .as_array().unwrap().iter()

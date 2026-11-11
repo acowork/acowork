@@ -8,7 +8,13 @@
 //!    - 状态变更工具要求身份
 //!    - `pm_claim_task` / `pm_submit_task` / `pm_update_task` 要求
 //!      调用者 `instance_id` == 任务 `assignee`（**ADR-073**：`agent_instance_id`
-//!      是唯一身份 key；`agent_id` 仅显示用），否则 403
+//!      是唯一身份 key；`agent_id` 仅显示用），否则 403。例外（**G1-b**）：
+//!      `pm_claim_task` 允许**项目成员**认领一张**未指派**（`assignee = None`）
+//!      的任务，认领时由 store 原子地把 assignee 写成该成员；非成员仍 403，
+//!      且措辞指向「不是成员」。例外（**G1-c**）：`pm_update_task` 允许
+//!      **项目 owner** 改除 `status` 外的全部字段（含 `assignee`，即收养
+//!      未指派/孤儿任务），**创建者**改自己任务的非状态字段；`pm_submit_task`
+//!      无例外，语义不变。
 //!    - `pm_create_task` 的 `assignee` 必须存在于 Agent 目录（§9.1，
 //!      按 instance_id 校验 `GET /api/agents/{instance_id}`）
 //! 3. 调用 [`PmStore`] trait 业务方法
@@ -46,38 +52,6 @@ pub async fn dispatch(
         "pm_list_tasks" => pm_list_tasks(state, actor, args).await,
         "pm_get_task" => pm_get_task(state, args).await,
 
-        // ── 需要身份的只读（自查）───────────────────────────────────
-        // Deprecated alias of `pm_list_tasks(assignee = caller)` — see the
-        // alias note above `pm_check_task`.
-        "pm_list_my_tasks" => {
-            let a = require_actor(actor)?;
-            // Parse the retired shape first (so its own schema is enforced and
-            // reconciled), then translate: the caller never had to spell out
-            // `assignee`, and never could.
-            let my: ListMyTasksArgs = parse_args("pm_list_my_tasks", args)?;
-            let mut forwarded = serde_json::json!({ "assignee": a });
-            if let Some(status) = my.status {
-                forwarded["status"] = serde_json::json!(status);
-            }
-            if let Some(limit) = my.limit {
-                forwarded["limit"] = serde_json::json!(limit);
-            }
-            if let Some(project_id) = my.project_id {
-                forwarded["project_id"] = serde_json::json!(project_id);
-            }
-            pm_list_tasks(state, actor, forwarded).await
-        }
-        // Deprecated alias — sits next to the read tools it shares a family
-        // with, not in the alias block at the bottom. All three aliases
-        // (`pm_check_task`, `pm_list_my_tasks`, `pm_reparent_task`) translate
-        // their arguments and then run the *same* handler as their target, so
-        // the answer is byte-identical by construction: one implementation,
-        // nothing to drift (design 32 §3.1, D1). The old shapes are retired —
-        // a flat review summary, a bare array, `{ok:true}`; callers read the
-        // field they need out of the canonical answer. Folded away in the next
-        // minor (plan §9.3).
-        "pm_check_task" => pm_get_task(state, args).await,
-
         // ── 状态变更（需要身份）──────────────────────────────────────
         "pm_create_project" => {
             let a = require_actor(actor)?;
@@ -99,24 +73,6 @@ pub async fn dispatch(
             let a = require_actor(actor)?;
             pm_submit_task(state, a, args).await
         }
-        // Deprecated alias of `pm_update_task(parent_task_id = …)`.
-        "pm_reparent_task" => {
-            let a = require_actor(actor)?;
-            let r: ReparentTaskArgs = parse_args("pm_reparent_task", args)?;
-            // The old name for the same thing: `new_parent` becomes the
-            // three-state `parent_task_id` (absent / null / a task id).
-            let parent_task_id = match r.new_parent {
-                Some(parent) => serde_json::json!(parent),
-                // Explicit `null`: detach to root.
-                None => serde_json::Value::Null,
-            };
-            let forwarded = serde_json::json!({
-                "task_id": r.task_id,
-                "parent_task_id": parent_task_id,
-            });
-            pm_update_task(state, a, forwarded).await
-        }
-
         // ── Dispatch prerequisites (design 32 §3.3) ────────────────
         "pm_list_agents" => {
             // Requires an actor on purpose: an unauthenticated caller has no
@@ -156,13 +112,50 @@ fn require_actor(actor: Option<&str>) -> Result<&str> {
     })
 }
 
-/// 要求调用方 == 任务 assignee（设计 §9.2）。`pm_claim_task` /
-/// `pm_submit_task` / `pm_update_task` 使用。
+/// 把 `assignee` 里的 `"me"` 哨兵解析成调用方自己的 `agent_instance_id`
+/// —— agent 读不到自己的 instance id（身份在 Gateway 侧，ADR-073 §1.2），
+/// 这是它唯一能给自己指派的写法。
+///
+/// **一份实现，所有带 `assignee` 的工具共用**（`pm_list_tasks` /
+/// `pm_create_task`）：哨兵必须在读写两侧是同一个意思，否则用
+/// `assignee="me"` 建出来的任务会被 `pm_list_tasks(assignee="me")` 漏掉
+/// —— 建了却查不到，等于没建。
+///
+/// 大小写与空白做**规范化**（`"ME"`、`" me "` 一律按 `"me"` 处理）：LLM
+/// 少打一个键就是它自己，而"agent 目录里没有这个 instance"这种报错教不
+/// 会调用方任何东西。instance id 恒为 UUID，不会与哨兵撞车。
+///
+/// `None`（调用方没给 assignee）原样透传——它要的就是一张没人领的单。
+fn resolve_assignee_me(
+    assignee: Option<&str>,
+    actor: Option<&str>,
+    tool: &str,
+) -> Result<Option<String>> {
+    let Some(raw) = assignee else { return Ok(None) };
+    if !raw.trim().eq_ignore_ascii_case("me") {
+        return Ok(Some(raw.to_string()));
+    }
+    let actor = actor.ok_or_else(|| {
+        PmError::Unauthenticated(format!(
+            "{tool}: assignee \"{raw}\" needs an authenticated MCP connection (X-MCP-Actor header)"
+        ))
+    })?;
+    Ok(Some(actor.to_string()))
+}
+
+/// 要求调用方 == 任务 assignee（设计 §9.2）。`pm_submit_task` 全程使用，
+/// `pm_claim_task` 仅对**已指派**任务使用（未指派任务走成员自领路径，见
+/// [`pm_claim_task`] 与 G1-b），`pm_update_task` 仅对**陌生人**使用——
+/// owner 收养与创建者修复走各自的字段闸（G1-c），见 [`pm_update_task`]。
 ///
 /// **ADR-073**：两侧比较的都是 `agent_instance_id`（UUID）——
 /// `actor` 来自 `X-MCP-Actor` header（Gateway 注入 `{instance_id}` 模板，
 /// Runtime 替换为 `self.instance_id`），`task.assignee` 在创建时已按
 /// instance 维度校验存在性（§9.1）。
+///
+/// `assignee = None` 分支由 submit 与 update 的陌生人路径命中（claim 的未指派
+/// 分支走成员自领路径，不经过本函数）：一张没人领的单不能被提交；改动它的
+/// 人至少得是 owner 或创建者。
 fn ensure_assignee(task: &Task, actor: &str) -> Result<()> {
     match &task.assignee {
         Some(a) if a == actor => Ok(()),
@@ -210,11 +203,7 @@ fn parse_args<T: for<'de> Deserialize<'de>>(name: &str, args: Value) -> Result<T
 // the manifest on the same screen; miss any of the three and
 // `manifest_properties_equal_impl_fields` goes red.
 //
-// Coverage: the 6 tools touched by this change. The rest (`pm_list_projects` /
-// `pm_get_project` / `pm_get_task` / `pm_claim_task` / `pm_reparent_task` /
-// `pm_check_task` / `pm_list_my_tasks` / `pm_submit_task`) join the table when
-// P1 T1-4 touches dispatch — they have few parameters and little drift surface,
-// but they should not stay off the table forever.
+// Coverage: every tool served by `tools/list`; see `MANIFEST_FIELDS`.
 
 /// `pm_create_task` arguments.
 #[derive(Deserialize)]
@@ -285,10 +274,9 @@ struct UpdateTaskArgs {
     /// fields: absent = leave alone, `null` = promote to a project root,
     /// a task id = re-parent under it.
     ///
-    /// This is `pm_reparent_task` folded into the one update tool
-    /// (design 32 §3.1) — a structural move is still "changing a field of
-    /// this task", and two tools for it means two places to get the
-    /// permission and cycle checks right.
+    /// A structural move is still "changing a field of this task"
+    /// (design 32 §3.1), so it lives here rather than in a second tool that
+    /// would need its own permission and cycle checks.
     #[serde(default, deserialize_with = "deserialize_clearable")]
     parent_task_id: Option<Option<TaskId>>,
 }
@@ -496,7 +484,7 @@ impl GetProjectArgs {
     const FIELDS: &'static [&'static str] = &["project_id"];
 }
 
-/// `pm_get_task` (and its `pm_check_task` alias) arguments.
+/// `pm_get_task` arguments.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct GetTaskArgs {
@@ -549,46 +537,6 @@ impl SubmitTaskArgs {
     const FIELDS: &'static [&'static str] = &["task_id", "text", "attachment_ids"];
 }
 
-/// `pm_list_my_tasks` — the deprecated alias parses its own (retired) shape
-/// before translating, so its manifest schema is reconciled like any other
-/// tool instead of being whatever the target happens to accept.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ListMyTasksArgs {
-    #[serde(default)]
-    status: Option<TaskStatus>,
-    #[serde(default)]
-    limit: Option<usize>,
-    /// Narrowing by project always worked through the alias (it forwarded every
-    /// key to `pm_list_tasks`); the schema never said so. Declared now that the
-    /// alias parses its own shape.
-    #[serde(default)]
-    project_id: Option<ProjectId>,
-}
-
-#[cfg(test)]
-impl ListMyTasksArgs {
-    const FIELDS: &'static [&'static str] = &["status", "limit", "project_id"];
-}
-
-/// `pm_reparent_task` — same rule as [`ListMyTasksArgs`]: parse the old shape,
-/// then translate to `pm_update_task(parent_task_id = …)`.
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ReparentTaskArgs {
-    task_id: TaskId,
-    /// Three states, and all three mean something different: a task id
-    /// reparents, `null` detaches to root, and an **absent** key is a caller bug
-    /// the schema declares `required` — so it is a deserialization error, never
-    /// a silent detach.
-    new_parent: Option<TaskId>,
-}
-
-#[cfg(test)]
-impl ReparentTaskArgs {
-    const FIELDS: &'static [&'static str] = &["task_id", "new_parent"];
-}
-
 /// Tool → the **wire field names** its implementation accepts.
 ///
 /// Its only reason to exist is reconciling the manifest against the
@@ -596,7 +544,7 @@ impl ReparentTaskArgs {
 /// table is a tool left unguarded — whoever adds a field edits `Args` and never
 /// thinks of the schema.
 ///
-/// **Coverage rule**: every tool served by `tools/list` (aliases included) has a
+/// **Coverage rule**: every tool served by `tools/list` has a
 /// row — `manifest_fields_cover_every_tool` fails when one is added and not
 /// registered here. Being on the table is not a nicety: it is the only thing
 /// that stops a schema from drifting, which is exactly how `pm_update_task`'s
@@ -618,11 +566,6 @@ pub(crate) const MANIFEST_FIELDS: &[(&str, &[&str])] = &[
     ("pm_submit_task", SubmitTaskArgs::FIELDS),
     ("pm_add_activity", AddActivityArgs::FIELDS),
     ("pm_list_activity", ListActivityArgs::FIELDS),
-    // Deprecated aliases are reconciled too: their schemas are still served by
-    // `tools/list`, so a caller may still be reading them.
-    ("pm_check_task", GetTaskArgs::FIELDS),
-    ("pm_list_my_tasks", ListMyTasksArgs::FIELDS),
-    ("pm_reparent_task", ReparentTaskArgs::FIELDS),
 ];
 
 // ── 响应序列化辅助 ────────────────────────────────────────────────────────
@@ -952,14 +895,7 @@ async fn pm_list_tasks(state: &McpState, actor: Option<&str>, args: Value) -> Re
 
     // `me` is resolved server-side from the MCP actor, so a caller never has
     // to know its own instance id (which it cannot read from anywhere else).
-    let assignee = match a.assignee.as_deref() {
-        Some("me") => Some(actor.ok_or_else(|| {
-            PmError::Unauthenticated(
-                "pm_list_tasks: assignee \"me\" needs an authenticated MCP connection".to_string(),
-            )
-        })?.to_string()),
-        other => other.map(|s| s.to_string()),
-    };
+    let assignee = resolve_assignee_me(a.assignee.as_deref(), actor, "pm_list_tasks")?;
 
     let narrowed = a.status.is_some()
         || assignee.is_some()
@@ -1140,11 +1076,19 @@ async fn pm_update_project(state: &McpState, actor: &str, args: Value) -> Result
 /// `pm_create_task` — 创建任务（Agent 创建 → `review_status=pending`，待人类审核）。
 ///
 /// `assignee` 若提供则必须存在于 Agent 目录（§9.1）；不要求是调用者本人（§9.2）。
+/// `assignee: "me"` 是例外中的例外：**解析成调用方自己的 instance id**
+/// （agent 读不到自己的 id，只能这样指名），但照样要过下面两道闸。
 async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
     let a: CreateTaskArgs = parse_args("pm_create_task", args)?;
 
-    // 设计 §9.1：assignee 必须存在（按 instance_id 校验，ADR-073）
-    if let Some(assignee) = &a.assignee
+    // `assignee: "me"` → 调用方自己的 instance id（解析后存的是 UUID，
+    // 不是字符串 "me"）。
+    let assignee = resolve_assignee_me(a.assignee.as_deref(), Some(actor), "pm_create_task")?;
+
+    // 设计 §9.1：assignee 必须存在（按 instance_id 校验，ADR-073）。
+    // 解析成 "me" 之后这里查的是调用方自己的 instance —— 免检会让
+    // "自己"变成一个绕过目录校验的洞。
+    if let Some(assignee) = &assignee
         && !state.agent_dir.agent_exists(assignee).await
     {
         return Err(PmError::BadRequest(format!(
@@ -1160,7 +1104,7 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         parent_task_id: a.parent_task_id,
         depends_on: a.depends_on,
         attachment_ids: vec![],
-        assignee: a.assignee,
+        assignee,
         due_at: a.due_at,
         start_at: a.start_at,
     };
@@ -1171,17 +1115,70 @@ async fn pm_create_task(state: &McpState, actor: &str, args: Value) -> Result<Va
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
-/// `pm_update_task` — 更新任务（仅 assignee 本人，设计 §9.2）。
+/// `pm_update_task` — 更新任务。
+///
+/// **授权分层（G1-c）**——此前这里只有"assignee 本人"一道闸，未指派 /
+/// 孤儿（重装后 UUID 失效）任务因此对所有人永久冻结：
+///
+/// | 角色 | 可改字段 |
+/// |---|---|
+/// | assignee | 全部（含 `status`），语义不变 |
+/// | 项目 owner（[`Project::can_govern`]，与 `pm_update_project` / REST 同一判据） | 全部**除 `status`**；`assignee` 只有 owner 能在非 assignee 路径上改（收养），新值仍过目录存在性（`assignee_not_found`）+ 成员闸（`assignee_not_project_member`）——收养不是免检 |
+/// | 创建者（`Task::created_by`） | 非状态字段修复集：title / description / type / priority / parent_task_id / depends_on / due_at / start_at。**不含** assignee 与 status |
+/// | 其他人 | `ensure_assignee` 原样拒绝，措辞不变（A6） |
+///
+/// `status` 刻意不随收养放开：本工具放开的是"谁能改字段"，不是"谁能推
+/// 状态机"。状态跃迁仍只属于 assignee（受状态机 + 审批闸约束）与人类面。
+/// 任何经本面发生的 assignee 变更都落一条 activity 留痕（A8），否则
+/// "任务怎么换的人"事后无从查证。
 async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
     let a: UpdateTaskArgs = parse_args("pm_update_task", args)?;
 
-    let task = state
+    let existing = state
         .store
         .get_task(&a.task_id)
         .await?
         .ok_or_else(|| PmError::TaskNotFound(a.task_id.to_string()))?;
-    ensure_assignee(&task, actor)?;
 
+    let is_assignee = existing.assignee.as_deref() == Some(actor);
+    if !is_assignee {
+        let is_owner = match state.store.get_project(&existing.project_id).await? {
+            Some(project) => project.can_govern(actor, false),
+            None => false,
+        };
+        let is_creator = existing.created_by == actor;
+        if !is_owner && !is_creator {
+            // 陌生人路径保持历史行为与历史措辞（验收 A6）。
+            ensure_assignee(&existing, actor)?;
+        }
+        if a.status.is_some() {
+            return Err(PmError::Forbidden(format!(
+                "task {} is not assigned to `{actor}`; status transitions stay with the assignee and the human surfaces — an owner or creator may update fields, but not `status`",
+                existing.id
+            )));
+        }
+        if a.assignee.is_some() && !is_owner {
+            return Err(PmError::Forbidden(format!(
+                "task {}: only the project owner can change `assignee` (adoption of an unassigned or orphaned task); as the creator you may fix the non-status fields (title / description / type / priority / parent_task_id / depends_on / due_at / start_at)",
+                existing.id
+            )));
+        }
+    }
+
+    // 存在性闸对所有改 assignee 的路径生效（与 `pm_create_task` §9.1 同闸，
+    // 收养不是免检，验收 A4）。成员闸留在 store（`ensure_assignee_is_member`），
+    // REST 与 MCP 继续共用同一份名册判定。
+    if let Some(Some(new_assignee)) = &a.assignee
+        && !state.agent_dir.agent_exists(new_assignee).await
+    {
+        return Err(PmError::AssigneeNotFound {
+            assignee: new_assignee.clone(),
+        });
+    }
+
+    // `a.assignee` is moved into `input`; capture "was the key provided"
+    // first so the audit trail below can tell "cleared" from "untouched".
+    let assignee_provided = a.assignee.is_some();
     let input = UpdateTask {
         title: a.title,
         description: a.description,
@@ -1193,6 +1190,7 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
         start_at: a.start_at,
         depends_on: a.depends_on,
     };
+    let previous_assignee = existing.assignee.clone();
     let mut task = state.store.update_task(&a.task_id, input).await?;
 
     // A parent change is structural: it relocates the task directory on disk
@@ -1212,10 +1210,39 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
             .await?
             .ok_or_else(|| PmError::TaskNotFound(a.task_id.to_string()))?;
     }
+
+    // 收养/改派留痕（A8）：只要本调用真正换了责任人就记一条，不区分角色
+    // ——owner 收养、owner 改派、assignee 移交、清空指派，事后都可查证。
+    //
+    // 留痕写失败不能裸 `?`：改派此刻**已经落盘**，而调用方重试时
+    // `previous_assignee == task.assignee`，留痕条件不再成立——一次 IO 抖动
+    // 会把审计缺口变成永久的、且第二次调用以成功收尾（响亮失败、静默丢失）。
+    // 因此这里显式失败并给出补救通道：变更已生效，缺的是那条留痕，用
+    // pm_add_activity 人工补记。
+    if assignee_provided && task.assignee != previous_assignee {
+        let text = format!(
+            "[reassign] assignee changed: `{}` -> `{}`",
+            previous_assignee.as_deref().unwrap_or("(unassigned)"),
+            task.assignee.as_deref().unwrap_or("(unassigned)"),
+        );
+        if let Err(e) = state.store.add_task_comment(&a.task_id, &text, actor).await {
+            tracing::error!(task_id = %a.task_id, error = %e, "reassign audit trail write failed");
+            return Err(PmError::Internal(format!(
+                "the reassignment of task {} was applied, but its [reassign] audit trail could not be written: {e}; record it manually with pm_add_activity — a retry of this call will NOT restore the trace",
+                a.task_id
+            )));
+        }
+    }
+
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
 }
 
-/// `pm_claim_task` — 自领（pending → in_progress），仅限 assignee；依赖未满足 409。
+/// `pm_claim_task` — 自领（pending → in_progress）。
+///
+/// 已指派的任务仍**仅限 assignee 本人**（设计 §9.2 / ADR-073）。未指派的任务
+/// 允许**项目成员**自领（G1-b）：claim 时由 store 在同一事务里把 assignee
+/// 原子地写成 actor。非成员领未指派任务 → `forbidden`，措辞指向「不是成员」
+/// 而不是旧的「任务没有指派人」。审批闸 / 依赖闸在 store 内，顺序不变。
 async fn pm_claim_task(state: &McpState, actor: &str, args: Value) -> Result<Value> {
     let a: ClaimTaskArgs = parse_args("pm_claim_task", args)?;
 
@@ -1224,7 +1251,32 @@ async fn pm_claim_task(state: &McpState, actor: &str, args: Value) -> Result<Val
         .get_task(&a.task_id)
         .await?
         .ok_or_else(|| PmError::TaskNotFound(a.task_id.to_string()))?;
-    ensure_assignee(&task, actor)?;
+
+    match &task.assignee {
+        // Assigned (to me or to someone else): unchanged — only the assignee may
+        // claim it. `ensure_assignee` yields the exact "assigned to instance X"
+        // rejection for a non-assignee (A6).
+        Some(_) => ensure_assignee(&task, actor)?,
+        // Unassigned (G1-b): any project member may claim it. Reject a non-member
+        // here with a Forbidden naming the real reason — "not a member of this
+        // project" — instead of the old "task has no assignee", which told the
+        // caller nothing actionable. The predicate is the one the store enforces
+        // (`Project::has_member`, shared with `ensure_assignee_is_member`); the
+        // store re-checks it and performs the atomic assignee write.
+        None => {
+            let project = state
+                .store
+                .get_project(&task.project_id)
+                .await?
+                .ok_or_else(|| PmError::ProjectNotFound(task.project_id.to_string()))?;
+            if !project.has_member(actor) {
+                return Err(PmError::Forbidden(format!(
+                    "task {} is unassigned and caller `{actor}` is not a member of project {}; only a project member can claim an unassigned task",
+                    task.id, task.project_id
+                )));
+            }
+        }
+    }
 
     let task = state.store.claim_task(&a.task_id, actor).await?;
     task_to_value(&state.store, state.agent_dir.as_ref(), task).await
@@ -1584,13 +1636,20 @@ async fn pm_list_activity(state: &McpState, args: Value) -> Result<Value> {
 
 /// `pm_add_activity` — append a reply to a task (`ActivityKind::Comment`).
 ///
-/// **Write permission = assignee or creator**, one notch wider than
-/// `ensure_assignee`, and that notch is the entire point of this tool: after
-/// dispatching, the PM has to leave context on the task (why it is blocked, why
-/// it was re-scheduled, the doc-library path), and it is neither the assignee
-/// nor the one doing the work. Gating on the assignee alone would silence the
-/// coordinator, and the agent would fall back to editing `description` — a
-/// destructive act that overwrites the acceptance criteria.
+/// **Write permission = assignee, creator, or project owner**, one notch
+/// wider than `ensure_assignee`, and that notch is the entire point of this
+/// tool: after dispatching, the PM has to leave context on the task (why it
+/// is blocked, why it was re-scheduled, the doc-library path), and it is
+/// neither the assignee nor the one doing the work. Gating on the assignee
+/// alone would silence the coordinator, and the agent would fall back to
+/// editing `description` — a destructive act that overwrites the acceptance
+/// criteria.
+///
+/// The owner tier closes the G1-c loop: the `[reassign]` trail is
+/// auto-generated and reason-free, and the owner who adopts an orphaned task
+/// is typically neither its creator nor its assignee — without this right the
+/// "必要时带原因" half of the audit requirement had no channel at all on the
+/// MCP surface.
 ///
 /// Humans ([`HUMAN_CREATOR`] sentinel) go through REST, not this path; no
 /// special allowance here.
@@ -1605,9 +1664,17 @@ async fn pm_add_activity(state: &McpState, actor: &str, args: Value) -> Result<V
 
     let is_assignee = task.assignee.as_deref() == Some(actor);
     let is_creator = task.created_by == actor;
-    if !is_assignee && !is_creator {
+    let is_owner = if is_assignee || is_creator {
+        false
+    } else {
+        match state.store.get_project(&task.project_id).await? {
+            Some(project) => project.can_govern(actor, false),
+            None => false,
+        }
+    };
+    if !is_assignee && !is_creator && !is_owner {
         return Err(PmError::Forbidden(format!(
-            "task {} belongs to project {} as assignee `{}` created_by `{}`; only the assignee or the creator can comment on it. Read it with pm_get_task, or ask its creator to add you to the project",
+            "task {} belongs to project {} as assignee `{}` created_by `{}`; only the assignee, the creator, or the project owner can comment on it. Read it with pm_get_task, or ask its creator to add you to the project",
             task.id,
             task.project_id,
             task.assignee.as_deref().unwrap_or("(unassigned)"),

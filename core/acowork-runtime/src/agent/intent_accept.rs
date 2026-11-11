@@ -24,7 +24,7 @@
 //! when a message that "was delivered" never ran.
 
 use acowork_core::auth::NODE_TOKEN_HEADER;
-use acowork_core::defaults::GATEWAY_HTTP_PORT;
+use acowork_core::defaults::gateway_http_port;
 use acowork_core::intent::TurnOrigin;
 
 use crate::agent::inbound::IntentEnvelope;
@@ -70,7 +70,7 @@ impl AcceptanceReporter {
         Self {
             instance_id: instance_id.into(),
             node_token: node_token.into(),
-            base_url: format!("http://{gateway_host}:{GATEWAY_HTTP_PORT}"),
+            base_url: format!("http://{gateway_host}:{}", gateway_http_port()),
         }
     }
 
@@ -195,7 +195,7 @@ mod tests {
     #[test]
     fn the_receipt_addresses_the_publishing_gateway() {
         let r = reporter();
-        assert_eq!(r.base_url, format!("http://127.0.0.1:{GATEWAY_HTTP_PORT}"));
+        assert_eq!(r.base_url, format!("http://127.0.0.1:{}", gateway_http_port()));
         assert_eq!(r.instance_id, "inst-1");
         assert_eq!(r.node_token, "tok");
     }

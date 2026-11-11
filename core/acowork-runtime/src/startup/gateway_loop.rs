@@ -1183,6 +1183,21 @@ async fn route_intent_inbound(
         ));
     };
 
+    // ADR-106 D6 rev. 2026-11-12: a click on a live `exec_session_route_confirm`
+    // card is the parked turn's tool result, not a new routing question. The
+    // claim runs BEFORE every ladder level — level 1 would otherwise serve the
+    // "continue" click as an ordinary addressed turn (the click carries
+    // `targetSession`), delivering the message a second time while the parked
+    // turn waits out its timeout beside it. A claimed envelope is consumed
+    // here: the parked turn delivers the human's original message itself
+    // (confirmed: straight into the named session; refused: through the model,
+    // which writes the new session's brief). No live card, a different row, or
+    // an envelope with no address claims nothing — the unchanged ladder
+    // follows, which is the slow path a timed-out click still lands on.
+    if chat_sessions.claim_card_answer(&env).is_some() {
+        return Ok(());
+    }
+
     // ADR-106 D6 level 1: the human replied to one of the round reference rows
     // in this chat, so the Gateway already resolved *which* execution session
     // that round ran in and stamped it on the envelope. Explicit addressing is
@@ -2063,6 +2078,83 @@ mod tests {
                 .is_empty(),
             "nothing may be routed inline while the router is on"
         );
+    }
+
+    /// A click on a live card is the parked turn's tool result, not a new
+    /// routing question: it is claimed before every ladder level and the
+    /// envelope is consumed. Level 1 would otherwise serve the "continue"
+    /// click as an ordinary addressed turn — delivering the message a second
+    /// time while the parked turn waits out its timeout beside it.
+    #[tokio::test]
+    async fn a_click_on_a_live_card_is_claimed_before_the_ladder() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, chat_sessions) = chat_router_test_pair(dir.path());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        chat_sessions.register_card("cs-click", "m-1", tx);
+
+        let mut click = chat_envelope("cs-click", "go on");
+        click.params.as_object_mut().unwrap().insert(
+            acowork_core::protocol::TARGET_SESSION_PARAM.to_string(),
+            serde_json::json!("sess-old"),
+        );
+        route_intent_inbound(
+            &sm,
+            &chat_sessions,
+            "",
+            InboundMessage::IntentMessage(click),
+            dir.path(),
+            "node-token",
+        )
+        .await
+        .expect("a claimed click cannot fail");
+
+        // The parked turn holds the answer...
+        let answer = rx.await.expect("the click wakes the parked turn");
+        assert_eq!(
+            answer,
+            crate::agent::chat_router::RouteAnswer::Continue {
+                session_id: "sess-old".into()
+            }
+        );
+        // ...and the envelope never reached the ladder: nothing queued,
+        // nothing routed inline.
+        assert_eq!(chat_sessions.pending_turns("cs-click"), 0);
+        assert!(
+            sm.try_lock()
+                .expect("the inbound loop must not hold the manager")
+                .active_sessions()
+                .is_empty(),
+            "a claimed click must not be delivered by level 1 as well"
+        );
+    }
+
+    /// The same click with no live card is an ordinary addressed turn: the
+    /// claim reads nothing and level 1 serves it exactly as before this tool
+    /// existed — the slow path a timed-out card falls back to.
+    #[tokio::test]
+    async fn a_click_with_no_live_card_takes_the_ladder() {
+        let dir = tempfile::TempDir::new().expect("temp work dir");
+        let (sm, chat_sessions) = chat_router_test_pair(dir.path());
+
+        let mut click = chat_envelope("cs-stale", "go on");
+        click.params.as_object_mut().unwrap().insert(
+            acowork_core::protocol::TARGET_SESSION_PARAM.to_string(),
+            serde_json::json!("sess-old"),
+        );
+        route_intent_inbound(
+            &sm,
+            &chat_sessions,
+            "",
+            InboundMessage::IntentMessage(click),
+            dir.path(),
+            "node-token",
+        )
+        .await
+        .expect("an addressed turn routes inline");
+
+        // Level 1 ran: the queue stayed empty (the router was never asked).
+        assert_eq!(chat_sessions.pending_turns("cs-stale"), 0);
+        assert!(!chat_sessions.chat_is_busy("cs-stale"));
     }
 
     /// ADR-099 D8 kill switch: with `chat_router.enabled = false` a Chat message

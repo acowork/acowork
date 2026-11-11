@@ -1,7 +1,7 @@
 ---
 name: refactoring
 description: Identify code smells and apply structured, behavior-preserving refactoring with characterization tests, small reversible steps, and regression safety
-version: "1.1.0"
+version: "1.2.0"
 author: developer
 triggers:
   - refactor

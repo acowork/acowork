@@ -1,7 +1,7 @@
 ---
 name: figma-design-review
 description: Review Figma designs, screenshots, prototypes, or design specs for product intent, UX flow, states, accessibility, analytics, and engineering handoff readiness
-version: "1.0.0"
+version: "1.2.0"
 author: developer
 triggers:
   - Figma
@@ -10,9 +10,9 @@ triggers:
   - 设计评审
   - 原型评审
 tool_deps:
-  - file_read
-  - file_write
-  - network
+  - doc_read
+  - doc_search
+  - doc_write
   - mcp_memory__memory_store
   - mcp_memory__memory_recall
 ---
@@ -29,8 +29,8 @@ If direct Figma access is unavailable, ask for screenshots, exported frames, pro
 
 1. **Load product and design context**
    - Use `mcp_memory__memory_recall` to retrieve PRD decisions, user segments, Figma review findings, design standards, and launch constraints
-   - Use `file_read` to inspect PRD, acceptance criteria, user flow, prior design notes, screenshots, or exported Figma specs
-   - Use `network` only when a Figma or design reference is available and access is allowed
+   - Use `doc_read` and `doc_search` to inspect PRD, acceptance criteria, user flow, prior design notes, screenshots, or exported Figma specs
+   - Fetch a Figma or design reference only when one is available and access is allowed
    - Identify design source: Figma file, prototype, screenshot, exported frames, or written spec
 
 2. **Map design to product intent**
@@ -50,7 +50,7 @@ If direct Figma access is unavailable, ask for screenshots, exported frames, pro
 
 5. **Provide findings and recommendation**
    - Classify findings as Blocker, Important, Minor, or Question
-   - Use `file_write` to save review when requested
+   - Publish with `doc_write` into `{doc_path}/{area}/` (see `project-participation`).
    - Use `mcp_memory__memory_store` to persist design decisions, gaps, and accepted trade-offs
 
 ## Output Format

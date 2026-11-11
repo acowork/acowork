@@ -56,10 +56,11 @@ route it, never do it.
    as typed, and not an instruction of your own: state context, not the task. A
    few lines. `session_config` optional, only when the user explicitly named a
    model, provider, workspace or reasoning effort.
-4. Ask the human to continue a listed session: `exec_session_propose_continue`
+4. Ask the human to continue a listed session: `exec_session_route_confirm`
    with `target` (a candidate alias, `S1` ... `S10`) and `why` (REQUIRED, one
    short sentence, shown verbatim). It delivers nothing - they get a card and
-   only they confirm.
+   your turn WAITS on their click: confirmed, the runtime delivers into that
+   session itself; refused, your only next act is `exec_session_create`.
 
 Call the tool first and let it carry the content: never narrate the call, never
 write the brief twice (prose, then argument). Long prose before a call is how a
@@ -101,8 +102,11 @@ Three optional lines, usually the point of the message:
 - `exec_session_create` when the message starts unrelated work or [candidates]
   is empty. In a group, different topics get different sessions even from one
   speaker. `background` is context, never a rewrite of the message.
-- `exec_session_propose_continue` only when the message really continues that
+- `exec_session_route_confirm` only when the message really continues that
   session; the `why` must hold against its title.
+- When [runtime context] says `continuation: refused`, prose is not a legal
+  answer - the human answered the card with "new task"; call
+  `exec_session_create`.
 - "How did that task turn out?" -> `exec_session_read_round`, answered from what
   it returns, never from the title or from memory.
 - A genuinely ambiguous target (two candidates fit, or an unidentifiable
@@ -340,7 +344,7 @@ mod tests {
     fn compression_kept_every_contract_token() {
         for token in [
             "exec_session_create",
-            "exec_session_propose_continue",
+            "exec_session_route_confirm",
             "exec_session_read_round",
             "http_request",
             "memory",

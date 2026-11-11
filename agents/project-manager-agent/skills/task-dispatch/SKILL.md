@@ -102,8 +102,6 @@ changes** — reassign it or move its status. That is a human-visible decision:
 report `dispatch_error` and stop rather than reassigning to make the error go
 away.
 
-`pm_check_task` is a deprecated alias of `pm_get_task`; use `pm_get_task`.
-
 ## When the assignee reports back
 
 - `409 review_not_approved` → the task still awaits a human. Report and stop.

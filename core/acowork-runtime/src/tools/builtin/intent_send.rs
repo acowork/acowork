@@ -24,7 +24,7 @@
 //! (design doc 27), not as this call's return value.
 
 use acowork_core::agent_instance_id::AgentInstanceId;
-use acowork_core::defaults::GATEWAY_HTTP_PORT;
+use acowork_core::defaults::gateway_http_port;
 use acowork_core::tools::traits::{Tool, ToolContext, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use serde_json::Value;
@@ -165,7 +165,7 @@ impl Tool for IntentSendTool {
 
         let url = format!(
             "http://{}:{}/api/intents",
-            self.config.gateway_host, GATEWAY_HTTP_PORT
+            self.config.gateway_host, gateway_http_port()
         );
         let body = serde_json::json!({
             "sender": self.config.instance_id,

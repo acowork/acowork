@@ -61,6 +61,19 @@ beforeEach(() => {
   state.healthy = true;
 });
 
+describe("project note", () => {
+  // 备注原来是"整块可点"：一行字连同它周围的空白全是点击区，误触一下就滚进
+  // 编辑态，退出还得先点里面再点外面。入口收成行尾的铅笔，正文只读。
+  it("opens the note editor from the pencil, not from the note text", () => {
+    header();
+    fireEvent.click(screen.getByText("pm.noDescription"));
+    expect(screen.queryByRole("textbox", { name: "pm.projectDescEdit" })).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "pm.projectDescEdit" }));
+    expect(screen.getByRole("textbox", { name: "pm.projectDescEdit" })).toBeTruthy();
+  });
+});
+
 describe("view switch", () => {
   it("marks the active view for assistive tech", () => {
     header();

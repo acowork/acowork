@@ -211,7 +211,10 @@ export function ProjectBoard({
           )}
         </div>
       )}
-      <div className="min-h-0 flex-1">
+      {/* 列表视图自带胶囊外壳（见 TaskListView 根部），这里给它和看板列同样的
+          12px 通栏留白 —— 看板的留白在 `KanbanBoard` 里，列表的在外壳上，
+          两边贴到窗口边缘的间距才是同一个数。 */}
+      <div className={cn("min-h-0 flex-1", view === "list" && "p-3")}>
         {view === "list" ? (
           <TaskListView
             project={project}

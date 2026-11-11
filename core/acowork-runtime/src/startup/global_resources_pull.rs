@@ -99,7 +99,7 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use tracing::{debug, error, info, warn};
 
-use acowork_core::defaults::GATEWAY_HTTP_PORT;
+use acowork_core::defaults::gateway_http_port;
 use acowork_core::mqtt_proto::DataEnvelope;
 
 use crate::config::RuntimeConfig;
@@ -182,7 +182,7 @@ pub(crate) async fn pull_global_resources_from_gateway(
     cache: &SharedAvailableCache,
 ) -> bool {
     let host = config.gateway_host.as_deref().unwrap_or("127.0.0.1");
-    let url = format!("http://{}:{}/api/global-resources", host, GATEWAY_HTTP_PORT);
+    let url = format!("http://{}:{}/api/global-resources", host, gateway_http_port());
 
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))

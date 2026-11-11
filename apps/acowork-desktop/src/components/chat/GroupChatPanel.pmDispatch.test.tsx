@@ -19,6 +19,13 @@
  *     block must still be identifiable and must never borrow the wake-up
  *     playbook — design 27 §5.4.2, that string reaches the system block and no
  *     chat surface.
+ *
+ * And one rendering fact, which the dispatch row is the only `user_message`
+ * that has: its words are the PM's generated Markdown, spoken in the author's
+ * name — nobody typed them, so they render as Markdown, in the neutral speech
+ * bubble. A person's own message stays literal text (`GroupChatPanel
+ * .userLiteral`), and the dispatch's own `meta.task_id` is the marker that
+ * tells the two apart.
  */
 import { render, screen } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
@@ -152,6 +159,15 @@ function dispatchMessage(seq: number, from = ME): ChatMessageRow {
   };
 }
 
+/** The same dispatch, with the Markdown the PM actually generates: headings and
+ *  emphasis in the body, which nobody typed. */
+function dispatchMessageWithMarkdown(seq: number, from = ME): ChatMessageRow {
+  return {
+    ...dispatchMessage(seq, from),
+    body: "## 任务\n\n1. 定位组件\n2. **第二步**",
+  };
+}
+
 /** The round's reference row: contentless, threaded under the dispatch row it
  *  answers (`triggerId`) — or, for a row written before the rev, under a mailbox
  *  id no chat row carries. `legacyBrief` is what those older rows put in
@@ -223,6 +239,28 @@ describe("GroupChatPanel: a PM dispatch in the project group", () => {
     expect(
       screen.getAllByText(new RegExp(DESCRIPTION)).filter((el) => el.tagName === "PRE"),
     ).toHaveLength(0);
+  });
+
+  it("renders the dispatch's generated Markdown as Markdown, in the speech skin", () => {
+    // The dispatch body is the PM's own Markdown — the task title and
+    // description it wrote — carried in the author's name. Nobody typed those
+    // characters, so the row must not paint its own syntax as text. The
+    // marker is the dispatch's own (`meta.task_id`, set by the Gateway's
+    // dispatch path and by nothing a person sends), and the skin follows the
+    // renderer: markdown wears the neutral bubble, because the prose palette
+    // is painted for that backdrop.
+    tail = [dispatchMessageWithMarkdown(1)];
+    const { container } = render(<GroupChatPanel />);
+
+    const bubble = container.querySelector(".bg-chat-bubble");
+    expect(bubble, "the dispatch bubble must render").not.toBeNull();
+    expect(bubble!.querySelector(".prose"), "the dispatch body must be parsed").not.toBeNull();
+    expect(bubble!.querySelector("h2")?.textContent).toContain("任务");
+    expect(bubble!.querySelector("strong")?.textContent).toContain("第二步");
+    expect(container.textContent).not.toContain("## 任务");
+    // Not the accent bubble: markdown in the accent one is the "user bubble
+    // text turned black" defect, one level up.
+    expect(container.querySelector(".bg-chat-user")).toBeNull();
   });
 
   it("still names a pre-rev dispatch block by the projection (no message row exists)", () => {

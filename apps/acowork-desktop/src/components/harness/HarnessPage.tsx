@@ -656,7 +656,7 @@ function ProvidersTab() {
               {/* Hairline between functional areas — the whole dialog is a
                   stack of unrelated forms (keys / endpoint / models), and the
                   `space-y-2` gaps alone read as one continuous list. */}
-              {!isLocalProvider(showEditDialog) && <div className="border-t border-border-divider" />}
+              {!isLocalProvider(showEditDialog) && <div className="-mx-5 border-t border-border-divider" />}
 
               {(
                 <div>
@@ -671,7 +671,7 @@ function ProvidersTab() {
                 </div>
               )}
 
-              <div className="border-t border-border-divider" />
+              <div className="-mx-5 border-t border-border-divider" />
 
               {/* Model selection (shared multi-select component) */}
               {(() => {

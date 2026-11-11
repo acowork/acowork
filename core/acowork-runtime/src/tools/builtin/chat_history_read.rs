@@ -111,7 +111,7 @@ impl Tool for ChatHistoryReadTool {
 
         let url = format!(
             "http://{}:{}/api/intents/chat-history",
-            self.config.gateway_host, acowork_core::defaults::GATEWAY_HTTP_PORT
+            self.config.gateway_host, acowork_core::defaults::gateway_http_port()
         );
         let mut req = self.client.get(&url).query(&[
             ("sender", self.config.instance_id.as_str()),

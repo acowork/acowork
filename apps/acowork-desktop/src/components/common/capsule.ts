@@ -26,3 +26,34 @@
  */
 export const CAPSULE_PANE_CN =
   "flex min-h-0 flex-col overflow-hidden rounded-xl border border-border-outer";
+
+/**
+ * The surface ladder every pane in the app walks — four steps, no fifth.
+ *
+ *   1. `bg-page-bg`        the view plane itself.
+ *   2. SURFACE_PANEL_CN    a panel off that plane: a board column, the capsule
+ *                          around a table (its toolbar / pager show this fill).
+ *   3. SURFACE_HEAD_CN     the title band of a piece of content: a board card's
+ *                          title strip, a table's header row, an embedded list
+ *                          box. Reads as "this block has a heading".
+ *   4. SURFACE_CONTENT_CN  the content body below that band: a card's detail
+ *                          row, the table body, an expanded list body.
+ *
+ * The board has worn exactly these four since the vibrancy pass —
+ * page → column (P) → card title strip (H) → card body (C). The pm list now
+ * walks the same four: page → list capsule (P) → table header (H) → rows (C).
+ *
+ * Two rules follow from the ladder, and they are what makes separate views
+ * read as one system:
+ *
+ *   - content never sits directly on the page (`page-bg` → body with no panel
+ *     and no header step between reads as a flat wall with no boundary);
+ *   - content never wears the panel's own fill (a wall of rows on the panel
+ *     grey goes muddy, and the title band disappears into it).
+ *
+ * A pane that reaches for `bg-zinc-*` to invent a fifth step is exactly how
+ * these surfaces drifted apart before. Name the step, don't re-pick a colour.
+ */
+export const SURFACE_PANEL_CN = "bg-right-panel";
+export const SURFACE_HEAD_CN = "bg-panel-block";
+export const SURFACE_CONTENT_CN = "bg-panel-inset";

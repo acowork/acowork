@@ -34,6 +34,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { PriorityBadge } from "./PriorityBadge";
 import { TaskTypeIcon } from "./TaskTypeIcon";
 import { RejectDialog } from "./RejectDialog";
+import { SURFACE_CONTENT_CN, SURFACE_HEAD_CN } from "../../components/common/capsule";
 import { cn } from "../../lib/utils";
 import type { PmTaskResponse } from "../../lib/pm-types";
 import { useActorLabel } from "./pmMembers";
@@ -109,9 +110,11 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
           }
         }}
         className={cn(
-          // 外壳 = ListBox 卡片：圆角 + 外发丝线 + panel-block，overflow-hidden
-          // 让子块（标题条/正文）不再各自圆角，与设置面板的卡片同一副骨架。
-          "group w-full overflow-hidden rounded-md border border-border-outer bg-panel-block text-left transition-colors",
+          // 外壳 = 卡片的标题带（`SURFACE_HEAD_CN`）：圆角 + 外发丝线，标题条
+          // 透出这一层；正文是下面一档（`SURFACE_CONTENT_CN`）。overflow-hidden
+          // 让两段共用外圆角，与设置面板的卡片同一副骨架。
+          "group w-full overflow-hidden rounded-md border border-border-outer text-left transition-colors",
+          SURFACE_HEAD_CN,
           "hover:border-zinc-300 dark:hover:border-zinc-600",
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]",
           needsReview && "border-amber-300 dark:border-amber-700/60",
@@ -136,9 +139,14 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
           </span>
         </div>
 
-        {/* 正文 —— border-t 发丝线 + panel-inset：与设置面板卡片的展开体
-            完全同一关系（两段之间是线 + 一档明度差）。 */}
-        <div className="flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border-divider bg-panel-inset px-2.5 py-1.5 text-10 text-text-tertiary ">
+        {/* 正文 —— border-t 发丝线 + `SURFACE_CONTENT_CN`：与设置面板卡片的
+            展开体完全同一关系（两段之间是线 + 一档明度差）。 */}
+        <div
+          className={cn(
+            "flex flex-wrap items-center gap-x-2 gap-y-1 border-t border-border-divider px-2.5 py-1.5 text-10 text-text-tertiary ",
+            SURFACE_CONTENT_CN,
+          )}
+        >
           <PriorityBadge priority={task.priority} />
 
           {task.is_blocked && (

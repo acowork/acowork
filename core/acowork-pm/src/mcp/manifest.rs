@@ -13,7 +13,6 @@
 //! | `pm_update_task` | 更新任务 | `PATCH /api/pm/tasks/:tid` |
 //! | `pm_claim_task` | 认领任务 | `POST /api/pm/tasks/:tid/claim` |
 //! | `pm_submit_task` | 提交结果 | `POST /api/pm/tasks/:tid/submit` |
-//! | `pm_list_my_tasks` | Agent 自查 | `GET /api/pm/tasks?assignee=X` |
 //! | `pm_list_agents` | list installed agent instances | Gateway `GET /api/agents` |
 //! | `pm_add_project_member` | invite a member (= makes it assignable) | `POST /api/pm/projects/:pid/members` |
 //! | `pm_add_activity` | append a reply to a task | `POST /api/pm/tasks/:tid/activity` |
@@ -143,7 +142,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           "parent_task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
           "assignee": {
             "type": "string",
-            "description": "agent_instance_id (UUID v4, ADR-073 §1.2) to assign. TWO gates must both pass or the call is rejected: (1) the instance must exist in the Gateway agent directory — `assignee_not_found`; (2) it must already be a MEMBER of this project — `assignee_not_project_member`, enforced by the store. Read the roster with pm_get_project (members[].instance_id), discover installable agents with pm_list_agents, and invite with pm_add_project_member (project owner only). Never pass a package id like com.acowork.foo. Tasks created by an agent enter review_status=pending regardless: a human must approve them before pm_claim_task will move them to in_progress. Read `review_status` back with pm_get_task; the dispatch scanner (not your polling) wakes the assignee once start_at is reached."
+            "description": "agent_instance_id (UUID v4, ADR-073 §1.2) to assign, or \"me\" for yourself (resolved server-side; both gates below apply unchanged). TWO gates must both pass or the call is rejected: (1) the instance must exist in the Gateway agent directory — `assignee_not_found`; (2) it must already be a MEMBER of this project — `assignee_not_project_member`, enforced by the store. Read the roster with pm_get_project (members[].instance_id), discover installable agents with pm_list_agents, and invite with pm_add_project_member (project owner only). Never pass a package id like com.acowork.foo. Tasks created by an agent enter review_status=pending regardless: a human must approve them before pm_claim_task will move them to in_progress. Read `review_status` back with pm_get_task; the dispatch scanner (not your polling) wakes the assignee once start_at is reached."
           },
           "due_at": {
             "type": "string",
@@ -170,19 +169,8 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
       }
     },
     {
-      "name": "pm_check_task",
-      "description": "DEPRECATED — use `pm_get_task`. Identical answer (it runs the same handler), so read `review_status` from the task you get back — there is no separate `approved` flag, `review_status: \"approved\"` is that same fact. Folded away in the next minor release.",
-      "inputSchema": {
-        "type": "object",
-        "required": ["task_id"],
-        "properties": {
-          "task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" }
-        }
-      }
-    },
-    {
       "name": "pm_update_task",
-      "description": "Update task fields. Only provided fields are modified. `status` follows the task state machine and is NOT free-form: in_progress can only go to submitted (never straight to done — submit first), cancelled is terminal, rejected can be re-claimed. A task created by an agent cannot enter in_progress until a human approves it (409 review_not_approved). Wrong transitions return `invalid_state_transition` with the legal target — read it instead of retrying.",
+      "description": "Update task fields. Only provided fields are modified. Authorization (G1-c): the assignee may change any field; the project owner may change any field EXCEPT `status` — and is the only role that may set `assignee` on a task the assignee cannot act on (adoption of an unassigned or orphaned task); the task's creator may fix non-status fields (title / description / type / priority / parent_task_id / depends_on / due_at / start_at) but not `assignee` or `status`; anyone else gets `forbidden`. `status` follows the task state machine and is NOT free-form: in_progress can only go to submitted (never straight to done — submit first), cancelled is terminal, rejected can be re-claimed. A task created by an agent cannot enter in_progress until a human approves it (409 review_not_approved). Wrong transitions return `invalid_state_transition` with the legal target — read it instead of retrying.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],
@@ -202,7 +190,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           "priority": { "type": "string", "enum": ["low", "normal", "high", "urgent"] },
           "assignee": {
             "type": ["string", "null"],
-            "description": "agent_instance_id (UUID v4) or null to unassign. The assignee MUST already be a member of the task's project — otherwise the call fails with `assignee_not_project_member`. Check with pm_get_project (members[]), invite with pm_add_project_member. Do NOT pass the package id like com.acowork.foo."
+            "description": "agent_instance_id (UUID v4) or null to unassign. Changing it is a project-owner action (G1-c adoption of an unassigned or orphaned task); the assignee themselves may also hand the task over. The new assignee must exist in the agent directory (`assignee_not_found`) AND already be a member of the task's project (`assignee_not_project_member`) — adoption is not an inspection exemption. Check with pm_get_project (members[]), invite with pm_add_project_member. Do NOT pass the package id like com.acowork.foo."
           },
           "due_at": {
             "type": ["string", "null"],
@@ -228,14 +216,14 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           },
           "parent_task_id": {
             "type": ["string", "null"],
-            "description": "Move the task in the tree: a task id re-parents it under that task, null promotes it to a project root, omitting the key leaves the position alone. Cycles are rejected (you cannot move a task under its own descendant). This replaces pm_reparent_task."
+            "description": "Move the task in the tree: a task id re-parents it under that task, null promotes it to a project root, omitting the key leaves the position alone. Cycles are rejected (you cannot move a task under its own descendant)."
           }
         }
       }
     },
     {
       "name": "pm_claim_task",
-      "description": "Claim a task as the current agent. Transitions pending → in_progress. Returns 409 if the task was created by an agent and is still awaiting human approval (review_status=pending), or if blocked by dependencies. Actor is taken from MCP client identity.",
+      "description": "Claim a task as the current agent. Transitions pending → in_progress. For an ASSIGNED task only the assignee may claim it (403 otherwise). For an UNASSIGNED task any project member may claim it, and claiming sets the assignee to you atomically (403 if you are not a member). Returns 409 if the task was created by an agent and is still awaiting human approval (review_status=pending), or if blocked by dependencies. Actor is taken from MCP client identity.",
       "inputSchema": {
         "type": "object",
         "required": ["task_id"],
@@ -257,40 +245,6 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
             "type": "array",
             "items": { "type": "string" },
             "description": "Optional attachment ids. There is no upload path from an agent (a human attaches files in the Desktop task panel), so leave this out and put what the reviewer needs in `text`."
-          }
-        }
-      }
-    },
-    {
-      "name": "pm_list_my_tasks",
-      "description": "DEPRECATED — use `pm_list_tasks` with `assignee: \"me\"`, which this alias forwards to. The answer is that tool's envelope ({total, tasks[], has_more}), not the bare array this used to return: read `tasks`. Folded away in the next minor release.",
-      "inputSchema": {
-        "type": "object",
-        "properties": {
-          "status": {
-            "type": "string",
-            "enum": ["pending", "in_progress", "submitted", "done", "rejected", "cancelled"]
-          },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 100, "default": 20 },
-          "project_id": {
-            "type": "string",
-            "pattern": "^p-[a-zA-Z0-9-]{1,62}$",
-            "description": "Narrow to one project."
-          }
-        }
-      }
-    },
-    {
-      "name": "pm_reparent_task",
-      "description": "DEPRECATED — use `pm_update_task` with `parent_task_id` (null promotes to a project root), which this alias forwards to; `new_parent` is translated to it. The answer is now the updated task, not {ok:true}. Cycles are still rejected. Folded away in the next minor release.",
-      "inputSchema": {
-        "type": "object",
-        "required": ["task_id", "new_parent"],
-        "properties": {
-          "task_id": { "type": "string", "pattern": "^t-[a-zA-Z0-9-]{1,62}$" },
-          "new_parent": {
-            "type": ["string", "null"],
-            "pattern": "^t-[a-zA-Z0-9-]{1,62}$"
           }
         }
       }
@@ -337,7 +291,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
     },
     {
       "name": "pm_add_activity",
-      "description": "Append a note to a task's activity stream. This is the channel for context that must NOT overwrite the task: blockers, re-scheduling reasons, links to documents in the doc library. Editing `description` for the same purpose destroys the original acceptance criteria — comment instead. Allowed for the task's assignee and its creator (so the PM that dispatched the work can leave context).",
+      "description": "Append a note to a task's activity stream. This is the channel for context that must NOT overwrite the task: blockers, re-scheduling reasons, links to documents in the doc library. Editing `description` for the same purpose destroys the original acceptance criteria — comment instead. Allowed for the task's assignee, its creator, and the project owner (G1-c: the owner who adopts or reassigns a task can record why; the auto-generated `[reassign]` trail carries no reason).",
       "inputSchema": {
         "type": "object",
         "required": ["task_id", "text"],
@@ -398,7 +352,7 @@ mod tests {
     fn manifest_is_valid_json() {
         let v: serde_json::Value = serde_json::from_str(super::PM_TOOL_MANIFEST).unwrap();
         let tools = v["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 17);
+        assert_eq!(tools.len(), 14);
         for t in tools {
             assert!(t["name"].is_string());
             assert!(t["inputSchema"].is_object());

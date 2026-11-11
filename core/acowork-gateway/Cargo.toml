@@ -92,6 +92,13 @@ dialoguer = { workspace = true, optional = true }
 [dev-dependencies]
 acowork-sign = { workspace = true }
 acowork-memory = { workspace = true }
+# route_confirm_e2e: the real `ChatSessionManager::claim_card_answer` runs
+# against the envelope the real Gateway derives — the ADR-106 D6 coordinate
+# seam lives in two processes, and only linking the Runtime's own type and
+# claim function tests the pair. Runtime already dev-depends on Gateway for
+# its own e2e tests: a dev-only cycle is fine — dev-deps do not enter the
+# normal graph, so the shipped dependency graph stays acyclic.
+acowork-runtime = { workspace = true }
 # Design doc 24 M2 test: the relay client e2e test runs a real
 # in-process acowork-relay server.
 acowork-relay = { workspace = true }

@@ -341,6 +341,19 @@ impl Project {
         self.owner_id.as_deref().unwrap_or(&self.created_by)
     }
 
+    /// Whether `instance_id` is a member of this project.
+    ///
+    /// The single source of truth for the membership predicate. The creator /
+    /// owner is always in `members` (seeded at project creation), so "owner or
+    /// member" folds into this one check. Every gate that asks "is this actor a
+    /// member" reads through here — the store's assignee gate
+    /// (`PmTree::ensure_assignee_is_member`) and the MCP self-claim authorization
+    /// alike — so G1-b does not grow a second, drift-prone definition (design 32
+    /// §2 principle 5: one authorization model, many faces).
+    pub fn has_member(&self, instance_id: &str) -> bool {
+        self.members.iter().any(|m| m.instance_id == instance_id)
+    }
+
     /// Whether `actor` may perform a **governance** action on this project
     /// (invite or evict members, transfer ownership, edit project fields).
     ///

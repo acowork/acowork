@@ -676,6 +676,73 @@ run_ort_api_redline() {
     echo "ONNX Runtime API red line: OK (ort api-${api_feature} <= ORT ${legacy})"
 }
 
+# Agent-skill tool red line — plan §8 assertion 1 of
+# docs/plan/zh/pm-doc-agent-participation-plan.md.
+#
+# `file_write` may appear in a SKILL.md only when that skill's deliverable IS
+# repository source (code, tests, config) — never when the deliverable is a
+# document, which belongs in the shared library via `doc_write` and must land
+# under `{doc_path}/{area}/`. A skill that promises `file_write` while its
+# manifest declares no such tool is a dead instruction (the defect this list
+# exists to prevent), and a document-producing skill that writes files instead
+# of publishing is how a deliverable disappears from the project tree.
+#
+# The allowlist is a CONSTANT, not a heuristic: a fourth entry requires
+# amending §4.4 of the plan first. `testing` is here because its deliverable is
+# test files; `debugging`/`refactoring` because their fix is the source change.
+AGENT_SKILL_FILE_WRITE_ALLOWLIST="
+senior-engineer-agent/skills/debugging
+senior-engineer-agent/skills/refactoring
+senior-engineer-agent/skills/testing
+"
+# The packages §4.1 of the plan converts. `github.ponytail`, `document-manager`
+# and the older `agnes-*` / `project-manager` packages are out of scope: their
+# prompts are third-party or shipped earlier, so this rule does not judge them.
+AGENT_SKILL_PACKAGES="
+product-manager-agent
+quality-assurance-agent
+senior-engineer-agent
+software-architect-agent
+"
+run_agent_skill_tool_redline() {
+    echo "Checking agent-skill file_write red line (plan §4.4 + §8)..."
+    local root="$SCRIPT_DIR/.."
+    local pair pkg path offenders=""
+
+    # A renamed or deleted allowlisted skill must fail loudly instead of
+    # silently shrinking the rule to "nobody may use file_write".
+    for pair in $AGENT_SKILL_FILE_WRITE_ALLOWLIST; do
+        if [ ! -f "$root/agents/$pair/SKILL.md" ]; then
+            echo "ERROR: allowlist entry '$pair' has no SKILL.md under agents/."
+            exit 1
+        fi
+    done
+
+    for pkg in $AGENT_SKILL_PACKAGES; do
+        for path in "$root"/agents/"$pkg"/skills/*/SKILL.md; do
+            [ -f "$path" ] || continue
+            # project-participation names `file_write` once, in a Role line that
+            # says where code goes; it is not a persistence instruction and it
+            # declares no such tool.
+            case "$path" in */skills/project-participation/SKILL.md) continue ;; esac
+            grep -q 'file_write' "$path" || continue
+            pair="${path#"$root"/agents/}"
+            pair="${pair%/SKILL.md}"
+            if ! printf '%s\n' "$AGENT_SKILL_FILE_WRITE_ALLOWLIST" | grep -qxF "$pair"; then
+                offenders="$offenders $pair"
+            fi
+        done
+    done
+
+    if [ -n "$offenders" ]; then
+        echo "ERROR: file_write used by skills outside the §4.4 allowlist:$offenders"
+        echo "       A document-producing skill publishes with doc_write into"
+        echo "       {doc_path}/{area}/; only source-changing skills write files."
+        exit 1
+    fi
+    echo "agent-skill file_write red line: OK (allowed: debugging, refactoring, testing)"
+}
+
 run_clippy() {
     echo "Running cargo clippy..."
     cargo clippy --all-targets -- -D warnings
@@ -754,6 +821,7 @@ case "$MODE" in
         run_permission_route_redline
         run_lsp_registry_redline
         run_ort_api_redline
+        run_agent_skill_tool_redline
         run_check
         ;;
     clippy)
@@ -782,6 +850,7 @@ case "$MODE" in
         run_permission_route_redline
         run_lsp_registry_redline
         run_ort_api_redline
+        run_agent_skill_tool_redline
         run_check
         run_clippy
         run_test

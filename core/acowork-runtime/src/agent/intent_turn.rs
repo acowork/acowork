@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use acowork_core::defaults::GATEWAY_HTTP_PORT;
+use acowork_core::defaults::gateway_http_port;
 
 use super::inbound::IntentEnvelope;
 use serde::{Deserialize, Serialize};
@@ -698,17 +698,63 @@ fn display_summary(headline: &str, action: &str) -> String {
 /// a display that could be mistaken for one of those would change their meaning.
 pub const META_KEY_INTENT_DISPLAY: &str = "intent";
 
-/// Wrap a display for the user row's `metadata`.
+/// The `metadata.turn_origin` key a turn's user row carries.
 ///
-/// Serialization cannot fail for this shape (four strings and a bool); the `Null`
-/// arm keeps the signature total rather than panicking on a value only a schema
-/// change could produce.
-pub fn intent_display_meta(display: &IntentDisplay) -> Value {
+/// The row's origin — the wire value of the turn that produced it
+/// ([`acowork_core::intent::TurnOrigin`]). It exists for exactly one fact: a
+/// PM dispatch's words are the **PM's**, spoken in the task owner's name, so a
+/// surface can tell them from something a person typed. The dispatch body is
+/// generated Markdown (the task title and description), and rendering it as
+/// literal text paints its own syntax as characters (design 27 §5.4.4).
+///
+/// Only a dispatch writes one. Every other turn leaves the row byte-identical
+/// to what it was — the origin of an ordinary turn is not worth a byte.
+pub const META_KEY_TURN_ORIGIN: &str = "turn_origin";
+
+/// The metadata a turn's user row carries.
+///
+/// Two facts, both about where the words came from:
+///
+/// - `turn_origin` — this turn's origin. Only a PM dispatch writes one; every
+///   other origin leaves the row byte-identical to what it was, because
+///   "a person typed this" needs no marker.
+/// - `intent` — the display projection of an agent-origin envelope.
+///
+/// `None` when there is nothing to say: an ordinary turn's row must not grow
+/// an empty `metadata` object.
+///
+/// The row's metadata is a shared bag (`round_id`, `internal`, the tool
+/// fields), so each fact is keyed under its own member — nesting under one key
+/// is what keeps a display from being read as one of those. Serialization
+/// cannot fail for this shape (four strings and a bool), so a failed write
+/// drops the member rather than panicking on a value only a schema change
+/// could produce.
+pub fn turn_row_meta(kind: &str, display: Option<&IntentDisplay>) -> Option<Value> {
     let mut map = serde_json::Map::new();
-    if let Ok(value) = serde_json::to_value(display) {
+    if acowork_core::intent::TurnOrigin::parse(kind) == acowork_core::intent::TurnOrigin::PmTask {
+        map.insert(
+            META_KEY_TURN_ORIGIN.to_string(),
+            Value::String(acowork_core::intent::TurnOrigin::PmTask.as_str().to_string()),
+        );
+    }
+    if let Some(display) = display
+        && let Ok(value) = serde_json::to_value(display)
+    {
         map.insert(META_KEY_INTENT_DISPLAY.to_string(), value);
     }
-    Value::Object(map)
+    (!map.is_empty()).then_some(Value::Object(map))
+}
+
+/// The origin a row's metadata carries, when it carries one.
+///
+/// The **only** reader of [`META_KEY_TURN_ORIGIN`] outside the writer, so a
+/// change to the key or to the emptiness rule cannot reach one surface and
+/// miss another (the same rule [`IntentDisplay::from_metadata`] follows).
+pub fn turn_origin_from_metadata(metadata: &Value) -> Option<String> {
+    metadata
+        .get(META_KEY_TURN_ORIGIN)?
+        .as_str()
+        .map(str::to_string)
 }
 
 impl IntentDisplay {
@@ -755,7 +801,7 @@ pub async fn append_chat_row(
     body: &str,
     meta: serde_json::Value,
 ) -> Result<(), String> {
-    let url = format!("http://{gateway_host}:{GATEWAY_HTTP_PORT}/api/intents/chat-append");
+    let url = format!("http://{gateway_host}:{}/api/intents/chat-append", gateway_http_port());
     let payload = serde_json::json!({
         "from": instance_id,
         "chat_session_id": chat_session_id,
@@ -965,7 +1011,7 @@ pub async fn post_intent_response(
     body: &str,
 ) -> Result<(), String> {
     let url = format!(
-        "http://{gateway_host}:{GATEWAY_HTTP_PORT}/api/intents/{}/response",
+        "http://{gateway_host}:{}/api/intents/{}/response", gateway_http_port(),
         ctx.request_id
     );
     let payload = serde_json::json!({
@@ -1105,7 +1151,7 @@ pub async fn pull_chat_attachment(
     message_id: &str,
 ) -> Result<(String, String, Vec<u8>), String> {
     let url = format!(
-        "http://{gateway_host}:{GATEWAY_HTTP_PORT}/api/intents/chat-attachments/{target_instance}/{chat_session_id}/{attachment_id}/{message_id}"
+        "http://{gateway_host}:{}/api/intents/chat-attachments/{target_instance}/{chat_session_id}/{attachment_id}/{message_id}", gateway_http_port()
     );
     let mut req = reqwest::Client::new()
         .get(&url)
@@ -1551,7 +1597,7 @@ mod tests {
         // as one of those.
         let d = render_intent_display("response", "notify", &serde_json::json!({ "message": "done" }))
             .expect("display");
-        let meta = intent_display_meta(&d);
+        let meta = turn_row_meta("response", Some(&d)).expect("meta");
         assert_eq!(meta[META_KEY_INTENT_DISPLAY]["summary"], "done");
         assert_eq!(meta[META_KEY_INTENT_DISPLAY]["body"], "done");
         assert_eq!(meta[META_KEY_INTENT_DISPLAY]["origin"], "response");
@@ -1570,8 +1616,33 @@ mod tests {
             &serde_json::json!({ "title": "审计 usecase 分层", "request": "检查接口" }),
         )
         .expect("display");
-        let meta = intent_display_meta(&d);
+        let meta = turn_row_meta("request", Some(&d)).expect("meta");
         assert_eq!(IntentDisplay::from_metadata(&meta), Some(d));
+    }
+
+    #[test]
+    fn a_pm_dispatch_row_says_where_its_words_came_from() {
+        // The one fact a surface cannot guess: a dispatch's words are the PM's
+        // generated Markdown in the owner's name, not something a person typed.
+        // Without the marker the row is indistinguishable from a human's, and the
+        // dispatch body paints its own syntax as characters.
+        let meta = turn_row_meta("pm_task", None).expect("a dispatch row carries its origin");
+        assert_eq!(meta[META_KEY_TURN_ORIGIN], "pm_task");
+        assert_eq!(
+            turn_origin_from_metadata(&meta).as_deref(),
+            Some("pm_task"),
+            "the writer and the reader must agree on the key"
+        );
+    }
+
+    #[test]
+    fn an_ordinary_turn_row_stays_byte_identical() {
+        // "A person typed this" needs no marker: an ordinary turn's row must not
+        // grow an empty metadata object, or every session on disk changes shape
+        // for a fact nobody reads.
+        assert_eq!(turn_row_meta("user_message", None), None);
+        assert_eq!(turn_row_meta("", None), None);
+        assert_eq!(turn_origin_from_metadata(&serde_json::json!({})), None);
     }
 
     #[test]

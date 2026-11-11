@@ -82,7 +82,8 @@ import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
 import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
 import { turnInflight, resolveExpectedResponders } from "../../lib/chatTurnInflight";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
-import { cardAnswerFor, type TranscriptItem } from "./chatTranscriptGroups";
+import { cardAnswerFor, activeAsk, type TranscriptItem } from "./chatTranscriptGroups";
+import { ChatAskDock } from "./ChatAskDock";
 import { useRevealPendingAsk } from "./useRevealPendingAsk";
 import { useTranscriptLayout } from "./useTranscriptLayout";
 import {
@@ -93,6 +94,7 @@ import {
 import { detectPaste } from "./pasteDetect";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { CollapsibleChatContent } from "./CollapsibleChatContent";
+import { isPmDispatchChatRow } from "./pmDispatch";
 import {
   VirtualRowList,
   type VirtualRowListHandle,
@@ -386,6 +388,12 @@ const GroupRowView = memo(function GroupRowView({
   }
 
   const own = row.kind === "user_message" && row.from === me;
+  // The PM's dispatch speaks in the task creator's name, but its words are the
+  // PM's: the task title and description, written as Markdown by the PM
+  // service. `meta.task_id` is the dispatch's own marker (the human send path
+  // never sets it), so this is the one `user_message` that is not something a
+  // person typed.
+  const pmDispatch = isPmDispatchChatRow(row);
   const who: ParticipantWho = own
     ? { name: profile.displayName, isAgent: false, avatarUrl: null, builtinAvatarId: null }
     : nameOf(row.from);
@@ -547,7 +555,15 @@ const GroupRowView = memo(function GroupRowView({
               className={cn(
                 "max-w-full rounded-md px-4 py-2.5 leading-relaxed break-words select-text",
                 own
-                  ? "rounded-br-sm bg-chat-user text-chat-user-text"
+                  ? pmDispatch
+                    // Markdown wears the NEUTRAL bubble: the prose palette is
+                    // painted for that backdrop, and the accent one is what the
+                    // human typed. A dispatch's Markdown in the accent bubble
+                    // paints near-black on a blue field — the "user bubble text
+                    // turned black" defect, one level up. The side (right, own
+                    // avatar) still says "this is mine".
+                    ? "rounded-br-sm bg-chat-bubble text-text-primary"
+                    : "rounded-br-sm bg-chat-user text-chat-user-text"
                   : "rounded-bl-sm bg-chat-bubble text-text-primary",
               )}
             >
@@ -560,9 +576,12 @@ const GroupRowView = memo(function GroupRowView({
                 its own wrapper, which beats the white `text-chat-user-text`
                 the accent-filled own-bubble inherits — the "user bubble text
                 turned black" defect. It also made `**bold**` render bold in
-                a group chat while reading as literal text in the 1:1 chat. */}
+                a group chat while reading as literal text in the 1:1 chat.
+                The PM's dispatch is the one exception: nobody typed its
+                words, they are generated Markdown, and they belong to the
+                PM — so they render as speech (see `pmDispatch.ts`). */}
               {row.body ? (
-                row.kind === "user_message" ? (
+                row.kind === "user_message" && !pmDispatch ? (
                   <div className="whitespace-pre-wrap break-words">
                     {row.body}
                   </div>
@@ -639,6 +658,9 @@ const GroupRowView = memo(function GroupRowView({
 
 interface GroupItemProps extends Omit<RowProps, "row"> {
   item: TranscriptItem;
+  /** This run's question is docked at the bottom of the surface, so the run
+   *  must not draw it at its tail as well. */
+  pendingAskDocked?: boolean;
 }
 
 /**
@@ -657,6 +679,7 @@ interface GroupItemProps extends Omit<RowProps, "row"> {
  */
 const GroupItemView = memo(function GroupItemView({
   item,
+  pendingAskDocked,
   ...rowProps
 }: GroupItemProps) {
   if (item.kind === "run") {
@@ -682,7 +705,9 @@ const GroupItemView = memo(function GroupItemView({
         // The router's question about this run is drawn at the block's tail and
         // answers through the same handler a standalone card row gets — the gate
         // (the person the card asked, D10) already ran in `cardAnswerFor`.
+        // Unless the host docked it, in which case the tail stays empty.
         onChooseCard={rowProps.onChooseCard}
+        pendingAskDocked={pendingAskDocked}
         focusInput={
           !!focusBlockSessionId && item.execSessionId === focusBlockSessionId
         }
@@ -986,6 +1011,11 @@ export function GroupChatPanel() {
     virtualAttrs,
     seqsByItem,
   } = useTranscriptLayout(rows, activeGroupId ?? "");
+  // The router's open question, and the run it asks about (ADR-106 revision
+  // 2026-11-11): it is docked at the bottom of this surface, and the run wears
+  // a badge so the question still has a subject.
+  const askBlock = useMemo(() => activeAsk(items), [items]);
+  const askSeq = askBlock?.pendingAsk?.seq ?? null;
   // A question the router asks about a run is drawn at that run's block, which
   // stays where the exchange began — this is what brings the reader there.
   // Declared AFTER the follow hook, the same rule `useLocateMessage` follows
@@ -1637,6 +1667,21 @@ export function GroupChatPanel() {
   // Reading is allowed (server-side admin bypass), posting is not — hide the
   // composer and card actions for anyone who isn't a participant.
   const canPost = participants.some((p) => p.id === me);
+  // The docked question's answer path — the same gate as everywhere else
+  // (`cardAnswerFor`): only the person the card asked may answer it (D10), and
+  // on this surface only a participant may answer anything at all — the same
+  // read/write split the blocks get (`readOnly`). Stable identities, so the
+  // dock does not re-render on every keystroke.
+  const askHandler =
+    canPost && askBlock ? cardAnswerFor(askBlock, me, answerCard) : undefined;
+  const askChoose = useCallback(
+    (choice: CardChoice) => {
+      if (askHandler && askBlock?.pendingAsk) {
+        askHandler(askBlock.pendingAsk, choice);
+      }
+    },
+    [askBlock, askHandler],
+  );
 
   // Right-click on an agent's avatar / name → the "@name" menu. No menu
   // without a composer: a read-only viewer has nowhere to put the mention.
@@ -1854,6 +1899,11 @@ export function GroupChatPanel() {
                   onChooseCard={
                     canPost ? cardAnswerFor(item, me, answerCard) : undefined
                   }
+                  pendingAskDocked={
+                    askSeq !== null &&
+                    item.kind === "run" &&
+                    item.pendingAsk?.seq === askSeq
+                  }
                   onLocateRef={handleLocateRef}
                   focusBlockSessionId={focusBlockSessionId ?? undefined}
                 />
@@ -1927,7 +1977,15 @@ export function GroupChatPanel() {
         )}
       </div>
 
-      <div className="shrink-0">
+      {/* The composer area. `relative` so the router's open question can be
+          docked over its edge (ADR-106 revision 2026-11-11) — the reader sees
+          it without hunting for the run it asks about, and the input stays
+          clear. */}
+      <div className="relative shrink-0">
+        <ChatAskDock
+          card={askBlock?.pendingAsk ?? null}
+          onChoose={askHandler ? askChoose : undefined}
+        />
         {!canPost ? (
           <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg px-3 py-2 text-center text-10 text-text-tertiary">
             {t("groupChat.readOnly")}

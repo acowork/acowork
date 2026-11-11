@@ -1788,7 +1788,7 @@ pub struct MentionRequest {
     #[serde(default)]
     pub refs: Vec<MentionRef>,
     /// ADR-106 D6 level 5's cheap escape: "continue nothing, this is new work".
-    /// It is always offered next to an `exec_session_propose_continue`
+    /// It is always offered next to an `exec_session_route_confirm`
     /// confirmation, and here
     /// it takes the ladder's continuation branch away (level 3 is skipped) while
     /// the new session's brief still comes from the Chat Router.

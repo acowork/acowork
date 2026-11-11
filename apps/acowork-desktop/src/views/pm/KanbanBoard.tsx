@@ -17,7 +17,6 @@ import {
   DragOverlay,
   KeyboardSensor,
   PointerSensor,
-  closestCorners,
   useSensor,
   useSensors,
   type DragEndEvent,
@@ -32,6 +31,7 @@ import { KanbanColumn } from "./KanbanColumn";
 import { TaskCard } from "./TaskCard";
 import { BOARD_COLUMNS } from "../../lib/pm-types";
 import { boardPageForTask } from "../../lib/pm-board-settings";
+import { boardCollisionDetection } from "../../lib/pm-board-dnd";
 import type { Coordinates } from "@dnd-kit/utilities";
 import type { PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 
@@ -239,7 +239,7 @@ export function KanbanBoard({ projectId, pageSize, onOpenTask }: KanbanBoardProp
   return (
     <DndContext
       sensors={sensors}
-      collisionDetection={closestCorners}
+      collisionDetection={boardCollisionDetection}
       onDragStart={handleDragStart}
       onDragOver={handleDragOver}
       onDragEnd={handleDragEnd}

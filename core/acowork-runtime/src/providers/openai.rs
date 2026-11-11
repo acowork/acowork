@@ -1757,7 +1757,7 @@ mod tests {
         // own unit tests cross this boundary; this one does.
         use crate::agent::chat_router::tool::{
             memory_recall_tool_name, router_tools, EXEC_SESSION_CREATE_TOOL,
-            EXEC_SESSION_PROPOSE_CONTINUE_TOOL, EXEC_SESSION_READ_ROUND_TOOL, HTTP_REQUEST_TOOL,
+            EXEC_SESSION_ROUTE_CONFIRM_TOOL, EXEC_SESSION_READ_ROUND_TOOL, HTTP_REQUEST_TOOL,
         };
         let memory_tool = memory_recall_tool_name();
         let tools = router_tools(Some(&memory_tool), true);
@@ -1767,7 +1767,7 @@ mod tests {
             names,
             vec![
                 EXEC_SESSION_CREATE_TOOL,
-                EXEC_SESSION_PROPOSE_CONTINUE_TOOL,
+                EXEC_SESSION_ROUTE_CONFIRM_TOOL,
                 memory_tool.as_str(),
                 HTTP_REQUEST_TOOL,
                 EXEC_SESSION_READ_ROUND_TOOL

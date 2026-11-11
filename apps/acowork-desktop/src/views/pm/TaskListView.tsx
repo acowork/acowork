@@ -41,6 +41,11 @@ import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { showToast } from "../../components/common/ToastProvider";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
+import {
+  CAPSULE_PANE_CN,
+  SURFACE_CONTENT_CN,
+  SURFACE_PANEL_CN,
+} from "../../components/common/capsule";
 import { TaskFieldPicker } from "./TaskFieldPicker";
 import { PmPopover, PmPopoverItem, PmPopoverSection } from "./pmPopover";
 import { PmColumnResizer } from "./PmColumnResizer";
@@ -56,17 +61,19 @@ import {
 import {
   resolveActorLabel,
   resolveMembers,
+  MemberAvatar,
   usePmDirectoryUsers,
   useSelfAccount,
   withOwner,
 } from "./pmMembers";
 import { STATUS_TRANSITIONS } from "./TaskStatusMove";
+import { PriorityBadge } from "./PriorityBadge";
 import {
-  ADD_COL_WIDTH,
   CHECK_COL_WIDTH,
   ROW_HEIGHT,
   STATUS_DOT_CLASS,
   STATUS_LABEL_KEY,
+  STATUS_PILL_CLASS,
   TH_BASE_CN,
   estimateTableWidth,
 } from "./taskListLabels";
@@ -542,7 +549,7 @@ export function TaskListView({
 
   const filtersActive = hasActivePmListFilters(filters);
   const allSelected = rows.length > 0 && rows.every((r) => selected.has(r.task.id));
-  const colCount = visibleColumns.length + 2;
+  const colCount = visibleColumns.length + 1;
 
   const groupLabelOf = useCallback(
     (id: string): string => {
@@ -556,7 +563,16 @@ export function TaskListView({
   );
 
   return (
-    <div className="relative flex h-full min-h-0 flex-col bg-page-bg">
+    // 整块列表 = 一枚大胶囊，与看板的列同一个外壳（`CAPSULE_PANE_CN`）：头部是
+    // 工具栏、尾部是页码、中间是行。留白（p-3）由 `ProjectBoard` 给，看板的 p-3
+    // 在 `KanbanBoard` 里，两者在窗口里的位置一致。`relative` 留在这一层：批量
+    // 操作条是胶囊内的绝对定位浮条。
+    //
+    // 表面三层，与看板一一对应（`capsule.ts` 的 SURFACE_* 阶梯）：
+    //   页面 `page-bg` → 胶囊 = 看板的"列" `SURFACE_PANEL_CN`（工具条 / 页脚 /
+    //   表头露出这层）→ 表格 = 看板的"卡片" `SURFACE_CONTENT_CN`（见下面
+    //   `<table>`，行 / 空态 / 新建行 / 骨架行全在表格盒内，一处上色就够）。
+    <div className={cn(CAPSULE_PANE_CN, "relative h-full", SURFACE_PANEL_CN)}>
       <TaskListToolbar
         filters={filters}
         filtersActive={filtersActive}
@@ -572,14 +588,21 @@ export function TaskListView({
           裸滚动容器在主题化表面里会露出系统滚动条（Chromium 121+ 之后
           `::-webkit-scrollbar` 那套皮肤在标准属性非 auto 时整族失效）。
           `showXThumb` + `overflow-x-auto`：列多时要横向滚动，而视口默认是
-          `overflow-x-hidden`，横向那根只能显式要。 */}
-      <OverlayScrollbar fill="flex" showXThumb className="overflow-x-auto">
+          `overflow-x-hidden`，横向那根只能显式要。
+
+          `px-3` 左右各留 12px：表头 / 表体的底色块在胶囊里内缩一圈，两侧露出
+          胶囊自己的底色，胶囊才是一整枚（否则色块顶到边框上、把圆角切开，看着
+          像两个并排的方块）。12px 与工具栏 / 页脚的 `px-3` 同一条竖线。 */}
+      <OverlayScrollbar fill="flex" showXThumb className="overflow-x-auto px-3">
         <table
           /* `text-xs`（12px）而不是 `text-11`（11px）：列表的任务标题要和
              看板卡片（`TaskCard` 的 `text-xs`）是同一个字号，否则同一个任务在
              两种视图里大小不同、像两套 UI。12px 与全局 `--ui-text-size`
              （列表 / 工具栏这一档）也一致。行高 34px 放得下 12px 单行文本。 */
-          className="w-full border-separate border-spacing-0 text-xs"
+          /* 表格整盒 = 看板卡片的底色（`SURFACE_CONTENT_CN`）：数据行 / 空态 /
+             新建行 / 骨架行都是它的子节点，一处上色；行自己不上底色，`tr` 的
+             hover 与选中高亮才能透出来。表头单独用下一档（见 `TH_BASE_CN`）。 */
+          className={cn("w-full border-separate border-spacing-0 text-xs", SURFACE_CONTENT_CN)}
           style={{
             tableLayout: "fixed",
             minWidth: estimateTableWidth(visibleColumns, widths),
@@ -599,7 +622,6 @@ export function TaskListView({
                 }}
               />
             ))}
-            <col style={{ width: ADD_COL_WIDTH }} />
           </colgroup>
 
           <thead>
@@ -623,7 +645,7 @@ export function TaskListView({
                   className="h-3.5 w-3.5 cursor-pointer accent-[var(--color-accent)]"
                 />
               </th>
-              {visibleColumns.map((c) => (
+              {visibleColumns.map((c, i) => (
                 <th
                   key={c.key}
                   data-column={c.key}
@@ -634,7 +656,14 @@ export function TaskListView({
                         : "descending"
                       : "none"
                   }
-                  className={cn(TH_BASE_CN, "group/th", c.align === "right" && "text-right")}
+                  /* 末列 `pr-3`：表格右边界不再有「＋」占位列兜着，由最后一列
+                     自己收住 12px，与左侧复选框列的 `pl-3` / 工具栏 `px-3` 对称。 */
+                  className={cn(
+                    TH_BASE_CN,
+                    "group/th",
+                    c.align === "right" && "text-right",
+                    i === visibleColumns.length - 1 && "pr-3",
+                  )}
                   title={t("pm.list.sortHint")}
                 >
                   {/* 排序挂在内容层，**不是** `<th>` 上：列宽手柄也是 `<th>` 的
@@ -671,19 +700,10 @@ export function TaskListView({
                   />
                 </th>
               ))}
-              {/* 末列 `pr-3 pl-0`：12px 右边距与左侧 12px 对称，末列的「＋」与
-                  页脚右端的「6 列」落在同一条竖线上。 */}
-              <th className={cn(TH_BASE_CN, "cursor-default pr-3 pl-0")}>
-                <button
-                  type="button"
-                  aria-label={t("pm.list.fields.open")}
-                  title={t("pm.list.fields.open")}
-                  onClick={openAt({ kind: "fields" })}
-                  className="rounded px-1 text-text-tertiary hover:bg-zinc-200 hover:text-text dark:hover:bg-zinc-700"
-                >
-                  ＋
-                </button>
-              </th>
+              {/* 表头里不再挂「＋」字段入口：它和工具栏右端的「字段」打开同一个
+                  `TaskFieldPicker`，而列表的列是固定注册字段、没有"就地新建字段"
+                  这回事，那个 ＋ 只是同一弹层的第二个门。表格的右边界由最后一个
+                  可见列自己的 `pr-3` 收住（pl-3 的复选框列对称），与页脚右端对齐。 */}
             </tr>
           </thead>
 
@@ -876,7 +896,12 @@ export function TaskListView({
               )}
               {targets.map((s) => (
                 <PmPopoverItem key={s} onClick={() => void applyStatus(task, s)}>
-                  <span className="flex items-center gap-1.5">
+                  <span
+                    className={cn(
+                      "inline-flex items-center gap-1 rounded px-1.5 py-0.5",
+                      STATUS_PILL_CLASS[s],
+                    )}
+                  >
                     <span
                       className={cn("h-1.5 w-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[s])}
                       aria-hidden
@@ -902,7 +927,7 @@ export function TaskListView({
                   checked={task.priority === p}
                   onClick={() => void applyField(task, { priority: p })}
                 >
-                  {t(`pm.priority.${p}`)}
+                  <PriorityBadge priority={p} className="px-1.5 py-0.5 text-xs" />
                 </PmPopoverItem>
               ))}
             </PmPopover>
@@ -917,20 +942,28 @@ export function TaskListView({
             <PmPopover anchor={open.anchor} onClose={close} width={210}>
               <PmPopoverSection>{t("pm.list.col.assignee")}</PmPopoverSection>
               <OverlayScrollbar maxHeight={256}>
-                {assigneeOptions.map((o) => (
-                  <PmPopoverItem
-                    key={o.value}
-                    checked={task.assignee === o.value}
-                    onClick={() => void applyField(task, { assignee: o.value })}
-                  >
-                    {o.label}
-                  </PmPopoverItem>
-                ))}
+                {assigneeOptions.map((o) => {
+                  const member = memberById.get(o.value);
+                  return (
+                    <PmPopoverItem
+                      key={o.value}
+                      checked={task.assignee === o.value}
+                      prefix={
+                        member ? (
+                          <MemberAvatar member={member} size={16} className="shrink-0" />
+                        ) : undefined
+                      }
+                      onClick={() => void applyField(task, { assignee: o.value })}
+                    >
+                      {o.label}
+                    </PmPopoverItem>
+                  );
+                })}
                 <PmPopoverItem
                   checked={task.assignee === null}
                   onClick={() => void applyField(task, { assignee: null })}
                 >
-                  {t("pm.task.unassigned")}
+                  <span className="text-text-tertiary">{t("pm.task.unassigned")}</span>
                 </PmPopoverItem>
               </OverlayScrollbar>
             </PmPopover>
@@ -981,33 +1014,64 @@ export function TaskListView({
                   那根公共滚动条 —— 裸 `max-h-* overflow-y-auto` 会被
                   `overlayScrollCoverage` 判成未绑定容器。 */}
               <OverlayScrollbar maxHeight={256}>
-                {options.map((o) => (
-                  <PmPopoverItem
-                    key={o.value}
-                    checked={!isBulk && active.has(o.value)}
-                    onClick={() => {
-                      if (isBulk) {
-                        if (field === "status") void applyBulk({ status: o.value as TaskStatus });
-                        else if (field === "priority")
-                          void applyBulk({ priority: o.value as Priority });
-                        else
-                          void applyBulk({
-                            assignee: o.value === UNASSIGNED ? null : o.value,
-                          });
-                        return;
+                {options.map((o) => {
+                  // 与列表行内的 value 同一套视觉：状态胶囊 / 优先级徽章 / 头像。
+                  const member = field === "assignee" ? memberById.get(o.value) : undefined;
+                  return (
+                    <PmPopoverItem
+                      key={o.value}
+                      checked={!isBulk && active.has(o.value)}
+                      prefix={
+                        member ? (
+                          <MemberAvatar member={member} size={16} className="shrink-0" />
+                        ) : undefined
                       }
-                      setFilters((prev) => {
-                        const cur = prev[field] as string[];
-                        const next = cur.includes(o.value)
-                          ? cur.filter((v) => v !== o.value)
-                          : [...cur, o.value];
-                        return { ...prev, [field]: next } as PmListFilters;
-                      });
-                    }}
-                  >
-                    {o.label}
-                  </PmPopoverItem>
-                ))}
+                      onClick={() => {
+                        if (isBulk) {
+                          if (field === "status") void applyBulk({ status: o.value as TaskStatus });
+                          else if (field === "priority")
+                            void applyBulk({ priority: o.value as Priority });
+                          else
+                            void applyBulk({
+                              assignee: o.value === UNASSIGNED ? null : o.value,
+                            });
+                          return;
+                        }
+                        setFilters((prev) => {
+                          const cur = prev[field] as string[];
+                          const next = cur.includes(o.value)
+                            ? cur.filter((v) => v !== o.value)
+                            : [...cur, o.value];
+                          return { ...prev, [field]: next } as PmListFilters;
+                        });
+                      }}
+                    >
+                      {field === "status" ? (
+                        <span
+                          className={cn(
+                            "inline-flex items-center gap-1 rounded px-1.5 py-0.5",
+                            STATUS_PILL_CLASS[o.value as TaskStatus],
+                          )}
+                        >
+                          <span
+                            className={cn(
+                              "h-1.5 w-1.5 shrink-0 rounded-full",
+                              STATUS_DOT_CLASS[o.value as TaskStatus],
+                            )}
+                            aria-hidden
+                          />
+                          {o.label}
+                        </span>
+                      ) : field === "priority" ? (
+                        <PriorityBadge priority={o.value as Priority} className="px-1.5 py-0.5 text-xs" />
+                      ) : member ? (
+                        o.label
+                      ) : (
+                        <span className="text-text-tertiary">{o.label}</span>
+                      )}
+                    </PmPopoverItem>
+                  );
+                })}
               </OverlayScrollbar>
             </PmPopover>
           );
