@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from "react";
+import React, { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { ChevronRight, ChevronDown, Search, Wrench, Terminal, Check, X, Square } from "lucide-react";
 import type { ChatMessage, ToolApprovalNeededEvent } from "../../lib/types";
 import { ThinkBlock } from "./ThinkBlock";
@@ -260,22 +260,28 @@ function approvalMatchesSession(
  * ExploreBlock: aggregates consecutive think + tool_call + tool_result
  * messages into a single collapsible block with full rendering inside.
  *
- * - Default: expanded (for new active blocks).
+ * - Default: FOLDED (2026-11-11). The block is a summary line, not the
+ *   transcript's body — the reader opens it when they want the work detail.
+ *   This mirrors ADR-106's 2026-11-10 revision, which folded the chat-side
+ *   execution block by default and retired the "auto-expand the newest work"
+ *   state machine for the same reason.
  * - Collapsed: "Exploring... (N steps)" + chevron.
  * - Expanded: max-height 144px container with ThinkBlock and ToolCallItem.
- * - Streaming: auto-scrolls to bottom.
- * - Collapse (auto): ONLY when hasFollowUpReply=true — an assistant reply
- *   message appears after this explore block in display order.
- * - Collapse (manual): user can collapse at any time.
+ * - Streaming: auto-scrolls to bottom while expanded.
+ * - Open (auto): a PENDING TOOL AUTHORIZATION opens the block — a control
+ *   hidden behind a fold is not answerable (ADR-106 D8, same rule the
+ *   execution block follows for an unanswered card). When the decision
+ *   lands, the block folds itself again: the question is settled and the
+ *   answer bubble is what the reader wants back.
+ * - Open (manual): the reader may open it at any time; the fold stays open
+ *   until they close it (or an authorization opens it and later closes it).
  */
 export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreaming, pendingApproval, currentSessionId, onApprove, hasFollowUpReply, onCancelTool, toolProgress, isThinking, thinkingContent, thinkingStartTime, isLive }: ExploreBlockProps) {
   const { t } = useTranslation();
-  // Start collapsed only if this block already has a follow-up reply (historical/loaded).
-  // For new active blocks, always start expanded — collapses ONLY when
-  // an assistant reply appears after it.
-  const [expanded, setExpanded] = useState(!hasFollowUpReply);
+  // Folded by default. `hasFollowUpReply` no longer decides the resting
+  // shape — the reader opens the block when they want the detail.
+  const [expanded, setExpanded] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
-  const manuallyCollapsed = useRef(false);
 
   // Auto-scroll to bottom when expanded and new items arrive
   useEffect(() => {
@@ -288,8 +294,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   const stepCount = pairedItems.length;
 
   // Count tool_calls that have NOT yet been paired with a tool_result.
-  // Derived once here so both `hasPendingTools` (drives isExploring /
-  // auto-expand) and the collapsed-header "M running" badge can share
+  // Derived once here so the collapsed-header "M running" badge can read
   // the same source of truth instead of recomputing over `pairedItems`
   // a second time.
   const pendingToolsCount = pairedItems.filter(
@@ -298,8 +303,6 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
 
   // Still have tool_calls without results
   const hasPendingTools = pendingToolsCount > 0;
-
-  const isExploring = isStreaming || hasPendingTools;
 
   // Live ThinkBlock: shown only when (a) the agent is actively thinking,
   // AND (b) the live thought is NOT already folded into this block's
@@ -320,49 +323,85 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   // the live ThinkBlock rendered as a duplicate of PairedExploreItem.
   const liveThoughtNotYetLoaded = !!isThinking && !isLive;
 
-  // Auto-expand when exploring starts (respect user manual collapse),
-  // but only if no follow-up reply has appeared (once collapsed by reply, stay collapsed)
-  useEffect(() => {
-    if (isExploring && !hasFollowUpReply && !manuallyCollapsed.current) {
-      setExpanded(true);
-    }
-  }, [isExploring, hasFollowUpReply]);
-
-  // Auto-collapse when agent response appears after this explore block.
-  // This is the ONLY auto-collapse condition — tools finishing alone does NOT collapse.
-  useEffect(() => {
-    if (hasFollowUpReply) {
-      setExpanded(false);
-      manuallyCollapsed.current = false;
-    }
-  }, [hasFollowUpReply]);
-
-  // Check if this block has any pending shell approval for current session
-  const hasPendingApproval = pendingApproval && Object.values(pendingApproval).some(
-    (ev) => {
-      const sessionMatch = approvalMatchesSession(ev, currentSessionId);
+  // The pending authorizations THIS block owns — the ones whose tool_call
+  // row sits in `items[]` and whose session is the current one.  Computed
+  // as a key SET rather than a boolean: two tools can be awaiting a
+  // decision at once, and the block must stay open until the LAST of them
+  // is answered.
+  const pendingApprovalKeys = useMemo(() => {
+    if (!pendingApproval) return [] as string[];
+    const keys: string[] = [];
+    for (const ev of Object.values(pendingApproval)) {
+      if (!approvalMatchesSession(ev, currentSessionId)) continue;
       const toolMatch = items.some(
         (m) => m.type === "tool_call" && m.toolCallId === ev.tool_call_id && !items.some(
           (r) => r.type === "tool_result" && r.toolName === m.toolName
         )
       );
-      return sessionMatch && toolMatch;
+      if (toolMatch) keys.push(ev.tool_call_id || ev.request_id);
     }
-  );
+    return keys;
+  }, [pendingApproval, currentSessionId, items]);
 
-  // Auto-expand when pending approval — always, even if user collapsed
+  const hasPendingApproval = pendingApprovalKeys.length > 0;
+
+  // The ONE condition that opens the block on its own: a pending tool
+  // authorization.  A control hidden behind a fold is not answerable
+  // (ADR-106 D8 — the same rule the execution block follows for a round
+  // parked on an unanswered card).
+  //
+  // `openedByApproval` remembers that THIS open was the authorization's
+  // doing, not the reader's: when the decision lands the block folds
+  // itself again.  A block the reader opened by hand stays open — the
+  // reader's choice to read the work survives the round that triggered it.
+  const openedByApproval = useRef(false);
+
+  // The pending set, as a stable string: the effect below reacts to the
+  // SET changing (not to the boolean flipping), so two authorizations
+  // arriving one after the other open the block once, and the block closes
+  // only when the last one is answered.  The count is part of the key so an
+  // empty set is distinguishable from a set of empty keys.
+  const pendingKey = `${pendingApprovalKeys.length}:${pendingApprovalKeys.join(",")}`;
+
   useEffect(() => {
     if (hasPendingApproval) {
       setExpanded(true);
-      manuallyCollapsed.current = false;
+      openedByApproval.current = true;
       // Auto-scroll to bottom so the approval button is visible
       setTimeout(() => {
         if (contentRef.current) {
           contentRef.current.scrollTop = contentRef.current.scrollHeight;
         }
       }, 0);
+    } else if (openedByApproval.current) {
+      // Every decision landed (allow / deny / timeout): the questions are
+      // settled, so the block returns to its resting folded shape.
+      setExpanded(false);
+      openedByApproval.current = false;
     }
-  }, [hasPendingApproval]);
+    // The effect reacts to the pending SET, not to its identity: a new
+    // `pendingApproval` object with the same authorizations is not a change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pendingKey]);
+
+  // The decision itself folds the block.  The store round-trip that clears
+  // `pendingApproval` is asynchronous, so folding here makes the block
+  // react to the CLICK rather than to the echo — the reader asked a
+  // question, answered it, and the fold is gone before the answer is.
+  // With another authorization still pending, the block stays open: it
+  // still owes the reader an answerable control.
+  const handleApprove = useCallback(
+    (action: "allow" | "deny", approval: ToolApprovalNeededEvent) => {
+      onApprove?.(action, approval);
+      const answeredKey = approval.tool_call_id || approval.request_id;
+      const stillPending = pendingApprovalKeys.some((k) => k !== answeredKey);
+      if (!stillPending) {
+        setExpanded(false);
+        openedByApproval.current = false;
+      }
+    },
+    [onApprove, pendingApprovalKeys],
+  );
 
   return (
     <div className="max-w-[var(--content-max-width)]">
@@ -371,13 +410,15 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
         onClick={() => {
           const next = !expanded;
           setExpanded(next);
-          // Track manual collapse during exploring; reset on manual expand
-          if (!next && isExploring) {
-            manuallyCollapsed.current = true;
-          } else if (next) {
-            manuallyCollapsed.current = false;
+          // A manual toggle takes the block back from the authorization:
+          // if the reader closes it by hand, the pending decision must not
+          // re-open it behind their back — and if they open it by hand,
+          // the block stays open when the decision lands.
+          if (!next) {
+            openedByApproval.current = false;
           }
         }}
+        aria-expanded={expanded}
         className="flex w-fit items-center gap-2 rounded-md bg-zinc-100/60 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-zinc-200 dark:bg-zinc-800/30  dark:hover:bg-zinc-700"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
@@ -420,7 +461,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
         >
           <div className="flex flex-col gap-0.5">
             {pairedItems.map((paired, idx) => (
-              <PairedExploreItem key={idx} item={paired} isStreaming={isStreaming} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={onApprove} onCancelTool={onCancelTool} toolProgress={toolProgress} />
+              <PairedExploreItem key={idx} item={paired} isStreaming={isStreaming} pendingApproval={pendingApproval} currentSessionId={currentSessionId} onApprove={handleApprove} onCancelTool={onCancelTool} toolProgress={toolProgress} />
             ))}
             {/* Live thought anchored at the BOTTOM (after paired items).
                 Rationale:  the live thought is the freshest item currently

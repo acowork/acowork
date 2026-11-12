@@ -1988,7 +1988,9 @@
     "review": {
       "createdByLabel": "作成者",
       "approve": "承認",
-      "reject": "却下"
+      "reject": "却下",
+      "openExec": "実行を表示",
+      "execNotFound": "このタスクの実行セッションが見つかりません"
     },
     "reject": {
       "title": "タスクを却下",

@@ -2388,7 +2388,9 @@
     "review": {
       "createdByLabel": "创建者",
       "approve": "批准",
-      "reject": "拒绝"
+      "reject": "拒绝",
+      "openExec": "查看执行",
+      "execNotFound": "未找到该任务的执行会话"
     },
     "reject": {
       "title": "拒绝任务",

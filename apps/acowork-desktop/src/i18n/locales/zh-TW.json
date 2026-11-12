@@ -1979,7 +1979,9 @@
     "review": {
       "createdByLabel": "建立者",
       "approve": "核准",
-      "reject": "拒絕"
+      "reject": "拒絕",
+      "openExec": "查看執行",
+      "execNotFound": "找不到此任務的執行工作階段"
     },
     "reject": {
       "title": "拒絕任務",
