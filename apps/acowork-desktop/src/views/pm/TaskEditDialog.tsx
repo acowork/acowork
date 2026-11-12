@@ -436,14 +436,14 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
               对话框里唯一能毁掉这一行的动作，所以它留在最远的一角。 */}
           <footer className="flex shrink-0 items-center gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
             {hasRow && (
-              // Same destructive treatment as the memory panel's Delete Node
-              // (MemoryNodeDetail.tsx): bordered, tinted, iconed. A bare red
-              // text link next to two solid buttons reads as a third neutral
-              // action, which is the wrong thing to be next to 保存.
+              // Solid red + white text, the same weight as the review strip's
+              // 拒绝 on a task card. The footer's other two buttons are a
+              // neutral 取消 and the accent 保存, so 删除 must not read as a
+              // third equal-weight action: a tinted outline did exactly that.
               <button
                 type="button"
                 onClick={() => setConfirmDelete(true)}
-                className="inline-flex items-center justify-center gap-1 rounded-md border border-red-200 bg-red-50 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400 dark:hover:bg-red-900"
+                className="inline-flex items-center justify-center gap-1 rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 dark:bg-red-700 dark:hover:bg-red-600"
               >
                 <Trash2 className="h-3 w-3" aria-hidden />
                 {t("pm.task.delete")}
