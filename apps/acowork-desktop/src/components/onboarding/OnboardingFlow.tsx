@@ -14,6 +14,10 @@ import type { GatewayMode, ProviderListEntry, VaultKeyEntry, BootstrapStateView,
 import { RadioGroup } from "../common/RadioGroup";
 import { StyledInput } from "../common/StyledInput";
 import { ErrorBox } from "../common/ErrorBox";
+import { NoNodeBanner } from "../nodes/NoNodeBanner";
+import { useNodeTopologyRefresh } from "../nodes/useNodeTopologyRefresh";
+import { usableNodesOf, noNodeDetailOf, noNodeDetailKey } from "../nodes/nodeAvailability";
+import { useToast } from "../common/ToastProvider";
 import { Dropdown } from "../common/Dropdown";
 import { ProviderLogo } from "../common/ProviderLogo";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -731,6 +735,66 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
   }
 
   const [ops, setOps] = useState<Record<string, InstallOp>>({});
+  // ADR-113: the install target comes from protocol state, never from a
+  // Gateway-mode default. Both this step and the Agent library dialog use
+  // the same `usableNodesOf` predicate and the same empty-state banner.
+  const nodes = useAgentStore((st) => st.nodes);
+  const [startingNode, setStartingNode] = useState(false);
+  const { addToast } = useToast();
+  const usableNodes = useMemo(() => usableNodesOf(nodes), [nodes]);
+  const noAvailableNode = usableNodes.length === 0;
+  // The node shown to the user must be the one the click targets. Pin it so
+  // a topology refresh between render and submit cannot silently move the
+  // install to a different machine.
+  const displayedNodeId = usableNodes[0]?.node_id ?? null;
+  const noNodeDetail = useMemo(() => {
+    const key = noNodeDetailKey(noNodeDetailOf(nodes));
+    return key ? t(key) : null;
+  }, [nodes, t]);
+
+  // ADR-113 D6: shared replayable topology subscription. Onboarding runs
+  // before the main layout is mounted, so it owns this while it is visible.
+  useNodeTopologyRefresh(true);
+
+  const startLocalNode = useCallback(async () => {
+    if (startingNode) return;
+    setStartingNode(true);
+    try {
+      const res = await invoke<{ already_running?: boolean }>("create_local_node");
+      addToast({
+        type: "info",
+        message: res.already_running
+          ? t("agentHub.startLocalNodeAlreadyRunning")
+          : t("agentHub.startLocalNodeStarted"),
+      });
+      void useAgentStore.getState().fetchNodes().catch((e) => {
+        log.warn("[onboarding] node list refresh failed:", e);
+      });
+    } catch (e) {
+      addToast({
+        type: "error",
+        message: t("agentHub.startLocalNodeFailed", { error: String(e) }),
+      });
+    } finally {
+      setStartingNode(false);
+    }
+  }, [addToast, startingNode, t]);
+
+  /** Resolve an explicit node_id right before submitting. Never infers a
+   *  default; if the topology changed under us, briefly re-read it. */
+  const resolveTargetNode = useCallback(async (): Promise<string> => {
+    const deadline = Date.now() + 8_000;
+    while (Date.now() < deadline) {
+      const candidates = usableNodesOf(useAgentStore.getState().nodes);
+      const target = candidates.find((n) => n.node_id === displayedNodeId) ?? candidates[0];
+      if (target) return target.node_id;
+      await sleep(400);
+      await useAgentStore.getState().fetchNodes().catch((e) => {
+        log.warn("[onboarding] node list refresh failed while resolving target:", e);
+      });
+    }
+    throw new Error(t("agentHub.noAvailableNode"));
+  }, [displayedNodeId, t]);
 
   const updateOp = (resourceName: string, patch: Partial<InstallOp>) => {
     setOps((prev) => ({
@@ -803,13 +867,17 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       // 1) Wait for bootstrap READY — installs are rejected with the
       // structured `dependency_not_ready` code before that.
       await waitBootstrapReady();
-      // 2) Submit install operations with bounded concurrency (3 in
+      // 2) ADR-113: name the target explicitly. The Gateway never
+      // infers a landing node from deployment state.
+      const nodeId = await resolveTargetNode();
+      // 3) Submit install operations with bounded concurrency (3 in
       // flight). Each ack carries an operation_id; completion is
       // correlated by polling the Gateway inventory for the agent id.
       await runBounded(items, 3, async (op) => {
         try {
           const ack = await invoke<OperationAck>("install_bundled_agent", {
             resourceName: op.resourceName,
+            nodeId,
             devMode: true,
           });
           updateOp(op.resourceName, {
@@ -863,7 +931,8 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
         // Wait for bootstrap READY first: the Gateway rejects installs
         // with `dependency_not_ready` until its subsystems are up.
         await waitBootstrapReady();
-        await invoke("install_agent", { packagePath: selected });
+        const nodeId = await resolveTargetNode();
+        await invoke("install_agent", { packagePath: selected, nodeId });
         // Refresh the agent list so the backfill runs for the new agent.
         await useAgentStore.getState().fetchAgents();
         setInstalling(null);
@@ -875,6 +944,9 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
   };
 
   const completedCount = Object.values(ops).filter((op) => op.state === "completed").length;
+  // `installing` is "" (not null) while the recommended batch is in flight.
+  // Every busy check must test against null, never the string's truthiness.
+  const installInFlight = installing !== null;
   const totalCount = Object.keys(ops).length;
 
   return (
@@ -883,6 +955,20 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.installAgent.subtitle")}</p>
 
       <div className="mt-4 space-y-3">
+        {noAvailableNode && (
+          <NoNodeBanner
+            starting={startingNode}
+            onStart={() => void startLocalNode()}
+            detail={noNodeDetail}
+          />
+        )}
+        {!noAvailableNode && (
+          <p className="text-10 text-text-tertiary">
+            {t("onboarding.installAgent.targetNode", {
+              node: usableNodes[0].node_name ?? usableNodes[0].hostname ?? usableNodes[0].node_id,
+            })}
+          </p>
+        )}
         {/* Bootstrap readiness status (ADR-059 §5.2) */}
         {installing !== null && bootstrap && bootstrap.phase !== "READY" && bootstrap.phase !== "DEGRADED" && (
           <p className="text-xs text-text-tertiary">
@@ -915,7 +1001,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
                     type="checkbox"
                     checked={selectedAgents.includes(agent.resourceName)}
                     onChange={() => toggleRecommendedAgent(agent.resourceName)}
-                    disabled={!!installing}
+                    disabled={installInFlight}
                     className="mt-0.5 h-4 w-4 rounded border-zinc-300"
                   />
                   <span className="flex-1">
@@ -941,14 +1027,11 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           </div>
           <button
             onClick={handleInstallRecommended}
-            // `installing` is set to "" while the recommended-install run
-            // is in flight ("" = busy, not a specific file), so `!!installing`
-            // is false there and the button would stay clickable — a
-            // double-click re-submits the whole batch. Test against null.
-            disabled={installing !== null || selectedAgents.length === 0}
+            disabled={installInFlight || selectedAgents.length === 0 || noAvailableNode}
+            title={noAvailableNode ? t("agentHub.noAvailableNode") : undefined}
             className="mt-3 w-full rounded btn-solid py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
           >
-            {installing
+            {installInFlight
               ? totalCount > 0 && completedCount > 0
                 ? t("onboarding.installAgent.installProgress", { done: completedCount, total: totalCount })
                 : t("onboarding.installAgent.waitingReady")
@@ -958,14 +1041,15 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
 
         <button
           onClick={handleInstallFromFile}
-          disabled={!!installing}
+          disabled={installInFlight || noAvailableNode}
+          title={noAvailableNode ? t("agentHub.noAvailableNode") : undefined}
           className="w-full rounded-md border border-zinc-200 p-3 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
         >
           <span className="text-11 font-medium">{t("onboarding.installAgent.fromFileTitle")}</span>
           <p className="mt-0.5 text-10 text-text-tertiary">{t("onboarding.installAgent.fromFileSubtitle")}</p>
         </button>
 
-        {installing && !bootstrap && (
+        {installInFlight && !bootstrap && (
           <p className="text-xs text-text-tertiary">{t("onboarding.installAgent.waitingReady")}</p>
         )}
         {installError && (

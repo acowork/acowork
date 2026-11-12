@@ -58,7 +58,9 @@ Gateway 默认 `--daemon` 启动会按 ADR-055 §6.11 自动 spawn 一个 Node A
 
 优先级：CLI > env > TOML > default。
 
-> 500ms reuse window（`gateway/node_manager.rs`）保留——如果外部已经启动了一个同名（机器名）Node，Gateway 会优先复用而不 spawn；该行为与 flag 无关，是分布式拓扑的逃生通道。Gateway spawn 的子进程带内部标记 `--gateway-managed`（仅用于孤儿清理识别自身子进程），因此即使名字一样，也绝不会误杀用户手动起的 Node。
+> 500ms reuse window（`gateway/node_manager.rs`）保留——如果 Gateway 已经能从 `GET /api/nodes` 的协议状态里解析出「本机在线节点」（`local_node_id()`：`local_node.json` anchor 仍在线，否则 `online` + `hostname` 匹配），就优先复用而不 spawn；该行为与启动者无关，是分布式拓扑的逃生通道。Gateway spawn 的子进程带内部标记 `--spawn-marker`（ADR-113；仅用于本机进程表孤儿清理识别自身子进程，不写入 `identity.json`、不上报 `NodeInfo`、不参与任何协议判定），因此即使名字一样，也绝不会误杀用户手动起的 Node。升级兼容：`cleanup_orphaned_local_nodes()` 同时匹配旧版 `--gateway-managed` 字符串。
+>
+> **注意**：`local_node_id()` 是 Gateway 本地部署判断（loopback 下载优化 / claim 范围），**不是 install 默认落点**。所有 install / ensure 请求必须显式带 `node_id`；Gateway 不再推断本机节点，详见 [ADR-113](../adr/zh/ADR-113-protocol-self-consistency-explicit-node-target.md)。
 
 > 旧版本「靠 binary 不存在来隐式 disable」已经被删除。如果 `acowork-node.exe` 不在同级目录，**会报错**而不是悄悄跳过——这是有意为之，build 问题不该被静默吞掉。
 

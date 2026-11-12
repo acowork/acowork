@@ -533,6 +533,27 @@ Parking occupies the chat's drain task (the per-chat serial invariant already ru
 
 **Observability.** The decision log gains the optional columns `confirm_wait_ms` (how long the turn parked) and `confirm_result` (`continue` / `new_task` / `timeout`); an `act` value of `exec_session_route_confirm:S_x` means this turn wrote a card.
 
+## Amendment (2026-11-11, the execution surface's explore block starts shut): the thinking and tool list are folded by default, open only for a tool authorization, and fold again once the decision lands
+
+**Motivation.** The 2026-11-10 amendment folded the block and its rounds on the CHAT surface, on the grounds that "the transcript reads as a conversation, not as an execution log". The execution surface's `ExploreBlock` (the `explore_group` block of the Desktop `ChatPanel`, aggregating thinking + tool_call + tool_result) has the same defect: it used to start expanded, so a long run took over the screen and the reader had to climb past the thinking and the tool list to reach what the agent actually said. The folded header already says it all — "Exploring... (N steps)" and "N running" — so what gets folded away is exactly the detail the reader did not ask for.
+
+**Decision 1: `ExploreBlock` starts folded.** `useState(!hasFollowUpReply)` becomes `useState(false)`; `hasFollowUpReply` no longer decides the resting shape. Two pieces of the state machine retire with it: (1) "expand as soon as exploration starts" (driven by `isExploring`), and (2) "collapse as soon as a reply follows" (driven by `hasFollowUpReply`). The first existed to "keep the newest work on screen"; the second was its patch — they retire together, because one click now reaches the same information. The `isStreaming` / `hasFollowUpReply` / `manuallyCollapsed` signals leave with them.
+
+**Decision 2: a pending tool authorization opens the block, and the block folds itself once the decision lands.** The one automatic open condition is a **pending tool authorization** (ADR-106 D8: a control hidden behind a fold is not answerable — the same rule the block follows for an unanswered card). When the decision lands the block folds itself again: an authorization is a question, and once it is asked the block returns to its resting shape — otherwise the transcript keeps a permanently open tool list.
+
+The implementation has two layers, and it needs both:
+
+- **the click closes it**: the `onApprove` callback folds the block immediately. The store round-trip that clears `pendingApproval` is asynchronous, so waiting for it makes the fold land a beat after the click — the reader has answered, and the tool list is still on screen.
+- **the echo closes it**: the block folds when `pendingApproval` goes empty, which covers every path that is not a click (timeout, deny, an answer delivered server-side).
+
+With two authorizations outstanding the decision is made on the **set**, not on a boolean: answering one of them must not hide the other's button, and the block folds only when the last decision lands. `openedByApproval` records that "this open was the authorization's doing, not the reader's" — a block the reader closed by hand is never re-opened behind their back by a pending decision.
+
+**Decision 3: a block the reader opened by hand is not closed by the authorization's answer.** The landing of a decision closes only the open the authorization itself caused; a block the reader opened stays open until the reader closes it. Ownership of the open belongs to the reader, and the arrival of an answer must not fold a panel they are still reading.
+
+**Incidental.** The `explore_group` branch of `blockHeightEstimator.ts` goes back to `EXPLORE_HEADER_HEIGHT` (a folded block is one header). The expanded height gets no second branch — `measureElement` and the `ResizeObserver` write the true height back into `measuredHeightsByBlockId` as soon as the block is in view, and the next estimate consults that cache first. The estimate only has to be right about the **resting** shape; estimating the expanded shape (32 + 4 + 144) would reserve 148px of blank space under every folded block.
+
+**Scope.** Presentation layer only, on the Desktop execution surface (`ChatPanel` → `VirtualMessageList` → `ExploreBlock`). The data model, the read path and the backend are unchanged. Mobile's `ExploreBlock` was already folded by default and is left alone.
+
 ## References
 
 - [ADR-097](./ADR-097-in-conversation-history-search-disposable-index.md) — the complete disposable side-table pattern: write-time incrementals, warn-only failures, watermark/first-touch rebuild, the Windows handle ordering contract. Decision 5 adopts it clause by clause.

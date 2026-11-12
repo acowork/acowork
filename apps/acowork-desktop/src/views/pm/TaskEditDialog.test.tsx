@@ -388,9 +388,22 @@ describe("the box is three zones — identity, fields, commit", () => {
     const labels = Array.from(footer!.querySelectorAll("button")).map((b) =>
       (b.textContent ?? "").trim(),
     );
-    expect(labels).toEqual(["pm.task.delete", "common.cancel", "pm.task.save"]);
-    // 一块 flex-1 撑开中间：危险动作与提交路径不相邻
+    expect(labels).toEqual([
+      "pm.task.delete",
+      "pm.review.openExec",
+      "common.cancel",
+      "pm.task.save",
+    ]);
+    // 一块 flex-1 撑开中间：危险动作 / 查看执行 与提交路径不相邻
     expect(footer!.querySelector(".flex-1")).toBeTruthy();
+  });
+
+  it("view-run is absent when the row never ran", () => {
+    // pending = 还没开工，背后没有执行 session；摆一颗点了只会报"未找到"的
+    // 按钮就是把失败做成入口。判断与看板卡片共用 `canViewExecSession`。
+    mocks.detail = row({ status: "pending" });
+    render(<TaskEditDialog onClose={() => {}} />);
+    expect(screen.queryByRole("button", { name: /pm\.review\.openExec/ })).toBeNull();
   });
 
   it("the header carries only the identity — title and close", () => {
@@ -667,18 +680,19 @@ describe("where saving and deleting land", () => {
     expect(mocks.removeTask).not.toHaveBeenCalled();
   });
 
-  it("delete is the bordered destructive button in the footer, not a bare link", () => {
-    // 它紧挨着 取消 / 保存，所以要比一块安静的红字更"有分量"：带边框、带底色的
-    // 破坏性按钮（和 memory 面板的 Delete Node 同一套）。裸红字会被读成第三个
-    // 中性动作，那是最糟的误读。
+  it("delete is a solid red button with white text, not an outline", () => {
+    // 它紧挨着 取消 / 保存，所以必须靠"重量"而不是颜色微差来区分：纯色红底 +
+    // 白字（与任务卡审核条的 拒绝 同一档）。描边+浅底会被读成第三个同等重量
+    // 的中性动作，那是最糟的误读。
     render(<TaskEditDialog onClose={() => {}} />);
     const button = deleteButton();
     expect(button.tagName).toBe("BUTTON");
     expect(button.textContent).toContain("pm.task.delete");
     const tokens = button.className.split(/\s+/);
-    expect(tokens).toContain("border-red-200");
-    expect(tokens).toContain("bg-red-50");
-    expect(tokens).toContain("text-red-700");
+    expect(tokens).toContain("bg-red-600");
+    expect(tokens).toContain("text-white");
+    expect(tokens).not.toContain("border-red-200");
+    expect(tokens).not.toContain("bg-red-50");
     // 位置：底栏最左，且与 保存 之间隔着那块 flex-1
     const footer = screen.getByRole("dialog").querySelector("footer") as HTMLElement;
     expect(footer.contains(button)).toBe(true);

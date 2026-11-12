@@ -30,6 +30,8 @@ import { useState } from "react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
+import { canViewExecSession, openTaskExecSession } from "../../lib/pmTaskExecSession";
+import { showToast } from "../../components/common/ToastProvider";
 import { useTranslation } from "../../i18n/useTranslation";
 import { PriorityBadge } from "./PriorityBadge";
 import { TaskTypeIcon } from "./TaskTypeIcon";
@@ -52,6 +54,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
   const healthy = usePmHealthStore((s) => s.healthy);
   const childCount = usePmBoardStore((s) => s.childrenOf(task.id).length);
   const [rejecting, setRejecting] = useState(false);
+  const [openingExec, setOpeningExec] = useState(false);
 
   // 离线（healthy === false）时禁用拖拽源 —— 看板只读
   const draggableDisabled = healthy === false;
@@ -92,6 +95,27 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
   const handleReject = async (reason?: string) => {
     setRejecting(false);
     await usePmBoardStore.getState().reviewTask(task.id, false, reason);
+  };
+
+  // 审核一条任务时，"它到底干了什么"在它自己的执行 session 里。跳过去而不是
+  // 把过程搬上卡片：转录是执行面的职责（ADR-106 D3 只搬坐标）。
+  const handleOpenExec = async () => {
+    if (openingExec) return;
+    setOpeningExec(true);
+    try {
+      const result = await openTaskExecSession(task.project_id, task.id);
+      if (result === "gone") {
+        showToast({ type: "info", message: t("chatView.execSessionGone") });
+      } else if (result === "not_found") {
+        showToast({ type: "info", message: t("pm.review.execNotFound") });
+      }
+    } catch {
+      // 网络 / 服务失败与"没有执行会话"给同一句提示：对点按钮的人而言都是
+      // "现在看不到过程"，区别只在日志里。
+      showToast({ type: "error", message: t("pm.review.execNotFound") });
+    } finally {
+      setOpeningExec(false);
+    }
   };
 
   return (
@@ -179,6 +203,26 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
               <span aria-hidden>⊞</span>
               {childCount}
             </span>
+          )}
+
+          {/* 「查看执行」住在正文元信息行里，因为它是一条**信息**的入口，不是
+              裁决：审核条带上那两颗实心按钮决定任务去哪，这颗只回答"它到底
+              干了什么"。三态都出（进行中 / 待审核 / 已完成）—— 这三种状态
+              背后都有一个或多个执行 session；pending / rejected / cancelled
+              上没有可看的东西，就不摆一颗点了会报"未找到"的按钮。 */}
+          {canViewExecSession(task.status) && (
+            <button
+              type="button"
+              disabled={draggableDisabled || openingExec}
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleOpenExec();
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-10 font-medium text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-zinc-700"
+            >
+              ▶ {t("pm.review.openExec")}
+            </button>
           )}
         </div>
 

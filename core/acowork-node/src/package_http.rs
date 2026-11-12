@@ -626,7 +626,6 @@ mod tests {
         NodeIdentity {
             node_id: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
             node_name: "node-1".to_string(),
-            gateway_managed: false,
             node_token: token.map(str::to_string),
             gateway_addr: None,
             enrollment: EnrollmentState::Enrolled,

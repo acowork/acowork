@@ -302,7 +302,6 @@ mod tests {
             tempfile::tempdir().unwrap().path(),
             Some("gpu-server"),
             Some("192.168.1.10:19876"),
-            false,
         )
         .unwrap();
         identity.gateway_addr = Some("192.168.1.10:19876".to_string());

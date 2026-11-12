@@ -691,32 +691,17 @@ pub(crate) async fn resolve_agent_identity(
     Ok((inst, aid))
 }
 
-/// Resolve the Gateway's own-machine node id from the NodeRegistry
-/// (ADR-075 D5/D6) and fail LOUD when it cannot be resolved.
+/// Resolve the node hosting an agent instance from the protocol-owned
+/// inventory (ADR-055 §6.5).
 ///
-/// The `"local"` anchor is a state placeholder for Gateway-direct agents
-/// (ADR-075 D6) — it is NOT a routable MQTT topic (no Node subscribes to
-/// `acowork/nodes/local/...`), so a dispatch path must never fall back to
-/// it: the command would be published into a topic nobody subscribes to
-/// (command timeout + Desktop retry loop). ADR-075 Q2: "install 等默认
-/// 落点不得静默落到任一远程节点".
-pub(crate) async fn resolve_local_node_id(state: &AppState) -> Result<String, ApiError> {
-    let resolved = match state.node_registry.as_ref() {
-        Some(reg) => crate::mqtt::node_registry::local_node_id(reg).await,
-        None => None,
-    };
-    resolved.ok_or_else(|| {
-        ApiError::conflict(
-            "the Gateway's own-machine node is not online — cannot resolve the local node id \
-             (no `gateway_managed` node in the node registry); retry once GET /api/bootstrap \
-             reports READY, or pass an explicit node_id",
-        )
-    })
-}
-
-/// Resolve the node hosting an agent instance: the install/running record
-/// first (ADR-055 §6.5), else the Gateway's own-machine node. Fails loud
-/// when neither can be resolved — see [`resolve_local_node_id`].
+/// ADR-113: there is deliberately NO "fall back to the Gateway's own
+/// machine" branch. The caller must name a node; the Gateway never
+/// guesses a target from deployment-specific state. When the inventory
+/// has no record, the operation fails with a bad-request explaining that
+/// the hosting node is unknown. Callers here are lifecycle routes with no
+/// `node_id` parameter; new-instance installs use the explicit multipart
+/// `node_id` instead of this resolver. This keeps the protocol identical
+/// no matter who started the node, in which order, or on which machine.
 pub(crate) async fn resolve_agent_node_id(
     state: &AppState,
     instance_id: &str,
@@ -728,10 +713,16 @@ pub(crate) async fn resolve_agent_node_id(
             .map(|i| i.node_id.clone())
             .or_else(|| gw.running_agents.get(instance_id).map(|r| r.node_id.clone()))
     };
-    if let Some(node_id) = resolved {
-        return Ok(node_id);
-    }
-    resolve_local_node_id(state).await
+    resolved.ok_or_else(|| {
+        // Callers are lifecycle routes (start/stop/uninstall/...) that do
+        // not accept a node_id. Give them the real protocol-level recovery
+        // hint instead of asking for a parameter the route has no slot for.
+        ApiError::bad_request(&format!(
+            "no hosting node recorded for agent instance '{instance_id}' — \
+             the instance is absent from the retained inventory; wait for the \
+             node to publish its installed inventory (or check GET /api/nodes) before retrying"
+        ))
+    })
 }
 
 /// `GET /api/packages/{agent_id}/download` — serve the uploaded `.agent`
@@ -1220,10 +1211,13 @@ struct AgentUploadForm {
 }
 
 /// Read the install/ensure multipart body.
-async fn read_agent_upload(
-    state: &AppState,
-    mut multipart: Multipart,
-) -> Result<AgentUploadForm, ApiError> {
+///
+/// ADR-113: `node_id` is REQUIRED. A missing target is a client error
+/// (400), not a signal for the Gateway to infer a default from its own
+/// machine, hostname, spawn markers or a persisted anchor. The set of
+/// usable nodes is protocol state exposed by `GET /api/nodes`; choosing
+/// one is the caller's job.
+async fn read_agent_upload(mut multipart: Multipart) -> Result<AgentUploadForm, ApiError> {
     let mut package_bytes: Option<Vec<u8>> = None;
     let mut node_id: Option<String> = None;
     // ADR-059 §7.3: optional optimistic-concurrency precondition — the
@@ -1243,7 +1237,7 @@ async fn read_agent_upload(
                 })?;
                 package_bytes = Some(bytes.to_vec());
             }
-            // ADR-055 §3.3: optional target node (defaults to `local`).
+            // ADR-113: explicit target node, always required.
             "node_id" => {
                 let text = field.text().await.unwrap_or_default();
                 if !text.is_empty() {
@@ -1266,15 +1260,18 @@ async fn read_agent_upload(
         return Err(ApiError::bad_request("Package file is empty"));
     }
 
+    let node_id = node_id
+        .filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            ApiError::bad_request(
+                "missing required field: 'node_id' — installs must name an explicit target node; \
+                 query GET /api/nodes for available nodes",
+            )
+        })?;
+
     Ok(AgentUploadForm {
         package_bytes,
-        node_id: match node_id {
-            Some(id) => id,
-            // ADR-075 D5/Q2: no node_id in the form → resolve the local
-            // node's UUID from the registry; loud failure when it is not
-            // online (never the non-routable "local" anchor).
-            None => resolve_local_node_id(state).await?,
-        },
+        node_id,
         expected_version,
     })
 }
@@ -1296,7 +1293,7 @@ fn node_control_client(state: &AppState) -> Result<NodeControlClient, ApiError> 
 /// enroll request before NodeReady (bootstrap order, ADR-059 §7.2), so
 /// `node.{id}` cannot be ready while the node is unknown to the
 /// registry.
-async fn ensure_node_ready(state: &AppState, node_id: &str) -> Result<(), ApiError> {
+pub(crate) async fn ensure_node_ready(state: &AppState, node_id: &str) -> Result<(), ApiError> {
     let Some(registry) = state.bootstrap_registry.as_ref() else {
         // No bootstrap registry (MQTT disabled) — the dispatch path fails
         // later with a clearer error.
@@ -1403,7 +1400,7 @@ pub async fn ensure_agent(
     auth: Option<Extension<AuthContext>>,
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<EnsureAck>), ApiError> {
-    let form = read_agent_upload(&state, multipart).await?;
+    let form = read_agent_upload(multipart).await?;
     let node_id = form.node_id;
 
     // ADR-087 D4: ensure is an install-intent on the target node →
@@ -1490,7 +1487,7 @@ pub async fn install_agent(
     auth: Option<Extension<AuthContext>>,
     multipart: Multipart,
 ) -> Result<(StatusCode, Json<OperationAck>), ApiError> {
-    let form = read_agent_upload(&state, multipart).await?;
+    let form = read_agent_upload(multipart).await?;
     let package_bytes = form.package_bytes;
     let node_id = form.node_id;
     let expected_version = form.expected_version;
@@ -1654,8 +1651,10 @@ async fn publish_to_registry(
         )));
     }
     let registry_path = registry_dir.join(format!("{}.agent", agent_id));
-    // ADR-075 D5: resolve the Gateway's own-machine node from the
-    // registry (loopback dial); None → the "local" anchor (D6).
+    // ADR-113: a Gateway-LOCAL deployment query for the loopback download
+    // optimisation only. `local_node_id()` is decided from protocol-visible
+    // state (online + hostname); it is NOT an install target and never
+    // depends on who spawned the node.
     let local_node_id = match state.node_registry.as_ref() {
         Some(reg) => crate::mqtt::node_registry::local_node_id(reg).await,
         None => None,
@@ -1919,11 +1918,16 @@ pub async fn clone_agent(
 
 /// `POST /api/agents/:id/upgrade` — upgrade an agent to a new package
 ///
-/// Multipart body: `package` (the new .agent file, required) + optional
-/// `node_id` (defaults to the node hosting the agent). The Gateway spools
-/// the package to the registry and dispatches an asynchronous upgrade to
-/// the node (ADR-055 §3.2) — completion is observed via the node's
-/// retained installed inventory with the new version.
+/// Multipart body: `package` (the new .agent file, required) + `node_id`.
+/// ADR-113: upgrade targets an EXISTING instance, so an omitted `node_id`
+/// is resolved from that instance's recorded `node_id` in the protocol
+/// inventory — never from the Gateway's own machine, hostname or a launcher
+/// marker. New installs (`install` / `ensure`) always require an explicit
+/// `node_id`.
+///
+/// The Gateway spools the package to the registry and dispatches an
+/// asynchronous upgrade to the node (ADR-055 §3.2) — completion is observed
+/// via the node's retained installed inventory with the new version.
 pub async fn upgrade_agent(
     State(state): State<AppState>,
     Path(agent_id): Path<String>,

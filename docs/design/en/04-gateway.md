@@ -305,11 +305,12 @@ pub fn http_routes() -> Router<GatewayState> {
     ]
 }
 
-// POST /api/agents/install
-// Request: { "path": "/path/to/weather.agent" }
-// → 200 { "agent_id": "com.example.weather", "version": "1.0.0" }
-// → 400 { "error": "invalid package" }
-// → 409 { "error": "already installed" }
+// POST /api/agents/install — multipart, not JSON (see docs/protocols/en/http.md §9.1)
+// Request: form-data { package: <bytes>, node_id: <explicit target node> }
+//   ADR-113: node_id is REQUIRED; the Gateway infers no local default → 400
+// → 202/200 { "agent_id": "com.example.weather", "version": "1.0.0" }
+// → 400 { "error": "invalid package" / "missing required field: 'node_id'" }
+// → structured dependency_not_ready (target node not yet NodeReady)
 
 // POST /api/agents/{instance_id}/clone
 // Request: { "mode": "skeleton" | "full", "new_agent_id": "com.example.weather",

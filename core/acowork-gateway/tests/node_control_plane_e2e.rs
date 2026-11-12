@@ -62,9 +62,9 @@ const GATE_NODE_PROXY_PORT: u16 = 19902;
 /// parallel with the other tests.
 const RENAME_TEST_PORT: u16 = 18994;
 const RENAME_NODE_ID: &str = "rename-node";
-/// ADR-075 D5: the gateway-managed boot marker runs on an isolated port.
-const GW_MANAGED_TEST_PORT: u16 = 18995;
-const GW_MANAGED_NODE_ID: &str = "gw-managed-node";
+/// ADR-113: spawn-marker neutrality runs on an isolated port.
+const SPAWN_MARKER_TEST_PORT: u16 = 18995;
+const SPAWN_MARKER_NODE_ID: &str = "marked-node";
 
 /// Locate the compiled `acowork-node` binary (workspace target dir).
 fn node_binary() -> Option<std::path::PathBuf> {
@@ -183,6 +183,9 @@ async fn node_binary_speaks_the_control_plane_contract() {
         // inherits the console, so the child would block on the "Username:"
         // prompt and never write identity.json — close stdin to keep the
         // service-style (credential-less) startup the assertions expect.
+        // (This was the exact failure mode the Gateway's own spawn path hit
+        // in production — ADR-113 D10; `spawn_node_child` now applies this
+        // same all-null stdio contract. Do not remove.)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
@@ -1086,27 +1089,26 @@ async fn node_rename_updates_display_name_without_touching_uuid() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
-// ADR-075 D5: the Gateway recognizes its own-machine node by the
-// `gateway_managed` marker — persisted into identity.json at spawn
-// (`--gateway-managed`), carried on every NodeInfo, and queried via the
-// NodeRegistry `local_node_id()` (gateway_managed == true && online).
+// ADR-113 architecture guard: the launch marker is protocol-invisible.
 //
-// Scenario:
-// 1. Real node binary boots with `--gateway-managed`.
-// 2. Assert the marker is persisted in identity.json AND the info topic
-//    carries gateway_managed = true.
-// 3. Feed a real NodeRegistry the same way MQTT dispatch does (status +
-//    info retained topics) and assert `local_node_id()` resolves to this
-//    node's UUID.
+// A real node binary is booted WITH the supervisor's `--spawn-marker`
+// argv hint. The assertions below are identical to what an unmarked,
+// Desktop-spawned, CLI-spawned or remotely-spawned node must satisfy:
+//   * identity.json carries no launcher field;
+//   * NodeInfo carries no launcher field (proto field 12 is retired);
+//   * the registry resolves it as an own-machine node from protocol
+//     state alone (online + hostname).
+// In other words, replacing "who pressed start" cannot change any
+// observable protocol behaviour.
 // ═══════════════════════════════════════════════════════════════════════
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn node_booted_with_gateway_managed_marker_is_visible_to_registry() {
+async fn spawn_marker_does_not_change_node_protocol_behaviour() {
     let Some(bin) = node_binary() else {
         eprintln!("SKIP: acowork-node binary not found — run `cargo build --workspace` first");
         return;
     };
 
-    let broker_handle = acowork_gateway::mqtt::start_broker("127.0.0.1", GW_MANAGED_TEST_PORT)
+    let broker_handle = acowork_gateway::mqtt::start_broker("127.0.0.1", SPAWN_MARKER_TEST_PORT)
         .expect("broker starts");
 
     let home = tempfile::tempdir().unwrap();
@@ -1116,10 +1118,10 @@ async fn node_booted_with_gateway_managed_marker_is_visible_to_registry() {
         .args([
             "start",
             "--gateway",
-            &format!("127.0.0.1:{GW_MANAGED_TEST_PORT}"),
+            &format!("127.0.0.1:{SPAWN_MARKER_TEST_PORT}"),
             "--name",
-            GW_MANAGED_NODE_ID,
-            "--gateway-managed",
+            SPAWN_MARKER_NODE_ID,
+            "--spawn-marker",
             "--home",
         ])
         .arg(&node_home)
@@ -1129,24 +1131,24 @@ async fn node_booted_with_gateway_managed_marker_is_visible_to_registry() {
         .spawn()
         .expect("spawn node");
 
-    let mut collector = Collector::connect(GW_MANAGED_TEST_PORT, "test:gw-managed-e2e", None);
+    let mut collector = Collector::connect(SPAWN_MARKER_TEST_PORT, "test:spawn-marker-e2e", None);
 
     let identity_path = node_home.join("identity.json");
     let node_id = wait_for_identity_node_id(&identity_path, Duration::from_secs(10))
         .await
         .expect("node_id persisted to identity.json");
 
-    // The spawn marker is persisted (ADR-075 D5) — a service/container
-    // restart that drops the flag still leaves a recognized node.
-    let identity = std::fs::read_to_string(&identity_path).expect("identity read");
-    let identity: serde_json::Value = serde_json::from_str(&identity).expect("identity parses");
-    assert_eq!(
-        identity["gateway_managed"].as_bool(),
-        Some(true),
-        "gateway_managed must be persisted into identity.json at spawn"
+    // The marker is consumed by the CLI — it is a process-table hint for
+    // the launcher, never persisted node state.
+    let raw_identity = std::fs::read_to_string(&identity_path).expect("identity read");
+    assert!(
+        !raw_identity.contains("gateway_managed") && !raw_identity.contains("spawn_marker"),
+        "identity.json must not record its launcher: {raw_identity}"
     );
+    let identity: serde_json::Value =
+        serde_json::from_str(&raw_identity).expect("identity parses");
+    assert_eq!(identity["node_id"].as_str(), Some(node_id.as_str()));
 
-    // NodeInfo carries the marker on the wire.
     let status = collector
         .wait_for_topic(&format!("/nodes/{node_id}/status"), Duration::from_secs(10))
         .await
@@ -1159,14 +1161,15 @@ async fn node_booted_with_gateway_managed_marker_is_visible_to_registry() {
         .expect("info topic");
     let info = decode_info(&info_bytes);
     assert_eq!(info.node_id, node_id);
-    assert_eq!(info.node_name, GW_MANAGED_NODE_ID);
+    assert_eq!(info.node_name, SPAWN_MARKER_NODE_ID);
     assert!(
-        info.gateway_managed,
-        "NodeInfo must carry gateway_managed=true for a Gateway-spawned node"
+        !info.hostname.is_empty(),
+        "hostname is the protocol-visible location fact the registry needs"
     );
 
     // Feed the registry exactly like MQTT dispatch does (status + info
-    // retained), then ask local_node_id() — ADR-075 D5 query semantics.
+    // retained). No spawn marker exists in this data path at all — and
+    // resolution still works. That is the whole point of ADR-113.
     let registry = new_shared_registry();
     registry
         .write()
@@ -1181,7 +1184,7 @@ async fn node_booted_with_gateway_managed_marker_is_visible_to_registry() {
     assert_eq!(
         resolved.as_deref(),
         Some(node_id.as_str()),
-        "local_node_id() must resolve the gateway-managed online node to its UUID"
+        "own-machine resolution must not depend on who launched the node"
     );
 
     // Cleanup.

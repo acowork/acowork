@@ -1,5 +1,7 @@
 # ADR-055：Runtime 远程化部署 - Node Agent 拓扑
 
+> **⚠ ADR-113 已取代本文的启动者身份条款（2026-11-12）**：本文 §6.3.4 / §6.11 / §6.12 / §7 验证段及附录中关于 `--gateway-managed`、`gateway_managed=true` 持久化、reuse window 按启动者标记复用的描述均已失效。当前实现：启动者是 launcher 本地事务，不进入 `identity.json` / `NodeInfo` / `NodeRegistry` / `GET /api/nodes`；spawn 标记改名为 `--spawn-marker`，仅供本机进程表孤儿清理；`local_node_id()` 只按 `online` + `hostname` 判定本地部署，**不作为 install 默认落点**；所有 install 必须显式 `node_id`。详见 [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md)。本 ADR 其余拓扑、enrollment、鉴权决策继续有效。
+
 **状态**：已定案（Phase 1–5a 实施完成；Phase 5b 待办）
 **日期**：2026-08-23（2026-08-25 修订：L3 清单补遗 AgentHello 路径 L3-9；L3-6 标注已被 ADR-058 W4 部分修复、Phase 1.3 改为增量任务；Phase 2 拆分为 2a/2b/2c；新增 §6.19 Re-adopt、§6.20 依赖红线与模块结构、§7.1 测试策略；补指令幂等语义、advertise 注入链路、sidecar status topic 归宿、local node 启动时序。2026-08-26 修订：Phase 5a 安全模型实施完成——CONNECT 层动态鉴权、enrollment 协议（§6.2）、node token 存储与 HTTP 通道鉴权落地；§6.8 记录 rumqttd topic-ACL 限制偏差。2026-08-27 修订：§6.8 新增对端 IP 白名单安全兜底（`[security].allowed_node_ips`，HTTP 403 / MQTT TCP pre-filter）；Desktop「本地/远程单一拓扑」语义定稿——本地模式仅表示 Desktop 可能 spawn Gateway，Gateway/Node/Runtime 行为与配置在两种模式完全一致（相关 runbook 同步）。2026-08-28 修订：node 命名统一为机器名 slug——移除保留名 `local`（`LOCAL_NODE_ID` 常量删除，改为共享函数 `local_node_id()`）；Gateway spawn 本机节点不再传 `--name`，改传内部标记 `--gateway-managed`（孤儿清理专用）；§6.11/§6.12 同步。2026-08-29 修订（ADR-075）：node_id 升级为持久化 UUID v4（稳定路由键），新增 node_name（slug、纯展示、可 rename），删除 machine_uid；冲突检测删除，enrollment 幂等化；`local` 恢复为保留字（`LOCAL_NODE_ID` 常量，Gateway 直管 agent 固定字面量）；rename 简化为仅改 node_name。2026-10-10 修订（ADR-091）：§6.7 LSP relay 一行的权威范围扩展——`{node_home}/lsp_servers.json`（preset ∪ custom ∪ install state）由 Node 单一写者持有，relay 只读；`ACOWORK_LSP_CONFIG_DIR` / `ACOWORK_LSP_ASSET_DIR` 双 env 由 supervisor 显式注入；Gateway 新增 `/api/nodes/{id}/lsp-admin/{*tail}` 反代，relay 的 install 路由删除）
 **决策者**：大鱼
@@ -516,8 +518,8 @@ pub struct RunningAgentInfo {
   2. **在线判定窗口**：Gateway 订阅 `acowork/nodes/+/status`（retained）后等待短窗口（默认 500ms）。窗口内收到 `online` 且 `gateway_managed=true` → 复用现有 node（覆盖「Gateway 重启、本机 node 存活」场景）；超时 → 进入 spawn 判定。
   3. **重复 spawn 避让**：spawn 前探测本机 `:19900`（local node 反代端口）。端口被占用且 health 返回本节点身份 → 判定 node 已在运行但 MQTT 未连（broker 刚重启）→ 不重复 spawn，等其重连；端口空闲 → spawn。spawn 失败记录日志并周期重试（60s）。
   4. **崩溃自愈**：Gateway 对 local node 子进程挂 reaper（同 Runtime reaper 模式）；退出后回到上述判定窗口重新 spawn。local node 崩溃不杀其 Runtime 子进程（§8「Node 单点」同一语义），Runtime 由 MQTT 重连框架维持，Node 重启后按 §6.19 re-adopt 收养。
-- **Desktop 与现有 HTTP API 完全无感知**：`/api/agents/install` 不传 node_id 时默认本机节点（Gateway 直管 agent 固定 `"local"`）。
-- 这保证「单机用户零额外步骤」且「Gateway 代码只有一条路径」——不存在 `if remote { ... } else { ... }` 的协议分叉，只有 `node_id` 路由参数化。
+- ~~**Desktop 与现有 HTTP API 完全无感知**：`/api/agents/install` 不传 node_id 时默认本机节点（Gateway 直管 agent 固定 `"local"`）。~~ ~~**已由 ADR-113 废除**：这一「不传就默认本机」正是协议不自洽的根源。现在所有 install / ensure 必须显式 `node_id`，Desktop 从 `GET /api/nodes` 选可用节点；没有可用节点时提示空状态并给出「启动本机 Node / 远程启动引导」两条恢复路径。~~
+- 这保证「单机用户零额外步骤」且「Gateway 代码只有一条路径」——不存在 `if remote { ... } else { ... }` 的协议分叉，只有 `node_id` 路由参数化。（ADR-113：该目标现在由「必要的显式 `node_id` + 协议内可用节点列表」实现，而不是由默认落点推断实现。）
 - **关闭自动 spawn 的出口**（多节点 / 容器 / 单步调试场景）：
   - CLI flag `--no-spawn-local-node`
   - 环境变量 `ACOWORK_GATEWAY_NO_SPAWN_LOCAL_NODE=1`

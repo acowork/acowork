@@ -355,7 +355,7 @@ class Gateway:
         log("INFO", f"Starting Gateway (http :{self.http_port}, mqtt :{self.mqtt_port}, "
                     f"auth={self.auth_enabled}): {self.bin}")
         # ACOWORK_NODE_HOME: the Gateway spawns its local node agent
-        # (`--gateway-managed`, no explicit --name) WITHOUT --home, so the
+        # (`--spawn-marker`, no explicit --name) WITHOUT --home, so the
         # node would otherwise
         # use the shared default ~/.acowork/acowork-node. A stale
         # identity.json there (left by an earlier auth-enabled run)
@@ -1865,7 +1865,6 @@ def run_recovery_suite(gw_bin, node_bin, http):
     (node_dir / "identity.json").write_text(json.dumps({
         "node_id": stale_node_id,
         "node_name": "smoke-node",
-        "gateway_managed": True,
         "node_token": stale_token,
         "enrollment": "enrolled",
         "created_at": "2026-08-01T00:00:00Z",

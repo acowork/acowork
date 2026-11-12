@@ -408,6 +408,10 @@ acowork/nodes/{node_id}/
 │                                     #   与 agent status 同构（ADR-055 §6.2）
 ├── info                              # [Retained] protobuf DataEnvelope<NodeInfo>
 │                                     #   节点元数据（hostname、os、arch、runtime_version、能力集）
+├── ready                             # [Retained] protobuf DataEnvelope<NodeReady>
+│                                     #   { node_id, protocol_version }——控制面就绪。
+│                                     #   Gateway 据此把 `node.{id}` 标记为 Ready，
+│                                     #   安装门禁 `ensure_node_ready()` 依赖它。
 ├── enroll                            # [QoS 1] Node → Gateway 注册请求（Phase 5a）
 │                                     #   payload = DataEnvelope<NodeEnroll>
 │                                     #   { node_id, os, arch, node_version,
@@ -422,6 +426,8 @@ acowork/nodes/{node_id}/
 ├── agents/{id}/events                # [QoS 1] Node → Gateway 执行结果上报
 └── lsps                              # [Retained] 节点本地 LSP relay endpoint（替代全局 lsps）
 ```
+
+**状态可重放（ADR-113 D9）**：`status` 与 `ready` 都是**状态**，不是一次性事件。Node 在 ConnAck 时发布，并在连接期间周期性重断言（首次连接后 1s，之后每 5s），直到断开或关闭。这样无论 Gateway 何时完成 SUBSCRIBE、无论 Node 由谁启动，拓扑都会在一个周期内收敛；不会出现「进程在跑但 `GET /api/nodes` 里没有它」。重断言是幂等的：`status=online` 只在 false→true 边沿刷新 `online_since`，`node.{id}` 状态未变时不触发 bootstrap snapshot 版本递增。关闭时发布 `offline` 后停止重断言，不会被排队的 `online` 覆盖。
 
 **Enrollment 语义（Phase 5a）**：
 

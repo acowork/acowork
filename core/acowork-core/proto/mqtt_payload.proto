@@ -1369,11 +1369,14 @@ message NodeInfo {
   /// Display name (slug, renameable, ADR-075 D2) — user-facing only,
   /// NEVER a routing key. Defaults to the hostname slug at first start.
   string node_name = 11;
-  /// True when this node was spawned by the Gateway (`--gateway-managed`)
-  /// and the marker was persisted into identity.json (ADR-075 D5). The
-  /// Gateway uses it to recognize its own-machine node. Authority: this
-  /// field on every online NodeInfo (enroll never carries it).
-  bool gateway_managed = 12;
+  // field 12 retired — ADR-113: `gateway_managed` removed. Who spawned a
+  // node is a process-lifecycle fact of the launcher, not protocol state.
+  // It must never appear on the wire: the same node started by the
+  // Gateway, the Desktop, a CLI, or a remote machine has to be
+  // indistinguishable to every consumer of NodeInfo. The slot is
+  // reserved so an old binary's field 12 can never be reinterpreted.
+  reserved 12;
+  reserved "gateway_managed";
 }
 
 /// Node → Gateway installed-agent inventory entry (ADR-055 §6.5).

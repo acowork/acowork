@@ -29,16 +29,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Loader2, MoreHorizontal, Search, ShieldAlert, X } from "lucide-react";
 import { open as openFilePicker } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { cn } from "../../lib/utils";
+import { log } from "../../lib/logger";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useAgentStore } from "../../stores/agentStore";
-import { useSettingsStore } from "../../stores/settingsStore";
 import { useToast } from "../common/ToastProvider";
 import { useEscapeClose } from "../../hooks/useEscapeClose";
 import { StyledInput } from "../common/StyledInput";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBox } from "../common/ErrorBox";
+import { NoNodeBanner } from "../nodes/NoNodeBanner";
+import { useNodeTopologyRefresh } from "../nodes/useNodeTopologyRefresh";
+import { usableNodesOf, noNodeDetailOf, noNodeDetailKey } from "../nodes/nodeAvailability";
 import { ContextMenu, useContextMenu, type ContextMenuItem } from "../common/ContextMenu";
 import { claimFileDrop, releaseFileDrop } from "../../lib/fileDropClaim";
 import {
@@ -82,13 +86,6 @@ const DROP_OWNER = "agent-library-dialog";
  */
 const LOCAL_INSTALL_KEY = "__local__";
 
-/**
- * The node_id the Gateway inventory anchors its own machine's instances on
- * when no enrolled node resolves (ADR-075 D6). Mirrors `AgentInfo.node_id`
- * in lib/types.ts.
- */
-const LOCAL_NODE_ANCHOR = "local";
-
 interface AgentLibraryDialogProps {
   open: boolean;
   /** Node pre-selected by the entry point (an empty node group). */
@@ -103,7 +100,13 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   const agentsMap = useAgentStore((s) => s.agents);
   const fetchAgents = useAgentStore((s) => s.fetchAgents);
   const selectAgent = useAgentStore((s) => s.selectAgent);
-  const gatewayMode = useSettingsStore((s) => s.gatewayMode);
+
+  // ADR-113 D6: this dialog *decides* whether an install is possible, so it
+  // must read the current protocol state instead of trusting the store's
+  // mount snapshot. On a cold start the Gateway-spawned node can appear
+  // after `AgentList` already fetched an empty list; without this the UI
+  // stays on "No available node" until some unrelated action refreshes it.
+  useNodeTopologyRefresh(open);
 
   // D9 / REQ-021: Local is the default — the first screen must not depend on
   // a network round-trip.
@@ -116,6 +119,10 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   const [baseUrl, setBaseUrl] = useState("");
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [loadingCatalog, setLoadingCatalog] = useState(false);
+
+  // Recovery action for "no usable node". The guide's open/closed state
+  // lives inside the banner so it resets whenever the banner unmounts.
+  const [startingNode, setStartingNode] = useState(false);
 
   const [busy, setBusy] = useState(false);
   // Which action `busy` belongs to. Install is serialized (REQ-014), but the
@@ -179,39 +186,62 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     setInstallingPath(null);
     setConfirmTarget(null);
     setInstallingId(null);
+    setStartingNode(false);
     cardMenuClose();
   }, [open, cardMenuClose]);
 
   // ── Target node (REQ-008 / REQ-009) ───────────────────────────────────
-  const onlineNodes = useMemo(() => nodes.filter((n) => n.online), [nodes]);
+  // ADR-113: "usable" is pure protocol state — online, control plane
+  // ready (NodeReady / bootstrap `node.{id}`), and manageable by this
+  // caller. `control_ready` / `can_manage` are optional so a pre-ADR-113
+  // Gateway still works: absence defers the final gate to the Gateway's
+  // `ensure_node_ready()` + structured retry.
+  const usableNodes = useMemo(() => usableNodesOf(nodes), [nodes]);
+  // Derived straight from the protocol state, not from the pending target
+  // selection — the banner must not flash on the first frame before the
+  // seeding effect below has picked a node.
+  const noAvailableNode = usableNodes.length === 0;
+  const noNodeDetail = useMemo(() => {
+    const key = noNodeDetailKey(noNodeDetailOf(nodes));
+    return key ? t(key) : null;
+  }, [nodes, t]);
 
   // Seed / repair the selection whenever the topology moves: prefer the
-  // entry point's node, then the only online node. `null` is the Gateway's
-  // default node, which is what Local mode has always installed to.
+  // entry point's node, then the first online node. `null` means there is
+  // no target at all — installs are disabled, never sent without a node_id.
   useEffect(() => {
     if (!open) return;
-    if (targetNodeId && onlineNodes.some((n) => n.node_id === targetNodeId)) return;
+    if (targetNodeId && usableNodes.some((n) => n.node_id === targetNodeId)) return;
     const preferred =
-      initialNodeId && onlineNodes.some((n) => n.node_id === initialNodeId)
+      initialNodeId && usableNodes.some((n) => n.node_id === initialNodeId)
         ? initialNodeId
-        : onlineNodes.length > 0
-          ? onlineNodes[0].node_id
+        : usableNodes.length > 0
+          ? usableNodes[0].node_id
           : null;
     setTargetNodeId(preferred);
-  }, [open, onlineNodes, initialNodeId, targetNodeId]);
+  }, [open, usableNodes, initialNodeId, targetNodeId]);
 
-  const targetNode = onlineNodes.find((n) => n.node_id === targetNodeId) ?? null;
+  const targetNode = usableNodes.find((n) => n.node_id === targetNodeId) ?? null;
+  // The selection can briefly name a node that has just become unusable
+  // (topology moved between two refreshes). Read that node from the FULL
+  // protocol list — looking only inside `usableNodes` would make every
+  // refusal branch below unreachable.
+  const selectedNode = nodes.find((n) => n.node_id === targetNodeId) ?? null;
 
-  // Why an install cannot start right now, in the user's words. Remote mode
-  // with nothing online is a different reason from "you cannot manage this
-  // node" and they must not be conflated (REQ-009).
+  // "No usable target" is a protocol state, not a Gateway-mode condition:
+  // an empty node set means the same thing in every topology. The banner
+  // explains that state; `targetBlockReason` carries only per-target
+  // refusals (REQ-009) so the same sentence is never painted twice.
   const targetBlockReason =
-    gatewayMode !== "local" && onlineNodes.length === 0
-      ? t("agentHub.noOnlineNode")
-      : targetNode && targetNode.can_manage === false
-        ? t("agentHub.nodeNotManageable")
+    selectedNode?.can_manage === false
+      ? t("agentHub.nodeNotManageable")
+      : selectedNode?.control_ready === false
+        ? t("agentHub.noNodeDetailNotReady")
         : null;
-  const targetBlocked = targetBlockReason !== null;
+  const targetBlocked = noAvailableNode || !targetNode || targetBlockReason !== null;
+  // Disabled buttons still need a reason on hover. `title` is an attribute,
+  // so it does not duplicate the banner's visible text.
+  const noNodeReason = noAvailableNode ? t("agentHub.noAvailableNode") : null;
 
   // ── Catalog load ──────────────────────────────────────────────────────
   const loadCatalog = useCallback(async (force: boolean) => {
@@ -271,6 +301,42 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     void loadLibrary();
   }, [open, loadLibrary]);
 
+  // ── No-node recovery ─────────────────────────────────────────────────
+  // Both recovery paths are topology-independent. Starting a node here is
+  // a Desktop capability (ADR-087), not a Local-mode feature; the guide
+  // explains how to start one elsewhere. This dialog never waits for the
+  // node to come online and never chains an install after it.
+  const startLocalNode = useCallback(async () => {
+    if (startingNode) return;
+    setStartingNode(true);
+    try {
+      // Idempotent: `already_running` means no spawn happened at all. Its
+      // result says nothing about whether a node has enrolled yet.
+      const res = await invoke<{ already_running?: boolean }>("create_local_node");
+      addToast({
+        type: "info",
+        message: res.already_running
+          ? t("agentHub.startLocalNodeAlreadyRunning")
+          : t("agentHub.startLocalNodeStarted"),
+      });
+      // One immediate reconcile; later topology changes reach the store
+      // through the bootstrap-driven node refetch (AgentList). A refresh
+      // failure is not a start failure — log it, do not block.
+      void useAgentStore.getState().fetchNodes().catch((e) => {
+        log.warn("[agentLibrary] node list refresh failed:", e);
+      });
+    } catch (e) {
+      // Recovering a node is separate from a failed install, so this never
+      // overwrites `actionError`.
+      addToast({
+        type: "error",
+        message: t("agentHub.startLocalNodeFailed", { error: String(e) }),
+      });
+    } finally {
+      setStartingNode(false);
+    }
+  }, [addToast, startingNode, t]);
+
   // ── Install ───────────────────────────────────────────────────────────
   const finishInstall = useCallback(
     async (instanceId: string) => {
@@ -285,7 +351,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   const runHubInstall = useCallback(
     async (agent: HubAgent, ensure: boolean) => {
       const pkg = agent.package;
-      if (!pkg) return;
+      if (!pkg || !targetNodeId) return;
       setBusy(true);
       setInstallingId(agent.agent_id);
       setActionError(null);
@@ -335,14 +401,14 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   );
 
   const runLocalInstall = useCallback(async () => {
-    if (!localPath || busy || targetBlocked) return;
+    if (!localPath || busy || targetBlocked || !targetNodeId) return;
     setBusy(true);
     setInstallingId(LOCAL_INSTALL_KEY);
     setActionError(null);
     try {
       const instanceId = await useAgentStore.getState().installAgent(
         localPath,
-        targetNodeId ?? undefined,
+        targetNodeId,
       );
       // The store already refreshed the inventory, so the only thing left is
       // the selection. ADR-073: select by the instance key the Gateway acked —
@@ -388,7 +454,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   // the Gateway, so the toast is its answer, not a guess.
   const runLibraryEnsure = useCallback(
     async (row: LocalAgentRow) => {
-      if (busy || targetBlocked) return;
+      if (busy || targetBlocked || !targetNodeId) return;
       setBusy(true);
       setInstallingPath(row.path);
       setActionError(null);
@@ -421,14 +487,14 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   // *supposed* to multiply.
   const runLibraryInstallAnother = useCallback(
     async (row: LocalAgentRow) => {
-      if (busy || targetBlocked) return;
+      if (busy || targetBlocked || !targetNodeId) return;
       setBusy(true);
       setInstallingPath(row.path);
       setActionError(null);
       try {
         const instanceId = await useAgentStore
           .getState()
-          .installAgent(row.path, targetNodeId ?? undefined);
+          .installAgent(row.path, targetNodeId);
         if (instanceId) selectAgent(instanceId);
         addToast({
           type: "success",
@@ -524,7 +590,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
           label: t("agentHub.installAnother"),
           // A broken file cannot be installed at all — the row says why.
           disabled: busy || targetBlocked || menuRow.error !== null,
-          title: targetBlockReason ?? menuRow.error ?? undefined,
+          title: targetBlockReason ?? noNodeReason ?? menuRow.error ?? undefined,
           onClick: () => void runLibraryInstallAnother(menuRow),
         },
       ];
@@ -535,7 +601,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
         key: "installAnother",
         label: t("agentHub.installAnother"),
         disabled: busy || targetBlocked || !menuAgent.package,
-        title: targetBlockReason ?? undefined,
+        title: targetBlockReason ?? noNodeReason ?? undefined,
         onClick: () => requestHubInstall(menuAgent, false),
       },
     ];
@@ -546,6 +612,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     busy,
     targetBlocked,
     targetBlockReason,
+    noNodeReason,
     requestHubInstall,
     runLibraryInstallAnother,
     t,
@@ -613,6 +680,13 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
           aria-labelledby={tab === "library" ? "agent-hub-tab-library" : "agent-hub-tab-local"}
           className="min-h-0 flex-1 overflow-y-auto px-5 py-4"
         >
+          {noAvailableNode && (
+            <NoNodeBanner
+              starting={startingNode}
+              onStart={() => void startLocalNode()}
+              detail={noNodeDetail}
+            />
+          )}
           {tab === "library" ? (
             <div className="flex flex-col gap-3">
               <div className="relative">
@@ -663,13 +737,10 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                     // Once it has one, another click lands another instance —
                     // multi-instance is legal (ADR-073) and "already
                     // installed, nothing happened" reads as a broken button.
-                    // `null` targetNodeId is the Gateway default node, whose
-                    // inventory rows are anchored on "local" (ADR-075 D6).
-                    const instanceCount = countInstancesOnNode(
-                      instanceEntries,
-                      agent.agent_id,
-                      targetNodeId ?? LOCAL_NODE_ANCHOR,
-                    );
+                    // With no target there is nothing to count.
+                    const instanceCount = targetNodeId
+                      ? countInstancesOnNode(instanceEntries, agent.agent_id, targetNodeId)
+                      : 0;
                     return (
                       <HubAgentCard
                         key={agent.agent_id}
@@ -678,7 +749,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                         instanceCount={instanceCount}
                         installing={installingId === agent.agent_id}
                         disabled={busy || targetBlocked}
-                        disabledReason={targetBlockReason ?? undefined}
+                        disabledReason={targetBlockReason ?? noNodeReason ?? undefined}
                         onInstall={() => requestHubInstall(agent, instanceCount === 0)}
                         onMore={(e) =>
                           cardMenu.openAt(e, { kind: "hub", agentId: agent.agent_id })
@@ -695,7 +766,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                 list={libraryList}
                 loadError={libraryError}
                 disabled={busy || targetBlocked}
-                disabledReason={targetBlockReason ?? undefined}
+                disabledReason={targetBlockReason ?? noNodeReason ?? undefined}
                 busyPath={installingPath}
                 onInstall={(row) => void runLibraryEnsure(row)}
                 onInstallAnother={(row, e) =>
@@ -708,7 +779,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                       info={localInfo}
                       busy={installingId === LOCAL_INSTALL_KEY}
                       disabled={busy || targetBlocked}
-                      disabledReason={targetBlockReason ?? undefined}
+                      disabledReason={targetBlockReason ?? noNodeReason ?? undefined}
                       onInstall={() => void runLocalInstall()}
                       onClear={() => {
                         setLocalPath(null);
@@ -737,7 +808,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
           )}
           <div className={cn("flex items-center gap-2 text-xs text-text-tertiary", actionError && "shrink-0")}>
             <span>{t("agentHub.targetNode")}</span>
-            {onlineNodes.length > 1 ? (
+            {usableNodes.length > 1 ? (
               <select
                 value={targetNodeId ?? ""}
                 onChange={(e) => setTargetNodeId(e.target.value || null)}
@@ -745,7 +816,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                 aria-label={t("agentHub.targetNode")}
                 className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-xs text-text outline-none focus:border-[var(--color-accent)]"
               >
-                {onlineNodes.map((node) => (
+                {usableNodes.map((node) => (
                   <option key={node.node_id} value={node.node_id}>
                     {node.node_name ?? node.hostname ?? node.node_id}
                   </option>
@@ -755,9 +826,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
               <span className="text-text-secondary">
                 {targetNode
                   ? targetNode.node_name ?? targetNode.hostname ?? targetNode.node_id
-                  : gatewayMode === "local"
-                    ? t("agentHub.targetThisComputer")
-                    : null}
+                  : t("agentHub.targetNone")}
               </span>
             )}
           </div>

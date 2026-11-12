@@ -27,7 +27,6 @@ const h = vi.hoisted(() => ({
       node_id: "node-1",
       node_name: "workstation",
       online: true,
-      gateway_managed: false,
       capabilities: [],
     },
   ] as unknown[],
@@ -123,7 +122,6 @@ beforeEach(() => {
       node_id: "node-1",
       node_name: "workstation",
       online: true,
-      gateway_managed: false,
       capabilities: [],
     },
   ];

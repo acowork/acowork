@@ -674,6 +674,7 @@ pub fn run() {
             // ADR-087: "Create local Node" — Desktop-spawned node bound
             // to the signed-in user (token minted internally, invisible).
             commands::gateway::create_local_node,
+            commands::gateway::build_remote_node_command,
             commands::gateway::local_node_status,
             commands::gateway::inspect_local_node_process,
             commands::gateway::stop_local_node_process,

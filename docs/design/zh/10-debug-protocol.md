@@ -743,9 +743,11 @@ POST /api/agents/:id/publish/build
 body: { "sign_key": null | "/path/to/key" }
 → { "output_path": "build/com.example.weather-1.0.0.agent" }
 
-# Step 5a: 本地安装
+# Step 5a: 安装构建产物（ADR-113：必须显式指定目标节点）
+# 名称里的 "locally" 只表示产物来源在本地，不代表默认落点是本机节点。
+# node_id 取自 GET /api/nodes 中的可用节点，Gateway 不做任何推断。
 POST /api/agents/:id/publish/install-locally
-body: { "package_path": "build/com.example.weather-1.0.0.agent" }
+body: { "package_path": "build/com.example.weather-1.0.0.agent", "node_id": "<node-id>" }
 
 # Step 5b: 导出文件
 POST /api/agents/:id/publish/export

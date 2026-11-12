@@ -368,7 +368,7 @@ export function installFromHub(input: {
   agentId: string;
   packageFile: string;
   sha256: string;
-  nodeId: string | null;
+  nodeId: string;
   ensure: boolean;
 }): Promise<HubInstallResult> {
   return invoke<HubInstallResult>("install_from_hub", {
@@ -406,7 +406,7 @@ export function listLocalAgentPackages(): Promise<LocalAgentList> {
  */
 export function ensureLocalAgent(input: {
   packagePath: string;
-  nodeId: string | null;
+  nodeId: string;
 }): Promise<LocalAgentEnsureResult> {
   return invoke<LocalAgentEnsureResult>("ensure_local_agent", {
     packagePath: input.packagePath,

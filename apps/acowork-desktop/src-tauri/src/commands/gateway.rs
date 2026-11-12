@@ -247,6 +247,12 @@ pub async fn init_local_gateway(
 /// Shared by every command that gates on bootstrap READY.
 const BOOTSTRAP_TIMEOUT_SECS: u64 = 30;
 
+/// ADR-113: how long `create_local_node` lets `GET /api/nodes` converge on
+/// an already-running node (one whose `identity.json` we can read) before
+/// deciding to spawn. Bounded so a genuinely missing node still starts
+/// promptly; 0 when this machine has no identity yet (nothing to dedup).
+const LOCAL_NODE_DEDUP_WINDOW: Duration = Duration::from_millis(1500);
+
 /// HTTP client used to poll `/api/bootstrap` (short per-request timeout;
 /// the poll loop in [`wait_for_bootstrap_ready`] retries every 500 ms).
 fn bootstrap_probe_client() -> Result<reqwest::Client, DependencyNotReady> {
@@ -868,6 +874,81 @@ async fn local_node_running(
     })
 }
 
+/// Mint a one-time enrollment token through the Gateway HTTP API.
+///
+/// Shared by the local spawn path and the "start a node on another
+/// machine" guide. The token is bound to the signed-in account and is
+/// returned to the UI **only** when the user explicitly asks for the
+/// remote-start command — never logged, never persisted.
+async fn mint_enrollment_token(
+    client: &crate::gateway_client::GatewayClient,
+    base_url: &str,
+    ttl_seconds: u64,
+) -> Result<String, String> {
+    let url = format!(
+        "{}/api/nodes/enrollment-tokens",
+        base_url.trim_end_matches('/')
+    );
+    let resp = client
+        .send(|| {
+            Ok(client
+                .request(reqwest::Method::POST, &url)
+                .json(&serde_json::json!({ "ttl_seconds": ttl_seconds })))
+        })
+        .await
+        .map_err(|e| format!("enrollment-token request failed: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!("enrollment-tokens: HTTP {}", resp.status()));
+    }
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("enrollment-tokens response: {e}"))?;
+    body.get("token")
+        .and_then(|t| t.as_str())
+        .map(str::to_string)
+        .ok_or_else(|| "enrollment-tokens response has no `token`".to_string())
+}
+
+/// ADR-113: everything the Desktop needs to build a copy-pasteable
+/// `acowork-node start` command for a DIFFERENT machine.
+///
+/// The Desktop cannot know which address is routable from that machine,
+/// so `suggested_host` is only a starting point — the UI lets the user
+/// edit the host and renders the final command locally. The MQTT port
+/// and enrollment token are real values from this Gateway, not
+/// placeholders.
+#[derive(Debug, Clone, Serialize)]
+pub struct RemoteNodeCommand {
+    pub mqtt_port: u16,
+    pub token: String,
+    pub token_ttl_seconds: u64,
+    pub suggested_host: String,
+}
+
+#[tauri::command]
+pub async fn build_remote_node_command(
+    state: tauri::State<'_, AppState>,
+) -> Result<RemoteNodeCommand, String> {
+    const TTL_SECONDS: u64 = 3600;
+    let client = state.gateway.read().await;
+    let base_url = client.base_url().to_string();
+    let parsed = reqwest::Url::parse(&base_url)
+        .map_err(|e| format!("bad gateway base_url {base_url}: {e}"))?;
+    let suggested_host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+    let status = client
+        .system_status()
+        .await
+        .map_err(|e| format!("GET /api/status failed: {e}"))?;
+    let token = mint_enrollment_token(&client, &base_url, TTL_SECONDS).await?;
+    Ok(RemoteNodeCommand {
+        mqtt_port: status.mqtt_port,
+        token,
+        token_ttl_seconds: TTL_SECONDS,
+        suggested_host,
+    })
+}
+
 /// ADR-087: "Create local Node" — spawn an `acowork-node` Agent on this
 /// machine, owned by the signed-in user.
 ///
@@ -897,9 +978,34 @@ pub async fn create_local_node(
     let base_url = client.base_url().to_string();
 
     // Dedup: never spawn a second node for the same identity.
-    if local_node_running(&client, &base_url, local_node_id.as_deref()).await {
-        tracing::info!("ADR-087: create_local_node — a local node is already running, skipping spawn");
-        return Ok(serde_json::json!({ "already_running": true }));
+    //
+    // ADR-113: this is a protocol-state question, not a process-table one.
+    // A node started by the Gateway (or the CLI) shares this machine's
+    // `identity.json`, so `local_node_id` is the id it will announce. On a
+    // cold start that announcement can land a few hundred ms after our
+    // first read of `GET /api/nodes`; spawning on that stale empty result
+    // creates a SECOND process for the SAME node id (two workers fighting
+    // over the proxy port and the MQTT client id). When the identity is
+    // already known, give the protocol view a short convergence window
+    // before deciding. A truly absent node still starts without delay —
+    // a fresh machine has no `identity.json`, hence no window.
+    let dedup_window = if local_node_id.is_some() {
+        LOCAL_NODE_DEDUP_WINDOW
+    } else {
+        std::time::Duration::ZERO
+    };
+    let deadline = std::time::Instant::now() + dedup_window;
+    loop {
+        if local_node_running(&client, &base_url, local_node_id.as_deref()).await {
+            tracing::info!(
+                "ADR-087: create_local_node — a local node is already running, skipping spawn"
+            );
+            return Ok(serde_json::json!({ "already_running": true }));
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
     }
 
     if silent.unwrap_or(false) && !enrolled {
@@ -920,28 +1026,7 @@ pub async fn create_local_node(
     let token = if enrolled {
         None
     } else {
-        let url = format!("{}/api/nodes/enrollment-tokens", base_url.trim_end_matches('/'));
-        let resp = client
-            .send(|| {
-                Ok(client
-                    .request(reqwest::Method::POST, &url)
-                    .json(&serde_json::json!({ "ttl_seconds": 3600 })))
-            })
-            .await
-            .map_err(|e| format!("enrollment-token request failed: {e}"))?;
-        if !resp.status().is_success() {
-            return Err(format!("enrollment-tokens: HTTP {}", resp.status()));
-        }
-        let body: serde_json::Value = resp
-            .json()
-            .await
-            .map_err(|e| format!("enrollment-tokens response: {e}"))?;
-        Some(
-            body.get("token")
-                .and_then(|t| t.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| "enrollment-tokens response has no `token`".to_string())?,
-        )
+        Some(mint_enrollment_token(&client, &base_url, 3600).await?)
     };
 
     let mut command = std::process::Command::new(&node_bin);
@@ -954,8 +1039,12 @@ pub async fn create_local_node(
     if let Some(t) = token.as_deref() {
         command.arg("--token").arg(t);
     }
-    // Same console-window suppression as the Gateway spawn: the node is a
-    // console binary; a flashing terminal from a desktop app is noise.
+    // Console-window suppression, mirrored by the Gateway's own
+    // `spawn_node_child`: the node is a console binary; a flashing
+    // terminal from a desktop app is noise. Both spawn sites also null
+    // all three std handles — an inherited console stdin handle makes
+    // the node's fresh-machine interactive enrollment block forever
+    // (see node_manager.rs `spawn_node_child`).
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
@@ -1374,7 +1463,7 @@ mod local_node_identity_tests {
         let dir = scratch_dir("notoken");
         std::fs::write(
             dir.join("identity.json"),
-            br#"{"node_id":"abc-123","node_name":"box","gateway_managed":false,"created_at":"2026-01-01T00:00:00Z","enrollment":"created"}"#,
+            br#"{"node_id":"abc-123","node_name":"box","created_at":"2026-01-01T00:00:00Z","enrollment":"created"}"#,
         )
         .unwrap();
         let (node_id, enrolled) = read_local_node_identity(&dir);
@@ -1388,7 +1477,7 @@ mod local_node_identity_tests {
         let dir = scratch_dir("token");
         std::fs::write(
             dir.join("identity.json"),
-            br#"{"node_id":"abc-123","node_name":"box","gateway_managed":false,"node_token":"tok","created_at":"2026-01-01T00:00:00Z","enrollment":"enrolled"}"#,
+            br#"{"node_id":"abc-123","node_name":"box","node_token":"tok","created_at":"2026-01-01T00:00:00Z","enrollment":"enrolled"}"#,
         )
         .unwrap();
         let (node_id, enrolled) = read_local_node_identity(&dir);
@@ -1402,7 +1491,7 @@ mod local_node_identity_tests {
         let dir = scratch_dir("emptytoken");
         std::fs::write(
             dir.join("identity.json"),
-            br#"{"node_id":"abc-123","node_name":"box","gateway_managed":false,"node_token":"","created_at":"2026-01-01T00:00:00Z"}"#,
+            br#"{"node_id":"abc-123","node_name":"box","node_token":"","created_at":"2026-01-01T00:00:00Z"}"#,
         )
         .unwrap();
         let (_, enrolled) = read_local_node_identity(&dir);

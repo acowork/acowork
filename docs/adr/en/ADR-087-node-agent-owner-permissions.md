@@ -1,5 +1,7 @@
 # ADR-087: The Node and Agent Owner Permission Model — Plugging the Hole Where "the Whole Machine Is Writable by Every User by Default"
 
+> **⚠ Superseded in part by ADR-113 (2026-11-12)**: the statement in D2 / implementation step 4 that "`gateway_managed` local nodes default to ownerless" no longer applies. The `gateway_managed` protocol field is deleted and launcher identity must not affect ownership. Current rule: whether a node is ownerless is decided **solely by the enrollment token's `owner_user_id` (or the absence of an owner record in `node_owners.json`)** — a node enrolled with an ownerless token (CLI-issued, or issued by a local supervisor without an owner) is ownerless / admin-only, regardless of who spawned it. D2's main decision (the token binds its creator) and the three-tier permission model remain in force. See [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md).
+
 > **Chinese source of truth**: [ADR-087](../zh/ADR-087-node-agent-owner-permissions.md)
 > **Terminology**: see [GLOSSARY.md](./GLOSSARY.md)
 

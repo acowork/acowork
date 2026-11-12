@@ -22,6 +22,7 @@ import {
     runLspInstall,
 } from "./gateway-api";
 import type { BackendUserProfile } from "./types";
+import { usableNodesOf } from "../components/nodes/nodeAvailability";
 
 // ── Fixtures ─────────────────────────────────────────────────────────────
 
@@ -330,6 +331,29 @@ describe("fetchNodes field normalization", () => {
         const nodes = await fetchNodes("http://gw");
 
         expect(nodes[0].lsp_endpoint).toBe("http://10.0.0.2:19878");
+    });
+
+    // ADR-113 D6: an older Gateway has no `control_ready` field. Absence
+    // must stay `undefined` (not `false`), or `usableNodesOf()` filters out
+    // every node and the UI is stuck on "no available node" forever.
+    it("keeps control_ready undefined for pre-ADR-113 Gateways", async () => {
+        mockFetchOnce([{ node_id: "legacy-1", online: true }]);
+        const nodes = await fetchNodes("http://gw");
+
+        expect(nodes[0].control_ready).toBeUndefined();
+        expect(usableNodesOf(nodes).map((n) => n.node_id)).toEqual(["legacy-1"]);
+    });
+
+    it("maps an explicit control_ready through to the usable-node predicate", async () => {
+        mockFetchOnce([
+            { node_id: "ready", online: true, control_ready: true },
+            { node_id: "pending", online: true, control_ready: false },
+        ]);
+        const nodes = await fetchNodes("http://gw");
+
+        expect(nodes[0].control_ready).toBe(true);
+        expect(nodes[1].control_ready).toBe(false);
+        expect(usableNodesOf(nodes).map((n) => n.node_id)).toEqual(["ready"]);
     });
 });
 

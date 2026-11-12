@@ -602,7 +602,6 @@ mod tests {
         Arc::new(RwLock::new(NodeIdentity {
             node_id: "11111111-1111-4111-8111-111111111111".into(),
             node_name: "migration-test".into(),
-            gateway_managed: false,
             node_token: Some("node-token-1".into()),
             gateway_addr: None,
             enrollment: crate::identity::EnrollmentState::Enrolled,

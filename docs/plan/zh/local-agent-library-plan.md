@@ -52,8 +52,10 @@ pub(crate) fn copy_into_library(app: &AppHandle, src: &Path) -> Result<PathBuf>;
 #[tauri::command] pub async fn list_local_agent_packages(app: AppHandle) -> Result<Vec<LocalAgentRow>, String>;
 
 #[tauri::command] pub async fn ensure_local_agent(state: State<'_, AppState>, app: AppHandle,
-    package_path: String, node_id: Option<String>) -> Result<String /* instance_id */, String>;
+    package_path: String, node_id: String) -> Result<String /* instance_id */, String>;
 ```
+
+> **ADR-113 修订**：`node_id` 由 `Option<String>` 收紧为必填 `String`。Gateway 不再推断默认落点；UI 从 `GET /api/nodes` 的可用节点中显式选取并逐层传入。
 
 行结构（`serde::Serialize`）：
 

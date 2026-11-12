@@ -78,7 +78,7 @@ Desktop App interacts with Gateway via the **Gateway HTTP API**:
 |-----------|-------------|------|-------------|
 | Gateway status | GET | `/health` | Health check |
 | Agent list | GET | `/api/agents` | Installed Agents list |
-| Agent install | POST | `/api/agents/install` | Install .agent package |
+| Agent install | POST | `/api/agents/install` | Install .agent package (multipart: `.agent` bytes + required `node_id`, ADR-113) |
 | Agent uninstall | DELETE | `/api/agents/:id` | Uninstall Agent |
 | Agent clone | POST | `/api/agents/clone` | Clone Agent |
 | Agent start/stop | POST | `/api/agents/:id/start` | Start Agent |
@@ -561,7 +561,7 @@ pub enum HttpRoute {
 
     // Agent management
     Get("/api/agents") -> AgentListResponse,
-    Post("/api/agents/install") -> AgentInstallResponse,         // body: .agent file path
+    Post("/api/agents/install") -> AgentInstallResponse,         // multipart: package bytes + required node_id (ADR-113)
     Delete("/api/agents/:id") -> AgentUninstallResponse,
     
     Post("/api/agents/:id/start") -> AgentStartResponse,

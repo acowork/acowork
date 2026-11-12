@@ -2204,7 +2204,6 @@ mod tests {
             agent_count: 0,
             http_endpoint: "http://127.0.0.1:19900".to_string(),
             node_name: "gpu-1".to_string(),
-            gateway_managed: true,
         };
         let envelope = DataEnvelope {
             version: 1,
@@ -2332,7 +2331,6 @@ mod tests {
             agent_count: 0,
             http_endpoint: "http://127.0.0.1:19900".to_string(),
             node_name: "gpu-1".to_string(),
-            gateway_managed: false,
         };
         let envelope = DataEnvelope {
             version: 1,

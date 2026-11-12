@@ -98,13 +98,14 @@ pub enum Command {
         /// relay listener beyond loopback.
         #[arg(long, env = "ACOWORK_NODE_EXPOSE_LSP_RELAY", default_value = "false")]
         expose_lsp_relay: bool,
-        /// Internal spawn marker: set ONLY by the Gateway when it
-        /// spawns its own-machine node (hidden from help). Persisted
-        /// into identity.json at creation so the Gateway can recognize
-        /// its own node even after a service/container restart drops
-        /// this flag (ADR-075 D5). No other behavioural effect.
+        /// Process-lifetime marker for a supervisor's LOCAL process
+        /// table (ADR-113). It exists only so a launcher can find and
+        /// reap the child it spawned by scanning this machine's argv.
+        /// It is deliberately consumed and discarded here: no identity
+        /// field, no NodeInfo field, no protocol behaviour. A node is
+        /// indistinguishable regardless of who supplied this flag.
         #[arg(long, hide = true)]
-        gateway_managed: bool,
+        spawn_marker: bool,
     },
     /// Register the node identity against a Gateway without staying
     /// resident (script / bulk-deployment friendly; idempotent).
@@ -357,8 +358,12 @@ impl Cli {
                 max_agents,
                 lsp_relay_port,
                 expose_lsp_relay,
-                gateway_managed,
+                spawn_marker,
             }) => {
+                // ADR-113: the marker is a local process-table hint, not
+                // node state. Consume it here so it cannot leak into the
+                // identity, the config, or any published NodeInfo.
+                let _ = spawn_marker;
                 let (gateway_host, gateway_mqtt_port) = split_gateway(&gateway)?;
                 // Public address: explicit `--addr`, else the machine's
                 // first non-loopback IPv4 (fallback loopback) + default
@@ -397,7 +402,6 @@ impl Cli {
                     gateway_mqtt_port,
                     gateway_http,
                     name,
-                    gateway_managed,
                     token,
                     max_agents,
                     advertise_host,

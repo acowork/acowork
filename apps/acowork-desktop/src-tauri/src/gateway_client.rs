@@ -326,17 +326,18 @@ async fn parse_gateway_response<T: DeserializeOwned>(resp: Response) -> Result<T
 /// [`GatewayClient::install_agent`] because that request is rebuilt for the
 /// transparent 401 replay ([`GatewayClient::send`]) and a multipart body
 /// cannot be cloned.
-fn upload_form(package_bytes: &[u8], node_id: Option<&str>) -> Result<reqwest::multipart::Form> {
-    let mut form = reqwest::multipart::Form::new().part(
-        "package",
-        reqwest::multipart::Part::bytes(package_bytes.to_vec())
-            .file_name("package.agent")
-            .mime_str("application/octet-stream")?,
-    );
-    if let Some(node) = node_id {
-        form = form.text("node_id", node.to_string());
-    }
-    Ok(form)
+fn upload_form(package_bytes: &[u8], node_id: &str) -> Result<reqwest::multipart::Form> {
+    // ADR-113: `node_id` is a required protocol field. There is no
+    // "let the Gateway pick one" variant — the Desktop always resolves a
+    // target from GET /api/nodes before calling this.
+    Ok(reqwest::multipart::Form::new()
+        .part(
+            "package",
+            reqwest::multipart::Part::bytes(package_bytes.to_vec())
+                .file_name("package.agent")
+                .mime_str("application/octet-stream")?,
+        )
+        .text("node_id", node_id.to_string()))
 }
 
 /// Build the multipart body of `POST /api/agents/install`.
@@ -348,13 +349,9 @@ fn upload_form(package_bytes: &[u8], node_id: Option<&str>) -> Result<reqwest::m
 fn install_form(
     package_bytes: &[u8],
     dev_mode: bool,
-    node_id: Option<&str>,
+    node_id: &str,
 ) -> Result<reqwest::multipart::Form> {
-    Ok(upload_form(
-        package_bytes,
-        node_id,
-    )?
-    .text("dev_mode", dev_mode.to_string()))
+    Ok(upload_form(package_bytes, node_id)?.text("dev_mode", dev_mode.to_string()))
 }
 
 /// Mirror of Gateway's `EnsureAck` (`POST /api/agents/ensure`, ADR-073).
@@ -545,8 +542,9 @@ impl GatewayClient {
 
     /// `POST /api/agents/install` — upload .agent package via multipart
     ///
-    /// `node_id` is the target node (ADR-055 §6.13.3); `None` lets the
-    /// Gateway default to `local`.
+    /// `node_id` is the REQUIRED target node (ADR-113). The Gateway
+    /// rejects a request without it; it never infers a default landing
+    /// node from deployment topology.
     ///
     /// ADR-059 §6: answers HTTP 202 with an [`OperationAck`]; the actual
     /// install runs asynchronously on the node and completes with a
@@ -558,7 +556,7 @@ impl GatewayClient {
         &self,
         package_bytes: &[u8],
         dev_mode: bool,
-        node_id: Option<&str>,
+        node_id: &str,
     ) -> Result<OperationAck> {
         let url = format!("{}/api/agents/install", self.base_url);
         let resp = self
@@ -584,7 +582,7 @@ impl GatewayClient {
     pub async fn ensure_agent(
         &self,
         package_bytes: &[u8],
-        node_id: Option<&str>,
+        node_id: &str,
     ) -> Result<EnsureAck> {
         let url = format!("{}/api/agents/ensure", self.base_url);
         let resp = self

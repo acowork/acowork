@@ -2733,7 +2733,6 @@ mod tests {
             payload: Some(data_envelope::Payload::NodeInfo(NodeInfo {
                 node_id: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
                 node_name: "node-test".to_string(),
-                gateway_managed: true,
                 hostname: "host".to_string(),
                 os: "linux".to_string(),
                 arch: "x86_64".to_string(),

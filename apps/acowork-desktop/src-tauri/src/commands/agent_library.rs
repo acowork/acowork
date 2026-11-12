@@ -614,8 +614,9 @@ pub async fn ensure_local_agent(
     state: State<'_, AppState>,
     app: AppHandle,
     package_path: String,
-    node_id: Option<String>,
+    node_id: String,
 ) -> Result<LocalEnsureResult, String> {
+    crate::commands::agent::require_node_id(&node_id)?;
     const LABEL: &str = "LOCAL_ENSURE";
     let started = std::time::Instant::now();
 
@@ -648,7 +649,7 @@ pub async fn ensure_local_agent(
         let node_id = node_id.clone();
         async move {
             let client = state.gateway.read().await;
-            client.ensure_agent(&bytes, node_id.as_deref()).await
+            client.ensure_agent(&bytes, &node_id).await
         }
     })
     .await?;
