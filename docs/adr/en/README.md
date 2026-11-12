@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 102 / 102 documents translated.
+**Coverage**: 103 / 103 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -27,6 +27,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | What model / reasoning effort a brand-new session starts on | [ADR-110](./ADR-110-per-agent-session-defaults.md) |
 | What an agent's name actually is, and where it is stored | [ADR-111](./ADR-111-one-agent-one-name-one-file.md) |
 | Why a workspace HTML file renders as a real page, and what a preview link is allowed to carry | [ADR-112](./ADR-112-workspace-preview-capability-ticket.md) |
+| Why installs must name an explicit `node_id`, and why a Node's launcher is not protocol state | [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md) |
 
 ## Index
 
@@ -137,6 +138,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 110 | [ADR-110](./ADR-110-per-agent-session-defaults.md) | Per-agent New-session Defaults — `default_model` / `default_provider` / `default_reasoning_effort` Seed Every New Session | Implemented | [zh](../zh/ADR-110-per-agent-session-defaults.md) |
 | 111 | [ADR-111](./ADR-111-one-agent-one-name-one-file.md) | One Agent, One Name, One File — `name` Lives in `agent_config.json`; `display_name` and `overrides.json` Retire | Implemented; supersedes ADR-073's rename/overrides clauses and ADR-104's `display_name` | [zh](../zh/ADR-111-one-agent-one-name-one-file.md) |
 | 112 | [ADR-112](./ADR-112-workspace-preview-capability-ticket.md) | A Capability Ticket for Workspace Static-Asset Preview — HTML Opens in the Address-Bar Browser; the Ticket Rides in the Path | Implemented | [zh](../zh/ADR-112-workspace-preview-capability-ticket.md) |
+| 113 | [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md) | Protocol Self-Consistency — Launch Relationships Stay Out of the Protocol, Installs Must Name an Explicit `node_id` | Implemented; supersedes the `gateway_managed` clauses of ADR-055 / ADR-075 / ADR-087 | [zh](../zh/ADR-113-protocol-self-consistency-explicit-node-target.md) |
 
 ---
 

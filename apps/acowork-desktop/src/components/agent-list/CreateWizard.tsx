@@ -81,6 +81,9 @@ interface CreateWizardProps {
   open: boolean;
   onCreated: (agentId: string) => void;
   onClose: () => void;
+  /** ADR-113: explicit install target from protocol state. `null` when
+   *  there is no usable node — creating then has to be blocked. */
+  nodeId: string | null;
 }
 
 interface BuiltinToolInfo {
@@ -125,7 +128,7 @@ function nextUid(prefix: string): string {
   return `${prefix}-${uidCounter}`;
 }
 
-export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
+export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardProps) {
   const { t } = useTranslation();
   const STEPS = STEP_ICONS.map((s) => ({ ...s, label: t(`createWizard.${s.i18nKey}`) }));
 
@@ -554,11 +557,16 @@ export function CreateWizard({ open, onCreated, onClose }: CreateWizardProps) {
   }, [open, step, loadPreview]);
 
   const handleCreate = async () => {
+    if (!nodeId) {
+      setError(t("agentHub.noAvailableNode"));
+      return;
+    }
     setBusy(true);
     setError(null);
     try {
       const agentId = await invoke<string>("create_agent", {
         draft: toCreateAgentDraft(draftState),
+        nodeId,
       });
       onCreated(agentId);
     } catch (e) {

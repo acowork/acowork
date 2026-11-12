@@ -206,13 +206,17 @@ ACOWORK_GATEWAY_ALLOWED_NODE_IPS="192.168.1.20,192.168.1.0/24"
 | GET | `/api/agents` | 列出全部已安装 Agent（含 status、avatar、mqtt_online 等） |
 | GET | `/api/agents/{id}` | Agent 详情（manifest、installed/connected/dev_mode 等） |
 | DELETE | `/api/agents/{id}` | 卸载 Agent |
-| POST | `/api/agents/install` | 安装 `.agent` 包（multipart） |
+| POST | `/api/agents/install` | 安装 `.agent` 包（multipart：`package` + **必填** `node_id`；ADR-113） |
 | POST | `/api/agents/{id}/clone` | 克隆 Agent（skeleton 或 full） |
 | POST | `/api/agents/{id}/publish/prepare` | 准备打包（校验、清理） |
 | POST | `/api/agents/{id}/publish/build` | 构建 `.agent` 包 |
 | POST | `/api/agents/{id}/publish/export` | 导出包到目标路径 |
-| POST | `/api/agents/{id}/publish/install-locally` | 本地安装构建产物 |
+| POST | `/api/agents/{id}/publish/install-locally` | 安装构建产物；JSON body 的 `node_id` **必填**（ADR-113，名称里的 "locally" 仅指产物来源，不表示默认落点是本机节点） |
 | GET | `/api/packages/{agent_id}/download` | 下载 `.agent` 包（Node install 拉取路径）；开启鉴权时校验 `X-ACowork-Node-Token`（ADR-055 Phase 5a）：缺失/不匹配 → 401/403 |
+
+> **ADR-113 契约**：`POST /api/agents/install`、`POST /api/agents/ensure` 与 `POST /api/agents/{id}/publish/install-locally` 都要求显式 `node_id`。Gateway **不会**依据本机 hostname、进程启动者标记或 `local_node.json` 推断默认落点；缺失或空白 → `400 missing required field: 'node_id'`。调用方先从 `GET /api/nodes` 取可用节点（`online` + `control_ready !== false` + `can_manage !== false`）；最终就绪门禁仍是 Gateway 的 `ensure_node_ready()`（结构化 `dependency_not_ready`）。没有可用节点是合法的空状态，不是 409。
+
+`GET /api/nodes` 的 `control_ready` 是**三态**：接入 bootstrap readiness registry 时为 `true` / `false`；未接入时（MQTT 关闭 / 精简 server）该字段**不出现**。缺失表示「就绪状态未知」，与 ADR-113 之前的 Gateway 等价，因为该配置下 `ensure_node_ready()` 是 fail-open。调用方不得把缺失值强制转成 `false`。
 
 ### 4.3 Agent 生命周期控制
 
@@ -1405,8 +1409,14 @@ Content-Disposition: form-data; name="package"; filename="hello.agent"
 Content-Type: application/octet-stream
 
 <binary>
+------abc
+Content-Disposition: form-data; name="node_id"
+
+<从 GET /api/nodes 选取的目标 node_id —— ADR-113 必填>
 ------abc--
 ```
+
+缺 `node_id` → `400`；目标节点不在线 / 控制面未 `NodeReady` → 由 `ensure_node_ready()` 返回结构化 `dependency_not_ready`。
 
 ### 9.2 启动 Agent 并发送消息（HTTP）
 

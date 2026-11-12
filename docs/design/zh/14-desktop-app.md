@@ -78,7 +78,7 @@ Desktop App 通过 **Gateway HTTP API** 与 Gateway 交互：
 |------|----------|------|------|
 | Gateway 状态 | GET | `/health` | 健康检查 |
 | Agent 列表 | GET | `/api/agents` | 已安装的 Agent 列表 |
-| Agent 安装 | POST | `/api/agents/install` | 安装 .agent 包 |
+| Agent 安装 | POST | `/api/agents/install` | 安装 .agent 包（multipart：`.agent` 字节 + 必填 `node_id`，ADR-113） |
 | Agent 卸载 | DELETE | `/api/agents/:id` | 卸载 Agent |
 | Agent 克隆 | POST | `/api/agents/clone` | 克隆 Agent |
 | Agent 启停 | POST | `/api/agents/:id/start` | 启动 Agent |
@@ -560,7 +560,7 @@ pub enum HttpRoute {
 
     // Agent 管理
     Get("/api/agents") -> AgentListResponse,
-    Post("/api/agents/install") -> AgentInstallResponse,         // body: .agent 文件路径
+    Post("/api/agents/install") -> AgentInstallResponse,         // multipart: package bytes + 必填 node_id (ADR-113)
     Delete("/api/agents/:id") -> AgentUninstallResponse,
     Post("/api/agents/:instance_id/clone") -> AgentCloneResponse, // body: { mode, new_agent_id }
     Post("/api/agents/:id/start") -> AgentStartResponse,

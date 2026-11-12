@@ -1,6 +1,8 @@
 ---
 # ADR-075: Node 身份模型归位 — `node_id` 升级为稳定 UUID，`node_name` 承接 display 职责
 
+> **⚠ ADR-113 已取代本文 D5 / D9 及实现清单中的启动者身份条款（2026-11-12）**：`gateway_managed` 已从 `NodeIdentity`（`identity.json`）、`NodeConfig`、`NodeInfo`（proto field 12，已 `reserved`）、`NodeInfoState` 中删除；`--gateway-managed` 改名为 `--spawn-marker`，仅作 launcher 本机进程表标记、由 CLI 消费即丢弃；`local_node_id()` 不再查询启动者标记，只按 `online` + `hostname` 判定，且不再作为 install 默认落点；Q1（"`gateway_managed` 放 NodeInfo 还是 enroll"）随字段删除而作废。`node_id` = UUID v4、`node_name` 纯展示、enrollment 幂等、rename 只改 `node_name` 等决策继续有效。详见 [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md)。
+
 **状态**：草案
 **日期**：2026-09-13
 **决策者**：大鱼

@@ -54,6 +54,75 @@ use mqtt::{NodeMqttClient, NodeMqttMessageCallback, SharedNodeMqttCredentials};
 /// Gateway detect "online but stuck" via timestamp).
 const INFO_HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// ADR-113 follow-up: how often the node re-asserts the two retained
+/// protocol-state signals `status=online` and `NodeReady`.
+///
+/// These are STATE, not one-shot events. Historically the ConnAck handler
+/// published them exactly once (retained) and the 60 s heartbeat only
+/// re-published `NodeInfo`. On a cold start the Gateway's SUBSCRIBE can
+/// still be in flight when the node's first PUBLISH lands; if that
+/// retained snapshot is missed, no later message ever repairs it — the
+/// node process is running and healthy but is invisible in `GET /api/nodes`
+/// and has `control_ready: false` forever. Only a *second* node process
+/// (or a node reconnect) re-ran ConnAck and accidentally healed it.
+///
+/// Re-asserting periodically makes convergence depend on neither the
+/// launcher nor the start order: any Gateway that subscribes at any time
+/// sees the true topology within one interval. Both re-asserts are
+/// idempotent downstream — `NodeRegistry::update_status_from_mqtt` only
+/// stamps `online_since` on a false→true edge, and
+/// `SubsystemReadinessRegistry::transition` is a no-op when already Ready,
+/// so this does not bump the bootstrap snapshot version.
+const PRESENCE_REASSERT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// First re-assert lands quickly, so a cold start does not have to wait a
+/// full interval before the node becomes an installable target.
+const PRESENCE_FIRST_DELAY: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// The retained NodeReady envelope. Shared by the ConnAck bootstrap path
+/// and the periodic presence re-assert so the two can never drift.
+fn node_ready_envelope(node_id: &str) -> DataEnvelope {
+    DataEnvelope {
+        version: 1,
+        payload: Some(data_envelope::Payload::NodeReady(
+            acowork_core::mqtt_proto::NodeReady {
+                node_id: node_id.to_string(),
+                protocol_version: 1,
+            },
+        )),
+    }
+}
+
+/// Re-assert the node's retained presence on the CURRENT MQTT connection.
+///
+/// `NodeMqttClient` (rather than the ConnAck's captured `AsyncClient`) is
+/// used deliberately: it resolves the live connection handle, so a
+/// soft-restart / sleep-wake reconnect is covered by the same loop.
+async fn reassert_presence(client: &NodeMqttClient, node_id: &str) {
+    if let Err(e) = client
+        .publish_text(
+            &node_status_topic(node_id),
+            "online",
+            QoS::AtLeastOnce,
+            true,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to re-assert node status=online");
+    }
+    if let Err(e) = client
+        .publish_envelope(
+            &node_ready_topic(node_id),
+            &node_ready_envelope(node_id),
+            QoS::AtLeastOnce,
+            true,
+        )
+        .await
+    {
+        tracing::warn!(error = %e, "Failed to re-assert NodeReady (retained)");
+    }
+}
+
 /// The node control plane daemon.
 pub struct NodeControlPlane {
     config: NodeConfig,
@@ -77,7 +146,8 @@ pub fn build_node_info(
     NodeInfo {
         node_id: identity.node_id.clone(),
         node_name: identity.node_name.clone(),
-        gateway_managed: identity.gateway_managed,
+        // ADR-113: no `gateway_managed` field. NodeInfo describes a node,
+        // never the process that launched it.
         hostname: system_hostname(),
         os: std::env::consts::OS.to_string(),
         arch: std::env::consts::ARCH.to_string(),
@@ -819,7 +889,6 @@ impl NodeControlPlane {
             &config.home,
             config.name.as_deref(),
             Some(&gateway_addr),
-            config.gateway_managed,
         )?;
         let node_id = identity.node_id.clone();
         tracing::info!(
@@ -1039,15 +1108,9 @@ impl NodeControlPlane {
                 // two protocol fields travel — no generation counters
                 // (ADR-059 §7.2 OCP boundary).
                 let ready_topic = acowork_core::node::node_ready_topic(&node_id);
-                let ready_envelope = DataEnvelope {
-                    version: 1,
-                    payload: Some(data_envelope::Payload::NodeReady(
-                        acowork_core::mqtt_proto::NodeReady {
-                            node_id: node_id.clone(),
-                            protocol_version: 1,
-                        },
-                    )),
-                };
+                // Same envelope as the periodic presence re-assert below —
+                // see `node_ready_envelope` / `reassert_presence`.
+                let ready_envelope = node_ready_envelope(&node_id);
                 if let Err(e) = client
                     .publish(
                         ready_topic,
@@ -1407,13 +1470,22 @@ fn probe_health(port: u16) -> std::io::Result<()> {
 }
 
 impl NodeControlPlane {
-    /// Main loop: info heartbeat + sleep/wake recovery + graceful
-    /// shutdown. HTTP server responsiveness is monitored out-of-band
-    /// by `spawn_http_watchdog` (separate OS thread — see the 2026-08
-    /// incident comment there).
+    /// Main loop: info heartbeat + presence re-assert + sleep/wake
+    /// recovery + graceful shutdown. HTTP server responsiveness is
+    /// monitored out-of-band by `spawn_http_watchdog` (separate OS thread
+    /// — see the 2026-08 incident comment there).
     async fn run_loop(mut self) -> Result<(), NodeError> {
         let mut heartbeat = tokio::time::interval(INFO_HEARTBEAT_INTERVAL);
         heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        // ADR-113: `status=online` / `NodeReady` are replayable state, not
+        // ConnAck-only events. `interval_at` gives a quick first re-assert
+        // after connect (cold-start race) then a low steady-state cost.
+        let mut presence = tokio::time::interval_at(
+            tokio::time::Instant::now() + PRESENCE_FIRST_DELAY,
+            PRESENCE_REASSERT_INTERVAL,
+        );
+        presence.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         // ADR-065 Step 1: sleep/wake recovery runs as an independent task
         // using the shared `run_power_probe_loop` (2 s interval, same as
@@ -1435,6 +1507,19 @@ impl NodeControlPlane {
 
         loop {
             tokio::select! {
+                _ = presence.tick() => {
+                    // Only re-assert while actually connected. While the
+                    // link is down the ConnAck handler owns the initial
+                    // publish; a queued `online` must never overwrite a
+                    // graceful `offline` published during shutdown.
+                    // Bind the bool, not the guard: an `RwLock` read guard
+                    // living across the awaited publish would stall the
+                    // identity/state writers (261a8f77 lock-discipline).
+                    let connected = self.state.read().await.snapshot().connected;
+                    if connected {
+                        reassert_presence(&self.client, &self.identity.node_id).await;
+                    }
+                }
                 _ = heartbeat.tick() => {
                     // ADR-075 D4: converge a display-name rename performed
                     // while the daemon keeps running — identity.json is
@@ -1587,7 +1672,6 @@ impl NodeControlPlane {
             &config.home,
             config.name.as_deref(),
             Some(&gateway_addr),
-            config.gateway_managed,
         )?;
         let node_id = identity.node_id.clone();
 
@@ -2223,6 +2307,23 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
 
+    /// ADR-113: `NodeReady` is replayable state. The ConnAck bootstrap and
+    /// the periodic presence re-assert share this builder — a wrong node id
+    /// here would make every re-assert a no-op (the Gateway drops mismatched
+    /// announcements), silently restoring the cold-start bug.
+    #[test]
+    fn node_ready_envelope_carries_the_announcing_node_id() {
+        let bytes = prost::Message::encode_to_vec(&node_ready_envelope("node-113"));
+        let decoded = DataEnvelope::decode(bytes.as_slice()).expect("NodeReady envelope decodes");
+        match decoded.payload {
+            Some(data_envelope::Payload::NodeReady(ready)) => {
+                assert_eq!(ready.node_id, "node-113");
+                assert_eq!(ready.protocol_version, 1);
+            }
+            other => panic!("unexpected payload: {other:?}"),
+        }
+    }
+
     fn ping_command() -> NodeControlCommand {
         NodeControlCommand {
             node_id: "local".to_string(),
@@ -2743,7 +2844,6 @@ mod tests {
         NodeIdentity {
             node_id: "0f0e0d0c-0b0a-4009-8007-060504030201".to_string(),
             node_name: "gpu-1".to_string(),
-            gateway_managed: false,
             node_token: None,
             gateway_addr: None,
             enrollment: EnrollmentState::Created,

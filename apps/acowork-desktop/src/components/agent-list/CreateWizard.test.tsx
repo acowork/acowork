@@ -102,7 +102,7 @@ let onCreated: ReturnType<typeof vi.fn>;
 let onClose: ReturnType<typeof vi.fn>;
 
 function renderWizard() {
-  return render(<CreateWizard open onCreated={onCreated} onClose={onClose} />);
+  return render(<CreateWizard open nodeId="n1" onCreated={onCreated} onClose={onClose} />);
 }
 
 const next = () => screen.getByRole("button", { name: /Next|下一步|次へ/ });
@@ -697,6 +697,8 @@ describe("CreateWizard — step 5: preview and create", () => {
 
     // Same object, field for field: preview and create cannot drift.
     expect(lastDraftFor("create_agent")).toEqual(previewDraft);
+    const call = invoke.mock.calls.filter((c) => c[0] === "create_agent").at(-1);
+    expect((call?.[1] as { nodeId: string }).nodeId).toBe("n1");
     expect(lastDraftFor("create_agent").labels).toEqual(["agile"]);
   });
 
@@ -722,8 +724,8 @@ describe("CreateWizard — reset", () => {
     fireEvent.keyDown(screen.getByLabelText("Labels"), { key: "Enter" });
     expect(screen.getByRole("button", { name: "Remove label agile" })).toBeTruthy();
 
-    rerender(<CreateWizard open={false} onCreated={onCreated} onClose={onClose} />);
-    rerender(<CreateWizard open onCreated={onCreated} onClose={onClose} />);
+    rerender(<CreateWizard open={false} nodeId="n1" onCreated={onCreated} onClose={onClose} />);
+    rerender(<CreateWizard open nodeId="n1" onCreated={onCreated} onClose={onClose} />);
 
     expect((screen.getByLabelText("Agent ID") as HTMLInputElement).value).toBe("");
     expect(screen.queryByRole("button", { name: "Remove label agile" })).toBeNull();

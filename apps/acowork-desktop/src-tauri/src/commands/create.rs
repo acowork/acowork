@@ -369,7 +369,9 @@ pub async fn preview_manifest(draft: CreateAgentDraft) -> Result<ManifestPreview
 pub async fn create_agent(
     state: State<'_, AppState>,
     draft: CreateAgentDraft,
+    node_id: String,
 ) -> Result<String, String> {
+    crate::commands::agent::require_node_id(&node_id)?;
     let agent_id = draft.manifest.agent_id.trim().to_string();
     let name = draft.manifest.name.trim().to_string();
 
@@ -476,7 +478,7 @@ pub async fn create_agent(
     // Install via Gateway
     let client = state.gateway.read().await;
     client
-        .install_agent(&package_bytes, true, None)
+        .install_agent(&package_bytes, true, &node_id)
         .await
         .map_err(|e| format!("Install failed: {}", e))?;
 

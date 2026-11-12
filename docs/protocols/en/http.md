@@ -152,13 +152,17 @@ Package-level CRUD and publishing. Packages are installed to `<packages_dir>`, a
 | GET | `/api/agents` | List all installed Agents (including status, avatar, mqtt_online, etc.) |
 | GET | `/api/agents/{id}` | Agent details (manifest, installed/connected/dev_mode, etc.) |
 | DELETE | `/api/agents/{id}` | Uninstall Agent |
-| POST | `/api/agents/install` | Install `.agent` package (multipart) |
+| POST | `/api/agents/install` | Install `.agent` package (multipart: `package` + **required** `node_id`; ADR-113) |
 | POST | `/api/agents/{id}/clone` | Clone Agent (skeleton or full) |
 | POST | `/api/agents/{id}/publish/prepare` | Prepare packaging (validation, cleanup) |
 | POST | `/api/agents/{id}/publish/build` | Build `.agent` package |
 | POST | `/api/agents/{id}/publish/export` | Export package to target path |
-| POST | `/api/agents/{id}/publish/install-locally` | Install build artifact locally |
+| POST | `/api/agents/{id}/publish/install-locally` | Install a build artifact; the JSON body's `node_id` is **required** (ADR-113 — "locally" describes where the artifact came from, not a default target on this machine) |
 | GET | `/api/packages/{agent_id}/download` | Download `.agent` package (Node install pull path); when auth enabled, validates `X-ACowork-Node-Token` (ADR-055 Phase 5a): missing/mismatch → 401/403 |
+
+> **ADR-113 contract**: `POST /api/agents/install`, `POST /api/agents/ensure` and `POST /api/agents/{id}/publish/install-locally` all require an explicit `node_id`. The Gateway **does not** infer a default from its own hostname, a launcher marker, or `local_node.json`; a missing/blank value → `400 missing required field: 'node_id'`. Callers select a usable node from `GET /api/nodes` (`online` + `control_ready !== false` + `can_manage !== false`); the final readiness gate remains the Gateway's `ensure_node_ready()` (structured `dependency_not_ready`). Having no usable node is a legitimate empty state, not a 409.
+
+`GET /api/nodes` → `control_ready` is **tri-state**: `true` / `false` when a bootstrap readiness registry is wired, and the field is **omitted** when there is none (MQTT disabled / minimal server). Omission means "readiness unknown", matching a pre-ADR-113 Gateway, because `ensure_node_ready()` is fail-open in that configuration. Clients must not coerce an absent value to `false`.
 
 ### 4.3 Agent Lifecycle Control
 
@@ -1123,8 +1127,14 @@ Content-Disposition: form-data; name="package"; filename="hello.agent"
 Content-Type: application/octet-stream
 
 <binary>
+------abc
+Content-Disposition: form-data; name="node_id"
+
+<target node_id chosen from GET /api/nodes — required by ADR-113>
 ------abc--
 ```
+
+A missing `node_id` → `400`; an offline target or one whose control plane has not announced `NodeReady` is gated by `ensure_node_ready()` with a structured `dependency_not_ready`.
 
 ### 9.2 Start Agent and send message (MQTT)
 

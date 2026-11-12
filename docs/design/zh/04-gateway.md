@@ -304,11 +304,12 @@ pub fn http_routes() -> Router<GatewayState> {
     ]
 }
 
-// POST /api/agents/install
-// Request: { "path": "/path/to/weather.agent" }
-// → 200 { "agent_id": "com.example.weather", "version": "1.0.0" }
-// → 400 { "error": "invalid package" }
-// → 409 { "error": "already installed" }
+// POST /api/agents/install —— multipart，不是 JSON（见 docs/protocols/zh/http.md §9.1）
+// Request: form-data { package: <bytes>, node_id: <显式目标节点> }
+//   ADR-113：node_id 必填；Gateway 不推断本机落点，缺失 → 400
+// → 202/200 { "agent_id": "com.example.weather", "version": "1.0.0" }
+// → 400 { "error": "invalid package" / "missing required field: 'node_id'" }
+// → structured dependency_not_ready（目标节点未 NodeReady）
 
 // POST /api/agents/{instance_id}/clone
 // Request: { "mode": "skeleton" | "full", "new_agent_id": "com.example.weather",

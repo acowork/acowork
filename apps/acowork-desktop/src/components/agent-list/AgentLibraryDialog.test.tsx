@@ -38,10 +38,11 @@ const h = vi.hoisted(() => ({
     nodes: [] as unknown[],
     agents: {} as Record<string, unknown>,
     fetchAgents: vi.fn(async () => {}),
+    fetchNodes: vi.fn(async () => {}),
     selectAgent: vi.fn(),
     installAgent: vi.fn(async () => "inst-local" as string | null),
   },
-  settings: { gatewayMode: "local" as string },
+  settingsReads: 0 as number,
   dropHandler: null as ((event: { payload: string[] }) => void) | null,
 }));
 
@@ -60,8 +61,14 @@ vi.mock("../../stores/agentStore", () => {
   return { useAgentStore: store };
 });
 
+// Architecture guard: the dialog must not read Gateway mode. Returning
+// "remote" makes any re-introduced mode branch visibly change behaviour,
+// and settingsReads lets a test assert the store was never consulted.
 vi.mock("../../stores/settingsStore", () => ({
-  useSettingsStore: (selector: (state: typeof h.settings) => unknown) => selector(h.settings),
+  useSettingsStore: (selector: (state: { gatewayMode: string }) => unknown) => {
+    h.settingsReads++;
+    return selector({ gatewayMode: "remote" });
+  },
 }));
 
 vi.mock("../common/ToastProvider", () => ({
@@ -105,7 +112,6 @@ const RISKY_AGENT = {
 const ONLINE_NODE = {
   node_id: "n1",
   online: true,
-  gateway_managed: false,
   capabilities: [],
   node_name: "Workstation",
   can_manage: true,
@@ -166,6 +172,17 @@ function mockCatalog(agents: unknown[]) {
       return { agent_id: "com.acowork.demo", instance_id: "inst-ensured", already_present: false };
     }
     if (command === "install_agent") return { ok: true };
+    if (command === "create_local_node") return { pid: 42 };
+    // ADR-113: the remote guide builds a REAL command from this Gateway's
+    // MQTT port and a freshly minted enrollment token.
+    if (command === "build_remote_node_command") {
+      return {
+        mqtt_port: 1883,
+        token: "tok-remote-113",
+        token_ttl_seconds: 3600,
+        suggested_host: "10.0.0.5",
+      };
+    }
     throw new Error(`unexpected command: ${command}`);
   });
 }
@@ -197,10 +214,13 @@ beforeEach(() => {
   cleanup();
   vi.clearAllMocks();
   resetHubIndexCache();
-  h.agent.nodes = [];
+  // Installs need an explicit target. Give every test a usable node by
+  // default; the no-node cases clear it explicitly.
+  h.agent.nodes = [ONLINE_NODE];
   h.agent.agents = {};
   h.agent.installAgent = vi.fn(async () => "inst-local" as string | null);
-  h.settings.gatewayMode = "local";
+  h.agent.fetchNodes = vi.fn(async () => {});
+  h.settingsReads = 0;
   h.dropHandler = null;
   h.listen.mockImplementation(async (_event: string, handler: (e: { payload: string[] }) => void) => {
     h.dropHandler = handler;
@@ -430,24 +450,28 @@ describe("multi-instance routing", () => {
     expect(screen.getAllByRole("button", { name: "agentHub.install" }).length).toBe(1);
   });
 
-  it("counts instances against the \"local\" anchor when no node is selected", async () => {
-    // Local mode with nothing enrolled: targetNodeId stays null and the
-    // Gateway inventory anchors own-machine instances on "local" (ADR-075 D6).
+  it("never treats the \"local\" anchor as a target when no node is available", async () => {
+    h.agent.nodes = [];
     h.agent.agents = installedEntry("com.acowork.safe", "inst-old", "local");
     await renderLibraryTab();
 
-    fireEvent.click(await screen.findByRole("button", { name: "agentHub.installAnother" }));
-    await waitFor(() =>
-      expect(h.invoke).toHaveBeenCalledWith("install_from_hub", expect.objectContaining({ ensure: false })),
-    );
+    // No target → no instance counting against a magic anchor, and no
+    // install may be submitted. The recovery banner is the only action.
+    expect(screen.queryByRole("button", { name: "agentHub.installAnother" })).toBeNull();
+    for (const button of await screen.findAllByRole("button", { name: "agentHub.install" })) {
+      expect(button.hasAttribute("disabled")).toBe(true);
+    }
+    expect(h.invoke).not.toHaveBeenCalledWith("install_from_hub", expect.anything());
   });
 });
 
 describe("install target (REQ-008 / REQ-009)", () => {
-  it("blocks every install and says why when a remote Gateway has no online node", async () => {
-    h.settings.gatewayMode = "remote";
+  it("blocks every install and offers both recovery paths when no node is available", async () => {
+    h.agent.nodes = [];
     await renderLibraryTab();
-    expect(await screen.findByText("agentHub.noOnlineNode")).toBeDefined();
+    expect(await screen.findByText("agentHub.noAvailableNode")).toBeDefined();
+    expect(screen.getByRole("button", { name: "agentHub.startLocalNode" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "agentHub.remoteNodeGuide" })).toBeDefined();
     for (const button of await screen.findAllByRole("button", { name: "agentHub.install" })) {
       expect(button.hasAttribute("disabled")).toBe(true);
     }
@@ -455,17 +479,201 @@ describe("install target (REQ-008 / REQ-009)", () => {
     expect(h.invoke).not.toHaveBeenCalledWith("install_from_hub", expect.anything());
   });
 
+  it("never reads Gateway mode to decide whether a node is available", async () => {
+    h.agent.nodes = [];
+    await renderLibraryTab();
+    expect(await screen.findByText("agentHub.noAvailableNode")).toBeDefined();
+    expect(screen.getByRole("button", { name: "agentHub.startLocalNode" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "agentHub.remoteNodeGuide" })).toBeDefined();
+    expect(h.settingsReads).toBe(0);
+  });
+
+  it("starts a local node on request without waiting for it or chaining an install", async () => {
+    h.agent.nodes = [];
+    await renderLibraryTab();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.startLocalNode" }));
+    await waitFor(() => {
+      expect(h.invoke).toHaveBeenCalledWith("create_local_node");
+      expect(h.agent.fetchNodes).toHaveBeenCalled();
+      expect(h.addToast).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "agentHub.startLocalNodeStarted" }),
+      );
+    });
+    expect(h.invoke).not.toHaveBeenCalledWith("install_from_hub", expect.anything());
+    expect(h.invoke).not.toHaveBeenCalledWith("install_agent", expect.anything());
+  });
+
+  it("reports an already-running local node and still reconciles the list", async () => {
+    h.agent.nodes = [];
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "create_local_node") return { already_running: true };
+      if (command === "fetch_hub_index") {
+        return { schema_version: 2, base_url: "https://hub.acowork.ai", agents: [SAFE_AGENT] };
+      }
+      if (command === "list_local_agent_packages") return { rows: [], warning: null };
+      throw new Error(`unexpected command: ${command}`);
+    });
+    await renderLibraryTab();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.startLocalNode" }));
+    await waitFor(() =>
+      expect(h.addToast).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "agentHub.startLocalNodeAlreadyRunning" }),
+      ),
+    );
+    expect(h.agent.fetchNodes).toHaveBeenCalled();
+  });
+
+  it("surfaces a start failure without overwriting the install error", async () => {
+    h.agent.nodes = [];
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "create_local_node") throw new Error("spawn denied");
+      if (command === "fetch_hub_index") {
+        return { schema_version: 2, base_url: "https://hub.acowork.ai", agents: [SAFE_AGENT] };
+      }
+      if (command === "list_local_agent_packages") return { rows: [], warning: null };
+      throw new Error(`unexpected command: ${command}`);
+    });
+    await renderLibraryTab();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.startLocalNode" }));
+    await waitFor(() =>
+      expect(h.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "error" })),
+    );
+    expect(screen.queryByText("agentHub.startLocalNodeFailed")).toBeNull();
+  });
+
+  it("builds a real, copyable remote command without executing anything", async () => {
+    h.agent.nodes = [];
+    await renderLibraryTab();
+    const guide = await screen.findByRole("button", { name: "agentHub.remoteNodeGuide" });
+    // No token is minted until the user actually opens the guide.
+    expect(h.invoke).not.toHaveBeenCalledWith("build_remote_node_command");
+
+    fireEvent.click(guide);
+    const command = await screen.findByText(
+      "acowork-node start --gateway 10.0.0.5:1883 --token tok-remote-113",
+    );
+    expect(command.tagName.toLowerCase()).toBe("code");
+    await waitFor(() =>
+      expect(h.invoke).toHaveBeenCalledWith("build_remote_node_command"),
+    );
+    expect(
+      h.invoke.mock.calls.filter(([cmd]) => cmd === "build_remote_node_command"),
+    ).toHaveLength(1);
+    expect(h.invoke).not.toHaveBeenCalledWith("create_local_node");
+    expect(screen.getByRole("button", { name: "agentHub.remoteNodeCopy" })).toBeDefined();
+
+    // The host is editable, so a loopback default can be replaced with the
+    // address a remote machine can actually reach.
+    const host = screen.getByRole("textbox", { name: "agentHub.remoteNodeHost" });
+    fireEvent.change(host, { target: { value: "gateway.internal" } });
+    expect(
+      await screen.findByText(
+        "acowork-node start --gateway gateway.internal:1883 --token tok-remote-113",
+      ),
+    ).toBeDefined();
+  });
+
+  it("cannot be turned into a different shell command by the editable host", async () => {
+    h.agent.nodes = [];
+    await renderLibraryTab();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeGuide" }));
+    await screen.findByText(
+      "acowork-node start --gateway 10.0.0.5:1883 --token tok-remote-113",
+    );
+
+    const host = screen.getByRole("textbox", { name: "agentHub.remoteNodeHost" });
+    fireEvent.change(host, { target: { value: "gw; rm -rf $HOME `id`" } });
+    // Shell metacharacters and whitespace never reach the copyable command.
+    expect(
+      await screen.findByText(
+        "acowork-node start --gateway gwrm-rfHOMEid:1883 --token tok-remote-113",
+      ),
+    ).toBeDefined();
+  });
+
+  it("brackets an IPv6 suggested host before appending the port", async () => {
+    h.agent.nodes = [];
+    h.invoke.mockImplementation(async (command: string) => {
+      if (command === "fetch_hub_index") {
+        return { schema_version: 2, base_url: "https://hub.acowork.ai", agents: [SAFE_AGENT] };
+      }
+      if (command === "list_local_agent_packages") return { rows: [], warning: null };
+      if (command === "build_remote_node_command") {
+        return {
+          mqtt_port: 1883,
+          token: "tok-v6",
+          token_ttl_seconds: 3600,
+          suggested_host: "::1",
+        };
+      }
+      throw new Error(`unexpected command: ${command}`);
+    });
+    await renderLibraryTab();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeGuide" }));
+    expect(
+      await screen.findByText("acowork-node start --gateway [::1]:1883 --token tok-v6"),
+    ).toBeDefined();
+  });
+
+  it("re-reads the node topology when it opens, instead of trusting the store snapshot", async () => {
+    // Cold start: AgentList fetched before the Gateway's node announced
+    // itself, so the store is empty while `GET /api/nodes` is not. The
+    // dialog must ask again on open (ADR-113 D6) — otherwise the empty
+    // state is permanent and "Start local node" looks like the only fix.
+    h.agent.nodes = [];
+    await renderLibraryTab();
+    expect(h.agent.fetchNodes).toHaveBeenCalled();
+  });
+
+  it("does not let a leading dash turn the host into a CLI option", async () => {
+    h.agent.nodes = [];
+    await renderLibraryTab();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeGuide" }));
+    await screen.findByText(
+      "acowork-node start --gateway 10.0.0.5:1883 --token tok-remote-113",
+    );
+
+    const host = screen.getByRole("textbox", { name: "agentHub.remoteNodeHost" });
+    fireEvent.change(host, { target: { value: "--help.evil" } });
+    expect(
+      await screen.findByText(
+        "acowork-node start --gateway help.evil:1883 --token tok-remote-113",
+      ),
+    ).toBeDefined();
+  });
+
   it("blocks installs to a node the caller cannot manage", async () => {
-    h.settings.gatewayMode = "remote";
     h.agent.nodes = [{ ...ONLINE_NODE, can_manage: false }];
     await renderLibraryTab();
-    expect(await screen.findByText("agentHub.nodeNotManageable")).toBeDefined();
+    expect(await screen.findByText("agentHub.noAvailableNode")).toBeDefined();
+    expect(await screen.findByText("agentHub.noNodeDetailNotManageable")).toBeDefined();
     const buttons = await screen.findAllByRole("button", { name: "agentHub.install" });
     for (const button of buttons) expect(button.hasAttribute("disabled")).toBe(true);
+    fireEvent.click(buttons[0]);
+    expect(h.invoke).not.toHaveBeenCalledWith("install_from_hub", expect.anything());
+  });
+
+  it("blocks installs to an online node whose control plane is not ready", async () => {
+    h.agent.nodes = [{ ...ONLINE_NODE, control_ready: false }];
+    await renderLibraryTab();
+    expect(await screen.findByText("agentHub.noAvailableNode")).toBeDefined();
+    expect(await screen.findByText("agentHub.noNodeDetailNotReady")).toBeDefined();
+    for (const button of await screen.findAllByRole("button", { name: "agentHub.install" })) {
+      expect(button.hasAttribute("disabled")).toBe(true);
+    }
+  });
+
+  it("still accepts an older Gateway that omits readiness fields", async () => {
+    // control_ready / can_manage are optional for wire compatibility: the
+    // final gate stays with the Gateway's ensure_node_ready().
+    h.agent.nodes = [{ node_id: "n1", online: true, node_name: "Legacy" }];
+    await renderLibraryTab();
+    expect(screen.queryByText("agentHub.noAvailableNode")).toBeNull();
+    const buttons = await screen.findAllByRole("button", { name: "agentHub.install" });
+    expect(buttons.every((b) => !b.hasAttribute("disabled"))).toBe(true);
   });
 
   it("pre-selects the node the entry point came from when several are online", async () => {
-    h.settings.gatewayMode = "remote";
     h.agent.nodes = [ONLINE_NODE, { ...ONLINE_NODE, node_id: "n2", node_name: "Server" }];
     await renderLibraryTab({ initialNodeId: "n2" });
     const select = await screen.findByRole("combobox", { name: "agentHub.targetNode" });
@@ -571,7 +779,7 @@ describe("local agent library (REQ-021..032)", () => {
     await waitFor(() =>
       expect(h.invoke).toHaveBeenCalledWith("ensure_local_agent", {
         packagePath: LOCAL_ROW.path,
-        nodeId: null,
+        nodeId: "n1",
       }),
     );
     // Never the non-idempotent path.
@@ -778,7 +986,7 @@ describe("local agent library (REQ-021..032)", () => {
     });
     fireEvent.click(item);
 
-    await waitFor(() => expect(h.agent.installAgent).toHaveBeenCalledWith(LOCAL_ROW.path, undefined));
+    await waitFor(() => expect(h.agent.installAgent).toHaveBeenCalledWith(LOCAL_ROW.path, "n1"));
     expect(h.invoke).not.toHaveBeenCalledWith("ensure_local_agent", expect.anything());
   });
 

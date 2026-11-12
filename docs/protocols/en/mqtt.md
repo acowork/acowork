@@ -388,6 +388,10 @@ acowork/nodes/{node_id}/
 │                                     #   isomorphic to agent status (ADR-055 §6.2)
 ├── info                              # [Retained] protobuf DataEnvelope<NodeInfo>
 │                                     #   node metadata (hostname, os, arch, runtime_version, capability set)
+├── ready                             # [Retained] protobuf DataEnvelope<NodeReady>
+│                                     #   { node_id, protocol_version } — control plane up.
+│                                     #   The Gateway marks `node.{id}` Ready from it; the
+│                                     #   install gate `ensure_node_ready()` depends on it.
 ├── enroll                            # [QoS 1] Node → Gateway registration request (Phase 5a)
 │                                     #   payload = DataEnvelope<NodeEnroll>
 │                                     #   { node_id, os, arch, node_version,
@@ -402,6 +406,8 @@ acowork/nodes/{node_id}/
 ├── agents/{id}/events                # [QoS 1] Node → Gateway execution result reports
 └── lsps                              # [Retained] Node-local LSP relay endpoint (replaces global lsps)
 ```
+
+**Replayable state (ADR-113 D9)**: `status` and `ready` are **state**, not one-shot events. The Node publishes them on ConnAck and re-asserts them periodically while connected (first at 1 s, then every 5 s) until disconnect or shutdown. Convergence therefore depends on neither when the Gateway completes its SUBSCRIBE nor who launched the Node — there is no "process is running but `GET /api/nodes` does not list it" state. Re-assertion is idempotent: `status=online` only refreshes `online_since` on a false→true edge, and an unchanged `node.{id}` state does not bump the bootstrap snapshot version. Shutdown publishes `offline` and then stops re-asserting, so a queued `online` cannot overwrite it.
 
 **Enrollment Semantics (Phase 5a)**:
 

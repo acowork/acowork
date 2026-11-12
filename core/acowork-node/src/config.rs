@@ -31,11 +31,6 @@ pub struct NodeConfig {
     /// Explicit node name (`--name`). When `None`, a new identity is
     /// derived from the hostname. Display only (ADR-075 D2).
     pub name: Option<String>,
-    /// Spawn marker set ONLY by the Gateway (`--gateway-managed`,
-    /// hidden from help). Persisted into identity.json at creation so
-    /// the Gateway can recognize its own-machine node even after a
-    /// service/container restart drops the flag (ADR-075 D5).
-    pub gateway_managed: bool,
     /// Enrollment token (Phase 5a — carried through the config so the
     /// CLI surface is already in place; the broker does not validate
     /// it yet).
@@ -87,7 +82,6 @@ impl Default for NodeConfig {
             gateway_mqtt_port: acowork_core::defaults::GATEWAY_MQTT_PORT,
             gateway_http: None,
             name: None,
-            gateway_managed: false,
             token: None,
             max_agents: acowork_core::node::NODE_DEFAULT_MAX_AGENTS,
             advertise_host: "127.0.0.1".to_string(),

@@ -12,9 +12,11 @@
 //!    spawning a fresh one. Detection mirrors
 //!    `cleanup_orphaned_runtimes`: process-list scan for
 //!    `acowork-node` whose cmdline carries our spawn markers
-//!    (`--gateway-managed --gateway 127.0.0.1:{port}`). The
-//!    `--gateway-managed` marker is set ONLY by the Gateway, so this
-//!    never touches user-managed nodes on the same machine.
+//!    (`--spawn-marker --gateway 127.0.0.1:{port}`). ADR-113: the
+//!    marker is a LOCAL process-table hint only — it is never written
+//!    into identity.json, never published in NodeInfo, and never read
+//!    by any protocol path. It exists solely so this launcher can reap
+//!    its own children without touching user-started nodes.
 //!
 //! **Loopback-only spawn rule (local-mode decision):** a
 //! Gateway-spawned node is by definition on this very machine, so it
@@ -27,10 +29,9 @@
 //!    `acowork/nodes/+/status`; wait a short window for a retained
 //!    `online` from THIS machine's node (persisted anchor first, then
 //!    a same-hostname scan — see `local_node_id`), reusing it instead
-//!    of spawning a duplicate. `gateway_managed` alone is NOT enough:
-//!    a remote LAN node carries the marker too (2026-09-20 incident —
-//!    the local node was never spawned because a node spawned on
-//!    another machine hijacked the reuse check).
+//!    of spawning a duplicate. ADR-113: the scan uses only protocol
+//!    state (online + reported hostname), so a node started by the
+//!    Desktop, a CLI or a remote launcher is reused just the same.
 //! 3. **Spawn + reaper** — the supervisor task owns the `Child`,
 //!    reaps it on exit, and respawns after a retry delay (re-checking
 //!    the registry first: another instance may have taken over).
@@ -53,11 +54,13 @@ use tokio::sync::RwLock;
 use crate::mqtt::node_control::{NodeControlClient, NodeInstallDispatch, NodePackageSource};
 use crate::mqtt::node_registry::{local_node_id, SharedNodeRegistry};
 
-/// URL host a package-dispatch download must target: the local node dials
-/// the (normalized) HTTP bind host — a wildcard bind must still be reached
-/// via loopback — while remote nodes dial the advertise host they can route
-/// to (ADR-055 D3). `local_node_id` is the registry-resolved id of the
-/// Gateway's own-machine node (ADR-075 D5), None when unknown.
+/// URL host a package-dispatch download must target: a node on the
+/// Gateway's own machine dials the (normalized) HTTP bind host — a
+/// wildcard bind must still be reached via loopback — while other nodes
+/// dial the advertise host they can route to (ADR-055 D3).
+/// ADR-113: `local_node_id` is resolved from protocol state only
+/// (online + hostname); this is a routing optimisation, never a
+/// statement about who launched the node.
 pub fn dispatch_url_host<'a>(
     local_node_id: Option<&str>,
     node_id: &str,
@@ -202,10 +205,11 @@ pub(crate) fn find_procs_by_cmdline(pattern: &str) -> Vec<(u32, String)> {
 /// Kill orphaned local-node processes from a previous Gateway run.
 ///
 /// Marker: cmdline contains `acowork-node`, our internal
-/// `--gateway-managed` spawn marker, and our `--gateway {host}:{port}`
-/// value. pgrep-less environments (Windows): skipped (returns 0) —
-/// same limitation as `cleanup_orphaned_runtimes`; Windows-specific
-/// verification is a Phase 2b gate item.
+/// `--spawn-marker` argv hint, and our `--gateway {host}:{port}`
+/// value. The legacy `--gateway-managed` spelling is still matched so
+/// an upgrade can reap children spawned by a pre-ADR-113 Gateway.
+/// pgrep-less environments (Windows): skipped (returns 0) — same
+/// limitation as `cleanup_orphaned_runtimes`.
 fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
     let my_pid = std::process::id();
     let gateway_marker = format!("--gateway {LOCAL_GATEWAY_HOST}:{mqtt_port}");
@@ -216,7 +220,10 @@ fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
             if pid == my_pid {
                 return None;
             }
-            if cmdline.contains("--gateway-managed") && cmdline.contains(&gateway_marker) {
+            let spawned_by_us = cmdline.contains("--spawn-marker")
+                // Pre-ADR-113 binaries used this argv spelling.
+                || cmdline.contains("--gateway-managed");
+            if spawned_by_us && cmdline.contains(&gateway_marker) {
                 Some(pid)
             } else {
                 None
@@ -239,22 +246,16 @@ fn cleanup_orphaned_local_nodes(mqtt_port: u16) -> usize {
     pids.len()
 }
 
-// ── Own-machine node identity anchor (ADR-075 D5 amendment) ──────────
+// ── Own-machine node identity anchor (ADR-113) ──────────────────────
 //
-// ADR-075 D5 identified the Gateway's own-machine node as "the online
-// node with `gateway_managed == true`" — an assumption that breaks in
-// a LAN (`--remote`) fleet: a node spawned by the Gateway on ANOTHER
-// machine carries `gateway_managed = true` too, and once it reconnects
-// within the reuse window the Gateway believed the local node was
-// already up and skipped the spawn (2026-09-20 incident: the Mac's own
-// node never started because the Windows node hijacked the reuse
-// check).
+// This is launcher-local bookkeeping, NOT protocol state. The Gateway
+// records the node_id it last spawned/reused in
+// `{data_dir}/local_node.json` so the next boot can ask the registry
+// "is that exact node still online?" without a hostname scan.
 //
-// The anchor removes the guesswork: whichever node_id this Gateway
-// resolved as its own-machine node last is persisted to
-// `{data_dir}/local_node.json` and wins on the next boot; the
-// same-hostname scan inside `local_node_id` is only the migration
-// fallback.
+// It is deliberately NOT used as an install target: install/ensure
+// requests always carry an explicit node_id. A node started by the
+// Desktop, a CLI, or a remote machine is indistinguishable here.
 
 /// `{data_dir}/local_node.json` — the persisted own-machine node id.
 fn local_node_anchor_path(data_dir: &str) -> std::path::PathBuf {
@@ -377,8 +378,7 @@ pub async fn ensure_local_node(
     data_dir: &str,
 ) -> std::io::Result<Arc<LocalNodeSupervisor>> {
     // Step 0: pin the persisted own-machine node id so the reuse
-    // window below can only ever match THIS machine's node — never a
-    // remote gateway-managed one.
+    // window below matches the exact node this launcher saw last.
     if let Some(anchor) = load_persisted_local_node_id(data_dir) {
         node_registry
             .write()
@@ -387,7 +387,7 @@ pub async fn ensure_local_node(
     }
 
     // Step 1: kill orphans from a previous Gateway run (they carry our
-    // `--gateway-managed` marker — user-managed nodes never match).
+    // local `--spawn-marker` argv hint — user-started nodes never match).
     let orphans = cleanup_orphaned_local_nodes(mqtt_port);
     if orphans > 0 {
         // Avoid a spawn race with the dying process. Retained state is
@@ -534,8 +534,10 @@ async fn spawn_and_supervise(
     Ok(())
 }
 
-/// Spawn the `acowork-node start` child with the internal spawn marker
-/// used by orphan cleanup (`--gateway-managed --gateway 127.0.0.1:{port}`).
+/// Spawn the `acowork-node start` child with the LOCAL process marker
+/// used by orphan cleanup (`--spawn-marker --gateway 127.0.0.1:{port}`).
+/// ADR-113: the marker is discarded by the node (see acowork-node cli.rs);
+/// it never becomes identity or protocol state.
 /// No `--name` is passed: the node defaults to its machine hostname
 /// slug (unified naming rule). `token` (ADR-055 Phase 5a) is the
 /// pre-issued local node credential, forwarded as `--token` when MQTT
@@ -564,7 +566,7 @@ fn spawn_node_child(
         &format!("{LOCAL_GATEWAY_HOST}:{effective_proxy_port}"),
         "--proxy-port",
         &effective_proxy_port.to_string(),
-        "--gateway-managed",
+        "--spawn-marker",
         "--packages-dir",
         packages_dir,
     ]);
@@ -578,8 +580,34 @@ fn spawn_node_child(
     if let Some(port) = lsp_relay_port {
         cmd.args(["--lsp-relay-port", &port.to_string()]);
     }
-    cmd.stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::inherit());
+    // The Gateway-spawned node is a daemon, never an interactive CLI:
+    // all three std handles must be explicitly null. The previous
+    // `stderr(inherit)` + default stdin inherit leaked the *launcher
+    // chain's* console handles into a process attached to a different
+    // console. Concrete failure (Windows, dev build, fresh machine):
+    // the node inherited the dev terminal's console input handle, so
+    // `IsTerminal` (a handle-level check) said "TTY" and the fresh-start
+    // path entered the interactive ADR-087 enrollment prompt
+    // (`interactive_enrollment_token`), whose `read_line` on a console
+    // the node is not attached to blocks forever — node alive, zero
+    // MQTT traffic, no identity.json, 0-byte file log. Matching the
+    // Desktop's `create_local_node` stdio byte-for-byte also keeps the
+    // ADR-113 invariant: swapping *who* spawns the node never changes
+    // its startup behavior. The node's own rolling file log under
+    // `{home}/logs/` is its diagnostics channel, not inherited stderr.
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+
+    #[cfg(windows)]
+    {
+        // Same console-window suppression as the Desktop spawn path
+        // (`create_local_node`): the node is a console binary; never
+        // flash a terminal window when the launcher chain has no
+        // console of its own (release Desktop).
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
 
     #[cfg(unix)]
     {
@@ -642,37 +670,6 @@ async fn collect_node_registry_via_mqtt(
 
     drop(client);
     Ok(node_registry)
-}
-
-/// Resolve the Gateway's own-machine node id from the broker's retained
-/// topics (ADR-075 D5): the online `gateway_managed` node reporting the
-/// Gateway machine's hostname, newest `last_updated` wins.
-///
-/// Why the CLI needs this: `--node` defaults to "the Gateway's own
-/// machine", but the node id is a UUID minted by the Node — a standalone
-/// CLI process has no daemon registry to read. The `"local"` anchor is
-/// NOT a routable MQTT topic (no Node subscribes to
-/// `acowork/nodes/local/...`), so falling back to it would publish into
-/// a topic nobody receives: the command would silently never arrive.
-/// Failure is loud instead (ADR-075 Q2).
-///
-/// The hostname gate assumes the CLI runs on the Gateway's machine (the
-/// documented usage); from a remote shell the default is unresolvable —
-/// pass `--node <node_id>` explicitly.
-pub async fn resolve_local_node_via_mqtt(
-    mqtt_host: &str,
-    mqtt_port: u16,
-) -> crate::error::Result<String> {
-    let registry = collect_node_registry_via_mqtt(mqtt_host, mqtt_port).await?;
-    crate::mqtt::node_registry::local_node_id(&registry)
-        .await
-        .ok_or_else(|| {
-            crate::error::GatewayError::Config(
-                "the Gateway's own-machine node is not online (no `gateway_managed` node in the \
-                 retained node registry) — pass `--node <node_id>` explicitly"
-                    .to_string(),
-            )
-        })
 }
 
 /// `acowork-gateway nodes list` — query the running Gateway's broker
@@ -1226,7 +1223,7 @@ mod tests {
         let path = dir.path().join("identity.json");
         std::fs::write(
             &path,
-            r#"{"node_id":"id-1","node_name":"mac","gateway_managed":true,"node_token":"secret"}"#,
+            r#"{"node_id":"id-1","node_name":"mac","node_token":"secret"}"#,
         )
         .unwrap();
         assert_eq!(read_node_identity_id(&path).as_deref(), Some("id-1"));

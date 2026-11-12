@@ -524,7 +524,7 @@ interface AgentStoreState {
    *  Resolves with the INSTANCE key the Gateway acked (ADR-073) so the
    *  caller can select what it just created; `null` only if a Gateway
    *  predates the ack field, in which case the selection is left alone. */
-  installAgent: (packagePath: string, nodeId?: string) => Promise<string | null>;
+  installAgent: (packagePath: string, nodeId: string) => Promise<string | null>;
   uninstallAgent: (agentId: string) => Promise<void>;
   startAgent: (agentId: string, devMode?: boolean) => Promise<void>;
   stopAgent: (agentId: string) => Promise<void>;
@@ -1009,6 +1009,14 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
   },
 
   installAgent: async (packagePath, nodeId) => {
+    // The install target is always explicit. A missing node_id must never
+    // reach the Gateway, where it would be inferred from deployment-specific
+    // state; callers disable installation while no target is available.
+    if (!nodeId) {
+      const error = "installAgent requires an explicit nodeId";
+      set({ error });
+      throw new Error(error);
+    }
     try {
       // No `devMode` argument: the Gateway ignores the multipart field
       // (`read_agent_upload` drops unknown names, PRD §14.5 F17) and decides
@@ -1016,7 +1024,7 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       // only made the client look like it could weaken verification.
       const ack = await invoke<{ instance_id?: string }>("install_agent", {
         packagePath,
-        nodeId: nodeId ?? null,
+        nodeId,
       });
       await get().fetchAgents();
       return ack.instance_id ?? null;

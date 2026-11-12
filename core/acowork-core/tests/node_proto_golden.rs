@@ -33,7 +33,6 @@ fn sample_node_info() -> NodeInfo {
         agent_count: 0,
         http_endpoint: "http://127.0.0.1:19900".to_string(),
         node_name: "nicholas-pc".to_string(),
-        gateway_managed: true,
     }
 }
 
@@ -136,8 +135,16 @@ fn golden_node_info_envelope() {
     // Golden vector — computed from the contract above; any change to
     // field numbers/types in NodeInfo or the envelope tag must update
     // this deliberately.
-    let expected = "08 01 e2 01 68 0a 05 6c 6f 63 61 6c 12 0b 6e 69 63 68 6f 6c 61 73 2d 70 63 1a 05 6d 61 63 6f 73 22 07 61 61 72 63 68 36 34 2a 05 30 2e 31 2e 30 30 01 3a 07 70 72 6f 63 65 73 73 3a 07 70 61 63 6b 61 67 65 40 10 52 16 68 74 74 70 3a 2f 2f 31 32 37 2e 30 2e 30 2e 31 3a 31 39 39 30 30 5a 0b 6e 69 63 68 6f 6c 61 73 2d 70 63 60 01";
+    // ADR-113: field 12 (`gateway_managed`) was retired and reserved. The
+    // two bytes `60 01` at the tail of the old vector must never come back:
+    // a node's launcher is not protocol state.
+    let expected = "08 01 e2 01 66 0a 05 6c 6f 63 61 6c 12 0b 6e 69 63 68 6f 6c 61 73 2d 70 63 1a 05 6d 61 63 6f 73 22 07 61 61 72 63 68 36 34 2a 05 30 2e 31 2e 30 30 01 3a 07 70 72 6f 63 65 73 73 3a 07 70 61 63 6b 61 67 65 40 10 52 16 68 74 74 70 3a 2f 2f 31 32 37 2e 30 2e 30 2e 31 3a 31 39 39 30 30 5a 0b 6e 69 63 68 6f 6c 61 73 2d 70 63";
     assert_eq!(hex(&bytes), expected.replace(' ', ""));
+    let fields = top_level_field_numbers(&sample_node_info().encode_to_vec());
+    assert!(
+        !fields.contains(&12),
+        "NodeInfo must not encode retired field 12 (gateway_managed): {fields:?}"
+    );
 
     // Round-trip contract: the golden bytes must decode back to the
     // same logical payload.
@@ -151,7 +158,6 @@ fn golden_node_info_envelope() {
     assert_eq!(info.max_agents, 16);
     assert_eq!(info.http_endpoint, "http://127.0.0.1:19900");
     assert_eq!(info.node_name, "nicholas-pc");
-    assert!(info.gateway_managed);
 }
 
 #[test]

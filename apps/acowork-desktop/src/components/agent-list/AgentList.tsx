@@ -1,5 +1,6 @@
 import { useEffect, useState, useRef, useMemo, useCallback, Fragment } from "react";
 import { useAgentStore } from "../../stores/agentStore";
+import { usableNodesOf } from "../nodes/nodeAvailability";
 import { useChatStore } from "../../stores/chatStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
 import { useSettingsStore } from "../../stores/settingsStore";
@@ -1155,6 +1156,7 @@ export function AgentList({ width }: AgentListProps) {
       {/* Create wizard */}
       <CreateWizard
         open={showCreateWizard}
+        nodeId={usableNodesOf(nodes)[0]?.node_id ?? null}
         onCreated={(agentId) => {
           setShowCreateWizard(false);
           addToast({ type: "success", message: t("agentList.agentCreated", { agentId }) });

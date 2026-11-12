@@ -50,14 +50,12 @@ import { useAgentStore } from "./agentStore";
 const NODE_A = {
   node_id: "n-1",
   online: true,
-  gateway_managed: true,
   capabilities: [],
   hostname: "alpha",
 };
 const NODE_B = {
   node_id: "n-2",
   online: true,
-  gateway_managed: false,
   capabilities: [],
   hostname: "beta",
 };

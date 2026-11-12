@@ -156,12 +156,10 @@ pub enum Commands {
     Install {
         /// Path to .agent package file
         package: String,
-        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, resolved from the broker's retained node
-        /// registry — pass `--node <node_id>` to target a remote node).
-        /// Wiring lands in Phase 3 —
-        /// the command is currently delegated to the local node via the
-        /// HTTP API.
+        /// Target node (ADR-113): `--node <node_id>` is REQUIRED.
+        /// List the ids with `acowork-gateway nodes list`; the Gateway
+        /// never infers a default from its own machine or registry.
+        /// Dispatched over MQTT to the named node's control topic.
         #[arg(long)]
         node: Option<String>,
     },
@@ -169,9 +167,9 @@ pub enum Commands {
     Uninstall {
         /// Agent ID to uninstall
         agent_id: String,
-        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, resolved from the broker's retained node
-        /// registry — pass `--node <node_id>` to target a remote node).
+        /// Target node (ADR-113): `--node <node_id>` is REQUIRED.
+        /// List the ids with `acowork-gateway nodes list`; the Gateway
+        /// never infers a default from its own machine or registry.
         #[arg(long)]
         node: Option<String>,
     },
@@ -181,9 +179,9 @@ pub enum Commands {
         agent_id: String,
         /// Path to new .agent package file
         package: String,
-        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, resolved from the broker's retained node
-        /// registry — pass `--node <node_id>` to target a remote node).
+        /// Target node (ADR-113): `--node <node_id>` is REQUIRED.
+        /// List the ids with `acowork-gateway nodes list`; the Gateway
+        /// never infers a default from its own machine or registry.
         #[arg(long)]
         node: Option<String>,
     },
@@ -191,9 +189,9 @@ pub enum Commands {
     Start {
         /// Agent ID to start
         agent_id: String,
-        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, resolved from the broker's retained node
-        /// registry — pass `--node <node_id>` to target a remote node).
+        /// Target node (ADR-113): `--node <node_id>` is REQUIRED.
+        /// List the ids with `acowork-gateway nodes list`; the Gateway
+        /// never infers a default from its own machine or registry.
         #[arg(long)]
         node: Option<String>,
     },
@@ -201,9 +199,9 @@ pub enum Commands {
     Stop {
         /// Agent ID to stop
         agent_id: String,
-        /// Target node (ADR-055 §6.13.3; default: the Gateway's own
-        /// machine node, resolved from the broker's retained node
-        /// registry — pass `--node <node_id>` to target a remote node).
+        /// Target node (ADR-113): `--node <node_id>` is REQUIRED.
+        /// List the ids with `acowork-gateway nodes list`; the Gateway
+        /// never infers a default from its own machine or registry.
         #[arg(long)]
         node: Option<String>,
     },
@@ -342,7 +340,7 @@ impl Cli {
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
-                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
+                let node = resolve_target_node(node)?;
                 let dispatch = crate::gateway::node_manager::CliPackageDispatch {
                     mqtt_host: &mqtt_host,
                     mqtt_port,
@@ -363,7 +361,7 @@ impl Cli {
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
-                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
+                let node = resolve_target_node(node)?;
                 rt.block_on(crate::gateway::node_manager::uninstall_agent_via_mqtt(
                     &mqtt_host,
                     mqtt_port,
@@ -376,7 +374,7 @@ impl Cli {
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
-                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
+                let node = resolve_target_node(node)?;
                 let dispatch = crate::gateway::node_manager::CliPackageDispatch {
                     mqtt_host: &mqtt_host,
                     mqtt_port,
@@ -399,7 +397,7 @@ impl Cli {
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
-                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
+                let node = resolve_target_node(node)?;
                 rt.block_on(crate::gateway::node_manager::start_agent_via_mqtt(
                     &mqtt_host,
                     mqtt_port,
@@ -412,7 +410,7 @@ impl Cli {
                     .enable_all()
                     .build()
                     .map_err(GatewayError::Io)?;
-                let node = resolve_target_node(&rt, node, &mqtt_host, mqtt_port)?;
+                let node = resolve_target_node(node)?;
                 rt.block_on(crate::gateway::node_manager::stop_agent_via_mqtt(
                     &mqtt_host,
                     mqtt_port,
@@ -874,27 +872,22 @@ pub(crate) fn update_log_file_count(count: u64) {
 
 // Re-export from acowork-core (shared with Agent Runtime)
 
-/// Resolve the target node of a node-scoped CLI command (ADR-075 D5).
+/// ADR-113: every node-scoped CLI command must name its target node.
 ///
-/// An explicit `--node` wins. Without it the command targets the
-/// Gateway's own-machine node — which must be resolved from the running
-/// broker's retained node registry, because the node id is a UUID the
-/// Node minted (a standalone CLI process has nothing to derive it from).
-/// The `"local"` anchor is deliberately NOT used here: no Node subscribes
-/// to `acowork/nodes/local/...`, so dispatching to it would silently
-/// never arrive.
-fn resolve_target_node(
-    rt: &tokio::runtime::Runtime,
-    node: Option<String>,
-    mqtt_host: &str,
-    mqtt_port: u16,
-) -> Result<String, GatewayError> {
-    match node {
-        Some(node_id) => Ok(node_id),
-        None => rt.block_on(crate::gateway::node_manager::resolve_local_node_via_mqtt(
-            mqtt_host, mqtt_port,
-        )),
-    }
+/// The old default ("the Gateway's own-machine node") made the CLI
+/// resolve a target from retained MQTT topics plus this machine's
+/// hostname — deployment-specific knowledge that changes the result
+/// depending on how and where nodes were started. That is exactly the
+/// inference the protocol must not perform on a caller's behalf.
+/// `acowork-gateway nodes list` lists the ids; pass one with `--node`.
+fn resolve_target_node(node: Option<String>) -> Result<String, GatewayError> {
+    node.filter(|id| !id.trim().is_empty())
+        .ok_or_else(|| {
+            GatewayError::Config(
+                "a target node is required: pass --node <node_id> \
+                 (list them with `acowork-gateway nodes list`)".to_string(),
+            )
+        })
 }
 
 /// Async main entry point for daemon mode

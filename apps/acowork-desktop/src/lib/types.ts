@@ -121,8 +121,15 @@ export interface NodeInfo {
   online_since?: string;
   /** ADR-075 D2: display name (slug, renameable) — never a routing key. */
   node_name?: string;
-  /** ADR-075 D5: true when the node was spawned by the Gateway. */
-  gateway_managed: boolean;
+  /**
+   * ADR-113: control plane announced NodeReady (bootstrap node.{id}).
+   * Tri-state on the wire: true/false when the Gateway has a readiness
+   * registry, absent when it does not (readiness unknown). `undefined`
+   * means "let the Gateway's ensure_node_ready() decide" — never coerce
+   * it to false, or every node on an older / MQTT-disabled Gateway would
+   * be filtered out while the install gate is actually fail-open.
+   */
+  control_ready?: boolean;
   hostname?: string;
   os?: string;
   arch?: string;

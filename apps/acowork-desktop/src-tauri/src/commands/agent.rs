@@ -192,6 +192,19 @@ pub async fn get_agent_detail(
         .map_err(|e| e.to_string())
 }
 
+/// ADR-113: every install/ensure command must name its target node.
+/// Reject an empty id here so a missing target never becomes an HTTP
+/// request the Gateway would have to guess a landing node for.
+pub(crate) fn require_node_id(node_id: &str) -> Result<(), String> {
+    if node_id.trim().is_empty() {
+        return Err(
+            "install requires an explicit nodeId — query GET /api/nodes for available nodes"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
 /// Install an agent from a .agent package
 ///
 /// Reads the package file locally (Desktop App side) and uploads its contents
@@ -213,8 +226,9 @@ pub async fn get_agent_detail(
 pub async fn install_agent(
     state: State<'_, AppState>,
     package_path: String,
-    node_id: Option<String>,
+    node_id: String,
 ) -> Result<OperationAck, String> {
+    require_node_id(&node_id)?;
     // Read the .agent file into memory on the Desktop App side
     let package_bytes = std::fs::read(&package_path)
         .map_err(|e| format!("Failed to read package file '{}': {}", package_path, e))?;
@@ -237,9 +251,8 @@ pub async fn install_agent(
         let node_id = node_id.clone();
         async move {
             let client = state.gateway.read().await;
-            // Historical default; see the command's doc comment.
             client
-                .install_agent(&package_bytes, false, node_id.as_deref())
+                .install_agent(&package_bytes, false, &node_id)
                 .await
         }
     })
@@ -280,8 +293,10 @@ pub async fn install_bundled_agent(
     state: State<'_, AppState>,
     app_handle: tauri::AppHandle,
     resource_name: String,
+    node_id: String,
     dev_mode: Option<bool>,
 ) -> Result<OperationAck, String> {
+    require_node_id(&node_id)?;
     if resource_name.contains('/') || resource_name.contains('\\') || resource_name.contains("..") {
         return Err("Invalid bundled agent name".to_string());
     }
@@ -327,10 +342,13 @@ pub async fn install_bundled_agent(
         // so we re-clone the bytes on every attempt instead of moving.
         let state = state_for_op.clone();
         let package_bytes = package_bytes.clone();
+        let node_id = node_id.clone();
         let dev_mode = dev_mode.unwrap_or(true);
         async move {
             let client = state.gateway.read().await;
-            client.install_agent(&package_bytes, dev_mode, None).await
+            client
+                .install_agent(&package_bytes, dev_mode, &node_id)
+                .await
         }
     })
     .await?;

@@ -1,5 +1,7 @@
 # ADR-075: Restoring the Node Identity Model — `node_id` Upgraded to a Stable UUID, `node_name` Taking Over the Display Role
 
+> **⚠ Superseded in part by ADR-113 (2026-11-12)**: the launcher-identity clauses in D5 / D9 and the implementation checklist no longer describe the code. `gateway_managed` is removed from `NodeIdentity` (`identity.json`), `NodeConfig`, `NodeInfo` (proto field 12 is `reserved`) and `NodeInfoState`; `--gateway-managed` became `--spawn-marker`, a launcher-local process-table hint consumed and discarded by the CLI; `local_node_id()` no longer queries a launcher marker, is decided from `online` + `hostname` only, and is not an install default; Q1 ("NodeInfo or enroll for `gateway_managed`") is void now that the field is gone. The UUID v4 `node_id`, display-only `node_name`, idempotent enrollment and rename-only-`node_name` decisions remain in force. See [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md).
+
 > **Chinese source of truth**: [ADR-075](../zh/ADR-075-node-identity-uuid-and-node-name.md)
 > **Terminology**: see [GLOSSARY.md](./GLOSSARY.md)
 

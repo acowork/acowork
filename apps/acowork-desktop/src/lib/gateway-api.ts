@@ -989,12 +989,19 @@ export async function fetchNodes(gatewayUrl = getGatewayUrl()): Promise<NodeInfo
 /** Normalize one `/api/nodes` entry (snake_case contract or legacy camelCase) into `NodeInfo`. */
 function normalizeNode(raw: Record<string, unknown>): NodeInfo {
   const snakeOrCamel = (snake: string, camel: string): unknown => raw[snake] ?? raw[camel];
+  // ADR-113: tri-state on the wire. Pre-113 Gateways omit the field; a
+  // Gateway with no bootstrap registry omits it too (readiness unknown,
+  // and its ensure_node_ready() is fail-open). Keep both as `undefined`
+  // rather than coercing to `false` — `usableNodesOf` treats `undefined`
+  // as "let the Gateway's ensure_node_ready() decide", while `false`
+  // would mark every node unusable while the install gate disagrees.
+  const controlReady = snakeOrCamel("control_ready", "controlReady");
   return {
     node_id: (snakeOrCamel("node_id", "nodeId") ?? "") as string,
     online: raw.online === true,
     online_since: snakeOrCamel("online_since", "onlineSince") as string | undefined,
     node_name: snakeOrCamel("node_name", "nodeName") as string | undefined,
-    gateway_managed: snakeOrCamel("gateway_managed", "gatewayManaged") === true,
+    control_ready: typeof controlReady === "boolean" ? controlReady : undefined,
     hostname: raw.hostname as string | undefined,
     os: raw.os as string | undefined,
     arch: raw.arch as string | undefined,

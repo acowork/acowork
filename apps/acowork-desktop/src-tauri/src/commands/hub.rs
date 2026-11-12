@@ -85,9 +85,10 @@ pub async fn install_from_hub(
     agent_id: String,
     package_file: String,
     sha256: String,
-    node_id: Option<String>,
+    node_id: String,
     ensure: Option<bool>,
 ) -> Result<HubInstallResult, String> {
+    crate::commands::agent::require_node_id(&node_id)?;
     let ensure = ensure.unwrap_or(true);
     let started = Instant::now();
     let label = if ensure { "HUB_ENSURE" } else { "HUB_INSTALL" };
@@ -123,7 +124,7 @@ pub async fn install_from_hub(
             let node_id = node_id.clone();
             async move {
                 let client = state.gateway.read().await;
-                client.ensure_agent(&bytes, node_id.as_deref()).await
+                client.ensure_agent(&bytes, &node_id).await
             }
         })
         .await?;
@@ -154,7 +155,7 @@ pub async fn install_from_hub(
                 let client = state.gateway.read().await;
                 // `dev_mode` is not a client-side knob — the Gateway reads
                 // its own config (F3). Pass the historical default.
-                client.install_agent(&bytes, false, node_id.as_deref()).await
+                client.install_agent(&bytes, false, &node_id).await
             }
         })
         .await?;

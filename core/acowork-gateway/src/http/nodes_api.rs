@@ -52,8 +52,21 @@ pub struct NodeResponse {
     /// Display name (slug, renameable, ADR-075 D2) from the info snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
-    /// True when this node was spawned by the Gateway (ADR-075 D5).
-    pub gateway_managed: bool,
+    /// ADR-113: the node's control plane has announced `NodeReady` and
+    /// the `node.{id}` bootstrap subsystem is READY. This is the
+    /// protocol-side "can accept an install command" signal — clients
+    /// use it to build the set of usable targets instead of guessing
+    /// from `online` alone. No deployment/launcher facts involved.
+    ///
+    /// Tri-state on the wire: `Some(true/false)` when a bootstrap registry
+    /// is wired, and **absent** when the Gateway has no registry (MQTT
+    /// disabled / minimal server). In that case `ensure_node_ready()` is
+    /// fail-open, so reporting `false` would contradict the install gate
+    /// and make every online node look unusable to clients. Absence means
+    /// "unknown — let the Gateway's own gate decide", the same semantics
+    /// a pre-ADR-113 Gateway's missing field has.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub control_ready: Option<bool>,
     /// Node hostname (info snapshot).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hostname: Option<String>,
@@ -191,12 +204,23 @@ pub async fn list_nodes(
                         None,
                     )
                 };
+            // ADR-113: readiness is protocol state (bootstrap registry),
+            // not a property of whoever launched the node. An online
+            // node whose control plane has not announced NodeReady yet
+            // is visible but not a valid install target.
+            // `None` = no registry wired = readiness unknown. Must stay
+            // absent on the wire: `ensure_node_ready()` is fail-open in
+            // exactly this configuration, so a hard `false` here would
+            // have the node list and the install gate disagree.
+            let control_ready = state.bootstrap_registry.as_ref().map(|reg| {
+                reg.is_ready(&crate::bootstrap::SubsystemId(format!("node.{}", n.node_id)))
+            });
             Some(NodeResponse {
                 node_id: n.node_id,
                 online: n.online,
                 online_since: n.online_since.map(|t| t.to_rfc3339()),
                 node_name: n.node_name.clone(),
-                gateway_managed: n.gateway_managed,
+                control_ready,
                 hostname,
                 os,
                 arch,
@@ -596,7 +620,6 @@ mod tests {
             agent_count: 2,
             http_endpoint: "http://10.0.0.2:19900".to_string(),
             node_name: "gpu-1".to_string(),
-            gateway_managed: true,
         }
     }
 
@@ -1053,19 +1076,15 @@ mod tests {
         assert_eq!(ids, vec!["alpha", "zeta"]);
     }
 
-    #[test]
-    fn node_response_serializes_with_snake_case_fields() {
-        // Contract: the Desktop `NodeInfo` type (snake_case) consumes this
-        // payload verbatim via `fetchNodes`. A camelCase `rename_all` here
-        // silently broke `node_id`/`agent_count` parsing — every node
-        // failed to match its agent bucket, collapsing the remote-mode
-        // sidebar into one gray "unknown node" group.
-        let resp = NodeResponse {
+    /// `control_ready: None` = unknown, the state a Desktop must treat
+    /// as "let the Gateway's install gate decide".
+    fn sample_node_response() -> NodeResponse {
+        NodeResponse {
             node_id: "nicholas-pc".to_string(),
             online: true,
             online_since: Some("2026-09-13T05:10:21+00:00".to_string()),
             node_name: Some("nicholas-pc".to_string()),
-            gateway_managed: true,
+            control_ready: None,
             hostname: Some("NICHOLAS-PC".to_string()),
             os: Some("windows".to_string()),
             arch: Some("x86_64".to_string()),
@@ -1079,6 +1098,19 @@ mod tests {
             can_manage: true,
             is_guest: false,
             visibility: "private".to_string(),
+        }
+    }
+
+    #[test]
+    fn node_response_serializes_with_snake_case_fields() {
+        // Contract: the Desktop `NodeInfo` type (snake_case) consumes this
+        // payload verbatim via `fetchNodes`. A camelCase `rename_all` here
+        // silently broke `node_id`/`agent_count` parsing — every node
+        // failed to match its agent bucket, collapsing the remote-mode
+        // sidebar into one gray "unknown node" group.
+        let resp = NodeResponse {
+            control_ready: Some(true),
+            ..sample_node_response()
         };
 
         let json = serde_json::to_value(&resp).expect("NodeResponse serializes");
@@ -1089,7 +1121,7 @@ mod tests {
             "online",
             "online_since",
             "node_name",
-            "gateway_managed",
+            "control_ready",
             "hostname",
             "os",
             "arch",
@@ -1107,7 +1139,9 @@ mod tests {
             "nodeId",
             "onlineSince",
             "nodeName",
+            "controlReady",
             "gatewayManaged",
+            "gateway_managed",
             "machineUid",
             "nodeVersion",
             "protocolVersion",
@@ -1119,6 +1153,62 @@ mod tests {
         }
         assert_eq!(obj["node_id"], "nicholas-pc");
         assert_eq!(obj["agent_count"], 2);
+        assert_eq!(obj["control_ready"], true);
+    }
+
+    #[test]
+    fn unknown_control_ready_is_absent_not_false() {
+        // ADR-113: `false` is a *decision* (the node's control plane is
+        // not ready); absence is *no information*. Collapsing the two
+        // would make every node on a registry-less Gateway unusable.
+        let json = serde_json::to_value(sample_node_response()).unwrap();
+        let obj = json.as_object().unwrap();
+        assert!(!obj.contains_key("control_ready"));
+    }
+
+    #[tokio::test]
+    async fn list_nodes_marks_readiness_unknown_without_a_registry() {
+        // `ensure_node_ready()` is fail-open when no bootstrap registry is
+        // wired (MQTT disabled / minimal server). GET /api/nodes must not
+        // contradict it by asserting `false` for the same nodes.
+        let state = test_app_state();
+        {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            reg.update_status_from_mqtt("acowork/nodes/alpha/status", b"online");
+        }
+        assert!(state.bootstrap_registry.is_none());
+
+        let resp = list_nodes(State(state), None).await;
+        assert_eq!(resp.0.len(), 1);
+        assert_eq!(resp.0[0].control_ready, None);
+    }
+
+    #[tokio::test]
+    async fn list_nodes_projects_node_ready_from_the_bootstrap_registry() {
+        use crate::bootstrap::{ReadinessKind, SubsystemReadinessRegistry};
+
+        let mut state = test_app_state();
+        let registry = SubsystemReadinessRegistry::new_shared();
+        registry
+            .register("node.alpha", ReadinessKind::Optional)
+            .mark_ready(None);
+        state.bootstrap_registry = Some(registry);
+        {
+            let mut reg = state.node_registry.as_ref().unwrap().write().await;
+            reg.update_status_from_mqtt("acowork/nodes/alpha/status", b"online");
+            reg.update_status_from_mqtt("acowork/nodes/beta/status", b"online");
+        }
+
+        let resp = list_nodes(State(state), None).await;
+        let by_id = |id: &str| {
+            resp.0
+                .iter()
+                .find(|n| n.node_id == id)
+                .unwrap_or_else(|| panic!("missing node {id}"))
+                .control_ready
+        };
+        assert_eq!(by_id("alpha"), Some(true));
+        assert_eq!(by_id("beta"), Some(false));
     }
 
     // ── ADR-087 (revised): POST /api/nodes/{id}/claim ─────────────────

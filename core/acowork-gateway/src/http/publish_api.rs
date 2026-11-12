@@ -155,6 +155,9 @@ fn parse_result<T: serde::de::DeserializeOwned>(
 pub struct InstallLocallyRequest {
     /// Path to the built .agent package (from build_publish response)
     pub package_path: String,
+    /// ADR-113: explicit target node. The Gateway never infers a default
+    /// landing node from who spawned what.
+    pub node_id: String,
 }
 
 /// `POST /api/agents/:id/publish/install-locally` — install built package
@@ -177,13 +180,22 @@ pub async fn install_locally(
     let node_control = state.node_control.clone().ok_or_else(|| {
         ApiError::internal("Node control plane unavailable (MQTT disabled)")
     })?;
-    // ADR-075 D5/Q2: resolve the local node's UUID from the registry and
-    // fail loud when it is not online (the control topic is per-node —
-    // "local" alone would publish into a topic nobody subscribes to).
-    let target_node = crate::http::agents::resolve_local_node_id(&state).await?;
+    // ADR-113: the caller names the node. No "own-machine" resolution —
+    // that would make the same request behave differently depending on
+    // which process happened to start the node.
+    if req.node_id.trim().is_empty() {
+        return Err(ApiError::bad_request(
+            "missing required field: 'node_id' — installs must name an explicit target node",
+        ));
+    }
+    // Same protocol-internal gates as /install and /ensure: an explicit
+    // target is still checked for NodeReady and protocol compatibility
+    // before anything is published to its control topic.
+    crate::http::agents::ensure_node_ready(&state, &req.node_id).await?;
+    crate::http::agents::check_node_compatible(&state, &req.node_id).await?;
     let event = node_control
         .install_agent(NodeInstallDispatch {
-            node_id: &target_node,
+            node_id: &req.node_id,
             instance_id: &instance_id,
             agent_id: &agent_id,
             source: NodePackageSource::LocalPath(&req.package_path),
