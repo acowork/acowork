@@ -2357,7 +2357,9 @@
     "review": {
       "createdByLabel": "Created by",
       "approve": "Approve",
-      "reject": "Reject"
+      "reject": "Reject",
+      "openExec": "View run",
+      "execNotFound": "No execution session found for this task"
     },
     "reject": {
       "title": "Reject task",

@@ -30,6 +30,8 @@ import { useState } from "react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
+import { openTaskExecSession } from "../../lib/pmTaskExecSession";
+import { showToast } from "../../components/common/ToastProvider";
 import { useTranslation } from "../../i18n/useTranslation";
 import { PriorityBadge } from "./PriorityBadge";
 import { TaskTypeIcon } from "./TaskTypeIcon";
@@ -52,6 +54,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
   const healthy = usePmHealthStore((s) => s.healthy);
   const childCount = usePmBoardStore((s) => s.childrenOf(task.id).length);
   const [rejecting, setRejecting] = useState(false);
+  const [openingExec, setOpeningExec] = useState(false);
 
   // 离线（healthy === false）时禁用拖拽源 —— 看板只读
   const draggableDisabled = healthy === false;
@@ -92,6 +95,27 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
   const handleReject = async (reason?: string) => {
     setRejecting(false);
     await usePmBoardStore.getState().reviewTask(task.id, false, reason);
+  };
+
+  // 审核一条任务时，"它到底干了什么"在它自己的执行 session 里。跳过去而不是
+  // 把过程搬上卡片：转录是执行面的职责（ADR-106 D3 只搬坐标）。
+  const handleOpenExec = async () => {
+    if (openingExec) return;
+    setOpeningExec(true);
+    try {
+      const result = await openTaskExecSession(task.project_id, task.id);
+      if (result === "gone") {
+        showToast({ type: "info", message: t("chatView.execSessionGone") });
+      } else if (result === "not_found") {
+        showToast({ type: "info", message: t("pm.review.execNotFound") });
+      }
+    } catch {
+      // 网络 / 服务失败与"没有执行会话"给同一句提示：对点按钮的人而言都是
+      // "现在看不到过程"，区别只在日志里。
+      showToast({ type: "error", message: t("pm.review.execNotFound") });
+    } finally {
+      setOpeningExec(false);
+    }
   };
 
   return (
@@ -219,6 +243,24 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
               >
                 ✗ {t("pm.review.reject")}
               </button>
+              {/* 第三个动作是"去看"，不是"做决定"：描边而不是实心底，
+                  免得三颗按钮看起来是三个同等的裁决。只在 `submitted` 上出现
+                  —— 待批准开工（pending + review_status=pending）的任务还
+                  没有任何执行，摆一颗永远"未找到"的按钮就是骗点击。 */}
+              {task.status === "submitted" && (
+                <button
+                  type="button"
+                  disabled={draggableDisabled || openingExec}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleOpenExec();
+                  }}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  className="rounded border border-border-outer px-2 py-0.5 text-10 font-medium text-text-secondary transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  ▶ {t("pm.review.openExec")}
+                </button>
+              )}
             </div>
           </div>
         )}

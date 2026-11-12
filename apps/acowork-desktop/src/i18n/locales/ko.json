@@ -1989,7 +1989,9 @@
     "review": {
       "createdByLabel": "작성자",
       "approve": "승인",
-      "reject": "거부"
+      "reject": "거부",
+      "openExec": "실행 보기",
+      "execNotFound": "이 작업의 실행 세션을 찾을 수 없습니다"
     },
     "reject": {
       "title": "작업 거부",
