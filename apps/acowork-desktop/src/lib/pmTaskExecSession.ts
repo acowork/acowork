@@ -21,6 +21,7 @@ import { useChatStore } from "../stores/chatStore";
 import { useChatSessionStore } from "../stores/chatSessionStore";
 import { useProjectGroupStore } from "../stores/projectGroupStore";
 import { useLayoutStore } from "../stores/layoutStore";
+import type { PmTaskResponse } from "./pm-types";
 
 /** 每次读到用户服务 `/messages` 的上限（`chat_sessions_api::MAX_PAGE`）。 */
 const PAGE = 200;
@@ -57,6 +58,17 @@ export type TaskExecOpenResult =
   | "not_found"
   /** 引用行在，但执行 session 已被删除。 */
   | "gone";
+
+/**
+ * 这个状态的任务背后有没有执行 session 可看 —— 三态：干活中 / 交活待审 /
+ * 已完成。`pending`（还没开工）/ `rejected` / `cancelled` 上没有"过程"可看。
+ *
+ * 一处判断，两个入口用（看板卡片、任务弹框底栏）：哪个界面把按钮摆出来是
+ * 同一个事实，分成两份判断就迟早给出两种答案。
+ */
+export function canViewExecSession(status: PmTaskResponse["status"]): boolean {
+  return status === "in_progress" || status === "submitted" || status === "done";
+}
 
 /**
  * 一页转录里该任务**最新**的执行 session。

@@ -388,9 +388,22 @@ describe("the box is three zones — identity, fields, commit", () => {
     const labels = Array.from(footer!.querySelectorAll("button")).map((b) =>
       (b.textContent ?? "").trim(),
     );
-    expect(labels).toEqual(["pm.task.delete", "common.cancel", "pm.task.save"]);
-    // 一块 flex-1 撑开中间：危险动作与提交路径不相邻
+    expect(labels).toEqual([
+      "pm.task.delete",
+      "pm.review.openExec",
+      "common.cancel",
+      "pm.task.save",
+    ]);
+    // 一块 flex-1 撑开中间：危险动作 / 查看执行 与提交路径不相邻
     expect(footer!.querySelector(".flex-1")).toBeTruthy();
+  });
+
+  it("view-run is absent when the row never ran", () => {
+    // pending = 还没开工，背后没有执行 session；摆一颗点了只会报"未找到"的
+    // 按钮就是把失败做成入口。判断与看板卡片共用 `canViewExecSession`。
+    mocks.detail = row({ status: "pending" });
+    render(<TaskEditDialog onClose={() => {}} />);
+    expect(screen.queryByRole("button", { name: /pm\.review\.openExec/ })).toBeNull();
   });
 
   it("the header carries only the identity — title and close", () => {

@@ -30,7 +30,7 @@ import { useState } from "react";
 import { useDraggable, useDroppable } from "@dnd-kit/core";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
-import { openTaskExecSession } from "../../lib/pmTaskExecSession";
+import { canViewExecSession, openTaskExecSession } from "../../lib/pmTaskExecSession";
 import { showToast } from "../../components/common/ToastProvider";
 import { useTranslation } from "../../i18n/useTranslation";
 import { PriorityBadge } from "./PriorityBadge";
@@ -83,11 +83,6 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
   const needsReview =
     task.status === "submitted" ||
     (task.status === "pending" && task.review_status === "pending");
-
-  /** 背后有执行 session 可以看的三态：干活中 / 交活待审 / 已完成。
-   *  pending（还没开工）/ rejected / cancelled 上没有"过程"可看。 */
-  const canViewRun =
-    task.status === "in_progress" || task.status === "submitted" || task.status === "done";
 
   // 截止日期格式化：MM-DD（跨年带年份），逾期红色
   const dueLabel = task.due_at ? formatDue(task.due_at) : null;
@@ -215,7 +210,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
               干了什么"。三态都出（进行中 / 待审核 / 已完成）—— 这三种状态
               背后都有一个或多个执行 session；pending / rejected / cancelled
               上没有可看的东西，就不摆一颗点了会报"未找到"的按钮。 */}
-          {canViewRun && (
+          {canViewExecSession(task.status) && (
             <button
               type="button"
               disabled={draggableDisabled || openingExec}

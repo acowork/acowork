@@ -49,7 +49,7 @@
  * pass through 保存 — which is why it is not wired into `useTaskForm`.
  */
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Trash2 } from "lucide-react";
+import { Trash2, Play } from "lucide-react";
 import { usePmTaskDetailStore } from "../../stores/pm/taskDetailStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { useTranslation } from "../../i18n/useTranslation";
@@ -64,6 +64,7 @@ import { DatePicker } from "../../components/common/DatePicker";
 import { Dropdown } from "../../components/common/Dropdown";
 import { showToast } from "../../components/common/ToastProvider";
 import { attachmentUrl, deleteTask } from "../../lib/pm-api";
+import { canViewExecSession, openTaskExecSession } from "../../lib/pmTaskExecSession";
 import { useActorLabel } from "./pmMembers";
 import { TaskActivitySection } from "./TaskActivity";
 import { formatBytes, formatDateTime } from "./taskFormatters";
@@ -135,6 +136,7 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [openingExec, setOpeningExec] = useState(false);
   const [confirmDeleteAtt, setConfirmDeleteAtt] = useState<string | null>(null);
   const [confirmDiscard, setConfirmDiscard] = useState(false);
   // What to run once the user confirms discarding. Cancelling, closing, and
@@ -256,6 +258,31 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
       });
     }
   }, [detail, removeTask, openTask, onClose, t]);
+
+  /**
+   * 底栏的「查看执行」：解析这条任务的执行 session 并切过去。
+   *
+   * 走 `requestLeave` 而不是自己 `onClose` —— 表单里有未保存的改动时，跳去
+   * 执行面同样是一次"离开"，该由同一道闸门问一次；确认后被接受的草稿逻辑
+   * 与取消 / ESC 完全一致。跳转失败（解析不到 / session 已删）时**不**离开，
+   * 弹框留着，用户正好看到那句提示。
+   */
+  const handleOpenExec = useCallback(async () => {
+    if (!detail || openingExec) return;
+    setOpeningExec(true);
+    try {
+      const result = await openTaskExecSession(detail.project_id, detail.id);
+      if (result === "gone") {
+        showToast({ type: "info", message: t("chatView.execSessionGone") });
+      } else if (result === "not_found") {
+        showToast({ type: "info", message: t("pm.review.execNotFound") });
+      }
+    } catch {
+      showToast({ type: "error", message: t("pm.review.execNotFound") });
+    } finally {
+      setOpeningExec(false);
+    }
+  }, [detail, openingExec, t]);
 
   const handleUpload = useCallback(
     async (file: File) => {
@@ -447,6 +474,21 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
               >
                 <Trash2 className="h-3 w-3" aria-hidden />
                 {t("pm.task.delete")}
+              </button>
+            )}
+            {/* 删除右边、离 保存 最远的那一段：这颗不决定任务去哪，只回答
+                "它干了什么"。只在有执行 session 的三态上出现（与看板卡片同一
+                个判断，`canViewExecSession`），安静的文字按钮 —— 底栏的重量
+                分配是 实心红删除 | 安静查看 …… 安静取消 | 强调保存。 */}
+            {hasRow && detail && canViewExecSession(detail.status) && (
+              <button
+                type="button"
+                onClick={() => requestLeave(() => void handleOpenExec())}
+                disabled={openingExec}
+                className="inline-flex items-center justify-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+              >
+                <Play className="h-3 w-3" aria-hidden />
+                {t("pm.review.openExec")}
               </button>
             )}
             <div className="flex-1" />
