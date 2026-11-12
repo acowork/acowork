@@ -106,6 +106,22 @@ describe("TaskCard card grammar", () => {
   });
 });
 
+describe("TaskCard 查看执行", () => {
+  // 这颗按钮的关键就是"哪些状态有东西可看"：三种跑过的状态都出，没跑过的
+  // 状态不出（否则点了只会弹"未找到执行会话"）。
+  const find = () => screen.queryByRole("button", { name: /pm\.review\.openExec/ });
+
+  it.each(["in_progress", "submitted", "done"] as const)("shows on %s", (status) => {
+    renderCard({ status });
+    expect(find()).not.toBeNull();
+  });
+
+  it.each(["pending", "rejected", "cancelled"] as const)("hides on %s", (status) => {
+    renderCard({ status });
+    expect(find()).toBeNull();
+  });
+});
+
 describe("TaskCard drag source", () => {
   it("never mirrors the active draggable transform (scale would blow the card up)", () => {
     const source = readFileSync(resolve(__dirname, "TaskCard.tsx"), "utf8");

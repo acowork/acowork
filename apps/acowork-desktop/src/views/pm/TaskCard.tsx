@@ -84,6 +84,11 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
     task.status === "submitted" ||
     (task.status === "pending" && task.review_status === "pending");
 
+  /** 背后有执行 session 可以看的三态：干活中 / 交活待审 / 已完成。
+   *  pending（还没开工）/ rejected / cancelled 上没有"过程"可看。 */
+  const canViewRun =
+    task.status === "in_progress" || task.status === "submitted" || task.status === "done";
+
   // 截止日期格式化：MM-DD（跨年带年份），逾期红色
   const dueLabel = task.due_at ? formatDue(task.due_at) : null;
   const overdue = task.due_at ? isOverdue(task.due_at, task.status) : false;
@@ -204,6 +209,26 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
               {childCount}
             </span>
           )}
+
+          {/* 「查看执行」住在正文元信息行里，因为它是一条**信息**的入口，不是
+              裁决：审核条带上那两颗实心按钮决定任务去哪，这颗只回答"它到底
+              干了什么"。三态都出（进行中 / 待审核 / 已完成）—— 这三种状态
+              背后都有一个或多个执行 session；pending / rejected / cancelled
+              上没有可看的东西，就不摆一颗点了会报"未找到"的按钮。 */}
+          {canViewRun && (
+            <button
+              type="button"
+              disabled={draggableDisabled || openingExec}
+              onClick={(e) => {
+                e.stopPropagation();
+                void handleOpenExec();
+              }}
+              onKeyDown={(e) => e.stopPropagation()}
+              className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-10 font-medium text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-zinc-700"
+            >
+              ▶ {t("pm.review.openExec")}
+            </button>
+          )}
         </div>
 
         {/* 待审核卡片 —— 创建者 + 批准/拒绝 inline 操作。两种形态：
@@ -243,24 +268,6 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
               >
                 ✗ {t("pm.review.reject")}
               </button>
-              {/* 第三个动作是"去看"，不是"做决定"：描边而不是实心底，
-                  免得三颗按钮看起来是三个同等的裁决。只在 `submitted` 上出现
-                  —— 待批准开工（pending + review_status=pending）的任务还
-                  没有任何执行，摆一颗永远"未找到"的按钮就是骗点击。 */}
-              {task.status === "submitted" && (
-                <button
-                  type="button"
-                  disabled={draggableDisabled || openingExec}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    void handleOpenExec();
-                  }}
-                  onKeyDown={(e) => e.stopPropagation()}
-                  className="rounded border border-border-outer px-2 py-0.5 text-10 font-medium text-text-secondary transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:cursor-not-allowed disabled:opacity-40"
-                >
-                  ▶ {t("pm.review.openExec")}
-                </button>
-              )}
             </div>
           </div>
         )}
