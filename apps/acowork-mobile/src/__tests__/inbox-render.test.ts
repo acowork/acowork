@@ -9,7 +9,7 @@
 import { describe, expect, it } from 'vitest'
 import { renderMarkdown } from '../lib/markdown'
 import { userChatId } from '../lib/api'
-import { formatListTime, daySeparator } from '../lib/time'
+import { formatListTime, formatScheduleTime, daySeparator } from '../lib/time'
 
 /** Flatten the node tree to text, and collect every `href` it produced. */
 function walk(nodes: unknown, texts: string[], hrefs: string[]): void {
@@ -121,5 +121,16 @@ describe('time labels', () => {
     // exact clock depends on the runner's locale.
     expect(daySeparator(now, now - 86_400_000)).toMatch(/^昨天 /)
     expect(daySeparator(null, now)).toMatch(/^今天 /)
+  })
+
+  it('labels a schedule with its day *and* its clock', () => {
+    // A task's start / due time is never relative: "昨天" reads as a past
+    // moment, and a bare clock hides which day it is.
+    const now = Date.now()
+    expect(formatScheduleTime(now)).toMatch(/^今天 \d{2}:\d{2}$/)
+    expect(formatScheduleTime(now - 86_400_000)).toMatch(/^昨天 \d{2}:\d{2}$/)
+    expect(formatScheduleTime(now - 30 * 86_400_000)).toMatch(/^\d+月\d+日 \d{2}:\d{2}$/)
+    expect(formatScheduleTime(0)).toBe('')
+    expect(formatScheduleTime(undefined)).toBe('')
   })
 })

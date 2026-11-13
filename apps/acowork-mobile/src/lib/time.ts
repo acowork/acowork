@@ -47,6 +47,23 @@ export function formatMessageTime(ms: number | undefined | null): string {
 }
 
 /**
+ * A scheduled moment — a task's start / due time.
+ *
+ * Unlike a message row, a schedule is never relative: "昨天" for a deadline
+ * reads as a past moment, and the clock alone would hide which day it is.
+ * The day word plus the clock is what the user set.
+ */
+export function formatScheduleTime(ms: number | undefined | null): string {
+  if (!ms || !Number.isFinite(ms)) return ''
+  const d = new Date(ms)
+  const days = Math.round((startOfDay(Date.now()) - startOfDay(d.getTime())) / DAY)
+  const c = clock(d.getTime())
+  if (days <= 0) return `今天 ${c}`
+  if (days === 1) return `昨天 ${c}`
+  return `${d.getMonth() + 1}月${d.getDate()}日 ${c}`
+}
+
+/**
  * A day separator between messages, the IM convention that keeps a long
  * thread scannable. Empty string when the previous message is the same day.
  */

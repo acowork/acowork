@@ -20,6 +20,7 @@ import { useForegroundRefresh } from '../../lib/foreground'
 import { Banner, ListRow } from '../../components/ui'
 import { EdgeSwipe } from '../../components/EdgeSwipe'
 import { renderMarkdown } from '../../lib/markdown'
+import { formatScheduleTime } from '../../lib/time'
 
 const STATUS_LABEL: Record<string, string> = {
   pending: '待处理',
@@ -102,8 +103,8 @@ export function TaskDetailScreen() {
             <ListRow label="优先级" value={PRIORITY_LABEL[task.priority] ?? task.priority} />
             <ListRow label="类型" value={TYPE_LABEL[task.type] ?? task.type} />
             <ListRow label="负责人" value={task.assignee ?? '未指派'} />
-            {task.start_at ? <ListRow label="开始" value={new Date(task.start_at).toLocaleDateString('zh-CN')} /> : null}
-            {task.due_at ? <ListRow label="截止" value={new Date(task.due_at).toLocaleDateString('zh-CN')} /> : null}
+            {task.start_at ? <ListRow label="开始" value={formatScheduleTime(Date.parse(task.start_at))} /> : null}
+            {task.due_at ? <ListRow label="截止" value={formatScheduleTime(Date.parse(task.due_at))} /> : null}
             {task.is_blocked ? <ListRow label="被阻塞于" value={(task.blocked_by ?? []).join('、')} /> : null}
           </div>
 
