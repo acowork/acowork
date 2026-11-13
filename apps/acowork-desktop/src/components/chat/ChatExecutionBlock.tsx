@@ -617,16 +617,42 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                   <span className="min-w-0 max-w-[16rem] truncate font-medium text-text-tertiary ">
                     {name}
                   </span>
-                  <span className="text-text-tertiary">
-                    ({t("chatView.block.roundCount", { count: block.rounds.length })}
-                    {shownState && (
-                      <>
-                        {" · "}
-                        {shownState}
-                      </>
-                    )}
-                    )
-                  </span>
+                  {/* Working vs idle must be readable at a glance. A run with
+                      positive evidence it is still going (D9's `inProgress`)
+                      wears the count + live state word as a filled capsule —
+                      the highlight color as a BACKGROUND with white text, the
+                      one accent usage the design language sanctions (see
+                      `chatCardChrome.test.tsx`). The spinner rides inside the
+                      capsule instead of standing alone at 3px beside plain
+                      gray text, which read as no different from an idle run.
+                      An idle block keeps the bare tertiary span: no capsule,
+                      no fill — the shape itself is the status. */}
+                  {inProgress ? (
+                    <span
+                      data-testid="exec-block-working-capsule"
+                      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-accent-strong px-2 py-0.5 font-medium text-white"
+                    >
+                      {t("chatView.block.roundCount", { count: block.rounds.length })}
+                      {shownState && (
+                        <>
+                          {" · "}
+                          {shownState}
+                        </>
+                      )}
+                      <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                    </span>
+                  ) : (
+                    <span className="text-text-tertiary">
+                      ({t("chatView.block.roundCount", { count: block.rounds.length })}
+                      {shownState && (
+                        <>
+                          {" · "}
+                          {shownState}
+                        </>
+                      )}
+                      )
+                    </span>
+                  )}
                   {taskId && (
                     <span className="shrink-0 rounded bg-surface/70 px-1.5 py-0.5 text-[0.8em] text-text-secondary">
                       {taskId}
@@ -642,9 +668,6 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                     >
                       {t("chatView.block.unanswered")}
                     </span>
-                  )}
-                  {inProgress && (
-                    <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
                   )}
                   {expanded ? (
                     <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-text-tertiary" />

@@ -464,6 +464,45 @@ describe("ChatExecutionBlock", () => {
     expect(document.querySelector(".animate-spin")).toBeTruthy();
   });
 
+  /** Working vs idle must be readable at a glance (user report 2026-11-19):
+   *  the bare 3px spinner beside gray text did not survive a glance at a list
+   *  of blocks. A run with positive evidence it is going wears its count +
+   *  state as a filled capsule — accent BACKGROUND, white text, the one
+   *  accent usage the design language sanctions (`chatCardChrome.test.tsx`);
+   *  an idle run wears nothing. The shape is the status signal now. */
+  it("a working run wears an accent capsule; an idle run does not", () => {
+    const { container: working } = renderBlock({
+      [REF1]: entryOf({
+        status: "pending",
+        projection: { round_id: "r1", terminal: false, status: "in_progress" },
+      }),
+    });
+    const pill = working.querySelector("[data-testid='exec-block-working-capsule']");
+    expect(pill).toBeTruthy();
+    // The fill is the sanctioned accent surface with white text — never an
+    // accent border or an accent label.
+    expect(pill!.className).toContain("bg-accent-strong");
+    expect(pill!.className).toContain("text-white");
+    expect(pill!.className).not.toMatch(/border-\[var\(--color-accent\)\]/);
+    // The spinner lives INSIDE the capsule: one object says "working", not a
+    // word and a stray glyph.
+    expect(pill!.querySelector(".animate-spin")).toBeTruthy();
+    // The capsule carries the same copy the bare span used to: count and word.
+    expect(pill!.textContent).toContain("chatView.block.roundCount");
+    expect(pill!.textContent).toContain("chatView.block.inProgress");
+
+    // Idle: a settled run paints no capsule at all.
+    const { container: idle } = renderBlock({
+      [REF1]: entryOf({
+        status: "ok",
+        projection: { round_id: "r1", terminal: true, status: "completed", answer: { body: "a", ts: "1" } },
+      }),
+    });
+    expect(idle.querySelector("[data-testid='exec-block-working-capsule']")).toBeNull();
+    expect(headerText(idle)).toContain("chatView.block.roundCount");
+    expect(headerText(idle)).toContain("chatView.block.completed");
+  });
+
   it("an unreachable read is an outage with a retry, never a run in flight (D9)", () => {
     renderBlock({
       [REF1]: entryOf({ status: "unreachable", projection: undefined, detail: "connection refused" }),
