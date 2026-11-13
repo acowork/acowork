@@ -93,11 +93,33 @@ docs/                  # Public architecture docs
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   runbooks/            # Operator runbooks
 
-agents/                # Agent packages shipped with the app (`agent-packages/*.agent`)
+agents/                # Agent package SOURCES (`<name>-agent/`) + shipped
+                       # build artifacts (`agent-packages/*.agent`)
 dev/                   # Build / package / CI scripts
 ```
 
 Crate specs: [docs/module-design/](docs/module-design/) · Design: [docs/design/](docs/design/)
+
+### Agent packages and the hub
+
+`agents/<name>-agent/` (manifest + prompts + skills + assets) is the single
+source of truth for the platform agents. `agents/agent-packages/<agent_id>.agent`
+is a build artifact of it — rebuild with `dev/common/build-agent.sh` and commit
+the rebuilt package in the same change; `acowork-sign`'s `example_packages` test
+fails when the zip and the source tree disagree.
+
+`ACoworkAgentHub/agents/official/**` is a **generated mirror** of those sources,
+never a second copy to edit. After landing an agent change here, publish it with:
+
+```bash
+dev/common/sync-hub-mirror.sh            # mirror current HEAD into a hub branch + PR
+dev/common/sync-hub-mirror.sh --dry-run  # just show what the hub would republish
+```
+
+So an agent change is two commits in this order: source here (with a `version`
+bump), generated mirror there. The hub's CI fails if its mirror does not match
+the commit its `hub.json` claims — that is the hand-edit alarm, not a
+"master moved" alarm.
 
 ## Architecture
 

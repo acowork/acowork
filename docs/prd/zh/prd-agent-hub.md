@@ -2,12 +2,16 @@
 
 | 项 | 内容 |
 | --- | --- |
-| 状态 | 待评审（v1 已随本文档实现，见 §11 交付清单） |
+| 状态 | v1 已实现并上线；展示层与注册中心已迁至 `ACoworkAgentHub`（本文档 §11/§12 的 `ACoworkWebSite/agents/*` 清单保留为历史记录） |
 | 作者 | Product |
 | 日期 | 2026-06 |
-| 涉及仓库 | `ACoworkWebSite`（页面）、`ACowork`（数据源与打包脚本） |
+| 涉及仓库 | `ACowork`（agent 源与打包）、`ACoworkAgentHub`（注册中心、签名发布、hub.acowork.ai）、`ACoworkWebSite`（导航入口） |
 | 关联 | Roadmap Phase 7「remote `.agent` registry / Agent store」（Planning）；`dev/common/build-agent.sh`；`agents/agent-packages/` |
 | 非目标声明 | 本文档不覆盖 skills 目录、付费分发、在线试用 |
+
+> **当前实现（2026-11）**：D1–D10 的产品决策仍然成立，但落地位置变了。官网那套静态页（`ACoworkWebSite/agents/*` + `dev/common/sync-agent-hub.py` + `dev/agent-hub/hub.test.js`）已被 `ACoworkAgentHub` 仓库取代：该仓库自己持有 agent 源目录、CI 打包签名、`index.json` 与站点，§11/§12 中指向 `ACoworkWebSite` 的行因此成为历史记录，保留不改写。
+>
+> **平台 agent 的真源是 `ACowork/agents/<name>-agent/`**，Hub 的 `agents/official/**` 是`tools/sync-official.py` 生成的镜像（逐字节拷贝，并在 `hub.json.mirror.source_commit` 记录所镜像的提交）。跨仓同步机制与两条检查（硬：镜像是否等于它声称的提交；软：master 是否已前进）见 `ACoworkAgentHub/CONTRIBUTING.md` 与 `docs/publishing.md`。
 
 ---
 
@@ -238,7 +242,7 @@
 | **装了带 Shell+Network 权限的第三方 agent = 把用户机器交给别人的 prompt**；而 `install/mod.rs` 尚未强制签名校验 | **高** | 缓解：权限外露（R5）+ 逐个 agent 如实显示 `author`（D5b）+ 校验和（R4）。**注意：D5b 取消了 Community 标识这一层预警，风险敞口比原先大**——用户看到的是一个自洽的 agent 卡片，而非"这个来源和别的不同"的提示。根治仍是安装侧签名强制校验落地（开放问题 Q1，需 Core 团队答复）；在信任链落地前，第三方向 Registry 投稿需**人工审核**，这是当前唯一的闸门 |
 | 7 个包撑不起"商店"叙事，反而显空 | 中 | D5 命名降级；首页只放"agent 库"而非"生态" |
 | 国内 `*.pages.dev` 打不开 | 中 | P0 前置项，未解决则不上线 |
-| 跨仓库同步靠人工，会忘记重跑 | 低 | 脚本幂等 + 写入 ACowork 发版 checklist；后续可挂 CI |
+| 跨仓库同步靠人工，会忘记重跑 | 低 | **已闭环**：`ACoworkAgentHub/tools/sync-official.py` 单向生成镜像并记录上游提交；`dev/common/sync-hub-mirror.sh` 一条命令产出 Hub 镜像 PR；`validate.yml`/`publish.yml` 两条检查——镜像与所声称提交不符即红（生成区被手改），master 前进只出提示不阻塞 |
 | Pages Functions 能力未实测（10ms CPU/请求等） | 低（v1 不依赖） | 升级前做一次 spike |
 
 **开放问题**
