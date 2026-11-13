@@ -1074,7 +1074,9 @@ export function TaskListView({
                         <PriorityBadge priority={o.value as Priority} className="px-1.5 py-0.5 text-xs" />
                       ) : field === "type" ? (
                         <span className="inline-flex items-center gap-1.5">
-                          <TaskTypeIcon type={o.value as TaskType} />
+                          <span aria-hidden>
+                            <TaskTypeIcon type={o.value as TaskType} />
+                          </span>
                           <span>{o.label}</span>
                         </span>
                       ) : member ? (

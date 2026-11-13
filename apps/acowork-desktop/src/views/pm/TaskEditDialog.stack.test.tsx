@@ -157,4 +157,94 @@ describe("点子任务 = 在父任务上面再开一个框", () => {
     expect(s.rows[parentKey]?.detail?.title).toBe("父任务");
     expect(s.rows[s.frames[1].key]?.detail?.title).toBe("子任务");
   });
+
+  // ── 层级：确认框必须压在自己的弹框之上 ──────────────────────────
+  //
+  // 本弹框自己会弹 ConfirmDialog（删除 / 放弃修改），那是个 `fixed inset-0
+  // z-50` 的浮层。弹框层如果也在 z-50 之上，子任务层（depth=1）的确认框
+  // 就被自己的弹框盖住 —— 用户点了「删除」什么也看不见。
+  it("确认框压在自己的弹框之上：弹框层低于 ConfirmDialog 的 z-50", async () => {
+    act(() => {
+      void usePmTaskDetailStore.getState().openTask("t-parent");
+    });
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(1));
+    render(<TaskEditDialog onClose={closeLikeProjectsView} />);
+
+    openRelatedTab();
+    fireEvent.click(screen.getByText("child-row"));
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(2));
+
+    // 两层都在场，且层号递增（上层盖下层）。
+    const layers = screen.getAllByRole("dialog").map((el) => {
+      const layer = el.parentElement as HTMLElement;
+      return Number(layer.style.zIndex);
+    });
+    expect(layers).toHaveLength(2);
+    expect(layers[1]).toBeGreaterThan(layers[0]);
+    // 关键：都在 ConfirmDialog（z-50）之下 —— 确认框浮在弹框之上。
+    expect(Math.max(...layers)).toBeLessThan(50);
+
+    // 只有栈顶是模态 + 可聚焦：下面那层露着一条边，但它不该抢焦点，
+    // 否则 Tab 键能绕进被盖住的父任务表单里。
+    const panes = screen.getAllByRole("dialog");
+    expect(panes[0].getAttribute("aria-modal")).toBe("false");
+    expect(panes[1].getAttribute("aria-modal")).toBe("true");
+    expect(panes[0].hasAttribute("inert")).toBe(true);
+    expect(panes[1].hasAttribute("inert")).toBe(false);
+  });
+
+  // ── 确认框只属于栈顶 ───────────────────────────────────────────
+  //
+  // ConfirmDialog 是 fixed + z-50，浮在所有层之上，遮罩拦不住它。父层那一
+  // 份如果也渲染，用户以为在删子任务，实际触发的是**父任务**的删除确认。
+  it("只有栈顶那层能弹确认框：父层那份不出现", async () => {
+    act(() => {
+      void usePmTaskDetailStore.getState().openTask("t-parent");
+    });
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(1));
+    render(<TaskEditDialog onClose={closeLikeProjectsView} />);
+
+    openRelatedTab();
+    fireEvent.click(screen.getByText("child-row"));
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(2));
+
+    // 两层都有「删除」按钮。点**父层**那个（DOM 顺序在前 = 栈底）。
+    const deletes = screen.getAllByText("pm.task.delete");
+    expect(deletes.length).toBe(2);
+    fireEvent.click(deletes[0]);
+    // 父层不是栈顶 → 不弹确认框。
+    expect(screen.queryByText("pm.task.deleteTaskTitle")).toBeNull();
+
+    // 点栈顶那个 → 弹出**子任务**的确认框。
+    fireEvent.click(deletes[deletes.length - 1]);
+    expect(screen.getByText("pm.task.deleteTaskTitle")).not.toBeNull();
+  });
+
+  // ── 父层数据跟着子层的变化更新 ─────────────────────────────────
+  //
+  // 子任务保存后 pop，父层露出来 —— 它的行数据可能已经过时。单层时代没有
+  // 这个问题（保存即关窗），栈化之后必须显式补一次刷新。
+  it("子任务保存后，露出来的父层被刷新", async () => {
+    act(() => {
+      void usePmTaskDetailStore.getState().openTask("t-parent");
+    });
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(1));
+    render(<TaskEditDialog onClose={closeLikeProjectsView} />);
+
+    openRelatedTab();
+    fireEvent.click(screen.getByText("child-row"));
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(2));
+
+    const parentKey = usePmTaskDetailStore.getState().frames[0].key;
+    const before = usePmTaskDetailStore.getState().rows[parentKey]?.detail;
+
+    // 保存子任务 → 这一层关闭，父层重新露出来。
+    const saves = screen.getAllByText("pm.task.save");
+    fireEvent.click(saves[saves.length - 1]);
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(1));
+
+    // 父层的行被重新拉过（detail 是新对象，不是原来那个）。
+    const after = usePmTaskDetailStore.getState().rows[parentKey]?.detail;
+    expect(after).not.toBe(before);
+  });
 });

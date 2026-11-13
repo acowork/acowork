@@ -143,6 +143,7 @@ function TaskDialogPane({
   const error = taskRow?.error ?? null;
   const addReply = usePmTaskDetailStore((s) => s.addReply);
   const refresh = usePmTaskDetailStore((s) => s.refresh);
+  const refreshBelowTop = usePmTaskDetailStore((s) => s.refreshBelowTop);
   const uploadAttachment = usePmTaskDetailStore((s) => s.uploadAttachment);
   const deleteAttachment = usePmTaskDetailStore((s) => s.deleteAttachment);
   const pushTask = usePmTaskDetailStore((s) => s.pushTask);
@@ -273,9 +274,13 @@ function TaskDialogPane({
     // 保存成功 → 关闭**这一层**弹框。行已经在服务端了，这一层没有留下的理由；
     // 下面那层（父任务）还在原地，接着干活。栈底那层保存 = 整个关掉。
     resetForm();
-    if (depth > 0) pop();
-    else onClose();
-  }, [form, resetForm, depth, pop, onClose, t]);
+    if (depth > 0) {
+      // 这一层改的是自己（子任务），但下面那层展示的是父任务，它的数据
+      // 可能已经过时（子任务改名 / 状态变了）—— 露出来之前先补一次刷新。
+      void refreshBelowTop();
+      pop();
+    } else onClose();
+  }, [form, resetForm, depth, pop, onClose, refreshBelowTop, t]);
 
   const handleDelete = useCallback(async () => {
     if (!detail) return;
@@ -289,8 +294,12 @@ function TaskDialogPane({
       showToast({ type: "success", message: t("pm.task.taskDeleted") });
       // Landing matters: deleting a child from inside its parent's box should
       // leave the parent open, not drop the reader onto the board.
-      if (depth > 0) pop();
-      else if (parentId) openTask(parentId);
+      if (depth > 0) {
+        // 子任务没了，父任务的「关联任务」里那棵树也变了 —— 父层露出来之前
+        // 先刷新它，否则用户看到的是一棵还挂着已删子任务的旧树。
+        void refreshBelowTop();
+        pop();
+      } else if (parentId) openTask(parentId);
       else onClose();
     } catch (e) {
       showToast({
@@ -300,7 +309,7 @@ function TaskDialogPane({
         }),
       });
     }
-  }, [detail, removeTask, openTask, depth, pop, onClose, t]);
+  }, [detail, removeTask, openTask, depth, pop, onClose, refreshBelowTop, t]);
 
   /**
    * 底栏的「查看执行」：解析这条任务的执行 session 并切过去。
@@ -370,10 +379,14 @@ function TaskDialogPane({
   return (
     <>
       <div
-        className="fixed inset-0 z-50 flex items-center justify-center"
-        // 上层盖下层：同 z-index 下靠渲染顺序，但写明确更省心（z-50 是
-        // ConfirmDialog 那套的公共层）。
-        style={{ zIndex: 50 + depth }}
+        className="fixed inset-0 flex items-center justify-center"
+        // 上层盖下层：同 z-index 下靠渲染顺序，但写明确更省心。
+        //
+        // z-30 段（30 + depth）是**刻意低于** ConfirmDialog 的 z-50：本弹框
+        // 自己会弹 ConfirmDialog（删除确认 / 放弃修改），那个确认框必须压在
+        // 弹框之上。原实现用 z-50，结果子任务层（depth=1 → 51）的确认框
+        // 被自己的弹框盖住，用户点「删除」什么也看不见。
+        style={{ zIndex: 30 + depth }}
       >
         {/* House pattern (MemberManagerDialog, ConfirmDialog): a separate
             overlay layer with onClick, so a click that starts inside the panel
@@ -387,7 +400,12 @@ function TaskDialogPane({
           ref={dialogRef}
           tabIndex={-1}
           role="dialog"
-          aria-modal="true"
+          // 只有栈顶是真的模态：下面那层虽然还看得见（上移 24px 露一条边），
+          // 但它的遮罩已经被栈顶那层接管，不该再声称 aria-modal 抢焦点。
+          aria-modal={isTop}
+          // 键盘同理：`inert` 让下面那层不可聚焦 —— 遮罩只拦了鼠标，
+          // Tab 键原本能钻进被盖住的父任务表单里。
+          inert={!isTop}
           aria-labelledby={`pm-edit-task-title-${frame.key}`}
           // Fixed height: the box never resizes when sections appear or when
           // the reader jumps to a child row.
@@ -568,7 +586,12 @@ function TaskDialogPane({
         </div>
       </div>
 
-      {hasRow && detail && (
+      {/* ConfirmDialog 只在**栈顶**这一层渲染。
+          它是 `fixed inset-0 z-50`，浮在所有层之上 —— 父层那一份会被用户
+          直接点到（遮罩拦不住它，因为它在遮罩之上），于是「我在删子任务」
+          实际触发的是**父任务**的删除确认。栈只有一层时下面这段恒为真，
+          行为与改动前一致。 */}
+      {isTop && hasRow && detail && (
         <ConfirmDialog
           open={confirmDelete}
           title={t("pm.task.deleteTaskTitle")}
@@ -580,39 +603,43 @@ function TaskDialogPane({
         />
       )}
 
-      <ConfirmDialog
-        open={!!confirmDeleteAtt}
-        title={t("pm.task.deleteAttachmentTitle")}
-        message={t("pm.task.deleteAttachmentDesc")}
-        confirmLabel={t("common.delete")}
-        destructive
-        onConfirm={() => {
-          if (confirmDeleteAtt) void handleDeleteAttachment(confirmDeleteAtt);
-        }}
-        onCancel={() => setConfirmDeleteAtt(null)}
-      />
+      {isTop && (
+        <ConfirmDialog
+          open={!!confirmDeleteAtt}
+          title={t("pm.task.deleteAttachmentTitle")}
+          message={t("pm.task.deleteAttachmentDesc")}
+          confirmLabel={t("common.delete")}
+          destructive
+          onConfirm={() => {
+            if (confirmDeleteAtt) void handleDeleteAttachment(confirmDeleteAtt);
+          }}
+          onCancel={() => setConfirmDeleteAtt(null)}
+        />
+      )}
 
-      <ConfirmDialog
-        open={confirmDiscard}
-        title={t("pm.task.discardChangesTitle")}
-        message={t("pm.task.discardChangesDesc")}
-        confirmLabel={t("pm.task.discardChangesConfirm")}
-        destructive
-        onConfirm={() => {
-          // Acceptance IS the answer to the dirty guard: leave directly.
-          // Bouncing back through `requestLeave` re-opened this dialog, because
-          // `dirty` is still true at this instant (discarding is exactly what
-          // makes it false), so 放弃修改 looked like it did nothing.
-          const after = pendingDiscard;
-          setConfirmDiscard(false);
-          setPendingDiscard(null);
-          leave(after ?? undefined);
-        }}
-        onCancel={() => {
-          setConfirmDiscard(false);
-          setPendingDiscard(null);
-        }}
-      />
+      {isTop && (
+        <ConfirmDialog
+          open={confirmDiscard}
+          title={t("pm.task.discardChangesTitle")}
+          message={t("pm.task.discardChangesDesc")}
+          confirmLabel={t("pm.task.discardChangesConfirm")}
+          destructive
+          onConfirm={() => {
+            // Acceptance IS the answer to the dirty guard: leave directly.
+            // Bouncing back through `requestLeave` re-opened this dialog, because
+            // `dirty` is still true at this instant (discarding is exactly what
+            // makes it false), so 放弃修改 looked like it did nothing.
+            const after = pendingDiscard;
+            setConfirmDiscard(false);
+            setPendingDiscard(null);
+            leave(after ?? undefined);
+          }}
+          onCancel={() => {
+            setConfirmDiscard(false);
+            setPendingDiscard(null);
+          }}
+        />
+      )}
     </>
   );
 }

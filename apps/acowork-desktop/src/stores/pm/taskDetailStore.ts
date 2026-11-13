@@ -74,6 +74,8 @@ interface PmTaskDetailState {
   pop: () => void;
   /** 后台静默刷新（栈顶那一行） */
   refresh: () => Promise<void>;
+  /** 后台静默刷新（栈顶下面那一行）—— 子层改完后，下面的数据可能已过时 */
+  refreshBelowTop: () => Promise<void>;
   /** 上传附件 → 成功追加到列表 */
   uploadAttachment: (file: File) => Promise<PmAttachmentMeta | null>;
   /** 删除附件 → 成功从列表移除 */
@@ -232,6 +234,21 @@ export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => {
       const top = topFrame();
       if (!top?.taskId) return;
       await loadRow(top.key, top.taskId, false);
+    },
+
+    /**
+     * 刷新栈顶**下面**那一层（如果有）。
+     *
+     * 子任务那一层保存 / 删除之后，下面那层露出来给用户看 —— 它的行数据
+     * 可能已经过时（子任务改名了、状态变了、被删了）。单层时代没有这个问题
+     * （保存即关窗），栈化之后必须显式补一次刷新，否则用户看到的是上一秒
+     * 的旧数据。
+     */
+    refreshBelowTop: async () => {
+      const { frames } = get();
+      const below = frames[frames.length - 2];
+      if (!below?.taskId) return;
+      await loadRow(below.key, below.taskId, false);
     },
 
     uploadAttachment: async (file) => {
