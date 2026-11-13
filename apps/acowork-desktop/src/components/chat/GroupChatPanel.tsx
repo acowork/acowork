@@ -80,6 +80,7 @@ import {
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { agentActivity, liveActivityStatus } from "../../lib/agentActivity";
 import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
 import { turnInflight, resolveExpectedResponders } from "../../lib/chatTurnInflight";
 import { ChatExecutionBlock } from "./ChatExecutionBlock";
@@ -1021,6 +1022,38 @@ export function GroupChatPanel() {
   // a badge so the question still has a subject.
   const askBlock = useMemo(() => activeAsk(items), [items]);
   const askSeq = askBlock?.pendingAsk?.seq ?? null;
+  // What the agent(s) are doing while this send waits (the 1:1 view's rule,
+  // same source). Candidates are the newest run block PER responder named by
+  // the claim — a member's older, unrelated session is not this turn's work —
+  // and `liveActivityStatus` refuses to pick a word when more than one of them
+  // is busy, which is exactly the fan-out case design 27 §5.3.1 already
+  // refuses to name an agent for.
+  const waitRunSessions = useMemo(() => {
+    const ids = new Set(turnHeaderIdentities.map((i) => i.id));
+    if (ids.size === 0) return [];
+    const seen = new Set<string>();
+    const out: { instanceId: string; execSessionId: string }[] = [];
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it?.kind !== "run" || !ids.has(it.instanceId)) continue;
+      if (seen.has(it.instanceId)) continue;
+      seen.add(it.instanceId);
+      out.push({ instanceId: it.instanceId, execSessionId: it.execSessionId });
+    }
+    return out;
+  }, [items, turnHeaderIdentities]);
+  // Returns one of the store's own status objects (or null), so the selector's
+  // result identity is stable across unrelated store writes.
+  const waitRunStatus = useChatStore((s) =>
+    liveActivityStatus(
+      waitRunSessions.map(
+        (c) =>
+          s.agentStates?.[c.instanceId]?.sessionStates?.[c.execSessionId]
+            ?.sessionStatus ?? null,
+      ),
+    ),
+  );
+  const waitActivity = agentActivity(waitRunStatus, t);
   // A question the router asks about a run is drawn at that run's block, which
   // stays where the exchange began — this is what brings the reader there.
   // Declared AFTER the follow hook, the same rule `useLocateMessage` follows
@@ -1930,18 +1963,32 @@ export function GroupChatPanel() {
             default responder are the delivery decision's inputs, not guesses
             read off the transcript, and any re-route or failure closes the
             claim with the row that states it. The POST-in-flight moment and
-            an unresolved identity keep the generic centered line. */}
+            an unresolved identity keep the generic centered line.
+            Rev. (2026-11-12, the activity word): when the run this Chat
+            anchors is reporting a live phase, the word says what it is doing
+            rather than repeating one sentence for the whole turn — and a
+            fan-out gets no word at all, because naming one member's tool for
+            a turn addressed to several is the same guess §5.3.1 already
+            refuses. Liveness, deadline and takeover anchor are untouched. */}
           {composerLocked && (
             turnLive && turnHeaderIdentities.length > 0 ? (
               <ChatTurnHeader
                 identities={turnHeaderIdentities}
-                text={t("chatView.notice.pendingTurnGeneric")}
+                text={
+                  waitActivity.specific
+                    ? waitActivity.text
+                    : t("chatView.notice.pendingTurnGeneric")
+                }
               />
             ) : (
               <ChatTurnStatusLine
                 className="px-4"
                 live
-                text={t("chatView.notice.pendingTurnGeneric")}
+                text={
+                  waitActivity.specific
+                    ? waitActivity.text
+                    : t("chatView.notice.pendingTurnGeneric")
+                }
               />
             )
           )}

@@ -259,6 +259,16 @@
     "cancelReply": "返信をキャンセル",
     "emptyAnswer": "（内容なし）",
     "viewRun": "実行を表示",
+    "activity": {
+      "working": "ツールを実行中",
+      "analyzing": "分析中",
+      "composing": "返信を作成中",
+      "waitingApproval": "承認待ち",
+      "tool": "{{name}} を実行中",
+      "memory": "記憶を検索中",
+      "project": "プロジェクトを確認中",
+      "docs": "ドキュメントを確認中"
+    },
     "notice": {
       "pendingTurn": "{{name}}が処理中です…",
       "pendingTurnGeneric": "処理中です…",
@@ -339,11 +349,6 @@
     "replying": "返信中...",
     "working": "処理中...",
     "compacting": "コンテキスト圧縮中...",
-    "phaseWaiting": "モデル応答待ち...",
-    "phaseThinking": "思考中...",
-    "phaseStreaming": "応答を生成中...",
-    "phaseToolExecuting": "ツール実行中...",
-    "phaseWaitingApproval": "ツール承認待ち...",
     "inputMessage": "メッセージを入力...（Enterで送信、Shift+Enterで改行）",
     "inputMessageConnecting": "メッセージを入力...（Agentに接続中...）",
     "inputMessageQueueing": "メッセージを入力...（キューに追加、次のターンで送信）",

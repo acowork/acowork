@@ -108,6 +108,7 @@ import {
   type CardChoice,
 } from "../../lib/chatCardAnswer";
 import { ChatTurnStatusLine } from "./ChatTurnStatusLine";
+import { agentActivity, liveActivityStatus } from "../../lib/agentActivity";
 import { ChatTurnHeader, type TurnIdentity } from "./ChatTurnHeader";
 import { turnInflight, resolveExpectedResponders } from "../../lib/chatTurnInflight";
 import { useLocateMessage } from "../../lib/useLocateMessage";
@@ -680,6 +681,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
     if (!inflightTurn || turnInflight(rows, inflightTurn)) return;
     settleTurn(sessionId, inflightTurn.messageId);
   }, [rows, inflightTurn, sessionId, settleTurn]);
+  // What the agent is doing while this send waits. This changes the WORD, not
+  // the liveness rule — D9's claim still starts at this device's own POST and
+  // ends at the first row answering it.
+  //
   // Virtualization adapters (render-perf L2): keys, estimates, per-item
   // attributes and the seq→item index shared with the group panel.
   const {
@@ -698,6 +703,29 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
   // on is anchored where its exchange started, so a question drawn at that
   // run's tail is a question the human never sees — and the run wears a badge
   // so the two stay attached.
+  // The candidate is the run this Chat's transcript anchors: the responder's
+  // newest block, which is the same execution session the block header
+  // narrates. Any other session the agent happens to be running (a task
+  // dispatched from a project group) is not this turn's work and must not be
+  // dressed up as it.
+  const waitRunSessionId = useMemo(() => {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const it = items[i];
+      if (it?.kind === "run" && it.instanceId === agentId) return it.execSessionId;
+    }
+    return "";
+  }, [items, agentId]);
+  // Read off the pushed `session_state`, never off cached transcript records:
+  // whether a background session's rows landed in this client's window depends
+  // on when it was loaded, and a word that comes and goes with cache warmth
+  // reads as a glitch, not as liveness.
+  const waitRunStatus = useChatStore((s) =>
+    waitRunSessionId
+      ? (s.agentStates?.[agentId]?.sessionStates?.[waitRunSessionId]?.sessionStatus ?? null)
+      : null,
+  );
+  const waitActivity = agentActivity(liveActivityStatus([waitRunStatus]), t);
+
   const askBlock = useMemo(() => activeAsk(items), [items]);
   const askSeq = askBlock?.pendingAsk?.seq ?? null;
   // Optimistic exec-session title seed (ADR-099). A Router-created execute
@@ -1373,21 +1401,33 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
               wait wears the peer's avatar + name and hands over to the block's
               own header at the same anchor when the first answering row lands.
               The POST-in-flight moment and an unresolvable identity keep the
-              centered line: no face without a name to put on it. */}
+              centered line: no face without a name to put on it.
+              Rev. (2026-11-12, the activity word): while the responder's run
+              is reporting a live phase, the word says what that run is doing
+              — recalling, researching, editing a file — instead of one
+              sentence that never changes for the whole turn. The claim, its
+              deadline and its takeover anchor are untouched; a wait line with
+              no evidence still says the platform's own generic thing. */}
           {composerLocked && (
             turnLive && turnHeaderIdentities.length > 0 ? (
               <ChatTurnHeader
                 identities={turnHeaderIdentities}
-                text={t("chatView.notice.pendingTurnGeneric")}
+                text={
+                  waitActivity.specific
+                    ? waitActivity.text
+                    : t("chatView.notice.pendingTurnGeneric")
+                }
               />
             ) : (
               <ChatTurnStatusLine
                 className="px-4"
                 live
                 text={
-                  agentName
-                    ? t("chatView.notice.pendingTurn", { name: agentName })
-                    : t("chatView.notice.pendingTurnGeneric")
+                  waitActivity.specific
+                    ? waitActivity.text
+                    : agentName
+                      ? t("chatView.notice.pendingTurn", { name: agentName })
+                      : t("chatView.notice.pendingTurnGeneric")
                 }
               />
             )

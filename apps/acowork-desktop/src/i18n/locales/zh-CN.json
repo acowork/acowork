@@ -265,6 +265,16 @@
     "cancelReply": "取消回复",
     "emptyAnswer": "（无内容）",
     "viewRun": "查看执行",
+    "activity": {
+      "working": "正在执行工具",
+      "analyzing": "正在分析",
+      "composing": "正在组织回复",
+      "waitingApproval": "等你确认",
+      "tool": "正在执行 {{name}}",
+      "memory": "正在回忆",
+      "project": "正在查项目",
+      "docs": "正在查文档"
+    },
     "notice": {
       "pendingTurn": "{{name}}正在处理…",
       "pendingTurnGeneric": "正在处理…",
@@ -313,15 +323,6 @@
       "collapseAnswer": "收起回复",
       "unnamedRun": "执行会话",
       "noQuestion": "（本轮没有记录提问）",
-      "state": {
-        "idle": "空闲",
-        "waiting": "等模型响应",
-        "thinking": "思考中",
-        "streaming": "正在输出",
-        "toolExecuting": "执行工具中",
-        "waitingApproval": "等你审批",
-        "paused": "已暂停"
-      },
       "rawEnvelope": "原始信封（机器格式）",
       "displayTruncated": "正文已截断，完整内容见原始信封"
     },
@@ -423,11 +424,6 @@
     "replying": "正在回复...",
     "working": "正在处理...",
     "compacting": "上下文压缩中...",
-    "phaseWaiting": "等待模型响应...",
-    "phaseThinking": "正在思考...",
-    "phaseStreaming": "正在生成回复...",
-    "phaseToolExecuting": "正在执行工具...",
-    "phaseWaitingApproval": "等待工具授权...",
     "inputMessage": "输入消息...（Enter 发送，Shift+Enter 换行）",
     "inputMessageConnecting": "输入消息...（正在连接 Agent...）",
     "inputMessageReconnecting": "输入消息...（正在重新连接...）",

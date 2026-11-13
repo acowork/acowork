@@ -8,7 +8,8 @@ import { useSkillStore } from "../../stores/skillStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import type { ToolApprovalNeededEvent, AttachedItem } from "../../lib/types";
-import { isProcessing, getProcessingPhase } from "../../lib/types";
+import { isProcessing, getProcessingPhase, type ProcessingPhase } from "../../lib/types";
+import { agentActivity } from "../../lib/agentActivity";
 import { cn } from "../../lib/utils";
 import { reasoningLevelsFor } from "../../lib/reasoningEfforts";
 import { CAPSULE_PANE_CN } from "../common/capsule";
@@ -161,6 +162,17 @@ interface ChatScrollSnapshot {
 // the OLDEST snapshot is dropped when the cap is exceeded — fine because
 // the user just toggled away from the settings nav-back use case which is
 // the only consumer of these snapshots.
+// The activity line's dot per phase (ADR-049's visibility contract, unchanged:
+// one line per processing phase). `idle` and `paused` are deliberately absent
+// — nothing is running, and the pause banners own the paused state.
+const PHASE_DOTS: Partial<Record<ProcessingPhase, string>> = {
+  thinking: "bg-purple-500",
+  waiting: "bg-zinc-400 dark:bg-zinc-500",
+  streaming: "bg-[var(--color-accent)]",
+  tool_executing: "bg-blue-500",
+  waiting_approval: "bg-yellow-500",
+};
+
 const MAX_SCROLL_SNAPSHOTS = 64;
 const chatScrollSnapshots = new Map<string, ChatScrollSnapshot>();
 
@@ -2215,47 +2227,19 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                 wrapper ownership as DebugPausedBanner. */}
             <RetryWaitBanner />
             {/* ADR-049: Phase indicators driven by getProcessingPhase().
-                Each phase maps to a dot color + i18n label. paused is not
-                handled here: DebugPausedBanner / RetryWaitBanner / the
+                Each phase maps to a dot color; the WORD comes from
+                `lib/agentActivity` — the single map every surface reads, so
+                a running tool is named by what it does ("正在回忆") instead of
+                the word "tool", here and in the chat view at once. `paused`
+                is not handled here: DebugPausedBanner / RetryWaitBanner / the
                 iteration-limit & loop-detected banners (derived from
-                Paused.detail) cover all paths. */}
-            {!isCompacting && phase === "thinking" && (
+                Paused.detail) cover all paths, and the map carries no entry
+                for it. */}
+            {!isCompacting && PHASE_DOTS[phase] && (
               <div className="mt-1 ml-12 flex items-center gap-1.5">
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-purple-500 animate-pulse" />
+                <span className={cn("shrink-0 h-1.5 w-1.5 rounded-full animate-pulse", PHASE_DOTS[phase])} />
                 <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
-                  {t("chatPanel.phaseThinking", { defaultValue: "Thinking…" })}
-                </span>
-              </div>
-            )}
-            {!isCompacting && phase === "waiting" && (
-              <div className="mt-1 ml-12 flex items-center gap-1.5">
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
-                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
-                  {t("chatPanel.phaseWaiting", { defaultValue: "Waiting for model…" })}
-                </span>
-              </div>
-            )}
-            {!isCompacting && phase === "streaming" && (
-              <div className="mt-1 ml-12 flex items-center gap-1.5">
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse" />
-                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
-                  {t("chatPanel.phaseStreaming", { defaultValue: "Generating reply…" })}
-                </span>
-              </div>
-            )}
-            {!isCompacting && phase === "tool_executing" && (
-              <div className="mt-1 ml-12 flex items-center gap-1.5">
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-blue-500 animate-pulse" />
-                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
-                  {t("chatPanel.phaseToolExecuting", { defaultValue: "Running tool…" })}
-                </span>
-              </div>
-            )}
-            {!isCompacting && phase === "waiting_approval" && (
-              <div className="mt-1 ml-12 flex items-center gap-1.5">
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-yellow-500 animate-pulse" />
-                <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
-                  {t("chatPanel.phaseWaitingApproval", { defaultValue: "Waiting for tool approval…" })}
+                  {agentActivity(sessionStatus, t).text}
                 </span>
               </div>
             )}

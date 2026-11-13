@@ -259,6 +259,16 @@
     "cancelReply": "取消回覆",
     "emptyAnswer": "（無內容）",
     "viewRun": "檢視執行",
+    "activity": {
+      "working": "正在執行工具",
+      "analyzing": "正在分析",
+      "composing": "正在組織回覆",
+      "waitingApproval": "等你確認",
+      "tool": "正在執行 {{name}}",
+      "memory": "正在回憶",
+      "project": "正在查專案",
+      "docs": "正在查文件"
+    },
     "notice": {
       "pendingTurn": "{{name}}正在處理…",
       "pendingTurnGeneric": "正在處理…",
@@ -336,11 +346,6 @@
     "replying": "正在回覆...",
     "working": "正在處理...",
     "compacting": "上下文壓縮中...",
-    "phaseWaiting": "等待模型回應...",
-    "phaseThinking": "正在思考...",
-    "phaseStreaming": "正在產生回覆...",
-    "phaseToolExecuting": "正在執行工具...",
-    "phaseWaitingApproval": "等待工具授權...",
     "inputMessage": "輸入訊息...（Enter 傳送，Shift+Enter 換行）",
     "inputMessageConnecting": "輸入訊息...（正在連線至 Agent...）",
     "inputMessageQueueing": "輸入訊息...（加入佇列，等下一輪）",

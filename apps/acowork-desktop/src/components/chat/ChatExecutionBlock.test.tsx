@@ -767,9 +767,32 @@ describe("ChatExecutionBlock", () => {
     // for yet), but it may not manufacture liveness: the read is TERMINAL, so no
     // spinner and no "in progress" copy ride in on it (D9).
     const { container } = renderBlock({ [REF1]: entryOf({}) });
-    expect(headerText(container)).toContain("chatView.block.state.toolExecuting");
+    // Rev. (2026-11-12, the activity word): the header no longer holds its own
+    // `chatView.block.state.*` map — a dispatch that names no tool falls back to
+    // the shared generic word, and one that names a tool says what it is.
+    expect(headerText(container)).toContain("chatView.activity.working");
     expect(document.querySelector(".animate-spin")).toBeNull();
     expect(screen.queryByText("chatView.block.inProgress")).toBeNull();
+  });
+
+  it("a named dispatch is described by the tool, not by the word \"tool\"", () => {
+    store.chat = {
+      agentStates: {
+        ag: {
+          sessionStates: {
+            s1: {
+              sessionStatus: {
+                status: "tool_executing",
+                detail: { tools: ["memory_recall"] },
+              },
+            },
+          },
+        },
+      },
+    };
+    const { container } = renderBlock({ [REF1]: entryOf({}) });
+    expect(headerText(container)).toContain("tools.memory_recall.running");
+    expect(headerText(container)).not.toContain("chatView.activity.working");
   });
 
   it("an idle session lets the block's own outcome speak", () => {
@@ -780,7 +803,10 @@ describe("ChatExecutionBlock", () => {
     };
     const { container } = renderBlock({ [REF1]: entryOf({}) });
     expect(headerText(container)).toContain("chatView.block.completed");
-    expect(headerText(container)).not.toContain("chatView.block.state.");
+    // An idle session may not lend the header an activity word either.
+    expect(headerText(container)).not.toMatch(
+      /chatView\.(block\.state|activity)\.|tools\.[a-z_]+\.running/,
+    );
   });
 
   it("the drill keeps its own chrome and sits above the block", () => {

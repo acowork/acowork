@@ -68,7 +68,8 @@ import { useSessionTitle } from "../../lib/useSessionTitle";
 import { SpeakerBadge } from "./speakerNames";
 import { sendAnswer, sendApproval } from "../../lib/session-control";
 import { deriveSessionTitle } from "../../lib/sessionConfigMapper";
-import { getProcessingPhase, isProcessing, type SessionStatus } from "../../lib/types";
+import { isProcessing, type SessionStatus } from "../../lib/types";
+import { agentActivity } from "../../lib/agentActivity";
 import { AgentAvatar } from "../common/AgentAvatar";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { RunBlockActionRow } from "./RunBlockActionRow";
@@ -180,25 +181,20 @@ function statusKey(status: string): string {
 
 /** The session's live state, in as few words as the header can carry. This is
  *  `session_state` talk, not the round's: D9's "is this still running" stays a
- *  `pending` read, and this only says what a run that IS in flight is doing. */
-const STATE_KEYS: Record<string, string> = {
-  idle: "chatView.block.state.idle",
-  llm_awaiting_first_chunk: "chatView.block.state.waiting",
-  thinking: "chatView.block.state.thinking",
-  llm_streaming: "chatView.block.state.streaming",
-  tool_executing: "chatView.block.state.toolExecuting",
-  waiting_approval: "chatView.block.state.waitingApproval",
-  paused: "chatView.block.state.paused",
-};
-
+ *  `pending` read, and this only says what a run that IS in flight is doing.
+ *
+ *  The words come from `lib/agentActivity.ts` — the one table that turns a
+ *  `SessionStatus` into prose. It used to be a `STATE_KEYS` map of
+ *  `chatView.block.state.*` keys held here, which is why the Chat's wait line
+ *  and this header could say different things about the same run: a map in one
+ *  component is not a shared vocabulary. A missing status is still "" — no
+ *  evidence, so the header falls back to the round's own outcome word. */
 function stateText(
   t: (key: string, opts?: Record<string, unknown>) => string,
   status: SessionStatus | null,
 ): string {
   if (!status) return "";
-  return t(STATE_KEYS[status.status] ?? "chatView.block.state.idle", {
-    defaultValue: getProcessingPhase(status),
-  });
+  return agentActivity(status, t).text;
 }
 
 /** One-line summary for a round row, the way a tool row shows its arguments:
