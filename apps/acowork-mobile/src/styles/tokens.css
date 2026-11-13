@@ -41,6 +41,10 @@
    * glare like a destructive action. */
   --color-warning-quiet: #b45309;
   --color-bubble-peer: #ffffff;
+  /* A card's title banner — one shade off the card's own face, so the banner
+   * reads as the card's upper half rather than a second object on top of it.
+   * Light: the white card (#ffffff) with a gray banner above it. */
+  --color-chat-title: #f2f2f4;
 
   --space-1: 4px;
   --space-2: 8px;
@@ -158,6 +162,9 @@
   /* Dimmed for the dark bg, same reason as the light value above. */
   --color-warning-quiet: #c98a1e;
   --color-bubble-peer: #2a2a2a;
+  /* Dark: the banner is one step LIGHTER than the card (#1a1a1a), the same
+   * direction the desktop card's title takes in dark. */
+  --color-chat-title: #26262c;
   color-scheme: dark;
 }
 :root[data-theme='light'] {
