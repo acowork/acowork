@@ -14,10 +14,10 @@ export const inputReadonly =
   "rounded border border-zinc-200 bg-zinc-50 px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-800 ";
 
 // Note: dropdown styling was historically provided via `selectBase` and
-// `selectArrowStyle` here. Both have been consolidated into the
-// `Dropdown` component at components/common/Dropdown.tsx, which owns the
-// SVG arrow + appearance-none contract. All call sites have been
-// migrated; do not reintroduce these tokens.
+// `selectArrowStyle` here. It now lives in
+// `components/common/dropdownTheme.ts`, consumed by `Dropdown.tsx` and by
+// every popup-menu surface. All call sites have been migrated; do not
+// reintroduce these tokens or a second dropdown surface palette.
 
 /** Font-mono input (for API keys, codes) */
 export const inputMono =
@@ -56,9 +56,12 @@ export const toolbarButton =
 export const toolbarIconButton =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent";
 
-/** Toolbar button active state */
-export const toolbarButtonActive =
-  "bg-zinc-200 dark:bg-zinc-700 text-text ";
+// Toolbar "open / active" chrome now lives in
+// `components/common/dropdownTheme.ts` (`DROPDOWN_TRIGGER_ACTIVE_CLASS`).
+// A second literal copy used to sit here as `toolbarButtonActive`; it had no
+// consumers and was removed so the recipe cannot drift. A grey active state
+// is exactly what made an open dropdown read as a different widget from its
+// own menu.
 
 /**
  * List-row tokens.
@@ -142,6 +145,31 @@ export const dialogButtonPrimary =
 /** Dialog secondary action (Cancel) */
 export const dialogButtonSecondary =
   "w-20 rounded px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700";
+
+// ── Interaction-card chrome ─────────────────────────────────────────
+
+/**
+ * The one card chrome: hairline shell, neutral title banner, agent-bubble
+ * body. Written for `InteractionCardShell` and reused as-is by the Chat
+ * execution block, whose title banner IS its collapse header and whose body
+ * is the run's latest answer — a second copy of the recipe is a drift
+ * waiting to happen (`chatCardChrome.test.tsx` pins the rule).
+ *
+ * Two title banners, one geometry: `chatCardTitleBar` is the card palette's
+ * own (`--color-chat-title`, the same tone a code block's title wears), while
+ * `chatCardTitleBarMuted` is one step lighter — a run's banner sits in the
+ * transcript and must not out-shout the answer under it. The DARK step is
+ * identical in both, so the muted variant's dark side references the token
+ * directly (`dark:bg-chat-title`) rather than re-stating the tone; the quiet
+ * variant only lightens the light theme, where the literal zinc-100/60 is
+ * deliberately one step below `--color-chat-title`'s light value.
+ */
+export const chatCardShell = "overflow-hidden rounded-md border border-chat-border";
+const chatCardTitleBarBase =
+  "flex w-full items-center gap-[7px] border-b border-border-divider px-3 py-[7px] text-left text-xs font-medium text-text";
+export const chatCardTitleBar = `${chatCardTitleBarBase} bg-chat-title`;
+export const chatCardTitleBarMuted = `${chatCardTitleBarBase} bg-zinc-100/60 dark:bg-chat-title`;
+export const chatCardBody = "bg-chat-bubble px-3 py-2.5";
 
 // ── Interaction-card buttons ────────────────────────────────────────
 

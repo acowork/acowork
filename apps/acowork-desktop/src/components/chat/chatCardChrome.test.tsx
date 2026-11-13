@@ -18,7 +18,7 @@
  *
  * What this pins:
  *   1. The execution-session card shell (`AskQuestionCard`) is
- *      `border-border-outer` and carries no `--color-accent` anywhere in its
+ *      `border-chat-border` and carries no `--color-accent` anywhere in its
  *      border or header class. Its header uses the shared neutral card-header
  *      recipe (`bg-chat-title` + `text-text`) — the same one CodeBlock uses.
  *   2. The accent BUTTONS inside the cards survive the fix — a card that loses
@@ -85,7 +85,7 @@ describe("interaction card chrome", () => {
       />,
     );
     const shell = shellOf(container);
-    expect(shell.className).toContain("border-border-outer");
+    expect(shell.className).toContain("border-chat-border");
     expect(shell.className).not.toContain("--color-accent");
     const header = headerOf(shell);
     expect(header.className).toContain("bg-chat-title");

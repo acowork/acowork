@@ -675,7 +675,7 @@ def test_cold_start(http, base, mq, packages):
     #      client must retry after phase = READY
     #    * 202 OperationAck — bootstrap already READY when the probe
     #      landed (no 409 window on this machine)
-    probe_pkg = REPO_ROOT / "examples" / "agent-packages" / f"{packages[0]}.agent"
+    probe_pkg = REPO_ROOT / "agents" / "agent-packages" / f"{packages[0]}.agent"
     probe_installed = None
     status, body = install_package(http, base, probe_pkg)
     if status == 409:
@@ -765,7 +765,7 @@ def test_cold_start(http, base, mq, packages):
         if package_id == probe_installed:
             ok(f"{package_id}: covered by the early-install probe (202)")
             continue
-        pkg_path = REPO_ROOT / "examples" / "agent-packages" / f"{package_id}.agent"
+        pkg_path = REPO_ROOT / "agents" / "agent-packages" / f"{package_id}.agent"
         if not pkg_path.exists():
             fail(f"package missing on disk: {pkg_path}")
             return False
@@ -880,7 +880,7 @@ def test_warm_restart(gw_bin, home, http_port, mq_port, packages):
     instance_a = snap_a["instance_id"]
 
     # Install one package with the operation-id round trip.
-    pkg = REPO_ROOT / "examples" / "agent-packages" / f"{packages[0]}.agent"
+    pkg = REPO_ROOT / "agents" / "agent-packages" / f"{packages[0]}.agent"
     if not install_and_await_ack(http, base, mq, pkg):
         mq.disconnect()
         http.close()

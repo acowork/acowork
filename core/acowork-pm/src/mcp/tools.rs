@@ -226,7 +226,7 @@ struct CreateTaskArgs {
     #[serde(default)]
     due_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Start time: the PM dispatch scanner pushes the intent once it is due;
-    /// absent means immediately.
+    /// absent means the store fills `now` (immediately).
     #[serde(default)]
     start_at: Option<chrono::DateTime<chrono::Utc>>,
 }

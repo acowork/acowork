@@ -123,16 +123,21 @@ fn shipped_packages_match_their_source_tree() {
             packaged.insert(name, bytes);
         }
 
+        // The hint has to be a command that actually runs: the builder takes a
+        // path under `agents/`, not a bare directory name, and the POSIX
+        // builder needs `zip`, which Git Bash on Windows does not ship.
+        let rel = agent_dir
+            .strip_prefix(&root)
+            .unwrap_or(&agent_dir)
+            .display();
         assert_eq!(
             packaged.get("manifest.toml").map(|b| b.as_slice()),
             Some(source_manifest.as_bytes()),
-            "{}: packaged manifest.toml differs from the source — rebuild with \
-             dev/common/build-agent.sh {}",
+            "{}: packaged manifest.toml differs from the source — rebuild it with \
+             `dev/common/build-agent.ps1 -AgentDir agents/{rel}` on Windows, or \
+             `dev/common/build-agent.sh agents/{rel}` elsewhere (needs `zip`), \
+             then commit the regenerated .agent",
             package.display(),
-            agent_dir
-                .strip_prefix(&root)
-                .unwrap_or(&agent_dir)
-                .display()
         );
 
         let mut source: BTreeMap<String, Vec<u8>> = BTreeMap::new();

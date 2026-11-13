@@ -1,5 +1,9 @@
 import { useEffect, useRef, type RefObject } from "react";
 import { cn } from "../../lib/utils";
+import {
+  DROPDOWN_ITEM_HOVER_CLASS,
+  DROPDOWN_TRIGGER_ACTIVE_CLASS,
+} from "../common/dropdownTheme";
 
 /**
  * Shared chrome for the title-bar popover menus (Gateway, Appearance).
@@ -35,8 +39,8 @@ export function titleBarMenuTrigger(open: boolean): string {
   return cn(
     "flex h-8 w-8 items-center justify-center rounded transition-colors",
     open
-      ? "bg-zinc-300 text-text-primary dark:bg-zinc-700"
-      : "text-text-secondary hover:bg-zinc-300 dark:hover:bg-zinc-700",
+      ? DROPDOWN_TRIGGER_ACTIVE_CLASS
+      : cn("text-text-secondary", DROPDOWN_ITEM_HOVER_CLASS),
   );
 }
 

@@ -64,7 +64,23 @@ fn parse_live_status(json: &str) -> Option<acowork_core::SessionStatusDto> {
     if json.is_empty() {
         return None;
     }
-    serde_json::from_str(json).ok()
+    let mut value = serde_json::from_str::<serde_json::Value>(json).ok()?;
+    // One compatibility shim, and it is the reader's job because the reader
+    // outlives the writer: a snapshot or a retained `sessions/{sid}/state`
+    // message written before `tool_executing` grew its `tools` list carries
+    // the bare tag `{"status":"tool_executing"}`, and adjacent tagging needs
+    // the `detail` key to exist for a struct variant. Repairing it is what
+    // keeps a session mid-tool-call across a binary swap reading as an
+    // unnamed dispatch instead of as no status at all.
+    if value.get("status").and_then(|s| s.as_str()) == Some("tool_executing")
+        && value.get("detail").is_none()
+    {
+        value.as_object_mut()?.insert(
+            "detail".to_string(),
+            serde_json::Value::Object(serde_json::Map::new()),
+        );
+    }
+    serde_json::from_value(value).ok()
 }
 
 pub struct RuntimeSessionMetadataService {
@@ -428,6 +444,32 @@ mod tests {
             parse_live_status(WAITING),
             Some(SessionStatusDto::WaitingApproval {
                 request_id: "req-1".to_string()
+            })
+        );
+    }
+
+    /// A snapshot written before `tool_executing` grew its `tools` list is the
+    /// bare tag with no `detail` object. The reader must still report a
+    /// dispatch — unnamed, which every surface falls back on — rather than
+    /// "no status", because a session parked mid-tool-call across a binary
+    /// swap is exactly the state a listing is read to show.
+    #[test]
+    fn a_pre_tools_tool_executing_snapshot_still_reads_as_a_dispatch() {
+        match parse_live_status(r#"{"status":"tool_executing"}"#) {
+            Some(SessionStatusDto::ToolExecuting { tools }) => assert!(tools.is_empty()),
+            other => panic!("expected an unnamed dispatch, got {other:?}"),
+        }
+    }
+
+    /// The shape the Runtime writes now: names present, and read back as
+    /// names, not dropped on the way through the stored string.
+    #[test]
+    fn a_tool_executing_snapshot_keeps_the_names_it_wrote() {
+        let json = r#"{"status":"tool_executing","detail":{"tools":["memory_recall"]}}"#;
+        assert_eq!(
+            parse_live_status(json),
+            Some(SessionStatusDto::ToolExecuting {
+                tools: vec!["memory_recall".to_string()]
             })
         );
     }

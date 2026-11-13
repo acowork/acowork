@@ -15,11 +15,12 @@
  * under the open row. The only thing invented here is what a row pairs:
  * `user` / `assistant` instead of `tool_call` / `tool_result`, plus the
  * session's live state next to the count. Design 27 §6.5's mobile deltas:
- * - the run's latest answer is drawn BELOW the block as an ordinary assistant
- *   bubble, folded to eight lines with a double-chevron toggle (the desktop
- *   `RunAnswerBubble`, copied): the card can stay collapsed without the
- *   agent's newest words disappearing behind a tap — they are on the
- *   transcript, and the rounds stay one tap away inside the card;
+ * - the run's latest answer is the CARD's BODY, not a bubble under it (the
+ *   desktop card's shape, copied): the collapse header is the card's title
+ *   banner, so the run and the agent's newest words read as ONE object. It is
+ *   still folded to eight lines with a double-chevron toggle (the desktop
+ *   `RunAnswerBubble`, copied), so the card can stay collapsed without the
+ *   agent's newest words disappearing behind a tap;
  * - a decision card a round is parked on stays visible even when the block is
  *   folded, and its buttons live in a BOTTOM SHEET: on a thumb-sized screen the
  *   tap that approves a tool call must not be reachable by accident.
@@ -317,84 +318,89 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
         ) : null}
       </div>
 
-      <button
-        type="button"
-        className="explore-toggle"
-        onClick={() => {
-          const next = !open
-          setOpen(next)
-          manuallyCollapsed.current = next ? false : true
-        }}
-        aria-expanded={open}
-      >
-        <span
-          className={`explore-toggle-icon${inProgress ? ' is-live' : ''}${
-            isFailureStatus(newestEntry?.projection?.status ?? '') ? ' is-danger' : ''
-          }`}
-          aria-hidden
+      {/* The run and its latest answer are ONE card (the desktop card's
+          shape, copied): the collapse header IS the title banner, the rounds
+          unfold under it, and the answer is the card's BODY. Drawn as a bubble
+          under the block, one agent message read as two objects. */}
+      <div className="chat-run-card">
+        <button
+          type="button"
+          className="explore-toggle"
+          onClick={() => {
+            const next = !open
+            setOpen(next)
+            manuallyCollapsed.current = next ? false : true
+          }}
+          aria-expanded={open}
         >
-          {inProgress ? '◌' : isFailureStatus(newestEntry?.projection?.status ?? '') ? '!' : '⚙'}
-        </span>
-        <span className="explore-toggle-label">{name}</span>
-        <span className="explore-toggle-summary">
-          {block.rounds.length} 轮{shownState ? ` · ${shownState}` : ''}
-          {taskId ? ` · ${taskId}` : ''}
-        </span>
-        <span className="explore-toggle-caret" aria-hidden>
-          {open ? '⌄' : '›'}
-        </span>
-      </button>
+          <span
+            className={`explore-toggle-icon${inProgress ? ' is-live' : ''}${
+              isFailureStatus(newestEntry?.projection?.status ?? '') ? ' is-danger' : ''
+            }`}
+            aria-hidden
+          >
+            {inProgress ? '◌' : isFailureStatus(newestEntry?.projection?.status ?? '') ? '!' : '⚙'}
+          </span>
+          <span className="explore-toggle-label">{name}</span>
+          <span className="explore-toggle-summary">
+            {block.rounds.length} 轮{shownState ? ` · ${shownState}` : ''}
+            {taskId ? ` · ${taskId}` : ''}
+          </span>
+          <span className="explore-toggle-caret" aria-hidden>
+            {open ? '⌄' : '›'}
+          </span>
+        </button>
 
-      {open ? (
-        <div className="explore-body">
-          {hiddenOlder > 0 ? (
-            <button
-              type="button"
-              className="chat-run-older"
-              onClick={() => setRevealed((n) => n + REVEAL_STEP)}
-            >
-              查看更早 {hiddenOlder} 轮
-            </button>
-          ) : null}
-          {shown.map((round, i) => (
-            <RoundItem
-              key={round.ref}
-              round={round}
-              /** The label is the round's position in the SESSION, so a pinned
-               *  round above the window keeps its own number. */
-              index={shownIndices[i]!}
-              /** The freshest round of an open block shows its pair; earlier ones
-               *  fold to one line, the way a long run's older tool calls do. */
-              defaultOpen={shownIndices[i] === block.rounds.length - 1}
-              chatSessionId={chatSessionId}
-              entry={entries[round.ref]}
-              reload={reload}
-            />
-          ))}
-          {/* ADR-106 revision 2026-11-04: continue the run in place. The row is
-              present whenever the block is OPEN and the viewer may answer, and
-              NEVER when the block is folded (§6.5 — a collapsed run shows no
-              input). Its send rides `deliver(text, rowId)` — the level-1 branch —
-              so the claim and the wait line are the same machinery a card answer
-              already uses. The freshest round's reference row is what it answers. */}
-          {canAnswer && onReplyInPlace ? (
-            <BlockReplyRow
-              rowId={newest?.roundRow.meta?.message_id ?? ''}
-              focusSignal={focusInput}
-              onSend={onReplyInPlace}
-            />
-          ) : null}
-        </div>
-      ) : null}
+        {open ? (
+          <div className="explore-body">
+            {hiddenOlder > 0 ? (
+              <button
+                type="button"
+                className="chat-run-older"
+                onClick={() => setRevealed((n) => n + REVEAL_STEP)}
+              >
+                查看更早 {hiddenOlder} 轮
+              </button>
+            ) : null}
+            {shown.map((round, i) => (
+              <RoundItem
+                key={round.ref}
+                round={round}
+                /** The label is the round's position in the SESSION, so a pinned
+                 *  round above the window keeps its own number. */
+                index={shownIndices[i]!}
+                /** The freshest round of an open block shows its pair; earlier ones
+                 *  fold to one line, the way a long run's older tool calls do. */
+                defaultOpen={shownIndices[i] === block.rounds.length - 1}
+                chatSessionId={chatSessionId}
+                entry={entries[round.ref]}
+                reload={reload}
+              />
+            ))}
+            {/* ADR-106 revision 2026-11-04: continue the run in place. The row is
+                present whenever the block is OPEN and the viewer may answer, and
+                NEVER when the block is folded (§6.5 — a collapsed run shows no
+                input). Its send rides `deliver(text, rowId)` — the level-1 branch —
+                so the claim and the wait line are the same machinery a card answer
+                already uses. The freshest round's reference row is what it answers. */}
+            {canAnswer && onReplyInPlace ? (
+              <BlockReplyRow
+                rowId={newest?.roundRow.meta?.message_id ?? ''}
+                focusSignal={focusInput}
+                onSend={onReplyInPlace}
+              />
+            ) : null}
+          </div>
+        ) : null}
 
-      {/* The run's latest answer, in the transcript's own assistant-bubble
-          skin — under the block, never inside the fold. This is what keeps the
-          surface reading as a conversation: the agent's newest words are on
-          screen while the rounds stay one tap away. It is the SAME projected
-          `answer` the newest answered round carries (`latestAnswer`), so
-          nothing here can say anything the block would not; a run that has not
-          answered yet paints nothing instead of an empty bubble. */}
-      {latestAnswer ? <RunAnswerBubble content={latestAnswer} /> : null}
+        {/* The run's latest answer, as the card's BODY — never behind the
+            fold, so the agent's newest words are on screen while the rounds
+            stay one tap away. It is the SAME projected `answer` the newest
+            answered round carries (`latestAnswer`), so nothing here can say
+            anything the block would not; a run that has not answered yet
+            paints no body instead of an empty bubble. */}
+        {latestAnswer ? <RunAnswerBubble content={latestAnswer} /> : null}
+      </div>
 
       {parked.map((round) => (
         <BlockCardSurface

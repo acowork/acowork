@@ -26,6 +26,8 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useWorkspaceStore } from "../../stores/workspaceStore";
 import { openAttachedRef } from "../../lib/openWorkspaceRef";
 import { formatBubbleTime } from "../../lib/formatTime";
+import { resendUserMessageText } from "../../lib/resendUserMessage";
+import { BubbleMetaActions } from "./BubbleMetaActions";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import { MessageRefBlock } from "./MessageRefBlock";
 import { isAttachmentPart, isMessageRefPart } from "./messageFolder";
@@ -155,6 +157,13 @@ export function UserWithAttachmentsBubble({
     [currentSessionId],
   );
 
+  // Re-send this turn's text. Same helper as the plain user bubble's
+  // right-click Resend, so the two entry points stay one behaviour.
+  const handleResend = useCallback(
+    () => resendUserMessageText(userMessage.content),
+    [userMessage.content],
+  );
+
   const fontSizeStyle: React.CSSProperties = { fontSize: "var(--ui-font-size, 0.875rem)" };
   // Renderer + skin both follow the SPEAKER, decided once so the two cannot
   // be configured apart (`speakerBubble.ts`).
@@ -271,10 +280,23 @@ export function UserWithAttachmentsBubble({
               />
             ))}
 
-            {userMessage.timestamp && (
-              <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
-                {formatBubbleTime(userMessage.timestamp)}
-              </span>
+            {(userMessage.timestamp || userMessage.content) && (
+              <div className="mt-1 flex items-center gap-1.5">
+                {/* Copy + resend, revealed with the timestamp. Resend is the
+                    same call the plain user bubble's right-click menu makes
+                    (`resendUserMessageText`) — the parts bubble has no menu
+                    of its own, so this is its only entry point, and it must
+                    still behave identically. */}
+                <BubbleMetaActions
+                  copyText={userMessage.content}
+                  onResend={userMessage.content ? handleResend : undefined}
+                />
+                {userMessage.timestamp && (
+                  <span className="text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
+                    {formatBubbleTime(userMessage.timestamp)}
+                  </span>
+                )}
+              </div>
             )}
           </div>
         )}

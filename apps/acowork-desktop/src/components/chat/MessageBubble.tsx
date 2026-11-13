@@ -24,6 +24,9 @@ import {
   type ContextMenuItem,
 } from "../common/ContextMenu";
 import { copySelectionOrFallback, snapshotSelection } from "../../lib/clipboard";
+import { resendUserMessageText } from "../../lib/resendUserMessage";
+import { useActiveSessionReadOnly } from "../../lib/session-write-access";
+import { BubbleMetaActions } from "./BubbleMetaActions";
 import { formatBubbleTime } from "../../lib/formatTime";
 import { bubbleMetaAnchor } from "./bubbleMetaAnchor";
 import {
@@ -160,6 +163,10 @@ const MessageBubble = React.memo(function MessageBubble({
   // otherwise. Resend keeps using `content` — it re-sends the turn as it was
   // recorded, machine text included.
   const readableBody = message.display?.body || message.content;
+  // Whether this session may be written to at all — gates the two re-send
+  // entry points (right-click menu, hover icon). Read from the hook, not
+  // passed down: see `session-write-access.ts`.
+  const readOnlySession = useActiveSessionReadOnly();
   // Live names — received as props from ChatPanel so React.memo can detect
   // profile changes (name/avatar edits update all rendered bubbles instantly).
   const liveUserName = liveUserNameProp ?? message.senderDisplayName;
@@ -206,13 +213,10 @@ const MessageBubble = React.memo(function MessageBubble({
   // agentId via `getState()` keeps this callback's deps narrow and
   // stable — same pattern used by the chip handlers above.
   const handleResend = useCallback(() => {
-    const agentId = useAgentStore.getState().selectedAgentId;
-    if (!agentId) return;
-    // Resend only carries the text body.  Any original attachments are
-    // intentionally dropped — they were tied to a previous send and would
-    // double-charge the upload pipeline on a fresh re-send.
-    if (!message.content) return;
-    void useChatStore.getState().sendMessage(message.content, agentId);
+    // The rule lives in `resendUserMessageText`, shared with the hover-meta
+    // resend and the with-parts bubble, so the two entry points — and the
+    // two user bubbles — cannot drift apart.
+    resendUserMessageText(message.content);
   }, [message.content]);
 
   // ── Copy handler ────────────────────────────────────────────────────
@@ -263,7 +267,13 @@ const MessageBubble = React.memo(function MessageBubble({
     // Resend is user-bubble-only. No disabled state — either the
     // message has content (we got past the `if` above) or the item is
     // not rendered at all.
-    if (message.type === "user" && message.content) {
+    //
+    // It is also a session WRITE, so it takes the same gate as the hover
+    // icon (`session-write-access.ts`: the control asks, nothing threads it).
+    // Offering it here while the icon is hidden would leave the menu and the
+    // bubble disagreeing about whether this session can be written to — the
+    // half-enabled toolbar that file exists to prevent.
+    if (message.type === "user" && message.content && !readOnlySession) {
       list.push({
         key: "resend",
         icon: <RotateCcw size={14} />,
@@ -273,7 +283,7 @@ const MessageBubble = React.memo(function MessageBubble({
     }
 
     return list;
-  }, [message.content, message.type, handleCopy, handleResend, t]);
+  }, [message.content, message.type, handleCopy, handleResend, t, readOnlySession]);
 
   // Common right-click trigger — bound to whichever layout wrapper the
   // message type uses (see each branch below). No payload: items read
@@ -399,10 +409,21 @@ const MessageBubble = React.memo(function MessageBubble({
                     </div>
                   )}
                 </div>
-                {message.timestamp && (
-                  <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
-                    {formatBubbleTime(message.timestamp)}
-                  </span>
+                {(message.timestamp || readableBody) && (
+                  <div className="mt-1 flex items-center gap-1.5">
+                    {/* Copy + resend, revealed with the timestamp. Resend is
+                        the right-click action itself — one handler, two
+                        entry points. */}
+                    <BubbleMetaActions
+                      copyText={readableBody}
+                      onResend={message.content ? handleResend : undefined}
+                    />
+                    {message.timestamp && (
+                      <span className="text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
+                        {formatBubbleTime(message.timestamp)}
+                      </span>
+                    )}
+                  </div>
                 )}
               </div>
             )}

@@ -335,6 +335,8 @@ export interface PmListFilters {
   query: string;
   status: TaskStatus[];
   priority: Priority[];
+  /** 任务类型（task / feature / bug / chore / checkpoint / milestone） */
+  type: TaskType[];
   /** `instance_id` 集合；`UNASSIGNED` = 未指派 */
   assignee: string[];
 }
@@ -343,6 +345,7 @@ export const EMPTY_PM_LIST_FILTERS: PmListFilters = {
   query: "",
   status: [],
   priority: [],
+  type: [],
   assignee: [],
 };
 
@@ -351,6 +354,7 @@ export function hasActivePmListFilters(f: PmListFilters): boolean {
     f.query.trim() !== "" ||
     f.status.length > 0 ||
     f.priority.length > 0 ||
+    f.type.length > 0 ||
     f.assignee.length > 0
   );
 }
@@ -370,6 +374,7 @@ export function filterPmListTasks(
   const q = filters.query.trim().toLowerCase();
   const statusSet = new Set(filters.status);
   const prioritySet = new Set(filters.priority);
+  const typeSet = new Set(filters.type);
   const assigneeSet = new Set(filters.assignee);
   return tasks.filter((t) => {
     if (q) {
@@ -378,6 +383,7 @@ export function filterPmListTasks(
     }
     if (statusSet.size && !statusSet.has(t.status)) return false;
     if (prioritySet.size && !prioritySet.has(t.priority)) return false;
+    if (typeSet.size && !typeSet.has(t.type)) return false;
     if (assigneeSet.size && !assigneeSet.has(t.assignee ?? UNASSIGNED)) return false;
     return true;
   });

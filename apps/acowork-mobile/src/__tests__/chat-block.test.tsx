@@ -812,6 +812,21 @@ describe('collapsed by default, answer bubble under the block (the desktop shape
     expect(html).toContain('报表已整理好。')
   })
 
+  /** The reader's ask, copied from desktop: one agent message must read as
+   *  ONE object. The collapse header is the card's title banner, the run's
+   *  latest answer is its body, and both live inside ONE shell. Drawn as a
+   *  bubble under the block, the answer made every run look like two
+   *  messages. */
+  it('draws the header and the answer inside one card', () => {
+    seedEntries({ 'ag|s1|r1': entryOf({ ref: 'ag|s1|r1' }) })
+    const html = renderFolded(onlyBlock([triggerRow('u1', '帮我整理报表'), refRow()]))
+    // The answer is a CHILD of the card shell — the header and the answer
+    // share one object.
+    expect(html).toMatch(/chat-run-card[^>]*>[\s\S]*data-run-answer/)
+    // ... and it is the card's body, not a second bubble with its own skin.
+    expect(html).not.toContain('bubble-peer')
+  })
+
   it('the bubble carries the newest round WITH an answer, not the newest round', () => {
     // A round still working has not spoken yet — the previous answer stands.
     seedEntries({

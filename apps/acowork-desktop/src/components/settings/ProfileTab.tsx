@@ -18,7 +18,6 @@ import {
   deleteUserAvatarFile,
   resolveUserAvatarFileUrl,
 } from "../../lib/avatar";
-import type { UserAvatarConfig } from "../../lib/avatar";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
@@ -48,7 +47,6 @@ export function ProfileTab() {
   // ── Avatar state ───────────────────────────────────────────────────
   const [avatarPopupOpen, setAvatarPopupOpen] = useState(false);
   const [avatarTab, setAvatarTab] = useState<"custom" | "builtin">("builtin");
-  const [avatarConfig, setAvatarConfig] = useState<UserAvatarConfig | null>(null);
   const [avatarAssets, setAvatarAssets] = useState<AvatarAssetEntry[]>([]);
   const [avatarBusy, setAvatarBusy] = useState(false);
 
@@ -61,10 +59,15 @@ export function ProfileTab() {
   ];
 
   // ── Load avatar config from backend ────────────────────────────────
+  // The avatar renders from the STORE, never from a local copy of the
+  // config: the store already holds the persisted value (mirrored from the
+  // account at login — see `authStore.app`), so the very first paint shows
+  // the custom avatar. The local copy used to start out `null` and was only
+  // filled in when this fetch resolved, so every visit painted a builtin
+  // icon first and swapped to the custom avatar a frame later (the flash).
   useEffect(() => {
     fetchUserAvatarConfig()
       .then((cfg) => {
-        setAvatarConfig(cfg);
         setProfile({
           backendAvatarUrl: cfg.avatar ?? null,
           backendBuiltinAvatarId: cfg.builtin_avatar ?? null,
@@ -204,7 +207,6 @@ export function ProfileTab() {
     setAvatarBusy(true);
     try {
       const cfg = await updateUserAvatarConfig({ avatar: relativePath, builtin_avatar: "" });
-      setAvatarConfig(cfg);
       setProfile({
         backendAvatarUrl: cfg.avatar ?? null,
         backendBuiltinAvatarId: cfg.builtin_avatar ?? null,
@@ -221,7 +223,6 @@ export function ProfileTab() {
     setAvatarBusy(true);
     try {
       const cfg = await updateUserAvatarConfig({ avatar: "", builtin_avatar: iconId });
-      setAvatarConfig(cfg);
       setProfile({
         backendAvatarUrl: cfg.avatar ?? null,
         backendBuiltinAvatarId: cfg.builtin_avatar ?? null,
@@ -262,7 +263,10 @@ export function ProfileTab() {
         fetchUserAvatarConfig(),
       ]);
       setAvatarAssets(assetsResp.assets);
-      setAvatarConfig(cfg);
+      setProfile({
+        backendAvatarUrl: cfg.avatar ?? null,
+        backendBuiltinAvatarId: cfg.builtin_avatar ?? null,
+      });
     } catch (err) {
       log.warn("[ProfileTab] Delete avatar failed:", err);
     } finally {
@@ -278,6 +282,12 @@ export function ProfileTab() {
 
   // Account actions (see the buttons next to the avatar below).
   const loggedIn = useAuthStore((s) => s.status === "logged_in");
+  // The ID line used to wait for `fetchSelfProfile` to resolve, so the card
+  // grew by a line a moment after the page opened (the page "flashed").
+  // The account is already in the store at login — render the ID from
+  // there and let the fetch cover the local-mode gap.
+  const account = useAuthStore((s) => s.account);
+  const selfId = account?.user_id ?? backendUser?.user_id;
   const [changePasswordOpen, setChangePasswordOpen] = useState(false);
 
   return (
@@ -306,8 +316,8 @@ export function ProfileTab() {
             >
               <UserAvatar
                 size={64}
-                avatarUrl={avatarConfig?.avatar ?? null}
-                builtinAvatarId={avatarConfig?.builtin_avatar ?? undefined}
+                avatarUrl={profile.backendAvatarUrl ?? null}
+                builtinAvatarId={profile.backendBuiltinAvatarId ?? undefined}
               />
               {/* Pencil badge */}
               <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600">
@@ -373,7 +383,7 @@ export function ProfileTab() {
                         <span className="text-lg">+</span>
                       </button>
                       {avatarAssets.map((asset) => {
-                        const isSelected = avatarConfig?.avatar === asset.relative_path;
+                        const isSelected = profile.backendAvatarUrl === asset.relative_path;
                         return (
                           <div
                             key={asset.relative_path}
@@ -408,7 +418,7 @@ export function ProfileTab() {
                   {avatarTab === "builtin" && (
                     <div className="grid grid-cols-4 gap-2">
                       {BUILTIN_ICON_IDS.map((iconId) => {
-                        const isSelected = avatarConfig?.builtin_avatar === iconId;
+                        const isSelected = profile.backendBuiltinAvatarId === iconId;
                         return (
                           <button
                             key={iconId}
@@ -440,9 +450,9 @@ export function ProfileTab() {
             <p className="text-sm font-medium text-text ">
               {profile.displayName}
             </p>
-            {backendUser?.user_id && (
-              <p className="mt-0.5 select-all break-all text-10 text-text-tertiary" title={backendUser.user_id}>
-                ID: {backendUser.user_id}
+            {selfId && (
+              <p className="mt-0.5 select-all break-all text-10 text-text-tertiary" title={selfId}>
+                ID: {selfId}
               </p>
             )}
           </div>

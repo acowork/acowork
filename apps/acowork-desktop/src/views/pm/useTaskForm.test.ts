@@ -151,35 +151,35 @@ describe("assignee dropdown options", () => {
 /**
  * Date-field round-trip (plan §8 debt: the timezone drift the old TaskEditDialog
  * had).
- * The date input carries a *local* calendar day; the stored instant is
- * local midnight. The old code (`new Date("YYYY-MM-DD")`) parsed as UTC
+ * The field carries a *local wall clock* `YYYY-MM-DDTHH:mm`; the stored instant
+ * is that wall clock. The old code (`new Date("YYYY-MM-DD")`) parsed as UTC
  * midnight, so users west of UTC saw the previous day after a re-edit.
- * These run in the test runner's timezone (Asia/Shanghai, UTC+8):
- * UTC-midnight storage would render 08:00 local, local-midnight storage
- * renders 00:00 — the assertions below pin the local-midnight semantics.
+ * These run in the test runner's timezone (Asia/Shanghai, UTC+8), so a UTC
+ * parse would render 08:00 local — the assertions below pin the wall-clock
+ * semantics instead.
  */
 describe("task form date fields", () => {
-  it("stores a date field as local midnight", async () => {
-    const { localDateFieldToIso } = await import("./useTaskForm");
-    const iso = localDateFieldToIso("2026-10-30");
+  it("stores a wall-clock field as that local instant", async () => {
+    const { localDateTimeToIso } = await import("./useTaskForm");
+    const iso = localDateTimeToIso("2026-10-30T08:30");
     const d = new Date(iso);
     expect(d.getFullYear()).toBe(2026);
     expect(d.getMonth()).toBe(9);
     expect(d.getDate()).toBe(30);
-    expect(d.getHours()).toBe(0);
-    expect(d.getMinutes()).toBe(0);
+    expect(d.getHours()).toBe(8);
+    expect(d.getMinutes()).toBe(30);
   });
 
-  it("round-trips iso back to the same local calendar day", async () => {
-    const { localDateFieldToIso, isoToLocalDate } = await import("./useTaskForm");
-    expect(isoToLocalDate(localDateFieldToIso("2026-10-30"))).toBe("2026-10-30");
-    expect(isoToLocalDate(localDateFieldToIso("2026-02-01"))).toBe("2026-02-01");
+  it("round-trips iso back to the same local wall clock", async () => {
+    const { localDateTimeToIso, isoToLocalDateTime } = await import("./useTaskForm");
+    expect(isoToLocalDateTime(localDateTimeToIso("2026-10-30T08:30"))).toBe("2026-10-30T08:30");
+    expect(isoToLocalDateTime(localDateTimeToIso("2026-02-01T00:00"))).toBe("2026-02-01T00:00");
   });
 
   it("tolerates empty and malformed input", async () => {
-    const { isoToLocalDate } = await import("./useTaskForm");
-    expect(isoToLocalDate(null)).toBe("");
-    expect(isoToLocalDate(undefined)).toBe("");
-    expect(isoToLocalDate("not-a-date")).toBe("not-a-date");
+    const { isoToLocalDateTime } = await import("./useTaskForm");
+    expect(isoToLocalDateTime(null)).toBe("");
+    expect(isoToLocalDateTime(undefined)).toBe("");
+    expect(isoToLocalDateTime("not-a-date")).toBe("not-a-date");
   });
 });

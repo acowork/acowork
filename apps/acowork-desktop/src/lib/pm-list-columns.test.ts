@@ -117,10 +117,31 @@ describe("filterPmListTasks", () => {
     ).toEqual(["t-2"]);
   });
 
+  it("filters by task type, like status and priority do", () => {
+    const tasks = [
+      task("t-1", { type: "bug" }),
+      task("t-2", { type: "feature" }),
+      task("t-3", { type: "bug" }),
+    ];
+    expect(
+      filterPmListTasks(tasks, { ...EMPTY_PM_LIST_FILTERS, type: ["bug"] }, LABEL).map(
+        (t) => t.id,
+      ),
+    ).toEqual(["t-1", "t-3"]);
+    expect(
+      filterPmListTasks(
+        tasks,
+        { ...EMPTY_PM_LIST_FILTERS, type: ["bug", "feature"] },
+        LABEL,
+      ).length,
+    ).toBe(3);
+  });
+
   it("reports active filters so the toolbar can show a clear button", () => {
     expect(hasActivePmListFilters(EMPTY_PM_LIST_FILTERS)).toBe(false);
     expect(hasActivePmListFilters({ ...EMPTY_PM_LIST_FILTERS, query: "  " })).toBe(false);
     expect(hasActivePmListFilters({ ...EMPTY_PM_LIST_FILTERS, status: ["done"] })).toBe(true);
+    expect(hasActivePmListFilters({ ...EMPTY_PM_LIST_FILTERS, type: ["bug"] })).toBe(true);
   });
 });
 

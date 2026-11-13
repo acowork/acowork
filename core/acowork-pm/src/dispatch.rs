@@ -9,10 +9,11 @@
 //! New single trigger source: a periodic scan. Every tick the scanner takes
 //! the in-memory index (no disk reads for filtering), selects tasks that are
 //! `pending` + assigned (agent or human) + creation-approved + undispatched +
-//! `start_at` reached, and pushes one dispatch per task. On delivery the
-//! task is stamped `dispatched_at` (idempotence); the stamp is cleared
-//! whenever the task leaves `pending` or is reassigned, so a rollback to
-//! `pending` re-dispatches naturally.
+//! scheduled (`start_at` set and reached — a task with no `start_at` is
+//! 未排期 and is never dispatched), and pushes one dispatch per task. On
+//! delivery the task is stamped `dispatched_at` (idempotence); the stamp is
+//! cleared whenever the task leaves `pending` or is reassigned, so a rollback
+//! to `pending` re-dispatches naturally.
 //!
 //! One dispatch, two shapes, decided by the Gateway from the target's type in
 //! the project group roster: an **agent** gets the group-chat sentence plus a
@@ -212,6 +213,14 @@ pub fn spawn_scanner(
                     || task.dispatched_at.is_some()
                 {
                     continue; // raced with a claim/reassign between filter and read
+                }
+                // The same fail-closed rule as the candidate filter: a task
+                // that lost its schedule between the filter and this read is
+                // not dispatched. The filter's snapshot is a tick old, and
+                // "未排期 = 不派发" has to hold at the delivery point, not
+                // only at the selection point.
+                if task.start_at.is_none_or(|s| s > Utc::now()) {
+                    continue;
                 }
                 let Some(assignee) = task.assignee.as_deref() else {
                     continue;

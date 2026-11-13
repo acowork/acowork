@@ -310,6 +310,13 @@ Write-Host "[5/5] Building $profile APK for $Target (this compiles Rust for Andr
 Push-Location $AppDir
 try {
     npx tauri android build --apk $profile --target $Target
+    # $ErrorActionPreference = "Stop" does NOT cover native commands: PowerShell
+    # only raises on cmdlet errors, so a failing build used to fall through to
+    # the install step below and flash the PREVIOUS APK - "Success" on screen,
+    # stale UI on the phone, and nothing points at the real error.
+    if ($LASTEXITCODE -ne 0) {
+        throw "tauri android build failed (exit $LASTEXITCODE). No APK was produced by this run - the tree under app\build\outputs\apk is STALE, do not install or trust it."
+    }
 } finally { Pop-Location }
 
 $apk = Get-ChildItem (Join-Path $GenDir "app\build\outputs\apk") -Recurse -Filter *.apk -ErrorAction SilentlyContinue |
@@ -324,5 +331,9 @@ if ($Install) {
     if (-not (Test-Path $adb)) { throw "adb not found at $adb" }
     Write-Host "Installing on the connected device..." -ForegroundColor Cyan
     & $adb install -r $apk.FullName
+    # Same reason as the build guard above: adb's exit code is invisible to
+    # $ErrorActionPreference, and "Failure [INSTALL_FAILED_*]" used to be
+    # followed by the launch hint as though the flash had worked.
+    if ($LASTEXITCODE -ne 0) { throw "adb install failed (exit $LASTEXITCODE) - the device is still running the PREVIOUS build." }
     Write-Host "Launch: adb shell monkey -p com.acowork.mobile -c android.intent.category.LAUNCHER 1" -ForegroundColor DarkGray
 }

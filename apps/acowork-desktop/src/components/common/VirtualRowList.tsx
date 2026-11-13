@@ -249,6 +249,22 @@ export function VirtualRowList<T>({
       ro.observe(el, { box: "border-box" });
       return () => ro.disconnect();
     },
+    // Positions and the sizer's height are written STRAIGHT TO THE DOM, inside
+    // the notification that reported the new measurements. Why: a height that
+    // lands after mount — a folded answer clamping to its ten-line ceiling, an
+    // image decoding, markdown settling — reaches us through a ResizeObserver,
+    // and a measurement notification is non-sync, so the re-render it asks for
+    // is scheduled rather than flushed. React then paints the frame with the
+    // row's NEW height and the NEXT rows' OLD offsets, and corrects on the
+    // following frame: the one-frame jump the reader reports as "it flashes".
+    // With this flag the library repositions the mounted rows (and resizes the
+    // sizer) in the same layout pass, before paint.
+    //
+    // The two obligations it puts on the render below:
+    //   - the sizer div takes `virtualizer.containerRef` and sets no height;
+    //   - a row keeps `position:absolute` + `top/left:0` and must NOT write its
+    //     own main-axis position (no `transform`/`top` in `rowStyle`).
+    directDomUpdates: true,
     // Content-stable keys so the internal measurement cache survives
     // prepend/append (index keys shift every measurement on a prepend).
     getItemKey: (index: number) => {
@@ -512,9 +528,15 @@ export function VirtualRowList<T>({
   );
 
   return (
+    // The sizer: `containerRef` (directDomUpdates) lets the virtualizer write
+    // its height itself, so a React-owned value must not fight it — the `auto`
+    // below only exists to CLEAR a height the library left behind when the
+    // fallback branch takes over (a viewport that collapses to zero), where
+    // there is no library write to correct it.
     <div
+      ref={virtualized ? virtualizer.containerRef : undefined}
       style={{
-        height: virtualized ? virtualizer.getTotalSize() : undefined,
+        height: virtualized ? undefined : "auto",
         width: "100%",
         position: "relative",
       }}
@@ -532,7 +554,9 @@ export function VirtualRowList<T>({
                 top: 0,
                 left: 0,
                 width: "100%",
-                transform: `translateY(${virtualRow.start}px)`,
+                // No `transform` here: the virtualizer writes the main-axis
+                // position itself (see `directDomUpdates`), and a React-owned
+                // transform would overwrite it on the next render.
                 ...(rowStyle?.(item, virtualRow.index) ?? {}),
               },
               true,

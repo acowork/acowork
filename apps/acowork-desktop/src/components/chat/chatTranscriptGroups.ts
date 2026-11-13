@@ -161,10 +161,26 @@ function sessionOf(row: ChatMessageRow): {
   return { instanceId, execSessionId, roundId };
 }
 
+/** The block a session's rounds fold into, as the key path needs it. */
+export interface BlockIdentity {
+  instanceId: string;
+  execSessionId: string;
+  /** Where the block sits in this window — the session's OLDEST row HERE, so
+   *  it moves when a page is prepended. Not usable as a stable key. */
+  anchorRow: ChatMessageRow;
+}
+
 export function buildTranscriptItems(
   rows: ChatMessageRow[],
   keyOf: (row: ChatMessageRow) => string,
+  /** Render key for a folded block. Defaults to the anchor row's key, which is
+   *  what a non-virtualized transcript wants. A virtualized surface must pass
+   *  a session-stable one: the default key changes the moment a prepend brings
+   *  in older rounds of the same session, and a changed key means a cache miss
+   *  on the block's measured height — the block then jumps to its estimate. */
+  blockKeyOf?: (block: BlockIdentity) => string,
 ): TranscriptLayout {
+  const keyOfBlock = blockKeyOf ?? ((b: BlockIdentity) => keyOf(b.anchorRow));
   // The chat's own rows, addressable by the id a reference row answers.
   const byMessageId = new Map<string, ChatMessageRow>();
   for (const r of rows) {
@@ -241,6 +257,21 @@ export function buildTranscriptItems(
   const anchorOf = new Map<string, ChatMessageRow>();
   for (const [key, group] of groups) {
     anchorOf.set(key, group.rounds[0]!.roundRow);
+  }
+  // …and the block's own render key, resolved per group once. A folded row's
+  // seq has to map to exactly the key the block item carries, so both sides
+  // read this table instead of re-deriving it (and disagreeing about it).
+  // Indexed by the ANCHOR row's seq because that is all the later loops have:
+  // every value in it comes from `anchorOf`, and every row they look up is an
+  // anchor, so the lookup cannot miss.
+  const blockKeyByAnchorSeq = new Map<number, string>();
+  for (const [key, group] of groups) {
+    const { instanceId, execSessionId } = group;
+    const anchorRow = anchorOf.get(key)!;
+    blockKeyByAnchorSeq.set(
+      anchorRow.seq,
+      keyOfBlock({ instanceId, execSessionId, anchorRow }),
+    );
   }
 
   // The addressing question a block answers for (ADR-106 D6 level 5): a
@@ -319,13 +350,11 @@ export function buildTranscriptItems(
     if (key) {
       const group = groups.get(key)!;
       const anchor = anchorOf.get(key)!;
-      // Folded rows still resolve to the block's key, so a locate lands on the
-      // block that holds them.
-      if (r !== anchor) {
-        keyOfSeq.set(r.seq, keyOf(foldedInto.get(r.seq) ?? anchor));
-        continue;
-      }
-      keyOfSeq.set(r.seq, keyOf(anchor));
+      // Every row this session owns resolves to the block's key — the anchor
+      // itself and the rounds folded into it — so a locate on a folded round
+      // lands on the block that holds it.
+      keyOfSeq.set(r.seq, blockKeyByAnchorSeq.get(anchor.seq)!);
+      if (r !== anchor) continue;
       const pendingAsk = askByKey.get(key);
       items.push({
         kind: "run",
@@ -341,14 +370,14 @@ export function buildTranscriptItems(
     // tail, so its seq resolves there (a locate on the card scrolls to it).
     const askAnchor = askAnchorOf.get(r.seq);
     if (askAnchor) {
-      keyOfSeq.set(r.seq, keyOf(askAnchor));
+      keyOfSeq.set(r.seq, blockKeyByAnchorSeq.get(askAnchor.seq)!);
       continue;
     }
     // A question row a block folded: it renders inside that block, so its seq
     // must resolve there — a locate on it scrolls to the block that shows it.
     const folded = foldedInto.get(r.seq);
     if (folded) {
-      keyOfSeq.set(r.seq, keyOf(folded));
+      keyOfSeq.set(r.seq, blockKeyByAnchorSeq.get(folded.seq)!);
       continue;
     }
     items.push({ kind: "row", row: r });

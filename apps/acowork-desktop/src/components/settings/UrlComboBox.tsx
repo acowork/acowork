@@ -21,6 +21,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { DROPDOWN_ITEM_HOVER_CLASS } from "../common/dropdownTheme";
 
 export interface UrlComboBoxProps {
   value: string;
@@ -134,7 +135,10 @@ export function UrlComboBox({
                   setOpen(false);
                   onCommit?.(url);
                 }}
-                className="cursor-pointer px-2 py-1.5 hover:bg-panel-inset"
+                className={cn(
+                  "cursor-pointer truncate px-3 py-1.5 font-mono text-xs",
+                  DROPDOWN_ITEM_HOVER_CLASS,
+                )}
                 title={url}
               >
                 {renderOption ? (

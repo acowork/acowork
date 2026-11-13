@@ -273,6 +273,16 @@
     "cancelReply": "返信をキャンセル",
     "emptyAnswer": "（内容なし）",
     "viewRun": "実行を表示",
+    "activity": {
+      "working": "ツールを実行中",
+      "analyzing": "分析中",
+      "composing": "返信を作成中",
+      "waitingApproval": "承認待ち",
+      "tool": "{{name}} を実行中",
+      "memory": "記憶を検索中",
+      "project": "プロジェクトを確認中",
+      "docs": "ドキュメントを確認中"
+    },
     "notice": {
       "pendingTurn": "{{name}}が処理中です…",
       "pendingTurnGeneric": "処理中です…",
@@ -353,11 +363,6 @@
     "replying": "返信中...",
     "working": "処理中...",
     "compacting": "コンテキスト圧縮中...",
-    "phaseWaiting": "モデル応答待ち...",
-    "phaseThinking": "思考中...",
-    "phaseStreaming": "応答を生成中...",
-    "phaseToolExecuting": "ツール実行中...",
-    "phaseWaitingApproval": "ツール承認待ち...",
     "inputMessage": "メッセージを入力...（Enterで送信、Shift+Enterで改行）",
     "inputMessageConnecting": "メッセージを入力...（Agentに接続中...）",
     "inputMessageQueueing": "メッセージを入力...（キューに追加、次のターンで送信）",
@@ -1863,11 +1868,14 @@
     "formInstallScript": "インストールスクリプト名"
   },
   "datePicker": {
-    "placeholder": "日付を選択",
+    "placeholder": "日時を選択",
     "prevMonth": "前の月",
     "nextMonth": "次の月",
     "today": "今日",
-    "clear": "クリア"
+    "clear": "クリア",
+    "time": "時刻",
+    "hour": "時",
+    "minute": "分"
   },
   "pm": {
     "projects": "プロジェクト",
@@ -1916,10 +1924,11 @@
       "completed": "{{done}}/{{total}}",
       "edit": "タスクを編集",
       "delete": "タスクを削除",
-      "dueDate": "期限",
+      "dueDate": "期限時刻",
       "dispatchFailed": "ディスパッチ失敗（{{attempts}} 回目）：{{error}}",
+      "unscheduled": "未スケジュール:開始時刻がないため、タスクはディスパッチされません。開始時刻を設定すると担当者に渡ります。",
       "dispatchAbandoned": "5 回连续失败后已放弃派发：{{error}}。重新指派或变更状态后可重试。",
-      "startDate": "開始日",
+      "startDate": "開始時刻",
       "assignee": "担当者",
       "priority": "優先度",
       "type": "種別",

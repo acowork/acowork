@@ -193,6 +193,16 @@
     "cancelReply": "Cancel reply",
     "emptyAnswer": "(no content)",
     "viewRun": "View run",
+    "activity": {
+      "working": "Running a tool",
+      "analyzing": "Analyzing",
+      "composing": "Writing the reply",
+      "waitingApproval": "Waiting for your approval",
+      "tool": "Running {{name}}",
+      "memory": "Recalling memory",
+      "project": "Checking the project",
+      "docs": "Reading the docs"
+    },
     "notice": {
       "pendingTurn": "{{name}} is working on it…",
       "pendingTurnGeneric": "Working on it…",
@@ -241,15 +251,6 @@
       "collapseAnswer": "Collapse the answer",
       "unnamedRun": "Execution session",
       "noQuestion": "(no question recorded for this round)",
-      "state": {
-        "idle": "Idle",
-        "waiting": "Waiting for the model",
-        "thinking": "Thinking",
-        "streaming": "Streaming",
-        "toolExecuting": "Running a tool",
-        "waitingApproval": "Waiting for your approval",
-        "paused": "Paused"
-      },
       "rawEnvelope": "Raw envelope (machine format)",
       "displayTruncated": "Body truncated — the raw envelope holds the whole message"
     },
@@ -369,11 +370,6 @@
     "replying": "Replying...",
     "working": "working ...",
     "compacting": "Context compacting...",
-    "phaseWaiting": "Waiting for model...",
-    "phaseThinking": "Thinking...",
-    "phaseStreaming": "Generating reply...",
-    "phaseToolExecuting": "Running tool...",
-    "phaseWaitingApproval": "Waiting for tool approval...",
     "ariaLabelChatMessages": "Chat messages",
     "ariaLabelScrollToBottom": "Scroll to bottom",
     "ariaLabelClearActiveSkill": "Clear active skill",
@@ -2102,11 +2098,14 @@
     "formInstallScript": "Install script name"
   },
   "datePicker": {
-    "placeholder": "Select date",
+    "placeholder": "Select date & time",
     "prevMonth": "Previous month",
     "nextMonth": "Next month",
     "today": "Today",
-    "clear": "Clear"
+    "clear": "Clear",
+    "time": "Time",
+    "hour": "Hour",
+    "minute": "Minute"
   },
   "pm": {
     "settingsPanel": {
@@ -2314,10 +2313,11 @@
       "completed": "{{done}}/{{total}}",
       "edit": "Edit task",
       "delete": "Delete task",
-      "dueDate": "Due date",
+      "dueDate": "Due time",
       "dispatchFailed": "Dispatch failed (attempt {{attempts}}): {{error}}",
+      "unscheduled": "Not scheduled: no start time, so the task is never dispatched. Set a start time to hand it to the assignee.",
       "dispatchAbandoned": "Dispatch abandoned after 5 failed attempts: {{error}}. Reassign or change status to retry.",
-      "startDate": "Start date",
+      "startDate": "Start time",
       "assignee": "Assignee",
       "priority": "Priority",
       "type": "Type",

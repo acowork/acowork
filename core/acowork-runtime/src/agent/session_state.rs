@@ -220,7 +220,23 @@ pub enum SessionStatus {
     ///
     /// ADR-049: distinct from `LlmStreaming` so the UI can show a "tool
     /// running" indicator instead of generic "replying".
-    ToolExecuting,
+    ///
+    /// `tools` names the calls this dispatch is waiting on (deduped, in
+    /// dispatch order) so a surface can say WHAT the agent is doing —
+    /// "recalling", "reading a file" — instead of one unchanging
+    /// "working on it" line. Empty is a real state, not a missed field: the
+    /// transition from `WaitingApproval` back here does not know which calls
+    /// are still in flight, and a surface must then fall back to its generic
+    /// "running a tool" word rather than guess from the previous dispatch.
+    ///
+    /// The field is optional to its readers, not to its writer: the status
+    /// travels as an opaque JSON string (proto `SessionState.status`), so no
+    /// Rust peer ever parses an older shape — but a Desktop build can predate
+    /// the field and must degrade to the generic word, not break.
+    ToolExecuting {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<String>,
+    },
     /// A tool requires user approval before execution.
     ///
     /// **Concurrent semantics**: when multiple tools await approval
@@ -341,7 +357,7 @@ impl SessionStatus {
             Self::LlmAwaitingFirstChunk
                 | Self::Thinking
                 | Self::LlmStreaming { .. }
-                | Self::ToolExecuting
+                | Self::ToolExecuting { .. }
                 | Self::WaitingApproval { .. }
                 | Self::Paused { .. }
         )
@@ -783,6 +799,64 @@ mod tests {
 
     // ── Errored status ────────────────────────────────────────────
 
+    /// The core DTO promises to stay "1:1 in sync" with this enum, and the
+    /// Gateway hands the serialized status to the frontend as an opaque
+    /// string — so a variant the DTO does not model degrades to `None` in
+    /// `parse_live_status` and the session list silently loses its status.
+    /// This test is what makes that promise checkable: every variant this
+    /// Runtime can emit must parse back through `SessionStatusDto`.
+    #[test]
+    fn every_emittable_status_parses_as_the_core_dto() {
+        use acowork_core::SessionStatusDto;
+        for status in [
+            SessionStatus::Idle,
+            SessionStatus::LlmAwaitingFirstChunk,
+            SessionStatus::Thinking,
+            SessionStatus::LlmStreaming {
+                message_id: Some("m1".into()),
+            },
+            SessionStatus::ToolExecuting {
+                tools: vec!["memory_recall".into()],
+            },
+            SessionStatus::ToolExecuting { tools: vec![] },
+            SessionStatus::WaitingApproval {
+                request_id: "r1".into(),
+            },
+            SessionStatus::Paused {
+                iteration: Some(1),
+                max_iterations: Some(3),
+                retry_info: None,
+                reason: Some(PauseReason::IterationLimit),
+                message: Some("limit".into()),
+            },
+        ] {
+            let json = serde_json::to_string(&status).unwrap();
+            let dto: SessionStatusDto =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{json} -> {e}"));
+            // Same string both sides: the DTO is not a lossy projection.
+            assert_eq!(
+                serde_json::to_string(&dto).unwrap(),
+                json,
+                "DTO round-trip changed {json}"
+            );
+        }
+    }
+
+    #[test]
+    fn tool_executing_names_the_dispatched_tools_on_the_wire() {
+        let json = serde_json::to_string(&SessionStatus::ToolExecuting {
+            tools: vec!["file_read".into()],
+        })
+        .unwrap();
+        assert!(json.contains("\"tools\":[\"file_read\"]"), "{json}");
+        // The "cannot name it" value stays the compact one — a reader that
+        // sees `tools: []` would have to distinguish it from a real dispatch,
+        // and there is nothing to distinguish.
+        let unnamed = serde_json::to_string(&SessionStatus::ToolExecuting { tools: vec![] }).unwrap();
+        assert_eq!(unnamed, r#"{"status":"tool_executing","detail":{}}"#);
+        assert!(SessionStatus::ToolExecuting { tools: vec![] }.is_active());
+    }
+
     #[test]
     fn errored_serializes_with_snake_case_tag() {
         let status = SessionStatus::Errored {
@@ -846,7 +920,10 @@ mod tests {
             SessionStatus::LlmStreaming {
                 message_id: Some("m1".into()),
             },
-            SessionStatus::ToolExecuting,
+            SessionStatus::ToolExecuting {
+                tools: vec!["file_read".into(), "http_request".into()],
+            },
+            SessionStatus::ToolExecuting { tools: vec![] },
             SessionStatus::WaitingApproval {
                 request_id: "r1".into(),
             },

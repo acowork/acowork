@@ -59,7 +59,7 @@ AGENT_ID = "com.acowork.senior-engineer"
 NODE_ID = "smoke-node"
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-AGENT_PACKAGE = REPO_ROOT / "examples" / "agent-packages" / f"{AGENT_ID}.agent"
+AGENT_PACKAGE = REPO_ROOT / "agents" / "agent-packages" / f"{AGENT_ID}.agent"
 
 # LLM-dependent cases (chat streaming, tool calls, flow stop) only run when
 # SMOKE_LLM=1 — a CI box without a configured provider skips them gracefully.

@@ -273,6 +273,16 @@
     "cancelReply": "답장 취소",
     "emptyAnswer": "(내용 없음)",
     "viewRun": "실행 보기",
+    "activity": {
+      "working": "도구 실행 중",
+      "analyzing": "분석 중",
+      "composing": "답변 작성 중",
+      "waitingApproval": "승인 대기 중",
+      "tool": "{{name}} 실행 중",
+      "memory": "기억 검색 중",
+      "project": "프로젝트 확인 중",
+      "docs": "문서 확인 중"
+    },
     "notice": {
       "pendingTurn": "{{name}}님이 처리하고 있습니다…",
       "pendingTurnGeneric": "처리하고 있습니다…",
@@ -350,11 +360,6 @@
     "replying": "답장 중...",
     "working": "처리 중...",
     "compacting": "컨텍스트 압축 중...",
-    "phaseWaiting": "모델 응답 대기 중...",
-    "phaseThinking": "생각하는 중...",
-    "phaseStreaming": "응답 생성 중...",
-    "phaseToolExecuting": "도구 실행 중...",
-    "phaseWaitingApproval": "도구 승인 대기 중...",
     "inputMessage": "메시지 입력...（Enter로 전송, Shift+Enter로 줄바꿈）",
     "inputMessageConnecting": "메시지 입력...（Agent에 연결 중...）",
     "inputMessageQueueing": "메시지 입력...（대기열 추가, 다음 턴에 전송）",
@@ -1864,11 +1869,14 @@
     "formInstallScript": "설치 스크립트 이름"
   },
   "datePicker": {
-    "placeholder": "날짜 선택",
+    "placeholder": "날짜 및 시간 선택",
     "prevMonth": "이전 달",
     "nextMonth": "다음 달",
     "today": "오늘",
-    "clear": "지우기"
+    "clear": "지우기",
+    "time": "시간",
+    "hour": "시",
+    "minute": "분"
   },
   "pm": {
     "projects": "프로젝트",
@@ -1917,10 +1925,11 @@
       "completed": "{{done}}/{{total}}",
       "edit": "작업 편집",
       "delete": "작업 삭제",
-      "dueDate": "마감일",
+      "dueDate": "마감 시각",
       "dispatchFailed": "디스패치 실패 ({{attempts}}회차): {{error}}",
+      "unscheduled": "미스케줄: 시작 시간이 없으므로 작업은 디스패치되지 않습니다. 시작 시간을 설정하면 담당자에게 전달됩니다.",
       "dispatchAbandoned": "5회 연속 실패로 디스패치를 중단했습니다: {{error}}. 재할당 또는 상태 변경 후 재시도할 수 있습니다.",
-      "startDate": "시작일",
+      "startDate": "시작 시각",
       "assignee": "담당자",
       "priority": "우선순위",
       "type": "유형",

@@ -165,7 +165,15 @@ impl AgentLoop {
                     if self.pending_approvals.is_empty() {
                         // ADR-049: tools (possibly more of them) are still
                         // running - resume ToolExecuting, not LlmAwaitingFirstChunk.
-                        self.transition_status(SessionStatus::ToolExecuting);
+                        //
+                        // No names here: this branch knows an approval was
+                        // answered, not which calls are still in flight (the
+                        // batch's others may already have returned), and the
+                        // previous dispatch's list would be a guess the Chat
+                        // wait line then states as fact. Empty tools is the
+                        // honest value — the surfaces fall back to their
+                        // generic "running a tool" word.
+                        self.transition_status(SessionStatus::ToolExecuting { tools: Vec::new() });
                     }
                 } else {
                     tracing::warn!(

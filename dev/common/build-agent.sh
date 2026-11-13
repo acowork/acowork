@@ -47,6 +47,15 @@ if [ ! -f "${AGENT_DIR}/manifest.toml" ]; then
     exit 1
 fi
 
+# Step 1 shells out to `zip`. Git Bash on Windows does not ship it, and without
+# this check the failure lands after the cargo build, where it reads like a
+# compile problem. On Windows use dev/common/build-agent.ps1 instead.
+if ! command -v zip >/dev/null 2>&1; then
+    echo -e "${RED}Error: 'zip' is not on PATH — this builder needs it (Git Bash on Windows does not ship it).${NC}"
+    echo -e "${YELLOW}Use the PowerShell builder instead: dev/common/build-agent.ps1 -AgentDir ${AGENT_DIR}${NC}"
+    exit 1
+fi
+
 # Read agent ID from manifest
 AGENT_ID=$(grep '^agent_id' "${AGENT_DIR}/manifest.toml" | head -1 | sed 's/.*= *"\(.*\)".*/\1/' | tr -d '"')
 AGENT_VERSION=$(grep '^version' "${AGENT_DIR}/manifest.toml" | head -1 | sed 's/.*= *"\(.*\)".*/\1/' | tr -d '"')

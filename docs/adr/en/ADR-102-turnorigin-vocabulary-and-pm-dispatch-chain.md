@@ -51,7 +51,7 @@ The brief reaches the system block (equivalent to instruction injection), theref
 
 ### D5 — Dispatch triggering converges on the PM scanner
 
-PM no longer calls Gateway synchronously on state changes; a scanner periodically pulls due tasks (three gates: `start_at` reached + approval + dependencies satisfied) and dispatches in batches. Event hooks were rejected: they leak domain knowledge (dependency trees, approval state) into the call site, and restarts lose events; the scanner is idempotent by construction and crash-self-healing.
+PM no longer calls Gateway synchronously on state changes; a scanner periodically pulls due tasks (three gates: scheduled and due — `start_at` present and reached — plus approval and dependencies satisfied) and dispatches in batches. **A missing `start_at` is not "dispatch now": creation fills `now` when the caller gave none, and a task whose `start_at` is empty is unscheduled and never dispatched (fail-closed)** — scheduling is an explicit act (revised 2026-11-13). Event hooks were rejected: they leak domain knowledge (dependency trees, approval state) into the call site, and restarts lose events; the scanner is idempotent by construction and crash-self-healing.
 
 ### D6 — Retry idempotency: generation identity + bounded backoff
 

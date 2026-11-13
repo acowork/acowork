@@ -12,15 +12,25 @@ ACowork is a decentralized, high-security, scalable AI Agent runtime platform. E
 
 ## Build & Test
 
-### Core (Rust workspace)
+**CI is GitHub Actions** (`.github/workflows/ci.yml`, on `github.com/acowork/ACowork` — the
+Gitee remote is a mirror, GitHub is the review home). Every job calls `dev/ci.sh`, so the
+script is the contract and the workflow is only a scheduler: `redlines` (the 14 greps),
+`core` (check + clippy + test + integration + strict embed), `packages` (shipped `.agent`
+freshness + hub mirror interop), `web` (desktop + mobile `npm run test` and `build`).
 
 ```bash
 cd core
 cargo build --release          # all workspace members
 cargo clippy --all-targets -- -D warnings
 cargo test                     # unit + integration tests
-# ./dev/ci.sh all              # check + clippy + test + integration
+# ./dev/ci.sh redlines         # architecture red lines only — seconds, no compile
+# ./dev/ci.sh all              # redlines + check + clippy + test + integration + smoke
 ```
+
+> `dev/ci.sh check` runs **all 14** red lines. It used to run 12, with
+> `run_node_redline` and `run_mqtt_redline` reachable only from `all` — the mode
+> nobody runs for a small change. If you add a red line, add it to
+> `run_all_redlines`, never to a single mode.
 
 ### Desktop App (Tauri v2)
 
@@ -93,11 +103,33 @@ docs/                  # Public architecture docs
   protocols/{zh,en}/   # HTTP + MQTT + RAG protocol reference
   runbooks/            # Operator runbooks
 
-agents/                # Agent packages shipped with the app (`agent-packages/*.agent`)
+agents/                # Agent package SOURCES (`<name>-agent/`) + shipped
+                       # build artifacts (`agent-packages/*.agent`)
 dev/                   # Build / package / CI scripts
 ```
 
 Crate specs: [docs/module-design/](docs/module-design/) · Design: [docs/design/](docs/design/)
+
+### Agent packages and the hub
+
+`agents/<name>-agent/` (manifest + prompts + skills + assets) is the single
+source of truth for the platform agents. `agents/agent-packages/<agent_id>.agent`
+is a build artifact of it — rebuild with `dev/common/build-agent.sh` and commit
+the rebuilt package in the same change; `acowork-sign`'s `example_packages` test
+fails when the zip and the source tree disagree.
+
+`ACoworkAgentHub/agents/official/**` is a **generated mirror** of those sources,
+never a second copy to edit. After landing an agent change here, publish it with:
+
+```bash
+dev/common/sync-hub-mirror.sh            # mirror current HEAD into a hub branch + PR
+dev/common/sync-hub-mirror.sh --dry-run  # just show what the hub would republish
+```
+
+So an agent change is two commits in this order: source here (with a `version`
+bump), generated mirror there. The hub's CI fails if its mirror does not match
+the commit its `hub.json` claims — that is the hand-edit alarm, not a
+"master moved" alarm.
 
 ## Architecture
 

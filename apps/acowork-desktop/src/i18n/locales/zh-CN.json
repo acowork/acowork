@@ -288,6 +288,16 @@
     "cancelReply": "取消回复",
     "emptyAnswer": "（无内容）",
     "viewRun": "查看执行",
+    "activity": {
+      "working": "正在执行工具",
+      "analyzing": "正在分析",
+      "composing": "正在组织回复",
+      "waitingApproval": "等你确认",
+      "tool": "正在执行 {{name}}",
+      "memory": "正在回忆",
+      "project": "正在查项目",
+      "docs": "正在查文档"
+    },
     "notice": {
       "pendingTurn": "{{name}}正在处理…",
       "pendingTurnGeneric": "正在处理…",
@@ -336,15 +346,6 @@
       "collapseAnswer": "收起回复",
       "unnamedRun": "执行会话",
       "noQuestion": "（本轮没有记录提问）",
-      "state": {
-        "idle": "空闲",
-        "waiting": "等模型响应",
-        "thinking": "思考中",
-        "streaming": "正在输出",
-        "toolExecuting": "执行工具中",
-        "waitingApproval": "等你审批",
-        "paused": "已暂停"
-      },
       "rawEnvelope": "原始信封（机器格式）",
       "displayTruncated": "正文已截断，完整内容见原始信封"
     },
@@ -446,11 +447,6 @@
     "replying": "正在回复...",
     "working": "正在处理...",
     "compacting": "上下文压缩中...",
-    "phaseWaiting": "等待模型响应...",
-    "phaseThinking": "正在思考...",
-    "phaseStreaming": "正在生成回复...",
-    "phaseToolExecuting": "正在执行工具...",
-    "phaseWaitingApproval": "等待工具授权...",
     "inputMessage": "输入消息...（Enter 发送，Shift+Enter 换行）",
     "inputMessageConnecting": "输入消息...（正在连接 Agent...）",
     "inputMessageReconnecting": "输入消息...（正在重新连接...）",
@@ -2113,11 +2109,14 @@
     "formInstallScript": "安装脚本名"
   },
   "datePicker": {
-    "placeholder": "选择日期",
+    "placeholder": "选择日期时间",
     "prevMonth": "上个月",
     "nextMonth": "下个月",
     "today": "今天",
-    "clear": "清除"
+    "clear": "清除",
+    "time": "时间",
+    "hour": "时",
+    "minute": "分"
   },
   "pm": {
     "settingsPanel": {
@@ -2325,10 +2324,11 @@
       "completed": "{{done}}/{{total}}",
       "edit": "编辑任务",
       "delete": "删除任务",
-      "dueDate": "截止日期",
+      "dueDate": "截止时间",
       "dispatchFailed": "派发失败（第 {{attempts}} 次）：{{error}}",
+      "unscheduled": "未排期：没有开始时间，不会派发给执行人。设置开始时间后才会派出。",
       "dispatchAbandoned": "派发已放弃（连续 5 次失败）：{{error}}。重新指派或变更状态后可重试。",
-      "startDate": "开始日期",
+      "startDate": "开始时间",
       "assignee": "负责人",
       "priority": "优先级",
       "type": "类型",

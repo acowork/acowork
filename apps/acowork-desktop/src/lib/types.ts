@@ -1650,8 +1650,17 @@ export type SessionStatus =
   | { status: "llm_awaiting_first_chunk" }
   | { status: "thinking" }
   | { status: "llm_streaming"; detail?: { message_id: string | null } }
-  /** ADR-049: Tool calls dispatched, awaiting tool results. */
-  | { status: "tool_executing" }
+  /** ADR-049: Tool calls dispatched, awaiting tool results.
+   *
+   * `tools` names the calls this dispatch is waiting on (deduped), so a
+   * surface can say *what* the agent is doing instead of one static
+   * "working on it" line. Empty or absent is the Runtime saying it cannot
+   * name this dispatch — the resume-after-approval transition does not know
+   * which calls are still in flight — and the reader must fall back to its
+   * generic word, never reuse the previous dispatch's name. Absent from a
+   * Runtime older than the field, which is why it is optional here:
+   * `lib/agentActivity.ts` owns that fallback. */
+  | { status: "tool_executing"; detail?: { tools?: string[] } }
   | { status: "waiting_approval"; detail: { request_id: string } }
   | {
     status: "paused";

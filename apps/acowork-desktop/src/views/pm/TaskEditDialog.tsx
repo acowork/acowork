@@ -50,7 +50,7 @@
  */
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Trash2, Play } from "lucide-react";
-import { usePmTaskDetailStore } from "../../stores/pm/taskDetailStore";
+import { usePmTaskDetailStore, type TaskFrame } from "../../stores/pm/taskDetailStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
@@ -60,7 +60,7 @@ import { DependencyPicker, ParentTaskPicker } from "./TaskTreePicker";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { StyledInput, StyledTextarea } from "../../components/common/StyledInput";
-import { DatePicker } from "../../components/common/DatePicker";
+import { DateTimePicker } from "../../components/common/DateTimePicker";
 import { Dropdown } from "../../components/common/Dropdown";
 import { showToast } from "../../components/common/ToastProvider";
 import { attachmentUrl, deleteTask } from "../../lib/pm-api";
@@ -96,23 +96,60 @@ const PRIORITY_I18N: Record<string, string> = {
   urgent: "pm.priority.urgent",
 };
 
+/**
+ * 弹框的**栈**：每一层一个 `TaskDialogPane`，上面那层盖在下面那层上面。
+ *
+ * 底 → 顶的顺序就是渲染顺序，同一个 z-index 下后者画在上面（与 ConfirmDialog
+ * 叠在弹框之上的老办法一致）。父任务那一层**不卸载**，所以它的草稿、标签页
+ * 都还在；关掉子任务只是把上面那层摘掉，父任务原样露出来。
+ */
 export function TaskEditDialog({ onClose }: { onClose: () => void }) {
-  const mode = usePmTaskDetailStore((s) => s.mode);
-  const detail = usePmTaskDetailStore((s) => s.detail);
-  const attachments = usePmTaskDetailStore((s) => s.attachments);
-  const activity = usePmTaskDetailStore((s) => s.activity);
-  const replying = usePmTaskDetailStore((s) => s.replying);
+  const frames = usePmTaskDetailStore((s) => s.frames);
+  return (
+    <>
+      {frames.map((frame, depth) => (
+        <TaskDialogPane
+          key={frame.key}
+          frame={frame}
+          depth={depth}
+          isTop={depth === frames.length - 1}
+          onClose={onClose}
+        />
+      ))}
+    </>
+  );
+}
+
+function TaskDialogPane({
+  frame,
+  depth,
+  isTop,
+  onClose,
+}: {
+  frame: TaskFrame;
+  /** 0 = 最底下那层；越大越靠上。 */
+  depth: number;
+  /** 只有最上面那层可交互（下面那层被盖住）。 */
+  isTop: boolean;
+  onClose: () => void;
+}) {
+  const mode = frame.mode;
+  const taskRow = usePmTaskDetailStore((s) => s.rows[frame.key]);
+  const detail = taskRow?.detail ?? null;
+  const attachments = taskRow?.attachments ?? [];
+  const activity = taskRow?.activity ?? [];
+  const replying = taskRow?.replying ?? false;
+  const uploading = taskRow?.uploading ?? false;
+  const error = taskRow?.error ?? null;
   const addReply = usePmTaskDetailStore((s) => s.addReply);
-  const uploading = usePmTaskDetailStore((s) => s.uploading);
-  const error = usePmTaskDetailStore((s) => s.error);
-  const storeProjectId = usePmTaskDetailStore((s) => s.projectId);
-  const createParentId = usePmTaskDetailStore((s) => s.createParentId);
-  const returnTo = usePmTaskDetailStore((s) => s.returnTo);
-  const openTask = usePmTaskDetailStore((s) => s.openTask);
-  const openCreate = usePmTaskDetailStore((s) => s.openCreate);
   const refresh = usePmTaskDetailStore((s) => s.refresh);
+  const refreshBelowTop = usePmTaskDetailStore((s) => s.refreshBelowTop);
   const uploadAttachment = usePmTaskDetailStore((s) => s.uploadAttachment);
   const deleteAttachment = usePmTaskDetailStore((s) => s.deleteAttachment);
+  const pushTask = usePmTaskDetailStore((s) => s.pushTask);
+  const pushCreate = usePmTaskDetailStore((s) => s.pushCreate);
+  const pop = usePmTaskDetailStore((s) => s.pop);
+  const openTask = usePmTaskDetailStore((s) => s.openTask);
   const removeTask = usePmBoardStore((s) => s.removeTask);
   const { t } = useTranslation();
 
@@ -121,11 +158,11 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
   // server-keyed tabs are picked by `visibleTaskTabs`, the rest by `detail`.
   const hasRow = !isCreate && !!detail;
 
-  const projectId = storeProjectId ?? detail?.project_id ?? null;
+  const projectId = frame.projectId ?? detail?.project_id ?? null;
   const form = useTaskForm({
     projectId: projectId ?? "",
     initial: isCreate ? null : detail,
-    defaultParentId: isCreate ? createParentId : null,
+    defaultParentId: isCreate ? frame.createParentId : null,
   });
   // `form` is a fresh object every render (the hook returns a literal). Pull out
   // the one stable member the exit path needs, so `leave` / `requestLeave` do
@@ -162,11 +199,15 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
   /**
    * The unconditional exit: the form is on its way out, whoever asked for it.
    *
-   * Three destinations — jump to another row (`after`), go back to the parent a
-   * subtask form was opened from, or close. `reset()` runs on the closing path
-   * so an abandoned draft cannot resurrect when the same row is opened again
-   * (`useTaskForm` keeps the draft for the row's lifetime); navigation does not
-   * need it, because the form re-keys on the new row.
+   * Two destinations — jump to another row (`after`), or close THIS box.
+   * `reset()` runs on the closing path so an abandoned draft cannot resurrect
+   * when the same row is opened again (`useTaskForm` keeps the draft for the
+   * row's lifetime); navigation does not need it, because the form re-keys on
+   * the new row.
+   *
+   * Closing a box that sits ON TOP of another one only pops that layer: the
+   * box below it stays mounted, so the reader lands back on the parent task
+   * with its draft intact. Only the bottom-most box closes the whole stack.
    */
   const leave = useCallback(
     (after?: () => void) => {
@@ -174,12 +215,11 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
         after();
         return;
       }
-      // Cancelling a subtask form goes back to the parent it came from.
       resetForm();
-      if (isCreate && returnTo) void openTask(returnTo);
+      if (depth > 0) pop();
       else onClose();
     },
-    [resetForm, isCreate, returnTo, openTask, onClose],
+    [resetForm, depth, pop, onClose],
   );
 
   /**
@@ -207,12 +247,14 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
   );
 
   useEffect(() => {
+    // Only the topmost box answers ESC — the ones below it are covered.
+    if (!isTop) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Escape" && !form.saving) requestLeave();
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [requestLeave, form.saving]);
+  }, [requestLeave, form.saving, isTop]);
 
   const handleSave = useCallback(async () => {
     const outcome = await form.save();
@@ -229,11 +271,16 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
       return;
     }
     showToast({ type: "success", message: t("pm.task.taskSaved") });
-    // 保存成功 → 关闭弹框。三种形态一样：新建任务、编辑任务、在任务里新建
-    // 子任务。行已经在服务端了，弹框没有留下的理由；关掉之后看板上的那一行
-    // 就是结果的唯一呈现（`save()` 内部已经 reload 过看板）。
-    onClose();
-  }, [form, onClose, t]);
+    // 保存成功 → 关闭**这一层**弹框。行已经在服务端了，这一层没有留下的理由；
+    // 下面那层（父任务）还在原地，接着干活。栈底那层保存 = 整个关掉。
+    resetForm();
+    if (depth > 0) {
+      // 这一层改的是自己（子任务），但下面那层展示的是父任务，它的数据
+      // 可能已经过时（子任务改名 / 状态变了）—— 露出来之前先补一次刷新。
+      void refreshBelowTop();
+      pop();
+    } else onClose();
+  }, [form, resetForm, depth, pop, onClose, refreshBelowTop, t]);
 
   const handleDelete = useCallback(async () => {
     if (!detail) return;
@@ -247,7 +294,12 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
       showToast({ type: "success", message: t("pm.task.taskDeleted") });
       // Landing matters: deleting a child from inside its parent's box should
       // leave the parent open, not drop the reader onto the board.
-      if (parentId) void openTask(parentId);
+      if (depth > 0) {
+        // 子任务没了，父任务的「关联任务」里那棵树也变了 —— 父层露出来之前
+        // 先刷新它，否则用户看到的是一棵还挂着已删子任务的旧树。
+        void refreshBelowTop();
+        pop();
+      } else if (parentId) openTask(parentId);
       else onClose();
     } catch (e) {
       showToast({
@@ -257,7 +309,7 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
         }),
       });
     }
-  }, [detail, removeTask, openTask, onClose, t]);
+  }, [detail, removeTask, openTask, depth, pop, onClose, refreshBelowTop, t]);
 
   /**
    * 底栏的「查看执行」：解析这条任务的执行 session 并切过去。
@@ -304,14 +356,14 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
     [deleteAttachment, t],
   );
 
-  // 给当前行加子任务：开一张新建表单并预设父任务，取消时回到这一行
-  // （`returnTo`）。它是一次"离开脏表单"的导航，所以走同一个守卫。
+  // 给当前行加子任务：在这一层**上面**再开一张新建表单，并预设父任务。
+  // 它是一次"离开脏表单"的导航，所以走同一个守卫。
   const addSubtask = useCallback(() => {
     if (!detail) return;
     requestLeave(() =>
-      openCreate({ projectId: detail.project_id, parentId: detail.id, returnTo: detail.id }),
+      pushCreate({ projectId: detail.project_id, parentId: detail.id }),
     );
-  }, [detail, requestLeave, openCreate]);
+  }, [detail, requestLeave, pushCreate]);
 
   // Which tabs this form can fill (a server fact, see `visibleTaskTabs`), and
   // where the open tab lands if the strip changes underneath it.
@@ -326,25 +378,47 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center">
+      <div
+        className="fixed inset-0 flex items-center justify-center"
+        // 上层盖下层：同 z-index 下靠渲染顺序，但写明确更省心。
+        //
+        // z-30 段（30 + depth）是**刻意低于** ConfirmDialog 的 z-50：本弹框
+        // 自己会弹 ConfirmDialog（删除确认 / 放弃修改），那个确认框必须压在
+        // 弹框之上。原实现用 z-50，结果子任务层（depth=1 → 51）的确认框
+        // 被自己的弹框盖住，用户点「删除」什么也看不见。
+        style={{ zIndex: 30 + depth }}
+      >
         {/* House pattern (MemberManagerDialog, ConfirmDialog): a separate
             overlay layer with onClick, so a click that starts inside the panel
-            and ends outside does not close the form over the user's draft. */}
-        <div className="absolute inset-0 bg-modal-overlay" onClick={() => requestLeave()} />
+            and ends outside does not close the form over the user's draft.
+            只有最上面那层铺遮罩：下面那层已经被这一层的遮罩盖住了，再铺一层
+            只是把看板压得更黑。 */}
+        {isTop && (
+          <div className="absolute inset-0 bg-modal-overlay" onClick={() => requestLeave()} />
+        )}
         <div
           ref={dialogRef}
           tabIndex={-1}
           role="dialog"
-          aria-modal="true"
-          aria-labelledby="pm-edit-task-title"
+          // 只有栈顶是真的模态：下面那层虽然还看得见（上移 24px 露一条边），
+          // 但它的遮罩已经被栈顶那层接管，不该再声称 aria-modal 抢焦点。
+          aria-modal={isTop}
+          // 键盘同理：`inert` 让下面那层不可聚焦 —— 遮罩只拦了鼠标，
+          // Tab 键原本能钻进被盖住的父任务表单里。
+          inert={!isTop}
+          aria-labelledby={`pm-edit-task-title-${frame.key}`}
           // Fixed height: the box never resizes when sections appear or when
           // the reader jumps to a child row.
           className="relative z-10 flex h-[560px] max-h-[86vh] w-full max-w-[640px] flex-col overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl outline-none"
+          // The stack fans out downwards: every layer sits a little lower than
+          // the one below, so the box underneath stays visible instead of
+          // being hidden edge-to-edge behind its child.
+          style={depth > 0 ? { transform: `translateY(${depth * 24}px)` } : undefined}
         >
           {/* 头部只有身份 + 关闭。行级动作（状态流转 / 删除）是这一行的属性，
               归 基本信息 的元信息条，见 `BasicInfoTab`。 */}
           <header className="flex shrink-0 items-center justify-between gap-2 border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
-            <h3 id="pm-edit-task-title" className="min-w-0 truncate text-sm font-semibold">
+            <h3 id={`pm-edit-task-title-${frame.key}`} className="min-w-0 truncate text-sm font-semibold">
               {isCreate ? t("pm.newTask") : t("pm.task.edit")}
             </h3>
             <button
@@ -430,7 +504,7 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
                 <RelatedTasksTab
                   form={form}
                   row={row}
-                  onOpenTask={(id) => requestLeave(() => void openTask(id))}
+                  onOpenTask={(id) => requestLeave(() => pushTask(id))}
                   onAddSubtask={addSubtask}
                 />
               )}
@@ -512,7 +586,12 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
         </div>
       </div>
 
-      {hasRow && detail && (
+      {/* ConfirmDialog 只在**栈顶**这一层渲染。
+          它是 `fixed inset-0 z-50`，浮在所有层之上 —— 父层那一份会被用户
+          直接点到（遮罩拦不住它，因为它在遮罩之上），于是「我在删子任务」
+          实际触发的是**父任务**的删除确认。栈只有一层时下面这段恒为真，
+          行为与改动前一致。 */}
+      {isTop && hasRow && detail && (
         <ConfirmDialog
           open={confirmDelete}
           title={t("pm.task.deleteTaskTitle")}
@@ -524,39 +603,43 @@ export function TaskEditDialog({ onClose }: { onClose: () => void }) {
         />
       )}
 
-      <ConfirmDialog
-        open={!!confirmDeleteAtt}
-        title={t("pm.task.deleteAttachmentTitle")}
-        message={t("pm.task.deleteAttachmentDesc")}
-        confirmLabel={t("common.delete")}
-        destructive
-        onConfirm={() => {
-          if (confirmDeleteAtt) void handleDeleteAttachment(confirmDeleteAtt);
-        }}
-        onCancel={() => setConfirmDeleteAtt(null)}
-      />
+      {isTop && (
+        <ConfirmDialog
+          open={!!confirmDeleteAtt}
+          title={t("pm.task.deleteAttachmentTitle")}
+          message={t("pm.task.deleteAttachmentDesc")}
+          confirmLabel={t("common.delete")}
+          destructive
+          onConfirm={() => {
+            if (confirmDeleteAtt) void handleDeleteAttachment(confirmDeleteAtt);
+          }}
+          onCancel={() => setConfirmDeleteAtt(null)}
+        />
+      )}
 
-      <ConfirmDialog
-        open={confirmDiscard}
-        title={t("pm.task.discardChangesTitle")}
-        message={t("pm.task.discardChangesDesc")}
-        confirmLabel={t("pm.task.discardChangesConfirm")}
-        destructive
-        onConfirm={() => {
-          // Acceptance IS the answer to the dirty guard: leave directly.
-          // Bouncing back through `requestLeave` re-opened this dialog, because
-          // `dirty` is still true at this instant (discarding is exactly what
-          // makes it false), so 放弃修改 looked like it did nothing.
-          const after = pendingDiscard;
-          setConfirmDiscard(false);
-          setPendingDiscard(null);
-          leave(after ?? undefined);
-        }}
-        onCancel={() => {
-          setConfirmDiscard(false);
-          setPendingDiscard(null);
-        }}
-      />
+      {isTop && (
+        <ConfirmDialog
+          open={confirmDiscard}
+          title={t("pm.task.discardChangesTitle")}
+          message={t("pm.task.discardChangesDesc")}
+          confirmLabel={t("pm.task.discardChangesConfirm")}
+          destructive
+          onConfirm={() => {
+            // Acceptance IS the answer to the dirty guard: leave directly.
+            // Bouncing back through `requestLeave` re-opened this dialog, because
+            // `dirty` is still true at this instant (discarding is exactly what
+            // makes it false), so 放弃修改 looked like it did nothing.
+            const after = pendingDiscard;
+            setConfirmDiscard(false);
+            setPendingDiscard(null);
+            leave(after ?? undefined);
+          }}
+          onCancel={() => {
+            setConfirmDiscard(false);
+            setPendingDiscard(null);
+          }}
+        />
+      )}
     </>
   );
 }
@@ -620,6 +703,11 @@ function BasicInfoTab({
                   })}
             </p>
           )}
+          {/* 未排期 = 没有开始时间 = 扫描器不派发（fail-closed）。清掉了开始
+              时间的任务在这里必须自己说出来,否则它和"等扫描器"长得一样。 */}
+          {row.status === "pending" && !row.dispatched_at && !row.start_at && (
+            <p className="mt-1.5">{t("pm.task.unscheduled")}</p>
+          )}
         </div>
       )}
 
@@ -682,14 +770,14 @@ function BasicInfoTab({
           )}
         </Field>
 
-        {/* 用组件库的 DatePicker，不用原生 `<input type="date">`：原生弹层由
+        {/* 用组件库的 DateTimePicker，不用原生 `<input type="date">`：原生弹层由
             WebView2 自己绘制（不属页面 DOM，CSS 管不到），箭头尺寸和底部按钮的
             底色都失控，也正是"看着业余"的来源。宽度跟这一行的其他格子对齐。 */}
         <Field label={t("pm.task.startDate")}>
-          <DatePicker value={form.values.startAt} onChange={form.setStartAt} />
+          <DateTimePicker value={form.values.startAt} onChange={form.setStartAt} />
         </Field>
         <Field label={t("pm.task.dueDate")}>
-          <DatePicker value={form.values.dueAt} onChange={form.setDueAt} />
+          <DateTimePicker value={form.values.dueAt} onChange={form.setDueAt} />
         </Field>
       </div>
 
