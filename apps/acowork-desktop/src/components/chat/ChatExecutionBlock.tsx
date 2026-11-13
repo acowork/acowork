@@ -32,14 +32,16 @@
  *   thing that opens the block on its own is an unanswered card (D8): an
  *   answerable control behind a fold is not answerable, so the block and the
  *   parked round open together.
- * - the run's latest answer is drawn BELOW the block as an ordinary assistant
- *   bubble (`data-run-answer`). That is the Chat's own grammar — the agent's
- *   newest words sit in the transcript — while the rounds stay one click away.
- *   The text is the same projected `answer` the collapsed round shows: no
- *   second read, no new row, no invented content. The bubble itself is folded
- *   to ten lines (`RunAnswerBubble`): an agent's answer is usually long, and an
- *   unclamped bubble under every block turns the transcript into a wall of
- *   text — the conversation's shape is what the reader is paging through.
+ * - the run and its latest answer are ONE card: the collapse header is the
+ *   card's title banner, the rounds unfold under it, and the answer is the
+ *   card's body (`data-run-answer`). The agent's newest words sit in the
+ *   transcript while the rounds stay one click away, and one message reads as
+ *   one object instead of a block plus a bubble floating under it. The text is
+ *   the same projected `answer` the collapsed round shows: no second read, no
+ *   new row, no invented content. The body itself is folded to ten lines
+ *   (`RunAnswerBubble`): an agent's answer is usually long, and an unclamped
+ *   body under every block turns the transcript into a wall of text — the
+ *   conversation's shape is what the reader is paging through.
  */
 
 import { memo, useEffect, useMemo, useRef, useState } from "react";
@@ -76,7 +78,7 @@ import { IntentDisplayBody } from "./IntentDisplayBody";
 import { ChatNoticeEventRow } from "./ChatNoticeEventRow";
 import { InteractionCardShell } from "./InteractionCardShell";
 import { QuestionAnswerForm } from "./QuestionAnswerForm";
-import { cardButtonAccent, cardButtonNeutral } from "../../lib/ui-styles";
+import { cardButtonAccent, cardButtonNeutral, chatCardShell, chatCardTitleBarMuted } from "../../lib/ui-styles";
 import type { CardAnswerHandler, CardChoice } from "../../lib/chatCardAnswer";
 import { BLOCK_DETAIL_FONT_SIZE, BLOCK_FONT_SIZE } from "./blockTypeScale";
 import { runBlockToText } from "../../lib/runBlockText";
@@ -598,111 +600,117 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
               canSend={!!latestRowId}
               focusSignal={focusInput}
             />
-            <div className="max-w-full" style={{ fontSize: BLOCK_FONT_SIZE }}>
-              <button
-                onClick={() => setExpanded((v) => !v)}
-                aria-expanded={expanded}
-                // Stable hook for "the block's own collapse header": the action
-                // row above now carries `aria-expanded` too (its drawer), so a
-                // query on that generic attribute finds two different things.
-                data-run-header=""
-                className="flex w-fit items-center gap-2 rounded-md bg-zinc-100/60 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-zinc-200 dark:bg-zinc-800/30  dark:hover:bg-zinc-700"
-                style={{ fontSize: BLOCK_FONT_SIZE }}
-              >
-                <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
-                <span className="min-w-0 max-w-[16rem] truncate font-medium text-text-tertiary ">
-                  {name}
-                </span>
-                <span className="text-text-tertiary">
-                  ({t("chatView.block.roundCount", { count: block.rounds.length })}
-                  {shownState && (
-                    <>
-                      {" · "}
-                      {shownState}
-                    </>
-                  )}
-                  )
-                </span>
-                {taskId && (
-                  <span className="shrink-0 rounded bg-surface/70 px-1.5 py-0.5 text-[0.8em] text-text-secondary">
-                    {taskId}
-                  </span>
-                )}
-                {/* The question about THIS run is docked at the bottom of the
-                    surface, so the run says so: a reader who sees the badge
-                    knows where the question went, and which run it is about. */}
-                {pendingAsk && (
-                  <span
-                    data-testid="exec-block-ask-badge"
-                    className="shrink-0 rounded bg-[var(--color-accent)]/15 px-1.5 py-0.5 text-[0.8em] text-text-secondary"
-                  >
-                    {t("chatView.block.unanswered")}
-                  </span>
-                )}
-                {inProgress && (
-                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
-                )}
-                {expanded ? (
-                  <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-                ) : (
-                  <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-                )}
-              </button>
-
-              {expanded && (
-                <OverlayScrollbar
-                  ref={contentRef}
-                  /** Twice `ExploreBlock`'s cap: that list is one-line tool
-                   *  labels, this one unfolds a whole question/answer pair per
-                   *  round, so 144px showed barely one row of prose. */
-                  maxHeight={288}
-                  containerClassName="flex-none ml-2 mt-1 rounded-md border-l-2 border-zinc-300 bg-zinc-100/60 dark:border-zinc-600 dark:bg-zinc-800/30"
-                  className="pl-3 pr-2 py-2 overscroll-contain"
-                  onViewportWheel={(event) => {
-                    if (event.deltaY !== 0) event.stopPropagation();
-                  }}
+            {/* The run and its latest answer are ONE card (design 27 §5.5):
+                the collapse header is the card's title banner, the rounds
+                unfold under it, and the answer is the card's body. Drawing the
+                answer as a bubble under the block made one message read as two
+                objects — the title banner is what gives the card its 整体感. */}
+            <div className={`${chatCardShell} w-full max-w-full bg-chat-bubble`}>
+              <div className="max-w-full" style={{ fontSize: BLOCK_FONT_SIZE }}>
+                <button
+                  onClick={() => setExpanded((v) => !v)}
+                  aria-expanded={expanded}
+                  // Stable hook for "the block's own collapse header": the action
+                  // row above now carries `aria-expanded` too (its drawer), so a
+                  // query on that generic attribute finds two different things.
+                  data-run-header=""
+                  className={`${chatCardTitleBarMuted} gap-2 transition-colors hover:bg-black/5 dark:hover:bg-white/10`}
+                  style={{ fontSize: BLOCK_FONT_SIZE }}
                 >
-                  <div className="flex flex-col gap-0.5">
-                    {hiddenOlder > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setRevealed((n) => n + REVEAL_STEP)}
-                        className="self-start rounded px-1 py-0.5 text-text-tertiary underline underline-offset-2 hover:text-text-secondary"
-                      >
-                        {t("chatView.block.olderRounds", { count: hiddenOlder })}
-                      </button>
+                  <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
+                  <span className="min-w-0 max-w-[16rem] truncate font-medium text-text-tertiary ">
+                    {name}
+                  </span>
+                  <span className="text-text-tertiary">
+                    ({t("chatView.block.roundCount", { count: block.rounds.length })}
+                    {shownState && (
+                      <>
+                        {" · "}
+                        {shownState}
+                      </>
                     )}
-                    {shown.map((round, i) => (
-                      <RoundItem
-                        key={round.ref}
-                        round={round}
-                        /** The row's label is its position in the SESSION's list,
-                         *  so a pinned round above the window keeps its own
-                         *  number instead of being renumbered by the window. */
-                        index={shownIndices[i]!}
-                        chatSessionId={chatSessionId}
-                        instanceId={instanceId}
-                        execSid={execSid}
-                        entry={entries[round.ref]}
-                        reload={reload}
-                        canAnswer={canAnswer}
-                        onReplyToRound={onReplyToRound}
-                        onContinueRound={onContinueRound}
-                      />
-                    ))}
-                  </div>
-                </OverlayScrollbar>
-              )}
+                    )
+                  </span>
+                  {taskId && (
+                    <span className="shrink-0 rounded bg-surface/70 px-1.5 py-0.5 text-[0.8em] text-text-secondary">
+                      {taskId}
+                    </span>
+                  )}
+                  {/* The question about THIS run is docked at the bottom of the
+                      surface, so the run says so: a reader who sees the badge
+                      knows where the question went, and which run it is about. */}
+                  {pendingAsk && (
+                    <span
+                      data-testid="exec-block-ask-badge"
+                      className="shrink-0 rounded bg-[var(--color-accent)]/15 px-1.5 py-0.5 text-[0.8em] text-text-secondary"
+                    >
+                      {t("chatView.block.unanswered")}
+                    </span>
+                  )}
+                  {inProgress && (
+                    <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                  )}
+                  {expanded ? (
+                    <ChevronDown className="ml-auto h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+                  ) : (
+                    <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+                  )}
+                </button>
+
+                {expanded && (
+                  <OverlayScrollbar
+                    ref={contentRef}
+                    /** Twice `ExploreBlock`'s cap: that list is one-line tool
+                     *  labels, this one unfolds a whole question/answer pair per
+                     *  round, so 144px showed barely one row of prose. */
+                    maxHeight={288}
+                    containerClassName="flex-none ml-2 mt-1 mb-2 rounded-md border-l-2 border-zinc-300 bg-zinc-100/60 dark:border-zinc-600 dark:bg-zinc-800/30"
+                    className="pl-3 pr-2 py-2 overscroll-contain"
+                    onViewportWheel={(event) => {
+                      if (event.deltaY !== 0) event.stopPropagation();
+                    }}
+                  >
+                    <div className="flex flex-col gap-0.5">
+                      {hiddenOlder > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setRevealed((n) => n + REVEAL_STEP)}
+                          className="self-start rounded px-1 py-0.5 text-text-tertiary underline underline-offset-2 hover:text-text-secondary"
+                        >
+                          {t("chatView.block.olderRounds", { count: hiddenOlder })}
+                        </button>
+                      )}
+                      {shown.map((round, i) => (
+                        <RoundItem
+                          key={round.ref}
+                          round={round}
+                          /** The row's label is its position in the SESSION's list,
+                           *  so a pinned round above the window keeps its own
+                           *  number instead of being renumbered by the window. */
+                          index={shownIndices[i]!}
+                          chatSessionId={chatSessionId}
+                          instanceId={instanceId}
+                          execSid={execSid}
+                          entry={entries[round.ref]}
+                          reload={reload}
+                          canAnswer={canAnswer}
+                          onReplyToRound={onReplyToRound}
+                          onContinueRound={onContinueRound}
+                        />
+                      ))}
+                    </div>
+                  </OverlayScrollbar>
+                )}
+              </div>
+              {/* The run's latest answer is the card's BODY — the title banner
+                  above says what the run is, this says what the agent just
+                  said, so one message reads as one object while the rounds stay
+                  one click away. It is the SAME projected `answer` the newest
+                  answered round carries (`latestAnswer`), so nothing here can
+                  say anything the block would not; a run that has not answered
+                  yet paints no body instead of an empty one. */}
+              {latestAnswer && <RunAnswerBubble content={latestAnswer} />}
             </div>
-            {/* The run's latest answer, in the transcript's own assistant-bubble
-                skin — under the block, never inside the fold. This is what keeps
-                the surface reading as a conversation: the agent's newest words
-                are on screen while the rounds stay one click away.
-                It is the SAME projected `answer` the newest answered round
-                carries (`latestAnswer`), so nothing here can say anything the
-                block would not; a run that has not answered yet paints nothing
-                instead of an empty bubble. */}
-            {latestAnswer && <RunAnswerBubble content={latestAnswer} />}
           </div>
           {/* The router's question about this run, drawn at the run's tail and
               outside the collapse: an unanswerable thing behind a fold is the
@@ -752,8 +760,9 @@ interface RoundItemProps {
 
 /** One round: a question line that opens into the question/answer pair, in
  *  `ExploreBlock`'s row-plus-two-panels chrome. Folded like the block itself —
- *  the run's answer is already on screen below it (`data-run-answer`), and the
- *  pair is what a reader opens when they want the question beside it. */
+ *  the run's answer is already on screen in the card's body
+ *  (`data-run-answer`), and the pair is what a reader opens when they want the
+ *  question beside it. */
 function RoundItem({
   round,
   index,

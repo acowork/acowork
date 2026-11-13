@@ -824,7 +824,7 @@ describe("ChatExecutionBlock", () => {
     expect(screen.queryByText("chatView.block.olderRounds")).toBeNull();
   });
 
-  it("wears ExploreBlock's chrome: pill header, ruled list, no invented card shell", () => {
+  it("the collapse header is the card's title banner; the list keeps ExploreBlock's rule", () => {
     const { container } = renderBlock({
       [REF1]: entryOf({
         projection: {
@@ -836,12 +836,47 @@ describe("ChatExecutionBlock", () => {
         },
       }),
     });
-    const pill = container.querySelector("[data-run-header]") as HTMLElement;
-    expect(pill.className).toContain("bg-zinc-100/60");
+    const header = container.querySelector("[data-run-header]") as HTMLElement;
+    // The header is no longer a free-floating pill: it is the title banner of
+    // the same card whose body carries the answer (the shared card recipe) —
+    // worn one step LIGHTER than an interaction card's banner, because a run's
+    // banner sits in the transcript and must not out-shout its answer.
+    expect(header.className).toContain("bg-zinc-100/60");
+    expect(header.className).toContain("border-b");
     // The highlight color is a button background, never a border or a title.
-    expect(pill.className).not.toContain("--color-accent");
+    expect(header.className).not.toContain("--color-accent");
     expect(document.querySelector("[class*='border-l-2']")).toBeTruthy();
     expect(container.querySelector("[class*='border-hairline']")).toBeNull();
+  });
+
+  /** The reader's ask: one agent message must read as one object. The
+   *  collapse header is the card's title banner, the run's latest answer is its
+   *  body, and both live inside ONE hairline shell. Drawn as a bubble under the
+   *  block, the answer made every run look like two messages. */
+  it("draws the header and the answer inside one card", () => {
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            answer: { body: "done", ts: "1" },
+          },
+        }),
+      },
+      {},
+      blockOf([roundOf("r1", 3)]),
+      { folded: true },
+    );
+    const answer = container.querySelector("[data-run-answer]") as HTMLElement;
+    expect(answer.className).toContain("bg-chat-bubble");
+    const card = answer.parentElement as HTMLElement;
+    // One shell, two bands: the title banner and the body are its children.
+    expect(card.className).toContain("border-border-outer");
+    expect(card.querySelector("[data-run-header]")).toBeTruthy();
+    // The body is the card's body, not a second bubble with its own radius.
+    expect(answer.className).not.toContain("rounded-md");
   });
 
   it("paints the pair in the transcript's own bubble colours", () => {

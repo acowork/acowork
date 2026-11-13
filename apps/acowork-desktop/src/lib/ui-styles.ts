@@ -143,6 +143,29 @@ export const dialogButtonPrimary =
 export const dialogButtonSecondary =
   "w-20 rounded px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700";
 
+// ── Interaction-card chrome ─────────────────────────────────────────
+
+/**
+ * The one card chrome: hairline shell, neutral title banner, agent-bubble
+ * body. Written for `InteractionCardShell` and reused as-is by the Chat
+ * execution block, whose title banner IS its collapse header and whose body
+ * is the run's latest answer — a second copy of the recipe is a drift
+ * waiting to happen (`chatCardChrome.test.tsx` pins the rule).
+ *
+ * Two title banners, one geometry: `chatCardTitleBar` is the card palette's
+ * own (`--color-chat-title`, the same tone a code block's title wears), while
+ * `chatCardTitleBarMuted` is one step lighter — a run's banner sits in the
+ * transcript and must not out-shout the answer under it. The DARK step is
+ * identical in both: there the card tone already reads as a banner, so the
+ * quiet variant only lightens the light theme.
+ */
+export const chatCardShell = "overflow-hidden rounded-md border border-border-outer";
+const chatCardTitleBarBase =
+  "flex w-full items-center gap-[7px] border-b border-border-divider px-3 py-[7px] text-left text-xs font-medium text-text";
+export const chatCardTitleBar = `${chatCardTitleBarBase} bg-chat-title`;
+export const chatCardTitleBarMuted = `${chatCardTitleBarBase} bg-zinc-100/60 dark:bg-zinc-700/70`;
+export const chatCardBody = "bg-chat-bubble px-3 py-2.5";
+
 // ── Interaction-card buttons ────────────────────────────────────────
 
 /**
