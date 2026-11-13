@@ -1,4 +1,4 @@
-//! Calendar arithmetic for `DatePicker` — the data layer, no DOM.
+//! Calendar arithmetic for `DateTimePicker` — the data layer, no DOM.
 //!
 //! ## Why this is its own module
 //!
@@ -42,7 +42,7 @@ export interface CalendarDate {
 
 /** One rendered cell. */
 export interface CalendarCell extends CalendarDate {
-  /** The cell's value: `YYYY-MM-DD`, i.e. exactly what `DatePicker` reports. */
+  /** The cell's value: `YYYY-MM-DD`, i.e. exactly what `DateTimePicker` reports. */
   value: string;
   /** False for the leading/trailing days borrowed from the adjacent months. */
   inMonth: boolean;
@@ -92,6 +92,22 @@ export function todayDateField(now: Date = new Date()): string {
 /** Local day of a `Date` — the projection `todayDateField` and stepping share. */
 export function dateToField(d: Date): string {
   return toDateField(d.getFullYear(), d.getMonth() + 1, d.getDate());
+}
+
+/**
+ * A local wall-clock timestamp: `YYYY-MM-DDTHH:mm`.
+ *
+ * No timezone suffix on purpose — the form edits *local* time, and the one
+ * conversion to the stored UTC instant happens in `useTaskForm`. A `Z` here
+ * would mean UTC and would shift the day for half the world.
+ */
+export function toDateTimeField(day: string, hour: number, minute: number): string {
+  return `${day}T${pad2(hour)}:${pad2(minute)}`;
+}
+
+/** The current local minute — what a fresh task starts at. */
+export function nowDateTimeField(now: Date = new Date()): string {
+  return toDateTimeField(todayDateField(now), now.getHours(), now.getMinutes());
 }
 
 /** Step a `(year, month)` pair by `delta` months, rolling the year over. */

@@ -1860,11 +1860,14 @@
     "formInstallScript": "설치 스크립트 이름"
   },
   "datePicker": {
-    "placeholder": "날짜 선택",
+    "placeholder": "날짜 및 시간 선택",
     "prevMonth": "이전 달",
     "nextMonth": "다음 달",
     "today": "오늘",
-    "clear": "지우기"
+    "clear": "지우기",
+    "time": "시간",
+    "hour": "시",
+    "minute": "분"
   },
   "pm": {
     "projects": "프로젝트",
@@ -1913,11 +1916,11 @@
       "completed": "{{done}}/{{total}}",
       "edit": "작업 편집",
       "delete": "작업 삭제",
-      "dueDate": "마감일",
+      "dueDate": "마감 시각",
       "dispatchFailed": "디스패치 실패 ({{attempts}}회차): {{error}}",
       "unscheduled": "미스케줄: 시작 시간이 없으므로 작업은 디스패치되지 않습니다. 시작 시간을 설정하면 담당자에게 전달됩니다.",
       "dispatchAbandoned": "5회 연속 실패로 디스패치를 중단했습니다: {{error}}. 재할당 또는 상태 변경 후 재시도할 수 있습니다.",
-      "startDate": "시작일",
+      "startDate": "시작 시각",
       "assignee": "담당자",
       "priority": "우선순위",
       "type": "유형",

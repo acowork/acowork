@@ -163,12 +163,12 @@ vi.mock("./useTaskForm", () => ({
     reset: mocks.reset,
     save: mocks.save,
   }),
-  localDateFieldToIso: (v: string) => v,
-  isoToLocalDate: (v?: string | null) => v ?? "",
+  localDateTimeToIso: (v: string) => v,
+  isoToLocalDateTime: (v?: string | null) => v ?? "",
 }));
 
 vi.mock("../../i18n/useTranslation", () => ({
-  // The hook's real shape: `DatePicker` reads the language for its weekday
+  // The hook's real shape: `DateTimePicker` reads the language for its weekday
   // initials, so a `{ t }`-only mock is a lie that only shows up at runtime.
   useTranslation: () => ({ t: (key: string) => key, i18n: { language: "en" } }),
 }));
@@ -332,31 +332,33 @@ describe("chrome — the box the user asked to keep", () => {
 
   // 原生 `<input type="date">` 的弹层是 WebView2 自己画的（不在页面 DOM 里），
   // 箭头尺寸和底部按钮的底色都改不动 —— 那正是"看着业余"的根因。所以日期字段
-  // 必须是组件库的 DatePicker，且它写回表单的值仍是本地日历日 `YYYY-MM-DD`。
+  // 必须是组件库的 DateTimePicker，且它写回表单的值仍是本地墙钟
+  // `YYYY-MM-DDTHH:mm`。
   it("the date fields are the design-system picker, not a native date input", () => {
-    mocks.values = { startAt: "2026-11-06" };
+    mocks.values = { startAt: "2026-11-06T08:30" };
     const { container } = render(<TaskEditDialog onClose={() => {}} />);
     expect(container.querySelector('input[type="date"]')).toBeNull();
     const triggers = screen.getAllByTestId("date-picker-trigger");
     expect(triggers).toHaveLength(2);
     expect(triggers[0].textContent).toContain("2026-11-06");
+    expect(triggers[0].textContent).toContain("08:30");
     // 空字段读占位符，不再是一个空白原生控件
     expect(triggers[1].textContent).toContain("datePicker.placeholder");
   });
 
-  it("picking a day writes the local calendar day back into the form", () => {
-    mocks.values = { startAt: "2026-11-06" };
+  it("picking a day writes the local wall clock back into the form", () => {
+    mocks.values = { startAt: "2026-11-06T08:30" };
     render(<TaskEditDialog onClose={() => {}} />);
     fireEvent.click(screen.getAllByTestId("date-picker-trigger")[0]);
     fireEvent.click(screen.getByRole("button", { name: "2026-11-20" }));
-    expect(mocks.setStartAt).toHaveBeenCalledWith("2026-11-20");
+    expect(mocks.setStartAt).toHaveBeenCalledWith("2026-11-20T08:30");
     expect(mocks.setDueAt).not.toHaveBeenCalled();
   });
 
   it("dismissing the calendar with Escape leaves the task form open", () => {
     // 对话框自己在 window 上监听 Escape 来关闭整张表单；日历必须吞掉这个键 ——
     // 关掉日历不等于丢弃草稿。
-    mocks.values = { startAt: "2026-11-06" };
+    mocks.values = { startAt: "2026-11-06T08:30" };
     const onClose = vi.fn();
     render(<TaskEditDialog onClose={onClose} />);
     fireEvent.click(screen.getAllByTestId("date-picker-trigger")[0]);

@@ -1,4 +1,4 @@
-//! DatePicker — the app's date field, replacing `<input type="date">`.
+//! DateTimePicker — the app's date-time field, replacing `<input type="date">`.
 //!
 //! ## Why not the native control
 //!
@@ -29,10 +29,21 @@
 //!
 //! ## The value contract
 //!
-//! `value` is a *local calendar day* written `YYYY-MM-DD` (`""` = no date) —
-//! the exact shape `TaskFormValues.startAt` / `dueAt` already hold, so the
-//! picker needs no knowledge of the ISO instants the API stores. All arithmetic
-//! is in `calendarGrid.ts`; this file renders it.
+//! `value` is a *local wall clock* written `YYYY-MM-DDTHH:mm` (`""` = no
+//! value) — the exact shape `TaskFormValues.startAt` / `dueAt` already hold,
+//! so the picker needs no knowledge of the ISO instants the API stores. All
+//! arithmetic is in `calendarGrid.ts`; this file renders it.
+//!
+//! The clock is local on purpose: the form edits the wall clock the user
+//! reads ("明早 8 点"), and the conversion to the stored UTC instant happens
+//! once, in `useTaskForm`.
+//!
+//! ## Why the time is picked *before* the day
+//!
+//! The clock row (时 / 分) sits under the grid and above the footer buttons.
+//! Setting the clock first and the day second is the order that always works:
+//! a clock edit on an empty field has no day to attach to yet, so it waits in
+//! `pendingTime` and lands on the day the user picks next.
 
 import { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -40,6 +51,7 @@ import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { useTranslation } from "../../i18n/useTranslation";
 import { FIELD_SURFACE_CLASS } from "./StyledInput";
+import { Dropdown } from "./Dropdown";
 import {
   addDays,
   addMonths,
@@ -48,6 +60,7 @@ import {
   formatMonthTitle,
   parseDateField,
   toDateField,
+  toDateTimeField,
   todayDateField,
   weekdayLabels,
 } from "./calendarGrid";
@@ -60,10 +73,10 @@ const POPUP_WIDTH = 240;
 /** Space between the trigger and the popup. */
 const POPUP_GAP = 4;
 
-export interface DatePickerProps {
-  /** Local calendar day `YYYY-MM-DD`, or `""` for "no date". */
+export interface DateTimePickerProps {
+  /** Local wall clock `YYYY-MM-DDTHH:mm`, or `""` for "no value". */
   value: string;
-  /** Receives the picked day (`YYYY-MM-DD`) or `""` after 清除. */
+  /** Receives the picked wall clock (`YYYY-MM-DDTHH:mm`) or `""` after 清除. */
   onChange: (value: string) => void;
   disabled?: boolean;
   /** Extra classes for the trigger, merged after the field surface. */
@@ -71,6 +84,36 @@ export interface DatePickerProps {
   /** Accessible name for the trigger when it is not wrapped in a `<label>`. */
   ariaLabel?: string;
 }
+
+/** The `YYYY-MM-DD` day of a wall-clock value ("" when there is none). */
+function dayOf(value: string): string {
+  const day = value.slice(0, 10);
+  return parseDateField(day) ? day : "";
+}
+
+/** The `HH:mm` clock of a wall-clock value (`""` when it carries no time). */
+function clockOf(value: string): string {
+  if (value.length < 16) return "";
+  return `${value.slice(11, 13)}:${value.slice(14, 16)}`;
+}
+
+/** The current wall clock, to the minute — the default clock of a fresh field. */
+function nowClock(now: Date = new Date()): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+}
+
+/** Hours on offer: every one of them, so any scheduled hour stays editable. */
+const HOUR_OPTIONS = Array.from({ length: 24 }, (_, h) => {
+  const hh = String(h).padStart(2, "0");
+  return { value: hh, label: hh };
+});
+
+/** Minutes on offer: every one of them — a scheduled 09:37 must survive an edit. */
+const MINUTE_OPTIONS = Array.from({ length: 60 }, (_, m) => {
+  const mm = String(m).padStart(2, "0");
+  return { value: mm, label: mm };
+});
 
 /** The month a value belongs to, falling back to today for an empty field. */
 function monthOf(value: string): { year: number; month: number } {
@@ -80,7 +123,13 @@ function monthOf(value: string): { year: number; month: number } {
   return today ? { year: today.year, month: today.month } : { year: 1970, month: 1 };
 }
 
-export function DatePicker({ value, onChange, disabled, className, ariaLabel }: DatePickerProps) {
+export function DateTimePicker({
+  value,
+  onChange,
+  disabled,
+  className,
+  ariaLabel,
+}: DateTimePickerProps) {
   const { t, i18n } = useTranslation();
   const [open, setOpen] = useState(false);
   const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
@@ -89,7 +138,13 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
    * so browsing months and moving focus can never disagree about where the
    * grid is — one state, one grid.
    */
-  const [focusedDay, setFocusedDay] = useState<string>(() => value || todayDateField());
+  const [focusedDay, setFocusedDay] = useState<string>(() => dayOf(value) || todayDateField());
+  /**
+   * The clock the user has dialled in. It is separate from `value` because a
+   * clock edit on an empty field has no day to attach to yet — it waits here
+   * and lands on the day picked next.
+   */
+  const [pendingTime, setPendingTime] = useState<string>(() => clockOf(value) || nowClock());
 
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popupRef = useRef<HTMLDivElement>(null);
@@ -97,6 +152,7 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
   const popupId = useId();
 
   const today = todayDateField();
+  const day = dayOf(value);
   const view = monthOf(focusedDay);
   const cells = useMemo(() => buildMonthGrid(view.year, view.month), [view.year, view.month]);
   /**
@@ -106,11 +162,19 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
    */
   const locale = i18n?.language ?? "en";
   const weekdays = useMemo(() => weekdayLabels(locale), [locale]);
-  const selected = parseDateField(value);
+  const selected = parseDateField(day);
+
+  /**
+   * The clock follows the stored value — a form reset or an edit from
+   * elsewhere must not leave a stale clock in the popup.
+   */
+  useEffect(() => {
+    setPendingTime(clockOf(value) || nowClock());
+  }, [value]);
 
   /** Open on the value's month (or today's), with the keyboard on that day. */
   const show = useCallback(() => {
-    setFocusedDay(value || todayDateField());
+    setFocusedDay(dayOf(value) || todayDateField());
     setPos(null);
     setOpen(true);
   }, [value]);
@@ -127,6 +191,29 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
       hide(true);
     },
     [hide, onChange],
+  );
+
+  /**
+   * Pick a day. The clock comes along unchanged — the user dialled it in
+   * above, and the day is what was missing.
+   */
+  const pickDay = useCallback(
+    (next: string) => {
+      commit(toDateTimeField(next, Number(pendingTime.slice(0, 2)), Number(pendingTime.slice(3, 5))));
+    },
+    [commit, pendingTime],
+  );
+
+  /**
+   * Dial the clock. With a day in hand the new clock lands immediately; on an
+   * empty field it waits in `pendingTime` for the day the user picks next.
+   */
+  const setClock = useCallback(
+    (next: string) => {
+      setPendingTime(next);
+      if (day) onChange(`${day}T${next}`);
+    },
+    [day, onChange],
   );
 
   /**
@@ -166,6 +253,10 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
       if (!target) return;
       if (popupRef.current?.contains(target)) return;
       if (triggerRef.current?.contains(target)) return;
+      // The clock dropdowns open their own portal, so their option list sits
+      // *outside* this popup. A click on it must not dismiss the calendar
+      // under it — the click would never reach the option.
+      if (target instanceof Element && target.closest('[role="listbox"]')) return;
       hide(false);
     };
     document.addEventListener("mousedown", onPointerDown, true);
@@ -200,7 +291,7 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
         case "Enter":
         case " ":
           e.preventDefault();
-          commit(focusedDay);
+          pickDay(focusedDay);
           break;
         case "ArrowLeft":
           e.preventDefault();
@@ -232,7 +323,7 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
     };
     popup.addEventListener("keydown", onKeyDown);
     return () => popup.removeEventListener("keydown", onKeyDown);
-  }, [commit, focusedDay, hide, open]);
+  }, [focusedDay, hide, open, pickDay]);
 
   /** Follow the keyboard: the focused day is always visible, hence focused. */
   useEffect(() => {
@@ -264,7 +355,7 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
       >
         <CalendarDays className="h-3.5 w-3.5 shrink-0 text-text-tertiary" aria-hidden />
         <span className={cn("truncate", !value && "text-text-tertiary")}>
-          {value || t("datePicker.placeholder")}
+          {value ? value.replace("T", " ") : t("datePicker.placeholder")}
         </span>
       </button>
 
@@ -323,7 +414,7 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
 
             <div className="grid grid-cols-7 gap-y-0.5">
               {cells.map((cell) => {
-                const isSelected = !!selected && cell.value === value;
+                const isSelected = !!selected && cell.value === day;
                 const isToday = cell.value === today;
                 return (
                   <button
@@ -338,7 +429,7 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
                     aria-current={isToday ? "date" : undefined}
                     data-day={cell.value}
                     tabIndex={cell.value === focusedDay ? 0 : -1}
-                    onClick={() => commit(cell.value)}
+                    onClick={() => pickDay(cell.value)}
                     className={cn(
                       "flex h-8 w-8 items-center justify-center rounded-md text-xs tabular-nums transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]",
                       isSelected
@@ -358,7 +449,33 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
               })}
             </div>
 
-            <div className="mt-1 flex items-center justify-between gap-2 border-t border-border-divider px-1 pt-2">
+            {/* The clock. It sits above the buttons because it is edited
+                *before* the day is settled: a clock with no day has nowhere to
+                go yet, and the day picked next carries it. */}
+            <div className="mt-1 flex items-center gap-1.5 border-t border-border-divider px-1 pt-2">
+              <span className="text-10 text-text-tertiary">{t("datePicker.time")}</span>
+              <Dropdown
+                size="small"
+                value={pendingTime.slice(0, 2)}
+                onChange={(h) => setClock(`${h}:${pendingTime.slice(3, 5)}`)}
+                options={HOUR_OPTIONS}
+                aria-label={t("datePicker.hour")}
+                className="w-14"
+              />
+              <span aria-hidden className="text-10 text-text-tertiary">
+                :
+              </span>
+              <Dropdown
+                size="small"
+                value={pendingTime.slice(3, 5)}
+                onChange={(m) => setClock(`${pendingTime.slice(0, 2)}:${m}`)}
+                options={MINUTE_OPTIONS}
+                aria-label={t("datePicker.minute")}
+                className="w-14"
+              />
+            </div>
+
+            <div className="mt-1 flex items-center justify-between gap-2 px-1">
               <button
                 type="button"
                 disabled={!value}
@@ -369,7 +486,7 @@ export function DatePicker({ value, onChange, disabled, className, ariaLabel }: 
               </button>
               <button
                 type="button"
-                onClick={() => commit(today)}
+                onClick={() => pickDay(today)}
                 className="btn-accent inline-flex items-center justify-center rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium"
               >
                 {t("datePicker.today")}

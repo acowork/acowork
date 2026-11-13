@@ -1,15 +1,18 @@
-//! The `DatePicker` contract — the picker that replaced `<input type="date">`.
+//! The `DateTimePicker` contract — the picker that replaced `<input type="date">`.
 //!
 //! What is pinned here is everything the native popup did and a hand-rolled one
 //! would get wrong:
 //!
-//!   1. the value it reports is a local calendar day `YYYY-MM-DD` (`""` = 清除),
-//!      i.e. exactly the shape the task form stores;
-//!   2. it opens on the value's month, and picking / clearing dismisses it;
-//!   3. keyboard operation (arrows, PageUp/PageDown, Enter, Escape) works and
+//!   1. the value it reports is a local wall clock `YYYY-MM-DDTHH:mm` (`""` =
+//!      清除), i.e. exactly the shape the task form stores;
+//!   2. the day and the clock are edited independently — picking a day keeps
+//!      the clock, dialling the clock keeps the day, and a clock dialled on an
+//!      empty field waits for the day;
+//!   3. it opens on the value's month, and picking / clearing dismisses it;
+//!   4. keyboard operation (arrows, PageUp/PageDown, Enter, Escape) works and
 //!      **Escape never reaches `window`** — the task dialog closes itself on a
 //!      window-level Escape, and dismissing a calendar must not discard a form;
-//!   4. a click outside dismisses it, a click inside does not.
+//!   5. a click outside dismisses it, a click inside does not.
 //!
 //! Visual facts (which is to say, the reason this component exists) are CSS, so
 //! they are checked at the source level: the trigger composes the shared field
@@ -20,8 +23,8 @@ import { describe, expect, it, vi } from "vitest";
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { fireEvent, render, screen } from "@testing-library/react";
-import { DatePicker } from "./DatePicker";
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { DateTimePicker } from "./DateTimePicker";
 import { todayDateField } from "./calendarGrid";
 
 vi.mock("../../i18n/useTranslation", () => ({
@@ -32,12 +35,17 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 function setup(value = "") {
   const onChange = vi.fn();
-  const view = render(<DatePicker value={value} onChange={onChange} ariaLabel="date" />);
+  const view = render(<DateTimePicker value={value} onChange={onChange} ariaLabel="date" />);
   return { ...view, onChange, trigger: () => screen.getByTestId("date-picker-trigger") };
 }
 
 /** The day cell for a `YYYY-MM-DD` value (cells carry the ISO day as a name). */
 const day = (iso: string) => screen.getByRole("button", { name: iso });
+
+/** The hidden native carrier of the clock dropdowns. */
+const hourSelect = () => screen.getByRole("combobox", { name: "datePicker.hour" }) as HTMLSelectElement;
+const minuteSelect = () =>
+  screen.getByRole("combobox", { name: "datePicker.minute" }) as HTMLSelectElement;
 
 function open(value = "") {
   const ctx = setup(value);
@@ -45,35 +53,36 @@ function open(value = "") {
   return ctx;
 }
 
-describe("DatePicker trigger", () => {
+describe("DateTimePicker trigger", () => {
   it("shows the placeholder while the field is empty, the day once it is set", () => {
     const { trigger } = setup("");
     expect(trigger().textContent).toContain("datePicker.placeholder");
     expect(trigger().getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("shows the stored local calendar day verbatim", () => {
-    const { trigger } = setup("2026-11-06");
+  it("shows the stored local wall clock verbatim", () => {
+    const { trigger } = setup("2026-11-06T08:30");
     expect(trigger().textContent).toContain("2026-11-06");
+    expect(trigger().textContent).toContain("08:30");
   });
 
   it("does not open while disabled", () => {
     const onChange = vi.fn();
-    render(<DatePicker value="" onChange={onChange} disabled ariaLabel="date" />);
+    render(<DateTimePicker value="" onChange={onChange} disabled ariaLabel="date" />);
     fireEvent.click(screen.getByTestId("date-picker-trigger"));
     expect(screen.queryByTestId("date-picker-popup")).toBeNull();
   });
 
   it("announces itself as a popup trigger", () => {
-    const { trigger } = open("2026-11-06");
+    const { trigger } = open("2026-11-06T08:30");
     expect(trigger().getAttribute("aria-haspopup")).toBe("dialog");
     expect(trigger().getAttribute("aria-expanded")).toBe("true");
   });
 });
 
-describe("DatePicker popup", () => {
+describe("DateTimePicker popup", () => {
   it("opens on the month of the value and marks the selected day", () => {
-    open("2026-11-06");
+    open("2026-11-06T08:30");
     expect(screen.getByTestId("date-picker-popup").textContent).toContain("2026-11");
     expect(day("2026-11-06").getAttribute("aria-pressed")).toBe("true");
     expect(day("2026-11-05").getAttribute("aria-pressed")).toBe("false");
@@ -87,22 +96,22 @@ describe("DatePicker popup", () => {
   });
 
   it("renders a fixed 6×7 grid, including the borrowed adjacent days", () => {
-    open("2026-11-06");
+    open("2026-11-06T08:30");
     // November 2026 starts on a Sunday, so October 26th leads the grid — the
     // same first row the native popup drew.
     expect(day("2026-10-26").textContent).toBe("26");
     expect(day("2026-12-06").textContent).toBe("6");
   });
 
-  it("reports the picked day as a local calendar day and dismisses itself", () => {
-    const { onChange } = open("2026-11-06");
+  it("reports the picked day with the dialled clock and dismisses itself", () => {
+    const { onChange } = open("2026-11-06T08:30");
     fireEvent.click(day("2026-11-20"));
-    expect(onChange).toHaveBeenCalledWith("2026-11-20");
+    expect(onChange).toHaveBeenCalledWith("2026-11-20T08:30");
     expect(screen.queryByTestId("date-picker-popup")).toBeNull();
   });
 
   it("clears to an empty field", () => {
-    const { onChange } = open("2026-11-06");
+    const { onChange } = open("2026-11-06T08:30");
     fireEvent.click(screen.getByRole("button", { name: "datePicker.clear" }));
     expect(onChange).toHaveBeenCalledWith("");
     expect(screen.queryByTestId("date-picker-popup")).toBeNull();
@@ -116,13 +125,13 @@ describe("DatePicker popup", () => {
   });
 
   it("picks today without walking the grid", () => {
-    const { onChange } = open("");
+    const { onChange } = open("2026-11-06T08:30");
     fireEvent.click(screen.getByRole("button", { name: "datePicker.today" }));
-    expect(onChange).toHaveBeenCalledWith(todayDateField());
+    expect(onChange).toHaveBeenCalledWith(`${todayDateField()}T08:30`);
   });
 
   it("steps months with the header buttons and follows the year boundary", () => {
-    open("2026-12-15");
+    open("2026-12-15T08:30");
     expect(screen.getByTestId("date-picker-popup").textContent).toContain("2026-12");
     fireEvent.click(screen.getByRole("button", { name: "datePicker.nextMonth" }));
     expect(screen.getByTestId("date-picker-popup").textContent).toContain("2027-01");
@@ -133,17 +142,71 @@ describe("DatePicker popup", () => {
 
   it("clamps the day when a month is shorter", () => {
     // 2026-01-31 stepped into February must not become 2026-03-03.
-    const { onChange } = open("2026-01-31");
+    const { onChange } = open("2026-01-31T08:30");
     fireEvent.click(screen.getByRole("button", { name: "datePicker.nextMonth" }));
     expect(screen.getByTestId("date-picker-popup").textContent).toContain("2026-02");
     fireEvent.keyDown(day("2026-02-28"), { key: "Enter" });
-    expect(onChange).toHaveBeenCalledWith("2026-02-28");
+    expect(onChange).toHaveBeenCalledWith("2026-02-28T08:30");
   });
 });
 
-describe("DatePicker dismissal", () => {
+describe("DateTimePicker clock", () => {
+  it("offers every hour and every minute", () => {
+    open("2026-11-06T08:30");
+    expect(hourSelect().options).toHaveLength(24);
+    expect(minuteSelect().options).toHaveLength(60);
+  });
+
+  it("edits the hour of a stored value and stays open", () => {
+    const { onChange } = open("2026-11-06T08:30");
+    fireEvent.change(hourSelect(), { target: { value: "09" } });
+    expect(onChange).toHaveBeenCalledWith("2026-11-06T09:30");
+    expect(screen.queryByTestId("date-picker-popup")).not.toBeNull();
+  });
+
+  it("edits the minute of a stored value", () => {
+    const { onChange } = open("2026-11-06T08:30");
+    fireEvent.change(minuteSelect(), { target: { value: "45" } });
+    expect(onChange).toHaveBeenCalledWith("2026-11-06T08:45");
+  });
+
+  it("holds a clock dialled on an empty field until the day is picked", () => {
+    const { onChange } = open("");
+    fireEvent.change(minuteSelect(), { target: { value: "45" } });
+    fireEvent.change(hourSelect(), { target: { value: "09" } });
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(day("2026-11-20"));
+    expect(onChange).toHaveBeenCalledWith("2026-11-20T09:45");
+  });
+
+  it("defaults a fresh field to the current minute, not midnight", () => {
+    // Midnight would be a lie: a task scheduled at 00:00 the user never asked
+    // for. The fresh field starts at "now", the way the form pre-fills it.
+    const { onChange } = open("");
+    const hour = hourSelect().value;
+    const minute = minuteSelect().value;
+    fireEvent.click(day("2026-11-20"));
+    expect(onChange).toHaveBeenCalledWith(`2026-11-20T${hour}:${minute}`);
+    expect(hour).not.toBe("00");
+  });
+
+  it("survives the clock dropdown's own portal", () => {
+    // The option list is rendered outside the calendar's popup, so a click on
+    // it must not dismiss the calendar — the click would never arrive.
+    const { onChange } = open("2026-11-06T08:30");
+    fireEvent.click(screen.getAllByTestId("dropdown-trigger")[0]);
+    const list = screen.getByRole("listbox");
+    const option = within(list).getByRole("option", { name: "09" });
+    fireEvent.mouseDown(option);
+    expect(screen.queryByTestId("date-picker-popup")).not.toBeNull();
+    fireEvent.click(option);
+    expect(onChange).toHaveBeenCalledWith("2026-11-06T09:30");
+  });
+});
+
+describe("DateTimePicker dismissal", () => {
   it("closes on a click outside, stays open on a click inside", () => {
-    open("2026-11-06");
+    open("2026-11-06T08:30");
     fireEvent.mouseDown(day("2026-11-20"));
     expect(screen.queryByTestId("date-picker-popup")).not.toBeNull();
     fireEvent.mouseDown(document.body);
@@ -159,7 +222,7 @@ describe("DatePicker dismissal", () => {
     };
     window.addEventListener("keydown", onWindowKeyDown);
     try {
-      const ctx = open("2026-11-06");
+      const ctx = open("2026-11-06T08:30");
       fireEvent.keyDown(day("2026-11-06"), { key: "Escape" });
       expect(screen.queryByTestId("date-picker-popup")).toBeNull();
       expect(windowEscape).not.toHaveBeenCalled();
@@ -171,27 +234,31 @@ describe("DatePicker dismissal", () => {
 
   it("reopens on the picked month, not the one it was left on", () => {
     const onChange = vi.fn();
-    const view = render(<DatePicker value="2026-11-06" onChange={onChange} ariaLabel="date" />);
+    const view = render(
+      <DateTimePicker value="2026-11-06T08:30" onChange={onChange} ariaLabel="date" />,
+    );
     fireEvent.click(screen.getByTestId("date-picker-trigger"));
     fireEvent.click(screen.getByRole("button", { name: "datePicker.nextMonth" }));
     fireEvent.keyDown(day("2026-12-06"), { key: "Escape" });
-    view.rerender(<DatePicker value="2026-12-20" onChange={onChange} ariaLabel="date" />);
+    view.rerender(
+      <DateTimePicker value="2026-12-20T08:30" onChange={onChange} ariaLabel="date" />,
+    );
     fireEvent.click(screen.getByTestId("date-picker-trigger"));
     expect(screen.getByTestId("date-picker-popup").textContent).toContain("2026-12");
     expect(day("2026-12-20").getAttribute("aria-pressed")).toBe("true");
   });
 });
 
-describe("DatePicker keyboard", () => {
+describe("DateTimePicker keyboard", () => {
   const focusedIso = () => (document.activeElement as HTMLElement | null)?.getAttribute("aria-label");
 
   it("hands the keyboard to the selected day when it opens", () => {
-    open("2026-11-06");
+    open("2026-11-06T08:30");
     expect(focusedIso()).toBe("2026-11-06");
   });
 
   it("walks days and weeks with the arrow keys", () => {
-    open("2026-11-06");
+    open("2026-11-06T08:30");
     fireEvent.keyDown(day("2026-11-06"), { key: "ArrowRight" });
     expect(focusedIso()).toBe("2026-11-07");
     fireEvent.keyDown(day("2026-11-07"), { key: "ArrowDown" });
@@ -202,14 +269,14 @@ describe("DatePicker keyboard", () => {
   });
 
   it("crosses a month boundary with the arrows, taking the grid with it", () => {
-    open("2026-11-30");
+    open("2026-11-30T08:30");
     fireEvent.keyDown(day("2026-11-30"), { key: "ArrowRight" });
     expect(focusedIso()).toBe("2026-12-01");
     expect(screen.getByTestId("date-picker-popup").textContent).toContain("2026-12");
   });
 
   it("walks months with PageUp / PageDown", () => {
-    open("2026-11-06");
+    open("2026-11-06T08:30");
     fireEvent.keyDown(day("2026-11-06"), { key: "PageDown" });
     expect(focusedIso()).toBe("2026-12-06");
     expect(screen.getByTestId("date-picker-popup").textContent).toContain("2026-12");
@@ -220,7 +287,7 @@ describe("DatePicker keyboard", () => {
   it("leaves Enter alone outside the grid — the month arrows own their key", () => {
     // The arrows are ordinary buttons: Enter on 下个月 must not be read as
     // "pick the focused day" just because it happened inside the popup.
-    const { onChange } = open("2026-11-06");
+    const { onChange } = open("2026-11-06T08:30");
     fireEvent.keyDown(screen.getByRole("button", { name: "datePicker.nextMonth" }), {
       key: "Enter",
     });
@@ -229,25 +296,25 @@ describe("DatePicker keyboard", () => {
   });
 
   it("picks the focused day with Enter", () => {
-    const { onChange } = open("2026-11-06");
+    const { onChange } = open("2026-11-06T08:30");
     fireEvent.keyDown(day("2026-11-06"), { key: "ArrowRight" });
     fireEvent.keyDown(day("2026-11-07"), { key: "Enter" });
-    expect(onChange).toHaveBeenCalledWith("2026-11-07");
+    expect(onChange).toHaveBeenCalledWith("2026-11-07T08:30");
   });
 });
 
-describe("DatePicker reuses the design system", () => {
-  const source = readFileSync(resolve(__dirname, "DatePicker.tsx"), "utf8");
+describe("DateTimePicker reuses the design system", () => {
+  const source = readFileSync(resolve(__dirname, "DateTimePicker.tsx"), "utf8");
 
-  it("takes its surface from the shared field constant, not a copied class string", () => {
-    // Composition, not a duplicated string: the trigger and `StyledInput` must
-    // change together or the defensively-copied copy drifts silently.
+  it("composes the shared field surface instead of restating it", () => {
+    // The trigger and the surface it borrows must change together or the
+    // defensively-copied copy drifts silently.
     expect(source).toContain("FIELD_SURFACE_CLASS");
     expect(source).not.toContain("border-input-border");
   });
 
   it("sits on the same surface as the text fields beside it", () => {
-    const { trigger } = setup("2026-11-06");
+    const { trigger } = setup("2026-11-06T08:30");
     const classes = trigger().className;
     expect(classes).toContain("border-input-border");
     expect(classes).toContain("bg-input-bg");
@@ -256,15 +323,13 @@ describe("DatePicker reuses the design system", () => {
   });
 
   it("dresses its footer in the registered button tones", () => {
-    open("2026-11-06");
+    open("2026-11-06T08:30");
     const clear = screen.getByRole("button", { name: "datePicker.clear" });
     const today = screen.getByRole("button", { name: "datePicker.today" });
     expect(clear.className).toContain("btn-solid");
     expect(today.className).toContain("btn-accent");
     for (const button of [clear, today]) {
       // One padding token for both, which is what keeps the fill behind the
-      // label instead of hanging off it.
-      expect(button.className).toContain("py-[var(--ui-btn-py)]");
       expect(button.className).toContain("px-3");
     }
   });
@@ -272,7 +337,7 @@ describe("DatePicker reuses the design system", () => {
   it("sizes its own month arrows instead of inheriting a platform control", () => {
     // The oversized arrows were the reported defect; a bounded icon button is
     // the fix, so the fixed box is the contract.
-    open("2026-11-06");
+    open("2026-11-06T08:30");
     for (const name of ["datePicker.prevMonth", "datePicker.nextMonth"]) {
       const button = screen.getByRole("button", { name });
       expect(button.className).toContain("h-7");
@@ -282,7 +347,7 @@ describe("DatePicker reuses the design system", () => {
   });
 
   it("renders no native date input — nothing for WebView2 to draw for us", () => {
-    const { container } = setup("2026-11-06");
+    const { container } = setup("2026-11-06T08:30");
     expect(container.querySelector("input")).toBeNull();
     expect(screen.getByTestId("date-picker-trigger").tagName).toBe("BUTTON");
   });

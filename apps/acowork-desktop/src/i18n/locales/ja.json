@@ -1859,11 +1859,14 @@
     "formInstallScript": "インストールスクリプト名"
   },
   "datePicker": {
-    "placeholder": "日付を選択",
+    "placeholder": "日時を選択",
     "prevMonth": "前の月",
     "nextMonth": "次の月",
     "today": "今日",
-    "clear": "クリア"
+    "clear": "クリア",
+    "time": "時刻",
+    "hour": "時",
+    "minute": "分"
   },
   "pm": {
     "projects": "プロジェクト",
@@ -1912,11 +1915,11 @@
       "completed": "{{done}}/{{total}}",
       "edit": "タスクを編集",
       "delete": "タスクを削除",
-      "dueDate": "期限",
+      "dueDate": "期限時刻",
       "dispatchFailed": "ディスパッチ失敗（{{attempts}} 回目）：{{error}}",
       "unscheduled": "未スケジュール:開始時刻がないため、タスクはディスパッチされません。開始時刻を設定すると担当者に渡ります。",
       "dispatchAbandoned": "5 回连续失败后已放弃派发：{{error}}。重新指派或变更状态后可重试。",
-      "startDate": "開始日",
+      "startDate": "開始時刻",
       "assignee": "担当者",
       "priority": "優先度",
       "type": "種別",

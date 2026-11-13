@@ -2080,11 +2080,14 @@
     "formInstallScript": "Install script name"
   },
   "datePicker": {
-    "placeholder": "Select date",
+    "placeholder": "Select date & time",
     "prevMonth": "Previous month",
     "nextMonth": "Next month",
     "today": "Today",
-    "clear": "Clear"
+    "clear": "Clear",
+    "time": "Time",
+    "hour": "Hour",
+    "minute": "Minute"
   },
   "pm": {
     "settingsPanel": {
@@ -2292,11 +2295,11 @@
       "completed": "{{done}}/{{total}}",
       "edit": "Edit task",
       "delete": "Delete task",
-      "dueDate": "Due date",
+      "dueDate": "Due time",
       "dispatchFailed": "Dispatch failed (attempt {{attempts}}): {{error}}",
       "unscheduled": "Not scheduled: no start time, so the task is never dispatched. Set a start time to hand it to the assignee.",
       "dispatchAbandoned": "Dispatch abandoned after 5 failed attempts: {{error}}. Reassign or change status to retry.",
-      "startDate": "Start date",
+      "startDate": "Start time",
       "assignee": "Assignee",
       "priority": "Priority",
       "type": "Type",

@@ -21,7 +21,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createTask, reparentTask, updateTask } from "../../lib/pm-api";
-import { todayDateField } from "../../components/common/calendarGrid";
+import { nowDateTimeField } from "../../components/common/calendarGrid";
 import { useAgentStore } from "../../stores/agentStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
@@ -32,23 +32,28 @@ import type { PmTaskResponse, Priority, TaskType } from "../../lib/pm-types";
 // ── Date fields ───────────────────────────────────────────────────────
 
 /**
- * A `<input type="date">` value means *local* calendar day, so the stored
- * instant is local midnight: parse with a time component (`T00:00:00`, no
- * suffix → local per spec). `new Date("YYYY-MM-DD")` would parse as UTC
- * midnight and shift the rendered date a day behind for users west of UTC.
- * Paired with `isoToLocalDate` so an edit round-trip never drifts.
+ * A local wall-clock field (`YYYY-MM-DDTHH:mm`) → the stored UTC instant.
+ *
+ * The field carries no timezone suffix, so it is parsed as local time (per
+ * spec a date-time form without an offset is local). `new Date("2026-10-30")`
+ * would parse as UTC midnight and shift the rendered day west of UTC. Paired
+ * with `isoToLocalDateTime` so an edit round-trip never drifts.
+ *
+ * ponytail: a wall-clock time DST skips (02:30 on a spring-forward day) is
+ * shifted an hour by the engine — once a year, silently.
  */
-export function localDateFieldToIso(dateField: string): string {
-  return new Date(`${dateField}T00:00:00`).toISOString();
+export function localDateTimeToIso(field: string): string {
+  const withTime = field.includes("T") ? field : `${field}T00:00`;
+  return new Date(`${withTime}:00`).toISOString();
 }
 
-/** The local calendar day of a stored instant, for the date input. */
-export function isoToLocalDate(iso?: string | null): string {
+/** The local wall clock of a stored instant — what the picker edits. */
+export function isoToLocalDateTime(iso?: string | null): string {
   if (!iso) return "";
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return iso.slice(0, 10);
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 16);
   const pad = (n: number) => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
 // ── Public shape ──────────────────────────────────────────────────────
@@ -60,7 +65,7 @@ export interface TaskFormValues {
   description: string;
   /** `""` = unassigned. Value is an `instance_id` / `user_id` (ADR-073). */
   assignee: string;
-  /** Local calendar day (`YYYY-MM-DD`) or `""`. */
+  /** Local wall clock (`YYYY-MM-DDTHH:mm`) or `""`. */
   dueAt: string;
   startAt: string;
   /** `""` = top level. */
@@ -131,11 +136,11 @@ export function useTaskForm({
       priority: initial?.priority ?? "normal",
       description: initial?.description ?? "",
       assignee: initial?.assignee ?? "",
-      dueAt: isoToLocalDate(initial?.due_at),
-      // 创建时默认"现在"：今天的本地零点 ≤ now → 到期即派发。服务端的缺省
+      dueAt: isoToLocalDateTime(initial?.due_at),
+      // 创建时默认"现在"：当前的本地分钟 ≤ now → 到期即派发。服务端的缺省
       // 也是 `now`（没给就填当前时刻），这里预填只是让**显示的**与**存的**
       // 一致——不再是一片空白，让人以为"没排期 = 不会派发"。
-      startAt: initial ? isoToLocalDate(initial.start_at) : todayDateField(),
+      startAt: initial ? isoToLocalDateTime(initial.start_at) : nowDateTimeField(),
       parentId: initial?.parent_id ?? defaultParentId ?? "",
       dependsOn: initial?.depends_on?.map((d) => d.task_id) ?? [],
     }),
@@ -212,8 +217,8 @@ export function useTaskForm({
     setSaving(true);
     try {
       const dependsOn = values.dependsOn.map((id) => ({ task_id: id, kind: "relates" as const }));
-      const dueIso = values.dueAt ? localDateFieldToIso(values.dueAt) : null;
-      const startIso = values.startAt ? localDateFieldToIso(values.startAt) : null;
+      const dueIso = values.dueAt ? localDateTimeToIso(values.dueAt) : null;
+      const startIso = values.startAt ? localDateTimeToIso(values.startAt) : null;
 
       if (isEdit && initial) {
         await updateTask(initial.id, {

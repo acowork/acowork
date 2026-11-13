@@ -1,4 +1,4 @@
-//! The calendar arithmetic behind `DatePicker`, pinned without a renderer.
+//! The calendar arithmetic behind `DateTimePicker`, pinned without a renderer.
 //!
 //! What is checked here is exactly what a hand-rolled picker gets wrong:
 //! month rollover, leap Februaries, the Monday-first offset (the grid the
@@ -18,8 +18,10 @@ import {
   formatMonthTitle,
   GRID_SIZE,
   mondayFirstWeekday,
+  nowDateTimeField,
   parseDateField,
   toDateField,
+  toDateTimeField,
   todayDateField,
   weekdayLabels,
 } from "./calendarGrid";
@@ -154,6 +156,19 @@ describe("todayDateField", () => {
     // field must keep the day the user's calendar shows.
     expect(todayDateField(new Date(2026, 10, 6, 0, 30))).toBe("2026-11-06");
     expect(todayDateField(new Date(2026, 10, 6, 23, 30))).toBe("2026-11-06");
+  });
+});
+
+describe("toDateTimeField / nowDateTimeField", () => {
+  it("writes a local wall clock with no timezone suffix", () => {
+    // A `Z` here would mean UTC and would shift the day for half the world.
+    expect(toDateTimeField("2026-11-06", 8, 5)).toBe("2026-11-06T08:05");
+    expect(toDateTimeField("2026-11-06", 23, 59)).toBe("2026-11-06T23:59");
+    expect(toDateTimeField("2026-01-01", 0, 0)).toBe("2026-01-01T00:00");
+  });
+
+  it("reads the current local minute", () => {
+    expect(nowDateTimeField(new Date(2026, 10, 6, 8, 5))).toBe("2026-11-06T08:05");
   });
 });
 

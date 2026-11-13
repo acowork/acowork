@@ -1850,11 +1850,14 @@
     "formInstallScript": "安裝腳本名"
   },
   "datePicker": {
-    "placeholder": "選擇日期",
+    "placeholder": "選擇日期時間",
     "prevMonth": "上個月",
     "nextMonth": "下個月",
     "today": "今天",
-    "clear": "清除"
+    "clear": "清除",
+    "time": "時間",
+    "hour": "時",
+    "minute": "分"
   },
   "pm": {
     "projects": "專案",
@@ -1903,11 +1906,11 @@
       "completed": "{{done}}/{{total}}",
       "edit": "編輯任務",
       "delete": "刪除任務",
-      "dueDate": "截止日期",
+      "dueDate": "截止時間",
       "dispatchFailed": "派發失敗（第 {{attempts}} 次）：{{error}}",
       "unscheduled": "未排期：沒有開始時間，不會派發給執行人。設定開始時間後才會派出。",
       "dispatchAbandoned": "派發已放棄（連續 5 次失敗）：{{error}}。重新指派或變更狀態後可重試。",
-      "startDate": "開始日期",
+      "startDate": "開始時間",
       "assignee": "負責人",
       "priority": "優先級",
       "type": "類型",

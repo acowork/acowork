@@ -60,7 +60,7 @@ import { DependencyPicker, ParentTaskPicker } from "./TaskTreePicker";
 import { ConfirmDialog } from "../../components/common/ConfirmDialog";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
 import { StyledInput, StyledTextarea } from "../../components/common/StyledInput";
-import { DatePicker } from "../../components/common/DatePicker";
+import { DateTimePicker } from "../../components/common/DateTimePicker";
 import { Dropdown } from "../../components/common/Dropdown";
 import { showToast } from "../../components/common/ToastProvider";
 import { attachmentUrl, deleteTask } from "../../lib/pm-api";
@@ -687,14 +687,14 @@ function BasicInfoTab({
           )}
         </Field>
 
-        {/* 用组件库的 DatePicker，不用原生 `<input type="date">`：原生弹层由
+        {/* 用组件库的 DateTimePicker，不用原生 `<input type="date">`：原生弹层由
             WebView2 自己绘制（不属页面 DOM，CSS 管不到），箭头尺寸和底部按钮的
             底色都失控，也正是"看着业余"的来源。宽度跟这一行的其他格子对齐。 */}
         <Field label={t("pm.task.startDate")}>
-          <DatePicker value={form.values.startAt} onChange={form.setStartAt} />
+          <DateTimePicker value={form.values.startAt} onChange={form.setStartAt} />
         </Field>
         <Field label={t("pm.task.dueDate")}>
-          <DatePicker value={form.values.dueAt} onChange={form.setDueAt} />
+          <DateTimePicker value={form.values.dueAt} onChange={form.setDueAt} />
         </Field>
       </div>
 
