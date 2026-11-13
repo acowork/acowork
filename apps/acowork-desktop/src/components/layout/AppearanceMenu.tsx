@@ -120,7 +120,14 @@ export function AppearanceMenu() {
               Appearance tab's swatches (same size, same ring treatment)
               so the two read as the same control. */}
           <div className="pt-2">
-            <p className="px-1 pb-1.5 text-xs text-text-tertiary">
+            {/* `pb-3`, not the theme section's `pb-1.5`: the selected swatch
+                is `scale-110` with a `ring-2 ring-offset-2`, so its paint
+                reaches ~6px past the top of its 36px box. A 6px label gap is
+                therefore no gap at all — the ring lands on the caption. The
+                theme rows sit inside `py-1.5` buttons and need no such
+                allowance. `mb-3` is also what Settings ▸ Appearance uses for
+                this same caption (SettingsPage.tsx). */}
+            <p className="px-1 pb-3 text-xs text-text-tertiary">
               {t("settings.accentColor")}
             </p>
             <AccentSwatches
