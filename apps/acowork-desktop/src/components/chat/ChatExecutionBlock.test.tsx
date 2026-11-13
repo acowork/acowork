@@ -899,7 +899,7 @@ describe("ChatExecutionBlock", () => {
     expect(answer.className).toContain("bg-chat-bubble");
     const card = answer.parentElement as HTMLElement;
     // One shell, two bands: the title banner and the body are its children.
-    expect(card.className).toContain("border-border-outer");
+    expect(card.className).toContain("border-chat-border");
     expect(card.querySelector("[data-run-header]")).toBeTruthy();
     // The body is the card's body, not a second bubble with its own radius.
     expect(answer.className).not.toContain("rounded-md");

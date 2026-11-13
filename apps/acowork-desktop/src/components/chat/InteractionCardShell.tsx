@@ -17,7 +17,7 @@ import { chatCardBody, chatCardShell, chatCardTitleBar } from "../../lib/ui-styl
  *
  * The chrome rule `chatCardChrome.test.tsx` pins: the highlight color paints
  * a BUTTON BACKGROUND and nothing else. The shell border and the header
- * title stay neutral (`border-border-outer`, `bg-chat-title` + `text-text`).
+ * title stay neutral (`border-chat-border`, `bg-chat-title` + `text-text`).
  */
 interface InteractionCardShellProps {
   icon: LucideIcon;

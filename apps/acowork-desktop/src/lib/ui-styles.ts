@@ -159,7 +159,7 @@ export const dialogButtonSecondary =
  * identical in both: there the card tone already reads as a banner, so the
  * quiet variant only lightens the light theme.
  */
-export const chatCardShell = "overflow-hidden rounded-md border border-border-outer";
+export const chatCardShell = "overflow-hidden rounded-md border border-chat-border";
 const chatCardTitleBarBase =
   "flex w-full items-center gap-[7px] border-b border-border-divider px-3 py-[7px] text-left text-xs font-medium text-text";
 export const chatCardTitleBar = `${chatCardTitleBarBase} bg-chat-title`;

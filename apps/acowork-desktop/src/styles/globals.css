@@ -81,8 +81,8 @@
   /* = zinc-300 — block title */
   --color-chat-body: hsl(0 0% 100%);
   /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
-  --color-chat-border: hsl(240 5.9% 90.6%);
-  /* = zinc-200, #e4e4e7 — container border (CodeBlock/Mermaid wrapper & title separator) */
+  --color-chat-border: hsl(240 5.9% 90.6% / 0.3);
+  /* = zinc-200/30 — container border (chat card shell, CodeBlock/Mermaid wrapper & title separator) */
   --color-chat-input-border: var(--color-border-outer);
   /* = zinc-200, #e4e4e7 — chat input box outline (matches the
      right-panel section divider hairlines like `border-zinc-200` on
@@ -672,8 +672,8 @@
   /* = zinc-700, #3f3f46 — block title (lighter than body) */
   --color-chat-body: hsl(240 3.8% 8%);
   /* = zinc-900, #18181b — block body (darker, closer to panel) */
-  --color-chat-border: hsl(240 5.2% 26.1%);
-  /* = zinc-700, #3f3f46 — container border */
+  --color-chat-border: hsl(240 5.2% 26.1% / 0.2);
+  /* = zinc-700/20 — container border */
   --color-chat-input-border: var(--color-border-outer);
   /* = zinc-800, #27272a — chat input box outline (mirrors the
      right-panel section divider hairlines `dark:border-zinc-800` on
