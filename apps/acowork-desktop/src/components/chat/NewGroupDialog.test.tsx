@@ -39,7 +39,7 @@ function agent(id: string, name: string): AgentStorage {
 beforeEach(() => {
   fetchDirectory.mockClear();
   useAuthStore.setState({
-    mode: "multi_user", status: "logged_in", accessToken: "token",
+    accountState: "ready", status: "logged_in", accessToken: "token",
     account: { user_id: ME, username: "me", display_name: "Me", role: "user", language: "en", timezone: "UTC", created_at: "", updated_at: "" },
   });
   useAgentStore.setState({ agents: { "ag-1": agent("ag-1", "Bot") }, fetchAgents: vi.fn(async () => {}) } as never);

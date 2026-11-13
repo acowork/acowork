@@ -464,7 +464,7 @@ async fn create_session(
     // is system-created and carries no user-side owner.
     let owner = (kind == SessionKind::UserGroup).then(|| caller.clone());
     let session = offload(move || {
-        let participants = typed_participants(auth.as_ref(), &req.participants, Some(&caller));
+        let participants = typed_participants(&auth, &req.participants, Some(&caller));
         chat_sessions::create_session(
             &dir,
             kind,
@@ -482,14 +482,13 @@ async fn create_session(
 /// §8.1: identity types are resolved server-side, never taken from the
 /// request body. The user service owns the account list, so an id naming
 /// a known account is Human and anything else is an agent instance; the
-/// token-verified caller is always Human. Local mode has no accounts —
-/// there every id classifies as Agent (and the human surface is 503).
+/// token-verified caller is always Human.
 fn typed_participants(
-    auth: Option<&std::sync::Arc<crate::auth::service::AuthService>>,
+    auth: &std::sync::Arc<crate::auth::service::AuthService>,
     ids: &[String],
     caller: Option<&str>,
 ) -> Vec<Participant> {
-    let accounts = auth.and_then(|a| a.load_accounts().ok());
+    let accounts = auth.load_accounts().ok();
     ids.iter()
         .map(|id| {
             let identity = if Some(id.as_str()) == caller {
@@ -590,7 +589,7 @@ async fn default_session(
     let auth = state.auth_service.clone();
     let session = offload(move || {
         let ids = [caller.clone(), pair.clone()];
-        let participants = typed_participants(auth.as_ref(), &ids, Some(&caller));
+        let participants = typed_participants(&auth, &ids, Some(&caller));
         // A `user_user` pair is two people. Identity types are resolved
         // server-side (§8.1), so refuse when the peer id did not name a known
         // account — an agent id must never open a human DM.
@@ -778,7 +777,7 @@ async fn add_participants_route(
             return Err("only user_group sessions are user-managed".to_string());
         }
         let start = s.participants.len();
-        let participants = typed_participants(auth.as_ref(), &ids, None);
+        let participants = typed_participants(&auth, &ids, None);
         let mut cur = s;
         for p in participants {
             cur = chat_sessions::add_participant(&dir, &session_id, &p, now_unix())?;
@@ -1509,7 +1508,7 @@ async fn system_ensure_pair(
     let auth = state.auth_service.clone();
     let session = offload(move || {
         let ids = [req.a.clone(), req.b.clone()];
-        let participants = typed_participants(auth.as_ref(), &ids, None);
+        let participants = typed_participants(&auth, &ids, None);
         chat_sessions::ensure_pair(
             &dir,
             participants[0].clone(),
@@ -1558,7 +1557,7 @@ async fn system_ensure_group(
     let dir = data_dir_any(&state).await;
     let auth = state.auth_service.clone();
     let session = offload(move || {
-        let participants = typed_participants(auth.as_ref(), &req.participants, None);
+        let participants = typed_participants(&auth, &req.participants, None);
         chat_sessions::create_session(
             &dir,
             SessionKind::ProjectGroup,
@@ -1588,7 +1587,7 @@ async fn system_sync_group(
     let dir = data_dir_any(&state).await;
     let auth = state.auth_service.clone();
     let session = offload(move || {
-        let participants = typed_participants(auth.as_ref(), &req.participants, None);
+        let participants = typed_participants(&auth, &req.participants, None);
         chat_sessions::sync_group(
             &dir,
             &req.project_id,
@@ -2002,13 +2001,7 @@ fn write_entry(
 }
 
 fn data_dir(state: &AppState) -> Result<std::path::PathBuf, ApiError> {
-    state
-        .auth_service
-        .as_ref()
-        .map(|s| s.data_dir().to_path_buf())
-        .ok_or_else(|| {
-            ApiError::service_unavailable("the account system is disabled (AUTH_MODE=local)")
-        })
+    Ok(state.auth_service.data_dir().to_path_buf())
 }
 
 /// Data dir for the **system** (Gateway-mediated) endpoints: local mode has
@@ -2016,10 +2009,7 @@ fn data_dir(state: &AppState) -> Result<std::path::PathBuf, ApiError> {
 /// mediates (design 27 §4.6) — the shared data dir is the same one every
 /// other store uses. The human-facing endpoints keep [`data_dir`].
 async fn data_dir_any(state: &AppState) -> std::path::PathBuf {
-    match state.auth_service.as_ref() {
-        Some(s) => s.data_dir().to_path_buf(),
-        None => state.shared.read().await.data_dir.clone(),
-    }
+    state.auth_service.data_dir().to_path_buf()
 }
 
 /// Offload a blocking filesystem step off the reactor (same helper shape as

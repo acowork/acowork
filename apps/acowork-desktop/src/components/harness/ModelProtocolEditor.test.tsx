@@ -34,7 +34,13 @@ describe("ModelProtocolEditor", () => {
   it("labels the dropdown and shows the current selection", () => {
     renderEditor({ selection: "responses" });
     expect(screen.getByText(i18n.t("harness.protocol"))).toBeTruthy();
-    expect(screen.getByText(i18n.t("harness.shapeResponses"))).toBeTruthy();
+    // The themed Dropdown shows the current value in its trigger, while the
+    // hidden native <select> still carries the same text in its <option> —
+    // query the visible control rather than a bare text match (which is now
+    // ambiguous by design).
+    expect(
+      screen.getByRole("button", { name: i18n.t("harness.shapeResponses") }),
+    ).toBeTruthy();
   });
 
   it("hides the base_url input unless Responses is selected", () => {

@@ -283,11 +283,11 @@ export async function buildLspWsUrl(
     const params = new URLSearchParams();
     if (workspaceRoot) params.set("workspace_root", workspaceRoot);
     // ADR-089 D2: the proxy sits behind the Gateway bearer gate and a
-    // browser WebSocket cannot set headers — under `multi_user` the
-    // token rides as a query parameter (the Gateway accepts it for
-    // upgrade requests only and redacts it from logs).
+    // browser WebSocket cannot set headers — the token rides as a
+    // query parameter (the Gateway accepts it for upgrade requests only
+    // and redacts it from logs). ADR-114: no account-mode branch.
     const auth = useAuthStore.getState();
-    if (auth.mode === "multi_user" && auth.accessToken) {
+    if (auth.accessToken) {
         params.set("access_token", auth.accessToken);
     }
     const qs = params.toString();

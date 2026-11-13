@@ -26,7 +26,7 @@ Please include:
   signer, Desktop/Mobile app, WASM tool host, …).
 - **What an attacker can do**, concretely. "Arbitrary file read in the Gateway" is a
   report; "the validation looks weak" is not.
-- **Steps to reproduce**, including any config or `AUTH_MODE` the reproduction needs.
+- **Steps to reproduce**, including the config and the reported `account_state`.
 - **Impact** — what is reachable: another user's data, a stored credential, code
   execution as the local OS user.
 - **Your environment** — OS, commit SHA, deployment topology (single machine / LAN /
@@ -62,17 +62,22 @@ ACowork runs as a desktop application under a single OS user account. The **phys
 user is the root of trust** for the local deployment. Anything the OS user can read, the
 Gateway can read.
 
-This is why the two auth modes exist:
+ADR-114: **there is one account system, and it is always on.** The Gateway's bind
+address decides only which network peers can reach the listener; it never decides
+whether accounts exist, whether login is required, or whether the account system has
+been initialised. `AUTH_MODE` / `auth_mode` / `--auth-mode` were removed.
 
-| Auth mode | Binding | Trust boundary | Account system |
-|---|---|---|---|
-| `local` | loopback only | The OS user. Legacy bearer-token auth, no login, no admin role, session filtering disabled. | ADR-076 §1–§11 are no-ops. |
-| `multi_user` | non-loopback | The account system + the OS user | Full ADR-076 account system: login tokens, admin role, session isolation, user-to-user chat. |
+| Question | Authoritative source | What it controls |
+|---|---|---|
+| Is the listener reachable from the network? | `[http].host` bind address | TCP reachability only. `0.0.0.0` exposes the listener; it does not change authentication. |
+| Can anyone log in yet? | `accounts.json` → `AccountSystemState` (`uninitialized` / `needs_setup` / `ready`) | The first-boot gate: until `ready`, all non-setup API routes answer 403 `setup_required`. |
+| May this caller create the first administrator? | The **real peer address** of the connection (`ConnectInfo<SocketAddr>`) | `POST /api/auth/setup` is admitted only from a loopback peer, unconditionally — even if a stale health snapshot claims `ready`. The relay listener denies the path outright because tunnelled requests also arrive with a loopback peer. |
 
-`AUTH_MODE` is resolved by explicit CLI flag → explicit TOML → bind-address inference →
-default `local`. Note the consequence: **binding to `0.0.0.0` implies `multi_user`**.
-If you expose a Gateway to the LAN or the internet, the full account system is active —
-but so is the full attack surface.
+A fresh install is therefore not a "local mode" with no accounts: it is an always-on
+account system in `needs_setup`. The first administrator is created from the Gateway
+host itself (Desktop onboarding wizard, or `acowork-gateway admin-setup`), which mints
+the first token pair. A Gateway bound to `0.0.0.0` has exactly the same account
+semantics as one bound to `127.0.0.1`.
 
 ### Process architecture
 
@@ -148,11 +153,13 @@ whether the underlying operation was "only" a file read.
 
 If you run ACowork for yourself or for a team:
 
-- **Keep the bind address on loopback** unless you are deliberately running a multi-user
-  deployment. `local` is the default and the smaller surface.
-- **When exposing it**, set `AUTH_MODE=multi_user` explicitly and understand that the
-  account system is the only thing standing between a network peer and another user's
-  sessions.
+- **Keep the bind address on loopback** unless you deliberately need network access —
+  that reduces the reachable surface. It does **not** switch authentication off: the
+  account system is always on (ADR-114).
+- **When exposing it**, finish first-boot setup from the Gateway host *before* making
+  the listener reachable. `POST /api/auth/login` has no rate limit or account lockout
+  yet, so put a rate-limiting reverse proxy in front; a valid account token is the only
+  thing standing between a network peer and another user's sessions.
 - **Give the Gateway a dedicated OS account** on shared machines, so a compromise of the
   process does not also compromise the user's other files.
 - **Treat the Vault as the crown jewel.** It is unlocked by the user's password. A

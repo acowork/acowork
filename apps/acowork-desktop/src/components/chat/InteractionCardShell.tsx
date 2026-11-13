@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
+import { chatCardBody, chatCardShell, chatCardTitleBar } from "../../lib/ui-styles";
 
 /**
  * InteractionCardShell — the ONE card chrome every interaction card wears,
@@ -16,7 +17,7 @@ import type { LucideIcon } from "lucide-react";
  *
  * The chrome rule `chatCardChrome.test.tsx` pins: the highlight color paints
  * a BUTTON BACKGROUND and nothing else. The shell border and the header
- * title stay neutral (`border-border-outer`, `bg-chat-title` + `text-text`).
+ * title stay neutral (`border-chat-border`, `bg-chat-title` + `text-text`).
  */
 interface InteractionCardShellProps {
   icon: LucideIcon;
@@ -44,13 +45,13 @@ export function InteractionCardShell({
 }: InteractionCardShellProps) {
   return (
     <div className={className}>
-      <div className="overflow-hidden rounded-md border border-border-outer">
-        <div className="flex items-center gap-[7px] border-b border-border-divider bg-chat-title px-3 py-[7px] text-xs font-medium text-text">
+      <div className={chatCardShell}>
+        <div className={chatCardTitleBar}>
           <Icon className="h-3.5 w-3.5 shrink-0" />
           <span className="flex-1">{title}</span>
           {headerRight}
         </div>
-        <div className={bodyClassName ?? "bg-chat-bubble px-3 py-2.5"}>{children}</div>
+        <div className={bodyClassName ?? chatCardBody}>{children}</div>
       </div>
     </div>
   );

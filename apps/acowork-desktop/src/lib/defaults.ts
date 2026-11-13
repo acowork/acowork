@@ -1,7 +1,8 @@
-import type { GatewayMode, Theme } from "./types";
+import type { Theme } from "./types";
 
+/** The fixed loopback address of a Desktop-spawned Gateway. It is also the
+ *  first entry in the server-address list — not a separate "local mode". */
 export const DEFAULT_GATEWAY_URL = "http://127.0.0.1:19876";
-export const DEFAULT_GATEWAY_MODE: GatewayMode = "local";
 export const DEFAULT_THEME: Theme = "system";
 export const DEFAULT_FONT_SIZE = 0.875;
 export const DEFAULT_LOG_LEVEL = "info";

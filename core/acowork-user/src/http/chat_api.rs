@@ -27,8 +27,8 @@
 //! therefore the service's own record of the bytes it received, and `kind`
 //! is derived from that rather than accepted from the caller.
 //!
-//! Registered only under `AUTH_MODE=multi_user`, alongside `account_api`
-//! (ADR-076 §决策 12).
+//! ADR-114: always registered alongside `account_api`; there is no
+//! deployment mode that hides the chat surface.
 
 use std::path::PathBuf;
 
@@ -145,9 +145,9 @@ pub struct MessagesResponse {
 // ── Plumbing ───────────────────────────────────────────────────────────
 
 fn service(state: &AppState) -> Result<std::sync::Arc<AuthService>, ApiError> {
-    state.auth_service.clone().ok_or_else(|| {
-        ApiError::service_unavailable("the account system is disabled (AUTH_MODE=local)")
-    })
+    // ADR-114: the account system is always present — there is no
+    // deployment in which these routes are unreachable because it is off.
+    Ok(state.auth_service.clone())
 }
 
 fn data_dir(state: &AppState) -> Result<PathBuf, ApiError> {

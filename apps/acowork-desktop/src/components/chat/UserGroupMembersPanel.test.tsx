@@ -63,7 +63,7 @@ beforeEach(() => {
     })),
   );
   useAuthStore.setState({
-    mode: "multi_user", status: "logged_in", accessToken: "token",
+    accountState: "ready", status: "logged_in", accessToken: "token",
     account: { user_id: ME, username: "me", display_name: "Me", role: "user", language: "en", timezone: "UTC", created_at: "", updated_at: "" },
   });
 });

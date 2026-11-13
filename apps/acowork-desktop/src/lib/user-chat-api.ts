@@ -6,7 +6,7 @@
  * attaches the bearer and handles the 401 → refresh → replay for us.
  * Threading tokens through here would be a second, weaker copy of that.
  *
- * Every route below exists only under `AUTH_MODE=multi_user`
+ * Every route below belongs to the always-on account system (ADR-114)
  * (ADR-076 §决策 12); under `local` the view that uses them is never
  * mounted.
  *

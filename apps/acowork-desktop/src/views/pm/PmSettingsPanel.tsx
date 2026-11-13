@@ -32,7 +32,7 @@ import { showToast } from "../../components/common/ToastProvider";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { MemberManagerSection } from "./MemberManagerDialog";
-import { canGovernProject, useLocalMode, useSelfAccount } from "./pmMembers";
+import { canGovernProject, useSelfAccount } from "./pmMembers";
 import type { PmProject } from "../../lib/pm-types";
 
 interface PmSettingsPanelProps {
@@ -49,8 +49,7 @@ export function PmSettingsPanel({ width, onResizeStart, onClose }: PmSettingsPan
   // server would refuse. The roster half is gated inside `MemberManagerSection`
   // (shared with the group-chat dialog), so it is not repeated here.
   const self = useSelfAccount();
-  const localMode = useLocalMode();
-  const canGovern = canGovernProject(project, self, localMode);
+  const canGovern = canGovernProject(project, self);
 
   return (
     <div className="relative ml-1 flex shrink-0 flex-col" style={{ width }}>

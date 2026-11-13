@@ -407,6 +407,15 @@ mod tests {
             port: p,
             ready: true,
         });
+        // ADR-114: even anonymous requests traverse the auth middleware,
+        // which answers 503 while no user-service verifier is published
+        // (the "service still starting" window). Tests simulate a healthy
+        // Gateway: publish the fixture verifier and arm the internal
+        // service token so tests can pass the always-on bearer gate
+        // WITHOUT acquiring a user identity — the anonymous pass-through
+        // these forwarding tests were written against.
+        gw.user_verifier = Some(crate::http::test_support::verifier());
+        gw.internal_service_token = Some("test-svc-token".to_string());
         AppState::new(Arc::new(RwLock::new(gw)), Arc::new(HttpAuth::new(false)))
     }
 
@@ -453,6 +462,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/users")
+                    .header("authorization", "Bearer test-svc-token")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -477,7 +487,11 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/users")
-                    .header("authorization", "Bearer some.access.token")
+                    // ADR-114: the always-on gate now actually verifies
+                    // this header; the internal service token passes it
+                    // without acquiring a user identity, matching the
+                    // anonymous-forwarding semantics this test asserts.
+                    .header("authorization", "Bearer test-svc-token")
                     .header("x-echo", "passthrough")
                     .body(Body::empty())
                     .unwrap(),
@@ -511,6 +525,7 @@ mod tests {
             .oneshot(
                 Request::builder()
                     .uri("/api/users")
+                    .header("authorization", "Bearer test-svc-token")
                     .header("x-auth-user", "attacker-chosen-id")
                     .header("x-auth-role", "admin")
                     .header("x-auth-as-user", "victim")
@@ -649,6 +664,7 @@ mod tests {
                 Request::builder()
                     .method(axum::http::Method::DELETE)
                     .uri("/api/chat-sessions/c-1")
+                    .header("authorization", "Bearer test-svc-token")
                     .body(Body::empty())
                     .unwrap(),
             )

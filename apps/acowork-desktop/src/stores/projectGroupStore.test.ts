@@ -65,7 +65,7 @@ function stubFetch(routes: Record<string, (url: string, init?: RequestInit) => R
 }
 
 beforeEach(() => {
-  useAuthStore.setState({ mode: "multi_user", status: "logged_in", account: {
+  useAuthStore.setState({ accountState: "ready", status: "logged_in", account: {
     user_id: ME, username: "me", display_name: "Me", role: "user",
     language: "en", timezone: "UTC", created_at: "", updated_at: "",
   }, accessToken: "token" });

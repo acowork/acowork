@@ -10,9 +10,9 @@
 //! **The Gateway is the only trusted source of identity.** Every request
 //! arrives through the reverse proxy with `x-user-id` already stripped of
 //! any client-supplied value and re-derived from the caller's access token
-//! (`acowork-gateway`'s `auth_middleware`). In `AUTH_MODE=local` the header
-//! is absent, which means "no account system" — unfiltered, exactly as
-//! before this module existed.
+//! (`acowork-gateway`'s `auth_middleware`). ADR-114: the account system is
+//! always present, so an absent header means an internal/trusted caller
+//! with no scope to enforce, not a deployment mode.
 //!
 //! Writes are *not* the same as reads: a public session is visible to
 //! every account but owned by one. See [`SessionMeta::is_writable_by`].
@@ -298,10 +298,10 @@ async fn publish_lifecycle(
 ///
 /// Membership comes from the Gateway-injected `x-acowork-chat-scope` — the
 /// same set the `Members` read check uses, and the same trust rule (the
-/// middleware strips any client-supplied copy). `Unfiltered` (`AUTH_MODE=local`,
-/// where there is no account system at all) has nothing to check against and
-/// binds directly; an administrator binds through its own membership, exactly
-/// like any other account.
+/// middleware strips any client-supplied copy). `Unfiltered` (an internal
+/// caller with no scope header, or the wildcard admin scope) has nothing to
+/// check against and binds directly; a scoped administrator binds through
+/// its own membership, exactly like any other account.
 ///
 /// A `false` answer skips the binding; it never rejects the creation. The
 /// header is best-effort injection, and an unbound session is merely not a

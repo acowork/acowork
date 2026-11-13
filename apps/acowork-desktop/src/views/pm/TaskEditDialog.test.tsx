@@ -33,12 +33,17 @@ const mocks = vi.hoisted(() => ({
   createParentId: null as string | null,
   returnTo: null as string | null,
   tasks: [] as PmTaskResponse[],
+  /** A second (stacked) frame — the child box on top of the parent. */
+  child: null as null | { mode: "edit" | "create"; detail: PmTaskResponse | null },
   dirty: false,
   saving: false,
   hasMembers: true,
   values: {} as Record<string, unknown>,
   openTask: vi.fn(async () => {}),
   openCreate: vi.fn(),
+  pushTask: vi.fn(),
+  pushCreate: vi.fn(),
+  pop: vi.fn(),
   setMode: vi.fn(),
   refresh: vi.fn(async () => {}),
   uploadAttachment: vi.fn(async () => ({ id: "att-1" }) as unknown as PmAttachmentMeta),
@@ -54,29 +59,65 @@ const mocks = vi.hoisted(() => ({
   setDueAt: vi.fn(),
 }));
 
+/**
+ * The store is a STACK: `frames[]` holds the open boxes (bottom → top) and
+ * `rows[key]` holds each box's row data. The mock mirrors that shape — one
+ * frame by default, two when `mocks.child` is set (a subtask box on top of
+ * its parent).
+ */
 function detailState() {
-  return {
-    taskId: mocks.detail?.id ?? null,
-    detail: mocks.detail,
-    attachments: mocks.attachments,
-    activity: mocks.activity,
-    uploading: mocks.uploading,
-    replying: mocks.replying,
-    addReply: mocks.addReply,
-    loading: false,
-    error: mocks.error,
+  const parent = {
+    key: "tf1",
     mode: mocks.mode,
+    taskId: mocks.detail?.id ?? null,
     projectId: mocks.projectId ?? mocks.detail?.project_id ?? null,
     createParentId: mocks.createParentId,
-    returnTo: mocks.returnTo,
-    openTask: mocks.openTask,
-    openCreate: mocks.openCreate,
-    setMode: mocks.setMode,
+  };
+  const child = mocks.child
+    ? {
+        key: "tf2",
+        mode: mocks.child.mode,
+        taskId: mocks.child.detail?.id ?? null,
+        projectId: mocks.projectId ?? mocks.child.detail?.project_id ?? null,
+        createParentId: null,
+      }
+    : null;
+  return {
+    frames: child ? [parent, child] : [parent],
+    rows: {
+      tf1: {
+        detail: mocks.detail,
+        attachments: mocks.attachments,
+        activity: mocks.activity,
+        uploading: mocks.uploading,
+        replying: mocks.replying,
+        loading: false,
+        error: mocks.error,
+      },
+      ...(child
+        ? {
+            tf2: {
+              detail: child.detail,
+              attachments: [],
+              activity: [],
+              uploading: false,
+              replying: false,
+              loading: false,
+              error: null,
+            },
+          }
+        : {}),
+    },
+    addReply: mocks.addReply,
     refresh: mocks.refresh,
     uploadAttachment: mocks.uploadAttachment,
     deleteAttachment: mocks.deleteAttachment,
-    updateDetail: vi.fn(),
-    close: vi.fn(),
+    openTask: mocks.openTask,
+    openCreate: mocks.openCreate,
+    pushTask: mocks.pushTask,
+    pushCreate: mocks.pushCreate,
+    pop: mocks.pop,
+    setMode: mocks.setMode,
     clear: vi.fn(),
   };
 }
@@ -163,12 +204,12 @@ vi.mock("./useTaskForm", () => ({
     reset: mocks.reset,
     save: mocks.save,
   }),
-  localDateFieldToIso: (v: string) => v,
-  isoToLocalDate: (v?: string | null) => v ?? "",
+  localDateTimeToIso: (v: string) => v,
+  isoToLocalDateTime: (v?: string | null) => v ?? "",
 }));
 
 vi.mock("../../i18n/useTranslation", () => ({
-  // The hook's real shape: `DatePicker` reads the language for its weekday
+  // The hook's real shape: `DateTimePicker` reads the language for its weekday
   // initials, so a `{ t }`-only mock is a lie that only shows up at runtime.
   useTranslation: () => ({ t: (key: string) => key, i18n: { language: "en" } }),
 }));
@@ -224,6 +265,7 @@ beforeEach(() => {
   mocks.projectId = null;
   mocks.createParentId = null;
   mocks.returnTo = null;
+  mocks.child = null;
   mocks.tasks = [];
   mocks.dirty = false;
   mocks.saving = false;
@@ -231,6 +273,9 @@ beforeEach(() => {
   mocks.values = {};
   mocks.openTask.mockClear();
   mocks.openCreate.mockClear();
+  mocks.pushTask.mockClear();
+  mocks.pushCreate.mockClear();
+  mocks.pop.mockClear();
   mocks.setMode.mockClear();
   mocks.uploadAttachment.mockClear();
   mocks.deleteAttachment.mockClear();
@@ -332,31 +377,33 @@ describe("chrome — the box the user asked to keep", () => {
 
   // 原生 `<input type="date">` 的弹层是 WebView2 自己画的（不在页面 DOM 里），
   // 箭头尺寸和底部按钮的底色都改不动 —— 那正是"看着业余"的根因。所以日期字段
-  // 必须是组件库的 DatePicker，且它写回表单的值仍是本地日历日 `YYYY-MM-DD`。
+  // 必须是组件库的 DateTimePicker，且它写回表单的值仍是本地墙钟
+  // `YYYY-MM-DDTHH:mm`。
   it("the date fields are the design-system picker, not a native date input", () => {
-    mocks.values = { startAt: "2026-11-06" };
+    mocks.values = { startAt: "2026-11-06T08:30" };
     const { container } = render(<TaskEditDialog onClose={() => {}} />);
     expect(container.querySelector('input[type="date"]')).toBeNull();
     const triggers = screen.getAllByTestId("date-picker-trigger");
     expect(triggers).toHaveLength(2);
     expect(triggers[0].textContent).toContain("2026-11-06");
+    expect(triggers[0].textContent).toContain("08:30");
     // 空字段读占位符，不再是一个空白原生控件
     expect(triggers[1].textContent).toContain("datePicker.placeholder");
   });
 
-  it("picking a day writes the local calendar day back into the form", () => {
-    mocks.values = { startAt: "2026-11-06" };
+  it("picking a day writes the local wall clock back into the form", () => {
+    mocks.values = { startAt: "2026-11-06T08:30" };
     render(<TaskEditDialog onClose={() => {}} />);
     fireEvent.click(screen.getAllByTestId("date-picker-trigger")[0]);
     fireEvent.click(screen.getByRole("button", { name: "2026-11-20" }));
-    expect(mocks.setStartAt).toHaveBeenCalledWith("2026-11-20");
+    expect(mocks.setStartAt).toHaveBeenCalledWith("2026-11-20T08:30");
     expect(mocks.setDueAt).not.toHaveBeenCalled();
   });
 
   it("dismissing the calendar with Escape leaves the task form open", () => {
     // 对话框自己在 window 上监听 Escape 来关闭整张表单；日历必须吞掉这个键 ——
     // 关掉日历不等于丢弃草稿。
-    mocks.values = { startAt: "2026-11-06" };
+    mocks.values = { startAt: "2026-11-06T08:30" };
     const onClose = vi.fn();
     render(<TaskEditDialog onClose={onClose} />);
     fireEvent.click(screen.getAllByTestId("date-picker-trigger")[0]);
@@ -582,22 +629,21 @@ describe("the three carried-over capabilities", () => {
     expect(screen.getByTestId("task-tree")).toBeTruthy();
   });
 
-  it("添加子任务 opens a create form that knows where it came from", () => {
+  it("添加子任务 opens a create form ON TOP of this one", () => {
     render(<TaskEditDialog onClose={() => {}} />);
     openTab("related");
     fireEvent.click(screen.getByText("+ pm.task.addSubtask"));
-    expect(mocks.openCreate).toHaveBeenCalledWith({
+    expect(mocks.pushCreate).toHaveBeenCalledWith({
       projectId: "p-1",
       parentId: "t-1",
-      returnTo: "t-1",
     });
   });
 
-  it("clicking a child row re-opens this box on that row", () => {
+  it("clicking a child row opens ANOTHER box on top of this one", () => {
     render(<TaskEditDialog onClose={() => {}} />);
     openTab("related");
     fireEvent.click(screen.getByText("child-row"));
-    expect(mocks.openTask).toHaveBeenCalledWith("t-child");
+    expect(mocks.pushTask).toHaveBeenCalledWith("t-child");
   });
 });
 
@@ -769,9 +815,9 @@ describe("leaving a dirty form", () => {
     render(<TaskEditDialog onClose={() => {}} />);
     openTab("related");
     fireEvent.click(screen.getByText("child-row"));
-    expect(mocks.openTask).not.toHaveBeenCalled();
+    expect(mocks.pushTask).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("pm.task.discardChangesConfirm"));
-    expect(mocks.openTask).toHaveBeenCalledWith("t-child");
+    expect(mocks.pushTask).toHaveBeenCalledWith("t-child");
   });
 
   it("leaving a clean form clears the draft — it must not resurrect on re-entry", () => {
@@ -780,14 +826,16 @@ describe("leaving a dirty form", () => {
     expect(mocks.reset).toHaveBeenCalledTimes(1);
   });
 
-  it("cancelling a subtask form returns to the parent it was opened from", () => {
-    mocks.mode = "create";
-    mocks.detail = null;
-    mocks.returnTo = "t-root";
+  it("cancelling a box that sits ON TOP pops it — the parent stays open", () => {
+    // A subtask box is a second layer of the stack: cancelling it must land
+    // the reader back on the parent, not close the whole thing.
+    mocks.child = { mode: "create", detail: null };
     const onClose = vi.fn();
     render(<TaskEditDialog onClose={onClose} />);
-    fireEvent.click(screen.getByText("common.cancel"));
-    expect(mocks.openTask).toHaveBeenCalledWith("t-root");
+    // Two boxes are on screen; the child's cancel is the second one.
+    expect(screen.getAllByRole("dialog")).toHaveLength(2);
+    fireEvent.click(screen.getAllByText("common.cancel")[1]);
+    expect(mocks.pop).toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
   });
 

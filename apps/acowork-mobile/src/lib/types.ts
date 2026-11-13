@@ -115,9 +115,9 @@ export interface GatewayStatus {
   agents_running: number
   uptime_secs: number
   mqtt_port: number
-  auth_mode: 'local' | 'multi_user'
+  /** ADR-114: the account system is always on; this is its runtime state. */
+  account_state: 'uninitialized' | 'needs_setup' | 'ready'
   registration_open: boolean
-  requires_setup: boolean
 }
 
 /** `POST /api/auth/login|refresh` — `TokenPair` (ADR-076 §决策 3). */

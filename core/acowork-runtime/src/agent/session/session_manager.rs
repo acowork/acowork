@@ -1276,9 +1276,9 @@ impl SessionManager {
     ///
     /// Returns the new session ID on success.
     /// ADR-076 §决策 4: `initiator` is who started this session (an account,
-    /// or an agent instance), or `None` under `AUTH_MODE=local` (no account
-    /// system). It is recorded once on the session meta and never
-    /// reassigned.
+    /// or an agent instance), or `None` for an internal caller with no
+    /// account identity. ADR-114: the account system is always present, so
+    /// `None` is not a deployment mode. Recorded once, never reassigned.
     pub async fn create_frontend_session(
         &mut self,
         workspace_id: Option<&str>,

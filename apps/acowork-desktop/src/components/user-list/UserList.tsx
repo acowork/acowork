@@ -2,9 +2,8 @@
  * Sidebar "Users" folding group (ADR-076 §决策 5 / 6 / 7).
  *
  * Rendered below the agent list in [AgentList.tsx](../agent-list/AgentList.tsx).
- * Only appears under `AUTH_MODE=multi_user` with a live session — under
- * `local` the whole account system is a no-op (§决策 12), so the group is
- * not shown.
+ * Only appears with a live session (ADR-114: the account system is
+ * always present, so there is no mode in which the group is hidden).
  *
  * Selection semantics:
  * - Single click (any role): opens / focuses the 1:1 DM session with that
@@ -64,7 +63,6 @@ export type UserListHandle = {
 
 export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref) {
   const { t } = useTranslation();
-  const mode = useAuthStore((s) => s.mode);
   const status = useAuthStore((s) => s.status);
   const self = useAuthStore((s) => s.account);
   const accessToken = useAuthStore((s) => s.accessToken);
@@ -87,7 +85,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
 
   const menu = useContextMenu<UserAccount>();
 
-  const loggedIn = mode === "multi_user" && status === "logged_in";
+  const loggedIn = status === "logged_in";
   const isAdmin = self?.role === "admin";
   // §决策 6: a non-admin may create accounts only while self-registration is
   // open (the Gateway hardcodes the created role to `user`). Admins always may.

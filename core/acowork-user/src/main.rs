@@ -42,13 +42,6 @@ fn main() {
     if let Some(port) = cli.port {
         config.port = port;
     }
-    match acowork_user::cli::resolve_auth_mode(&cli, config.auth_mode) {
-        Ok(mode) => config.auth_mode = mode,
-        Err(e) => {
-            eprintln!("{e}");
-            std::process::exit(1);
-        }
-    }
     if let Err(e) = config.validate() {
         tracing::error!(error = %e, "invalid acowork-user config");
         std::process::exit(1);
@@ -81,27 +74,24 @@ fn main() {
         std::process::exit(run_first_admin(&config));
     }
 
-    let auth = if config.is_multi_user() {
-        match AuthService::new(
-            &config.data_dir,
-            config.password_policy.clone(),
-            config.bootstrap_admin.clone(),
-        ) {
-            Ok(svc) => {
-                if let Err(e) = svc.ensure_bootstrap_admin() {
-                    tracing::error!(error = %e, "failed to ensure bootstrap admin");
-                    std::process::exit(1);
-                }
-                Some(Arc::new(svc))
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to initialize the account service");
+    // ADR-114: the account system is always on — there is no mode in
+    // which this process serves profiles without accounts.
+    let auth = match AuthService::new(
+        &config.data_dir,
+        config.password_policy.clone(),
+        config.bootstrap_admin.clone(),
+    ) {
+        Ok(svc) => {
+            if let Err(e) = svc.ensure_bootstrap_admin() {
+                tracing::error!(error = %e, "failed to ensure bootstrap admin");
                 std::process::exit(1);
             }
+            Arc::new(svc)
         }
-    } else {
-        tracing::info!("AUTH_MODE=local — serving profiles and avatars only");
-        None
+        Err(e) => {
+            tracing::error!(error = %e, "failed to initialize the account service");
+            std::process::exit(1);
+        }
     };
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -119,14 +109,12 @@ fn main() {
         // fail-soft: a pair that cannot convert keeps its staging directory
         // for the next boot, and the adapter 404s that chat rather than
         // serve a half-migrated one.
-        if let Some(svc) = auth.as_ref() {
-            match acowork_user::chat_sessions::migrate_legacy(svc.data_dir()) {
-                Ok(r) if r.pairs > 0 => {
-                    tracing::info!(pairs = r.pairs, messages = r.messages, "legacy chat layout migrated (Wave 6.2)");
-                }
-                Ok(_) => {}
-                Err(e) => tracing::error!(error = %e, "legacy chat migration aborted"),
+        match acowork_user::chat_sessions::migrate_legacy(auth.data_dir()) {
+            Ok(r) if r.pairs > 0 => {
+                tracing::info!(pairs = r.pairs, messages = r.messages, "legacy chat layout migrated (Wave 6.2)");
             }
+            Ok(_) => {}
+            Err(e) => tracing::error!(error = %e, "legacy chat migration aborted"),
         }
 
         // Profile-change signal (ADR-084 §决策 4b). Best-effort: a broker that
@@ -165,7 +153,6 @@ fn main() {
         tracing::info!(
             addr = %addr,
             data_dir = %config.data_dir.display(),
-            auth_mode = %config.auth_mode,
             "acowork-user service listening (standalone)"
         );
 
@@ -197,13 +184,6 @@ fn run_admin_setup(
     password_stdin: bool,
     check_only: bool,
 ) -> i32 {
-    if !config.is_multi_user() {
-        eprintln!(
-            "admin-setup requires --auth-mode multi_user (resolved: {}).",
-            config.auth_mode
-        );
-        return 1;
-    }
     if check_only {
         // Read-only probe: report the same predicate `/health` publishes as
         // `requires_setup`, so the Gateway's first-boot prompt cannot
@@ -265,13 +245,6 @@ fn run_admin_setup(
 /// account identity is established even before the password is set, and
 /// the default owner is an identity, not a credential.
 fn run_first_admin(config: &UserServiceConfig) -> i32 {
-    if !config.is_multi_user() {
-        eprintln!(
-            "first-admin requires --auth-mode multi_user (resolved: {}).",
-            config.auth_mode
-        );
-        return 1;
-    }
     let list = match acowork_user::account::store::load_accounts(&config.data_dir) {
         Ok(list) => list,
         Err(e) => {

@@ -5,7 +5,7 @@ import { cn } from "../../lib/utils";
  * The field surface: border, fill, padding and focus treatment every form
  * control in the app shares.
  *
- * Exported because a control is not always an `<input>` — `DatePicker`'s
+ * Exported because a control is not always an `<input>` — `DateTimePicker`'s
  * trigger is a `<button>` opening a calendar, and it has to sit in the same
  * row as the text fields without looking like a different family. Copying the
  * class string into it would be a second source of truth that drifts the first

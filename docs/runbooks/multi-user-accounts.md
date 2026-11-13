@@ -1,106 +1,115 @@
 # 多用户账号系统 - 用户手册 / Runbook
 
-> 对应设计：[ADR-076 多用户账号系统](../adr/zh/ADR-076-multi-user-account-system.md)。
-> 本文是**面向使用者的操作手册**——怎么开、怎么建号、怎么用 Desktop、数据落在哪、出问题怎么查。
-> 产品背景（为什么这么设计）看 ADR；本文只讲"手怎么动"。
+> ⚠️ **本文的开篇已被 [ADR-114](../adr/zh/ADR-114-account-system-decoupled-from-network-topology.md) 取代。**
+> `AUTH_MODE` / `auth_mode` / `--auth-mode` / `[multi_user]` 配置段**已全部删除**。
+> 账号系统恒开，bind 地址不再决定登录模式；首次启动不再"拒启动"，而是进入
+> `needs_setup` 受限态并从 Gateway 本机完成管理员设置。下文 §0–§2 已按 ADR-114
+> 重写；§3 以后的账号生命周期 / 权限语义仍然成立，但凡出现 `AUTH_MODE`、
+> `auth_mode`、按 bind 推断模式、"路由 404" 的段落都是**历史记录，不可照做**。
+> 产品背景看 ADR-114；本文只讲"手怎么动"。
 
 ---
 
 ## 0. 一分钟版
 
 ```bash
-# 单机（现状，无账号系统）：什么都不用做，行为与之前完全一致
-acowork-gateway --daemon --home ~/.acowork/acowork-gateway
-
-# 多用户：写配置 → 起 Gateway → Desktop 打开就是登录页
-cat >> ~/.acowork/acowork-gateway/config/gateway.toml <<'EOF'
-auth_mode = "multi_user"
-
-[multi_user.bootstrap_admin]
-username = "root"
-password = "改掉这个密码1"
-EOF
+# 什么都不用配：账号系统恒开，新装进入 needs_setup
 acowork-gateway --daemon --home ~/.acowork/acowork-gateway
 ```
 
-一个开关（`AUTH_MODE`）决定这台 Gateway 是**单人本地工具**还是**多用户服务**。
-它只有一个值是危险的：明明绑在 `0.0.0.0`（别人能连）却跑在 `local`（没有账号系统）——所以模式按 bind 地址**推断**，并把推断依据写进启动日志。
+打开**和 Gateway 同一台机器**上的 Desktop，会出现首启向导（不是登录页）：
+填用户名、显示名、密码 → 创建第一个管理员 → 直接带着 token 进主界面。
+
+想跳过向导、用配置预置管理员：写 user 服务自己的 `acowork-user.toml`，
+再在 `gateway.toml` 的 `[user].config` 指向它（见 §2.1）。
+
+> 把 Gateway 从 `127.0.0.1` 改成 `0.0.0.0` **不会**改变任何账号语义，只是让
+> 监听器能被网络上的其他机器连到。账号是一个还是多个，只取决于你建了几个。
 
 ---
 
-## 1. AUTH_MODE：一个开关，两种部署
+## 1. 账号系统恒开：状态与网络拓扑无关
 
-| | `local`（默认，单用户） | `multi_user`（多用户） |
+ADR-114 废除了 `AUTH_MODE`。现在只有三种**账号系统状态**，都来自
+`acowork-user` 的 `accounts.json`，由 `GET /api/status.account_state` 下发：
+
+| `account_state` | 含义 | Gateway 行为 |
 |---|---|---|
-| 身份 | 无。谁连上就是"本机用户" | 账号 + 密码，JWT（access / refresh） |
-| 登录页 | 不出现（Desktop 直接进主界面） | 首次启动即出现 |
-| 路由 | `/api/auth/*`、`/api/users/*`（账号管理）、用户聊天**未注册** → 404 | 全部注册，无 token → 401（`/health`、`/api/status` 与登录/刷新/登出/首次登录这几条除外） |
-| 会话可见性 | 不过滤，看到全部 | 只看自己的；admin 可用 `?as_user=` 只读查看。**新建会话默认私有**（🔒），要给别人看就点输入框工具行的 🌐 开关 |
-| 落盘 | 不创建 `accounts.json`，不创建 `data/auth/` | 两者都创建 |
-| 用户档案 | 沿用旧的 `user_profiles.json` | 同上，**不升级 schema** |
+| `uninitialized` | 账号存储不存在 / 为空 | 除 `/health`、`/api/status`、`POST /api/auth/setup` 外，全部 403 `setup_required` |
+| `needs_setup` | 有账号但没有可登录的管理员（典型：启动时播种的无密码 `admin`） | 同上 |
+| `ready` | 至少一个 admin 有真实 Argon2id hash 且未禁用 | 正常服务，无 token → 401 |
 
-**为什么 local 模式下路由是"不存在"而不是"403"**：未注册的路由不可能因为将来某次中间件改动被放开。少一条能踩的路，比多一条守住的墙划算（ADR-076 §决策 12）。
+要点：
 
-> ⚠️ **暴露到非信任网络前必读**：`POST /api/auth/login` **没有速率限制，也没有账号 lockout**（连续失败不锁定账号）。当前唯一的在线防线是密码强度（`password_policy`），其余靠部署面兜底——默认部署 bind `127.0.0.1`，外部根本连不上。若要把 Gateway 放到局域网 / 公网，**先**在它前面加一层限流（反向代理的 `limit_req` / fail2ban 之类），或先补上 ADR-076 §10.2 第 14 项。这不是"可以留白的 ceiling"，是信任边界上的缺口。
+- **路由恒注册**：`/api/auth/*`、`/api/users/*`、用户聊天始终存在，不存在
+  "local 模式 404" 这回事。首启是靠 `restricted_mode` 中间件返回 403 拦住的。
+- **bind 只管连通性**：`[http].host` 是 `127.0.0.1` 还是 `0.0.0.0`，与账号
+  系统是否存在、是否需要登录、是否已初始化**完全无关**。
+- **首启只能本机做**：`POST /api/auth/setup` 由 Gateway 按**真实 peer 地址**
+  （不是 bind、不是可伪造的 header）放行，且这个判定是无条件的，不受
+  账号状态快照影响。relay 隧道进来的请求 peer 也是 loopback，所以 relay
+  listener 直接把该路径 deny 掉。远端 Desktop / Mobile 会看到 403
+  `setup_local_only`，需要回 Gateway 本机用 Desktop 或
+  `acowork-gateway admin-setup` 完成。
+- **会话可见性**：只看自己的；admin 可用 `?as_user=` 只读查看。新建会话
+  默认私有（🔒）。`user_profiles.json` 是从 `accounts.json` 派生的展示视图。
 
-### 1.1 模式怎么定的（优先级从上到下）
-
-1. `--auth-mode local|multi_user`（命令行，最大）
-2. `gateway.toml` 里的 `auth_mode = "local" | "multi_user"`
-3. **bind 地址推断**：`127.0.0.1` / `[::1]` / 其他 loopback → `local`；`0.0.0.0` / 局域网 IP / 公网 IP / link-local → `multi_user`
-4. 都没有 → `local`
-
-```bash
-# 想看看这台机器会被判成什么：起一次，看日志里的 AUTH_MODE 行
-grep -m1 "AUTH_MODE=" ~/.acowork/acowork-gateway/data/logs/*.log
-```
-
-显式指定与 bind 推断不一致时**显式值赢**，但会打一条 `warn`（`explicit auth_mode overrides the bind-address inference`）——因为 "0.0.0.0 + local" 是唯一一个会让服务裸奔的组合，绝不能是静默的。
+> ⚠️ **暴露到非信任网络前必读**：`POST /api/auth/login` **没有速率限制，也没有账号 lockout**。
+> 当前唯一的在线防线是密码强度（`password_policy`），其余靠部署面兜底。若要把
+> Gateway 放到局域网 / 公网，**先**在它前面加一层限流（反向代理的 `limit_req` /
+> fail2ban 之类）。这不是"可以留白的 ceiling"，是信任边界上的缺口。
 
 ---
 
-## 2. 第一次启动多用户模式
+## 2. 第一次启动（首启设置）
 
-### 2.1 配置
+### 2.1 两条路，任选其一
 
-`{HOME_DIR}/.acowork/acowork-gateway/config/gateway.toml`：
+**A. Desktop 向导（默认）**：什么都不配。user 服务在空的 `accounts.json` 上
+播种一个无密码 `admin`，`/health` 报 `needs_setup`，Desktop 显示首启表单。
+`POST /api/auth/setup` 原地激活这个 `admin`（不会建出第二个管理员），返回
+token pair。重复调用返回 409。
+
+**B. 配置预置管理员**：写 user 服务自己的 TOML（`acowork-user.toml`）：
 
 ```toml
-# 三个目录字段没有默认值：一旦用 --config-path 指定配置文件，就必须写全
-vault_dir = "/Users/you/.acowork/acowork-gateway/data/vault"
-packages_dir = "/Users/you/.acowork/acowork-gateway/config/packages"
-data_dir = "/Users/you/.acowork/acowork-gateway/data"
-
-auth_mode = "multi_user"
-
-# 首次启动的管理员。表为空时**必须**有这一项，否则拒启动。
-[multi_user.bootstrap_admin]
+[bootstrap_admin]
 username = "root"
 password = "换一个满足策略的密码1"     # 只在账号表为空时使用
 display_name = "管理员"                # 可选
 
-[multi_user.password_policy]           # 可选，下面是默认值
+[password_policy]                       # 可选，下面是默认值
 min_length = 8
 require_digit = true
 require_mixed_case = false
 
-registration_open = false              # 见 §3.1
+registration_open = false                # 见 §3.1
 ```
 
-> `bootstrap_admin` 是**一次性**的：账号表一旦非空，这项配置再也不会被读。它不是"常驻的第二个管理员"，所以别指望改它来改密码——改密码走 Desktop（§4.2）。
+再在 `gateway.toml` 里把它交给 user 服务：
 
-### 2.2 起不来？这是设计好的
-
-空账号表 + 没配 `bootstrap_admin` + `multi_user` → **拒启动**，退出码非 0：
-
-```
-Error: Config error: AUTH_MODE=multi_user requires [multi_user].bootstrap_admin in
-gateway.toml when the account store is empty — refusing to start with no way to log in
+```toml
+[user]
+config = "/Users/you/.acowork/acowork-gateway/config/acowork-user.toml"
 ```
 
-一个没人能登录的 Gateway 是最坏的结果：进程活着、端口开着、Desktop 卡在登录页、没有任何自救入口。所以这里宁可不开（`core/acowork-gateway/tests/auth_mode_e2e.rs` 把这个行为钉住了）。
+配了 `bootstrap_admin` 时，启动后 `/api/status.account_state` 直接是 `ready`，
+Desktop 显示登录页，不出现首启向导。
 
-密码不满足策略同样会拒启动，错误信息里会附上策略原文（`bootstrap_admin.password violates the password policy: password must be at least 8 characters`）。
+> `bootstrap_admin` 是**一次性**的：账号表一旦非空，这项配置再也不会被读。
+> 它不是"常驻的第二个管理员"，别指望改它来改密码——改密码走 Desktop（§4.2）。
+> `UserServiceConfig` 带 `deny_unknown_fields`：残留的 `auth_mode` 键会**硬报错**，
+> 这条报错是在提醒你配置还停留在 ADR-076 时代。
+
+### 2.2 不再"拒启动"
+
+旧行为（空账号表 + 没配 `bootstrap_admin` → 进程退出）已废除。现在进程正常
+启动、端口正常监听、`/api/status` 如实报 `needs_setup`，其它 API 返回 403
+`setup_required`，Desktop 直接给出可提交的首启表单。这样"没人能登录"是一个
+**可自救**的状态，而不是一个要 SSH 上机器敲命令才能修的黑洞。
+
+密码不满足策略时 setup 返回 422，响应体带上策略原文；Desktop 直接展示，
+前端不再硬编码一份可能和服务端不一致的策略。
 
 ---
 

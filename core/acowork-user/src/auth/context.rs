@@ -115,6 +115,11 @@ pub(crate) fn is_public_path(path: &str) -> bool {
                 | "/api/auth/logout"
                 | "/api/auth/first-login"
                 | "/api/auth/pair/redeem"
+                // ADR-114 first-boot setup: no token can exist yet. The
+                // Gateway gates this on the real peer address (and its relay
+                // listener denies the path outright); this service binds
+                // loopback only, so the trust boundary is the host itself.
+                | "/api/auth/setup"
         )
 }
 
@@ -123,16 +128,10 @@ pub(crate) fn is_public_path(path: &str) -> bool {
 /// Runs ahead of every route, so handlers can keep the `Extension<AuthContext>`
 /// extractor they had in the Gateway.
 pub async fn inject_identity(
-    State(state): State<AppState>,
+    _state: State<AppState>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    // `local`: the account system is off, so no identity may be asserted and
-    // none is required — the profile routes address the single OS user.
-    if !state.is_multi_user() {
-        return next.run(req).await;
-    }
-
     if is_public_path(req.uri().path()) {
         return next.run(req).await;
     }

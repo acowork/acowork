@@ -3011,7 +3011,7 @@ mod tests {
     /// anything, so the same ownerless setup that hides from a stranger
     /// still lists in single-user mode.
     #[tokio::test]
-    async fn list_agents_local_mode_skips_the_cascade() {
+    async fn list_agents_without_auth_context_skips_the_cascade() {
         let inst = "22222222-0b1b-4c2c-8d3d-9e4e5f6a7b8c";
         let state = state_with_installed(inst).await;
         let Json(list) = list_agents(
@@ -3022,7 +3022,7 @@ mod tests {
         .await;
         assert!(
             list.iter().any(|a| a.instance_id == inst),
-            "Local mode (no AuthContext) lists everything — authorization is a no-op"
+            "No AuthContext (internal caller) lists everything — authorization is a no-op"
         );
     }
 
@@ -3147,7 +3147,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_permissions_local_mode_no_row_is_editable() {
+    async fn agent_permissions_without_auth_context_no_row_is_editable() {
         // No ownership row at all (Local mode / never attributed): empty
         // state, editable, visibility reads as `shared` in local mode.
         let inst = "cccccccc-0b1b-4c2c-8d3d-9e4e5f6a7b8c";

@@ -23,7 +23,6 @@ import {
   MemberAvatar,
   canGovern,
   canGovernProject,
-  useLocalMode,
   useResolvedMembers,
   withOwner,
   type ResolvedMember,
@@ -105,8 +104,7 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
   // created_by`), which PM pushes onto the session row — the same judgement
   // `MemberManagerDialog` uses to gate transfer and the settings panel uses to
   // gate the project itself. Owner-or-admin only (ADR-098).
-  const localMode = useLocalMode();
-  const canSeePrompt = canGovernProject(project, self, localMode);
+  const canSeePrompt = canGovernProject(project, self);
   // The channel is deletable only once its project is archived (design 27
   // §4.4) — while the project lives, PM's `ensure_group` would just re-create
   // it, so the backend refuses and this button stays away. `group.owner` is the
@@ -114,7 +112,7 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
   // list, so `project` is null exactly when the button is allowed to appear.
   const deleteGroup = useProjectGroupStore((s) => s.deleteGroup);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const canDelete = canDeleteProjectGroup(group, self, localMode);
+  const canDelete = canDeleteProjectGroup(group, self);
   // Agent members only: "who answers" cannot be a human (the store refuses a
   // non-agent id too — this just keeps the picker honest).
   const agentCandidates = useMemo(
@@ -284,9 +282,8 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
 export function canDeleteProjectGroup(
   group: { owner?: string; project_deleted_at?: number } | null | undefined,
   self: UserAccount | null,
-  localMode: boolean,
 ): boolean {
-  return !!group?.project_deleted_at && canGovern(group.owner, self, localMode);
+  return !!group?.project_deleted_at && canGovern(group.owner, self);
 }
 
 function MemberTile({ member }: { member: ResolvedMember }) {

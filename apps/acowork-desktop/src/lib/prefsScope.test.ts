@@ -3,10 +3,8 @@
  *
  * The property that matters is *isolation*: two accounts on one machine must
  * not see each other's appearance. Everything else here exists to serve that,
- * plus one counter-property: `AUTH_MODE=local` has no account at all, so it
- * must keep using the original unscoped keys (ADR-076 §决策 12 makes local a
- * no-op, and a refactor that silently renamed single-user installs' prefs
- * would reset them).
+ * plus one counter-property: with no signed-in account the scope must stay
+ * `null` and keep using the original unscoped keys.
  */
 import { describe, it, expect, beforeEach, vi } from "vitest";
 

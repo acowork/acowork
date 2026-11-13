@@ -8611,7 +8611,7 @@ mod tests {
 
     /// The header pair is what tells the two admin-ish scopes apart.
     #[test]
-    fn admin_header_scope_is_distinct_from_local_mode() {
+    fn admin_header_scope_is_distinct_from_unfiltered() {
         let admin = SessionScope::from_headers(Some("*"), Some("u-admin"), Some("cs-1"));
         assert_eq!(
             admin,

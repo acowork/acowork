@@ -24,6 +24,10 @@ import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmHealthStore } from "../../stores/pm/healthStore";
 import { showToast } from "../../components/common/ToastProvider";
 import { ProjectAvatar } from "../../components/common/ProjectAvatar";
+import {
+  COUNT_BADGE_BASE_CN,
+  COUNT_BADGE_NEUTRAL_CN,
+} from "../../components/common/sidebarCountBadge";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import type { PmViewMode } from "../../lib/pm-view-settings";
@@ -207,21 +211,33 @@ export function ProjectHeader({
             </div>
           )}
 
-          {/* 统计 */}
+          {/* 统计 —— 数字用实底胶囊，跟看板列头（卡片标题栏）的数字同一种形状：
+              同一个数字在不同面板里不该长得像两种东西。 */}
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-11 text-text-tertiary ">
-            <span>
-              {t("pm.statTotal")}: <strong className="tabular-nums">{total}</strong>
+            <span className="flex items-center gap-1">
+              {t("pm.statTotal")}:
+              <strong className={COUNT_BADGE_NEUTRAL_CN}>{total}</strong>
             </span>
-            <span>
-              {t("pm.board.inProgress")}: <strong className="tabular-nums">{inProgress}</strong>
+            <span className="flex items-center gap-1">
+              {t("pm.board.inProgress")}:
+              <strong className={COUNT_BADGE_NEUTRAL_CN}>{inProgress}</strong>
             </span>
             {submitted > 0 && (
-              <span className="text-amber-600 dark:text-amber-400">
-                {t("pm.board.submitted")}: <strong className="tabular-nums">{submitted}</strong>
+              <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+                {t("pm.board.submitted")}:
+                <strong
+                  className={cn(
+                    COUNT_BADGE_BASE_CN,
+                    "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
+                  )}
+                >
+                  {submitted}
+                </strong>
               </span>
             )}
-            <span>
-              {t("pm.board.done")}: <strong className="tabular-nums">{done}</strong>
+            <span className="flex items-center gap-1">
+              {t("pm.board.done")}:
+              <strong className={COUNT_BADGE_NEUTRAL_CN}>{done}</strong>
             </span>
           </div>
         </div>

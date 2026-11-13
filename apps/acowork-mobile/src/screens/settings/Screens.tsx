@@ -192,7 +192,18 @@ export function GatewayScreen() {
     <SubScreen title="网关">
       <ListRow label="服务器地址" hint={baseUrl || '未设置'} />
       <ListRow label="版本" value={status?.version ?? '—'} />
-      <ListRow label="模式" value={status?.auth_mode === 'multi_user' ? '多用户' : '本地'} />
+      <ListRow
+        label="账号系统"
+        value={
+          status?.account_state === 'ready'
+            ? '已就绪'
+            : status?.account_state === 'needs_setup'
+              ? '待设置管理员'
+              : status?.account_state === 'uninitialized'
+                ? '未初始化'
+                : '—'
+        }
+      />
       <ListRow label="运行时长" value={status ? uptime(status.uptime_secs) : '—'} />
       <ListRow label="Agent" value={status ? `${status.agents_running} / ${status.agents_installed}` : '—'} hint="运行中 / 已安装" />
       <ListRow label="MQTT 端口" value={status ? String(status.mqtt_port) : '—'} />

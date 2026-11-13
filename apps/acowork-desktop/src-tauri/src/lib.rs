@@ -746,8 +746,11 @@ pub fn run() {
             // TEMP DEBUG: frontend logger bridge (mqtt reconnect
             // investigation). See `fe_log` above.
             fe_log,
-            // Connectivity guard: this machine's own IPv4 addresses.
+            // Connectivity guard: this machine's own IPv4 addresses, and the
+            // default-route interface's address (phone-reachable, unlike
+            // virtual adapters that sort first in enumeration).
             commands::netinfo::get_local_ipv4_addresses,
+            commands::netinfo::get_default_route_ipv4,
         ])
         .setup(|app| {
             tray::setup(app)?;

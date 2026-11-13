@@ -16,8 +16,10 @@
  *   no cascade, so the class string IS the spec.
  *
  * What this pins:
- *   1. text fields go through `StyledInput` — no raw `<input>` re-declaring
- *      the field style;
+ *   1. the recovery view hosts the shared `GatewayAddressPicker` instead of
+ *      hand-rolling an address field — that control owns the `text-xs` +
+ *      `--ui-input-py` pair (and, since ADR-115, is the ONE place a user can
+ *      change servers, so every mount point must share it);
  *   2. no rem-frozen / oversized text steps (`text-lg`+), which would ignore
  *      the global `--ui-font-size` scale (see globalFontSize.test.ts);
  *   3. filled ACTION buttons take vertical padding from `--ui-btn-py`, not a
@@ -37,11 +39,13 @@ const SRC = readFileSync(
 );
 
 describe("SplashScreen recovery view shares the app type/control scale", () => {
-    it("has no raw <input> re-declaring the field style", () => {
+    it("hosts the shared address picker instead of a hand-rolled field", () => {
         const raw = SRC.match(/<input[\s\S]*?\/>/g) ?? [];
-        expect(raw, `use StyledInput: ${raw.join("\n")}`).toEqual([]);
-        // And the shared field component is actually wired in.
-        expect(SRC, "StyledInput must be imported").toContain("StyledInput");
+        expect(raw, `use GatewayAddressPicker: ${raw.join("\n")}`).toEqual([]);
+        // And the shared control is actually wired in.
+        expect(SRC, "GatewayAddressPicker must be imported").toContain(
+            "GatewayAddressPicker",
+        );
     });
 
     it("stays within the token tiers (no rem-frozen text-lg+ steps)", () => {

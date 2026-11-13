@@ -39,6 +39,14 @@ export interface CopyButtonProps {
     /** Icon-only. Drops the label and keeps the icon as the affordance;
      *  the `aria-label` is then required for screen readers. */
     iconOnly?: boolean;
+    /** Reports the confirmation window opening and closing.
+     *
+     *  A surface that keeps this button hidden until the pointer arrives
+     *  needs the signal: the reveal is driven by hover, and a confirmation
+     *  that fades because the pointer moved away after the click reports
+     *  nothing at all. Such a caller holds the row open while `copied` is
+     *  true. Callers that always show the button do not need it. */
+    onCopiedChange?: (copied: boolean) => void;
     /** Rendered after the label — for an external marker such as a
      *  per-source citation counter. */
     children?: React.ReactNode;
@@ -51,6 +59,7 @@ export function CopyButton({
     ariaLabel,
     tone = "ghost",
     iconOnly = false,
+    onCopiedChange,
     children,
     className = "",
     testId,
@@ -65,6 +74,16 @@ export function CopyButton({
             if (timerRef.current) clearTimeout(timerRef.current);
         };
     }, []);
+
+    // One place flips the state and reports it, so a reporter can never see
+    // a transition the button itself did not make.
+    const report = useCallback(
+        (value: boolean) => {
+            setCopied(value);
+            onCopiedChange?.(value);
+        },
+        [onCopiedChange],
+    );
 
     const handleCopy = useCallback(async () => {
         // Nothing to copy: leave the button inert rather than reporting a
@@ -83,10 +102,10 @@ export function CopyButton({
             document.execCommand("copy");
             document.body.removeChild(ta);
         }
-        setCopied(true);
+        report(true);
         if (timerRef.current) clearTimeout(timerRef.current);
-        timerRef.current = setTimeout(() => setCopied(false), COPIED_RESET_MS);
-    }, [text]);
+        timerRef.current = setTimeout(() => report(false), COPIED_RESET_MS);
+    }, [text, report]);
 
     const solid = tone === "solid";
     const stateCls = copied

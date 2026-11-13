@@ -64,10 +64,15 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   };
 });
 
+// The pushed `session_state` per execution session (design 27 §5.3.2: the
+// Runtime owns it, the surface only reads it). The wait line's activity word
+// comes from here, so a case that wants the agent to look busy sets it.
+let chatStates: Record<string, unknown> = {};
+
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: Object.assign(
     (selector: (state: unknown) => unknown) =>
-      selector({ availableModels, providerAccounts: [] }),
+      selector({ availableModels, providerAccounts: [], agentStates: chatStates }),
     {
       getState: () => ({
         openSession: (...a: unknown[]) => openSessionMock(...(a as [])),
@@ -326,6 +331,7 @@ function sendDisabled(): boolean {
 
 describe("AgentChatView event-log wiring", () => {
   beforeEach(() => {
+    chatStates = {};
     vi.clearAllMocks();
     sendingMap = {};
     inflightMap = {};
@@ -469,6 +475,95 @@ describe("AgentChatView event-log wiring", () => {
     // 1:1 names the agent the human is talking to (ADR-100 Rev.2's wording);
     // only the group surface has to stay generic.
     expect(screen.getByText("chatView.notice.pendingTurn|Agent A")).toBeTruthy();
+  });
+
+  describe("the wait line says what the agent is doing", () => {
+    // Rev. (2026-11-12, the activity word). One sentence for the whole turn is
+    // what made a busy agent look slow; the runtime has always pushed the live
+    // phase, so the line now reads it. What these cases pin is the honesty
+    // rule under the improvement: the word may only come from the run this
+    // Chat's own transcript anchors, and never from a session that merely
+    // belongs to the same agent.
+    const busy = (status: Record<string, unknown>, sid = "exec-9") => ({
+      [AGENT]: { sessionStates: { [sid]: { sessionStatus: status } } },
+    });
+
+    it("a named dispatch replaces the generic sentence, on the header", () => {
+      windows = windowOf(userRow(1, "hello there"), roundRow(2));
+      inflightMap = { [SESSION]: { messageId: "u1", at: 1, responders: [AGENT] } };
+      chatStates = busy({
+        status: "tool_executing",
+        detail: { tools: ["memory_recall"] },
+      });
+      render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+      const header = document.querySelector("[data-turn-header]");
+      expect(header).toBeTruthy();
+      expect(header!.textContent).toContain("tools.memory_recall.running");
+      expect(header!.textContent).not.toContain("chatView.notice.pendingTurnGeneric");
+    });
+
+    it("and on the centered line, when no identity resolved", () => {
+      windows = windowOf(userRow(1, "hello there"), roundRow(2));
+      sendingMap = { [SESSION]: true };
+      chatStates = busy({ status: "llm_streaming", detail: { message_id: null } });
+      render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+      expect(screen.getByRole("status").textContent).toContain(
+        "chatView.activity.composing",
+      );
+    });
+
+    it("the router-deciding window has no anchor, so it keeps the generic line", () => {
+      // The transcript holds no run row yet — the turn may go to a session
+      // that does not exist. A word from any other session would be invented.
+      windows = windowOf(userRow(1, "hello there"));
+      inflightMap = { [SESSION]: { messageId: "u1", at: 1, responders: [AGENT] } };
+      chatStates = busy(
+        { status: "tool_executing", detail: { tools: ["memory_recall"] } },
+        "exec-somewhere-else",
+      );
+      render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+      const header = document.querySelector("[data-turn-header]");
+      expect(header!.textContent).toContain("chatView.notice.pendingTurnGeneric");
+      expect(header!.textContent).not.toContain("tools.memory_recall.running");
+    });
+
+    it("a session the agent runs for other work is not this turn's activity", () => {
+      // The agent's own list can hold a task dispatched from a project group.
+      // That run's tool call is a fact about a different conversation, and
+      // borrowing its word here would report work this turn never did.
+      windows = windowOf(userRow(1, "hello there"), roundRow(2));
+      inflightMap = { [SESSION]: { messageId: "u1", at: 1, responders: [AGENT] } };
+      chatStates = {
+        [AGENT]: {
+          sessionStates: {
+            "exec-9": { sessionStatus: { status: "idle" } },
+            "exec-other": {
+              sessionStatus: {
+                status: "tool_executing",
+                detail: { tools: ["memory_recall"] },
+              },
+            },
+          },
+        },
+      };
+      render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+      const header = document.querySelector("[data-turn-header]");
+      expect(header!.textContent).toContain("chatView.notice.pendingTurnGeneric");
+      expect(header!.textContent).not.toContain("tools.memory_recall.running");
+    });
+
+    it("a dispatch that names nothing falls back without dropping the name", () => {
+      // Resume-after-approval cannot say which calls are still in flight. The
+      // line must not reuse the previous dispatch's tool, and the 1:1 surface
+      // keeps its named sentence.
+      windows = windowOf(userRow(1, "hello there"), roundRow(2));
+      sendingMap = { [SESSION]: true };
+      chatStates = busy({ status: "tool_executing" });
+      render(<AgentChatView agentId={AGENT} sessionId={SESSION} />);
+      expect(screen.getByRole("status").textContent).toContain(
+        "chatView.notice.pendingTurn|Agent A",
+      );
+    });
   });
 
   it("the claim outliving the POST keeps the line up AND locks the composer (D9)", () => {

@@ -5,7 +5,7 @@
 //!   contract in `acowork_core::auth`.
 //! - [`revoked`] — refresh-token family revocation registry.
 //! - [`service`] — the assembled account service (login / refresh / logout /
-//!   change-password), built only under `AUTH_MODE=multi_user`.
+//!   change-password), always constructed (ADR-114).
 
 pub mod context;
 pub mod issuer;

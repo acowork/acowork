@@ -14,14 +14,14 @@
  *     always invalidate by changing the password (kills every refresh family).
  *
  * Base-URL derivation: when the persisted Gateway URL is loopback the phone
- * cannot dial it, so we swap the host to this machine's LAN IPv4 (the same
- * enumeration the connectivity guard uses). A URL that already carries a LAN
- * IP or a relay hostname is used verbatim.
+ * cannot dial it, so we swap the host to the default-route interface's LAN
+ * IPv4 — the one address a Wi-Fi peer can actually reach. A URL that already
+ * carries a LAN IP or a relay hostname is used verbatim.
  */
 import QRCode from "qrcode";
 import { useAuthStore } from "../stores/authStore";
 import { getGatewayUrl, isGatewayLocal } from "./config";
-import { fetchLocalIpv4Addresses } from "./connectivity/localNetwork";
+import { fetchDefaultRouteIpv4, fetchLocalIpv4Addresses } from "./connectivity/localNetwork";
 
 /** QR payload schema version — the mobile parser branches on this. */
 export const PAIR_QR_SCHEMA = 1;
@@ -48,17 +48,28 @@ export class NoLanAddressError extends Error {
 /**
  * Resolve the base URL a phone on the same network should dial.
  *
- * Loopback → swap to this machine's first LAN IPv4 (throws `NoLanAddressError`
- * when none). Anything else (a LAN IP already, or a remote/relay host) is used
- * as-is. Trailing slash is stripped so callers can append paths safely.
+ * Loopback → swap to a phone-reachable host. The host is the IPv4 of the
+ * interface owning the DEFAULT ROUTE: the interface list's `ips[0]` is
+ * enumeration order, and virtual adapters (WSL vEthernet, security-suite
+ * virtual NICs) routinely sort first — a phone dialing that address gets
+ * nothing (2026-11-13 incident: QR embedded a VPN adapter's 192.168.200.x
+ * while the phone sat on Wi-Fi 192.168.0.x). When no route resolves (fully
+ * offline), fall back to the first interface address and throw
+ * `NoLanAddressError` when there is none. Anything that is not loopback
+ * (a LAN IP already, or a remote/relay host) is used as-is. Trailing
+ * slash is stripped so callers can append paths safely.
  */
 export async function resolvePairingBaseUrl(): Promise<string> {
   const url = getGatewayUrl();
   if (!isGatewayLocal()) return trimTrailingSlash(url);
-  const ips = await fetchLocalIpv4Addresses();
-  if (ips.length === 0) throw new NoLanAddressError();
+  const [routeIp, ips] = await Promise.all([
+    fetchDefaultRouteIpv4(),
+    fetchLocalIpv4Addresses(),
+  ]);
+  const host = routeIp ?? ips[0];
+  if (!host) throw new NoLanAddressError();
   const u = new URL(url);
-  u.hostname = ips[0];
+  u.hostname = host;
   return trimTrailingSlash(u.toString());
 }
 

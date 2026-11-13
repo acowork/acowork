@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { useSettingsStore, requestGatewayModeChange } from "../../stores/settingsStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { useAuthStore } from "../../stores/authStore";
 import { initMqttListener } from "../../stores/chatStore";
 import { initWorkspaceFsListener } from "../../lib/workspaceFsEvents";
@@ -9,13 +9,12 @@ import { initDocTreeChangeListener } from "../../lib/docFsEvents";
 import { getGatewayUrl } from "../../lib/config";
 import { UNREACHABLE_HINT_MS, probeKnownCandidates } from "../../lib/connectivity/gatewayConnectivity";
 import { useTranslation } from "../../i18n/useTranslation";
-import { StyledInput } from "../common/StyledInput";
-import { Dropdown } from "../common/Dropdown";
+import { GatewayAddressPicker } from "../connection/GatewayAddressPicker";
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 import pkg from "../../../package.json";
 import brandMark from "../../../../../assets/brand-mark.svg";
 import { log } from "../../lib/logger";
-import type { BootstrapStateView, GatewayBootResult, GatewayMode } from "../../lib/types";
+import type { BootstrapStateView, GatewayBootResult } from "../../lib/types";
 
 const POLL_INTERVAL = 500;
 const MIN_SPLASH_MS = 1500;
@@ -44,18 +43,15 @@ const LOCAL_MAX_WAIT_MS = 30_000;
  */
 
 /**
- * Push the persisted settings into Rust and (for local mode) boot the
- * Gateway — probe-then-spawn. Returns nothing; the poll loop in
- * `SplashScreen` decides when the Gateway is ready.
+ * Push the persisted address into Rust and, when that address is this
+ * machine, boot the Gateway — probe-then-spawn. Returns nothing; the poll
+ * loop in `SplashScreen` decides when the Gateway is ready.
  *
- * Single-topology policy: Gateway behaviour/config does NOT depend on the
- * Desktop's local/remote mode. Rust accepts the user-configured URL in
- * BOTH modes (no local-mode URL override). The only difference:
- *   - local  → Desktop probes `{url}/health`; if nothing answers it
- *              spawns a child Gateway (ownership "owned"); if a Gateway
- *              is already running there it adopts it ("foreign").
- *   - remote → Desktop never spawns; the Gateway is presumed to have
- *              been started manually (this machine or another).
+ * ADR-115 single-address policy: `mode` is derived from the URL, never
+ * read from a separate persisted knob. A loopback URL means Desktop MAY
+ * spawn/adopt a local Gateway; any other address is connect-only. This is
+ * what fixes the old "mode=local but address=remote" deadlock where Rust
+ * spawned on 127.0.0.1 while every probe went to a LAN host.
  */
 async function bootGateway(): Promise<void> {
     const settings = useSettingsStore.getState();
@@ -63,32 +59,28 @@ async function bootGateway(): Promise<void> {
     const url = settings.gatewayUrl;
     const gatewayStore = useGatewayStore.getState();
 
-    // 1) Sync config into Rust. Switching local→remote stops any
-    //    locally-spawned Gateway (frees the port for the manual one).
+    // 1) Sync config into Rust.
     await invoke("set_gateway_config", {
         config: { mode, url },
     });
 
-    // 2) Boot the gateway itself
+    // 2) Boot the gateway itself — only for a loopback address.
     if (mode === "local") {
         // Probe-then-spawn (see spawn_gateway in commands/gateway.rs):
         // adopts an already-running Gateway ("foreign") or spawns a
         // child ("owned"). Waits for bootstrap READY before returning.
         const boot = await invoke<GatewayBootResult>("init_local_gateway");
         gatewayStore.recordBootResult(boot);
+        // Rust re-points base_url at the fixed loopback port when it had to
+        // spawn (the child cannot serve an arbitrary alias/port). Mirror
+        // that back into the frontend so every subsequent HTTP call and
+        // the persisted address agree with the process that is running.
+        useSettingsStore.getState().adoptBootUrl(boot.base_url);
         // Sync the frontend store with the Rust-side process handle.
-        // `init_local_gateway` bypasses `startLocalGateway()` (the store
-        // action), so without this call `localState` would stay "idle"
-        // even though the backend has a running child process. This
-        // causes the Settings page to show a spurious "Start Gateway"
-        // button next to the green "Running" indicator.
         await gatewayStore.checkLocalStatus();
-    } else {
-        // Remote mode: the Gateway is presumed already running on `url`
-        // (started manually — possibly on this machine's LAN IP). The
-        // poll loop below verifies reachability; ownership is irrelevant
-        // because Desktop never spawns in remote mode.
     }
+    // Remote / relay: the Gateway is presumed already running on `url`.
+    // The poll loop below verifies reachability; Desktop never spawns.
 
     // 3) ADR-077: System Agent is a regular bundled agent. Installation
     //    happens through the standard flow (onboarding wizard / agentStore
@@ -157,6 +149,28 @@ function describeBootError(err: unknown): string {
     if (err instanceof Error) return err.message;
     return String(err);
 }
+
+/**
+ * Every key the boot status line may show. A closed union, not `string`:
+ * the line is rendered as `t(status.key)`, so a typo here is invisible to the
+ * i18n scanner (it only sees `t("literal")` calls) and would surface as a raw
+ * key name on the very screen a broken install lands on.
+ */
+export const SPLASH_STATUS_KEYS = [
+    "splashScreen.ready",
+    "splashScreen.waitingForServices",
+    "splashScreen.preparing",
+    "splashScreen.startingGateway",
+    "splashScreen.connectingToGateway",
+    "splashScreen.connectingToUrl",
+    "splashScreen.retryingConnection",
+] as const;
+
+type SplashStatusKey = (typeof SPLASH_STATUS_KEYS)[number];
+
+/** A localizable status line. Stored as key + params so the string is
+ *  rendered through `t()` at paint time — see the `status` state comment. */
+type StatusSpec = { key: SplashStatusKey; params?: Record<string, string | number> };
 
 interface SplashScreenProps {
     onReady: () => void;
@@ -280,7 +294,22 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
      * 30s timeout / user-driven retry path take over.
      */
     const [candidatesOffered, setCandidatesOffered] = useState(false);
-    const [statusText, setStatusText] = useState("Starting Gateway...");
+    /**
+     * A status line is stored as `(key, params)`, never as a rendered string.
+     * Two reasons:
+     *   - "Starting Gateway: <address>" has to name the address the boot is
+     *     actually aimed at (ADR-115: the address IS the setting, so a status
+     *     line that hides it says nothing useful);
+     *   - rendering through `t()` at paint time keeps the line correct if the
+     *     language changes, instead of freezing whatever locale was active
+     *     when the state was set.
+     */
+    const [status, setStatus] = useState<StatusSpec>(() => {
+        const { gatewayUrl: url, gatewayMode: mode } = useSettingsStore.getState();
+        return mode === "local"
+            ? { key: "splashScreen.startingGateway", params: { url } }
+            : { key: "splashScreen.connectingToGateway", params: { url } };
+    });
     const [timedOut, setTimedOut] = useState(false);
     /**
      * The boot budget that actually fired the current timeout, captured at
@@ -305,12 +334,6 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
      */
     const [pickingUrl, setPickingUrl] = useState<string | null>(null);
     const pickingUrlRef = useRef<string | null>(null);
-    // Pre-filled with the persisted address so the user can edit a stale
-    // remote-gateway URL straight from the timeout view (the Settings
-    // page is unreachable until the Gateway connects).
-    const [gatewayUrlInput, setGatewayUrlInput] = useState(
-        () => useSettingsStore.getState().gatewayUrl,
-    );
     const [fadeIn, setFadeIn] = useState(false);
     const mountedRef = useRef(true);
     const startTimeRef = useRef(Date.now());
@@ -363,7 +386,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         await checkHealth();
         const elapsed = Date.now() - startTimeRef.current;
         const remaining = Math.max(0, MIN_SPLASH_MS - elapsed);
-        setStatusText(t("splashScreen.ready"));
+        setStatus({ key: "splashScreen.ready" });
         setTimeout(() => {
             if (mountedRef.current) onReady();
         }, remaining);
@@ -395,7 +418,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         const pollAgentReady = () => {
             // Phase not READY yet: surface the Gateway's own diagnostic
             // (subsystem-level phase detail) instead of a fixed message.
-            setStatusText("Waiting for services...");
+            setStatus({ key: "splashScreen.waitingForServices" });
             const onSnapshot = (view: BootstrapStateView | null) => {
                 if (!view) return false;
                 if (view.phase === "READY" || view.phase === "DEGRADED") return true;
@@ -403,7 +426,10 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                     setTimedOut(true);
                     return true;
                 }
-                setStatusText(`Preparing: ${view.phase_detail}`);
+                setStatus({
+                    key: "splashScreen.preparing",
+                    params: { detail: view.phase_detail },
+                });
                 return false;
             };
             // Try immediately first
@@ -423,11 +449,17 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         };
 
         const init = async () => {
-            if (gatewayMode === "local") {
-                setStatusText("Starting local Gateway...");
-            } else {
-                setStatusText("Connecting to Gateway...");
-            }
+            // Name the address, and drop the word "local": since ADR-115
+            // there is no local/remote *mode* for the user to reason about —
+            // there is one server address, and this line should say which.
+            // A loopback address is also the only one Desktop may spawn, so
+            // "starting" is the honest verb there.
+            const bootUrl = getGatewayUrl();
+            setStatus(
+                gatewayMode === "local"
+                    ? { key: "splashScreen.startingGateway", params: { url: bootUrl } }
+                    : { key: "splashScreen.connectingToGateway", params: { url: bootUrl } },
+            );
 
             // Fallback: if the persisted URL hasn't connected within the
             // shared budget, probe the URL history through the
@@ -508,37 +540,19 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
         // here (the manual "Retry" button path leaves it null). Reading
         // it via ref avoids waiting for React's setState to commit.
         const pickingOnEntry = pickingUrlRef.current;
-        // Remote mode: the timeout view lets the user edit the Gateway
-        // address. Persist + push to Rust before probing so this retry
-        // (and every later command) targets the new URL. `applyGatewayUrl`
-        // also keeps the mode consistent — an `http://` address while the
-        // mode is still `relay` would be permanently rejected by Rust
-        // (`relay_mqtt_wss_url` only accepts `https://` device domains),
-        // so it flips the mode to `remote` in the same step.
-        //
-        // `overrideUrl` is used by the candidate-pick path: when the
-        // user clicks a candidate chip, the chip passes the picked URL
-        // explicitly because the React `gatewayUrlInput` state is still
-        // showing the mount-time (dead) URL — React's setState is async,
-        // so reading it on the same tick would see the stale value and
-        // roll the store back to the dead host. When no override is
-        // passed (the user clicked the "Retry" button on the timeout
-        // view), fall back to the current input value.
-        const nextUrl = (overrideUrl ?? gatewayUrlInput).trim();
-        if (nextUrl) {
-            useSettingsStore.getState().applyGatewayUrl(nextUrl);
+        // `overrideUrl` comes from the candidate-chip path. Commit it with
+        // the LOW-LEVEL setter: this retry already calls `bootGateway()`
+        // below, so a `switchGateway()` here would restart the whole
+        // SplashScreen and fan out two boot pipelines. The mode is derived
+        // from the URL now, so there is no relay+http inconsistency to fix.
+        if (overrideUrl) {
+            useSettingsStore.getState().setGatewayUrl(overrideUrl);
         }
         // The candidate-pick path already set a "Connecting to <url>..."
         // status text the instant the row was clicked — don't overwrite
-        // it with the generic "Retrying..." string until the pick
-        // settles. The manual "Retry" button (no pickingOnEntry) still
-        // gets the previous generic text.
+        // it with the generic "Retrying..." string until the pick settles.
         if (!pickingOnEntry) {
-            setStatusText(
-                gatewayMode === "local"
-                    ? "Retrying local Gateway..."
-                    : "Retrying connection...",
-            );
+            setStatus({ key: "splashScreen.retryingConnection" });
         }
         try {
             // Re-run the FULL boot sequence (config push → spawn/adopt →
@@ -631,8 +645,10 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                 <div className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
                                 <p className="max-w-md text-center text-sm break-words text-text-secondary ">
                                     {bootError
-                                        ? `Gateway initialization failed: ${bootError}`
-                                        : `Gateway did not respond within ${timedOutBudgetMs / 1000}s`}
+                                        ? t("splashScreen.bootFailed", { error: bootError })
+                                        : t("splashScreen.timeoutNoResponse", {
+                                              seconds: timedOutBudgetMs / 1000,
+                                          })}
                                 </p>
                             </div>
                             <p className="max-w-md text-center text-xs text-text-tertiary ">
@@ -640,82 +656,35 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                     ? t("splashScreen.bootFailedHint")
                                     : t("splashScreen.timeoutHint")}
                             </p>
-                            {/* Compact recovery form — a two-column grid
-                                (`auto` label column + `1fr` control column).
-                                The label column sizes to the longest label so
-                                text NEVER wraps (the earlier fixed `w-24`
-                                column forced wrapping the moment a label was
-                                wider), while every control — mode picker,
-                                address field, action button — lands in the
-                                second column and shares ONE left edge via
-                                `justify-self-start`. Locale-agnostic. The mode
-                                picker is the escape hatch for the deadlock
-                                where a remote Gateway is down and there is
-                                nothing to connect to — switching to `local`
-                                flips the button into "start a local Gateway"
-                                (bootGateway / handleRetry already route by
-                                mode: local → spawn + adopt, remote/relay →
-                                re-probe the edited URL). StyledInput / Dropdown
-                                keep the splash on the shared form scale
-                                (text-xs + --ui-input-py / --ui-btn-py + theme
-                                tokens) instead of the old hardcoded zinc/text-sm. */}
-                            <div className="mt-2 grid w-full max-w-xs grid-cols-[auto_1fr] items-center gap-x-2 gap-y-2">
-                                <label
-                                    htmlFor="splash-gateway-mode"
-                                    className="text-xs text-text-tertiary"
-                                >
-                                    {t("splashScreen.modeLabel")}
-                                </label>
-                                <Dropdown
-                                    id="splash-gateway-mode"
-                                    size="small"
-                                    className="w-auto justify-self-start"
-                                    value={gatewayMode}
-                                    onChange={(v) => void requestGatewayModeChange(v as GatewayMode)}
-                                    options={[
-                                        { value: "local", label: t("splashScreen.modeLocal") },
-                                        { value: "remote", label: t("splashScreen.modeRemote") },
-                                        { value: "relay", label: t("splashScreen.modeRelay") },
-                                    ]}
+                            {/* ADR-115: ONE address list, always available.
+                                No mode picker — localhost is just an entry,
+                                and choosing it re-runs the boot pipeline,
+                                which spawns a local Gateway if none answers. */}
+                            <div className="mt-2 w-full max-w-sm rounded-md border border-border-outer bg-panel-base p-3">
+                                <GatewayAddressPicker
+                                    compact
+                                    busy={retrying}
+                                    onSelect={(url) => {
+                                        // `switchGateway` drops the session and
+                                        // restarts the boot gate (App.tsx keys
+                                        // the SplashScreen on `epoch`), so the
+                                        // new address gets a full, fresh boot.
+                                        void useSettingsStore.getState().switchGateway(url);
+                                    }}
+                                    onReset={() => {
+                                        void useSettingsStore.getState().resetConnectionSettings();
+                                    }}
                                 />
-                                {/* Address field only applies to remote/relay —
-                                    local is pinned to the loopback default. */}
-                                {gatewayMode !== "local" && (
-                                    <>
-                                        <label
-                                            htmlFor="splash-gateway-url"
-                                            className="text-xs text-text-tertiary"
-                                        >
-                                            {t("splashScreen.gatewayAddress")}
-                                        </label>
-                                        <StyledInput
-                                            id="splash-gateway-url"
-                                            type="text"
-                                            value={gatewayUrlInput}
-                                            onChange={(e) => setGatewayUrlInput(e.target.value)}
-                                            spellCheck={false}
-                                            autoCapitalize="off"
-                                            autoCorrect="off"
-                                            fontMono
-                                            className="w-full min-w-0"
-                                        />
-                                    </>
-                                )}
-                                {/* Empty label cell keeps the button on the
-                                    same control column as the fields above. */}
-                                <span aria-hidden="true" />
-                                <button
-                                    onClick={() => { void handleRetry(); }}
-                                    disabled={retrying}
-                                    className="btn-accent justify-self-start rounded-md px-4 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-40"
-                                >
-                                    {retrying
-                                        ? t("splashScreen.retrying")
-                                        : gatewayMode === "local"
-                                            ? t("splashScreen.startLocal")
-                                            : t("splashScreen.retryConnection")}
-                                </button>
                             </div>
+                            <button
+                                onClick={() => { void handleRetry(); }}
+                                disabled={retrying}
+                                className="btn-accent mt-1 rounded-md px-4 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-40"
+                            >
+                                {retrying
+                                    ? t("splashScreen.retrying")
+                                    : t("splashScreen.retryConnection")}
+                            </button>
                         </>
                     ) : (
                         <>
@@ -741,36 +710,16 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                             // nothing".
                                             setPickingUrl(url);
                                             pickingUrlRef.current = url;
-                                            setStatusText(
-                                                t("splashScreen.connectingToUrl", { url }),
-                                            );
-                                            // Persist + push to Rust BEFORE
-                                            // retrying so the reconnect lands
-                                            // on the picked host. Also records
-                                            // the picked URL back into history
-                                            // so it stays at the top next boot.
-                                            // `applyGatewayUrl` additionally
-                                            // keeps the mode consistent: an
-                                            // http LAN pick while mode is relay
-                                            // would otherwise create the exact
-                                            // relay+http combo Rust rejects
-                                            // forever.
-                                            useSettingsStore.getState().applyGatewayUrl(url);
-                                            // Pass the picked URL explicitly so
-                                            // handleRetry() doesn't read a stale
-                                            // `gatewayUrlInput`. The input field
-                                            // is frozen at the mount-time store
-                                            // URL and React's setState is async,
-                                            // so reading it on the same tick
-                                            // would see the old, dead address
-                                            // and roll the store back to it.
-                                            // Sync the input field too so the
-                                            // timeout view (when it appears)
-                                            // shows the address we're actually
-                                            // trying, not the dead one.
-                                            setGatewayUrlInput(url);
+                                            setStatus({
+                                                key: "splashScreen.connectingToUrl",
+                                                params: { url },
+                                            });
                                             // Reuse the existing retry path so
-                                            // we don't fork the boot flow.
+                                            // we don't fork the boot flow. It
+                                            // commits `overrideUrl` with the
+                                            // low-level setter (mode is now
+                                            // derived from the URL, so there
+                                            // is no relay+http combo to fix).
                                             handleRetry(url);
                                         }}
                                         onDismiss={() => clearCandidates()}
@@ -790,7 +739,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                 />
                             </div>
                             <p className="text-sm text-text-tertiary ">
-                                {statusText}
+                                {t(status.key, status.params)}
                                 <LoadingDots className="inline-block w-5 text-left text-text-tertiary " />
                             </p>
                         </>

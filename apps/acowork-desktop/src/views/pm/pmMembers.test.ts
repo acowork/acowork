@@ -252,33 +252,25 @@ describe("canGovern / canGovernProject (ADR-098 owner-or-admin)", () => {
     ({ created_by, owner_id }) as unknown as Parameters<typeof canGovernProject>[0];
 
   it("admits the owner", () => {
-    expect(canGovern("u-owner", account("u-owner"), false)).toBe(true);
+    expect(canGovern("u-owner", account("u-owner"))).toBe(true);
   });
 
   it("admits an admin who is not the owner", () => {
-    expect(canGovern("u-owner", account("u-admin", "admin"), false)).toBe(true);
+    expect(canGovern("u-owner", account("u-admin", "admin"))).toBe(true);
   });
 
   it("refuses a plain member, with or without a known owner", () => {
-    expect(canGovern("u-owner", account("u-plain"), false)).toBe(false);
+    expect(canGovern("u-owner", account("u-plain"))).toBe(false);
     // A project channel whose project has not resolved yet — still nothing.
-    expect(canGovern("", account("u-plain"), false)).toBe(false);
+    expect(canGovern("", account("u-plain"))).toBe(false);
   });
 
   it("refuses while no account is resolved (still loading)", () => {
-    expect(canGovern("u-owner", null, false)).toBe(false);
-  });
-
-  it("admits the single local actor with no account at all", () => {
-    // local: `authStore.account` is permanently null and the Gateway injects
-    // the constant actor "human", so the machine's one human governs
-    // everything — including a project an agent created.
-    expect(canGovern("com.acowork.some-agent", null, true)).toBe(true);
-    expect(canGovernProject(project("com.acowork.some-agent"), null, true)).toBe(true);
+    expect(canGovern("u-owner", null)).toBe(false);
   });
 
   it("follows owner_id over created_by (a transfer moved the governance)", () => {
-    expect(canGovernProject(project("u-old", "u-new"), account("u-new"), false)).toBe(true);
-    expect(canGovernProject(project("u-old", "u-new"), account("u-old"), false)).toBe(false);
+    expect(canGovernProject(project("u-old", "u-new"), account("u-new"))).toBe(true);
+    expect(canGovernProject(project("u-old", "u-new"), account("u-old"))).toBe(false);
   });
 });

@@ -440,8 +440,9 @@ pub struct Task {
     /// 截止时间（可选）。
     #[serde(default)]
     pub due_at: Option<DateTime<Utc>>,
-    /// 开始时间（可选）：派发扫描器在 `start_at <= now` 时才向 assignee
-    /// agent 推送 intent；`None` = 立即（下一个 tick 派发）。
+    /// 开始时间：派发扫描器**只在 `start_at <= now`** 时才向 assignee 推送
+    /// intent。`None` = **未排期 = 不派发**（fail-closed）。创建时没给则缺省
+    /// 填 `now`（见 `create_task_as`），所以 null 只可能是有人显式取消了排期。
     #[serde(default)]
     pub start_at: Option<DateTime<Utc>>,
     /// Idempotence marker for dispatch: written by the scanner after a
@@ -676,7 +677,8 @@ pub struct CreateTask {
     /// 截止时间（可选；`pm_create_task` 的 `due` 参数）。
     #[serde(default)]
     pub due_at: Option<DateTime<Utc>>,
-    /// 开始时间（可选）：到期才派发 intent 给 assignee agent；缺省 = 立即。
+    /// 开始时间（可选）：到期才派发 intent 给 assignee agent；没给则缺省
+    /// 填 `now`（= 立即）。
     #[serde(default)]
     pub start_at: Option<DateTime<Utc>>,
 }
@@ -748,7 +750,7 @@ pub struct UpdateTask {
     pub assignee: Option<Option<String>>, // `null` 表示清空
     #[serde(default, deserialize_with = "deserialize_clearable")]
     pub due_at: Option<Option<DateTime<Utc>>>,
-    /// `null` 表示清空（清空 = 立即派发）。
+    /// `null` 表示清空（清空 = **未排期 = 不派发**，等人类重新排期）。
     #[serde(default, deserialize_with = "deserialize_clearable")]
     pub start_at: Option<Option<DateTime<Utc>>>,
     pub depends_on: Option<Vec<Dependency>>,

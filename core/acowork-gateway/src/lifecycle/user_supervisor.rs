@@ -39,6 +39,7 @@ use acowork_core::auth::TokenVerifier;
 use acowork_core::health::supervisor_defaults;
 use acowork_core::supervisor::{RestartHistory, backoff_with_jitter};
 
+use crate::auth::AccountSystemState;
 use crate::gateway::state::GatewayState;
 
 /// Shared gateway state handle (same as the PM / doc supervisors).
@@ -58,12 +59,19 @@ pub struct UserProcessState {
 ///
 /// Rides the poll the supervisor already performs, so the restricted-mode
 /// gate and `/api/status` need no extra round trip and no I/O on the hot path.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserSnapshot {
-    /// No admin has a password yet (ADR-076 §决策 12 v2) → the Gateway
-    /// answers 403 `setup_required` to everything but `/health` and
+    /// The account system's first-boot state (ADR-114).
+    ///
+    /// `Uninitialized` = no account store / empty store: the first
+    /// administrator has to be created. `NeedsSetup` = accounts exist but
+    /// none of them can be logged into yet. `Ready` = at least one
+    /// administrator can log in.
+    ///
+    /// While this is not `Ready` the Gateway answers 403 `setup_required`
+    /// to everything but the first-boot setup surface, `/health` and
     /// `/api/status`.
-    pub requires_setup: bool,
+    pub account_state: AccountSystemState,
     /// `[multi_user].registration_open` — whether non-admins may self-register.
     pub registration_open: bool,
     /// Live `user_profiles.json` version. The supervisor compares it against
@@ -71,6 +79,31 @@ pub struct UserSnapshot {
     /// the healing path for a missed MQTT signal
     /// ([`crate::lifecycle::user_profile_sync`]).
     pub profile_version: u64,
+}
+
+impl Default for UserSnapshot {
+    /// A snapshot with no information defaults to the *restricted* state.
+    ///
+    /// Production never constructs a default snapshot — the supervisor only
+    /// publishes one built from a real `/health` reply, and "no snapshot yet"
+    /// is represented by `Option::None` (which the gate treats as a startup
+    /// window because `user_proxy` has no upstream in that window either).
+    /// This `Default` exists for struct-update syntax in tests; keeping it
+    /// fail-closed means an accidental production use cannot open the gate.
+    fn default() -> Self {
+        Self {
+            account_state: AccountSystemState::NeedsSetup,
+            registration_open: false,
+            profile_version: 0,
+        }
+    }
+}
+
+impl UserSnapshot {
+    /// Whether the first-boot gate is closed.
+    pub fn requires_setup(&self) -> bool {
+        self.account_state.requires_setup()
+    }
 }
 
 /// Supervisor config (spawn parameters for acowork-user).
@@ -100,9 +133,6 @@ pub struct UserSupervisorConfig {
     /// `[user].config` — the service's own TOML (bootstrap admin, password
     /// policy, registration flag), forwarded verbatim.
     pub config: Option<PathBuf>,
-    /// Deployment mode resolved by the Gateway — the single source of truth
-    /// (ADR-084 §决策 6), forwarded via `--auth-mode`.
-    pub auth_mode: &'static str,
     /// Broker port forwarded via `--mqtt-port` so the service can publish its
     /// profile-change signal to the embedded broker (always loopback: the
     /// service is spawned on this host, next to the broker — the host is
@@ -185,10 +215,7 @@ async fn spawn_and_monitor(cfg: &UserSupervisorConfig, state: &SharedState) {
         }
     };
     let snapshot = UserSnapshot {
-        requires_setup: details
-            .get("requires_setup")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        account_state: parse_account_state(details.get("account_state")),
         registration_open: details
             .get("registration_open")
             .and_then(|v| v.as_bool())
@@ -203,24 +230,19 @@ async fn spawn_and_monitor(cfg: &UserSupervisorConfig, state: &SharedState) {
     // to `port` the moment `user_process` is set, and a request that arrives
     // with a verifiable token but no verifier would be rejected.
     //
-    // `local` mode has no account system at all (ADR-076 §决策 12), so the
-    // service never writes a key. Waiting anyway would stall readiness for the
-    // whole 5s deadline and then log a false "authenticated requests will be
-    // refused" error — in this mode nothing authenticates.
-    let verifier = if cfg.auth_mode == crate::auth::AuthMode::MultiUser.as_str() {
-        match details.get("data_dir").and_then(|v| v.as_str()) {
-            Some(dir) => load_verifier(std::path::Path::new(dir)).await,
-            None => {
-                // Not fatal, but loud: the service is up and the Gateway still
-                // cannot verify anything it signs.
-                tracing::error!(
-                    "user service /health reports no data_dir; cannot locate its signing key"
-                );
-                None
-            }
+    // ADR-114: the key is loaded **unconditionally**. The account system is
+    // always present, so the service always writes a key — there is no mode
+    // in which "no verifier" is the correct steady state.
+    let verifier = match details.get("data_dir").and_then(|v| v.as_str()) {
+        Some(dir) => load_verifier(std::path::Path::new(dir)).await,
+        None => {
+            // Not fatal, but loud: the service is up and the Gateway still
+            // cannot verify anything it signs.
+            tracing::error!(
+                "user service /health reports no data_dir; cannot locate its signing key"
+            );
+            None
         }
-    } else {
-        None
     };
 
     {
@@ -363,10 +385,7 @@ async fn load_verifier(user_data_dir: &std::path::Path) -> Option<TokenVerifier>
 async fn fetch_snapshot(port: u16) -> Option<UserSnapshot> {
     let details = fetch_details(port).await?;
     Some(UserSnapshot {
-        requires_setup: details
-            .get("requires_setup")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false),
+        account_state: parse_account_state(details.get("account_state")),
         registration_open: details
             .get("registration_open")
             .and_then(|v| v.as_bool())
@@ -376,6 +395,38 @@ async fn fetch_snapshot(port: u16) -> Option<UserSnapshot> {
             .and_then(|v| v.as_u64())
             .unwrap_or(0),
     })
+}
+
+/// Parse the account system's first-boot state out of the service's
+/// `/health` details (ADR-114).
+///
+/// A missing or unrecognised value **fails closed** into
+/// [`AccountSystemState::NeedsSetup`]. The old fail-open `Ready` was justified
+/// by "the auth gate still requires a valid token, and a token cannot exist
+/// before an administrator exists" — ADR-114 invalidated that reasoning:
+/// `POST /api/auth/setup` is a token-less path that *creates* both the
+/// administrator and its first token. A `/health` reply without this field is
+/// a broken contract, not a deployment we should silently trust; closing the
+/// gate is loud and recoverable, while opening it can hand the first admin
+/// account to whoever reaches the endpoint.
+///
+/// "No `/health` reply at all" is a different case and is handled elsewhere:
+/// `fetch_details()` returns `None`, no snapshot is published, and the gate's
+/// `Option::None` startup-window default applies.
+fn parse_account_state(raw: Option<&serde_json::Value>) -> AccountSystemState {
+    match raw.and_then(|v| v.as_str()) {
+        Some("uninitialized") => AccountSystemState::Uninitialized,
+        Some("needs_setup") => AccountSystemState::NeedsSetup,
+        Some("ready") => AccountSystemState::Ready,
+        other => {
+            tracing::warn!(
+                ?other,
+                "user service /health did not report a valid account_state; \
+                 keeping the first-boot gate closed until it does"
+            );
+            AccountSystemState::NeedsSetup
+        }
+    }
 }
 
 /// `GET /health` → the `details` object.
@@ -458,8 +509,6 @@ async fn spawn_user(cfg: &UserSupervisorConfig) -> Result<(tokio::process::Child
         .arg(cfg.port.to_string())
         .arg("--port-file")
         .arg(&cfg.port_file)
-        .arg("--auth-mode")
-        .arg(cfg.auth_mode)
         .arg("--gateway-health-url")
         .arg(&cfg.gateway_health_url)
         .arg("--log-level")
@@ -504,4 +553,35 @@ async fn spawn_user(cfg: &UserSupervisorConfig) -> Result<(tokio::process::Child
     let pid = child.id().unwrap_or(0);
     tracing::info!(pid, port = cfg.port, "user service spawned");
     Ok((child, pid))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn health_snapshot_states_parse_to_the_wire_spelling() {
+        let cases = [
+            ("uninitialized", AccountSystemState::Uninitialized),
+            ("needs_setup", AccountSystemState::NeedsSetup),
+            ("ready", AccountSystemState::Ready),
+        ];
+        for (raw, expected) in cases {
+            assert_eq!(parse_account_state(Some(&json!(raw))), expected, "{raw}");
+        }
+    }
+
+    /// Regression (ADR-114 review): fail-open `Ready` on a broken `/health`
+    /// contract could unlock the token-less setup endpoint. Unknown and
+    /// missing values must close the gate instead.
+    #[test]
+    fn a_missing_or_unknown_health_state_fails_closed() {
+        for raw in [None, Some(json!("multi_user")), Some(json!(7)), Some(json!(null))] {
+            let state = parse_account_state(raw.as_ref());
+            assert_eq!(state, AccountSystemState::NeedsSetup, "raw = {raw:?}");
+            assert!(state.requires_setup());
+        }
+        assert!(UserSnapshot::default().requires_setup());
+    }
 }

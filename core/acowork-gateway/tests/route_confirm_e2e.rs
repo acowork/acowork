@@ -140,8 +140,6 @@ vault_dir = "{home}/data/vault"
 packages_dir = "{home}/config/packages"
 data_dir = "{home}/data"
 
-auth_mode = "multi_user"
-
 [user]
 config = "{home}/acowork-user.toml"
 "#,

@@ -45,10 +45,11 @@ export function ProjectsView() {
   const loadTasks = usePmBoardStore((s) => s.loadTasks);
   const clearBoard = usePmBoardStore((s) => s.clear);
 
-  // The dialog's open/closed state IS the store's mode — one source of truth,
-  // so the board, the search deep link and the "add subtask" entry can never
-  // disagree about what is on screen.
-  const dialogMode = usePmTaskDetailStore((s) => s.mode);
+  // The dialog's open/closed state IS the store's frame stack — one source of
+  // truth, so the board, the search deep link and the "add subtask" entry can
+  // never disagree about what is on screen. The stack can hold more than one
+  // box (a subtask opens on top of its parent), so the test is "is it empty".
+  const dialogOpen = usePmTaskDetailStore((s) => s.frames.length > 0);
   const openTask = usePmTaskDetailStore((s) => s.openTask);
   const openCreate = usePmTaskDetailStore((s) => s.openCreate);
   const clearDetail = usePmTaskDetailStore((s) => s.clear);
@@ -198,7 +199,7 @@ export function ProjectsView() {
           attachments / subtasks / delete. Centered dialog like the rest of the
           app; pm's 40px right rail belongs to the project settings panel
           (PmSettingsPanel), not to tasks. */}
-      {dialogMode && <TaskEditDialog onClose={handleCloseDetail} />}
+      {dialogOpen && <TaskEditDialog onClose={handleCloseDetail} />}
     </div>
   );
 }

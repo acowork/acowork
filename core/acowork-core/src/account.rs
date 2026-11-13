@@ -48,13 +48,95 @@ impl Role {
 
 /// Sentinel `password_hash` for accounts that have not yet set a password.
 ///
-/// Used (under `AUTH_MODE=multi_user`) for accounts an admin created but
-/// whose owner has not completed first-login via `invite_token`
-/// (ADR-076 §决策 6). It is never a valid PHC string, so a verify against
-/// it always fails — the account is structurally un-loggable-in rather
-/// than merely disabled. `AUTH_MODE=local` never creates accounts at all
-/// (ADR-076 §决策 12).
+/// Used for accounts an admin created but whose owner has not completed
+/// first-login via `invite_token` (ADR-076 §决策 6). It is never a valid
+/// PHC string, so a verify against it always fails — the account is
+/// structurally un-loggable-in rather than merely disabled.
 pub const DISABLED_PASSWORD_HASH: &str = "$disabled$";
+
+/// Prefix of a hash this service can actually verify. `hash_password()`
+/// writes Argon2id PHC strings; anything else (the sentinel, an empty
+/// string, a truncated or hand-corrupted record) makes `verify_password`
+/// fail, so it must never be counted as "somebody can log in".
+pub const ARGON2ID_PHC_PREFIX: &str = "$argon2id$";
+
+/// Whether a stored credential looks like a verifiable Argon2id PHC string.
+///
+/// This is a *shape* check, not a parse: `acowork-core` deliberately does
+/// not depend on the argon2 crate. The login path still parses and verifies
+/// the hash for real; this only keeps the first-boot state from claiming a
+/// store is usable when no password could possibly work.
+pub fn has_verifiable_password_hash(stored: &str) -> bool {
+    stored.starts_with(ARGON2ID_PHC_PREFIX) && stored.len() > ARGON2ID_PHC_PREFIX.len()
+}
+
+/// The lifecycle state of the account system itself (ADR-114).
+///
+/// Replaces the old `AUTH_MODE` knob. The account system is **always on** —
+/// what varies is how far along its first-boot lifecycle it is, and that is
+/// a *runtime fact about the store*, not a deployment mode and not something
+/// the network topology may decide.
+///
+/// The distinction that matters: `Uninitialized` means "there is no account
+/// system here yet" (an operator has to create the first account), while
+/// `NeedsSetup` means "accounts exist but none of them can be logged into
+/// yet" (a seeded administrator still needs a password). Collapsing both
+/// into one boolean is what made the first-boot gate undecidable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AccountSystemState {
+    /// No account store yet, or the store is empty. The first administrator
+    /// has to be created before anything else can happen.
+    Uninitialized,
+    /// Accounts exist, but no administrator has a usable password — nobody
+    /// can log in until the first-boot password is set.
+    NeedsSetup,
+    /// At least one administrator can log in. The account system is usable.
+    Ready,
+}
+
+impl AccountSystemState {
+    /// The canonical lowercase spelling used on the wire and in logs.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Uninitialized => "uninitialized",
+            Self::NeedsSetup => "needs_setup",
+            Self::Ready => "ready",
+        }
+    }
+
+    /// Derive the state from the persisted account list.
+    ///
+    /// The empty list is `Uninitialized` (nothing to log into *and* nothing
+    /// to set up) — distinct from a list that holds only passwordless
+    /// accounts, which is `NeedsSetup`.
+    pub fn from_accounts(list: &AccountListFile) -> Self {
+        if list.accounts.is_empty() {
+            return Self::Uninitialized;
+        }
+        // One single predicate, shared with the login path. Keeping a second
+        // ad-hoc "is this admin usable?" loop here drifted from
+        // `is_login_capable()` on `disabled_at` and on malformed hashes,
+        // which let `/health` and the CLI disagree about the same store.
+        if list
+            .accounts
+            .iter()
+            .any(|a| a.is_admin() && a.is_login_capable())
+        {
+            Self::Ready
+        } else {
+            // Accounts exist but nobody can log in: no admin at all, only
+            // passwordless / disabled admins, or a store with unusable
+            // credential records.
+            Self::NeedsSetup
+        }
+    }
+
+    /// Whether the first-boot gate is closed — no administrator can log in.
+    pub fn requires_setup(self) -> bool {
+        !matches!(self, Self::Ready)
+    }
+}
 
 /// A user account (ADR-076 §决策 1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -73,7 +155,8 @@ pub struct UserAccount {
 
     // ── Credentials ──
     /// Argon2id PHC string (`$argon2id$v=19$m=...,t=...,p=...$<salt>$<hash>`),
-    /// or [`DISABLED_PASSWORD_HASH`] for local-mode accounts. Stored
+    /// or [`DISABLED_PASSWORD_HASH`] for a seeded, not-yet-activated
+    /// account (ADR-114 first-boot setup). Stored
     /// independently of the Vault so login verification works while the
     /// Vault is locked.
     pub password_hash: String,
@@ -129,10 +212,11 @@ pub struct UserAccount {
 }
 
 impl UserAccount {
-    /// Whether this account may log in with a password: it has a real hash
-    /// (not the [`DISABLED_PASSWORD_HASH`] sentinel) and is not disabled.
+    /// Whether this account may log in with a password: it has a real,
+    /// verifiable Argon2id hash (not the [`DISABLED_PASSWORD_HASH`] sentinel
+    /// or a corrupt record) and is not disabled.
     pub fn is_login_capable(&self) -> bool {
-        self.password_hash != DISABLED_PASSWORD_HASH && self.disabled_at.is_none()
+        has_verifiable_password_hash(&self.password_hash) && self.disabled_at.is_none()
     }
 
     /// Whether this account is an administrator.
@@ -304,7 +388,7 @@ mod tests {
         assert_eq!(json, "\"admin\"");
         let back: Role = serde_json::from_str("\"user\"").unwrap();
         assert_eq!(back, Role::User);
-        // Missing role defaults to User (old data / local mode).
+        // Missing role defaults to User (legacy records).
         let a: UserAccount = serde_json::from_str(
             r#"{"user_id":"x","username":"y","display_name":"Y",
                 "password_hash":"$disabled$","language":"en","timezone":"UTC",
@@ -351,5 +435,141 @@ mod tests {
         assert!(list.find("u-1").is_some());
         assert!(list.find("nope").is_none());
         assert!(list.find_by_username("ALICE").is_some());
+    }
+
+    // ── AccountSystemState (ADR-114) ────────────────────────────────
+
+    fn admin_with(hash: &str, disabled: bool) -> UserAccount {
+        let mut a = sample();
+        a.role = Role::Admin;
+        a.password_hash = hash.into();
+        a.disabled_at = disabled.then(|| "2026-10-16T00:00:00Z".into());
+        a
+    }
+
+    #[test]
+    fn empty_store_is_uninitialized() {
+        let state = AccountSystemState::from_accounts(&AccountListFile::default());
+        assert_eq!(state, AccountSystemState::Uninitialized);
+        assert!(state.requires_setup());
+    }
+
+    #[test]
+    fn passwordless_admin_is_needs_setup_not_uninitialized() {
+        // The distinction the old boolean could not express: accounts DO
+        // exist, they just cannot be logged into yet.
+        let list = AccountListFile {
+            version: 1,
+            accounts: vec![admin_with(DISABLED_PASSWORD_HASH, false)],
+        };
+        let state = AccountSystemState::from_accounts(&list);
+        assert_eq!(state, AccountSystemState::NeedsSetup);
+        assert!(state.requires_setup());
+    }
+
+    #[test]
+    fn admin_with_a_password_is_ready() {
+        let list = AccountListFile {
+            version: 1,
+            accounts: vec![admin_with("$argon2id$v=19$m=1,t=1,p=1$salt$hash", false)],
+        };
+        let state = AccountSystemState::from_accounts(&list);
+        assert_eq!(state, AccountSystemState::Ready);
+        assert!(!state.requires_setup());
+    }
+
+    #[test]
+    fn disabled_admin_does_not_count_as_ready() {
+        let list = AccountListFile {
+            version: 1,
+            accounts: vec![admin_with("$argon2id$v=19$m=1,t=1,p=1$salt$hash", true)],
+        };
+        assert_eq!(
+            AccountSystemState::from_accounts(&list),
+            AccountSystemState::NeedsSetup
+        );
+    }
+
+    /// Regression (ADR-114 review): `from_accounts()` used to treat *any*
+    /// non-sentinel string as a usable password, so a corrupt record made
+    /// the Gateway report `ready` while `verify_password` could never
+    /// succeed — an unrecoverable lockout with no setup path.
+    #[test]
+    fn a_corrupt_hash_does_not_count_as_ready() {
+        for hash in ["", "plaintext", DISABLED_PASSWORD_HASH, "$argon2id$"] {
+            let list = AccountListFile {
+                version: 1,
+                accounts: vec![admin_with(hash, false)],
+            };
+            assert_eq!(
+                AccountSystemState::from_accounts(&list),
+                AccountSystemState::NeedsSetup,
+                "hash = {hash:?}"
+            );
+            assert!(!list.accounts[0].is_login_capable(), "hash = {hash:?}");
+        }
+    }
+
+    #[test]
+    fn state_and_login_capability_agree_for_a_mixed_store() {
+        // A disabled admin with a good hash plus a passwordless admin is
+        // still `NeedsSetup`; a second, enabled admin makes it `Ready`.
+        let mut disabled = admin_with("$argon2id$v=19$m=1,t=1,p=1$salt$hash", true);
+        disabled.user_id = "u-disabled".into();
+        let mut seeded = admin_with(DISABLED_PASSWORD_HASH, false);
+        seeded.user_id = "u-seeded".into();
+        let mut enabled = admin_with("$argon2id$v=19$m=1,t=1,p=1$salt$hash", false);
+        enabled.user_id = "u-enabled".into();
+
+        let list = AccountListFile {
+            version: 1,
+            accounts: vec![disabled.clone(), seeded.clone()],
+        };
+        assert_eq!(
+            AccountSystemState::from_accounts(&list),
+            AccountSystemState::NeedsSetup
+        );
+        assert!(!disabled.is_login_capable());
+        assert!(!seeded.is_login_capable());
+
+        let list = AccountListFile {
+            version: 2,
+            accounts: vec![disabled, seeded, enabled.clone()],
+        };
+        assert_eq!(
+            AccountSystemState::from_accounts(&list),
+            AccountSystemState::Ready
+        );
+        assert!(enabled.is_login_capable());
+    }
+
+    #[test]
+    fn accounts_without_an_admin_cannot_log_in() {
+        let list = AccountListFile {
+            version: 1,
+            accounts: vec![sample()],
+        };
+        assert_eq!(
+            AccountSystemState::from_accounts(&list),
+            AccountSystemState::NeedsSetup
+        );
+    }
+
+    #[test]
+    fn state_serde_uses_the_wire_spelling() {
+        assert_eq!(
+            serde_json::to_string(&AccountSystemState::Uninitialized).unwrap(),
+            "\"uninitialized\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AccountSystemState::NeedsSetup).unwrap(),
+            "\"needs_setup\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AccountSystemState::Ready).unwrap(),
+            "\"ready\""
+        );
+        let back: AccountSystemState = serde_json::from_str("\"ready\"").unwrap();
+        assert_eq!(back, AccountSystemState::Ready);
     }
 }

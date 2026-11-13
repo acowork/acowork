@@ -1350,7 +1350,23 @@ impl AgentLoop {
         // `todo_write`) and parallel tool execution are all covered — they
         // share the same `ToolExecuting` semantic ("LLM produced tool calls,
         // awaiting results").
-        self.transition_status(SessionStatus::ToolExecuting);
+        //
+        // The names go with the status because the surfaces that watch a run
+        // from the outside (the Chat transcript's wait line) have no copy of
+        // this session's messages: without the name they can only ever say
+        // "working on it". Deduped, in dispatch order — a fan-out of one tool
+        // names that tool, a mixed batch names none of them specially and the
+        // reader falls back to the generic word.
+        let mut dispatched_tools: Vec<String> = Vec::new();
+        for tc in &calls_to_execute {
+            let name = tc.function.name.clone();
+            if !dispatched_tools.contains(&name) {
+                dispatched_tools.push(name);
+            }
+        }
+        self.transition_status(SessionStatus::ToolExecuting {
+            tools: dispatched_tools,
+        });
 
         // Intercept special tools
         let mut ask_question_results: Vec<(usize, (String, bool))> = Vec::new();

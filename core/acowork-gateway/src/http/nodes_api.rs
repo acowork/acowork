@@ -999,7 +999,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_permissions_local_mode_no_row_is_editable() {
+    async fn node_permissions_without_auth_context_no_row_is_editable() {
         // Local mode (no AuthContext) + never-attributed node → empty state,
         // editable (every resource is manageable in single-user mode).
         let state = state_with_node_owner("other", None, &[]);

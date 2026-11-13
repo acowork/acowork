@@ -290,7 +290,10 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
     }
   }, [expanded, items, thinkingContent]);
 
-  const pairedItems = buildPairedItems(items);
+  // Memoized: the pending-authorization set below reads it, and a fresh
+  // array identity every render would make that set recompute (and the
+  // fold effect re-fire) on renders that changed nothing about the block.
+  const pairedItems = useMemo(() => buildPairedItems(items), [items]);
   const stepCount = pairedItems.length;
 
   // Count tool_calls that have NOT yet been paired with a tool_result.
@@ -328,20 +331,29 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   // as a key SET rather than a boolean: two tools can be awaiting a
   // decision at once, and the block must stay open until the LAST of them
   // is answered.
+  //
+  // The set is read from `pairedItems` — the same rows `ToolCallItem`
+  // draws its Allow / Deny pair from (a `tool_call` with no paired result,
+  // pairing keyed on `tool_call_id`) — so the fold and the button cannot
+  // disagree.  Deriving it by TOOL NAME instead ("is there any
+  // tool_result named `bash` in this block?") made them disagree on the
+  // common execution-session shape: the agent ran `bash` once, got a
+  // result, then asked something riskier, and the earlier result silenced
+  // the second call's authorization — the button existed, the block stayed
+  // folded, and the pending decision was invisible.
   const pendingApprovalKeys = useMemo(() => {
     if (!pendingApproval) return [] as string[];
     const keys: string[] = [];
-    for (const ev of Object.values(pendingApproval)) {
-      if (!approvalMatchesSession(ev, currentSessionId)) continue;
-      const toolMatch = items.some(
-        (m) => m.type === "tool_call" && m.toolCallId === ev.tool_call_id && !items.some(
-          (r) => r.type === "tool_result" && r.toolName === m.toolName
-        )
-      );
-      if (toolMatch) keys.push(ev.tool_call_id || ev.request_id);
+    for (const paired of pairedItems) {
+      if (paired.kind !== "tool" || paired.result) continue;
+      if (paired.call.type !== "tool_call") continue;
+      const id = paired.call.toolCallId;
+      if (!id) continue;
+      const ev = pendingApproval[id];
+      if (ev && approvalMatchesSession(ev, currentSessionId)) keys.push(id);
     }
     return keys;
-  }, [pendingApproval, currentSessionId, items]);
+  }, [pendingApproval, currentSessionId, pairedItems]);
 
   const hasPendingApproval = pendingApprovalKeys.length > 0;
 
@@ -491,6 +503,9 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   return prev.items === next.items
     && prev.isStreaming === next.isStreaming
     && prev.pendingApproval === next.pendingApproval
+    // The pending-authorization set is session-scoped, so a session change
+    // can change whether this block owes the reader an open control.
+    && prev.currentSessionId === next.currentSessionId
     && prev.hasFollowUpReply === next.hasFollowUpReply
     && prev.toolProgress === next.toolProgress
     && prev.onCancelTool === next.onCancelTool

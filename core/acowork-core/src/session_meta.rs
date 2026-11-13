@@ -534,9 +534,10 @@ impl SessionVisibility {
 /// to exclude: it stays fully unfiltered.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionScope {
-    /// No restriction at all: a local-mode Runtime (`AUTH_MODE=local`,
-    /// ADR-076 §决策 12), where the account system is off and one implicit
-    /// human owns everything.
+    /// No restriction at all. ADR-114 keeps the account system always on;
+    /// this variant now means "no chat-scope header was supplied" — an
+    /// internal/trusted caller or the wildcard admin scope — never a
+    /// deployment mode with accounts switched off.
     Unfiltered,
     /// An administrator: may **read** every session (`as_user` inspection
     /// included), may **write** only what it initiated itself.
@@ -852,9 +853,9 @@ pub struct SessionMeta {
     /// and reusing it here is what made "the session owner", "the logged-in
     /// user" and "the message sender" look interchangeable.
     ///
-    /// `None` = created before the account system existed, or under
-    /// `AUTH_MODE=local` (no accounts at all) — only an unfiltered
-    /// (local-mode) reader sees those.
+    /// `None` = a legacy session written before `initiator` was recorded,
+    /// or one created by an internal caller with no account identity —
+    /// only an unfiltered reader sees those.
     #[serde(default, alias = "user_id", skip_serializing_if = "Option::is_none")]
     pub initiator: Option<String>,
     /// ADR-076 §决策 4: who may read this session. **Absent = public**
@@ -1784,7 +1785,7 @@ mod authority_tests {
     /// A stranger is not handed a tier by the new list being absent, and local
     /// mode is unchanged (one implicit human owns everything).
     #[test]
-    fn strangers_and_local_mode_are_unchanged() {
+    fn strangers_and_unfiltered_scope_are_unchanged() {
         let m = meta(Some("8f7be9a6-agent-instance"), Some("private"), &["user-other"]);
         assert_eq!(
             m.authority_for(&SessionScope::user("user-stranger")),

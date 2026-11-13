@@ -16,7 +16,7 @@
 
 import { ChevronLeft, ChevronRight } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { cn } from "../../lib/utils";
+import { Dropdown } from "../../components/common/Dropdown";
 import { PM_LIST_PAGE_SIZE_OPTIONS } from "../../lib/pm-view-settings";
 import type { PmListPage } from "../../lib/pm-list-columns";
 
@@ -84,27 +84,24 @@ export function TaskListPager({
           </button>
         </span>
       )}
-      <label className="flex items-center gap-1">
+      <span className="flex items-center gap-1">
         <span className="sr-only">{t("pm.list.page.size")}</span>
-        <select
-          value={pageSize}
-          onChange={(e) => onPageSizeChange(Number(e.target.value))}
+        {/* 24px 高 + `text-xs`（12px）：`h-5 text-10` 的组合在 14px 基准下
+            只有 10px 字、20px 高，页脚那行几乎读不出来；12px 与表格
+            标题、工具栏按钮同一档。走公共 Dropdown 而不是手写 <select>：
+            原生 option 列表由 WebView2 绘制，无法用主题色着色。 */}
+        <Dropdown
+          value={String(pageSize)}
+          onChange={(v) => onPageSizeChange(Number(v))}
           aria-label={t("pm.list.page.size")}
-          className={cn(
-            /* 24px 高 + `text-xs`（12px）：`h-5 text-10` 的组合在 14px 基准下
-               只有 10px 字、20px 高，页脚那行几乎读不出来；12px 与表格
-               标题、工具栏按钮同一档。 */
-            "h-6 rounded border border-border-outer bg-page-bg px-1.5 text-xs text-text-secondary",
-            "outline-none focus:border-[var(--color-accent)]",
-          )}
-        >
-          {PM_LIST_PAGE_SIZE_OPTIONS.map((n) => (
-            <option key={n} value={n}>
-              {t("pm.list.page.perPage", { count: n })}
-            </option>
-          ))}
-        </select>
-      </label>
+          size="small"
+          className="h-6 w-auto rounded border-border-outer bg-page-bg px-1.5 text-xs text-text-secondary"
+          options={PM_LIST_PAGE_SIZE_OPTIONS.map((n) => ({
+            value: String(n),
+            label: t("pm.list.page.perPage", { count: n }),
+          }))}
+        />
+      </span>
     </span>
   );
 }

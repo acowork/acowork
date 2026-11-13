@@ -1,0 +1,137 @@
+name: CI
+
+# Every gate here is the same command a contributor runs locally — `dev/ci.sh`
+# is the single entry point for both, so "passes locally, fails in CI" is a bug
+# in this file rather than a mystery. See CONTRIBUTING.md "The build and test
+# gates you must pass".
+#
+# What is deliberately NOT here:
+#   * `dev/ci.sh smoke` — boots a real Gateway + node agent against temp homes
+#     and needs the debug binaries; it belongs on a self-hosted runner with the
+#     desktop toolchain, not on every push.
+#   * Tauri bundling (desktop/mobile shells) — same reason: the native shells
+#     need webkit/Android SDKs that a PR gate should not pay for.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # The architecture red lines: 14 greps over the tree, no toolchain, a few
+  # seconds. They run first and alone so a boundary crossing fails the PR
+  # before anything spends ten minutes compiling.
+  redlines:
+    name: Architecture red lines
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: dev/ci.sh redlines
+        run: ./dev/ci.sh redlines
+
+  core:
+    name: Rust workspace
+    runs-on: ubuntu-latest
+    needs: redlines
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: Check
+        run: ./dev/ci.sh check
+      - name: Clippy
+        run: ./dev/ci.sh clippy
+      - name: Tests
+        run: ./dev/ci.sh test
+      # `dev/ci.sh test` downgrades a missing ONNX Runtime to a warning, which
+      # is right on a laptop and wrong on a gate: here the runtime is
+      # downloadable, so a failure must fail the run.
+      - name: acowork-embed tests (strict)
+        working-directory: core
+        run: cargo test -p acowork-embed --features download-ort
+      - name: Integration
+        run: ./dev/ci.sh integration
+
+  # The shipped `.agent` files are generated from `agents/*`. Two guards:
+  # one inside this repo (does the artifact match its source?), one against
+  # the hub, whose mirror publishes the same bytes under the same agent_id.
+  packages:
+    name: Agent packages + hub mirror
+    runs-on: ubuntu-latest
+    needs: redlines
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core
+      - name: The hub registry (source of the mirrored packages)
+        uses: actions/checkout@v4
+        with:
+          repository: acowork/ACoworkAgentHub
+          persist-credentials: false
+          path: .ci/hub
+      - name: Shipped packages match their source tree
+        working-directory: core
+        run: cargo test -p acowork-sign --test example_packages
+      # Opt-in by design: without the hub present these tests fail loudly
+      # rather than pass vacuously. The checkout above is what makes them run.
+      - name: Hub packages satisfy the manifest contract
+        working-directory: core
+        env:
+          ACOWORK_HUB_AGENTS: ${{ github.workspace }}/.ci/hub/agents
+        run: cargo test -p acowork-core --test hub_interop -- --ignored
+      - name: Fetch master (the soft check compares against it)
+        # actions/checkout fetches only the triggering ref, so `origin/master`
+        # would not exist here and the check would die on a missing ref.
+        run: git fetch --no-tags --depth=1 origin +master:refs/remotes/origin/master
+      - name: The hub mirror matches the commit it claims
+        run: |
+          python3 .ci/hub/tools/sync-official.py \
+            --main-repo "$GITHUB_WORKSPACE" \
+            --main-ref origin/master \
+            --check --report-only | tee .ci/mirror-report.txt
+          # Soft by intent: main-repo activity must not turn an unrelated hub
+          # PR red. The annotation is the signal; the hard gate lives in the
+          # hub's own publish workflow.
+          grep -q '::warning' .ci/mirror-report.txt && \
+            echo "The published mirror lags master — open a mirror PR: dev/common/sync-hub-mirror.sh" || true
+
+  web:
+    name: ${{ matrix.app }}
+    runs-on: ubuntu-latest
+    needs: redlines
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - app: desktop
+            dir: apps/acowork-desktop
+          - app: mobile
+            dir: apps/acowork-mobile
+    defaults:
+      run:
+        working-directory: ${{ matrix.dir }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ${{ matrix.dir }}/package-lock.json
+      - run: npm ci
+      # The desktop suite carries the coverage guards (i18n, overlay-scroll
+      # backlog) that a build alone would not run.
+      - run: npm run test
+      - run: npm run build

@@ -1,15 +1,16 @@
 //! acowork-user standalone-process CLI (ADR-084 §决策 5).
 //!
 //! Mirrors the PM/doc supervisor contract: `--host/--port/--port-file` for
-//! binding and port reporting, `--data-dir` for storage, `--auth-mode` for
-//! the deployment mode the Gateway resolved, `--gateway-health-url` for the
-//! ADR-018 watchdog, and `--config` for the TOML overlay.
+//! binding and port reporting, `--data-dir` for storage,
+//! `--gateway-health-url` for the ADR-018 watchdog, and `--config` for the
+//! TOML overlay.
+//!
+//! ADR-114: there is no `--auth-mode` any more — the account system is
+//! always on, so the service has exactly one behaviour.
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
-
-use crate::config::AuthMode;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -36,10 +37,6 @@ pub struct Cli {
     /// Data directory. Default `$HOME/.acowork/acowork-user/`.
     #[arg(long, global = true)]
     pub data_dir: Option<PathBuf>,
-
-    /// Deployment mode, resolved by the Gateway (`local` | `multi_user`).
-    #[arg(long, global = true)]
-    pub auth_mode: Option<String>,
 
     /// TOML config file to layer over the defaults.
     #[arg(long, global = true)]
@@ -81,7 +78,7 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    /// Seed the first administrator (`multi_user` only), then exit.
+    /// Seed the first administrator, then exit.
     AdminSetup {
         /// Read the password from this file.
         #[arg(long)]
@@ -109,13 +106,4 @@ pub enum Command {
     /// (ADR-084). Read-only: never seeds, never creates the auth dir.
     /// Exit `0` = found (user_id on stdout), `1` = no admin account exists.
     FirstAdmin,
-}
-
-/// Apply the CLI overrides onto a config, validating `--auth-mode`.
-pub fn resolve_auth_mode(cli: &Cli, fallback: AuthMode) -> Result<AuthMode, String> {
-    match cli.auth_mode.as_deref() {
-        Some(raw) => AuthMode::parse(raw)
-            .ok_or_else(|| format!("invalid --auth-mode `{raw}` (expected `local` | `multi_user`)")),
-        None => Ok(fallback),
-    }
 }

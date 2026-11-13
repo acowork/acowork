@@ -81,10 +81,15 @@ Never hand-type an id you were not given by a tool.
 
 **`start_at` is the wake-up clock, and it is the contract.** A task's
 `description` is the whole brief the assignee receives; `start_at` is when the
-dispatch scanner pushes it to them. Omit it and the wake-up goes out as soon as
-approval lands; set it and the scanner waits (a past `start_at` means
-"immediately"). Declare blockers with `depends_on` — a blocked task is not
-dispatched at all, and prose using the word "blocked" blocks nothing.
+dispatch scanner pushes it to them. Omit it and the store fills `now` — the
+wake-up goes out as soon as approval lands; set a future `start_at` and the
+scanner waits (a past `start_at` means "immediately"). Declare blockers with
+`depends_on` — a blocked task is not dispatched at all, and prose using the
+word "blocked" blocks nothing.
+
+**A task with no `start_at` is never dispatched.** `pm_update_task` with
+`start_at: null` unschedules it (未排期) — it waits for a human to give it a
+time. That is the only way to park work without cancelling it.
 
 So the honest sentence after creating a task is *"created and assigned; a human
 must approve it before the scanner can wake the assignee"* — not "dispatched".

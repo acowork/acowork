@@ -1,8 +1,9 @@
 /**
- * Account session state (ADR-076 §决策 3 / 6 / 7).
+ * Account session state (ADR-076 §决策 3 / 6 / 7, ADR-114).
  *
- * Owns the *UI-facing* session: resolved deployment auth mode, the current
- * account, the login gate, and the error/setup states the views bind to.
+ * Owns the *UI-facing* session: the account system's first-boot state, the
+ * current account, the login gate, and the error/setup states the views
+ * bind to.
  *
  * It deliberately does NOT own the token pair. That lives in
  * `lib/session/tokens.ts`, the single rotation source; this store keeps a
@@ -10,8 +11,11 @@
  * `accessToken` and need to re-render when it changes. `refreshToken` is not
  * mirrored — nothing outside the module has any business holding it.
  *
- * `AUTH_MODE=local` (the default loopback deployment) is a full no-op
- * (§决策 12): the store resolves to `disabled` and the UI never gates.
+ * ADR-114: there is no "no-account-system" state. The account system is
+ * always present; `accountState` only describes how far along its
+ * first-boot lifecycle it is. On a fresh install the Desktop shows the
+ * setup wizard instead of the login form, and completes it over HTTP from
+ * the Gateway host.
  */
 
 import { create } from "zustand";
@@ -25,6 +29,7 @@ import {
   fetchMe,
   firstLoginRequest,
   loginRequest,
+  setupRequest,
 } from "../lib/auth-api";
 import {
   acquire,
@@ -36,7 +41,7 @@ import {
   restore,
   signOut,
 } from "../lib/session/tokens";
-import type { AuthMode, AuthState, TokenPair, UserAccount } from "../lib/types";
+import type { AccountSystemState, AuthState, TokenPair, UserAccount } from "../lib/types";
 import { useUserProfileStore } from "./userProfileStore";
 import { setPrefScope } from "../lib/prefsScope";
 import { RECOVERY_RELOAD_FLAG } from "../lib/recoveryReload";
@@ -61,8 +66,9 @@ function reloadApp(): void {
 }
 
 interface AuthStore {
-  /** Resolved deployment mode; `"unknown"` until `/api/status` answers. */
-  mode: AuthMode | "unknown";
+  /** ADR-114: the account system's first-boot state; `"unknown"` until
+   *  `/api/status` answers. Never derived from the network bind. */
+  accountState: AccountSystemState | "unknown";
   /**
    * ADR-076 §决策 6: `[multi_user].registration_open`. When set, a logged-in
    * non-admin may create accounts (the Gateway still forces `role: user`), so
@@ -70,10 +76,10 @@ interface AuthStore {
    */
   registrationOpen: boolean;
   /**
-   * ADR-076 §决策 12 v2: while `true`, the Desktop renders the "Gateway
-   * is not ready" gate instead of the login form. The store polls
-   * `/api/status` while this flag is set; the moment it flips to
-   * `false` we transition the gate into the normal flow.
+   * ADR-114: while `true`, the Desktop renders the first-boot setup view
+   * instead of the login form. Derived from `accountState !== "ready"`.
+   * The store polls `/api/status` while this flag is set so a setup done
+   * on another client (or via the CLI on the host) is picked up too.
    */
   setupRequired: boolean;
   /** App-level gate state. */
@@ -99,7 +105,8 @@ interface AuthStore {
    * in flight. */
   _setupPollHandle: ReturnType<typeof setInterval> | null;
 
-  /** Resolve the mode and restore a stored session. Call once, after the Gateway is reachable. */
+  /** Resolve the account state and restore a stored session. Call once,
+   *  after the Gateway is reachable. */
   init: () => Promise<void>;
 
   /**
@@ -134,14 +141,14 @@ interface AuthStore {
    *
    * When called with no in-memory session (the user was on LoginView
    * when the URL changed), the probe is skipped and init() runs to
-   * re-resolve the deployment mode for the new URL.
+   * re-resolve the account state for the new URL.
    */
   onGatewayUrlChanged: (newUrl: string, oldUrl: string) => Promise<void>;
 
   /**
    * ADR-076 §决策 12 v2: poll `/api/status` every 5 s while
    * `setupRequired` is `true`. The moment the Gateway flips
-   * `requires_setup` to `false`, stop polling and re-run `init()` so
+   * `account_state` to `ready`, stop polling and re-run `init()` so
    * the rest of the auth flow takes over. Idempotent — calling it
    * twice does not spawn two pollers.
    */
@@ -150,6 +157,13 @@ interface AuthStore {
    * poller is running. */
   stopSetupPoll: () => void;
   login: (username: string, password: string) => Promise<void>;
+  /**
+   * ADR-114: create the first administrator from this machine and enter
+   * the app with the returned token pair. Only reachable while
+   * `status === "setup_required"`; a remote client is refused by the
+   * Gateway with 403 `setup_local_only`.
+   */
+  completeSetup: (username: string, password: string, displayName?: string) => Promise<void>;
   /** ADR-076 §决策 6: consume an invite token and set the first password. */
   firstLogin: (inviteToken: string, newPassword: string) => Promise<void>;
   /** Revoke the session, clear tokens, and reload into LoginView. */
@@ -181,7 +195,7 @@ function app(account: UserAccount | null): void {
 }
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
-  mode: "unknown",
+  accountState: "unknown",
   registrationOpen: false,
   setupRequired: false,
   status: "unknown",
@@ -193,49 +207,42 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
 
   init: async () => {
     const url = getGatewayUrl();
-    let mode: AuthMode;
     try {
       const policy = await fetchAuthPolicy(url);
-      mode = policy.authMode;
       set({
+        accountState: policy.accountState,
         registrationOpen: policy.registrationOpen,
         setupRequired: policy.requiresSetup,
       });
     } catch (err) {
-      log.warn("[authStore] failed to resolve auth mode:", err);
+      log.warn("[authStore] failed to resolve the account state:", err);
       // Gateway not answering the probe — leave `unknown` so the UI stays
       // out of the way, but do not gate the user behind a login.
-      set({ mode: "unknown", status: "unknown" });
+      set({ accountState: "unknown", status: "unknown" });
       return;
     }
 
-    // ADR-076 §决策 12 v2: first-boot restricted mode short-circuits the
-    // whole flow — even with a valid token in localStorage, every other
-    // `/api/*` route will 403 until setup completes. Show the
-    // "Gateway not ready" gate and start polling.
-    if (mode === "multi_user" && get().setupRequired) {
-      set({ mode, status: "setup_required" });
+    // ADR-114: no login-capable administrator yet. Even with a valid token
+    // in localStorage, every other `/api/*` route answers 403 until setup
+    // completes, so show the first-boot wizard and start polling for a
+    // setup performed elsewhere (CLI on the host, another local client).
+    if (get().setupRequired) {
+      set({ status: "setup_required" });
       get().pollUntilSetupComplete();
       return;
     }
 
-    if (mode === "local") {
-      set({ mode, status: "disabled" });
-      return;
-    }
-
     if (!restore()) {
-      set({ mode, status: "logged_out" });
+      set({ status: "logged_out" });
       return;
     }
-    set({ mode });
 
     // Ask the module for a token that is usable *now* — it rotates first if
     // the stored one is about to expire, so a boot at minute 14 of the TTL
     // does not walk straight into a 401.
     const token = await acquire();
     if (!token) {
-      set({ mode, status: "logged_out" });
+      set({ status: "logged_out" });
       return;
     }
 
@@ -266,7 +273,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     if (newUrl === oldUrl) return;
     const accessToken = get().accessToken;
     // No session to validate: skip the probe (no Authorization header
-    // to send). Just re-resolve the mode so LoginView's "wrong
+    // to send). Just re-resolve the account state so LoginView's "wrong
     // credentials" state clears and setup_required transitions take
     // effect. init() will see no stored tokens → status=logged_out.
     if (!accessToken) {
@@ -294,7 +301,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         // null into Rust, releasing any in-flight
         // `gateway-auth-required` waiter (ADR-076 §决策 3). Then
         // re-init() against the new Gateway so the login gate
-        // reflects the new deployment policy (mode / setup).
+        // reflects the new account state (setup / login).
         get().clearLocalSession();
         await get().init();
         return;
@@ -302,11 +309,97 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       // Network unreachable / 5xx — don't drop a possibly-valid
       // session on a flaky probe. Do NOT re-init either: a network
       // error there means we can't even resolve the new Gateway's
-      // auth mode, and re-init would clobber our in-memory session.
+      // account state, and re-init would clobber our in-memory session.
       // Leave the store as-is; later 401s will trip the natural
       // interceptor refresh ladder when the network is back.
       log.warn("[authStore] onGatewayUrlChanged probe failed (keeping session):", err);
     }
+  },
+
+  completeSetup: async (username, password, displayName) => {
+    const url = getGatewayUrl();
+    set({ error: null });
+    let pair: TokenPair;
+    try {
+      pair = await setupRequest(url, {
+        username,
+        password,
+        ...(displayName ? { display_name: displayName } : {}),
+      });
+    } catch (err) {
+      const message =
+        err instanceof AuthApiError ? err.message : "Unable to reach the Gateway";
+      set({ error: message });
+      throw err;
+    }
+
+    adopt(pair);
+    get().stopSetupPoll();
+
+    // The Gateway's restricted-mode gate reads a health snapshot that lags
+    // the user service by one poll, so an immediate `/api/auth/me` could
+    // still answer 403 `setup_required`. Wait for `/api/status` to agree
+    // before making authenticated calls, and remember whether it ever did.
+    let gatewayReady = false;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        const policy = await fetchAuthPolicy(url);
+        if (!policy.requiresSetup) {
+          gatewayReady = true;
+          break;
+        }
+      } catch {
+        // Gateway may be mid-restart; keep waiting.
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+
+    // Only claim `logged_in` once the account itself resolved. A `logged_in`
+    // status with `account === null` leaves half the app uninitialised, and
+    // the old code produced exactly that when the status poll timed out or
+    // `/me` failed (it merely logged a warning).
+    let account: UserAccount | null = null;
+    let failure: unknown = null;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        account = await fetchMe(url, pair.access_token);
+        failure = null;
+        break;
+      } catch (err) {
+        failure = err;
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      }
+    }
+
+    if (account) {
+      set({
+        accountState: "ready",
+        setupRequired: false,
+        status: "logged_in",
+        account,
+        error: null,
+      });
+      app(account);
+      return;
+    }
+
+    // Setup already succeeded on the server, so a second attempt would 409 —
+    // the wizard is not a recovery path. Drop the local session and send the
+    // user to the login form with the credentials they just chose.
+    log.warn("[authStore] setup succeeded but the session could not be established:", {
+      gatewayReady,
+      failure,
+    });
+    clear();
+    set({
+      accountState: "ready",
+      setupRequired: false,
+      status: "logged_out",
+      account: null,
+      error: gatewayReady
+        ? "Administrator created, but the session could not be loaded. Please sign in."
+        : "Administrator created, but the Gateway has not reported ready yet. Please sign in.",
+    });
   },
 
   login: async (username, password) => {
@@ -316,6 +409,26 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     try {
       pair = await loginRequest(url, username, password);
     } catch (err) {
+      // ADR-114 (2026-11-14): a 403 whose error code is `setup_required`
+      // is the restricted gate answering — no login-capable admin exists,
+      // so the login form should never have been reachable. Route to the
+      // first-boot wizard instead of printing the raw error code: the boot
+      // probe can outrun the user-service snapshot and land the user here
+      // on a machine that has NO accounts at all.
+      if (
+        err instanceof AuthApiError &&
+        err.status === 403 &&
+        err.message === "setup_required"
+      ) {
+        set({
+          accountState: "needs_setup",
+          setupRequired: true,
+          status: "setup_required",
+          error: null,
+        });
+        get().pollUntilSetupComplete();
+        return;
+      }
       const message =
         err instanceof AuthApiError ? err.message : "Unable to reach the Gateway";
       set({ error: message });
@@ -324,7 +437,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     // Hand the pair to the module; `accessToken` below is only the mirror
     // that `onTokenChange` keeps in sync.
     adopt(pair);
-    set({ mode: "multi_user", status: "logged_in", error: null });
+    set({ accountState: "ready", status: "logged_in", error: null });
     try {
       const account = await fetchMe(url, pair.access_token);
       set({ account });
@@ -341,13 +454,30 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     try {
       pair = await firstLoginRequest(url, inviteToken, newPassword);
     } catch (err) {
+      // Same restricted-gate conversion as `login` — an invite cannot be
+      // redeemed while no login-capable admin exists, and the raw error
+      // code is not a user-facing message.
+      if (
+        err instanceof AuthApiError &&
+        err.status === 403 &&
+        err.message === "setup_required"
+      ) {
+        set({
+          accountState: "needs_setup",
+          setupRequired: true,
+          status: "setup_required",
+          error: null,
+        });
+        get().pollUntilSetupComplete();
+        return;
+      }
       const message =
         err instanceof AuthApiError ? err.message : "Unable to reach the Gateway";
       set({ error: message });
       throw err;
     }
     adopt(pair);
-    set({ mode: "multi_user", status: "logged_in", error: null });
+    set({ accountState: "ready", status: "logged_in", error: null });
     try {
       const account = await fetchMe(url, pair.access_token);
       set({ account });
@@ -416,7 +546,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     });
   },
 
-  // ADR-076 §决策 12 v2: poll loop for first-boot restricted mode. The
+  // ADR-114: poll loop for the first-boot setup state. The
   // poll is intentionally light — it does NOT touch the network beyond
   // the public `/api/status` probe — so a long-running setup (operator
   // typing at the Gateway's TTY) costs us nothing.
@@ -431,6 +561,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       try {
         const policy = await fetchAuthPolicy(getGatewayUrl());
         set({
+          accountState: policy.accountState,
           setupRequired: policy.requiresSetup,
           registrationOpen: policy.registrationOpen,
         });

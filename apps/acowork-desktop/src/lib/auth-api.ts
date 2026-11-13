@@ -1,5 +1,5 @@
 /**
- * Account-system HTTP client (ADR-076 §决策 3 / 6).
+ * Account-system HTTP client (ADR-076 §决策 3 / 6, ADR-114).
  *
  * Thin, side-effect-free wrappers over the Gateway `/api/auth/*` routes.
  * These calls deliberately use plain `fetch` with an explicit
@@ -9,11 +9,12 @@
  * path. Keeping the token plumbing here (not in the store) means the
  * store only owns state, and error shapes stay in one place.
  *
- * Every route here is only registered under `AUTH_MODE=multi_user`
- * (ADR-076 §决策 12); under `local` they 404.
+ * ADR-114: the account system is always present. There is no mode in which
+ * these routes 404 — what varies is the store's first-boot state, which
+ * `/api/status` reports as `account_state`.
  */
 
-import type { AuthMode, DirectoryUser, TokenPair, UserAccount } from "./types";
+import type { AccountSystemState, DirectoryUser, TokenPair, UserAccount } from "./types";
 
 /**
  * Budget for the public auth-policy probe. The probe runs against a
@@ -69,16 +70,16 @@ async function postJson(url: string, body: unknown, accessToken?: string): Promi
 }
 
 /**
- * Read the deployment auth policy from the public `/api/status` probe
- * (ADR-076 §决策 12 + §决策 6). An older Gateway that predates ADR-076 omits
- * `auth_mode` — treated as `local` so the Desktop never gates a backend that
- * has no account system. `registration_open` is `false` whenever the account
- * system is off, so a stale flag can never offer a dead invite button.
+ * Read the account system's first-boot state from the public `/api/status`
+ * probe (ADR-114).
  *
- * `requiresSetup` (ADR-076 §决策 12 v2) signals first-boot restricted mode.
- * `false` whenever the account system is off (`local`) or after the
- * operator completed setup, so the field is safe to ignore on legacy
- * gateways that predate the flag.
+ * A missing or unrecognised `account_state` is treated as `ready`: a
+ * Gateway that has not answered yet (or predates ADR-114) must not send
+ * the Desktop into the setup wizard. This mirrors the Gateway's own
+ * fail-open default for a snapshot that has not arrived.
+ *
+ * `requiresSetup` is derived from the state rather than being a second
+ * wire field — one source of truth, so the two can never disagree.
  *
  * Bounded by `AUTH_POLICY_TIMEOUT_MS`: a black-holed gateway URL (stale
  * LAN IP after a Wi-Fi hop) makes the raw fetch hang on the OS TCP
@@ -89,7 +90,7 @@ async function postJson(url: string, body: unknown, accessToken?: string): Promi
 export async function fetchAuthPolicy(
   gatewayUrl: string,
 ): Promise<{
-  authMode: AuthMode;
+  accountState: AccountSystemState;
   registrationOpen: boolean;
   requiresSetup: boolean;
 }> {
@@ -98,15 +99,43 @@ export async function fetchAuthPolicy(
   });
   if (!resp.ok) throw new AuthApiError(resp.status, await readError(resp));
   const data = (await resp.json()) as {
-    auth_mode?: AuthMode;
+    account_state?: string;
     registration_open?: boolean;
-    requires_setup?: boolean;
   };
+  const accountState: AccountSystemState =
+    data.account_state === "uninitialized"
+      ? "uninitialized"
+      : data.account_state === "needs_setup"
+        ? "needs_setup"
+        : "ready";
   return {
-    authMode: data.auth_mode === "multi_user" ? "multi_user" : "local",
+    accountState,
     registrationOpen: data.registration_open === true,
-    requiresSetup: data.requires_setup === true,
+    requiresSetup: accountState !== "ready",
   };
+}
+
+/**
+ * ADR-114: create the first administrator from this machine.
+ *
+ * Public (no token yet) and gated by the Gateway on the **real peer
+ * address** — a remote Desktop gets 403 `setup_local_only`, and the relay
+ * listener denies the path entirely. Returns a token pair so the wizard
+ * can enter the app without a second login round-trip.
+ */
+export interface SetupAdminBody {
+  username: string;
+  password: string;
+  display_name?: string;
+}
+
+export async function setupRequest(
+  gatewayUrl: string,
+  body: SetupAdminBody,
+): Promise<TokenPair> {
+  const resp = await postJson(`${gatewayUrl}/api/auth/setup`, body);
+  if (!resp.ok) throw new AuthApiError(resp.status, await readError(resp));
+  return (await resp.json()) as TokenPair;
 }
 
 export async function loginRequest(

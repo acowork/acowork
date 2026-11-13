@@ -464,6 +464,45 @@ describe("ChatExecutionBlock", () => {
     expect(document.querySelector(".animate-spin")).toBeTruthy();
   });
 
+  /** Working vs idle must be readable at a glance (user report 2026-11-19):
+   *  the bare 3px spinner beside gray text did not survive a glance at a list
+   *  of blocks. A run with positive evidence it is going wears its count +
+   *  state as a filled capsule — accent BACKGROUND, white text, the one
+   *  accent usage the design language sanctions (`chatCardChrome.test.tsx`);
+   *  an idle run wears nothing. The shape is the status signal now. */
+  it("a working run wears an accent capsule; an idle run does not", () => {
+    const { container: working } = renderBlock({
+      [REF1]: entryOf({
+        status: "pending",
+        projection: { round_id: "r1", terminal: false, status: "in_progress" },
+      }),
+    });
+    const pill = working.querySelector("[data-testid='exec-block-working-capsule']");
+    expect(pill).toBeTruthy();
+    // The fill is the sanctioned accent surface with white text — never an
+    // accent border or an accent label.
+    expect(pill!.className).toContain("bg-accent-strong");
+    expect(pill!.className).toContain("text-white");
+    expect(pill!.className).not.toMatch(/border-\[var\(--color-accent\)\]/);
+    // The spinner lives INSIDE the capsule: one object says "working", not a
+    // word and a stray glyph.
+    expect(pill!.querySelector(".animate-spin")).toBeTruthy();
+    // The capsule carries the same copy the bare span used to: count and word.
+    expect(pill!.textContent).toContain("chatView.block.roundCount");
+    expect(pill!.textContent).toContain("chatView.block.inProgress");
+
+    // Idle: a settled run paints no capsule at all.
+    const { container: idle } = renderBlock({
+      [REF1]: entryOf({
+        status: "ok",
+        projection: { round_id: "r1", terminal: true, status: "completed", answer: { body: "a", ts: "1" } },
+      }),
+    });
+    expect(idle.querySelector("[data-testid='exec-block-working-capsule']")).toBeNull();
+    expect(headerText(idle)).toContain("chatView.block.roundCount");
+    expect(headerText(idle)).toContain("chatView.block.completed");
+  });
+
   it("an unreachable read is an outage with a retry, never a run in flight (D9)", () => {
     renderBlock({
       [REF1]: entryOf({ status: "unreachable", projection: undefined, detail: "connection refused" }),
@@ -767,9 +806,32 @@ describe("ChatExecutionBlock", () => {
     // for yet), but it may not manufacture liveness: the read is TERMINAL, so no
     // spinner and no "in progress" copy ride in on it (D9).
     const { container } = renderBlock({ [REF1]: entryOf({}) });
-    expect(headerText(container)).toContain("chatView.block.state.toolExecuting");
+    // Rev. (2026-11-12, the activity word): the header no longer holds its own
+    // `chatView.block.state.*` map — a dispatch that names no tool falls back to
+    // the shared generic word, and one that names a tool says what it is.
+    expect(headerText(container)).toContain("chatView.activity.working");
     expect(document.querySelector(".animate-spin")).toBeNull();
     expect(screen.queryByText("chatView.block.inProgress")).toBeNull();
+  });
+
+  it("a named dispatch is described by the tool, not by the word \"tool\"", () => {
+    store.chat = {
+      agentStates: {
+        ag: {
+          sessionStates: {
+            s1: {
+              sessionStatus: {
+                status: "tool_executing",
+                detail: { tools: ["memory_recall"] },
+              },
+            },
+          },
+        },
+      },
+    };
+    const { container } = renderBlock({ [REF1]: entryOf({}) });
+    expect(headerText(container)).toContain("tools.memory_recall.running");
+    expect(headerText(container)).not.toContain("chatView.activity.working");
   });
 
   it("an idle session lets the block's own outcome speak", () => {
@@ -780,7 +842,10 @@ describe("ChatExecutionBlock", () => {
     };
     const { container } = renderBlock({ [REF1]: entryOf({}) });
     expect(headerText(container)).toContain("chatView.block.completed");
-    expect(headerText(container)).not.toContain("chatView.block.state.");
+    // An idle session may not lend the header an activity word either.
+    expect(headerText(container)).not.toMatch(
+      /chatView\.(block\.state|activity)\.|tools\.[a-z_]+\.running/,
+    );
   });
 
   it("the drill keeps its own chrome and sits above the block", () => {
@@ -824,7 +889,7 @@ describe("ChatExecutionBlock", () => {
     expect(screen.queryByText("chatView.block.olderRounds")).toBeNull();
   });
 
-  it("wears ExploreBlock's chrome: pill header, ruled list, no invented card shell", () => {
+  it("the collapse header is the card's title banner; the list keeps ExploreBlock's rule", () => {
     const { container } = renderBlock({
       [REF1]: entryOf({
         projection: {
@@ -836,12 +901,47 @@ describe("ChatExecutionBlock", () => {
         },
       }),
     });
-    const pill = container.querySelector("[data-run-header]") as HTMLElement;
-    expect(pill.className).toContain("bg-zinc-100/60");
+    const header = container.querySelector("[data-run-header]") as HTMLElement;
+    // The header is no longer a free-floating pill: it is the title banner of
+    // the same card whose body carries the answer (the shared card recipe) —
+    // worn one step LIGHTER than an interaction card's banner, because a run's
+    // banner sits in the transcript and must not out-shout its answer.
+    expect(header.className).toContain("bg-zinc-100/60");
+    expect(header.className).toContain("border-b");
     // The highlight color is a button background, never a border or a title.
-    expect(pill.className).not.toContain("--color-accent");
+    expect(header.className).not.toContain("--color-accent");
     expect(document.querySelector("[class*='border-l-2']")).toBeTruthy();
     expect(container.querySelector("[class*='border-hairline']")).toBeNull();
+  });
+
+  /** The reader's ask: one agent message must read as one object. The
+   *  collapse header is the card's title banner, the run's latest answer is its
+   *  body, and both live inside ONE hairline shell. Drawn as a bubble under the
+   *  block, the answer made every run look like two messages. */
+  it("draws the header and the answer inside one card", () => {
+    const { container } = renderBlock(
+      {
+        [REF1]: entryOf({
+          projection: {
+            round_id: "r1",
+            terminal: true,
+            status: "completed",
+            answer: { body: "done", ts: "1" },
+          },
+        }),
+      },
+      {},
+      blockOf([roundOf("r1", 3)]),
+      { folded: true },
+    );
+    const answer = container.querySelector("[data-run-answer]") as HTMLElement;
+    expect(answer.className).toContain("bg-chat-bubble");
+    const card = answer.parentElement as HTMLElement;
+    // One shell, two bands: the title banner and the body are its children.
+    expect(card.className).toContain("border-chat-border");
+    expect(card.querySelector("[data-run-header]")).toBeTruthy();
+    // The body is the card's body, not a second bubble with its own radius.
+    expect(answer.className).not.toContain("rounded-md");
   });
 
   it("paints the pair in the transcript's own bubble colours", () => {

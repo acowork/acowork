@@ -2373,7 +2373,23 @@ pub enum SessionStatusDto {
     LlmStreaming { message_id: Option<String> },
     /// Tool calls have been dispatched to the tool registry; waiting for
     /// their results.
-    ToolExecuting,
+    ///
+    /// `tools` mirrors the runtime variant: the deduped names of the calls in
+    /// this dispatch, empty when the transition cannot name them (resuming
+    /// after an approval). A surface reads it to say *what* the agent is doing
+    /// instead of a static "working on it"; it must fall back to a generic word
+    /// when the list is empty, never reuse the previous dispatch's name.
+    ///
+    /// This DTO is deserialized only from strings written by the same binary
+    /// (`usecases::session_metadata_impl::parse_live_status`), so it tracks the
+    /// runtime enum exactly rather than the older shape — the compatibility
+    /// duty is on the reader that can outlive the writer: the frontend's
+    /// `tool_executing` type keeps `tools` optional because a Desktop and a
+    /// Runtime are not always rebuilt together.
+    ToolExecuting {
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        tools: Vec<String>,
+    },
     /// A tool requires user approval before execution.
     WaitingApproval { request_id: String },
     /// Iteration limit reached, debug pause, or 429 retry wait — awaiting user decision.
@@ -2888,7 +2904,28 @@ mod tests {
         }
     }
 
+
+    /// `tool_executing` grew a `tools` list so a Chat can name the action
+    /// instead of showing one unchanging "working on it" line. The list is
+    /// skipped when empty — "this dispatch cannot be named" must not arrive
+    /// as `tools: []` that a reader then treats as a real dispatch.
+    #[test]
+    fn test_tool_executing_dto_roundtrips_tool_names() {
+        let status = SessionStatusDto::ToolExecuting {
+            tools: vec!["memory_recall".into(), "http_request".into()],
+        };
+        let json = serde_json::to_string(&status).unwrap();
+        assert!(json.contains("memory_recall"));
+        assert_eq!(serde_json::from_str::<SessionStatusDto>(&json).unwrap(), status);
+
+        let unnamed = SessionStatusDto::ToolExecuting { tools: vec![] };
+        let json = serde_json::to_string(&unnamed).unwrap();
+        assert!(!json.contains("tools"), "{json}");
+        assert_eq!(serde_json::from_str::<SessionStatusDto>(&json).unwrap(), unnamed);
+    }
+
     // ── ADR-066: ContextUsageInfo cache token fields ─────────────────────
+
 
     /// All six cache-token fields round-trip cleanly through JSON.
     /// This is the wire-format contract between Runtime push (ContextUpdate)

@@ -11,7 +11,7 @@
  * - manage 门：仅节点创建者或 admin 可修改；其他人只读（服务端 403
  *   required=manage 兜底，前端用 GET 返回的 can_manage 预判）。
  *
- * 仅在 `multi_user` 模式挂载——local 模式无账号体系，服务端恒放行。
+ * 仅在已登录且选中节点时挂载（ADR-114：账号体系常开）。
  */
 
 import { useCallback, useEffect, useMemo, useState } from "react";

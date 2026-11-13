@@ -47,45 +47,35 @@ impl SharedState {
 /// Application state available to all HTTP handlers.
 #[derive(Clone)]
 pub struct AppState {
-    /// The account system. `None` under `AUTH_MODE=local`, where the service
-    /// only serves profiles and avatars (ADR-084 §决策 6).
-    pub auth_service: Option<Arc<AuthService>>,
+    /// The account system. Always present (ADR-114) — there is no
+    /// deployment in which this service serves profiles but no accounts.
+    pub auth_service: Arc<AuthService>,
     /// Lazily-shared mutable state (profile cache + tuning flags).
     pub shared: Arc<RwLock<SharedState>>,
     /// Live delivery failures, by Chat (`crate::chat_alerts`). In memory on
     /// purpose: a failed send is news while it is news, and nothing that restarts
     /// this service should resurrect it as history.
     pub alerts: Arc<AlertStore>,
-    /// Deployment mode, resolved by the Gateway and handed down.
-    pub auth_mode: crate::config::AuthMode,
 }
 
 impl AppState {
-    pub fn new(config: &UserServiceConfig, auth_service: Option<Arc<AuthService>>) -> Self {
+    pub fn new(config: &UserServiceConfig, auth_service: Arc<AuthService>) -> Self {
         let shared = SharedState::new(config.data_dir.clone(), config.registration_open);
         Self {
             auth_service,
             shared: Arc::new(RwLock::new(shared)),
             alerts: Arc::new(AlertStore::new()),
-            auth_mode: config.auth_mode,
         }
     }
 
-    /// Whether the account system is active (login / tokens / chat).
-    pub fn is_multi_user(&self) -> bool {
-        self.auth_mode.is_multi_user()
-    }
-
-    /// The account service, or a 503 if the request implies one is running.
+    /// The account system's current first-boot state (ADR-114).
     ///
-    /// Under `local` the account routes are not registered at all, so this
-    /// only fires if a route was added without a mode guard.
-    pub fn require_auth_service(&self) -> Result<Arc<AuthService>, crate::error::ApiError> {
-        self.auth_service.clone().ok_or_else(|| {
-            crate::error::ApiError::service_unavailable(
-                "the account system is disabled (AUTH_MODE=local)",
-            )
-        })
+    /// Read straight off the store this process owns — the Gateway learns
+    /// it from `/health`, so there is exactly one reader and the two can
+    /// never disagree.
+    pub async fn account_system_state(&self) -> acowork_core::account::AccountSystemState {
+        let dir = self.shared.read().await.data_dir.clone();
+        crate::health::account_system_state(&dir)
     }
 }
 

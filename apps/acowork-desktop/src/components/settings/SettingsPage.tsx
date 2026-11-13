@@ -4,21 +4,21 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useChatStore } from "../../stores/chatStore";
 import { useServicesStore } from "../../stores/servicesStore";
 import { useTranslation } from "../../i18n/useTranslation";
-import type { AgentListResponse, GatewayConfig, GatewayMode, NodeInfo } from "../../lib/types";
+import type { AgentListResponse, GatewayConfig, NodeInfo } from "../../lib/types";
 import { fetchNodes } from "../../lib/gateway-api";
 import { cn } from "../../lib/utils";
 import { ConfirmDialog } from "../common/ConfirmDialog";
-import { requestGatewayModeChange } from "../../stores/settingsStore";
 import { ExpandableRow, ListBox, ListRow } from "../common/list";
 import { RadioGroup } from "../common/RadioGroup";
 import { Switch } from "../common/Switch";
-import { DEFAULT_GATEWAY_URL, getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
+import { getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
 import { AccentSwatches } from "../common/AccentSwatches";
 import { Bug, HelpCircle, Monitor, User, SlidersHorizontal, Palette, Globe } from "lucide-react";
 import { inputReadonly } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
-import { UrlComboBox } from "./UrlComboBox";
+import { GatewayAddressPicker } from "../connection/GatewayAddressPicker";
+import { isHttpsUrl } from "../../lib/gatewayUrl";
 import { ProfileTab } from "./ProfileTab";
 import { ServicesPanel } from "./ServicesPanel";
 import { SectionPane } from "../common/SectionPane";
@@ -58,21 +58,13 @@ export function SettingsPage({ initialTab = "profile" }: { initialTab?: Settings
   );
 }
 
-/** Relay mode's base URL must be the relay's TLS device domain
- *  (`https://<gw-id>.<relay-domain>`). Scheme check mirrors
- *  `relay_mqtt_wss_url` in `src-tauri/src/commands/chat_mqtt.rs`, which
- *  refuses anything but `https` — keep the two in step. */
-function isHttpsUrl(url: string): boolean {
-  return /^https:\/\//i.test(url.trim());
-}
-
-/** Gateway connection settings */
+/**
+ * Gateway connection settings
+ */
 export function GatewayTab() {
   const { t } = useTranslation();
   const { status, health, localState, localOwnership, checkHealth, checkLocalStatus, startLocalGateway, stopLocalGateway } = useGatewayStore();
   const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
-  const setGatewayUrl = useSettingsStore((s) => s.setGatewayUrl);
-  const gatewayUrlHistory = useSettingsStore((s) => s.gatewayUrlHistory);
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
   const autoStartLocalNode = useSettingsStore((s) => s.autoStartLocalNode);
   const setAutoStartLocalNode = useSettingsStore((s) => s.setAutoStartLocalNode);
@@ -81,25 +73,42 @@ export function GatewayTab() {
   const [agentsLoading, setAgentsLoading] = useState(false);
   const [nodes, setNodes] = useState<NodeInfo[]>([]);
   const [nodesLoading, setNodesLoading] = useState(false);
-  const [urlDraft, setUrlDraft] = useState(gatewayUrl);
+  // The dedicated relay entry is the ONLY explicit topology switch. It is
+  // kept separate from the server-address list because relay URLs are TLS
+  // device domains, not alternative Gateway hosts.
+  const [relayDraft, setRelayDraft] = useState("");
   const [starting, setStarting] = useState(false);
   const [stopping, setStopping] = useState(false);
   // Gateway's relay device id. A property of the Gateway we are TALKED to,
-  // not of the mode we are in — see the gw-id line in the mode card.
+  // not of the section we are in — see the gw-id line in the relay section.
   const [relayGwId, setRelayGwId] = useState<string | null>(null);
   // Level-1 collapsible cards (same grammar as the Setup panel), default open
-  const [gatewayModeOpen, setGatewayModeOpen] = useState(true);
+  const [gatewayConnectionOpen, setGatewayConnectionOpen] = useState(true);
   const [localGatewayOpen, setLocalGatewayOpen] = useState(true);
   const [gatewayConnOpen, setGatewayConnOpen] = useState(true);
   const [nodesOpen, setNodesOpen] = useState(true);
+  // Radio = transport KIND, never local vs remote: direct covers localhost
+  // and LAN addresses alike in ONE merged address list (that merge is the
+  // whole point of ADR-115 — splitting them back into two sections would
+  // resurrect the "two knobs" UI). Relay is the only other transport.
+  // The radio is UI state only: the mode stays DERIVED from the committed
+  // address, and expanding a section never switches anything by itself —
+  // the store changes only through an address commit inside the section.
+  const [section, setSection] = useState<"direct" | "relay">(
+    gatewayMode === "relay" ? "relay" : "direct",
+  );
+  useEffect(() => {
+    setSection(gatewayMode === "relay" ? "relay" : "direct");
+  }, [gatewayMode]);
+
+  const handleSectionChange = useCallback((s: "direct" | "relay") => {
+    setSection(s);
+  }, []);
   // P1: collapse state for the new diagnostic cards.
   const [servicesOpen, setServicesOpen] = useState(true);
   const [eventsOpen, setEventsOpen] = useState(true);
   // Per-node level-1 collapse state inside the Nodes section.
   const [openNodeIds, setOpenNodeIds] = useState<Record<string, boolean>>({});
-
-  // Sync draft when gatewayUrl changes externally
-  useEffect(() => { setUrlDraft(gatewayUrl); }, [gatewayUrl]);
 
   // On mount, sync both the HTTP health status and the local process
   // handle from the Rust side. This covers the case where the Gateway
@@ -114,14 +123,15 @@ export function GatewayTab() {
   // The relay device id, read from the Gateway we are pointed at.
   //
   // Fetched once per (connection, address) rather than polled: the id never
-  // changes while a Gateway is running, and the mode card is visible in
-  // every mode — polling here would put a 5 s timer on every local-mode user
-  // who has no tunnel at all. `RelayTunnelPanel` keeps the 5 s poll for the
-  // one mode where tunnel liveness actually matters.
+  // changes while a Gateway is running, and the row renders in the relay
+  // section of the connection card — polling here would put a 5 s timer on
+  // every local-section user who has no tunnel at all. `RelayTunnelPanel`
+  // keeps the 5 s poll for the one place where tunnel liveness actually
+  // matters.
   //
   // `authFetch`'s global interceptor attaches the bearer token, so a bare
   // fetch is correct here: `/api/relay/status` is not a public path
-  // (core http/auth_middleware.rs `is_public_path`) and multi_user mode
+  // (core http/auth_middleware.rs `is_public_path`) and the always-on account system (ADR-114)
   // rejects an anonymous caller.
   useEffect(() => {
     let cancelled = false;
@@ -137,28 +147,11 @@ export function GatewayTab() {
     return () => { cancelled = true; };
   }, [gatewayUrl, status]);
 
-  const handleModeChange = useCallback((mode: GatewayMode) => {
-    void requestGatewayModeChange(mode);
-  }, []);
-
-  // Relay mode's Gateway URL is the relay's TLS device domain (design doc 24
-  // §8.0) — `relay_mqtt_wss_url` accepts only `https` and the strict remote
-  // MQTT listener lives behind the relay's TLS byte pipe, so a plain-http
-  // address can never carry MQTT. It DOES answer the HTTP health probe, which
-  // is why this used to surface as "已连接" + a red MQTT row with no cause.
-  const draftIsPlainHttp =
-    gatewayMode === "relay" && urlDraft.trim() !== "" && !isHttpsUrl(urlDraft);
-  const savedIsPlainHttp =
-    gatewayMode === "relay" && gatewayUrl.trim() !== "" && !isHttpsUrl(gatewayUrl);
-
-  const handleUrlSave = useCallback(() => {
-    const trimmed = urlDraft.trim();
-    if (trimmed && trimmed !== gatewayUrl) {
-      setGatewayUrl(trimmed);
-    } else if (!trimmed) {
-      setUrlDraft(gatewayUrl);
-    }
-  }, [urlDraft, gatewayUrl, setGatewayUrl]);
+  // A relay address must be the TLS device domain (`https://<gw-id>...`).
+  // `relay_mqtt_wss_url` in chat_mqtt.rs refuses every other scheme, and a
+  // plain-http relay address still answers /health — so validate before the
+  // user commits instead of surfacing a red MQTT row later.
+  const relayDraftInvalid = relayDraft.trim() !== "" && !isHttpsUrl(relayDraft);
 
   const handleTest = useCallback(async () => {
     // P1-5 (a): "测试连接" 按钮语义升级为"运行诊断"——
@@ -260,97 +253,102 @@ export function GatewayTab() {
 
   return (
     <div className="max-w-lg space-y-4">
-      {/* Mode selection */}
+      {/* Connection card — radio box + sectioned controls (ADR-115). The
+          radio picks a transport KIND, not a mode: direct is one address
+          list with localhost as an ordinary entry; the mode stays derived
+          from the committed address. */}
       <ListBox dividers={false}>
         <ExpandableRow
-          open={gatewayModeOpen}
-          onToggle={() => setGatewayModeOpen((v) => !v)}
-          title={t("settings.gatewayMode")}
-          ariaLabel={t("settings.gatewayMode")}
+          open={gatewayConnectionOpen}
+          onToggle={() => setGatewayConnectionOpen((v) => !v)}
+          title={t("settings.gatewayConnection")}
+          ariaLabel={t("settings.gatewayConnection")}
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
         >
           <RadioGroup
-            name="gatewayMode"
-            value={gatewayMode}
+            name="gatewayConnectionKind"
+            value={section}
             options={[
-              { label: t("settings.local"), value: "local" as GatewayMode },
-              { label: t("settings.remote"), value: "remote" as GatewayMode },
-              { label: t("settings.relay"), value: "relay" as GatewayMode },
+              { label: t("connection.direct"), value: "direct" as const },
+              { label: t("connection.viaRelay"), value: "relay" as const },
             ]}
-            onChange={handleModeChange}
+            onChange={handleSectionChange}
           />
-          {/* Single-topology note: mode and URL are independent. Surface the
-              current URL inside the mode card (UI spec: secondary info
-              belongs inside the collapsing section, not below it) so users
-              don't silently "switch back to local" while the URL still
-              points at a remote host. When the URL is non-loopback in
-              local mode, warn that Desktop will probe the remote address
-              first (probe-then-spawn in init_local_gateway: ownership=
-              foreign if reachable, owned if it has to spawn a child). */}
-          <div className="mt-2.5 flex items-center gap-1.5 text-xs text-text-tertiary">
-            <span className="truncate">
-              {t("settings.gatewayUrl")}: <span className="font-mono">{gatewayUrl}</span>
-            </span>
-            {gatewayMode === "local" && !/127\.0\.0\.1|::1|localhost/i.test(gatewayUrl) && (
-              <HelpHint content={t("settings.localModeKeepsUrl")} />
-            )}
-          </div>
-          {/* ADR-087 follow-up: remote-mode-only behavior — resume this
-              machine's already-enrolled local Node on every Desktop
-              launch. Local mode needs no toggle (the Gateway auto-spawns
-              the node itself); relay is not validated for this path yet.
-              First-time enrollment is NEVER silent: the AgentList banner
-              asks explicitly regardless of this setting. */}
-          {gatewayMode === "remote" && (
-            <div className="mt-3 border-t border-border-divider pt-3">
-              {/* Row mirrors the Switch's built-in "label left, toggle
-                  right" layout, but the label slot carries a HelpHint —
-                  the long explanation belongs in the same `?` tooltip
-                  language as the gw-id row, not as a paragraph under the
-                  toggle. Hand-rolled because a <button> must not sit
-                  inside the Switch's <label>: clicking the hint would
-                  also flip the switch.
 
-                  Type step: `text-xs`, no color/weight override — this is
-                  an operable control's label, so it must read at the same
-                  scale and contrast as the mode radios right above it
-                  (both inherit `--color-text`). The row used to carry
-                  `text-10 font-medium text-text-tertiary`, copied
-                  verbatim from Switch's internal label slot; that is a
-                  component default for dense inline labels, NOT a
-                  caller-facing design token, and at 10px it rendered
-                  ~17% smaller than every other label in this card
-                  (`--text-10` = 0.714em vs `--text-xs` = 0.857em). Do not
-                  restore a `--text-9/10/11` step or a dimming color here:
-                  micro steps are the meta-line scale (URL, device id),
-                  never the control-label scale. */}
-              <div className="flex items-center justify-between gap-2">
-                <span className="flex flex-1 items-center gap-1.5 text-xs">
-                  {t("settings.autoStartLocalNode")}
-                  <HelpHint content={t("settings.autoStartLocalNodeHelp")} />
+          {section === "direct" && (
+            <div className="mt-3">
+              {/* THE address list — localhost, LAN and history entries all
+                  live here together; picking any row is a switch. Status /
+                  start-stop for the local machine stays in the Local
+                  Gateway card below. */}
+              <GatewayAddressPicker
+                onSelect={(url) => void useSettingsStore.getState().switchGateway(url)}
+                onReset={() => void useSettingsStore.getState().resetConnectionSettings()}
+              />
+
+              {/* ADR-087: only a non-loopback address needs this machine's
+                  already-enrolled local Node resumed on launch. */}
+              {gatewayMode === "remote" && (
+                <div className="mt-3 border-t border-border-divider pt-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="flex flex-1 items-center gap-1.5 text-xs">
+                      {t("settings.autoStartLocalNode")}
+                      <HelpHint content={t("settings.autoStartLocalNodeHelp")} />
+                    </span>
+                    <Switch checked={autoStartLocalNode} onChange={setAutoStartLocalNode} />
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {section === "relay" && (
+            <div className="mt-3">
+              {/* Dedicated relay entry. Relay stays its own path (WSS MQTT +
+                  access-token CONNECT), so it is not mixed into the address
+                  list. It is the only way to set the derived `relay` mode. */}
+              <label
+                htmlFor="gateway-relay-input"
+                className="mb-1 block text-xs text-text-tertiary"
+              >
+                {t("connection.relayEntry")}
+              </label>
+              <div className="flex gap-2">
+                <StyledInput
+                  id="gateway-relay-input"
+                  type="text"
+                  value={relayDraft}
+                  onChange={(e) => setRelayDraft(e.target.value)}
+                  placeholder="https://<gw-id>.relay.example.com"
+                  spellCheck={false}
+                  fontMono
+                  className="w-full min-w-0"
+                />
+                <button
+                  type="button"
+                  onClick={() => void useSettingsStore.getState().setRelayGateway(relayDraft)}
+                  disabled={!relayDraft.trim() || relayDraftInvalid}
+                  className="btn-accent shrink-0 rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+                >
+                  {t("connection.connect")}
+                </button>
+              </div>
+              {relayDraftInvalid && (
+                <p role="alert" className="mt-1 text-11 text-red-500">
+                  {t("settings.relayUrlMustBeHttps")}
+                </p>
+              )}
+              {/* The relay device id is a property of the Gateway, not of a
+                  mode, and is needed BEFORE the relay address can be filled. */}
+              <div className="mt-2 flex items-center gap-1.5 text-xs text-text-tertiary">
+                <span className="truncate">
+                  {t("settings.relayGwId")}:{" "}
+                  <span className="font-mono">{relayGwId ?? "—"}</span>
                 </span>
-                <Switch checked={autoStartLocalNode} onChange={setAutoStartLocalNode} />
+                <GatewayGwIdHelp gwId={relayGwId} />
               </div>
             </div>
           )}
-          {/* The relay device id, shown in EVERY mode. It is a property of
-              the Gateway, not of the connection mode — and it is the one
-              thing a user needs before they can fill in a relay address
-              (`https://<gw-id>.<relay-domain>`), so gating it behind
-              `gatewayMode === "relay"` made it unreachable exactly when it
-              was most needed: the address you need the id FOR does not
-              resolve until you have the id.
-
-              Same shape as the URL line above (label + monospace value, no
-              inline prose): the card's two facts read as a tidy pair, and
-              the explanation lives in the help toast. */}
-          <div className="mt-1.5 flex items-center gap-1.5 text-xs text-text-tertiary">
-            <span className="truncate">
-              {t("settings.relayGwId")}:{" "}
-              <span className="font-mono">{relayGwId ?? "—"}</span>
-            </span>
-            <GatewayGwIdHelp gwId={relayGwId} />
-          </div>
         </ExpandableRow>
       </ListBox>
 
@@ -433,62 +431,20 @@ export function GatewayTab() {
         </ListBox>
       )}
 
-      {/* Off-site modes (remote LAN / relay): URL + test */}
-      {gatewayMode !== "local" && (
-        <ListBox dividers={false}>
-          <ExpandableRow
-            open={gatewayConnOpen}
-            onToggle={() => setGatewayConnOpen((v) => !v)}
-            title={t("settings.gatewayConnection")}
-            ariaLabel={t("settings.gatewayConnection")}
-            bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
-          >
-
+      {/* Connection diagnostics — always available, all topologies. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={gatewayConnOpen}
+          onToggle={() => setGatewayConnOpen((v) => !v)}
+          title={t("settings.connectionDiagnostics")}
+          ariaLabel={t("settings.connectionDiagnostics")}
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
+        >
           <div className="space-y-3">
-            <div>
-              <label className="mb-1 block text-xs text-text-tertiary">{t("settings.gatewayUrl")}</label>
-              <div className="flex gap-2">
-                <UrlComboBox
-                  value={urlDraft}
-                  onChange={setUrlDraft}
-                  onCommit={handleUrlSave}
-                  options={gatewayUrlHistory}
-                  placeholder={gatewayMode === "relay" ? "https://<gw-id>.relay.example.com" : DEFAULT_GATEWAY_URL}
-                  ariaLabel={t("settings.gatewayUrl")}
-                />
-                {/* Relay mode's address is the relay's TLS device domain. A
-                    plain-http address still answers the HTTP health probe, so
-                    "测试连接" would report success while MQTT can never
-                    connect (`relay_mqtt_wss_url` refuses to derive a broker
-                    URL from it). Flag it at the field instead of failing
-                    later — as a hint on the field's own row, not as a
-                    paragraph under it: these are two full sentences, and a
-                    red block under the input reflowed the whole card.
-
-                    Sits BEFORE the Apply button so the "?" does not slide when
-                    Apply appears and disappears. */}
-                {(draftIsPlainHttp || savedIsPlainHttp) && (
-                  <HelpHint
-                    content={[
-                      draftIsPlainHttp ? t("settings.relayUrlMustBeHttps") : null,
-                      savedIsPlainHttp ? t("settings.relayUrlSavedPlainHttp") : null,
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                  />
-                )}
-                {urlDraft !== gatewayUrl && (
-                  <button
-                    onClick={handleUrlSave}
-                    disabled={draftIsPlainHttp}
-                    className="btn-accent rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
-                  >
-                    {t("settings.apply")}
-                  </button>
-                )}
-              </div>
+            <div className="flex items-center gap-2 text-xs">
+              <span className="text-text-tertiary">{t("settings.gatewayUrl")}</span>
+              <span className="truncate font-mono">{gatewayUrl}</span>
             </div>
-
             <div className="flex items-center gap-2 text-xs">
               <span className="text-text-tertiary">{t("settings.status")}</span>
               <span
@@ -505,25 +461,22 @@ export function GatewayTab() {
                 {status === "connected" ? t("settings.connected") : status === "error" ? t("settings.error") : t("settings.disconnected")}
               </span>
             </div>
-
             {health && (
               <div className="flex items-center gap-2 text-xs">
                 <span className="text-text-tertiary">{t("settings.version")}</span>
                 <span>{health.version}</span>
               </div>
             )}
-
             <button
               onClick={handleTest}
-              disabled={testing || !urlDraft.trim() || savedIsPlainHttp}
+              disabled={testing}
               className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
             >
               {testing ? t("settings.testing") : t("settings.testConnection")}
             </button>
           </div>
-          </ExpandableRow>
-        </ListBox>
-      )}
+        </ExpandableRow>
+      </ListBox>
 
       {/* Relay mode: tunnel status panel (polls GET /api/relay/status —
           the Gateway's relay client snapshot, forwarded through the
@@ -531,7 +484,7 @@ export function GatewayTab() {
           admin (the remote ACL blocks the mutating endpoints, §7.2). */}
       {gatewayMode === "relay" && <RelayTunnelPanel />}
 
-      {/* Nodes + their agents (shared between modes) */}
+      {/* Nodes + their agents (every address — no topology gate) */}
       <ListBox dividers={false}>
         <ExpandableRow
           open={nodesOpen}

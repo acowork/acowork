@@ -113,7 +113,7 @@ const AUTH_RENEW_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1
 
 /// Desktop-side mirror of the webview's account session.
 ///
-/// Under `AUTH_MODE=multi_user` every Gateway route except the public
+/// ADR-114: accounts are always on, so every Gateway route except the public
 /// probes requires `Authorization: Bearer <access_token>`. The webview
 /// owns the token pair and is the only party that may rotate it: refresh
 /// rotation has no grace window, so two concurrent rotations would revoke

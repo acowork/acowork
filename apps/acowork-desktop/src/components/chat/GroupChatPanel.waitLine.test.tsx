@@ -66,9 +66,13 @@ vi.mock("../../stores/chatSessionStore", async (importOriginal) => {
   };
 });
 
+// The pushed `session_state` per execution session. The wait line's activity
+// word reads exactly this, so a case that wants an agent to look busy sets it.
+let agentStates: Record<string, unknown> = {};
+
 vi.mock("../../stores/chatStore", () => ({
   useChatStore: Object.assign(
-    (selector: (state: unknown) => unknown) => selector({ agentStates: {} }),
+    (selector: (state: unknown) => unknown) => selector({ agentStates }),
     { getState: () => ({ openSession: vi.fn() }) },
   ),
 }));
@@ -161,6 +165,25 @@ function row(seq: number, over: Partial<ChatMessageRow>): ChatMessageRow {
   };
 }
 
+const EXEC = "exec-a1";
+
+/** A round row the agent owns — what gives the surface a run to speak for. */
+function roundRow(seq: number, execSid = EXEC): ChatMessageRow {
+  return row(seq, {
+    from: AGENT_A,
+    kind: "execution_round",
+    body: "",
+    to: ME,
+    meta: {
+      message_id: `round:${execSid}|r${seq}`,
+      agent_instance_id: AGENT_A,
+      agent_session_id: execSid,
+      round_id: `r${seq}`,
+      in_reply_to: "m1",
+    },
+  });
+}
+
 /** The composer gate proper: the textarea is disabled by exactly one flag,
  *  `composerLocked`, so it separates the claim's lock from the button's other
  *  reason to sit out (an empty draft). */
@@ -188,6 +211,7 @@ describe("GroupChatPanel in-flight turn claim", () => {
     vi.clearAllMocks();
     inflightMap = {};
     agentRole = undefined;
+    agentStates = {};
     settleTurnMock = vi.fn();
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new Error("no network in test")));
   });
@@ -306,5 +330,73 @@ describe("GroupChatPanel in-flight turn claim", () => {
     expect(composerLocked()).toBe(false);
     typeDraft();
     expect(sendDisabled()).toBe(false);
+  });
+});
+
+describe("GroupChatPanel the wait line says what the run is doing", () => {
+  // Rev. (2026-11-12, the activity word). The group shares the 1:1 surface's
+  // map, and shares its restraint: the word comes from the run this Chat
+  // anchors AND that the claim addressed. A fan-out is not described by one
+  // member's tool call, and a turn the router has not placed yet has no run
+  // to describe at all — those are the two windows where the generic sentence
+  // is the honest one.
+  const busyWith = (tools: string[], execSid = EXEC) => ({
+    [AGENT_A]: {
+      sessionStates: {
+        [execSid]: {
+          sessionStatus: { status: "tool_executing", detail: { tools } },
+        },
+      },
+    },
+  });
+
+  it("a run the claim addressed names its work under the addressed face", () => {
+    tail = [row(1, { body: "check what we decided last time" }), roundRow(2)];
+    inflightMap = { [GROUP]: { messageId: "m1", at: 1, responders: [AGENT_A] } };
+    agentStates = busyWith(["memory_recall"]);
+    render(<GroupChatPanel />);
+    const header = document.querySelector("[data-turn-header]");
+    expect(header).toBeTruthy();
+    expect(header!.textContent).toContain("tools.memory_recall.running");
+    expect(header!.textContent).not.toContain("chatView.notice.pendingTurnGeneric");
+  });
+
+  it("before the first round lands there is no run to speak for", () => {
+    // The router-deciding window: the session this turn goes to may not exist
+    // yet, and the previous task's session is a different conversation's work.
+    tail = [row(1, { body: "check what we decided last time" })];
+    inflightMap = { [GROUP]: { messageId: "m1", at: 1, responders: [AGENT_A] } };
+    agentStates = busyWith(["memory_recall"]);
+    render(<GroupChatPanel />);
+    const header = document.querySelector("[data-turn-header]");
+    expect(header!.textContent).toContain("chatView.notice.pendingTurnGeneric");
+    expect(header!.textContent).not.toContain("tools.memory_recall.running");
+  });
+
+  it("a run the claim did not address is not this turn's activity", () => {
+    // Same transcript, same busy session — but the send carries no responder
+    // set, so the surface has no warrant to say who this turn went to. The
+    // generic line is what the claim can actually support.
+    tail = [row(1, { body: "check what we decided last time" }), roundRow(2)];
+    inflightMap = { [GROUP]: { messageId: "m1", at: 1 } };
+    agentStates = busyWith(["memory_recall"]);
+    render(<GroupChatPanel />);
+    expect(screen.getByRole("status").textContent).toContain(
+      "chatView.notice.pendingTurnGeneric",
+    );
+    expect(screen.getByRole("status").textContent).not.toContain(
+      "tools.memory_recall.running",
+    );
+  });
+
+  it("an idle session does not get a work word", () => {
+    tail = [row(1, { body: "check what we decided last time" }), roundRow(2)];
+    inflightMap = { [GROUP]: { messageId: "m1", at: 1, responders: [AGENT_A] } };
+    agentStates = {
+      [AGENT_A]: { sessionStates: { [EXEC]: { sessionStatus: { status: "idle" } } } },
+    };
+    render(<GroupChatPanel />);
+    const header = document.querySelector("[data-turn-header]");
+    expect(header!.textContent).toContain("chatView.notice.pendingTurnGeneric");
   });
 });

@@ -16,7 +16,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use crate::auth::AuthMode;
 use crate::gateway::state::GatewayState;
 use crate::http::auth::HttpAuth;
 use acowork_core::StructuredErrorBody;
@@ -77,9 +76,6 @@ pub struct AppState {
     /// Enforced by the `ip_allowlist_middleware` for requests that carry a
     /// real `ConnectInfo` (i.e. every request that arrived over TCP).
     pub ip_allowlist: crate::security::IpAllowlist,
-    /// ADR-076 §决策 12: the resolved deployment auth mode. `Local` =
-    /// legacy bearer token, no account system.
-    pub auth_mode: AuthMode,
     /// Design doc 24 §6.3: relay tunnel client — runtime enable/disable
     /// and status for the outbound WSS tunnel to an acowork-relay.
     pub relay_client: Option<std::sync::Arc<crate::relay::RelayClient>>,
@@ -124,7 +120,6 @@ impl AppState {
             bootstrap_registry: None,
             operation_store: None,
             ip_allowlist: crate::security::IpAllowlist::default(),
-            auth_mode: AuthMode::Local,
             relay_client: None,
             node_owners: None,
             agent_owners: None,
@@ -388,7 +383,8 @@ pub fn build_router(state: AppState) -> Router {
         // the inner layer — it sees the `AuthContext` the auth gate
         // injects, and every `/api/agents/{id}/**` route is checked
         // against the ownership tables (default-deny for unregistered
-        // routes). No-op under `AUTH_MODE=local` (ADR-087 D8).
+        // routes). ADR-114: there is no local-mode bypass; the layer only
+        // no-ops for requests that carry no injected identity.
         .layer(middleware::from_fn_with_state(
             auth_layer_state.clone(),
             crate::http::permission::permission_middleware,
@@ -479,25 +475,26 @@ pub struct SystemStatusResponse {
     /// broker CONNECT check accepts for `user:*:desktop:*` clients.
     /// Present only when `mqtt.auth_enabled` is on.
     pub mqtt_password: Option<String>,
-    /// ADR-076 §决策 12: the resolved deployment auth mode
-    /// (`"local"` | `"multi_user"`). The Desktop reads this at boot to
-    /// decide whether to gate the UI behind a login (`multi_user`) or
-    /// skip the account system entirely (`local`). `/api/status` is on
-    /// the auth middleware's public whitelist, so this is reachable
-    /// before any login.
-    pub auth_mode: &'static str,
+    /// ADR-114: the account system's first-boot state.
+    ///
+    /// `uninitialized` = no account store / empty store (the first
+    /// administrator has to be created), `needs_setup` = accounts exist but
+    /// none of them can be logged into yet, `ready` = at least one
+    /// administrator can log in.
+    ///
+    /// This replaces the old `auth_mode` field. The account system is
+    /// always present — the network topology does not decide whether it
+    /// exists — so the Desktop reads this to decide whether to show the
+    /// first-boot setup step or the login screen.
+    ///
+    /// `/api/status` is on the auth middleware's public whitelist, so this
+    /// is reachable before any login.
+    pub account_state: &'static str,
     /// ADR-076 §决策 6: whether a non-admin may create accounts
     /// (`[multi_user].registration_open`). Always `false` unless the account
     /// system is actually running — the Desktop offers the invite
     /// affordance to non-admins only when this is set.
     pub registration_open: bool,
-    /// ADR-076 §决策 12 v2: true iff the Gateway is in first-boot
-    /// restricted mode (a passwordless `admin` account exists). The
-    /// Desktop reads this to decide whether to render the
-    /// "Gateway is not ready" gate instead of the login screen. Always
-    /// `false` in `local` mode or after setup is finished.
-    #[serde(default)]
-    pub requires_setup: bool,
     /// ADR-101: the memory service's availability, for the Desktop's panel /
     /// search-tab gating. Always present so the frontend never has to tell
     /// "disabled" and "not started yet" apart by looking for a missing key.
@@ -562,15 +559,32 @@ pub async fn system_status(State(state): State<AppState>) -> Json<SystemStatusRe
             .unwrap_or_else(crate::config::default_mqtt_port),
         mqtt_username,
         mqtt_password,
-        auth_mode: state.auth_mode.as_str(),
         // ADR-084 §决策 4b: both flags come from the user service's
         // `/health` snapshot, so `/api/status` no longer needs the account
         // store (and no longer disagrees with the service's own view).
+        //
+        // ADR-114: the account system's first-boot state, published under
+        // one explicit name. 2026-11-14: fail-CLOSED (`uninitialized`) when
+        // the user service has not reported yet. The old fail-open `ready`
+        // raced the Desktop's boot probe: bootstrap READY does not include
+        // the user-supervisor snapshot, so a fast boot ran `init()` while
+        // `/api/status` still claimed `ready`, the Desktop fell through to
+        // the login view on a machine with NO accounts at all, and the
+        // subsequent sign-in was answered by the restricted gate's 403
+        // `setup_required`. `uninitialized` is the honest word for "no
+        // snapshot yet": Desktop/Mobile map it to the setup wizard, and the
+        // setup-completion poll re-runs `init()` the moment the snapshot
+        // reports `ready` — a false positive self-heals within one poll
+        // period instead of dead-ending the first boot.
+        account_state: gw
+            .user_snapshot
+            .as_ref()
+            .map(|s| s.account_state.as_str())
+            .unwrap_or(acowork_core::account::AccountSystemState::Uninitialized.as_str()),
         registration_open: gw
             .user_snapshot
             .as_ref()
             .is_some_and(|s| s.registration_open),
-        requires_setup: gw.user_snapshot.as_ref().is_some_and(|s| s.requires_setup),
         memory_service: MemoryServiceStatus {
             ready: gw.memory_process.as_ref().is_some_and(|p| p.ready),
             mcp_url: gw.memory_mcp_url.clone(),
@@ -1033,10 +1047,15 @@ mod tests {
         // MQTT auth off by default → no credentials are exposed.
         assert_eq!(resp.mqtt_username, None);
         assert_eq!(resp.mqtt_password, None);
-        // ADR-076 §决策 12: the resolved mode is exposed for the Desktop's
-        // login gate; the default (loopback) deployment is `local`.
-        assert_eq!(resp.auth_mode, "local");
-        // No account system → registration can never be open.
+        // ADR-114: the account system's first-boot state is exposed for the
+        // Desktop's gate. With no user-service snapshot yet the state is
+        // `uninitialized` (fail-closed, 2026-11-14): the Desktop's boot
+        // probe can outrun the snapshot, and fail-open `ready` sent it to
+        // the login view on a machine with no accounts at all. The setup
+        // wizard's completion poll re-inits once the snapshot lands, so a
+        // false positive self-heals; a false `ready` dead-ended the boot.
+        assert_eq!(resp.account_state, "uninitialized");
+        // Registration can never be open without a running account system.
         assert!(!resp.registration_open);
     }
 

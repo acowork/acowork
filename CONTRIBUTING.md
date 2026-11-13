@@ -51,7 +51,11 @@ git checkout -b fix/<short-slug>
 ./dev/ci.sh all
 ```
 
-`dev/ci.sh all` is the same entry point CI uses. If it passes locally, it passes in CI.
+CI lives on **GitHub** (`github.com/acowork/ACowork`, `.github/workflows/ci.yml`) and it is
+the review home for this repository; the Gitee remote is a mirror. `dev/ci.sh` is the single
+entry point for both sides — CI calls the same modes you do, so a gate you can run locally
+has no hidden CI-only behaviour. `./dev/ci.sh all` is stricter than CI in exactly one way:
+it also runs the frontend smoke suite, which boots a real Gateway and is not a per-push job.
 
 **Good first contributions** in this repository:
 
@@ -162,6 +166,16 @@ dev/                   Build, packaging, CI, deployment scripts
 
 Everything below is what CI runs. Run it **before** you open a PR.
 
+| Job | Command | Catches |
+|---|---|---|
+| `redlines` | `./dev/ci.sh redlines` | the 14 architecture red lines, in seconds, before anything compiles |
+| `core` | `./dev/ci.sh check` → `clippy` → `test` → `integration`, plus a strict `cargo test -p acowork-embed --features download-ort` | compile, lints, unit + cross-crate e2e |
+| `packages` | `cargo test -p acowork-sign --test example_packages`, `cargo test -p acowork-core --test hub_interop -- --ignored`, `sync-official.py --check --report-only` | a shipped `.agent` that does not match its source; a hub mirror that drifted |
+| `web` | `npm ci && npm run test && npm run build` (desktop + mobile) | 350 desktop + 38 mobile test files, i18n coverage, the scroll-container backlog |
+
+`dev/ci.sh test` downgrades a missing ONNX Runtime to a warning, which is right on a laptop
+and wrong on a gate — so the `core` job runs the embed tests again, strictly.
+
 ### Core (Rust)
 
 ```bash
@@ -194,11 +208,20 @@ discussed.
 | `run_meta_layout_redline` | Session meta files have exactly one owner | ADR-024 |
 | `run_session_full_read_redline` | No full session-log read on a request path | ADR-096 |
 | `run_gateway_auth_scope_redline` | Gateway may not assert a user identity from a client claim | ADR-076 §决策 4 |
-| `run_user_auth_mode_redline` | Auth mode handling | ADR-076 |
+| `run_account_routes_redline` | Account/auth routes are always registered (no deployment auth mode) | ADR-114 |
 | `run_user_chat_path_redline` | User chat path ownership | ADR-084 |
 | `run_permission_route_redline` | Every agent/node route must live under the permission gate | ADR-087 D5 |
 | `run_lsp_registry_redline` | LSP registry ownership | ADR-091 |
 | `run_ort_api_redline` | `ort` API level must not exceed the oldest supported ONNX Runtime | — |
+| `run_chat_projection_redline` | the chat projection keeps its registry fallback, write contract and row shapes | Design 31 §6 |
+| `run_agent_skill_tool_redline` | an agent may not reach for a raw file tool where a skill owns the write | docs/plan §8 |
+
+Every one of them is a grep over **production** code: `scan_production` skips everything from
+a file's first `#[cfg(test)]` marker onward. A test fixture that hand-rolls a path or echoes
+an identity header is simulating a peer, not crossing a boundary, and that code is not in the
+shipped binary — so counting it would train everyone to add allowlist entries for test files,
+which blinds the guard to the production code in the same file. A violation cannot hide after
+the marker: past it the file compiles only for tests.
 
 The two red lines with **frozen ceilings** are worth understanding before you touch the
 relevant files:
@@ -215,6 +238,14 @@ relevant files:
 > **If you hit a ceiling**, the correct move is to lower the number in the same commit
 > that removes the call site — never to raise it, and never to add a new allowlisted
 > file.
+>
+> A *writer allowlist* (as opposed to a numeric ceiling) is different, because a new
+> legitimate owner does appear from time to time: `intent_api.rs` joined the
+> identity-injection list when the intent API started forwarding a scoped read to the
+> Runtime. That is an ADR amendment in all but name, so the entry must say in the guard
+> why the site is a trusted **writer** deriving identity from the verified token, and not
+> a second **authority** deciding it from a client claim. If you cannot write that
+> sentence, the code is wrong, not the guard.
 
 ### Integration and smoke
 

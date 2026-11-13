@@ -26,11 +26,9 @@ use crate::types::OperationAck;
 use acowork_core::operation::{OperationRecord, OperationState};
 use acowork_core::protocol::UserProfile;
 
-/// Build the users router (local mode: presentation-only profile CRUD).
-///
-/// Under `AUTH_MODE=multi_user` these routes are replaced by
-/// [`crate::http::account_api::account_routes`], which owns the same
-/// `/api/users` paths with credential-aware semantics.
+/// Build the account-backed users router (ADR-114: the account system is
+/// always on). `user_profiles.json` remains only as a derived presentation
+/// view owned by [`crate::http::account_api::sync_profiles`].
 pub fn users_routes() -> Router<AppState> {
     Router::new()
         .route("/api/users", get(list_users).post(create_user))
@@ -481,7 +479,8 @@ pub async fn get_user_avatar_config(
     State(state): State<AppState>,
     auth: Option<Extension<AuthContext>>,
 ) -> Result<Json<UserAvatarConfigResponse>, ApiError> {
-    if let (Some(svc), Some(ctx)) = (state.auth_service.clone(), auth.map(|Extension(c)| c)) {
+    let svc = state.auth_service.clone();
+    if let Some(ctx) = auth.map(|Extension(c)| c) {
         let uid = ctx.user_id;
         let account = blocking(move || svc.account(&uid)).await?;
         return Ok(Json(UserAvatarConfigResponse {
@@ -521,10 +520,8 @@ pub async fn update_user_avatar_config(
     auth: Option<Extension<AuthContext>>,
     Json(req): Json<UpdateUserAvatarConfigRequest>,
 ) -> Result<Json<UserAvatarConfigResponse>, ApiError> {
-    if let (Some(svc), Some(ctx)) = (
-        state.auth_service.clone(),
-        auth.clone().map(|Extension(c)| c),
-    ) {
+    let svc = state.auth_service.clone();
+    if let Some(ctx) = auth.clone().map(|Extension(c)| c) {
         let patch = ProfilePatch {
             avatar: req.avatar,
             builtin_avatar: req.builtin_avatar,
@@ -729,7 +726,7 @@ pub async fn delete_user_avatar_file(
     // The guard runs *before* the unlink: refusing after the delete would
     // still have destroyed the file. An admin removing someone else's file
     // goes through `PUT /api/users/{id}` first (un-reference, then delete).
-    if state.auth_service.is_some() {
+    {
         let ctx = auth
             .as_ref()
             .map(|Extension(c)| c)
@@ -748,7 +745,8 @@ pub async fn delete_user_avatar_file(
         .map_err(|e| ApiError::internal(&format!("Failed to delete avatar file: {}", e)))?;
 
     // multi_user: clear the caller's own field through the authority.
-    if let (Some(svc), Some(ctx)) = (state.auth_service.clone(), auth.map(|Extension(c)| c)) {
+    let svc = state.auth_service.clone();
+    if let Some(ctx) = auth.map(|Extension(c)| c) {
         let uid = ctx.user_id;
         let path = query.path.clone();
         let cleared = blocking(move || {

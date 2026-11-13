@@ -3,7 +3,7 @@
  *
  * The interceptor is the single place every Gateway request gets its
  * bearer token and its 401→refresh→replay ladder, so a regression here
- * silently breaks the whole Desktop under `multi_user`. Pin the four
+ * silently breaks the whole Desktop. Pin the four
  * behaviours: skip non-Gateway origins, skip `/api/auth/*`, attach the
  * token, and replay once after a successful refresh.
  */
@@ -37,7 +37,7 @@ beforeEach(() => {
   // module side effect), so install it here.
   installTokenTransport();
   uninstall = installAuthFetchInterceptor();
-  useAuthStore.setState({ mode: "multi_user", status: "logged_in" });
+  useAuthStore.setState({ accountState: "ready", status: "logged_in" });
   // The interceptor takes tokens from the session module, so that is where
   // a test puts one. `at` is not a JWT, which keeps the scheduled rotation
   // out of these cases — they are about the request path, not the timer.

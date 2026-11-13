@@ -1,21 +1,20 @@
-//! acowork-user HTTP surface (ADR-084 §决策 6 / §决策 1).
+//! acowork-user HTTP surface (ADR-084 §决策 6 / §决策 1, ADR-114).
 //!
 //! **Internal paths are byte-identical to the old Gateway paths** and the
 //! Gateway's `user_proxy` does **not** strip the prefix (unlike `/api/doc`),
 //! so the ported handlers needed no path changes and the Desktop sees the
 //! same URLs it always did.
 //!
-//! Mode split (mirrors the Gateway's registration, ADR-076 §决策 12):
+//! The account system is always on (ADR-114), so the router registers the
+//! **account** routes unconditionally:
 //!
-//! | Mode | Registered |
-//! |------|-----------|
-//! | `multi_user` | `account_routes` (`/api/users` with credential semantics), `chat_routes`, `auth_routes` |
-//! | `local` | `users_routes` (`/api/users` presentation-only CRUD) |
-//! | both | `user_avatar_routes` |
-//!
-//! Never both account and presentation `/api/users` routes: axum panics on a
-//! double registration of one path, and the two have different authorization
-//! semantics.
+//! - `account_routes` — `/api/users` with credential semantics (the
+//!   presentation-only variant was a second registration of the same paths
+//!   and could not coexist with it: axum panics on a double registration,
+//!   and the two have different authorization semantics),
+//! - `chat_routes` + `chat_session_routes` — user-to-user chat,
+//! - `auth_routes` — login / refresh / logout / setup,
+//! - `user_avatar_routes` — avatars, mode-independent.
 
 pub mod account_api;
 pub mod auth_api;
@@ -37,22 +36,13 @@ pub const GLOBAL_BODY_LIMIT: usize = 64 * 1024 * 1024;
 
 /// Build the user-domain router **without** `/health` (merged by the server
 /// together with the identity layer).
-pub fn user_router(state: &AppState) -> Router<AppState> {
-    let mut router = if state.is_multi_user() {
-        account_api::account_routes()
-            .merge(chat_api::chat_routes())
-            .merge(chat_sessions_api::chat_session_routes())
-    } else {
-        profile_api::users_routes()
-    };
-
-    router = router.merge(profile_api::user_avatar_routes());
-
-    if state.is_multi_user() {
-        router = router.merge(auth_api::auth_routes());
-    }
-
-    router
+pub fn user_router(_state: &AppState) -> Router<AppState> {
+    Router::new()
+        .merge(account_api::account_routes())
+        .merge(chat_api::chat_routes())
+        .merge(chat_sessions_api::chat_session_routes())
+        .merge(auth_api::auth_routes())
+        .merge(profile_api::user_avatar_routes())
 }
 
 /// The complete user-service surface: user domain + `/health` + the

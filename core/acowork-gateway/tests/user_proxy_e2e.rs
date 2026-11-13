@@ -13,7 +13,7 @@
 //!
 //! is exercised as a single black box.
 //!
-//! Mirror of `auth_mode_e2e.rs`'s shape: dependency-free HTTP, ephemeral ports,
+//! Mirror of `account_state_e2e.rs`'s shape: dependency-free HTTP, ephemeral ports,
 //! per-test temp homes, child killed on drop.
 
 use std::fs;
@@ -242,10 +242,10 @@ fn json_string_field<'a>(body: &'a str, field: &str) -> Option<&'a str> {
 /// i.e. the supervisor has finished its post-spawn setup, including loading
 /// the Ed25519 public key from `{user_data_dir}/auth/ed25519.pub`.
 ///
-/// `/api/status` is *not* a reliable signal here: `requires_setup` is
-/// serialised via `gw.user_snapshot.as_ref().is_some_and(|s| s.requires_setup)`,
-/// which is `false` while the snapshot is `None` (the supervisor's pre-setup
-/// state). The same trap bit a phase of M3 dev (see dev-plan §3-M3 "未覆盖"
+/// `/api/status` is *not* a reliable signal here: ADR-114 serialises
+/// `account_state` with a `ready` fallback while the snapshot is `None`
+/// (the supervisor's pre-setup state), so it never proves the setup
+/// has finished. The same trap bit a phase of M3 dev (see dev-plan §3-M3 "未覆盖"
 /// note). The only externally observable "verifier is loaded" signal is
 /// `auth_middleware` switching from a 503 ("authentication is unavailable")
 /// to a 401 (token rejected) on a request carrying any bearer header — so
@@ -277,10 +277,11 @@ fn wait_for_user_service_ready(port: u16) {
     );
 }
 
-/// Wait until `user_proxy` is serving `path` for an **unauthenticated**
-/// request — used in `local` mode (where `auth_middleware` is a no-op).
-/// The proxy's not-ready branch is the only 503 on this path, so a non-503
-/// is enough to claim readiness.
+/// Wait until `user_proxy` is serving `path` for an unauthenticated
+/// request. The proxy's not-ready branch is the only 503 on this path, so
+/// any non-503 is enough to claim readiness — including ADR-114's first-boot
+/// 403 `setup_required`. The auth gate is never a no-op, so this helper
+/// deliberately does not assert a 200.
 fn wait_until_user_proxy_serves(port: u16, path: &str) {
     let deadline = Instant::now() + BOOT_TIMEOUT;
     let mut last = (0u16, String::new());
@@ -333,7 +334,7 @@ fn probe_user_service(start_port: u16) -> (u16, Option<String>) {
 fn multi_user_login_then_users_via_proxy() {
     let home = temp_home("login-chain");
     let (http, mqtt) = (free_port(), free_port());
-    // Forward slashes for the same TOML escape reason `auth_mode_e2e` cites.
+    // Forward slashes for the same TOML escape reason `account_state_e2e` cites.
     let home_s = home.display().to_string().replace('\\', "/");
     let config = write_config(
         &home,
@@ -342,8 +343,6 @@ fn multi_user_login_then_users_via_proxy() {
 vault_dir = "{home}/data/vault"
 packages_dir = "{home}/config/packages"
 data_dir = "{home}/data"
-
-auth_mode = "multi_user"
 
 [user]
 config = "{home}/acowork-user.toml"
@@ -374,7 +373,7 @@ display_name = "Root"
     // verifier from `details.data_dir`; if those two diverge (e.g. under
     // `--home`, where the parent env is set via `set_var`), the verifier
     // load fails and every authenticated request 503s while /api/status
-    // *still* sees `requires_setup:false` (the snapshot is set, the
+    // *still* sees `account_state:"ready"` (the snapshot is set, the
     // verifier is not).
     let (user_port, user_health) = probe_user_service(default_user_port());
     let data_dir = user_health
@@ -388,7 +387,7 @@ display_name = "Root"
     );
 
     // Wait for the user service to actually verify tokens. /api/status's
-    // `requires_setup` is *false by default* (`gw.user_snapshot` is None
+    // `account_state` is *`ready` by default* (`gw.user_snapshot` is None
     // until the supervisor finishes setup), so a check on that flag alone
     // returns immediately — long before the Ed25519 verifier is loaded and
     // `auth_middleware` will accept any request. The only observable signal
@@ -429,46 +428,118 @@ display_name = "Root"
     );
 }
 
-// ── local mode ────────────────────────────────────────────────────────
+// ── first-boot account state ─────────────────────────────────────────
 
-/// ADR-084 §1.4 / §决策 6: under `local` the user service runs for
-/// profiles/avatars only — `/api/users` must answer, but `/api/auth/*`
-/// must NOT (the auth routes are simply not registered; the public path
-/// distinction is real, not a 200/401 split).
+/// ADR-114: there is no "local mode" in which the user service is a
+/// profile-only process and `/api/auth/*` is unregistered. The account
+/// surface is always mounted; a fresh install is simply `needs_setup`, so
+/// `restricted_mode_middleware` answers 403 *before* the proxy. Once the
+/// first admin is set up from loopback, the very same proxy chain serves
+/// `/api/users` with the token that setup minted — the chain this file
+/// exists to prove across a real Gateway ↔ user-service boundary.
 #[test]
-fn local_mode_profile_via_proxy_works_but_login_returns_404() {
-    let home = temp_home("local-routes");
+fn fresh_install_gates_the_proxy_until_setup_then_serves_users() {
+    let home = temp_home("firstboot-routes");
     let (http, mqtt) = (free_port(), free_port());
     let mut gw = spawn(&home, http, mqtt, &[]);
     gw.wait_until_serving();
 
-    // Local mode: auth_middleware is a no-op, so a plain unauthenticated
-    // `GET /api/users` reaches the proxy. The 503 here is the proxy's
-    // "user_process = None" branch — a probe on /api/users therefore
-    // doubles as "user service spawned" while skipping the verifier-load
-    // window that complicates the multi_user wait above.
     wait_until_user_proxy_serves(http, "/api/users");
 
-    let (code, body, _) = http_get(http, "/api/users");
-    assert_eq!(
-        code, 200,
-        "GET /api/users under local must proxy to the user service (200); body:\n{body}"
-    );
+    // The health snapshot fail-opens as `ready` until the first poll lands.
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    loop {
+        let (code, body, _) = http_get(http, "/api/status");
+        assert_eq!(code, 200, "status; body:/n{body}");
+        if body.contains("\"account_state\":\"needs_setup\"")
+            || body.contains("\"account_state\":\"uninitialized\"")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "account_state never reached a first-boot state; body:/n{body}/nstderr:/n{}",
+            gw.stderr()
+        );
+        sleep(Duration::from_millis(100));
+    }
 
-    // Auth routes are absent in local — Gateway returns 404 (route not
-    // matched) rather than 401 (the middleware being strict). The public
-    // path of `auth_mode_e2e::multi_user_without_bootstrap_admin_serves_restricted_mode`
-    // already pins the 403 setup_required surface; this one pins the
-    // route-does-not-exist surface under local.
+    let (code, body, _) = http_get(http, "/api/users");
+    assert_eq!(code, 403, "GET /api/users before setup must be gated; body:/n{body}");
+    assert!(body.contains("setup_required"), "the 403 must name the reason; body:/n{body}");
+
     let login_body = serde_json::to_vec(&serde_json::json!({
         "username": "root",
         "password": "irrelevant",
     }))
     .expect("serialize login body");
-    let (code, _body, _) = http_post_json(http, "/api/auth/login", &login_body);
+    let (code, body, _) = http_post_json(http, "/api/auth/login", &login_body);
     assert_eq!(
-        code, 404,
-        "POST /api/auth/login must NOT be registered under local (404)"
+        code, 403,
+        "the auth routes exist but are gated on a fresh install (not 404); body:/n{body}"
+    );
+    assert!(body.contains("setup_required"), "the 403 must name the reason; body:/n{body}");
+
+    // Loopback setup activates the seeded admin and mints a token pair.
+    // Retry 503: /api/status may report the first-boot state before the
+    // proxy / verifier has been published.
+    let setup = serde_json::to_vec(&serde_json::json!({
+        "username": "root", "password": "s3cret123", "display_name": "Root"
+    }))
+    .unwrap();
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    let (code, body) = loop {
+        let (code, body, _) = http_post_json(http, "/api/auth/setup", &setup);
+        if code != 503 {
+            break (code, body);
+        }
+        assert!(Instant::now() < deadline, "setup stayed 503; stderr:/n{}", gw.stderr());
+        sleep(Duration::from_millis(100));
+    };
+    assert_eq!(code, 200, "loopback setup; body:/n{body}");
+    let access = json_string_field(&body, "access_token")
+        .expect("setup response must carry access_token; body:/n{body}")
+        .to_string();
+
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    loop {
+        let (_, body, _) = http_get(http, "/api/status");
+        if body.contains("\"account_state\":\"ready\"") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "account_state never became ready; body:/n{body}/nstderr:/n{}",
+            gw.stderr()
+        );
+        sleep(Duration::from_millis(100));
+    }
+
+    // A wrong password now reaches the real login handler: the route was
+    // never absent, only gated. 404 would mean someone reintroduced a
+    // mode-dependent route registration.
+    let (code, body, _) = http_post_json(http, "/api/auth/login", &login_body);
+    assert!(
+        (400..500).contains(&code),
+        "login must be served after setup ({code}); body:/n{body}"
+    );
+    assert_ne!(code, 404, "auth routes must be registered; body:/n{body}");
+    assert_ne!(code, 403, "the setup gate must be lifted; body:/n{body}");
+
+    let (code, body, _) = http_request(
+        http,
+        "GET",
+        "/api/users",
+        None,
+        &[("Authorization", &format!("Bearer {access}"))],
+    );
+    assert_eq!(
+        code, 200,
+        "GET /api/users with the setup token must proxy to the user service; body:/n{body}"
+    );
+    assert!(
+        body.contains("root"),
+        "the new admin's own profile must be in the list; body:/n{body}"
     );
 }
 
@@ -490,8 +561,6 @@ fn user_service_disabled_returns_503_with_retry_after() {
 vault_dir = "{home}/data/vault"
 packages_dir = "{home}/config/packages"
 data_dir = "{home}/data"
-
-auth_mode = "multi_user"
 
 [user]
 enabled = false

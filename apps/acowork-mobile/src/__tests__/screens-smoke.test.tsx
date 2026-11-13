@@ -28,7 +28,7 @@ const ROUTES_MAP: [RegExp, () => unknown][] = [
   [/\/api\/agents$/, () => [{ agent_id: 'com.acowork.ponytail', instance_id: AGENT, name: 'Ponytail', display_name: 'Ponytail', status: 'running', session_count: 1 }]],
   [/\/api\/users\/directory$/, () => ({ users: [{ user_id: 'u1', username: 'nancy', display_name: 'Nancy' }] })],
   [/\/api\/auth\/me$/, () => ({ user_id: 'u1', username: 'nancy', display_name: 'Nancy', role: 'user', language: 'zh-CN', timezone: 'Asia/Shanghai', avatar: '', builtin_avatar: '', last_login_at: '2026-10-04T10:00:00Z' })],
-  [/\/api\/status$/, () => ({ version: '0.1.0', agents_installed: 2, agents_running: 1, uptime_secs: 3600, mqtt_port: 19875, auth_mode: 'multi_user', registration_open: false, requires_setup: false })],
+  [/\/api\/status$/, () => ({ version: '0.1.0', agents_installed: 2, agents_running: 1, uptime_secs: 3600, mqtt_port: 19875, account_state: 'ready', registration_open: false })],
   [/\/sessions\?page=/, () => ({ sessions: [{ session_id: SESSION, title: 'Smoke session', created_at: '2026-10-01T00:00:00Z', last_active_at: '2026-10-04T00:00:00Z', message_count: 2, can_write: true, visibility: 'private' }], total_count: 1, total_pages: 1, page: 1, size: 20 })],
   [/\/sessions$/, () => ({ sessions: [], total_count: 0, total_pages: 1, page: 1, size: 20 })],
   [/\/sessions\/[^/]+\/messages/, () => ({ messages: [{ id: 'm1', ts: '2026-10-04T10:00:00Z', role: 'user', content: 'hello' }, { id: 'm2', ts: '2026-10-04T10:00:01Z', role: 'assistant', content: '**hi** there' }] })],

@@ -186,7 +186,7 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
       role="navigation"
       aria-label={t("navBar.ariaLabelMainNavigation")}
     >
-      {/* User avatar — account menu under multi_user (ADR-076 §决策 7),
+      {/* User avatar — account menu with a live session (ADR-076 §决策 7),
           otherwise the historical "edit profile" entry. */}
       <AccountMenu onOpenProfile={onAvatarClick} />
 

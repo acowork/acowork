@@ -36,8 +36,8 @@
 //! sweep keyed on "blob with no sidecar, older than N days" if a deployment
 //! ever cares to reclaim the space.
 //!
-//! Only reachable under `AUTH_MODE=multi_user` (ADR-076 §决策 12) — nothing
-//! here runs, and `data_dir/users/` is never created, in `local` mode.
+//! ADR-114: the account system is always on and these routes are always
+//! mounted; `data_dir/users/` is created on first use in every deployment.
 
 use std::fs;
 use std::path::{Path, PathBuf};

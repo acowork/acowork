@@ -68,6 +68,7 @@ import {
 } from "./pmMembers";
 import { STATUS_TRANSITIONS } from "./TaskStatusMove";
 import { PriorityBadge } from "./PriorityBadge";
+import { TaskTypeIcon } from "./TaskTypeIcon";
 import {
   CHECK_COL_WIDTH,
   ROW_HEIGHT,
@@ -92,6 +93,7 @@ import {
   nextPmListSort,
   paginatePmListGroups,
   pmListColumn,
+  TYPE_ORDER,
   type PmColumnWidths,
   type PmListGroupBy,
   type PmListColumnKey,
@@ -104,6 +106,7 @@ import type {
   PmTaskResponse,
   Priority,
   TaskStatus,
+  TaskType,
 } from "../../lib/pm-types";
 
 interface TaskListViewProps {
@@ -1005,7 +1008,12 @@ export function TaskListView({
                     value: p,
                     label: t(`pm.priority.${p}`),
                   }))
-                : [...assigneeOptions, { value: UNASSIGNED, label: t("pm.task.unassigned") }];
+                : field === "type"
+                  ? TYPE_ORDER.map((ty) => ({
+                      value: ty,
+                      label: t(`pm.taskType.${ty}`),
+                    }))
+                  : [...assigneeOptions, { value: UNASSIGNED, label: t("pm.task.unassigned") }];
           const active = new Set<string>(filters[field] as string[]);
           return (
             <PmPopover anchor={open.anchor} onClose={close} width={210}>
@@ -1064,6 +1072,13 @@ export function TaskListView({
                         </span>
                       ) : field === "priority" ? (
                         <PriorityBadge priority={o.value as Priority} className="px-1.5 py-0.5 text-xs" />
+                      ) : field === "type" ? (
+                        <span className="inline-flex items-center gap-1.5">
+                          <span aria-hidden>
+                            <TaskTypeIcon type={o.value as TaskType} />
+                          </span>
+                          <span>{o.label}</span>
+                        </span>
                       ) : member ? (
                         o.label
                       ) : (

@@ -56,7 +56,6 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
   const self = useSelfAccount();
   const directoryUsers = usePmDirectoryUsers();
   const accessToken = useAuthStore((s) => s.accessToken);
-  const mode = useAuthStore((s) => s.mode);
   const status = useAuthStore((s) => s.status);
   const loadDirectory = usePmUserDirectoryStore((s) => s.loadDirectory);
 
@@ -70,7 +69,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
   // `x-actor == Project::owner() || admin` (PM's `require_governance`). Mirror
   // it here: a plain member reads the roster but gets no invite list and no
   // remove / make-owner button for an action the server would refuse (403).
-  const canGovern = canGovernProject(project, self, mode === "local");
+  const canGovern = canGovernProject(project, self);
   const displayMembers = useMemo(() => withOwner(project), [project]);
   const memberIds = useMemo(
     () => new Set(displayMembers.map((m) => m.instance_id)),
@@ -86,7 +85,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
   // 打开时确保账号目录已加载（用户成员候选）。loadDirectory 自带幂等与
   // 缓存，重复调用不会重复发请求。
   useEffect(() => {
-    if (mode === "multi_user" && status === "logged_in" && self && accessToken) {
+    if (status === "logged_in" && self && accessToken) {
       void loadDirectory(self.user_id, accessToken);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -13,12 +13,13 @@
 //! * attachments: upload → reference → download → cross-session refusal (§4.2.1)
 //! * participant sync (§8.3) and reinstalled-agent history (§10.19)
 //! * card answer for a nonexistent card fails loud (§5.5.4)
-//! * local mode (the desktop default form) refuses chat writes and serves
-//!   no session surface — the multi_user-only gate stays (ADR-076 §决策 12)
+//! * a fresh install (no configured bootstrap admin) gates the chat surface
+//!   behind first-boot setup — ADR-114, `AccountSystemState::NeedsSetup`
 //!
-//! multi_user mode with the bootstrap admin, because the Gateway's chat
-//! write entry requires a token-derived identity (local mode keeps the
-//! legacy ChatPanel surface by design).
+//! ADR-114 removed `AUTH_MODE`: there is no "local mode" left. The account
+//! system is always present; what changes on a fresh install is only that
+//! the seeded admin has no password yet. Every test below therefore boots
+//! with a real admin, except the one that deliberately walks the setup gate.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -102,7 +103,8 @@ fn temp_home(tag: &str) -> PathBuf {
     home
 }
 
-/// Boot a multi_user gateway with a bootstrap admin (root / s3cret123).
+/// Boot a gateway with a configured bootstrap admin (root / s3cret123).
+/// ADR-114: this is the ordinary "ready" form, not a deployment mode.
 fn boot_multi_user(tag: &str) -> (Gateway, String /*token*/, String /*root uid*/) {
     let home = temp_home(tag);
     let (http, mqtt) = (free_port(), free_port());
@@ -115,8 +117,6 @@ fn boot_multi_user(tag: &str) -> (Gateway, String /*token*/, String /*root uid*/
 vault_dir = "{home}/data/vault"
 packages_dir = "{home}/config/packages"
 data_dir = "{home}/data"
-
-auth_mode = "multi_user"
 
 [user]
 config = "{home}/acowork-user.toml"
@@ -919,12 +919,12 @@ fn agent_agent_pair_is_one_shared_channel_for_both_sides() {
     assert!((400..500).contains(&code), "non-participant write refused ({code})");
 }
 
-/// Boot a `local`-mode gateway (the desktop default form): no account
-/// system, no token, no bootstrap admin — the auth middleware is a no-op
-/// and the user service deliberately does not mount the chat-session
-/// surface (ADR-076 §决策 12; the new Chat store is multi_user-only by
-/// design, the legacy ChatPanel surface stays).
-fn boot_local(tag: &str) -> Gateway {
+/// Boot a fresh install: the user service config has no `bootstrap_admin`,
+/// so `ensure_bootstrap_admin()` seeds a passwordless `admin` and the
+/// account system reports `needs_setup`. ADR-114: this is a *store state*,
+/// not a network/deployment mode — the bind address is identical to the
+/// ready form above.
+fn boot_fresh_install(tag: &str) -> Gateway {
     let home = temp_home(tag);
     let (http, mqtt) = (free_port(), free_port());
     let home_s = home.display().to_string().replace('\\', "/");
@@ -985,16 +985,18 @@ config = "{home}/acowork-user.toml"
     gw
 }
 
-/// Wave 6 acceptance, third form: `local` mode keeps the legacy surface.
-/// The new chat write entries must refuse cleanly (401 — identity is
-/// token-derived and there is no token), and the proxied chat read must
-/// fail soft (4xx, never a 5xx or a hang) because the user service does
-/// not mount the route at all. A future "make local mode work like
-/// multi_user" shortcut that removes the gate would flip these codes.
+/// Wave 6 acceptance, third form (ADR-114): a fresh install gates the chat
+/// surface until the first admin is set up. This is a *store state*, not a
+/// network mode — both halves of this test use the very same loopback bind.
+/// Before setup every chat path answers 403 `setup_required` (never 401 —
+/// there is no token to ask for yet); after loopback setup the ordinary
+/// token-derived identity gate applies and chat writes without a token are
+/// 401. A shortcut that lets unauthenticated chat through on a loopback bind
+/// would flip these codes.
 #[test]
-fn local_mode_refuses_chat_writes_and_serves_no_session_surface() {
+fn fresh_install_gates_chat_until_first_admin_setup() {
     let _serial = lock_chain();
-    let gw = boot_local("local");
+    let gw = boot_fresh_install("firstboot");
     let http = gw.http_port;
 
     // Wait for the user service to be up (proxy stops answering 503).
@@ -1004,26 +1006,113 @@ fn local_mode_refuses_chat_writes_and_serves_no_session_surface() {
         if code != 503 {
             break;
         }
-        assert!(Instant::now() < deadline, "user service never came up; stderr:\n{}", gw.stderr());
+        assert!(Instant::now() < deadline, "user service never came up; stderr:/n{}", gw.stderr());
         sleep(Duration::from_millis(100));
     }
 
-    // Token-derived identity is required at every chat write entry; local
-    // mode has no token → 401, before any body validation or user-service
-    // call (so even a well-formed request is refused).
+    // The health snapshot arrives asynchronously and fail-opens as `ready`
+    // until then. Poll /api/status for the real first-boot state.
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    loop {
+        let (code, body, _) = http_get_plain(http, "/api/status");
+        assert_eq!(code, 200, "status; body:/n{body}");
+        if body.contains("\"account_state\":\"needs_setup\"")
+            || body.contains("\"account_state\":\"uninitialized\"")
+        {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "account_state never reached a first-boot state; body:/n{body}/nstderr:/n{}",
+            gw.stderr()
+        );
+        sleep(Duration::from_millis(100));
+    }
+
+    // Before setup the restricted-mode gate fires ahead of the auth gate:
+    // answering 401 would send the Desktop into a login form it cannot use.
     let msg = serde_json::json!({"chat_session_id": "whatever", "from_user": "human", "text": "hi"});
     let (code, body, _) = http_post_json(http, "/api/intents/chat-message", &serde_json::to_vec(&msg).unwrap());
-    assert_eq!(code, 401, "chat-message without identity in local mode; body:\n{body}");
+    assert_eq!(code, 403, "chat-message before setup; body:/n{body}");
+    assert!(body.contains("setup_required"), "the 403 must name the reason; body:/n{body}");
+    assert!(body.contains("account_state"), "the 403 must publish the state; body:/n{body}");
 
     let mention = serde_json::json!({"chat_session_id": "whatever", "from_user": "human", "text": "hi", "targets": ["a"]});
     let (code, body, _) = http_post_json(http, "/api/intents/mentions", &serde_json::to_vec(&mention).unwrap());
-    assert_eq!(code, 401, "mentions without identity in local mode; body:\n{body}");
+    assert_eq!(code, 403, "mentions before setup; body:/n{body}");
+    assert!(body.contains("setup_required"), "the 403 must name the reason; body:/n{body}");
 
-    // The public session surface is not mounted in local mode: the proxy
-    // forwards and the user service answers 404 — a clean miss, not a
-    // 5xx, not a timeout.
-    let (code, _, _) = http_get_plain(http, "/api/chat-sessions/human");
-    assert!((400..500).contains(&code), "session list fails soft in local mode ({code})");
+    let (code, body, _) = http_get_plain(http, "/api/chat-sessions/human");
+    assert_eq!(code, 403, "session list before setup; body:/n{body}");
+    assert!(body.contains("setup_required"), "the read surface is gated too; body:/n{body}");
+
+    // The Desktop on the Gateway host activates the seeded admin in place
+    // and gets a token pair back. Retry 503: /api/status may already report
+    // a first-boot state before the proxy/verifier is published.
+    let setup = serde_json::to_vec(&serde_json::json!({
+        "username": "root", "password": "s3cret123", "display_name": "Root"
+    }))
+    .unwrap();
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    let (code, body) = loop {
+        let (code, body, _) = http_post_json(http, "/api/auth/setup", &setup);
+        if code != 503 {
+            break (code, body);
+        }
+        assert!(Instant::now() < deadline, "setup stayed 503; stderr:/n{}", gw.stderr());
+        sleep(Duration::from_millis(100));
+    };
+    assert_eq!(code, 200, "loopback setup; body:/n{body}");
+    let token = json_parse(&body)["access_token"]
+        .as_str()
+        .expect("access_token")
+        .to_string();
+
+    // Wait for the Gateway's next health poll to lift the gate.
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    loop {
+        let (_, body, _) = http_get_plain(http, "/api/status");
+        if body.contains("\"account_state\":\"ready\"") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "account_state never became ready; body:/n{body}/nstderr:/n{}",
+            gw.stderr()
+        );
+        sleep(Duration::from_millis(100));
+    }
+
+    // Now the normal identity gate applies: token-derived identity is
+    // required at every chat write entry, before any body validation or
+    // user-service call (so even a well-formed request is refused).
+    let (code, body, _) = http_post_json(http, "/api/intents/chat-message", &serde_json::to_vec(&msg).unwrap());
+    assert_eq!(code, 401, "chat-message without identity after setup; body:/n{body}");
+
+    let (code, body, _) = http_post_json(http, "/api/intents/mentions", &serde_json::to_vec(&mention).unwrap());
+    assert_eq!(code, 401, "mentions without identity after setup; body:/n{body}");
+
+    // The chat-session surface is mounted unconditionally once the account
+    // system is ready: a clean 2xx/4xx, never 403/401/5xx.
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    let (code, body) = loop {
+        let (code, body, _) = http_get_auth(http, "/api/chat-sessions/human", &token);
+        if code != 503 {
+            break (code, body);
+        }
+        assert!(Instant::now() < deadline, "session list stayed 503; stderr:/n{}", gw.stderr());
+        sleep(Duration::from_millis(100));
+    };
+    assert!(
+        (200..300).contains(&code) || (400..500).contains(&code),
+        "session surface fails soft after setup ({code}); body:/n{body}"
+    );
+    assert_ne!(code, 403, "the setup gate must be lifted; body:/n{body}");
+    assert_ne!(code, 401, "the setup token must be accepted; body:/n{body}");
+
+    // One-shot: a second setup is 409 even if the health snapshot lags.
+    let (code, body, _) = http_post_json(http, "/api/auth/setup", &setup);
+    assert_eq!(code, 409, "a second setup must be refused; body:/n{body}");
 }
 
 // ─────────────────────────────────────────────────────────────────────

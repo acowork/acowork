@@ -361,14 +361,14 @@ pub struct GatewayState {
     /// ADR-084 §决策 2：验签用的 Ed25519 公钥。
     ///
     /// 由 user supervisor 在用户服务 ready 后从 `{user.data_dir}/auth/ed25519.pub`
-    /// 载入。`None` = 尚未载入（multi_user 下此时必须拒绝鉴权，见
-    /// `auth_middleware`），`local` 下始终为 `None`（无账号系统）。
+    /// 载入。`None` = 尚未载入（此时必须拒绝鉴权，见 `auth_middleware`）。
+    /// ADR-114：账号系统恒开，`None` 只表示启动窗口，不表示部署模式。
     pub user_verifier: Option<std::sync::Arc<acowork_core::auth::TokenVerifier>>,
     /// ADR-084 §决策 4b：用户服务的 `/health` 快照。
     ///
-    /// `None` = 尚未探到（启动窗口内）。`requires_setup` 喂
-    /// `restricted_mode`，`registration_open` 喂 `/api/status`，两者都因此
-    /// 不再需要 Gateway 触碰账号存储（M3 任务 2/5）。
+    /// `None` = 尚未探到（启动窗口内）。`account_state` 喂
+    /// `restricted_mode` 与 `/api/status`，`registration_open` 喂
+    /// `/api/status`，因此 Gateway 不再需要触碰账号存储（M3 任务 2/5）。
     pub user_snapshot: Option<crate::lifecycle::user_supervisor::UserSnapshot>,
     /// doc MCP HTTP 端点 URL（`http://{advertise_host}:{http.port}{doc.mcp_http_path}`）。
     ///

@@ -131,20 +131,6 @@ pub struct Cli {
     )]
     pub no_spawn_local_node: bool,
 
-    /// Deployment auth mode (ADR-076 §决策 12): `local` or `multi_user`.
-    ///
-    /// Overrides the bind-address inference (loopback → `local`, anything
-    /// else → `multi_user`). Use for edge cases such as a reverse proxy
-    /// fronting a `0.0.0.0` bind that is only reachable on a trusted
-    /// subnet. TOML counterpart: `auth_mode = "local"`.
-    #[arg(
-        long,
-        global = true,
-        value_name = "local|multi_user",
-        env = "ACOWORK_GATEWAY_AUTH_MODE"
-    )]
-    pub auth_mode: Option<String>,
-
     /// Subcommands
     #[command(subcommand)]
     pub command: Option<Commands>,
@@ -332,7 +318,9 @@ impl Cli {
         // configured password policy + resolved auth mode to validate the
         // new password. Captured here so we can still build the gateway
         // (which consumes `config`).
-        let admin_setup_auth_mode = config.effective_auth_mode();
+        //
+        // ADR-114: there is no auth mode any more — the account system is
+        // always present, so `admin-setup` is always available.
         let gateway = Gateway::new(config)?;
         match self.command {
             Some(Commands::Install { package, node }) => {
@@ -494,13 +482,10 @@ impl Cli {
                 // ADR-087: a CLI-issued token has no interactive owner —
                 // the operator running this on the Gateway machine IS the
                 // admin, so bind the earliest-created admin as the node
-                // owner up front. Local mode (no accounts) keeps None:
-                // ownerless = the machine is the owner.
-                let owner = if admin_setup_auth_mode.is_multi_user() {
-                    user_first_admin(user_data_dir.as_deref())
-                } else {
-                    None
-                };
+                // owner up front. Before the first administrator exists
+                // there is nothing to bind and the row stays ownerless —
+                // the claim endpoint is the manual fallback.
+                let owner = user_first_admin(user_data_dir.as_deref());
                 let plaintext = store.create_token(ttl, owner);
                 println!("Enrollment token created (one-time, TTL {}m):", ttl.as_secs() / 60);
                 println!("{plaintext}");
@@ -513,18 +498,12 @@ impl Cli {
                 // resolution matches `Gateway::new` — load policy from the
                 // same TOML, build the same `AuthService`, call
                 // `set_admin_password`.
-                if !admin_setup_auth_mode.is_multi_user() {
-                    eprintln!(
-                        "admin-setup requires AUTH_MODE=multi_user (resolved mode: {admin_setup_auth_mode})."
-                    );
-                    eprintln!(
-                        "Either set `auth_mode = \"multi_user\"` in gateway.toml or remove \
-                         this invocation — local-mode deployments do not have an admin account."
-                    );
-                    return Err(GatewayError::Config(format!(
-                        "admin-setup requires multi_user mode (got {admin_setup_auth_mode})"
-                    )));
-                }
+                //
+                // ADR-114: no mode gate any more. The account system is
+                // always present, so `admin-setup` is always a valid
+                // operation — it simply fails if the administrator already
+                // has a password (the user service refuses to overwrite).
+                //
                 // ADR-084: the account store belongs to `acowork-user`, so
                 // this subcommand is a thin alias for that binary's own
                 // `admin-setup` — it must not open the store here, or the
@@ -551,25 +530,30 @@ impl Cli {
                 //     entry point, but if the operator forgets that and
                 //     just runs the bare binary on a fresh install we
                 //     shouldn't dead-end them at a help banner.
-                //  2. Safety — the prompt path must NEVER silently start a
-                //     daemon afterwards. The operator should see the
-                //     prompt, set the password, then explicitly choose to
-                //     run with `--daemon` (or skip daemon entirely).
+                //  2. Safety — finishing the prompt must NOT silently
+                //     launch a daemon. The operator sets the password,
+                //     then explicitly runs with `--daemon`.
                 //
-                // We therefore handle first-boot setup *before* the
-                // daemon/help dispatch, regardless of `self.daemon`. If
-                // the operator didn't ask for the daemon, we exit after
-                // the prompt so they can confirm before launching the
-                // service.
+                // 2026-11-14 (ADR-114 follow-up): the INTERACTIVE prompt is
+                // for a human at a shell, NEVER for a daemon. A
+                // Desktop-spawned child inherits `npm run tauri dev`'s
+                // console, so stdin/stdout WERE TTYs and
+                // `can_prompt_interactively()` reported "a human attached";
+                // `rpassword::prompt_password` then blocked forever on a
+                // password nobody could see or type. The Gateway never
+                // bound 19876/19875, Desktop timed out on /api/bootstrap
+                // and a fresh install could not reach the setup wizard at
+                // all. ADR-114 already makes the Desktop's HTTP setup form
+                // the primary path: a daemon only has to boot into
+                // restricted mode and serve that surface.
                 if gateway.is_first_boot_restricted() {
-                    // ADR-076 §决策 12 v3: the prompt is *best effort* and
-                    // must never abort the boot — a Gateway that refuses to
-                    // start cannot serve the restricted-mode surface
-                    // (`/api/status` + `requires_setup`), so the Desktop
-                    // would see "connection refused" instead of the gate.
-                    // `build_macos.sh --start` is exactly that case: it
-                    // backgrounds us with stdio redirected.
-                    if can_prompt_interactively() {
+                    if self.daemon || !can_prompt_interactively() {
+                        warn_first_boot_restricted();
+                    } else {
+                        // Best effort: a failure here must never abort the
+                        // boot (a Gateway that refuses to start cannot serve
+                        // the restricted-mode surface — the Desktop would
+                        // see "connection refused" instead of the wizard).
                         eprintln!(
                             "First-boot setup required: a passwordless 'admin' account has \
                              been seeded.\n\
@@ -582,33 +566,19 @@ impl Cli {
                                     .map_err(GatewayError::Config)?;
                                 zeroize::Zeroize::zeroize(&mut pw);
                                 eprintln!("Admin password set.\n");
-                                if !self.daemon {
-                                    // Operator did NOT ask for the daemon.
-                                    // Exit cleanly — they can re-run with
-                                    // `--daemon` (or pick a subcommand) on
-                                    // the next invocation. We deliberately
-                                    // don't auto-promote them into daemon
-                                    // mode: that would couple first-boot UX
-                                    // to a launch decision they haven't
-                                    // made yet.
-                                    eprintln!(
-                                        "Run again with --daemon to start the gateway, \
-                                         or use a subcommand (run --help to list them)."
-                                    );
-                                    return Ok(());
-                                }
+                                // Non-daemon: exit cleanly so the operator
+                                // explicitly chooses to launch the service.
+                                eprintln!(
+                                    "Run again with --daemon to start the gateway, \
+                                     or use a subcommand (run --help to list them)."
+                                );
+                                return Ok(());
                             }
                             Err(e) => {
-                                // Mismatch / policy / no TTY after all. Keep
-                                // booting (restricted) rather than dying, so
-                                // the operator can retry with `admin-setup`
-                                // against the running Gateway.
                                 eprintln!("First-boot setup incomplete: {e}");
                                 warn_first_boot_restricted();
                             }
                         }
-                    } else {
-                        warn_first_boot_restricted();
                     }
                 }
                 if self.daemon {
@@ -647,8 +617,11 @@ fn can_prompt_interactively() -> bool {
 /// the rolling log file, because the motivating path (`build_macos.sh
 /// --start`) sends stderr to `/dev/null`. ADR-076 §决策 12 v3.
 fn warn_first_boot_restricted() {
+    // ADR-114: the Desktop on this host can now finish setup over HTTP. It
+    // is the primary path; the CLI paths stay as headless alternatives.
     const HOW: &str = "Complete first-boot setup with ONE of:\n  \
-                       - run 'acowork-gateway' from an interactive shell (you will be prompted)\n  \
+                       - open the Desktop app on this machine (it offers a setup form)\n  \
+                       - POST /api/auth/setup from this host (loopback only)\n  \
                        - run 'acowork-gateway admin-setup --password-file <path>' \
                        once with a file containing the new password\n  \
                        - run 'acowork-gateway admin-setup --password-stdin < secret.txt'\n  \
@@ -656,11 +629,11 @@ fn warn_first_boot_restricted() {
                        (gateway.toml [user] config -> the service TOML, or the service's \
                        own --config) and restart the Gateway";
     eprintln!(
-        "Gateway is in first-boot restricted mode (admin has no password).\n\n{HOW}\n\n\
-         Only /health and /api/status are reachable until setup is complete."
+        "Gateway is in first-boot restricted mode (no administrator can log in).\n\n{HOW}\n\n\
+         Only /health, /api/status and /api/auth/setup are reachable until setup is complete."
     );
     tracing::warn!(
-        "first-boot restricted mode (passwordless admin) — only /health and /api/status are \
+        "first-boot restricted mode (account_state != ready) — only the setup surface is \
          served. {HOW}"
     );
 }
@@ -908,7 +881,7 @@ async fn async_main(
 // The Gateway no longer opens the account store. These two helpers shell out
 // to the owning process instead, so every write to `accounts.json` happens
 // under one owner — and, for `--check`, so the boot-time prompt reads the
-// same predicate the service publishes as `requires_setup`.
+// the same store state the service publishes as `account_state`.
 
 /// Path of the `acowork-user` binary (sibling of this executable).
 fn user_binary() -> std::path::PathBuf {
@@ -922,7 +895,6 @@ fn user_binary() -> std::path::PathBuf {
 /// subcommand argument and silently ignored).
 fn user_command(user_data_dir: Option<&std::path::Path>) -> std::process::Command {
     let mut cmd = std::process::Command::new(user_binary());
-    cmd.args(["--auth-mode", "multi_user"]);
     if let Some(dir) = user_data_dir {
         cmd.arg("--data-dir").arg(dir);
     }

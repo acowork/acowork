@@ -105,9 +105,12 @@ export interface SystemStatusResponse {
   uptime_secs: number;
   /** ADR-055 D3: MQTT broker port for dynamic discovery (L3-6). */
   mqtt_port: number;
-  /** ADR-076 §决策 12: resolved deployment auth mode. `undefined` when the
-   *  Gateway is older than ADR-076 (treated as `local` — no login gate). */
-  auth_mode?: AuthMode;
+  /** ADR-114: the account system's first-boot state, exposed by
+   *  `GET /api/status`. `undefined` on a Gateway older than ADR-114
+   *  (treated as `ready` — no first-boot gate). */
+  account_state?: AccountSystemState;
+  /** ADR-076 §决策 6: whether non-admins may self-register. */
+  registration_open?: boolean;
   /** ADR-101: memory service gating signal. `undefined` on a Gateway older
    *  than ADR-101 — which has no standalone memory service to talk to, so
    *  the memory panel and the search tab stay hidden. */
@@ -1647,8 +1650,17 @@ export type SessionStatus =
   | { status: "llm_awaiting_first_chunk" }
   | { status: "thinking" }
   | { status: "llm_streaming"; detail?: { message_id: string | null } }
-  /** ADR-049: Tool calls dispatched, awaiting tool results. */
-  | { status: "tool_executing" }
+  /** ADR-049: Tool calls dispatched, awaiting tool results.
+   *
+   * `tools` names the calls this dispatch is waiting on (deduped), so a
+   * surface can say *what* the agent is doing instead of one static
+   * "working on it" line. Empty or absent is the Runtime saying it cannot
+   * name this dispatch — the resume-after-approval transition does not know
+   * which calls are still in flight — and the reader must fall back to its
+   * generic word, never reuse the previous dispatch's name. Absent from a
+   * Runtime older than the field, which is why it is optional here:
+   * `lib/agentActivity.ts` owns that fallback. */
+  | { status: "tool_executing"; detail?: { tools?: string[] } }
   | { status: "waiting_approval"; detail: { request_id: string } }
   | {
     status: "paused";
@@ -2255,24 +2267,26 @@ export interface TokenPair {
   expires_in: number;
 }
 
-/** ADR-076 §决策 12: deployment auth mode exposed by `GET /api/status`. */
-export type AuthMode = "local" | "multi_user";
+/** ADR-114: lifecycle state of the always-on account system, exposed by
+ *  `GET /api/status`. This is a runtime fact about the account store —
+ *  never a deployment mode, and never derived from the network bind.
+ *
+ *  - `uninitialized`: no accounts exist yet; the first admin must be created.
+ *  - `needs_setup`: accounts exist but no admin can log in (seeded passwordless admin).
+ *  - `ready`: at least one admin can log in. */
+export type AccountSystemState = "uninitialized" | "needs_setup" | "ready";
 
-/** Lifecycle of the Desktop auth session (ADR-076 §决策 6 / 7). */
+/** Lifecycle of the Desktop auth session (ADR-076 §决策 6 / 7, ADR-114). */
 export type AuthState =
-  /** Mode not yet resolved (Gateway not reached) — render nothing gated. */
+  /** Account state not yet resolved (Gateway not reached) — render nothing gated. */
   | "unknown"
-  /** `AUTH_MODE=local` — account system is a no-op, no login gate. */
-  | "disabled"
-  /** `multi_user` and no valid token — must log in. */
+  /** No valid token — must log in. */
   | "logged_out"
-  /** `multi_user` with a token pair held in memory / storage. */
+  /** A token pair is held in memory / storage. */
   | "logged_in"
-  /** ADR-076 §决策 12 v2: Gateway is in first-boot restricted mode (a
-   * passwordless admin account exists). The Desktop must NOT show the
-   * normal login form — `/api/auth/login` will be refused and so will
-   * every other `/api/*` route. Render the "Gateway is not ready" gate
-   * and poll `/api/status` until setup completes. */
+  /** ADR-114: no administrator can log in yet. The Desktop renders the
+   * first-boot setup view instead of the login form — every other `/api/*`
+   * route answers 403 `setup_required` until setup completes. */
   | "setup_required";
 
 // ── MCP types ────────────────────────────────────────────────────────

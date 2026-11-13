@@ -10,10 +10,9 @@
 //! POST   /api/users/{id}/reset-password    → { invite_token } (admin)
 //! ```
 //!
-//! Registered **only under `AUTH_MODE=multi_user`** (ADR-076 §决策 12),
-//! *instead of* the local-mode presentation routes
-//! ([`crate::http::profile_api`]) for the shared `/api/users` paths. Under
-//! `local` this module never runs and `accounts.json` is never created.
+//! ADR-114: always registered. `user_profiles.json` is no longer a
+//! substitute for the account store — it is a derived presentation view
+//! rebuilt from `accounts.json` by [`sync_profiles`].
 //!
 //! Two authorities are kept coherent here: `accounts.json` (the credential
 //! authority, written by [`AuthService`]) and `user_profiles.json` (the
@@ -38,7 +37,9 @@ use crate::auth::context::AuthContext;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// The account-management routes (merged only under `multi_user`).
+/// The account-management routes. ADR-114: always registered — the account
+/// system is present in every deployment, and a fresh install is gated by
+/// `restricted_mode` instead of by these routes being absent.
 pub fn account_routes() -> Router<AppState> {
     Router::new()
         // Static segment, so it wins over `/api/users/{user_id}` (matchit 0.8
@@ -133,9 +134,9 @@ pub struct UserDirectoryResponse {
 // ── Guards ─────────────────────────────────────────────────────────────
 
 fn service(state: &AppState) -> Result<Arc<AuthService>, ApiError> {
-    state.auth_service.clone().ok_or_else(|| {
-        ApiError::service_unavailable("the account system is disabled (AUTH_MODE=local)")
-    })
+    // ADR-114: the account system is always present — there is no
+    // deployment in which these routes are unreachable because it is off.
+    Ok(state.auth_service.clone())
 }
 
 pub(crate) async fn blocking<T, F>(f: F) -> Result<T, ApiError>
@@ -387,21 +388,35 @@ async fn registration_open(state: &AppState) -> bool {
 /// multi-user equivalent of "the active user"), falling back to the first
 /// enabled admin so a freshly bootstrapped Gateway still pushes a profile.
 ///
-/// ponytail: a single global `is_active` is a local-mode holdover — under
-/// `multi_user` every session carries its own owner via `x-user-id`, so the
-/// global active profile only feeds the legacy `last_user_profile` topic.
+/// ponytail: a single global `is_active` is a legacy holdover — every
+/// session carries its own owner via `x-user-id`, so the global active
+/// profile only feeds the legacy `last_user_profile` topic.
 /// When Runtime learns per-request profiles this whole sync goes away.
 /// Re-derive `user_profiles.json` from `accounts.json` (the authority).
 ///
 /// `pub(crate)` because the mode-independent avatar routes in
 /// [`crate::http::profile_api`] write through `accounts.json` too and must
 /// refresh the same derived view.
+///
+/// Failures are **loud**, not fatal. `accounts.json` is the authority and has
+/// already been written by the time this runs, so answering HTTP 500 here
+/// would be worse than a stale derived view: the caller would retry the
+/// mutation (or, for `/api/auth/setup`, retry a one-shot operation that now
+/// correctly answers 409). A failed rebuild heals on the next account
+/// mutation, and `rebuild_and_save_user_profile_cache` logs its own disk
+/// write failures.
 pub(crate) async fn sync_profiles(state: &AppState) {
-    let Some(auth) = state.auth_service.clone() else {
-        return;
-    };
-    let Ok(accounts) = auth.load_accounts() else {
-        return;
+    let auth = state.auth_service.clone();
+    let accounts = match auth.load_accounts() {
+        Ok(list) => list,
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "could not reload accounts.json to rebuild user_profiles.json; \
+                 the derived presentation view is stale until the next account mutation"
+            );
+            return;
+        }
     };
 
     let active_id = accounts
@@ -810,26 +825,30 @@ mod tests {
         );
     }
 
-    /// Under `local` mode `/api/users` is the presentation router — no
-    /// invite semantics, and the account routes do not exist.
+    /// ADR-114: `/api/users` carries **account** semantics unconditionally —
+    /// the presentation-only variant was a second registration of the same
+    /// path and could not coexist with it (axum panics on a double
+    /// registration). So the account routes always exist, and the identity
+    /// layer always gates them.
     #[tokio::test]
-    async fn local_mode_keeps_presentation_routes() {
+    async fn account_semantics_are_unconditional() {
         let dir = temp_dir();
-        let st = crate::test_support::local_state(&dir);
-        let router = build_router(st);
-        // The presentation GET works (no auth service → no middleware gate).
+        let router = build_router(crate::test_support::multi_user_state(&dir));
+
+        // The account-only reset route exists — it is gated, not absent.
         let resp = router
             .clone()
-            .oneshot(req("GET", "/api/users", None, None))
-            .await
-            .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        // The account-only reset route does not exist.
-        let resp = router
             .oneshot(req("POST", "/api/users/x/reset-password", None, None))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        // The list route is the account list, so it needs an admin token.
+        let resp = router
+            .oneshot(req("GET", "/api/users", None, None))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// ADR-076 §决策 1: `PUT /api/users/{id}` carries the display fields
@@ -896,7 +915,7 @@ mod tests {
     /// account mutation — which rebuilds `user_profiles.json` from the
     /// authority — can no longer wipe the avatar.
     #[tokio::test]
-    async fn avatar_config_writes_through_accounts_under_multi_user() {
+    async fn avatar_config_writes_through_accounts() {
         let dir = temp_dir();
         let router = build_router(admin_state(&dir));
         let admin = login(&router, "root", PWD).await;

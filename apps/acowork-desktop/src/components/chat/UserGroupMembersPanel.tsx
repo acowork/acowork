@@ -61,7 +61,6 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
   const { t } = useTranslation();
   const me = useAuthStore((s) => s.account?.user_id ?? "");
   const account = useAuthStore((s) => s.account);
-  const localMode = useAuthStore((s) => s.mode) === "local";
   const token = useAuthStore((s) => s.accessToken);
   const agents = useAgentStore((s) => s.agents);
   const removeMember = useProjectGroupStore((s) => s.removeMember);
@@ -89,7 +88,7 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
   // rename / transfer / remove affordances nor the group prompt card.
   const owner = group.owner ?? "";
   const isOwner = !!owner && owner === me;
-  const governs = canManage && canGovern(owner, account, localMode);
+  const governs = canManage && canGovern(owner, account);
 
   const nameOf = useMemo(() => {
     const byId = new Map<string, DirectoryUser>();

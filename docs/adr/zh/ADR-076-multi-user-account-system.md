@@ -25,6 +25,8 @@
 > **不受影响、仍然有效**：§决策 4（session 隔离）、§决策 7（Desktop UI）、§决策 10（PM / Doc 反代身份注入）、§决策 11（PM 成员模型），以及 [ADR-042](./ADR-042-mqtt-user-identity-delivery.md) 身份下发。
 >
 > 实施计划见 [docs/plan/zh/user-dev-plan.md](../../plan/zh/user-dev-plan.md)。
+>
+> **再次取代说明（2026-11-13）**：[ADR-114](./ADR-114-account-system-decoupled-from-network-topology.md) 废除了 §决策 12 的 `AUTH_MODE` / 部署模式分流。账号系统**恒开**，`local` 与 `multi_user` 两个模式、以及「按 bind 地址推断登录模式」的做法全部删除；首启状态改为 `AccountSystemState` 三态，首个管理员的密码可经 `POST /api/auth/setup` 从本机设置。本 ADR 中「账号系统可以不存在」「首启只能 TTY / CLI」的相关表述均不再适用；账号模型、角色、session 隔离等其余决策仍然有效。
 
 ---
 

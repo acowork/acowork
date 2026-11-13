@@ -49,7 +49,7 @@ fn publish_keyless_provider(id: &str) -> bool {
 ///   -style attribution.
 /// - `X-ACowork-Node-Token: {node_token}` — **that the caller is a trusted
 ///   machine** (ADR-076). Without it the whole request dies at
-///   `auth_middleware` with 401 the moment `AUTH_MODE=multi_user`, and the
+///   `auth_middleware` with 401 (accounts are always on, ADR-114), and the
 ///   failure is *silent at the UI layer*: `tools/list` never returns, so
 ///   `agent_mcp_tools.json` reconciles to zero entries and the Desktop
 ///   Tools panel renders no expandable row for the server at all. The

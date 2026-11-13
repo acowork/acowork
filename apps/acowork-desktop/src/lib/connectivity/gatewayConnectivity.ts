@@ -25,6 +25,7 @@
  * StrictMode double-mounts and tests stay deterministic.
  */
 import { probeGateways } from "../gateway-probe";
+import { gatewayAddressOptions } from "../gatewayUrl";
 import { log } from "../logger";
 import { useChatStore } from "../../stores/chatStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
@@ -81,14 +82,19 @@ function syncMqttLiveness(connected: boolean): void {
  * hosts into `gatewayStore.candidates` as each settles — the single
  * candidate probe for BOTH the splash fallback and the runtime chip.
  * Returns the number of candidates added (0 when skipped: already
- * recovered, local mode, empty history).
+ * recovered, or empty history).
+ *
+ * ADR-115: no local-mode short-circuit. A loopback address is just one
+ * entry in the list, so a Desktop sitting on a dead LAN address must
+ * still be offered localhost as an alternative — that is precisely the
+ * escape route the old `if (gatewayMode === "local") return 0;` denied.
  */
 export async function probeKnownCandidates(): Promise<number> {
   if (isRecovered()) return 0;
-  const { gatewayMode, gatewayUrl, gatewayUrlHistory } = useSettingsStore.getState();
-  // Local mode is pinned to loopback — there is no other address to probe.
-  if (gatewayMode === "local") return 0;
-  const others = gatewayUrlHistory.filter((u) => u !== gatewayUrl);
+  const { gatewayUrl, gatewayUrlHistory, lastGoodUrl } = useSettingsStore.getState();
+  const others = gatewayAddressOptions(gatewayUrl, gatewayUrlHistory, lastGoodUrl).filter(
+    (u) => u !== gatewayUrl,
+  );
   if (others.length === 0) {
     useGatewayStore.getState().setCandidates([]);
     return 0;

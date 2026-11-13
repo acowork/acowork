@@ -43,7 +43,8 @@ pub fn hash_password_with(password: &str, params: Params) -> Result<String, Stri
 /// Verify `password` against a stored PHC string.
 ///
 /// Returns `Ok(false)` for a correct-shape-but-wrong password, and for the
-/// [`DISABLED_PASSWORD_HASH`] sentinel (a local-mode account never logs in).
+/// [`DISABLED_PASSWORD_HASH`] sentinel (a seeded, not-yet-activated account
+/// cannot log in until first-boot setup gives it a real password).
 /// Returns `Err` only when the stored string is unparseable — i.e. the
 /// account store is corrupt.
 pub fn verify_password(password: &str, stored_phc: &str) -> Result<bool, String> {

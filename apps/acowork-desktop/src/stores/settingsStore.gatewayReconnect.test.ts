@@ -33,7 +33,9 @@ function invokedCommands(): string[] {
 describe("settingsStore gateway config change", () => {
     beforeEach(() => {
         vi.clearAllMocks();
-        useSettingsStore.setState({ gatewayMode: "remote", gatewayUrl: NEW_URL });
+        // The mode is derived from the URL on every write, so seeding the
+        // URL is enough — there is no independent mode knob to keep in sync.
+        useSettingsStore.setState({ gatewayUrl: NEW_URL, gatewayMode: "remote" });
     });
 
     it("re-runs connect_mqtt after setGatewayUrl so Rust rebuilds the MQTT connection", async () => {
@@ -43,16 +45,6 @@ describe("settingsStore gateway config change", () => {
         });
         expect(invoke).toHaveBeenCalledWith("set_gateway_config", {
             config: { mode: "remote", url: "http://192.168.3.67:19876" },
-        });
-    });
-
-    it("re-runs connect_mqtt after setGatewayMode (mode switch changes the target broker)", async () => {
-        useSettingsStore.getState().setGatewayMode("local");
-        await vi.waitFor(() => {
-            expect(invokedCommands()).toEqual(["set_gateway_config", "connect_mqtt"]);
-        });
-        expect(invoke).toHaveBeenCalledWith("set_gateway_config", {
-            config: { mode: "local", url: NEW_URL },
         });
     });
 

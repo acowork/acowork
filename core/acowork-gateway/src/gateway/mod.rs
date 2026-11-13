@@ -77,38 +77,23 @@ impl Gateway {
         // it starts; the Gateway aggregates those into `installed_agents`
         // via the MQTT dispatch path.
 
-        // ADR-076 §决策 12: resolve the deployment auth mode. Under
-        // `multi_user` the account system is built here. A missing
-        // `bootstrap_admin` on an empty account store is *not* fatal any
-        // more (v2): a passwordless `admin` is seeded and the Gateway boots
-        // into restricted mode, so the Desktop can see `requires_setup`
-        // instead of a dead port.
-        let auth_mode = config.effective_auth_mode();
-        // ADR-076 §决策 12: an explicit mode that disagrees with the bind
-        // inference is allowed (explicit always wins) but suspicious — warn
-        // so a `--auth-mode local` behind a `0.0.0.0` bind is never silent.
-        if config.auth_mode.is_some() {
-            let inferred = crate::auth::resolve_auth_mode(None, None, &config.http.host);
-            if inferred != auth_mode {
-                tracing::warn!(
-                    explicit = %auth_mode,
-                    inferred = %inferred,
-                    bind_host = %config.http.host,
-                    "explicit auth_mode overrides the bind-address inference (ADR-076 §决策 12)"
-                );
-            }
-        }
-        // ADR-084: the account store is *not* opened here any more. It
-        // belongs to the `acowork-user` process, which the supervisor
-        // starts below and whose Ed25519 public key the Gateway uses to
-        // verify access tokens. Opening it here as well would make the
-        // Gateway a second writer of `accounts.json` — the exact coupling
-        // the ADR removes.
-        if auth_mode.is_multi_user() {
-            tracing::info!("AUTH_MODE=multi_user: account system delegated to acowork-user");
-        } else {
-            tracing::info!("AUTH_MODE=local: single-user mode (account system disabled)");
-        }
+        // ADR-076 §决策 12: the account system lives in the `acowork-user`
+        // process. ADR-114: it is **always** present — what varies is
+        // whether the first administrator has been created yet, and that is
+        // a runtime fact read from the account store, never a deployment
+        // mode inferred from the bind address.
+        //
+        // A missing `bootstrap_admin` on an empty account store is *not*
+        // fatal: a passwordless `admin` is seeded and the Gateway boots
+        // into the first-boot state, so the Desktop can see it instead of
+        // a dead port.
+        //
+        // ADR-084: the account store is *not* opened here. It belongs to
+        // the `acowork-user` process, which the supervisor starts below and
+        // whose Ed25519 public key the Gateway uses to verify access
+        // tokens. Opening it here as well would make the Gateway a second
+        // writer of `accounts.json` — the exact coupling the ADR removes.
+        tracing::info!("account system delegated to acowork-user (always on, ADR-114)");
 
         let gateway = Self {
             config,
@@ -123,23 +108,19 @@ impl Gateway {
     ///
     /// ADR-084: the Gateway no longer inspects the account store. It asks
     /// the owner — `acowork-user admin-setup --check` — which reports the
-    /// *same* predicate its `/health` publishes as `requires_setup`, so the
-    /// boot-time prompt cannot disagree with the restricted-mode gate
-    /// applied minutes later. Returns `false` in `local` mode.
+    /// *same* predicate its `/health` publishes, so the boot-time prompt
+    /// cannot disagree with the restricted-mode gate applied minutes later.
+    ///
+    /// ADR-114: there is no "local mode" to short-circuit this any more —
+    /// the account system always exists, so the question is always asked.
     pub fn is_first_boot_restricted(&self) -> bool {
-        if !self.config.effective_auth_mode().is_multi_user() {
-            return false;
-        }
         crate::cli::user_setup_required(self.config.user.data_dir.as_deref()).unwrap_or(false)
     }
 
     /// Apply the first-boot admin password — used by the daemon's TTY
-    /// prompt path (ADR-076 §决策 12 v2). Errors if the account system is
-    /// not running (`local` mode) or the admin already has a password.
+    /// prompt path (ADR-076 §决策 12 v2). Errors if the admin already has
+    /// a password.
     pub fn set_admin_password(&self, password: &str) -> Result<(), String> {
-        if !self.config.effective_auth_mode().is_multi_user() {
-            return Err("admin-setup is unavailable in local mode".to_string());
-        }
         crate::cli::user_admin_setup(self.config.user.data_dir.as_deref(), password)
     }
 
@@ -684,7 +665,6 @@ impl Gateway {
                 gateway_health_url: format!("http://127.0.0.1:{}/health", http_config.port),
                 data_dir: self.config.user.data_dir.clone(),
                 config: self.config.user.config.clone(),
-                auth_mode: self.config.effective_auth_mode().as_str(),
                 mqtt_port: self.config.mqtt.port,
                 // ADR-084 §决策 4b: with broker auth on, the service
                 // authenticates as `user:service` with the shared
@@ -1479,10 +1459,10 @@ impl Gateway {
         // handlers (open records) and the MQTT dispatch layer
         // (transition them on NodeEvent correlation).
         let http_operation_store = operation_store_shared.clone();
-        // ADR-084: the HTTP layer resolves whether the account system is on
-        // from the mode alone — the account service itself now lives behind
-        // the user proxy, and its public key arrives via the supervisor.
-        let http_auth_mode = self.config.effective_auth_mode();
+        // ADR-084: the HTTP layer resolves the account system's state from
+        // the supervisor's `/health` snapshot — the account service itself
+        // now lives behind the user proxy, and its public key arrives via
+        // the supervisor. ADR-114: there is no mode to pass down any more.
         // Design doc 24 §7.2 (M3): remote-origin listener ports, read
         // up front — the spawn below takes `self` out of scope.
         let remote_listener = crate::http::server::RemoteListenerParams {
@@ -1509,7 +1489,6 @@ impl Gateway {
                 Some(http_bootstrap_registry),
                 Some(http_operation_store),
                 http_auth,
-                http_auth_mode,
                 Some(http_relay_client),
                 Some(remote_listener),
                 node_owners,
@@ -1862,7 +1841,6 @@ mod tests {
             user: crate::config::UserConfig::default(),
             memory: crate::config::MemoryConfig::default(),
             security: crate::config::SecurityConfig::default(),
-            auth_mode: None,
             relay: crate::config::RelayClientConfig::default(),
         }
     }

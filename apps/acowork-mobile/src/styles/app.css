@@ -1717,11 +1717,6 @@
   text-align: left;
   cursor: pointer;
 }
-/* Opened, the toggle and the body are the same card: the bottom corners
- * move to the body and a hairline separates header from content. */
-.chat-run:has(.explore-body) .explore-toggle {
-  border-radius: var(--radius-md) var(--radius-md) 0 0;
-}
 .explore-toggle-icon {
   font-size: 12px;
 }
@@ -1740,6 +1735,24 @@
   display: flex;
   align-items: center;
   color: var(--color-label-secondary);
+}
+/* The run's card: the collapse header IS the title banner and the run's
+ * latest answer IS the body — ONE shell, so one agent message reads as one
+ * object instead of a block plus a bubble floating under it (the desktop
+ * card's shape, copied).
+ *
+ * The banner is a shade off the card's face — grayer in light, lighter in
+ * dark, which is the direction the desktop card's title takes. The shell
+ * clips its children, so the toggle and the body drop their own radius. */
+.chat-run .chat-run-card {
+  overflow: hidden;
+  border: 0.5px solid var(--color-separator);
+  border-radius: var(--radius-md);
+  background: var(--color-bg-elevated);
+}
+.chat-run .chat-run-card > .explore-toggle {
+  border-radius: 0;
+  background: var(--color-chat-title);
 }
 .explore-body {
   /* The card's content half — the same face as the header row above. */
@@ -2143,13 +2156,14 @@
 }
 
 /* ── The session's block (ADR-106 D3/D4/D8/D9) ─────────────────────────
-   ONE execution session's rounds in ONE collapsible block, drawn in this app's
-   execution-surface ExploreBlock chrome: a pill header, a hairline list under
-   it, one row per round, the round's pair in panels under the open row. A card
+   ONE execution session's rounds in ONE collapsible CARD, drawn in this app's
+   execution-surface ExploreBlock chrome: a title banner (the collapse header),
+   a hairline list under it, one row per round, the round's pair in panels
+   under the open row, and the run's latest answer as the card's BODY. A card
    per reference row turned a long-lived run into a stack of near-identical
    boxes. The accent never paints a block border — it tints the human's line,
-   exactly as the thread's user bubble does, and the answer sits on the peer
-   bubble's fill. §6.5's mobile delta: the newest round's answer stays inline
+   exactly as the thread's user bubble does, and the answer sits on the card's
+   own fill. §6.5's mobile delta: the newest round's answer stays inline
    (folding a reply behind a tap would make it cost more to read here than on
    the surface that owns the same transcript) and the decision card collapses to
    one line with its buttons in a bottom sheet. */
@@ -2228,16 +2242,22 @@
   width: 16px;
   height: 16px;
 }
-/* The card is collapsed by default; its answer bubble belongs to the block
- * column, so it wears the peer skin at the card's measure, not the 85% a
- * chat row takes. */
+/* The card's BODY: the run's latest answer, inside the card's own fill. It
+ * wears the card's padding rather than a bubble's, because it is the card's
+ * lower half — not a second object floating under the block. */
 .run-answer-bubble {
-  max-width: 100%;
-  align-self: stretch;
+  padding: var(--space-2) var(--space-3) var(--space-3);
+  border-top: 0.5px solid var(--color-separator);
 }
 .run-answer-content {
   font-size: 16px;
   line-height: 1.5;
+  /* The card body inherits the card's face, so it carries no background of
+   * its own. What it must keep is the wrapping the old bubble skin gave the
+   * text: without it a long unbreakable token (a URL, a hash) pushes the
+   * card past the screen. */
+  white-space: normal;
+  word-break: break-word;
 }
 /* Older rounds stay in the block, one tap away — a long run must not push the
    rest of the transcript off the device. */

@@ -606,7 +606,17 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("acowork-preview-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("temp dir");
-        let gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+        // ADR-114: even anonymous requests traverse the auth middleware,
+        // which answers 503 while no user-service verifier is published
+        // (the "service still starting" window). Tests simulate a healthy
+        // Gateway, so publish the fixture verifier.
+        gw.user_verifier = Some(crate::http::test_support::verifier());
+        // Machine-actor credential for the router-level tests: requests
+        // carrying `Bearer test-svc-token` pass the gate without a user
+        // identity, which is the semantics these tests had before the
+        // bearer gate became always-on (ADR-114).
+        gw.internal_service_token = Some("test-svc-token".to_string());
         AppState::new(
             Arc::new(RwLock::new(gw)),
             Arc::new(crate::http::auth::HttpAuth::new(false)),
@@ -786,8 +796,7 @@ mod tests {
     /// verifier is installed from the test fixture key pair, so an anonymous
     /// request gets the real 401 instead of the "user service not ready" 503.
     fn multi_user_state() -> AppState {
-        let mut state = bare_state();
-        state.auth_mode = crate::auth::AuthMode::MultiUser;
+        let state = bare_state();
         // `bare_state` builds the Gateway state synchronously; the verifier is
         // normally installed by the user service supervisor.
         {
@@ -815,16 +824,18 @@ mod tests {
     async fn the_mint_route_is_registered_under_the_path_the_desktop_calls() {
         use tower::ServiceExt;
 
-        // `Local` mode: the bearer gate is a no-op, so this exercises routing +
-        // handler only. The desktop builds exactly this path
-        // (`lib/workspacePreviewUrl.ts`) — a rename on either side must fail
-        // here rather than silently 404ing in the UI.
+        // The desktop builds exactly this path (`lib/workspacePreviewUrl.ts`)
+        // — a rename on either side must fail here rather than silently
+        // 404ing in the UI. The request authenticates as the internal
+        // service (machine actor): no user identity, same as the desktop's
+        // own loopback calls (ADR-114 removed the no-op gate).
         let state = bare_state();
         let response = merged_router(state)
             .oneshot(
                 axum::http::Request::builder()
                     .method("POST")
                     .uri("/api/agents/agent-1/workspaces/preview-ticket")
+                    .header("authorization", "Bearer test-svc-token")
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(r#"{"workspace_id":"ws-1"}"#))
                     .expect("build request"),

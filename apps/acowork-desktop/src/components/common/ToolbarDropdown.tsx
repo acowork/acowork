@@ -2,6 +2,7 @@ import { type ReactNode } from "react";
 import { ChevronDown } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { toolbarButton } from "../../lib/ui-styles";
+import { DROPDOWN_TRIGGER_ACTIVE_CLASS } from "./dropdownTheme";
 import { Tooltip } from "./Tooltip";
 
 /**
@@ -88,7 +89,9 @@ export function ToolbarDropdownTrigger({
                     className={cn(
                         toolbarButton,
                         "min-w-0 max-w-full",
-                        open && "bg-zinc-200 dark:bg-zinc-700 text-text ",
+                        // An open dropdown wears the global accent, not a
+                        // neutral grey "pressed" state.
+                        open && DROPDOWN_TRIGGER_ACTIVE_CLASS,
                         buttonClassName,
                     )}
                 >

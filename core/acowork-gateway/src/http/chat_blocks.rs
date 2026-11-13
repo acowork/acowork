@@ -1239,16 +1239,14 @@ mod tests {
         );
     }
 
-    fn test_state(mode: crate::auth::AuthMode) -> AppState {
+    fn test_state() -> AppState {
         let dir = std::env::temp_dir().join(format!("acowork-chatblocks-{}", uuid::Uuid::new_v4()));
         let _ = std::fs::create_dir_all(&dir);
         let gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
-        let mut state = AppState::new(
+        AppState::new(
             std::sync::Arc::new(tokio::sync::RwLock::new(gw)),
             std::sync::Arc::new(crate::http::auth::HttpAuth::new(false)),
-        );
-        state.auth_mode = mode;
-        state
+        )
     }
 
     fn caller(id: &str) -> AuthContext {
@@ -1265,7 +1263,7 @@ mod tests {
     /// user service and no Runtime is needed to prove what is refused and in
     /// which order.
     async fn get_status(uri: &str, ctx: Option<AuthContext>) -> StatusCode {
-        let app = chat_block_routes().with_state(test_state(crate::auth::AuthMode::MultiUser));
+        let app = chat_block_routes().with_state(test_state());
         let mut request = Request::builder()
             .uri(uri)
             .body(axum::body::Body::empty())
@@ -1452,7 +1450,7 @@ mod tests {
     /// The Gateway state a real deployment would have at this moment: a ready
     /// user service and one registered Runtime endpoint.
     async fn orchestrated(backend: &FakeBackend) -> AppState {
-        let mut state = test_state(crate::auth::AuthMode::MultiUser);
+        let mut state = test_state();
         let registry = std::sync::Arc::new(tokio::sync::RwLock::new(
             crate::http::proxy::RuntimeHttpRegistry::new(),
         ));

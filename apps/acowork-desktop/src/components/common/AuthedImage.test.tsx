@@ -1,7 +1,7 @@
 /**
  * Self-check for `AuthedImage` (ADR-076 follow-up).
  *
- * The bug this locks down: under `multi_user` a bare `<img src="…/avatar-file">`
+ * The bug this locks down: behind the bearer gate, a bare `<img src="…/avatar-file">`
  * cannot send the bearer token, so every custom avatar came back 401 and the
  * UI silently showed the builtin icon instead. `AuthedImage` must therefore
  * (a) resolve through `fetch` and render the resulting blob URL, and
