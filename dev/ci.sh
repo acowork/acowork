@@ -1,6 +1,6 @@
 #!/bin/bash
 # CI script for ACowork.AI
-# Usage: ./dev/ci.sh [check|clippy|test|integration|smoke|all]
+# Usage: ./dev/ci.sh [redlines|check|clippy|test|integration|smoke|all]
 
 set -e
 
@@ -249,17 +249,51 @@ run_session_full_read_redline() {
 # client's own claim first and re-derive from `AuthContext`; `doc_proxy`'
 # tests pin both directions (forged role replaced on the REST path, absent on
 # the MCP path).
+# Shared scanner for the grep-based red lines. Reports `file:line:text` for
+# every match in *production* code, where production means before the file's
+# first `#[cfg(test)]` marker.
+#
+# This repo puts the test module last, and test code is not in the shipped
+# binary: a fixture that hand-rolls a `messages.jsonl` path or echoes an
+# `x-user-id` header is simulating a peer, not crossing a boundary. Without
+# this, every whole-crate grep counts its own tests as violations, and the
+# tempting fix — add the file to the allowlist — blinds the guard to the
+# production code in that same file. A violation cannot hide after the marker:
+# past it the file compiles only for tests.
+#
+# $1 pattern (ERE)   $2 root dir   $3 allowlist regex over the file name
+# Paths are taken unquoted from `grep -rl`; this tree has no spaces in them.
+scan_production() {
+    local files
+    files=$(grep -rlE "$1" --include='*.rs' "$2" 2>/dev/null || true)
+    [ -z "$files" ] && return 0
+    PAT="$1" ALLOW="$3" awk '
+        FNR == 1 { intest = 0 }
+        /#\[cfg\(test\)\]/ { intest = 1 }
+        intest { next }
+        $0 ~ ENVIRON["PAT"] && FILENAME !~ ENVIRON["ALLOW"] {
+            print FILENAME ":" FNR ":" $0
+        }
+    ' $files 2>/dev/null || true
+}
+
 run_gateway_auth_scope_redline() {
     echo "Checking ADR-076 identity-injection red line..."
     local root="$SCRIPT_DIR/../core/acowork-gateway/src"
     local offenders
-    offenders=$(grep -rnE '(USER_SCOPE_HEADER|"x-user-id"|AUTH_USER_HEADER|AUTH_ROLE_HEADER|AUTH_AS_USER_HEADER|"x-auth-)' --include='*.rs' "$root" \
-        | grep -vE "^$root/http/auth_middleware\.rs:" \
-        | grep -vE "^$root/http/user_proxy\.rs:" \
-        | grep -vE "^$root/http/doc_proxy\.rs:" \
-        || true)
+    # The allowlist is the set of trusted writers. `intent_api.rs` joined it
+    # after ADR-076 §决策 4 was written: `pin_reference_rounds` forwards a
+    # scoped read to the Runtime (design 27 §8.2) and builds its header map
+    # from `verified_user` — the identity the middleware already verified — so
+    # it is a fourth trusted *writer*, not a second *authority*. The property
+    # the red line protects (never assert an identity from a client claim) is
+    # unchanged.
+    offenders=$(scan_production \
+        '(USER_SCOPE_HEADER|"x-user-id"|AUTH_USER_HEADER|AUTH_ROLE_HEADER|AUTH_AS_USER_HEADER|"x-auth-)' \
+        "$root" \
+        '/http/(auth_middleware|user_proxy|doc_proxy|intent_api)\.rs$')
     if [ -n "$offenders" ]; then
-        echo "ERROR: identity header (constant or literal) referenced outside auth_middleware.rs / user_proxy.rs / doc_proxy.rs (ADR-076 §决策 4):"
+        echo "ERROR: identity header (constant or literal) referenced outside auth_middleware.rs / user_proxy.rs / doc_proxy.rs / intent_api.rs (ADR-076 §决策 4):"
         echo "$offenders"
         echo "The Gateway reverse proxy must never assert a user identity from a client claim —"
         echo "the scope is written only by the listed proxies, from the verified token."
@@ -318,11 +352,10 @@ run_user_chat_path_redline() {
     # different domain from the `users/…/chats/{min__max}` pair tree this
     # red line guards; its file layout is defined by that file itself, so
     # its `messages.jsonl` is not a hand-rolled pair path.
-    offenders=$(grep -rnE '\.join\("(users|chats|files|conversation\.json|messages\.jsonl)"\)' \
-        --include='*.rs' "$root" \
-        | grep -vE "^$root/chat\.rs:" \
-        | grep -vE "^$root/chat_sessions\.rs:" \
-        || true)
+    offenders=$(scan_production \
+        '\.join\("(users|chats|files|conversation\.json|messages\.jsonl)"\)' \
+        "$root" \
+        '/(chat|chat_sessions)\.rs$')
     if [ -n "$offenders" ]; then
         echo "ERROR: chat pairing path constructed outside chat.rs (ADR-076 §决策 8):"
         echo "$offenders"
@@ -743,6 +776,27 @@ run_agent_skill_tool_redline() {
     echo "agent-skill file_write red line: OK (allowed: debugging, refactoring, testing)"
 }
 
+# Every red line in one list. `check` and `all` both call this, so a gate can
+# no longer be added to one mode and quietly missing from the other — the
+# previous split had `run_node_redline` and `run_mqtt_redline` reachable only
+# from `all`, which is the mode nobody runs on a small change.
+run_all_redlines() {
+    run_node_redline
+    run_mqtt_redline
+    run_gateway_fs_redline
+    run_user_boundary_redline
+    run_meta_layout_redline
+    run_session_full_read_redline
+    run_gateway_auth_scope_redline
+    run_user_auth_mode_redline
+    run_user_chat_path_redline
+    run_chat_projection_redline
+    run_permission_route_redline
+    run_lsp_registry_redline
+    run_ort_api_redline
+    run_agent_skill_tool_redline
+}
+
 run_clippy() {
     echo "Running cargo clippy..."
     cargo clippy --all-targets -- -D warnings
@@ -809,19 +863,13 @@ run_smoke() {
 }
 
 case "$MODE" in
+    # The greps only. Seconds, no toolchain, no network — this is what a PR
+    # gate can afford to run first, on every push.
+    redlines)
+        run_all_redlines
+        ;;
     check)
-        run_gateway_fs_redline
-        run_user_boundary_redline
-        run_meta_layout_redline
-        run_session_full_read_redline
-        run_gateway_auth_scope_redline
-        run_user_auth_mode_redline
-        run_user_chat_path_redline
-        run_chat_projection_redline
-        run_permission_route_redline
-        run_lsp_registry_redline
-        run_ort_api_redline
-        run_agent_skill_tool_redline
+        run_all_redlines
         run_check
         ;;
     clippy)
@@ -837,20 +885,7 @@ case "$MODE" in
         run_smoke
         ;;
     all)
-        run_node_redline
-        run_mqtt_redline
-        run_gateway_fs_redline
-        run_user_boundary_redline
-        run_meta_layout_redline
-        run_session_full_read_redline
-        run_gateway_auth_scope_redline
-        run_user_auth_mode_redline
-        run_user_chat_path_redline
-        run_chat_projection_redline
-        run_permission_route_redline
-        run_lsp_registry_redline
-        run_ort_api_redline
-        run_agent_skill_tool_redline
+        run_all_redlines
         run_check
         run_clippy
         run_test
@@ -859,7 +894,7 @@ case "$MODE" in
         ;;
     *)
         echo "Unknown mode: $MODE"
-        echo "Usage: $0 [check|clippy|test|integration|smoke|all]"
+        echo "Usage: $0 [redlines|check|clippy|test|integration|smoke|all]"
         exit 1
         ;;
 esac
