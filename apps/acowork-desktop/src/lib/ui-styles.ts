@@ -156,14 +156,16 @@ export const dialogButtonSecondary =
  * own (`--color-chat-title`, the same tone a code block's title wears), while
  * `chatCardTitleBarMuted` is one step lighter — a run's banner sits in the
  * transcript and must not out-shout the answer under it. The DARK step is
- * identical in both: there the card tone already reads as a banner, so the
- * quiet variant only lightens the light theme.
+ * identical in both, so the muted variant's dark side references the token
+ * directly (`dark:bg-chat-title`) rather than re-stating the tone; the quiet
+ * variant only lightens the light theme, where the literal zinc-100/60 is
+ * deliberately one step below `--color-chat-title`'s light value.
  */
 export const chatCardShell = "overflow-hidden rounded-md border border-chat-border";
 const chatCardTitleBarBase =
   "flex w-full items-center gap-[7px] border-b border-border-divider px-3 py-[7px] text-left text-xs font-medium text-text";
 export const chatCardTitleBar = `${chatCardTitleBarBase} bg-chat-title`;
-export const chatCardTitleBarMuted = `${chatCardTitleBarBase} bg-zinc-100/60 dark:bg-zinc-700/70`;
+export const chatCardTitleBarMuted = `${chatCardTitleBarBase} bg-zinc-100/60 dark:bg-chat-title`;
 export const chatCardBody = "bg-chat-bubble px-3 py-2.5";
 
 // ── Interaction-card buttons ────────────────────────────────────────
