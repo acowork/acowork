@@ -63,10 +63,13 @@ either.
    - `pm_create_task` with `project_id`, `title` (imperative, concrete),
      `description` (acceptance criteria — this is the whole brief the assignee
      will get), `assignee`, `priority`, `type`.
-   - `start_at`: when the work should *begin*. Omit it and the wake-up goes out
-     as soon as approval lands; set it and the scanner waits. Use it for real
-     sequencing (a sprint start, a dependency's expected completion), not as a
-     reminder for yourself — a past `start_at` means "immediately".
+   - `start_at`: when the work should *begin*. Omit it and the store fills
+     `now` — the wake-up goes out as soon as approval lands; set a future
+     `start_at` and the scanner waits. Use it for real sequencing (a sprint
+     start, a dependency's expected completion), not as a reminder for yourself
+     — a past `start_at` means "immediately". A task whose `start_at` is
+     **empty** is 未排期 and is **never dispatched** — only `pm_update_task`
+     with `start_at: null` can unschedule one.
    - `depends_on`: declare blockers rather than describing them in prose. A
      blocked task is **not dispatched** and `pm_claim_task` refuses it with
      `409 dependency_not_satisfied`; prose is invisible to both.
@@ -94,6 +97,7 @@ either.
 | `dispatched_at` set | the wake-up was delivered for this generation |
 | `dispatched_at` null, `review_status=pending` | waiting on a human |
 | `dispatched_at` null, approved, `start_at` in the future | waiting for the clock — normal |
+| `dispatched_at` null, approved, `start_at` empty | 未排期 — never dispatched until someone schedules it |
 | `dispatch_error` non-null | delivery failed; the reason is the Gateway/target's own text |
 | `dispatch_attempts` rising | the scanner is retrying with backoff |
 

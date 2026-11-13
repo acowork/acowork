@@ -1111,7 +1111,11 @@ impl PmStore for TreePmStore {
             priority: input.priority,
             assignee: input.assignee,
             due_at: input.due_at,
-            start_at: input.start_at,
+            // 开始时间的缺省：**只在没给的时候填 `now`**——PM agent 显式设的
+            // `start_at` 原样保留（那是它的排期意图），没设的按"立即开始"落到
+            // 当前时刻。派发扫描器只认 `start_at <= now`（见 `dispatch_due_ids`），
+            // 所以缺省值必须是"已到期"，不能是空。
+            start_at: Some(input.start_at.unwrap_or(now)),
             dispatched_at: None,
             dispatch_message_id: None,
             dispatch_attempts: 0,
@@ -1939,9 +1943,63 @@ impl PmStore for TreePmStore {
 impl TreePmStore {
     // ── 派发扫描器支撑（dispatch.rs 唯一消费者）──────────────────────
 
-    /// 纯内存过滤出"到期可派发"的任务 ID：pending + agent 责任人 +
-    /// 创建审批已过 + 未派发过 + `start_at` 为空或已到。
-    /// 不读任何 task.json，每 tick O(pending)。
+    /// One-shot migration for the `start_at` rule change: a task with **no**
+    /// `start_at` used to mean "dispatch immediately" (缺省=立即); the rule is
+    /// now fail-closed — an unscheduled task is never dispatched. Every task
+    /// created before the change carries a null `start_at`, so without a
+    /// backfill the whole existing backlog would freeze.
+    ///
+    /// The backfill writes `now` — the same instant the old default meant — so
+    /// pending, undispatched work keeps moving exactly as before. Only
+    /// pending + undispatched rows are touched: a task that already dispatched
+    /// keeps its history, and a task that left `pending` will not dispatch
+    /// again until it comes back. Idempotent: after the first run there is
+    /// nothing left to backfill.
+    ///
+    /// Reads the in-memory index, so it only sees what the index sees — the
+    /// same set the scanner filters. Run it after the index is built.
+    pub async fn migrate_null_start_at(&self) -> Result<usize> {
+        let candidates: Vec<(TaskId, TaskEntry)> = {
+            let index = self.index.read();
+            index
+                .by_id
+                .iter()
+                .filter(|(_, e)| {
+                    e.status == TaskStatus::Pending
+                        && e.dispatched_at.is_none()
+                        && e.start_at.is_none()
+                })
+                .map(|(id, e)| (id.clone(), e.clone()))
+                .collect()
+        };
+        let mut migrated = 0usize;
+        for (id, entry) in candidates {
+            let path = entry.dir_path.join("task.json");
+            let mut task: Task = match read_json(&path).await {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        task = %id,
+                        error = %e,
+                        "start_at backfill: task.json unreadable"
+                    );
+                    continue;
+                }
+            };
+            // Re-check against the file, not the index snapshot: the row may
+            // have been scheduled between the scan and this read.
+            if task.start_at.is_some() || task.status != TaskStatus::Pending {
+                continue;
+            }
+            task.start_at = Some(Utc::now());
+            task.updated_at = Utc::now();
+            atomic_write_json(&path, &task).await?;
+            self.refresh_entry(&entry, &id, &task);
+            migrated += 1;
+        }
+        Ok(migrated)
+    }
+
     /// Dependency gate over an already-loaded task: blocker statuses come
     /// from the index, so no extra disk read (the per-candidate
     /// `compute_blocked_by` re-read the same task.json). A dangling
@@ -1959,7 +2017,8 @@ impl TreePmStore {
 
     /// The scanner's candidate set, computed entirely from the index (no
     /// `task.json` reads, no entry clones): pending + past the approval
-    /// gate + `start_at` due + undispatched + assigned (agent **or** human —
+    /// gate + **scheduled and due** (a null `start_at` = 未排期 = never
+    /// dispatched) + undispatched + assigned (agent **or** human —
     /// a human assignee gets the sentence in the group chat, no wake; only
     /// the legacy `"human"` sentinel, which addresses nobody, is skipped) +
     /// not abandoned (attempt bound) + every Blocks prerequisite already
@@ -1977,7 +2036,13 @@ impl TreePmStore {
                     e.dispatched_at.is_none()
                         && e.review_status != ReviewStatus::Pending
                         && matches!(&e.assignee, Some(a) if a != "human")
-                        && e.start_at.is_none_or(|s| s <= now)
+                        // Fail-closed: a task with no `start_at` is **未排期**,
+                        // and an unscheduled task is NOT dispatched. Creation
+                        // fills `now` when the caller gave none (see
+                        // `create_task_as`), so a null here means the task was
+                        // deliberately unscheduled (the desktop's cleared date
+                        // field) — it waits for a human to schedule it.
+                        && e.start_at.is_some_and(|s| s <= now)
                         && e.dispatch_attempts < crate::dispatch::MAX_DISPATCH_ATTEMPTS
                         && e.blocks.iter().all(|b| {
                             matches!(
@@ -3650,7 +3715,8 @@ mod tests {
         let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
         add_member(&store, &p.id, inst).await;
 
-        // No start_at = dispatchable immediately.
+        // No start_at given → the store fills `now` (缺省 = 立即), so the task
+        // is due right away.
         let now_task = store
             .create_task(
                 &p.id,
@@ -3659,7 +3725,30 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(now_task.start_at.is_some(), "缺省 start_at 落成 now");
         assert_eq!(store.dispatch_due_ids(Utc::now(), 100), vec![now_task.id.clone()]);
+
+        // 未排期 (start_at cleared) → never dispatched, even though the task
+        // is pending, approved and assigned. Fail-closed.
+        let unscheduled = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("unscheduled") },
+                "human",
+            )
+            .await
+            .unwrap();
+        store
+            .update_task(
+                &unscheduled.id,
+                UpdateTask { start_at: Some(None), ..Default::default() },
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store.dispatch_due_ids(Utc::now(), 100).contains(&unscheduled.id),
+            "没有开始时间 = 未排期 = 不派发"
+        );
 
         // Future start_at → not due.
         let future = store
@@ -3796,6 +3885,54 @@ mod tests {
         // Limit: the due set is truncated, so a 10k-task backlog costs one
         // bounded probe per tick instead of unbounded per-candidate reads.
         assert!(store.dispatch_due_ids(Utc::now(), 1).len() <= 1);
+    }
+
+    /// The `start_at` rule is fail-closed (a task with no start time is never
+    /// dispatched), and every task created before the change carries a null
+    /// `start_at`. The one-shot backfill rewrites those legacy rows to `now`
+    /// — the instant the old "缺省 = 立即" meant — so the existing backlog
+    /// keeps moving instead of freezing.
+    #[tokio::test]
+    async fn migrate_null_start_at_backfills_legacy_pending_rows() {
+        let store = TreePmStore::new(test_config()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, inst).await;
+        let legacy = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("legacy") },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        // Rewrite the row the way the old store left it: `start_at` = null.
+        let entry = store.index_entry(&legacy.id).unwrap();
+        let path = entry.dir_path.join("task.json");
+        let mut task: Task = read_json(&path).await.unwrap();
+        task.start_at = None;
+        atomic_write_json(&path, &task).await.unwrap();
+        store.refresh_entry(&entry, &legacy.id, &task);
+
+        assert!(
+            !store.dispatch_due_ids(Utc::now(), 100).contains(&legacy.id),
+            "未排期的任务不进候选集"
+        );
+
+        assert_eq!(store.migrate_null_start_at().await.unwrap(), 1);
+        let after = store.get_task(&legacy.id).await.unwrap().unwrap();
+        assert!(after.start_at.is_some(), "回填后有开始时间");
+        assert_eq!(store.dispatch_due_ids(Utc::now(), 100), vec![legacy.id.clone()]);
+
+        // Idempotent: a second run has nothing left to do.
+        assert_eq!(store.migrate_null_start_at().await.unwrap(), 0);
     }
 
     /// Dispatch generation identity lifecycle: minted and persisted before

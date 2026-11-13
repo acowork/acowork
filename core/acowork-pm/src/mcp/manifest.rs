@@ -161,7 +161,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           "start_at": {
             "type": "string",
             "format": "date-time",
-            "description": "RFC3339 start timestamp. The PM dispatch scanner sends the wake-up intent to the assignee agent when start_at is reached (after human approval). Omit or null = dispatch as soon as the task is actionable."
+            "description": "RFC3339 start timestamp. The PM dispatch scanner sends the wake-up intent to the assignee agent when start_at is reached (after human approval). Omit = the store fills `now` (dispatch as soon as the task is actionable); set a future timestamp to schedule the wake-up."
           },
           "depends_on": {
             "type": "array",
@@ -209,7 +209,7 @@ pub const PM_TOOL_MANIFEST: &str = r#"{
           "start_at": {
             "type": ["string", "null"],
             "format": "date-time",
-            "description": "RFC3339 start timestamp. The PM dispatch scanner sends the wake-up intent to the assignee agent when start_at is reached (after human approval). Null clears it (dispatch as soon as the task is actionable)."
+            "description": "RFC3339 start timestamp. The PM dispatch scanner sends the wake-up intent to the assignee agent when start_at is reached (after human approval). Null clears it (未排期 = the task is never dispatched until someone schedules it)."
           },
           "depends_on": {
             "type": "array",

@@ -77,6 +77,17 @@ impl PmService {
             store.rebuild_index().await?;
         }
 
+        // 一次性回填 `start_at`：改动前建的任务该字段全是 null，而新规则
+        // 「没有开始时间 = 不派发」会把它们整体冻住。回填成 `now`（旧缺省值
+        // 的同一个含义），存量待办照常流动。幂等，第二次跑无事可做。
+        match store.migrate_null_start_at().await {
+            Ok(n) if n > 0 => {
+                tracing::info!(count = n, "PM backfilled start_at on legacy tasks")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(error = %e, "PM start_at backfill failed"),
+        }
+
         Ok(Self {
             config,
             store,
