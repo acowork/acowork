@@ -72,8 +72,11 @@
        right-panel section divider color so the box reads as part of
        the layout — tweak independently if it needs more / less
        contrast against `bg-right-panel`) with no `dark:` prefix needed. */
-  --color-chat-bubble: hsl(240 5.9% 92% / 0.5);
-  /* = zinc-200/50 — message surface */
+  --color-chat-bubble: hsl(240 4.8% 95.9% / 0.2);
+  /* = zinc-100/20 — message surface, the explore block's fill
+     (`bg-zinc-100/60`) at a lighter alpha so the bubble reads as one
+     family with the "Explored" pill without washing over the text.
+     Dark mode intentionally unchanged. */
   --color-chat-title: hsl(240 4.8% 86.1% / 0.5);
   /* = zinc-300 — block title */
   --color-chat-body: hsl(0 0% 100%);
