@@ -149,4 +149,11 @@
 
 **约定入文**：AGENTS.md 补两条——「chat transcript 渲染已 windowed+memoized（L1-L3）」与「identity-preserving store 更新」。
 
+**向上翻闪烁的两处修正（2026-11，读者报告「往上翻偶尔闪一下，翻页后位置变了」）**：
+
+1. **测量修正曾晚一帧**。行高在 ref 回调里测（`VirtualRowList.measureRef`），而长回答的折叠（`CollapsibleChatContent` 的 `useLayoutEffect`）在 ref 之后才把行夹短；夹短后的修正经 ResizeObserver → `resizeItem()` → `notify(false)`，而非 sync 通知只调度、不 flush 重渲染，于是这一帧按「新行高 + 旧 offset」绘制，下一帧才对齐——即读者看到的一帧跳动。改用库的 `directDomUpdates: true`：位置与 sizer 高度在通知内直接写 DOM，同一次 layout 内完成。代价是两条渲染约束写进了壳：sizer 接 `virtualizer.containerRef` 且不设 height，行保留 `position:absolute`+`top/left:0` 且不得自己写主轴位置。
+2. **block 的渲染 key 曾随加载窗口漂移**。折叠块的锚点行是「本窗口内该 session 最老的一行」（`anchorOf`），`loadOlder` 把同一 session 更老的 round 带进来后锚点前移，key 随之改变 → measured-height cache 失配、回落粗估 → 块及其下方一起跳。`buildTranscriptItems` 增加 `blockKeyOf`（默认仍是锚点行 key），虚拟化面传 session 稳定 key（`${scope}:run:${instanceId}|${execSessionId}`），`keyOfSeq` 与 item key 同源。回归测试：`useTranscriptLayout.test.ts` "keeps a block's virtual key when a page is prepended above it"（换回锚点行 key 即红）。
+
+「prepend 补偿用总 scrollHeight 增量，分不清增长在视口上方还是下方」是已知残留（`useStickToBottom`），本次未动：稳定 key 之后翻页的高度变化收敛，暂无复现证据；若再次出现位置漂移，优先改这里（按首可见 item 的 start 差补偿）。
+
 **度量验收（§5 S1/S2/S3）待真机执行**：本环境为 jsdom，longtask/上屏延迟需桌面真机用 mainThreadProbe（lib/mainThreadProbe.ts）复测。

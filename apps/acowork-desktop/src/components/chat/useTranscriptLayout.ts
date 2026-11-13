@@ -36,8 +36,6 @@ export interface TranscriptLayoutView {
   rowsRef: RefObject<ChatMessageRow[]>;
   /** Stable across `rows` ticks: the locate fallback reads it, not `layout`. */
   keyOfSeqRef: RefObject<Map<number, string>>;
-  /** The row an item is anchored at (a block's anchor row). */
-  itemOf: (item: TranscriptItem) => ChatMessageRow;
   virtualKeyOf: (item: TranscriptItem) => string;
   virtualEstimate: (item: TranscriptItem) => number;
   virtualAttrs: (item: TranscriptItem) => { "data-seq": number };
@@ -61,6 +59,17 @@ export function useTranscriptLayout(
   );
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
+  // A block's key is the SESSION, not the row it happens to start at. Its
+  // anchor row is the session's oldest row *in the loaded window*, so a prepend
+  // that brings in older rounds of the same session moves the anchor — and an
+  // anchor-keyed item loses its entry in the shell's measured-height cache and
+  // drops to the coarse estimate. The reader sees the block (and everything
+  // under it) jump by however wrong that estimate was.
+  const blockKeyOf = useCallback(
+    (b: { instanceId: string; execSessionId: string }) =>
+      `${scopeKey}:run:${b.instanceId}|${b.execSessionId}`,
+    [scopeKey],
+  );
   // Coarse pre-measure estimate from body length; `measureElement` corrects it on
   // first mount and the shell's cache keeps the real height after.
   const estimateRow = useCallback((r: ChatMessageRow) => {
@@ -73,22 +82,18 @@ export function useTranscriptLayout(
   // rows they were built from fold inside it. Memoized on the window, so a
   // composer keystroke keeps every item identity that the row views' memo needs.
   const layout = useMemo(
-    () => buildTranscriptItems(rows, rowKeyOf),
-    [rows, rowKeyOf],
+    () => buildTranscriptItems(rows, rowKeyOf, blockKeyOf),
+    [rows, rowKeyOf, blockKeyOf],
   );
   const items = layout.items;
   const keyOfSeqRef = useRef(layout.keyOfSeq);
   keyOfSeqRef.current = layout.keyOfSeq;
-  const itemOf = useCallback(
-    (item: TranscriptItem): ChatMessageRow =>
-      item.kind === "run" ? item.anchorRow : item.row,
-    [],
-  );
   const virtualKeyOf = useCallback(
-    (item: TranscriptItem) => rowKeyOf(itemOf(item)),
-    [rowKeyOf, itemOf],
+    (item: TranscriptItem) =>
+      item.kind === "run" ? blockKeyOf(item) : rowKeyOf(item.row),
+    [blockKeyOf, rowKeyOf],
   );
-  // A block starts folded: its pill plus the run's latest-answer bubble under it.
+  // A block starts folded: its title banner plus the answer body under it.
   // Neither height is knowable from the rows alone (the answer comes from the
   // block read), so this stays a coarse guess — round lines as the upper bound of
   // what the fold would have cost. `measureElement` corrects it on first mount and
@@ -101,8 +106,10 @@ export function useTranscriptLayout(
     [estimateRow],
   );
   const virtualAttrs = useCallback(
-    (item: TranscriptItem) => ({ "data-seq": itemOf(item).seq }),
-    [itemOf],
+    (item: TranscriptItem) => ({
+      "data-seq": (item.kind === "run" ? item.anchorRow : item.row).seq,
+    }),
+    [],
   );
   const seqsByItem = useMemo(() => {
     const m = new Map<string, Set<number>>();
@@ -120,7 +127,6 @@ export function useTranscriptLayout(
     items,
     rowsRef,
     keyOfSeqRef,
-    itemOf,
     virtualKeyOf,
     virtualEstimate,
     virtualAttrs,
