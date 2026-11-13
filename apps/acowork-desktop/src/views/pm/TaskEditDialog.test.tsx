@@ -33,12 +33,17 @@ const mocks = vi.hoisted(() => ({
   createParentId: null as string | null,
   returnTo: null as string | null,
   tasks: [] as PmTaskResponse[],
+  /** A second (stacked) frame — the child box on top of the parent. */
+  child: null as null | { mode: "edit" | "create"; detail: PmTaskResponse | null },
   dirty: false,
   saving: false,
   hasMembers: true,
   values: {} as Record<string, unknown>,
   openTask: vi.fn(async () => {}),
   openCreate: vi.fn(),
+  pushTask: vi.fn(),
+  pushCreate: vi.fn(),
+  pop: vi.fn(),
   setMode: vi.fn(),
   refresh: vi.fn(async () => {}),
   uploadAttachment: vi.fn(async () => ({ id: "att-1" }) as unknown as PmAttachmentMeta),
@@ -54,29 +59,65 @@ const mocks = vi.hoisted(() => ({
   setDueAt: vi.fn(),
 }));
 
+/**
+ * The store is a STACK: `frames[]` holds the open boxes (bottom → top) and
+ * `rows[key]` holds each box's row data. The mock mirrors that shape — one
+ * frame by default, two when `mocks.child` is set (a subtask box on top of
+ * its parent).
+ */
 function detailState() {
-  return {
-    taskId: mocks.detail?.id ?? null,
-    detail: mocks.detail,
-    attachments: mocks.attachments,
-    activity: mocks.activity,
-    uploading: mocks.uploading,
-    replying: mocks.replying,
-    addReply: mocks.addReply,
-    loading: false,
-    error: mocks.error,
+  const parent = {
+    key: "tf1",
     mode: mocks.mode,
+    taskId: mocks.detail?.id ?? null,
     projectId: mocks.projectId ?? mocks.detail?.project_id ?? null,
     createParentId: mocks.createParentId,
-    returnTo: mocks.returnTo,
-    openTask: mocks.openTask,
-    openCreate: mocks.openCreate,
-    setMode: mocks.setMode,
+  };
+  const child = mocks.child
+    ? {
+        key: "tf2",
+        mode: mocks.child.mode,
+        taskId: mocks.child.detail?.id ?? null,
+        projectId: mocks.projectId ?? mocks.child.detail?.project_id ?? null,
+        createParentId: null,
+      }
+    : null;
+  return {
+    frames: child ? [parent, child] : [parent],
+    rows: {
+      tf1: {
+        detail: mocks.detail,
+        attachments: mocks.attachments,
+        activity: mocks.activity,
+        uploading: mocks.uploading,
+        replying: mocks.replying,
+        loading: false,
+        error: mocks.error,
+      },
+      ...(child
+        ? {
+            tf2: {
+              detail: child.detail,
+              attachments: [],
+              activity: [],
+              uploading: false,
+              replying: false,
+              loading: false,
+              error: null,
+            },
+          }
+        : {}),
+    },
+    addReply: mocks.addReply,
     refresh: mocks.refresh,
     uploadAttachment: mocks.uploadAttachment,
     deleteAttachment: mocks.deleteAttachment,
-    updateDetail: vi.fn(),
-    close: vi.fn(),
+    openTask: mocks.openTask,
+    openCreate: mocks.openCreate,
+    pushTask: mocks.pushTask,
+    pushCreate: mocks.pushCreate,
+    pop: mocks.pop,
+    setMode: mocks.setMode,
     clear: vi.fn(),
   };
 }
@@ -224,6 +265,7 @@ beforeEach(() => {
   mocks.projectId = null;
   mocks.createParentId = null;
   mocks.returnTo = null;
+  mocks.child = null;
   mocks.tasks = [];
   mocks.dirty = false;
   mocks.saving = false;
@@ -231,6 +273,9 @@ beforeEach(() => {
   mocks.values = {};
   mocks.openTask.mockClear();
   mocks.openCreate.mockClear();
+  mocks.pushTask.mockClear();
+  mocks.pushCreate.mockClear();
+  mocks.pop.mockClear();
   mocks.setMode.mockClear();
   mocks.uploadAttachment.mockClear();
   mocks.deleteAttachment.mockClear();
@@ -584,22 +629,21 @@ describe("the three carried-over capabilities", () => {
     expect(screen.getByTestId("task-tree")).toBeTruthy();
   });
 
-  it("添加子任务 opens a create form that knows where it came from", () => {
+  it("添加子任务 opens a create form ON TOP of this one", () => {
     render(<TaskEditDialog onClose={() => {}} />);
     openTab("related");
     fireEvent.click(screen.getByText("+ pm.task.addSubtask"));
-    expect(mocks.openCreate).toHaveBeenCalledWith({
+    expect(mocks.pushCreate).toHaveBeenCalledWith({
       projectId: "p-1",
       parentId: "t-1",
-      returnTo: "t-1",
     });
   });
 
-  it("clicking a child row re-opens this box on that row", () => {
+  it("clicking a child row opens ANOTHER box on top of this one", () => {
     render(<TaskEditDialog onClose={() => {}} />);
     openTab("related");
     fireEvent.click(screen.getByText("child-row"));
-    expect(mocks.openTask).toHaveBeenCalledWith("t-child");
+    expect(mocks.pushTask).toHaveBeenCalledWith("t-child");
   });
 });
 
@@ -771,9 +815,9 @@ describe("leaving a dirty form", () => {
     render(<TaskEditDialog onClose={() => {}} />);
     openTab("related");
     fireEvent.click(screen.getByText("child-row"));
-    expect(mocks.openTask).not.toHaveBeenCalled();
+    expect(mocks.pushTask).not.toHaveBeenCalled();
     fireEvent.click(screen.getByText("pm.task.discardChangesConfirm"));
-    expect(mocks.openTask).toHaveBeenCalledWith("t-child");
+    expect(mocks.pushTask).toHaveBeenCalledWith("t-child");
   });
 
   it("leaving a clean form clears the draft — it must not resurrect on re-entry", () => {
@@ -782,14 +826,16 @@ describe("leaving a dirty form", () => {
     expect(mocks.reset).toHaveBeenCalledTimes(1);
   });
 
-  it("cancelling a subtask form returns to the parent it was opened from", () => {
-    mocks.mode = "create";
-    mocks.detail = null;
-    mocks.returnTo = "t-root";
+  it("cancelling a box that sits ON TOP pops it — the parent stays open", () => {
+    // A subtask box is a second layer of the stack: cancelling it must land
+    // the reader back on the parent, not close the whole thing.
+    mocks.child = { mode: "create", detail: null };
     const onClose = vi.fn();
     render(<TaskEditDialog onClose={onClose} />);
-    fireEvent.click(screen.getByText("common.cancel"));
-    expect(mocks.openTask).toHaveBeenCalledWith("t-root");
+    // Two boxes are on screen; the child's cancel is the second one.
+    expect(screen.getAllByRole("dialog")).toHaveLength(2);
+    fireEvent.click(screen.getAllByText("common.cancel")[1]);
+    expect(mocks.pop).toHaveBeenCalled();
     expect(onClose).not.toHaveBeenCalled();
   });
 

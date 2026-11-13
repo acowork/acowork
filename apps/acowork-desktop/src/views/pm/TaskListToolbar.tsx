@@ -20,7 +20,7 @@ const BTN_ACTIVE_CN =
   "border-[var(--color-accent)]/40 bg-[var(--color-accent)]/10 text-[var(--color-accent)]";
 
 export type ToolbarPopoverSpec =
-  | { kind: "filter"; field: "status" | "priority" | "assignee" }
+  | { kind: "filter"; field: "status" | "priority" | "type" | "assignee" }
   | { kind: "group" }
   | { kind: "fields" };
 
@@ -44,9 +44,10 @@ export function TaskListToolbar({
   onClearFilters,
 }: TaskListToolbarProps) {
   const { t } = useTranslation();
-  const counts: Record<"status" | "priority" | "assignee", number> = {
+  const counts: Record<"status" | "priority" | "type" | "assignee", number> = {
     status: filters.status.length,
     priority: filters.priority.length,
+    type: filters.type.length,
     assignee: filters.assignee.length,
   };
 
@@ -65,7 +66,7 @@ export function TaskListToolbar({
         />
       </label>
 
-      {(["status", "priority", "assignee"] as const).map((field) => (
+      {(["status", "priority", "type", "assignee"] as const).map((field) => (
         <button
           key={field}
           type="button"

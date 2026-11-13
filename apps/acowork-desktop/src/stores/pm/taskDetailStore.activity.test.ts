@@ -28,6 +28,13 @@ vi.mock("../../lib/logger", () => ({ log: { warn: vi.fn(), debug: vi.fn(), error
 import { usePmTaskDetailStore } from "./taskDetailStore";
 import type { PmTaskActivity, PmTaskResponse } from "../../lib/pm-types";
 
+/** The row data of the TOP frame — the only one the writes act on. */
+function topRow() {
+  const s = usePmTaskDetailStore.getState();
+  const frame = s.frames[s.frames.length - 1];
+  return s.rows[frame.key];
+}
+
 const row = {
   id: "t-1",
   project_id: "p-1",
@@ -57,36 +64,33 @@ beforeEach(() => {
 describe("taskDetailStore activity", () => {
   it("loads history with the row", async () => {
     await usePmTaskDetailStore.getState().openTask("t-1");
-    const s = usePmTaskDetailStore.getState();
-    expect(s.detail?.id).toBe("t-1");
-    expect(s.activity.map((a) => a.id)).toEqual(["act-1"]);
+    const s = topRow();
+    expect(s?.detail?.id).toBe("t-1");
+    expect(s?.activity.map((a) => a.id)).toEqual(["act-1"]);
   });
 
   it("still opens the row when the history request fails", async () => {
     api.listTaskActivity.mockRejectedValue(new Error("404 not found"));
     await usePmTaskDetailStore.getState().openTask("t-1");
-    const s = usePmTaskDetailStore.getState();
-    expect(s.detail?.id).toBe("t-1");
-    expect(s.activity).toEqual([]);
-    expect(s.error).toBeNull();
+    const s = topRow();
+    expect(s?.detail?.id).toBe("t-1");
+    expect(s?.activity).toEqual([]);
+    expect(s?.error).toBeNull();
   });
 
   it("keeps the array identity across a refresh that changed nothing", async () => {
     await usePmTaskDetailStore.getState().openTask("t-1");
-    const first = usePmTaskDetailStore.getState().activity;
+    const first = topRow()?.activity;
     api.listTaskActivity.mockResolvedValue([entry("act-1")]);
     await usePmTaskDetailStore.getState().refresh();
-    expect(usePmTaskDetailStore.getState().activity).toBe(first);
+    expect(topRow()?.activity).toBe(first);
   });
 
   it("swaps in the new list when an entry landed", async () => {
     await usePmTaskDetailStore.getState().openTask("t-1");
     api.listTaskActivity.mockResolvedValue([entry("act-1"), entry("act-2")]);
     await usePmTaskDetailStore.getState().refresh();
-    expect(usePmTaskDetailStore.getState().activity.map((a) => a.id)).toEqual([
-      "act-1",
-      "act-2",
-    ]);
+    expect(topRow()?.activity.map((a) => a.id)).toEqual(["act-1", "act-2"]);
   });
 
   it("appends the server entry on a reply", async () => {
@@ -96,9 +100,9 @@ describe("taskDetailStore activity", () => {
     expect(ok).toBe(true);
     // 正文在服务端 trim，客户端发出去的就该是 trim 过的。
     expect(api.addTaskActivity).toHaveBeenCalledWith("t-1", "辛苦了");
-    const s = usePmTaskDetailStore.getState();
-    expect(s.activity.map((a) => a.id)).toEqual(["act-1", "act-2"]);
-    expect(s.replying).toBe(false);
+    const s = topRow();
+    expect(s?.activity.map((a) => a.id)).toEqual(["act-1", "act-2"]);
+    expect(s?.replying).toBe(false);
   });
 
   it("does not touch the list when the reply fails or is empty", async () => {
@@ -108,16 +112,28 @@ describe("taskDetailStore activity", () => {
 
     api.addTaskActivity.mockRejectedValue(new Error("500"));
     expect(await usePmTaskDetailStore.getState().addReply("再试一次")).toBe(false);
-    const s = usePmTaskDetailStore.getState();
-    expect(s.activity.map((a) => a.id)).toEqual(["act-1"]);
-    expect(s.replying).toBe(false);
-    expect(s.error).toBe("500");
+    const s = topRow();
+    expect(s?.activity.map((a) => a.id)).toEqual(["act-1"]);
+    expect(s?.replying).toBe(false);
+    expect(s?.error).toBe("500");
   });
 
   it("a create-mode dialog owns no history", async () => {
     usePmTaskDetailStore.getState().openCreate({ projectId: "p-1" });
-    const s = usePmTaskDetailStore.getState();
-    expect(s.activity).toEqual([]);
+    const s = topRow();
+    expect(s?.activity).toEqual([]);
     expect(api.listTaskActivity).not.toHaveBeenCalled();
+  });
+
+  it("a stacked box keeps its own history — the parent's is not overwritten", async () => {
+    await usePmTaskDetailStore.getState().openTask("t-1");
+    const parentKey = usePmTaskDetailStore.getState().frames[0].key;
+    api.listTaskActivity.mockResolvedValue([entry("act-2")]);
+    await usePmTaskDetailStore.getState().pushTask("t-2");
+    const s = usePmTaskDetailStore.getState();
+    expect(s.frames).toHaveLength(2);
+    // The parent's row still holds the parent's history.
+    expect(s.rows[parentKey]?.activity.map((a) => a.id)).toEqual(["act-1"]);
+    expect(topRow()?.activity.map((a) => a.id)).toEqual(["act-2"]);
   });
 });

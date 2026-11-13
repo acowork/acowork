@@ -4,8 +4,8 @@
  * `TaskEditDialog.test.tsx` mocks the task-detail store, so it can only prove
  * that the dialog *asks* to be closed. This file uses the REAL store, because
  * "close" is a store fact: `ProjectsView` renders the box iff
- * `usePmTaskDetailStore(s => s.mode)` is truthy, and `onClose` is
- * `clearDetail()` → `clear()` → `mode = null`. If that chain is broken, the
+ * `usePmTaskDetailStore(s => s.frames.length)` is truthy, and `onClose` is
+ * `clearDetail()` → `clear()` → no frames left. If that chain is broken, the
  * box stays on screen no matter how correct the dialog looks.
  *
  * The shape under test is the one the user reported: 新建任务 → 填内容 →
@@ -129,26 +129,26 @@ describe("saving closes the box (real store)", () => {
       usePmTaskDetailStore.getState().openCreate({ projectId: "p-1" });
     });
     render(<TaskEditDialog onClose={closeLikeProjectsView} />);
-    expect(usePmTaskDetailStore.getState().mode).toBe("create");
+    expect(usePmTaskDetailStore.getState().frames[0]?.mode).toBe("create");
 
     fireEvent.click(screen.getByText("pm.task.save"));
 
     await waitFor(() => expect(mocks.save).toHaveBeenCalled());
-    // The box is gone: the store says there is no mode to render.
-    await waitFor(() => expect(usePmTaskDetailStore.getState().mode).toBeNull());
+    // The box is gone: the store has no frame left to render.
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(0));
   });
 
   it("an edit: saving clears the store too", async () => {
     act(() => {
       void usePmTaskDetailStore.getState().openTask("t-1");
     });
-    await waitFor(() => expect(usePmTaskDetailStore.getState().mode).toBe("edit"));
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(1));
     render(<TaskEditDialog onClose={closeLikeProjectsView} />);
 
     fireEvent.click(screen.getByText("pm.task.save"));
 
     await waitFor(() => expect(mocks.save).toHaveBeenCalled());
-    await waitFor(() => expect(usePmTaskDetailStore.getState().mode).toBeNull());
+    await waitFor(() => expect(usePmTaskDetailStore.getState().frames).toHaveLength(0));
   });
 
   it("a failed save keeps the box (and the draft) open", async () => {
@@ -161,6 +161,6 @@ describe("saving closes the box (real store)", () => {
     fireEvent.click(screen.getByText("pm.task.save"));
 
     await waitFor(() => expect(mocks.save).toHaveBeenCalled());
-    expect(usePmTaskDetailStore.getState().mode).toBe("create");
+    expect(usePmTaskDetailStore.getState().frames[0]?.mode).toBe("create");
   });
 });

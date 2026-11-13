@@ -1,5 +1,5 @@
 /**
- * usePmTaskDetailStore — 任务详情（Drawer 数据）。
+ * usePmTaskDetailStore — 任务弹框的**栈** + 每一层的行数据。
  *
  * ⚠️ Selector 契约（强制）：
  * 任何 `usePmTaskDetailStore((s) => ...)` 的 selector **必须返回稳定引用**
@@ -9,8 +9,19 @@
  * 警告 + 无限重渲染 + "Maximum update depth exceeded"。
  * 如需派生数据，请改成 `usePmTaskDetailStore((s) => s.field)` + `useMemo`。
  *
- * 对齐 UX 设计 §6：打开 Drawer 时拉取详情；编辑/状态变更后刷新。
- * 关闭 Drawer 不清缓存（再次打开立即显示旧值 + 后台刷新）。
+ * 为什么是栈而不是"一格"：
+ * 点子任务会**再开一个弹框**，盖在父任务弹框上面；关掉子任务要回到父任务，
+ * 父任务的草稿还在。以前的实现只有一格（`taskId` / `detail`），点子任务等于
+ * 把父任务整个替换掉，× 一关就全没了。
+ *
+ * 现在：
+ * - `frames[]` —— 打开的弹框（底 → 顶），最后一个在最上面；
+ * - `rows[key]` —— 每个弹框自己的行数据（详情 / 附件 / 活动流）。
+ *   按 frame 的 key 归档，所以父任务那一层的数据不会被子任务覆盖，
+ *   父任务的表单也不用重新挂载（草稿自然还在）。
+ *
+ * 行的写操作（刷新 / 上传 / 回复）都作用在**栈顶**那一层：只有最上面的弹框
+ * 是可交互的，下面的被盖住。
  */
 
 import { create } from "zustand";
@@ -18,50 +29,50 @@ import * as pmApi from "../../lib/pm-api";
 import { log } from "../../lib/logger";
 import type { PmAttachmentMeta, PmTaskActivity, PmTaskResponse } from "../../lib/pm-types";
 
-interface PmTaskDetailState {
+/** The three faces of the one task dialog. */
+export type TaskDialogMode = "edit" | "create";
+
+/** One open task dialog. */
+export interface TaskFrame {
+  /** Identity of this open box — its row data is filed under this key. */
+  key: string;
+  mode: TaskDialogMode;
+  /** The row this box shows; `null` in create mode. */
   taskId: string | null;
+  /** Target project. Create mode carries it; edit mode derives it from the row. */
+  projectId: string | null;
+  /** Create mode only: the parent the new row is filed under. */
+  createParentId: string | null;
+}
+
+/** The server state behind one frame. */
+export interface TaskRow {
   detail: PmTaskResponse | null;
   attachments: PmAttachmentMeta[];
-  /**
-   * 任务活动历史（提交 / 审核 / 回复），服务端按时间升序。
-   *
-   * 与 `attachments` 同构：都是任务详情面上按需拉取的独立集合（PM 把它们
-   * 存在 `task.json` 之外，看板列表因此不会被提交正文撑大）。
-   */
   activity: PmTaskActivity[];
   loading: boolean;
-  /** 附件上传中（防止重复提交） */
   uploading: boolean;
-  /** 回复发送中（防止重复提交） */
   replying: boolean;
   error: string | null;
+}
 
-  /**
-   * Which face of the single task dialog is showing; `null` = closed.
-   *
-   * `create` is the only mode without a persisted task, which is also the only
-   * mode where the server-backed tabs (attachments / subtasks) cannot exist:
-   * the upload endpoint is task-scoped
-   * (`POST /tasks/{tid}/attachments`, `core/acowork-pm/src/api/routes.rs`).
-   */
-  mode: TaskDialogMode | null;
-  /** Target project — set on `openCreate`; derived from `detail` otherwise. */
-  projectId: string | null;
-  /** Pre-selected parent task, create mode only ("add subtask" entry). */
-  createParentId: string | null;
-  /**
-   * Task to land on after a create finishes. Set when create was entered from
-   * an open task (the "add subtask" path) so the dialog does not drop the
-   * reader out of the parent they were looking at.
-   */
-  returnTo: string | null;
+interface PmTaskDetailState {
+  /** The open boxes, bottom → top. The last one is the one on screen. */
+  frames: TaskFrame[];
+  /** Row data, filed under the frame's key. */
+  rows: Record<string, TaskRow>;
 
+  /** Open a task, replacing whatever is open (board / search entry points). */
   openTask: (taskId: string) => Promise<void>;
-  /** Open the dialog in create mode (no task row exists yet). */
-  openCreate: (init: { projectId: string; parentId?: string | null; returnTo?: string | null }) => void;
-  /** Switch faces (e.g. a saved create becoming an edit of the new row). */
-  setMode: (mode: TaskDialogMode) => void;
-  /** 后台静默刷新（Drawer 已打开时） */
+  /** Open a task ON TOP of the current one (navigating into a subtask). */
+  pushTask: (taskId: string) => Promise<void>;
+  /** Open a fresh create form, replacing whatever is open. */
+  openCreate: (init: { projectId: string; parentId?: string | null }) => void;
+  /** Open a fresh create form ON TOP of the current one ("add subtask"). */
+  pushCreate: (init: { projectId: string; parentId?: string | null }) => void;
+  /** Close the topmost box — the one below it becomes the visible one again. */
+  pop: () => void;
+  /** 后台静默刷新（栈顶那一行） */
   refresh: () => Promise<void>;
   /** 上传附件 → 成功追加到列表 */
   uploadAttachment: (file: File) => Promise<PmAttachmentMeta | null>;
@@ -69,12 +80,23 @@ interface PmTaskDetailState {
   deleteAttachment: (aid: string) => Promise<boolean>;
   /** 回复这条任务（写活动流，不动状态）→ 成功追加到 `activity` */
   addReply: (text: string) => Promise<boolean>;
-  updateDetail: (patch: Partial<PmTaskResponse>) => void;
+  /** Close every open box. */
   clear: () => void;
 }
 
-/** The three faces of the one task dialog. */
-export type TaskDialogMode = "edit" | "create";
+const emptyRow = (): TaskRow => ({
+  detail: null,
+  attachments: [],
+  activity: [],
+  loading: false,
+  uploading: false,
+  replying: false,
+  error: null,
+});
+
+/** Frame keys are handed out in order; they only have to be unique. */
+let frameSeq = 0;
+const nextKey = () => `tf${++frameSeq}`;
 
 export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => {
   /**
@@ -93,163 +115,184 @@ export const usePmTaskDetailStore = create<PmTaskDetailState>((set, get) => {
     prev.length === next.length &&
     prev.every((e, i) => e.id === next[i].id && e.created_at === next[i].created_at);
 
-  return {
-  taskId: null,
-  detail: null,
-  attachments: [],
-  activity: [],
-  loading: false,
-  uploading: false,
-  replying: false,
-  error: null,
-  mode: null,
-  projectId: null,
-  createParentId: null,
-  returnTo: null,
-
-  openTask: async (taskId) => {
-    set({
-      taskId,
-      mode: "edit",
-      projectId: null,
-      createParentId: null,
-      returnTo: null,
-      loading: true,
-      error: null,
+  /**
+   * Patch one frame's row. A frame that was closed while its request was in
+   * flight is gone from `rows` — the patch is dropped, so a late response
+   * cannot resurrect a box the user already closed.
+   */
+  const patchRow = (
+    key: string,
+    patch: Partial<TaskRow> | ((row: TaskRow) => Partial<TaskRow>),
+  ) =>
+    set((s) => {
+      const row = s.rows[key];
+      if (!row) return s;
+      const p = typeof patch === "function" ? patch(row) : patch;
+      return { rows: { ...s.rows, [key]: { ...row, ...p } } };
     });
+
+  /** Load one row into its frame. */
+  const loadRow = async (key: string, taskId: string, showLoading: boolean) => {
+    if (showLoading) patchRow(key, { loading: true, error: null });
     try {
       const [detail, attachments, activity] = await Promise.all([
         pmApi.getTask(taskId),
         pmApi.listTaskAttachments(taskId).catch(() => [] as PmAttachmentMeta[]),
         loadActivity(taskId),
       ]);
-      set({ detail, attachments, activity, projectId: detail.project_id, loading: false, error: null });
-    } catch (e) {
-      set({ loading: false, error: e instanceof Error ? e.message : String(e) });
-      log.warn("[pm:detail] openTask failed:", e);
-    }
-  },
-
-  openCreate: ({ projectId, parentId = null, returnTo = null }) => {
-    // A fresh row owns no server state: no detail, no attachments. Everything
-    // the create face must not offer (attachments / subtasks / delete) keys off
-    // `taskId === null`, so there is no second source of truth to drift.
-    set({
-      taskId: null,
-      detail: null,
-      attachments: [],
-      activity: [],
-      loading: false,
-      uploading: false,
-      replying: false,
-      error: null,
-      mode: "create",
-      projectId,
-      createParentId: parentId,
-      returnTo,
-    });
-  },
-
-  setMode: (mode) => {
-    const { taskId, mode: current } = get();
-    if (!current) return;
-    // `create` is entered through `openCreate` only — never by switching, and a
-    // taskless dialog cannot switch into the faces that need an id.
-    if (mode === "create") return;
-    if (!taskId) return;
-    set({ mode });
-  },
-
-  refresh: async () => {
-    const { taskId, activity } = get();
-    if (!taskId) return;
-    try {
-      const [detail, attachments, nextActivity] = await Promise.all([
-        pmApi.getTask(taskId),
-        pmApi.listTaskAttachments(taskId).catch(() => [] as PmAttachmentMeta[]),
-        loadActivity(taskId),
-      ]);
-      set({
+      patchRow(key, (row) => ({
         detail,
         attachments,
-        activity: isSameActivity(activity, nextActivity) ? activity : nextActivity,
-      });
-    } catch (e) {
-      log.warn("[pm:detail] refresh failed:", e);
-    }
-  },
-
-  uploadAttachment: async (file) => {
-    const taskId = get().taskId;
-    if (!taskId || get().uploading) return null;
-    set({ uploading: true, error: null });
-    try {
-      const meta = await pmApi.uploadAttachment(taskId, file);
-      set((s) => ({ attachments: [...s.attachments, meta], uploading: false }));
-      return meta;
-    } catch (e) {
-      set({
-        uploading: false,
-        error: e instanceof Error ? e.message : String(e),
-      });
-      log.warn("[pm:detail] uploadAttachment failed:", e);
-      return null;
-    }
-  },
-
-  deleteAttachment: async (aid) => {
-    if (get().uploading) return false;
-    try {
-      await pmApi.deleteAttachment(aid);
-      set((s) => ({
-        attachments: s.attachments.filter((a) => a.id !== aid),
+        activity: isSameActivity(row.activity, activity) ? row.activity : activity,
+        loading: false,
+        error: null,
       }));
-      return true;
     } catch (e) {
-      log.warn("[pm:detail] deleteAttachment failed:", e);
-      return false;
-    }
-  },
-
-  addReply: async (text) => {
-    const taskId = get().taskId;
-    if (!taskId || get().replying) return false;
-    const trimmed = text.trim();
-    if (!trimmed) return false;
-    set({ replying: true, error: null });
-    try {
-      const entry = await pmApi.addTaskActivity(taskId, trimmed);
-      set((s) => ({ activity: [...s.activity, entry], replying: false }));
-      return true;
-    } catch (e) {
-      set({
-        replying: false,
+      patchRow(key, {
+        loading: false,
         error: e instanceof Error ? e.message : String(e),
       });
-      log.warn("[pm:detail] addReply failed:", e);
-      return false;
+      log.warn("[pm:detail] load failed:", e);
     }
-  },
+  };
 
-  updateDetail: (patch) => {
-    const detail = get().detail;
-    if (!detail) return;
-    set({ detail: { ...detail, ...patch } });
-  },
+  /** The frame the writes act on: the topmost (only that one is clickable). */
+  const topFrame = () => {
+    const { frames } = get();
+    return frames[frames.length - 1] ?? null;
+  };
 
-  clear: () =>
-    set({
-      taskId: null,
-      detail: null,
-      attachments: [],
-      activity: [],
-      uploading: false,
-      replying: false,
-      error: null,
-      mode: null,
-      projectId: null,
-      createParentId: null,
-      returnTo: null,
-    }),
+  const editFrame = (key: string, taskId: string): TaskFrame => ({
+    key,
+    mode: "edit",
+    taskId,
+    projectId: null,
+    createParentId: null,
+  });
+
+  const createFrame = (
+    key: string,
+    projectId: string,
+    createParentId: string | null,
+  ): TaskFrame => ({
+    key,
+    mode: "create",
+    taskId: null,
+    projectId,
+    createParentId,
+  });
+
+  return {
+    frames: [],
+    rows: {},
+
+    openTask: (taskId) => {
+      const key = nextKey();
+      set({
+        frames: [editFrame(key, taskId)],
+        rows: { [key]: { ...emptyRow(), loading: true } },
+      });
+      return loadRow(key, taskId, false);
+    },
+
+    pushTask: (taskId) => {
+      const key = nextKey();
+      set((s) => ({
+        frames: [...s.frames, editFrame(key, taskId)],
+        rows: { ...s.rows, [key]: { ...emptyRow(), loading: true } },
+      }));
+      return loadRow(key, taskId, false);
+    },
+
+    openCreate: ({ projectId, parentId = null }) => {
+      const key = nextKey();
+      set({
+        frames: [createFrame(key, projectId, parentId)],
+        rows: { [key]: emptyRow() },
+      });
+    },
+
+    pushCreate: ({ projectId, parentId = null }) => {
+      const key = nextKey();
+      set((s) => ({
+        frames: [...s.frames, createFrame(key, projectId, parentId)],
+        rows: { ...s.rows, [key]: emptyRow() },
+      }));
+    },
+
+    pop: () =>
+      set((s) => {
+        if (s.frames.length <= 1) return { frames: [], rows: {} };
+        const rows = { ...s.rows };
+        delete rows[s.frames[s.frames.length - 1].key];
+        return { frames: s.frames.slice(0, -1), rows };
+      }),
+
+    refresh: async () => {
+      const top = topFrame();
+      if (!top?.taskId) return;
+      await loadRow(top.key, top.taskId, false);
+    },
+
+    uploadAttachment: async (file) => {
+      const top = topFrame();
+      if (!top?.taskId || get().rows[top.key]?.uploading) return null;
+      patchRow(top.key, { uploading: true, error: null });
+      try {
+        const meta = await pmApi.uploadAttachment(top.taskId, file);
+        patchRow(top.key, (row) => ({
+          attachments: [...row.attachments, meta],
+          uploading: false,
+        }));
+        return meta;
+      } catch (e) {
+        patchRow(top.key, {
+          uploading: false,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        log.warn("[pm:detail] uploadAttachment failed:", e);
+        return null;
+      }
+    },
+
+    deleteAttachment: async (aid) => {
+      const top = topFrame();
+      if (!top?.taskId || get().rows[top.key]?.uploading) return false;
+      try {
+        await pmApi.deleteAttachment(aid);
+        patchRow(top.key, (row) => ({
+          attachments: row.attachments.filter((a) => a.id !== aid),
+        }));
+        return true;
+      } catch (e) {
+        log.warn("[pm:detail] deleteAttachment failed:", e);
+        return false;
+      }
+    },
+
+    addReply: async (text) => {
+      const top = topFrame();
+      if (!top?.taskId || get().rows[top.key]?.replying) return false;
+      const trimmed = text.trim();
+      if (!trimmed) return false;
+      patchRow(top.key, { replying: true, error: null });
+      try {
+        const entry = await pmApi.addTaskActivity(top.taskId, trimmed);
+        patchRow(top.key, (row) => ({
+          activity: [...row.activity, entry],
+          replying: false,
+        }));
+        return true;
+      } catch (e) {
+        patchRow(top.key, {
+          replying: false,
+          error: e instanceof Error ? e.message : String(e),
+        });
+        log.warn("[pm:detail] addReply failed:", e);
+        return false;
+      }
+    },
+
+    clear: () => set({ frames: [], rows: {} }),
   };
 });

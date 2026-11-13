@@ -332,6 +332,19 @@ describe("empty, filtered-out and loading", () => {
   });
 });
 
+describe("filter by type", () => {
+  it("the toolbar's type filter narrows the rows, like status and priority do", async () => {
+    state.tasks = [task("t-1", { type: "bug" }), task("t-2", { type: "feature" })];
+    const { container } = view();
+    // 工具栏上有「类型」这个筛选入口（跟状态 / 优先级一个样式）。
+    fireEvent.click(screen.getByText("pm.list.col.type"));
+    fireEvent.click(await screen.findByText("pm.taskType.bug"));
+    expect(renderedIds(container)).toEqual(["t-1"]);
+    // 生效后按钮上带计数，并且出现「清除筛选」。
+    expect(screen.getByText("pm.list.clearFilters")).not.toBeNull();
+  });
+});
+
 describe("inline create", () => {
   it("jumps to the last page so the created row is on screen", async () => {
     // 默认序下新任务排在最后：不翻页的话用户建完看不见自己刚建的东西。
