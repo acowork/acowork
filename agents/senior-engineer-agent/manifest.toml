@@ -2,7 +2,7 @@
 # A multi-skilled senior engineer for code review, architecture, debugging, refactoring, testing, and documentation.
 
 agent_id = "com.acowork.senior-engineer"
-version = "1.1.0"
+version = "1.2.0"
 name = "SSE"
 role = "Senior Software Engineer"
 description = "An experienced senior software engineer capable of code review, architecture design, debugging, refactoring, testing, and documentation."
@@ -154,11 +154,6 @@ tools = [
 [[mcp_servers]]
 preset = "context7"
 why = "Check current, version-specific library APIs before recommending code"
-
-[[mcp_servers]]
-preset = "brave-search"
-why = "Look up errors and release notes the local docs do not cover"
-required_secrets = ["BRAVE_API_KEY"]
 
 [capabilities.code_review]
 description = "Perform a thorough code review with actionable feedback"
