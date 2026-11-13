@@ -38,6 +38,7 @@ import { useAgentStore } from "../../stores/agentStore";
 import { useToast } from "../common/ToastProvider";
 import { useEscapeClose } from "../../hooks/useEscapeClose";
 import { StyledInput } from "../common/StyledInput";
+import { Dropdown } from "../common/Dropdown";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBox } from "../common/ErrorBox";
 import { NoNodeBanner } from "../nodes/NoNodeBanner";
@@ -809,19 +810,18 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
           <div className={cn("flex items-center gap-2 text-xs text-text-tertiary", actionError && "shrink-0")}>
             <span>{t("agentHub.targetNode")}</span>
             {usableNodes.length > 1 ? (
-              <select
+              <Dropdown
                 value={targetNodeId ?? ""}
-                onChange={(e) => setTargetNodeId(e.target.value || null)}
+                onChange={(v) => setTargetNodeId(v || null)}
                 disabled={busy}
                 aria-label={t("agentHub.targetNode")}
-                className="rounded-md border border-input-border bg-input-bg px-2 py-1 text-xs text-text outline-none focus:border-[var(--color-accent)]"
-              >
-                {usableNodes.map((node) => (
-                  <option key={node.node_id} value={node.node_id}>
-                    {node.node_name ?? node.hostname ?? node.node_id}
-                  </option>
-                ))}
-              </select>
+                size="small"
+                className="w-auto rounded-md px-2 py-1 text-xs text-text"
+                options={usableNodes.map((node) => ({
+                  value: node.node_id,
+                  label: node.node_name ?? node.hostname ?? node.node_id,
+                }))}
+              />
             ) : (
               <span className="text-text-secondary">
                 {targetNode

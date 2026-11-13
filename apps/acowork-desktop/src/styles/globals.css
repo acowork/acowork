@@ -240,13 +240,10 @@
   /* Unified generic input box outline (light) — tweak here. Must be
      a literal value for Tailwind v4 to generate the
      .border-input-border utility class. */
-  --color-dropdown-bg: hsl(0 0% 98%);
-  /* Dropdown / <select> background (light). Defaults to the unified
-     input box bg. Tweak here to recolor every Dropdown across the
-     app. Must be a literal value for Tailwind v4 utility generation. */
-  --color-dropdown-border: hsl(240 5.9% 90.6%);
-  /* Dropdown / <select> outline (light). Defaults to the unified
-     input border. Literal value for Tailwind utility generation. */
+  /* The old dropdown-only surface/border tokens were removed. `Dropdown`
+     now composes `FIELD_SURFACE_CLASS` (--color-input-bg / --color-input-border)
+     and the accent tint family in components/common/dropdownTheme.ts, so a
+     separate light-grey select palette is no longer part of the design system. */
   --color-nav-control-hover: hsl(240 5% 82%);
   /* = #C8C9CC — primary action hover (light) */
   --color-nav-item-hover: hsl(240 6% 90%);
@@ -767,10 +764,8 @@
   --color-input-border: hsl(0 0% 18%);
   /* Unified generic input box outline (dark) — literal value for
      Tailwind v4 utility generation. */
-  --color-dropdown-bg: hsl(240 3.8% 16.7%);
-  /* Dropdown / <select> background (dark). Literal value. */
-  --color-dropdown-border: hsl(0 0% 18%);
-  /* Dropdown / <select> outline (dark). Literal value. */
+  /* Dark counterpart of the light-mode note: dropdown colours come from the
+     shared dropdown theme, not a second surface palette. */
   --color-nav-control-hover: hsl(0 0% 28%);
   /* = #474749 — primary action hover (dark) */
   --color-nav-item-hover: hsl(0 0% 22%);

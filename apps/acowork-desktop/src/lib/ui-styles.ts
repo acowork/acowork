@@ -14,10 +14,10 @@ export const inputReadonly =
   "rounded border border-zinc-200 bg-zinc-50 px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-800 ";
 
 // Note: dropdown styling was historically provided via `selectBase` and
-// `selectArrowStyle` here. Both have been consolidated into the
-// `Dropdown` component at components/common/Dropdown.tsx, which owns the
-// SVG arrow + appearance-none contract. All call sites have been
-// migrated; do not reintroduce these tokens.
+// `selectArrowStyle` here. It now lives in
+// `components/common/dropdownTheme.ts`, consumed by `Dropdown.tsx` and by
+// every popup-menu surface. All call sites have been migrated; do not
+// reintroduce these tokens or a second dropdown surface palette.
 
 /** Font-mono input (for API keys, codes) */
 export const inputMono =
@@ -56,9 +56,12 @@ export const toolbarButton =
 export const toolbarIconButton =
   "inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors text-text-tertiary hover:bg-zinc-200 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent";
 
-/** Toolbar button active state */
-export const toolbarButtonActive =
-  "bg-zinc-200 dark:bg-zinc-700 text-text ";
+// Toolbar "open / active" chrome now lives in
+// `components/common/dropdownTheme.ts` (`DROPDOWN_TRIGGER_ACTIVE_CLASS`).
+// A second literal copy used to sit here as `toolbarButtonActive`; it had no
+// consumers and was removed so the recipe cannot drift. A grey active state
+// is exactly what made an open dropdown read as a different widget from its
+// own menu.
 
 /**
  * List-row tokens.

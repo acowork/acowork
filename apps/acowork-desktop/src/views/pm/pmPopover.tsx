@@ -4,8 +4,9 @@
  * 为什么再来一个：列表视图有 6 个锚定弹层（列头 `⋮` 菜单、状态菜单、筛选
  * 多选、分组、字段配置、批量操作），每处都照 `WorkspaceSelector` /
  * `ContextUsageIcon` 那样手写一遍「portal 到 body + 测量 + 翻转 + 外点关闭」
- * 就是第六份拷贝。`ContextMenu` 子系统面向右键指针坐标，`Dropdown` 是原生
- * `<select>`，都不适合承载「多选筛选 + 搜索 + 自定义行」的弹层内容。
+ * 就是第六份拷贝。`ContextMenu` 子系统面向右键指针坐标，`Dropdown` 是单选
+ * 值控件，都不适合承载「多选筛选 + 搜索 + 自定义行」的弹层内容。弹层里的
+ * 行主题统一复用 `components/common/dropdownTheme.ts`（accent 洗色 + 勾）。
  *
  * 刻意**留在 `views/pm/` 里，不上提到 `components/common`**：它是 PM 的
  * 局部薄封装，公共弹层原语该由谁统一是另一件事，不该由这次改动顺带决定。
@@ -30,10 +31,16 @@ import {
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
+import { Check } from "lucide-react";
 import {
   computeDropdownPlacement,
   DROPDOWN_EDGE_GAP,
 } from "../../lib/dropdownPosition";
+import { cn } from "../../lib/utils";
+import {
+  DROPDOWN_CHECK_CLASS,
+  dropdownItemClass,
+} from "../../components/common/dropdownTheme";
 
 interface PmPopoverProps {
   /** 触发元素（面板贴在它下沿，放不下就贴上沿）。 */
@@ -185,11 +192,19 @@ export function PmPopoverItem({
       aria-disabled={disabled || undefined}
       title={title}
       onClick={disabled ? undefined : onClick}
-      className="context-menu-item"
+      // The row theme, not `.context-menu-item`: a checked row now wears the
+      // same accent wash + accent check as every other dropdown in the app.
+      className={cn(
+        dropdownItemClass(!!checked),
+        "justify-start px-3 text-text",
+        // Keep the old `.context-menu-item[aria-disabled]:hover` behaviour:
+        // a disabled row must not light up under the cursor.
+        disabled && "hover:bg-transparent dark:hover:bg-transparent",
+      )}
       style={disabled ? { cursor: "not-allowed", opacity: 0.5 } : undefined}
     >
-      <span className="w-3 shrink-0 text-center" aria-hidden>
-        {checked ? "✓" : ""}
+      <span className="flex w-3.5 shrink-0 justify-center" aria-hidden>
+        {checked && <Check className={DROPDOWN_CHECK_CLASS} />}
       </span>
       {prefix}
       <span className="min-w-0 flex-1 truncate">{children}</span>
