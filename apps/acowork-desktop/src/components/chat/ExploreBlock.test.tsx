@@ -46,6 +46,19 @@ function toolCall(id: string, toolCallId = "call-1"): ChatMessage {
   };
 }
 
+/** A tool_result row closing a `bash` call — the same tool, already answered. */
+function toolResult(id: string, toolCallId = "call-1"): ChatMessage {
+  return {
+    id,
+    type: "tool_result",
+    content: "total 0",
+    timestamp: 2000,
+    toolName: "bash",
+    toolCallId,
+    toolStatus: "success",
+  };
+}
+
 /** A thought row — the "thinking" half of the explore block. */
 function thought(id: string): ChatMessage {
   return {
@@ -288,5 +301,89 @@ describe("ExploreBlock — the pending set, not a boolean", () => {
 
     expect(header(container).getAttribute("aria-expanded")).toBe("true");
     expect(approvalButtons(container)).toHaveLength(2);
+  });
+});
+
+describe("ExploreBlock — the authorization opens the block, whatever the block already did", () => {
+  it("opens when the same tool has already run once in this block", () => {
+    // The shape an execution session actually has: the agent ran `bash`
+    // earlier in the same block (call-1, answered), and its NEXT `bash`
+    // call is parked on an authorization (call-2). Matching the pending
+    // authorization against the block by TOOL NAME — as an earlier
+    // revision did — finds call-1's result and concludes the question is
+    // already settled, so the block stays folded and the button the human
+    // owes the agent is behind it.
+    const { container } = render(
+      <ExploreBlock
+        items={[toolCall("c1", "call-1"), toolResult("r1", "call-1"), toolCall("c2", "call-2")]}
+        isStreaming={false}
+        currentSessionId="sess-1"
+        pendingApproval={{ "call-2": approval({ request_id: "req-2", tool_call_id: "call-2" }) }}
+        onApprove={vi.fn()}
+      />,
+    );
+
+    expect(header(container).getAttribute("aria-expanded")).toBe("true");
+    expect(approvalButtons(container)).toHaveLength(2);
+  });
+
+  it("opens once the tool_call row lands, when the authorization arrived first", () => {
+    // The approval event and the `tool_call` record are separate messages
+    // on separate channels; the event may well be seen before the row it
+    // belongs to is in `items[]`. The block must still open when the row
+    // arrives — the pending SET is what the fold reacts to, not the moment
+    // the event landed.
+    const { container, rerender } = render(
+      <ExploreBlock
+        items={[thought("t1")]}
+        isStreaming={false}
+        currentSessionId="sess-1"
+        pendingApproval={{ "call-1": approval() }}
+        onApprove={vi.fn()}
+      />,
+    );
+    expect(header(container).getAttribute("aria-expanded")).toBe("false");
+
+    rerender(
+      <ExploreBlock
+        items={[thought("t1"), toolCall("c1")]}
+        isStreaming={false}
+        currentSessionId="sess-1"
+        pendingApproval={{ "call-1": approval() }}
+        onApprove={vi.fn()}
+      />,
+    );
+    expect(header(container).getAttribute("aria-expanded")).toBe("true");
+  });
+
+  it("stays folded for an authorization whose tool call is already answered", () => {
+    // A stale entry in `pendingApproval` (the decision landed, the row was
+    // cleared) is not a question: opening the block for it would fold the
+    // transcript back out for a control that no longer exists.
+    const { container } = render(
+      <ExploreBlock
+        items={[toolCall("c1"), toolResult("r1")]}
+        isStreaming={false}
+        currentSessionId="sess-1"
+        pendingApproval={{ "call-1": approval() }}
+        onApprove={vi.fn()}
+      />,
+    );
+
+    expect(header(container).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("stays folded for an authorization belonging to another session", () => {
+    const { container } = render(
+      <ExploreBlock
+        items={[toolCall("c1")]}
+        isStreaming={false}
+        currentSessionId="sess-1"
+        pendingApproval={{ "call-1": approval({ session_id: "sess-2" }) }}
+        onApprove={vi.fn()}
+      />,
+    );
+
+    expect(header(container).getAttribute("aria-expanded")).toBe("false");
   });
 });
