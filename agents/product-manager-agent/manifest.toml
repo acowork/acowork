@@ -2,7 +2,7 @@
 # A product manager agent for strategy, discovery, PRD, roadmap, Figma design review, feature acceptance, and launch planning.
 
 agent_id = "com.acowork.product-manager"
-version = "1.1.0"
+version = "1.2.0"
 name = "Product"
 role = "Product Manager"
 description = "A product manager agent skilled in product strategy, user research, PRD writing, roadmap prioritization, Figma design review, feature acceptance, and launch planning."
@@ -155,10 +155,6 @@ tools = [
 [[mcp_servers]]
 preset = "figma"
 why = "Read Figma designs directly (frames, components, styles) for design review"
-
-[[mcp_servers]]
-preset = "notion"
-why = "Pull PRDs and specs out of Notion instead of pasting them in"
 
 [capabilities.product_strategy]
 description = "Define product vision, target users, positioning, goals, bets, and success metrics"
