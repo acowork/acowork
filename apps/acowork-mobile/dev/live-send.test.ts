@@ -67,7 +67,7 @@ describe.skipIf(!ARMED)('live send (billable)', () => {
 
   it('login → create → send → poll sees the reply land', async () => {
     const status = await probeStatus(RAW_GW)
-    expect(status.auth_mode).toBe('multi_user')
+    expect(status.account_state).toBe('ready')
 
     const tokens: TokenPair = await loginRequest(RAW_GW, E2E_USER, E2E_PW)
     setAuthBridge({

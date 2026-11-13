@@ -25,8 +25,9 @@
  *      instead of a fixed `py-N`;
  *   3. text fields go through `StyledInput`, which owns the `text-xs` +
  *      `--ui-input-py` pair;
- *   4. the Gateway mode row stays on one line (`noWrap` + bare mode names) —
- *      see that test for why the qualifiers moved to the hint line.
+ *   4. step 2 hosts the shared `GatewayAddressPicker` and has no residual
+ *      `gatewayMode` control (ADR-115: the mode is derived from the address,
+ *      so the wizard must not offer a second, conflicting way to set it).
  */
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
@@ -82,22 +83,15 @@ describe("onboarding shares the settings type/control scale", () => {
     expect(fields, `use StyledInput: ${fields.join("\n")}`).toEqual([]);
   });
 
-  // The Gateway mode row is three options inside a card that is narrower
-  // than Settings' own column, so the default `flex-wrap` group broke onto
-  // a second line — at a break point that moved with the locale and the
-  // font-size step. Pinned: the group is `noWrap`, and the mode names carry
-  // no qualifiers (they belong to the per-mode hint line instead).
-  it("keeps the gateway mode row on one line with bare names", () => {
-    const group = SRC.slice(SRC.indexOf("name=\"gatewayMode\""));
-    // Attributes live between the element's `name` prop and its `options`.
-    expect(group.slice(0, group.indexOf("options=")), "mode group must set noWrap").
-      toContain("noWrap");
-    const labels =
-      group.slice(0, group.indexOf("onChange")).match(/label: [^,]+/g) ?? [];
-    expect(labels, "three mode options expected").toHaveLength(3);
-    expect(
-      labels.filter((l) => /Recommended|\bfont-medium\b|Hint/.test(l)),
-      `mode labels must be bare names: ${labels}`,
-    ).toEqual([]);
+  // ADR-115: the wizard's step 2 no longer has a local/remote/relay radio —
+  // `gatewayMode` is derived from the address, so the whole mode row (and the
+  // qualifier-vs-name layout problem it carried) is gone. What must hold now
+  // is that the step hosts the SAME address control as every other mount
+  // point, so the user cannot get a different (or missing) way to change
+  // servers depending on which screen they are on.
+  it("hosts the shared address picker, not a per-step mode control", () => {
+    expect(SRC).not.toContain('name="gatewayMode"');
+    expect(SRC).toContain("GatewayAddressPicker");
+    expect(SRC).toContain('from "../connection/GatewayAddressPicker"');
   });
 });

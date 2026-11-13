@@ -6,7 +6,7 @@
  * 卡片（`ListBox` + `ExpandableRow`，与 chat 右侧面板同一卡片语法），
  * 滚动条统一 `OverlayScrollbar`。全局设置仍走 SettingsPage nav 视图：
  * - 权限：左侧树选中节点（目录/文档）的访问权限编辑（设计 §9，仅
- *   `multi_user` 挂载；local 无账号体系，服务端恒放行）
+ *   选中节点且已登录时挂载，ADR-114）
  * - 回收站：打开现有居中 `TrashDialog`
  * - 服务状态：doc 健康指示 + 重试（视图其余部分已有 30s 轮询）
  */
@@ -18,7 +18,6 @@ import { cn } from "../../lib/utils";
 import { CAPSULE_PANE_CN } from "../../components/common/capsule";
 import { ExpandableRow, ListBox } from "../../components/common/list";
 import { OverlayScrollbar } from "../../components/common/OverlayScrollbar";
-import { useAuthStore } from "../../stores/authStore";
 import { useDocHealthStore } from "../../stores/doc/healthStore";
 import { useDocTreeStore } from "../../stores/doc/treeStore";
 import { DocPermissionsCard } from "./DocPermissionsCard";
@@ -34,7 +33,6 @@ export function DocSettingsPanel({ width, onResizeStart, onClose }: DocSettingsP
   const { t } = useTranslation();
   const [trashOpen, setTrashOpen] = useState(false);
   const healthy = useDocHealthStore((s) => s.healthy);
-  const mode = useAuthStore((s) => s.mode);
   const selectedNode = useDocTreeStore((s) => s.selectedNode);
 
   return (
@@ -67,7 +65,7 @@ export function DocSettingsPanel({ width, onResizeStart, onClose }: DocSettingsP
           <div className="space-y-2">
             {/* 权限卡片 — 作用对象 = 树中选中的目录/文档（设计 §9）。
                 local 模式无账号体系，不展示（服务端也恒放行）。 */}
-            {mode === "multi_user" && selectedNode && (
+            {selectedNode && (
               <SettingsCard
                 title={t("doc.settingsPanel.permissions")}
                 bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset px-3 py-3"

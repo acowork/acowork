@@ -8,19 +8,28 @@
  * internal label classes verbatim: `text-10 font-medium text-text-tertiary`.
  * Those are a *component default* for dense inline labels, not a
  * caller-facing token. At the default `--ui-font-size` that is 10px while
- * every other label in the same card — the mode radios, `Gateway URL:`,
- * `Device ID:`, `Status` — is `text-xs` (12px), so the toggle read ~17%
- * smaller than its neighbours, and `text-text-tertiary` dimmed a control
- * label down to the meta-line contrast used for read-only values.
+ * every other label in the same section — the connection-kind radios,
+ * `Server address:` — is `text-xs` (12px), so the toggle read
+ * ~17% smaller than its neighbours, and `text-text-tertiary` dimmed a
+ * control label down to the meta-line contrast used for read-only values.
  *
  * What this pins, derived rather than hardcoded where possible:
- *   1. The label's text step EQUALS the mode radios' text step (they are
- *      label peers in one card, so they must move together if the card's
+ *   1. The label's text step EQUALS the relay-entry label's text step (they
+ *      are label peers in one card, so they must move together if the card's
  *      step ever changes) and is not one of the micro steps.
  *   2. The label carries no explicit text color, so it inherits
- *      `--color-text` exactly like the radios do.
+ *      `--color-text` — unlike the two read-only value lines in the same card
+ *      (`Device ID:`, the address hint), which are meta lines and stay dim.
  *   3. The `?` hint is still inside the row (the reason the layout is
  *      hand-rolled in the first place).
+ *
+ * Note on the reference peer: the card used to hold a `Remote (LAN)` radio
+ * whose label carried the "control contrast, no color class" pairing. ADR-115
+ * removed the mode radios (the mode is derived from the address); the
+ * connection card is now radio-sectioned, and the toggle lives in the
+ * "remote" section next to the `Server address:` label of the shared
+ * `GatewayAddressPicker` — that label is the size peer, and the "no color
+ * class" half is asserted directly instead of by comparison.
  *
  * Rendered DOM rather than source scanning: `GatewayTab` mounts under
  * jsdom, and the assertion is about what a user sees.
@@ -31,12 +40,13 @@ import { useSettingsStore } from "../../stores/settingsStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { GatewayTab } from "./SettingsPage";
 
-/** The row exists in remote mode only (local mode auto-spawns the node,
- *  relay is not validated for this path yet). */
+/** The row exists for a non-loopback address only (a loopback address
+ *  auto-spawns the node, and relay is not validated for this path yet). */
 const autoStartLabel = () => screen.getByText("Auto-start local Node on launch");
 
-/** A label peer in the same card body, used as the reference scale. */
-const remoteModeLabel = () => screen.getByText("Remote (LAN)");
+/** A label peer in the same section body (the address picker's field
+ *  label), used as the reference scale. */
+const serverAddressLabel = () => screen.getByText("Server address");
 
 /** Every `text-*` class token that sets a FONT SIZE (as opposed to a
  *  color, which is spelled `text-text-*`). Arbitrary px escapes
@@ -53,9 +63,16 @@ function colorTokens(el: Element): string[] {
 }
 
 beforeEach(() => {
-  useSettingsStore.setState({ gatewayMode: "remote", gatewayUrl: "http://127.0.0.1:19876" });
+  // Non-loopback address → derived mode is `remote`, which is the only mode
+  // that shows the auto-start-Node row.
+  useSettingsStore.setState({
+    gatewayMode: "remote",
+    relayActive: false,
+    gatewayUrl: "http://10.0.0.5:19876",
+  });
   useGatewayStore.setState({ status: "connected" });
-  // Everything `fetchAll` pulls (relay status, agents, nodes, health): empty.
+  // Everything `fetchAll` pulls (relay status, agents, nodes, health) plus
+  // the address picker's probes: empty.
   vi.spyOn(globalThis, "fetch").mockImplementation(
     async () => new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } }),
   );
@@ -73,11 +90,11 @@ afterEach(async () => {
 });
 
 describe("auto-start-Node toggle label typography", () => {
-  it("uses the same text step as the mode radios, not a micro step", async () => {
+  it("uses the same text step as the server-address label, not a micro step", async () => {
     render(<GatewayTab />);
     await waitFor(() => expect(autoStartLabel()).toBeTruthy());
 
-    expect(sizeTokens(autoStartLabel())).toEqual(sizeTokens(remoteModeLabel()));
+    expect(sizeTokens(autoStartLabel())).toEqual(sizeTokens(serverAddressLabel()));
     expect(sizeTokens(autoStartLabel())).toEqual(["text-xs"]);
   });
 
@@ -85,9 +102,8 @@ describe("auto-start-Node toggle label typography", () => {
     render(<GatewayTab />);
     await waitFor(() => expect(autoStartLabel()).toBeTruthy());
 
-    // Radio labels carry no color class either — both inherit `--color-text`,
-    // so the control label reads at control contrast, not meta contrast.
-    expect(colorTokens(remoteModeLabel())).toEqual([]);
+    // A control label inherits `--color-text`; only read-only meta lines
+    // (`Device ID:`, the address hint) go tertiary.
     expect(colorTokens(autoStartLabel())).toEqual([]);
   });
 

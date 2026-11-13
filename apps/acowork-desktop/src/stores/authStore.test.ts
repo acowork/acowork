@@ -2,7 +2,7 @@
  * Unit tests for the account session store (ADR-076 §决策 3 / 6 / 12).
  *
  * These cover the parts the login gate and the fetch interceptor depend
- * on: mode resolution (`local` is a no-op, `multi_user` gates), session
+ * on: account-state resolution (ADR-114: setup gate vs login), session
  * restore from storage, and — most important — the single-flight refresh
  * that stops parallel 401s from double-rotating the token family (the
  * Gateway treats a reused refresh token as a compromise and kills it).
@@ -56,7 +56,7 @@ beforeEach(() => {
   localStorage.clear();
   __resetForTests();
   useAuthStore.setState({
-    mode: "unknown",
+    accountState: "unknown",
     status: "unknown",
     account: null,
     accessToken: null,
@@ -69,17 +69,17 @@ beforeEach(() => {
 });
 
 describe("authStore.init", () => {
-  it("resolves to disabled under local mode (no login gate)", async () => {
-    stubFetch({ "/api/status": () => json({ auth_mode: "local" }) });
+  it("treats an explicit ready account_state as a normal login gate", async () => {
+    stubFetch({ "/api/status": () => json({ account_state: "ready" }) });
 
     await useAuthStore.getState().init();
 
-    expect(useAuthStore.getState().mode).toBe("local");
-    expect(useAuthStore.getState().status).toBe("disabled");
+    expect(useAuthStore.getState().accountState).toBe("ready");
+    expect(useAuthStore.getState().status).toBe("logged_out");
   });
 
-  it("gates under multi_user with no stored session", async () => {
-    stubFetch({ "/api/status": () => json({ auth_mode: "multi_user" }) });
+  it("requires a login on a ready account system", async () => {
+    stubFetch({ "/api/status": () => json({ account_state: "ready" }) });
 
     await useAuthStore.getState().init();
 
@@ -92,7 +92,7 @@ describe("authStore.init", () => {
       JSON.stringify({ accessToken: "at", refreshToken: "rt" }),
     );
     stubFetch({
-      "/api/status": () => json({ auth_mode: "multi_user" }),
+      "/api/status": () => json({ account_state: "ready" }),
       "/api/auth/me": () => json(acct),
     });
 
@@ -103,23 +103,22 @@ describe("authStore.init", () => {
     expect(state.account?.user_id).toBe("u-1");
   });
 
-  it("treats an older Gateway without auth_mode as local", async () => {
+  it("treats a Gateway without account_state as ready (no setup gate)", async () => {
     stubFetch({ "/api/status": () => json({ version: "0.0.0" }) });
 
     await useAuthStore.getState().init();
 
-    expect(useAuthStore.getState().status).toBe("disabled");
+    expect(useAuthStore.getState().accountState).toBe("ready");
+    expect(useAuthStore.getState().status).toBe("logged_out");
   });
 
-  it("enters setup_required when requires_setup is true", async () => {
-    stubFetch({
-      "/api/status": () =>
-        json({ auth_mode: "multi_user", requires_setup: true }),
-    });
+  it("enters setup_required when account_state is needs_setup", async () => {
+    stubFetch({ "/api/status": () => json({ account_state: "needs_setup" }) });
 
     await useAuthStore.getState().init();
 
     const state = useAuthStore.getState();
+    expect(state.accountState).toBe("needs_setup");
     expect(state.status).toBe("setup_required");
     expect(state.setupRequired).toBe(true);
     expect(state._setupPollHandle).not.toBeNull();
@@ -127,16 +126,57 @@ describe("authStore.init", () => {
     useAuthStore.getState().stopSetupPoll();
   });
 
-  it("ignores requires_setup=false on a multi_user gateway", async () => {
-    stubFetch({
-      "/api/status": () =>
-        json({ auth_mode: "multi_user", requires_setup: false }),
-    });
+  it("enters setup_required when the account store is uninitialized", async () => {
+    stubFetch({ "/api/status": () => json({ account_state: "uninitialized" }) });
+
+    await useAuthStore.getState().init();
+
+    expect(useAuthStore.getState().accountState).toBe("uninitialized");
+    expect(useAuthStore.getState().status).toBe("setup_required");
+    useAuthStore.getState().stopSetupPoll();
+  });
+
+  it("does not gate a ready account system", async () => {
+    stubFetch({ "/api/status": () => json({ account_state: "ready" }) });
 
     await useAuthStore.getState().init();
 
     expect(useAuthStore.getState().status).toBe("logged_out");
     expect(useAuthStore.getState().setupRequired).toBe(false);
+  });
+});
+
+// ADR-114 (2026-11-14): the boot probe can outrun the user-service
+// snapshot and land the user on LoginView while NO admin exists. The
+// restricted gate then answers the sign-in with 403 `setup_required` —
+// that must route to the first-boot wizard, never print the raw code.
+describe("authStore.login routes the restricted gate to the setup wizard", () => {
+  it("a 403 setup_required flips the store into the first-boot flow", async () => {
+    stubFetch({
+      "/api/auth/login": () =>
+        json({ error: "setup_required", message: "not initialised" }, 403),
+      "/api/status": () => json({ account_state: "needs_setup" }),
+    });
+
+    await useAuthStore.getState().login("alice", "pw");
+    useAuthStore.getState().stopSetupPoll();
+
+    const s = useAuthStore.getState();
+    expect(s.status).toBe("setup_required");
+    expect(s.accountState).toBe("needs_setup");
+    expect(s.setupRequired).toBe(true);
+    expect(s.error).toBeNull();
+  });
+
+  it("any other 403 still surfaces its message as a login error", async () => {
+    stubFetch({
+      "/api/auth/login": () => json({ error: "invalid_credentials" }, 403),
+    });
+
+    await expect(useAuthStore.getState().login("alice", "pw")).rejects.toThrow();
+    const s = useAuthStore.getState();
+    expect(s.status).toBe("unknown");
+    expect(s.error).toBe("invalid_credentials");
   });
 });
 
@@ -163,6 +203,54 @@ describe("authStore.firstLogin", () => {
 
     expect(useAuthStore.getState().status).not.toBe("logged_in");
     expect(useAuthStore.getState().error).toContain("invite");
+  });
+});
+
+describe("authStore.completeSetup", () => {
+  const pair = {
+    access_token: "at-setup",
+    refresh_token: "rt-setup",
+    token_type: "Bearer",
+    expires_in: 900,
+  };
+
+  it("waits for /api/status to be ready, then adopts the session with its account", async () => {
+    stubFetch({
+      "/api/auth/setup": () => json(pair),
+      "/api/status": () => json({ account_state: "ready" }),
+      "/api/auth/me": () => json(acct),
+    });
+
+    await useAuthStore.getState().completeSetup("admin", "s3cret123");
+
+    const state = useAuthStore.getState();
+    expect(state.status).toBe("logged_in");
+    expect(state.accountState).toBe("ready");
+    expect(state.setupRequired).toBe(false);
+    expect(state.account?.user_id).toBe("u-1");
+    expect(state.accessToken).toBe("at-setup");
+  });
+
+  /** Regression (ADR-114 review): the old code set `logged_in` before
+   *  `/me` and merely logged a warning on failure, leaving a half-built
+   *  session with `account === null`. The wizard cannot be retried (a
+   *  second setup answers 409), so the only sound recovery is the login
+   *  form with the credentials just created. */
+  it("falls back to logged_out instead of a half-built session when /me fails", async () => {
+    stubFetch({
+      "/api/auth/setup": () => json(pair),
+      "/api/status": () => json({ account_state: "ready" }),
+      "/api/auth/me": () => json({ error: "upstream unavailable" }, 503),
+    });
+
+    await useAuthStore.getState().completeSetup("admin", "s3cret123");
+
+    const state = useAuthStore.getState();
+    expect(state.status).toBe("logged_out");
+    expect(state.account).toBeNull();
+    expect(state.accessToken).toBeNull();
+    expect(state.setupRequired).toBe(false);
+    expect(state.error).toContain("sign in");
   });
 });
 
@@ -194,7 +282,7 @@ describe("authStore mirrors the token module", () => {
 
 describe("authStore.onGatewayUrlChanged", () => {
   it("is a no-op when newUrl equals oldUrl", async () => {
-    const spy = stubFetch({ "/api/status": () => json({ auth_mode: "multi_user" }) });
+    const spy = stubFetch({ "/api/status": () => json({ account_state: "ready" }) });
 
     await useAuthStore
       .getState()
@@ -209,7 +297,7 @@ describe("authStore.onGatewayUrlChanged", () => {
     const meSpy = vi.fn(() => json(acct));
     stubFetch({
       "/api/auth/me": meSpy,
-      "/api/status": () => json({ auth_mode: "multi_user" }),
+      "/api/status": () => json({ account_state: "ready" }),
     });
 
     await useAuthStore
@@ -227,7 +315,7 @@ describe("authStore.onGatewayUrlChanged", () => {
     useAuthStore.setState({ status: "logged_in", account: acct });
     stubFetch({
       "/api/auth/me": () => json({ detail: "invalid token" }, 401),
-      "/api/status": () => json({ auth_mode: "multi_user" }),
+      "/api/status": () => json({ account_state: "ready" }),
     });
 
     await useAuthStore
@@ -261,7 +349,7 @@ describe("authStore.onGatewayUrlChanged", () => {
       status: "logged_out",
       accessToken: null, 
     });
-    stubFetch({ "/api/status": () => json({ auth_mode: "multi_user" }) });
+    stubFetch({ "/api/status": () => json({ account_state: "ready" }) });
 
     await useAuthStore
       .getState()

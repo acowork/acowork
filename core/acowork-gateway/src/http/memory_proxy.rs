@@ -350,7 +350,16 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let gw_state = GatewayState::new(&dir.to_string_lossy());
+        let mut gw_state = GatewayState::new(&dir.to_string_lossy());
+        // ADR-114: even anonymous requests traverse the auth middleware,
+        // which answers 503 while no user-service verifier is published
+        // (the "service still starting" window). Tests simulate a healthy
+        // Gateway: publish the fixture verifier and arm the internal
+        // service token so tests can pass the always-on bearer gate
+        // WITHOUT acquiring a user identity — the anonymous pass-through
+        // these forwarding tests were written against.
+        gw_state.user_verifier = Some(crate::http::test_support::verifier());
+        gw_state.internal_service_token = Some("test-svc-token".to_string());
         AppState::new(
             Arc::new(RwLock::new(gw_state)),
             Arc::new(HttpAuth::new(false)),
@@ -435,6 +444,7 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/api/agents/inst-1/memory/nodes")
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");
@@ -459,6 +469,7 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/api/agents/inst-42/memory/nodes?type=Knowledge&page=2")
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");
@@ -491,6 +502,7 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/api/agents/inst-42/memory/stats?instance_id=victim")
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");
@@ -514,6 +526,7 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/api/memory/search?q=hi&instance_id=inst-1")
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");
@@ -535,6 +548,7 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/api/memory/search?q=hi")
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");
@@ -557,6 +571,7 @@ mod tests {
         let request = Request::builder()
             .method("POST")
             .uri("/api/memory/mcp")
+            .header("authorization", "Bearer test-svc-token")
             .header("x-mcp-actor", "inst-1")
             .header(NODE_TOKEN_HEADER, NODE_TOKEN_TEMPLATE)
             .body(Body::empty())
@@ -585,6 +600,7 @@ mod tests {
         let request = Request::builder()
             .method("POST")
             .uri("/api/memory/mcp")
+            .header("authorization", "Bearer test-svc-token")
             .header("x-mcp-actor", "not-installed")
             .body(Body::empty())
             .expect("build request");
@@ -610,6 +626,7 @@ mod tests {
         let request = Request::builder()
             .method("POST")
             .uri("/api/memory/admin/bootstrap?instance_id=inst-1")
+            .header("authorization", "Bearer test-svc-token")
             .header("content-type", "application/json")
             .body(Body::empty())
             .expect("build request");
@@ -636,6 +653,7 @@ mod tests {
         let request = Request::builder()
             .method("POST")
             .uri("/api/memory/admin/import?instance_id=inst-9")
+            .header("authorization", "Bearer test-svc-token")
             .header("content-type", "application/x-sqlite3")
             .header(NODE_TOKEN_HEADER, NODE_TOKEN_TEMPLATE)
             .body(Body::from(b"SQLite format 3\0".to_vec()))
@@ -662,6 +680,7 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/health")
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");

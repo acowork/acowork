@@ -22,7 +22,10 @@ pub struct UserService {
 
 impl UserService {
     /// Construct the service (no server started yet).
-    pub fn new(config: UserServiceConfig, auth: Option<Arc<crate::auth::AuthService>>) -> Self {
+    ///
+    /// The account service is always present (ADR-114): there is no
+    /// deployment in which the user service runs without one.
+    pub fn new(config: UserServiceConfig, auth: Arc<crate::auth::AuthService>) -> Self {
         Self {
             state: AppState::new(&config, auth),
             config,
@@ -117,9 +120,17 @@ mod tests {
         }
     }
 
+    /// A throwaway account service for the constructor (ADR-114: the
+    /// account system is unconditional, so the service cannot be built
+    /// without one).
+    fn test_auth(config: &UserServiceConfig) -> Arc<crate::auth::AuthService> {
+        Arc::new(crate::auth::AuthService::new(&config.data_dir, Default::default(), None).unwrap())
+    }
+
     #[tokio::test]
     async fn serve_rejects_non_loopback_bind() {
-        let svc = Arc::new(UserService::new(test_config(), None));
+        let config = test_config();
+        let svc = Arc::new(UserService::new(config.clone(), test_auth(&config)));
         let non_loopback: SocketAddr = "0.0.0.0:0".parse().unwrap();
         let err = svc
             .serve(non_loopback)
@@ -134,7 +145,8 @@ mod tests {
 
     #[tokio::test]
     async fn serve_accepts_loopback_bind() {
-        let svc = Arc::new(UserService::new(test_config(), None));
+        let config = test_config();
+        let svc = Arc::new(UserService::new(config.clone(), test_auth(&config)));
         let actual = svc
             .serve("127.0.0.1:0".parse().unwrap())
             .await

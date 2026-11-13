@@ -1,9 +1,9 @@
 //! ADR-087 — HTTP control-plane authorization layer (Gateway reverse-proxy
 //! entry, single enforcement point).
 //!
-//! Runs *inside* `auth_middleware` (so an [`AuthContext`] exists whenever
-//! `AUTH_MODE=multi_user`) and gates every route that can change a Node's
-//! machine or an Agent instance's configuration:
+//! Runs *inside* `auth_middleware` (so an [`AuthContext`] exists for every
+//! user request) and gates every route that can change a Node's machine or
+//! an Agent instance's configuration:
 //!
 //! - **Node-manage** — install/ensure/clone target, fs browse, rename,
 //!   drain/remove: node owner ∨ guest ∨ admin.
@@ -19,8 +19,9 @@
 //!    that forgets to register cannot leak — it locks non-owners out
 //!    (fail-closed), which the route-registration invariant test
 //!    ([`route_table_covers_every_registered_route`]) turns red in CI.
-//! 2. **Local mode is a no-op** (ADR-087 D8): the middleware returns
-//!    early, the ownership tables are still written but never evaluated.
+//! 2. **Always evaluated** (ADR-114): the account system is always
+//!    present, so ownership is always checked. The ownership tables are
+//!    written for every resource regardless.
 //! 3. **Single truth.** The booleans rendered into
 //!    `GET /api/agents|nodes` come from the same
 //!    [`ownership::can_manage`] / [`ownership::can_use`] functions this
@@ -357,15 +358,15 @@ fn forbidden(resource: &'static str, required: &'static str) -> Response {
 }
 
 /// Middleware entry — assembled in `http/routes.rs` right after the auth
-/// gate. No-op under `AUTH_MODE=local` (ADR-087 D8).
+/// gate.
+///
+/// ADR-114: there is no "local mode" to be a no-op in any more — the
+/// account system is always present, so ownership is always evaluated.
 pub async fn permission_middleware(
     State(state): State<AppState>,
     req: Request,
     next: Next,
 ) -> Response {
-    if !state.auth_mode.is_multi_user() {
-        return next.run(req).await;
-    }
     let Some(ctx) = req.extensions().get::<AuthContext>().cloned() else {
         // Machine actor (Node token / internal service token) or a path
         // the auth gate already answered. Ownership is a *user* concept;
@@ -902,18 +903,22 @@ mod tests {
             (StatusCode::OK, "reached")
         }
 
-        fn base_state(auth_mode: crate::auth::AuthMode) -> AppState {
+        fn base_state() -> AppState {
             let dir = std::env::temp_dir().join(format!(
                 "acowork-perm-e2e-{}",
                 uuid::Uuid::new_v4()
             ));
             let _ = std::fs::create_dir_all(&dir);
-            let gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+            let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
+            // ADR-114: even anonymous requests traverse the auth middleware,
+            // which answers 503 while no user-service verifier is published
+            // (the "service still starting" window). Tests simulate a healthy
+            // Gateway, so publish the fixture verifier.
+            gw.user_verifier = Some(crate::http::test_support::verifier());
             let mut state = AppState::new(
                 Arc::new(RwLock::new(gw)),
                 Arc::new(crate::http::auth::HttpAuth::new(false)),
             );
-            state.auth_mode = auth_mode;
             state.agent_owners = Some(ownership::new_shared_agent_owners(&dir));
             state.node_owners = Some(ownership::new_shared_node_owners(&dir));
             state
@@ -981,7 +986,7 @@ mod tests {
         /// auth gate), the REAL permission middleware, stub routes
         /// mirroring the production surface.
         async fn app(caller: Option<AuthContext>, instance: &str, rec: Option<OwnerRecord>) -> Router {
-            let state = base_state(crate::auth::AuthMode::MultiUser);
+            let state = base_state();
             seed_installed(&state, instance).await;
             if let Some(r) = rec {
                 let store = state.agent_owners.clone().unwrap();
@@ -1153,11 +1158,21 @@ mod tests {
             );
         }
 
-        // §9.5 — Local mode is a no-op: the same private-agent request
-        // that 404s in MultiUser passes untouched in Local.
+        // §9.5 — ADR-114: there is no "local mode" in which ownership is
+        // skipped any more. The same private-agent request that once
+        // passed untouched must now be refused exactly as it is for every
+        // other deployment — full production stack (auth gate + permission
+        // layer), authenticated as a non-owner user: the always-on gate
+        // injects identity, ownership answers 404. This is the regression
+        // that pins the removal.
+        //
+        // (A request with *no* identity is not "local mode" either — it is
+        // a machine actor on the internal-service-token / node-token
+        // branches, which pass the gate by design and stay per-route
+        // credential-checked. See `permission_middleware`.)
         #[tokio::test]
-        async fn local_mode_noop() {
-            let state = base_state(crate::auth::AuthMode::Local);
+        async fn ownership_is_always_enforced() {
+            let state = base_state();
             seed_installed(&state, "i-1").await;
             let store = state.agent_owners.clone().unwrap();
             ownership::lock(&store).put("i-1", owned("alice", Visibility::Private));
@@ -1165,11 +1180,27 @@ mod tests {
                 .route("/api/agents/{id}", any(reached))
                 .route("/api/agents/{id}/{*rest}", any(reached))
                 .layer(from_fn_with_state(state.clone(), permission_middleware))
+                .layer(from_fn_with_state(
+                    state.clone(),
+                    crate::http::auth_middleware::auth_middleware,
+                ))
                 .with_state(state);
+            let token = crate::http::test_support::access_token("bob", "user");
+            let resp = router
+                .oneshot(
+                    Request::builder()
+                        .method("GET")
+                        .uri("/api/agents/i-1")
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
             assert_eq!(
-                get(router, "GET", "/api/agents/i-1").await,
-                StatusCode::OK,
-                "Local mode: middleware is no-op"
+                resp.status(),
+                StatusCode::NOT_FOUND,
+                "private detail must not leak existence"
             );
         }
 
@@ -1198,7 +1229,7 @@ mod tests {
                 StatusCode::FORBIDDEN,
                 "no manage relation -> 403"
             );
-            let state = base_state(crate::auth::AuthMode::MultiUser);
+            let state = base_state();
             seed_installed(&state, "i-1").await;
             let store = state.node_owners.clone().unwrap();
             ownership::lock(&store).put("n-1", owned("alice", Visibility::Private));

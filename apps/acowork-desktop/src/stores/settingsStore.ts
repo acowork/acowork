@@ -9,7 +9,6 @@ import {
   DEFAULT_CONTENT_WIDTH,
   DEFAULT_OPACITY,
   DEFAULT_ACCENT_COLOR,
-  DEFAULT_GATEWAY_MODE,
   DEFAULT_LOG_FILE_SIZE_MB,
   DEFAULT_LOG_FILE_COUNT,
   DEFAULT_FRONTEND_LOG_LEVEL,
@@ -19,26 +18,14 @@ import {
   type LogLevel,
 } from "../lib/logger";
 import { log } from "../lib/logger";
-import i18n from "../i18n";
-
-/** Check for the default-port Node before committing a Gateway mode switch. */
-export async function requestGatewayModeChange(mode: GatewayMode): Promise<void> {
-  if (mode === useSettingsStore.getState().gatewayMode) return;
-  try {
-    const nodePids = await invoke<number[]>("inspect_local_node_process");
-    if (nodePids.length > 0) {
-      const confirmed = window.confirm(i18n.t("onboarding.gateway.nodeSwitchConfirm"));
-      if (!confirmed) return;
-      await invoke("stop_local_node_process");
-    }
-    useSettingsStore.getState().setGatewayMode(mode);
-  } catch (error) {
-    log.warn("Failed to handle local Node during Gateway mode switch:", error);
-    window.alert(`${i18n.t("onboarding.gateway.nodeSwitchFailed")}\n${String(error)}`);
-  }
-}
-
+import {
+  deriveGatewayMode,
+  hasHttpScheme,
+  isHttpsUrl,
+  normalizeGatewayUrl,
+} from "../lib/gatewayUrl";
 import { useAuthStore } from "./authStore";
+import { useConnectionStore } from "./connectionStore";
 import { readPref, writePref, onScopeChange } from "../lib/prefsScope";
 import {
   CUSTOM_ACCENT_ID,
@@ -48,30 +35,20 @@ import {
 } from "../lib/accentPresets";
 
 /**
- * Push the current gateway config to the Rust backend so that:
- *   - All Tauri HTTP commands use the correct base URL (previously they
- *     were hardcoded to 127.0.0.1:19876 in Rust)
- *   - The Rust side knows whether to skip spawning a local Gateway on
- *     the next boot (remote mode)
- *   - An address change also rebuilds the MQTT connection: the Rust
- *     `connect_mqtt` command detects that the configured broker differs
- *     from the one the live client was created for and reconnects — no
- *     app restart needed
+ * Push the connection config to the Rust backend so that:
+ *   - All Tauri HTTP commands use the correct base URL
+ *   - Rust knows whether spawning a local Gateway is allowed (derived mode)
+ *   - An address change rebuilds the MQTT connection
  *
- * Best-effort: errors are logged but never thrown, because settings
- * persistence must not be blocked by transient Tauri command failures
- * (e.g. during page reload while the Rust side is still booting).
+ * ADR-115: `mode` is derived from the URL by the caller, never persisted or
+ * chosen by the user. Best-effort: errors are logged, never thrown — settings
+ * persistence must not be blocked by a transient Tauri command failure.
  */
 async function pushGatewayConfigToRust(mode: GatewayMode, url: string): Promise<void> {
   try {
     await invoke("set_gateway_config", {
       config: { mode, url },
     });
-    // The MQTT client derives its broker host/port from the Gateway URL
-    // at creation time. Re-run `connect_mqtt` here so saving a new
-    // address — SplashScreen timeout retry or Settings — tears down a
-    // stale connection and rebuilds it against the configured broker.
-    // No-op when the endpoint is unchanged.
     try {
       await invoke("connect_mqtt");
     } catch {
@@ -90,17 +67,20 @@ const STORAGE_KEY_CONTENT_WIDTH = "acowork-content-width";
 const STORAGE_KEY_OPACITY = "acowork-opacity";
 const STORAGE_KEY_ACCENT_COLOR = "acowork-accent-color";
 /** Last user-picked custom accent, kept separately from `acowork-accent-color`
- *  so selecting a shipped preset does not destroy it. Without this the custom
- *  slot collapsed back to "+" the moment a preset was picked, and the color
- *  had to be mixed again by hand. */
+ *  so selecting a shipped preset does not destroy it. */
 const STORAGE_KEY_ACCENT_CUSTOM = "acowork-accent-custom";
+/** The server address to connect to on the next launch. */
 const STORAGE_KEY_GATEWAY_URL = "acowork-gateway-url";
 const STORAGE_KEY_GATEWAY_URL_HISTORY = "acowork-gateway-url-history";
-const STORAGE_KEY_GATEWAY_MODE = "acowork-gateway-mode";
+/** Last address that actually reached a connected Gateway. Shown first in
+ *  the picker as the safe way back after a wrong address / wrong password. */
+const STORAGE_KEY_LAST_GOOD_URL = "acowork-gateway-last-good-url";
+/** The only explicit topology switch: the dedicated relay entry point. */
+const STORAGE_KEY_RELAY_ACTIVE = "acowork-gateway-relay-active";
 /** Remote-mode auto-start of the local Node on Desktop launch (ADR-087 follow-up). */
 const STORAGE_KEY_AUTO_START_LOCAL_NODE = "acowork-auto-start-local-node";
 
-/** Max retained gateway URLs in localStorage. 8 covers typical LAN/office/home/relay switches without leaking storage. */
+/** Max retained gateway URLs in localStorage. */
 const GATEWAY_URL_HISTORY_MAX = 8;
 const STORAGE_KEY_LOG_FILE_SIZE = "acowork-log-file-size";
 const STORAGE_KEY_LOG_FILE_COUNT = "acowork-log-file-count";
@@ -112,65 +92,34 @@ function readOsTheme(): "light" | "dark" {
   return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
 }
 
-/** Apply theme to DOM by toggling .dark class on <html>.
- * For "system" mode, `osTheme` must be passed so the correct value
- * is applied even when the OS theme changed since the last call. */
+/** Apply theme to DOM by toggling .dark class on <html>. */
 function applyTheme(theme: Theme, osTheme: "light" | "dark") {
   const effective = theme === "system" ? osTheme : theme;
   document.documentElement.classList.toggle("dark", effective === "dark");
 }
 
-/** Apply fontSize to CSS custom property on root */
 function applyFontSize(size: number) {
   document.documentElement.style.setProperty("--ui-font-size", `${size}rem`);
 }
 
-/** Apply contentWidth to CSS custom property on root */
 function applyContentWidth(width: number) {
   document.documentElement.style.setProperty("--content-max-width", `${width}%`);
 }
 
-/** Apply user-controlled opacity to the DOM.
- *
- * Writes the raw 0..1 value to `--app-opacity` on `:root` for any
- * component that wants to bind to it.  The actual visual tint is
- * applied by AppLayout's `glassBg` (rgba with this alpha), not by
- * this variable — the html/body layers are intentionally transparent
- * so the OS-native vibrancy shows through. */
+/** Apply user-controlled opacity to the DOM. */
 function applyOpacity(opacity: number) {
   document.documentElement.style.setProperty("--app-opacity", String(opacity));
 }
 
-/** Apply accent preset to the DOM.
- *
- * Two layers of effect:
- *   1. `--color-accent` CSS variable — used by buttons, links, sliders, etc.
- *   2. `accent-{id}` class on <html>  — selects the matching per-accent
- *      block in globals.css that overrides `--glass-tint-light/dark`
- *      with the preset's hue-shifted near-neutral.
- *
- * The macOS native vibrancy tint (set via the `set_window_effect`
- * Tauri command) is owned by AppLayout — its useEffect on
- * `[isDark, accentColor]` re-invokes the command whenever either
- * changes, passing the matching RGBA tuples from `accentPresets.ts`.
- * That keeps the Rust side stateless w.r.t. accent selection.
- */
+/** Apply accent preset to the DOM. */
 function applyAccentPreset(preset: AccentPreset) {
   document.documentElement.style.setProperty("--color-accent", preset.hex);
   const classList = document.documentElement.classList;
-  // Remove any existing `accent-*` class, then add the current one.
-  // We iterate instead of using a regex because classList doesn't
-  // support wildcard removal in older browsers (and Safari < 17
-  // doesn't support `className.replace` with regex reliably either).
   for (const cls of Array.from(classList)) {
     if (cls.startsWith("accent-")) classList.remove(cls);
   }
   classList.add(`accent-${preset.id}`);
 
-  // globals.css ships a `.accent-{id}` block for the ten presets only, so a
-  // custom accent has no class to select its tints — write them inline.
-  // Presets must have these cleared, or an inline value left over from a
-  // custom pick would outrank the `.accent-{id}` rule and freeze the old hue.
   const style = document.documentElement.style;
   if (preset.id === CUSTOM_ACCENT_ID) {
     style.setProperty("--glass-tint-light", preset.glassTintLight);
@@ -181,18 +130,14 @@ function applyAccentPreset(preset: AccentPreset) {
   }
 }
 
-/** Read persisted theme from localStorage, fallback to "system" */
 function getPersistedTheme(): Theme {
   try {
     const stored = readPref(STORAGE_KEY_THEME);
     if (stored === "light" || stored === "dark" || stored === "system") return stored;
-  } catch {
-    // localStorage unavailable (SSR / privacy mode)
-  }
+  } catch { }
   return DEFAULT_THEME;
 }
 
-/** Read persisted font size from localStorage, fallback to 0.875 (M) */
 function getPersistedFontSize(): number {
   try {
     const stored = readPref(STORAGE_KEY_FONT_SIZE);
@@ -204,7 +149,6 @@ function getPersistedFontSize(): number {
   return DEFAULT_FONT_SIZE;
 }
 
-/** Read persisted log level from localStorage, fallback to "info" */
 function getPersistedLogLevel(): string {
   try {
     const stored = localStorage.getItem(STORAGE_KEY_LOG_LEVEL);
@@ -213,7 +157,6 @@ function getPersistedLogLevel(): string {
   return DEFAULT_LOG_LEVEL;
 }
 
-/** Read persisted content width from localStorage, fallback to 90 */
 function getPersistedContentWidth(): number {
   try {
     const stored = readPref(STORAGE_KEY_CONTENT_WIDTH);
@@ -225,130 +168,6 @@ function getPersistedContentWidth(): number {
   return DEFAULT_CONTENT_WIDTH;
 }
 
-/** A `#rrggbb` in the exact shape `--color-accent` and `<input type="color">`
- *  both require. The store's contract is that `accentColor` is always in this
- *  form, so both the read path and the write path gate on it. */
-function isAccentHex(value: string): boolean {
-  return /^#[0-9a-fA-F]{6}$/.test(value);
-}
-
-/** Read persisted accent color from localStorage, fallback to default blue.
- *
- * Always returns a valid `#rrggbb` hex string.  Unknown / malformed values
- * are coerced to `DEFAULT_ACCENT_COLOR` so downstream code can rely on the
- * format.  A valid hex outside the ten presets is *kept* — it is a
- * user-picked custom color, not a corrupt value.
- */
-function getPersistedAccentColor(): string {
-  try {
-    const stored = readPref(STORAGE_KEY_ACCENT_COLOR);
-    if (stored && isAccentHex(stored)) return stored;
-  } catch { }
-  return DEFAULT_ACCENT_COLOR;
-}
-
-/** Read the last user-picked custom accent, or `null` if there is none.
- *
- * A stored value that happens to match a shipped preset is treated as "no
- * custom color" — otherwise the custom slot would render a duplicate of a
- * swatch already present in the row.
- */
-function getPersistedAccentCustom(): string | null {
-  try {
-    const stored = readPref(STORAGE_KEY_ACCENT_CUSTOM);
-    if (!stored || !isAccentHex(stored)) return null;
-    return isCustomAccent(stored) ? stored : null;
-  } catch { }
-  return null;
-}
-
-/** Read persisted gateway URL from localStorage, fallback to DEFAULT_GATEWAY_URL */
-function getPersistedGatewayUrl(): string {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY_GATEWAY_URL);
-    if (stored) return stored;
-  } catch { }
-  return DEFAULT_GATEWAY_URL;
-}
-
-/** Read persisted gateway URL history (most-recent first). Deduplicates & caps to GATEWAY_URL_HISTORY_MAX. */
-function getPersistedGatewayUrlHistory(): string[] {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY_GATEWAY_URL_HISTORY);
-    if (!stored) return [];
-    const arr = JSON.parse(stored);
-    if (!Array.isArray(arr)) return [];
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const v of arr) {
-      if (typeof v !== "string") continue;
-      const t = v.trim();
-      if (!t || seen.has(t)) continue;
-      seen.add(t);
-      out.push(t);
-      if (out.length >= GATEWAY_URL_HISTORY_MAX) break;
-    }
-    return out;
-  } catch {
-    return [];
-  }
-}
-
-/** Read persisted gateway mode from localStorage, fallback to "local" */
-function getPersistedGatewayMode(): GatewayMode {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY_GATEWAY_MODE);
-    if (stored === "local" || stored === "remote" || stored === "relay") return stored;
-  } catch { }
-  return DEFAULT_GATEWAY_MODE;
-}
-
-/** Read persisted auto-start-local-node flag; default ON (only missing
- *  key or an explicit "false" turns it off). */
-function getPersistedAutoStartLocalNode(): boolean {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY_AUTO_START_LOCAL_NODE);
-    if (stored !== null) return stored !== "false";
-  } catch { }
-  return true;
-}
-
-/** Read persisted log file size from localStorage, fallback to 10 (MB) */
-function getPersistedLogFileSizeMb(): number {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY_LOG_FILE_SIZE);
-    if (stored) {
-      const val = parseInt(stored, 10);
-      if (!isNaN(val) && val >= 0) return val;
-    }
-  } catch { }
-  return DEFAULT_LOG_FILE_SIZE_MB;
-}
-
-/** Read persisted log file count from localStorage, fallback to 20 */
-function getPersistedLogFileCount(): number {
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY_LOG_FILE_COUNT);
-    if (stored) {
-      const val = parseInt(stored, 10);
-      if (!isNaN(val) && val >= 0) return val;
-    }
-  } catch { }
-  return DEFAULT_LOG_FILE_COUNT;
-}
-
-/** Read persisted frontend log level from localStorage, fallback to "warn".
- * Valid values: trace, debug, info, warn, error, off */
-function getPersistedFrontendLogLevel(): LogLevel {
-  const valid: LogLevel[] = ["trace", "debug", "info", "warn", "error", "off"];
-  try {
-    const stored = localStorage.getItem(STORAGE_KEY_FRONTEND_LOG_LEVEL);
-    if (stored && valid.includes(stored as LogLevel)) return stored as LogLevel;
-  } catch { }
-  return DEFAULT_FRONTEND_LOG_LEVEL;
-}
-
-/** Read persisted opacity from localStorage, fallback to 1.0 (opaque) */
 function getPersistedOpacity(): number {
   try {
     const stored = readPref(STORAGE_KEY_OPACITY);
@@ -360,6 +179,117 @@ function getPersistedOpacity(): number {
   return DEFAULT_OPACITY;
 }
 
+/** A `#rrggbb` in the exact shape `--color-accent` requires. */
+function isAccentHex(value: string): boolean {
+  return /^#[0-9a-fA-F]{6}$/.test(value);
+}
+
+function getPersistedAccentColor(): string {
+  try {
+    const stored = readPref(STORAGE_KEY_ACCENT_COLOR);
+    if (stored && isAccentHex(stored)) return stored;
+  } catch { }
+  return DEFAULT_ACCENT_COLOR;
+}
+
+function getPersistedAccentCustom(): string | null {
+  try {
+    const stored = readPref(STORAGE_KEY_ACCENT_CUSTOM);
+    if (!stored || !isAccentHex(stored)) return null;
+    return isCustomAccent(stored) ? stored : null;
+  } catch { }
+  return null;
+}
+
+/** The address boot will connect to. Malformed / empty falls back to localhost. */
+function getPersistedGatewayUrl(): string {
+  try {
+    const stored = normalizeGatewayUrl(localStorage.getItem(STORAGE_KEY_GATEWAY_URL) ?? "");
+    if (stored) return stored;
+  } catch { }
+  return DEFAULT_GATEWAY_URL;
+}
+
+/** Read persisted gateway URL history (most-recent first). Deduplicates & caps. */
+function getPersistedGatewayUrlHistory(): string[] {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_GATEWAY_URL_HISTORY);
+    if (!stored) return [];
+    const arr = JSON.parse(stored);
+    if (!Array.isArray(arr)) return [];
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const v of arr) {
+      if (typeof v !== "string") continue;
+      const t = normalizeGatewayUrl(v);
+      if (!t || seen.has(t)) continue;
+      seen.add(t);
+      out.push(t);
+      if (out.length >= GATEWAY_URL_HISTORY_MAX) break;
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+function getPersistedLastGoodUrl(): string | null {
+  try {
+    const stored = normalizeGatewayUrl(localStorage.getItem(STORAGE_KEY_LAST_GOOD_URL) ?? "");
+    return stored || null;
+  } catch {
+    return null;
+  }
+}
+
+function getPersistedRelayActive(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEY_RELAY_ACTIVE) === "true";
+  } catch {
+    return false;
+  }
+}
+
+/** Read persisted auto-start-local-node flag; default ON. */
+function getPersistedAutoStartLocalNode(): boolean {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_AUTO_START_LOCAL_NODE);
+    if (stored !== null) return stored !== "false";
+  } catch { }
+  return true;
+}
+
+function getPersistedLogFileSizeMb(): number {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_LOG_FILE_SIZE);
+    if (stored) {
+      const val = parseInt(stored, 10);
+      if (!isNaN(val) && val >= 0) return val;
+    }
+  } catch { }
+  return DEFAULT_LOG_FILE_SIZE_MB;
+}
+
+function getPersistedLogFileCount(): number {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_LOG_FILE_COUNT);
+    if (stored) {
+      const val = parseInt(stored, 10);
+      if (!isNaN(val) && val >= 0) return val;
+    }
+  } catch { }
+  return DEFAULT_LOG_FILE_COUNT;
+}
+
+function getPersistedFrontendLogLevel(): LogLevel {
+  const valid: LogLevel[] = ["trace", "debug", "info", "warn", "error", "off"];
+  try {
+    const stored = localStorage.getItem(STORAGE_KEY_FRONTEND_LOG_LEVEL);
+    if (stored && valid.includes(stored as LogLevel)) return stored as LogLevel;
+  } catch { }
+  return DEFAULT_FRONTEND_LOG_LEVEL;
+}
+
 interface SettingsStore {
   theme: Theme;
   osTheme: "light" | "dark";
@@ -367,50 +297,48 @@ interface SettingsStore {
   contentWidth: number;
   opacity: number;
   accentColor: string;
-  /**
-   * The last custom accent the user mixed, or `null` if they never have.
-   * Independent of which accent is *active*: picking a shipped preset changes
-   * `accentColor` and leaves this alone, so the custom slot keeps its color
-   * instead of collapsing back to a "+".
-   */
   customAccent: string | null;
+
+  /** The one user-facing connection setting: the Gateway server address. */
   gatewayUrl: string;
-  /**
-   * Recently-used gateway URLs (most-recent first). Lets the SettingsPage
-   * render a combo dropdown and lets SplashScreen probe candidates when
-   * the persisted URL is unreachable (e.g. laptop moved to a new LAN).
-   */
+  /** Addresses that actually connected, most-recent first. */
   gatewayUrlHistory: string[];
-  gatewayMode: GatewayMode;
+  /** Last address that reached `connected`. Never a typo or a dead host. */
+  lastGoodUrl: string | null;
   /**
-   * Remote mode only: auto-start this machine's local Node on Desktop
-   * launch when the machine is already enrolled (ADR-087 follow-up).
-   * First-time enrollment is never silent — the AgentList banner asks.
+   * DERIVED, never written by a UI control. `local` ⇔ loopback URL,
+   * `remote` ⇔ any other address, `relay` ⇔ the dedicated relay entry.
+   * Kept in the store so the existing Rust/MQTT/ACL consumers have one
+   * consistent verdict.
    */
+  gatewayMode: GatewayMode;
+  /** Explicit relay opt-in, set only by `setRelayGateway`. */
+  relayActive: boolean;
   autoStartLocalNode: boolean;
   logLevel: string;
   logFileSizeMb: number;
   logFileCount: number;
   frontendLogLevel: LogLevel;
+
   setTheme: (theme: Theme) => void;
   setFontSize: (size: number) => void;
   setContentWidth: (width: number) => void;
   setOpacity: (opacity: number) => void;
   setAccentColor: (color: string) => void;
+  /** Low-level address write for runtime auto-heal / boot retry. Does NOT
+   *  restart the boot pipeline or drop the session. */
   setGatewayUrl: (url: string) => void;
-  /**
-   * Persist a Gateway URL and keep the mode consistent with it in one
-   * step. `relay` mode can only reach its Gateway through `https://`
-   * relay-device domains (Rust `relay_mqtt_wss_url` rejects every other
-   * scheme), so an `http://` URL picked while mode is `relay` (candidate
-   * chooser, timeout-view edit) would otherwise create the exact combo
-   * that leaves MQTT permanently rejected. Flips the mode to `remote` in
-   * that case. No-ops when the URL is unchanged and no fix is needed.
-   */
-  applyGatewayUrl: (url: string) => void;
-  /** Push a URL to the front of the history (LRU). No-ops for falsy / duplicate-of-front. */
+  /** User picked a server address (login / setup / splash / settings).
+   *  Clears the session and re-runs the whole connection pipeline. */
+  switchGateway: (url: string) => Promise<void>;
+  /** Dedicated relay entry point. Relay URLs are https device domains. */
+  setRelayGateway: (url: string) => Promise<void>;
+  /** Adopt the base_url Rust resolved after spawning a local Gateway. */
+  adoptBootUrl: (url: string) => void;
+  /** LRU-push + remember as last good. Called on a CONNECTED transition. */
   recordGatewayUrl: (url: string) => void;
-  setGatewayMode: (mode: GatewayMode) => void;
+  /** Forget every connection setting and reboot against localhost. */
+  resetConnectionSettings: () => Promise<void>;
   setAutoStartLocalNode: (on: boolean) => void;
   setLogLevel: (level: string) => void;
   setLogFileSizeMb: (size: number) => void;
@@ -419,7 +347,6 @@ interface SettingsStore {
 }
 
 export const useSettingsStore = create<SettingsStore>((set, get) => {
-  // Initialize from persisted values and apply theme to DOM immediately
   const initialTheme = getPersistedTheme();
   const initialOsTheme = readOsTheme();
   const initialFontSize = getPersistedFontSize();
@@ -429,29 +356,25 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
   const initialContentWidth = getPersistedContentWidth();
   const initialAccentColor = getPersistedAccentColor();
   const initialCustomAccent = getPersistedAccentCustom();
+  const initialGatewayUrl = getPersistedGatewayUrl();
+  // Relay is TLS-only (see `commitGatewayUrl`). Sanitize at init as well, so a
+  // stale `acowork-gateway-relay-active=true` left behind next to a plain
+  // http address can never resurrect the "relay + http://" pair on boot.
+  const initialRelayActive = getPersistedRelayActive() && isHttpsUrl(initialGatewayUrl);
+
   applyTheme(initialTheme, initialOsTheme);
   applyFontSize(initialFontSize);
   applyOpacity(initialOpacity);
   applyContentWidth(initialContentWidth);
   applyAccentPreset(resolveAccentPreset(initialAccentColor));
-  // Sync logger module level with persisted setting on startup
   setLoggerLevel(initialFrontendLogLevel);
 
-  // Subscribe to OS theme changes so theme="system" stays in sync.
-  // Without this listener the .dark class on <html> is frozen at app
-  // start, so Tailwind dark variants and any component reading the
-  // resolved theme (AppLayout glass, NavBar, SetiIcon) stay stale when
-  // the user switches macOS appearance while the app is running.
   if (typeof window !== "undefined" && window.matchMedia) {
     const mq = window.matchMedia("(prefers-color-scheme: dark)");
     const handleChange = (e: MediaQueryListEvent) => {
       const nextOsTheme: "light" | "dark" = e.matches ? "dark" : "light";
       const current = get();
       if (current.osTheme === nextOsTheme) return;
-      // Always update osTheme so any component subscribed via the store
-      // re-renders with the new effective theme.
-      // If current.theme === "system", also re-apply to DOM so the
-      // .dark class on <html> flips and Tailwind dark variants kick in.
       const applyNeeded = current.theme === "system";
       set({ osTheme: nextOsTheme });
       if (applyNeeded) applyTheme(current.theme, nextOsTheme);
@@ -459,11 +382,59 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     if (mq.addEventListener) {
       mq.addEventListener("change", handleChange);
     } else if ((mq as any).addListener) {
-      // Safari < 14 fallback (not strictly needed since Tauri requires
-      // macOS 11+/Safari 14+, but kept for safety)
       (mq as any).addListener(handleChange);
     }
   }
+
+  /**
+   * The single choke point for an address change: normalize, derive the
+   * mode, persist, push to Rust, and (optionally) re-validate the session.
+   * `notifyAuth` is false for user-driven switches because those restart
+   * the boot pipeline, which re-runs `authStore.init()` anyway.
+   *
+   * Returns `true` when the address was committed. Callers that own a form
+   * (`GatewayAddressPicker`, the relay entry) use the `false` answer to keep
+   * a bad value visible instead of pretending it was saved.
+   */
+  const commitGatewayUrl = (
+    raw: string,
+    relayActive: boolean,
+    notifyAuth: boolean,
+  ): boolean => {
+    const url = normalizeGatewayUrl(raw) || DEFAULT_GATEWAY_URL;
+    // An address with no http(s) scheme is not a Gateway URL — it is a host
+    // that `fetch`/`base_url` can never resolve. Persisting one would make
+    // the NEXT launch start by trying an address that cannot work, so the
+    // store (the final line of defence) refuses it outright rather than
+    // letting each caller remember to validate.
+    if (!hasHttpScheme(url)) {
+      log.warn("[settings] refusing a scheme-less Gateway address:", raw);
+      return false;
+    }
+    const oldUrl = get().gatewayUrl;
+    // Invariant: relay only exists over TLS device domains. Any write of a
+    // plain http(s-less) address silently drops it, so the store can never
+    // hold the "relay + http://" pair Rust rejects forever (MQTT would be
+    // dead while /health still answers — the classic false "connected").
+    const relay = relayActive && isHttpsUrl(url);
+    const mode = deriveGatewayMode(url, relay);
+    try { localStorage.setItem(STORAGE_KEY_GATEWAY_URL, url); } catch { }
+    try {
+      localStorage.setItem(STORAGE_KEY_RELAY_ACTIVE, relay ? "true" : "false");
+    } catch { }
+    set({ gatewayUrl: url, gatewayMode: mode, relayActive: relay });
+    void pushGatewayConfigToRust(mode, url);
+    if (notifyAuth && oldUrl !== url) {
+      void useAuthStore.getState().onGatewayUrlChanged(url, oldUrl);
+    }
+    return true;
+  };
+
+  /** Clearing the session is mandatory: tokens are signed by one Gateway. */
+  const dropSessionAndReboot = (): void => {
+    useAuthStore.getState().clearLocalSession();
+    useConnectionStore.getState().restart();
+  };
 
   return {
     theme: initialTheme,
@@ -473,9 +444,11 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     opacity: initialOpacity,
     accentColor: initialAccentColor,
     customAccent: initialCustomAccent,
-    gatewayUrl: getPersistedGatewayUrl(),
+    gatewayUrl: initialGatewayUrl,
     gatewayUrlHistory: getPersistedGatewayUrlHistory(),
-    gatewayMode: getPersistedGatewayMode(),
+    lastGoodUrl: getPersistedLastGoodUrl(),
+    gatewayMode: deriveGatewayMode(initialGatewayUrl, initialRelayActive),
+    relayActive: initialRelayActive,
     autoStartLocalNode: getPersistedAutoStartLocalNode(),
     logLevel: initialLogLevel,
     logFileSizeMb: getPersistedLogFileSizeMb(),
@@ -483,8 +456,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     frontendLogLevel: initialFrontendLogLevel,
 
     setTheme: (theme) => {
-      const osTheme = get().osTheme;
-      applyTheme(theme, osTheme);
+      applyTheme(theme, get().osTheme);
       writePref(STORAGE_KEY_THEME, theme);
       set({ theme });
     },
@@ -508,99 +480,87 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
     },
 
     setAccentColor: (accentColor) => {
-      // A hex outside the ten presets is a user-picked custom color, not a
-      // corrupt value: resolve it to a synthesized preset so glass tints and
-      // the native vibrancy still follow it. Malformed input is the one case
-      // that still falls back — the store's contract is that `accentColor`
-      // is always `#rrggbb`, and `<input type="color">` rejects anything else.
       const value = isAccentHex(accentColor) ? accentColor : DEFAULT_ACCENT_COLOR;
-      const preset = resolveAccentPreset(value);
-      applyAccentPreset(preset);
+      applyAccentPreset(resolveAccentPreset(value));
       writePref(STORAGE_KEY_ACCENT_COLOR, value);
-      // Recording the custom color here — rather than through a separate
-      // setter — is what makes it impossible to apply a custom accent without
-      // it being remembered. Selecting a preset deliberately leaves it intact.
       const custom = isCustomAccent(value) ? value : get().customAccent;
       if (isCustomAccent(value)) writePref(STORAGE_KEY_ACCENT_CUSTOM, value);
       set({ accentColor: value, customAccent: custom });
     },
 
-    setGatewayUrl: (gatewayUrl) => {
-      const oldUrl = get().gatewayUrl;
-      try { localStorage.setItem(STORAGE_KEY_GATEWAY_URL, gatewayUrl); } catch { }
-      set({ gatewayUrl });
-      // Sync to Rust so subsequent Tauri commands use the new URL
-      pushGatewayConfigToRust(get().gatewayMode, gatewayUrl);
-      // NOTE: history is NOT updated here. The address hasn't necessarily
-      // connected yet — a user typo or an unreachable host would otherwise
-      // pollute the candidate list. History is updated by the connection
-      // lifecycle subscriber (see SplashScreen / AppLayout), so only URLs
-      // that ACTUALLY connected (or were just disconnected from) end up
-      // in the LRU.
+    setGatewayUrl: (url) => commitGatewayUrl(url, get().relayActive, true),
 
-      // NEW: notify authStore when the URL actually changed. Skipped on
-      // no-op writes (SettingsPage re-saves the same value, devtools
-      // tweak) so we don't burn a probe round-trip for nothing. The
-      // probe validates the existing access token against the new
-      // Gateway: same Gateway behind an alias → keep session; different
-      // Gateway (new signing key) → drop session and re-resolve the
-      // auth mode. See `authStore.onGatewayUrlChanged` for the full
-      // decision tree. Fixes the WiFi-hop / LAN-move "Node 不在网关里"
-      // failure where stale tokens held by the old Gateway's HMAC key
-      // turn every /api/* into 401.
-      if (oldUrl !== gatewayUrl) {
-        void useAuthStore.getState().onGatewayUrlChanged(gatewayUrl, oldUrl);
-      }
+    switchGateway: async (url) => {
+      // Empty input is a user mistake, not a request to go back to the
+      // default: `commitGatewayUrl` falls back to `DEFAULT_GATEWAY_URL` so the
+      // store is never address-less, and swallowing an empty switch here is
+      // what keeps that fallback out of user-driven paths.
+      if (!normalizeGatewayUrl(url)) return;
+      // Picking a plain address always leaves relay. Keeping relayActive
+      // would recreate the old "relay + http://" combo that Rust rejects.
+      // A refused address must not reboot: that would drop the session and
+      // re-run the boot pipeline against the address we just rejected.
+      if (!commitGatewayUrl(url, false, false)) return;
+      dropSessionAndReboot();
     },
-    /**
-     * URL + mode atomic consistency (see interface docs). Composed of the
-     * two existing actions so every side effect stays in one place
-     * (localStorage write, Rust push, `onGatewayUrlChanged` probe): URL
-     * first — its push already carries the new URL — then the mode fix,
-     * which re-pushes the config with the URL updated. The LAST
-     * `set_gateway_config` Rust sees is therefore (remote, url); the
-     * intermediate (relay, url) push's follow-up `connect_mqtt` rejection
-     * is swallowed by `pushGatewayConfigToRust` by design.
-     */
-    applyGatewayUrl: (gatewayUrl) => {
-      const needsModeFix =
-        get().gatewayMode === "relay" &&
-        gatewayUrl.trim().toLowerCase().startsWith("http://");
-      if (gatewayUrl === get().gatewayUrl && !needsModeFix) return;
-      if (gatewayUrl !== get().gatewayUrl) {
-        get().setGatewayUrl(gatewayUrl);
-      }
-      if (needsModeFix) {
-        get().setGatewayMode("remote");
-      }
+
+    setRelayGateway: async (url) => {
+      // Refuse rather than silently downgrade: `commitGatewayUrl` drops relay
+      // for a non-https address, so accepting one here would look like "relay
+      // applied" while actually connecting as a plain remote Gateway. The
+      // settings UI already blocks the submit for this case.
+      if (!isHttpsUrl(url)) return;
+      if (!commitGatewayUrl(url, true, false)) return;
+      dropSessionAndReboot();
     },
-    /**
-     * LRU-push: dedupe, cap, prepend. Called by setGatewayUrl so every
-     * saved URL (combo box selection, SplashScreen timeout view edit,
-     * candidate pick) is remembered without callers needing to opt in.
-     */
+
+    adoptBootUrl: (url) => {
+      if (!normalizeGatewayUrl(url)) return;
+      commitGatewayUrl(url, get().relayActive, false);
+    },
+
     recordGatewayUrl: (url) => {
-      const t = (url ?? "").trim();
+      const t = normalizeGatewayUrl(url);
       if (!t) return;
       const cur = get().gatewayUrlHistory;
-      // No-op when it would just shuffle the front entry to itself — saves
-      // a localStorage write on every SettingsPage keystroke that didn't
-      // change the value.
-      if (cur[0] === t) return;
-      const next = [t, ...cur.filter((u) => u !== t)].slice(0, GATEWAY_URL_HISTORY_MAX);
-      try { localStorage.setItem(STORAGE_KEY_GATEWAY_URL_HISTORY, JSON.stringify(next)); } catch { }
-      set({ gatewayUrlHistory: next });
+      if (cur[0] !== t) {
+        const next = [t, ...cur.filter((u) => u !== t)].slice(0, GATEWAY_URL_HISTORY_MAX);
+        try {
+          localStorage.setItem(STORAGE_KEY_GATEWAY_URL_HISTORY, JSON.stringify(next));
+        } catch { }
+        set({ gatewayUrlHistory: next });
+      }
+      try { localStorage.setItem(STORAGE_KEY_LAST_GOOD_URL, t); } catch { }
+      set({ lastGoodUrl: t });
     },
-    setGatewayMode: (gatewayMode) => {
-      try { localStorage.setItem(STORAGE_KEY_GATEWAY_MODE, gatewayMode); } catch { }
-      set({ gatewayMode });
-      // Sync to Rust. For local→remote this also stops any locally-
-      // spawned Gateway. For remote→local the user must press Start
-      // (or reload) — we don't auto-spawn here.
-      pushGatewayConfigToRust(gatewayMode, get().gatewayUrl);
+
+    resetConnectionSettings: async () => {
+      for (const key of [
+        STORAGE_KEY_GATEWAY_URL,
+        STORAGE_KEY_GATEWAY_URL_HISTORY,
+        STORAGE_KEY_LAST_GOOD_URL,
+        STORAGE_KEY_RELAY_ACTIVE,
+      ]) {
+        try { localStorage.removeItem(key); } catch { }
+      }
+      set({
+        gatewayUrl: DEFAULT_GATEWAY_URL,
+        gatewayUrlHistory: [],
+        lastGoodUrl: null,
+        relayActive: false,
+        gatewayMode: deriveGatewayMode(DEFAULT_GATEWAY_URL, false),
+      });
+      await pushGatewayConfigToRust("local", DEFAULT_GATEWAY_URL);
+      dropSessionAndReboot();
     },
+
     setAutoStartLocalNode: (autoStartLocalNode) => {
-      try { localStorage.setItem(STORAGE_KEY_AUTO_START_LOCAL_NODE, autoStartLocalNode ? "true" : "false"); } catch { }
+      try {
+        localStorage.setItem(
+          STORAGE_KEY_AUTO_START_LOCAL_NODE,
+          autoStartLocalNode ? "true" : "false",
+        );
+      } catch { }
       set({ autoStartLocalNode });
     },
     setLogLevel: (logLevel) => {
@@ -624,17 +584,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => {
 });
 
 /**
- * Re-read the user-level preferences under the current account scope and
- * re-apply them to both the store and the DOM.
- *
- * Needed because `authStore.login()` resolves the account *in place* — only
- * sign-out and account switch reload the page. A store that initialized
- * before login (theme applied at import, for the pre-login first paint) is
- * holding the previous scope's values, so signing in as a different user
- * would keep showing that user's appearance until the next restart.
- *
- * Machine-level settings are left alone: the Gateway URL and mode are what
- * the login round-trip itself depends on.
+ * Re-read the user-level preferences under the current account scope.
+ * Machine-level connection settings (address / history / relay flag) are
+ * deliberately left alone — the login round-trip itself depends on them.
  */
 function rehydrateUserPrefs(): void {
   const theme = getPersistedTheme();
@@ -652,6 +604,4 @@ function rehydrateUserPrefs(): void {
   useSettingsStore.setState({ theme, osTheme, fontSize, contentWidth, opacity, accentColor, customAccent });
 }
 
-// `prefsScope` seeds itself from the stored token at import, so this fires
-// only on an actual change of account during the session.
 onScopeChange(() => rehydrateUserPrefs());

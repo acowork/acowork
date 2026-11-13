@@ -76,6 +76,11 @@ pub enum RemoteDecision {
 /// - `PUT /api/config` — Gateway config write. `GET` stays available
 ///   (read-only view, same information a remote Desktop needs locally).
 /// - `DELETE /api/logs` — destructive log maintenance.
+/// - `/api/auth/setup` — ADR-114 first-boot administrator creation. This
+///   listener binds `127.0.0.1`, so a tunnelled request's **peer is also
+///   loopback** and would otherwise pass the Gateway's peer-based setup
+///   gate. The listener identity (not the peer) is the only sound origin
+///   signal here; deny every method so the path does not exist remotely.
 ///
 /// Anything else flows into the SAME auth middleware as the local
 /// listener — remote requests are authenticated users, not trusted
@@ -83,6 +88,9 @@ pub enum RemoteDecision {
 pub fn remote_origin_policy(path: &str, method: &str, has_node_token: bool) -> RemoteDecision {
     if has_node_token {
         return RemoteDecision::Forbidden;
+    }
+    if path == "/api/auth/setup" {
+        return RemoteDecision::NotFound;
     }
     if path.starts_with("/api/debug/") {
         return RemoteDecision::NotFound;
@@ -336,6 +344,27 @@ mod tests {
         assert_eq!(
             remote_origin_policy("/api/logs", "DELETE", false),
             RemoteDecision::NotFound
+        );
+    }
+
+    /// ADR-114: first-boot setup is local-only. This listener binds
+    /// `127.0.0.1`, so a tunnelled request's **peer is loopback too** and
+    /// the Gateway's peer-based setup gate would let it through. The
+    /// listener identity is the only sound origin signal here — deny every
+    /// method so the path does not exist on the remote surface at all.
+    #[test]
+    fn policy_never_exposes_first_boot_setup() {
+        for method in ["POST", "GET", "PUT", "DELETE", "OPTIONS"] {
+            assert_eq!(
+                remote_origin_policy("/api/auth/setup", method, false),
+                RemoteDecision::NotFound,
+                "{method} /api/auth/setup must not exist remotely"
+            );
+        }
+        // A unrelated auth path still flows through normally.
+        assert_eq!(
+            remote_origin_policy("/api/auth/login", "POST", false),
+            RemoteDecision::Allow
         );
     }
 

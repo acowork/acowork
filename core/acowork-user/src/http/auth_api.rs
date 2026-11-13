@@ -1,6 +1,7 @@
 //! Account lifecycle HTTP API (ADR-076 §决策 3 / §决策 6).
 //!
 //! ```text
+//! POST /api/auth/setup            {username, password, display_name?} → token pair
 //! POST /api/auth/login            {username, password} → token pair
 //! POST /api/auth/refresh          {refresh_token}      → token pair (rotated)
 //! POST /api/auth/logout           {refresh_token}      → 204
@@ -8,9 +9,13 @@
 //! GET  /api/auth/me               → AccountView (redacted)
 //! ```
 //!
-//! Registered **only under `AUTH_MODE=multi_user`** (ADR-076 §决策 12);
-//! in `local` mode `state.auth_service` is `None` and the router never
-//! merges these routes.
+//! Always registered (ADR-114): the account system is unconditional, so
+//! there is no deployment in which these routes are absent.
+//!
+//! `setup` is the first-boot exception: it needs no identity because none
+//! can exist yet. It refuses to run once an administrator is loggable-in
+//! (409), and the Gateway restricts it to a real loopback peer — see
+//! `http/restricted_mode.rs` and `relay/remote_listener.rs`.
 //!
 //! Argon2id is deliberately slow (~100 ms), so every handler that hashes
 //! or verifies runs on the blocking pool — never on an async worker.
@@ -32,9 +37,10 @@ use crate::auth::context::AuthContext;
 use crate::error::ApiError;
 use crate::state::AppState;
 
-/// The account routes (merged only when the account system is active).
+/// The account routes (always registered — ADR-114).
 pub fn auth_routes() -> Router<AppState> {
     Router::new()
+        .route("/api/auth/setup", post(setup_admin))
         .route("/api/auth/login", post(login))
         .route("/api/auth/refresh", post(refresh))
         .route("/api/auth/logout", post(logout))
@@ -43,6 +49,18 @@ pub fn auth_routes() -> Router<AppState> {
         .route("/api/auth/pair/create", post(pair_create))
         .route("/api/auth/pair/redeem", post(pair_redeem))
         .route("/api/auth/me", get(me))
+}
+
+/// ADR-114 first-boot setup: create the first login-capable administrator.
+/// Public at both auth layers (no token can exist yet); the Gateway gates it
+/// on the real peer address. `display_name` is optional and falls back to
+/// the username on the server.
+#[derive(Debug, Deserialize)]
+pub struct SetupAdminRequest {
+    pub username: String,
+    pub password: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -77,11 +95,11 @@ pub struct PairRedeemRequest {
     pub pairing_token: String,
 }
 
-/// The account system is only reachable in `multi_user` mode.
+/// The account service is always present (ADR-114).
 fn service(state: &AppState) -> Result<Arc<AuthService>, ApiError> {
-    state.auth_service.clone().ok_or_else(|| {
-        ApiError::service_unavailable("the account system is disabled (AUTH_MODE=local)")
-    })
+    // ADR-114: the account system is always present — there is no
+    // deployment in which these routes are unreachable because it is off.
+    Ok(state.auth_service.clone())
 }
 
 impl From<AuthError> for ApiError {
@@ -110,6 +128,28 @@ where
         .await
         .map_err(|e| ApiError::internal(&format!("auth task failed: {e}")))?
         .map_err(ApiError::from)
+}
+
+/// `POST /api/auth/setup` — ADR-114 first-boot administrator creation.
+///
+/// Returns a token pair so the Desktop's onboarding wizard can go straight
+/// into the authenticated app without a second login round-trip. The
+/// service itself refuses a second setup (409), independently of the
+/// Gateway's health snapshot, which lags by one poll interval.
+async fn setup_admin(
+    State(state): State<AppState>,
+    Json(req): Json<SetupAdminRequest>,
+) -> Result<Json<TokenPair>, ApiError> {
+    let auth = service(&state)?;
+    let display_name = req.display_name.unwrap_or_default();
+    let pair = blocking(move || {
+        auth.setup_first_admin(&req.username, &display_name, &req.password, now_unix())
+    })
+    .await?;
+    // The presentation cache is derived from accounts.json; the new admin
+    // must be visible to the Runtime's `last_user_profile` immediately.
+    crate::http::account_api::sync_profiles(&state).await;
+    Ok(Json(pair))
 }
 
 async fn login(
@@ -289,12 +329,8 @@ mod tests {
         user_id
     }
 
-    fn state(dir: &Path, multi_user: bool) -> AppState {
-        if multi_user {
-            crate::test_support::multi_user_state(dir)
-        } else {
-            crate::test_support::local_state(dir)
-        }
+    fn state(dir: &Path) -> AppState {
+        crate::test_support::multi_user_state(dir)
     }
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -323,12 +359,15 @@ mod tests {
         b.body(Body::empty()).unwrap()
     }
 
+    /// ADR-114: the account routes are unconditional. There is no
+    /// deployment in which "the account system is off", so the route must
+    /// exist even with an empty store — what changes is the *state*
+    /// (`uninitialized` / `needs_setup` / `ready`), not the route table.
     #[tokio::test]
-    async fn local_mode_registers_no_account_routes() {
+    async fn account_routes_exist_even_with_an_empty_store() {
         let dir = temp_dir();
-        let router = build_router(state(&dir, false));
+        let router = build_router(state(&dir));
 
-        // Login is not merely gated — the route does not exist.
         let resp = router
             .oneshot(post(
                 "/api/auth/login",
@@ -337,14 +376,128 @@ mod tests {
             ))
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// ADR-114: setup creates the first administrator from an empty store,
+    /// hands back a usable token pair, and refuses to run a second time.
+    #[tokio::test]
+    async fn setup_creates_the_first_admin_and_is_one_shot() {
+        let dir = temp_dir();
+        let router = build_router(state(&dir));
+
+        let resp = router
+            .clone()
+            .oneshot(post(
+                "/api/auth/setup",
+                r#"{"username":"Root","password":"rootpass1","display_name":"Boss"}"#,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let tokens = body_json(resp).await;
+        let access = tokens["access_token"].as_str().unwrap().to_string();
+
+        // The returned token works immediately; the username is normalised.
+        let resp = router
+            .clone()
+            .oneshot(get("/api/auth/me", Some(&access)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let me = body_json(resp).await;
+        assert_eq!(me["username"], "root");
+        assert_eq!(me["display_name"], "Boss");
+        assert_eq!(me["role"], "admin");
+
+        // …and the chosen credentials log in through the normal path.
+        let resp = router
+            .clone()
+            .oneshot(post(
+                "/api/auth/login",
+                r#"{"username":"root","password":"rootpass1"}"#,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // A second setup is a 409, never a silent password overwrite. This
+        // holds even when the Gateway's health snapshot still says
+        // "needs setup" — the service is the authority on its own store.
+        let resp = router
+            .oneshot(post(
+                "/api/auth/setup",
+                r#"{"username":"attacker","password":"hacked123"}"#,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+    }
+
+    /// The normal boot seeds a passwordless `admin`; setup must activate
+    /// *that* account in place rather than leaving a second administrator
+    /// behind (or 409-ing on the reserved username).
+    #[tokio::test]
+    async fn setup_activates_the_seeded_admin_in_place() {
+        let dir = temp_dir();
+        let st = state(&dir);
+        st.auth_service.ensure_bootstrap_admin().unwrap();
+        let before = st.auth_service.load_accounts().unwrap();
+        assert_eq!(before.accounts.len(), 1);
+        let seeded_id = before.accounts[0].user_id.clone();
+
+        let router = build_router(st.clone());
+        let resp = router
+            .oneshot(post(
+                "/api/auth/setup",
+                r#"{"username":"owner","password":"ownerpass1"}"#,
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let after = st.auth_service.load_accounts().unwrap();
+        assert_eq!(after.accounts.len(), 1, "setup must not add a second admin");
+        assert_eq!(after.accounts[0].user_id, seeded_id);
+        assert_eq!(after.accounts[0].username, "owner");
+        assert_eq!(after.accounts[0].display_name, "owner");
+        assert_ne!(
+            after.accounts[0].password_hash,
+            acowork_core::account::DISABLED_PASSWORD_HASH
+        );
+    }
+
+    /// Policy failures are 422 and must not half-initialise the store.
+    #[tokio::test]
+    async fn setup_enforces_username_and_password_policy() {
+        let dir = temp_dir();
+        let st = state(&dir);
+        let router = build_router(st.clone());
+
+        for body in [
+            r#"{"username":"root","password":"short"}"#,
+            r#"{"username":"root","password":"nodigitshere"}"#,
+            r#"{"username":"Bad Name","password":"longpass1"}"#,
+        ] {
+            let resp = router
+                .clone()
+                .oneshot(post("/api/auth/setup", body, None))
+                .await
+                .unwrap();
+            assert_eq!(resp.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        }
+        assert!(st.auth_service.load_accounts().unwrap().accounts.is_empty());
     }
 
     #[tokio::test]
-    async fn multi_user_gates_api_and_serves_login() {
+    async fn account_api_gates_api_and_serves_login() {
         let dir = temp_dir();
-        let st = state(&dir, true);
-        let user_id = seed_account(st.auth_service.as_ref().unwrap(), "alice", Role::User);
+        let st = state(&dir);
+        let user_id = seed_account(st.auth_service.as_ref(), "alice", Role::User);
         let router = build_router(st);
 
         // No token → 401 with a WWW-Authenticate challenge.
@@ -461,8 +614,8 @@ mod tests {
         .unwrap();
         svc.ensure_bootstrap_admin().unwrap();
 
-        let mut st = state(&dir, true);
-        st.auth_service = Some(Arc::new(svc));
+        let mut st = state(&dir);
+        st.auth_service = Arc::new(svc);
         let router = build_router(st);
 
         let resp = router

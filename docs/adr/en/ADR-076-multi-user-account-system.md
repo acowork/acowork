@@ -25,6 +25,8 @@
 > **Unaffected and still valid**: § Decision 4 (session isolation), § Decision 7 (Desktop UI), § Decision 10 (PM / Doc proxy identity injection), § Decision 11 (the PM member model), and the identity delivery of [ADR-042](./ADR-042-mqtt-user-identity-delivery.md).
 >
 > The implementation plan is at [docs/plan/zh/user-dev-plan.md](../../plan/zh/user-dev-plan.md).
+>
+> **Second supersession note (2026-11-13)**: [ADR-114](./ADR-114-account-system-decoupled-from-network-topology.md) retires the `AUTH_MODE` / deployment-mode split of § Decision 12. The account system is **always on**: both `local` and `multi_user` modes, and the inference of a login regime from the bind address, are gone. First-boot state becomes the three-valued `AccountSystemState`, and the first administrator password can be set over `POST /api/auth/setup` from the Gateway host. Every statement in this ADR that presumes "the account system may not exist" or "first boot is TTY/CLI only" is no longer current; the account model, roles and session isolation decisions remain valid.
 
 ---
 

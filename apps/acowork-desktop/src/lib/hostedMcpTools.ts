@@ -17,7 +17,7 @@
 //
 // `tools/list` needs no `X-MCP-Actor` on any of the three (the header only
 // scopes `tools/call`), and the app-wide auth interceptor adds the Desktop's
-// own bearer token, so this works under `AUTH_MODE=multi_user` too.
+// own bearer token, so this works with the always-on account system (ADR-114) too.
 //
 // ## Failure policy
 //

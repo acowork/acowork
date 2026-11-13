@@ -71,7 +71,7 @@
 //!    capped at [`PULL_BACKOFF_MAX`]. The first attempt is immediate.
 //! 6. **Presents the node credential (ADR-076).** `/api/global-resources`
 //!    sits behind the same `auth_middleware` gate as everything else, so
-//!    under `AUTH_MODE=multi_user` an unauthenticated pull gets a `401` —
+//!    (accounts are always on, ADR-114) an unauthenticated pull gets a `401` —
 //!    which is [`PullOutcome::Fatal`], i.e. the pull **aborts on the very
 //!    first attempt** and the Runtime silently degrades to MQTT-retained
 //!    only. The node token the Node injected at spawn is attached as

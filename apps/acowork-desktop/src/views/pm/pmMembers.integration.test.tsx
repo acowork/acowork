@@ -24,7 +24,7 @@ describe("useResolvedMembers account-directory integration", () => {
   beforeEach(() => {
     usePmUserDirectoryStore.getState().reset();
     useAuthStore.setState({
-      mode: "multi_user",
+      accountState: "ready",
       status: "logged_in",
       accessToken: "admin-token",
       account: {

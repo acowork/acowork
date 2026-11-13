@@ -84,7 +84,7 @@ describe("UserList rows carry the agent-list hairline", () => {
     const peerA = account("user", "u-peer-a", "Bravo");
     const peerB = account("user", "u-peer-b", "Chandra");
     useAuthStore.setState({
-      mode: "multi_user",
+      accountState: "ready",
       status: "logged_in",
       account: self,
       accessToken: "token",

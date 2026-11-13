@@ -141,9 +141,6 @@ pub(crate) async fn start_http_server(
     // password). Its `enabled` flag may be `http.auth_enabled ||
     // mqtt.auth_enabled`.
     auth: Arc<HttpAuth>,
-    // ADR-076 §决策 12: resolved deployment auth mode, and the account
-    // service (`Some` only under `AUTH_MODE=multi_user`).
-    auth_mode: crate::auth::AuthMode,
     // Design doc 24 §6.3: relay tunnel client handle — always constructed
     // by `Gateway::run`; the supervisor only runs when enabled.
     relay_client: Option<std::sync::Arc<crate::relay::RelayClient>>,
@@ -186,7 +183,6 @@ pub(crate) async fn start_http_server(
     app_state.node_registry = node_registry;
     app_state.bootstrap_registry = bootstrap_registry;
     app_state.operation_store = operation_store;
-    app_state.auth_mode = auth_mode;
     app_state.relay_client = relay_client;
     app_state.node_owners = Some(node_owners);
     app_state.agent_owners = Some(agent_owners);
@@ -197,11 +193,9 @@ pub(crate) async fn start_http_server(
     // existed. Runs before the first request so the ACL cascade never
     // observes a half-populated table.
     backfill_agent_owner_node_ids(&app_state).await;
-    if auth_mode.is_multi_user() {
-        tracing::info!(
-            "AUTH_MODE=multi_user: account system delegated to acowork-user              (verification starts once its public key is loaded)"
-        );
-    }
+    tracing::info!(
+        "account system delegated to acowork-user (verification starts once its public key is loaded)"
+    );
 
     // Prime the offline providers cache so `data_dir/offline_providers.json`
     // (written by `POST /api/models/refresh-catalog`) takes priority over the

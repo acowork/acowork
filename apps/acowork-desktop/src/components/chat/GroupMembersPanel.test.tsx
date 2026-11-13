@@ -111,23 +111,19 @@ describe("canDeleteProjectGroup (project channel delete gate)", () => {
   it("offers nothing while the project is still alive", () => {
     // The whole point of the rule: PM would re-create the channel, so a delete
     // here would only cost the history.
-    expect(canDeleteProjectGroup({ owner: "u-owner" }, owner, false)).toBe(false);
-    expect(canDeleteProjectGroup({ owner: "u-owner" }, admin, false)).toBe(false);
+    expect(canDeleteProjectGroup({ owner: "u-owner" }, owner)).toBe(false);
+    expect(canDeleteProjectGroup({ owner: "u-owner" }, admin)).toBe(false);
   });
 
   it("lets the group owner delete once PM archived the project", () => {
-    expect(canDeleteProjectGroup({ owner: "u-owner", project_deleted_at: 1 }, owner, false)).toBe(true);
+    expect(canDeleteProjectGroup({ owner: "u-owner", project_deleted_at: 1 }, owner)).toBe(true);
   });
 
   it("lets an admin delete someone else's archived project channel", () => {
-    expect(canDeleteProjectGroup({ owner: "u-owner", project_deleted_at: 1 }, admin, false)).toBe(true);
+    expect(canDeleteProjectGroup({ owner: "u-owner", project_deleted_at: 1 }, admin)).toBe(true);
   });
 
   it("keeps a plain member out, even after the archive", () => {
-    expect(canDeleteProjectGroup({ owner: "u-owner", project_deleted_at: 1 }, member, false)).toBe(false);
-  });
-
-  it("is open to everyone in local mode (one machine, one human)", () => {
-    expect(canDeleteProjectGroup({ owner: "human", project_deleted_at: 1 }, null, true)).toBe(true);
+    expect(canDeleteProjectGroup({ owner: "u-owner", project_deleted_at: 1 }, member)).toBe(false);
   });
 });

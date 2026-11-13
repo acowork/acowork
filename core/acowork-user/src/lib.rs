@@ -72,7 +72,7 @@ mod test_support;
 // ─────────────────────────────────────────────────────────────────────────
 
 // Config
-pub use config::{AuthMode, UserServiceConfig};
+pub use config::UserServiceConfig;
 
 // Errors
 pub use error::ApiError;

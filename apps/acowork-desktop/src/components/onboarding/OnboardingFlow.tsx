@@ -2,17 +2,17 @@ import { useState, useEffect, useCallback, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { useSettingsStore, requestGatewayModeChange } from "../../stores/settingsStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { useUserProfileStore } from "../../stores/userProfileStore";
 import { useAgentStore } from "../../stores/agentStore";
 import { useAuthStore } from "../../stores/authStore";
 import { cn } from "../../lib/utils";
 import { fetchProviders } from "../../lib/gateway-api";
 import { saveOnboardedIdentity } from "../../lib/selfProfile";
-import { DEFAULT_GATEWAY_URL, getGatewayUrl } from "../../lib/config";
-import type { GatewayMode, ProviderListEntry, VaultKeyEntry, BootstrapStateView, OperationAck } from "../../lib/types";
-import { RadioGroup } from "../common/RadioGroup";
+import { getGatewayUrl } from "../../lib/config";
+import type { ProviderListEntry, VaultKeyEntry, BootstrapStateView, OperationAck } from "../../lib/types";
 import { StyledInput } from "../common/StyledInput";
+import { GatewayAddressPicker } from "../connection/GatewayAddressPicker";
 import { ErrorBox } from "../common/ErrorBox";
 import { NoNodeBanner } from "../nodes/NoNodeBanner";
 import { useNodeTopologyRefresh } from "../nodes/useNodeTopologyRefresh";
@@ -100,7 +100,7 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
 
   // Prefill the identity step from the signed-in account.
   //
-  // Under `multi_user` the wizard *patches* the logged-in account
+  // The wizard *patches* the logged-in account
   // (`saveOnboardedIdentity`), so starting from its current values keeps a
   // re-run of the wizard (Settings → reset onboarding) from overwriting the
   // stored identity with blanks. In `local` mode there is no account yet and
@@ -123,7 +123,7 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
     //
     // Fire-and-forget — don't block onboarding completion on the API result.
     //
-    // Mode-aware (`lib/selfProfile.ts`): under `multi_user` the user is
+    // (`lib/selfProfile.ts`): the user is
     // already signed in (login-then-onboarding boot order), so this PUTs the
     // logged-in account; the legacy `POST /api/users` created a *second*
     // account nobody was signed in as, which is why the identity entered here
@@ -234,20 +234,17 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
   );
 }
 
-/** Step 2: Gateway Connection — mode selection + connect */
+/** Step 2: Gateway Connection — a single server address (ADR-115).
+ *
+ * The boot pipeline has already run by the time this wizard is mounted, so
+ * this step only reports reachability. Changing the address restarts that
+ * pipeline (including auto-starting a local Gateway when localhost is
+ * picked); the wizard is re-entered automatically afterwards. */
 function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void }) {
   const { t } = useTranslation();
-  const { status, localState, checkHealth, startLocalGateway } = useGatewayStore();
-  const gatewayMode = useSettingsStore((s) => s.gatewayMode);
+  const { status, checkHealth } = useGatewayStore();
   const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
-  const setGatewayUrl = useSettingsStore((s) => s.setGatewayUrl);
-  const [urlDraft, setUrlDraft] = useState(gatewayUrl);
   const [checking, setChecking] = useState(false);
-  const [starting, setStarting] = useState(false);
-  const [startError, setStartError] = useState<string | null>(null);
-
-  // Sync urlDraft when gatewayUrl changes externally
-  useEffect(() => { setUrlDraft(gatewayUrl); }, [gatewayUrl]);
 
   // Preload provider list as soon as Gateway is connected.
   useEffect(() => {
@@ -256,43 +253,18 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
     }
   }, [status]);
 
-  // Auto-check health when mode changes or on mount (both local and remote)
+  // Re-check whenever the address changes (the boot pipeline re-runs too).
   useEffect(() => {
     checkHealth();
-  }, [gatewayMode, checkHealth]);
+  }, [gatewayUrl, checkHealth]);
 
-  const handleModeChange = (mode: GatewayMode) => {
-    void requestGatewayModeChange(mode);
-    setStartError(null);
-  };
-
-  const handleStartLocal = async () => {
-    setStarting(true);
-    setStartError(null);
-    try {
-      await startLocalGateway();
-      // After successful start, health is already checked
-    } catch {
-      setStartError(t("onboarding.gateway.startFailedToast"));
-    } finally {
-      setStarting(false);
-    }
-  };
-
-  const handleTestRemote = async () => {
-    // Save URL first
-    setGatewayUrl(urlDraft.trim());
+  const handleTest = async () => {
     setChecking(true);
     await checkHealth();
     setChecking(false);
   };
 
-  const canProceed = gatewayMode === "local"
-    ? status === "connected"
-    : status === "connected";
-
-  const localConnected = gatewayMode === "local" && status === "connected";
-  const localError = gatewayMode === "local" && (startError || localState === "error");
+  const canProceed = status === "connected";
 
   return (
     <div>
@@ -300,131 +272,40 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
       <p className="mt-1 text-xs text-text-tertiary">{t("onboarding.gateway.subtitle")}</p>
 
       <div className="mt-4 space-y-3">
-        {/* Mode selection */}
         <div className="rounded-md border border-border-outer p-3">
-          <label className="mb-2 block text-xs text-text-tertiary">{t("onboarding.gateway.modeLabel")}</label>
-          {/* Bare mode names + `noWrap`: the wizard column is narrower than
-              Settings' card column, so the qualified labels ("Local
-              (recommended)", "Relay (public internet)") wrapped the group onto
-              a broken second line — and the break point moved with the locale
-              and the global font-size step. The qualifiers belong to the mode
-              itself, so they live in the hint line below, which is already
-              per-mode and only renders for the selected one. */}
-          <RadioGroup
-            name="gatewayMode"
-            value={gatewayMode}
-            noWrap
-            options={[
-              { label: t("onboarding.gateway.modeLocal"), value: "local" as GatewayMode },
-              { label: t("onboarding.gateway.modeRemote"), value: "remote" as GatewayMode },
-              { label: t("onboarding.gateway.modeRelay"), value: "relay" as GatewayMode },
-            ]}
-            onChange={handleModeChange}
+          <GatewayAddressPicker
+            busy={checking}
+            onSelect={(url) => void useSettingsStore.getState().switchGateway(url)}
           />
-          {gatewayMode === "local" && (
-            <p className="mt-1 text-xs text-text-tertiary">
-              {t("onboarding.gateway.localHint")}
-            </p>
-          )}
-          {gatewayMode === "remote" && (
-            <p className="mt-1 text-xs text-text-tertiary">
-              {t("onboarding.gateway.remoteHint")}
-            </p>
-          )}
-          {gatewayMode === "relay" && (
-            <p className="mt-1 text-xs text-text-tertiary">
-              {t("onboarding.gateway.relayHint")}
-            </p>
-          )}
         </div>
 
-        {/* Local mode: auto-start status */}
-        {gatewayMode === "local" && (
-          <div className="rounded-md border border-border-outer p-3">
-            <div className="flex items-center gap-2 text-xs">
-              <span className="text-text-tertiary">{t("onboarding.gateway.status")}</span>
-              {starting ? (
-                <span className="text-text-tertiary">{t("onboarding.gateway.starting")}</span>
-              ) : localConnected ? (
-                <>
-                  <span className="h-2 w-2 rounded-full bg-green-500" />
-                  <span className="text-green-600 dark:text-green-400">{t("onboarding.gateway.connected")}</span>
-                </>
-              ) : (
-                <>
-                  <span className="h-2 w-2 rounded-full bg-amber-500" />
-                  <span className="text-amber-600 dark:text-amber-400">
-                    {localError ? t("onboarding.gateway.failedToStart") : t("onboarding.gateway.notStarted")}
-                  </span>
-                </>
-              )}
-            </div>
-            {localError && (
-              <div className="mt-1">
-                <ErrorBox message={startError ?? t("onboarding.gateway.startFailed")} />
-              </div>
-            )}
-            {!localConnected && !starting && (
-              <button
-                onClick={handleStartLocal}
-                className="mt-3 rounded-md btn-accent px-3 py-[var(--ui-btn-py)] text-xs font-medium"
-              >
-                Start Local Gateway
-              </button>
+        <div className="rounded-md border border-border-outer p-3">
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-text-tertiary">{t("onboarding.gateway.status")}</span>
+            {checking ? (
+              <span className="text-text-tertiary">{t("onboarding.gateway.checking")}</span>
+            ) : status === "connected" ? (
+              <>
+                <span className="h-2 w-2 rounded-full bg-green-500" />
+                <span className="text-green-600 dark:text-green-400">{t("onboarding.gateway.connectedShort")}</span>
+              </>
+            ) : (
+              <>
+                <span className="h-2 w-2 rounded-full bg-red-500" />
+                <span className="text-red-600 dark:text-red-400">{t("onboarding.gateway.cannotConnect")}</span>
+              </>
             )}
           </div>
-        )}
-
-        {/* Off-site modes (remote LAN / relay): URL config + test */}
-        {gatewayMode !== "local" && (
-          <div className="rounded-md border border-border-outer p-3">
-            <label className="mb-1 block text-xs text-text-tertiary">{t("onboarding.gateway.urlLabel")}</label>
-            <div className="flex gap-2">
-              <StyledInput
-                type="text"
-                value={urlDraft}
-                onChange={(e) => setUrlDraft(e.target.value)}
-                placeholder={gatewayMode === "relay" ? "https://<gw-id>.relay.example.com" : DEFAULT_GATEWAY_URL}
-                className="flex-1"
-              />
-              {urlDraft !== gatewayUrl && (
-                <button
-                  onClick={() => { setGatewayUrl(urlDraft.trim()); checkHealth(); }}
-                  className="rounded-md btn-accent px-3 py-[var(--ui-btn-py)] text-xs font-medium"
-                >
-                  {t("onboarding.gateway.apply")}
-                </button>
-              )}
-            </div>
-
-            <div className="mt-3 flex items-center gap-2 text-xs">
-              <span className="text-text-tertiary">{t("onboarding.gateway.status")}</span>
-              {checking ? (
-                <span className="text-text-tertiary">{t("onboarding.gateway.checking")}</span>
-              ) : status === "connected" ? (
-                <>
-                  <span className="h-2 w-2 rounded-full bg-green-500" />
-                  <span className="text-green-600 dark:text-green-400">{t("onboarding.gateway.connectedShort")}</span>
-                </>
-              ) : (
-                <>
-                  <span className="h-2 w-2 rounded-full bg-red-500" />
-                  <span className="text-red-600 dark:text-red-400">{t("onboarding.gateway.cannotConnect")}</span>
-                </>
-              )}
-            </div>
-
-            {status !== "connected" && (
-              <button
-                onClick={handleTestRemote}
-                disabled={checking || !urlDraft.trim()}
-                className="mt-3 rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
-              >
-                {checking ? t("onboarding.gateway.startingShort") : t("onboarding.gateway.testConnection")}
-              </button>
-            )}
-          </div>
-        )}
+          {status !== "connected" && (
+            <button
+              onClick={handleTest}
+              disabled={checking}
+              className="mt-3 rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
+            >
+              {checking ? t("onboarding.gateway.startingShort") : t("onboarding.gateway.testConnection")}
+            </button>
+          )}
+        </div>
       </div>
 
       <div className="mt-6 flex justify-between">
@@ -433,10 +314,10 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
         </button>
         <button
           onClick={onNext}
-          disabled={!canProceed || starting}
+          disabled={!canProceed}
           className="rounded btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium disabled:opacity-50"
         >
-          {starting ? t("onboarding.gateway.startingShort") : t("onboarding.gateway.next")}
+          {t("onboarding.gateway.next")}
         </button>
       </div>
     </div>

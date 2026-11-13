@@ -7,9 +7,9 @@
  *     (`UNREACHABLE_HINT_MS`) regardless of the death classifier, and
  *     a recovery inside the budget cancels it;
  *   - `probeKnownCandidates` is the shared boot/runtime probe: folds
- *     reachable hosts in (fastest first), skips local mode, skips an
- *     already-recovered snapshot, and discards results that settle
- *     after recovery.
+ *     reachable hosts in (fastest first), offers localhost as an ordinary
+ *     candidate, skips an already-recovered snapshot, and discards results
+ *     that settle after recovery.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
@@ -123,10 +123,15 @@ describe("probeKnownCandidates (shared boot/runtime candidate probe)", () => {
         expect(candidates.map((c) => c.url)).toEqual([CANDIDATE_URL]);
     });
 
-    it("returns 0 in local mode (pinned to loopback — nothing to probe)", async () => {
-        useSettingsStore.setState({ gatewayMode: "local" });
-        expect(await probeKnownCandidates()).toBe(0);
-        expect(fetchMock).not.toHaveBeenCalled();
+    it("offers localhost as a candidate even from a remote address (ADR-115)", async () => {
+        // There is no "local mode" short-circuit any more: a Desktop stuck on
+        // a dead LAN address must be able to reach its own machine's Gateway.
+        useSettingsStore.setState({ gatewayUrl: OLD_URL, gatewayUrlHistory: [OLD_URL] });
+        stubReachableOnly("127.0.0.1");
+        expect(await probeKnownCandidates()).toBe(1);
+        expect(useGatewayStore.getState().candidates.map((c) => c.url)).toEqual([
+            LOOPBACK_URL,
+        ]);
     });
 
     it("returns 0 when already recovered (a probe would be noise)", async () => {
@@ -136,26 +141,37 @@ describe("probeKnownCandidates (shared boot/runtime candidate probe)", () => {
     });
 
     it("discards results that settle after recovery", async () => {
-        let resolveFetch: (v: Response) => void = () => {};
+        // Every host (localhost + the history entries) gets its own probe
+        // promise, so collect ALL resolvers — a single-host resolver would
+        // leave the batch hanging and the test would time out.
+        const resolvers: ((v: Response) => void)[] = [];
         fetchMock.mockImplementation(
             () =>
                 new Promise<Response>((resolve) => {
-                    resolveFetch = resolve;
+                    resolvers.push(resolve);
                 }),
         );
         const p = probeKnownCandidates();
         // Gateway comes back while the probe is in flight.
         useChatStore.setState({ mqttConnected: true });
-        resolveFetch({ ok: true, json: async () => ({}) } as Response);
+        for (const resolve of resolvers) {
+            resolve({ ok: true, json: async () => ({}) } as Response);
+        }
         expect(await p).toBe(0);
         expect(useGatewayStore.getState().candidates).toHaveLength(0);
     });
 
-    it("empty history clears stale candidates without probing", async () => {
+    it("nothing left to probe clears stale candidates without a request", async () => {
         useGatewayStore.setState({
             candidates: [{ url: "http://stale:19876", latencyMs: 1 }],
         });
-        useSettingsStore.setState({ gatewayUrlHistory: [OLD_URL] });
+        // Current address IS localhost and it is the only known address →
+        // no alternative to offer.
+        useSettingsStore.setState({
+            gatewayUrl: LOOPBACK_URL,
+            gatewayUrlHistory: [LOOPBACK_URL],
+            lastGoodUrl: LOOPBACK_URL,
+        });
         expect(await probeKnownCandidates()).toBe(0);
         expect(useGatewayStore.getState().candidates).toHaveLength(0);
         expect(fetchMock).not.toHaveBeenCalled();

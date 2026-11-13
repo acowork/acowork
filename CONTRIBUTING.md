@@ -194,7 +194,7 @@ discussed.
 | `run_meta_layout_redline` | Session meta files have exactly one owner | ADR-024 |
 | `run_session_full_read_redline` | No full session-log read on a request path | ADR-096 |
 | `run_gateway_auth_scope_redline` | Gateway may not assert a user identity from a client claim | ADR-076 §决策 4 |
-| `run_user_auth_mode_redline` | Auth mode handling | ADR-076 |
+| `run_account_routes_redline` | Account/auth routes are always registered (no deployment auth mode) | ADR-114 |
 | `run_user_chat_path_redline` | User chat path ownership | ADR-084 |
 | `run_permission_route_redline` | Every agent/node route must live under the permission gate | ADR-087 D5 |
 | `run_lsp_registry_redline` | LSP registry ownership | ADR-091 |

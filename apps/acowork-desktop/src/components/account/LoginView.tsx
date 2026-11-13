@@ -1,5 +1,5 @@
 /**
- * Login gate for `AUTH_MODE=multi_user` (ADR-076 §决策 6 / 7).
+ * Login gate for the always-on account system (ADR-076 §决策 6 / 7, ADR-114).
  *
  * Rendered by App.tsx whenever the resolved auth state is `logged_out`.
  * Two entry modes:
@@ -8,14 +8,18 @@
  *     handing the owner a one-time `invite_token`; the owner sets the
  *     first password here (§决策 6).
  *
- * Under `AUTH_MODE=local` the store resolves to `disabled` and this
- * component is never mounted (§决策 12).
+ * Mounted only when `status === "logged_out"`; a fresh install goes
+ * to the first-boot setup view instead (ADR-114).
  */
 
 import { useState, type FormEvent } from "react";
+import { ChevronDown } from "lucide-react";
 import { useAuthStore } from "../../stores/authStore";
+import { useSettingsStore } from "../../stores/settingsStore";
 import { useTranslation } from "../../i18n/useTranslation";
 import { StyledInput } from "../common/StyledInput";
+import { GatewayAddressPicker } from "../connection/GatewayAddressPicker";
+import { cn } from "../../lib/utils";
 import brandMark from "../../../../../assets/brand-mark.svg";
 
 type Mode = "password" | "invite";
@@ -24,6 +28,7 @@ export function LoginView() {
   const { t } = useTranslation();
   const login = useAuthStore((s) => s.login);
   const firstLogin = useAuthStore((s) => s.firstLogin);
+  const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
 
   const [mode, setMode] = useState<Mode>("password");
   const [username, setUsername] = useState("");
@@ -32,6 +37,12 @@ export function LoginView() {
   const [newPassword, setNewPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // The address section is COLLAPSED by default: this view only renders
+  // once the boot pipeline resolved auth, so the current address is
+  // connected and there is nothing to switch. A failed login auto-expands
+  // it — a wrong password (or a wrong server) is exactly the moment the
+  // user needs another address (ADR-115).
+  const [pickerOpen, setPickerOpen] = useState(false);
 
   const canSubmit =
     !busy &&
@@ -57,13 +68,16 @@ export function LoginView() {
         useAuthStore.getState().error ??
           t(mode === "password" ? "account.loginFailed" : "account.firstLoginFailed"),
       );
+      // The escape hatch opens itself: a failed login is the moment the
+      // user may need a different server address.
+      setPickerOpen(true);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <div className="flex h-screen w-screen items-center justify-center bg-page-bg">
+    <div className="flex h-screen w-screen flex-col items-center justify-center bg-page-bg">
       <form
         onSubmit={submit}
         className="flex w-full max-w-xs flex-col gap-3 rounded-md border border-border-outer bg-modal-surface p-6 shadow-xl"
@@ -170,6 +184,38 @@ export function LoginView() {
         >
           {t(mode === "password" ? "account.useInvite" : "account.backToLogin")}
         </button>
+
+        {/* ADR-115: the login gate must never be a dead end. Collapsed by
+            default (the current address is connected — see `pickerOpen`);
+            the summary row expands into the full picker. Inside the card,
+            below a divider — one centered card, no second panel. */}
+        <div className="mt-1 border-t border-border-divider pt-3">
+          <button
+            type="button"
+            aria-expanded={pickerOpen}
+            onClick={() => setPickerOpen((v) => !v)}
+            className="flex w-full items-center gap-2 text-xs text-text-tertiary transition-colors hover:text-text-secondary"
+          >
+            <span className="shrink-0">{t("connection.serverAddress")}</span>
+            <span className="min-w-0 flex-1 truncate text-left font-mono text-text-secondary">
+              {gatewayUrl}
+            </span>
+            <ChevronDown
+              aria-hidden="true"
+              className={cn("h-3.5 w-3.5 shrink-0 transition-transform", pickerOpen && "rotate-180")}
+            />
+          </button>
+          {pickerOpen && (
+            <div className="mt-3">
+              <GatewayAddressPicker
+                compact
+                busy={busy}
+                onSelect={(url) => void useSettingsStore.getState().switchGateway(url)}
+                onReset={() => void useSettingsStore.getState().resetConnectionSettings()}
+              />
+            </div>
+          )}
+        </div>
       </form>
     </div>
   );

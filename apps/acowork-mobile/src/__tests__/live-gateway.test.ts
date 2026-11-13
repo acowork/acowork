@@ -62,7 +62,7 @@ const RAW_GW = envv('ACOWORK_E2E_URL')
 async function gatewayUp(): Promise<string | null> {
   if (!ENABLED || !RAW_GW) return null
   try {
-    return (await probeStatus(RAW_GW)).auth_mode === 'multi_user' ? RAW_GW : null
+    return (await probeStatus(RAW_GW)).account_state === 'ready' ? RAW_GW : null
   } catch {
     return null
   }
@@ -125,7 +125,7 @@ describe.skipIf(GW === '')('live gateway (read-only)', () => {
     }
 
     const status = await probeStatus(GW)
-    expect(status.auth_mode).toBe('multi_user')
+    expect(status.account_state).toBe('ready')
   })
 
   /**

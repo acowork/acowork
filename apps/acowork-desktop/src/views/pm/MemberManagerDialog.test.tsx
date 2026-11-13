@@ -55,7 +55,7 @@ vi.mock("../../stores/pm/projectStore", () => ({
 
 vi.mock("../../stores/authStore", () => {
   // Read the current account from a mutable module-scope holder. Tests
-  // reassign it to flip between multi_user (admin) and local (null) mode
+  // reassign it to flip between an admin and a signed-out (null) account
   // without rebuilding the mock. The holder lives on globalThis so the
   // mutable binding survives factory hoisting.
   (globalThis as unknown as { __authAccount: unknown }).__authAccount = {

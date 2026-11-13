@@ -9,15 +9,17 @@
 //! held here; the account list is read from disk per operation (it is the
 //! authority, and a stale in-memory copy would let a revoked account log in).
 //!
-//! **Only constructed under `AUTH_MODE=multi_user`** (ADR-076 §决策 12) —
-//! in `local` mode nothing in this module runs and `accounts.json` is
-//! never created.
+//! ADR-114: the account system is **always present**. There is no deployment
+//! mode in which this module does not run — what varies is how far along its
+//! first-boot lifecycle it is ([`acowork_core::account::AccountSystemState`]).
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, MutexGuard, OnceLock};
 
-use acowork_core::account::{AccountListFile, DISABLED_PASSWORD_HASH, Role, UserAccount};
+use acowork_core::account::{
+    AccountListFile, AccountSystemState, DISABLED_PASSWORD_HASH, Role, UserAccount,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -243,6 +245,10 @@ pub struct AuthService {
     pairings: Mutex<HashMap<String, PairingRecord>>,
     policy: PasswordPolicy,
     bootstrap_admin: Option<BootstrapAdmin>,
+    /// Serialises the first-boot setup critical section (ADR-114). Two
+    /// concurrent `POST /api/auth/setup` calls must not both observe
+    /// `NeedsSetup` and create two administrators.
+    setup_lock: Mutex<()>,
 }
 
 impl AuthService {
@@ -269,6 +275,7 @@ impl AuthService {
             pairings: Mutex::new(HashMap::new()),
             policy,
             bootstrap_admin,
+            setup_lock: Mutex::new(()),
         })
     }
 
@@ -583,8 +590,8 @@ impl AuthService {
         if !list.accounts.is_empty() {
             if self.bootstrap_admin.is_some() {
                 tracing::warn!(
-                    "AUTH_MODE=multi_user: [multi_user].bootstrap_admin is configured but the \
-                     account store is non-empty — ignoring it (bootstrap is first-boot-only)"
+                    "[bootstrap_admin] is configured but the account store is non-empty — \
+                     ignoring it (bootstrap is first-boot-only)"
                 );
             }
             return Ok(());
@@ -719,14 +726,139 @@ impl AuthService {
     }
 
     /// Whether the Gateway is in first-boot restricted mode: nobody can log
-    /// in as an administrator yet. Drives the HTTP middleware and
-    /// `/api/status.requires_setup`.
+    /// in as an administrator yet. Drives the HTTP middleware and the
+    /// `/api/status.account_state` published by the health snapshot.
     pub fn is_restricted(&self) -> bool {
         match self.load_accounts() {
-            Ok(list) => requires_setup(&list),
+            // ADR-114: one shared predicate. This used to call a private
+            // `requires_setup()` that ignored `disabled_at` and accepted any
+            // non-sentinel string as a hash, so `/health` (which uses
+            // `AccountSystemState::from_accounts`) and the CLI `--check`
+            // could disagree about the very same store.
+            Ok(list) => AccountSystemState::from_accounts(&list).requires_setup(),
             // An unreadable store is not "ready" either.
             Err(_) => true,
         }
+    }
+
+    /// Complete first-boot setup: make exactly one administrator loggable-in
+    /// and mint its first token pair (ADR-114).
+    ///
+    /// This is the HTTP counterpart of the TTY prompt / `admin-setup`
+    /// subcommand and deliberately drives the **same seeded admin**:
+    /// [`Self::ensure_bootstrap_admin`] creates a passwordless `admin` on an
+    /// empty store, so instead of adding a second account (which would 409
+    /// on the username) we activate that one in place. A genuinely empty
+    /// store still works — the account is created here.
+    ///
+    /// The load→check→mutate→save sequence holds `setup_lock`, so two
+    /// concurrent setup requests cannot both pass the `Ready` check. The
+    /// `Ready` check is also the endpoint's own defence independent of the
+    /// Gateway: even if the Gateway's health snapshot lags a few seconds
+    /// behind, a second setup cannot overwrite the first administrator.
+    pub fn setup_first_admin(
+        &self,
+        username: &str,
+        display_name: &str,
+        new_password: &str,
+        now: i64,
+    ) -> Result<TokenPair, AuthError> {
+        let _guard = self.setup_lock.lock().unwrap_or_else(|e| e.into_inner());
+
+        let username = username.trim().to_ascii_lowercase();
+        if username.is_empty() || !username.bytes().all(is_username_byte) {
+            return Err(AuthError::Policy(
+                "username must be lowercase letters, digits, '-' or '_'".into(),
+            ));
+        }
+        self.policy
+            .validate(new_password)
+            .map_err(AuthError::Policy)?;
+
+        let display_name = display_name.trim();
+        let display_name = if display_name.is_empty() {
+            username.clone()
+        } else {
+            display_name.to_string()
+        };
+
+        let mut list = self.load_accounts().map_err(AuthError::Store)?;
+        if AccountSystemState::from_accounts(&list) == AccountSystemState::Ready {
+            return Err(AuthError::Conflict(
+                "the account system is already initialized".into(),
+            ));
+        }
+
+        // A first-boot store seeded by `ensure_bootstrap_admin` holds one
+        // passwordless admin. Reuse it so the operator ends up with exactly
+        // one administrator, under the username they chose in the wizard.
+        let reusable = list
+            .accounts
+            .iter()
+            .position(|a| a.role == Role::Admin && a.password_hash == DISABLED_PASSWORD_HASH);
+
+        let user_id = if let Some(idx) = reusable {
+            let seed_id = list.accounts[idx].user_id.clone();
+            let collides = list
+                .find_by_username(&username)
+                .is_some_and(|other| other.user_id != seed_id);
+            if collides {
+                return Err(AuthError::Conflict(format!(
+                    "username '{username}' already exists"
+                )));
+            }
+            let stamp = iso(now);
+            let hash = password::hash_password(new_password).map_err(AuthError::Store)?;
+            let admin = &mut list.accounts[idx];
+            admin.username = username;
+            admin.display_name = display_name;
+            admin.password_hash = hash;
+            admin.password_changed_at = stamp.clone();
+            admin.updated_at = stamp;
+            admin.disabled_at = None;
+            admin.invite_token_hash = None;
+            admin.invite_expires_at = None;
+            seed_id
+        } else {
+            if list.find_by_username(&username).is_some() {
+                return Err(AuthError::Conflict(format!(
+                    "username '{username}' already exists"
+                )));
+            }
+            let stamp = iso(now);
+            let account = UserAccount {
+                user_id: uuid::Uuid::new_v4().to_string(),
+                username,
+                display_name,
+                role: Role::Admin,
+                password_hash: password::hash_password(new_password)
+                    .map_err(AuthError::Store)?,
+                password_changed_at: stamp.clone(),
+                password_expires_at: None,
+                language: "zh-CN".into(),
+                timezone: "Asia/Shanghai".into(),
+                city: None,
+                country: None,
+                occupation: None,
+                avatar: None,
+                builtin_avatar: None,
+                communication_style: None,
+                custom: HashMap::new(),
+                created_at: stamp.clone(),
+                updated_at: stamp,
+                last_login_at: None,
+                disabled_at: None,
+                invite_token_hash: None,
+                invite_expires_at: None,
+            };
+            let id = account.user_id.clone();
+            list.accounts.push(account);
+            id
+        };
+
+        list.version += 1;
+        self.save_accounts(&list).map_err(AuthError::Store)?;
+        Ok(self.mint(&user_id, Role::Admin, now))
     }
 
     // ── Account CRUD (ADR-076 §决策 5 / §决策 6, `account_api.rs`) ──
@@ -988,42 +1120,24 @@ impl AuthService {
     }
 }
 
-/// Does this store still need first-boot setup?
+/// Does this store still need first-boot setup? Read straight off disk
+/// without building an [`AuthService`] (whose constructor creates `auth/`,
+/// generates the signing key and seeds an admin — none of which a read-only
+/// `admin-setup --check` probe may do).
 ///
-/// "Nobody can get in": **no** administrator exists, or every existing
-/// administrator is still passwordless. The `all` half is load-bearing —
-/// `reset_password` also writes `DISABLED_PASSWORD_HASH`, so a bare `any`
-/// would flip a working Gateway into restricted mode (403 on every
-/// `/api/*`, login included) the moment an admin resets any password,
-/// including its own, which §1.3 invariant 6 defines as the normal
-/// administrator change-password flow.
+/// ADR-114: the predicate is [`AccountSystemState::from_accounts`], the same
+/// one the service's `/health` publishes. There used to be a second, private
+/// `requires_setup()` here that ignored `disabled_at` and accepted any
+/// non-sentinel string as a password hash; `/health` and the CLI could then
+/// reach opposite conclusions about one store. Keeping exactly one
+/// definition is the fix.
 ///
-/// ADR-084: the empty case counts as restricted. It could not arise before —
-/// the Gateway always seeded an admin before asking — but the read-only
-/// `admin-setup --check` probe asks on a store that may not exist yet, and
-/// "there is no administrator" is exactly the state the operator must be
-/// pointed at setup for.
-pub fn requires_setup(list: &AccountListFile) -> bool {
-    let admins = list.accounts.iter().filter(|a| a.role == Role::Admin);
-    let mut any = false;
-    let mut all_passwordless = true;
-    for admin in admins {
-        any = true;
-        if admin.password_hash != DISABLED_PASSWORD_HASH {
-            all_passwordless = false;
-        }
-    }
-    !any || all_passwordless
-}
-
-/// [`requires_setup`] straight off disk, without building an [`AuthService`].
-///
-/// Read-only, not even a side effect: `AuthService::new` creates `auth/` and
-/// generates the signing key, which the `--check` probe has no business
-/// doing.
+/// The "read-only" and "empty store is restricted" halves still matter: the
+/// probe runs before the service exists, and a store with no administrator
+/// is precisely the state the operator must be pointed at setup for.
 pub fn store_requires_setup(data_dir: &Path) -> bool {
     match store::load_accounts(data_dir) {
-        Ok(list) => requires_setup(&list),
+        Ok(list) => AccountSystemState::from_accounts(&list).requires_setup(),
         Err(_) => true,
     }
 }

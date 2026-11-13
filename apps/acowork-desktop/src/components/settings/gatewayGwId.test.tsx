@@ -1,5 +1,5 @@
 /**
- * The Gateway's relay device id must be visible in EVERY connection mode.
+ * The Gateway's relay device id must be reachable from the relay section.
  *
  * Why this file exists:
  *   The gw-id is what a user needs BEFORE they can fill in a relay address
@@ -8,17 +8,25 @@
  *   `gatewayMode === "relay"`, and that panel polls the configured Gateway
  *   URL. So the only place the id appeared was unreachable at the exact
  *   moment it was needed: relay mode rejects a non-https address, and the
- *   https address does not resolve until you have the id. Local mode
- *   (the mode where the id is actually readable — the Gateway is right
- *   there) showed nothing at all.
+ *   https address does not resolve until you have the id.
  *
  * What this pins:
- *   1. The gw-id row renders in all three modes.
+ *   1. The connection card is radio-sectioned (直连 / 中继 — transport
+ *      kind, NOT local vs remote: localhost and LAN addresses share one
+ *      list in the direct section). The radio is a UI section picker,
+ *      never a mode write (ADR-115: the mode stays derived from the
+ *      committed address) — so opening the relay section from ANY topology
+ *      must not touch the store. The gw-id row renders in that section for
+ *      a loopback address, a LAN address and a relay device domain alike.
  *   2. It reports the id the Gateway returned, and an em-dash when the
  *      Gateway has none (tunnel never enabled).
  *   3. The help trigger shows the stock `Tooltip` on hover — not an inline
  *      expander, not a click popup, not a toast — with content that depends
  *      on whether the Gateway has an id, and it never reflows the row.
+ *   4. The dedicated relay entry validates the TLS-only scheme INLINE
+ *      (`role="alert"` + disabled Connect) rather than committing a
+ *      `relay + http://` pair that Rust's `relay_mqtt_wss_url` would reject
+ *      forever while `/health` still answered.
  *
  * Why rendered DOM rather than source scanning:
  *   The regression is a conditional-render bug. `capsule.test.tsx` scans
@@ -33,17 +41,41 @@ import { useGatewayStore } from "../../stores/gatewayStore";
 import { GatewayTab } from "./SettingsPage";
 
 const GW_ID = "0f1e2d3c-4b5a-4678-9abc-def012345678";
+const LOOPBACK_URL = "http://127.0.0.1:19876";
+const LAN_URL = "http://10.0.0.5:19876";
+const RELAY_URL = `https://${GW_ID}.relay.example.com`;
 
 /** The row is labelled by the i18n string "Device ID" (en.json
  *  `settings.relayGwId`), so tests match the rendered label rather than a
  *  testid the production code has no reason to carry. */
 const deviceIdRow = () => screen.getByText(/^Device ID:/);
 
-/** Same idea for the "?" beside a non-loopback address in local mode. */
-const urlWarn = () => screen.getByRole("button", { name: /probes this address first/i });
+/** The connection-kind radio group (`connection.viaRelay` → "Relay"). */
+const relayRadio = () => screen.getByRole("radio", { name: "Relay" });
+
+/** The gw-id row and the relay entry live in the relay SECTION of the
+ *  connection card. Opening the section is a pure UI action — it must not
+ *  write the store (the mode stays address-derived). */
+const openRelaySection = () => fireEvent.click(relayRadio());
+
+/** The relay entry's field — labelled by `connection.relayEntry`. */
+const relayInput = () =>
+  screen.getByLabelText(/connect via relay|connect via relay/i) as HTMLInputElement;
+
+/** The relay entry's commit button (shares the `connection.connect` label
+ *  with the address picker's own button, so scope by the relay row). */
+const relayConnectButton = () => {
+  const btn = relayInput().parentElement!.querySelector("button");
+  if (!btn) throw new Error("relay Connect button not found");
+  return btn as HTMLButtonElement;
+};
 
 beforeEach(() => {
-  useSettingsStore.setState({ gatewayMode: "local", gatewayUrl: "http://127.0.0.1:19876" });
+  useSettingsStore.setState({
+    gatewayMode: "local",
+    relayActive: false,
+    gatewayUrl: LOOPBACK_URL,
+  });
   useGatewayStore.setState({ status: "connected" });
 });
 
@@ -80,7 +112,8 @@ function mockRelayStatus(gwId: string | null) {
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     }
-    // Everything else the tab pulls (agents, nodes, health) — empty.
+    // Everything else the tab pulls (agents, nodes, health) plus the address
+    // picker's probes — empty.
     return new Response("[]", {
       status: 200,
       headers: { "Content-Type": "application/json" } });
@@ -88,22 +121,32 @@ function mockRelayStatus(gwId: string | null) {
 }
 
 describe("gw-id visibility", () => {
-  it.each(["local", "remote", "relay"] as const)(
-    "shows the row in %s mode",
-    async (mode) => {
-      mockRelayStatus(GW_ID);
-      useSettingsStore.setState({ gatewayMode: mode });
-      render(<GatewayTab />);
+  /** ADR-115: passed as an ADDRESS, not a mode flag. */
+  const topologies = [
+    ["a loopback address", LOOPBACK_URL, false],
+    ["a LAN address", LAN_URL, false],
+    ["a relay device domain", RELAY_URL, true],
+  ] as const;
 
-      // The regression: in local/remote this row did not exist at all.
-      await waitFor(() => expect(deviceIdRow()).toBeTruthy());
-      expect(deviceIdRow().textContent).toContain(GW_ID);
-    },
-  );
+  it.each(topologies)("shows the row for %s", async (_label, url, relayActive) => {
+    mockRelayStatus(GW_ID);
+    useSettingsStore.setState({ gatewayUrl: url, relayActive });
+    render(<GatewayTab />);
+
+    // The regression: this row did not exist outside relay mode at all.
+    // Now the relay section opens from any topology.
+    openRelaySection();
+    await waitFor(() => expect(deviceIdRow()).toBeTruthy());
+    expect(deviceIdRow().textContent).toContain(GW_ID);
+    // Opening the section is pure UI — the derived mode is untouched
+    // (ADR-115: the radio never writes the mode).
+    expect(useSettingsStore.getState().gatewayUrl).toBe(url);
+  });
 
   it("shows an em-dash when the Gateway has no device id", async () => {
     mockRelayStatus(null);
     render(<GatewayTab />);
+    openRelaySection();
 
     await waitFor(() => expect(deviceIdRow().textContent).toContain("—"));
     expect(deviceIdRow().textContent).not.toContain(GW_ID);
@@ -112,54 +155,67 @@ describe("gw-id visibility", () => {
   it("keeps the row when the Gateway is unreachable", async () => {
     vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("ECONNREFUSED"));
     render(<GatewayTab />);
+    openRelaySection();
 
-    // The row is part of the mode card's always-on chrome, not of the
+    // The row is part of the relay section's always-on chrome, not of the
     // connection status — it must not disappear because a fetch failed.
     await waitFor(() => expect(deviceIdRow()).toBeTruthy());
   });
 });
 
-describe("relay plain-http hint", () => {
-  beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }); });
-  afterEach(() => { vi.useRealTimers(); });
+describe("relay entry validates the TLS-only scheme inline", () => {
+  const HINT = /must be the https:\/\/ device domain/i;
 
-  const HINT = /must be the https:\/\/ device domain|is not https:\/\//;
-
-  const renderRelay = (url: string) => {
+  it("rejects a plain-http address with an inline alert and a disabled Connect", async () => {
     mockRelayStatus(GW_ID);
-    useSettingsStore.setState({ gatewayMode: "relay", gatewayUrl: url });
-    return render(<GatewayTab />);
-  };
-
-  it("puts the plain-http error behind a ? on the field row", () => {
-    renderRelay("http://gw.example.com:19876");
-    // Was two red paragraphs under the input, which reflowed the card.
-    expect(screen.queryByText(HINT)).toBeNull();
-    expect(screen.getByRole("button", { name: HINT })).toBeTruthy();
-
-    fireEvent.mouseEnter(screen.getByRole("button", { name: HINT }).parentElement!);
-    act(() => { vi.advanceTimersByTime(500); });
-    expect(screen.getByText(HINT)).toBeTruthy();
-  });
-
-  it("shows no ? for an https relay address, or in remote mode", () => {
-    const { unmount } = renderRelay("https://abc.relay.example.com");
-    expect(screen.queryByRole("button", { name: HINT })).toBeNull();
-    unmount();
-
-    useSettingsStore.setState({ gatewayMode: "remote" });
     render(<GatewayTab />);
-    expect(screen.queryByRole("button", { name: HINT })).toBeNull();
+    openRelaySection();
+    await waitFor(() => expect(deviceIdRow()).toBeTruthy());
+
+    // Nothing to complain about before the user types.
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(relayConnectButton().disabled).toBe(true);
+
+    fireEvent.change(relayInput(), { target: { value: "http://gw.example.com:19876" } });
+
+    expect(screen.getByRole("alert").textContent).toMatch(HINT);
+    expect(relayConnectButton().disabled).toBe(true);
+    // And the illegal pair was never committed.
+    expect(useSettingsStore.getState().relayActive).toBe(false);
   });
 
-  it("still disables Apply and the test button for a plain-http draft", () => {
-    renderRelay("https://abc.relay.example.com");
-    fireEvent.change(screen.getByLabelText(/gateway url/i), { target: { value: "http://x" } });
-    expect((screen.getByRole("button", { name: /^apply$/i }) as HTMLButtonElement).disabled).toBe(true);
+  it("accepts an https device domain: no alert, Connect enabled", async () => {
+    mockRelayStatus(GW_ID);
+    render(<GatewayTab />);
+    openRelaySection();
+    await waitFor(() => expect(deviceIdRow()).toBeTruthy());
+
+    fireEvent.change(relayInput(), { target: { value: RELAY_URL } });
+
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(relayConnectButton().disabled).toBe(false);
+  });
+
+  it("commits relay mode only through this entry", async () => {
+    mockRelayStatus(GW_ID);
+    render(<GatewayTab />);
+    openRelaySection();
+    await waitFor(() => expect(deviceIdRow()).toBeTruthy());
+
+    fireEvent.change(relayInput(), { target: { value: RELAY_URL } });
+    await act(async () => {
+      fireEvent.click(relayConnectButton());
+      await Promise.resolve();
+    });
+
+    const s = useSettingsStore.getState();
+    expect(s.relayActive).toBe(true);
+    expect(s.gatewayMode).toBe("relay");
+    expect(s.gatewayUrl).toBe(RELAY_URL);
   });
 });
 
-describe("local-mode URL hint", () => {
+describe("gw-id help", () => {
   beforeEach(() => { vi.useFakeTimers({ shouldAdvanceTime: true }); });
   afterEach(() => { vi.useRealTimers(); });
 
@@ -182,32 +238,6 @@ describe("local-mode URL hint", () => {
     act(() => { vi.advanceTimersByTime(500); });
   };
 
-  it("keeps the non-loopback warning out of the layout, behind a ? hint", () => {
-    mockRelayStatus(GW_ID);
-    useSettingsStore.setState({ gatewayUrl: "http://10.0.0.5:19876" });
-    render(<GatewayTab />);
-
-    // No inline prose next to the address: it used to be an amber span
-    // sitting after the URL, pushing both label/value lines into a wrap.
-    expect(screen.queryByText(/probes this address first/i)).toBeNull();
-
-    fireEvent.mouseEnter(urlWarn().parentElement!);
-    act(() => { vi.advanceTimersByTime(500); });
-    expect(screen.getByText(/probes this address first/i)).toBeTruthy();
-  });
-
-  it("shows no ? for a loopback address, and none outside local mode", () => {
-    const warn = /probes this address first/i;
-
-    const { unmount } = render(<GatewayTab />);
-    expect(screen.queryByRole("button", { name: warn })).toBeNull();
-    unmount();
-
-    useSettingsStore.setState({ gatewayMode: "remote" });
-    render(<GatewayTab />);
-    expect(screen.queryByRole("button", { name: warn })).toBeNull();
-  });
-
   /** `Tooltip` renders through `createPortal` to `document.body`, so it is
    *  not inside the settings card. `.fixed` is the portal wrapper; the tip
    *  itself is the child. */
@@ -216,6 +246,7 @@ describe("local-mode URL hint", () => {
   it("explains the pairing address when an id exists", async () => {
     mockRelayStatus(GW_ID);
     render(<GatewayTab />);
+    openRelaySection();
     await waitFor(() => expect(deviceIdRow()).toBeTruthy());
 
     const rowBefore = deviceIdRow().innerHTML;
@@ -232,6 +263,7 @@ describe("local-mode URL hint", () => {
   it("explains how to get an id when the Gateway has none", async () => {
     mockRelayStatus(null);
     render(<GatewayTab />);
+    openRelaySection();
     await waitFor(() => expect(deviceIdRow().textContent).toContain("—"));
 
     hoverHelp();
@@ -248,6 +280,7 @@ describe("local-mode URL hint", () => {
   it("is a hover hint, not a click popup", async () => {
     mockRelayStatus(GW_ID);
     render(<GatewayTab />);
+    openRelaySection();
     await waitFor(() => expect(deviceIdRow()).toBeTruthy());
 
     // A click alone must NOT open it — this is what separates the stock
@@ -262,6 +295,7 @@ describe("local-mode URL hint", () => {
   it("hides again on mouse leave", async () => {
     mockRelayStatus(GW_ID);
     render(<GatewayTab />);
+    openRelaySection();
     await waitFor(() => expect(deviceIdRow()).toBeTruthy());
 
     hoverHelp();

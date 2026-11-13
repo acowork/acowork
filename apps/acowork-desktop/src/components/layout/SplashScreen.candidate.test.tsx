@@ -16,6 +16,7 @@ import { render, screen, fireEvent, act } from "@testing-library/react";
 import { SplashScreen } from "./SplashScreen";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
+import { LOCAL_GATEWAY_URL } from "../../lib/gatewayUrl";
 
 const invokeMock = vi.fn(async (..._args: unknown[]) => ({}));
 vi.mock("@tauri-apps/api/core", () => ({
@@ -89,8 +90,10 @@ describe("SplashScreen 5s candidate chooser", () => {
         );
         useSettingsStore.setState({
             gatewayMode: "remote",
+            relayActive: false,
             gatewayUrl: OLD_URL,
             gatewayUrlHistory: [OLD_URL, CANDIDATE_URL],
+            lastGoodUrl: null,
         });
         useGatewayStore.setState({
             status: "disconnected",
@@ -134,16 +137,30 @@ describe("SplashScreen 5s candidate chooser", () => {
         expect(screen.queryByText("Retry Connection")).toBeNull();
     });
 
-    it("does NOT fire the fallback in local mode (history is irrelevant)", async () => {
-        useSettingsStore.setState({ gatewayMode: "local" });
+    /**
+     * ADR-115: the fallback probe no longer short-circuits on a loopback
+     * address. It used to (`if (gatewayMode === "local") return 0`), which
+     * made "localhost" a one-way door: a dead local Gateway left the
+     * splash spinning with no way to reach the LAN Gateway the user had
+     * used before. Localhost is just another address now, so its history
+     * candidates are offered exactly like everyone else's.
+     */
+    it("offers history candidates from a loopback address too", async () => {
+        useSettingsStore.setState({
+            gatewayMode: "local",
+            gatewayUrl: LOCAL_GATEWAY_URL,
+            gatewayUrlHistory: [LOCAL_GATEWAY_URL, CANDIDATE_URL],
+        });
         render(<SplashScreen onReady={vi.fn()} />);
         await flushMicrotasks();
         await act(async () => {
             vi.advanceTimersByTime(CANDIDATE_FALLBACK_MS + 100);
         });
         await flushMicrotasks();
-        expect(useGatewayStore.getState().candidates).toHaveLength(0);
-        expect(screen.queryByText(CANDIDATE_URL)).toBeNull();
+        expect(useGatewayStore.getState().candidates.map((c) => c.url)).toContain(
+            CANDIDATE_URL,
+        );
+        expect(screen.getByText(CANDIDATE_URL)).toBeTruthy();
     });
 
     it("does not surface a candidate when ALL probes fail", async () => {
@@ -263,15 +280,19 @@ describe("SplashScreen 5s candidate chooser", () => {
      * `relay_mqtt_wss_url` only accepts `https://` device domains, so
      * every `connect_mqtt` was rejected forever while HTTP health probes
      * still answered (the connection looked "alive" but chat was dead).
-     * Picking must now flip the mode to `remote` in the same step, and
-     * the FINAL `set_gateway_config` push must be the legal (remote,
-     * candidate-url) combo.
+     *
+     * ADR-115 moves that invariant into the store: `commitGatewayUrl`
+     * drops `relayActive` for any non-https address, so the illegal
+     * (relay, http) pair can never be persisted. The FINAL
+     * `set_gateway_config` push must therefore be (remote, candidate-url).
      */
-    it("picking an http candidate while in relay mode flips the mode to remote", async () => {
+    it("picking an http candidate while in relay mode drops relay and lands on remote", async () => {
         useSettingsStore.setState({
             gatewayMode: "relay",
+            relayActive: true,
             gatewayUrl: RELAY_URL,
             gatewayUrlHistory: [RELAY_URL, CANDIDATE_URL],
+            lastGoodUrl: null,
         });
         render(<SplashScreen onReady={vi.fn()} />);
         await flushMicrotasks();
@@ -294,7 +315,8 @@ describe("SplashScreen 5s candidate chooser", () => {
         fireEvent.click(pickBtn);
         await flushMicrotasks();
 
-        // Mode flipped to remote in the same step as the URL pick.
+        // Relay opt-in dropped in the same step as the URL pick.
+        expect(useSettingsStore.getState().relayActive).toBe(false);
         expect(useSettingsStore.getState().gatewayMode).toBe("remote");
         expect(useSettingsStore.getState().gatewayUrl).toBe(CANDIDATE_URL);
         // The final config push is the legal (remote, http-lan) combo —
@@ -348,9 +370,9 @@ describe("SplashScreen 5s candidate chooser", () => {
     });
 
     /**
-     * Regression: pre-fix, the status line below the chooser kept
-     * reading "Starting Gateway..." / "Connecting to Gateway..." through
-     * the entire pick, so the user had no text-level cue that the
+     * Regression: pre-fix, the status line below the chooser kept reading
+     * "Starting Gateway: <address>" / "Connecting to Gateway: <address>"
+     * through the entire pick, so the user had no text-level cue that the
      * click had registered either. The candidate-pick path must swap
      * the status text to "Connecting to <picked-url>..." in the same
      * tick as the click.
@@ -413,9 +435,14 @@ describe("SplashScreen 5s candidate chooser", () => {
         fireEvent.click(pickBtn);
         await flushMicrotasks();
 
-        // Timeout view replaced the chooser (no more candidate row).
+        // Timeout view replaced the chooser: the transient candidate list is
+        // gone ("Keep waiting" only exists inside the chooser). The URL may
+        // still be visible in the recovery view's address picker — it is the
+        // address currently selected, and the picker is the thing that must
+        // remain available (ADR-115) — but it must no longer be offered as a
+        // candidate row to click again.
         expect(screen.getByText("Retry Connection")).toBeTruthy();
-        expect(screen.queryByText(CANDIDATE_URL)).toBeNull();
+        expect(screen.queryByText(/keep waiting/i)).toBeNull();
 
         // The dead URL is gone from the store; a fresh probe (not part
         // of this test) is the only way it can come back.

@@ -7,9 +7,8 @@ import { probeGateways, type ProbeResult } from "../../lib/gateway-probe";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
 import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
-import { Dropdown } from "../common/Dropdown";
+import { gatewayAddressOptions, isLoopbackGatewayUrl } from "../../lib/gatewayUrl";
 import { titleBarMenuPanel, titleBarMenuTrigger, useDismissMenu } from "./titleBarMenu";
-import type { GatewayMode } from "../../lib/types";
 
 /** Probe verdict for one row. Derived from the raw `ProbeResult` rather
  *  than a separate enum: `undefined` = still in flight ("pending"), the
@@ -52,48 +51,40 @@ type Verdict = "pending" | "ok" | "fail";
  *   2. what else is alive on this network?
  *
  * Reuses the pieces instead of re-deriving them:
- *   - the list is `settingsStore.gatewayUrlHistory` — the LRU of URLs
- *     that ACTUALLY connected (SplashScreen/AppLayout record on the
- *     connection lifecycle, never on a keystroke), so a typo or a dead
- *     host can never show up here as a candidate.
+ *   - the list is `gatewayAddressOptions(gatewayUrl, history, lastGoodUrl)`
+ *     — `localhost` is ALWAYS the first row (an ordinary address, per
+ *     ADR-115), then the last address that actually connected, then the
+ *     current one, then the LRU of URLs that ACTUALLY connected
+ *     (`App.tsx` records on the connection lifecycle, never on a keystroke),
+ *     so a typo or a dead host can never show up here as a candidate.
  *   - probing is `probeGateways` (per-host AbortController, 1.5s budget,
  *     `onSettled` per host) driven through local state. Deliberately NOT
- *     `probeKnownCandidates()`: that one is the boot-time failover path
- *     — it returns 0 while connected, returns 0 in local mode, and
- *     writes into `gatewayStore.candidates`, which SplashScreen's chooser
- *     owns. This menu asks the same question in the opposite situation
- *     (connected, browsing) so it must not share that state.
- *   - switching is `applyGatewayUrl` + `checkHealth` — so the
- *     relay→remote http:// correction and the authStore re-validation
- *     happen here too. The pill's old candidate pick used the same pair.
+ *     `probeKnownCandidates()`: that one is the boot-time failover path —
+ *     it returns 0 while recovered and writes into
+ *     `gatewayStore.candidates`, which SplashScreen's chooser owns. This
+ *     menu asks the same question in the opposite situation (connected,
+ *     browsing) so it must not share that state.
+ *   - switching is `switchGateway` — the whole pipeline (config push, local
+ *     spawn when the address is loopback, MQTT rebuild, auth re-init). A
+ *     bare URL write + health probe could never escape a wrong remote
+ *     address. It reboots the app through the splash, which is the honest
+ *     shape of "the backend changed".
  *   - the trigger glyph is `Globe`, the SAME icon SettingsPage gives its
- *     gateway tab (SettingsPage.tsx:38). The title-bar button and that
- *     tab are two doors to one feature, so they must not learn two
- *     shapes — a user who finds `Globe` in Settings must meet the same
- *     mark in the title bar. `Server` was tried first and is wrong:
- *     it reads as "a machine running a service", not "which network am I
- *     on", and it was the only lucide glyph this app used exactly once.
+ *     gateway tab. The title-bar button and that tab are two doors to one
+ *     feature, so they must not learn two shapes — a user who finds `Globe`
+ *     in Settings must meet the same mark in the title bar. `Server` was
+ *     tried first and is wrong: it reads as "a machine running a service",
+ *     not "which network am I on", and it was the only lucide glyph this
+ *     app used exactly once.
  *   - row tints come from `listRowSelected` / `listRowHover`
  *     (lib/ui-styles.ts) — the app-wide accent-tint family every other
  *     list (popups, side panels, file tree, search results) uses, so the
  *     cursor passing over a row reads the same here as everywhere else.
  *
- * The mode control is a label + `<select>` listbox, not three radios.
- * Two reasons, both measured against the real widget:
- *   - the three labels ("Local" / "Remote (LAN)" / "Relay (WAN)")
- *     wrapped onto two rows inside the popover, which reads as a
- *     broken layout rather than a compact mode picker;
- *   - a native listbox already has the keyboard and screen-reader
- *     contract (`role=listbox`, arrow keys, type-ahead) a hand-rolled
- *     popover list would have to re-implement. The shared `Dropdown` is
- *     the app's one `<select>` wrapper — the same one the settings tabs
- *     use, so the control looks identical everywhere.
- *
- * The mode listbox is a FILTER, not a config editor: picking a row is
- * what commits. `setGatewayMode` pushes to Rust and rebuilds MQTT, and
- * firing that from a stray selection inside a title-bar popover would
- * switch the connection out from under the user with no address chosen.
- * The live configuration's mode still marks the current row.
+ * There is no mode control. ADR-115 deleted the local/remote/relay picker:
+ * the mode is an inference from the address, so a "mode" row here would be a
+ * second, disagreeing way to write the same fact. The header names the one
+ * concept (server address) and the current row is the selected one.
  */
 export function GatewaySwitcherMenu({
   onOpenGatewaySettings,
@@ -106,18 +97,13 @@ export function GatewaySwitcherMenu({
   const { t } = useTranslation();
   const gatewayUrl = useSettingsStore((s) => s.gatewayUrl);
   const gatewayUrlHistory = useSettingsStore((s) => s.gatewayUrlHistory);
-  const configuredMode = useSettingsStore((s) => s.gatewayMode);
-  const applyGatewayUrl = useSettingsStore((s) => s.applyGatewayUrl);
-  const status = useGatewayStore((s) => s.status);
+  const lastGoodUrl = useSettingsStore((s) => s.lastGoodUrl);
   const localState = useGatewayStore((s) => s.localState);
   const startLocalGateway = useGatewayStore((s) => s.startLocalGateway);
   const checkHealth = useGatewayStore((s) => s.checkHealth);
   const gatewayUnreachable = useGatewayStore((s) => s.gatewayUnreachable);
 
   const [open, setOpen] = useState(false);
-  // Starts on the live mode so the panel opens on the relevant list
-  // instead of defaulting to a tab the user never uses.
-  const [tab, setTab] = useState<GatewayMode>(configuredMode);
   // Per-row probe outcome. `undefined` means "still in flight" — a
   // distinct pre-settle state so a row never renders as "offline"
   // while its probe is running (a black-holed address would otherwise
@@ -133,21 +119,16 @@ export function GatewaySwitcherMenu({
   // menu shell so every popover here dismisses identically.
   useDismissMenu(wrapRef, open, () => setOpen(false));
 
-  // Remote/relay browse the recorded history; local is pinned to one
-  // address (there is no second address to discover on the loopback).
-  // The current URL leads the list even if history is empty — a
-  // first-run install has a URL but no history yet, and showing an empty
-  // panel would leave the user with no address to look at.
-  const rows =
-    tab === "local"
-      ? [gatewayUrl]
-      : Array.from(new Set([gatewayUrl, ...gatewayUrlHistory]));
+  // ADR-115: one address list for every topology. `localhost` is always
+  // present; the last connected address is pinned near the top. No mode
+  // filter — the mode is derived from whichever row the user picks.
+  const rows = gatewayAddressOptions(gatewayUrl, gatewayUrlHistory, lastGoodUrl);
 
   // Probe the browsed list. `onSettled` folds each host in as it lands
   // so one black-holed address can't hold a reachable one hostage for
   // the full budget.
   useEffect(() => {
-    if (!open || tab === "local") return;
+    if (!open) return;
     const targets = rows;
     setProbes({});
     let cancelled = false;
@@ -161,7 +142,7 @@ export function GatewaySwitcherMenu({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, tab, probeRun]);
+  }, [open, probeRun, rows.join("|")]);
 
   const toggle = () => {
     setOpen((v) => {
@@ -184,25 +165,25 @@ export function GatewaySwitcherMenu({
   const switchTo = (url: string) => {
     if (url === gatewayUrl) return;
     setOpen(false);
-    // Same entry point as the outage chip's candidate pick: persists the
-    // URL, pushes it to Rust (rebuilds MQTT), persists the mode, and
-    // re-validates the auth token against the new Gateway.
-    applyGatewayUrl(url);
-    void checkHealth();
+    // Reboot the whole connection pipeline: config push, local spawn when
+    // the address is loopback, MQTT rebuild and auth re-init. A bare URL
+    // write + health probe could never escape a wrong remote address.
+    void useSettingsStore.getState().switchGateway(url);
   };
-
-  const isLocalTab = tab === "local";
 
   // Outage reason, mirroring the wording the pill always used. Kept as
   // three states because "which address is dead" and "is the process
   // even running" have different fixes, and only the second one is
   // answered by the Start button below.
-  const isLocal = configuredMode === "local";
+  // Derived from the address — there is no independent mode flag to read,
+  // and the copy no longer says "local Gateway": since ADR-115 the user has
+  // one setting (a server address), not a local/remote mode to interpret.
+  const isLocal = isLoopbackGatewayUrl(gatewayUrl);
   const isStarting = localState === "starting";
   const outageLabel = isLocal
     ? isStarting
-      ? t("splashScreen.bannerLocalStarting")
-      : t("splashScreen.bannerLocalDown")
+      ? t("splashScreen.bannerStarting")
+      : t("splashScreen.bannerNotRunning")
     : t("splashScreen.bannerRemoteDown");
 
   return (
@@ -288,31 +269,12 @@ export function GatewaySwitcherMenu({
             </div>
           )}
 
-          {/* Label left, listbox + Details button right — one row at
-              any language width. The label is the settings tab's own
-              wording so the two screens name the concept identically.
-
-              Two controls share the row, so widths are pinned by side:
-              the listbox keeps `flex-1` to render "Relay" without
-              truncation, the Details button is `shrink-0` so it never
-              gets squeezed, and `ml-auto` is dropped (the button is the
-              right-anchor now, not the listbox). */}
-          <div className="flex items-center gap-2 border-b border-border-divider px-1 pb-2">
+          {/* ADR-115: no mode filter. One header row names the single
+              concept (server address) and keeps the Details shortcut. */}
+          <div className="flex items-center justify-between gap-2 border-b border-border-divider px-1 pb-2">
             <span className="shrink-0 text-xs text-text-tertiary">
-              {t("settings.gatewayMode")}
+              {t("connection.serverAddress")}
             </span>
-            <Dropdown
-              size="small"
-              value={tab}
-              onChange={(v) => setTab(v as GatewayMode)}
-              options={[
-                { value: "local", label: t("settings.local") },
-                { value: "remote", label: t("settings.remote") },
-                { value: "relay", label: t("settings.relay") },
-              ]}
-              aria-label={t("settings.gatewayMode")}
-              className="min-w-0 flex-1"
-            />
             {onOpenGatewaySettings && (
               <button
                 type="button"
@@ -324,83 +286,40 @@ export function GatewaySwitcherMenu({
             )}
           </div>
 
-          {/* Local: one address, no discovery. The lifecycle row is the
-              useful part (a local Gateway that isn't running is the
-              common failure), so it gets Start — the same action
-              SettingsPage's local card offers. */}
-          {isLocalTab ? (
-            <div className="pt-2">
-              <p className="truncate px-1 font-mono text-xs" title={gatewayUrl}>
-                {gatewayUrl}
-              </p>
-              <div className="mt-1.5 flex items-center justify-between gap-2 px-1">
-                <StatusRow status={status} localState={localState} />
-                {localState !== "running" && localState !== "starting" && (
+          <ul className="mt-1 flex max-h-64 flex-col gap-0.5 overflow-auto">
+            {rows.map((url) => {
+              const current = url === gatewayUrl;
+              // A row is switchable ONLY once its probe has positively
+              // answered `/health` — a whitelist, not a blacklist of the
+              // failures. The one exemption is `localhost`: when no local
+              // Gateway is online the boot pipeline spawns one, so an
+              // offline loopback row is still a valid way out of a bad
+              // remote address.
+              const reachable =
+                probes[url]?.ok === true || isLoopbackGatewayUrl(url);
+              return (
+                <li key={url}>
                   <button
                     type="button"
-                    onClick={() => void startLocalGateway()}
-                    className="btn-solid shrink-0 rounded-md px-2 py-1 text-xs font-medium"
+                    onClick={() => switchTo(url)}
+                    disabled={current || !reachable}
+                    title={url}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left transition-colors",
+                      current ? listRowSelected : listRowHover,
+                      !reachable && "cursor-not-allowed opacity-50",
+                    )}
                   >
-                    {t("settings.startGateway")}
+                    <span className="truncate font-mono text-xs">{url}</span>
+                    <RowVerdict
+                      probe={probes[url]}
+                      current={current}
+                    />
                   </button>
-                )}
-              </div>
-            </div>
-          ) : (
-            <ul className="mt-1 flex max-h-64 flex-col gap-0.5 overflow-auto">
-              {rows.map((url) => {
-                const current = url === gatewayUrl;
-                // A row is switchable ONLY once its probe has positively
-                // answered `/health` — a whitelist, not a blacklist of
-                // the failures. Anything else (still in flight, rejected,
-                // never probed) is disabled, because clicking it can only
-                // do one thing: swap a working Gateway for a connection
-                // that then fails `checkHealth`, stranding the user.
-                //
-                // Gating on `fail` alone left the exact window an attacker
-                // — or a user — reaches for: open the menu, click before
-                // the first probe settles. A few hundred ms is all it takes,
-                // and "the row greyed out a moment ago" is the whole answer
-                // to why it now can't be clicked.
-                //
-                // No local-mode exemption is needed: that tab renders
-                // `rows = [gatewayUrl]`, i.e. the current address alone,
-                // which `current` already disables.
-                const reachable = probes[url]?.ok === true;
-                return (
-                  <li key={url}>
-                    <button
-                      type="button"
-                      onClick={() => switchTo(url)}
-                      disabled={current || !reachable}
-                      title={url}
-                      className={cn(
-                        "flex w-full items-center justify-between gap-2 rounded px-2 py-1.5 text-left transition-colors",
-                        // `listRowSelected` bundles its own `hover:` arm —
-                        // without it the hover tint would win over the
-                        // selection while the cursor sits on the row
-                        // (Tailwind emits hover variants after plain
-                        // utilities), and the active row would grey out
-                        // under the cursor exactly when you click it.
-                        current ? listRowSelected : listRowHover,
-                        // A disabled row must not light up under the
-                        // cursor while refusing the click (`listRowHover`
-                        // is a bare `hover:` utility with no disabled arm).
-                        !reachable && "cursor-not-allowed opacity-50",
-                      )}
-                    >
-                      <span className="truncate font-mono text-xs">{url}</span>
-                      <RowVerdict
-                        probe={probes[url]}
-                        current={current}
-                        configuredMode={configuredMode}
-                      />
-                    </button>
-                  </li>
-                );
-              })}
-            </ul>
-          )}
+                </li>
+              );
+            })}
+          </ul>
         </div>
       )}
     </div>
@@ -423,21 +342,19 @@ export function GatewaySwitcherMenu({
 function RowVerdict({
   probe,
   current,
-  configuredMode,
 }: {
   probe: ProbeResult | undefined;
   current: boolean;
-  configuredMode: GatewayMode;
 }) {
   const { t } = useTranslation();
   const verdict: Verdict = !probe ? "pending" : probe.ok ? "ok" : "fail";
   if (current) {
-    // Relay mode's own label matters here: an https:// relay address and
-    // a plain remote address look alike in the list, and picking one
-    // silently flips the mode (applyGatewayUrl's relay→remote fix).
+    // ADR-115: there is no user-visible mode to label any more. The row
+    // the app is connected to just says so; the dot's question is
+    // "which OTHERS are reachable".
     return (
       <span className="flex shrink-0 items-center gap-1.5 text-11 text-text-secondary">
-        {t(`settings.${configuredMode}`)}
+        {t("settings.connected")}
         <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
       </span>
     );
@@ -465,49 +382,6 @@ function RowVerdict({
       <span className="text-11 text-text-tertiary tabular-nums">
         {Math.round(probe?.latencyMs ?? 0)}ms
       </span>
-    </span>
-  );
-}
-
-/** Connection status line — the same wording as SettingsPage's row so
- *  the two never disagree. localState wins in local mode because that's
- *  where the Gateway actually lives (a remote address can be answered
- *  by an externally-owned process). */
-function StatusRow({
-  status,
-  localState,
-}: {
-  status: string;
-  localState: string;
-}) {
-  const { t } = useTranslation();
-  const local = localState === "running";
-  const starting = localState === "starting";
-  const tone = local || status === "connected"
-    ? "text-emerald-600 dark:text-emerald-400"
-    : status === "error"
-      ? "text-red-600 dark:text-red-400"
-      : "text-text-tertiary";
-  const label = starting
-    ? t("settings.starting")
-    : local || status === "connected"
-      ? t("settings.connected")
-      : status === "error"
-        ? t("settings.error")
-        : t("settings.disconnected");
-  return (
-    <span className={cn("flex items-center gap-2 text-xs", tone)}>
-      <span
-        className={cn(
-          "h-2 w-2 rounded-full",
-          local || status === "connected"
-            ? "bg-emerald-500"
-            : status === "error"
-              ? "bg-red-500"
-              : "bg-zinc-400",
-        )}
-      />
-      {label}
     </span>
   );
 }

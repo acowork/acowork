@@ -6,9 +6,9 @@
 //! kept unencrypted: login must work while the Vault is locked
 //! (ADR-076 §决策 1).
 //!
-//! `accounts.json` is **only created under `AUTH_MODE=multi_user`**
-//! (ADR-076 §决策 12). Under `local` the presentation store
-//! (`user_profiles.json`) is unchanged and this module is never called.
+//! ADR-114: the account system is always on, so `accounts.json` is the
+//! authoritative store in every deployment. `user_profiles.json` is a
+//! derived presentation view rebuilt from it by `sync_profiles()`.
 
 use acowork_core::account::AccountListFile;
 use std::path::{Path, PathBuf};

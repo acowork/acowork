@@ -54,7 +54,7 @@ function account(role: Role, user_id?: string, display_name?: string): UserAccou
 
 async function signIn(role: Role, registrationOpen: boolean) {
   useAuthStore.setState({
-    mode: "multi_user",
+    accountState: "ready",
     status: "logged_in",
     account: account(role),
     accessToken: "token",
@@ -79,7 +79,7 @@ describe("UserList invite affordance (ADR-076 §决策 6)", () => {
         text: async () => "{}",
       })),
     );
-    useAuthStore.setState({ mode: "unknown", status: "unknown", account: null });
+    useAuthStore.setState({ accountState: "unknown", status: "unknown", account: null });
     mqttHandlers.clear();
   });
 

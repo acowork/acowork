@@ -15,6 +15,7 @@ import { initWorkspaceFsListener } from "./lib/workspaceFsEvents";
 import { initDocTreeChangeListener } from "./lib/docFsEvents";
 import { useGatewayStore } from "./stores/gatewayStore";
 import { useSettingsStore } from "./stores/settingsStore";
+import { useConnectionStore } from "./stores/connectionStore";
 import { log } from "./lib/logger";
 import { isRecoveryReload, clearRecoveryReload } from "./lib/recoveryReload";
 import { initGatewayConnectivity } from "./lib/connectivity/gatewayConnectivity";
@@ -31,11 +32,17 @@ function App() {
     return localStorage.getItem("acowork_onboarding") === "completed";
   });
 
-  const [gatewayReady, setGatewayReady] = useState(isRecoveryReload);
+  // ADR-115: the boot gate lives in a store, not local state. Changing the
+  // server address from the login / setup screen calls `restart()`, which
+  // drops `ready` and bumps `epoch` so a fresh SplashScreen boot runs
+  // against the new address (including auto-spawning a local Gateway when
+  // the picked address is localhost). A terminal local `useState(true)` was
+  // the reason a wrong address could never be escaped.
+  const gatewayReady = useConnectionStore((s) => s.ready);
+  const bootEpoch = useConnectionStore((s) => s.epoch);
 
-  // ADR-076 §决策 12: resolve the deployment auth mode once the Gateway is
-  // reachable, and restore a stored session under multi_user. Runs for the
-  // recovery-reload path too (gatewayReady starts true).
+  // ADR-114: resolve the account state once the Gateway is reachable, and
+  // restore a stored session. Runs for the recovery-reload path too.
   const [authProbed, setAuthProbed] = useState(false);
   useEffect(() => {
     if (!gatewayReady) return;
@@ -44,7 +51,7 @@ function App() {
       .getState()
       .init()
       .finally(() => setAuthProbed(true));
-  }, [gatewayReady]);
+  }, [gatewayReady, bootEpoch]);
 
   const authStatus = useAuthStore((s) => s.status);
 
@@ -109,26 +116,16 @@ function App() {
     showWindow();
   }, []);
 
-  // Connection lifecycle → gateway URL history.
-  //
-  //   - On CONNECTED:        record the URL (known-good Gateway).
-  //   - On DISCONNECTED:     if we WERE connected, also record (the user
-  //                          just successfully disconnected from this URL,
-  //                          typically after typing a new one — it's a
-  //                          candidate we know worked recently).
-  //
-  // We do NOT record inside `setGatewayUrl`: an address change alone
-  // doesn't mean it connected. This way typos and unreachable hosts
-  // never pollute the candidate list shown by SplashScreen's 5s
-  // fallback chooser / the SettingsPage combo.
+  // Connection lifecycle → gateway URL history. Record ONLY on a genuine
+  // CONNECTED transition: a URL the user typed but never reached must never
+  // become a "known-good" address (that was how a wrong remote address kept
+  // winning the next boot).
   useEffect(() => {
     const unsub = useGatewayStore.subscribe((state, prev) => {
-      const record = useSettingsStore.getState().recordGatewayUrl;
-      const url = useSettingsStore.getState().gatewayUrl;
       if (state.status === "connected" && prev.status !== "connected") {
-        record(url);
-      } else if (prev.status === "connected" && state.status !== "connected") {
-        record(url);
+        useSettingsStore.getState().recordGatewayUrl(
+          useSettingsStore.getState().gatewayUrl,
+        );
       }
     });
     return unsub;
@@ -156,7 +153,10 @@ function App() {
   if (!gatewayReady) {
     return (
       <div className="h-screen w-screen overflow-hidden">
-        <SplashScreen onReady={() => setGatewayReady(true)} />
+        <SplashScreen
+          key={bootEpoch}
+          onReady={() => useConnectionStore.getState().markReady()}
+        />
       </div>
     );
   }
@@ -181,7 +181,7 @@ function App() {
           // hanging on a blank screen.
           <div className="flex h-screen w-screen items-center justify-center bg-page-bg" />
         ) : !onboardingDone ? (
-          // ADR-076 §决策 7: the account comes first — under `multi_user` the
+          // ADR-076 §决策 7: the account comes first — with the always-on account system the
           // wizard PATCHES the signed-in account, so it must not run before
           // the login gate.
           <OnboardingFlow onComplete={() => setOnboardingDone(true)} />

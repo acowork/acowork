@@ -224,13 +224,12 @@ pub async fn init_local_gateway(
         }
     }
 
-    let base_url = state.gateway.read().await.base_url().to_string();
-
     // Probe-then-spawn: the spawn path itself re-checks reachability under
     // a lock (concurrency-safe); here we just need the outcome.
     let ownership = spawn_gateway(&state, &app_handle)
         .await
         .map_err(DependencyNotReady::install_failed)?;
+    let base_url = adopt_spawned_base_url(&state, &ownership).await;
 
     // Wait for READY on the configured URL. When ownership is "foreign",
     // the gateway is already up; this wait doubles as the health probe.
@@ -241,6 +240,41 @@ pub async fn init_local_gateway(
         base_url,
         ownership: ownership.as_str().to_string(),
     })
+}
+
+/// The address a Desktop-spawned Gateway actually serves reliably.
+///
+/// `spawn_gateway` starts the child on `0.0.0.0:{GATEWAY_HTTP_PORT}` (the
+/// 2026-11-13 product decision — see the spawn code), so the canonical
+/// `http://127.0.0.1:{GATEWAY_HTTP_PORT}` is always one of its valid
+/// addresses. A configured *loopback alias* — `http://localhost:19876`,
+/// `http://[::1]:19876`, or a different port — cannot be served by that
+/// child, so probing and every later request would hit a black hole while
+/// the process runs happily on the real port. That is exactly the
+/// "mode=local but address=remote" deadlock in another guise: the URL
+/// decides whether we spawn, so once we DID spawn, Rust must own the truth
+/// about where the child answers. The canonical URL is preferred over the
+/// machine's LAN IP: loopback is immune to every future network change.
+///
+/// Returns the URL the caller should use (and report back to the frontend)
+/// after re-pointing the client when needed.
+async fn adopt_spawned_base_url(
+    state: &tauri::State<'_, AppState>,
+    ownership: &GatewayOwnership,
+) -> String {
+    let mut base_url = state.gateway.read().await.base_url().to_string();
+    if *ownership != GatewayOwnership::Owned {
+        return base_url;
+    }
+    let canonical = defaults::GATEWAY_HTTP_URL.to_string();
+    if base_url != canonical {
+        tracing::warn!(
+            "[BOOT] spawned Gateway listens on {canonical}; re-pointing base_url from {base_url}"
+        );
+        state.gateway.write().await.set_base_url(canonical.clone());
+        base_url = canonical;
+    }
+    base_url
 }
 
 /// Time budget for waiting on the Gateway bootstrap phase (seconds).
@@ -467,7 +501,7 @@ pub async fn start_local_gateway(
     let ownership = spawn_gateway(&state, &app_handle)
         .await
         .map_err(DependencyNotReady::install_failed)?;
-    let base_url = state.gateway.read().await.base_url().to_string();
+    let base_url = adopt_spawned_base_url(&state, &ownership).await;
     let client = bootstrap_probe_client()?;
     wait_for_bootstrap_ready(&client, &base_url, BOOTSTRAP_TIMEOUT_SECS).await?;
     Ok(GatewayBootResult {
@@ -504,12 +538,19 @@ pub async fn spawn_gateway(
     let mut proc_guard = state.gateway_process.lock().await;
 
     // 1) In-process handle check: did we already spawn one?
-    if let Some(ref child) = *proc_guard
-        && child_output_is_alive(child)
+    if let Some(ref mut child) = *proc_guard
+        && child_process_is_alive(child)
     {
         tracing::info!("[BOOT] Gateway already running (in-process handle), skipping spawn");
         return Ok(GatewayOwnership::Owned);
     }
+    // The handle is stale (the child exited since we spawned it): clear it
+    // and fall through to probe/spawn. The previous "alive" check compared
+    // `child.id() > 0`, which is ALWAYS true — a reaped or dead child kept
+    // its spawn-time PID — so a crashed/hung Gateway could never be
+    // respawned: every retry hit "already running, skipping spawn" and the
+    // boot loop timed out forever (2026-11-14).
+    *proc_guard = None;
 
     // 2) URL probe: is there already a Gateway listening on the
     //    configured URL? Covers a manually-started Gateway, a remote
@@ -524,6 +565,41 @@ pub async fn spawn_gateway(
             base_url
         );
         return Ok(GatewayOwnership::Foreign);
+    }
+
+    // 2b) A Gateway mid-STARTUP holds the port before /health answers (a
+    //     debug build needs seconds to bring up user/pm/doc/memory). One
+    //     failed probe must NOT condemn it: 2026-11-13 incident — the
+    //     Desktop killed a script-started remote-mode Gateway inside its
+    //     startup window and replaced it with a loopback-only child, and
+    //     every phone pairing against the LAN address went dark. Retry
+    //     briefly; only a port holder that never wakes up is stale.
+    #[cfg(target_os = "windows")]
+    {
+        if !pids_listening_on(defaults::GATEWAY_HTTP_PORT).is_empty() {
+            use tokio::time::{sleep, Duration};
+            const STARTUP_GRACE_ATTEMPTS: u32 = 16; // ~8 s at 500 ms
+            for attempt in 1..=STARTUP_GRACE_ATTEMPTS {
+                tracing::info!(
+                    "[BOOT] port {} is held but /health did not answer — waiting for a starting Gateway (attempt {}/{})",
+                    defaults::GATEWAY_HTTP_PORT,
+                    attempt,
+                    STARTUP_GRACE_ATTEMPTS
+                );
+                sleep(Duration::from_millis(500)).await;
+                if is_gateway_reachable(&base_url).await {
+                    tracing::info!(
+                        "[BOOT] Gateway became reachable at {} — adopting (foreign), skipping spawn",
+                        base_url
+                    );
+                    return Ok(GatewayOwnership::Foreign);
+                }
+            }
+            tracing::warn!(
+                "[BOOT] port {} is held but its owner never answered /health within the grace window — treating it as stale",
+                defaults::GATEWAY_HTTP_PORT
+            );
+        }
     }
 
     // 3) Kill any stale local Gateway from a previous run.
@@ -548,9 +624,29 @@ pub async fn spawn_gateway(
         .map_err(|e| format!("Failed to get resource dir: {}", e))?;
     tracing::info!("[BOOT] Tauri resource_dir: {}", resource_dir.display());
 
+    // Advertise host: the default-route interface's IPv4 — the address
+    // LAN peers (phone QR pairing, remote nodes) can actually reach.
+    // Falls back to loopback when no route exists (fully offline
+    // machine: the 0.0.0.0 bind below still serves loopback clients).
+    // Virtual adapters (WSL vEthernet, security-suite NICs) sort first
+    // in interface enumeration, so the interface LIST must never be
+    // used for this — see `netinfo::default_route_ipv4`.
+    let advertise_host = crate::commands::netinfo::default_route_ipv4()
+        .unwrap_or_else(|| "127.0.0.1".to_string());
+    tracing::info!("[BOOT] Local Gateway advertise host: {advertise_host}");
+
     let mut command = Command::new(&gateway_bin);
     command
         .current_dir(&resource_dir)
+        // A daemon child must have NO interactive capability. In dev the
+        // Desktop itself runs inside a terminal (`npm run tauri dev`), so
+        // inheriting fd 0/1/2 gives the Gateway a real TTY and
+        // `cli::can_prompt_interactively()` then claims "a human is
+        // attached" — on a fresh install that sent the Gateway into
+        // rpassword's blocking first-boot prompt and it never bound a port
+        // (2026-11-14). Gateway diagnostics go to its own rolling log
+        // file; stdout/stderr stay inherited for the dev console.
+        .stdin(std::process::Stdio::null())
         .env("ACOWORK_GATEWAY_DAEMON", "true")
         .env("ACOWORK_GATEWAY_LOG_LEVEL", "debug")
         .env("RUST_LOG", "debug,h2=info,hyper=info,hyper_util=info,tower=info")
@@ -558,27 +654,20 @@ pub async fn spawn_gateway(
             "ACOWORK_LSP_CONFIG_DIR",
             resource_dir.to_string_lossy().to_string(),
         )
-        // Pin the advertise host to loopback (ADR-055 D3). The Gateway's
-        // HTTP API listens only on `config.http.host` (127.0.0.1 by
-        // default), and the local node downloads .agent packages from
-        // `http://{advertise_host}:{port}/api/packages/...`. When
-        // advertise_host is left unset the Gateway auto-detects a LAN IP
-        // (resolve_advertise_host), which a loopback-only listener cannot
-        // serve — every install then fails with connection refused and
-        // onboarding stalls on "waiting" states. Remote nodes are
-        // unaffected: they keep using the gateway's own resolved
-        // advertise host when configured.
-        .env("ACOWORK_GATEWAY_ADVERTISE_HOST", "127.0.0.1")
-        // Pin the BIND addresses to loopback too (CLI > TOML). A config
-        // file left over from remote-style experiments (`[http]`/`[mqtt]`
-        // host = 0.0.0.0) would otherwise leak a Desktop-spawned Gateway
-        // onto the LAN and make it IP-sensitive again. Local mode is
-        // loopback-only: remote nodes attach to a remote-mode Gateway,
-        // never to one spawned by Desktop.
+        // 2026-11-13 product decision: bind 0.0.0.0 (both listeners), not
+        // loopback. A loopback-only child made the phone's pairing QR —
+        // which carries the LAN IP — permanently unreachable: Desktop
+        // worked on localhost while every other device was locked out,
+        // the exact "one client works, everyone else dead" shape ADR-115
+        // exists to prevent. Safe now because the account system is
+        // ALWAYS on (ADR-114: every route requires a bearer token except
+        // a tiny public set, and first-boot setup is loopback-peer-only
+        // regardless of bind).
+        .env("ACOWORK_GATEWAY_ADVERTISE_HOST", &advertise_host)
         .arg("--addr")
-        .arg(format!("127.0.0.1:{}", defaults::GATEWAY_HTTP_PORT))
+        .arg(format!("0.0.0.0:{}", defaults::GATEWAY_HTTP_PORT))
         .arg("--mqtt-addr")
-        .arg(format!("127.0.0.1:{}", defaults::GATEWAY_MQTT_PORT));
+        .arg(format!("0.0.0.0:{}", defaults::GATEWAY_MQTT_PORT));
     // Suppress the pop-up Windows Terminal / conhost window. The Gateway
     // is a console-subsystem binary, so when spawned from a non-console
     // parent (the Tauri WebView2 host), Windows otherwise allocates a new
@@ -649,9 +738,9 @@ pub async fn stop_local_gateway(state: tauri::State<'_, AppState>) -> Result<(),
 /// Check if the local Gateway process is currently running.
 #[tauri::command]
 pub async fn get_local_gateway_status(state: tauri::State<'_, AppState>) -> Result<bool, String> {
-    let proc = state.gateway_process.lock().await;
-    if let Some(ref child) = *proc {
-        Ok(child_output_is_alive(child))
+    let mut proc = state.gateway_process.lock().await;
+    if let Some(ref mut child) = *proc {
+        Ok(child_process_is_alive(child))
     } else {
         Ok(false)
     }
@@ -1235,12 +1324,17 @@ fn parse_netstat_listeners(output: &str, port: u16) -> Vec<u32> {
 }
 
 /// Check if a child process output indicates it is alive.
-fn child_output_is_alive(child: &std::process::Child) -> bool {
-    // Child::id() returns the PID assigned at spawn; if the process
-    // was never spawned or has been reaped, id() still returns the
-    // original PID. For our purposes, we treat a non-zero PID as
-    // "was successfully spawned".
-    child.id() > 0
+/// Whether the spawned Gateway child is still running.
+///
+/// `Child::id()` always returns the spawn-time PID, even after the process
+/// exits and is reaped — it can never prove liveness. `try_wait` can:
+/// `Ok(None)` means the OS still has the process running. Note this only
+/// covers a DEAD child; a child that is alive but hung (never bound its
+/// port) is not detected here — the port-holder grace window in
+/// `spawn_gateway` step 2b and the bootstrap timeout are the guards for
+/// that shape.
+fn child_process_is_alive(child: &mut std::process::Child) -> bool {
+    matches!(child.try_wait(), Ok(None))
 }
 
 /// Resolve the PIDs of processes listening on a TCP port (Windows

@@ -25,7 +25,7 @@ import { UserAvatar } from "../common/UserAvatar";
 import { ChangePasswordModal } from "./ChangePasswordModal";
 
 interface AccountMenuProps {
-  /** Kept for the non-multi_user path: open user preferences (old behaviour). */
+  /** Fallback: open user preferences when no account menu is available. */
   onOpenProfile: () => void;
 }
 

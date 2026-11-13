@@ -221,7 +221,7 @@ pub fn reconcile_and_persist_mcp_tools(
 ///
 /// ## Why this exists
 ///
-/// Under `AUTH_MODE=multi_user` the Gateway's `auth_middleware` gates every
+/// ADR-114: accounts are always on, so the Gateway's `auth_middleware` gates every
 /// `/api/*` route, and the pm / doc MCP endpoints are no exception — they
 /// are Gateway reverse-proxies like any other. A Runtime that connects
 /// without a machine credential gets a 401 on `tools/list`, which the
@@ -318,8 +318,8 @@ fn resolve_node_token_template(
 /// `node_token` is the machine credential the Node injected at spawn
 /// (`--mqtt-password`, which carries the same node_token value the Node
 /// itself uses). It is substituted into the Gateway-published
-/// `{node_token}` header placeholder so pm / doc MCP survive
-/// `AUTH_MODE=multi_user`; see [`resolve_node_token_template`]. Pass
+/// `{node_token}` header placeholder so pm / doc MCP survive the
+/// always-on auth gate; see [`resolve_node_token_template`]. Pass
 /// `None` in standalone mode, where no Gateway credential exists.
 pub async fn connect_mcp_with_reconcile_and_filter(
     work_dir: &Path,

@@ -4,8 +4,7 @@
  * The Desktop talks to the Gateway through ~170 raw `fetch` call sites
  * spread across stores and components. Rather than thread an
  * `Authorization` header through every one of them (and risk silently
- * missing one — a missing header under `multi_user` is a 401 with no
- * obvious cause), we install a single interceptor on `window.fetch` that:
+ * missing one — a missing header is a 401 with no obvious cause), we install a single interceptor on `window.fetch` that:
  *
  *   1. only touches requests aimed at the Gateway (other origins —
  *      LSP relay, the webview's own asset protocol — pass through),
@@ -20,11 +19,11 @@
  * This is a *consumer*: it takes tokens and reports rejections, it never
  * decides when to rotate — all of that lives in `lib/session/tokens.ts`.
  *
- * Under `AUTH_MODE=local` the store's mode is never `multi_user`, so the
- * interceptor is a pure pass-through (§决策 12).
+ * ADR-114: the account system is always present, so there is no mode
+ * that turns this interceptor off. `acquire()` returns null when no
+ * session exists and the request passes through untouched.
  */
 
-import { useAuthStore } from "../stores/authStore";
 import { acquire, reportRejected } from "./session/tokens";
 import { getGatewayUrl } from "./config";
 import { log } from "./logger";
@@ -78,10 +77,7 @@ export function installAuthFetchInterceptor(): () => void {
 
   window.fetch = async (input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
     const url = requestUrl(input);
-    const auth = useAuthStore.getState();
-
     if (
-      auth.mode !== "multi_user" ||
       !targetsGateway(url) ||
       url.includes("/api/auth/") ||
       hasAuthHeader(requestHeaders(input, init))

@@ -54,7 +54,7 @@ export function installGatewayAuthBridge(): void {
   // Adopt the persisted pair before `authStore.init()` gets to run. The boot
   // commands (SplashScreen → `init_local_gateway` / `connect_mqtt`, agent
   // installs) execute before the App-level auth gate resolves, and under
-  // `multi_user` they must carry a token — otherwise every one of them
+  // the always-on account system (ADR-114) they must carry a token — otherwise every one of them
   // answers 401. `init()` later re-reads the same values, so this only moves
   // the adoption earlier.
   restore();

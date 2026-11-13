@@ -3,18 +3,19 @@
  * (since it absorbed the old GatewayStatusChip) the app's only Gateway
  * outage affordance.
  *
- * What this pins (each was a real way to get it wrong):
- *   1. The mode listbox is a FILTER, not a config editor. Selecting
- *      "local" must NOT call `setGatewayMode` — that pushes to Rust and
- *      rebuilds MQTT, which would switch the connection out from under
- *      the user with no address chosen.
- *   2. Picking a row switches through `applyGatewayUrl` + `checkHealth`
- *      (the old chip's entry point), NOT `setGatewayUrl`. `setGatewayUrl`
- *      alone skips the relay→remote correction and the auth re-validation.
- *   3. The list is `gatewayUrlHistory` (URLs that actually connected) with
- *      the current URL forced to the front — a first-run install has a URL
- *      but no history, and the panel must not be empty then.
- *   4. Probing is per-row and local; the panel must not write into
+ * ADR-115 changes what this pins. The old contract was "the mode listbox is
+ * a FILTER, not a config editor"; the control itself is gone, because a
+ * user-visible local/remote mode was the thing that made a wrong address
+ * unrecoverable. What is load-bearing now:
+ *
+ *   1. There is no mode control at all — `localhost` is an ordinary row.
+ *   2. Picking a row goes through `switchGateway` (session drop + full boot
+ *      restart), never a bare URL write.
+ *   3. The list is `gatewayAddressOptions`: localhost, then last-good, then
+ *      the current address, then connected history.
+ *   4. A `localhost` row is clickable even when its probe failed — that is
+ *      the escape hatch that spawns a local Gateway.
+ *   5. Probing is per-row and local; the panel must not write into
  *      `gatewayStore.candidates`, which the boot-time chooser owns.
  *
  * The outage block (formerly the chip) pins the parts that were easy to
@@ -28,13 +29,19 @@ import { act, render, screen, fireEvent, waitFor } from "@testing-library/react"
 import { GatewaySwitcherMenu } from "./GatewaySwitcherMenu";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useGatewayStore } from "../../stores/gatewayStore";
-import { probeGateways } from "../../lib/gateway-probe";
 
 vi.mock("@tauri-apps/api/core", () => ({ invoke: vi.fn(async () => ({})) }));
 
 // Probe is the network; stub it and record what it was asked to check.
-const probeMock = vi.hoisted(() => vi.fn(async () => [] as { url: string; ok: boolean; latencyMs: number }[]));
+const probeMock = vi.hoisted(() =>
+  vi.fn(async () => [] as { url: string; ok: boolean; latencyMs: number }[]),
+);
 vi.mock("../../lib/gateway-probe", () => ({ probeGateways: probeMock }));
+
+const LOOPBACK = "http://127.0.0.1:19876";
+const CURRENT = "http://192.168.1.10:19876";
+const OTHER = "http://192.168.1.20:19876";
+const THIRD = "http://192.168.1.30:19876";
 
 const openBtn = () => screen.getByRole("button", { name: /Gateway|网关|閘道|ゲートウェイ|게이트웨이/ });
 
@@ -43,15 +50,25 @@ const open = () => {
   fireEvent.click(openBtn());
 };
 
+const row = (fragment: RegExp) => screen.getByRole("button", { name: fragment });
+
+function settleAll(ok: (url: string) => boolean) {
+  probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
+    urls.forEach((u) => opts?.onSettled?.({ url: u, ok: ok(u), latencyMs: 3 } as never));
+    return [];
+  });
+}
+
 describe("GatewaySwitcherMenu", () => {
   beforeEach(() => {
     localStorage.clear();
     vi.clearAllMocks();
     probeMock.mockImplementation(async () => []);
     useSettingsStore.setState({
-      gatewayMode: "remote",
-      gatewayUrl: "http://192.168.1.10:19876",
-      gatewayUrlHistory: ["http://192.168.1.10:19876", "http://192.168.1.20:19876"],
+      gatewayUrl: CURRENT,
+      gatewayUrlHistory: [CURRENT, OTHER],
+      lastGoodUrl: null,
+      relayActive: false,
     });
     useGatewayStore.setState({
       status: "connected",
@@ -61,139 +78,94 @@ describe("GatewaySwitcherMenu", () => {
     });
   });
 
-  it("lists the current URL first, then recorded history", () => {
+  it("offers localhost first, then the current address and connected history", async () => {
+    settleAll(() => true);
     open();
-    const rows = screen.getAllByRole("button", { name: /19876/ });
-    expect(rows[0].getAttribute("title")).toBe("http://192.168.1.10:19876");
-    expect(screen.getByRole("button", { name: /192\.168\.1\.20/ })).toBeTruthy();
+    await waitFor(() => expect(probeMock).toHaveBeenCalled());
+    const urls = screen.getAllByTitle(/19876/).map((el) => el.getAttribute("title"));
+    expect(urls).toEqual([LOOPBACK, CURRENT, OTHER]);
   });
 
-  it("mode listbox filters the list WITHOUT changing the configured mode", () => {
-    const setSpy = vi.spyOn(useSettingsStore.getState(), "setGatewayMode");
+  it("has no mode control (the address is the only connection setting)", () => {
     open();
-    fireEvent.change(screen.getByRole("combobox"), { target: { value: "local" } });
-    // Filtered: local shows only the loopback/current address, with the
-    // lifecycle row instead of the browsable history.
-    expect(screen.getByText("http://192.168.1.10:19876")).toBeTruthy();
-    expect(screen.queryByText("http://192.168.1.20:19876")).toBeNull();
-    // ...and the live config was NOT committed.
-    expect(setSpy).not.toHaveBeenCalled();
-    expect(useSettingsStore.getState().gatewayMode).toBe("remote");
-    setSpy.mockRestore();
+    expect(screen.queryByRole("combobox")).toBeNull();
   });
 
-  it("clicking another address switches via applyGatewayUrl + checkHealth", async () => {
-    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
-      urls.forEach((u) => opts?.onSettled?.({ url: u, ok: true, latencyMs: 3 } as never));
-      return [];
-    });
-    const applySpy = vi.spyOn(useSettingsStore.getState(), "applyGatewayUrl");
-    const checkSpy = vi.spyOn(useGatewayStore.getState(), "checkHealth").mockResolvedValue();
+  it("switching a row goes through switchGateway, not a bare URL write", async () => {
+    settleAll(() => true);
+    const switchSpy = vi
+      .spyOn(useSettingsStore.getState(), "switchGateway")
+      .mockResolvedValue();
     open();
-    const row = screen.getByRole("button", { name: /192\.168\.1\.20/ });
-    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
-    fireEvent.click(row);
-    expect(applySpy).toHaveBeenCalledWith("http://192.168.1.20:19876");
-    expect(checkSpy).toHaveBeenCalled();
-    applySpy.mockRestore();
-    checkSpy.mockRestore();
+    await waitFor(() => expect((row(/192\.168\.1\.20/) as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(row(/192\.168\.1\.20/));
+    expect(switchSpy).toHaveBeenCalledWith(OTHER);
+    switchSpy.mockRestore();
   });
 
-  it("disables only the probe-rejected address — a reachable one stays clickable", async () => {
-    // Three rows so "disabled because unreachable" is distinguishable from
-    // "disabled because it is the current address": `.10` is current,
-    // `.20` probes ok, `.30` probes dead.
-    useSettingsStore.setState({
-      gatewayUrlHistory: [
-        "http://192.168.1.10:19876",
-        "http://192.168.1.20:19876",
-        "http://192.168.1.30:19876",
-      ],
-    });
-    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
-      urls.forEach((u) =>
-        opts?.onSettled?.({ url: u, ok: !u.includes(".30"), latencyMs: 3 } as never),
-      );
-      return [];
-    });
+  it("disables only the probe-rejected remote address — a reachable one stays clickable", async () => {
+    useSettingsStore.setState({ gatewayUrlHistory: [CURRENT, OTHER, THIRD] });
+    settleAll((u) => !u.includes(".30"));
     open();
-    await waitFor(() =>
-      expect(
-        (screen.getByRole("button", { name: /192\.168\.1\.30/ }) as HTMLButtonElement).disabled,
-      ).toBe(true),
-    );
-    expect(
-      (screen.getByRole("button", { name: /192\.168\.1\.20/ }) as HTMLButtonElement).disabled,
-    ).toBe(false);
+    await waitFor(() => expect((row(/192\.168\.1\.30/) as HTMLButtonElement).disabled).toBe(true));
+    expect((row(/192\.168\.1\.20/) as HTMLButtonElement).disabled).toBe(false);
   });
 
-  it("a probe-rejected address cannot fire applyGatewayUrl", async () => {
-    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
-      urls.forEach((u) => opts?.onSettled?.({ url: u, ok: false, latencyMs: 0 } as never));
-      return [];
-    });
-    const applySpy = vi.spyOn(useSettingsStore.getState(), "applyGatewayUrl");
+  it("a probe-rejected address cannot fire switchGateway", async () => {
+    settleAll(() => false);
+    const switchSpy = vi
+      .spyOn(useSettingsStore.getState(), "switchGateway")
+      .mockResolvedValue();
     open();
-    await waitFor(() =>
-      expect(
-        (screen.getByRole("button", { name: /192\.168\.1\.20/ }) as HTMLButtonElement).disabled,
-      ).toBe(true),
-    );
-    fireEvent.click(screen.getByRole("button", { name: /192\.168\.1\.20/ }));
-    expect(applySpy).not.toHaveBeenCalled();
-    applySpy.mockRestore();
+    await waitFor(() => expect((row(/192\.168\.1\.20/) as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(row(/192\.168\.1\.20/));
+    expect(switchSpy).not.toHaveBeenCalled();
+    switchSpy.mockRestore();
   });
 
-  it("disables a still-probing address until its probe lands", () => {
-    // The window between opening the menu and the first verdict arriving
-    // is exactly the one an unreachable row is clicked through. Nothing
-    // may be clickable in it — not even a reachable host, because nothing
-    // has been proven yet.
+  it("keeps localhost clickable even when no local Gateway answers (it will be spawned)", async () => {
+    settleAll(() => false);
+    open();
+    await waitFor(() => expect((row(/192\.168\.1\.20/) as HTMLButtonElement).disabled).toBe(true));
+    expect((row(/127\.0\.0\.1/) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("disables a still-probing remote address until its probe lands", () => {
     probeMock.mockImplementation(async () => []);
     open();
-    expect(
-      (screen.getByRole("button", { name: /192\.168\.1\.20/ }) as HTMLButtonElement).disabled,
-    ).toBe(true);
+    expect((row(/192\.168\.1\.20/) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it("enables a row the moment its probe answers ok", async () => {
     probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
-      opts?.onSettled?.({ url: urls[1], ok: true, latencyMs: 3 } as never);
+      const target = urls.find((u) => u.includes(".20")) ?? urls[0];
+      opts?.onSettled?.({ url: target, ok: true, latencyMs: 3 } as never);
       return [];
     });
     open();
-    await waitFor(() =>
-      expect(
-        (screen.getByRole("button", { name: /192\.168\.1\.20/ }) as HTMLButtonElement).disabled,
-      ).toBe(false),
-    );
+    await waitFor(() => expect((row(/192\.168\.1\.20/) as HTMLButtonElement).disabled).toBe(false));
   });
 
-  it("probes the browsed list on open and does NOT touch gatewayStore.candidates", async () => {
-    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
-      urls.forEach((u) => opts?.onSettled?.({ url: u, ok: u.endsWith(".20:19876"), latencyMs: 3 } as never));
-      return [];
-    });
+  it("probes the whole address list on open and does NOT touch gatewayStore.candidates", async () => {
+    settleAll(() => true);
     open();
     await waitFor(() => expect(probeMock).toHaveBeenCalled());
-    expect(probeMock.mock.calls[0][0]).toEqual([
-      "http://192.168.1.10:19876",
-      "http://192.168.1.20:19876",
-    ]);
-    // The outage chip owns this slice — borrowing it would leak this
+    expect(probeMock.mock.calls[0][0]).toEqual([LOOPBACK, CURRENT, OTHER]);
+    // The boot-time chooser owns this slice — borrowing it would leak this
     // menu's rows into the failover banner.
     expect(useGatewayStore.getState().candidates).toEqual([]);
   });
 
-  it("does not probe in local mode (single loopback address)", () => {
-    useSettingsStore.setState({ gatewayMode: "local" });
+  it("still probes when the current address is loopback", async () => {
+    useSettingsStore.setState({ gatewayUrl: LOOPBACK, gatewayUrlHistory: [LOOPBACK] });
+    settleAll(() => true);
     open();
-    expect(probeMock).not.toHaveBeenCalled();
+    await waitFor(() => expect(probeMock).toHaveBeenCalled());
   });
 
   it("closes on Escape", () => {
     open();
-    expect(screen.getByRole("button", { name: /192\.168\.1\.20/ })).toBeTruthy();
+    expect(row(/192\.168\.1\.20/)).toBeTruthy();
     act(() => {
       fireEvent.keyDown(document, { key: "Escape" });
     });
@@ -230,9 +202,10 @@ describe("GatewaySwitcherMenu outage trigger", () => {
     vi.clearAllMocks();
     probeMock.mockImplementation(async () => []);
     useSettingsStore.setState({
-      gatewayMode: "remote",
-      gatewayUrl: "http://192.168.1.10:19876",
-      gatewayUrlHistory: ["http://192.168.1.10:19876", "http://192.168.1.20:19876"],
+      gatewayUrl: CURRENT,
+      gatewayUrlHistory: [CURRENT, OTHER],
+      lastGoodUrl: null,
+      relayActive: false,
     });
     useGatewayStore.setState({
       status: "disconnected",
@@ -247,24 +220,15 @@ describe("GatewaySwitcherMenu outage trigger", () => {
   it("turns the trigger into a breathing amber pill on a drop", () => {
     render(<GatewaySwitcherMenu />);
     const btn = pill();
-    // No auto-dismiss anywhere — a sleep/wake drop is still broken until
-    // the user picks an address, so the pill must stay lit.
     expect(btn.className).not.toMatch(/animate-\[.*fade/);
-    // Solid amber fill + pulsing icon: the fill carries the attention,
-    // the pulse marks the outage as live and unattended.
     expect(btn.className).toContain("bg-amber-500");
     expect(btn.querySelector(".animate-pulse")).toBeTruthy();
   });
 
   it("follows gatewayUnreachable, NOT the death classifier's status", () => {
-    // A classifier verdict alone must NOT raise the pill — the 5s budget
-    // lives in the connectivity module.
     useGatewayStore.setState({ status: "error", gatewayUnreachable: false });
     const { container, rerender } = render(<GatewaySwitcherMenu />);
     expect(container.querySelector('[aria-label="Gateway Status"]')).toBeNull();
-    // ...and the inverse: unreachable raises it even though the
-    // classifier never wrote `error` — a black-holed path, exactly the
-    // outage that used to stay hidden for minutes.
     act(() => useGatewayStore.setState({ status: "connecting", gatewayUnreachable: true }));
     rerender(<GatewaySwitcherMenu />);
     expect(screen.getByRole("button", { expanded: false })).toBeTruthy();
@@ -276,27 +240,16 @@ describe("GatewaySwitcherMenu outage trigger", () => {
     act(() => useGatewayStore.setState({ gatewayUnreachable: false }));
     rerender(<GatewaySwitcherMenu />);
     expect(screen.queryByRole("button", { expanded: false, name: /Gateway Status/ })).toBeNull();
-    // Back to the ordinary switcher, still functional.
     expect(openBtn()).toBeTruthy();
   });
 
   it("the pill opens the SAME popover the healthy glyph opens", async () => {
-    probeMock.mockImplementation(async (urls: string[], opts?: { onSettled?: (r: never) => void }) => {
-      for (const url of urls) opts?.onSettled?.({ url, ok: url.endsWith(".20:19876"), latencyMs: 2 } as never);
-      return [];
-    });
+    settleAll((u) => u.includes(".20"));
     render(<GatewaySwitcherMenu />);
     fireEvent.click(pill());
-    // One list, not two: the old chip rendered its own candidate block
-    // above the menu's address list, offering the same URLs twice in two
-    // differently-decorated lists. The address list IS the candidate list.
     const reachable = await screen.findByRole("button", { name: /192\.168\.1\.20/ });
     expect((reachable as HTMLButtonElement).disabled).toBe(false);
-    // The outage reason is the one thing the list can't offer — it shows
-    // twice on purpose (pill + popover heading), matching the old chip's
-    // own "pill says it, popover repeats it" arrangement.
     expect(screen.getAllByText(/unreachable|不可达|到達できません|연결할 수 없음/)).toHaveLength(2);
-    // Retry is available and is NOT the mode listbox.
     fireEvent.click(screen.getByRole("button", { name: /Retry|重试|再試行|재시도/ }));
     expect(probeMock.mock.calls.length).toBeGreaterThan(1);
   });
@@ -304,19 +257,18 @@ describe("GatewaySwitcherMenu outage trigger", () => {
   it("start button appears for a down local gateway, retry alone otherwise", () => {
     render(<GatewaySwitcherMenu />);
     fireEvent.click(pill());
-    // Remote outage: nothing to start, only retry.
-    expect(screen.queryByRole("button", { name: /Start Gateway|启动网关|啟動閘道/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^(Start|启动|啟動|起動|시작)$/ })).toBeNull();
     expect(screen.getByRole("button", { name: /Retry|重试|再試行|재시도/ })).toBeTruthy();
   });
 
   it("offers Start (not just Retry) when the local gateway is the one down", () => {
-    useSettingsStore.setState({ gatewayMode: "local" });
+    // `isLocal` derives from the address now — no mode flag to set.
+    useSettingsStore.setState({ gatewayUrl: LOOPBACK, gatewayUrlHistory: [LOOPBACK] });
     render(<GatewaySwitcherMenu />);
     fireEvent.click(pill());
-    expect(screen.getByRole("button", { name: /Start Gateway|启动网关|啟動閘道/ })).toBeTruthy();
-    // A gateway already booting must not offer to boot again.
+    expect(screen.getByRole("button", { name: /^(Start|启动|啟動|起動|시작)$/ })).toBeTruthy();
     act(() => useGatewayStore.setState({ localState: "starting" }));
     fireEvent.click(screen.getByRole("button", { name: /Retry|重试|再試行|재시도/ }));
-    expect(screen.queryByRole("button", { name: /Start Gateway|启动网关|啟動閘道/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^(Start|启动|啟動|起動|시작)$/ })).toBeNull();
   });
 });

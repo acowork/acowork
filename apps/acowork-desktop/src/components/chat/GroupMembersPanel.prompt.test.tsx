@@ -53,7 +53,7 @@ const group = {
 
 function loginAs(userId: string, role: "user" | "admin" = "user") {
   useAuthStore.setState({
-    mode: "multi_user",
+    accountState: "ready",
     status: "logged_in",
     accessToken: "token",
     account: {

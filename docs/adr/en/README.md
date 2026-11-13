@@ -28,6 +28,8 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | What an agent's name actually is, and where it is stored | [ADR-111](./ADR-111-one-agent-one-name-one-file.md) |
 | Why a workspace HTML file renders as a real page, and what a preview link is allowed to carry | [ADR-112](./ADR-112-workspace-preview-capability-ticket.md) |
 | Why installs must name an explicit `node_id`, and why a Node's launcher is not protocol state | [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md) |
+| Why changing the Gateway bind address must never change the login regime, and how first-boot setup works | [ADR-114](./ADR-114-account-system-decoupled-from-network-topology.md) |
+| Why Desktop has ONE connection setting (a server address) and no local/remote choice, and what happens when that address is wrong | [ADR-115](./ADR-115-desktop-single-server-address-model.md) |
 
 ## Index
 
@@ -139,6 +141,8 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 111 | [ADR-111](./ADR-111-one-agent-one-name-one-file.md) | One Agent, One Name, One File — `name` Lives in `agent_config.json`; `display_name` and `overrides.json` Retire | Implemented; supersedes ADR-073's rename/overrides clauses and ADR-104's `display_name` | [zh](../zh/ADR-111-one-agent-one-name-one-file.md) |
 | 112 | [ADR-112](./ADR-112-workspace-preview-capability-ticket.md) | A Capability Ticket for Workspace Static-Asset Preview — HTML Opens in the Address-Bar Browser; the Ticket Rides in the Path | Implemented | [zh](../zh/ADR-112-workspace-preview-capability-ticket.md) |
 | 113 | [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md) | Protocol Self-Consistency — Launch Relationships Stay Out of the Protocol, Installs Must Name an Explicit `node_id` | Implemented; supersedes the `gateway_managed` clauses of ADR-055 / ADR-075 / ADR-087 | [zh](../zh/ADR-113-protocol-self-consistency-explicit-node-target.md) |
+| 114 | [ADR-114](./ADR-114-account-system-decoupled-from-network-topology.md) | Account System Decoupled from Network Topology — Accounts Are Always On; `AccountSystemState` + Local-Only First-Boot Setup | Implemented; supersedes the `AUTH_MODE` clauses of ADR-076 § Decision 12 | [zh](../zh/ADR-114-account-system-decoupled-from-network-topology.md) |
+| 115 | [ADR-115](./ADR-115-desktop-single-server-address-model.md) | Desktop Single-Server-Address Model — `local` / `remote` Demoted to an Inference from the Address; One Address Control on Every Screen; Restartable Boot Gate | Implemented; supersedes the mode+address two-knob connection settings left after ADR-114 | [zh](../zh/ADR-115-desktop-single-server-address-model.md) |
 
 ---
 

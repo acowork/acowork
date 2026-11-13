@@ -55,6 +55,19 @@ export async function fetchLocalIpv4Addresses(): Promise<string[]> {
   }
 }
 
+/** The IPv4 of the interface owning the default route — the address a LAN
+ *  peer (phone) can actually reach. `fetchLocalIpv4Addresses` returns
+ *  interfaces in enumeration order and virtual adapters (WSL vEthernet,
+ *  security-suite NICs) can sort first, so it must NOT be used to pick a
+ *  phone-reachable address on its own. `null` when no route exists. */
+export async function fetchDefaultRouteIpv4(): Promise<string | null> {
+  try {
+    return await invoke<string | null>("get_default_route_ipv4");
+  } catch {
+    return null;
+  }
+}
+
 export function readLocalHostHint(): string | null {
   try {
     return localStorage.getItem(STORAGE_KEY_LOCAL_HOST_HINT);

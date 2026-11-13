@@ -73,7 +73,7 @@ vi.mock("../../stores/authStore", () => {
     useAuthStore: (selector: (state: Record<string, unknown>) => unknown) =>
       selector({
         account: (globalThis as unknown as { __panelAccount: unknown }).__panelAccount,
-        mode: "multi_user",
+        accountState: "ready",
       }),
   };
 });

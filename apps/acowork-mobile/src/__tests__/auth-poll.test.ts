@@ -103,18 +103,41 @@ describe('authStore.boot', () => {
 
   it('saved url, no tokens → probe → login', async () => {
     localStorage.setItem('acowork.gatewayUrl', 'http://g:19876')
-    fetchMock.mockResolvedValue(jsonRes({ version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, auth_mode: 'multi_user', registration_open: false, requires_setup: false }))
+    fetchMock.mockResolvedValue(jsonRes({ version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, account_state: 'ready', registration_open: false }))
     const useAuthStore = await freshAuth()
     await useAuthStore.getState().boot()
     expect(useAuthStore.getState().phase).toBe('login')
   })
 
-  it('requires_setup → restricted', async () => {
+  it('needs_setup → restricted', async () => {
     localStorage.setItem('acowork.gatewayUrl', 'http://g:19876')
-    fetchMock.mockResolvedValue(jsonRes({ version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, auth_mode: 'multi_user', registration_open: false, requires_setup: true }))
+    fetchMock.mockResolvedValue(jsonRes({ version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, account_state: 'needs_setup', registration_open: false }))
     const useAuthStore = await freshAuth()
     await useAuthStore.getState().boot()
     expect(useAuthStore.getState().phase).toBe('restricted')
+  })
+
+  it('uninitialized → restricted', async () => {
+    localStorage.setItem('acowork.gatewayUrl', 'http://g:19876')
+    fetchMock.mockResolvedValue(jsonRes({ version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, account_state: 'uninitialized', registration_open: false }))
+    const useAuthStore = await freshAuth()
+    await useAuthStore.getState().boot()
+    expect(useAuthStore.getState().phase).toBe('restricted')
+  })
+
+  it('missing or unknown account_state fails open (matches Desktop)', async () => {
+    for (const body of [
+      { version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, registration_open: false },
+      { version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, account_state: 'something_new', registration_open: false },
+    ]) {
+      localStorage.clear()
+      localStorage.setItem('acowork.gatewayUrl', 'http://g:19876')
+      fetchMock.mockReset()
+      fetchMock.mockResolvedValue(jsonRes(body))
+      const useAuthStore = await freshAuth()
+      await useAuthStore.getState().boot()
+      expect(useAuthStore.getState().phase, JSON.stringify(body)).toBe('login')
+    }
   })
 
   it('unreachable gateway → disconnected', async () => {
@@ -130,7 +153,7 @@ describe('authStore.boot', () => {
   // explicit timeout signal so `disconnected` fires within seconds.
   it('wires a timeout signal into the boot probe fetch', async () => {
     localStorage.setItem('acowork.gatewayUrl', 'http://g:19876')
-    fetchMock.mockResolvedValue(jsonRes({ version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, auth_mode: 'multi_user', registration_open: false, requires_setup: false }))
+    fetchMock.mockResolvedValue(jsonRes({ version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0, mqtt_port: 1, account_state: 'ready', registration_open: false }))
     const useAuthStore = await freshAuth()
     await useAuthStore.getState().boot()
     const init = fetchMock.mock.calls[0]?.[1] as RequestInit | undefined

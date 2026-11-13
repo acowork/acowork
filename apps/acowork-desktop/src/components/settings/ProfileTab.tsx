@@ -133,7 +133,7 @@ export function ProfileTab() {
   const [occupation, setOccupation] = useState("");
 
   // Load the caller's own profile from backend on mount. Mode-aware
-  // (`lib/selfProfile.ts`): `GET /api/auth/me` under multi_user, the
+  // (`lib/selfProfile.ts`): `GET /api/auth/me` (ADR-114), the
   // active-user record under local.
   useEffect(() => {
     let cancelled = false;
@@ -451,7 +451,7 @@ export function ProfileTab() {
               now right-click only and the profile page is the left-click
               target. `ml-auto` parks them on the row's trailing edge, well
               clear of the avatar + name. Hidden when there is no account to
-              act on (AUTH_MODE=local / not logged in).
+              act on (not logged in).
 
               The two buttons share the app's row-trailing-action grammar
               (`inline-flex … gap-1 rounded btn-solid px-2 py-1 text-11

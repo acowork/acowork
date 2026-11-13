@@ -1,11 +1,15 @@
-//! Authentication middleware (ADR-076 §决策 3).
+//! Authentication middleware (ADR-076 §决策 3, ADR-114).
 //!
-//! Under `AUTH_MODE=multi_user`, every `/api/*` request must carry
-//! `Authorization: Bearer <access_token>`; the verified identity is
-//! injected as [`AuthContext`] for downstream handlers. Under
-//! `AUTH_MODE=local` there is no account system and this middleware is a
-//! pass-through — the legacy bearer token keeps doing whatever it did
-//! (ADR-076 §决策 12: local is a no-op for the account system).
+//! Every `/api/*` request must carry `Authorization: Bearer <access_token>`;
+//! the verified identity is injected as [`AuthContext`] for downstream
+//! handlers.
+//!
+//! ADR-114 removed the `local` short-circuit. There is no deployment mode
+//! in which this middleware is a pass-through: the account system is always
+//! present, so an unauthenticated caller is always unauthenticated. What
+//! *does* vary is whether the account system has been initialised yet —
+//! that is the first-boot gate's job (see [`crate::http::restricted_mode`]),
+//! not this middleware's.
 //!
 //! It is layered *inside* CORS (so a 401 still carries
 //! `Access-Control-Allow-Origin` and the browser can read the error) and
@@ -91,10 +95,11 @@ pub const SCOPE_ALL: &str = "*";
 
 /// ADR-076 §决策 10: the trusted REST actor forwarded to PM / Doc.
 ///
-/// Under `multi_user` this is the authenticated identity
-/// ([`AuthContext::effective_user_id`]); under `local` the middleware is a
-/// no-op and inserts no [`AuthContext`], so the caller falls back to the
-/// legacy `human` constant (§决策 12 — the whole account system is off).
+/// This is the authenticated identity ([`AuthContext::effective_user_id`]).
+/// The `human` fallback covers the two cases in which a request reaches a
+/// proxy path *without* an identity: the internal-service-token branch and
+/// the node-token branch, both of which are machine callers rather than
+/// users. It is not a "local mode" leftover (ADR-114 removed that mode).
 pub const LOCAL_HUMAN_ACTOR: &str = "human";
 
 /// Resolve the REST actor to inject on the PM / Doc reverse-proxy paths.
@@ -164,7 +169,9 @@ fn is_valid_scope_id(id: &str) -> bool {
 ///
 /// Kept deliberately tiny: what a client needs *before* it can log in —
 /// liveness/readiness, the bootstrap probe, the login and refresh calls,
-/// the first-login call (a freshly-created account has no password yet),
+/// the first-boot setup call (ADR-114: the first administrator has to be
+/// creatable over HTTP so the Desktop's onboarding flow can do it), the
+/// first-login call (a freshly-created account has no password yet),
 /// the pairing-redeem call (a scanned phone holds only a one-time QR token,
 /// not a pair — see 方案③),
 /// and logout (a client with an expired access token must still be able to
@@ -180,6 +187,12 @@ fn is_public_path(path: &str) -> bool {
             | "/api/auth/logout"
             | "/api/auth/first-login"
             | "/api/auth/pair/redeem"
+            // ADR-114: first-boot administrator creation. Reachable without
+            // a token precisely because no token can exist yet — and
+            // guarded by the restricted-mode gate, which only lets a
+            // **loopback peer** through it. See
+            // `crate::http::restricted_mode`.
+            | "/api/auth/setup"
     ) {
         return true;
     }
@@ -199,7 +212,7 @@ fn is_public_path(path: &str) -> bool {
     // user data in it. It has to be reachable without a token because the
     // Desktop renders it via `<img src>`, and an `<img>` cannot carry an
     // `Authorization` header. Without this the model menu and the Harness
-    // provider list get a 401 per row under `AUTH_MODE=multi_user`.
+    // provider list get a 401 per row now that accounts are always on.
     //
     // Exactly two segments after the prefix, and the second must be `logo`:
     // a looser suffix test would also match
@@ -215,23 +228,18 @@ fn is_public_path(path: &str) -> bool {
     !id.is_empty() && !id.contains('?')
 }
 
-/// Bearer-token gate for `AUTH_MODE=multi_user` (ADR-076 §决策 3).
+/// Bearer-token gate (ADR-076 §决策 3, ADR-114).
+///
+/// ADR-114 removed the `local` short-circuit: there is no longer a
+/// deployment in which an unauthenticated caller may reach a `/api/*`
+/// handler. The account system is always present; whether the *first*
+/// administrator exists yet is a separate question, answered by the
+/// first-boot gate in [`crate::http::restricted_mode`].
 pub async fn auth_middleware(
     State(state): State<AppState>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    // Local mode: no account system, nothing to enforce.
-    if !state.auth_mode.is_multi_user() {
-        // The account system is off, so no identity may be asserted. Drop
-        // any client-supplied scope header rather than letting it reach
-        // the Runtime unvetted (ADR-076 §决策 4).
-        req.headers_mut().remove(USER_SCOPE_HEADER);
-        req.headers_mut().remove(ADMIN_SCOPE_HEADER);
-        req.headers_mut().remove(CHAT_SCOPE_HEADER);
-        return next.run(req).await;
-    }
-
     // Never forward a client-asserted identity: the header is re-derived
     // from the verified token below, and only for authenticated callers.
     req.headers_mut().remove(USER_SCOPE_HEADER);
@@ -587,7 +595,8 @@ mod tests {
     fn provider_logo_is_public_but_the_rest_of_the_provider_api_is_not() {
         // The Desktop renders provider marks with `<img src>`, which cannot
         // carry an Authorization header — so this one route has to be
-        // reachable unauthenticated or every row 401s under multi_user mode.
+        // reachable unauthenticated or every row 401s (ADR-114: the auth
+        // gate is unconditional; there is no mode without it).
         assert!(is_public_path("/api/providers/anthropic/logo"));
         assert!(is_public_path("/api/providers/custom-my-proxy/logo"));
 
@@ -650,11 +659,10 @@ mod tests {
             let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
             gw.user_verifier = Some(crate::http::test_support::verifier());
             gw.internal_service_token = token.map(str::to_string);
-            let mut st = crate::http::routes::AppState::new(
+            let st = crate::http::routes::AppState::new(
                 Arc::new(tokio::sync::RwLock::new(gw)),
                 Arc::new(crate::http::auth::HttpAuth::new(false)),
             );
-            st.auth_mode = crate::auth::AuthMode::MultiUser;
             Router::new()
                 .route("/api/agents", get(|| async { "ok" }))
                 .layer(axum::middleware::from_fn_with_state(st, auth_middleware))
@@ -727,19 +735,13 @@ mod tests {
         // the fixture key is what the gate now verifies.
         let admin_token = crate::http::test_support::access_token("root", "admin");
 
-        let state = |multi: bool| {
+        let state = || {
             let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
-            if multi {
-                gw.user_verifier = Some(crate::http::test_support::verifier());
-            }
-            let mut st = crate::http::routes::AppState::new(
+            gw.user_verifier = Some(crate::http::test_support::verifier());
+            crate::http::routes::AppState::new(
                 Arc::new(tokio::sync::RwLock::new(gw)),
                 Arc::new(crate::http::auth::HttpAuth::new(false)),
-            );
-            if multi {
-                st.auth_mode = crate::auth::AuthMode::MultiUser;
-            }
-            st
+            )
         };
 
         // Terminal handler: echo the scope header the Runtime would see.
@@ -751,15 +753,12 @@ mod tests {
                 .to_string()
         }
 
-        let app = |multi: bool| {
+        let app = || {
             Router::new()
                 .route("/api/agents", get(echo_scope))
                 // Write endpoint, for the read-only guard on `as_user`.
                 .route("/api/agents/{sid}", axum::routing::delete(echo_scope))
-                .layer(axum::middleware::from_fn_with_state(
-                    state(multi),
-                    auth_middleware,
-                ))
+                .layer(axum::middleware::from_fn_with_state(state(), auth_middleware))
         };
         let call = |uri: &str, token: Option<&str>| {
             let mut b = Request::builder()
@@ -776,19 +775,14 @@ mod tests {
                 .unwrap()
         };
 
-        // Local mode: forged header is dropped, nothing injected.
-        let resp = app(false).oneshot(call("/api/agents", None)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(&body_of(resp).await[..], b"<none>");
-
-        // multi_user, no token: 401 (nothing downstream).
-        let resp = app(true).oneshot(call("/api/agents", None)).await.unwrap();
+        // No token: 401 (nothing downstream). ADR-114 — there is no longer a
+        // deployment in which an unauthenticated caller reaches a handler.
+        let resp = app().oneshot(call("/api/agents", None)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
-        // multi_user, valid admin token: the forged "u-victim" is gone and
-        // the token-derived scope ("*" = no filtering) is what the Runtime
-        // sees.
-        let resp = app(true)
+        // Valid admin token: the forged "u-victim" is gone and the
+        // token-derived scope ("*" = no filtering) is what the Runtime sees.
+        let resp = app()
             .oneshot(call("/api/agents", Some(&admin_token)))
             .await
             .unwrap();
@@ -796,7 +790,7 @@ mod tests {
         assert_eq!(&body_of(resp).await[..], SCOPE_ALL.as_bytes());
 
         // as_user narrows an admin to one user's scope...
-        let resp = app(true)
+        let resp = app()
             .oneshot(call("/api/agents?as_user=u-alice", Some(&admin_token)))
             .await
             .unwrap();
@@ -804,7 +798,7 @@ mod tests {
         assert_eq!(&body_of(resp).await[..], b"u-alice");
 
         // ...but a scope value that could not be a header fails closed.
-        let resp = app(true)
+        let resp = app()
             .oneshot(call("/api/agents?as_user=bad%20value", Some(&admin_token)))
             .await
             .unwrap();
@@ -824,7 +818,7 @@ mod tests {
             }
             b.body(Body::empty()).unwrap()
         };
-        let resp = app(true)
+        let resp = app()
             .oneshot(write(
                 "/api/agents/sess-1?as_user=u-alice",
                 Some(&admin_token),
@@ -834,7 +828,7 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
 
         // The same write without `as_user` still works as the admin.
-        let resp = app(true)
+        let resp = app()
             .oneshot(write("/api/agents/sess-1", Some(&admin_token)))
             .await
             .unwrap();
@@ -861,11 +855,10 @@ mod tests {
 
         let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
         gw.user_verifier = Some(crate::http::test_support::verifier());
-        let mut st = crate::http::routes::AppState::new(
+        let st = crate::http::routes::AppState::new(
             Arc::new(tokio::sync::RwLock::new(gw)),
             Arc::new(crate::http::auth::HttpAuth::new(false)),
         );
-        st.auth_mode = crate::auth::AuthMode::MultiUser;
 
         async fn echo_chat_scope(req: Request<Body>) -> String {
             req.headers()
@@ -879,23 +872,6 @@ mod tests {
             .route("/api/agents/{id}/sessions", get(echo_chat_scope))
             .layer(axum::middleware::from_fn_with_state(st, auth_middleware));
 
-        // Local mode: forged value dropped, nothing injected.
-        let app_local = Router::new()
-            .route("/api/agents/{id}/sessions", get(echo_chat_scope))
-            .layer(axum::middleware::from_fn_with_state(
-                {
-                    let mut st = crate::http::routes::AppState::new(
-                        Arc::new(tokio::sync::RwLock::new(
-                            crate::gateway::state::GatewayState::new(&dir.to_string_lossy()),
-                        )),
-                        Arc::new(crate::http::auth::HttpAuth::new(false)),
-                    );
-                    st.auth_mode = crate::auth::AuthMode::Local;
-                    st
-                },
-                auth_middleware,
-            ));
-
         let call = |token: Option<&str>| {
             let mut b = Request::builder()
                 .uri("/api/agents/a-1/sessions")
@@ -905,14 +881,6 @@ mod tests {
             }
             b.body(Body::empty()).unwrap()
         };
-
-        let resp = app_local.oneshot(call(None)).await.unwrap();
-        assert_eq!(resp.status(), StatusCode::OK);
-        assert_eq!(
-            &axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap()[..],
-            b"<none>",
-            "local mode drops a forged chat scope"
-        );
 
         // multi_user, valid user token: forged value stripped; with no
         // user service in the fixture nothing is injected — the Runtime

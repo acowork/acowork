@@ -244,7 +244,16 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let gw_state = GatewayState::new(&dir.to_string_lossy());
+        let mut gw_state = GatewayState::new(&dir.to_string_lossy());
+        // ADR-114: even anonymous requests traverse the auth middleware,
+        // which answers 503 while no user-service verifier is published
+        // (the "service still starting" window). Tests simulate a healthy
+        // Gateway, so publish the fixture verifier, and arm the internal
+        // service token so tests can pass the (always-on) bearer gate
+        // WITHOUT acquiring a user identity — the anonymous pass-through
+        // these forwarding tests were written against.
+        gw_state.user_verifier = Some(crate::http::test_support::verifier());
+        gw_state.internal_service_token = Some("test-svc-token".to_string());
         AppState::new(
             Arc::new(RwLock::new(gw_state)),
             Arc::new(HttpAuth::new(false)),
@@ -291,7 +300,7 @@ mod tests {
     /// so the auth middleware injects an `AuthContext` on authenticated
     /// requests. Mirrors `pm_proxy`'s helper — the two proxies are
     /// isomorphic and must be tested symmetrically.
-    fn multi_user_app_state() -> AppState {
+    fn authenticated_app_state() -> AppState {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
@@ -305,11 +314,10 @@ mod tests {
         // ADR-084: the gate verifies with the user service's public key and
         // gates on the resolved mode — no account store involved.
         gw_state.user_verifier = Some(crate::http::test_support::verifier());
-        let mut st = AppState::new(
+        let st = AppState::new(
             Arc::new(RwLock::new(gw_state)),
             Arc::new(HttpAuth::new(false)),
         );
-        st.auth_mode = crate::auth::AuthMode::MultiUser;
         st
     }
 
@@ -331,6 +339,10 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/api/doc/api/tree")
+            // ADR-114: always-on bearer gate — the internal service token
+            // passes it without a user identity so the 503 under test is
+            // the proxy's, not the auth gate's 401.
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");
@@ -359,6 +371,7 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/api/doc/api/docs/doc-1")
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");
@@ -382,6 +395,7 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/api/doc/api/tree")
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");
@@ -417,6 +431,7 @@ mod tests {
         let request = Request::builder()
             .method("GET")
             .uri("/api/doc/api/docs/doc-42")
+            .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
         let response = router.oneshot(request).await.expect("router responds");
@@ -535,7 +550,13 @@ mod tests {
         extra_headers: &[(&str, &str)],
     ) -> serde_json::Value {
         let router = build_router(state);
-        let mut builder = Request::builder().method("GET").uri(uri);
+        let mut builder = Request::builder()
+            .method("GET")
+            .uri(uri)
+            // ADR-114: the bearer gate is always on. The internal service
+            // token passes it without acquiring a user identity — the
+            // anonymous pass-through these tests assert against.
+            .header("authorization", "Bearer test-svc-token");
         for (k, v) in extra_headers {
             builder = builder.header(*k, *v);
         }
@@ -576,8 +597,8 @@ mod tests {
     /// ADR-076 §决策 10: under `multi_user` the REST actor is the *token*
     /// identity, not the `human` constant. Mirrors `pm_proxy`'s case.
     #[tokio::test]
-    async fn rest_path_injects_token_identity_under_multi_user() {
-        let state = multi_user_app_state();
+    async fn rest_path_injects_token_identity() {
+        let state = authenticated_app_state();
         let token = seed_and_login(&state);
         let port = start_echo_doc_server().await;
         set_doc_process(&state, port).await;
@@ -598,7 +619,7 @@ mod tests {
         assert_eq!(
             echoed["x-actor"],
             serde_json::json!("u-alice"),
-            "multi_user REST actor must be the token identity, got: {echoed}"
+            "REST actor must be the token identity, got: {echoed}"
         );
     }
 
@@ -625,7 +646,7 @@ mod tests {
     /// user is replaced (the doc service gates permission *management* on it).
     #[tokio::test]
     async fn rest_path_injects_token_role_and_drops_forged_role() {
-        let state = multi_user_app_state();
+        let state = authenticated_app_state();
         let token = seed_and_login(&state); // u-alice, role `user`
         let port = start_echo_doc_server().await;
         set_doc_process(&state, port).await;
@@ -653,7 +674,7 @@ mod tests {
     /// REST path under `multi_user` with an *admin* token → `x-auth-role: admin`.
     #[tokio::test]
     async fn rest_path_injects_admin_role() {
-        let state = multi_user_app_state();
+        let state = authenticated_app_state();
         let token = crate::http::test_support::access_token("u-root", "admin");
         let port = start_echo_doc_server().await;
         set_doc_process(&state, port).await;

@@ -34,7 +34,7 @@ use crate::auth::context::{
     AUTH_AS_USER_HEADER, AUTH_ROLE_HEADER, AUTH_USER_HEADER, is_public_path,
 };
 use crate::auth::{AuthService, BootstrapAdmin};
-use crate::config::{AuthMode, UserServiceConfig};
+use crate::config::UserServiceConfig;
 use crate::error::ApiError;
 use crate::state::AppState;
 
@@ -55,10 +55,9 @@ pub fn temp_dir(prefix: &str) -> PathBuf {
 }
 
 /// Config for a test service rooted at `dir`.
-pub fn test_config(dir: &Path, auth_mode: AuthMode) -> UserServiceConfig {
+pub fn test_config(dir: &Path) -> UserServiceConfig {
     UserServiceConfig {
         data_dir: dir.to_path_buf(),
-        auth_mode,
         // Gateway default: only an admin creates accounts (ADR-076 §决策 6).
         // Tests that exercise self-signup flip it on explicitly.
         registration_open: false,
@@ -66,7 +65,7 @@ pub fn test_config(dir: &Path, auth_mode: AuthMode) -> UserServiceConfig {
     }
 }
 
-/// A `multi_user` service whose store holds one admin (`root` / [`PWD`]).
+/// A service whose store holds one admin (`root` / [`PWD`]).
 pub fn admin_state(dir: &Path) -> AppState {
     let svc = AuthService::new(
         dir,
@@ -79,31 +78,23 @@ pub fn admin_state(dir: &Path) -> AppState {
     )
     .unwrap();
     svc.ensure_bootstrap_admin().unwrap();
-    state(dir, AuthMode::MultiUser, Some(svc))
+    state(dir, svc)
 }
 
 /// The password every seeded test account uses.
 pub const PWD: &str = "s3cret123";
 
-/// A `multi_user` service with an empty account store (no bootstrap admin).
+/// A service with an empty account store (no bootstrap admin) — the
+/// first-boot state (ADR-114).
 pub fn multi_user_state(dir: &Path) -> AppState {
     state(
         dir,
-        AuthMode::MultiUser,
-        Some(AuthService::new(dir, Default::default(), None).unwrap()),
+        AuthService::new(dir, Default::default(), None).unwrap(),
     )
 }
 
-/// A `local`-mode service: profiles and avatars only, no account system.
-pub fn local_state(dir: &Path) -> AppState {
-    state(dir, AuthMode::Local, None)
-}
-
-fn state(dir: &Path, auth_mode: AuthMode, auth_service: Option<AuthService>) -> AppState {
-    AppState::new(
-        &test_config(dir, auth_mode),
-        auth_service.map(std::sync::Arc::new),
-    )
+fn state(dir: &Path, auth_service: AuthService) -> AppState {
+    AppState::new(&test_config(dir), std::sync::Arc::new(auth_service))
 }
 
 /// The full user-service router with the Gateway's token→header step in
@@ -125,10 +116,7 @@ async fn gateway_identity_shim(
     mut req: Request,
     next: Next,
 ) -> Response {
-    // `local` has no account system and no identity to assert.
-    let Some(svc) = state.auth_service.clone() else {
-        return next.run(req).await;
-    };
+    let svc = state.auth_service.clone();
 
     // The Gateway is the **only** trusted writer of these headers: a
     // client-supplied copy must never survive (proxy forwards headers

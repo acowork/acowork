@@ -7,10 +7,10 @@
  * module those lived under one flat localStorage key shared by every account,
  * so signing in as a second user inherited the first one's appearance.
  *
- * Machine-level settings are deliberately NOT scoped — gateway URL, gateway
- * mode, log level / file size / count, auto-start-local-node. Those describe
- * the deployment, not the person, and a login screen still needs to know
- * which Gateway to reach before anyone has signed in.
+ * Machine-level settings are deliberately NOT scoped — gateway URL, URL
+ * history, relay flag, log level / file size / count, auto-start-local-node.
+ * Those describe the deployment, not the person, and a login screen still
+ * needs to know which Gateway to reach before anyone has signed in.
  *
  * The scope is resolved **synchronously** from the persisted access token,
  * because `settingsStore` is imported at the top of `main.tsx` to apply the
@@ -23,17 +23,16 @@
  * settings on the same machine, which the attacker already has physical
  * access to.
  *
- * In `AUTH_MODE=local` there is no token, so the scope stays `null` and every
- * key resolves to its original unscoped name — the historical single-user
- * behavior is untouched.
+ * With no token (not logged in) the scope stays `null` and every key
+ * resolves to its original unscoped name.
  */
 
 import { decodeJwtPayload } from "./jwt";
 
 const TOKEN_STORAGE_KEY = "acowork.auth.tokens";
 
-/** The account whose preferences we are reading and writing, or `null` for
- *  "no account" (local mode, or logged out). */
+/** The account whose preferences we are reading and writing, or `null` when
+ *  nobody is signed in. */
 let scope: string | null = null;
 
 /** Listeners re-read their persisted values when the scope changes — the

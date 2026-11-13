@@ -53,7 +53,7 @@ function hit(over: Partial<HistoryHit> & Pick<HistoryHit, "from" | "kind" | "bod
 beforeEach(() => {
   searchChatHistory.mockReset();
   useAuthStore.setState({
-    mode: "multi_user",
+    accountState: "ready",
     status: "logged_in",
     accessToken: "token",
     account: {

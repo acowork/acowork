@@ -266,7 +266,6 @@ export function useSelfAccount(): UserAccount | null {
 export function usePmDirectoryUsers(): ReadonlyArray<DirectoryUser> {
   const self = useSelfAccount();
   const accessToken = useAuthStore((s) => s.accessToken);
-  const mode = useAuthStore((s) => s.mode);
   const status = useAuthStore((s) => s.status);
   const ownerUserId = usePmUserDirectoryStore((s) => s.ownerUserId);
   const storedUsers = usePmUserDirectoryStore((s) => s.users);
@@ -274,12 +273,12 @@ export function usePmDirectoryUsers(): ReadonlyArray<DirectoryUser> {
   const resetDirectory = usePmUserDirectoryStore((s) => s.reset);
 
   useEffect(() => {
-    if (mode === "multi_user" && status === "logged_in" && self && accessToken) {
+    if (status === "logged_in" && self && accessToken) {
       void loadDirectory(self.user_id, accessToken);
     } else {
       resetDirectory();
     }
-  }, [mode, status, self?.user_id, accessToken, loadDirectory, resetDirectory]);
+  }, [status, self?.user_id, accessToken, loadDirectory, resetDirectory]);
 
   // Never briefly expose another account's cached directory after an account switch.
   return ownerUserId === self?.user_id ? storedUsers : [];
@@ -323,20 +322,14 @@ export function projectOwnerId(
  * (`chat_sessions::can_govern_group`, PM's `require_governance`), so a surface
  * never offers an affordance the server would refuse with a 403.
  *
- * `localMode` is the ADR-076 §决策 12 exemption: under `local` there is no
- * account store — `self` is always null and the Gateway injects the constant
- * actor `"human"` for every call. One machine, one human, so that human
- * governs everything, including a project an agent created through
- * `pm_create_project` (whose owner id is an instance id no human header can
- * match). The backend applies the same exemption; both sides must, or local
- * mode ends up with no governance UI at all.
+ * ADR-114: the account system is always present, so there is no
+ * "single anonymous human governs everything" exemption. An unresolved
+ * account simply does not govern — the backend gates on a real actor.
  */
 export function canGovern(
   ownerId: string | null | undefined,
   self: UserAccount | null,
-  localMode: boolean,
 ): boolean {
-  if (localMode) return true;
   if (!self) return false;
   return self.role === "admin" || (!!ownerId && ownerId === self.user_id);
 }
@@ -345,14 +338,8 @@ export function canGovern(
 export function canGovernProject(
   project: Pick<PmProject, "created_by" | "owner_id"> | null | undefined,
   self: UserAccount | null,
-  localMode: boolean,
 ): boolean {
-  return canGovern(projectOwnerId(project), self, localMode);
-}
-
-/** The deployment's `local` flag — the second argument both helpers above need. */
-export function useLocalMode(): boolean {
-  return useAuthStore((s) => s.mode === "local");
+  return canGovern(projectOwnerId(project), self);
 }
 
 /**

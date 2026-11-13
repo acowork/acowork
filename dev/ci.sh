@@ -268,39 +268,44 @@ run_gateway_auth_scope_redline() {
     echo "Identity-injection red line: OK"
 }
 
-# ADR-076 §决策 12: the account API exists only under `AUTH_MODE=multi_user`.
-# Its routes must stay behind an `is_multi_user()` branch, so `local` mode
-# returns 404 rather than exposing a gated-but-registered surface.
+# ADR-114 supersedes ADR-076 §决策 12: the account system is ALWAYS present.
+# There is no `AUTH_MODE`, no `is_multi_user()` branch and no deployment in
+# which `/api/auth/*` or `/api/users/*` are unregistered. A fresh install is
+# gated by the Gateway's `restricted_mode` middleware (403 setup_required),
+# not by the routes being absent.
 #
 # Since ADR-084 the registrations live in the user service, not the Gateway —
-# the Gateway registers no account route at all, it reverse-proxies the whole
-# surface. Scanned file is therefore `acowork-user/src/http/mod.rs`; pointing
-# the lint at the Gateway after the move would pass vacuously.
-run_user_auth_mode_redline() {
-    echo "Checking ADR-076 auth-mode routing red line..."
+# the Gateway reverse-proxies the whole surface. Scanned file is therefore
+# `acowork-user/src/http/mod.rs`; pointing the lint at the Gateway after the
+# move would pass vacuously.
+run_account_routes_redline() {
+    echo "Checking ADR-114 unconditional account-route registration..."
     local routes="$SCRIPT_DIR/../core/acowork-user/src/http/mod.rs"
-    # Every `auth_routes()` / `account_api` registration line must sit inside a
-    # branch whose scrutinee (`state.is_multi_user()`) is within the preceding
-    # 4 lines.
-    local offenders
-    offenders=$(awk '
-        { ctx[NR % 5] = $0 }
-        /auth_api::auth_routes|account_api::/ {
-            ok = 0
-            for (i = 1; i <= 4; i++) {
-                if (ctx[(NR - i) % 5] ~ /is_multi_user|AuthMode|auth_mode/) ok = 1
-            }
-            if (!ok) print FILENAME ":" NR ": " $0
-        }
-    ' "$routes" || true)
-    if [ -n "$offenders" ]; then
-        echo "ERROR: auth routes registered without an auth_mode branch (ADR-076 §决策 12):"
-        echo "$offenders"
-        echo "Register them only when the account system is active — an unregistered"
-        echo "route cannot be reached by a future auth-middleware mistake."
+    if [ ! -f "$routes" ]; then
+        echo "ERROR: missing $routes"
         exit 1
     fi
-    echo "Auth-mode routing red line: OK"
+    for required in \
+        'account_api::account_routes()' \
+        'auth_api::auth_routes()'
+    do
+        if ! grep -Fq "$required" "$routes"; then
+            echo "ERROR: $routes does not register $required unconditionally (ADR-114)."
+            echo "The account API must not disappear in any deployment mode."
+            exit 1
+        fi
+    done
+    # A mode branch anywhere in the registration file means the old design
+    # is creeping back. Comments are fine; only real identifiers are banned.
+    local offenders
+    offenders=$(grep -nE 'is_multi_user\(|AuthMode|\bauth_mode\b' "$routes" \
+        | grep -v '^\s*[0-9]*:\s*//' || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: ADR-114 removed the deployment auth mode; stale branch in $routes:"
+        echo "$offenders"
+        exit 1
+    fi
+    echo "Unconditional account-route registration: OK"
 }
 
 # ADR-076 §决策 8: the user-to-user chat store (`src/chat.rs`) owns the pairing
@@ -815,7 +820,7 @@ case "$MODE" in
         run_meta_layout_redline
         run_session_full_read_redline
         run_gateway_auth_scope_redline
-        run_user_auth_mode_redline
+        run_account_routes_redline
         run_user_chat_path_redline
         run_chat_projection_redline
         run_permission_route_redline
@@ -844,7 +849,7 @@ case "$MODE" in
         run_meta_layout_redline
         run_session_full_read_redline
         run_gateway_auth_scope_redline
-        run_user_auth_mode_redline
+        run_account_routes_redline
         run_user_chat_path_redline
         run_chat_projection_redline
         run_permission_route_redline

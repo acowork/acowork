@@ -2,20 +2,21 @@
  * Centralized Gateway configuration helpers.
  *
  * Default values are defined in `./defaults.ts` (a pure-constants module with
- * no runtime imports) and re-exported here for backward compatibility with
- * existing callers that import `DEFAULT_*` from `./config`.
+ * no runtime imports) and re-exported here for existing callers that import
+ * `DEFAULT_*` from `./config`.
+ *
+ * ADR-115: the user-facing configuration is a single server address. The
+ * deployment mode is derived from it (see `./gatewayUrl.ts`) and is never
+ * persisted or written by a UI control.
  */
 
 import { useSettingsStore } from "../stores/settingsStore";
-import {
-  DEFAULT_GATEWAY_URL,
-  DEFAULT_GATEWAY_MODE,
-} from "./defaults";
+import { DEFAULT_GATEWAY_URL } from "./defaults";
+import { isLoopbackGatewayUrl } from "./gatewayUrl";
 import type { GatewayMode } from "./types";
 
 export {
   DEFAULT_GATEWAY_URL,
-  DEFAULT_GATEWAY_MODE,
   DEFAULT_THEME,
   DEFAULT_FONT_SIZE,
   DEFAULT_LOG_LEVEL,
@@ -29,7 +30,6 @@ export {
 /**
  * Get the current Gateway URL.
  * Reads from settingsStore if available (user-configured), falls back to DEFAULT_GATEWAY_URL.
- * Supports remote Desktop ↔ Gateway scenarios.
  */
 export function getGatewayUrl(): string {
   try {
@@ -42,48 +42,32 @@ export function getGatewayUrl(): string {
 }
 
 /**
- * Check if the current Gateway URL points to a local address.
+ * Check if the current Gateway URL points to this machine.
  *
  * Used by local-only features (e.g. "Reveal in File Explorer" — opening
- * the OS file manager on a remote Gateway host has no value to the user).
+ * the OS file manager on a remote Gateway host has no value to the user)
+ * and by the boot path to decide whether a local Gateway may be spawned.
  * Debug Protocol itself is NOT local-only — RPC rides Gateway HTTP and
- * events ride MQTT with the broker host derived from the Gateway URL
- * (ADR-048 D6 + ADR-055/058), so remote mode is fully supported.
+ * events ride MQTT with the broker host derived from the Gateway URL.
  */
 export function isGatewayLocal(): boolean {
-  const url = getGatewayUrl();
-  try {
-    const hostname = new URL(url).hostname;
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
-  } catch {
-    // URL unparseable (e.g. missing protocol) — try manual hostname extraction
-    const hostname = url.replace(/^https?:\/\//i, '').split('/')[0].split(':')[0];
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "[::1]";
-  }
+  return isLoopbackGatewayUrl(getGatewayUrl());
 }
 
 /**
- * Get the current Gateway deployment mode.
- * Reads from settingsStore, defaults to "local".
+ * The derived internal topology mode. Read-only: there is no setter.
+ * Relay keeps its own explicit entry point (`settingsStore.setRelayGateway`);
+ * every other address maps to `local` (loopback) or `remote` (anything else).
  */
 export function getGatewayMode(): GatewayMode {
   try {
-    const mode = useSettingsStore.getState().gatewayMode;
-    if (mode === "local" || mode === "remote" || mode === "relay") return mode;
+    return useSettingsStore.getState().gatewayMode;
   } catch {
-    // settingsStore not yet available
+    return "local";
   }
-  return DEFAULT_GATEWAY_MODE;
 }
 
-/**
- * Check whether the Gateway is off-site (remote LAN or cloud relay).
- *
- * Both off-site modes share the "Desktop never spawns the Gateway"
- * lifecycle; use `getGatewayMode()` when the distinction matters
- * (e.g. MQTT transport, fs-browse availability — the remote ACL
- * blocks `/api/fs/browse` for relay-originated requests).
- */
+/** True when the configured address is off this machine (LAN or relay). */
 export function isGatewayModeRemote(): boolean {
   return getGatewayMode() !== "local";
 }

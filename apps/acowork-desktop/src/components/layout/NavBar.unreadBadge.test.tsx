@@ -58,7 +58,7 @@ function seedDms(...unread: number[]) {
 describe("NavBar chat unread dot", () => {
   beforeEach(() => {
     useAuthStore.setState({
-      mode: "multi_user",
+      accountState: "ready",
       status: "logged_in",
       account: self,
       accessToken: "token",

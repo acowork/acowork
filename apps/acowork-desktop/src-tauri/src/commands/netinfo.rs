@@ -42,6 +42,43 @@ pub fn get_local_ipv4_addresses() -> Vec<String> {
     }))
 }
 
+/// The IPv4 of the interface that owns the DEFAULT ROUTE — the one address
+/// a LAN peer (e.g. a phone pairing over Wi-Fi) can actually reach.
+///
+/// Why this exists: `get_local_ipv4_addresses` returns interfaces in
+/// enumeration order, and virtual adapters (WSL vEthernet, Hyper-V,
+/// security-suite virtual NICs) routinely sort FIRST — a phone that
+/// dials that address gets nothing. The interface that owns the default
+/// route is the one genuinely attached to the LAN (same rule
+/// `dev/common/build_core.ps1` uses to pick `--advertise-host`).
+///
+/// Implementation: the classic UDP "connect trick". Connecting a UDP
+/// socket sends no packet — it only makes the OS resolve a route and pick
+/// the local source address for it. The sentinel target is a public DNS
+/// server, but any routable address works; offline machines still have a
+/// default route, so this succeeds without any traffic. Returns `None`
+/// when no route exists (fully offline / exotic stack) — callers fall
+/// back to the interface list.
+#[tauri::command]
+pub fn get_default_route_ipv4() -> Option<String> {
+    default_route_ipv4()
+}
+
+/// Crate-visible: `spawn_gateway` uses this to pin the advertise host of a
+/// Desktop-spawned Gateway to the LAN-reachable interface (2026-11-13
+/// product decision: the child binds 0.0.0.0 so a phone can pair via QR).
+pub(crate) fn default_route_ipv4() -> Option<String> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    // Any routable sentinel; no packet is ever sent for a UDP connect.
+    sock.connect("8.8.8.8:53").ok()?;
+    match sock.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(v4) if !v4.is_loopback() && !v4.is_unspecified() => {
+            Some(v4.to_string())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

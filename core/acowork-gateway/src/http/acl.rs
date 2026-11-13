@@ -383,7 +383,6 @@ mod tests {
             Arc::new(RwLock::new(gw)),
             Arc::new(crate::http::auth::HttpAuth::new(false)),
         );
-        st.auth_mode = crate::auth::AuthMode::MultiUser;
         let node_store = ownership::new_shared_node_owners(&dir);
         for (id, r) in nodes {
             ownership::lock(&node_store).put(id, r.clone());
@@ -582,11 +581,10 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("acowork-acl-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("temp dir");
         let gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
-        let mut st = AppState::new(
+        let st = AppState::new(
             Arc::new(RwLock::new(gw)),
             Arc::new(crate::http::auth::HttpAuth::new(false)),
         );
-        st.auth_mode = crate::auth::AuthMode::MultiUser;
         // No stores installed.
         let bob = user("bob", false);
         assert!(evaluate(&st, &bob, Op::Manage, &Resource::Agent("a-1".into())).is_some());

@@ -7,9 +7,12 @@
  *     ├─url+token─me fail──▶ login ──────────┘
  *     └─probe fail with saved url──▶ disconnected (retry / change address)
  *
- * `restricted` renders when `/api/status` says `requires_setup` — the
- * Gateway has no usable admin password yet and mobile never fixes that;
- * it points the user at the Desktop instead.
+ * `restricted` renders when `/api/status` reports `uninitialized` or
+ * `needs_setup` (ADR-114) — the Gateway has no usable admin password yet
+ * and mobile never fixes that; it points the user at the Desktop instead.
+ * An absent/unknown state is treated as `ready`, matching the Desktop and
+ * the Gateway's own startup-window default: a broken status payload must
+ * not lock the client into a setup screen it cannot complete.
  *
  * Tokens live in the WebView's localStorage. The access token is 15-minute
  * lived and the refresh family is revocable server-side, so a stolen
@@ -49,6 +52,18 @@ const LS = {
   me: 'acowork.me',
 }
 
+/**
+ * ADR-114: `requires_setup` is not a wire field — it is derived from state.
+ * Only the two explicit restricted states gate the client. `undefined` /
+ * unrecognised values fail open to `ready`, the same rule as the Desktop's
+ * `fetchAuthPolicy()`; `st.account_state !== 'ready'` used to fail *closed*
+ * and stranded Mobile on a restricted screen whenever `/api/status` came
+ * back without the field.
+ */
+function needsSetup(st: GatewayStatus): boolean {
+  return st.account_state === 'uninitialized' || st.account_state === 'needs_setup'
+}
+
 function lsGet(k: string): string | null {
   try {
     return localStorage.getItem(k)
@@ -83,7 +98,7 @@ interface AuthStore {
 
   /** Cold start: decide the phase from persisted state. */
   boot(): Promise<void>
-  /** Connect screen: probe a URL, branch on auth_mode/requires_setup. */
+  /** Connect screen: probe a URL, branch on account_state. */
   probe(url: string): Promise<boolean>
   login(username: string, password: string): Promise<boolean>
   /** 方案③：扫码兑换配对票据 -> 落 token -> ready（含地址）。 */
@@ -126,19 +141,11 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     set({ baseUrl: url, accessToken: access, refreshToken: refresh })
     try {
       const st = await probeStatus(url)
-      console.log('[AUTH] boot() probeStatus ok, auth_mode=', st.auth_mode)
+      console.log('[AUTH] boot() probeStatus ok, account_state=', st.account_state)
       set({ status: st })
-      if (st.requires_setup) {
+      if (needsSetup(st)) {
         console.log('[AUTH] boot() → restricted')
         set({ phase: 'restricted' })
-        return
-      }
-      if (st.auth_mode === 'local') {
-        // No account system: the Gateway's single bearer token is minted by
-        // Desktop; mobile v1 only supports multi_user gateways in practice,
-        // but a tokenless local gateway still gets a ready state.
-        console.log('[AUTH] boot() →', access ? 'ready' : 'login', '(local mode)')
-        set({ phase: access ? 'ready' : 'login' })
         return
       }
       if (access && refresh) {
@@ -175,7 +182,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       const st = await probeStatus(clean)
       lsSet(LS.url, clean)
       set({ baseUrl: clean, status: st, busy: false })
-      if (st.requires_setup) {
+      if (needsSetup(st)) {
         set({ phase: 'restricted' })
       } else {
         set({ phase: 'login' })
@@ -228,8 +235,8 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       set({ baseUrl: clean })
       const pair = await redeemPairing(clean, pairingToken)
       get()._setTokens(pair)
-      // 与 boot/probe 一致地拉 status；兑换成功即说明网关可用且已鉴权，requires_setup
-      // 不应发生，但仍保守探测。me 失败不阻断进入 ready（与 login 同构）。
+      // 与 boot/probe 一致地拉 status；兑换成功即说明网关可用且已鉴权，
+      // account_state 应为 ready，但仍保守探测。me 失败不阻断 ready（同 login）。
       const st = await probeStatus(clean).catch(() => null)
       const me = await fetchMe().catch((e) => { console.log('[AUTH] pairLogin() fetchMe error (non-fatal)', e); return null })
       set({ busy: false, status: st, me, phase: 'ready' })
@@ -263,7 +270,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       const st = await probeStatus(url)
       console.log('[AUTH] retryConnection() probeStatus ok')
       set({ status: st, busy: false })
-      if (st.requires_setup) set({ phase: 'restricted' })
+      if (needsSetup(st)) set({ phase: 'restricted' })
       else if (get().accessToken && get().refreshToken) {
         try {
           await fetchMe()
