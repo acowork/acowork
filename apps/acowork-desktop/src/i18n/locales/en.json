@@ -2294,6 +2294,7 @@
       "delete": "Delete task",
       "dueDate": "Due date",
       "dispatchFailed": "Dispatch failed (attempt {{attempts}}): {{error}}",
+      "unscheduled": "Not scheduled: no start time, so the task is never dispatched. Set a start time to hand it to the assignee.",
       "dispatchAbandoned": "Dispatch abandoned after 5 failed attempts: {{error}}. Reassign or change status to retry.",
       "startDate": "Start date",
       "assignee": "Assignee",

@@ -21,6 +21,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createTask, reparentTask, updateTask } from "../../lib/pm-api";
+import { todayDateField } from "../../components/common/calendarGrid";
 import { useAgentStore } from "../../stores/agentStore";
 import { usePmBoardStore } from "../../stores/pm/boardStore";
 import { usePmProjectStore } from "../../stores/pm/projectStore";
@@ -131,7 +132,10 @@ export function useTaskForm({
       description: initial?.description ?? "",
       assignee: initial?.assignee ?? "",
       dueAt: isoToLocalDate(initial?.due_at),
-      startAt: isoToLocalDate(initial?.start_at),
+      // 创建时默认"现在"：今天的本地零点 ≤ now → 到期即派发。服务端的缺省
+      // 也是 `now`（没给就填当前时刻），这里预填只是让**显示的**与**存的**
+      // 一致——不再是一片空白，让人以为"没排期 = 不会派发"。
+      startAt: initial ? isoToLocalDate(initial.start_at) : todayDateField(),
       parentId: initial?.parent_id ?? defaultParentId ?? "",
       dependsOn: initial?.depends_on?.map((d) => d.task_id) ?? [],
     }),

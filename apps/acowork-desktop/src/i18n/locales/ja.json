@@ -1914,6 +1914,7 @@
       "delete": "タスクを削除",
       "dueDate": "期限",
       "dispatchFailed": "ディスパッチ失敗（{{attempts}} 回目）：{{error}}",
+      "unscheduled": "未スケジュール:開始時刻がないため、タスクはディスパッチされません。開始時刻を設定すると担当者に渡ります。",
       "dispatchAbandoned": "5 回连续失败后已放弃派发：{{error}}。重新指派或变更状态后可重试。",
       "startDate": "開始日",
       "assignee": "担当者",

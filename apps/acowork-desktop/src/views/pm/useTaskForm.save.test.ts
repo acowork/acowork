@@ -17,7 +17,8 @@
  * real `memberOptions` mapping against ADR-073. Vitest mocks are file-scoped.
  */
 import { act, renderHook, waitFor } from "@testing-library/react";
-import { localDateFieldToIso, useTaskForm } from "./useTaskForm";
+import { isoToLocalDate, localDateFieldToIso, useTaskForm } from "./useTaskForm";
+import { todayDateField } from "../../components/common/calendarGrid";
 import { createTask, reparentTask, updateTask } from "../../lib/pm-api";
 
 vi.mock("../../lib/pm-api", () => ({
@@ -127,6 +128,40 @@ describe("useTaskForm save path", () => {
     // The regression: no follow-up PATCH.
     expect(updateTask).not.toHaveBeenCalled();
     expect(stores.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it("defaults the start time to now — a task with no start time is never dispatched", async () => {
+    const { result } = renderHook(() => useTaskForm({ projectId: "p-1" }));
+
+    act(() => result.current.setTitle("新任务"));
+    act(() => result.current.setAssignee("u-1"));
+
+    await act(async () => {
+      await result.current.save();
+    });
+
+    expect(createTask).toHaveBeenCalledTimes(1);
+    // 今天的本地零点（≤ now → 到期即派发），不是空。
+    expect(vi.mocked(createTask).mock.calls[0][1].start_at).toBe(
+      localDateFieldToIso(todayDateField()),
+    );
+  });
+
+  it("keeps the stored start time on edit — an edit must not reschedule a task", async () => {
+    const stored = "2026-10-20T00:00:00Z";
+    const initial = row({ start_at: stored });
+    const { result } = renderHook(() => useTaskForm({ projectId: "p-1", initial }));
+
+    act(() => result.current.setTitle("改过的标题"));
+    await act(async () => {
+      await result.current.save();
+    });
+
+    // 编辑走的是"存的值"，不是缺省的 now——否则一次改名就把排期抹平了。
+    expect(updateTask).toHaveBeenCalledWith(
+      "t-1",
+      expect.objectContaining({ start_at: localDateFieldToIso(isoToLocalDate(stored)) }),
+    );
   });
 
   it("joins the run that is already on the wire instead of creating a second row", async () => {

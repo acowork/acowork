@@ -2305,6 +2305,7 @@
       "delete": "删除任务",
       "dueDate": "截止日期",
       "dispatchFailed": "派发失败（第 {{attempts}} 次）：{{error}}",
+      "unscheduled": "未排期：没有开始时间，不会派发给执行人。设置开始时间后才会派出。",
       "dispatchAbandoned": "派发已放弃（连续 5 次失败）：{{error}}。重新指派或变更状态后可重试。",
       "startDate": "开始日期",
       "assignee": "负责人",

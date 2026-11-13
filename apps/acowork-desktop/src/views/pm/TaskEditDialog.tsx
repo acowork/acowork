@@ -620,6 +620,11 @@ function BasicInfoTab({
                   })}
             </p>
           )}
+          {/* 未排期 = 没有开始时间 = 扫描器不派发（fail-closed）。清掉了开始
+              时间的任务在这里必须自己说出来,否则它和"等扫描器"长得一样。 */}
+          {row.status === "pending" && !row.dispatched_at && !row.start_at && (
+            <p className="mt-1.5">{t("pm.task.unscheduled")}</p>
+          )}
         </div>
       )}
 

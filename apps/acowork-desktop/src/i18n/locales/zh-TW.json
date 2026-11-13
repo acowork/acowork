@@ -1905,6 +1905,7 @@
       "delete": "刪除任務",
       "dueDate": "截止日期",
       "dispatchFailed": "派發失敗（第 {{attempts}} 次）：{{error}}",
+      "unscheduled": "未排期：沒有開始時間，不會派發給執行人。設定開始時間後才會派出。",
       "dispatchAbandoned": "派發已放棄（連續 5 次失敗）：{{error}}。重新指派或變更狀態後可重試。",
       "startDate": "開始日期",
       "assignee": "負責人",
