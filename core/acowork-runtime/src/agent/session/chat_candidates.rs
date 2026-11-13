@@ -75,7 +75,7 @@ fn candidate_status(status: &SessionStatus) -> Option<CandidateStatus> {
         SessionStatus::LlmAwaitingFirstChunk
         | SessionStatus::Thinking
         | SessionStatus::LlmStreaming { .. }
-        | SessionStatus::ToolExecuting
+        | SessionStatus::ToolExecuting { .. }
         | SessionStatus::WaitingApproval { .. }
         | SessionStatus::Paused { .. } => Some(CandidateStatus::Working),
         SessionStatus::Errored { .. } => Some(CandidateStatus::Errored),
