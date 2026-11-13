@@ -23,6 +23,8 @@
 #
 # Environment:
 #   ACOWORK_HUB   hub checkout (default: ../ACoworkAgentHub)
+#   HUB_BASE      ref the mirror branch is cut from (default: origin/main).
+#                 Override it to test against an unmerged tooling branch.
 #   NO_PUSH=1     commit on the mirror branch, skip push and the PR
 #
 # Exit codes:
@@ -96,14 +98,57 @@ if [ -n "$DIRTY" ]; then
     exit 1
 fi
 
-BASE="$(git -C "$HUB" rev-parse --verify origin/main 2>/dev/null || git -C "$HUB" rev-parse HEAD)"
+BASE="${HUB_BASE:-$(git -C "$HUB" rev-parse --verify origin/main 2>/dev/null || git -C "$HUB" rev-parse HEAD)}"
 BRANCH="mirror/sync-$SHORT"
+PREV_BRANCH="$(git -C "$HUB" rev-parse --abbrev-ref HEAD)"
+
+# The base ref decides WHICH GENERATOR RUNS, because the PR has to be
+# checkable by the hub's own CI and that CI calls this tool. The script needs
+# `--main-ref` to pin the claim and `--print-claims` to diff it, so a hub whose
+# merged tooling predates them cannot be synced this way at all.
+#
+# Ask the PARSER, not the help text: the generator on origin/main prints
+# `--main-ref` in its docstring (which argparse echoes into --help) and then
+# rejects it in the parser, so grepping --help accepts a tool that cannot run.
+# Here an accepted flag fails later for some other reason, which is fine —
+# only argparse's own refusal means the tool is too old.
+TMP_GEN="$(mktemp)"
+trap 'rm -f "$TMP_GEN"' EXIT
+accepts_flag() {
+    local out
+    # `--main-repo` is required, and argparse reports a missing required
+    # argument before it reports an unrecognized one. Satisfy it, or every old
+    # generator looks new.
+    out="$("$PY" "$TMP_GEN" --main-repo . "$1" 2>&1 || true)"
+    ! grep -q "unrecognized argument.*$1" <<<"$out"
+}
+for flag in --main-ref --print-claims --check; do
+    git -C "$HUB" show "$BASE:tools/sync-official.py" > "$TMP_GEN" 2>/dev/null \
+        || { echo "ERROR: $BASE has no tools/sync-official.py" >&2; exit 2; }
+    if ! accepts_flag "$flag"; then
+        echo "ERROR: the generator at $BASE does not accept $flag." >&2
+        echo "       The mirror-sync tooling has not been merged into the hub's main yet." >&2
+        echo "       Merge it first, or run the generator by hand on the branch that carries it:" >&2
+        echo "         cd $HUB && $PY tools/sync-official.py --main-repo $MAIN_REPO --main-ref $SHA" >&2
+        exit 1
+    fi
+done
+
 git -C "$HUB" switch -c "$BRANCH" "$BASE" >/dev/null
+# Anything below that fails must not leave the checkout on a branch nobody
+# asked for, with the mirror half-written.
+cleanup_branch() {
+    git -C "$HUB" switch "$PREV_BRANCH" >/dev/null 2>&1 || true
+    git -C "$HUB" reset --hard >/dev/null 2>&1 || true
+    git -C "$HUB" branch -D "$BRANCH" >/dev/null 2>&1 || true
+}
 
 # The generator is the only writer here: it copies manifest.toml, prompts/,
 # skills/ and assets/ verbatim and produces hub.json / README.md / LICENSE
 # itself, recording $SHA as the claim.
-( cd "$HUB" && "$PY" tools/sync-official.py --main-repo "$MAIN_REPO" --main-ref "$SHA" )
+( cd "$HUB" && "$PY" tools/sync-official.py --main-repo "$MAIN_REPO" --main-ref "$SHA" ) || {
+    echo "ERROR: the generator failed; the hub checkout was left as it was." >&2
+    cleanup_branch; exit 1; }
 
 git -C "$HUB" add -A agents/
 if git -C "$HUB" diff --cached --quiet; then
@@ -116,8 +161,14 @@ fi
 CHANGED="$(git -C "$HUB" diff --cached --name-only | sed -n 's|^agents/[^/]*/\([^/]*\)/.*|\1|p' | sort -u | tr '\n' ' ')"
 
 # Prove the commit satisfies the hub's own gate before pushing it: the mirror
-# must match the claim it is about to carry.
-"$PY" "$HUB/tools/sync-official.py" --main-repo "$MAIN_REPO" --check >/dev/null
+# must match the claim it is about to carry. A failure here means the
+# generator produced something the hub would reject, so the branch is torn
+# down rather than left half-written in someone's checkout.
+if ! "$PY" "$HUB/tools/sync-official.py" --main-repo "$MAIN_REPO" --check >/dev/null; then
+    echo "ERROR: the generated mirror does not pass the hub's own --check; branch torn down." >&2
+    cleanup_branch
+    exit 1
+fi
 
 git -C "$HUB" commit -q -F - <<MSG
 chore(mirror): sync official agents from ACowork@${SHORT}
