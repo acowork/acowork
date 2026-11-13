@@ -53,6 +53,7 @@ import {
 import { useTranslation } from "../../i18n/useTranslation";
 import type { Components } from "react-markdown";
 import { formatBubbleTime } from "../../lib/formatTime";
+import { BubbleMetaActions } from "./BubbleMetaActions";
 import { cn } from "../../lib/utils";
 import { composerChip, listRowSelected, toolbarIconButton } from "../../lib/ui-styles";
 import { getGatewayUrl } from "../../lib/config";
@@ -644,7 +645,11 @@ const GroupRowView = memo(function GroupRowView({
               className="mt-0.5"
             />
           ) : null}
-          <div className="mt-1 flex items-center gap-2">
+          <div className="mt-1 flex items-center gap-1.5">
+            {/* Copy only, and only on a human's utterance — the same reason
+                the 1:1 thread has no resend here: a group row is a chat-log
+                entry, not a turn in an agent session. */}
+            {row.kind === "user_message" && <BubbleMetaActions copyText={row.body} />}
             <span className="text-10 text-text-tertiary opacity-0 transition-opacity group-hover:opacity-100">
               {formatBubbleTime(row.ts * 1000)}
             </span>

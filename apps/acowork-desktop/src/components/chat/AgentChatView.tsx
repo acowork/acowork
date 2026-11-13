@@ -62,6 +62,7 @@ import {
   Quote,
 } from "lucide-react";
 import { formatBubbleTime } from "../../lib/formatTime";
+import { BubbleMetaActions } from "./BubbleMetaActions";
 import { cn } from "../../lib/utils";
 import { composerChip, toolbarIconButton } from "../../lib/ui-styles";
 import { useStickToBottom } from "../../lib/stickToBottom";
@@ -425,9 +426,19 @@ const RowView = memo(function RowView({
             {row.delivery?.alert ? (
               <DeliveryAlertLine alert={row.delivery.alert} align="end" className="mt-0.5" />
             ) : null}
-            <span className="mt-1 text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
-              {formatBubbleTime(row.ts * 1000)}
-            </span>
+            {(row.ts || row.body) && (
+              <div className="mt-1 flex items-center gap-1.5">
+                {/* Copy only: a chat-session row is a chat-log entry, not a
+                    turn in an agent session, so there is nothing here to
+                    re-send. The execution surface adds the resend icon. */}
+                <BubbleMetaActions copyText={row.body} />
+                {row.ts ? (
+                  <span className="text-10 text-text-tertiary  opacity-0 transition-opacity group-hover:opacity-100">
+                    {formatBubbleTime(row.ts * 1000)}
+                  </span>
+                ) : null}
+              </div>
+            )}
           </div>
         </div>
         <UserAvatar
