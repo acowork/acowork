@@ -71,7 +71,11 @@ vi.mock("../../stores/chatStore", () => ({
 vi.mock("../../stores/agentStore", () => ({
   useAgentStore: Object.assign(
     (selector: (state: unknown) => unknown) =>
-      selector({ agents: { [AGENT]: { meta: { display_name: AGENT_NAME, name: "agent-a" } } } }),
+      // `ed3a1ad8` collapsed the two agent names into one instance name:
+      // `AgentInfo` carries a single `name`, which IS the label a human sees.
+      // A fixture with a second `display_name` describes a payload the platform
+      // no longer sends, and the component is right to ignore it.
+      selector({ agents: { [AGENT]: { meta: { name: AGENT_NAME } } } }),
     { getState: () => ({ selectAgent: vi.fn() }) },
   ),
 }));
