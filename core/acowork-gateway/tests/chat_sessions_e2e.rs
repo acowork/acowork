@@ -39,15 +39,7 @@ fn free_port() -> u16 {
 }
 
 fn gateway_binary() -> PathBuf {
-    let exe = std::env::current_exe().expect("current exe");
-    let dir = exe.parent().and_then(|p| p.parent()).expect("target/debug dir");
-    let name = if cfg!(windows) { "acowork-gateway.exe" } else { "acowork-gateway" };
-    let candidate = dir.join(name);
-    if candidate.exists() {
-        candidate
-    } else {
-        dir.parent().expect("target root").join(name)
-    }
+    PathBuf::from(env!("CARGO_BIN_EXE_acowork-gateway"))
 }
 
 struct Gateway {

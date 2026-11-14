@@ -27,6 +27,11 @@ pub mod security;
 pub mod util;
 pub mod vault;
 
+/// Test-only helpers (loopback ports / clients) shared by the in-tree test
+/// modules, so a port is never hand-picked twice. See the module docs.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 /// Type alias for the tracing reload handle used to dynamically change log levels.
 pub type LogReloadHandle =
     tracing_subscriber::reload::Handle<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>;

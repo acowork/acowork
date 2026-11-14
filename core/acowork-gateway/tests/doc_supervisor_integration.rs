@@ -17,6 +17,9 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+#[path = "support/binary.rs"]
+mod binary;
+
 use acowork_gateway::gateway::state::GatewayState;
 use acowork_gateway::lifecycle::doc_supervisor::{DocProcessState, DocSupervisorConfig};
 use tokio::sync::RwLock;
@@ -30,18 +33,7 @@ fn free_port() -> u16 {
 
 /// Locate the `acowork-doc` binary relative to the test executable.
 fn doc_binary() -> PathBuf {
-    let exe = std::env::current_exe().expect("current exe");
-    let dir = exe
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("target/debug dir");
-    let name = if cfg!(windows) { "acowork-doc.exe" } else { "acowork-doc" };
-    let candidate = dir.join(name);
-    if candidate.exists() {
-        candidate
-    } else {
-        dir.parent().expect("target root").join(name)
-    }
+    binary::locate("acowork-doc")
 }
 
 /// Kill a process by OS pid (cross-platform test helper).

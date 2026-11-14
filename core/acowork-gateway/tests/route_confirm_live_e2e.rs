@@ -29,6 +29,9 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
+
+#[path = "support/binary.rs"]
+mod binary;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -48,18 +51,6 @@ const CHAT_TEXT_2: &str = "继续那个任务，把边框也改了";
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     listener.local_addr().unwrap().port()
-}
-
-fn binary(name: &str) -> PathBuf {
-    let exe = std::env::current_exe().expect("current exe");
-    let dir = exe.parent().and_then(|p| p.parent()).expect("target/debug dir");
-    let name = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
-    let candidate = dir.join(&name);
-    if candidate.exists() {
-        candidate
-    } else {
-        dir.parent().expect("target root").join(&name)
-    }
 }
 
 struct Gateway {
@@ -167,7 +158,7 @@ display_name = "Root"
     )
     .expect("write node_tokens.json");
 
-    let mut cmd = Command::new(binary("acowork-gateway"));
+    let mut cmd = Command::new(binary::locate("acowork-gateway"));
     cmd.arg("--daemon")
         .arg("--home")
         .arg(&home)
@@ -638,7 +629,7 @@ runtime_version = "0.1.0"
     );
 
     let work = temp_home("work");
-    let runtime = Proc(Command::new(binary("acowork-runtime"))
+    let runtime = Proc(Command::new(binary::locate("acowork-runtime"))
         .args([
             "--agent-id", "com.e2e.live",
             "--agent-instance-id", &instance,

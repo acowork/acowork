@@ -882,6 +882,20 @@ mod tests {
 
     #[tokio::test]
     async fn closed_port_is_a_transport_error() {
+        // What this asserts: a *direct* connection to a dead port is refused
+        // immediately and must classify as a transport error, not a timeout.
+        // With an ambient proxy configured the request never reaches that port
+        // — the proxy answers on its behalf — so the assertion would describe
+        // the proxy. Provider probes deliberately honour the machine's proxy
+        // (that is how a user behind one reaches the endpoint), so the test
+        // declares that precondition rather than failing on it.
+        if std::env::var_os("HTTP_PROXY")
+            .or_else(|| std::env::var_os("http_proxy"))
+            .is_some()
+        {
+            eprintln!("skipping: an HTTP proxy is configured; the probe would not reach the port");
+            return;
+        }
         // Bind then drop: the port is closed — no server.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = listener.local_addr().unwrap();

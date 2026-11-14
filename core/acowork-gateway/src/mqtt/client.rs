@@ -447,7 +447,7 @@ mod tests {
         // server threads), which would hang this test whenever the port
         // is free. `start_broker` parks the broker on a
         // background OS thread instead.
-        let port = 18976;
+        let port = crate::test_support::free_port();
         let broker_handle = crate::mqtt::broker::start_broker("127.0.0.1", port)
             .expect("broker should start");
 
@@ -474,7 +474,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_publish_envelope() {
-        let port = 18977;
+        let port = crate::test_support::free_port();
         // Threaded mode — see `test_gateway_client_connects_to_broker`
         // for why `start_broker` must not be called on the test thread.
         let broker_handle = crate::mqtt::broker::start_broker("127.0.0.1", port)

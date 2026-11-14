@@ -2494,7 +2494,9 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .create_token(std::time::Duration::from_secs(3600), None);
 
-        let port = 18979; // distinct from the broker smoke-test ports (18976/18977 in mqtt/client.rs, 18978 in global_resources_publisher.rs)
+        // Ephemeral, not a hand-picked constant kept disjoint from other test
+        // files by a comment: see `crate::test_support`.
+        let port = crate::test_support::free_port();
         let host = "127.0.0.1";
         let auth = crate::mqtt::broker::BrokerAuth {
             auth_enabled: true,
@@ -2599,12 +2601,24 @@ mod tests {
             }
             saw_result
         });
-        // Wait until the node connection is established before publishing.
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-        node_client
-            .publish(&enroll_topic, QoS::AtLeastOnce, false, enroll_msg.as_slice())
-            .await
-            .expect("publish enroll");
+        // The connection completes asynchronously, and the poll task above is
+        // what drives it. A fixed sleep is a bet on the scheduler: under a full
+        // parallel run the CONNECT is still in flight and the first publish
+        // fails. Retry until the broker accepts it, bounded so a real breakage
+        // still fails the test instead of hanging it.
+        let publish_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match node_client
+                .publish(&enroll_topic, QoS::AtLeastOnce, false, enroll_msg.as_slice())
+                .await
+            {
+                Ok(()) => break,
+                Err(_) if tokio::time::Instant::now() < publish_deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+                Err(e) => panic!("publish enroll never accepted by the broker: {e:?}"),
+            }
+        }
 
         let saw_result = tokio::time::timeout(std::time::Duration::from_secs(10), node_poll)
             .await

@@ -432,10 +432,6 @@ mod e2e_tests {
 
     /// Fixed test ports, deliberately far from the production defaults
     /// (19874/19875/19876/19877) so a concurrently running Gateway is
-    /// never disturbed.
-    const TEST_MAIN_MQTT: u16 = 27975;
-    const TEST_REMOTE_MQTT: u16 = 27974;
-    const TEST_REMOTE_HTTP: u16 = 27977;
 
     /// Minimal MQTT 3.1.1 CONNECT packet (protocol level 4, clean
     /// session, username + password, keep-alive 60s).
@@ -533,6 +529,9 @@ mod e2e_tests {
     ///    password is refused (rc=5 "not authorized").
     #[tokio::test]
     async fn remote_listener_guard_and_mqtt_bridge_e2e() {
+        // Ephemeral and distinct, not constants: see `crate::test_support`.
+        let ports = crate::test_support::free_ports(3);
+        let (main_port, remote_port, http_port) = (ports[0], ports[1], ports[2]);
         let dir = tempfile::tempdir().unwrap();
         let mut gw =
             crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
@@ -543,11 +542,11 @@ mod e2e_tests {
         // here but part of the same broker by design).
         let broker = crate::mqtt::start_broker_with_auth(
             "127.0.0.1",
-            TEST_MAIN_MQTT,
+            main_port,
             None,
             Some(crate::mqtt::RemoteMqttListener {
                 host: "127.0.0.1".to_string(),
-                port: TEST_REMOTE_MQTT,
+                port: remote_port,
                 auth: crate::mqtt::RemoteMqttAuth {
                     gateway_state: gateway_state.clone(),
                 },
@@ -556,7 +555,7 @@ mod e2e_tests {
         .expect("broker with strict listener starts");
         assert_eq!(
             broker.remote_listen_addr.expect("remote addr").port(),
-            TEST_REMOTE_MQTT
+            remote_port
         );
 
         // Remote-origin HTTP listener.
@@ -566,17 +565,17 @@ mod e2e_tests {
         );
         let server = tokio::spawn(start_remote_http_listener(
             state,
-            TEST_REMOTE_HTTP,
-            TEST_REMOTE_MQTT,
+            http_port,
+            remote_port,
         ));
-        wait_listening(TEST_REMOTE_HTTP).await;
+        wait_listening(http_port).await;
         // The broker's remote server binds asynchronously inside its
         // OS thread — the bridge would otherwise race it and close.
-        wait_listening(TEST_REMOTE_MQTT).await;
+        wait_listening(remote_port).await;
 
         // ── 1. HTTP guard ───────────────────────────────────────────
-        let client = reqwest::Client::new();
-        let base = format!("http://127.0.0.1:{TEST_REMOTE_HTTP}");
+        let client = crate::test_support::loopback_client();
+        let base = format!("http://127.0.0.1:{http_port}");
 
         let health = client.get(format!("{base}/health")).send().await.unwrap();
         assert_eq!(health.status(), 200);
@@ -612,7 +611,7 @@ mod e2e_tests {
 
         // Valid credential: CONNECT → CONNACK rc=0.
         let (mut ws, _) = tokio_tungstenite::connect_async(format!(
-            "ws://127.0.0.1:{TEST_REMOTE_HTTP}/mqtt"
+            "ws://127.0.0.1:{http_port}/mqtt"
         ))
         .await
         .expect("WS upgrade on /mqtt");
@@ -642,7 +641,7 @@ mod e2e_tests {
         // Whatever surfaces on the WS (Close / end / error), it must
         // NOT be a successful CONNACK.
         let (mut ws, _) = tokio_tungstenite::connect_async(format!(
-            "ws://127.0.0.1:{TEST_REMOTE_HTTP}/mqtt"
+            "ws://127.0.0.1:{http_port}/mqtt"
         ))
         .await
         .unwrap();
@@ -675,6 +674,8 @@ mod e2e_tests {
     /// the bridge internals.
     #[tokio::test]
     async fn strict_listener_rejects_internal_identities() {
+        let ports = crate::test_support::free_ports(2);
+        let (main_port, strict_port) = (ports[0], ports[1]);
         let dir = tempfile::tempdir().unwrap();
         let mut gw =
             crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
@@ -683,23 +684,23 @@ mod e2e_tests {
 
         let _broker = crate::mqtt::start_broker_with_auth(
             "127.0.0.1",
-            TEST_MAIN_MQTT + 10,
+            main_port,
             None,
             Some(crate::mqtt::RemoteMqttListener {
                 host: "127.0.0.1".to_string(),
-                port: TEST_REMOTE_MQTT + 10,
+                port: strict_port,
                 auth: crate::mqtt::RemoteMqttAuth {
                     gateway_state: gateway_state.clone(),
                 },
             }),
         )
         .expect("broker starts");
-        wait_listening(TEST_REMOTE_MQTT + 10).await;
+        wait_listening(strict_port).await;
 
         use rumqttc::{AsyncClient, MqttOptions};
         let token = crate::http::test_support::access_token("alice", "user");
 
-        let mut opts = MqttOptions::new("node:rogue", "127.0.0.1", TEST_REMOTE_MQTT + 10);
+        let mut opts = MqttOptions::new("node:rogue", "127.0.0.1", strict_port);
         opts.set_keep_alive(std::time::Duration::from_secs(5));
         opts.set_credentials("rogue", &token);
         let (_client, mut eventloop) = AsyncClient::new(opts, 4);
@@ -730,8 +731,10 @@ mod e2e_tests {
     /// SUBACK code would mean the whole phase-2 design fails closed on ACLs).
     #[tokio::test]
     async fn lan_mqtt_bridge_connects_and_grants_presence_subscribe() {
-        const TEST_LAN_HTTP: u16 = 27980;
-        let strict_port = TEST_REMOTE_MQTT + 20;
+        let ports = crate::test_support::free_ports(3);
+        let (main_port, strict_port, lan_http_port) = (ports[0], ports[1], ports[2]);
+
+
 
         let dir = tempfile::tempdir().unwrap();
         let mut gw = crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
@@ -740,7 +743,7 @@ mod e2e_tests {
 
         let _broker = crate::mqtt::start_broker_with_auth(
             "127.0.0.1",
-            TEST_MAIN_MQTT + 20,
+            main_port,
             None,
             Some(crate::mqtt::RemoteMqttListener {
                 host: "127.0.0.1".to_string(),
@@ -762,7 +765,7 @@ mod e2e_tests {
                 },
             ),
         );
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", TEST_LAN_HTTP))
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", lan_http_port))
             .await
             .unwrap();
         let server = tokio::spawn(async move {
@@ -772,13 +775,13 @@ mod e2e_tests {
             )
             .await;
         });
-        wait_listening(TEST_LAN_HTTP).await;
+        wait_listening(lan_http_port).await;
 
         use futures_util::StreamExt as _;
         use tokio_tungstenite::tungstenite::Message;
         let token = crate::http::test_support::access_token("alice", "user");
         let (mut ws, _) = tokio_tungstenite::connect_async(format!(
-            "ws://127.0.0.1:{TEST_LAN_HTTP}/mqtt"
+            "ws://127.0.0.1:{lan_http_port}/mqtt"
         ))
         .await
         .expect("WS upgrade on the LAN /mqtt route");

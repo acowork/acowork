@@ -339,7 +339,7 @@ mod tests {
         use std::sync::Arc;
         use tokio::sync::RwLock;
 
-        let port = 18978;
+        let port = crate::test_support::free_port();
         // Threaded mode: `start_broker` blocks forever on rumqttd's
         // `Broker::start()` (it joins the server threads), so calling it
         // from the test thread would hang whenever the port is free.

@@ -18,23 +18,24 @@ fn free_port() -> u16 {
     listener.local_addr().unwrap().port()
 }
 
-/// Locate the `acowork-doc` binary relative to the test executable.
+/// The `acowork-doc` binary. This package owns the target, so Cargo builds it
+/// for the test and exports the exact path — no artifact-tree guessing, which
+/// matters because Cargo does not keep one layout: a test executable sits in
+/// `target/<profile>/deps/`, but when the package is also compiled as a
+/// dependency with a different feature set, its test binary is built under
+/// `target/<profile>/build/<pkg>/<metadata>/out/` instead, at a different
+/// depth. A clean CI checkout hits the second shape; an incrementally rebuilt
+/// developer directory the first.
 fn binary_path() -> PathBuf {
-    // `cargo test` places the test binary under target/debug/deps/; the
-    // service binary sits alongside at target/debug/acowork-doc[.exe].
-    let exe = std::env::current_exe().expect("current exe");
-    let dir = exe
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("target/debug dir");
-    let name = if cfg!(windows) { "acowork-doc.exe" } else { "acowork-doc" };
-    let candidate = dir.join(name);
-    if candidate.exists() {
-        candidate
-    } else {
-        // Fallback: run from the workspace target root.
-        dir.parent().expect("target root").join(name)
-    }
+    PathBuf::from(env!("CARGO_BIN_EXE_acowork-doc"))
+}
+
+/// A client for the loopback endpoints these tests started themselves.
+fn loopback_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .no_proxy()
+        .build()
+        .expect("loopback client")
 }
 
 /// Poll `GET /health` until it returns 200 or `timeout` elapses.
@@ -42,7 +43,7 @@ async fn wait_healthy(port: u16, timeout: Duration) -> bool {
     let url = format!("http://127.0.0.1:{}/health", port);
     let deadline = Instant::now() + timeout;
     loop {
-        let ok = reqwest::Client::new()
+        let ok = loopback_client()
             .get(&url)
             .timeout(Duration::from_secs(2))
             .send()
