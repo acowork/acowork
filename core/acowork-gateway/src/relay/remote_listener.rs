@@ -33,8 +33,8 @@
 
 use std::net::SocketAddr;
 
-use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::Request;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
@@ -113,11 +113,7 @@ pub fn remote_origin_policy(path: &str, method: &str, has_node_token: bool) -> R
 /// axum middleware form of [`remote_origin_policy`].
 pub async fn remote_origin_guard(req: Request, next: Next) -> Response {
     let has_node_token = req.headers().contains_key(NODE_TOKEN_HEADER);
-    let decision = remote_origin_policy(
-        req.uri().path(),
-        req.method().as_str(),
-        has_node_token,
-    );
+    let decision = remote_origin_policy(req.uri().path(), req.method().as_str(), has_node_token);
     match decision {
         RemoteDecision::Allow => next.run(req).await,
         // Deliberately bodiless/plain: the remote surface must not
@@ -418,10 +414,19 @@ mod tests {
                 .collect(),
         );
         // No policy configured (empty) — every peer reaches the bridge.
-        assert!(lan_bridge_allowed(&IpAllowlist::default(), SocketAddr::from((outside, 1))));
+        assert!(lan_bridge_allowed(
+            &IpAllowlist::default(),
+            SocketAddr::from((outside, 1))
+        ));
         // A configured list gates the bridge like every other route.
-        assert!(lan_bridge_allowed(&allowlist, SocketAddr::from((inside, 1))));
-        assert!(!lan_bridge_allowed(&allowlist, SocketAddr::from((outside, 1))));
+        assert!(lan_bridge_allowed(
+            &allowlist,
+            SocketAddr::from((inside, 1))
+        ));
+        assert!(!lan_bridge_allowed(
+            &allowlist,
+            SocketAddr::from((outside, 1))
+        ));
     }
 }
 
@@ -429,9 +434,6 @@ mod tests {
 mod e2e_tests {
     use super::*;
     use std::sync::Arc;
-
-    /// Fixed test ports, deliberately far from the production defaults
-    /// (19874/19875/19876/19877) so a concurrently running Gateway is
 
     /// Minimal MQTT 3.1.1 CONNECT packet (protocol level 4, clean
     /// session, username + password, keep-alive 60s).
@@ -511,7 +513,10 @@ mod e2e_tests {
     /// Wait until a TCP port accepts connections (bounded).
     async fn wait_listening(port: u16) {
         for _ in 0..100 {
-            if tokio::net::TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
                 return;
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -533,8 +538,7 @@ mod e2e_tests {
         let ports = crate::test_support::free_ports(3);
         let (main_port, remote_port, http_port) = (ports[0], ports[1], ports[2]);
         let dir = tempfile::tempdir().unwrap();
-        let mut gw =
-            crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
+        let mut gw = crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
         gw.user_verifier = Some(crate::http::test_support::verifier());
         let gateway_state = Arc::new(tokio::sync::RwLock::new(gw));
 
@@ -563,11 +567,7 @@ mod e2e_tests {
             gateway_state.clone(),
             Arc::new(crate::http::auth::HttpAuth::new(false)),
         );
-        let server = tokio::spawn(start_remote_http_listener(
-            state,
-            http_port,
-            remote_port,
-        ));
+        let server = tokio::spawn(start_remote_http_listener(state, http_port, remote_port));
         wait_listening(http_port).await;
         // The broker's remote server binds asynchronously inside its
         // OS thread — the bridge would otherwise race it and close.
@@ -587,10 +587,18 @@ mod e2e_tests {
             .unwrap();
         assert_eq!(debug.status(), 404, "debug endpoints are not visible");
 
-        let fs = client.get(format!("{base}/api/fs/browse")).send().await.unwrap();
+        let fs = client
+            .get(format!("{base}/api/fs/browse"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(fs.status(), 404, "fs browse is not visible");
 
-        let config_put = client.put(format!("{base}/api/config")).send().await.unwrap();
+        let config_put = client
+            .put(format!("{base}/api/config"))
+            .send()
+            .await
+            .unwrap();
         assert_eq!(config_put.status(), 404, "config writes are not visible");
 
         let node_token = client
@@ -610,11 +618,10 @@ mod e2e_tests {
         let token = crate::http::test_support::access_token("alice", "user");
 
         // Valid credential: CONNECT → CONNACK rc=0.
-        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
-            "ws://127.0.0.1:{http_port}/mqtt"
-        ))
-        .await
-        .expect("WS upgrade on /mqtt");
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{http_port}/mqtt"))
+                .await
+                .expect("WS upgrade on /mqtt");
         ws.send(tokio_tungstenite::tungstenite::Message::Binary(
             mqtt_connect("user:alice:desktop:mac-1", "alice", &token).into(),
         ))
@@ -640,11 +647,10 @@ mod e2e_tests {
         // and drops the connection (Error::InvalidAuth — no CONNACK).
         // Whatever surfaces on the WS (Close / end / error), it must
         // NOT be a successful CONNACK.
-        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
-            "ws://127.0.0.1:{http_port}/mqtt"
-        ))
-        .await
-        .unwrap();
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{http_port}/mqtt"))
+                .await
+                .unwrap();
         ws.send(tokio_tungstenite::tungstenite::Message::Binary(
             mqtt_connect("user:alice:desktop:mac-1", "alice", "wrong-password").into(),
         ))
@@ -676,9 +682,9 @@ mod e2e_tests {
     async fn strict_listener_rejects_internal_identities() {
         let ports = crate::test_support::free_ports(2);
         let (main_port, strict_port) = (ports[0], ports[1]);
+
         let dir = tempfile::tempdir().unwrap();
-        let mut gw =
-            crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
+        let mut gw = crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
         gw.user_verifier = Some(crate::http::test_support::verifier());
         let gateway_state = Arc::new(tokio::sync::RwLock::new(gw));
 
@@ -734,8 +740,6 @@ mod e2e_tests {
         let ports = crate::test_support::free_ports(3);
         let (main_port, strict_port, lan_http_port) = (ports[0], ports[1], ports[2]);
 
-
-
         let dir = tempfile::tempdir().unwrap();
         let mut gw = crate::gateway::state::GatewayState::new(&dir.path().to_string_lossy());
         gw.user_verifier = Some(crate::http::test_support::verifier());
@@ -780,11 +784,10 @@ mod e2e_tests {
         use futures_util::StreamExt as _;
         use tokio_tungstenite::tungstenite::Message;
         let token = crate::http::test_support::access_token("alice", "user");
-        let (mut ws, _) = tokio_tungstenite::connect_async(format!(
-            "ws://127.0.0.1:{lan_http_port}/mqtt"
-        ))
-        .await
-        .expect("WS upgrade on the LAN /mqtt route");
+        let (mut ws, _) =
+            tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{lan_http_port}/mqtt"))
+                .await
+                .expect("WS upgrade on the LAN /mqtt route");
 
         ws.send(Message::Binary(
             mqtt_connect("user:alice:mobile:phone-1", "alice", &token).into(),
