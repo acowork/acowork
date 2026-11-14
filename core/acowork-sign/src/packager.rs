@@ -63,7 +63,8 @@ fn build_agent_package_with_options(
     let output_file = fs::File::create(output_path)?;
     let mut archive = zip::ZipWriter::new(output_file);
     let zip_options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated);
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(archive_entry_time(options)?);
 
     // Walk the agent directory and add files that pass the exclusion filter.
     walk_and_add(agent_dir, agent_dir, &mut archive, zip_options, options)?;
@@ -119,6 +120,66 @@ fn validate_declaration_graph(agent_dir: &Path) -> Result<()> {
     )))
 }
 
+/// Timestamp stored in every archive entry.
+///
+/// `zip` gives a fresh entry the wall clock (`DateTime::default_for_write`), so
+/// two builds of one source tree produced different bytes — and because the
+/// signature covers the archive, different signatures as well. A package could
+/// not be reproduced from its commit, and two builders could not agree on what
+/// they shipped. Entry order is now sorted and the compression method is
+/// fixed; this was the last clock in the path.
+///
+/// `PackageOptions::timestamp_epoch` pins it explicitly, else
+/// `SOURCE_DATE_EPOCH` (the reproducible-builds convention) does: CI and the
+/// determinism guard pass the source commit's timestamp, so "same commit, same
+/// bytes" becomes something anyone can check. With neither, the stamp is the
+/// real build time, which is what a local build wants to show.
+pub(crate) fn archive_entry_time(options: &PackageOptions) -> Result<zip::DateTime> {
+    let pinned: Option<Result<i64>> = match options.timestamp_epoch {
+        Some(epoch) => Some(Ok(epoch)),
+        None => std::env::var("SOURCE_DATE_EPOCH")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+            .map(|raw| {
+                raw.trim().parse::<i64>().map_err(|_| {
+                    SignError::InvalidPackage(format!(
+                        "SOURCE_DATE_EPOCH is not a unix timestamp: {raw}"
+                    ))
+                })
+            }),
+    };
+    let epoch: i64 = match pinned {
+        Some(v) => v?,
+        None => std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0),
+    };
+    entry_time_from_epoch(epoch)
+}
+
+/// Convert a unix timestamp to the ZIP entry format, refusing a value the
+/// format cannot express rather than substituting a wrong date.
+fn entry_time_from_epoch(epoch: i64) -> Result<zip::DateTime> {
+    use chrono::{Datelike, Timelike};
+
+    let civil = chrono::DateTime::from_timestamp(epoch, 0).ok_or_else(|| {
+        SignError::InvalidPackage(format!("timestamp out of range for a ZIP entry: {epoch}"))
+    })?;
+    let civil = civil.naive_utc();
+    zip::DateTime::from_date_and_time(
+        civil.year() as u16,
+        civil.month() as u8,
+        civil.day() as u8,
+        civil.hour() as u8,
+        civil.minute() as u8,
+        civil.second() as u8,
+    )
+    .map_err(|e| {
+        SignError::InvalidPackage(format!("cannot express timestamp {epoch} as a ZIP date: {e}"))
+    })
+}
+
 /// Recursively walk a directory and add files to the ZIP archive
 /// that pass the exclusion filter.
 fn walk_and_add(
@@ -128,10 +189,18 @@ fn walk_and_add(
     zip_options: zip::write::SimpleFileOptions,
     options: &PackageOptions,
 ) -> Result<()> {
-    let entries = fs::read_dir(current_dir)?;
+    // Sorted, and only files: the archive is a published artifact, so two
+    // builds of one commit must produce one byte string. `read_dir` hands back
+    // entries in filesystem order, which differs between NTFS and ext4 and
+    // even between two runs on the same tree, and the signature covers the
+    // archive — an unordered walk makes "same commit, same bytes" untestable
+    // and turns every rebuild into a spurious package change.
+    let mut entries = fs::read_dir(current_dir)?
+        .filter_map(|entry| entry.ok())
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
 
     for entry in entries {
-        let entry = entry?;
         let path = entry.path();
         let relative = path.strip_prefix(base_dir).unwrap_or(&path);
         let relative_str = relative.to_string_lossy();
@@ -236,6 +305,90 @@ runtime_version = "0.1.0"
         }
         names.sort();
         names
+    }
+
+    /// One source tree, two builds, one byte string.
+    ///
+    /// The property the packaging path did not have: `zip` stamped a fresh
+    /// entry with the wall clock and the walk followed filesystem order, so
+    /// rebuilding an unchanged commit produced different bytes — and because
+    /// the signature covers the archive, a different signature as well. The
+    /// shell builder and the PowerShell builder shipped different packages for
+    /// identical source.
+    ///
+    /// Pinned through the option, not `SOURCE_DATE_EPOCH`, on purpose: a test
+    /// that mutates process environment races with its siblings, and an
+    /// earlier version of this check passed by accident because both builds
+    /// landed inside the same two-second ZIP timestamp tick.
+    #[test]
+    fn one_tree_builds_to_one_byte_string() {
+        let tmp_dir = std::env::temp_dir().join("acowork-test-pkg-deterministic");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        fs::create_dir_all(&tmp_dir).unwrap();
+
+        let agent_dir = tmp_dir.join("agent");
+        create_test_agent_dir(&agent_dir);
+
+        let opts = PackageOptions {
+            timestamp_epoch: Some(1_700_000_000),
+            ..Default::default()
+        };
+
+        let first = tmp_dir.join("first.agent");
+        let second = tmp_dir.join("second.agent");
+        build_agent_package_with_options(&agent_dir, &first, &opts).unwrap();
+        build_agent_package_with_options(&agent_dir, &second, &opts).unwrap();
+        assert_eq!(
+            fs::read(&first).unwrap(),
+            fs::read(&second).unwrap(),
+            "two builds of one tree must produce identical bytes"
+        );
+
+        // The pin must be doing the work; otherwise this test would also pass
+        // if the timestamp were dropped from the archive entirely.
+        let other = PackageOptions {
+            timestamp_epoch: Some(1_600_000_000),
+            ..Default::default()
+        };
+        let third = tmp_dir.join("third.agent");
+        build_agent_package_with_options(&agent_dir, &third, &other).unwrap();
+        assert_ne!(
+            fs::read(&first).unwrap(),
+            fs::read(&third).unwrap(),
+            "the pinned timestamp must actually reach the archive"
+        );
+
+        // Content still dominates: one pin, two trees, two packages.
+        fs::write(agent_dir.join("prompts/system.md"), "changed").unwrap();
+        let fourth = tmp_dir.join("fourth.agent");
+        build_agent_package_with_options(&agent_dir, &fourth, &opts).unwrap();
+        assert_ne!(
+            fs::read(&first).unwrap(),
+            fs::read(&fourth).unwrap(),
+            "a changed tree must not reuse the old package"
+        );
+
+        // The two-builds-equal check above can pass by luck when both builds
+        // land in the same two-second ZIP tick, which is exactly how an
+        // earlier version of this test fooled me. This half cannot: it reads
+        // the stamp back out of the archive, so an ignored pin — the wall
+        // clock leaking in — fails here instead of in a mirror diff months
+        // later. 1_700_000_000 is 2023-11-14T22:13:20Z.
+        let mut archive = zip::ZipArchive::new(std::io::BufReader::new(
+            fs::File::open(&first).unwrap(),
+        ))
+        .unwrap();
+        for i in 0..archive.len() {
+            let t = archive.by_index(i).unwrap().last_modified().unwrap();
+            assert_eq!(
+                (t.year(), t.month(), t.day(), t.hour(), t.minute()),
+                (2023, 11, 14, 22, 13),
+                "entry {} carries the build clock, not the pinned timestamp",
+                i
+            );
+        }
+
+        let _ = fs::remove_dir_all(&tmp_dir);
     }
 
     #[test]
@@ -357,6 +510,7 @@ runtime_version = "0.1.0"
         let opts = PackageOptions {
             include_conversations: true,
             include_config: true,
+            timestamp_epoch: None,
         };
 
         build_agent_package_with_options(&agent_dir, &output_path, &opts).unwrap();
@@ -557,6 +711,43 @@ runtime_version = "0.1.0"
         let names = list_archive_entries(&out);
         assert!(names.contains(&"manifest.toml".to_string()));
         assert!(names.contains(&"skills/search/SKILL.md".to_string()));
+        let _ = fs::remove_dir_all(&tmp_dir);
+    }
+
+    /// Two builds of one tree are one byte string.
+    ///
+    /// The archive is signed, so an unordered walk makes the signature depend
+    /// on filesystem enumeration order: the same commit would publish different
+    /// bytes per machine, per run, and every rebuild would look like a package
+    /// change. This is the property the build scripts used to violate by
+    /// shelling out to `zip` / `Compress-Archive` instead of this packer.
+    #[test]
+    fn two_builds_of_one_tree_are_one_byte_string() {
+        let tmp_dir = std::env::temp_dir().join("acowork-test-pack-determinism");
+        let _ = fs::remove_dir_all(&tmp_dir);
+        let agent_dir = tmp_dir.join("agent");
+        agent_dir_with(
+            &agent_dir,
+            VALID_MANIFEST,
+            &["search", "index", "archive", "beta"],
+        );
+
+        let first = tmp_dir.join("first.agent");
+        let second = tmp_dir.join("second.agent");
+        build_agent_package(&agent_dir, &first, None).unwrap();
+        build_agent_package(&agent_dir, &second, None).unwrap();
+
+        let a = fs::read(&first).unwrap();
+        let b = fs::read(&second).unwrap();
+        assert_eq!(a.len(), b.len(), "same tree, same length");
+        assert_eq!(a, b, "same tree, same bytes");
+
+        // And the order is the sorted one, not whatever the directory handed back.
+        let names = list_archive_entries(&first);
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "entries are written in sorted order");
+
         let _ = fs::remove_dir_all(&tmp_dir);
     }
 }

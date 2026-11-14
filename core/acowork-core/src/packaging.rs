@@ -59,6 +59,17 @@ pub struct PackageOptions {
     /// User configurations may contain preferences or settings specific
     /// to a particular installation.
     pub include_config: bool,
+
+    /// Unix timestamp to stamp on every archive entry, or `None` to resolve
+    /// from `SOURCE_DATE_EPOCH` and then the build clock.
+    ///
+    /// An archive entry's time is part of the archive's bytes, and the
+    /// signature covers the archive: left at the wall clock, two builds of one
+    /// commit produce two different packages. Callers that must be able to
+    /// reproduce an artifact — a rebuild check, a CI gate, a test — pin the
+    /// source commit's timestamp here instead of relying on process state.
+    #[serde(default)]
+    pub timestamp_epoch: Option<i64>,
 }
 
 /// Check whether a relative path should be excluded from the package.
@@ -121,6 +132,7 @@ mod tests {
         let opts = PackageOptions {
             include_conversations: true,
             include_config: true,
+            ..Default::default()
         };
         assert!(opts.include_conversations);
         assert!(opts.include_config);
@@ -135,6 +147,7 @@ mod tests {
         let opts = PackageOptions {
             include_conversations: true,
             include_config: true,
+            ..Default::default()
         };
         assert!(should_exclude_path("memory/private.sqlite", &opts));
         assert!(should_exclude_path("memory/private.sqlite-wal", &opts));

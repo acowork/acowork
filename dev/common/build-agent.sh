@@ -47,14 +47,12 @@ if [ ! -f "${AGENT_DIR}/manifest.toml" ]; then
     exit 1
 fi
 
-# Step 1 shells out to `zip`. Git Bash on Windows does not ship it, and without
-# this check the failure lands after the cargo build, where it reads like a
-# compile problem. On Windows use dev/common/build-agent.ps1 instead.
-if ! command -v zip >/dev/null 2>&1; then
-    echo -e "${RED}Error: 'zip' is not on PATH — this builder needs it (Git Bash on Windows does not ship it).${NC}"
-    echo -e "${YELLOW}Use the PowerShell builder instead: dev/common/build-agent.ps1 -AgentDir ${AGENT_DIR}${NC}"
-    exit 1
-fi
+# Packaging goes through `acowork-pack` (acowork-sign), the same packer the
+# Node publish path uses. It used to be `zip -r` here and `Compress-Archive`
+# there: two writers of one artifact, and because a zip stores per-entry
+# mtimes and its own directory order, the same source tree produced different
+# bytes on each platform — different SHA, different signature, so a package
+# could never be reproduced from its commit. One packer, one byte string.
 
 # Read agent ID from manifest
 AGENT_ID=$(grep '^agent_id' "${AGENT_DIR}/manifest.toml" | head -1 | sed 's/.*= *"\(.*\)".*/\1/' | tr -d '"')
@@ -77,6 +75,19 @@ echo ""
 # Create output directory
 mkdir -p "$OUTPUT_DIR"
 
+# Pin the archive timestamp to the last commit that touched this agent, so a
+# rebuild of one commit reproduces the shipped bytes without anyone having to
+# remember an environment variable. Unset (or not a git repo) falls back to the
+# build clock, which is the honest answer for a working tree with uncommitted
+# changes — those are not reproducible anyway, and pretending otherwise would
+# stamp an artifact with a commit it does not contain.
+if [ -z "${SOURCE_DATE_EPOCH:-}" ]; then
+    _pin="$(git -C "$PROJECT_ROOT" log -1 --format=%ct -- "$AGENT_DIR" 2>/dev/null || true)"
+    if [ -n "$_pin" ]; then
+        export SOURCE_DATE_EPOCH="$_pin"
+    fi
+fi
+
 # Convert to absolute paths
 OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 
@@ -85,8 +96,10 @@ UNSIGNED_PKG="${OUTPUT_DIR}/${AGENT_ID}-${AGENT_VERSION}.unsigned.agent"
 SIGNED_PKG="${OUTPUT_DIR}/${AGENT_ID}.agent"
 
 echo -e "${GREEN}[1/4]${NC} Creating unsigned package..."
-cd "$AGENT_DIR"
-zip -r "$UNSIGNED_PKG" manifest.toml prompts/ skills/ assets/ -x "*.DS_Store" -x "*/__MACOSX/*"
+AGENT_DIR_ABS="$(cd "$AGENT_DIR" && pwd)"
+cd "$PROJECT_ROOT/core"
+cargo run --release -q -p acowork-sign --bin acowork-pack -- \
+    --agent-dir "$AGENT_DIR_ABS" --output "$UNSIGNED_PKG"
 echo -e "      Created: ${UNSIGNED_PKG}"
 echo ""
 

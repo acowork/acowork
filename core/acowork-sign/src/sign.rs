@@ -7,13 +7,14 @@
 //! 4. Writing the signed ZIP with the SigningBlock binary-embedded
 //!    before the Central Directory (APK v2 style)
 
+use acowork_core::packaging::PackageOptions;
 use ed25519_dalek::Signer as Ed25519Signer;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Cursor, Read};
 use std::path::Path;
 
-use crate::error::Result;
+use crate::error::{Result, SignError};
 use crate::keygen::KeyType;
 use crate::keygen::load_keypair;
 use crate::signing_block::{
@@ -41,7 +42,7 @@ pub fn sign_package(
 
     // Create signing attributes
     let signed_attrs = SignedAttributes {
-        signing_time: chrono::Utc::now().to_rfc3339(),
+        signing_time: signing_time()?,
     };
 
     // Sign the concatenated digests
@@ -108,6 +109,33 @@ fn compute_digests(zip_data: &[u8]) -> Result<Vec<SectionDigest>> {
     Ok(digests)
 }
 
+/// Signature timestamp — wall clock, unless `SOURCE_DATE_EPOCH` pins it.
+///
+/// A code signature carrying the time it was made is correct behaviour, but it
+/// also means re-signing one unchanged package yields different bytes, so
+/// "same commit, same artifact" cannot be asserted by anyone: not a
+/// reproducibility check, not a mirror diff, not a second builder on another
+/// machine. Reproducible-build tooling standardised on `SOURCE_DATE_EPOCH` for
+/// exactly this hole. Set it (CI, a determinism gate) and the whole package is
+/// a pure function of its source tree; leave it unset and the stamp is the real
+/// signing time, which is what a normal build wants.
+fn signing_time() -> Result<String> {
+    let pinned = std::env::var("SOURCE_DATE_EPOCH").ok().filter(|s| !s.trim().is_empty());
+    match pinned {
+        Some(raw) => {
+            let epoch = raw.trim().parse::<i64>().map_err(|_| {
+                SignError::InvalidPackage(format!("SOURCE_DATE_EPOCH is not an integer: {raw}"))
+            })?;
+            chrono::DateTime::from_timestamp(epoch, 0)
+                .map(|dt| dt.to_rfc3339())
+                .ok_or_else(|| {
+                    SignError::InvalidPackage(format!("SOURCE_DATE_EPOCH out of range: {raw}"))
+                })
+        }
+        None => Ok(chrono::Utc::now().to_rfc3339()),
+    }
+}
+
 /// Create the data to be signed (concatenation of all digests + signed_attrs JSON)
 pub fn create_signature_data(
     digests: &[SectionDigest],
@@ -142,8 +170,16 @@ fn write_signed_zip(original_data: &[u8], block: &SigningBlock, output_path: &Pa
 
     let clean_zip_buffer = Cursor::new(Vec::new());
     let mut writer = zip::ZipWriter::new(clean_zip_buffer);
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    // Keep each entry's own timestamp instead of letting
+    // `SimpleFileOptions::default()` stamp the wall clock: re-signing an
+    // unchanged package would otherwise rewrite the time of all twelve entries
+    // and change its bytes, undoing the packer's pin. The signature step must
+    // not be a second source of nondeterminism.
+    let fallback_time = crate::packager::archive_entry_time(&PackageOptions::default())?;
+    let stored_options =
+        |mod_time: zip::DateTime| zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored)
+            .last_modified_time(mod_time);
 
     for i in 0..archive.len() {
         let mut file = archive.by_index(i)?;
@@ -154,7 +190,8 @@ fn write_signed_zip(original_data: &[u8], block: &SigningBlock, output_path: &Pa
             continue;
         }
 
-        writer.start_file(&name, options)?;
+        let mod_time = file.last_modified().unwrap_or(fallback_time);
+        writer.start_file(&name, stored_options(mod_time))?;
         std::io::copy(&mut file, &mut writer)?;
     }
 

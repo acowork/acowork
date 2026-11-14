@@ -121,29 +121,38 @@ function Build-Agent {
 
     # ── [1/4] Create unsigned .agent ZIP ──
 
+    # Same pin as build-agent.sh: timestamp the archive at the last commit that
+    # touched this agent, so the two builders on the two platforms produce one
+    # byte string for one commit.
+    if (-not $env:SOURCE_DATE_EPOCH) {
+        $pin = & git -C $ProjectRoot log -1 --format=%ct -- $AgentDir 2>$null
+        if ($LASTEXITCODE -eq 0 -and $pin) { $env:SOURCE_DATE_EPOCH = "$pin".Trim() }
+    }
+
     $unsignedPkg = Join-Path $OutputDir "$agentId-$agentVersion.unsigned.agent"
     $signedPkg   = Join-Path $OutputDir "$agentId.agent"
 
-    Write-Warn "[1/4] Creating unsigned package..."
+    Write-Subtle "[1/4] Creating unsigned package..."
 
-    Push-Location $AgentDir
+    # Same packer as build-agent.sh. This used to be Compress-Archive, which
+    # wrote its own entry order, its own compression and backslash path
+    # separators — so a package built here and one built from Git Bash were
+    # different bytes for one source tree, and the signature made that
+    # visible. `acowork-pack` is the only writer of the archive now.
+    Remove-Item -Force -ErrorAction SilentlyContinue $unsignedPkg
+    Push-Location (Join-Path $ProjectRoot "core")
     try {
-        $filesToZip = @("manifest.toml")
-        $dirsToAdd  = @("prompts", "skills", "assets")
-
-        foreach ($d in $dirsToAdd) {
-            if (Test-Path $d) {
-                $filesToZip += $d
-            }
+        & cargo run --release -q -p acowork-sign --bin acowork-pack -- `
+            --agent-dir $(if ([IO.Path]::IsPathRooted($AgentDir)) { $AgentDir } else { Join-Path $ProjectRoot $AgentDir }) `
+            --output $unsignedPkg
+        if ($LASTEXITCODE -ne 0) {
+            Write-Error "acowork-pack failed (exit $LASTEXITCODE)"
+            exit 1
         }
-
-        # Remove existing unsigned file, then compress
-        Remove-Item -Force -ErrorAction SilentlyContinue $unsignedPkg
-        Compress-Archive -Path $filesToZip -DestinationPath $unsignedPkg -CompressionLevel Optimal
-        Write-Subtle "  Created: $unsignedPkg"
     } finally {
         Pop-Location
     }
+    Write-Subtle "  Created: $unsignedPkg"
     Write-Host ""
 
     # ── [2/4] Generate signing keys if needed ──
