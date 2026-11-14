@@ -20,6 +20,20 @@
  * into the library (A5). Only rows that are already in the library go through
  * `ensure` (REQ-026).
  *
+ * A successful install does NOT dismiss the dialog. Installing several agents
+ * in one visit is the normal flow, and closing on success turned the `+` menu
+ * into one-install-per-open. The success toast is the feedback — the Hub card
+ * also shows the refreshed instance count, the Local rows show nothing beyond
+ * the toast — and the footer Close button, the header `×`, Esc and the
+ * overlay are the only ways out.
+ *
+ * Because the surface stays up, a primary button must not change meaning
+ * under the cursor. A package installed during THIS visit keeps the
+ * idempotent `ensure` on its primary button; the instance count rising does
+ * not turn it into "install another" (REQ-005 — two clicks on the primary
+ * button must not create two instances). A second instance is the `⋯`
+ * menu's explicit job (REQ-006).
+ *
  * Drop handling rides the window-level `desktop://file-drop` channel rather
  * than HTML5 `dataTransfer`, because the install path reads a file from an
  * absolute path and the webview never sees a real path from `dataTransfer`.
@@ -136,6 +150,13 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
   const [localPath, setLocalPath] = useState<string | null>(null);
   const [localInfo, setLocalInfo] = useState<LocalPackageInfo | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  // Packages this visit installed through the IDEMPOTENT path, keyed by
+  // package and node. Their primary button stays on `ensure`, so its label
+  // and its meaning do not flip under the cursor a second after the click
+  // (REQ-005: clicking twice must not create a second instance). The
+  // explicit "install another instance" path is NOT pinned — the user asked
+  // for another instance, and the button keeps saying so (REQ-006).
+  const [installedHere, setInstalledHere] = useState<ReadonlySet<string>>(() => new Set());
   // The library listing: `null` = not answered yet, so the first paint can be
   // a skeleton instead of a premature "empty" (REQ-028).
   const [libraryList, setLibraryList] = useState<LocalAgentList | null>(null);
@@ -188,6 +209,10 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
     setConfirmTarget(null);
     setInstallingId(null);
     setStartingNode(false);
+    // The pin is per VISIT: a fresh visit may install the same package
+    // again, and the primary button starts from the node's real instance
+    // count (REQ-005).
+    setInstalledHere(new Set());
     cardMenuClose();
   }, [open, cardMenuClose]);
 
@@ -373,17 +398,29 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
             ? t("agentHub.alreadyPresent", { name: hubDisplayNameOf(agent) })
             : t("agentHub.installed", { name: hubDisplayNameOf(agent) }),
         });
-        onClose();
+        // Pin this package's primary button to the idempotent `ensure` for
+        // the rest of the visit: the instance count just went up, and the
+        // button would otherwise turn into "install another" under the
+        // cursor — a second click creating a second instance (REQ-005).
+        // Only the idempotent path pins: an explicit "install another"
+        // already means "one more instance" (REQ-006).
+        if (ensure) {
+          setInstalledHere((prev) => new Set(prev).add(`${targetNodeId} ${agent.agent_id}`));
+        }
+        // No `onClose()` here (file header): the toast plus the card's own
+        // refreshed instance count is the feedback, and the next install is
+        // clicked in this same dialog.
       } catch (e) {
-        // Keep the dialog: the usual next move is picking another node and
-        // retrying, which should not require reopening and re-searching.
+        // Keep the dialog on failure too: the usual next move is picking
+        // another node and retrying, which should not require reopening and
+        // re-searching.
         setActionError(t("agentHub.errorInstall", { error: String(e) }));
       } finally {
         setBusy(false);
         setInstallingId(null);
       }
     },
-    [addToast, finishInstall, onClose, targetNodeId, t],
+    [addToast, finishInstall, targetNodeId, t],
   );
 
   const requestHubInstall = useCallback(
@@ -420,14 +457,19 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
       // only honest move.
       if (instanceId) selectAgent(instanceId);
       addToast({ type: "success", message: t("agentHub.installed", { name: localInfo?.file_name ?? "" }) });
-      onClose();
+      // The pending card described a file that is now installed. Clear it: the
+      // dialog stays open after a successful install (multi-install in one
+      // visit), and leaving the card up invites a second, unintended install
+      // of the same path — this is the non-idempotent `/install` route.
+      setLocalPath(null);
+      setLocalInfo(null);
     } catch (e) {
       setActionError(t("agentHub.errorInstall", { error: String(e) }));
     } finally {
       setBusy(false);
       setInstallingId(null);
     }
-  }, [addToast, busy, localInfo, localPath, onClose, selectAgent, targetBlocked, targetNodeId, t]);
+  }, [addToast, busy, localInfo, localPath, selectAgent, targetBlocked, targetNodeId, t]);
 
   const acceptLocalPath = useCallback(
     async (path: string) => {
@@ -471,7 +513,6 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
             ? t("agentHub.alreadyPresent", { name })
             : t("agentHub.installed", { name }),
         });
-        onClose();
       } catch (e) {
         setActionError(t("agentHub.errorInstall", { error: String(e) }));
       } finally {
@@ -479,7 +520,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
         setInstallingPath(null);
       }
     },
-    [addToast, busy, finishInstall, onClose, targetBlocked, targetNodeId, t],
+    [addToast, busy, finishInstall, targetBlocked, targetNodeId, t],
   );
 
   // A library row's "⋯ → install another instance": the NON-idempotent path
@@ -501,7 +542,6 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
           type: "success",
           message: t("agentHub.installed", { name: row.name ?? row.file_name }),
         });
-        onClose();
       } catch (e) {
         setActionError(t("agentHub.errorInstall", { error: String(e) }));
       } finally {
@@ -509,7 +549,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
         setInstallingPath(null);
       }
     },
-    [addToast, busy, onClose, selectAgent, targetBlocked, targetNodeId, t],
+    [addToast, busy, selectAgent, targetBlocked, targetNodeId, t],
   );
 
   const pickLocalFile = useCallback(async () => {
@@ -733,25 +773,38 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
               ) : (
                 <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                   {visibleAgents.map((agent) => {
-                    // Plan A routing: the primary button is idempotent only
-                    // while the package has NO instance on the target node.
-                    // Once it has one, another click lands another instance —
-                    // multi-instance is legal (ADR-073) and "already
+                    // Plan A routing (PRD D2): the primary button is idempotent
+                    // only while the package has NO instance on the target
+                    // node. Once it has one, another click lands another
+                    // instance — multi-instance is legal (ADR-073) and "already
                     // installed, nothing happened" reads as a broken button.
                     // With no target there is nothing to count.
                     const instanceCount = targetNodeId
                       ? countInstancesOnNode(instanceEntries, agent.agent_id, targetNodeId)
                       : 0;
+                    // The exception: a package THIS VISIT installed through
+                    // `ensure` keeps the idempotent button. The dialog stays
+                    // open after a success (REQ-013), so the user may click
+                    // the same card again — and the button must not become
+                    // "install another" under the cursor, or that second
+                    // click lands a second instance (REQ-005). "Install
+                    // another" is the `⋯` menu's explicit job (REQ-006).
+                    // Keyed by node too — moving the target starts over.
+                    const pinned = targetNodeId
+                      ? installedHere.has(`${targetNodeId} ${agent.agent_id}`)
+                      : false;
+                    const idempotent = pinned || instanceCount === 0;
                     return (
                       <HubAgentCard
                         key={agent.agent_id}
                         agent={agent}
                         baseUrl={baseUrl}
                         instanceCount={instanceCount}
+                        idempotent={idempotent}
                         installing={installingId === agent.agent_id}
                         disabled={busy || targetBlocked}
                         disabledReason={targetBlockReason ?? noNodeReason ?? undefined}
-                        onInstall={() => requestHubInstall(agent, instanceCount === 0)}
+                        onInstall={() => requestHubInstall(agent, idempotent)}
                         onMore={(e) =>
                           cardMenu.openAt(e, { kind: "hub", agentId: agent.agent_id })
                         }
@@ -937,6 +990,11 @@ interface HubAgentCardProps {
   agent: HubAgent;
   baseUrl: string;
   instanceCount: number;
+  /** The primary button stays on the idempotent `ensure`. A package the
+   *  node already holds would otherwise flip the button to "install
+   *  another" — legal (ADR-073) but the wrong default for a second click
+   *  on the same button (REQ-005). */
+  idempotent: boolean;
   /** This card's own install is in flight — the only one that may render as
    *  "installing". Every other card is disabled instead (REQ-014 serializes
    *  installs; it does not make them all look busy). */
@@ -951,6 +1009,7 @@ function HubAgentCard({
   agent,
   baseUrl,
   instanceCount,
+  idempotent,
   installing,
   disabled,
   disabledReason,
@@ -1026,9 +1085,9 @@ function HubAgentCard({
           {installing ? <Loader2 className="h-3 w-3 animate-spin" /> : null}
           {installing
             ? t("agentHub.installing")
-            : instanceCount > 0
-              ? t("agentHub.installAnother")
-              : t("agentHub.install")}
+            : idempotent
+              ? t("agentHub.install")
+              : t("agentHub.installAnother")}
         </button>
       </div>
     </article>

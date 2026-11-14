@@ -344,11 +344,17 @@ describe("hub install", () => {
     );
   });
 
-  it("closes the dialog on success", async () => {
+  // An install is not the end of the dialog: the user who opens it may install
+  // several agents in one visit, so a success must not dismiss the surface —
+  // the toast is the feedback, the footer `×` / Esc is the only dismiss.
+  it("keeps the dialog open on success", async () => {
     const closed = await renderLibraryTab();
     const buttons = await screen.findAllByRole("button", { name: "agentHub.install" });
     fireEvent.click(buttons[0]);
-    await waitFor(() => expect(closed).toContain("closed"));
+    await waitFor(() => expect(h.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "success" })));
+    expect(closed).not.toContain("closed");
+    // Still on screen — `getByRole` throws when it is gone.
+    expect(screen.getByRole("dialog")).toBeTruthy();
   });
 
   // REQ-006 / D2: the primary button is idempotent, so the extra-instance
@@ -462,6 +468,35 @@ describe("multi-instance routing", () => {
       expect(button.hasAttribute("disabled")).toBe(true);
     }
     expect(h.invoke).not.toHaveBeenCalledWith("install_from_hub", expect.anything());
+  });
+
+  // REQ-005: clicking the primary button twice must not create two
+  // instances. The dialog now stays open after a success, so the second
+  // click happens on the SAME button — which must still be the idempotent
+  // `ensure`, not the "install another" the instance count would imply.
+  it("keeps the primary button idempotent after this visit installed the package", async () => {
+    // The store grows the instance the ack named, as the real store does.
+    h.agent.fetchAgents = vi.fn(async () => {
+      h.agent.agents = { "inst-1": { meta: { agent_id: "com.acowork.safe", node_id: "n1" } } };
+    });
+    await renderLibraryTab({ initialNodeId: "n1" });
+
+    const first = (await screen.findAllByRole("button", { name: "agentHub.install" }))[0];
+    fireEvent.click(first);
+    await waitFor(() => expect(h.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "success" })));
+
+    // The instance count rose — but the button did not become "install
+    // another", and it is still there to be clicked.
+    expect(screen.queryByRole("button", { name: "agentHub.installAnother" })).toBeNull();
+    const again = (await screen.findAllByRole("button", { name: "agentHub.install" }))[0];
+    fireEvent.click(again);
+
+    // The second click is still `ensure`: no second instance.
+    await waitFor(() => {
+      const calls = h.invoke.mock.calls.filter(([command]) => command === "install_from_hub");
+      expect(calls.length).toBe(2);
+      expect(calls[1][1]).toMatchObject({ agentId: "com.acowork.safe", ensure: true });
+    });
   });
 });
 
@@ -786,7 +821,9 @@ describe("local agent library (REQ-021..032)", () => {
     expect(h.invoke).not.toHaveBeenCalledWith("install_agent", expect.anything());
     await waitFor(() => expect(h.agent.selectAgent).toHaveBeenCalledWith("inst-ensured"));
     expect(h.addToast).toHaveBeenCalledWith(expect.objectContaining({ type: "success" }));
-    expect(closed).toContain("closed");
+    // And the dialog stays open: the next install is clicked here, not in a
+    // freshly reopened one.
+    expect(closed).not.toContain("closed");
   });
 
   // The two tabs pack identically: one agent per cell, two cells per row once
@@ -976,7 +1013,7 @@ describe("local agent library (REQ-021..032)", () => {
   // instance is allowed to come from.
   it("installs another instance from the row menu through /install", async () => {
     mockLibrary([LOCAL_ROW]);
-    renderOpen();
+    const closed = renderOpen();
     fireEvent.click(await screen.findByRole("button", { name: "agentHub.moreActions" }));
 
     const item = await waitFor(() => {
@@ -988,6 +1025,9 @@ describe("local agent library (REQ-021..032)", () => {
 
     await waitFor(() => expect(h.agent.installAgent).toHaveBeenCalledWith(LOCAL_ROW.path, "n1"));
     expect(h.invoke).not.toHaveBeenCalledWith("ensure_local_agent", expect.anything());
+    // The dialog stays open here too — the row menu is one of the four
+    // install paths, and every success keeps the surface up.
+    expect(closed).not.toContain("closed");
   });
 
   // A8 / PRD §14.4: one unreadable file marks its own row; the others stay
@@ -1036,10 +1076,11 @@ describe("local agent library (REQ-021..032)", () => {
 
 describe("local file tab (REQ-011 / REQ-020)", () => {
   async function openLocalTab() {
-    renderOpen();
+    const closed = renderOpen();
     fireEvent.click(await screen.findByRole("tab", { name: "agentHub.tabLocal" }));
     // The dialog claims the window-level drop channel while mounted.
     await waitFor(() => expect(h.dropHandler).not.toBeNull());
+    return closed;
   }
 
   it("refuses a dropped file that is not an .agent package", async () => {
@@ -1056,6 +1097,21 @@ describe("local file tab (REQ-011 / REQ-020)", () => {
     expect(await screen.findByText("picked.agent")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "agentHub.install" }));
     await waitFor(() => expect(h.agent.installAgent).toHaveBeenCalled());
+  });
+
+  // The picked-file card is a one-shot: it names a file that, once installed,
+  // has no reason to stay on screen. Leaving it up would put a second
+  // non-idempotent `/install` of the same path one click away — in a dialog
+  // that now stays open after a success.
+  it("clears the pending picked file after its install succeeds", async () => {
+    const closed = await openLocalTab();
+    h.dropHandler!({ payload: ["C:\\pkgs\\picked.agent"] });
+
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.install" }));
+    await waitFor(() => expect(h.agent.installAgent).toHaveBeenCalled());
+
+    await waitFor(() => expect(screen.queryByText("picked.agent")).toBeNull());
+    expect(closed).not.toContain("closed");
   });
 
   // F8 / ADR-073: the local path returns the acked INSTANCE key. Selecting the
