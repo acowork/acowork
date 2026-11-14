@@ -261,6 +261,11 @@ pub(crate) fn relay_proxy_client() -> &'static reqwest::Client {
     CLIENT.get_or_init(|| {
         reqwest::Client::builder()
             .connect_timeout(std::time::Duration::from_secs(5))
+            // Gateway -> Node hop. An ambient HTTP_PROXY (Clash, mitm, a
+            // corporate proxy) must not carry it: these requests attach
+            // internal credentials, which would leak to the proxy, and the
+            // answer it gives describes the proxy, not the node.
+            .no_proxy()
             .build()
             .expect("Failed to build LSP relay proxy HTTP client")
     })

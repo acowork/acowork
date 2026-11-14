@@ -23,6 +23,10 @@ pub(crate) fn http_client() -> &'static reqwest::Client {
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .connect_timeout(std::time::Duration::from_secs(5))
+            // Loopback hop to a supervised sidecar. An ambient HTTP_PROXY
+            // must not answer for it: a proxy's reply would make a dead
+            // service look healthy (or a healthy one dead).
+            .no_proxy()
             .build()
             .expect("Failed to build embed HTTP client")
     })

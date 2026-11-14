@@ -80,6 +80,10 @@ async fn is_gateway_on_port(host: &str, port: u16) -> bool {
     let url = format!("http://{}:{}/health", host, port);
     let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(2))
+        // "Is a Gateway already on this port?" is a question about the local
+        // socket. An ambient HTTP_PROXY answering on our behalf would make the
+        // Gateway conclude another instance is running (or that none is).
+        .no_proxy()
         .build()
     {
         Ok(c) => c,
