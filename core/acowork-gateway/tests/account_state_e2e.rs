@@ -262,7 +262,12 @@ fn json_string(body: &str, key: &str) -> Option<String> {
 /// supervisor reads off the supervised user service's `/health`, and that
 /// service is spawned asynchronously after the Gateway binds. Waiting for the
 /// socket is therefore no longer enough to observe a settled state.
-fn wait_for_status(port: u16, pred: impl Fn(&str) -> bool, what: &str) -> String {
+fn wait_for_status(
+    gw: &Gateway,
+    port: u16,
+    pred: impl Fn(&str) -> bool,
+    what: &str,
+) -> String {
     let deadline = Instant::now() + BOOT_TIMEOUT;
     let mut last = String::new();
     while Instant::now() < deadline {
@@ -273,7 +278,10 @@ fn wait_for_status(port: u16, pred: impl Fn(&str) -> bool, what: &str) -> String
         last = body;
         sleep(Duration::from_millis(100));
     }
-    panic!("{what} was not observed within {BOOT_TIMEOUT:?}; last /api/status body:\n{last}");
+    panic!(
+        "{what} was not observed within {BOOT_TIMEOUT:?}; last /api/status body:\n{last}\n--- gateway stderr ---\n{}",
+        gw.stderr()
+    );
 }
 
 /// The snapshot may turn `ready` before the Gateway has published the user
@@ -297,12 +305,26 @@ fn wait_for_authenticated_api(port: u16, token: &str) -> (u16, String) {
 
 /// Wait for a file to appear (the user service writes its store at its own
 /// boot, which the Gateway does not serialise against).
-fn wait_for_file(path: &Path, what: &str) {
+///
+/// The Gateway handle is part of the signature on purpose: this file is written
+/// by a *supervised child*, so when it never appears the reason is in the
+/// Gateway's own log — a failed spawn, a health probe that never passed, a
+/// refused bind. Without it the assertion says only "a file is missing" on the
+/// one machine that cannot be reproduced locally, which is a failure nobody can
+/// act on.
+fn wait_for_file(gw: &Gateway, path: &Path, what: &str) {
     let deadline = Instant::now() + BOOT_TIMEOUT;
     while !path.exists() && Instant::now() < deadline {
         sleep(Duration::from_millis(100));
     }
-    assert!(path.exists(), "{what} did not appear at {}", path.display());
+    assert!(
+        path.exists(),
+        "{what} did not appear at {}
+--- gateway stderr ---
+{}",
+        path.display(),
+        gw.stderr()
+    );
 }
 
 fn account_store(home: &Path) -> PathBuf {
@@ -328,7 +350,7 @@ fn a_fresh_install_is_restricted_until_setup_completes_over_http() {
     let mut gw = spawn(&home, http, mqtt, &[]);
     gw.wait_until_serving();
 
-    let status = wait_for_status(http, is_first_boot_status, "a first-boot account_state");
+    let status = wait_for_status(&gw, http, is_first_boot_status, "a first-boot account_state");
     assert!(
         !status.contains("\"account_state\":\"ready\""),
         "a fresh install must not advertise a usable admin"
@@ -349,7 +371,7 @@ fn a_fresh_install_is_restricted_until_setup_completes_over_http() {
     );
 
     let accounts = account_store(&home);
-    wait_for_file(&accounts, "the seeded account store");
+    wait_for_file(&gw, &accounts, "the seeded account store");
     assert!(
         fs::read_to_string(&accounts)
             .expect("read accounts.json")
@@ -379,6 +401,7 @@ fn a_fresh_install_is_restricted_until_setup_completes_over_http() {
     assert!(!access.is_empty());
 
     wait_for_status(
+        &gw,
         http,
         |body| body.contains("\"account_state\":\"ready\""),
         "the ready state after setup",
@@ -450,7 +473,7 @@ display_name = "Root"
     gw.wait_until_serving();
 
     let accounts = account_store(&home);
-    wait_for_file(&accounts, "the bootstrapped account store");
+    wait_for_file(&gw, &accounts, "the bootstrapped account store");
     let raw = fs::read_to_string(&accounts).expect("read accounts.json");
     assert!(
         raw.contains("root"),
@@ -462,6 +485,7 @@ display_name = "Root"
     );
 
     wait_for_status(
+        &gw,
         http,
         |body| body.contains("\"account_state\":\"ready\""),
         "the ready state from a configured bootstrap admin",
@@ -499,12 +523,12 @@ fn a_loopback_bind_still_has_the_full_account_system() {
     let mut gw = spawn(&home, http, mqtt, &[]);
     gw.wait_until_serving();
 
-    wait_for_file(&account_store(&home), "the account store on a loopback bind");
+    wait_for_file(&gw, &account_store(&home), "the account store on a loopback bind");
     assert!(
         home.join("acowork-user").join("auth").exists(),
         "the signing-key directory must exist on every deployment"
     );
-    wait_for_status(http, is_first_boot_status, "the first-boot state on a loopback bind");
+    wait_for_status(&gw, http, is_first_boot_status, "the first-boot state on a loopback bind");
 }
 
 /// The regression that motivated ADR-114: binding `0.0.0.0` used to flip the
@@ -525,8 +549,8 @@ fn a_public_bind_changes_nothing_about_the_account_state() {
     // `127.0.0.1:<port>` still connects when the listener is on `0.0.0.0`.
     gw.wait_until_serving();
 
-    wait_for_status(http, is_first_boot_status, "the first-boot state on a public bind");
-    wait_for_file(&account_store(&home), "the account store on a public bind");
+    wait_for_status(&gw, http, is_first_boot_status, "the first-boot state on a public bind");
+    wait_for_file(&gw, &account_store(&home), "the account store on a public bind");
 
     let (code, body) = http_post(
         http,
@@ -538,6 +562,7 @@ fn a_public_bind_changes_nothing_about_the_account_state() {
         "a loopback peer must be able to bootstrap a publicly-bound Gateway; body:\n{body}"
     );
     wait_for_status(
+        &gw,
         http,
         |body| body.contains("\"account_state\":\"ready\""),
         "the ready state on a public bind",
