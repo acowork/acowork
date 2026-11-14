@@ -845,6 +845,19 @@ run_clippy() {
 
 run_test() {
     echo "Running cargo test..."
+    # `cargo test` compiles a package's bin targets as test harnesses; it does
+    # not guarantee that `target/debug/<bin>` exists. The Gateway e2e suites
+    # spawn the *real* service binaries — the Gateway supervises acowork-user,
+    # doc, pm, memory and runtime, and `account_state_e2e` failed on the runner
+    # with "acowork-user binary not found" while passing on every developer
+    # machine, where an earlier `cargo build` (or the desktop `core:build`) put
+    # those files there long ago. Build them explicitly instead of inheriting
+    # whatever the last local command happened to leave behind.
+    #
+    # acowork-embed is excluded for the same reason it is excluded from the
+    # test run below: without ORT installed it fails at link time.
+    echo "Building the service binaries the e2e suites spawn..."
+    cargo build --workspace --exclude acowork-embed --bins
     # acowork-embed links to ONNX Runtime (dev/common/setup_ort.sh). On machines
     # without ORT installed, building its tests fails at link time — but
     # it isn't depended on by any other crate's tests, so test the rest of
