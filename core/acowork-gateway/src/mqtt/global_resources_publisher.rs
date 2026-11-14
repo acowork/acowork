@@ -362,10 +362,14 @@ mod tests {
         // the ready barrier was added.)
         handle.mark_ready();
 
-        // Give the publisher a moment to publish
-        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-
-        // Subscribe and verify we receive the retained messages.
+        // Subscribe *first*, then nudge a republish. The publisher's initial
+        // retained snapshot races this SUBSCRIBE: a snapshot the broker
+        // already holds is handed over as retained, one it publishes after
+        // the SUBSCRIBE is delivered normally, but a snapshot published in
+        // the gap between them is missed and never re-sent — that is what
+        // made this test fail only under a full `cargo test` load. Ordering
+        // the nudge after the SUBSCRIBE removes the race instead of trying to
+        // out-wait it with a fixed sleep.
         use rumqttc::{AsyncClient, MqttOptions, QoS};
         let mut opts = MqttOptions::new("test:subscriber", "127.0.0.1", port);
         opts.set_keep_alive(std::time::Duration::from_secs(5));
@@ -374,6 +378,7 @@ mod tests {
             .subscribe("acowork/global/#", QoS::AtLeastOnce)
             .await
             .unwrap();
+        handle.trigger_republish();
 
         // Poll for retained messages. We use `tokio::time::timeout`
         // around each poll so we never spin-busy when the eventloop

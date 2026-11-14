@@ -329,6 +329,13 @@ async fn build_surface(port: u16, instance_id: &str) -> TestSurface {
     gw_state.config = Some(config);
     let gw_state: SharedHttpState = Arc::new(RwLock::new(gw_state));
     gw_state.write().await.bootstrap.orchestrator = Some(orchestrator.clone());
+    // The auth middleware answers every `/api/*` request with 503 until the
+    // user service's token verifier is loaded (ADR-114) — that gate sits in
+    // front of the node dependency gate this file is about. Install a
+    // verifier from the process-local test keypair so requests can reach the
+    // handler under test; `post_install` signs its bearer token with the
+    // same issuer.
+    gw_state.write().await.user_verifier = Some(Arc::new(token_issuer().verifier()));
 
     let runtime_http_registry = acowork_gateway::http::proxy::new_shared_registry();
     let agent_registry = acowork_gateway::mqtt::agent_registry::new_shared_registry();
@@ -498,6 +505,27 @@ fn multipart_body(fields: &[(&str, Vec<u8>)], boundary: &str) -> Vec<u8> {
     out
 }
 
+/// A keypair shared by the whole test binary: `build_surface` installs its
+/// verifier into `GatewayState.user_verifier` and `post_install` signs the
+/// bearer token with it, so the pair always agrees. `load_or_generate` keeps
+/// it on disk so the two call sites do not have to hand the issuer around.
+fn token_issuer() -> &'static acowork_core::auth::TokenIssuer {
+    static ISSUER: std::sync::OnceLock<acowork_core::auth::TokenIssuer> = std::sync::OnceLock::new();
+    ISSUER.get_or_init(|| {
+        let key_path = std::env::temp_dir().join("acowork-bootstrap-e2e-token.key");
+        acowork_core::auth::TokenIssuer::load_or_generate(&key_path).expect("test token issuer")
+    })
+}
+
+/// A currently-valid admin access token from [`token_issuer`].
+fn test_token() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock is ahead of the epoch")
+        .as_secs() as i64;
+    token_issuer().sign_access("u-bootstrap-test", "admin", now)
+}
+
 /// Build an install HTTP request through the real router (multipart
 /// extractor only works via axum). Returns `(status, body)`.
 async fn post_install(
@@ -520,6 +548,7 @@ async fn post_install(
     let request = axum::http::Request::builder()
         .method("POST")
         .uri("/api/agents/install")
+        .header("authorization", format!("Bearer {}", test_token()))
         .header(
             "content-type",
             format!("multipart/form-data; boundary={boundary}"),
