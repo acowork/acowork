@@ -240,10 +240,6 @@ fn http_get(port: u16, path: &str) -> (u16, String) {
     http_request(port, "GET", path, None, None)
 }
 
-fn http_post(port: u16, path: &str, body: &str) -> (u16, String) {
-    http_request(port, "POST", path, Some(body), None)
-}
-
 /// Pull a string field out of a compact JSON body without a JSON crate.
 /// Chunked-transfer framing (if any) sits before the object, which is why
 /// this searches rather than parsing from offset 0.
@@ -280,6 +276,51 @@ fn wait_for_status(
     }
     panic!(
         "{what} was not observed within {BOOT_TIMEOUT:?}; last /api/status body:\n{last}\n--- gateway stderr ---\n{}",
+        gw.stderr()
+    );
+}
+
+/// `POST` until the Gateway stops answering 503 "user service not ready".
+///
+/// `/api/status` deliberately fail-opens to `ready` before the first health
+/// snapshot arrives, so at the moment a test considers the Gateway booted the
+/// proxy may still not have published `user_process`. The 503 that follows is
+/// a correct and transient answer — it carries `Retry-After: 2`, the same
+/// contract the Desktop's `with503Retry` absorbs. A test that asserts on the
+/// first attempt is asserting on that race rather than on behaviour, and it
+/// loses whenever the runner is busy.
+fn post_until_ready(gw: &Gateway, port: u16, path: &str, json: &str) -> (u16, String) {
+    request_until_ready(gw, port, "POST", path, Some(json), None)
+}
+
+/// The same window on the read side: the restricted-mode gate is a decision
+/// the Gateway can make, but a 503 from the not-yet-published user service
+/// arrives first and is not an answer about the gate.
+fn request_until_ready(
+    gw: &Gateway,
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    token: Option<&str>,
+) -> (u16, String) {
+    let deadline = Instant::now() + BOOT_TIMEOUT;
+    let mut last = (0u16, String::new());
+    while Instant::now() < deadline {
+        last = http_request(port, method, path, body, token);
+        if last.0 != 503 {
+            return last;
+        }
+        sleep(Duration::from_millis(100));
+    }
+    panic!(
+        "{method} {path} kept answering {} within {:?}; last body:
+{}
+--- gateway stderr ---
+{}",
+        last.0,
+        BOOT_TIMEOUT,
+        last.1,
         gw.stderr()
     );
 }
@@ -356,7 +397,7 @@ fn a_fresh_install_is_restricted_until_setup_completes_over_http() {
         "a fresh install must not advertise a usable admin"
     );
 
-    let (code, body) = http_get(http, "/api/users");
+    let (code, body) = request_until_ready(&gw, http, "GET", "/api/users", None, None);
     assert_eq!(
         code, 403,
         "a token-less /api/users must be 403 setup_required, never 401; body:\n{body}"
@@ -390,7 +431,8 @@ fn a_fresh_install_is_restricted_until_setup_completes_over_http() {
     // ADR-114: the Desktop on the Gateway host drives the existing bootstrap
     // admin through `POST /api/auth/setup`, gets a token pair back, and the
     // Gateway lifts the gate on its next health poll.
-    let (code, body) = http_post(
+    let (code, body) = post_until_ready(
+        &gw,
         http,
         "/api/auth/setup",
         r#"{"username":"owner","password":"ownerpass1","display_name":"Owner"}"#,
@@ -412,7 +454,8 @@ fn a_fresh_install_is_restricted_until_setup_completes_over_http() {
 
     // One-shot: a second setup is 409 even while the Gateway's health
     // snapshot still says "needs setup" — the user service is the authority.
-    let (code, body) = http_post(
+    let (code, body) = post_until_ready(
+        &gw,
         http,
         "/api/auth/setup",
         r#"{"username":"attacker","password":"hacked123"}"#,
@@ -495,19 +538,12 @@ display_name = "Root"
     // proxy has published `user_process`. Retry the resulting 503 window —
     // the same `Retry-After: 2` contract the Desktop's `with503Retry` uses.
     // Once the proxy is live, the user service itself answers 409.
-    let deadline = Instant::now() + BOOT_TIMEOUT;
-    let (mut code, mut body) = (0, String::new());
-    while Instant::now() < deadline {
-        (code, body) = http_post(
-            http,
-            "/api/auth/setup",
-            r#"{"username":"intruder","password":"hacked123"}"#,
-        );
-        if code != 503 {
-            break;
-        }
-        sleep(Duration::from_millis(100));
-    }
+    let (code, body) = post_until_ready(
+        &gw,
+        http,
+        "/api/auth/setup",
+        r#"{"username":"intruder","password":"hacked123"}"#,
+    );
     assert_eq!(code, 409, "setup must be refused once an admin can log in; body:\n{body}");
 }
 
@@ -552,7 +588,8 @@ fn a_public_bind_changes_nothing_about_the_account_state() {
     wait_for_status(&gw, http, is_first_boot_status, "the first-boot state on a public bind");
     wait_for_file(&gw, &account_store(&home), "the account store on a public bind");
 
-    let (code, body) = http_post(
+    let (code, body) = post_until_ready(
+        &gw,
         http,
         "/api/auth/setup",
         r#"{"username":"owner","password":"ownerpass1"}"#,
