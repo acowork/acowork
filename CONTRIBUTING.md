@@ -99,9 +99,20 @@ answered by an ADR that already decided the question, including the reason.
 | Python 3 + `pillow` | 3.x | frontend smoke tests, store logos |
 | PowerShell 7 | 7.x | the `.ps1` scripts on Windows |
 
-`Cargo.lock` is **not** committed (see [`.gitignore`](.gitignore)), so the crate floor
-in `core/Cargo.toml` is what carries dependency constraints. If you bump a dependency,
-bump the floor in the same commit.
+`core/Cargo.lock` — and the two Tauri lockfiles — **is** committed. It was not
+until the first GitHub CI run, and that one line in `.gitignore` was the whole
+difference between CI and every developer's machine: a local checkout builds
+against a lock that has aged with that machine, while a runner with no lock
+resolves the newest semver-compatible release of 91 crates and meets an API
+change nobody chose. The symptom is the worst kind — red CI, green locally, and
+an error message that points at code with nothing wrong with it.
+
+So a dependency update is a deliberate change: run `cargo update -p <crate>`
+(or `cargo update` for the whole graph), build and test, and commit the lock
+diff with it. That diff is the review surface, and it is what makes a
+"this commit broke the build" bisect answerable. The crate floors in
+`core/Cargo.toml` still state the minimum; the lock states what everyone
+actually builds.
 
 ONNX Runtime is **not** a manual prerequisite — `dev/common/build_core.*` probes `.ort/` and
 offers to run `setup_ort.*` in place when it is missing, and `dev/ort_env.js` makes Tauri
