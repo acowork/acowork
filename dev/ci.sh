@@ -19,17 +19,28 @@ cd "$SCRIPT_DIR/../core"
 # as annotations. Off a runner nothing changes: no tee, no trap, no delay.
 if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
     CI_LOG="$(mktemp)"
-    exec > >(tee "$CI_LOG") 2>&1
-    ci_report_failure() {
+    # Two traps this has to avoid. Not `tee`: a second writer means the tail of
+    # the output is still in flight when the exit trap reads the log, and the
+    # compiler diagnostics — which always come last — are exactly the lines
+    # that get missed; the first version of this annotated nothing. And the
+    # replay must go to the file descriptor the script started with, because
+    # `exec >"$CI_LOG"` has already moved stdout into the log: `cat`-ing to the
+    # redirected stdout writes into the file being read and shows nobody
+    # anything. That second one was measured, not guessed — the local run of
+    # this script printed an empty screen.
+    exec 3>&1
+    exec > "$CI_LOG" 2>&1
+    ci_replay_log() {
         local code=$?
-        [ "$code" -eq 0 ] && return
-        # Best effort: `tee` is a separate process, so the last lines may still
-        # be in flight when the trap fires.
-        sleep 0.5
-        grep -E '^error' -A6 "$CI_LOG" | head -80 | sed 's/^/::error:: /'
-        echo "::error::dev/ci.sh ${MODE} failed (exit ${code}) — the lines above are the reason"
+        cat "$CI_LOG" >&3
+        if [ "$code" -ne 0 ]; then
+            grep -E '^(error|warning:)' -A8 "$CI_LOG" | head -100 | sed 's/^/::error:: /' >&3
+            echo "::error::dev/ci.sh ${MODE} failed (exit ${code}) — the errors above are the reason" >&3
+        fi
+        rm -f "$CI_LOG"
+        exit $code
     }
-    trap ci_report_failure EXIT
+    trap ci_replay_log EXIT
 fi
 
 echo "=== ACowork.AI CI ==="

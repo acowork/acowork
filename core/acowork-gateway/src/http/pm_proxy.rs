@@ -279,11 +279,10 @@ mod tests {
         // ADR-084: the gate verifies with the user service's public key and
         // gates on the resolved mode — no account store involved.
         gw_state.user_verifier = Some(crate::http::test_support::verifier());
-        let st = AppState::new(
+        AppState::new(
             Arc::new(RwLock::new(gw_state)),
             Arc::new(HttpAuth::new(false)),
-        );
-        st
+        )
     }
 
     /// A valid access token for `u-alice` (role `user`) — the identity these
