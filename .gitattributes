@@ -4,6 +4,11 @@
 # Rust source and config
 *.rs text eol=lf
 *.toml text eol=lf
+# Lockfiles are read by `cargo`, diffed in review, and hashed by CI. Letting
+# autocrlf rewrite every line of one turns a dependency bump into a 19 000-line
+# diff and makes two checkouts of one commit look different to any byte-level
+# check.
+Cargo.lock text eol=lf
 
 # Protobuf
 *.proto text eol=lf

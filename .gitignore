@@ -4,7 +4,14 @@ core/target/
 apps/**/target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+# `Cargo.lock` is deliberately NOT ignored. This workspace builds binaries
+# that are shipped (gateway, node, desktop sidecar), and an ignored lockfile
+# means every machine resolves a different dependency graph: a developer
+# builds against versions pinned in a months-old local lock while CI
+# resolves the newest semver-compatible release of 91 crates and hits an API
+# change nobody chose. "Green locally, red in CI" was that, not a code bug.
+# Updating dependencies is a deliberate change now — `cargo update` in a PR,
+# with the diff of the lock as the review surface.
 
 # Desktop app build staging (populated by build.rs)
 apps/acowork-desktop/src-tauri/bin/

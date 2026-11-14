@@ -11,6 +11,27 @@ MODE=${1:-all}
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR/../core"
 
+# A failed step on a GitHub runner is an annotation that reads "Process
+# completed with exit code 101", and the log that says *why* needs a repository
+# token to download. Anyone without one — a contributor on a phone, an agent
+# with no credentials — gets a red X and no information. On a runner, keep a
+# copy of this script's output and, if it dies, publish the errors themselves
+# as annotations. Off a runner nothing changes: no tee, no trap, no delay.
+if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+    CI_LOG="$(mktemp)"
+    exec > >(tee "$CI_LOG") 2>&1
+    ci_report_failure() {
+        local code=$?
+        [ "$code" -eq 0 ] && return
+        # Best effort: `tee` is a separate process, so the last lines may still
+        # be in flight when the trap fires.
+        sleep 0.5
+        grep -E '^error' -A6 "$CI_LOG" | head -80 | sed 's/^/::error:: /'
+        echo "::error::dev/ci.sh ${MODE} failed (exit ${code}) — the lines above are the reason"
+    }
+    trap ci_report_failure EXIT
+fi
+
 echo "=== ACowork.AI CI ==="
 
 run_check() {
