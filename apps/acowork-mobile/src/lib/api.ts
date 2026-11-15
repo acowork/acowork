@@ -1170,6 +1170,12 @@ export interface PmProject {
   status: 'active' | 'archived' | 'completed'
   created_at: string
   updated_at: string
+  /**
+   * Free-form UI preferences (the icon reference lives here — see
+   * `lib/projectIcon.ts`). The server always sends it; older servers may
+   * not, so it stays optional.
+   */
+  metadata?: Record<string, unknown>
   members?: { instance_id: string }[]
 }
 

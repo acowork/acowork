@@ -8,9 +8,11 @@
 
 import { t as tr } from '../../i18n'
 import { useEffect } from 'react'
+import { useAuthStore } from '../../stores/authStore'
 import { useNavStore } from '../../stores/navStore'
 import { usePmStore } from '../../stores/pmStore'
 import { ListRow, Banner } from '../../components/ui'
+import { ProjectIcon } from '../../components/ProjectIcon'
 
 export function ProjectListScreen() {
   const projects = usePmStore((s) => s.projects)
@@ -19,6 +21,7 @@ export function ProjectListScreen() {
   const refresh = usePmStore((s) => s.refreshProjects)
   const openProject = usePmStore((s) => s.openProject)
   const push = useNavStore((s) => s.push)
+  const baseUrl = useAuthStore((s) => s.baseUrl)
 
   useEffect(() => {
     void refresh()
@@ -44,7 +47,12 @@ export function ProjectListScreen() {
           <ListRow
             key={p.id}
             onClick={() => open(p.id)}
-            label={<span className="row-title">{p.title}</span>}
+            label={
+              <span className="row-title project-row-label">
+                <ProjectIcon project={p} baseUrl={baseUrl} size={22} />
+                <span className="project-row-name">{p.title}</span>
+              </span>
+            }
             hint={p.description || undefined}
             value={p.status === 'active' ? tr('进行中') : p.status === 'archived' ? tr('已归档') : tr('已完成')}
           />

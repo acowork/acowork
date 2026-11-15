@@ -509,6 +509,18 @@
   left: calc(var(--list-row-pad-x) + var(--settings-icon-size) + var(--list-row-gap));
 }
 
+/* Project icon — the leading tile in the project list. Same shape language
+ * as desktop's `ProjectAvatar` (rounded square + hairline ring), sized in
+ * px by the caller. `object-fit: cover` so a custom upload that is not
+ * square still fills the tile instead of letterboxing. The ring is
+ * `--color-separator`, not a fixed black alpha, so it survives dark mode. */
+.project-icon {
+  flex: none;
+  border-radius: var(--avatar-radius);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--color-separator);
+}
+
 .row-title {
   display: flex;
   align-items: center;
@@ -2016,6 +2028,23 @@
   color: var(--color-label-secondary);
 }
 .doc-tree-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Project list row label — icon tile + name, mirroring Desktop's
+ * <ProjectAvatar/> + `min-w-0 flex-1 truncate` span. The name needs its own
+ * truncating box: `text-overflow` on `.list-row-label` cannot reach text that
+ * lives inside the flex `.row-title`, so without this the title hard-clips at
+ * the row edge instead of ellipsizing (same reason `.doc-tree-name` exists).
+ * 22px matches mobile's own leading-icon slot (`--settings-icon-size`) rather
+ * than Desktop's 18px, which is sized for a 14px sidebar font. */
+.project-row-label {
+  gap: 6px;
+}
+.project-row-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

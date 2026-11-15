@@ -5,16 +5,20 @@
  * The avatar-file endpoints require auth; a bare <img src> cannot send the
  * Authorization header, so we fetch explicitly and produce a blob.
  */
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useState, type CSSProperties, type ReactNode } from 'react'
 import { useAuthStore } from '../stores/authStore'
 
 export function AuthImage({
   src,
   alt,
+  className,
+  style,
   fallback,
 }: {
   src: string | null
   alt?: string
+  className?: string
+  style?: CSSProperties
   fallback: ReactNode
 }) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null)
@@ -50,5 +54,5 @@ export function AuthImage({
   }, [src])
 
   if (!blobUrl) return <>{fallback}</>
-  return <img src={blobUrl} alt={alt ?? ''} />
+  return <img src={blobUrl} alt={alt ?? ''} className={className} style={style} />
 }
