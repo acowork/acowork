@@ -289,7 +289,7 @@ fn execute_inner(params: Value, work_dir: Option<&str>) -> ToolResult {
     let max_side = detail_max_side(&detail);
     let needs_scale = max_side.is_some_and(|cap| src_w.max(src_h) > cap);
 
-    let (payload, out_w, out_h, scaled) = if needs_scale {
+    let (payload, out_w, out_h, scaled, out_mime) = if needs_scale {
         let cap = max_side.unwrap_or(MAX_SIDE_PX);
         let img = match decode_bounded(&full_path, sniffed.format) {
             Ok(img) => img,
@@ -303,7 +303,8 @@ fn execute_inner(params: Value, work_dir: Option<&str>) -> ToolResult {
         let resized = img.resize(cap, cap, image::imageops::FilterType::Lanczos3);
         let out_w = resized.width();
         let out_h = resized.height();
-        let payload = match encode_raster(&resized, sniffed.format) {
+        let (out_format, mime) = output_format(sniffed.format);
+        let payload = match encode_raster(&resized, out_format) {
             Ok(p) => p,
             Err(_) => {
                 return fail(format!(
@@ -312,24 +313,33 @@ fn execute_inner(params: Value, work_dir: Option<&str>) -> ToolResult {
                 ));
             }
         };
-        (payload, out_w, out_h, true)
+        if payload.len() > MAX_INLINE_IMAGE_BYTES {
+            return fail(format!(
+                "image too large after downscale ({} > 8 MiB); crop or re-encode at lower quality",
+                human_size(payload.len())
+            ));
+        }
+        (payload, out_w, out_h, true, mime)
     } else {
+        // Passthrough ships the file bytes as-is, so the 8 MiB budget
+        // is a statement about the *file* — and the pixel pre-check
+        // above does not bound file bytes (chunk padding is arbitrary).
+        // Reject on the recorded size before anything is read.
+        if meta.len() as usize > MAX_INLINE_IMAGE_BYTES {
+            return fail(format!(
+                "image too large ({} > 8 MiB); crop or re-encode at lower quality",
+                human_size(meta.len() as usize)
+            ));
+        }
         let mut buf = Vec::with_capacity(meta.len() as usize);
         if let Err(e) = std::fs::File::open(&full_path).and_then(|mut f| f.read_to_end(&mut buf))
         {
             return fail(format!("failed to read {path}: {e}"));
         }
-        (buf, src_w, src_h, false)
+        (buf, src_w, src_h, false, sniffed.mime)
     };
 
-    if payload.len() > MAX_INLINE_IMAGE_BYTES {
-        return fail(format!(
-            "image too large after downscale ({} > 8 MiB); crop or re-encode at lower quality",
-            human_size(payload.len())
-        ));
-    }
-
-    let url = build_data_url(sniffed.mime, &payload);
+    let url = build_data_url(out_mime, &payload);
     let part = ContentPart::ImageUrl {
         image_url: ImageUrlPart {
             url,
@@ -423,8 +433,25 @@ fn decode_bounded(path: &Path, format: ImageFormat) -> image::ImageResult<image:
     reader.decode()
 }
 
-/// Deterministic re-encode after a downscale. Animated GIFs collapse to
-/// the first frame (decode() yields frame 0) — v1 accepts that.
+/// Output format (and its MIME) after a downscale. JPEG keeps JPEG at
+/// the fixed quality; everything else becomes PNG. The `image` crate's
+/// WebP encoder is lossless-only (VP8L) — re-encoding a downscaled
+/// lossy WebP as VP8L inflates photo content several-fold and burns
+/// the 8 MiB payload budget for no perceptual gain. PNG keeps alpha
+/// (GIF/WebP sources), is deterministic at fixed encoder settings,
+/// and the data URI's MIME always describes the payload actually sent,
+/// not the file on disk.
+fn output_format(source: ImageFormat) -> (ImageFormat, &'static str) {
+    match source {
+        ImageFormat::Jpeg => (ImageFormat::Jpeg, "image/jpeg"),
+        _ => (ImageFormat::Png, "image/png"),
+    }
+}
+
+/// Deterministic re-encode after a downscale. `format` is the
+/// *output* format from [`output_format`] (JPEG or PNG only).
+/// Animated GIFs collapse to the first frame (decode() yields frame 0)
+/// — v1 accepts that.
 fn encode_raster(img: &image::DynamicImage, format: ImageFormat) -> image::ImageResult<Vec<u8>> {
     let mut buf = Vec::new();
     match format {
@@ -580,6 +607,70 @@ mod tests {
         let uri = part_url(&r);
         let (_, b64) = parse_data_uri(&uri).unwrap();
         assert_eq!(base64_decode(b64), raw, "already under the cap: no re-encode");
+    }
+
+    /// Deterministic photo-like noise (fixed-seed LCG) — the content a
+    /// lossless codec cannot compress. Smooth gradients hide payload
+    /// bloat, so the downscale-size regressions below must use this.
+    fn noise(w: u32, h: u32) -> DynamicImage {
+        let mut state: u64 = 0x2545_F491_4F6C_DD1D;
+        let buf: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(w, h, |_, _| {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            let v = (state >> 33) as u8;
+            Rgb([v, v.rotate_left(3), v.rotate_right(5)])
+        });
+        DynamicImage::ImageRgb8(buf)
+    }
+
+    /// M1 regression: the `image` crate's WebP encoder is lossless-only
+    /// (VP8L). Re-encoding a downscaled lossy WebP as VP8L inflated the
+    /// payload several-fold and could exceed the 8 MiB budget outright;
+    /// GIF got the same format-preserving treatment. After a downscale,
+    /// non-JPEG sources must ship as PNG and the data URI's MIME must
+    /// describe the payload actually sent, not the file on disk.
+    #[test]
+    fn downscaled_webp_and_gif_reencode_as_png() {
+        for name in ["photo.webp", "photo.gif"] {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join(name);
+            noise(2000, 1500).save(&p).unwrap();
+            let r = call(&p, Some("high"));
+            assert!(r.ok, "{name}: {:?}", r.error);
+            assert_eq!(part_dims(&r), (Some(1568), Some(1176)), "{name}");
+            let uri = part_url(&r);
+            let (mime, b64) = parse_data_uri(&uri).unwrap();
+            assert_eq!(mime, "image/png", "{name}: downscaled non-JPEG ships PNG");
+            let payload = base64_decode(b64);
+            assert!(
+                payload.len() < MAX_INLINE_IMAGE_BYTES,
+                "{name}: payload {} must stay under the 8 MiB budget",
+                payload.len()
+            );
+            let decoded = image::load_from_memory(&payload).expect("payload decodes");
+            assert_eq!((decoded.width(), decoded.height()), (1568, 1176));
+        }
+    }
+
+    /// M2 regression: the passthrough branch used to `read_to_end` the
+    /// whole file before checking the 8 MiB budget. A valid header with
+    /// arbitrary trailing bytes must be rejected on the recorded file
+    /// size, before anything is loaded into memory.
+    #[test]
+    fn oversized_file_is_rejected_before_being_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("padded.jpg");
+        gradient(100, 80).save(&p).unwrap();
+        let mut f = std::fs::OpenOptions::new().append(true).open(&p).unwrap();
+        std::io::Write::write_all(&mut f, &vec![0u8; 9 * 1024 * 1024]).unwrap();
+        drop(f);
+        let r = call(&p, Some("original"));
+        assert!(!r.ok);
+        assert_eq!(
+            r.error.unwrap(),
+            "image too large (9.0 MiB > 8 MiB); crop or re-encode at lower quality"
+        );
     }
 
     #[test]
