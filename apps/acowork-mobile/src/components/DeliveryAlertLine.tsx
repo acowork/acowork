@@ -17,6 +17,7 @@
  * token, and the sentence a human reads is localized copy.
  */
 
+import { t as tr } from '../i18n'
 import { useEffect, useState } from 'react'
 import type { ChatDeliveryAlert } from '../lib/types'
 
@@ -50,8 +51,8 @@ export function DeliveryAlertLine({ alert, name, align = 'end' }: DeliveryAlertL
   // the persisted receipt used, so nothing a reader sees changes except how
   // long it stays.
   const text = name
-    ? `消息未能送达 ${name}，请重试或 @ 该 Agent`
-    : '消息未能送达，请重试或 @ 该 Agent'
+    ? tr('消息未能送达 {{name}}，请重试或 @ 该 Agent', { name })
+    : tr('消息未能送达，请重试或 @ 该 Agent')
 
   return (
     <div

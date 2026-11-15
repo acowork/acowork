@@ -17,6 +17,7 @@
  * `lib/stickToBottom.ts`.
  */
 
+import { t as tr } from '../../i18n'
 import { Fragment, useEffect, useState, type ReactNode } from 'react'
 import { ChevronLeft, Send } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
@@ -100,7 +101,7 @@ export function UserChatScreen() {
   // Avatars mirror ChatDetailScreen: custom file → declared builtin →
   // deterministic builtin → initial. There is no per-user avatar-file route
   // for a peer, so the AuthImage fetch falls back to the builtin on failure.
-  const myName = me?.display_name || me?.username || '我'
+  const myName = me?.display_name || me?.username || tr('我')
   const meAvatar: ReactNode = (() => {
     if (!me) return <span>{'?'}</span>
     const picked = pickIconId(myName)
@@ -136,11 +137,11 @@ export function UserChatScreen() {
       <EdgeSwipe onBack={() => pop()}>
         <div className="screen">
           <header className="navbar">
-            <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
-            <span className="navbar-title">联系人</span>
+            <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}><ChevronLeft size={22} aria-hidden />{tr('返回')}</button>
+            <span className="navbar-title">{tr('联系人')}</span>
             <span className="navbar-trail" />
           </header>
-          <div className="empty-state">该联系人会话已关闭，请返回重试</div>
+          <div className="empty-state">{tr('该联系人会话已关闭，请返回重试')}</div>
         </div>
       </EdgeSwipe>
     )
@@ -150,21 +151,21 @@ export function UserChatScreen() {
     <EdgeSwipe onBack={() => pop()}>
       <div className="screen">
         <header className="navbar">
-          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
+          <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}><ChevronLeft size={22} aria-hidden />{tr('返回')}</button>
           <span className="navbar-title">{peerName ?? peer}</span>
           <span className="navbar-trail" />
         </header>
 
         {!me ? (
           <Banner tone="error">
-            <ListRow label="无法确定当前账号" hint="退出登录后重新登录即可恢复" />
+            <ListRow label={tr('无法确定当前账号')} hint={tr('退出登录后重新登录即可恢复')} />
           </Banner>
         ) : null}
         {error ? <Banner tone="warning">{error}</Banner> : null}
 
         <div className="scroll scroll-chat" ref={scrollRef}>
-          {loading ? <div className="empty-state">载入中…</div> : null}
-          {!loading && messages.length === 0 ? <div className="empty-state">还没有消息</div> : null}
+          {loading ? <div className="empty-state">{tr('载入中…')}</div> : null}
+          {!loading && messages.length === 0 ? <div className="empty-state">{tr('还没有消息')}</div> : null}
           {messages.length
             ? (() => {
                 // Fold consecutive same-sender messages into one turn (the
@@ -192,8 +193,8 @@ export function UserChatScreen() {
                   const avatar = turn.isUser ? meAvatar : peerAvatar
                   const name = turn.isUser ? myName : peerDisplayName
                   const role = turn.isUser
-                    ? (me?.role === 'admin' ? '管理员' : me?.role === 'user' ? '用户' : null)
-                    : (peerUser?.role === 'admin' ? '管理员' : peerUser?.role === 'user' ? '用户' : null)
+                    ? (me?.role === 'admin' ? tr('管理员') : me?.role === 'user' ? tr('用户') : null)
+                    : (peerUser?.role === 'admin' ? tr('管理员') : peerUser?.role === 'user' ? tr('用户') : null)
                   return (
                     <Fragment key={turn.items[0]!.id}>
                       {sep ? <div className="time-sep">{sep}</div> : null}
@@ -228,7 +229,7 @@ export function UserChatScreen() {
                 void markSeen()
               }}
             >
-              {unseen} 条新消息
+              {tr('{{n}} 条新消息', { n: unseen })}
             </button>
           ) : null}
         </div>
@@ -237,15 +238,15 @@ export function UserChatScreen() {
           <textarea
             className="composer-input"
             rows={1}
-            placeholder="发送消息"
-            aria-label="消息输入框"
+            placeholder={tr('发送消息')}
+            aria-label={tr('消息输入框')}
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
           />
           <button
             type="button"
             className="composer-send"
-            aria-label="发送"
+            aria-label={tr('发送')}
             disabled={!draft.trim() || sending || !me}
             onClick={() => void submit()}
           >

@@ -36,6 +36,7 @@
  *   of the transcript inventing an outcome for it.
  */
 
+import { t as tr } from '../i18n'
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AtSign } from 'lucide-react'
 import { OutlineBrainIcon } from './BrainIcon'
@@ -97,21 +98,21 @@ interface ChatExecutionBlockProps {
 function liveStatusText(s: LiveStatus): string {
   switch (s.status) {
     case 'llm_awaiting_first_chunk':
-      return '等模型响应'
+      return tr('等模型响应')
     case 'thinking':
-      return '思考中'
+      return tr('思考中')
     case 'llm_streaming':
-      return '正在输出'
+      return tr('正在输出')
     case 'tool_executing':
-      return '执行工具中'
+      return tr('执行工具中')
     case 'waiting_approval':
-      return '等你审批'
+      return tr('等你审批')
     case 'paused':
-      return '已暂停'
+      return tr('已暂停')
     case 'errored':
-      return '出错了'
+      return tr('出错了')
     default:
-      return '空闲'
+      return tr('空闲')
   }
 }
 
@@ -252,7 +253,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
       })
       .find((body) => body.trim() !== '') ||
     ''
-  const name = runTitle?.trim() || summarize(asked0, 24) || '执行会话'
+  const name = runTitle?.trim() || summarize(asked0, 24) || tr('执行会话')
   // The task coordinate (ADR-106 D13): it rides the ROUND, and the header is
   // where a reader looks for "which piece of work is this".
   const taskId = block.rounds.find((r) => r.roundRow.meta?.task_id)?.roundRow.meta?.task_id
@@ -299,8 +300,8 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
         <button
           type="button"
           className="chat-run-action"
-          title={name || '查看执行'}
-          aria-label="查看执行"
+          title={name || tr('查看执行')}
+          aria-label={tr('查看执行')}
           onClick={() => onJumpToExec(instanceId, execSid)}
         >
           <OutlineBrainIcon />
@@ -309,8 +310,8 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
           <button
             type="button"
             className="chat-run-action"
-            title="引用该任务"
-            aria-label="引用该任务"
+            title={tr('引用该任务')}
+            aria-label={tr('引用该任务')}
             onClick={() => onReferenceRun({ instanceId, execSessionId: execSid, name })}
           >
             <AtSign aria-hidden />
@@ -343,7 +344,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
           </span>
           <span className="explore-toggle-label">{name}</span>
           <span className="explore-toggle-summary">
-            {block.rounds.length} 轮{shownState ? ` · ${shownState}` : ''}
+            {tr('{{n}} 轮', { n: block.rounds.length })}{shownState ? ` · ${shownState}` : ''}
             {taskId ? ` · ${taskId}` : ''}
           </span>
           <span className="explore-toggle-caret" aria-hidden>
@@ -359,7 +360,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                 className="chat-run-older"
                 onClick={() => setRevealed((n) => n + REVEAL_STEP)}
               >
-                查看更早 {hiddenOlder} 轮
+                {tr('查看更早 {{n}} 轮', { n: hiddenOlder })}
               </button>
             ) : null}
             {shown.map((round, i) => (
@@ -474,7 +475,7 @@ function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: 
   // 2026-11-04). As a fallback for any round it published the PM wake-up
   // playbook as a round's question whenever the projection could not be read —
   // the reference row's name and the system slot are different things.
-  const summary = summarize(question) || '（无提问内容）'
+  const summary = summarize(question) || tr('（无提问内容）')
   const pending = entry?.status === 'pending'
   // A row parked on a card is waiting for the human, not executing — the same
   // rule the header follows, because a row that says "执行中" over the card it is
@@ -497,7 +498,7 @@ function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: 
         aria-expanded={open}
       >
         <span className="chat-run-row-name">
-          第 {index + 1} 轮
+          {tr('第 {{n}} 轮', { n: index + 1 })}
           <span
             className={`chat-run-glyph${inProgress ? ' is-live' : ''}${
               isFailureStatus(status) ? ' is-danger' : ''
@@ -525,11 +526,11 @@ function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: 
             <div className="chat-run-question">
               {renderMarkdown(questionBody)}
               {display.truncated ? (
-                <span className="chat-run-note">正文已截断，完整内容见原始信封</span>
+                <span className="chat-run-note">{tr('正文已截断，完整内容见原始信封')}</span>
               ) : null}
               {rawEnvelope ? (
                 <details className="chat-run-raw">
-                  <summary>原始信封（机器格式）</summary>
+                  <summary>{tr('原始信封（机器格式）')}</summary>
                   <pre>{rawEnvelope}</pre>
                 </details>
               ) : null}
@@ -563,24 +564,24 @@ function RoundBody({ entry, chatSessionId, reload, blockRef, status }: RoundBody
   const body = entry?.projection?.answer?.body.trim() ?? ''
 
   if (!entry) {
-    return <div className="chat-run-note">正在加载本轮执行…</div>
+    return <div className="chat-run-note">{tr('正在加载本轮执行…')}</div>
   }
   if (entry.status === 'unreachable') {
     return (
       <div className="chat-run-note is-danger">
-        <span>执行所在的主机暂不可达</span>
+        <span>{tr('执行所在的主机暂不可达')}</span>
         <button
           type="button"
           className="chat-block-hole-action"
           onClick={() => reload(chatSessionId, [blockRef])}
         >
-          重试
+          {tr('重试')}
         </button>
       </div>
     )
   }
   if (entry.status === 'not_found' || !entry.projection) {
-    return <div className="chat-run-note">本轮执行已不可用</div>
+    return <div className="chat-run-note">{tr('本轮执行已不可用')}</div>
   }
   if (body) {
     // §6.5: the answer is inline, at reading size — never folded behind a tap.
@@ -636,7 +637,7 @@ function BlockCardSurface({
         <span className="chat-block-card-tag">{cardLabel(card)}</span>
         <span className="chat-block-card-text">{truncate(card.prompt)}</span>
       </div>
-      <div className="chat-block-card-note">只有发起本轮的人可以回复</div>
+      <div className="chat-block-card-note">{tr('只有发起本轮的人可以回复')}</div>
     </div>
   )
 }
@@ -694,7 +695,7 @@ function RoundCard({
     return (
       <div className="chat-block-card">
         <div className="chat-block-card-static">
-          <span className="chat-block-card-tag">步骤确认</span>
+          <span className="chat-block-card-tag">{tr('步骤确认')}</span>
           <span className="chat-block-card-text">{truncate(card.prompt)}</span>
         </div>
         <button
@@ -703,7 +704,7 @@ function RoundCard({
           data-testid="block-reply"
           onClick={() => onReplyToRound(rowId, card.prompt ?? '')}
         >
-          继续执行
+          {tr('继续执行')}
         </button>
       </div>
     )
@@ -719,7 +720,7 @@ function RoundCard({
       >
         <span className="chat-block-card-tag">{cardLabel(card)}</span>
         <span className="chat-block-card-text">{truncate(card.prompt)}</span>
-        <span className="chat-block-card-go">去回复</span>
+        <span className="chat-block-card-go">{tr('去回复')}</span>
       </button>
       {sheet ? (
         <CardSheet
@@ -737,7 +738,7 @@ function RoundCard({
 
 /** The label a parked decision wears on its collapsed line. */
 function cardLabel(card: BlockCard): string {
-  return card.kind === 'approval' ? '需要审批' : card.kind === 'pause' ? '步骤确认' : 'Agent 询问'
+  return card.kind === 'approval' ? tr('需要审批') : card.kind === 'pause' ? tr('步骤确认') : tr('Agent 询问')
 }
 
 /** Bound a card's question to one line on the collapsed row — the sheet is where
@@ -768,15 +769,15 @@ function CardSheet({
   const [free, setFree] = useState('')
   const options = card.options ?? []
   return (
-    <Sheet open onClose={onClose} title={card.kind === 'approval' ? '允许执行？' : '需要你的回答'}>
+    <Sheet open onClose={onClose} title={card.kind === 'approval' ? tr('允许执行？') : tr('需要你的回答')}>
       {card.prompt ? <div className="chat-sheet-question">{renderMarkdown(card.prompt)}</div> : null}
       {card.kind === 'approval' ? (
         <div className="chat-sheet-row">
           <button type="button" className="chat-sheet-option is-primary" disabled={busy} onClick={() => onApprove(true)}>
-            批准
+            {tr('批准')}
           </button>
           <button type="button" className="chat-sheet-option" disabled={busy} onClick={() => onApprove(false)}>
-            拒绝
+            {tr('拒绝')}
           </button>
         </div>
       ) : (
@@ -789,8 +790,8 @@ function CardSheet({
           <div className="chat-sheet-free">
             <input
               className="chat-sheet-input"
-              placeholder="自由回答"
-              aria-label="自由回答"
+              placeholder={tr('自由回答')}
+              aria-label={tr('自由回答')}
               value={free}
               onChange={(e) => setFree(e.target.value)}
             />
@@ -803,12 +804,12 @@ function CardSheet({
                 setFree('')
               }}
             >
-              发送
+              {tr('发送')}
             </button>
           </div>
         </>
       )}
-      {failed ? <div className="chat-sheet-failed">回复未能发送，请重试</div> : null}
+      {failed ? <div className="chat-sheet-failed">{tr('回复未能发送，请重试')}</div> : null}
     </Sheet>
   )
 }
@@ -853,8 +854,8 @@ function BlockReplyRow({ rowId, focusSignal, onSend }: BlockReplyRowProps) {
         ref={boxRef}
         className="chat-block-reply-input"
         rows={1}
-        placeholder="回复以继续此任务…"
-        aria-label="继续此任务"
+        placeholder={tr('回复以继续此任务…')}
+        aria-label={tr('继续此任务')}
         value={draft}
         disabled={!rowId}
         onChange={(e) => setDraft(e.target.value)}
@@ -871,9 +872,9 @@ function BlockReplyRow({ rowId, focusSignal, onSend }: BlockReplyRowProps) {
         data-testid="block-reply-send"
         disabled={!draft.trim() || !rowId}
         onClick={send}
-        aria-label="发送"
+        aria-label={tr('发送')}
       >
-        发送
+        {tr('发送')}
       </button>
     </div>
   )

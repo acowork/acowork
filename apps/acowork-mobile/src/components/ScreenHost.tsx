@@ -28,6 +28,7 @@
  * which React collapses to a single node but with a confusing class.
  */
 
+import { t as tr } from '../i18n'
 import { useEffect, useLayoutEffect, useRef, useState, type ReactElement } from 'react'
 import { useNavStore, type Route, type TabKey } from '../stores/navStore'
 import { ROUTES } from '../routes'
@@ -40,7 +41,7 @@ const ANIM_CLEANUP_MS = ANIM_MS + 20
 function Placeholder({ route }: { route: Route }) {
   return (
     <div className="empty-state">
-      <div className="empty-title">未实现</div>
+      <div className="empty-title">{tr('未实现')}</div>
       <div className="empty-sub">{String(route)}</div>
     </div>
   )

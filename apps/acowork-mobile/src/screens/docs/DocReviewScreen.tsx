@@ -7,6 +7,7 @@
  * something the server already closed.
  */
 
+import { t as tr } from '../../i18n'
 import { useEffect } from 'react'
 import { useNavStore } from '../../stores/navStore'
 import { useDocStore } from '../../stores/docStore'
@@ -38,8 +39,8 @@ export function DocReviewScreen() {
     <EdgeSwipe onBack={() => pop()}>
       <div className="screen">
         <header className="navbar">
-          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回">返回</button>
-          <span className="navbar-title">审阅队列</span>
+          <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}>{tr('返回')}</button>
+          <span className="navbar-title">{tr('审阅队列')}</span>
           <span className="navbar-trail" />
         </header>
 
@@ -56,12 +57,12 @@ export function DocReviewScreen() {
               arrow
               onClick={() => open(r.request_id)}
               label={<span className="row-title">{r.path}</span>}
-              hint={`基于 v${r.base_version} · ${r.submitted_by}`}
+              hint={tr('基于 v{{version}} · {{by}}', { version: r.base_version, by: r.submitted_by })}
               value={formatListTime(Date.parse(r.created_at))}
             />
           ))}
-          {loading && !requests ? <ListRow label="载入中…" /> : null}
-          {requests && requests.length === 0 ? <ListRow label="没有待审阅的修改" /> : null}
+          {loading && !requests ? <ListRow label={tr('载入中…')} /> : null}
+          {requests && requests.length === 0 ? <ListRow label={tr('没有待审阅的修改')} /> : null}
         </div>
       </div>
     </EdgeSwipe>

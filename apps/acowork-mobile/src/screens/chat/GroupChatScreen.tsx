@@ -33,6 +33,7 @@
  * server-side, so the inbox badge clears on the next list re-read.
  */
 
+import { t as tr } from '../../i18n'
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AtSign, ChevronLeft, Quote, Send, Users } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
@@ -311,7 +312,7 @@ export function GroupChatScreen() {
     if (!cardId || !activeGroupId) return
     const lookup = await fetchCardAnswer(activeGroupId, cardId)
     if (!lookup.ok) {
-      if (lookup.reason === 'gone') setTransientHint('这张卡片已无法回答')
+      if (lookup.reason === 'gone') setTransientHint(tr('这张卡片已无法回答'))
       return
     }
     const answer = answerWithChoice(lookup.facts, choice)
@@ -351,12 +352,12 @@ export function GroupChatScreen() {
     setAddressStage(null)
     const scope = containerRef.current
     if (!scope || !execSessionId) {
-      setTransientHint('任务块不在已加载历史')
+      setTransientHint(tr('任务块不在已加载历史'))
       return
     }
     const el = scope.querySelector<HTMLElement>(`[data-session$="|${execSessionId}"]`)
     if (!el) {
-      setTransientHint('任务块不在已加载历史')
+      setTransientHint(tr('任务块不在已加载历史'))
       return
     }
     el.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -426,11 +427,11 @@ export function GroupChatScreen() {
       <EdgeSwipe onBack={() => pop()}>
         <div className="screen">
           <header className="navbar">
-            <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
-            <span className="navbar-title">群聊</span>
+            <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}><ChevronLeft size={22} aria-hidden />{tr('返回')}</button>
+            <span className="navbar-title">{tr('群聊')}</span>
             <span className="navbar-trail" />
           </header>
-          <div className="empty-state">未选择群聊，请返回重试</div>
+          <div className="empty-state">{tr('未选择群聊，请返回重试')}</div>
         </div>
       </EdgeSwipe>
     )
@@ -440,16 +441,16 @@ export function GroupChatScreen() {
     <EdgeSwipe onBack={() => pop()}>
       <div className="screen">
         <header className="navbar">
-          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
-          <span className="navbar-title">{group?.title ?? '群聊'}</span>
+          <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}><ChevronLeft size={22} aria-hidden />{tr('返回')}</button>
+          <span className="navbar-title">{group?.title ?? tr('群聊')}</span>
           <span className="navbar-trail">
-            <button type="button" className="navbar-action" onClick={() => setMembersOpen(true)} aria-label="成员">
-              成员
+            <button type="button" className="navbar-action" onClick={() => setMembersOpen(true)} aria-label={tr('成员')}>
+              {tr('成员')}
             </button>
           </span>
         </header>
 
-        {!group ? <Banner tone="info">群聊信息加载中…</Banner> : null}
+        {!group ? <Banner tone="info">{tr('群聊信息加载中…')}</Banner> : null}
 
         <div
           className="scroll scroll-chat"
@@ -458,9 +459,9 @@ export function GroupChatScreen() {
             if (typeof scrollRef === 'function') scrollRef(el)
           }}
         >
-          {win?.loadingOlder ? <div className="time-sep">载入更早消息…</div> : null}
+          {win?.loadingOlder ? <div className="time-sep">{tr('载入更早消息…')}</div> : null}
           {rows.length === 0 ? (
-            <div className="empty-state">还没有消息，发一条开始群聊</div>
+            <div className="empty-state">{tr('还没有消息，发一条开始群聊')}</div>
           ) : null}
           {items.map((item, i) => {
             const row = itemOf(item)
@@ -498,18 +499,18 @@ export function GroupChatScreen() {
                 <div className="msg-avatar">{participantAvatar(turnHeaderId)}</div>
                 <div className="msg-sender">
                   <span className="msg-sender-name">{nameOf(turnHeaderId).name}</span>
-                  <span className="chat-turn-header-status">正在处理…</span>
+                  <span className="chat-turn-header-status">{tr('正在处理…')}</span>
                 </div>
               </div>
             ) : (
               <div className="chat-notice">
-                <span className="chat-notice-pill">正在处理…</span>
+                <span className="chat-notice-pill">{tr('正在处理…')}</span>
               </div>
             )
           ) : null}
           {atBottom === false && rows.length > 0 ? (
-            <button type="button" className="chat-scroll-pill" onClick={stickNow} aria-label="回到底部">
-              回到底部 ↓
+            <button type="button" className="chat-scroll-pill" onClick={stickNow} aria-label={tr('回到底部')}>
+              {tr('回到底部 ↓')}
             </button>
           ) : null}
         </div>
@@ -518,8 +519,8 @@ export function GroupChatScreen() {
           <div className="composer-chips">
             {replyTo ? (
               <span className="composer-chip">
-                <span className="composer-chip-text">回复 {replyTo.quote.slice(0, 30)}</span>
-                <button type="button" className="composer-chip-clear" onClick={() => setReplyTo(null)} aria-label="取消回复">
+                <span className="composer-chip-text">{tr('回复 {{quote}}', { quote: replyTo.quote.slice(0, 30) })}</span>
+                <button type="button" className="composer-chip-clear" onClick={() => setReplyTo(null)} aria-label={tr('取消回复')}>
                   ×
                 </button>
               </span>
@@ -528,7 +529,7 @@ export function GroupChatScreen() {
               <span key={instanceId} className="composer-chip">
                 <span className="composer-chip-text">
                   @{name}
-                  {pick.forceNew ? ' · 开新任务' : pick.refs?.length ? ` · 引用 ${pick.refs.length} 个任务` : ''}
+                  {pick.forceNew ? tr(' · 开新任务') : pick.refs?.length ? tr(' · 引用 {{n}} 个任务', { n: pick.refs.length }) : ''}
                 </span>
                 <button
                   type="button"
@@ -540,7 +541,7 @@ export function GroupChatScreen() {
                       return next
                     })
                   }
-                  aria-label="移除寻址"
+                  aria-label={tr('移除寻址')}
                 >
                   ×
                 </button>
@@ -552,7 +553,7 @@ export function GroupChatScreen() {
         {transientHint ? <div className="composer-locate-hint" role="status">{transientHint}</div> : null}
 
         {pickerOpen && pickerRows.length > 0 ? (
-          <div className="group-mention-picker" role="listbox" aria-label="选择提及对象">
+          <div className="group-mention-picker" role="listbox" aria-label={tr('选择提及对象')}>
             {pickerRows.map((c) => (
               <button key={c.id} type="button" role="option" aria-selected="false" className="group-mention-row" onClick={() => pickCandidate(c)}>
                 <span className="group-mention-avatar">{participantAvatar(c.id)}</span>
@@ -567,7 +568,7 @@ export function GroupChatScreen() {
           <button
             type="button"
             className="composer-address"
-            aria-label="提及成员"
+            aria-label={tr('提及成员')}
             aria-expanded={pickerOpen}
             disabled={!group || candidates.length === 0}
             onClick={openPicker}
@@ -578,8 +579,8 @@ export function GroupChatScreen() {
             ref={textareaRef}
             className="composer-input"
             rows={1}
-            placeholder="发送消息（@ 提及成员）"
-            aria-label="消息输入框"
+            placeholder={tr('发送消息（@ 提及成员）')}
+            aria-label={tr('消息输入框')}
             value={draft}
             disabled={composerLocked}
             onChange={(e) => {
@@ -590,8 +591,8 @@ export function GroupChatScreen() {
           <button
             type="button"
             className="composer-send"
-            aria-label="发送"
-            title={turnLive ? '上一条消息正在处理中' : '发送'}
+            aria-label={tr('发送')}
+            title={turnLive ? tr('上一条消息正在处理中') : tr('发送')}
             disabled={!draft.trim() || composerLocked || !activeGroupId}
             onClick={() => void send()}
           >
@@ -622,7 +623,7 @@ export function GroupChatScreen() {
         ) : null}
 
         {membersOpen ? (
-          <Sheet open onClose={() => setMembersOpen(false)} title={`成员 · ${group?.participants?.length ?? 0}`}>
+          <Sheet open onClose={() => setMembersOpen(false)} title={tr('成员 · {{n}}', { n: group?.participants?.length ?? 0 })}>
             {(group?.participants ?? []).map((p) => {
               const who = nameOf(p.id)
               return (
@@ -635,14 +636,14 @@ export function GroupChatScreen() {
                       {who.isAgent ? <span className="group-mention-tag">Agent</span> : null}
                     </span>
                   }
-                  hint={p.id === me?.user_id ? '我' : undefined}
+                  hint={p.id === me?.user_id ? tr('我') : undefined}
                 />
               )
             })}
-            {group && !group.participants?.length ? <div className="chat-sheet-hint">成员名单加载中</div> : null}
+            {group && !group.participants?.length ? <div className="chat-sheet-hint">{tr('成员名单加载中')}</div> : null}
             <div className="chat-sheet-hint">
               <Users style={{ width: 12, height: 12, verticalAlign: -2, marginRight: 4 }} aria-hidden />
-              群成员随项目成员同步；增删成员请在桌面端项目页操作。
+              {tr('群成员随项目成员同步；增删成员请在桌面端项目页操作。')}
             </div>
           </Sheet>
         ) : null}
@@ -681,7 +682,7 @@ function GroupRowView(props: GroupRowProps) {
   if (row.kind === 'execution_round') {
     return (
       <div className="chat-notice">
-        <span className="chat-notice-pill">本轮执行已不可用</span>
+        <span className="chat-notice-pill">{tr('本轮执行已不可用')}</span>
       </div>
     )
   }
@@ -734,7 +735,7 @@ function GroupRowView(props: GroupRowProps) {
                     renderMarkdown(row.body)
                   )
                 ) : (
-                  <span className="bubble-empty">（无内容）</span>
+                  <span className="bubble-empty">{tr('（无内容）')}</span>
                 )}
               </div>
             ) : null}

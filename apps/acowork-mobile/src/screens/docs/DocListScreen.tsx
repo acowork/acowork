@@ -12,6 +12,7 @@
  * only be able to say "not on mobile".
  */
 
+import { t as tr } from '../../i18n'
 import { useEffect, useState } from 'react'
 import { Folder, FolderOpen, FileText } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
@@ -64,7 +65,7 @@ export function DocListScreen() {
   return (
     <div className="screen">
       <header className="navbar navbar-large">
-        <h1 className="navbar-title">文档</h1>
+        <h1 className="navbar-title">{tr('文档')}</h1>
       </header>
 
       <div className="search-bar">
@@ -72,8 +73,8 @@ export function DocListScreen() {
           className="search-input"
           type="search"
           inputMode="search"
-          placeholder="搜索文档"
-          aria-label="搜索文档"
+          placeholder={tr('搜索文档')}
+          aria-label={tr('搜索文档')}
           value={text}
           onChange={(e) => {
             setText(e.target.value)
@@ -84,8 +85,8 @@ export function DocListScreen() {
           }}
         />
         {text ? (
-          <button type="button" className="search-clear" aria-label="清除搜索" onClick={() => { setText(''); clearSearch() }}>
-            清除
+          <button type="button" className="search-clear" aria-label={tr('清除搜索')} onClick={() => { setText(''); clearSearch() }}>
+            {tr('清除')}
           </button>
         ) : null}
       </div>
@@ -101,14 +102,14 @@ export function DocListScreen() {
           <ListRow
             arrow
             onClick={() => push('docs/review')}
-            label={<span className="row-title">审阅队列</span>}
-            hint="Agent 提交的文档修改，需人工通过或驳回"
+            label={<span className="row-title">{tr('审阅队列')}</span>}
+            hint={tr('Agent 提交的文档修改，需人工通过或驳回')}
             badge={pending?.length ?? 0}
           />
         ) : null}
 
         <div className="list-section-title" style={{ padding: 'var(--space-3) var(--space-4) 0' }}>
-          {hits === null ? '全部文档' : `搜索结果 · ${hits.length}`}
+          {hits === null ? tr('全部文档') : tr('搜索结果 · {{n}}', { n: hits.length })}
         </div>
 
         {hits !== null ? (
@@ -126,9 +127,9 @@ export function DocListScreen() {
             />
           ))
         ) : searching && rows.length === 0 ? (
-          <ListRow label="载入中…" />
+          <ListRow label={tr('载入中…')} />
         ) : rows.length === 0 && !rootLoading ? (
-          <ListRow label="文档库为空" hint="在桌面端创建" />
+          <ListRow label={tr('文档库为空')} hint={tr('在桌面端创建')} />
         ) : (
           rows.map((r) =>
             r.kind === 'dir' ? (
@@ -143,7 +144,7 @@ export function DocListScreen() {
                     <span className="doc-tree-name">{r.name}</span>
                   </span>
                 }
-                hint={r.loading ? '载入中…' : undefined}
+                hint={r.loading ? tr('载入中…') : undefined}
                 value={r.count === null ? undefined : String(r.count)}
               />
             ) : (
@@ -161,7 +162,7 @@ export function DocListScreen() {
             ),
           )
         )}
-        {rootLoading && rows.length === 0 && hits === null ? <ListRow label="载入中…" /> : null}
+        {rootLoading && rows.length === 0 && hits === null ? <ListRow label={tr('载入中…')} /> : null}
       </div>
     </div>
   )

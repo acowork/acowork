@@ -6,9 +6,31 @@
  * weekday, and older shows the date. Everything is in the device's own zone
  * — there is no server timezone in this app's contract, and inventing one
  * would put every timestamp an hour off for half the users.
+ *
+ * Every human-readable word goes through the active language bundle. The
+ * Chinese day-part prefixes (凌晨/上午/…) and the 月/日 date form are kept for
+ * zh-CN / zh-TW; other languages get a 24-hour clock and an Intl month/day
+ * form, which avoids shipping a half-translated "3月4日" into an English UI.
  */
 
+import { currentLang, t as tr } from '../i18n'
+
 const DAY = 86_400_000
+
+function isCjk(): boolean {
+  const lang = currentLang()
+  return lang === 'zh-CN' || lang === 'zh-TW'
+}
+
+function intlLocale(): string {
+  switch (currentLang()) {
+    case 'zh-TW': return 'zh-TW'
+    case 'ja': return 'ja-JP'
+    case 'ko': return 'ko-KR'
+    case 'en': return 'en-US'
+    default: return 'zh-CN'
+  }
+}
 
 function startOfDay(ms: number): number {
   const d = new Date(ms)
@@ -23,14 +45,23 @@ function clock(ms: number): string {
   return `${hh}:${mm}`
 }
 
+/** Month + day, with the locale's own month name and ordering. */
+function dateLabel(d: Date): string {
+  if (isCjk()) return `${d.getMonth() + 1}月${d.getDate()}日`
+  return new Intl.DateTimeFormat(intlLocale(), { month: 'short', day: 'numeric' }).format(d)
+}
+
 /** Compact label for a list row's trailing slot. */
 export function formatListTime(ms: number | undefined | null): string {
   if (!ms || !Number.isFinite(ms)) return ''
   const days = Math.round((startOfDay(Date.now()) - startOfDay(ms)) / DAY)
   const d = new Date(ms)
   if (days <= 0) return clock(ms)
-  if (days === 1) return '昨天'
-  if (days < 7) return ['周日', '周一', '周二', '周三', '周四', '周五', '周六'][d.getDay()]!
+  if (days === 1) return tr('昨天')
+  if (days < 7) {
+    const weekdays = [tr('周日'), tr('周一'), tr('周二'), tr('周三'), tr('周四'), tr('周五'), tr('周六')]
+    return weekdays[d.getDay()]!
+  }
   const y = d.getFullYear()
   const md = `${d.getMonth() + 1}/${d.getDate()}`
   return y === new Date().getFullYear() ? md : `${y}/${md}`
@@ -42,8 +73,8 @@ export function formatMessageTime(ms: number | undefined | null): string {
   const d = new Date(ms)
   const days = Math.round((startOfDay(Date.now()) - startOfDay(d.getTime())) / DAY)
   if (days <= 0) return clock(d.getTime())
-  if (days === 1) return `昨天 ${clock(d.getTime())}`
-  return `${d.getMonth() + 1}月${d.getDate()}日 ${clock(d.getTime())}`
+  if (days === 1) return `${tr('昨天')} ${clock(d.getTime())}`
+  return `${dateLabel(d)} ${clock(d.getTime())}`
 }
 
 /**
@@ -58,9 +89,9 @@ export function formatScheduleTime(ms: number | undefined | null): string {
   const d = new Date(ms)
   const days = Math.round((startOfDay(Date.now()) - startOfDay(d.getTime())) / DAY)
   const c = clock(d.getTime())
-  if (days <= 0) return `今天 ${c}`
-  if (days === 1) return `昨天 ${c}`
-  return `${d.getMonth() + 1}月${d.getDate()}日 ${c}`
+  if (days <= 0) return `${tr('今天')} ${c}`
+  if (days === 1) return `${tr('昨天')} ${c}`
+  return `${dateLabel(d)} ${c}`
 }
 
 /**
@@ -72,9 +103,9 @@ export function daySeparator(prevMs: number | null, ms: number): string | null {
   if (prevMs !== null && startOfDay(prevMs) === startOfDay(ms)) return null
   const days = Math.round((startOfDay(Date.now()) - startOfDay(ms)) / DAY)
   const time = formatClock(cur)
-  if (days <= 0) return `今天 ${time}`
-  if (days === 1) return `昨天 ${time}`
-  return `${cur.getMonth() + 1}\u6708${cur.getDate()}\u65e5 ${time}`
+  if (days <= 0) return `${tr('今天')} ${time}`
+  if (days === 1) return `${tr('昨天')} ${time}`
+  return `${dateLabel(cur)} ${time}`
 }
 
 /** 5-minute gap time separator (WeChat style). */
@@ -89,11 +120,12 @@ export function timeGapSeparator(prevMs: number | null, ms: number): string | nu
 }
 
 function formatClock(d: Date): string {
+  if (!isCjk()) return clock(d.getTime())
   const h = d.getHours()
   const m = d.getMinutes().toString().padStart(2, '0')
-  if (h < 6) return `凌晨 ${h}:${m}`
-  if (h < 12) return `上午 ${h}:${m}`
-  if (h < 14) return `中午 ${h === 12 ? 12 : h - 12}:${m}`
-  if (h < 18) return `下午 ${h - 12}:${m}`
-  return `晚上 ${h - 12}:${m}`
+  if (h < 6) return `${tr('凌晨')} ${h}:${m}`
+  if (h < 12) return `${tr('上午')} ${h}:${m}`
+  if (h < 14) return `${tr('中午')} ${h === 12 ? 12 : h - 12}:${m}`
+  if (h < 18) return `${tr('下午')} ${h - 12}:${m}`
+  return `${tr('晚上')} ${h - 12}:${m}`
 }

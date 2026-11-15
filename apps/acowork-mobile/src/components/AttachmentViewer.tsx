@@ -13,6 +13,7 @@
  *   FileProvider intent from the native shell (see the note in the sheet).
  *   Saying so is the honest outcome; a dead capsule would just read as broken.
  */
+import { t as tr } from '../i18n'
 import { useEffect, useState } from 'react'
 
 import { Sheet } from './ui'
@@ -91,7 +92,7 @@ function ImageAttachmentViewer({
           <img className="attachment-lightbox-img" src={url} alt={attachment.filename} />
         ) : (
           <span className="attachment-lightbox-status">
-            {failed ? '图片已不可用' : '加载中…'}
+            {failed ? tr('图片已不可用') : tr('加载中…')}
           </span>
         )}
       </button>
@@ -141,11 +142,11 @@ function SheetAttachmentViewer({
         state === 'ready' ? (
           <pre className="attachment-text">{text}</pre>
         ) : (
-          <div className="attachment-void">{state === 'loading' ? '加载中…' : '没有可显示的内容'}</div>
+          <div className="attachment-void">{state === 'loading' ? tr('加载中…') : tr('没有可显示的内容')}</div>
         )
       ) : (
         <div className="attachment-void">
-          这类文件无法在应用内预览。请在桌面端聊天中打开，或让助手直接把内容读出来。
+          {tr('这类文件无法在应用内预览。请在桌面端聊天中打开，或让助手直接把内容读出来。')}
         </div>
       )}
     </Sheet>

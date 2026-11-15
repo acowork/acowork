@@ -21,6 +21,7 @@
  *    when the session returns to idle — no streaming, ever, in v1.
  */
 
+import { t as tr } from '../../i18n'
 import { Fragment, useCallback, useEffect, useState, type ReactNode } from 'react'
 import { Clock, Send, Settings2, Brain, Briefcase, Sparkles, Cpu, ChevronRight, Wrench, Image as ImageIcon, Check } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
@@ -79,19 +80,19 @@ function foldToolCalls(messages: ChatMessage[]): RenderItem[] {
 function statusText(s: LiveStatus): string {
   switch (s.status) {
     case 'llm_awaiting_first_chunk':
-      return '正在思考…'
+      return tr('正在思考…')
     case 'thinking':
-      return '正在思考…'
+      return tr('正在思考…')
     case 'llm_streaming':
-      return '正在生成回复…'
+      return tr('正在生成回复…')
     case 'tool_executing':
-      return '正在执行工具…'
+      return tr('正在执行工具…')
     case 'waiting_approval':
-      return '等待审批：工具执行'
+      return tr('等待审批：工具执行')
     case 'paused':
-      return '已暂停 — 请在桌面端继续'
+      return tr('已暂停 — 请在桌面端继续')
     case 'errored':
-      return `出错：${(s as { detail?: { message?: string } }).detail?.message ?? '会话异常终止'}`
+      return tr('出错：{{msg}}', { msg: (s as { detail?: { message?: string } }).detail?.message ?? tr('会话异常终止') })
     default:
       return ''
   }
@@ -301,17 +302,17 @@ export function ChatDetailScreen() {
             (Desktop's SessionTabBar uses the same clock glyph), not the title,
             so the title reads as a label and the bar has clear thirds. */}
         <header className="navbar navbar--chat">
-          <button type="button" className="navbar-back" onClick={onBack} aria-label="返回">
+          <button type="button" className="navbar-back" onClick={onBack} aria-label={tr('返回')}>
             <svg width="11" height="18" viewBox="0 0 12 20" fill="none" style={{ display: 'block' }}>
               <path d="M10 2L2 10l8 8" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
             </svg>
           </button>
-          <span className="navbar-title">{active?.title ?? agent?.name ?? '会话'}</span>
+          <span className="navbar-title">{active?.title ?? agent?.name ?? tr('会话')}</span>
           <button
             type="button"
             className="navbar-history"
             onClick={() => setSwitcherOpen(true)}
-            aria-label="会话历史"
+            aria-label={tr('会话历史')}
           >
             <Clock size={22} aria-hidden />
           </button>
@@ -319,19 +320,19 @@ export function ChatDetailScreen() {
 
         {readOnly ? (
           <Banner tone="info">
-            只读 · 来自 {active?.owner_id ?? '其他用户'} 的共享会话
+            {tr('只读 · 来自 {{owner}} 的共享会话', { owner: active?.owner_id ?? tr('其他用户') })}
           </Banner>
         ) : null}
 
         <div className="scroll scroll-chat" ref={scrollRef}>
-          {state?.isLoadingMore ? <div className="time-sep">载入更早消息…</div> : null}
-          {state?.loading ? <div className="empty-state">载入中…</div> : null}
+          {state?.isLoadingMore ? <div className="time-sep">{tr('载入更早消息…')}</div> : null}
+          {state?.loading ? <div className="empty-state">{tr('载入中…')}</div> : null}
           {state?.loaded && state.messages.length === 0 && !isActiveStatus(state.status) ? (
-            <div className="empty-state">还没有消息</div>
+            <div className="empty-state">{tr('还没有消息')}</div>
           ) : null}
           {state?.messages.length ? (() => {
             const folded = foldToolCalls(state.messages)
-            const userName = me?.display_name || me?.username || '我'
+            const userName = me?.display_name || me?.username || tr('我')
             const lastMsgOf = (it: RenderItem): ChatMessage =>
               it.type === 'msg' ? it.msg : it.items[it.items.length - 1]!
             // Desktop cohesion: fold consecutive same-role items into one
@@ -365,9 +366,9 @@ export function ChatDetailScreen() {
             return turns.map((turn) => {
               const sep = daySeparator(turn.prevTs, turn.firstTs) ?? timeGapSeparator(turn.prevTs, turn.firstTs)
               const avatar = turn.isUser ? userAvatar : agentAvatar
-              const name = turn.isUser ? userName : (agent?.name ?? '助手')
+              const name = turn.isUser ? userName : (agent?.name ?? tr('助手'))
               const role = turn.isUser
-                ? (me?.role === 'admin' ? '管理员' : me?.role === 'user' ? '用户' : null)
+                ? (me?.role === 'admin' ? tr('管理员') : me?.role === 'user' ? tr('用户') : null)
                 : (agent?.role ?? null)
               return (
                 <Fragment key={turn.key}>
@@ -410,7 +411,7 @@ export function ChatDetailScreen() {
                     className="retry-link"
                     onClick={() => agentId && activeId && void sendMessage(agentId, activeId)}
                   >
-                    发送失败 · 重试
+                    {tr('发送失败 · 重试')}
                   </button>
                 ) : null}
               </div>
@@ -426,10 +427,10 @@ export function ChatDetailScreen() {
           {/* Approval card: WS channel carries tool details (§8.1); the
               polling channel only knows a request is pending (§8.3). */}
           {!readOnly && approvalRequestId && agentId && activeId ? (
-            <div className="list-section" role="group" aria-label="工具审批">
+            <div className="list-section" role="group" aria-label={tr('工具审批')}>
               <ListRow
-                label={<span className="row-title">{approval ? `允许执行 ${approval.toolName}？` : '允许该工具执行？'}</span>}
-                hint={approval ? approval.action || approval.riskLevel || '工具详情' : '工具详情请在桌面端查看'}
+                label={<span className="row-title">{approval ? tr('允许执行 {{tool}}？', { tool: approval.toolName }) : tr('允许该工具执行？')}</span>}
+                hint={approval ? approval.action || approval.riskLevel || tr('工具详情') : tr('工具详情请在桌面端查看')}
                 value={
                   <span style={{ display: 'inline-flex', gap: 8 }}>
                     <button
@@ -438,7 +439,7 @@ export function ChatDetailScreen() {
                       style={{ color: 'var(--color-tint)' }}
                       onClick={() => void decideApproval(agentId, activeId, approvalRequestId, false)}
                     >
-                      拒绝
+                      {tr('拒绝')}
                     </button>
                     <button
                       type="button"
@@ -446,7 +447,7 @@ export function ChatDetailScreen() {
                       style={{ color: 'var(--color-success)' }}
                       onClick={() => void decideApproval(agentId, activeId, approvalRequestId, true)}
                     >
-                      允许
+                      {tr('允许')}
                     </button>
                   </span>
                 }
@@ -455,7 +456,7 @@ export function ChatDetailScreen() {
           ) : null}
           {/* AskQuestion card — WS channel only (polling cannot see it, §8.3). */}
           {!readOnly && question && agentId && activeId ? (
-            <div className="list-section" role="group" aria-label="助手提问">
+            <div className="list-section" role="group" aria-label={tr('助手提问')}>
               <div className="question-card">
                 <div className="question-text">{question.question}</div>
                 {question.options.length > 0 ? (
@@ -475,8 +476,8 @@ export function ChatDetailScreen() {
                 <div className="question-answer">
                   <input
                     className="input-field"
-                    placeholder="输入回答"
-                    aria-label="回答输入框"
+                    placeholder={tr('输入回答')}
+                    aria-label={tr('回答输入框')}
                     value={answerDraft}
                     onChange={(e) => setAnswerDraft(e.target.value)}
                   />
@@ -490,7 +491,7 @@ export function ChatDetailScreen() {
                       setAnswerDraft('')
                     }}
                   >
-                    回答
+                    {tr('回答')}
                   </button>
                 </div>
               </div>
@@ -510,7 +511,7 @@ export function ChatDetailScreen() {
               <button
                 type="button"
                 className="composer-settings"
-                aria-label="会话设置"
+                aria-label={tr('会话设置')}
                 onClick={() => setComposerMenu(true)}
               >
                 <Settings2 className="composer-send-icon" aria-hidden />
@@ -519,15 +520,15 @@ export function ChatDetailScreen() {
             <textarea
               className="composer-input"
               rows={1}
-              placeholder={activeId ? '发送消息' : '发送第一条消息将自动新建会话'}
-              aria-label="消息输入框"
+              placeholder={activeId ? tr('发送消息') : tr('发送第一条消息将自动新建会话')}
+              aria-label={tr('消息输入框')}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
             />
             <button
               type="button"
               className="composer-send"
-              aria-label="发送"
+              aria-label={tr('发送')}
               disabled={!draft.trim() || state?.pendingSend?.state === 'sending'}
               onClick={() => void (activeId ? send() : sendFirst())}
             >
@@ -546,7 +547,7 @@ export function ChatDetailScreen() {
            * top level; mobile folds them into a sub-sheet but the
            * action is never more than one tap away from the entry. */}
           <ListRow
-            label="＋ 新建会话"
+            label={tr('＋ 新建会话')}
             onClick={() => {
               setSwitcherOpen(false)
               void createSession(agentId!)
@@ -564,10 +565,10 @@ export function ChatDetailScreen() {
                   }}
                   label={
                     <span className="row-title">
-                      {s.visibility === 'public' ? <span aria-label="公开">🌐</span> : null}
-                      {s.visibility === 'private' ? <span aria-label="私有">🔒</span> : null}
+                      {s.visibility === 'public' ? <span aria-label={tr('公开')}>🌐</span> : null}
+                      {s.visibility === 'private' ? <span aria-label={tr('私有')}>🔒</span> : null}
                       {s.title}
-                      {isReadOnly ? <span className="badge">只读</span> : null}
+                      {isReadOnly ? <span className="badge">{tr('只读')}</span> : null}
                     </span>
                   }
                   value={s.session_id === activeId ? '✓' : undefined}
@@ -578,7 +579,7 @@ export function ChatDetailScreen() {
                 <button
                   type="button"
                   className="sheet-row-more"
-                  aria-label={`管理 ${s.title}`}
+                  aria-label={tr('管理 {{title}}', { title: s.title })}
                   onClick={() => {
                     setSwitcherOpen(false)
                     setManageId(s.session_id)
@@ -590,12 +591,12 @@ export function ChatDetailScreen() {
             )
           })}
           {sessionsHasMore ? (
-            <ListRow label="加载更多" onClick={() => void loadMoreSessions(agentId!)} />
+            <ListRow label={tr('加载更多')} onClick={() => void loadMoreSessions(agentId!)} />
           ) : null}
         </Sheet>
 
         {/* Per-session action sheet (§5.4). */}
-        <Sheet open={!!manageId} onClose={() => setManageId(null)} title="会话操作">
+        <Sheet open={!!manageId} onClose={() => setManageId(null)} title={tr('会话操作')}>
           {(() => {
             const target = sessions.find((s) => s.session_id === manageId)
             if (!target) return null
@@ -605,8 +606,8 @@ export function ChatDetailScreen() {
               <>
                 <ListRow
                   disabled={!writable}
-                  hint={writable ? undefined : '只读会话无法修改'}
-                  label={isPublic ? '🔒 设为私有' : '🌐 设为公开'}
+                  hint={writable ? undefined : tr('只读会话无法修改')}
+                  label={isPublic ? tr('🔒 设为私有') : tr('🌐 设为公开')}
                   onClick={() => {
                     setManageId(null)
                     void setSessionVisibility(agentId!, target.session_id, isPublic ? 'private' : 'public').then(() =>
@@ -617,8 +618,8 @@ export function ChatDetailScreen() {
                 <ListRow
                   destructive
                   disabled={!writable}
-                  hint={writable ? undefined : '只读会话无法删除'}
-                  label="删除会话"
+                  hint={writable ? undefined : tr('只读会话无法删除')}
+                  label={tr('删除会话')}
                   onClick={() => {
                     setManageId(null)
                     void deleteSession(agentId!, target.session_id)
@@ -635,16 +636,16 @@ export function ChatDetailScreen() {
          *  current value (`configSnap`) so the menu reads as a status
          *  surface, not a blank list. Tapping a row opens the matching
          *  sub-sheet — only one level open at a time. */}
-        <Sheet open={composerMenu} onClose={() => setComposerMenu(false)} title="会话设置">
-          <div className="menu-section-title">输入选项</div>
+        <Sheet open={composerMenu} onClose={() => setComposerMenu(false)} title={tr('会话设置')}>
+          <div className="menu-section-title">{tr('输入选项')}</div>
           <button
             type="button"
             className="menu-row"
             onClick={() => { setModelOpen(true) }}
           >
             <span className="menu-row-icon"><Cpu className="h-4 w-4" /></span>
-            <span className="menu-row-label">模型选择</span>
-            <span className="menu-row-trail">{configSnap?.model ?? '默认'}</span>
+            <span className="menu-row-label">{tr('模型选择')}</span>
+            <span className="menu-row-trail">{configSnap?.model ?? tr('默认')}</span>
             <span className="menu-row-arrow"><ChevronRight className="h-4 w-4" /></span>
           </button>
           <button
@@ -653,7 +654,7 @@ export function ChatDetailScreen() {
             onClick={() => { setEffortOpen(true) }}
           >
             <span className="menu-row-icon"><Brain className="h-4 w-4" /></span>
-            <span className="menu-row-label">推理深度</span>
+            <span className="menu-row-label">{tr('推理深度')}</span>
             <span className="menu-row-trail">{effortLabel(configSnap?.reasoning_effort)}</span>
             <span className="menu-row-arrow"><ChevronRight className="h-4 w-4" /></span>
           </button>
@@ -663,8 +664,8 @@ export function ChatDetailScreen() {
             onClick={() => { setWorkspaceOpen(true) }}
           >
             <span className="menu-row-icon"><Briefcase className="h-4 w-4" /></span>
-            <span className="menu-row-label">工作区选择</span>
-            <span className="menu-row-trail">{attachedWorkspaceLabel ?? '未附加'}</span>
+            <span className="menu-row-label">{tr('工作区选择')}</span>
+            <span className="menu-row-trail">{attachedWorkspaceLabel ?? tr('未附加')}</span>
             <span className="menu-row-arrow"><ChevronRight className="h-4 w-4" /></span>
           </button>
           <button
@@ -673,21 +674,21 @@ export function ChatDetailScreen() {
             onClick={() => { setSkillOpen(true) }}
           >
             <span className="menu-row-icon"><Sparkles className="h-4 w-4" /></span>
-            <span className="menu-row-label">技能选择</span>
-            <span className="menu-row-trail">{activeSkill ? activeSkill.name : '无'}</span>
+            <span className="menu-row-label">{tr('技能选择')}</span>
+            <span className="menu-row-trail">{activeSkill ? activeSkill.name : tr('无')}</span>
             <span className="menu-row-arrow"><ChevronRight className="h-4 w-4" /></span>
           </button>
           {activeSkill ? (
             <div className="menu-subsection menu-hint-row">
               <span className="menu-hint-row-text">
-                下条消息将以技能「{activeSkill.name}」发送；发送后自动清除。
+                {tr('下条消息将以技能「{{name}}」发送；发送后自动清除。', { name: activeSkill.name })}
               </span>
               <button
                 type="button"
                 className="btn btn-sm btn-solid"
                 onClick={() => setActiveSkill(null)}
               >
-                清除
+                {tr('清除')}
               </button>
             </div>
           ) : null}
@@ -802,24 +803,24 @@ function ComposerWorkspaceSheet({
     setError(null)
     fetchWorkspaces(agentId)
       .then((list) => { if (alive) setItems(list) })
-      .catch((e) => { if (alive) setError(e instanceof Error ? e.message : '加载失败') })
+      .catch((e) => { if (alive) setError(e instanceof Error ? e.message : tr('加载失败')) })
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [open, agentId])
 
   return (
-    <Sheet open={open} onClose={onClose} title="工作区选择">
+    <Sheet open={open} onClose={onClose} title={tr('工作区选择')}>
       {note ? <div className="menu-subsection">{note}</div> : null}
-      {loading ? <ListRow label="载入中…" /> : null}
+      {loading ? <ListRow label={tr('载入中…')} /> : null}
       {error ? <ListRow label={error} destructive /> : null}
       {items && items.length === 0 ? (
-        <ListRow label="该 Agent 暂无工作区" hint="在桌面端添加" />
+        <ListRow label={tr('该 Agent 暂无工作区')} hint={tr('在桌面端添加')} />
       ) : null}
       {items?.map((ws) => {
         const id = ws.id
         if (!id) return null
         const label = ws.alias?.trim() || ws.path || id
-        const access = ws.access === 'read-only' ? '只读' : '读写'
+        const access = ws.access === 'read-only' ? tr('只读') : tr('读写')
         const isCurrent = current?.workspace_id === id
         return (
           <ListRow
@@ -834,7 +835,7 @@ function ComposerWorkspaceSheet({
             selected={isCurrent}
             onClick={() => {
               if (!agentId || !sessionId) {
-                setNote('当前会话未打开无法附加工作区')
+                setNote(tr('当前会话未打开无法附加工作区'))
                 return
               }
               attachWorkspace(agentId, sessionId, id)
@@ -846,7 +847,7 @@ function ComposerWorkspaceSheet({
                   // `note` for the error path only.
                   onClose()
                 })
-                .catch((e) => setNote(e instanceof Error ? e.message : '附加失败'))
+                .catch((e) => setNote(e instanceof Error ? e.message : tr('附加失败')))
             }}
           />
         )
@@ -866,8 +867,8 @@ const EFFORT_LABELS: Record<string, string> = {
   minimal: '最小',
 }
 function effortLabel(v: string | null | undefined): string {
-  if (!v) return '默认'
-  return EFFORT_LABELS[v] ?? v
+  if (!v) return tr('默认')
+  return tr(EFFORT_LABELS[v] ?? v)
 }
 
 /** The four canonical effort values, ordered low → high. We always offer
@@ -922,7 +923,7 @@ function ComposerModelSheet({
         providers.forEach((p, i) => { map[p] = results[i]?.models ?? [] })
         setCatalog(map)
       })
-      .catch((e) => setError(e instanceof Error ? e.message : '加载失败'))
+      .catch((e) => setError(e instanceof Error ? e.message : tr('加载失败')))
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [open, agentId])
@@ -976,14 +977,14 @@ function ComposerModelSheet({
   })()
 
   return (
-    <Sheet open={open} onClose={onClose} title="模型选择">
-      {loading ? <ListRow label="载入中…" /> : null}
+    <Sheet open={open} onClose={onClose} title={tr('模型选择')}>
+      {loading ? <ListRow label={tr('载入中…')} /> : null}
       {error ? <ListRow label={error} destructive /> : null}
       {!loading && groups.length === 0 ? (
         <ListRow
-          label="尚未配置任何模型"
-          hint="在桌面端的设置中配置 API 密钥和模型"
-          value={<span className="badge">桌面端</span>}
+          label={tr('尚未配置任何模型')}
+          hint={tr('在桌面端的设置中配置 API 密钥和模型')}
+          value={<span className="badge">{tr('桌面端')}</span>}
           disabled
         />
       ) : null}
@@ -1016,7 +1017,7 @@ function ComposerModelSheet({
                     account_id: r.accountId ?? undefined,
                   })
                     .then(() => onClose())
-                    .catch((e) => setError(e instanceof Error ? e.message : '切换失败'))
+                    .catch((e) => setError(e instanceof Error ? e.message : tr('切换失败')))
                     .finally(() => setBusy(null))
                 }}
               />
@@ -1050,7 +1051,7 @@ function ComposerEffortSheet({
   const [error, setError] = useState<string | null>(null)
   if (!open) return null
   return (
-    <Sheet open={open} onClose={onClose} title="推理深度">
+    <Sheet open={open} onClose={onClose} title={tr('推理深度')}>
       {error ? <ListRow label={error} destructive /> : null}
       {EFFORT_OPTIONS.map((v) => {
         const isCurrent = current?.reasoning_effort === v
@@ -1067,7 +1068,7 @@ function ComposerEffortSheet({
               setBusy(v)
               patchSessionConfig(agentId, sessionId, { reasoning_effort: v })
                 .then(() => onClose())
-                .catch((e) => setError(e instanceof Error ? e.message : '切换失败'))
+                .catch((e) => setError(e instanceof Error ? e.message : tr('切换失败')))
                 .finally(() => setBusy(null))
             }}
           />
@@ -1104,7 +1105,7 @@ function ComposerSkillSheet({
     setError(null)
     fetchSkills(agentId)
       .then((r) => { if (alive) setSkills(r.skills ?? []) })
-      .catch((e) => setError(e instanceof Error ? e.message : '加载失败'))
+      .catch((e) => setError(e instanceof Error ? e.message : tr('加载失败')))
       .finally(() => { if (alive) setLoading(false) })
     return () => { alive = false }
   }, [open, agentId])
@@ -1112,20 +1113,20 @@ function ComposerSkillSheet({
   if (!open) return null
   const enabled = skills?.filter((s) => s.enabled !== false) ?? []
   return (
-    <Sheet open={open} onClose={onClear} title="技能选择">
-      {loading ? <ListRow label="载入中…" /> : null}
+    <Sheet open={open} onClose={onClear} title={tr('技能选择')}>
+      {loading ? <ListRow label={tr('载入中…')} /> : null}
       {error ? <ListRow label={error} destructive /> : null}
       {current ? (
         <ListRow
-          label={`清除当前选择「${current.name}」`}
+          label={tr('清除当前选择「{{name}}」', { name: current.name })}
           onClick={onClear}
         />
       ) : null}
       {!loading && enabled.length === 0 ? (
         <ListRow
-          label="该 Agent 暂无技能"
-          hint="在桌面端添加技能包"
-          value={<span className="badge">桌面端</span>}
+          label={tr('该 Agent 暂无技能')}
+          hint={tr('在桌面端添加技能包')}
+          value={<span className="badge">{tr('桌面端')}</span>}
           disabled
         />
       ) : null}
@@ -1134,7 +1135,7 @@ function ComposerSkillSheet({
           key={s.name}
           label={s.name}
           hint={s.description ?? undefined}
-          value={current?.name === s.name ? <span className="badge">当前</span> : undefined}
+          value={current?.name === s.name ? <span className="badge">{tr('当前')}</span> : undefined}
           onClick={() => onPick(s)}
         />
       ))}

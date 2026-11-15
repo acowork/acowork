@@ -5,6 +5,7 @@
  * no speculative variants (ADR-086 §被否决方案 C).
  */
 
+import { t as tr } from '../i18n'
 import type { CSSProperties, ReactNode } from 'react'
 
 /** The grouped-list container — the single most-used iOS surface.
@@ -207,7 +208,7 @@ export function Stepper({
     <div className="stepper" role="group" aria-label={label}>
       <button
         type="button"
-        aria-label="减少"
+        aria-label={tr('减少')}
         disabled={value <= min}
         onClick={() => onChange(Math.max(min, value - 1))}
       >
@@ -216,7 +217,7 @@ export function Stepper({
       <span className="stepper-value">{value}</span>
       <button
         type="button"
-        aria-label="增加"
+        aria-label={tr('增加')}
         disabled={value >= max}
         onClick={() => onChange(Math.min(max, value + 1))}
       >

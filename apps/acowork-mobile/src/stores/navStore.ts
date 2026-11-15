@@ -15,11 +15,13 @@ import { create } from 'zustand'
 
 export type TabKey = 'chat' | 'projects' | 'docs' | 'settings'
 
-export const TABS: { key: TabKey; label: string; icon: string }[] = [
-  { key: 'chat', label: '聊天', icon: 'message-circle' },
-  { key: 'projects', label: '项目', icon: 'folder-kanban' },
-  { key: 'docs', label: '文档', icon: 'file-text' },
-  { key: 'settings', label: '设置', icon: 'settings' },
+/** `labelKey` is an i18n key — TabBar resolves it through `useT()` so tab
+ *  labels follow the account language like every other screen. */
+export const TABS: { key: TabKey; labelKey: string; icon: string }[] = [
+  { key: 'chat', labelKey: 'tab.chat', icon: 'message-circle' },
+  { key: 'projects', labelKey: 'tab.projects', icon: 'folder-kanban' },
+  { key: 'docs', labelKey: 'tab.docs', icon: 'file-text' },
+  { key: 'settings', labelKey: 'tab.settings', icon: 'settings' },
 ]
 
 /** A screen is identified by a route string so deep links stay possible. */

@@ -11,6 +11,7 @@ import {
   type AuthBridge,
 } from '../lib/api'
 import type { ChatMessage, ConversationEntry, LiveStatus, SessionDetail, SessionRow } from '../lib/types'
+import { t } from '../i18n'
 
 /* ---------------- api: mapping ---------------- */
 
@@ -225,6 +226,100 @@ describe('401 ladder', () => {
     await expect(api.fetchAgents()).rejects.toThrow(/401/)
     expect(sessionExpired).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledTimes(1) // no replay after failed refresh
+  })
+})
+
+/* ---------------- stale session recovery ---------------- */
+
+// Sleep/wake, a Wi-Fi hop, or a Gateway restart leaves the persisted URL and
+// token pair stale at the same time. The old code treated EVERY refresh
+// failure as "session expired", so a dead LAN address produced a token error,
+// cleared the tokens, and pinned the app to `disconnected` with no login
+// route out. These lock in the classification and the scan escape hatch.
+describe('stale session recovery', () => {
+  const statusBody = {
+    version: '1', agents_installed: 0, agents_running: 0, uptime_secs: 0,
+    mqtt_port: 1, account_state: 'ready', registration_open: false,
+  }
+
+  it('a network failure during refresh keeps tokens and reports disconnected, not "登录已过期"', async () => {
+    localStorage.setItem('acowork.gatewayUrl', 'http://old-ip:19876')
+    localStorage.setItem('acowork.accessToken', 'A0')
+    localStorage.setItem('acowork.refreshToken', 'R0')
+    fetchMock.mockImplementation((url: string) => {
+      const u = String(url)
+      if (u.includes('/api/status')) return Promise.resolve(jsonRes(statusBody))
+      if (u.includes('/api/auth/refresh')) return Promise.reject(new TypeError('Failed to fetch'))
+      return Promise.resolve(jsonRes({ error: 'expired' }, 401))
+    })
+    const useAuthStore = await freshAuth()
+    await useAuthStore.getState().boot()
+    const s = useAuthStore.getState()
+    expect(s.phase).toBe('disconnected')
+    expect(s.accessToken).toBe('A0')
+    expect(s.refreshToken).toBe('R0')
+    expect(s.loginError).toBe('')
+  })
+
+  it('a 401 on refresh is a real expiry → login with tokens cleared', async () => {
+    localStorage.setItem('acowork.gatewayUrl', 'http://g:19876')
+    localStorage.setItem('acowork.accessToken', 'A0')
+    localStorage.setItem('acowork.refreshToken', 'R0')
+    fetchMock.mockImplementation((url: string) => {
+      const u = String(url)
+      if (u.includes('/api/status')) return Promise.resolve(jsonRes(statusBody))
+      return Promise.resolve(jsonRes({ error: 'token revoked' }, 401))
+    })
+    const useAuthStore = await freshAuth()
+    await useAuthStore.getState().boot()
+    const s = useAuthStore.getState()
+    expect(s.phase).toBe('login')
+    expect(s.accessToken).toBeNull()
+    expect(s.refreshToken).toBeNull()
+    // Stored as a key so the login screen re-translates it on a language
+    // change; `t()` still yields the exact zh-CN copy for the default locale.
+    expect(s.loginError).toBe('auth.sessionExpired')
+    expect(t('auth.sessionExpired')).toBe('登录已过期，请重新登录')
+  })
+
+  it('retryConnection against a dead URL keeps tokens for a later scan', async () => {
+    localStorage.setItem('acowork.gatewayUrl', 'http://old-ip:19876')
+    localStorage.setItem('acowork.accessToken', 'A0')
+    localStorage.setItem('acowork.refreshToken', 'R0')
+    const useAuthStore = await freshAuth()
+    useAuthStore.setState({
+      phase: 'disconnected', baseUrl: 'http://old-ip:19876',
+      accessToken: 'A0', refreshToken: 'R0',
+    })
+    fetchMock.mockRejectedValue(new Error('down'))
+    await useAuthStore.getState().retryConnection()
+    const s = useAuthStore.getState()
+    expect(s.phase).toBe('disconnected')
+    expect(s.busy).toBe(false)
+    expect(s.accessToken).toBe('A0')
+    expect(s.refreshToken).toBe('R0')
+  })
+
+  it('pairLogin replaces BOTH the stale URL and the token pair', async () => {
+    localStorage.setItem('acowork.gatewayUrl', 'http://old-ip:19876')
+    localStorage.setItem('acowork.accessToken', 'OLD_A')
+    localStorage.setItem('acowork.refreshToken', 'OLD_R')
+    fetchMock.mockImplementation((url: string) => {
+      const u = String(url)
+      if (u.includes('/api/auth/pair/redeem')) {
+        return Promise.resolve(jsonRes({ access_token: 'NEW_A', refresh_token: 'NEW_R' }))
+      }
+      return Promise.resolve(jsonRes(statusBody))
+    })
+    const useAuthStore = await freshAuth()
+    const ok = await useAuthStore.getState().pairLogin('http://new-ip:19876', 'pt-1')
+    expect(ok).toBe(true)
+    const s = useAuthStore.getState()
+    expect(s.phase).toBe('ready')
+    expect(s.baseUrl).toBe('http://new-ip:19876')
+    expect(localStorage.getItem('acowork.gatewayUrl')).toBe('http://new-ip:19876')
+    expect(s.accessToken).toBe('NEW_A')
+    expect(s.refreshToken).toBe('NEW_R')
   })
 })
 

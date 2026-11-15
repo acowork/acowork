@@ -12,6 +12,7 @@
  * payload rather than re-fetched per parent.
  */
 
+import { t as tr } from '../../i18n'
 import { useMemo, useState } from 'react'
 import { useNavStore } from '../../stores/navStore'
 import { usePmStore } from '../../stores/pmStore'
@@ -70,14 +71,14 @@ export function BoardScreen() {
     <EdgeSwipe onBack={() => pop()}>
       <div className="screen">
         <header className="navbar">
-          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回">
-            返回
+          <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}>
+            {tr('返回')}
           </button>
-          <span className="navbar-title">{project?.title ?? '看板'}</span>
+          <span className="navbar-title">{project?.title ?? tr('看板')}</span>
           <span className="navbar-trail" />
         </header>
 
-        <div className="board-nav" role="tablist" aria-label="状态筛选">
+        <div className="board-nav" role="tablist" aria-label={tr('状态筛选')}>
           {CHIPS.map((c) => (
             <button
               key={c.id}
@@ -87,7 +88,7 @@ export function BoardScreen() {
               className={`board-chip${chip === c.id ? ' is-active' : ''}`}
               onClick={() => setChip(c.id)}
             >
-              {c.label} <span className="board-chip-n">{counts[c.id] ?? 0}</span>
+              {tr(c.label)} <span className="board-chip-n">{counts[c.id] ?? 0}</span>
             </button>
           ))}
         </div>
@@ -99,7 +100,7 @@ export function BoardScreen() {
         ) : null}
 
         <div className="scroll">
-          {loading && !tasks ? <ListRow label="载入中…" /> : null}
+          {loading && !tasks ? <ListRow label={tr('载入中…')} /> : null}
           {visible.map((t) => (
             <ListRow
               key={t.id}
@@ -109,17 +110,17 @@ export function BoardScreen() {
                 <span className="row-title">
                   {t.depth > 0 ? <span className="task-indent">└ </span> : null}
                   {t.title}
-                  {t.is_blocked ? <span className="badge">被阻塞</span> : null}
-                  {t.review_status === 'pending' ? <span className="badge">需审核</span> : null}
+                  {t.is_blocked ? <span className="badge">{tr('被阻塞')}</span> : null}
+                  {t.review_status === 'pending' ? <span className="badge">{tr('需审核')}</span> : null}
                 </span>
               }
-              hint={`${STATUS_LABEL[t.status] ?? t.status} · ${PRIORITY_LABEL[t.priority] ?? t.priority}${
+              hint={`${tr(STATUS_LABEL[t.status] ?? t.status)} · ${tr(PRIORITY_LABEL[t.priority] ?? t.priority)}${
                 t.assignee ? ` · ${assigneeLabel(t.assignee)}` : ''
               }`}
               value={formatListTime(Date.parse(t.due_at ?? t.updated_at))}
             />
           ))}
-          {tasks && visible.length === 0 ? <ListRow label="该筛选下暂无任务" /> : null}
+          {tasks && visible.length === 0 ? <ListRow label={tr('该筛选下暂无任务')} /> : null}
         </div>
       </div>
     </EdgeSwipe>
@@ -133,6 +134,6 @@ export function BoardScreen() {
  * does not do.
  */
 function assigneeLabel(a: string): string {
-  if (a === 'human') return '我'
+  if (a === 'human') return tr('我')
   return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(a) ? a.slice(0, 8) : a
 }

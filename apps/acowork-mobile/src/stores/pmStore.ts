@@ -11,6 +11,7 @@
  * walking `/tasks/{tid}/children` recursively — N+1 on a phone network.
  */
 
+import { t as tr } from '../i18n'
 import { create } from 'zustand'
 import {
   fetchProjectTasks,
@@ -75,7 +76,7 @@ async function act(fn: () => Promise<PmTask>, set: SetFn, tid: string): Promise<
     }))
     return null
   } catch (e) {
-    return e instanceof Error ? e.message : '操作失败'
+    return e instanceof Error ? e.message : tr('操作失败')
   } finally {
     set({ acting: false })
   }
@@ -95,7 +96,7 @@ export const usePmStore = create<PmStore>((set, get) => ({
     try {
       set({ projects: await fetchProjects(), projectsLoaded: true, error: null })
     } catch (e) {
-      set({ error: e instanceof Error ? e.message : '项目列表加载失败' })
+      set({ error: e instanceof Error ? e.message : tr('项目列表加载失败') })
     }
   },
 
@@ -107,7 +108,7 @@ export const usePmStore = create<PmStore>((set, get) => ({
       // over project B if the user moved on.
       if (get().activeProjectId === projectId) set((s) => ({ tasksByProject: { ...s.tasksByProject, [projectId]: tasks } }))
     } catch (e) {
-      set({ error: e instanceof Error ? e.message : '任务加载失败' })
+      set({ error: e instanceof Error ? e.message : tr('任务加载失败') })
     } finally {
       set({ loadingProject: false })
     }
@@ -117,7 +118,7 @@ export const usePmStore = create<PmStore>((set, get) => ({
     try {
       set({ activeTask: await fetchTask(taskId), error: null })
     } catch (e) {
-      set({ error: e instanceof Error ? e.message : '任务加载失败' })
+      set({ error: e instanceof Error ? e.message : tr('任务加载失败') })
     }
   },
 

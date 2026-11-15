@@ -4,7 +4,8 @@ import { createRoot } from 'react-dom/client'
 import { App } from './App'
 import { setChatTransport } from './stores/chatStore'
 import { setDirectorySource, useAgentStore } from './stores/agentStore'
-import { httpChatTransport, fetchAgents, fetchNodes, fetchDirectory, tokenClaims, userChatChangedTopic } from './lib/api'
+import { httpChatTransport, fetchAgents, fetchNodes, fetchDirectory, tokenClaims, userChatChangedTopic, fetchMe } from './lib/api'
+import { initLanguage, applyAccountLanguage } from './i18n'
 import { setRealtimeDeps } from './lib/realtime'
 import { setPresenceDeps, startPresence, stopPresence } from './lib/presence'
 import { blockRefOf } from './lib/chatBlocks'
@@ -165,8 +166,33 @@ if (import.meta.hot) {
   import.meta.hot.dispose(() => stopSafeAreaWatch())
 }
 
+// Resolve the UI language before the first render so boot screens never
+// flash zh-CN and then switch when /api/auth/me lands.
+initLanguage()
 // Cold start: decide the boot phase from persisted state (§7.1).
 void useAuthStore.getState().boot()
+// Sleep/wake and Wi-Fi hops are the usual reason a saved Gateway URL goes
+// stale. `boot()` runs once on cold start only, so a phone that merely comes
+// back to the foreground used to keep retrying a dead address forever with
+// no way out but killing the process. Re-evaluate on foreground return and
+// on `online`, but only while disconnected (never interrupt a live session)
+// and never while a retry is already in flight.
+const reevaluateOnForeground = () => {
+  if (document.visibilityState !== 'visible') return
+  const s = useAuthStore.getState()
+  if (s.phase === 'disconnected' && !s.busy) void s.retryConnection()
+  else if (s.phase === 'ready') {
+    // The Desktop profile dropdown writes the account `language` server-side.
+    // Re-read it on foreground return so a Desktop change reaches the phone
+    // without a reinstall, a logout, or clearing app data.
+    void fetchMe().then((me) => {
+      useAuthStore.setState({ me })
+      applyAccountLanguage(me.language)
+    }).catch(() => undefined)
+  }
+}
+document.addEventListener('visibilitychange', reevaluateOnForeground)
+window.addEventListener('online', reevaluateOnForeground)
 // DIAG: log every phase change to WebView console (visible via remote debug / logcat)
 useAuthStore.subscribe((s, prev) => { if (s.phase !== prev.phase) console.log('[AUTH] PHASE', prev.phase, '→', s.phase) })
 // Directory + previews refresh whenever we reach `ready`; presence lives with

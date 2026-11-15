@@ -8,6 +8,7 @@
  * accessible name, and the right press feedback. A `span` with an onClick is
  * not tappable for a screen reader, and iOS/Android keep the 300ms tap delay.
  */
+import { t as tr } from '../i18n'
 import type { ChatAttachment } from '../lib/chatAttachment'
 import { attachmentKind, humanSize } from '../lib/chatAttachment'
 
@@ -54,5 +55,5 @@ export function ChatAttachmentCapsule({
 }
 
 function kindLabel(kind: 'image' | 'text' | 'other'): string {
-  return kind === 'image' ? '图片' : kind === 'text' ? '文本' : '文件'
+  return kind === 'image' ? tr('图片') : kind === 'text' ? tr('文本') : tr('文件')
 }

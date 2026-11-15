@@ -17,6 +17,7 @@
  *   re-fetching history as if it were live.
  */
 
+import { t as tr } from '../i18n'
 /** The row fields a block ref is built from. `ChatMessageRow.meta`'s relevant
  *  subset — kept structural so this module does not own the transcript type. */
 export interface BlockRefParts {
@@ -48,24 +49,24 @@ export function isFailureStatus(status: string): boolean {
 export function blockStatusText(status: string): string {
   switch (status) {
     case 'completed':
-      return '已完成'
+      return tr('已完成')
     case 'failed':
-      return '本轮执行失败'
+      return tr('本轮执行失败')
     case 'aborted':
     case 'interrupted':
-      return '本轮执行已中断'
+      return tr('本轮执行已中断')
     case 'timeout':
-      return '本轮执行超时'
+      return tr('本轮执行超时')
     case 'waiting':
-      return '等待你回复'
+      return tr('等待你回复')
     case 'in_progress':
-      return '执行中'
+      return tr('执行中')
     case 'unknown':
-      return '结果未知'
+      return tr('结果未知')
     default:
       // "执行中" is a claim that needs evidence (D9): an unrecognised — or
       // missing — status is an unknown outcome, never a running one.
-      return '结果未知'
+      return tr('结果未知')
   }
 }
 

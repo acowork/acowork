@@ -13,6 +13,7 @@
  * disabled-and-confusing.
  */
 
+import { t as tr } from '../../i18n'
 import { useCallback, useEffect, useState } from 'react'
 import { useNavStore } from '../../stores/navStore'
 import { usePmStore } from '../../stores/pmStore'
@@ -65,7 +66,7 @@ export function TaskDetailScreen() {
 
   const run = async (fn: () => Promise<string | null>) => {
     const err = await fn()
-    setNote(err ?? '已完成')
+    setNote(err ?? tr('已完成'))
   }
 
   if (!task) {
@@ -73,11 +74,11 @@ export function TaskDetailScreen() {
       <EdgeSwipe onBack={() => pop()}>
         <div className="screen">
           <header className="navbar">
-            <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回">返回</button>
-            <span className="navbar-title">任务</span>
+            <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}>{tr('返回')}</button>
+            <span className="navbar-title">{tr('任务')}</span>
             <span className="navbar-trail" />
           </header>
-          <div className="empty-state">任务不存在或已被删除</div>
+          <div className="empty-state">{tr('任务不存在或已被删除')}</div>
         </div>
       </EdgeSwipe>
     )
@@ -91,33 +92,33 @@ export function TaskDetailScreen() {
     <EdgeSwipe onBack={() => pop()}>
       <div className="screen">
         <header className="navbar">
-          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回">返回</button>
+          <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}>{tr('返回')}</button>
           <span className="navbar-title">{task.id}</span>
           <span className="navbar-trail" />
         </header>
 
         <div className="scroll">
-          <div className="list-section" role="group" aria-label="任务">
+          <div className="list-section" role="group" aria-label={tr('任务')}>
             <div className="task-title">{task.title}</div>
-            <ListRow label="状态" value={STATUS_LABEL[task.status] ?? task.status} />
-            <ListRow label="优先级" value={PRIORITY_LABEL[task.priority] ?? task.priority} />
-            <ListRow label="类型" value={TYPE_LABEL[task.type] ?? task.type} />
-            <ListRow label="负责人" value={task.assignee ?? '未指派'} />
-            {task.start_at ? <ListRow label="开始" value={formatScheduleTime(Date.parse(task.start_at))} /> : null}
-            {task.due_at ? <ListRow label="截止" value={formatScheduleTime(Date.parse(task.due_at))} /> : null}
-            {task.is_blocked ? <ListRow label="被阻塞于" value={(task.blocked_by ?? []).join('、')} /> : null}
+            <ListRow label={tr('状态')} value={tr(STATUS_LABEL[task.status] ?? task.status)} />
+            <ListRow label={tr('优先级')} value={tr(PRIORITY_LABEL[task.priority] ?? task.priority)} />
+            <ListRow label={tr('类型')} value={tr(TYPE_LABEL[task.type] ?? task.type)} />
+            <ListRow label={tr('负责人')} value={task.assignee ?? tr('未指派')} />
+            {task.start_at ? <ListRow label={tr('开始')} value={formatScheduleTime(Date.parse(task.start_at))} /> : null}
+            {task.due_at ? <ListRow label={tr('截止')} value={formatScheduleTime(Date.parse(task.due_at))} /> : null}
+            {task.is_blocked ? <ListRow label={tr('被阻塞于')} value={(task.blocked_by ?? []).join('、')} /> : null}
           </div>
 
           {task.description ? (
-            <div className="list-section" role="group" aria-label="描述">
-              <div className="list-section-title">描述</div>
+            <div className="list-section" role="group" aria-label={tr('描述')}>
+              <div className="list-section-title">{tr('描述')}</div>
               <div className="task-desc">{renderMarkdown(task.description)}</div>
             </div>
           ) : null}
 
           {task.result ? (
-            <div className="list-section" role="group" aria-label="提交结果">
-              <div className="list-section-title">提交结果</div>
+            <div className="list-section" role="group" aria-label={tr('提交结果')}>
+              <div className="list-section-title">{tr('提交结果')}</div>
               <div className="task-desc">{renderMarkdown(task.result.text)}</div>
             </div>
           ) : null}
@@ -129,12 +130,12 @@ export function TaskDetailScreen() {
           ) : null}
 
           {canClaim || canSubmit || canReview ? (
-            <div className="list-section" role="group" aria-label="流转">
-              <div className="list-section-title">流转</div>
+            <div className="list-section" role="group" aria-label={tr('流转')}>
+              <div className="list-section-title">{tr('流转')}</div>
               {canClaim ? (
                 <ListRow
                   disabled={acting}
-                  label={<span className="row-title tint">认领此任务</span>}
+                  label={<span className="row-title tint">{tr('认领此任务')}</span>}
                   onClick={() => void run(() => claim(task.id))}
                 />
               ) : null}
@@ -142,7 +143,7 @@ export function TaskDetailScreen() {
                 <>
                   <ListRow
                     disabled={acting}
-                    label={<span className="row-title tint">提交结果</span>}
+                    label={<span className="row-title tint">{tr('提交结果')}</span>}
                     onClick={() => setSubmitOpen((v) => !v)}
                   />
                   {submitOpen ? (
@@ -150,8 +151,8 @@ export function TaskDetailScreen() {
                       <textarea
                         className="composer-input"
                         rows={3}
-                        placeholder="结果说明"
-                        aria-label="结果说明"
+                        placeholder={tr('结果说明')}
+                        aria-label={tr('结果说明')}
                         value={submitText}
                         onChange={(e) => setSubmitText(e.target.value)}
                       />
@@ -171,7 +172,7 @@ export function TaskDetailScreen() {
                           })
                         }}
                       >
-                        提交
+                        {tr('提交')}
                       </button>
                     </div>
                   ) : null}
@@ -180,18 +181,18 @@ export function TaskDetailScreen() {
               {canReview ? (
                 <div className="review-actions">
                   <button type="button" className="review-btn reject" disabled={acting} onClick={() => void run(() => review(task.id, false))}>
-                    驳回
+                    {tr('驳回')}
                   </button>
                   <button type="button" className="review-btn approve" disabled={acting} onClick={() => void run(() => review(task.id, true))}>
-                    通过
+                    {tr('通过')}
                   </button>
                 </div>
               ) : null}
             </div>
           ) : null}
 
-          <div className="list-section" role="group" aria-label="编辑">
-            <ListRow label="编辑任务" hint="移动端 v1 不提供，请在桌面端" value={<span className="badge">桌面端</span>} />
+          <div className="list-section" role="group" aria-label={tr('编辑')}>
+            <ListRow label={tr('编辑任务')} hint={tr('移动端 v1 不提供，请在桌面端')} value={<span className="badge">{tr('桌面端')}</span>} />
           </div>
         </div>
       </div>

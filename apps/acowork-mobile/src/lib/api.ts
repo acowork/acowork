@@ -17,6 +17,7 @@
  * returns to the login screen. Same ladder as Desktop's `authFetch`.
  */
 
+import { t as tr } from '../i18n'
 import { newId } from './id'
 import type { ChatTransport } from '../stores/chatStore'
 import type { ChatAddress, ChatRefPick } from '../stores/chatSessionStore'
@@ -297,7 +298,7 @@ function isoToMs(ts: string | null | undefined): number {
 export function mapSessionRow(r: SessionRow): SessionInfo {
   return {
     session_id: r.session_id,
-    title: r.title ?? '新会话',
+    title: r.title ?? tr('新会话'),
     can_write: r.can_write,
     visibility: r.visibility ?? 'public',
     updated_at: isoToMs(r.last_active_at),

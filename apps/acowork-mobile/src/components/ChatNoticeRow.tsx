@@ -22,6 +22,7 @@
  * small buttons is where a mis-tap sends a turn into the wrong task.
  */
 
+import { t as tr } from '../i18n'
 import { useState } from 'react'
 import { Sheet } from './ui'
 import type { CardChoice } from '../lib/chatCardAnswer'
@@ -45,7 +46,7 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
 
   if (noticeType === 'session_choice' || noticeType === 'confirm_continue') {
     const confirm = noticeType === 'confirm_continue'
-    const question = confirm ? '继续这个任务吗？' : '你指的是哪一个任务？'
+    const question = confirm ? tr('继续这个任务吗？') : tr('你指的是哪一个任务？')
     // The service's projection (design 31 §6): the options the question offers,
     // whether a round already answered it, and which session took the answer.
     // `meta.options` is no longer read by any surface — a card whose payload
@@ -83,7 +84,7 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
         <div className="chat-notice-card-main">
           <span className="chat-notice-card-question">{question}</span>
           {proposed ? <span className="chat-notice-card-proposal">{proposed}</span> : null}
-          {!onChoose ? <span className="chat-notice-card-hint">只有发话的人可以回答</span> : null}
+          {!onChoose ? <span className="chat-notice-card-hint">{tr('只有发话的人可以回答')}</span> : null}
         </div>
         {onChoose ? (
           <button
@@ -91,7 +92,7 @@ export function ChatNoticeRow({ row, onChoose }: ChatNoticeRowProps) {
             className="btn btn-accent btn-sm chat-notice-card-go"
             onClick={() => setSheet(true)}
           >
-            {options.length === 1 ? '确认' : '选择'}
+            {options.length === 1 ? tr('确认') : tr('选择')}
             <span aria-hidden="true">›</span>
           </button>
         ) : null}
@@ -141,7 +142,7 @@ function ChooseSessionSheet({
     <Sheet open onClose={onClose} title={question}>
       {allowNewTask ? (
         <button type="button" className="chat-sheet-option is-primary" onClick={() => onChoose({ forceNew: true })}>
-          开新任务
+          {tr('开新任务')}
         </button>
       ) : null}
       {(options ?? []).map((option) => {

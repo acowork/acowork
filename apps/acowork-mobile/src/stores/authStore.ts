@@ -22,6 +22,10 @@
  * The 401→refresh→replay ladder is single-flight: parallel 401s share one
  * rotation, because two refreshes of the same token would trip the
  * Gateway's reuse detection and revoke the whole family.
+ *
+ * Every successful `/auth/me` also applies the account's `language` (see
+ * `i18n`) — the Desktop profile dropdown writes the same server field, so
+ * a language change made there reaches the phone without a reinstall.
  */
 
 import { create } from 'zustand'
@@ -35,6 +39,7 @@ import {
   setAuthBridge,
   fetchMe,
 } from '../lib/api'
+import { applyAccountLanguage } from '../i18n'
 import type { AccountMe, GatewayStatus, TokenPair } from '../lib/types'
 
 export type BootPhase =
@@ -92,7 +97,12 @@ interface AuthStore {
    * not a convenience: without it a 联系人 thread cannot be named or opened.
    */
   me: AccountMe | null
-  /** Username/password error text for the login screen. */
+  /**
+   * Login error as an i18n key (or a raw server message). Render with `t()`:
+   * a key resolves to the active language, an unknown string falls back to
+   * itself. Storing the key — not a translated snapshot — is what makes the
+   * error re-translate when the language changes.
+   */
   loginError: string
   busy: boolean
 
@@ -116,6 +126,11 @@ interface AuthStore {
 }
 
 let inflightRefresh: Promise<string | null> | null = null
+
+/** Apply the account language wherever a fresh `/auth/me` lands. */
+function syncLanguage(me: AccountMe | null): void {
+  if (me) applyAccountLanguage(me.language)
+}
 
 export const useAuthStore = create<AuthStore>((set, get) => ({
   phase: 'boot',
@@ -152,6 +167,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         try {
           const me = await fetchMe()
           console.log('[AUTH] boot() fetchMe ok → ready')
+          syncLanguage(me)
           set({ me, phase: 'ready' })
           return
         } catch (e) {
@@ -205,6 +221,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       // failure leaves `me` null and the screens that need it say so, rather
       // than rendering a thread that silently appears to have no messages.
       const me = await fetchMe().catch((e) => { console.log('[AUTH] login() fetchMe error (non-fatal)', e); return null })
+      syncLanguage(me)
       console.log('[AUTH] login() → ready')
       set({ busy: false, phase: 'ready', me })
       return true
@@ -212,10 +229,10 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       console.log('[AUTH] login() FAILED', e)
       const msg =
         e instanceof GatewayError && e.status === 401
-          ? '用户名或密码错误'
+          ? 'auth.wrongCredentials'
           : e instanceof GatewayError && e.status === 422
-            ? '账号未启用或需要首次登录，请在桌面端处理'
-            : '无法连接网关，请检查网络或稍后重试'
+            ? 'auth.accountDisabled'
+            : 'auth.unreachable'
       set({ busy: false, loginError: msg })
       return false
     }
@@ -224,8 +241,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   pairLogin: async (baseUrl, pairingToken) => {
     const clean = baseUrl.trim().replace(/\/+$/, '')
     if (!/^https?:\/\//.test(clean)) {
-      set({ loginError: '网关地址无效'
-      })
+      set({ loginError: 'auth.invalidGateway' })
       return false
     }
     set({ busy: true, loginError: '' })
@@ -239,13 +255,14 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       // account_state 应为 ready，但仍保守探测。me 失败不阻断 ready（同 login）。
       const st = await probeStatus(clean).catch(() => null)
       const me = await fetchMe().catch((e) => { console.log('[AUTH] pairLogin() fetchMe error (non-fatal)', e); return null })
+      syncLanguage(me)
       set({ busy: false, status: st, me, phase: 'ready' })
       return true
     } catch (e) {
       const msg =
         e instanceof GatewayError && e.status === 401
-          ? '二维码无效或已过期，请在桌面端重新生成'
-          : '无法连接网关，请确认手机与电脑在同一网络'
+          ? 'auth.pairInvalid'
+          : 'auth.pairUnreachable'
       set({ busy: false, loginError: msg })
       return false
     }
@@ -273,15 +290,20 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
       if (needsSetup(st)) set({ phase: 'restricted' })
       else if (get().accessToken && get().refreshToken) {
         try {
-          await fetchMe()
+          const me = await fetchMe()
+          syncLanguage(me)
           console.log('[AUTH] retryConnection() → ready')
-          set({ phase: 'ready' })
+          set({ me, phase: 'ready' })
         } catch (e) {
           console.log('[AUTH] retryConnection() fetchMe failed → login', e)
           set({ phase: 'login' })
         }
       } else { console.log('[AUTH] retryConnection() no token → login'); set({ phase: 'login' }) }
     } catch (e) {
+      // Deliberately keep the saved tokens: a dead URL is a connectivity
+      // failure, not an expired session (see `_refresh`). The scan action on
+      // DisconnectedScreen is the escape hatch that replaces BOTH the stale
+      // URL and the token pair when retrying the same address can never work.
       console.log('[AUTH] retryConnection() probeStatus failed', e)
       set({ busy: false })
     }
@@ -314,9 +336,20 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
         get()._setTokens(pair)
         return pair.access_token
       } catch (e) {
-        console.log('[AUTH] _refresh() FAILED → sessionExpired', e)
-        get()._sessionExpired()
-        return null
+        // Only an explicit auth rejection means the refresh family is dead.
+        // A network failure — stale LAN IP after sleep/wake, Gateway asleep,
+        // phone Wi-Fi powersave — is NOT a token problem. Rethrow it so the
+        // caller sees a connectivity error instead of a fabricated 401, and
+        // KEEP the tokens so a later reconnect can still reuse them.
+        // `authedFetch` owns the single `sessionExpired()` call: doing it
+        // here too fired it twice and mislabelled network outages as
+        // "登录已过期" (the token error users kept seeing).
+        if (e instanceof GatewayError && (e.status === 401 || e.status === 403)) {
+          console.log('[AUTH] _refresh() rejected → session expired', e)
+          return null
+        }
+        console.log('[AUTH] _refresh() network failure, keeping tokens', e)
+        throw e
       } finally {
         inflightRefresh = null
       }
@@ -328,7 +361,7 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
     console.log('[AUTH] *** _sessionExpired() CALLED — clearing tokens, → login ***')
     lsSet(LS.access, null)
     lsSet(LS.refresh, null)
-    set({ accessToken: null, refreshToken: null, phase: 'login', loginError: '登录已过期，请重新登录' })
+    set({ accessToken: null, refreshToken: null, phase: 'login', loginError: 'auth.sessionExpired' })
   },
 }))
 

@@ -40,6 +40,7 @@
  * on foreground return. No streaming, ever, in v1 (design doc 25 §8).
  */
 
+import { t as tr } from '../../i18n'
 import { Fragment, useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import { AtSign, ChevronDown, ChevronLeft, Quote, Send } from 'lucide-react'
 import { useNavStore } from '../../stores/navStore'
@@ -217,7 +218,7 @@ export function AgentChatScreen() {
       // A spent card (`already_answered`) closes itself on the next projection
       // read; `gone` is the one the human has to be told about, because those
       // buttons will never work again.
-      if (lookup.reason === 'gone') setTransientHint('这张卡片已无法回答')
+      if (lookup.reason === 'gone') setTransientHint(tr('这张卡片已无法回答'))
       return
     }
     const answer = answerWithChoice(lookup.facts, choice)
@@ -242,7 +243,7 @@ export function AgentChatScreen() {
     const refs = address?.refs ?? []
     if (refs.some((r) => `${r.agentInstanceId}|${r.sessionId}` === key)) return
     if (refs.length >= MAX_PICK_REFS) {
-      setTransientHint(`一条消息最多引用 ${MAX_PICK_REFS} 个任务`)
+      setTransientHint(tr('一条消息最多引用 {{max}} 个任务', { max: MAX_PICK_REFS }))
       return
     }
     setAddress({
@@ -261,14 +262,14 @@ export function AgentChatScreen() {
     setAddressStage(false)
     const scope = containerRef.current
     if (!scope || !execSessionId) {
-      setTransientHint('任务块不在已加载历史')
+      setTransientHint(tr('任务块不在已加载历史'))
       return
     }
     const el = scope.querySelector<HTMLElement>(
       `[data-session$="|${execSessionId}"]`,
     )
     if (!el) {
-      setTransientHint('任务块不在已加载历史')
+      setTransientHint(tr('任务块不在已加载历史'))
       return
     }
     el.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -321,7 +322,7 @@ export function AgentChatScreen() {
     }
     return fallbackEl
   })()
-  const myName = me?.display_name || me?.username || '我'
+  const myName = me?.display_name || me?.username || tr('我')
   const meAvatar: ReactNode = (() => {
     if (!me) return <span>{'?'}</span>
     const picked = pickIconId(myName)
@@ -339,11 +340,11 @@ export function AgentChatScreen() {
       <EdgeSwipe onBack={() => pop()}>
         <div className="screen">
           <header className="navbar">
-            <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
-            <span className="navbar-title">会话</span>
+            <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}><ChevronLeft size={22} aria-hidden />{tr('返回')}</button>
+            <span className="navbar-title">{tr('会话')}</span>
             <span className="navbar-trail" />
           </header>
-          <div className="empty-state">未选择 Agent，请返回重试</div>
+          <div className="empty-state">{tr('未选择 Agent，请返回重试')}</div>
         </div>
       </EdgeSwipe>
     )
@@ -355,16 +356,16 @@ export function AgentChatScreen() {
     <EdgeSwipe onBack={() => pop()}>
       <div className="screen">
         <header className="navbar">
-          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回"><ChevronLeft size={22} aria-hidden />返回</button>
+          <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}><ChevronLeft size={22} aria-hidden />{tr('返回')}</button>
           <span className="navbar-title">{agent?.name ?? agentId}</span>
           <span className="navbar-trail">
-            <button type="button" className="navbar-action" onClick={() => void openHistory()} aria-label="历史会话">
-              历史
+            <button type="button" className="navbar-action" onClick={() => void openHistory()} aria-label={tr('历史会话')}>
+              {tr('历史')}
             </button>
           </span>
         </header>
 
-        {failed ? <Banner tone="error">无法打开与该 Agent 的会话，请返回重试</Banner> : null}
+        {failed ? <Banner tone="error">{tr('无法打开与该 Agent 的会话，请返回重试')}</Banner> : null}
 
         <div
           className="scroll scroll-chat"
@@ -373,10 +374,10 @@ export function AgentChatScreen() {
             if (typeof scrollRef === 'function') scrollRef(el)
           }}
         >
-          {win?.loadingOlder ? <div className="time-sep">载入更早消息…</div> : null}
-          {!st?.resolved ? <div className="empty-state">载入中…</div> : null}
+          {win?.loadingOlder ? <div className="time-sep">{tr('载入更早消息…')}</div> : null}
+          {!st?.resolved ? <div className="empty-state">{tr('载入中…')}</div> : null}
           {st?.resolved && !failed && rows.length === 0 ? (
-            <div className="empty-state">还没有消息，发一条开始对话</div>
+            <div className="empty-state">{tr('还没有消息，发一条开始对话')}</div>
           ) : null}
           {items.map((item, i) => {
             const row = item.kind === 'run' ? item.anchorRow : item.row
@@ -454,14 +455,14 @@ export function AgentChatScreen() {
                       "someone is busy" reads the same on both surfaces. */}
                   <span className="chat-turn-header-status">
                     <span className="status-pulse" aria-hidden />
-                    <span>正在处理…</span>
+                    <span>{tr('正在处理…')}</span>
                   </span>
                 </div>
               </div>
             ) : (
               <div className="chat-turn-status" role="status">
                 <span className="chat-turn-status-text chat-turn-status-text-live">
-                  {agent?.name ? `${agent.name}正在处理…` : '正在处理…'}
+                  {agent?.name ? tr('{{name}}正在处理…', { name: agent.name }) : tr('正在处理…')}
                 </span>
               </div>
             )
@@ -478,7 +479,7 @@ export function AgentChatScreen() {
               type="button"
               className="chat-scroll-pill"
               onClick={stickNow}
-              aria-label="回到底部"
+              aria-label={tr('回到底部')}
             >
               <ChevronDown size={20} aria-hidden />
             </button>
@@ -494,13 +495,13 @@ export function AgentChatScreen() {
             {replyTo ? (
               <span className="composer-chip">
                 <span className="composer-chip-text">
-                  回复 {replyTo.quote.slice(0, 30)}
+                  {tr('回复 {{quote}}', { quote: replyTo.quote.slice(0, 30) })}
                 </span>
                 <button
                   type="button"
                   className="composer-chip-clear"
                   onClick={() => setReplyTo(null)}
-                  aria-label="取消回复"
+                  aria-label={tr('取消回复')}
                 >
                   ×
                 </button>
@@ -509,12 +510,12 @@ export function AgentChatScreen() {
               <>
                 {address.forceNew ? (
                   <span className="composer-chip">
-                    <span className="composer-chip-text">新任务</span>
+                    <span className="composer-chip-text">{tr('新任务')}</span>
                     <button
                       type="button"
                       className="composer-chip-clear"
                       onClick={() => setAddress(null)}
-                      aria-label="清除地址"
+                      aria-label={tr('清除地址')}
                     >
                       ×
                     </button>
@@ -544,7 +545,7 @@ export function AgentChatScreen() {
                                 : null,
                           )
                         }}
-                        aria-label="移除引用"
+                        aria-label={tr('移除引用')}
                       >
                         ×
                       </button>
@@ -566,7 +567,7 @@ export function AgentChatScreen() {
           <button
             type="button"
             className="composer-address"
-            aria-label="指定任务"
+            aria-label={tr('指定任务')}
             disabled={!sessionId || !!replyTo}
             onClick={() => setAddressStage(true)}
           >
@@ -575,8 +576,8 @@ export function AgentChatScreen() {
           <textarea
             className="composer-input"
             rows={1}
-            placeholder="发送消息"
-            aria-label="消息输入框"
+            placeholder={tr('发送消息')}
+            aria-label={tr('消息输入框')}
             value={draft}
             disabled={composerLocked}
             onChange={(e) => setDraft(e.target.value)}
@@ -584,8 +585,8 @@ export function AgentChatScreen() {
           <button
             type="button"
             className="composer-send"
-            aria-label="发送"
-            title={turnLive ? '上一条消息正在处理中' : '发送'}
+            aria-label={tr('发送')}
+            title={turnLive ? tr('上一条消息正在处理中') : tr('发送')}
             disabled={!draft.trim() || composerLocked || !sessionId}
             onClick={send}
           >
@@ -691,7 +692,7 @@ export function RowView(props: RowProps) {
     // nothing, so it has no block to fold into and keeps its own explicit hole
     // (ADR-106 D3). Every row that DOES name a round is drawn by the session's
     // `ChatExecutionBlock` and reaches it as a `run` item — not as a row.
-    return <div className="chat-notice"><span className="chat-notice-pill">本轮执行已不可用</span></div>
+    return <div className="chat-notice"><span className="chat-notice-pill">{tr('本轮执行已不可用')}</span></div>
   }
 
   if (row.kind === 'system_notice') {
@@ -745,7 +746,7 @@ export function RowView(props: RowProps) {
                     renderMarkdown(row.body)
                   )
                 ) : (
-                  <span className="bubble-empty">（无内容）</span>
+                  <span className="bubble-empty">{tr('（无内容）')}</span>
                 )}
               </div>
             ) : null}

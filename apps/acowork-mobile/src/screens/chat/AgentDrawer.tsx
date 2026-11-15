@@ -17,6 +17,7 @@
  * session visibility (§5.4) and the workspace attach.
  */
 
+import { t as tr } from '../../i18n'
 import { useCallback, useEffect, useState } from 'react'
 import {
   attachWorkspace,
@@ -58,14 +59,14 @@ export function AgentDrawer({ open, agentId, onClose }: { open: boolean; agentId
   return (
     <>
       <div className="drawer-backdrop" onClick={onClose} role="presentation" />
-      <aside className="drawer" role="dialog" aria-modal="true" aria-label={`${info?.name ?? 'Agent'} 设置`}>
+      <aside className="drawer" role="dialog" aria-modal="true" aria-label={tr('{{name}} 设置', { name: info?.name ?? 'Agent' })}>
         <header className="drawer-head">
           <div className="drawer-title">{info?.name ?? agentId}</div>
-          <button type="button" className="drawer-close" onClick={onClose} aria-label="关闭">
-            关闭
+          <button type="button" className="drawer-close" onClick={onClose} aria-label={tr('关闭')}>
+            {tr('关闭')}
           </button>
         </header>
-        <div className="drawer-tabs" role="tablist" aria-label="设置分区">
+        <div className="drawer-tabs" role="tablist" aria-label={tr('设置分区')}>
           {TABS.map((t) => (
             <button
               key={t.id}
@@ -75,7 +76,7 @@ export function AgentDrawer({ open, agentId, onClose }: { open: boolean; agentId
               className={`drawer-tab${t.id === tab ? ' is-active' : ''}`}
               onClick={() => setTab(t.id)}
             >
-              {t.label}
+              {tr(t.label)}
             </button>
           ))}
         </div>
@@ -102,7 +103,7 @@ function useTabData<T>(loader: () => Promise<T>, deps: unknown[]): { data: T | n
         setData(d)
         setError(null)
       })
-      .catch((e) => setError(e instanceof Error ? e.message : '加载失败'))
+      .catch((e) => setError(e instanceof Error ? e.message : tr('加载失败')))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, deps)
   useEffect(load, [load])
@@ -125,7 +126,7 @@ function Row({ k, v }: { k: string; v: React.ReactNode }) {
 function ErrBanner({ msg }: { msg: string }) {
   return (
     <div style={{ padding: 'var(--space-3)' }}>
-      <Banner tone="warning">{msg} · 该 Agent 可能不在此节点上，或 Runtime 尚未就绪</Banner>
+      <Banner tone="warning">{tr('{{msg}} · 该 Agent 可能不在此节点上，或 Runtime 尚未就绪', { msg })}</Banner>
     </div>
   )
 }
@@ -136,13 +137,13 @@ function StatusTab({ agentId }: { agentId: string }) {
   const st: AgentStatus | null = data
   return (
     <>
-      <Section title="运行状态">
-        <Row k="状态" v={info?.status === 'offline' ? '已停止' : '运行中'} />
-        <Row k="生命周期" v={info?.status ?? '未知'} />
-        {st ? <Row k="进程" v={String(st.pid)} /> : null}
-        {st ? <Row k="工作目录" v={<span className="mono">{tail(st.work_dir)}</span>} /> : null}
+      <Section title={tr('运行状态')}>
+        <Row k={tr('状态')} v={info?.status === 'offline' ? tr('已停止') : tr('运行中')} />
+        <Row k={tr('生命周期')} v={info?.status ?? tr('未知')} />
+        {st ? <Row k={tr('进程')} v={String(st.pid)} /> : null}
+        {st ? <Row k={tr('工作目录')} v={<span className="mono">{tail(st.work_dir)}</span>} /> : null}
       </Section>
-      {error ? <ErrBanner msg="状态不可得" /> : null}
+      {error ? <ErrBanner msg={tr('状态不可得')} /> : null}
     </>
   )
 }
@@ -160,31 +161,31 @@ function WorkspaceTab({ agentId }: { agentId: string }) {
 
   const addToChat = async (ws: WorkspaceEntry) => {
     if (!activeId) {
-      setNote('当前会话未打开，无法切换工作区')
+      setNote(tr('当前会话未打开，无法切换工作区'))
       return
     }
     const id = ws.id
     if (!id) {
-      setNote('该工作区没有可用 id')
+      setNote(tr('该工作区没有可用 id'))
       return
     }
     try {
       await attachWorkspace(agentId, activeId, id)
-      setNote('已加入当前会话')
+      setNote(tr('已加入当前会话'))
     } catch (e) {
-      setNote(e instanceof Error ? e.message : '切换失败')
+      setNote(e instanceof Error ? e.message : tr('切换失败'))
     }
   }
 
   return (
     <>
-      <Section title="工作区">
+      <Section title={tr('工作区')}>
         {(data ?? []).map((w, i) => {
           const id = w.id ?? ''
           // `alias` is the human's own label; without one the directory name
           // is the only thing that means anything to them — a workspace id
           // (`ws-e272622f`) looks like an error.
-          const label = w.alias || (w.path ? tail(w.path) : id) || '未命名'
+          const label = w.alias || (w.path ? tail(w.path) : id) || tr('未命名')
           const readOnly = w.access === 'read-only'
           return (
             <ListRow
@@ -194,17 +195,17 @@ function WorkspaceTab({ agentId }: { agentId: string }) {
               value={
                 id && !readOnly ? (
                   <button type="button" className="retry-link" style={{ color: 'var(--color-tint)' }} onClick={() => void addToChat(w)}>
-                    加入会话
+                    {tr('加入会话')}
                   </button>
                 ) : (
-                  <span className="badge">只读</span>
+                  <span className="badge">{tr('只读')}</span>
                 )
               }
             />
           )
         })}
-        {!data && !error ? <ListRow label="载入中…" /> : null}
-        {data && data.length === 0 ? <ListRow label="没有附加工作区" hint="在桌面端添加" /> : null}
+        {!data && !error ? <ListRow label={tr('载入中…')} /> : null}
+        {data && data.length === 0 ? <ListRow label={tr('没有附加工作区')} hint={tr('在桌面端添加')} /> : null}
       </Section>
       {note ? (
         <div style={{ padding: '0 var(--space-4)' }}>
@@ -214,9 +215,9 @@ function WorkspaceTab({ agentId }: { agentId: string }) {
       {/* §4.2: file contents are read by the agent in the conversation, never
           previewed here. The note tells the user where that boundary is. */}
       <div style={{ padding: 'var(--space-3) var(--space-4)' }}>
-        <Banner tone="info">移动端不提供文件预览，请在对话中让 Agent 读取</Banner>
+        <Banner tone="info">{tr('移动端不提供文件预览，请在对话中让 Agent 读取')}</Banner>
       </div>
-      {error ? <ErrBanner msg="工作区不可得" /> : null}
+      {error ? <ErrBanner msg={tr('工作区不可得')} /> : null}
     </>
   )
 }
@@ -226,41 +227,41 @@ function MemoryTab({ agentId }: { agentId: string }) {
   const byType = Object.entries(data?.by_type ?? {})
   return (
     <>
-      <Section title="记忆统计">
-        {data ? <Row k="节点总数" v={String(data.total_nodes)} /> : <ListRow label="载入中…" />}
+      <Section title={tr('记忆统计')}>
+        {data ? <Row k={tr('节点总数')} v={String(data.total_nodes)} /> : <ListRow label={tr('载入中…')} />}
         {byType.map(([k, v]) => (
-          <Row key={k} k={`${k} 记忆`} v={String(v)} />
+          <Row key={k} k={tr('{{k}} 记忆', { k })} v={String(v)} />
         ))}
-        {data ? <Row k="索引状态" v={indexLabel(data.index_health)} /> : null}
+        {data ? <Row k={tr('索引状态')} v={indexLabel(data.index_health)} /> : null}
       </Section>
-      <Section title="检索">
-        <ListRow label="浏览记忆节点" hint="需桌面端（节点树 + 嵌入详情）" value={<span className="badge">桌面端</span>} />
+      <Section title={tr('检索')}>
+        <ListRow label={tr('浏览记忆节点')} hint={tr('需桌面端（节点树 + 嵌入详情）')} value={<span className="badge">{tr('桌面端')}</span>} />
       </Section>
-      {error ? <ErrBanner msg="记忆统计不可得" /> : null}
+      {error ? <ErrBanner msg={tr('记忆统计不可得')} /> : null}
     </>
   )
 }
 
 function indexLabel(h: string): string {
-  if (h === 'healthy') return '已同步'
-  if (h === 'no_store') return '未建立'
-  return h.startsWith('error') ? '异常' : h
+  if (h === 'healthy') return tr('已同步')
+  if (h === 'no_store') return tr('未建立')
+  return h.startsWith('error') ? tr('异常') : h
 }
 
 function ToolsTab({ agentId }: { agentId: string }) {
   const { data, error } = useTabData<BuiltinTool[]>(() => fetchBuiltinTools(agentId), [agentId])
   return (
     <>
-      <Section title="内置工具">
+      <Section title={tr('内置工具')}>
         {(data ?? []).map((t) => (
-          <ListRow key={t.name} label={<span className="row-title">{t.name}</span>} value={t.enabled ? '已启用' : '已禁用'} />
+          <ListRow key={t.name} label={<span className="row-title">{t.name}</span>} value={t.enabled ? tr('已启用') : tr('已禁用')} />
         ))}
-        {!data && !error ? <ListRow label="载入中…" /> : null}
+        {!data && !error ? <ListRow label={tr('载入中…')} /> : null}
       </Section>
       <div style={{ padding: 'var(--space-3) var(--space-4)' }}>
-        <Banner tone="info">工具开关请在桌面端修改</Banner>
+        <Banner tone="info">{tr('工具开关请在桌面端修改')}</Banner>
       </div>
-      {error ? <ErrBanner msg="工具列表不可得" /> : null}
+      {error ? <ErrBanner msg={tr('工具列表不可得')} /> : null}
     </>
   )
 }
@@ -277,16 +278,16 @@ function ConfigTab({ agentId }: { agentId: string }) {
   const scalars = Object.entries(inner ?? {}).filter(([, v]) => v === null || typeof v !== 'object')
   return (
     <>
-      <Section title="配置">
+      <Section title={tr('配置')}>
         {scalars.map(([k, v]) => (
           <Row key={k} k={k} v={typeof v === 'string' ? tail(v) : String(v ?? '')} />
         ))}
-        {!data && !error ? <ListRow label="载入中…" /> : null}
+        {!data && !error ? <ListRow label={tr('载入中…')} /> : null}
       </Section>
       <div style={{ padding: 'var(--space-3) var(--space-4)' }}>
-        <Banner tone="info">配置修改请在桌面端进行</Banner>
+        <Banner tone="info">{tr('配置修改请在桌面端进行')}</Banner>
       </div>
-      {error ? <ErrBanner msg="配置不可得" /> : null}
+      {error ? <ErrBanner msg={tr('配置不可得')} /> : null}
     </>
   )
 }
@@ -301,7 +302,7 @@ function SessionsTab({ agentId, onClose }: { agentId: string; onClose: () => voi
 
   return (
     <>
-      <Section title={`会话 · ${sessions.length}`}>
+      <Section title={tr('会话 · {{n}}', { n: sessions.length })}>
         {sessions.map((s: SessionInfo) => (
           <ListRow
             key={s.session_id}
@@ -320,18 +321,18 @@ function SessionsTab({ agentId, onClose }: { agentId: string; onClose: () => voi
             label={<span className="row-title">{s.title}</span>}
             value={
               s.session_id === activeId ? (
-                <span className="badge">当前</span>
+                <span className="badge">{tr('当前')}</span>
               ) : s.can_write === false ? (
-                <span className="badge">只读</span>
+                <span className="badge">{tr('只读')}</span>
               ) : undefined
             }
           />
         ))}
-        {sessions.length === 0 ? <ListRow label="该 Agent 暂无会话" /> : null}
-        {hasMore && sessions.length > 0 ? <ListRow label="加载更多会话" onClick={() => void loadMore(agentId)} /> : null}
+        {sessions.length === 0 ? <ListRow label={tr('该 Agent 暂无会话')} /> : null}
+        {hasMore && sessions.length > 0 ? <ListRow label={tr('加载更多会话')} onClick={() => void loadMore(agentId)} /> : null}
       </Section>
       <div style={{ padding: 'var(--space-3) var(--space-4)' }}>
-        <Banner tone="info">多会话是业务事实：移动端与桌面端共用同一份会话列表</Banner>
+        <Banner tone="info">{tr('多会话是业务事实：移动端与桌面端共用同一份会话列表')}</Banner>
       </div>
     </>
   )

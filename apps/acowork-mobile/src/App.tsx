@@ -14,6 +14,7 @@
 
 import { useEffect } from 'react'
 import { useNavStore, TABS } from './stores/navStore'
+import { useT, useLanguage } from './i18n/useT'
 import { useAuthStore } from './stores/authStore'
 import { ScreenHost } from './components/ScreenHost'
 import { BootingScreen, ConnectScreen, DisconnectedScreen, LoginScreen, RestrictedScreen } from './screens/boot/Screens'
@@ -40,6 +41,13 @@ const TAB_ICONS: Record<string, { outline: TabIcon; filled: TabIcon }> = {
 
 export function App() {
   const phase = useAuthStore((s) => s.phase)
+
+  // Screens migrated in phase 2 call the plain `t()` (not the reactive `useT`).
+  // Subscribing at the root makes a language change re-render the whole tree,
+  // so every screen re-evaluates its `tr()` calls in the new language without
+  // each leaf having to opt into a hook. The subscription is cheap: the store
+  // only notifies when the language value actually changes.
+  useLanguage()
 
   // Android hardware/gesture back button. Without a handler Tauri's default
   // is to close the app on the first press, so every back press exited even
@@ -118,13 +126,14 @@ function Shell() {
  * clears it. It never blocks navigation — reads of cached lists still work.
  */
 function OfflineBanner() {
+  const t = useT()
   const phase = useAuthStore((s) => s.phase)
   if (phase === 'disconnected') {
     return (
       <div className="banner banner-offline" role="status">
-        连接已断开
+        {t('banner.offline')}
         <button type="button" onClick={() => void useAuthStore.getState().retryConnection()}>
-          重试
+          {t('common.retry')}
         </button>
       </div>
     )
@@ -133,26 +142,27 @@ function OfflineBanner() {
 }
 
 function TabBar() {
+  const t = useT()
   const activeTab = useNavStore((s) => s.activeTab)
   const switchTab = useNavStore((s) => s.switchTab)
   return (
-    <nav className="tabbar" role="tablist" aria-label="主导航">
-      {TABS.map((t) => (
+    <nav className="tabbar" role="tablist" aria-label={t('tab.navAria')}>
+      {TABS.map((tab) => (
         <button
-          key={t.key}
+          key={tab.key}
           type="button"
           role="tab"
-          aria-selected={t.key === activeTab}
-          className={`tabbar-item${t.key === activeTab ? ' is-active' : ''}`}
-          onClick={() => switchTab(t.key)}
+          aria-selected={tab.key === activeTab}
+          className={`tabbar-item${tab.key === activeTab ? ' is-active' : ''}`}
+          onClick={() => switchTab(tab.key)}
         >
           {(() => {
-            const set = TAB_ICONS[t.key]
+            const set = TAB_ICONS[tab.key]
             if (!set) return <span className="tabbar-icon" aria-hidden />
-            const Icon = t.key === activeTab ? set.filled : set.outline
+            const Icon = tab.key === activeTab ? set.filled : set.outline
             return <Icon className="tabbar-svg" />
           })()}
-          <span className="tabbar-label">{t.label}</span>
+          <span className="tabbar-label">{t(tab.labelKey)}</span>
         </button>
       ))}
     </nav>

@@ -19,6 +19,7 @@
  * `planPage` for the rule that keeps a reload from moving the viewport.
  */
 
+import { t as tr } from '../i18n'
 import { create } from 'zustand'
 import { fetchUserChats, fetchUserMessages, markUserChatRead, sendUserMessage, userChatId } from '../lib/api'
 import { useAuthStore } from './authStore'
@@ -225,7 +226,7 @@ export const useUserChatStore = create<UserChatStore>((set, get) => ({
       await markUserChatRead(me, chatId).catch(() => undefined)
       void get().refreshChats()
     } catch (e) {
-      if (get().activePeerId === peerId) set({ error: e instanceof Error ? e.message : '加载失败' })
+      if (get().activePeerId === peerId) set({ error: e instanceof Error ? e.message : tr('加载失败') })
     } finally {
       if (get().activePeerId === peerId) set({ loading: false })
     }
@@ -264,7 +265,7 @@ export const useUserChatStore = create<UserChatStore>((set, get) => ({
       void get().refreshChats()
       return true
     } catch (e) {
-      set({ error: e instanceof Error ? e.message : '发送失败' })
+      set({ error: e instanceof Error ? e.message : tr('发送失败') })
       return false
     } finally {
       set({ sending: false })

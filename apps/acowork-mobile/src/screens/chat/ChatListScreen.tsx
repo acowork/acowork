@@ -28,6 +28,7 @@
  * `.../sessions/+/state` fact — the two inboxes must not disagree.
  */
 
+import { t as tr } from '../../i18n'
 import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Monitor, Users, UsersRound } from 'lucide-react'
 import { useAgentStore } from '../../stores/agentStore'
@@ -93,7 +94,7 @@ function GroupTitle({ icon, name, online }: { icon: ReactNode; name: string; onl
       {online === undefined ? null : (
         <span
           className={`dot dot-sm ${online ? 'dot-online' : 'dot-offline'}`}
-          aria-label={online ? '在线' : '离线'}
+          aria-label={online ? tr('在线') : tr('离线')}
         />
       )}
     </span>
@@ -117,13 +118,13 @@ function NodeTitle({ node }: { node: NodeRow }) {
 /** Group header for the contacts section. A contact list has no aggregate
  *  presence (each peer is online or not on its own), so no status dot. */
 function ContactsTitle() {
-  return <GroupTitle icon={<Users className="group-title-icon" aria-hidden />} name="联系人" />
+  return <GroupTitle icon={<Users className="group-title-icon" aria-hidden />} name={tr('联系人')} />
 }
 
 /** Group header for the project-group section (design 27 §4.4). Like the
  *  contacts header: no aggregate state to advertise, so no dot. */
 function GroupsTitle() {
-  return <GroupTitle icon={<UsersRound className="group-title-icon" aria-hidden />} name="群聊" />
+  return <GroupTitle icon={<UsersRound className="group-title-icon" aria-hidden />} name={tr('群聊')} />
 }
 
 /** A group row's avatar: a deterministic builtin keyed by the title — the
@@ -132,7 +133,7 @@ function GroupsTitle() {
 function GroupAvatar({ title }: { title: string }) {
   const picked = pickIconId(title)
   const src = picked ? BUILTIN_ICONS[picked] : undefined
-  return src ? <img src={src} alt="" /> : <span>{title.charAt(0) || '群'}</span>
+  return src ? <img src={src} alt="" /> : <span>{title.charAt(0) || tr('群')}</span>
 }
 
 export function ChatListScreen() {
@@ -272,7 +273,7 @@ export function ChatListScreen() {
   return (
     <div className="screen">
       <header className="navbar navbar-large">
-        <h1 className="navbar-title">聊天</h1>
+        <h1 className="navbar-title">{tr('聊天')}</h1>
       </header>
 
       <div className="searchbar">
@@ -280,15 +281,15 @@ export function ChatListScreen() {
           className="searchbar-input"
           type="search"
           inputMode="search"
-          placeholder="搜索群聊、Agent 或联系人"
-          aria-label="搜索"
+          placeholder={tr('搜索群聊、Agent 或联系人')}
+          aria-label={tr('搜索')}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
         />
       </div>
 
       <div className="scroll">
-        {loading && agents.length === 0 ? <div className="empty-state">载入中…</div> : null}
+        {loading && agents.length === 0 ? <div className="empty-state">{tr('载入中…')}</div> : null}
         {onlineGroups.map((g) => (
           <ListSection key={g.node.node_id} title={<NodeTitle node={g.node} />}>
             {g.rows.map(({ a, recent }) => (
@@ -306,7 +307,7 @@ export function ChatListScreen() {
                   <span className="row-title">
                     {a.name}
                     {startingAgentIds.has(a.id) ? (
-                      <span className="dot-spinner" aria-label="正在启动" title="正在启动" />
+                      <span className="dot-spinner" aria-label={tr('正在启动')} title={tr('正在启动')} />
                     ) : (
                       (() => {
                         // Presence from the directory's `alive`/`lifecycle`;
@@ -324,7 +325,7 @@ export function ChatListScreen() {
                                 ? 'dot dot-busy'
                                 : 'dot dot-online'
                         const text =
-                          a.status === 'offline' ? '离线' : a.status === 'error' ? '异常' : working ? '正在工作' : '在线'
+                          a.status === 'offline' ? tr('离线') : a.status === 'error' ? tr('异常') : working ? tr('正在工作') : tr('在线')
                         return <span className={`dot-sm ${cls}`} aria-label={text} title={text} />
                       })()
                     )}
@@ -338,14 +339,14 @@ export function ChatListScreen() {
                 // (long bodies get truncated, code blocks render as
                 // mojibake). Unify on title for cross-platform consistency.
                 // Empty-title sessions fall through to "暂无会话".
-                hint={startingAgentIds.has(a.id) ? '正在启动…' : recent?.title || '暂无会话'}
+                hint={startingAgentIds.has(a.id) ? tr('正在启动…') : recent?.title || tr('暂无会话')}
               />
             ))}
           </ListSection>
         ))}
         {onlineGroups.length === 0 && !loading ? (
           <ListSection>
-            <ListRow label="暂无 Agent" hint="在桌面端安装后出现在这里" />
+            <ListRow label={tr('暂无 Agent')} hint={tr('在桌面端安装后出现在这里')} />
           </ListSection>
         ) : null}
 
@@ -358,7 +359,7 @@ export function ChatListScreen() {
                 onClick={() => openGroup(g.session_id)}
                 label={<span className="row-title">{g.title}</span>}
                 value={formatListTime(g.last_active_at * 1000)}
-                hint={g.last_message_preview || '群聊'}
+                hint={g.last_message_preview || tr('群聊')}
                 badge={unread > 0 ? unread : undefined}
               />
             ))}
@@ -374,16 +375,16 @@ export function ChatListScreen() {
               label={
                 <span className="row-title">
                   {u.display_name}
-                  {u.online ? <span className="dot dot-online" aria-label="在线" /> : null}
+                  {u.online ? <span className="dot dot-online" aria-label={tr('在线')} /> : null}
                 </span>
               }
               value={formatListTime(chat ? chat.last_active_at * 1000 : undefined)}
-              hint={chat?.last_message_preview || '开始对话'}
+              hint={chat?.last_message_preview || tr('开始对话')}
               badge={chat && chat.unread_count > 0 ? chat.unread_count : undefined}
             />
           ))}
           {users.length === 0 && !loading ? (
-            <ListRow label="暂无联系人" hint="在桌面端邀请成员后出现在这里" />
+            <ListRow label={tr('暂无联系人')} hint={tr('在桌面端邀请成员后出现在这里')} />
           ) : null}
         </ListSection>
       </div>

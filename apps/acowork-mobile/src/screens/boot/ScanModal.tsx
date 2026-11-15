@@ -18,6 +18,7 @@
 import { useEffect, useRef, useState, type CSSProperties } from 'react'
 import jsQR from 'jsqr'
 import { useAuthStore } from '../../stores/authStore'
+import { useT } from '../../i18n/useT'
 
 /** Decoded pairing QR payload (schema v1). */
 interface PairPayload {
@@ -48,9 +49,10 @@ const overlay: CSSProperties = {
 }
 
 export function ScanModal({ onClose }: { onClose: () => void }) {
+  const t = useT()
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const canvasRef = useRef<HTMLCanvasElement | null>(null)
-  const [msg, setMsg] = useState('正在启动相机…')
+  const [msgKey, setMsgKey] = useState('scan.starting')
   const [failed, setFailed] = useState(false)
 
   // Keep the latest onClose without making it an effect dependency — an inline
@@ -76,7 +78,7 @@ export function ScanModal({ onClose }: { onClose: () => void }) {
           audio: false,
         })
       } catch {
-        setMsg('无法访问相机：请在系统设置中允许 ACowork 使用相机后重试，或改用手动输入网关地址。')
+        setMsgKey('scan.cameraDenied')
         setFailed(true)
         return
       }
@@ -88,7 +90,7 @@ export function ScanModal({ onClose }: { onClose: () => void }) {
       } catch {
         /* autoplay can be blocked; the decode loop still reads frames */
       }
-      setMsg('将桌面端的配对二维码对准取景框')
+      setMsgKey('scan.aim')
 
       const loop = () => {
         if (cancelled) return
@@ -107,14 +109,14 @@ export function ScanModal({ onClose }: { onClose: () => void }) {
               // Stop the camera before the network round-trip: the token is
               // single-use, so there is nothing left to scan either way.
               stop()
-              setMsg('配对中…')
+              setMsgKey('scan.pairing')
               void useAuthStore
                 .getState()
                 .pairLogin(parsed.gw, parsed.pt)
                 .then((ok) => {
                   if (ok) onCloseRef.current()
                   else {
-                    setMsg(useAuthStore.getState().loginError || '配对失败，请在桌面端重新生成二维码')
+                    setMsgKey(useAuthStore.getState().loginError || 'scan.fallbackError')
                     setFailed(true)
                   }
                 })
@@ -144,11 +146,21 @@ export function ScanModal({ onClose }: { onClose: () => void }) {
           height: '100%',
           objectFit: 'cover',
           opacity: failed ? 0 : 1,
+          // A full-bleed *positioned* <video> paints AFTER the in-flow button
+          // bar and still hit-tests at opacity:0; on some OEM WebViews it is
+          // promoted to a hardware surface above the DOM entirely. Without
+          // this, the 返回 / 取消 button looks tappable but never receives
+          // the tap and the user is stranded on the error screen.
+          pointerEvents: 'none',
         }}
       />
       <canvas ref={canvasRef} style={{ display: 'none' }} />
       <div
         style={{
+          // Lift the bar above the positioned <video> in the paint order.
+          // `pointerEvents:'none'` on the video is the primary fix; this is
+          // the belt-and-braces for WebViews that composite video separately.
+          position: 'relative',
           marginTop: 'auto',
           // `--safe-bottom` is the resolved clearance (lib/safeArea.ts):
           // raw `env()` is 0 on notch-less Android, which buries the cancel
@@ -158,11 +170,11 @@ export function ScanModal({ onClose }: { onClose: () => void }) {
         }}
       >
         <div style={{ color: '#fff', fontSize: 14, textAlign: 'center', marginBottom: 16, lineHeight: 1.5 }}>
-          {msg}
+          {t(msgKey)}
         </div>
         <button
           type="button"
-          onClick={onClose}
+          onClick={() => onCloseRef.current()}
           style={{
             display: 'block',
             width: '100%',
@@ -174,7 +186,7 @@ export function ScanModal({ onClose }: { onClose: () => void }) {
             fontSize: 15,
           }}
         >
-          {failed ? '返回' : '取消'}
+          {failed ? t('scan.back') : t('scan.cancel')}
         </button>
       </div>
     </div>

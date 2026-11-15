@@ -46,6 +46,7 @@
  * the fold survives a refresh) lives in `lib/chatBubbleFold.ts`, apart from
  * the DOM, so it can be tested without one.
  */
+import { t as tr } from '../i18n'
 import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronsDown, ChevronsUp } from 'lucide-react'
 import {
@@ -303,8 +304,8 @@ export const CollapsibleChatContent = memo(function CollapsibleChatContent({
           className="chat-fold-toggle"
           onClick={toggle}
           aria-expanded={shownExpanded}
-          aria-label={shownExpanded ? '收起全文' : '展开全文'}
-          title={shownExpanded ? '收起全文' : '展开全文'}
+          aria-label={shownExpanded ? tr('收起全文') : tr('展开全文')}
+          title={shownExpanded ? tr('收起全文') : tr('展开全文')}
         >
           {shownExpanded ? (
             <ChevronsUp aria-hidden />

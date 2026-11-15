@@ -21,6 +21,7 @@
  *   an absence is a badge nobody trusts.
  */
 
+import { t as tr } from '../i18n'
 /** The lifecycle fact one `.../sessions/{sid}/state` publish carries for a
  *  session: its status name, plus — for `paused` — why it paused and whether
  *  the pause is a provider retry. Same shape and same rule as Desktop's
@@ -108,15 +109,15 @@ export function attentionReason(fact: SessionStatusFact | null | undefined): Att
 export function attentionLabel(reason: AttentionReason | null | undefined): string | undefined {
   switch (reason) {
     case 'approval':
-      return '等待你确认'
+      return tr('等待你确认')
     case 'iteration_limit':
-      return '已到迭代上限，等待你决定'
+      return tr('已到迭代上限，等待你决定')
     case 'loop_detected':
-      return '检测到循环，等待你决定'
+      return tr('检测到循环，等待你决定')
     case 'debug':
-      return '调试暂停，等待你继续'
+      return tr('调试暂停，等待你继续')
     case 'paused':
-      return '已暂停，等待你继续'
+      return tr('已暂停，等待你继续')
     default:
       return undefined
   }

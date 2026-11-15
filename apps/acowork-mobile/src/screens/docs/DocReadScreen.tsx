@@ -10,6 +10,7 @@
  * safe to do one-handed, which is none — so it is metadata instead.
  */
 
+import { t as tr } from '../../i18n'
 import { useCallback } from 'react'
 import { useNavStore } from '../../stores/navStore'
 import { useDocStore } from '../../stores/docStore'
@@ -35,8 +36,8 @@ export function DocReadScreen() {
     <EdgeSwipe onBack={() => pop()}>
       <div className="screen">
         <header className="navbar">
-          <button type="button" className="navbar-back" onClick={() => pop()} aria-label="返回">返回</button>
-          <span className="navbar-title">{doc?.meta.name ?? '文档'}</span>
+          <button type="button" className="navbar-back" onClick={() => pop()} aria-label={tr('返回')}>{tr('返回')}</button>
+          <span className="navbar-title">{doc?.meta.name ?? tr('文档')}</span>
           <span className="navbar-trail" />
         </header>
 
@@ -46,14 +47,14 @@ export function DocReadScreen() {
           </div>
         ) : null}
 
-        {loading && !doc ? <div className="empty-state">载入中…</div> : null}
-        {!loading && !doc ? <div className="empty-state">文档不存在或已被删除</div> : null}
+        {loading && !doc ? <div className="empty-state">{tr('载入中…')}</div> : null}
+        {!loading && !doc ? <div className="empty-state">{tr('文档不存在或已被删除')}</div> : null}
 
         {doc ? (
           <div className="scroll">
             <div className="doc-meta">
               v{doc.meta.version} · {formatListTime(Date.parse(doc.meta.updated_at))}
-              {doc.meta.import ? ` · 来自 ${doc.meta.import.workspace_path}` : ''}
+              {doc.meta.import ? tr(' · 来自 {{path}}', { path: doc.meta.import.workspace_path }) : ''}
             </div>
             <article className="doc-body">{renderMarkdown(doc.content)}</article>
           </div>

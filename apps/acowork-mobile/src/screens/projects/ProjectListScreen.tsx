@@ -6,6 +6,7 @@
  * projects stay on Desktop.
  */
 
+import { t as tr } from '../../i18n'
 import { useEffect } from 'react'
 import { useNavStore } from '../../stores/navStore'
 import { usePmStore } from '../../stores/pmStore'
@@ -31,7 +32,7 @@ export function ProjectListScreen() {
   return (
     <div className="screen">
       <header className="navbar navbar-large">
-        <h1 className="navbar-title">项目</h1>
+        <h1 className="navbar-title">{tr('项目')}</h1>
       </header>
       {error ? (
         <div style={{ padding: '0 var(--space-4)' }}>
@@ -45,11 +46,11 @@ export function ProjectListScreen() {
             onClick={() => open(p.id)}
             label={<span className="row-title">{p.title}</span>}
             hint={p.description || undefined}
-            value={p.status === 'active' ? '进行中' : p.status === 'archived' ? '已归档' : '已完成'}
+            value={p.status === 'active' ? tr('进行中') : p.status === 'archived' ? tr('已归档') : tr('已完成')}
           />
         ))}
-        {!loaded && !error ? <ListRow label="载入中…" /> : null}
-        {loaded && projects.length === 0 ? <ListRow label="没有项目" hint="在桌面端创建" /> : null}
+        {!loaded && !error ? <ListRow label={tr('载入中…')} /> : null}
+        {loaded && projects.length === 0 ? <ListRow label={tr('没有项目')} hint={tr('在桌面端创建')} /> : null}
       </div>
     </div>
   )

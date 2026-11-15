@@ -12,6 +12,7 @@
  * a gateway, which matters more than testing the fetch.
  */
 
+import { t as tr } from '../i18n'
 import { create } from 'zustand'
 import {
   approveDocRequest,
@@ -144,7 +145,7 @@ export const useDocStore = create<DocState>((set, get) => ({
       const root = await fetchDocTree()
       set((s) => ({ levels: { ...s.levels, [ROOT_ID]: toLevel(root) }, rootLoading: false }))
     } catch (e) {
-      set({ rootLoading: false, error: (e as Error).message || '文档库加载失败' })
+      set({ rootLoading: false, error: (e as Error).message || tr('文档库加载失败') })
     }
   },
 
@@ -168,7 +169,7 @@ export const useDocStore = create<DocState>((set, get) => ({
       set((s) => ({
         open: del(s.open, dirId),
         loadingDirs: del(s.loadingDirs, dirId),
-        error: (e as Error).message || '目录加载失败',
+        error: (e as Error).message || tr('目录加载失败'),
       }))
     }
   },
@@ -187,7 +188,7 @@ export const useDocStore = create<DocState>((set, get) => ({
       if (get().query === q) set({ hits, searching: false })
       else set({ searching: false })
     } catch (e) {
-      set({ searching: false, error: (e as Error).message || '搜索失败' })
+      set({ searching: false, error: (e as Error).message || tr('搜索失败') })
     }
   },
 
@@ -200,7 +201,7 @@ export const useDocStore = create<DocState>((set, get) => ({
     try {
       set({ activeDoc: await fetchDoc(docId), docLoading: false })
     } catch (e) {
-      set({ docLoading: false, error: (e as Error).message || '文档加载失败' })
+      set({ docLoading: false, error: (e as Error).message || tr('文档加载失败') })
     }
   },
 
@@ -209,7 +210,7 @@ export const useDocStore = create<DocState>((set, get) => ({
     try {
       set({ requests: await fetchDocRequests('pending'), requestsLoading: false })
     } catch (e) {
-      set({ requestsLoading: false, error: (e as Error).message || '审阅队列加载失败' })
+      set({ requestsLoading: false, error: (e as Error).message || tr('审阅队列加载失败') })
     }
   },
 
@@ -218,7 +219,7 @@ export const useDocStore = create<DocState>((set, get) => ({
     try {
       set({ activeRequest: await fetchDocRequest(id) })
     } catch (e) {
-      set({ error: (e as Error).message || '审阅详情加载失败' })
+      set({ error: (e as Error).message || tr('审阅详情加载失败') })
     }
   },
 
@@ -228,7 +229,7 @@ export const useDocStore = create<DocState>((set, get) => ({
     // must be this account. An agent that submitted a request cannot be the
     // one approving it — that separation is the entire reason the queue
     // exists instead of letting the agent write the document directly.
-    if (!me) return '未登录，无法审阅'
+    if (!me) return tr('未登录，无法审阅')
     set({ acting: true, error: null })
     try {
       // Approve wraps (`{request, doc_version}`), reject does not — see api.ts.
@@ -240,8 +241,8 @@ export const useDocStore = create<DocState>((set, get) => ({
       })
       return null
     } catch (e) {
-      set({ acting: false, error: (e as Error).message || '审阅失败' })
-      return e instanceof Error ? e.message : '审阅失败'
+      set({ acting: false, error: (e as Error).message || tr('审阅失败') })
+      return e instanceof Error ? e.message : tr('审阅失败')
     }
   },
 }))

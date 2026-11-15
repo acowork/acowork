@@ -7,6 +7,7 @@
  * bubble body.
  */
 
+import { t as tr } from '../i18n'
 import { useState } from 'react'
 import { renderMarkdown } from '../lib/markdown'
 import type { ChatMessage } from '../lib/types'
@@ -46,11 +47,11 @@ export function Bubble({ msg, literal = false }: { msg: ChatMessage; literal?: b
               words); the summary is then the only human text there is. */}
           {renderMarkdown(display.body || display.summary)}
           {display.truncated ? (
-            <span className="chat-run-note">正文已截断，完整内容见原始信封</span>
+            <span className="chat-run-note">{tr('正文已截断，完整内容见原始信封')}</span>
           ) : null}
           {msg.content ? (
             <details className="chat-run-raw">
-              <summary>原始信封（机器格式）</summary>
+              <summary>{tr('原始信封（机器格式）')}</summary>
               <pre>{msg.content}</pre>
             </details>
           ) : null}
@@ -73,8 +74,8 @@ function ToolRow({ msg, name }: { msg: ChatMessage; name: string }) {
   return (
     <button type="button" className="tool-row" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
       <span className="tool-row-icon" aria-hidden>⚙</span>
-      <span className="tool-row-name">调用 {name}</span>
-      <span className="tool-row-caret">{open ? '收起' : '详情'}</span>
+      <span className="tool-row-name">{tr('调用 {{name}}', { name })}</span>
+      <span className="tool-row-caret">{open ? tr('收起') : tr('详情')}</span>
       {open && msg.content ? <span className="tool-row-body">{msg.content.slice(0, 2000)}</span> : null}
     </button>
   )

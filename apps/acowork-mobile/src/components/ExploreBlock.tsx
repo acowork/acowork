@@ -5,6 +5,7 @@
  * tool_call and its paired tool_result are merged into one row (keyed by
  * toolCallId), so the expanded list is as compact as the desktop.
  */
+import { t as tr } from '../i18n'
 import { useState } from 'react'
 import type { ChatMessage } from '../lib/types'
 
@@ -81,7 +82,7 @@ export function ExploreBlock({ items }: { items: ChatMessage[] }) {
         aria-expanded={open}
       >
         <span className="explore-toggle-icon">&#9881;</span>
-        <span className="explore-toggle-label">已探索 {stepCount} 步</span>
+        <span className="explore-toggle-label">{tr('已探索 {{n}} 步', { n: stepCount })}</span>
         <span className="explore-toggle-summary">{summary}</span>
         <span className="explore-toggle-caret" aria-hidden>
           {open ? (
@@ -101,7 +102,7 @@ export function ExploreBlock({ items }: { items: ChatMessage[] }) {
             if (p.kind === 'thought') {
               return (
                 <div key={p.msg.id} className="explore-item">
-                  <span className="explore-item-name">{'\uD83D\uDCAD'} 思考</span>
+                  <span className="explore-item-name">{'\uD83D\uDCAD'} {tr('思考')}</span>
                   <span className="explore-item-args">{p.msg.content?.slice(0, 80)}</span>
                 </div>
               )

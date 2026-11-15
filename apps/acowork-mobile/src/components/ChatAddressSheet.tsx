@@ -27,6 +27,7 @@
  * Presentation: a bottom sheet (§6.5), because a phone has no hover.
  */
 
+import { t as tr } from '../i18n'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { fetchChatSessions } from '../lib/api'
 import { formatListTime } from '../lib/time'
@@ -163,23 +164,23 @@ export function ChatAddressSheet({ instanceId, chatSessionId, surface = 'direct'
   }, [picked, onPick])
 
   return (
-    <Sheet open onClose={onClose} title="引用哪些任务作为材料？">
+    <Sheet open onClose={onClose} title={tr('引用哪些任务作为材料？')}>
       <button
         type="button"
         className="chat-sheet-option is-primary"
         data-testid="address-new"
         onClick={() => onPick({ forceNew: true })}
       >
-        开新任务
+        {tr('开新任务')}
       </button>
 
       {failed ? (
         <button type="button" className="chat-sheet-option" onClick={() => setAttempt((a) => a + 1)}>
-          读不到本会话的任务列表 · 重试
+          {tr('读不到本会话的任务列表 · 重试')}
         </button>
       ) : null}
 
-      {!failed && rows === null ? <div className="chat-sheet-hint">载入中…</div> : null}
+      {!failed && rows === null ? <div className="chat-sheet-hint">{tr('载入中…')}</div> : null}
 
       {failed || rows === null
         ? null
@@ -207,7 +208,7 @@ export function ChatAddressSheet({ instanceId, chatSessionId, surface = 'direct'
                       push, which a closed sheet is not subscribed to), so the row
                       says when the work last moved — same slot, honest content. */}
                   <span className="chat-sheet-option-value">{formatListTime(s.updated_at)}</span>
-                  <span className="chat-sheet-ref-mark">{checked ? '已引用' : '引用'}</span>
+                  <span className="chat-sheet-ref-mark">{checked ? tr('已引用') : tr('引用')}</span>
                 </button>
                 <button
                   type="button"
@@ -215,7 +216,7 @@ export function ChatAddressSheet({ instanceId, chatSessionId, surface = 'direct'
                   data-testid="address-continue"
                   onClick={() => onLocate?.(s.session_id, s.title)}
                 >
-                  去续投
+                  {tr('去续投')}
                 </button>
               </div>
             )
@@ -228,7 +229,7 @@ export function ChatAddressSheet({ instanceId, chatSessionId, surface = 'direct'
           data-testid="address-none"
           onClick={() => onPick({})}
         >
-          不指定 — 不引用任何材料
+          {tr('不指定 — 不引用任何材料')}
         </button>
       ) : null}
 
@@ -240,12 +241,12 @@ export function ChatAddressSheet({ instanceId, chatSessionId, surface = 'direct'
           disabled={loadingMore}
           onClick={loadMore}
         >
-          {loadingMore ? '载入中…' : '更早的任务'}
+          {loadingMore ? tr('载入中…') : tr('更早的任务')}
         </button>
       ) : null}
 
       {rows && rows.length === 0 && !failed ? (
-        <div className="chat-sheet-hint">这里还没有可引用的任务</div>
+        <div className="chat-sheet-hint">{tr('这里还没有可引用的任务')}</div>
       ) : null}
 
       {rows && rows.length > 0 ? (
@@ -256,7 +257,7 @@ export function ChatAddressSheet({ instanceId, chatSessionId, surface = 'direct'
           disabled={pickedCount === 0}
           onClick={commit}
         >
-          完成（{pickedCount}/{MAX_PICK_REFS}）
+          {tr('完成（{{picked}}/{{max}}）', { picked: pickedCount, max: MAX_PICK_REFS })}
         </button>
       ) : null}
     </Sheet>
