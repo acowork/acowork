@@ -11,6 +11,15 @@
  *   that says there is more;
  * - expanded: the whole content, and a double-up chevron that says there is
  *   less;
+ * - the cut is a FADE, not a knife: the bottom band dissolves the text
+ *   through a mask instead of slicing a line in half. Folded and idle, the
+ *   reader sees ONLY that fade — the chevron's row is fully transparent, so
+ *   no rectangle is drawn over the bubble;
+ * - the chevron keeps its own row BELOW the text in BOTH states. Floating it
+ *   over the content puts the up-chevron on top of the answer's last line
+ *   once expanded, where a transparent control is illegible;
+ * - the rounded highlight is a pointer affordance, not a permanent skin: it
+ *   appears on hover / keyboard focus and disappears again on leave;
  * - the chevron toggles between the two.
  *
  * It is a CONTENT fold, not a bubble fold: the bubble's own skin (colour,
@@ -40,6 +49,7 @@ import { memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from 
 import { ChevronsDown, ChevronsUp } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import {
+  FOLD_FADE_BAND_PX,
   RUN_ANSWER_COLLAPSED_LINES,
   collapsedHeightPx,
   isOverflowing,
@@ -146,8 +156,10 @@ export const CollapsibleChatContent = memo(function CollapsibleChatContent({
   const clipRef = useRef<HTMLDivElement | null>(null);
   const [overflowing, setOverflowing] = useState(false);
   const [expanded, setExpanded] = useState(false);
-  /** The clip's height in each state, in pixels. `null` means "no ceiling"
-   *  (nothing to fold). */
+  /** The clip's ceiling in each state, in pixels. `null` means "no ceiling"
+   *  (nothing to fold). The expanded ceiling is the content's full height —
+   *  `max-height` cannot stretch a box, so reserving space for the chevron
+   *  inside the clip would only put the arrow back on top of the text. */
   const [clampPx, setClampPx] = useState<number | null>(null);
   const [fullPx, setFullPx] = useState<number | null>(null);
 
@@ -188,8 +200,9 @@ export const CollapsibleChatContent = memo(function CollapsibleChatContent({
         )
       : collapsedHeightPx(lineHeight, lineCount);
     // The cut is the TOP of the eleventh line — the boundary between the
-    // tenth line and the eleventh one. Cutting at the tenth line's own bottom
-    // would slice the eleventh line in half whenever the leading is generous.
+    // tenth line and the eleventh one. The ceiling sits a fade band BELOW it:
+    // the eleventh line is still painted there, but dissolves through the
+    // mask instead of being sliced by a hard `overflow: hidden` edge.
     const cut = hasLayout
       ? lineCount > RUN_ANSWER_COLLAPSED_LINES
         ? Math.ceil(lineTops[RUN_ANSWER_COLLAPSED_LINES]!)
@@ -204,6 +217,10 @@ export const CollapsibleChatContent = memo(function CollapsibleChatContent({
     const more = hasLayout
       ? lineCount > RUN_ANSWER_COLLAPSED_LINES
       : isOverflowing(full, cut);
+    // The ceiling never passes the content: a max-height taller than the
+    // content would put the mask's fade band over the last line that is
+    // actually there, fading readable text for no reason.
+    const clamp = Math.min(cut + FOLD_FADE_BAND_PX, Math.max(1, full - 1));
 
     if (!more) {
       setOverflowing(false);
@@ -214,7 +231,10 @@ export const CollapsibleChatContent = memo(function CollapsibleChatContent({
       return;
     }
     setOverflowing(true);
-    setClampPx(cut);
+    setClampPx(clamp);
+    // The chevron owns a row of its own (outside the clip) in both states, so
+    // the expand animation is a pure ceiling change: no row is added, no
+    // page jump, and no arrow sitting on the answer's last line.
     setFullPx(full);
   }, [text]);
 
@@ -243,25 +263,42 @@ export const CollapsibleChatContent = memo(function CollapsibleChatContent({
   }, [overflowing]);
 
   const clipHeight = shownExpanded ? fullPx : clampPx;
+  const folded = overflowing && !shownExpanded;
+  // The mask fades the CONTENT's own pixels, not a coloured overlay. That is
+  // what keeps the fold independent of the bubble skin: the three callers
+  // paint three different (and semi-transparent) surfaces, so no single
+  // "fade-to-background" colour could ever match all of them. The knee 20px
+  // above the bottom makes the last stretch almost clear, so the fade ends
+  // softly instead of leaving half-visible glyphs at the clip edge.
+  const fadeMask = folded
+    ? `linear-gradient(to bottom, #000 calc(100% - ${FOLD_FADE_BAND_PX}px), rgba(0, 0, 0, 0.25) calc(100% - 20px), transparent 100%)`
+    : undefined;
 
   return (
     <>
       {/* The clip. `overflow: hidden` with an animated ceiling is what makes
           the fold a fold; the inner content is never clipped itself, so it
-          can always be measured at full height. */}
+          can always be measured at full height. The mask is folded-state
+          only — expanded, it would fade the answer's last line. */}
       <div
         ref={clipRef}
         data-chat-fold-clip=""
+        data-chat-fold-fade={folded ? "" : undefined}
         className={`overflow-hidden transition-[max-height] duration-200 ease-out${className ? ` ${className}` : ""}`}
         style={{
           maxHeight: clipHeight === null ? undefined : `${clipHeight}px`,
           transitionDuration: `${CLIP_TRANSITION_MS}ms`,
+          maskImage: fadeMask,
+          WebkitMaskImage: fadeMask,
         }}
       >
         <div ref={contentRef}>{children}</div>
       </div>
-      {/* The chevron lives OUTSIDE the clip: a toggle that the clip cuts in
-          half is a toggle the reader cannot reach. */}
+      {/* The chevron keeps a row of its own BELOW the text, outside the clip:
+          a toggle the clip cuts in half is a toggle the reader cannot reach,
+          and one floating over the expanded answer sits on its last line.
+          Its idle surface is fully transparent — no rectangle over the
+          bubble. Only hover / focus paints the rounded highlight. */}
       {overflowing && (
         <button
           type="button"
@@ -278,7 +315,7 @@ export const CollapsibleChatContent = memo(function CollapsibleChatContent({
               ? t("chatView.block.collapseAnswer")
               : t("chatView.block.expandAnswer")
           }
-          className="mt-1 flex h-7 w-full items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-black/5 hover:text-text-secondary dark:hover:bg-white/10"
+          className="mt-1 flex h-7 w-full items-center justify-center rounded-md bg-transparent text-text-tertiary transition-colors hover:bg-black/5 hover:text-text-secondary focus-visible:bg-black/5 focus-visible:text-text-secondary dark:hover:bg-white/10 dark:focus-visible:bg-white/10"
         >
           {shownExpanded ? (
             <ChevronsUp className="h-4 w-4" />

@@ -16,6 +16,8 @@
  *      shape is the whole content again;
  *   4. a page jump on expand. The clip animates its ceiling instead of
  *      snapping between two heights.
+ *   5. a knifed cut. Folded, the clip's bottom band dissolves the text
+ *      through a mask; expanded, it must NOT still be fading the last line.
  *
  * The environment here has no layout (jsdom), so the fold takes its
  * measurement fallback path — the length estimate. That is a deliberate
@@ -27,6 +29,7 @@ import { fireEvent, render } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import { CollapsibleChatContent } from "./CollapsibleChatContent";
 import {
+  FOLD_FADE_BAND_PX,
   RUN_ANSWER_COLLAPSED_LINES,
   collapsedHeightPx,
   isOverflowing,
@@ -107,11 +110,56 @@ describe("CollapsibleChatContent", () => {
     const btn = toggle(container)!;
     // A chevron alone is a small target; the control is a padded button.
     expect(btn.className).toContain("h-7");
+    // It keeps its own row below the text in BOTH states: expanding must
+    // stay a pure height change, with no page jump and no arrow on the
+    // answer's last line.
+    expect(btn.className).toContain("mt-1");
+    expect(btn.className).not.toContain("absolute");
+    // Idle: no rectangle is drawn over the bubble. The rounded highlight
+    // is a pointer affordance, painted only on hover / keyboard focus.
+    expect(btn.className).toContain("bg-transparent");
+    expect(btn.className).toContain("hover:bg-black/5");
+    expect(btn.className).not.toContain("bg-linear-to-b");
     expect(btn.getAttribute("aria-label")).toBe("chatView.block.expandAnswer");
     fireEvent.click(btn);
     expect(toggle(container)?.getAttribute("aria-label")).toBe(
       "chatView.block.collapseAnswer",
     );
+  });
+
+  it("fades the cut while folded and stops fading once expanded", () => {
+    const text = longText();
+    const { container } = render(
+      <CollapsibleChatContent text={text}>
+        <div>{text}</div>
+      </CollapsibleChatContent>,
+    );
+    // Folded: the clip wears the mask whose bottom band dissolves the text.
+    expect(clip(container).hasAttribute("data-chat-fold-fade")).toBe(true);
+    expect(clip(container).style.maskImage).toContain("linear-gradient");
+    expect(clip(container).style.maskImage).toContain(`${FOLD_FADE_BAND_PX}px`);
+    fireEvent.click(toggle(container)!);
+    // Expanded: no mask. Leaving it on would fade the answer's last line.
+    expect(clip(container).hasAttribute("data-chat-fold-fade")).toBe(false);
+    expect(clip(container).style.maskImage).toBe("");
+    fireEvent.click(toggle(container)!);
+    expect(clip(container).hasAttribute("data-chat-fold-fade")).toBe(true);
+  });
+
+  it("keeps the chevron below the text after expanding", () => {
+    const text = longText();
+    const { container } = render(
+      <CollapsibleChatContent text={text}>
+        <div>{text}</div>
+      </CollapsibleChatContent>,
+    );
+    fireEvent.click(toggle(container)!);
+    const btn = toggle(container)!;
+    // A floating toggle would land on the answer's last line, where a
+    // transparent control is illegible. The row must stay in normal flow.
+    expect(btn.className).not.toContain("absolute");
+    expect(btn.className).toContain("mt-1");
+    expect(clip(container).contains(btn)).toBe(false);
   });
 
   it("a live refresh does not snap an expanded answer shut", () => {
@@ -169,6 +217,9 @@ describe("chatBubbleFold", () => {
   it("counts ten lines as the ceiling", () => {
     expect(RUN_ANSWER_COLLAPSED_LINES).toBe(10);
     expect(collapsedHeightPx(20)).toBe(200);
+    // The ceiling keeps those ten lines AND a fade band; the expanded
+    // ceiling is the content's own full height, nothing reserved inside it.
+    expect(FOLD_FADE_BAND_PX).toBe(48);
   });
 
   it("reads the browser's pixel line-height, and the shapes a hand-written style uses", () => {

@@ -25,6 +25,12 @@
 /** How many lines the folded bubble shows. */
 export const RUN_ANSWER_COLLAPSED_LINES = 8;
 
+/** Height of the band at the bottom of a folded clip where the content
+ *  dissolves instead of being cut. The ceiling keeps N whole line boxes AND
+ *  this band, so the partial line a hard `overflow: hidden` used to slice in
+ *  half is what fades away. */
+export const FOLD_FADE_BAND_PX = 48;
+
 /** The line-height ratio used when the computed value says nothing useful
  *  (`normal`, or an unparsable string). Matches the chat prose's own
  *  leading, so a fallback never cuts the text somewhere else. */

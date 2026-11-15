@@ -2213,8 +2213,12 @@
 /* --- Folded run answer -------------------------------------------------
  * The run's latest answer sits under the block in the transcript's own peer
  * skin (the desktop `RunAnswerBubble`, copied). The clip animates its
- * ceiling — a fold, not a page jump; the double-chevron toggle lives outside
- * the clipped box so the thumb can always reach it. */
+ * ceiling — a fold, not a page jump — and a mask dissolves its bottom band
+ * so no line is ever sliced in half. The double-chevron toggle keeps its own
+ * row BELOW the content in both states: outside the clipped box (so the
+ * thumb can always reach it) and never on top of the expanded answer's last
+ * line. It is fully transparent while idle; the rounded highlight is painted
+ * only on hover / focus / active. */
 .chat-fold-clip {
   overflow: hidden;
   transition-property: max-height;
@@ -2234,8 +2238,13 @@
   cursor: pointer;
   transition: background 0.12s, color 0.12s;
 }
+.chat-fold-toggle:hover,
+.chat-fold-toggle:focus-visible {
+  background: color-mix(in srgb, var(--color-label) 6%, transparent);
+  color: var(--color-label);
+}
 .chat-fold-toggle:active {
-  background: color-mix(in srgb, var(--color-label) 5%, transparent);
+  background: color-mix(in srgb, var(--color-label) 10%, transparent);
   color: var(--color-label);
 }
 .chat-fold-toggle svg {

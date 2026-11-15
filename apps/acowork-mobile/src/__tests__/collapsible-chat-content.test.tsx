@@ -32,6 +32,7 @@ import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { CollapsibleChatContent } from '../components/CollapsibleChatContent'
 import {
+  FOLD_FADE_BAND_PX,
   RUN_ANSWER_COLLAPSED_LINES,
   collapsedHeightPx,
   isOverflowing,
@@ -129,6 +130,28 @@ describe('CollapsibleChatContent', () => {
     expect(toggle(container)?.getAttribute('aria-label')).toBe('收起全文')
   })
 
+  it('fades the cut while folded and stops fading once expanded', () => {
+    const container = mountFold(longText())
+    // Folded: the clip's bottom band dissolves the text through a mask.
+    expect(clip(container).hasAttribute('data-chat-fold-fade')).toBe(true)
+    expect(clip(container).style.maskImage).toContain('linear-gradient')
+    expect(clip(container).style.maskImage).toContain(`${FOLD_FADE_BAND_PX}px`)
+    click(toggle(container))
+    // Expanded: no mask. Leaving it on would fade the answer's last line.
+    expect(clip(container).hasAttribute('data-chat-fold-fade')).toBe(false)
+    expect(clip(container).style.maskImage).toBe('')
+    click(toggle(container))
+    expect(clip(container).hasAttribute('data-chat-fold-fade')).toBe(true)
+  })
+
+  it('keeps the chevron below the text after expanding', () => {
+    const container = mountFold(longText())
+    click(toggle(container))
+    // A floating toggle would land on the answer's last line, where a
+    // transparent control is illegible. The row must stay below the clip.
+    expect(clip(container).contains(toggle(container))).toBe(false)
+  })
+
   it('a live refresh does not snap an expanded answer shut', () => {
     const container = mountFold(longText())
     click(toggle(container))
@@ -162,6 +185,9 @@ describe('chatBubbleFold', () => {
   it('counts eight lines as the ceiling', () => {
     expect(RUN_ANSWER_COLLAPSED_LINES).toBe(8)
     expect(collapsedHeightPx(20)).toBe(160)
+    // The ceiling keeps those eight lines AND a fade band; the expanded
+    // ceiling is the content's own full height, nothing reserved inside it.
+    expect(FOLD_FADE_BAND_PX).toBe(48)
   })
 
   it("reads the browser's pixel line-height, and the shapes a hand-written style uses", () => {
