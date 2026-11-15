@@ -386,8 +386,14 @@ impl GatewayClient {
 
     /// Plan §7 G4: validate `pm_submit_task`'s `doc_refs` against the doc
     /// service, through the Gateway's doc reverse proxy
-    /// (`POST /api/doc/api/refs/validate`). The doc side owns the fact of
+    /// (`POST /api/doc/refs/validate`). The doc side owns the fact of
     /// whether a reference resolves; PM only asks and refuses.
+    ///
+    /// The path comes from the shared constant
+    /// ([`acowork_core::doc_layout::DOC_REFS_VALIDATE_GATEWAY_PATH`]) that
+    /// the doc service also registers its route from — the two used to
+    /// disagree (`/api/doc/api/refs/validate` vs `/refs/validate`), which
+    /// made every `doc_refs` submission fail with a 404.
     ///
     /// Returns `Err(reason)` for a transport / non-2xx answer (the caller
     /// must refuse the submission — an unvalidated ref is a dead link by
@@ -404,8 +410,9 @@ impl GatewayClient {
         refs: &[String],
     ) -> Result<Vec<serde_json::Value>, RefValidationFailure> {
         let mut req = self.client.post(format!(
-            "{}/api/doc/api/refs/validate",
-            self.gateway_url
+            "{}{}",
+            self.gateway_url,
+            acowork_core::doc_layout::DOC_REFS_VALIDATE_GATEWAY_PATH
         ));
         if let Some(token) = &self.auth_token {
             req = req.bearer_auth(token);

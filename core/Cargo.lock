@@ -281,6 +281,7 @@ name = "acowork-pm"
 version = "0.1.0"
 dependencies = [
  "acowork-core",
+ "acowork-doc",
  "anyhow",
  "async-trait",
  "axum 0.8.9",

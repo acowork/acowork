@@ -23,9 +23,11 @@
 //!   client-side bug, not a library fact.
 //!
 //! The route is reached through the Gateway doc proxy as
-//! `/api/doc/api/refs/validate`; internal service callers (PM) arrive as the
-//! trusted `human` actor and bypass ACLs exactly like every other REST path
-//! under local mode.
+//! `/api/doc/refs/validate` (the Gateway strips its own `/api/doc` prefix
+//! and forwards the rest verbatim — see
+//! [`acowork_core::doc_layout::DOC_REFS_VALIDATE_ROUTE`]); internal
+//! service callers (PM) arrive as the trusted `human` actor and bypass
+//! ACLs exactly like every other REST path under local mode.
 
 use axum::Json;
 use axum::http::HeaderMap;
