@@ -150,7 +150,7 @@ export function NoNodeBanner({
           type="button"
           onClick={toggleGuide}
           aria-expanded={guideOpen}
-          className="shrink-0 rounded px-2 py-1 text-xs text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+          className="shrink-0 rounded px-2 py-1 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
         >
           {t("agentHub.remoteNodeGuide")}
         </button>
@@ -184,7 +184,7 @@ export function NoNodeBanner({
               <button
                 type="button"
                 onClick={mintRemoteCommand}
-                className="shrink-0 rounded border border-border-outer px-2 py-0.5 text-10 text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                className="shrink-0 rounded border border-border-outer px-2 py-0.5 text-10 text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
               >
                 {t("agentHub.retry")}
               </button>
@@ -212,7 +212,7 @@ export function NoNodeBanner({
                 <button
                   type="button"
                   onClick={() => void copy()}
-                  className="flex shrink-0 items-center gap-1 rounded border border-border-outer px-2 py-1 text-10 text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                  className="flex shrink-0 items-center gap-1 rounded border border-border-outer px-2 py-1 text-10 text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                 >
                   {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
                   {copied ? t("agentHub.remoteNodeCopied") : t("agentHub.remoteNodeCopy")}

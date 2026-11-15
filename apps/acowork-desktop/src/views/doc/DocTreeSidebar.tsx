@@ -221,7 +221,7 @@ function IconBtn({
         e.stopPropagation();
         onClick();
       }}
-      className="rounded p-1 text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-700 focus-visible:bg-nav-item-hover focus-visible:text-text-secondary disabled:opacity-30 dark:hover:text-zinc-100 dark:focus-visible:text-text"
+      className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 focus-visible:bg-nav-item-hover focus-visible:text-text-secondary disabled:opacity-30 dark:hover:text-zinc-100 dark:focus-visible:text-text"
     >
       {children}
     </button>

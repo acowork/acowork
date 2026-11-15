@@ -307,7 +307,7 @@ export function ChatNoticeEventRow({
                 disabled={busy}
                 onClick={() => choose({ sessionId: option.session_id })}
                 title={why ? `${label} — ${why}` : label}
-                className="group flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-nav-item-hover focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-accent)] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+                className="group flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-[var(--color-accent)] disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
               >
                 {row}
                 {!sending && (
@@ -325,7 +325,7 @@ export function ChatNoticeEventRow({
               type="button"
               disabled={busy}
               onClick={() => choose({ forceNew: true })}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-text-secondary disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
+              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-11 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:cursor-default disabled:opacity-50 disabled:hover:bg-transparent"
             >
               {pending?.forceNew ? (
                 <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin" />

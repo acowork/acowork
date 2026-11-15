@@ -431,7 +431,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
           }
         }}
         aria-expanded={expanded}
-        className="flex w-fit items-center gap-2 rounded-md bg-zinc-100/60 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-zinc-200 dark:bg-zinc-800/30  dark:hover:bg-zinc-700"
+        className="flex w-fit items-center gap-2 rounded-md bg-zinc-100/60 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:bg-zinc-800/30  dark:hover:bg-[var(--color-accent)]/15"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
@@ -711,7 +711,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
   return (
     <div className="min-w-0">
       <div
-        className="flex min-w-0 w-full items-center gap-2 rounded-md bg-zinc-100 px-2.5 py-1.5 text-left transition-colors hover:bg-zinc-200 dark:bg-zinc-700/50 dark:hover:bg-zinc-700"
+        className="flex min-w-0 w-full items-center gap-2 rounded-md bg-zinc-100 px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700/50 dark:hover:bg-[var(--color-accent)]/15"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <button className="flex min-w-0 flex-1 items-center gap-2" onClick={() => setShowDetails(!showDetails)}>

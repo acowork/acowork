@@ -271,7 +271,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                       <button
                         type="button"
                         onClick={() => onConnect(providerId, item)}
-                        className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                        className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
                       >
                         {t("harness.connect")}
                       </button>
@@ -321,7 +321,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                         <button
                           type="button"
                           onClick={() => onConnect(providerId, item)}
-                          className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                          className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
                         >
                           {t("harness.connect")}
                         </button>
@@ -368,7 +368,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                       ? "border-red-300 bg-red-50 text-red-600 hover:bg-red-100 dark:border-red-700 dark:bg-red-950 dark:text-red-400"
                       : refreshStatus.kind === "ok"
                       ? "border-emerald-300 bg-emerald-50 text-emerald-600 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-400"
-                      : "border-zinc-300 bg-modal-surface text-text-secondary hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-700",
+                      : "border-zinc-300 bg-modal-surface text-text-secondary hover:bg-[var(--color-accent)]/10 dark:border-zinc-600 dark:hover:bg-[var(--color-accent)]/15",
                     refreshStatus.kind === "loading" && "cursor-wait opacity-70",
                   )}
                 >
@@ -450,7 +450,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                             <button
                               type="button"
                               onClick={() => onConnect(providerId, item)}
-                              className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                              className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
                             >
                               {t("harness.addKey")}
                             </button>

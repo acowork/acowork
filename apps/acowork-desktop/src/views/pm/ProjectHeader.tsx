@@ -204,7 +204,7 @@ export function ProjectHeader({
                 }}
                 aria-label={t("pm.projectDescEdit")}
                 title={t("pm.projectDescEdit")}
-                className="shrink-0 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-text dark:hover:bg-zinc-700"
+                className="shrink-0 rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text dark:hover:bg-[var(--color-accent)]/15"
               >
                 <Pencil className="h-3 w-3" aria-hidden />
               </button>

@@ -424,7 +424,7 @@ function TaskDialogPane({
             <button
               type="button"
               onClick={() => requestLeave()}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-sm text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-sm text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
               aria-label={t("common.close")}
             >
               ×
@@ -454,7 +454,7 @@ function TaskDialogPane({
                 className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                   activeTab === key
                     ? "bg-zinc-200 text-text dark:bg-zinc-700"
-                    : "text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
+                    : "text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                 }`}
               >
                 {t(TASK_EDIT_TAB_I18N[key])}
@@ -559,7 +559,7 @@ function TaskDialogPane({
                 type="button"
                 onClick={() => requestLeave(() => void handleOpenExec())}
                 disabled={openingExec}
-                className="inline-flex items-center justify-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+                className="inline-flex items-center justify-center gap-1 rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
               >
                 <Play className="h-3 w-3" aria-hidden />
                 {t("pm.review.openExec")}
@@ -570,7 +570,7 @@ function TaskDialogPane({
               type="button"
               onClick={() => requestLeave()}
               disabled={form.saving}
-              className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+              className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
             >
               {t("common.cancel")}
             </button>
@@ -893,7 +893,7 @@ function Attachments({
           type="button"
           disabled={uploading}
           onClick={() => fileInputRef.current?.click()}
-          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:hover:bg-zinc-700"
+          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:hover:bg-[var(--color-accent)]/15"
         >
           <span aria-hidden>⬆</span>
           {uploading ? t("pm.task.uploading") : t("pm.task.uploadAttachment")}
@@ -933,7 +933,7 @@ function Attachments({
               ) : (
                 <a
                   href={attachmentUrl(att.id, { download: true })}
-                  className="flex h-20 flex-col items-center justify-center gap-0.5 text-text-tertiary hover:bg-zinc-50 dark:hover:bg-zinc-700"
+                  className="flex h-20 flex-col items-center justify-center gap-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                 >
                   <span className="text-lg" aria-hidden>📄</span>
                   <span className="max-w-full truncate px-1 text-10">{att.filename}</span>

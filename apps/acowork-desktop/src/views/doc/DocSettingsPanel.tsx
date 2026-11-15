@@ -55,7 +55,7 @@ export function DocSettingsPanel({ width, onResizeStart, onClose }: DocSettingsP
             type="button"
             onClick={onClose}
             aria-label={t("common.close")}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
           >
             ×
           </button>
@@ -86,7 +86,7 @@ export function DocSettingsPanel({ width, onResizeStart, onClose }: DocSettingsP
                 type="button"
                 disabled={healthy === false}
                 onClick={() => setTrashOpen(true)}
-                className="flex w-full items-center gap-2 rounded-md border border-border-outer px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-zinc-700"
+                className="flex w-full items-center gap-2 rounded-md border border-border-outer px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
               >
                 <Trash2 className="h-3.5 w-3.5" aria-hidden />
                 {t("doc.settingsPanel.openTrash")}
@@ -155,7 +155,7 @@ function ServiceStatusSection() {
         type="button"
         disabled={checking}
         onClick={() => void check()}
-        className="rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40 dark:hover:bg-zinc-700"
+        className="rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
       >
         {t("common.retry")}
       </button>

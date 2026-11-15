@@ -617,7 +617,7 @@ export function PublishWizard({
                   <button
                     onClick={() => void copyIntoLibrary(signResult?.output_path ?? "")}
                     disabled={!signResult || busy}
-                    className="mt-1.5 flex items-center gap-1.5 rounded-md border border-border-outer px-2 py-1 font-medium transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:hover:bg-zinc-700"
+                    className="mt-1.5 flex items-center gap-1.5 rounded-md border border-border-outer px-2 py-1 font-medium transition-colors hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
                   >
                     <RotateCcw className="h-3 w-3" />
                     {t("common.retry")}
@@ -628,7 +628,7 @@ export function PublishWizard({
               <button
                 onClick={runExport}
                 disabled={busy}
-                className="flex items-center gap-2 rounded-md border border-border-outer px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-50 disabled:opacity-50  dark:hover:bg-zinc-700"
+                className="flex items-center gap-2 rounded-md border border-border-outer px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 disabled:opacity-50  dark:hover:bg-[var(--color-accent)]/15"
               >
                 {busy ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
@@ -651,7 +651,7 @@ export function PublishWizard({
           <button
             onClick={onClose}
             disabled={busy}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50  dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50  dark:hover:bg-[var(--color-accent)]/15"
           >
             {step === "distribute" ? t("publishWizard.buttonClose") : t("common.cancel")}
           </button>
@@ -809,7 +809,7 @@ function AvatarPickerSubForm({
                     "flex aspect-square items-center justify-center rounded-md p-0.5 transition-colors",
                     active
                       ? "bg-zinc-200 dark:bg-zinc-600"
-                      : "hover:bg-zinc-100 dark:hover:bg-zinc-700",
+                      : "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                   )}
                   title={iconId}
                 >
@@ -842,7 +842,7 @@ function AvatarPickerSubForm({
               type="button"
               onClick={handlePickFile}
               disabled={disabled}
-              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-800 disabled:opacity-50 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-800 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
             >
               Replace
             </button>
@@ -850,7 +850,7 @@ function AvatarPickerSubForm({
               type="button"
               onClick={handleClearPackaged}
               disabled={disabled}
-              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-zinc-100 hover:text-red-600 disabled:opacity-50 dark:hover:bg-zinc-700"
+              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-red-600 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
               aria-label={t("publishWizard.ariaLabelRemoveAvatar")}
             >
               <XIcon className="h-3.5 w-3.5" />

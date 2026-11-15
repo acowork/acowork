@@ -141,7 +141,7 @@ export function TitleBar({
         <AppearanceMenu />
         <Tooltip content={t("titleBar.globalSearch")} position="bottom">
           <button
-            className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
+            className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
             onClick={openSearch}
             aria-label={t("titleBar.globalSearch")}
           >
@@ -157,7 +157,7 @@ export function TitleBar({
             // OS chrome — it must stay on the last toggle, not on the
             // window-controls group, or the two clusters fuse back into
             // one row of undifferentiated buttons.
-            className="mr-2 flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
+            className="mr-2 flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
             onClick={() => setRightPanelCollapsed((prev) => !prev)}
             aria-pressed={!rightPanelCollapsed}
             aria-label={rightPanelCollapsed ? t("titleBar.expandRightPanel") : t("titleBar.collapseRightPanel")}
@@ -173,13 +173,13 @@ export function TitleBar({
         {!isMacOS && (
           <>
             <button
-              className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
+              className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
               onClick={handleMinimize}
             >
               <Minus className="h-3.5 w-3.5" />
             </button>
             <button
-              className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-zinc-300  dark:hover:bg-zinc-700"
+              className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
               onClick={handleMaximize}
             >
               <Square className="h-3 w-3" />

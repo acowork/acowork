@@ -117,7 +117,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                 {/* Back */}
                 <button
                     onClick={() => { try { iframeRef.current?.contentWindow?.history.back(); } catch {} }}
-                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
+                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                     title={t("fileEditor.navBack")}
                 >
                     <ArrowLeft className="h-3.5 w-3.5" />
@@ -126,7 +126,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                 {/* Forward */}
                 <button
                     onClick={() => { try { iframeRef.current?.contentWindow?.history.forward(); } catch {} }}
-                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
+                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                     title={t("fileEditor.navForward")}
                 >
                     <ArrowRight className="h-3.5 w-3.5" />
@@ -135,7 +135,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                 {/* Refresh */}
                 <button
                     onClick={handleRefresh}
-                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-200  dark:hover:bg-zinc-700"
+                    className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                     title={t("fileEditor.navRefresh")}
                 >
                     <RefreshCw className="h-3.5 w-3.5" />

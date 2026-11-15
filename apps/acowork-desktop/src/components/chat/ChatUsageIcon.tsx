@@ -311,7 +311,7 @@ export function ChatUsageIcon({
               onClick={() => setOpen(false)}
               aria-label={t("chatUsage.close")}
               title={t("chatUsage.close")}
-              className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+              className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100"
             >
               <X size={14} strokeWidth={2.25} />
             </button>
@@ -353,7 +353,7 @@ export function ChatUsageIcon({
                   onClick={openWindowEditor}
                   aria-label={t("contextUsage.editWindow")}
                   title={t("contextUsage.editWindow")}
-                  className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700  dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+                  className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100"
                 >
                   <Pencil size={11} strokeWidth={2.25} />
                 </button>
@@ -421,7 +421,7 @@ export function ChatUsageIcon({
                   <button
                     type="button"
                     onClick={() => setEditingWindow(false)}
-                    className="rounded px-2 py-1 text-11 text-text-tertiary transition-colors hover:bg-zinc-100  dark:hover:bg-zinc-700/50"
+                    className="rounded px-2 py-1 text-11 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                   >
                     {t("contextUsage.cancel")}
                   </button>

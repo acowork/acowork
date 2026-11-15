@@ -161,7 +161,7 @@ export function ProjectsView() {
               </p>
               <button
                 type="button"
-                className="rounded-md bg-zinc-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="rounded-md bg-zinc-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
                 onClick={() => usePmProjectStore.getState().openCreate()}
               >
                 {t("pm.newProject")}

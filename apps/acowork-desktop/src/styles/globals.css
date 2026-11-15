@@ -1738,8 +1738,14 @@ input[type="radio"]:checked {
   color: #27272a;
 }
 
+/* Hover keeps the OPAQUE fill (darkened one step) and adds an accent inset
+   ring — the same recipe the hand-written solid buttons get from
+   `hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70`.
+   A translucent accent WASH would replace the opaque fill: white text
+   becomes unreadable in light mode and the silhouette vanishes in dark. */
 .btn-solid:hover {
   background: #d4d4d8;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-accent) 70%, transparent);
 }
 
 .dark .btn-solid {
@@ -1749,6 +1755,7 @@ input[type="radio"]:checked {
 
 .dark .btn-solid:hover {
   background: #52525b;
+  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--color-accent) 70%, transparent);
 }
 
 /* ── Solid accent-colored button — for confirm/primary actions in dialogs ── */
@@ -2078,11 +2085,11 @@ input[type="radio"]:checked {
 
 /* Selected row state.
  *
- * Lives here (not as a Tailwind utility) because the row also uses
- * `hover:bg-zinc-100`, and Tailwind emits hover variants AFTER the
- * matching non-hover utility — so an in-class `bg-[var(--color-accent)]/10`
- * gets visually overridden by `hover:bg-zinc-100` whenever the cursor is
- * over the row (i.e. exactly when you click it). Placing the rule
+ * Lives here (not as a Tailwind utility) because the row also uses a
+ * Tailwind `hover:bg-*` utility, and Tailwind emits hover variants AFTER
+ * the matching non-hover utility — so an in-class selected tint would be
+ * visually overridden whenever the cursor is over the row (i.e. exactly
+ * when you click it). Placing the rule
  * unlayered at the end of the bundle gives it higher precedence than any
  * Tailwind utility, so selected rows stay highlighted on hover as well.
  *

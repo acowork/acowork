@@ -467,7 +467,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
                                   e.stopPropagation();
                                   setConfirmDelete(null);
                                 }}
-                                className="rounded bg-zinc-200 px-2 py-0.5 text-xs text-text-secondary hover:bg-zinc-300 dark:bg-zinc-600  dark:hover:bg-zinc-500"
+                                className="rounded bg-zinc-200 px-2 py-0.5 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-600  dark:hover:bg-[var(--color-accent)]/15"
                               >
                                 {t("workspace.cancel")}
                               </button>
@@ -480,7 +480,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
                                   setConfirmDelete(dir.id);
                                 }}
                                 disabled={deletingId !== null}
-                                className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-zinc-100 dark:hover:bg-zinc-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                                className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 disabled:opacity-50 disabled:cursor-not-allowed"
                                 style={{}}
                               >
                                 <Trash2 className="h-3 w-3" />
@@ -495,7 +495,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
                                 e.stopPropagation();
                                 void handleToggleAccess(dir);
                               }}
-                              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-11 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-600"
+                              className="flex items-center gap-1 rounded px-1.5 py-0.5 text-11 transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                             >
                               {dir.access === "read-write" ? (
                                 <>
@@ -528,7 +528,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
               // denied the list has no business offering the add path
               // either. One gate, both buttons.
               disabled={gatewayMode === "relay" || deniedReason === "manage"}
-              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 disabled:opacity-40 disabled:hover:bg-zinc-100 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
+              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-900 disabled:opacity-40 disabled:hover:bg-transparent dark:bg-white/10  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100"
             >
               <FolderPlus className="h-3.5 w-3.5" />
               {t("workspace.addWorkspace")}

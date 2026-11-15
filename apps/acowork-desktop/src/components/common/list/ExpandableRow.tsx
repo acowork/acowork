@@ -103,7 +103,7 @@ export function ExpandableRow({
         className={cn(
           "flex w-full items-center gap-2 text-left transition-colors",
           variant === "section"
-            ? "min-h-[30px] rounded-md bg-zinc-100 px-2.5 hover:bg-zinc-200/80 dark:bg-zinc-700/60 dark:hover:bg-zinc-600/50"
+            ? "min-h-[30px] rounded-md bg-zinc-100 px-2.5 hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700/60 dark:hover:bg-[var(--color-accent)]/15"
             : surface === "inset"
               ? cn("min-h-[36px] px-3", listRowHoverInset)
               : cn("min-h-[36px] px-3", listRowHover),

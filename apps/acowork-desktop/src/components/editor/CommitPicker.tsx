@@ -292,7 +292,7 @@ export function CommitPicker({
                             "flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors " +
                             (currentRef === WORKING_TREE_REF
                                 ? "bg-blue-50 font-medium text-blue-700 dark:bg-blue-900/40 dark:text-blue-200"
-                                : "text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700")
+                                : "text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15")
                         }
                     >
                         <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-10 text-text-secondary dark:bg-zinc-600 ">
@@ -327,7 +327,7 @@ export function CommitPicker({
                                 "flex w-full items-center gap-2 px-3 py-1.5 text-left transition-colors",
                                 selected
                                     ? "bg-blue-50 dark:bg-blue-900/40"
-                                    : "hover:bg-zinc-100 dark:hover:bg-zinc-700",
+                                    : "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                             )}
                         >
                             <span className="shrink-0 rounded bg-zinc-200 px-1 py-px font-mono text-10 text-text-secondary dark:bg-zinc-600 ">
@@ -355,7 +355,7 @@ export function CommitPicker({
                         onClick={() => setPage((p) => Math.max(1, p - 1))}
                         disabled={pagination.currentPage <= 1 || loading2}
                         aria-label={t("gitStatus.commitPickerPrevPage")}
-                        className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-700"
+                        className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30  dark:hover:bg-[var(--color-accent)]/15"
                     >
                         <ChevronLeft className="h-3.5 w-3.5" />
                     </button>
@@ -374,7 +374,7 @@ export function CommitPicker({
                             pagination.currentPage >= pagination.totalPages || loading2
                         }
                         aria-label={t("gitStatus.commitPickerNextPage")}
-                        className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-700"
+                        className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30  dark:hover:bg-[var(--color-accent)]/15"
                     >
                         <ChevronRight className="h-3.5 w-3.5" />
                     </button>

@@ -470,6 +470,38 @@ describe("ChatExecutionBlock", () => {
    *  state as a filled capsule — accent BACKGROUND, white text, the one
    *  accent usage the design language sanctions (`chatCardChrome.test.tsx`);
    *  an idle run wears nothing. The shape is the status signal now. */
+  /** The header must stay ONE line tall, however narrow the chat pane gets.
+   *  A flex item without `min-w-0` cannot shrink below its min-content width,
+   *  so the state words wrapped onto two or three lines and the card grew
+   *  TALLER as the window got NARROWER (user report: the execution card blew
+   *  up its height). The text must shorten with an ellipsis instead. */
+  it("the header stays one line: the state text truncates instead of wrapping", () => {
+    const { container: idle } = renderBlock({
+      [REF1]: entryOf({
+        status: "ok",
+        projection: { round_id: "r1", terminal: true, status: "completed", answer: { body: "a", ts: "1" } },
+      }),
+    });
+    const state = idle.querySelector("[data-testid='exec-block-state']") as HTMLElement;
+    expect(state).toBeTruthy();
+    // `min-w-0` lets the flex item shrink past its content; `truncate` is what
+    // turns that shrink into an ellipsis on ONE line.
+    expect(state.className).toContain("min-w-0");
+    expect(state.className).toContain("truncate");
+
+    // The working capsule is the same story in a filled pill: its own text is
+    // the part that has to give way.
+    const { container: working } = renderBlock({
+      [REF1]: entryOf({
+        status: "pending",
+        projection: { round_id: "r1", terminal: false, status: "in_progress" },
+      }),
+    });
+    const pill = working.querySelector("[data-testid='exec-block-working-capsule']") as HTMLElement;
+    expect(pill.className).toContain("min-w-0");
+    expect(pill.querySelector(".truncate")).toBeTruthy();
+  });
+
   it("a working run wears an accent capsule; an idle run does not", () => {
     const { container: working } = renderBlock({
       [REF1]: entryOf({

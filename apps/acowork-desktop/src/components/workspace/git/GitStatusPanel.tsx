@@ -54,7 +54,7 @@ const EMPTY_CHANGES: GitChangeDto[] = [];
  *  decorations (absolute, shadow, animate-in) which would look out
  *  of place inside the flat file-list footer. */
 const PAGINATION_BUTTON_CLASS =
-  "inline-flex items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 p-1 text-text-tertiary transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30 dark:border-zinc-600 dark:bg-zinc-700  dark:hover:bg-zinc-600";
+  "inline-flex items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 disabled:cursor-not-allowed disabled:opacity-30 dark:border-zinc-600 dark:bg-zinc-700  dark:hover:bg-[var(--color-accent)]/15";
 
 interface GitStatusPanelProps {
   agentId: string;

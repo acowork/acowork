@@ -44,7 +44,7 @@ describe("AttachmentCapsule", () => {
     const className = screen.getByTitle("x").className;
     expect(className).toContain("rounded-md");
     expect(className).toContain("border-border-outer");
-    expect(className).toContain("hover:bg-zinc-100");
+    expect(className).toContain("hover:bg-[var(--color-accent)]/10");
   });
 
   it("renders the trailing control inside the frame", () => {

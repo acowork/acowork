@@ -110,7 +110,7 @@ export default function OfficePdfViewer(props: OfficePdfViewerProps) {
                     {conv.status === "failed" && (
                         <button
                             type="button"
-                            className="ml-auto shrink-0 rounded border border-border-default px-2 py-0.5 hover:bg-hover"
+                            className="ml-auto shrink-0 rounded border border-border-default px-2 py-0.5 hover:bg-[var(--color-accent)]/10"
                             onClick={conv.retry}
                         >
                             {t("fileEditor.docViewer.retry")}

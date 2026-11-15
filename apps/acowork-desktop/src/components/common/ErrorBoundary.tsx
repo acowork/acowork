@@ -49,7 +49,7 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
           <div className="mt-6 flex items-center justify-center gap-3">
             <button
               onClick={onRetry}
-              className="flex items-center gap-2 rounded-md bg-zinc-200 px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-300 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+              className="flex items-center gap-2 rounded-md bg-zinc-200 px-4 py-2 text-sm font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
             >
               <RefreshCw className="h-4 w-4" />
               {t("errorBoundary.retry")}

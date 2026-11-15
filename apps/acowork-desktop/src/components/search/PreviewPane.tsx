@@ -606,7 +606,7 @@ function PreviewHeader({
                     type="button"
                     onClick={handleCopy}
                     aria-label={t("common.copy")}
-                    className="ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-11 text-text-tertiary transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
+                    className="ml-auto inline-flex shrink-0 items-center gap-1 rounded px-1.5 py-0.5 text-11 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                 >
                     {copied ? (
                         <>

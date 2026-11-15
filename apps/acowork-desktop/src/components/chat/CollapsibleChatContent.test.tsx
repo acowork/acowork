@@ -118,7 +118,7 @@ describe("CollapsibleChatContent", () => {
     // Idle: no rectangle is drawn over the bubble. The rounded highlight
     // is a pointer affordance, painted only on hover / keyboard focus.
     expect(btn.className).toContain("bg-transparent");
-    expect(btn.className).toContain("hover:bg-black/5");
+    expect(btn.className).toContain("hover:bg-[var(--color-accent)]/10");
     expect(btn.className).not.toContain("bg-linear-to-b");
     expect(btn.getAttribute("aria-label")).toBe("chatView.block.expandAnswer");
     fireEvent.click(btn);

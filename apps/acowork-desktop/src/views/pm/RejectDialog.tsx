@@ -72,7 +72,7 @@ export function RejectDialog({ open, taskTitle, onConfirm, onCancel }: RejectDia
           <button
             type="button"
             onClick={onCancel}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("common.cancel")}
           </button>

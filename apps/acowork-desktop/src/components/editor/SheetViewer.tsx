@@ -139,7 +139,7 @@ export default function SheetViewer(props: ViewerFileProps) {
                             className={
                                 i === activeSheet
                                     ? "rounded px-2 py-0.5 text-xs font-medium bg-hover text-text"
-                                    : "rounded px-2 py-0.5 text-xs text-text-tertiary hover:bg-hover"
+                                    : "rounded px-2 py-0.5 text-xs text-text-tertiary hover:bg-[var(--color-accent)]/10"
                             }
                         >
                             {s.name}

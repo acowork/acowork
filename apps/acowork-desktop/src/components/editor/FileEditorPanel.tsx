@@ -1653,8 +1653,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                                             className={cn(
                                                 "shrink-0 rounded p-0.5 transition-opacity",
                                                 isActive
-                                                    ? "opacity-60 hover:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600"
-                                                    : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-zinc-300 dark:hover:bg-zinc-600",
+                                                    ? "opacity-60 hover:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
+                                                    : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                                             )}
                                         >
                                             <X className="h-3 w-3" />
@@ -1693,7 +1693,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                                 locateDisabled
                                     ? "text-text-secondary  cursor-not-allowed"
-                                    : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
+                                    : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300",
                             )}
                             >
                                 <Locate className="h-3.5 w-3.5" />
@@ -1720,7 +1720,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                         : t("fileEditor.openPreview")
                                 }
                                 onClick={handleTogglePreview}
-                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
                             >
                                 {activeFile.mode === "preview" ? (
                                     <Code2 className="h-3.5 w-3.5" />
@@ -1767,8 +1767,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                                         : activeFile.saveError
                                           ? "text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30"
                                           : activeFile.dirty
-                                            ? "text-[var(--color-accent)] hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
-                                            : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 cursor-default",
+                                            ? "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
+                                            : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 cursor-default",
                                 )}
                             >
                                 {activeFile.saving ? (
@@ -1837,7 +1837,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                             "flex items-center gap-2 truncate px-3 py-1 text-left transition-colors " +
                                             (pickerSide === "base"
                                                 ? "bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200"
-                                                : "text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800/60")
+                                                : "text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15")
                                         }
                                     >
                                         <span className="font-medium">
@@ -1871,7 +1871,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                             "flex items-center justify-end gap-2 truncate px-3 py-1 text-right transition-colors " +
                                             (pickerSide === "head"
                                                 ? "bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200"
-                                                : "text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800/60")
+                                                : "text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15")
                                         }
                                     >
                                         <span className="truncate text-text-tertiary ">
@@ -2067,7 +2067,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 <AlertCircle className="h-4 w-4" />
                                 {t("fileEditor.previewLoadFailed")}
                                 <button
-                                    className="rounded border border-border-default px-2 py-1 hover:bg-hover"
+                                    className="rounded border border-border-default px-2 py-1 hover:bg-[var(--color-accent)]/10"
                                     onClick={rasterImageBlob.retry}
                                 >
                                     {t("fileEditor.previewRetry")}

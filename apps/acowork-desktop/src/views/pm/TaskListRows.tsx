@@ -193,7 +193,7 @@ function TitleCell({
             e.stopPropagation();
             onToggleCollapse(task.id);
           }}
-          className="shrink-0 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-text-secondary dark:hover:bg-zinc-700"
+          className="shrink-0 rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
         >
           {collapsed ? (
             <Plus className="h-3 w-3" aria-hidden />
@@ -515,7 +515,7 @@ export function TaskListEmptyRow({
             <button
               type="button"
               onClick={onClearFilters}
-              className="mt-1 rounded px-2 py-0.5 text-10 text-[var(--color-accent)] hover:bg-zinc-100 dark:hover:bg-zinc-800"
+              className="mt-1 rounded px-2 py-0.5 text-10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
             >
               {clearFiltersLabel}
             </button>

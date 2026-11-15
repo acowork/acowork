@@ -596,7 +596,7 @@ function ProvidersTab() {
                           type="button"
                           onClick={() => setEditExistingEntries(editExistingEntries.filter((e) => e.accountId !== entry.accountId))}
                           aria-label="Remove account"
-                          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                         >
                           <Minus className="h-3.5 w-3.5" />
                         </button>
@@ -634,7 +634,7 @@ function ProvidersTab() {
                           onClick={() => setEditKeyEntries(editKeyEntries.filter((_, i) => i !== idx))}
                           disabled={editKeyEntries.length <= 1}
                           aria-label="Remove key"
-                          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-zinc-700"
+                          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-[var(--color-accent)]/15"
                         >
                           <Minus className="h-3.5 w-3.5" />
                         </button>
@@ -710,7 +710,7 @@ function ProvidersTab() {
             <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
               <button
                 onClick={() => setShowEditDialog(null)}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
               >
                 {t("common.cancel")}
               </button>
@@ -1293,7 +1293,7 @@ export function McpTab() {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={closeForm}
-                className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:border-zinc-600  dark:hover:bg-[var(--color-accent)]/15"
               >
                 {t("common.cancel")}
               </button>
@@ -1338,7 +1338,7 @@ export function McpTab() {
               </button>
               <button
                 onClick={() => { setActivePreset(null); setPresetEnvForm({}); }}
-                className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-50 dark:border-zinc-600  dark:hover:bg-zinc-700"
+                className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:border-zinc-600  dark:hover:bg-[var(--color-accent)]/15"
               >
                 {t("common.cancel")}
               </button>

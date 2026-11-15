@@ -119,7 +119,7 @@ export function ModelProtocolEditor({
                 ? t("harness.probeSendsOneRequest")
                 : t("harness.probeNeedsSaveFirst")
             }
-            className="rounded border border-border-outer px-2 py-1 text-xs text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-800"
+            className="rounded border border-border-outer px-2 py-1 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
           >
             {verifying ? t("harness.probeRunning") : t("harness.probeButton")}
           </button>

@@ -334,7 +334,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
                 onClick={() => toggleViewAs(viewAsUserId!)}
                 aria-label={t("userList.clearView")}
                 title={t("userList.clearView")}
-                className="ml-auto rounded p-0.5 hover:bg-nav-item-hover"
+                className="ml-auto rounded p-0.5 hover:bg-[var(--color-accent)]/10"
               >
                 <X className="h-3 w-3" />
               </button>

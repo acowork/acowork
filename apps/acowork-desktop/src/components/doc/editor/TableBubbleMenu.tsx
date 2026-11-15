@@ -54,7 +54,7 @@ function MenuButton({
       onClick={onClick}
       className={cn(
         "flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors",
-        "hover:bg-zinc-100 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
+        "hover:bg-[var(--color-accent)]/10 hover:text-zinc-800 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100",
       )}
     >
       <Icon className="h-3 w-3" aria-hidden />

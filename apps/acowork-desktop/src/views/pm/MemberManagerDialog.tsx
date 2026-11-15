@@ -221,7 +221,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
                 return (
                   <li
                     key={m.instance_id}
-                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                   >
                     <MemberAvatar member={m} size={24} />
                     <div className="min-w-0 flex-1">
@@ -282,7 +282,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
                 {candidates.map((a) => (
                   <li
                     key={a.meta.instance_id}
-                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                   >
                     <AgentAvatar
                       agentId={a.meta.instance_id}
@@ -301,7 +301,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
                       type="button"
                       disabled={busyId === a.meta.instance_id}
                       onClick={() => handleAdd(a.meta.instance_id, "agent")}
-                      className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40  dark:hover:bg-zinc-700"
+                      className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-40  dark:hover:bg-[var(--color-accent)]/15"
                     >
                       {t("pm.addMember")}
                     </button>
@@ -321,7 +321,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
                 {userCandidates.map((u) => (
                   <li
                     key={u.user_id}
-                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-zinc-50 dark:hover:bg-zinc-800/60"
+                    className="flex items-center gap-2 rounded-md px-2 py-1.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                   >
                     <UserAvatar
                       displayName={u.displayName}
@@ -337,7 +337,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
                       type="button"
                       disabled={busyId === u.user_id}
                       onClick={() => handleAdd(u.user_id, "user")}
-                      className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40  dark:hover:bg-zinc-700"
+                      className="shrink-0 rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-40  dark:hover:bg-[var(--color-accent)]/15"
                     >
                       {t("pm.addMember")}
                     </button>
@@ -385,7 +385,7 @@ export function MemberManagerDialog({ project, onClose }: MemberManagerDialogPro
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
             aria-label={t("common.close")}
           >
             ×

@@ -1118,7 +1118,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                     type="button"
                     onClick={addCapability}
                     disabled={busy}
-                    className="flex shrink-0 items-center gap-1 rounded border border-border-outer px-2 py-1 text-10 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+                    className="flex shrink-0 items-center gap-1 rounded border border-border-outer px-2 py-1 text-10 font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
                   >
                     <Plus className="h-3 w-3" />
                     {t("createWizard.capabilityAdd")}
@@ -1311,7 +1311,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
           <button
             onClick={stepIndex === 0 ? onClose : handleBack}
             disabled={busy}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
           >
             {stepIndex === 0 ? t("common.cancel") : t("common.back")}
           </button>

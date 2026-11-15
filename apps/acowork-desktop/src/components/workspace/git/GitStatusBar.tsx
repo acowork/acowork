@@ -231,7 +231,7 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
                   "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                   historyAnchor || viewingCommit
                     ? "text-[var(--color-accent)] bg-zinc-200 dark:bg-zinc-700"
-                    : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
+                    : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300",
                 )}
               >
                 <Clock className="h-3.5 w-3.5" />
@@ -256,7 +256,7 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
                     void refresh(agentId, workspaceId);
                   }
                 }}
-                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
               </span>

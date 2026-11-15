@@ -787,7 +787,7 @@ const MessageBubble = React.memo(function MessageBubble({
   if (message.type === "tool_call") {
     return (
       <div className="flex justify-start">
-        <div className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50  dark:hover:bg-zinc-800">
+        <div className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:border-zinc-700 dark:bg-zinc-800/50  dark:hover:bg-[var(--color-accent)]/15">
           <button
             className="flex flex-1 items-start gap-2 min-w-0"
             onClick={() => setExpanded(!expanded)}
@@ -807,7 +807,7 @@ const MessageBubble = React.memo(function MessageBubble({
       <>
         <div className="flex justify-start" onContextMenu={onContextMenu}>
           <button
-            className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800/50  dark:hover:bg-zinc-800"
+            className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:border-zinc-700 dark:bg-zinc-800/50  dark:hover:bg-[var(--color-accent)]/15"
             onClick={() => setExpanded(!expanded)}
           >
             <Wrench className="h-3 w-3 shrink-0" />

@@ -211,7 +211,7 @@ function LocalAgentCard({
           title={blockedReason}
           aria-label={t("agentHub.moreActions")}
           aria-haspopup="menu"
-          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-40 dark:hover:bg-zinc-700"
+          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
         >
           <MoreHorizontal className="h-4 w-4" />
         </button>

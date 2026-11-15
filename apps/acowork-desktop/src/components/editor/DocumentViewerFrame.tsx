@@ -120,7 +120,7 @@ export function DocumentViewerFrame({ file, state = IDLE_FEED, banner, extraActi
     };
 
     const actionBtn =
-        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-hover hover:text-text disabled:opacity-50";
+        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text disabled:opacity-50";
 
     return (
         <div className="flex h-full flex-col">
@@ -175,7 +175,7 @@ export function DocumentViewerFrame({ file, state = IDLE_FEED, banner, extraActi
                     <span className="max-w-[80%] truncate font-mono text-10">{state.error}</span>
                     <button
                         type="button"
-                        className="mt-1 inline-flex items-center gap-1 rounded border border-border-default px-2 py-1 hover:bg-hover"
+                        className="mt-1 inline-flex items-center gap-1 rounded border border-border-default px-2 py-1 hover:bg-[var(--color-accent)]/10"
                         onClick={state.retry}
                     >
                         <RefreshCw className="h-3 w-3" />

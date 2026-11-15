@@ -575,7 +575,7 @@ export function LspTab() {
                   aria-label={t("harnessLsp.addServer")}
                   onClick={() => setForm({ mode: "add" })}
                   disabled={!adminUrl}
-                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-40 dark:hover:bg-zinc-700 dark:text-zinc-300 transition-colors"
+                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15 dark:text-zinc-300 transition-colors"
                 >
                   <Plus className="h-3.5 w-3.5" />
                 </button>
@@ -588,7 +588,7 @@ export function LspTab() {
                   aria-label={refreshing ? t("harnessLsp.refreshing") : t("harnessLsp.refresh")}
                   onClick={() => void loadAll({ force: true })}
                   disabled={refreshing || !adminUrl}
-                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:text-zinc-300 transition-colors"
+                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-[var(--color-accent)]/15 dark:text-zinc-300 transition-colors"
                 >
                   {refreshing ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -808,7 +808,7 @@ function LspServerCard({
           <button
             onClick={onEdit}
             aria-label={t("harnessLsp.editServer")}
-            className="inline-flex items-center justify-center rounded p-1.5 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:text-zinc-300 transition-colors"
+            className="inline-flex items-center justify-center rounded p-1.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:text-zinc-300 transition-colors"
           >
             <Pencil className="h-3 w-3" />
           </button>
@@ -1253,7 +1253,7 @@ function LspServerFormDialog({
         <div className="mt-5 flex justify-end gap-2">
           <button
             onClick={onCancel}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("common.cancel")}
           </button>

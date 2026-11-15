@@ -69,7 +69,7 @@ export function AgentPickerChip({ agents, value, onChange }: AgentPickerChipProp
                     e.stopPropagation();
                 }}
                 onClick={() => setOpen((p) => !p)}
-                className="flex h-full items-center gap-1.5 px-5 py-1.5 min-h-[var(--ui-dialog-zone-h)] outline-none hover:bg-zinc-100 focus-visible:bg-zinc-100 dark:hover:bg-zinc-700/50 dark:focus-visible:bg-zinc-700/50"
+                className="flex h-full items-center gap-1.5 px-5 py-1.5 min-h-[var(--ui-dialog-zone-h)] outline-none hover:bg-[var(--color-accent)]/10 focus-visible:bg-zinc-100 dark:hover:bg-[var(--color-accent)]/15 dark:focus-visible:bg-zinc-700/50"
             >
                 {selected ? (
                     <AgentAvatar

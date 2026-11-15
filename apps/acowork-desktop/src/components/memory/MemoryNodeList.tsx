@@ -80,7 +80,7 @@ export function MemoryNodeList({
           aria-label="Previous memory page"
           disabled={page <= 1}
           onClick={() => onPageChange(page - 1)}
-          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-800"
+          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30  dark:hover:bg-[var(--color-accent)]/15"
         >
           <ChevronLeft className="h-3.5 w-3.5" />
         </button>
@@ -92,7 +92,7 @@ export function MemoryNodeList({
           aria-label="Next memory page"
           disabled={page >= totalPages}
           onClick={() => onPageChange(page + 1)}
-          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-800"
+          className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30  dark:hover:bg-[var(--color-accent)]/15"
         >
           <ChevronRight className="h-3.5 w-3.5" />
         </button>

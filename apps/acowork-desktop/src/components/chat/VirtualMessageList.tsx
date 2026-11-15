@@ -568,7 +568,7 @@ export const VirtualMessageList = React.forwardRef<
           </div>
           <button
             onClick={() => onRetryLoadSession?.()}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("chatPanel.retry")}
           </button>

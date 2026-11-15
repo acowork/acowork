@@ -646,7 +646,7 @@ export function EmbeddingModelTab() {
                                     aria-label={loading ? t("embedding.loading") : t("embedding.refresh")}
                                     onClick={loadModels}
                                     disabled={loading}
-                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
                                 >
                                     {loading ? (
                                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -712,7 +712,7 @@ export function EmbeddingModelTab() {
                                 <button
                                     aria-label={t("embedding.addCustomProvider")}
                                     onClick={() => setCustomDialogOpen(true)}
-                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
                                 >
                                     <Plus className="h-3.5 w-3.5" />
                                 </button>
@@ -725,7 +725,7 @@ export function EmbeddingModelTab() {
                                     aria-label={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
                                     onClick={loadCloudProviders}
                                     disabled={cloudLoading}
-                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
                                 >
                                     {cloudLoading ? (
                                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1750,7 +1750,7 @@ function AddCustomEmbeddingProviderDialog({
                     <button
                         onClick={handleClose}
                         disabled={saving}
-                        className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50  dark:hover:bg-zinc-700"
+                        className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50  dark:hover:bg-[var(--color-accent)]/15"
                     >
                         {t("embedding.cancel")}
                     </button>

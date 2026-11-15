@@ -119,7 +119,7 @@ export function TaskFieldPicker({
                   disabled={col.required || index <= 1 || index === 0}
                   title={t("pm.list.fields.moveUp")}
                   aria-label={t("pm.list.fields.moveUp")}
-                  className="rounded px-1 text-10 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+                  className="rounded px-1 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30 dark:hover:bg-[var(--color-accent)]/15"
                 >
                   ▲
                 </button>
@@ -129,7 +129,7 @@ export function TaskFieldPicker({
                   disabled={col.required || index === shown.length - 1}
                   title={t("pm.list.fields.moveDown")}
                   aria-label={t("pm.list.fields.moveDown")}
-                  className="rounded px-1 text-10 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+                  className="rounded px-1 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30 dark:hover:bg-[var(--color-accent)]/15"
                 >
                   ▼
                 </button>
@@ -159,14 +159,14 @@ export function TaskFieldPicker({
         <button
           type="button"
           onClick={onReset}
-          className="rounded px-1.5 py-0.5 text-10 text-text-tertiary hover:bg-zinc-100 hover:text-text dark:hover:bg-zinc-800"
+          className="rounded px-1.5 py-0.5 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text dark:hover:bg-[var(--color-accent)]/15"
         >
           {t("pm.list.fields.reset")}
         </button>
         <button
           type="button"
           onClick={onClose}
-          className="rounded bg-zinc-800 px-2 py-0.5 text-10 font-medium text-white hover:bg-zinc-700 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded bg-zinc-800 px-2 py-0.5 text-10 font-medium text-white hover:bg-zinc-700 hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 dark:bg-zinc-700 dark:hover:bg-zinc-600"
         >
           {t("pm.list.fields.done")}
         </button>

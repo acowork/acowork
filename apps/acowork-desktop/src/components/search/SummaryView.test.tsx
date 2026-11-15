@@ -196,7 +196,12 @@ describe("SummaryView — regenerate after a summary exists", () => {
         // against the frozen snapshot".
         const btn = screen.getByTestId("summary-start");
         expect(btn.textContent).toContain("Regenerate");
-        expect(screen.getAllByRole("button").filter((b) => b.className.includes("accent"))).toHaveLength(1);
+        // Match the trigger's own accent BORDER, not the loose "accent"
+        // substring: every button now carries an accent hover tint too.
+        expect(
+            screen.getAllByRole("button")
+                .filter((b) => b.className.includes("border-[var(--color-accent)]/30")),
+        ).toHaveLength(1);
     });
 
     it("re-runs on click after a summary exists", () => {

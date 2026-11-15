@@ -143,7 +143,7 @@ export function GroupChatPromptCard({ sessionId }: { sessionId: string }) {
         aria-label={t("groupChatPrompt.edit")}
         title={t("groupChatPrompt.edit")}
         data-testid="group-chat-prompt-edit"
-        className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
+        className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:text-zinc-300"
       >
         <Pencil className="h-3 w-3" />
       </button>
@@ -155,7 +155,7 @@ export function GroupChatPromptCard({ sessionId }: { sessionId: string }) {
           aria-label={t("groupChatPrompt.restore")}
           title={t("groupChatPrompt.restore")}
           data-testid="group-chat-prompt-restore"
-          className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-300"
+          className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-300"
         >
           {busy ? (
             <Loader2 className="h-3 w-3 animate-spin" />
@@ -197,7 +197,7 @@ export function GroupChatPromptCard({ sessionId }: { sessionId: string }) {
                 <button
                   type="button"
                   onClick={edit}
-                  className="inline-flex items-center gap-1 rounded border border-border-outer px-2 py-0.5 text-10 text-text-secondary transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                  className="inline-flex items-center gap-1 rounded border border-border-outer px-2 py-0.5 text-10 text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                 >
                   <Pencil className="h-3 w-3" />
                   {t("groupChatPrompt.edit")}

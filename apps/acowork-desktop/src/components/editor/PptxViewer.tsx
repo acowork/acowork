@@ -161,7 +161,7 @@ export default function PptxViewer(props: ViewerFileProps) {
                     <button
                         type="button"
                         onClick={handleJump}
-                        className="rounded border border-border-default px-1.5 py-0.5 text-xs hover:bg-hover"
+                        className="rounded border border-border-default px-1.5 py-0.5 text-xs hover:bg-[var(--color-accent)]/10"
                     >
                         {t("fileEditor.pptxViewer.jump")}
                     </button>

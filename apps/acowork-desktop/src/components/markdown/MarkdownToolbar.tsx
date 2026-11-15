@@ -162,7 +162,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
       "flex h-7 w-7 shrink-0 items-center justify-center rounded transition-colors",
       active
         ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-        : "text-text-tertiary hover:bg-zinc-100 hover:text-zinc-800  dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
+        : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-800  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100",
       inactive && "pointer-events-none opacity-40",
     );
 

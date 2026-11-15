@@ -1120,7 +1120,7 @@ export function AgentSetupTab() {
                               disabled={avatarBusy}
                               className={`flex items-center justify-center rounded-md p-1 transition-colors ${isSelected
                                 ? "bg-zinc-200 dark:bg-zinc-600"
-                                : "hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                                : "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                                 }`}
                             >
                               <img

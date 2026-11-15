@@ -114,7 +114,7 @@ export function AttachedContextChips({ surface = "exec" }: { surface?: "exec" | 
               <div
                 role="button"
                 tabIndex={0}
-                className="flex cursor-pointer items-center gap-1.5 rounded-l-md px-2.5 py-1 hover:bg-zinc-100 dark:hover:bg-zinc-700 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]/40"
+                className="flex cursor-pointer items-center gap-1.5 rounded-l-md px-2.5 py-1 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 focus:outline-none focus:ring-2 focus:ring-[var(--color-accent)]/40"
                 onClick={handleOpen}
                 onKeyDown={(e) => {
                   if (e.key === "Enter" || e.key === " ") {
@@ -133,7 +133,7 @@ export function AttachedContextChips({ surface = "exec" }: { surface?: "exec" | 
                 get a button-in-button DOM structure. */}
             <button
               type="button"
-              className="mr-0.5 rounded p-0.5 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+              className="mr-0.5 rounded p-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
               onClick={handleRemove}
               aria-label={`Remove ${item.name}`}
             >

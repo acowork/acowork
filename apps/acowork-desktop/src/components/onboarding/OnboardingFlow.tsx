@@ -876,7 +876,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
               return (
                 <label
                   key={agent.resourceName}
-                  className="flex cursor-pointer gap-2 rounded-md border border-zinc-100 p-2.5 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800"
+                  className="flex cursor-pointer gap-2 rounded-md border border-zinc-100 p-2.5 hover:bg-[var(--color-accent)]/10 dark:border-zinc-800 dark:hover:bg-[var(--color-accent)]/15"
                 >
                   <input
                     type="checkbox"
@@ -924,7 +924,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           onClick={handleInstallFromFile}
           disabled={installInFlight || noAvailableNode}
           title={noAvailableNode ? t("agentHub.noAvailableNode") : undefined}
-          className="w-full rounded-md border border-zinc-200 p-3 text-left transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:hover:bg-zinc-800"
+          className="w-full rounded-md border border-zinc-200 p-3 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:border-zinc-700 dark:hover:bg-[var(--color-accent)]/15"
         >
           <span className="text-11 font-medium">{t("onboarding.installAgent.fromFileTitle")}</span>
           <p className="mt-0.5 text-10 text-text-tertiary">{t("onboarding.installAgent.fromFileSubtitle")}</p>

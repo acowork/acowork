@@ -178,7 +178,7 @@ export function SkillMenuList({
           "mt-1 flex w-full items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-2 py-1.5 text-xs font-medium text-text-secondary transition-colors",
           readOnly
             ? "cursor-not-allowed opacity-50"
-            : "hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:hover:bg-white/15 dark:hover:text-zinc-100",
+            : "hover:bg-[var(--color-accent)]/10 hover:text-zinc-900 dark:bg-white/10 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100",
         )}
       >
         <FolderPlus className="h-3.5 w-3.5" />
@@ -270,7 +270,7 @@ export function SkillMenuList({
               <button
                 onClick={handleCloseDialog}
                 disabled={importing}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
               >
                 {t("common.cancel")}
               </button>

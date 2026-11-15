@@ -315,7 +315,7 @@ export const CollapsibleChatContent = memo(function CollapsibleChatContent({
               ? t("chatView.block.collapseAnswer")
               : t("chatView.block.expandAnswer")
           }
-          className="mt-1 flex h-7 w-full items-center justify-center rounded-md bg-transparent text-text-tertiary transition-colors hover:bg-black/5 hover:text-text-secondary focus-visible:bg-black/5 focus-visible:text-text-secondary dark:hover:bg-white/10 dark:focus-visible:bg-white/10"
+          className="mt-1 flex h-7 w-full items-center justify-center rounded-md bg-transparent text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary focus-visible:bg-black/5 focus-visible:text-text-secondary dark:hover:bg-[var(--color-accent)]/15 dark:focus-visible:bg-white/10"
         >
           {shownExpanded ? (
             <ChevronsUp className="h-4 w-4" />

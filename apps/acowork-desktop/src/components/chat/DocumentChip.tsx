@@ -100,7 +100,7 @@ export function DocumentChip({
       {onRemove && (
         <button
           type="button"
-          className="ml-0.5 rounded p-0.5 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+          className="ml-0.5 rounded p-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
           onClick={(e) => {
             e.stopPropagation();
             onRemove();

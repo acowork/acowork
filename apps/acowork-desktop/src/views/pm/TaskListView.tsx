@@ -692,7 +692,7 @@ export function TaskListView({
                       type="button"
                       aria-label={t("pm.list.columnMenu")}
                       onClick={openAt({ kind: "columnMenu", column: c.key })}
-                      className="shrink-0 rounded px-0.5 text-9 opacity-0 hover:bg-zinc-200 focus:opacity-100 group-hover/th:opacity-100 dark:hover:bg-zinc-700"
+                      className="shrink-0 rounded px-0.5 text-9 opacity-0 hover:bg-[var(--color-accent)]/10 focus:opacity-100 group-hover/th:opacity-100 dark:hover:bg-[var(--color-accent)]/15"
                     >
                       ⋮
                     </button>

@@ -866,7 +866,7 @@ export function AgentList({ width }: AgentListProps) {
                         disabled={!nodeOnline}
                         title={t("agentList.installAgent")}
                         data-testid="node-group-install"
-                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
+                        className="flex w-full items-center gap-2 px-3 py-2 text-left text-xs text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                       >
                         <Plus className="h-3.5 w-3.5 shrink-0" />
                         <span className="truncate">{t("agentList.installAgent")}</span>
@@ -998,7 +998,7 @@ export function AgentList({ width }: AgentListProps) {
           onClick={() => {
             setAddMenuOpen(!addMenuOpen);
           }}
-          className="flex w-full items-center justify-center rounded-md px-0 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-nav-control focus-visible:bg-nav-control "
+          className="flex w-full items-center justify-center rounded-md px-0 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 focus-visible:bg-nav-control "
           aria-label={t("agentList.ariaLabelAddAgent")}
         >
           <Plus className="h-3.5 w-3.5" />
@@ -1275,7 +1275,7 @@ function NodeGroupHeader({
           title={permissionsLabel}
           aria-label={permissionsLabel}
           data-testid="node-permissions-btn"
-          className="mr-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
+          className="mr-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:text-zinc-300"
         >
           {/* ponytail: icon only shrinks to 90% (14 -> 12.6px) for a lighter
               glyph; the button box stays h-6 w-6 so padding + hit area are

@@ -1458,7 +1458,7 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
         {atBottom === false && items.length > 0 && (
           <button
             onClick={stickNow}
-            className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+            className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-all animate-in fade-in zoom-in"
             aria-label={t("chatPanel.ariaLabelScrollToBottom")}
           >
             <ChevronsDown className="h-4 w-4 text-text-tertiary" />

@@ -71,7 +71,7 @@ export function PmSettingsPanel({ width, onResizeStart, onClose }: PmSettingsPan
             type="button"
             onClick={onClose}
             aria-label={t("common.close")}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
           >
             ×
           </button>
@@ -365,7 +365,7 @@ function ServiceStatusSection() {
         type="button"
         disabled={checking}
         onClick={() => void check()}
-        className="rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-40 dark:hover:bg-zinc-700"
+        className="rounded-md px-2 py-1 text-11 font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
       >
         {t("common.retry")}
       </button>

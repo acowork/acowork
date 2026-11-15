@@ -752,7 +752,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                                   setSnapshotsOpen(true);
                                   setSnapshotPage((p) => Math.max(0, p - 1));
                                 }}
-                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400  dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
                               >
                                 <ChevronLeft className="h-3.5 w-3.5" />
                               </button>
@@ -767,7 +767,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                                   setSnapshotsOpen(true);
                                   setSnapshotPage((p) => Math.min(snapshotTotalPages - 1, p + 1));
                                 }}
-                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400  dark:hover:bg-zinc-700 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
                               >
                                 <ChevronRight className="h-3.5 w-3.5" />
                               </button>

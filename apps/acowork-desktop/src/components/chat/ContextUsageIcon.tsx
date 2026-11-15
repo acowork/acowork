@@ -447,7 +447,7 @@ const handleCompressSummary = () => {
               onClick={() => setOpen(false)}
               aria-label={t("contextUsage.close")}
               title={t("contextUsage.close")}
-              className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700  dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+              className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100"
             >
               <X size={14} strokeWidth={2.25} />
             </button>
@@ -475,7 +475,7 @@ const handleCompressSummary = () => {
                 disabled={readOnly}
                 aria-label={t("contextUsage.editWindow")}
                 title={readOnly ? t("chatPanel.readOnlySession") : t("contextUsage.editWindow")}
-                className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent  dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+                className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100"
               >
                 <Pencil size={11} strokeWidth={2.25} />
               </button>
@@ -543,7 +543,7 @@ const handleCompressSummary = () => {
                   <button
                     type="button"
                     onClick={() => setEditingWindow(false)}
-                    className="rounded px-2 py-1 text-11 text-text-tertiary transition-colors hover:bg-zinc-100  dark:hover:bg-zinc-700/50"
+                    className="rounded px-2 py-1 text-11 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                   >
                     {t("contextUsage.cancel")}
                   </button>
@@ -663,7 +663,7 @@ const handleCompressSummary = () => {
               "mx-3 mb-2.5 mt-2 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
               isCompacting
                 ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20"
-                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10 dark:hover:bg-white/15 dark:hover:text-zinc-100",
+                : "bg-zinc-100 text-text-secondary hover:bg-[var(--color-accent)]/10 hover:text-zinc-900 dark:bg-white/10 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100",
               "disabled:cursor-not-allowed disabled:opacity-40",
             )}
           >

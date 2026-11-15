@@ -17,7 +17,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
           <div className="flex items-center gap-3 border-b border-border-divider px-4 py-3">
             <button
               onClick={onBack}
-              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
+              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
               aria-label={t("common.backToList")}
             >
               <ArrowLeft className="h-4 w-4" />
@@ -39,7 +39,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
           <div className="flex items-center gap-3 border-b border-border-divider px-4 py-3">
             <button
               onClick={onBack}
-              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
+              className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
               aria-label={t("common.backToList")}
             >
               <ArrowLeft className="h-4 w-4" />
@@ -65,7 +65,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
         <div className="flex items-center gap-3 border-b border-border-divider px-4 py-3">
           <button
             onClick={onBack}
-            className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
+            className="inline-flex items-center gap-1.5 rounded p-1 text-xs text-text-tertiary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
             aria-label={t("common.backToList")}
           >
             <ArrowLeft className="h-4 w-4" />

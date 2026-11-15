@@ -71,7 +71,7 @@ export const MessageRefBlock = memo(function MessageRefBlock({
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex w-fit max-w-full items-center gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30 dark:hover:bg-zinc-800/50"
+        className="flex w-fit max-w-full items-center gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:bg-zinc-800/30 dark:hover:bg-[var(--color-accent)]/15"
         style={{ fontSize: CARD_FONT_SIZE }}
       >
         <Quote className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />

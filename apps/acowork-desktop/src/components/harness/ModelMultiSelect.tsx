@@ -238,7 +238,7 @@ export function ModelMultiSelect({
               "rounded px-2 py-0.5 text-xs font-medium",
               capabilityFilter.includes("tool_call")
                 ? "bg-accent-green/10 text-accent-green"
-                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700 ",
+                : "bg-zinc-100 text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700 ",
             )}
           >
             🔧 {t("harness.toolCalling")}
@@ -250,7 +250,7 @@ export function ModelMultiSelect({
               "rounded px-2 py-0.5 text-xs font-medium",
               capabilityFilter.includes("reasoning")
                 ? "bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300"
-                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700 ",
+                : "bg-zinc-100 text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700 ",
             )}
           >
             🧠 {t("harness.reasoning")}
@@ -262,7 +262,7 @@ export function ModelMultiSelect({
               "rounded px-2 py-0.5 text-xs font-medium",
               capabilityFilter.includes("image")
                 ? "bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-300"
-                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700 ",
+                : "bg-zinc-100 text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700 ",
             )}
           >
             🖼️ {t("harness.image")}

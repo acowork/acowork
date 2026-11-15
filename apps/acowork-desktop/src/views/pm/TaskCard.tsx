@@ -219,7 +219,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
                 void handleOpenExec();
               }}
               onKeyDown={(e) => e.stopPropagation()}
-              className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-10 font-medium text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-zinc-700"
+              className="inline-flex items-center gap-0.5 rounded px-1 py-0.5 text-10 font-medium text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
             >
               ▶ {t("pm.review.openExec")}
             </button>

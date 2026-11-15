@@ -552,7 +552,7 @@ export function AddProviderFlow({
                           onClick={() => setNewKeyEntries(newKeyEntries.filter((_, i) => i !== idx))}
                           disabled={newKeyEntries.length <= 1}
                           aria-label="Remove key"
-                          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-zinc-700"
+                          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-[var(--color-accent)]/15"
                         >
                           <Minus className="h-3.5 w-3.5" />
                         </button>
@@ -711,7 +711,7 @@ export function AddProviderFlow({
                         onClick={() => setCustomKeyEntries(customKeyEntries.filter((_, i) => i !== idx))}
                         disabled={customKeyEntries.length <= 1}
                         aria-label="Remove key"
-                        className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-zinc-700"
+                        className="shrink-0 rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30 disabled:hover:bg-transparent dark:hover:bg-[var(--color-accent)]/15"
                       >
                         <Minus className="h-3.5 w-3.5" />
                       </button>
@@ -776,7 +776,7 @@ export function AddProviderFlow({
                       type="button"
                       onClick={handleImportCustomJson}
                       disabled={!customJsonInput.trim()}
-                      className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-text hover:bg-zinc-300 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                      className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-text hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-[var(--color-accent)]/15"
                     >
                       {t("harness.customJsonImport", { defaultValue: "Import" })}
                     </button>
@@ -846,7 +846,7 @@ export function AddProviderFlow({
           <div className="flex gap-2 shrink-0">
             <button
               onClick={onClose}
-              className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+              className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
             >
               {t("common.cancel")}
             </button>

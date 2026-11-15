@@ -165,7 +165,7 @@ export function ProjectIconPicker({ project, value, disabled, onChange, size = 6
                 <button
                   onClick={() => select(null)}
                   disabled={busy}
-                  className="mt-3 w-full rounded-md px-3 py-1.5 text-xs font-medium text-text-tertiary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+                  className="mt-3 w-full rounded-md px-3 py-1.5 text-xs font-medium text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
                 >
                   {t("pm.iconPicker.clear")}
                 </button>

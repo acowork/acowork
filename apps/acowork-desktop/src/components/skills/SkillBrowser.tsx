@@ -142,7 +142,7 @@ export function SkillBrowser() {
           <button
             onClick={handleImportClick}
             disabled={importing || loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700  dark:hover:bg-zinc-800"
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:border-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
           >
             <FolderPlus className={cn("h-3.5 w-3.5", importing && "animate-pulse")} />
             Import
@@ -150,7 +150,7 @@ export function SkillBrowser() {
           <button
             onClick={handleRefresh}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-50 disabled:opacity-50 dark:border-zinc-700  dark:hover:bg-zinc-800"
+            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:border-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
             Refresh
@@ -206,7 +206,7 @@ export function SkillBrowser() {
                         "flex w-full flex-col gap-1.5 px-4 py-3 text-left transition-colors",
                         isSelected
                           ? "bg-zinc-100 dark:bg-zinc-800"
-                          : "hover:bg-zinc-50 dark:hover:bg-zinc-800/50",
+                          : "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                       )}
                     >
                       <span className="text-sm font-medium text-text ">
@@ -274,7 +274,7 @@ export function SkillBrowser() {
               </h3>
               <button
                 onClick={handleCloseDialog}
-                className="rounded p-1 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                className="rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -335,7 +335,7 @@ export function SkillBrowser() {
             <div className="flex justify-end gap-2">
               <button
                 onClick={handleCloseDialog}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-100  dark:hover:bg-zinc-700"
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
               >
                 Cancel
               </button>

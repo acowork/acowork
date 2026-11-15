@@ -250,8 +250,8 @@ export function DocPermissionsCard({ kind, id, name }: DocPermissionsCardProps) 
                   "flex-1 rounded-md px-2 py-1 text-11 font-medium transition-colors",
                   mode === m
                     ? "bg-accent-strong text-white"
-                    : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700",
-                  !canManage && "cursor-not-allowed opacity-60 hover:bg-zinc-100 dark:hover:bg-zinc-800",
+                    : "bg-zinc-100 text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-800 dark:hover:bg-[var(--color-accent)]/15",
+                  !canManage && "cursor-not-allowed opacity-60 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                 )}
               >
                 {t(`doc.permissions.mode_${m}`)}
@@ -307,7 +307,7 @@ export function DocPermissionsCard({ kind, id, name }: DocPermissionsCardProps) 
                                   "rounded px-1.5 py-0.5 text-10 font-medium",
                                   roles[userId] === r
                                     ? "bg-accent-strong text-white"
-                                    : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-800 dark:hover:bg-zinc-700",
+                                    : "bg-zinc-100 text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-800 dark:hover:bg-[var(--color-accent)]/15",
                                 )}
                               >
                                 {t(`doc.permissions.role_${r}`)}

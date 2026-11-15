@@ -273,7 +273,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                     <h3 className="text-sm font-semibold text-text ">
                         {t("workspace.remoteBrowseTitle")}
                     </h3>
-                    <button onClick={onCancel} className="rounded-md p-1 text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-800">
+                    <button onClick={onCancel} className="rounded-md p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
                         ✕
                     </button>
                 </div>
@@ -315,7 +315,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                             <ErrorBox message={error} className="max-w-md" />
                             <button
                                 onClick={() => void fetchEntries(currentPath)}
-                                className="rounded-md px-3 py-1 text-xs bg-zinc-100 hover:bg-zinc-200 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                                className="rounded-md px-3 py-1 text-xs bg-zinc-100 hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700 dark:hover:bg-[var(--color-accent)]/15"
                             >
                                 {t("common.retry")}
                             </button>
@@ -351,7 +351,7 @@ export function RemoteFolderPicker({ onSelect, onCancel, target }: RemoteFolderP
                         <div className="flex items-center gap-2">
                             <button
                                 onClick={onCancel}
-                                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"
+                                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                             >
                                 {t("common.cancel")}
                             </button>

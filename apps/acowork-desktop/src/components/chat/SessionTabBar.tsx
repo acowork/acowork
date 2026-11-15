@@ -179,7 +179,7 @@ export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpene
           <Tooltip content={t("sessionTabBar.clearAll")} variant="plain">
             <button
               onClick={() => setConfirmClearAll(true)}
-              className="rounded p-1 transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+              className="rounded p-1 transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
             >
               <Trash2 className="h-3 w-3" />
             </button>
@@ -311,7 +311,7 @@ export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpene
           <button
             onClick={() => handlePageChange(currentPage - 1)}
             disabled={currentPage <= 1}
-            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-800"
+            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30  dark:hover:bg-[var(--color-accent)]/15"
           >
             <ChevronLeft className="h-3.5 w-3.5" />
           </button>
@@ -321,7 +321,7 @@ export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpene
           <button
             onClick={() => handlePageChange(currentPage + 1)}
             disabled={currentPage >= totalPages}
-            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30  dark:hover:bg-zinc-800"
+            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30  dark:hover:bg-[var(--color-accent)]/15"
           >
             <ChevronRight className="h-3.5 w-3.5" />
           </button>
@@ -857,7 +857,7 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
                     onClick={(e) => handleClose(e, sessionId)}
                     className={cn(
                       "shrink-0 rounded p-0.5 transition-opacity",
-                      isActive ? "opacity-60 hover:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600" : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-zinc-300 dark:hover:bg-zinc-600",
+                      isActive ? "opacity-60 hover:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15" : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                     )}
                   >
                     <X className="h-3 w-3" />
@@ -888,7 +888,7 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
               <button
                 onClick={onOpenChatHistory}
                 aria-label={t("chatHistory.title")}
-                className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+                className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
               >
                 <OutlineChatHistoryIcon size={14} />
               </button>
@@ -906,7 +906,7 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
           <Tooltip content={t("sessionTabBar.newConversation")} variant="plain">
             <button
               onClick={handleNew}
-              className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 transition-colors"
+              className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
             >
               <Plus className="h-3.5 w-3.5 shrink-0" />
             </button>
@@ -929,7 +929,7 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
                 "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                 listOpen
                   ? "text-[var(--color-accent)] bg-zinc-200 dark:bg-zinc-700"
-                  : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
+                  : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300",
               )}
             >
               <Clock className="h-3.5 w-3.5" />

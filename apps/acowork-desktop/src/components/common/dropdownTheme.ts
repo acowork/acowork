@@ -20,7 +20,7 @@
  *   `Dropdown.tsx` is the control that consumes them; popup menus that are
  *   not `<select>` replacements (model picker, PM filters, combo boxes …)
  *   consume the same tokens so "selected" reads identically everywhere.
- *   Do NOT reintroduce `bg-zinc-*` / `hover:bg-panel-inset` for a selected
+ *   Do NOT reintroduce `bg-zinc-*` / `hover:bg-[var(--color-accent)]/10` for a selected
  *   or expanded dropdown state.
  */
 import { cn } from "../../lib/utils";

@@ -1212,7 +1212,7 @@ export function AppLayout() {
                         <button
                           type="button"
                           onClick={() => setEditorLoadAttempt((n) => n + 1)}
-                          className="flex items-center gap-2 rounded-md bg-zinc-200 px-3 py-1.5 text-sm font-medium text-text-secondary hover:bg-zinc-300 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                          className="flex items-center gap-2 rounded-md bg-zinc-200 px-3 py-1.5 text-sm font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
                         >
                           <RefreshCw className="h-4 w-4" />
                           {t("errorBoundary.retry")}
@@ -1433,7 +1433,7 @@ export function AppLayout() {
                 statusType === "warning" &&
                   "text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 border-amber-300/70 dark:border-amber-800/70 hover:bg-amber-200/80 dark:hover:bg-amber-900/70",
                 statusType === "info" &&
-                  "text-text-tertiary  bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/75",
+                  "text-text-tertiary  bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
               )}
             >
               {statusCopied ? (

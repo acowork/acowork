@@ -127,7 +127,7 @@ export function ChangePasswordModal({ open, onClose }: ChangePasswordModalProps)
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-xs text-text-tertiary hover:bg-hover-overlay"
+            className="rounded-md px-3 py-1.5 text-xs text-text-tertiary hover:bg-[var(--color-accent)]/10"
           >
             {t("common.cancel")}
           </button>

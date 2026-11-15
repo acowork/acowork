@@ -203,7 +203,7 @@ export function ControlButton({
             ? "cursor-not-allowed text-text-secondary "
             : active
               ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-              : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700  dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-700  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
         )}
       >
         {children}
@@ -359,7 +359,7 @@ export function SnapshotNode({
                 e.stopPropagation();
                 onRewind(snapshot.iteration);
               }}
-              className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+              className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
             >
               <Rewind className="h-3 w-3" />
             </button>
@@ -411,7 +411,7 @@ export function SnapshotNode({
             return (
               <div key={sectionKey}>
                 {/* Section header */}
-                <div className="flex w-full items-center gap-1.5 rounded-md bg-zinc-50 pl-2 pr-2 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:bg-zinc-800/40 dark:hover:bg-zinc-800/60">
+                <div className="flex w-full items-center gap-1.5 rounded-md bg-zinc-50 pl-2 pr-2 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:bg-zinc-800/40 dark:hover:bg-[var(--color-accent)]/15">
                   <button
                     onClick={() => onToggleSection(sectionKey)}
                     className="flex flex-1 items-center gap-1.5"
@@ -447,7 +447,7 @@ export function SnapshotNode({
                         }
                       }
                     }}
-                    className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                    className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
                   >
                     <Edit3 className="h-2.5 w-2.5" />
                   </button>
@@ -474,11 +474,11 @@ export function SnapshotNode({
                           <button onClick={() => onSaveEdit(sectionKey, editingSection.current)} className="flex items-center gap-0.5 rounded bg-accent-strong px-2 py-0.5 text-10 text-white transition-opacity hover:opacity-90">
                             <Check className="h-2.5 w-2.5" />Apply
                           </button>
-                          <button onClick={onCancelEdit} className="flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700">
+                          <button onClick={onCancelEdit} className="flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
                             <X className="h-2.5 w-2.5" />Cancel
                           </button>
                           <Tooltip content={t("debugPanel.copyContent")} variant="plain">
-                            <button onClick={() => handleCopy(editingSection.current)} className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700">
+                            <button onClick={() => handleCopy(editingSection.current)} className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
                               {copied ? <><Check className="h-2.5 w-2.5" />Copied</> : <><Copy className="h-2.5 w-2.5" />Copy</>}
                             </button>
                           </Tooltip>

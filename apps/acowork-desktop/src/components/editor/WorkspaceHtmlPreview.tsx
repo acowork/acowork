@@ -93,7 +93,7 @@ export function WorkspaceHtmlPreview({ agentId, workspaceId, relPath, fileName }
                 <button
                     type="button"
                     onClick={retry}
-                    className="inline-flex items-center gap-1.5 rounded border border-border-divider px-2.5 py-1 text-xs text-text-secondary transition-colors hover:bg-zinc-100 dark:hover:bg-zinc-800"
+                    className="inline-flex items-center gap-1.5 rounded border border-border-divider px-2.5 py-1 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                 >
                     <RotateCw className="h-3 w-3" />
                     {t("fileEditor.htmlPreviewRetry")}

@@ -170,7 +170,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       <div className="flex items-center justify-between border-b border-border-divider px-3 py-2">
         <button
           onClick={onClose}
-          className="inline-flex items-center gap-1 rounded p-0.5 text-11 text-text-tertiary hover:bg-zinc-100  dark:hover:bg-zinc-800"
+          className="inline-flex items-center gap-1 rounded p-0.5 text-11 text-text-tertiary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           aria-label={t("memoryNodeDetail.ariaLabelBackToList")}
         >
           <ArrowLeft className="h-3.5 w-3.5" />

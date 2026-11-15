@@ -2379,7 +2379,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                             className={`h-1.5 w-1.5 rounded-full transition-all ${
                               idx === currentQuestionIndex
                                 ? "bg-zinc-500 dark:bg-zinc-300 w-3"
-                                : "bg-zinc-300 dark:bg-zinc-600 hover:bg-zinc-400 dark:hover:bg-zinc-500"
+                                : "bg-zinc-300 dark:bg-zinc-600 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                             }`}
                             aria-label={`${t("askQuestionCard.goTo")} ${idx + 1}`}
                           />
@@ -2411,12 +2411,12 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               Default opacity is reduced so the button does not visually crowd
               the chat content; it goes fully opaque on hover/focus for clear
               affordance. The existing `transition-all` covers the opacity
-              animation, and the `hover:bg-zinc-200` background change is
+              animation, and the `hover:bg-[var(--color-accent)]/10` background change is
               independent of the opacity change so both compose cleanly. */}
           {scrollController.showScrollToTop && (
             <button
               onClick={scrollController.jumpToTop}
-              className="absolute top-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+              className="absolute top-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-all animate-in fade-in zoom-in"
               aria-label="Scroll to top"
             >
               <ChevronsUp className="h-4 w-4 text-text-tertiary " />
@@ -2428,7 +2428,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           {scrollController.showScrollToBottom && (
             <button
               onClick={scrollController.jumpToBottom}
-              className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+              className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-all animate-in fade-in zoom-in"
               aria-label={t("chatPanel.ariaLabelScrollToBottom")}
             >
               <ChevronsDown className="h-4 w-4 text-text-tertiary " />
@@ -2441,7 +2441,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         {todos.length > 0 && (
           <div className="mx-12 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
             <button
-              className="flex items-center w-full px-2.5 py-1.5 border-b border-border-divider hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors"
+              className="flex items-center w-full px-2.5 py-1.5 border-b border-border-divider hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-colors"
               onClick={() => session.setTodosCollapsed(!session.todosCollapsed)}
             >
               {session.todosCollapsed ? (
@@ -2976,7 +2976,7 @@ function UnsupportedImageDialog({
         <div className="shrink-0 flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
           <button
             onClick={onClose}
-            className="rounded-md px-4 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+            className="rounded-md px-4 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("chatPanel.close")}
           </button>
@@ -3434,7 +3434,7 @@ export function ModelMenu({
               setShowAddDialog(true);
               closeMenu();
             }}
-            className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
+            className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-900 dark:bg-white/10  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100"
           >
             <Plus className="h-3.5 w-3.5" />
             {t("chatPanel.addModel")}

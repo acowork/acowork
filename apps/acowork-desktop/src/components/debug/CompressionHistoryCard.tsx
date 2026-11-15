@@ -126,7 +126,7 @@ export function CompressionHistoryCard({
               void load();
             }}
             title={t("rightPanel.buttonRefresh")}
-            className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-700  dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+            className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
           >
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
