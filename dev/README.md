@@ -74,6 +74,8 @@ in `apps/acowork-mobile` is enough (see
 | [`build_core.ps1`](common/build_core.ps1) · [`build_core.sh`](common/build_core.sh) | Build Gateway + Runtime + Node Agent. `-Start` / `--start` stops the old Gateway and starts a new one; `--start --remote` binds `0.0.0.0` and advertises the detected LAN IP instead of `127.0.0.1` — this is how you make the Gateway reachable from a phone on the same network. On macOS the embed build downloads ONNX Runtime via cargo (`download-ort`, CoreML on Apple Silicon; `--cpu` to opt out) and syncs it into `.ort/`, so no `setup_ort.sh` run is needed; `--install-deps` sets up Homebrew `pkg-config`/`cmake` and `--mirror` configures the USTC cargo mirror (both opt-in). |
 | [`start_node.ps1`](common/start_node.ps1) · [`start_node.sh`](common/start_node.sh) | Start a local `acowork-node` daemon joined to a remote Gateway (`<host>:<port>`). |
 | [`ort_env.js`](ort_env.js) | Invoked by `tauri.conf.json`'s `beforeDevCommand`; not run by hand. Probes `.ort/`, then the Cargo cache, and injects `--features download-ort[,coreml\|cuda\|directml]` when nothing is installed. |
+| [`version.mjs`](common/version.mjs) | Single source of truth for the platform version (`VERSION`): `check`, `set <version>`, `assert <tag>`. Called by `./dev/ci.sh check`. |
+| [`gen_changelog.mjs`](common/gen_changelog.mjs) | Generate release notes from Conventional Commits between two tags; used by the release workflow. |
 
 ## Packaging
 
@@ -109,7 +111,8 @@ before a release.
 
 | Mode | Runs |
 |---|---|
-| `check` | `cargo check --all` |
+| `versions` | `node dev/common/version.mjs check` — `VERSION` vs the seven generated declarations |
+| `check` | all 14 architecture red lines + the version gate + `cargo check --all` |
 | `clippy` | `cargo clippy --all-targets -- -D warnings` |
 | `test` | `cargo test` (unit + integration) |
 | `integration` | cross-process suites (relay full path, PM remote) |
@@ -130,6 +133,15 @@ Tests that live outside the Cargo test harness:
 | [`e2e_frontend_smoke/smoke_test.py`](e2e_frontend_smoke/smoke_test.py) | The `smoke` mode above. Covers the cases enumerated in `docs/plan/zh/e2e-frontend-smoke-test.md`, plus the PM member feature end-to-end across processes. |
 | [`e2e_frontend_smoke/onboarding_installs_all_agents.py`](e2e_frontend_smoke/onboarding_installs_all_agents.py) | ADR-059 first-run bootstrap handshake regression. `GET /api/bootstrap` is the readiness source of truth, **not** `/health`. |
 | [`e2e_stop_test.ps1`](desktop/windows/e2e_stop_test.ps1) | Stop-response latency after the control/data channel split: open a WebSocket, stream a long message over HTTP, send `stop` on the first delta, measure the latency. Referenced by [ADR-077](../docs/adr/zh/ADR-077-system-agent-demotion-to-default-agent.md). |
+
+## Releases
+
+[`RELEASING.md`](../RELEASING.md) is the release contract. In short: `VERSION` is
+the single source of truth (`version.mjs set` bumps all declarations),
+`./dev/ci.sh all` gates the release commit, and an annotated `v*` tag triggers
+[`.github/workflows/release.yml`](../.github/workflows/release.yml) — three
+desktop installers, `SHA256SUMS.txt`, generated release notes, and a **draft**
+GitHub Release that a maintainer publishes by hand.
 
 ## Deployment
 

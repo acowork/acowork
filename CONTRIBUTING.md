@@ -180,7 +180,7 @@ Everything below is what CI runs. Run it **before** you open a PR.
 | Job | Command | Catches |
 |---|---|---|
 | `redlines` | `./dev/ci.sh redlines` | the 14 architecture red lines, in seconds, before anything compiles |
-| `core` | `./dev/ci.sh check` → `clippy` → `test` → `integration`, plus a strict `cargo test -p acowork-embed --features download-ort` | compile, lints, unit + cross-crate e2e |
+| `core` | `./dev/ci.sh check` → `clippy` → `test` → `integration`, plus a strict `cargo test -p acowork-embed --features download-ort` | compile, lints, unit + cross-crate e2e; `check` also verifies `VERSION` against all seven generated copies |
 | `packages` | `cargo test -p acowork-sign --test example_packages`, `cargo test -p acowork-core --test hub_interop -- --ignored`, `sync-official.py --check --report-only` | a shipped `.agent` that does not match its source; a hub mirror that drifted |
 | `web` | `npm ci && npm run test && npm run build` (desktop + mobile) | 350 desktop + 38 mobile test files, i18n coverage, the scroll-container backlog |
 
@@ -563,6 +563,8 @@ Third-party dependencies keep their own licenses. The workspace pins them in
 | Document | What it covers |
 |---|---|
 | [`AGENTS.md`](AGENTS.md) | Architecture, conventions, and the rules that generate review comments |
+| [`RELEASING.md`](RELEASING.md) | Cutting a GitHub Release: version bump, tag, workflow, rollback |
+| [`CHANGELOG.md`](CHANGELOG.md) | Human-readable release history and notes conventions |
 | [`SECURITY.md`](SECURITY.md) | Reporting a vulnerability, and the security model |
 | [`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md) | Expected behaviour in project spaces |
 | [`docs/adr/zh/`](docs/adr/zh/) | Architecture decision records (Chinese — source of truth) |
