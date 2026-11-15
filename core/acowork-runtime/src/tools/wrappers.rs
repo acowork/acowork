@@ -382,6 +382,7 @@ impl PathGuardedTool {
                 | "glob_search"
                 | "content_search"
                 | "doc_reader"
+                | "image_read"
         )
     }
 
@@ -627,6 +628,40 @@ mod tests {
                 .unwrap()
                 .contains("outside all allowed workspace directories")
         );
+    }
+
+    /// `image_read` must be guarded exactly like `file_read` (design
+    /// doc t-65a1a89e §4.6): the denial wording is the wrapper's, so
+    /// the tool name has to be in `is_filesystem_tool`'s list. This
+    /// test fails the moment someone drops it from that match arm.
+    #[tokio::test]
+    async fn test_path_guarded_image_read_denial_matches_file_read() {
+        let resolver = || {
+            test_resolver(vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-workdir".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+                last_active: false,
+                prompt_file: None,
+            }])
+        };
+        let denied = |tool: Arc<dyn Tool>| {
+            let guarded = PathGuardedTool::new(tool, resolver());
+            async move {
+                guarded
+                    .execute(serde_json::json!({ "path": "/etc/passwd.png" }), None)
+                    .await
+                    .unwrap()
+                    .error
+                    .unwrap()
+            }
+        };
+        let img = denied(Arc::new(
+            crate::tools::builtin::image_read::ImageReadTool::new(),
+        ))
+        .await;
+        let txt = denied(Arc::new(crate::tools::builtin::file_read::FileReadTool::new())).await;
+        assert_eq!(img, txt, "path-escape denial must be identical to file_read's");
     }
 
     #[tokio::test]

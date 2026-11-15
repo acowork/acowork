@@ -369,6 +369,7 @@ dependencies = [
  "futures-util",
  "globset",
  "ignore",
+ "image",
  "indexmap",
  "lopdf 0.44.0",
  "mockito",

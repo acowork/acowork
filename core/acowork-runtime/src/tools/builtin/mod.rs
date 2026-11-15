@@ -13,6 +13,7 @@
 //! | file_write | filesystem:write:<path> |
 //! | file_edit | filesystem:write:<path> |
 //! | doc_reader | filesystem:read:<path> |
+//! | image_read | filesystem:read:<path> |
 //! | glob_search | filesystem:read:<path> |
 //! | content_search | filesystem:read:<path> |
 //! | intent_send | intent:send:<target> |
@@ -44,6 +45,7 @@ pub mod file_read;
 pub mod file_write;
 pub mod glob_search;
 pub mod http_request;
+pub mod image_read;
 pub mod intent_send;
 pub mod load_skill;
 pub mod mcp_install;
@@ -157,6 +159,7 @@ pub fn all_builtin_tools(
         Arc::new(file_write::FileWriteTool::new()),
         Arc::new(file_edit::FileEditTool::new()),
         Arc::new(doc_reader::DocReaderTool::new()),
+        Arc::new(image_read::ImageReadTool::new()),
         Arc::new(glob_search::GlobSearchTool::new(resolver)),
         Arc::new(content_search::ContentSearchTool::new(resolver)),
         Arc::new(intent_send::IntentSendTool::new(intent_send_config.clone())),
@@ -291,6 +294,7 @@ mod tests {
             "file_write",
             "file_edit",
             "doc_reader",
+            "image_read",
             "glob_search",
             "content_search",
             "intent_send",
