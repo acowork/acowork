@@ -177,12 +177,12 @@ export function ProjectBoard({
     return (
       <main className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 bg-page-bg")}>
         <div className="shrink-0 border-b border-border-divider px-4 py-3">
-          <div className="h-5 w-40 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
-          <div className="mt-2 h-3 w-64 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800" />
+          <div className="h-5 w-40 animate-pulse rounded bg-surface" />
+          <div className="mt-2 h-3 w-64 animate-pulse rounded bg-surface" />
         </div>
         <div className="flex flex-1 gap-3 p-3">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="flex-1 animate-pulse rounded-md bg-zinc-100 dark:bg-zinc-800" />
+            <div key={i} className="flex-1 animate-pulse rounded-md bg-surface" />
           ))}
         </div>
       </main>
@@ -198,13 +198,13 @@ export function ProjectBoard({
         onViewChange={changeView}
       />
       {error && (
-        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border-divider bg-amber-50 px-4 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+        <div className="flex shrink-0 items-center justify-between gap-2 border-b border-border-divider bg-warning-surface px-4 py-2 text-xs text-warning-quiet">
           <span className="min-w-0 truncate">{error}</span>
           {onRetry && (
             <button
               type="button"
               onClick={onRetry}
-              className="shrink-0 rounded-md px-2 py-0.5 text-11 font-medium text-amber-800 hover:bg-amber-100 dark:text-amber-200 dark:hover:bg-amber-900"
+              className="shrink-0 rounded-md px-2 py-0.5 text-11 font-medium text-warning-quiet hover:bg-warning-surface-hover"
             >
               {t("common.retry")}
             </button>

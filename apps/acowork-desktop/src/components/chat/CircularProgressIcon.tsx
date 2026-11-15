@@ -27,8 +27,8 @@ export function CircularProgressIcon({ usagePercent }: { usagePercent: number })
   const pct = Math.min(100, Math.max(0, usagePercent));
   const offset = circumference * (1 - pct / 100);
 
-  const fillColor = "var(--color-text-secondary, hsl(240 3.7% 46.9%))";
-  const emptyColor = "var(--shimmer-mid, #e8e8ec)";
+  const fillColor = "var(--color-text-secondary)";
+  const emptyColor = "var(--shimmer-mid)";
 
   return (
     <svg

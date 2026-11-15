@@ -109,10 +109,10 @@ export function CopyButton({
 
     const solid = tone === "solid";
     const stateCls = copied
-        ? "text-emerald-600 dark:text-emerald-400"
+        ? "text-ok"
         : solid
-          ? "text-text-secondary hover:bg-zinc-100 hover:text-text dark:hover:bg-zinc-700/50"
-          : "text-text-tertiary hover:bg-zinc-100 hover:text-text-secondary dark:hover:bg-zinc-700/50";
+          ? "text-text-secondary hover:bg-[var(--color-accent)]/10 hover:text-text dark:hover:bg-[var(--color-accent)]/15"
+          : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15";
 
     const label = copied ? t("common.copied") : t("common.copy");
 

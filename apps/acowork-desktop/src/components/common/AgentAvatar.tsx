@@ -15,7 +15,7 @@ function BuiltinIconAvatar({ iconId, size, className }: { iconId: string; size: 
       src={src}
       alt={iconId}
       draggable={false}
-      className={`rounded-lg object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
+      className={`rounded-lg object-cover ring-1 ring-border-strong/60 ${className ?? ""}`}
       style={{ width: size, height: size }}
     />
   );
@@ -115,7 +115,7 @@ function CustomAgentAvatar({
     <AuthedImage
       src={url}
       alt={agentId}
-      className={`rounded-lg object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
+      className={`rounded-lg object-cover ring-1 ring-border-strong/60 ${className ?? ""}`}
       style={{ width: size, height: size }}
       fallback={
         <DeterministicBuiltinAvatar seed={fallbackSeed} size={size} className={className} />
@@ -188,7 +188,7 @@ export function InlinedAgentAvatar({
         alt={agentId}
         draggable={false}
         onError={() => setFailed(true)}
-        className={`rounded-lg object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60 ${className ?? ""}`}
+        className={`rounded-lg object-cover ring-1 ring-border-strong/60 ${className ?? ""}`}
         style={{ width: size, height: size }}
       />
     );

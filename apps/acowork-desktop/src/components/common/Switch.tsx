@@ -143,7 +143,7 @@ export const Switch = forwardRef<HTMLInputElement, SwitchProps>(function Switch(
           className={cn(
             // Base track
             "block rounded-full transition-colors duration-150",
-            "bg-zinc-300 dark:bg-zinc-600",
+            "bg-surface-strong",
             "peer-checked:bg-[var(--color-accent)]",
             "peer-focus-visible:ring-2 peer-focus-visible:ring-[var(--color-accent)] peer-focus-visible:ring-offset-2 peer-focus-visible:ring-offset-white dark:peer-focus-visible:ring-offset-zinc-900",
             // Sizing

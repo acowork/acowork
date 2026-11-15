@@ -60,7 +60,7 @@ describe("agent row attention dot", () => {
   it("is red, small and round — the same slot as the group unread badge", () => {
     const start = agentList.indexOf('data-testid="agent-attention-dot"');
     const dot = agentList.slice(start, agentList.indexOf("/>", start));
-    expect(dot).toContain("bg-red-500");
+    expect(dot).toContain("bg-danger-solid");
     expect(dot).toContain("rounded-full");
     expect(dot).toContain("-right-1 -top-1");
   });
@@ -83,7 +83,7 @@ describe("session tab attention dot", () => {
     const start = tabBar.indexOf('data-testid="session-tab-attention-dot"');
     expect(start).toBeGreaterThan(-1);
     const dot = tabBar.slice(start, tabBar.indexOf("/>", start));
-    expect(dot).toContain("bg-red-500");
+    expect(dot).toContain("bg-danger-solid");
     expect(dot).toContain('t("sessionTabBar.attention")');
   });
 });

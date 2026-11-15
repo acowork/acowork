@@ -600,6 +600,8 @@
     "light": "淺色",
     "dark": "深色",
     "system": "跟隨系統",
+    "themePack": "配色主題",
+    "themeDefault": "預設",
     "accentColor": "全域強調色",
     "contentWidth": "內容寬度",
     "contentWidthHint": "聊天訊息、工具呼叫、Thinking 的最大顯示寬度",

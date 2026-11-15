@@ -1,0 +1,97 @@
+/*
+ * Rosewater theme pack — soft rose light / plum-rose dark.
+ *
+ * App-style palette (not a code-editor theme): a gentle pink tint across
+ * the whole UI at low saturation.
+ *
+ * Same contract as paper.css (the reference pack): file name is the id, only contract tokens
+ * from globals.css are overridden, and both light and dark scopes exist.
+ */
+
+:root.theme-rosewater {
+  --color-bg: hsl(340 var(--theme-chroma) 96%);
+  --color-page-bg: hsl(340 var(--theme-chroma) 91%);
+  --color-panel-block: hsl(340 var(--theme-chroma) 94%);
+  --color-panel-inset: hsl(340 var(--theme-chroma) 89%);
+  --color-panel-inset-2: hsl(340 var(--theme-chroma) 85%);
+  --color-modal-surface: hsl(340 var(--theme-chroma) 98%);
+  --color-editor-canvas: hsl(340 var(--theme-chroma) 95%);
+  --color-nav-surface: hsl(340 var(--theme-chroma) 89%);
+  --color-nav-item-hover: hsl(340 var(--theme-chroma) 83%);
+  --color-nav-divider: hsl(340 calc(var(--theme-chroma) * 0.85) 79%);
+  --color-right-panel: hsl(340 var(--theme-chroma) 93%);
+  --color-chat-body: hsl(340 var(--theme-chroma) 95%);
+  --color-chat-title: hsl(340 var(--theme-chroma) 87%);
+  --color-chat-input-bg: hsl(339 var(--theme-chroma) 93%);
+  --color-input-bg: hsl(339 var(--theme-chroma) 96%);
+  --color-input-border: hsl(338 calc(var(--theme-chroma) * 0.85) 88%);
+  --color-border-outer: hsl(340 calc(var(--theme-chroma) * 0.85) 76%);
+  --color-border-divider: hsl(340 calc(var(--theme-chroma) * 0.85) 83%);
+  --color-menu-divider: hsl(340 calc(var(--theme-chroma) * 0.85) 81%);
+  --color-text: hsl(340 calc(var(--theme-chroma) * 0.45) 28%);
+  --color-text-secondary: hsl(339 calc(var(--theme-chroma) * 0.45) 40%);
+  --color-text-tertiary: hsl(338 calc(var(--theme-chroma) * 0.45) 52%);
+  --color-text-disabled: hsl(337 calc(var(--theme-chroma) * 0.45) 66%);
+  --color-menu-text: hsl(340 calc(var(--theme-chroma) * 0.45) 30%);
+  --color-menu-icon: hsl(339 calc(var(--theme-chroma) * 0.7) 56%);
+  --color-menu-danger: hsl(350 70% 45%);
+  --color-menu-danger-hover: hsl(350 75% 95%);
+  --color-menu-warning: hsl(30 70% 42%);
+  --color-menu-warning-hover: hsl(30 80% 94%);
+  --color-danger-surface: hsl(350 75% 96%);
+  --color-danger-surface-hover: hsl(350 75% 92%);
+  --color-danger-border: hsl(350 55% 86%);
+  --color-danger-text: hsl(350 70% 43%);
+  --color-danger-text-strong: hsl(350 75% 33%);
+  --color-danger-icon: hsl(350 70% 53%);
+  --color-control-track: hsl(340 calc(var(--theme-chroma) * 0.7) 76%);
+  --color-control-outline: hsl(339 calc(var(--theme-chroma) * 0.7) 60%);
+  --color-highlight-locate: hsl(335 70% 62% / 0.16);
+  --color-muted: hsl(340 12% 90%);
+  --color-muted-foreground: hsl(338 12% 46%);
+  --shadow-menu: 0 4px 6px -1px hsl(340 12% 35% / 0.12), 0 2px 4px -2px hsl(340 20% 35% / 0.12);
+}
+
+:root.theme-rosewater.dark {
+  --color-bg: hsl(335 var(--theme-chroma) 3.9%);
+  --color-page-bg: hsl(335 var(--theme-chroma) 8%);
+  --color-panel-block: hsl(335 var(--theme-chroma) 16.7%);
+  --color-panel-inset: hsl(335 var(--theme-chroma) 8%);
+  --color-panel-inset-2: hsl(335 var(--theme-chroma) 4%);
+  --color-modal-surface: hsl(335 var(--theme-chroma) 10%);
+  --color-editor-canvas: hsl(335 var(--theme-chroma) 11.8%);
+  --color-nav-surface: hsl(335 var(--theme-chroma) 11.7%);
+  --color-nav-item-hover: hsl(335 var(--theme-chroma) 22%);
+  --color-nav-divider: hsl(335 calc(var(--theme-chroma) * 0.85) 35%);
+  --color-right-panel: hsl(335 var(--theme-chroma) 11.7%);
+  --color-chat-body: hsl(335 var(--theme-chroma) 8%);
+  --color-chat-title: hsl(335 var(--theme-chroma) 13%);
+  --color-chat-input-bg: hsl(335 var(--theme-chroma) 11.7%);
+  --color-input-bg: hsl(335 var(--theme-chroma) 16.7%);
+  --color-input-border: hsl(334 calc(var(--theme-chroma) * 0.85) 18%);
+  --color-border-outer: hsl(335 calc(var(--theme-chroma) * 0.85) 13%);
+  --color-border-divider: hsl(335 calc(var(--theme-chroma) * 0.85) 17%);
+  --color-menu-divider: hsl(335 calc(var(--theme-chroma) * 0.85) 20%);
+  --color-text: hsl(340 calc(var(--theme-chroma) * 0.45) 90%);
+  --color-text-secondary: hsl(340 calc(var(--theme-chroma) * 0.45) 80%);
+  --color-text-tertiary: hsl(340 calc(var(--theme-chroma) * 0.45) 60%);
+  --color-text-disabled: hsl(340 calc(var(--theme-chroma) * 0.45) 38%);
+  --color-menu-text: hsl(340 calc(var(--theme-chroma) * 0.45) 85%);
+  --color-menu-icon: hsl(340 calc(var(--theme-chroma) * 0.7) 46%);
+  --color-menu-danger: hsl(348 85% 72%);
+  --color-menu-danger-hover: hsl(348 50% 26% / 0.3);
+  --color-menu-warning: hsl(35 85% 68%);
+  --color-menu-warning-hover: hsl(35 50% 22% / 0.3);
+  --color-danger-surface: hsl(348 35% 22%);
+  --color-danger-surface-hover: hsl(348 35% 28%);
+  --color-danger-border: hsl(348 28% 35%);
+  --color-danger-text: hsl(348 80% 76%);
+  --color-danger-text-strong: hsl(348 85% 86%);
+  --color-danger-icon: hsl(348 85% 72%);
+  --color-control-track: hsl(335 calc(var(--theme-chroma) * 0.7) 36%);
+  --color-control-outline: hsl(338 calc(var(--theme-chroma) * 0.7) 46%);
+  --color-highlight-locate: hsl(335 80% 70% / 0.24);
+  --color-muted: hsl(335 47.4% 15%);
+  --color-muted-foreground: hsl(340 16.3% 65%);
+  --shadow-menu-dark: 0 4px 6px -1px hsl(340 30% 3% / 0.55), 0 2px 4px -2px hsl(340 30% 3% / 0.55);
+}

@@ -66,7 +66,7 @@ describe("NodeGroupHeader", () => {
     // The status dot is a trailing badge — after the name, so the row leads
     // with the glyph + identifier and status does not compete for the lead
     // position with the monitor icon.
-    expect(header.indexOf("bg-emerald-500")).toBeGreaterThan(name);
+    expect(header.indexOf("bg-ok-solid")).toBeGreaterThan(name);
   });
 
   it("sits on the same fill as the right-panel card title bars", () => {
@@ -96,12 +96,12 @@ describe("agent status dot (beside the name)", () => {
     // Two dots, one meaning ("something is live"). Matching the node
     // header's literal is deliberate: a different shade would look like a
     // different state at this size.
-    expect(dot).toContain("bg-emerald-500");
+    expect(dot).toContain("bg-ok-solid");
     expect(dot).toContain("agent.alive");
   });
 
   it("is gray when offline", () => {
-    expect(dot).toContain("bg-zinc-400");
+    expect(dot).toContain("bg-loading");
   });
 
   it("breathes (fully transparent <-> solid) while online and working", () => {

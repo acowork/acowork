@@ -436,14 +436,14 @@ describe("GitStatusPanel", () => {
     });
     const { container: deniedBox } = render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
     expect(screen.getByText("This action requires use access")).toBeTruthy();
-    expect(deniedBox.innerHTML).not.toContain("text-red-500");
+    expect(deniedBox.innerHTML).not.toContain("text-danger-icon");
     expect(deniedBox.innerHTML).toContain("text-text-tertiary");
   });
 
   it("keeps a real failure red", () => {
     setEntry({ data: null, loading: false, error: "boom 500", errorStatus: 500 });
     const { container } = render(<GitStatusPanel agentId="a1" workspaceId="ws1" />);
-    expect(container.innerHTML).toContain("text-red-500");
+    expect(container.innerHTML).toContain("text-danger-icon");
   });
 
   it("maps status states to icons (untracked / deleted / staged renamed / conflicted)", () => {

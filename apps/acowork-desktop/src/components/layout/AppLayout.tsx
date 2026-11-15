@@ -1198,7 +1198,7 @@ export function AppLayout() {
                   key={editorLoadAttempt}
                   fallback={
                     <div className="flex h-full w-full flex-col items-center justify-center gap-3 px-4 text-center">
-                      <AlertTriangle className="h-6 w-6 text-amber-500" />
+                      <AlertTriangle className="h-6 w-6 text-warning" />
                       <p className="text-sm text-text-tertiary ">
                         {t("errorBoundary.title")}
                       </p>
@@ -1212,7 +1212,7 @@ export function AppLayout() {
                         <button
                           type="button"
                           onClick={() => setEditorLoadAttempt((n) => n + 1)}
-                          className="flex items-center gap-2 rounded-md bg-zinc-200 px-3 py-1.5 text-sm font-medium text-text-secondary hover:bg-zinc-300 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                          className="flex items-center gap-2 rounded-md bg-surface-hover px-3 py-1.5 text-sm font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                         >
                           <RefreshCw className="h-4 w-4" />
                           {t("errorBoundary.retry")}
@@ -1429,11 +1429,11 @@ export function AppLayout() {
                 "inline-flex items-center gap-1 rounded-md px-2 py-0.5 max-w-[min(60%,32rem)] cursor-pointer transition-colors",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]/40",
                 statusType === "error" &&
-                  "text-red-600 dark:text-red-400 bg-red-100 dark:bg-red-950/70 border-red-300/70 dark:border-red-800/70 hover:bg-red-200/80 dark:hover:bg-red-900/70",
+                  "text-danger-text bg-danger-surface-hover border-danger-border/70 hover:bg-danger-surface-hover/80",
                 statusType === "warning" &&
-                  "text-amber-700 dark:text-amber-300 bg-amber-100 dark:bg-amber-950/70 border-amber-300/70 dark:border-amber-800/70 hover:bg-amber-200/80 dark:hover:bg-amber-900/70",
+                  "text-warning-quiet bg-warning-surface-hover border-warning-border/70 hover:bg-warning-surface-hover/80",
                 statusType === "info" &&
-                  "text-text-tertiary  bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60 hover:bg-zinc-200/80 dark:hover:bg-zinc-700/75",
+                  "text-text-tertiary  bg-surface/80 border border-border-outer/50 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
               )}
             >
               {statusCopied ? (
@@ -1449,13 +1449,13 @@ export function AppLayout() {
         )}
         {(rightPanelCollapsed || activeTab !== "status") && selectedAgent?.alive && agentName && (
           <span className="flex items-center gap-2 truncate">
-            <span className="flex items-center gap-1 pl-1 pr-4 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
+            <span className="flex items-center gap-1 pl-1 pr-4 py-px rounded-md bg-surface/80 border border-border-outer/50">
               <Bot className="h-3 w-3 text-text-tertiary " aria-hidden="true" />
               <span className="text-text-tertiary ">{t("statusBar.agent")}: </span>
               <span className="font-medium text-text-tertiary ">{agentName}</span>
             </span>
             {contextUsage && (
-              <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
+              <span className="flex items-center gap-1 px-2 py-px rounded-md bg-surface/80 border border-border-outer/50">
                 <Cpu className="h-3 w-3 text-text-tertiary " aria-hidden="true" />
                 <span className="text-text-tertiary ">{t("statusBar.context")}: </span>
                 <span
@@ -1481,7 +1481,7 @@ export function AppLayout() {
                 Runtime reports any cumulative cache accounting; the ratio
                 falls back to a dash when it isn't computable yet. */}
             {hasCacheData(contextUsage, "cumulative") && (
-              <span className="flex items-center gap-1 px-2 py-px rounded-md bg-zinc-100/80 dark:bg-zinc-800/75 border border-zinc-200/50 dark:border-zinc-700/60">
+              <span className="flex items-center gap-1 px-2 py-px rounded-md bg-surface/80 border border-border-outer/50">
                 <span className="tabular-nums font-medium text-text-tertiary ">
                   {cacheHitRateLabel ?? "\u2014"}
                 </span>

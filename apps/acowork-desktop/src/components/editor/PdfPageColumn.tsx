@@ -637,7 +637,7 @@ export const PdfPageColumn = forwardRef<PdfPageColumnHandle, PdfPageColumnProps>
                                     key={box.page}
                                     data-testid="pdf-column-page"
                                     data-page={box.page}
-                                    className="absolute bg-white ring-1 ring-zinc-300/60 dark:ring-zinc-600/60"
+                                    className="absolute bg-white ring-1 ring-border-strong/60"
                                     style={{
                                         left: box.left,
                                         top: box.top,
@@ -663,7 +663,7 @@ export const PdfPageColumn = forwardRef<PdfPageColumnHandle, PdfPageColumnProps>
                                         // what is selected.
                                         <div
                                             data-testid="pdf-column-selection"
-                                            className="pointer-events-none absolute border border-sky-500 bg-sky-500/10 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
+                                            className="pointer-events-none absolute border border-info-solid bg-info-solid/10 shadow-[0_0_0_9999px_rgba(0,0,0,0.35)]"
                                             style={selectionStyle}
                                         />
                                     )}

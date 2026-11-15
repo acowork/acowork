@@ -18,7 +18,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 
 const BTN_CN =
-  "inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-border-outer bg-panel-block px-2 text-xs text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-800";
+  "inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-border-outer bg-panel-block px-2 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15";
 
 export type BulkField = "status" | "priority" | "assignee";
 
@@ -68,7 +68,7 @@ export function TaskListBulkBar({ count, onOpen, onDelete, onClear }: TaskListBu
         type="button"
         onClick={onDelete}
         aria-label={t("pm.list.bulkDelete")}
-        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-border-outer bg-panel-block px-2 text-xs text-red-600 hover:bg-zinc-100 dark:text-red-400 dark:hover:bg-zinc-800"
+        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-border-outer bg-panel-block px-2 text-xs text-danger-text hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
       >
         <span aria-hidden>🗑</span>
         {t("common.delete")}
@@ -77,7 +77,7 @@ export function TaskListBulkBar({ count, onOpen, onDelete, onClear }: TaskListBu
         type="button"
         onClick={onClear}
         aria-label={t("pm.list.bulkClear")}
-        className="ml-1 shrink-0 rounded px-1.5 py-0.5 text-xs text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-800"
+        className="ml-1 shrink-0 rounded px-1.5 py-0.5 text-xs text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
       >
         ✕
       </button>

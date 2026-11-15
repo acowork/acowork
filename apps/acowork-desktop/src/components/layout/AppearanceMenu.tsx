@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { Check, Monitor, Moon, Palette, Sun } from "lucide-react";
+import { useRef, useState, useSyncExternalStore } from "react";
+import { Check, Layers, Monitor, Moon, Palette, Sun } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
@@ -7,6 +7,13 @@ import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
 import { AccentSwatches } from "../common/AccentSwatches";
 import { titleBarMenuPanel, titleBarMenuTrigger, useDismissMenu } from "./titleBarMenu";
+import {
+  DEFAULT_THEME_PACK,
+  THEME_PACKS,
+  getActiveThemePack,
+  setThemePack,
+  subscribeThemePacks,
+} from "../../styles/themePacks";
 import type { Theme } from "../../lib/types";
 
 /** Theme-mode rows, in the order the Settings ▸ Appearance tab lists
@@ -27,12 +34,14 @@ const THEME_ROWS: { value: Theme; icon: typeof Sun }[] = [
  * away. This menu is the same two settings, one click from the title
  * bar.
  *
- * It owns NO state. Both values are read from and written through
- * `settingsStore` (`theme` / `setTheme`, `accentColor` / `setAccentColor`),
- * which is the same store the Settings ▸ Appearance tab drives — so the
- * two entry points are two doors to one state, and picking a mode here
- * is immediately visible there (and vice versa). The store persists both
- * to localStorage, so the choice survives a restart.
+ * It owns NO state. The theme mode and accent color are read from and
+ * written through `settingsStore` (`theme` / `setTheme`, `accentColor` /
+ * `setAccentColor`), which is the same store the Settings ▸ Appearance
+ * tab drives — so the two entry points are two doors to one state, and
+ * picking a mode here is immediately visible there (and vice versa). The
+ * theme PACK goes through themePacks' own subscription for the same
+ * guarantee. The store persists everything to localStorage, so the
+ * choice survives a restart.
  *
  * The visual style is the Gateway menu's, not a new one: same panel
  * surface, same trigger chrome, same dismiss rules — all three come from
@@ -48,6 +57,15 @@ export function AppearanceMenu() {
 
   const [open, setOpen] = useState(false);
   const wrapRef = useRef<HTMLDivElement>(null);
+  // Theme packs are plain DOM state (a class on <html>), not store state.
+  // Subscribe via themePacks' listener set so this menu re-renders when the
+  // OTHER door (Settings ▸ Appearance) changes the pack while this one is
+  // mounted — and vice versa.
+  const activePack = useSyncExternalStore(subscribeThemePacks, getActiveThemePack);
+
+  const pickThemePack = (id: string) => {
+    setThemePack(id);
+  };
 
   useDismissMenu(wrapRef, open, () => setOpen(false));
 
@@ -115,6 +133,54 @@ export function AppearanceMenu() {
               })}
             </div>
           </div>
+
+          {/* Theme pack — the palette layer on top of the light/dark mode.
+              Same row grammar as the mode rows above so the two sections
+              read as one control family. "Default" restores the built-in
+              :root/.dark palette; each other row is a CSS file dropped into
+              styles/themes/ (auto-discovered, nothing to register). */}
+          {THEME_PACKS.length > 0 && (
+            <div
+              className="border-b border-border-divider pb-2 pt-2"
+              role="radiogroup"
+              aria-label={t("settings.themePack")}
+            >
+              <p className="px-1 pb-1.5 text-xs text-text-tertiary">
+                {t("settings.themePack")}
+              </p>
+              <div className="flex flex-col gap-0.5">
+                {[
+                  { id: DEFAULT_THEME_PACK, name: t("settings.themeDefault") },
+                  ...THEME_PACKS,
+                ].map((pack) => {
+                  const current = activePack === pack.id;
+                  return (
+                    <button
+                      key={pack.id}
+                      type="button"
+                      role="radio"
+                      aria-checked={current}
+                      onClick={() => pickThemePack(pack.id)}
+                      className={cn(
+                        "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors",
+                        current ? listRowSelected : listRowHover,
+                      )}
+                    >
+                      <Layers className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+                      <span className="flex-1">{pack.name}</span>
+                      {current && (
+                        <Check
+                          className="h-3 w-3 shrink-0"
+                          style={{ color: "var(--color-accent)" }}
+                          aria-hidden="true"
+                        />
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
 
           {/* Accent color — a swatch grid, matching the Settings ▸
               Appearance tab's swatches (same size, same ring treatment)

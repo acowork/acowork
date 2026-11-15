@@ -186,7 +186,7 @@ describe("依赖：会成环的候选画出来但点不动", () => {
     const chip = screen.getByTestId("dependency-chips").firstElementChild as HTMLElement;
     const chipTokens = (chip.className ?? "").split(/\s+/);
     expect(chipTokens).toContain("rounded");
-    expect(chipTokens).toContain("bg-zinc-100");
+    expect(chipTokens).toContain("bg-surface-hover");
     expect(chipTokens).toContain("text-10");
     // 删除控件不再是手写红字 ×，而是和 TagInput 一样的图标按钮
     expect(screen.getByLabelText("common.remove 登录模块")).toBeTruthy();

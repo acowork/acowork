@@ -385,7 +385,7 @@ export function DateTimePicker({
                   type="button"
                   aria-label={t("datePicker.prevMonth")}
                   onClick={() => setFocusedDay((current) => stepMonth(current, -1))}
-                  className="flex h-7 w-7 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-zinc-100 hover:text-text dark:hover:bg-zinc-700"
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text dark:hover:bg-[var(--color-accent)]/15"
                 >
                   <ChevronLeft className="h-3.5 w-3.5" aria-hidden />
                 </button>
@@ -393,7 +393,7 @@ export function DateTimePicker({
                   type="button"
                   aria-label={t("datePicker.nextMonth")}
                   onClick={() => setFocusedDay((current) => stepMonth(current, 1))}
-                  className="flex h-7 w-7 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-zinc-100 hover:text-text dark:hover:bg-zinc-700"
+                  className="flex h-7 w-7 items-center justify-center rounded-md text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text dark:hover:bg-[var(--color-accent)]/15"
                 >
                   <ChevronRight className="h-3.5 w-3.5" aria-hidden />
                 </button>
@@ -435,7 +435,7 @@ export function DateTimePicker({
                       isSelected
                         ? "btn-accent font-medium"
                         : cn(
-                            "hover:bg-zinc-100 dark:hover:bg-zinc-700",
+                            "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                             cell.inMonth ? "text-text" : "text-text-disabled",
                           ),
                       // 今天 stays readable while 选中, so it is marked with a

@@ -33,7 +33,7 @@ describe("ProtocolChip", () => {
     const chip = renderBadge({ kind: "degraded", stripped: [] });
     expect(chip.textContent).toContain("Ⓡ");
     // The dot is the only visual difference from `verified`.
-    expect(chip.querySelector(".bg-amber-500")).not.toBeNull();
+    expect(chip.querySelector(".bg-warning-solid")).not.toBeNull();
     expect(chip.getAttribute("title")).toBe(i18n.t("harness.probeDegradedTip"));
   });
 
@@ -50,13 +50,13 @@ describe("ProtocolChip", () => {
     const chip = renderBadge({ kind: "declared" });
     expect(chip.textContent).toContain("Ⓡ");
     expect(chip.className).toContain("text-text-tertiary");
-    expect(chip.querySelector(".bg-amber-500")).toBeNull();
+    expect(chip.querySelector(".bg-warning-solid")).toBeNull();
     expect(chip.getAttribute("title")).toBe(i18n.t("harness.probeDeclaredTip"));
   });
 
   it("renders the yellow blocked mark without the R glyph", () => {
     const chip = renderBadge({ kind: "blocked", reason: "failed", detail: "404" });
-    expect(chip.className).toContain("text-amber-500");
+    expect(chip.className).toContain("text-warning");
     // `R` means usable — a blocked selection must not show it.
     expect(chip.textContent).not.toContain("Ⓡ");
     expect(chip.textContent).toBe(i18n.t("harness.probeBlockedShort"));

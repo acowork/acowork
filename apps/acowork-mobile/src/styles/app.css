@@ -509,6 +509,18 @@
   left: calc(var(--list-row-pad-x) + var(--settings-icon-size) + var(--list-row-gap));
 }
 
+/* Project icon — the leading tile in the project list. Same shape language
+ * as desktop's `ProjectAvatar` (rounded square + hairline ring), sized in
+ * px by the caller. `object-fit: cover` so a custom upload that is not
+ * square still fills the tile instead of letterboxing. The ring is
+ * `--color-separator`, not a fixed black alpha, so it survives dark mode. */
+.project-icon {
+  flex: none;
+  border-radius: var(--avatar-radius);
+  object-fit: cover;
+  box-shadow: 0 0 0 1px var(--color-separator);
+}
+
 .row-title {
   display: flex;
   align-items: center;
@@ -582,10 +594,12 @@
 /* --- Bubbles --- */
 
 .bubble {
-  /* 85% of the stack, not 100%: at 16px a full-width peer bubble fits 19
-   * CJK glyphs per line — a wall of text. ~16 is the readable band, and
-   * short messages still shrink-wrap. */
-  max-width: 85%;
+  /* The bubble fills its column. The column is already bounded by the
+   * opposite side's avatar (`.msg-group-peer` / `.msg-group-self`), so a
+   * percentage cap on top of it took a third of the room away for no reason
+   * — on a 360pt phone the two sides read as two narrow strips instead of
+   * two halves of one screen. Short messages still shrink-wrap. */
+  max-width: 100%;
   padding: 10px 14px;
   border-radius: 6px;
   font-size: 16px;
@@ -623,7 +637,9 @@
 .composer {
   flex: none;
   display: flex;
-  align-items: flex-end;
+  /* The textarea was 40px and the send button 44px, bottom-aligned: their
+   * TOPS sat 4px apart, so the two did not read as one row. */
+  align-items: center;
   gap: var(--space-2);
   padding: 8px 12px;
   padding-bottom: calc(8px + var(--safe-bottom));
@@ -633,7 +649,8 @@
 .composer-input {
   flex: 1;
   min-width: 0;
-  min-height: 40px;
+  /* Same height as the send button beside it — one row, one line. */
+  min-height: 44px;
   max-height: 120px;
   padding: 8px 14px;
   border-radius: 6px;
@@ -1430,17 +1447,20 @@
 }
 .msg-group-peer {
   align-items: flex-start;
-  /* Anchor the peer turn to the LEFT — avatar and bubble column start at
-   * the screen's left gutter, with a generous right gutter so the bubble
-   * reads as "this side" rather than full-width body text. 32px ≈ 21
-   * Chinese chars/line at 16px — the sweet spot for prose readability,
-   * still leaves code blocks with plenty of room. */
-  padding-right: 32px;
+  /* Anchor the peer turn to the LEFT. The bubble column starts at the near
+   * avatar's LEFT edge and may run to the FAR avatar's left edge — the
+   * opposite side's avatar is what bounds it, not a percentage. The
+   * desktop's 85% cap was sized for a desktop column; on a 360pt phone it
+   * left the bubble a third narrower than the room the layout actually
+   * leaves, and the two sides read as two narrow columns rather than two
+   * halves of one screen. */
+  padding-right: var(--chat-avatar-size);
 }
 .msg-group-self {
   align-items: flex-end;
-  /* Mirror on the right. */
-  padding-left: 32px;
+  /* Mirror on the right: the bubble ends at the near avatar's RIGHT edge and
+   * may start at the far avatar's right edge. */
+  padding-left: var(--chat-avatar-size);
 }
 .msg-header {
   display: flex;
@@ -1455,8 +1475,8 @@
 }
 .msg-avatar {
   flex: none;
-  width: 36px;
-  height: 36px;
+  width: var(--chat-avatar-size);
+  height: var(--chat-avatar-size);
   border-radius: 4px;
   overflow: hidden;
   background: var(--color-bubble-peer);
@@ -1702,8 +1722,12 @@
  * radius-md, no border — the fill separates it from the gray page); the
  * toggle is not a second object painted on top of it. */
 .explore-toggle {
-  display: grid;
-  grid-template-columns: auto auto 1fr auto;
+  /* A flex row, not a grid: a flex item without `min-width: 0` shrinks to
+   * its MIN-content width, so a long run name wrapped onto several lines and
+   * the card got TALLER as the window got NARROWER. The name and the summary
+   * may now shrink past their content and the text shortens with an ellipsis
+   * instead, so the header stays ONE line tall. */
+  display: flex;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
@@ -1718,20 +1742,79 @@
   cursor: pointer;
 }
 .explore-toggle-icon {
+  flex: none;
   font-size: 12px;
 }
 .explore-toggle-label {
+  /* The run's name is a flex item that must not WRAP: one line, always, with
+   * an ellipsis when the name does not fit. Same rule as the summary below. */
+  flex: 0 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
   font-weight: 500;
   color: var(--color-label);
 }
 .explore-toggle-summary {
+  /* The summary takes the leftover room (`flex: 1`) and shortens with an
+   * ellipsis when there is none left. */
+  flex: 1 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  min-width: 0;
   font-size: 12px;
   opacity: 0.8;
 }
+/* The working capsule: the round count + the live state word, filled with the
+ * accent and wearing white text — the desktop card's rule, copied. The one
+ * accent usage the design language sanctions on a card is a STATUS fill, and
+ * the shape alone is what tells a working run from an idle one. */
+.explore-toggle-live {
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: var(--color-tint-strong);
+  color: var(--color-on-accent);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 1.4;
+}
+.explore-toggle-live-text {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* The spinner rides INSIDE the capsule instead of standing alone beside plain
+ * gray text, which read as no different from an idle run. */
+.explore-toggle-spinner {
+  flex: none;
+  animation: explore-spin 1.1s linear infinite;
+}
+@keyframes explore-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* The task id rides the header as its own quiet chip, not as part of the
+ * status text (D13) — a status word and an id are different things. */
+.explore-toggle-task {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--color-bubble-peer);
+  color: var(--color-label-secondary);
+  font-size: 11px;
+  line-height: 1.4;
+}
 .explore-toggle-caret {
+  flex: none;
   display: flex;
   align-items: center;
   color: var(--color-label-secondary);
@@ -1945,6 +2028,23 @@
   color: var(--color-label-secondary);
 }
 .doc-tree-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Project list row label — icon tile + name, mirroring Desktop's
+ * <ProjectAvatar/> + `min-w-0 flex-1 truncate` span. The name needs its own
+ * truncating box: `text-overflow` on `.list-row-label` cannot reach text that
+ * lives inside the flex `.row-title`, so without this the title hard-clips at
+ * the row edge instead of ellipsizing (same reason `.doc-tree-name` exists).
+ * 22px matches mobile's own leading-icon slot (`--settings-icon-size`) rather
+ * than Desktop's 18px, which is sized for a 14px sidebar font. */
+.project-row-label {
+  gap: 6px;
+}
+.project-row-name {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2298,6 +2398,12 @@
   align-items: center;
   gap: 8px;
   width: 100%;
+  /* The global touch rule (every button gets `min-height: var(--touch-min)`)
+   * made every button 44px tall. A round row holds 12px text, so 44px left
+   * ~10px of blank above and below it and the row read TALLER than the card's
+   * title banner. The row is a list line, not a touch target in a toolbar: let
+   * it size to its content (the desktop row does the same with `py-1.5`). */
+  min-height: auto;
   padding: 4px 0;
   border: none;
   background: transparent;
@@ -2939,7 +3045,10 @@
    while it is folded (the parent gates it on `open`). */
 .chat-block-reply {
   display: flex;
-  align-items: flex-end;
+  /* The box and the button were different heights (34px vs 32px) and
+   * bottom-aligned, so their TOPS sat 3px apart — the two halves of one
+   * control read as two rows. Same height + centered = one line. */
+  align-items: center;
   gap: 8px;
   margin-top: 6px;
   padding-top: 6px;
@@ -2947,7 +3056,7 @@
 }
 .chat-block-reply-input {
   flex: 1;
-  min-height: 34px;
+  min-height: 36px;
   resize: none;
   padding: 7px 10px;
   border: 1px solid var(--color-border, rgba(128, 128, 128, 0.25));
@@ -2961,6 +3070,9 @@
   /* Filled variant of the unified family; the old rule carried an orange
    * `#f59e0b` fallback that no other control in the app speaks. */
   flex: none;
+  /* Same height as the box beside it (`.btn-sm` gave 32px against the
+   * input's 34px) — two halves of one control, one line. */
+  min-height: 36px;
 }
 
 /* A locate that found no block says so once, briefly, above the composer. */

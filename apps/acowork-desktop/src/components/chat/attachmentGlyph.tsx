@@ -36,7 +36,7 @@ export const ATTACHMENT_KIND = {
 const TABLE: Record<string, AttachmentGlyph> = {
   [ATTACHMENT_KIND.attachedFile]: { Icon: FileText, className: "text-text-tertiary" },
   [ATTACHMENT_KIND.attachedSelection]: { Icon: Hash, className: "text-[var(--color-accent)]" },
-  [ATTACHMENT_KIND.attachedFolder]: { Icon: Folder, className: "text-amber-500" },
+  [ATTACHMENT_KIND.attachedFolder]: { Icon: Folder, className: "text-warning" },
   [ATTACHMENT_KIND.fileUpload]: { Icon: Upload, className: "text-text-tertiary" },
   [ATTACHMENT_KIND.imageUpload]: { Icon: ImageIcon, className: "text-text-tertiary" },
 };

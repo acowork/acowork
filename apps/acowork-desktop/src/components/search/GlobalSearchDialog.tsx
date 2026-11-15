@@ -1321,7 +1321,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             setConversationHits([]);
                         }}
                     />
-                    <div className="flex h-full flex-1 items-center gap-1.5 border-l border-zinc-200 px-5 py-1.5 dark:border-zinc-700">
+                    <div className="flex h-full flex-1 items-center gap-1.5 border-l border-border-outer px-5 py-1.5">
                         <Search className="h-3 w-3 shrink-0 text-text-tertiary" />
                         <input
                             ref={inputRef}
@@ -1365,7 +1365,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                 className={`flex h-6 w-6 shrink-0 items-center justify-center rounded transition-colors ${
                                     query.trim() !== ranQuery
                                         ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
-                                        : "text-text-tertiary hover:bg-zinc-100 hover:text-text-secondary dark:hover:bg-zinc-700/50"
+                                        : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
                                 }`}
                             >
                                 {/* Submit arrow, not a refresh glyph: this
@@ -1406,8 +1406,8 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                 }}
                                 className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                                     tab === tabDef.key
-                                        ? "bg-zinc-200 text-text dark:bg-zinc-700"
-                                        : "text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
+                                        ? "bg-surface-hover text-text"
+                                        : "text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                                 }`}
                             >
                                 {tabDef.label}
@@ -1577,7 +1577,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                     <button
                         type="button"
                         onClick={() => closeDialog()}
-                        className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+                        className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                     >
                         {t("globalSearch.close")}
                     </button>
@@ -1926,7 +1926,7 @@ function ToggleBtn({
             className={`flex h-6 min-w-[1.5rem] items-center justify-center rounded px-1.5 text-11 font-medium transition-colors ${
                 active
                     ? "bg-[var(--color-accent)]/20 text-[var(--color-accent)]"
-                    : "text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700/50"
+                    : "text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
             }`}
         >
             {children}

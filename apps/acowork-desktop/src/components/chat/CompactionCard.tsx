@@ -72,10 +72,10 @@ function formatTime(ms: number): string {
  * "folded metadata" blocks share the same language:
  *
  * - Outer wrapper is fully transparent — no border, no background.
- * - Header is a compact pill (`bg-zinc-50` / `hover:bg-zinc-100`,
- *   `bg-zinc-800/30` / `hover:bg-zinc-800/50` dark), `w-fit` so it hugs
+ * - Header is a compact pill (`bg-surface-subtle` / `hover:bg-[var(--color-accent)]/10`,
+ *   `bg-zinc-800/30` / `hover:bg-[var(--color-accent)]/10` dark), `w-fit` so it hugs
  *   its text — no full-width row, no chevron pushed to the far right.
- * - Expanded content uses the same `border-l-2 + bg-zinc-50` recipe as
+ * - Expanded content uses the same `border-l-2 + bg-surface-subtle` recipe as
  *   ExploreBlock's expanded tool trace, so the visual rhythm of the two
  *   cards is identical.
  * - Collapsed header (left → right):
@@ -101,7 +101,7 @@ export function CompactionCard({ summary, meta, timestampMs }: CompactionCardPro
       <button
         type="button"
         onClick={() => setExpanded((v) => !v)}
-        className="flex w-fit items-center gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-zinc-100 dark:bg-zinc-800/30  dark:hover:bg-zinc-800/50"
+        className="flex w-fit items-center gap-2 rounded-md bg-surface-subtle px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
         style={{ fontSize: CARD_FONT_SIZE }}
       >
         <FileText className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
@@ -123,7 +123,7 @@ export function CompactionCard({ summary, meta, timestampMs }: CompactionCardPro
           so a long summary cannot blow up the chat layout. */}
       {expanded && (
         <div
-          className="ml-2 mt-1 overflow-y-auto rounded-md border-l-2 border-zinc-300 bg-zinc-50 pl-3 pr-2 py-2 dark:border-zinc-600 dark:bg-zinc-800/30"
+          className="ml-2 mt-1 overflow-y-auto rounded-md border-l-2 border-border-strong bg-surface-subtle pl-3 pr-2 py-2"
           style={{ maxHeight: "240px" }}
         >
           <div

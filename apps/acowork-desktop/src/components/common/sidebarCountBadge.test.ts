@@ -48,10 +48,11 @@ describe("sidebar count bubbles", () => {
     expect(COUNT_BADGE_BASE_CN).toContain("tabular-nums");
   });
 
-  it("the neutral variant adds the zinc fill on top of the shared shape", () => {
+  it("the neutral variant adds the surface fill on top of the shared shape", () => {
     expect(COUNT_BADGE_NEUTRAL_CN).toContain(COUNT_BADGE_BASE_CN);
-    expect(COUNT_BADGE_NEUTRAL_CN).toContain("bg-zinc-200");
-    expect(COUNT_BADGE_NEUTRAL_CN).toContain("dark:bg-zinc-700");
+    // One semantic token flips both themes — no dark: twin may come back.
+    expect(COUNT_BADGE_NEUTRAL_CN).toContain("bg-surface-hover");
+    expect(COUNT_BADGE_NEUTRAL_CN).not.toContain("dark:");
   });
 
   it("the Users banner renders its count through the shared constant", () => {

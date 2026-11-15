@@ -1653,8 +1653,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                                             className={cn(
                                                 "shrink-0 rounded p-0.5 transition-opacity",
                                                 isActive
-                                                    ? "opacity-60 hover:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600"
-                                                    : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-zinc-300 dark:hover:bg-zinc-600",
+                                                    ? "opacity-60 hover:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
+                                                    : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                                             )}
                                         >
                                             <X className="h-3 w-3" />
@@ -1693,7 +1693,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                                 locateDisabled
                                     ? "text-text-secondary  cursor-not-allowed"
-                                    : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
+                                    : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15",
                             )}
                             >
                                 <Locate className="h-3.5 w-3.5" />
@@ -1720,7 +1720,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                         : t("fileEditor.openPreview")
                                 }
                                 onClick={handleTogglePreview}
-                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
                             >
                                 {activeFile.mode === "preview" ? (
                                     <Code2 className="h-3.5 w-3.5" />
@@ -1765,10 +1765,10 @@ export function FileEditorPanel({ width }: { width: number }) {
                                     activeFile.mode === "preview"
                                         ? "text-text-secondary  cursor-not-allowed"
                                         : activeFile.saveError
-                                          ? "text-red-500 hover:bg-red-100 dark:hover:bg-red-900/30"
+                                          ? "text-danger-icon hover:bg-danger-surface-hover"
                                           : activeFile.dirty
-                                            ? "text-[var(--color-accent)] hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
-                                            : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300 cursor-default",
+                                            ? "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
+                                            : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15 cursor-default",
                                 )}
                             >
                                 {activeFile.saving ? (
@@ -1824,7 +1824,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                     core/acowork-runtime/src/usecases/
                                     git_query_impl.rs `diff`). grid-cols-2
                                     keeps each label visually under its pane. */}
-                                <div className="grid grid-cols-2 border-b border-right-panel-border bg-zinc-50 text-11 dark:bg-zinc-900/40">
+                                <div className="grid grid-cols-2 border-b border-right-panel-border bg-surface-subtle text-11">
                                     <button
                                         type="button"
                                         onClick={(e) => {
@@ -1836,8 +1836,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                                         className={
                                             "flex items-center gap-2 truncate px-3 py-1 text-left transition-colors " +
                                             (pickerSide === "base"
-                                                ? "bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200"
-                                                : "text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800/60")
+                                                ? "bg-info-surface text-info"
+                                                : "text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15")
                                         }
                                     >
                                         <span className="font-medium">
@@ -1870,8 +1870,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                                         className={
                                             "flex items-center justify-end gap-2 truncate px-3 py-1 text-right transition-colors " +
                                             (pickerSide === "head"
-                                                ? "bg-blue-100 text-blue-800 dark:bg-blue-900/50 dark:text-blue-200"
-                                                : "text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800/60")
+                                                ? "bg-info-surface text-info"
+                                                : "text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15")
                                         }
                                     >
                                         <span className="truncate text-text-tertiary ">
@@ -2067,7 +2067,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                                 <AlertCircle className="h-4 w-4" />
                                 {t("fileEditor.previewLoadFailed")}
                                 <button
-                                    className="rounded border border-border-default px-2 py-1 hover:bg-hover"
+                                    className="rounded border border-border-default px-2 py-1 hover:bg-[var(--color-accent)]/10"
                                     onClick={rasterImageBlob.retry}
                                 >
                                     {t("fileEditor.previewRetry")}
@@ -2210,8 +2210,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-start gap-3">
-                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
-                                <FileText className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-warning-surface-hover">
+                                <FileText className="h-5 w-5 text-warning" />
                             </div>
                             <div className="flex-1">
                                 <h3 className="text-sm font-medium text-text ">
@@ -2287,8 +2287,8 @@ export function FileEditorPanel({ width }: { width: number }) {
                         onClick={(e) => e.stopPropagation()}
                     >
                         <div className="flex items-start gap-3">
-                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
-                                <FileText className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+                            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-warning-surface-hover">
+                                <FileText className="h-5 w-5 text-warning" />
                             </div>
                             <div className="flex-1">
                                 <h3 className="text-sm font-medium text-text ">

@@ -104,13 +104,13 @@ export default function OfficePdfViewer(props: OfficePdfViewerProps) {
     return (
         <div className="flex h-full flex-col">
             <div className="min-h-0 flex-1">{props.fallback}</div>
-            <div className="flex shrink-0 flex-col gap-0.5 border-t border-amber-300/60 bg-amber-50/95 px-3 py-1 text-11 text-amber-900 dark:bg-amber-950/60 dark:text-amber-100">
+            <div className="flex shrink-0 flex-col gap-0.5 border-t border-warning-border/60 bg-warning-surface/95 px-3 py-1 text-11 text-warning-quiet">
                 <div className="flex items-center gap-2">
                     <span className="min-w-0 truncate">{degraded}</span>
                     {conv.status === "failed" && (
                         <button
                             type="button"
-                            className="ml-auto shrink-0 rounded border border-border-default px-2 py-0.5 hover:bg-hover"
+                            className="ml-auto shrink-0 rounded border border-border-default px-2 py-0.5 hover:bg-[var(--color-accent)]/10"
                             onClick={conv.retry}
                         >
                             {t("fileEditor.docViewer.retry")}

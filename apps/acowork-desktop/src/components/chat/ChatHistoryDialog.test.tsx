@@ -296,9 +296,9 @@ describe("ChatHistoryDialog tab strip", () => {
     // Active pill: zinc wash + full-strength text (NOT accent-colored text on
     // an accent tint, which is what this dialog shipped with).
     expect(source).toContain("rounded-full px-3 py-1.5 text-xs font-medium transition-colors");
-    expect(source).toContain('"bg-zinc-200 text-text dark:bg-zinc-700"');
+    expect(source).toContain('"bg-surface-hover text-text"');
     expect(source).toContain(
-      '"text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700/50"',
+      '"text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"',
     );
     // The hand-rolled accent chip is gone.
     expect(source).not.toContain("bg-[var(--color-accent)]/12");

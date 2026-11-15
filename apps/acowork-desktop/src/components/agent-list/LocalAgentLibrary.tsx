@@ -147,7 +147,7 @@ function AddAgentCard({
       onClick={onClick}
       disabled={disabled}
       title={disabledReason}
-      className="flex h-full min-h-[7rem] flex-col items-center justify-center gap-1.5 rounded-md border border-dashed border-zinc-300 bg-panel-block p-3 text-xs text-text-secondary transition-colors hover:border-[var(--color-accent)]/60 hover:text-text disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600"
+      className="flex h-full min-h-[7rem] flex-col items-center justify-center gap-1.5 rounded-md border border-dashed border-border-strong bg-panel-block p-3 text-xs text-text-secondary transition-colors hover:border-[var(--color-accent)]/60 hover:text-text disabled:cursor-not-allowed disabled:opacity-50"
     >
       <Plus className="h-4 w-4" />
       {t("agentHub.localAddFile")}
@@ -211,7 +211,7 @@ function LocalAgentCard({
           title={blockedReason}
           aria-label={t("agentHub.moreActions")}
           aria-haspopup="menu"
-          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-zinc-100 disabled:opacity-40 dark:hover:bg-zinc-700"
+          className="shrink-0 rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
         >
           <MoreHorizontal className="h-4 w-4" />
         </button>
@@ -234,7 +234,7 @@ function LocalAgentCard({
       {chips.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {chips.map((chip) => (
-            <span key={chip} className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700">
+            <span key={chip} className="rounded bg-surface-hover px-1.5 py-0.5 text-10 text-text-secondary">
               {chip}
             </span>
           ))}
@@ -242,7 +242,7 @@ function LocalAgentCard({
       )}
 
       {broken && (
-        <div className="flex items-start gap-1.5 rounded-md bg-red-50 px-2 py-1 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300">
+        <div className="flex items-start gap-1.5 rounded-md bg-danger-surface px-2 py-1 text-xs text-danger-text">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span className="break-all">{t("agentHub.localBrokenFile", { error: row.error ?? "" })}</span>
         </div>
@@ -299,7 +299,7 @@ function LocalAvatar({
     return (
       <div
         aria-label={name}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-zinc-100 text-sm font-semibold text-text-secondary dark:bg-zinc-700"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-surface-hover text-sm font-semibold text-text-secondary"
       >
         {initial}
       </div>
@@ -325,7 +325,7 @@ function Notice({ tone, message }: { tone: "error"; message: string }) {
     <div
       className={cn(
         "flex items-start gap-2 rounded-md p-2 text-xs",
-        tone === "error" && "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-300",
+        tone === "error" && "bg-danger-surface text-danger-text",
       )}
     >
       <X className="mt-0.5 h-3.5 w-3.5 shrink-0" />

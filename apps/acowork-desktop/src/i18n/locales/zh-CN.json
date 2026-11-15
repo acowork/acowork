@@ -794,6 +794,8 @@
     "light": "浅色",
     "dark": "深色",
     "system": "跟随系统",
+    "themePack": "配色主题",
+    "themeDefault": "默认",
     "accentColor": "全局高亮色",
     "contentWidth": "内容宽度",
     "contentWidthHint": "聊天消息、工具调用、Thinking 的最大显示宽度",

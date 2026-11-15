@@ -294,7 +294,7 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
             aria-label="缩小"
             title="缩小"
             data-version={transformVersion}
-            className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-zinc-700 hover:bg-zinc-200  dark:hover:text-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ZoomOut className="h-3.5 w-3.5" />
           </button>
@@ -304,7 +304,7 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
             aria-label="重置缩放（撑满显示区域）"
             title="重置缩放（撑满显示区域）"
             data-version={transformVersion}
-            className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-zinc-700 hover:bg-zinc-200  dark:hover:text-zinc-200 dark:hover:bg-zinc-700"
+            className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           >
             <Maximize2 className="h-3.5 w-3.5" />
           </button>
@@ -315,7 +315,7 @@ export function MermaidBlock({ chart }: MermaidBlockProps) {
             aria-label="放大"
             title="放大"
             data-version={transformVersion}
-            className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-zinc-700 hover:bg-zinc-200  dark:hover:text-zinc-200 dark:hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+            className="flex items-center justify-center rounded p-0.5 text-text-tertiary hover:text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15 disabled:opacity-40 disabled:cursor-not-allowed"
           >
             <ZoomIn className="h-3.5 w-3.5" />
           </button>

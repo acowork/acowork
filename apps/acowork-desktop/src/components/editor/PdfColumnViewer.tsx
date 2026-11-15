@@ -196,7 +196,7 @@ export function PdfColumnViewer({
     }, [framing, onExitFraming, selection]);
 
     const toolBtn =
-        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-hover hover:text-text disabled:cursor-not-allowed disabled:opacity-40";
+        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text disabled:cursor-not-allowed disabled:opacity-40";
     const divider = <span className="mx-1 h-3.5 w-px shrink-0 bg-border-divider" />;
 
     return (
@@ -291,7 +291,7 @@ export function PdfColumnViewer({
                             type="button"
                             className={cn(
                                 "inline-flex h-6 shrink-0 items-center gap-1 rounded border border-border-default px-2 text-11 transition-colors",
-                                "hover:bg-hover disabled:cursor-not-allowed disabled:opacity-40",
+                                "hover:bg-[var(--color-accent)]/10 disabled:cursor-not-allowed disabled:opacity-40",
                             )}
                             onClick={() => selection && void addRegion(selection)}
                             disabled={

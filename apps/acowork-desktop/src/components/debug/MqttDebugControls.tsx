@@ -87,9 +87,9 @@ export function MqttDebugControls() {
         disabled={busy !== null}
         className={cn(
           "flex items-center gap-1 px-1.5 py-px rounded-md",
-          "bg-red-50/80 hover:bg-red-100 dark:bg-red-950/40 dark:hover:bg-red-950/60",
-          "border border-red-200/50 dark:border-red-800/60",
-          "text-red-700 dark:text-red-300",
+          "bg-danger-surface/80 hover:bg-danger-surface-hover",
+          "border border-danger-border/50",
+          "text-danger-text",
           "disabled:opacity-50 disabled:cursor-not-allowed",
           "transition-colors"
         )}
@@ -104,9 +104,9 @@ export function MqttDebugControls() {
         disabled={busy !== null}
         className={cn(
           "flex items-center gap-1 px-1.5 py-px rounded-md",
-          "bg-green-50/80 hover:bg-green-100 dark:bg-green-950/40 dark:hover:bg-green-950/60",
-          "border border-green-200/50 dark:border-green-800/60",
-          "text-green-700 dark:text-green-300",
+          "bg-ok-surface/80 hover:bg-ok-surface",
+          "border border-ok/50",
+          "text-ok",
           "disabled:opacity-50 disabled:cursor-not-allowed",
           "transition-colors"
         )}

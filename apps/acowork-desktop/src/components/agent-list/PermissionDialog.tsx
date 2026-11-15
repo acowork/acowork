@@ -447,7 +447,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
           <button
             ref={closeRef}
             onClick={onClose}
-            className="text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+            className="text-text-tertiary hover:text-text-tertiary"
             aria-label={t("permissionDialog.ariaLabelClose")}
           >
             ✕
@@ -458,7 +458,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
         <div className="max-h-[60vh] space-y-4 overflow-y-auto px-5 py-4 text-xs">
           {loading && !perms && (
             <div className="flex items-center justify-center py-8">
-              <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-border-strong border-t-zinc-600 dark:border-t-zinc-300" />
             </div>
           )}
 
@@ -678,7 +678,7 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
         <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
           <button
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("common.cancel")}
           </button>

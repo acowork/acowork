@@ -58,7 +58,7 @@ export function InviteTokenModal({ open, token, username, onClose }: InviteToken
             <button
               type="button"
               onClick={copy}
-              className="flex shrink-0 items-center gap-1 rounded-md border border-border-outer px-2 py-1.5 text-xs text-text-secondary hover:bg-hover-overlay"
+              className="flex shrink-0 items-center gap-1 rounded-md border border-border-outer px-2 py-1.5 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10"
             >
               {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
               {copied ? t("account.copied") : t("account.copy")}

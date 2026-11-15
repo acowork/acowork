@@ -2021,7 +2021,7 @@ export function GroupChatPanel() {
         {atBottom === false && items.length > 0 && (
           <button
             onClick={stickNow}
-            className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+            className="absolute bottom-3 right-4 z-10 rounded-full bg-surface-hover border border-border-outer shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-all animate-in fade-in zoom-in"
             aria-label={t("chatPanel.ariaLabelScrollToBottom")}
           >
             <ChevronsDown className="h-4 w-4 text-text-tertiary" />
@@ -2313,7 +2313,7 @@ export function GroupChatPanel() {
                       ? t("chatView.notice.turnInflightTooltip")
                       : t("groupChat.send")
                   }
-                  className="rounded-md p-1.5 text-text-tertiary hover:bg-zinc-200 disabled:opacity-50 dark:hover:bg-zinc-700 hover:text-zinc-700 dark:hover:text-zinc-200"
+                  className="rounded-md p-1.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15 hover:text-text-secondary"
                 >
                   <Send size={16} />
                 </button>

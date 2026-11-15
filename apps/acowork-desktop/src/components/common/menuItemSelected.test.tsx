@@ -15,11 +15,20 @@
  * resolves nor asserts on. The class strings ARE the spec here — same
  * approach as capsule.test.tsx / ToolbarDropdown.fontSize.test.tsx.
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, resolve } from "node:path";
+import { dirname, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { listRowHover, menuItemSelected } from "../../lib/ui-styles";
+import {
+  cardButtonNeutral,
+  dialogButtonPrimary,
+  dialogButtonSecondary,
+  interactiveHover,
+  listRowHover,
+  menuItemSelected,
+  toolbarButton,
+  toolbarIconButton,
+} from "../../lib/ui-styles";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const read = (rel: string) => readFileSync(resolve(__dirname, "..", "..", rel), "utf8");
@@ -66,9 +75,12 @@ describe("the popup cursor highlight", () => {
   });
 
   it("leaves the destructive / warning variants their own hue", () => {
+    // Pinned by TOKEN, not by hex: a theme pack must be free to recolour
+    // these variants. What matters is that each keeps its own hue instead of
+    // falling back to the accent tint used by ordinary rows.
     const css = read("styles/globals.css");
-    expect(css).toMatch(/--danger:hover \{[^}]*red/);
-    expect(css).toMatch(/--warning:hover \{[^}]*#fffbeb/);
+    expect(css).toMatch(/--danger:hover \{[^}]*--color-menu-danger-hover/);
+    expect(css).toMatch(/--warning:hover \{[^}]*--color-menu-warning-hover/);
   });
 });
 
@@ -94,9 +106,77 @@ it.each(MENUS)("%s routes every selected row through it", (rel, expected, banned
   // pull the token in, so a new menu row cannot ship text-only by default.
   expect(src.split("menuItemSelected").length - 1).toBe(expected + 1);
   // The hand-rolled two-space hover string these rows used before is gone.
-  expect(src).not.toContain('"hover:bg-zinc-50  dark:hover:bg-zinc-700/50"');
+  expect(src).not.toContain('"hover:bg-surface-subtle "');
   // A selected row's LABEL must not re-apply the accent foreground behind
   // the token's back. Scoped to the label expressions, not the whole file:
   // the check mark and the surrounding badges stay accent on purpose.
   for (const frag of banned) expect(src).not.toContain(frag);
+});
+
+/**
+ * Buttons used to light up a neutral zinc/grey rectangle while the menu rows
+ * they open wore the accent tint. The two must now be ONE colour family —
+ * source scanning, because jsdom does not resolve Tailwind arbitrary values.
+ * Overlay controls (image lightbox, thumbnail delete) keep their black/white
+ * scrim on purpose and are deliberately outside this rule.
+ */
+const NEUTRAL_BUTTON_HOVER =
+  /(?<![\w-])(?:dark:)?hover:bg-(?:zinc|gray|nav-item-hover|nav-control|hover-overlay|bg-hover|panel-inset|hover)(?![\w-])/;
+
+function sourceFiles(dir: string): string[] {
+  const out: string[] = [];
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const path = resolve(dir, entry.name);
+    if (entry.isDirectory()) out.push(...sourceFiles(path));
+    else if (/\.(?:ts|tsx|css)$/.test(entry.name) && !/\.test\./.test(entry.name)) out.push(path);
+  }
+  return out;
+}
+
+describe("interactiveHover — one highlight for buttons and list rows", () => {
+  it("is literally the list-row hover token", () => {
+    expect(interactiveHover).toBe(listRowHover);
+    expect(interactiveHover).toContain("hover:bg-[var(--color-accent)]/10");
+    expect(interactiveHover).toContain("dark:hover:bg-[var(--color-accent)]/15");
+  });
+
+  it.each([
+    ["toolbarButton", toolbarButton],
+    ["toolbarIconButton", toolbarIconButton],
+    ["dialogButtonSecondary", dialogButtonSecondary],
+    ["cardButtonNeutral", cardButtonNeutral],
+  ])("%s uses it and no neutral grey", (_name, cls) => {
+    expect(cls).toContain(interactiveHover);
+    expect(cls).not.toMatch(/hover:bg-(?:zinc|gray|nav)/);
+  });
+
+  it("solid primary buttons echo the accent with a ring, never a wash", () => {
+    // Pinned by TOKEN: the solid fill is the cross-mode btn-solid token
+    // (light/dark values live in globals.css), not a literal zinc class.
+    expect(dialogButtonPrimary).toContain("bg-btn-solid");
+    expect(dialogButtonPrimary).toContain("hover:bg-btn-solid-hover");
+    expect(dialogButtonPrimary).toContain("hover:ring-2");
+    expect(dialogButtonPrimary).toContain("hover:ring-[var(--color-accent)]/70");
+    expect(dialogButtonPrimary).not.toContain("hover:bg-[var(--color-accent)]");
+  });
+
+  it("leaves no neutral grey hover on any clickable surface", () => {
+    const srcDir = resolve(__dirname, "..", "..");
+    const offenders: string[] = [];
+    for (const file of sourceFiles(srcDir)) {
+      readFileSync(file, "utf8")
+        .split(/\r?\n/)
+        .forEach((line, i) => {
+          if (!NEUTRAL_BUTTON_HOVER.test(line)) return;
+          // Solid primary buttons keep their opaque fill (btn-solid token or a
+          // whitelisted cross-mode zinc class) and darken it by one step.
+          // They may keep that neutral hover ONLY while they also echo the
+          // accent with a hover ring (see dialogButtonPrimary).
+          if (/(?:bg-zinc-(?:800|900)|bg-btn-solid)\b/.test(line) &&
+              line.includes("hover:ring-[var(--color-accent)]")) return;
+          offenders.push(`${relative(srcDir, file)}:${i + 1}`);
+        });
+    }
+    expect(offenders).toEqual([]);
+  });
 });

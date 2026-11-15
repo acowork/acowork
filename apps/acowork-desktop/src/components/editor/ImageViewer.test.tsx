@@ -302,8 +302,7 @@ describe("ImageViewer bitmap boundary", () => {
     // One device-independent hair of grey in both themes — faint, but enough
     // to show where the bitmap ends.
     expect(cls).toMatch(/\bring-1\b/);
-    expect(cls).toContain("ring-zinc-300/60");
-    expect(cls).toContain("dark:ring-zinc-600/60");
+    expect(cls).toContain("ring-border-strong/60");
   });
 
   it("leaves the natural × scale box untouched by the decoration", () => {
@@ -314,7 +313,8 @@ describe("ImageViewer bitmap boundary", () => {
     // smaller than this box, and every readout/crop derived from it would skew.
     expect(stage.style.width).toBe("1000px");
     expect(stage.style.height).toBe("750px");
-    expect(stage.className).not.toMatch(/\bborder(-|\b)/);
+    // border-width classes only — `ring-border-strong` is a colour, not a width.
+    expect(stage.className).not.toMatch(/\bborder(?![a-z-])/);
     expect(stage.className).not.toMatch(/\bp[xytrbl]?-/);
   });
 

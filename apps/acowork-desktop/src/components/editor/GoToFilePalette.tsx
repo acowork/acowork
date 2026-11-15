@@ -21,6 +21,7 @@ import { SetiIcon } from "../common/SetiIcon";
 import { OverlayScrollTarget } from "../common/OverlayScrollbar";
 import { OVERLAY_SCROLL_HOST_CLASS, OVERLAY_SCROLL_VIEWPORT_CLASS } from "../common/overlayScrollThumb";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
+import { readThemeVar } from "../../lib/themeVars";
 
 /* ─── Types ────────────────────────────────────────────────────────────────── */
 
@@ -287,7 +288,7 @@ export function GoToFilePalette({ agentId, workspaceId, onClose }: GoToFilePalet
                     transform: "translateX(-50%)",
                     width: "60%",
                     zIndex: 2550,
-                    backgroundColor: colors.widgetBg,
+                    backgroundColor: readThemeVar("--color-widget-bg", colors.widgetBg),
                     borderRadius: 6,
                     boxShadow: colors.shadow,
                     fontFamily: '-apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", "Noto Sans SC", "Microsoft YaHei", Roboto, sans-serif',

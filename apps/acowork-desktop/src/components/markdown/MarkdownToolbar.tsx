@@ -162,7 +162,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
       "flex h-7 w-7 shrink-0 items-center justify-center rounded transition-colors",
       active
         ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-        : "text-text-tertiary hover:bg-zinc-100 hover:text-zinc-800  dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
+        : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text  dark:hover:bg-[var(--color-accent)]/15",
       inactive && "pointer-events-none opacity-40",
     );
 
@@ -200,7 +200,7 @@ export function MarkdownToolbar({ editor, disabled }: MarkdownToolbarProps) {
           <Table className="h-3.5 w-3.5" aria-hidden />
         </button>
         {tableOpen && (
-          <div className="absolute right-0 top-full z-30 mt-1 flex items-center gap-2 rounded-md border border-border-outer bg-white p-2 shadow-lg dark:bg-zinc-900">
+          <div className="absolute right-0 top-full z-30 mt-1 flex items-center gap-2 rounded-md border border-border-outer bg-surface-subtle p-2 shadow-lg">
             <label className="flex items-center gap-1 text-11 text-text-tertiary ">
               {t("doc.tbTableRows")}
               <input

@@ -119,7 +119,7 @@ export function CloneDialog({
         {/* Body */}
         <div className="space-y-4 px-5 py-4">
           {/* Source info */}
-          <div className="flex items-center gap-2 rounded-md bg-zinc-50 px-3 py-2 text-xs dark:bg-zinc-700/50">
+          <div className="flex items-center gap-2 rounded-md bg-surface-subtle px-3 py-2 text-xs">
             <Info className="h-4 w-4 text-text-tertiary" />
             <span className="text-text-tertiary ">
               {t("cloneDialog.cloningFrom")}{" "}
@@ -188,8 +188,8 @@ export function CloneDialog({
                   className={cn(
                     "flex-1 rounded-md border px-3 py-1.5 text-xs font-medium transition-colors",
                     mode === m
-                      ? "border-zinc-200 bg-zinc-200 text-text dark:border-zinc-600 dark:bg-zinc-600 dark:text-text "
-                      : "border-zinc-200 text-text-secondary hover:bg-zinc-50 dark:border-zinc-600  dark:hover:bg-zinc-700",
+                      ? "border-border-outer bg-surface-strong text-text dark:text-text "
+                      : "border-border-outer text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15",
                   )}
                 >
                   {modeDescriptions[m].label}
@@ -212,7 +212,7 @@ export function CloneDialog({
           <button
             onClick={onClose}
             disabled={cloning}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("common.cancel")}
           </button>

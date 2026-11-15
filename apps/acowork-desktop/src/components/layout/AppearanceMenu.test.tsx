@@ -17,6 +17,11 @@ import { describe, it, expect, beforeEach } from "vitest";
 import { render, screen, fireEvent, act } from "@testing-library/react";
 import { AppearanceMenu } from "./AppearanceMenu";
 import { useSettingsStore } from "../../stores/settingsStore";
+import {
+  DEFAULT_THEME_PACK,
+  THEME_PACKS,
+  applyThemePack,
+} from "../../styles/themePacks";
 
 /** The trigger button — its accessible name is the localized
  *  "Appearance" label (any of the 5 locales). */
@@ -57,12 +62,13 @@ describe("AppearanceMenu", () => {
     render(<AppearanceMenu />);
     expect(screen.queryByRole("radio")).toBeNull();
     fireEvent.click(trigger());
-    expect(screen.getAllByRole("radio").length).toBe(3);
+    // 3 theme-mode rows + the theme-pack rows (Default + every pack file).
+    expect(screen.getAllByRole("radio").length).toBe(3 + 1 + THEME_PACKS.length);
   });
 
   it("closes on Escape", () => {
     openMenu();
-    expect(screen.getAllByRole("radio").length).toBe(3);
+    expect(screen.getAllByRole("radio").length).toBe(3 + 1 + THEME_PACKS.length);
     act(() => {
       fireEvent.keyDown(document, { key: "Escape" });
     });
@@ -126,11 +132,13 @@ describe("AppearanceMenu", () => {
     fireEvent.click(swatch("green"));
 
     expect(useSettingsStore.getState().accentColor).toBe("#00C375");
-    // The CSS variable drives buttons / links / the glass tint.
+    // Shipped presets set NO inline value — `:root.accent-green` supplies the
+    // token so a theme pack can still override it (inline style would outrank
+    // every stylesheet).
     expect(
       document.documentElement.style.getPropertyValue("--color-accent"),
-    ).toBe("#00C375");
-    // The `accent-{id}` class selects the per-accent glass tint block.
+    ).toBe("");
+    // The `accent-{id}` class selects the per-accent block.
     expect(document.documentElement.classList.contains("accent-green")).toBe(true);
     expect(localStorage.getItem("acowork-accent-color")).toBe("#00C375");
   });
@@ -140,5 +148,52 @@ describe("AppearanceMenu", () => {
     openMenu();
     expect(swatch("rose").getAttribute("aria-pressed")).toBe("true");
     expect(swatch("green").getAttribute("aria-pressed")).toBe("false");
+  });
+});
+
+describe("AppearanceMenu theme packs", () => {
+  beforeEach(() => {
+    localStorage.clear();
+    applyThemePack(DEFAULT_THEME_PACK);
+    useSettingsStore.setState({ theme: "system", osTheme: "light" });
+    document.documentElement.classList.remove("dark");
+  });
+
+  /** A theme-pack row: "Paper" by name, or the localized Default row. */
+  const packRow = (name: string | RegExp) => screen.getByRole("radio", { name });
+  const defaultRow = () => packRow(/Default|默认|預設|デフォルト|기본값/);
+
+  it("picking a pack scopes <html>, persists, and Default restores", () => {
+    openMenu();
+    fireEvent.click(packRow("Paper"));
+    const root = document.documentElement;
+    expect(root.classList.contains("theme-paper")).toBe(true);
+    expect(root.getAttribute("data-theme-pack")).toBe("paper");
+    expect(localStorage.getItem("acowork-theme-pack")).toBe("paper");
+    expect(packRow("Paper").getAttribute("aria-checked")).toBe("true");
+    expect(defaultRow().getAttribute("aria-checked")).toBe("false");
+
+    fireEvent.click(defaultRow());
+    expect(root.classList.contains("theme-paper")).toBe(false);
+    expect(root.getAttribute("data-theme-pack")).toBeNull();
+    expect(localStorage.getItem("acowork-theme-pack")).toBeNull();
+    expect(defaultRow().getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("switching a pack leaves the light/dark mode untouched", () => {
+    // Go through the action (not bare setState) so applyTheme touches the DOM.
+    useSettingsStore.getState().setTheme("dark");
+    openMenu();
+    fireEvent.click(packRow("Paper"));
+    const root = document.documentElement;
+    expect(root.classList.contains("dark")).toBe(true);
+    expect(root.classList.contains("theme-paper")).toBe(true);
+  });
+
+  it("lists every pack discovered from styles/themes/", () => {
+    openMenu();
+    // The reference pack ships with the repo; a new theme file that forgets
+    // to register itself fails right here.
+    expect(() => packRow("Paper")).not.toThrow();
   });
 });

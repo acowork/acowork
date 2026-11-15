@@ -6,6 +6,8 @@
  * light palette stays light forever — there is no CSS var to re-point at
  * runtime. The only correct fix is to render with the palette that matches
  * the active theme, so the palette must live in data, not in the renderer.
+ * The canvas-critical entries additionally re-read the live CSS variables
+ * (see `tokensFor`), so a theme pack recolours diagrams too.
  *
  * Consumers pass `tokensFor(...)` into `renderMermaid(chart, tokens)`
  * (see `mermaid.ts`); nothing else may call `mermaid.initialize` directly.
@@ -18,6 +20,8 @@
  * `--color-chat-body` (dark) = #131316, so a diagram sits on the same
  * plane as the chat surface around it instead of punching a white hole.
  */
+
+import { readThemeVar } from "./themeVars";
 
 /** Mermaid's accepted theme names, narrowed to what we use. */
 export type MermaidThemeName = "base";
@@ -220,26 +224,32 @@ export const DARK_TOKENS: MermaidTokens = {
     fontFamily: FONT_FAMILY,
     nodeBorderRadius: 12,
   },
-  themeCSS: [
+  themeCSS: darkThemeCSS({ surface: DARK.surface, border: DARK.border }),
+};
+
+/** Dark themeCSS with the node fill/border parameterised so a live CSS-var
+ *  read can recolour the dominant surfaces without touching the rest. */
+function darkThemeCSS(vars: { surface: string; border: string }): string {
+  return [
     // Node fill/stroke pinned explicitly: mermaid's generated
     // `.node rect{...}` uses primaryColor/nodeBorder, but the neo-look and
     // cluster-nesting selectors both override it, so we restate depth by depth.
     ".node.default > rect,",
     ".node > rect {",
-    `  fill: ${DARK.surface} !important;`,
-    `  stroke: ${DARK.border} !important;`,
+    `  fill: ${vars.surface} !important;`,
+    `  stroke: ${vars.border} !important;`,
     "}",
     ".node.default > .label-container,",
     ".node > .label-container {",
-    `  fill: ${DARK.surface} !important;`,
+    `  fill: ${vars.surface} !important;`,
     "}",
     subgraphCss(DARK.surfaceMuted, DARK.borderMuted, 1),
     subgraphCss("#1c1c1f", "#45454d", 2),
     subgraphCss("#18181b", "#3f3f46", 3),
     SHAPE_CSS,
     DARK_OVERRIDE_CSS,
-  ].join("\n"),
-};
+  ].join("\n");
+}
 
 /** The app's theme preference, mirroring `settingsStore`'s `Theme`. */
 export type ThemePreference = "light" | "dark" | "system";
@@ -252,9 +262,40 @@ export type ThemePreference = "light" | "dark" | "system";
  * AppLayout — all three must agree or diagrams desync from the DOM's
  * `.dark` class.
  */
+/** Stable-reference cache: MermaidBlock memoizes on the tokens object, so the
+ *  same resolved values must return the SAME reference or every store update
+ *  re-renders every diagram. The key covers the live CSS-var reads, so a real
+ *  value change (theme pack switch) still produces a fresh object. */
+const tokenCache = new Map<string, MermaidTokens>();
+
 export function tokensFor(theme: ThemePreference, osTheme: "light" | "dark"): MermaidTokens {
   const effective = theme === "system" ? osTheme : theme;
-  return effective === "dark" ? DARK_TOKENS : LIGHT_TOKENS;
+  const dark = effective === "dark";
+  // Live reads: a theme pack (or the light/dark flip itself) recolours the
+  // diagram together with the surface it sits on. Fallbacks are the pinned
+  // literals, so jsdom — which resolves no custom properties — keeps the
+  // byte-equality expectations of the verify tests.
+  const nodeFill = readThemeVar("--color-diagram-node-fill", dark ? DARK.surface : LIGHT.primaryColor);
+  const nodeBorder = readThemeVar("--color-diagram-node-border", dark ? DARK.border : LIGHT.primaryBorderColor);
+  const line = readThemeVar("--color-diagram-line", dark ? DARK.line : LIGHT.lineColor);
+  const background = readThemeVar("--color-chat-body", dark ? DARK.background : LIGHT.background);
+  const key = JSON.stringify([dark, nodeFill, nodeBorder, line, background]);
+  const cached = tokenCache.get(key);
+  if (cached) return cached;
+
+  const base = dark ? DARK_TOKENS : LIGHT_TOKENS;
+  const themeVariables = {
+    ...base.themeVariables,
+    background,
+    primaryColor: nodeFill,
+    primaryBorderColor: nodeBorder,
+    nodeBorder,
+    lineColor: line,
+  };
+  const themeCSS = dark ? darkThemeCSS({ surface: nodeFill, border: nodeBorder }) : base.themeCSS;
+  const tokens: MermaidTokens = { ...base, themeVariables, themeCSS };
+  tokenCache.set(key, tokens);
+  return tokens;
 }
 
 /** Effective-theme boolean, for callers that only need the predicate. */

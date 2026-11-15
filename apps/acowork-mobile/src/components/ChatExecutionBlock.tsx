@@ -343,10 +343,28 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
             {inProgress ? '◌' : isFailureStatus(newestEntry?.projection?.status ?? '') ? '!' : '⚙'}
           </span>
           <span className="explore-toggle-label">{name}</span>
-          <span className="explore-toggle-summary">
-            {tr('{{n}} 轮', { n: block.rounds.length })}{shownState ? ` · ${shownState}` : ''}
-            {taskId ? ` · ${taskId}` : ''}
-          </span>
+          {/* Working vs idle must be readable at a glance, the desktop card's
+              rule copied: a run with positive evidence it is still going
+              (D9's `inProgress`) wears the round count + live state word as a
+              filled capsule — the accent as a BACKGROUND with white text. An
+              idle run keeps the bare gray text: the shape itself is the
+              status. */}
+          {inProgress ? (
+            <span className="explore-toggle-live" data-testid="exec-block-working-capsule">
+              <span className="explore-toggle-live-text">
+                {tr('{{n}} 轮', { n: block.rounds.length })}
+                {shownState ? ` · ${shownState}` : ''}
+              </span>
+              <span className="explore-toggle-spinner" aria-hidden>
+                ◌
+              </span>
+            </span>
+          ) : (
+            <span className="explore-toggle-summary">
+              {tr('{{n}} 轮', { n: block.rounds.length })}{shownState ? ` · ${shownState}` : ''}
+            </span>
+          )}
+          {taskId ? <span className="explore-toggle-task">{taskId}</span> : null}
           <span className="explore-toggle-caret" aria-hidden>
             {open ? '⌄' : '›'}
           </span>
@@ -370,9 +388,6 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                 /** The label is the round's position in the SESSION, so a pinned
                  *  round above the window keeps its own number. */
                 index={shownIndices[i]!}
-                /** The freshest round of an open block shows its pair; earlier ones
-                 *  fold to one line, the way a long run's older tool calls do. */
-                defaultOpen={shownIndices[i] === block.rounds.length - 1}
                 chatSessionId={chatSessionId}
                 entry={entries[round.ref]}
                 reload={reload}
@@ -424,7 +439,6 @@ interface RoundItemProps {
   round: RunBlock['rounds'][number]
   /** Position in the session's round list (1-based) — the row's label. */
   index: number
-  defaultOpen: boolean
   chatSessionId: string
   entry: ChatBlockEntry | undefined
   reload: (chatId: string, refs: string[]) => void
@@ -434,8 +448,13 @@ interface RoundItemProps {
  *  `ExploreBlock`'s row-plus-panels chrome. The decision a round is parked on is
  *  NOT drawn here — it rides under the block, so it stays answerable while the
  *  list is folded (§6.5). */
-function RoundItem({ round, index, defaultOpen, chatSessionId, entry, reload }: RoundItemProps) {
-  const [open, setOpen] = useState(defaultOpen)
+function RoundItem({ round, index, chatSessionId, entry, reload }: RoundItemProps) {
+  // Folded, like the desktop round row: the run's latest answer is already on
+  // screen in the card's body, and the question/answer PAIR is what a reader
+  // opens when they want the question beside it. The freshest round used to
+  // unfold by itself, which made an expanded block twice as tall and put the
+  // reader inside a fold they never opened.
+  const [open, setOpen] = useState(false)
   const projection = entry?.projection
   // An opener round's sentence stands on the transcript as its own bubble —
   // the block's line leads with the reference row's one-line `round_name`,

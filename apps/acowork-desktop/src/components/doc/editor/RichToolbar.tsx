@@ -67,7 +67,7 @@ function ToolButton({
         "flex h-7 w-7 shrink-0 items-center justify-center rounded transition-colors",
         active
           ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-          : "text-text-tertiary hover:bg-zinc-100 hover:text-zinc-800  dark:hover:bg-zinc-800 dark:hover:text-zinc-100",
+          : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text  dark:hover:bg-[var(--color-accent)]/15",
         disabled && "pointer-events-none opacity-40",
       )}
     >
@@ -136,24 +136,24 @@ export function RichToolbar({ editor, disabled }: RichToolbarProps) {
       <ToolButton icon={Heading1} label={t("doc.tbH1")} active={is("heading", { level: 1 })} disabled={inactive} onClick={() => chain().toggleHeading({ level: 1 }).run()} />
       <ToolButton icon={Heading2} label={t("doc.tbH2")} active={is("heading", { level: 2 })} disabled={inactive} onClick={() => chain().toggleHeading({ level: 2 }).run()} />
       <ToolButton icon={Heading3} label={t("doc.tbH3")} active={is("heading", { level: 3 })} disabled={inactive} onClick={() => chain().toggleHeading({ level: 3 }).run()} />
-      <span className="mx-0.5 h-4 w-px bg-zinc-200 dark:bg-zinc-700" aria-hidden />
+      <span className="mx-0.5 h-4 w-px bg-surface-hover" aria-hidden />
       <ToolButton icon={Bold} label={t("doc.tbBold")} active={is("bold")} disabled={inactive} onClick={() => chain().toggleBold().run()} />
       <ToolButton icon={Italic} label={t("doc.tbItalic")} active={is("italic")} disabled={inactive} onClick={() => chain().toggleItalic().run()} />
       <ToolButton icon={Strikethrough} label={t("doc.tbStrike")} active={is("strike")} disabled={inactive} onClick={() => chain().toggleStrike().run()} />
       <ToolButton icon={Code} label={t("doc.tbInlineCode")} active={is("code")} disabled={inactive} onClick={() => chain().toggleCode().run()} />
       <ToolButton icon={SquareCode} label={t("doc.tbCodeBlock")} active={is("codeBlock")} disabled={inactive} onClick={() => chain().toggleCodeBlock().run()} />
-      <span className="mx-0.5 h-4 w-px bg-zinc-200 dark:bg-zinc-700" aria-hidden />
+      <span className="mx-0.5 h-4 w-px bg-surface-hover" aria-hidden />
       <ToolButton icon={Quote} label={t("doc.tbQuote")} active={is("blockquote")} disabled={inactive} onClick={() => chain().toggleBlockquote().run()} />
       <ToolButton icon={List} label={t("doc.tbBulletList")} active={is("bulletList")} disabled={inactive} onClick={() => chain().toggleBulletList().run()} />
       <ToolButton icon={ListOrdered} label={t("doc.tbOrderedList")} active={is("orderedList")} disabled={inactive} onClick={() => chain().toggleOrderedList().run()} />
       <ToolButton icon={ListTodo} label={t("doc.tbTaskList")} active={is("taskList")} disabled={inactive} onClick={() => chain().toggleTaskList().run()} />
       <ToolButton icon={Table} label={t("doc.tbTable")} disabled={inactive} onClick={insertTable} />
       <ToolButton icon={Workflow} label={t("doc.tbMermaid")} disabled={inactive} onClick={insertMermaid} />
-      <span className="mx-0.5 h-4 w-px bg-zinc-200 dark:bg-zinc-700" aria-hidden />
+      <span className="mx-0.5 h-4 w-px bg-surface-hover" aria-hidden />
       <ToolButton icon={Link} label={t("doc.tbLink")} active={is("link")} disabled={inactive} onClick={promptLink} />
       <ToolButton icon={Image} label={t("doc.tbImage")} disabled={inactive} onClick={promptImage} />
       <ToolButton icon={Minus} label={t("doc.tbRule")} disabled={inactive} onClick={() => chain().setHorizontalRule().run()} />
-      <span className="mx-0.5 h-4 w-px bg-zinc-200 dark:bg-zinc-700" aria-hidden />
+      <span className="mx-0.5 h-4 w-px bg-surface-hover" aria-hidden />
       <ToolButton icon={Undo2} label={t("doc.tbUndo")} disabled={inactive || !editor?.can().undo()} onClick={() => chain().undo().run()} />
       <ToolButton icon={Redo2} label={t("doc.tbRedo")} disabled={inactive || !editor?.can().redo()} onClick={() => chain().redo().run()} />
     </div>

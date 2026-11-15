@@ -431,7 +431,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
           }
         }}
         aria-expanded={expanded}
-        className="flex w-fit items-center gap-2 rounded-md bg-zinc-100/60 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-zinc-200 dark:bg-zinc-800/30  dark:hover:bg-zinc-700"
+        className="flex w-fit items-center gap-2 rounded-md bg-surface/60 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
@@ -465,7 +465,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
         <OverlayScrollbar
           ref={contentRef}
           maxHeight={144}
-          containerClassName="flex-none max-h-60 ml-2 mt-1 rounded-md border-l-2 border-zinc-300 bg-zinc-100/60 dark:border-zinc-600 dark:bg-zinc-800/30"
+          containerClassName="flex-none max-h-60 ml-2 mt-1 rounded-md border-l-2 border-border-strong bg-surface/60"
           className="pl-3 pr-2 py-2 overscroll-contain"
           onViewportWheel={(event) => {
             if (event.deltaY !== 0) event.stopPropagation();
@@ -711,7 +711,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
   return (
     <div className="min-w-0">
       <div
-        className="flex min-w-0 w-full items-center gap-2 rounded-md bg-zinc-100 px-2.5 py-1.5 text-left transition-colors hover:bg-zinc-200 dark:bg-zinc-700/50 dark:hover:bg-zinc-700"
+        className="flex min-w-0 w-full items-center gap-2 rounded-md bg-surface-hover px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <button className="flex min-w-0 flex-1 items-center gap-2" onClick={() => setShowDetails(!showDetails)}>
@@ -724,9 +724,9 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
           )}
           {showProgress && progressEntry && call.toolCallId && (
             <div className="ml-2 flex items-center gap-2 text-10 text-text-tertiary ">
-              <div className="relative h-0.5 w-12 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+              <div className="relative h-0.5 w-12 overflow-hidden rounded-full bg-surface-hover">
                 <div
-                  className="absolute inset-y-0 left-0 bg-amber-500 dark:bg-amber-400 transition-[width] duration-500"
+                  className="absolute inset-y-0 left-0 bg-warning-solid transition-[width] duration-500"
                   style={{ width: `${Math.min(100, (progressEntry.elapsedMs / progressEntry.timeoutMs) * 100).toFixed(1)}%` }}
                 />
               </div>
@@ -735,7 +735,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
                 <button
                   onClick={handleCancel}
                   disabled={cancelling}
-                  className="ml-1 text-text-tertiary hover:text-red-500 transition-colors disabled:opacity-30"
+                  className="ml-1 text-text-tertiary hover:text-danger-icon transition-colors disabled:opacity-30"
                   title={t("exploreBlock.cancelTool")}
                   aria-label={t("exploreBlock.cancelTool")}
                 >
@@ -745,7 +745,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
             </div>
           )}
           {isCompressed && (
-            <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-10 font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
+            <span className="shrink-0 rounded bg-warning-surface-hover px-1.5 py-0.5 text-10 font-medium text-warning-quiet">
               已压缩
             </span>
           )}
@@ -754,7 +754,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
         {showApproval && onApprove && specificApproval && (
           <div className="flex items-center gap-1 shrink-0" onClick={(e) => e.stopPropagation()}>
             {countdownLabel && countdownLabel !== "expired" && (
-              <span className="text-10 font-mono text-amber-600 dark:text-amber-400 shrink-0 min-w-[2.5rem] text-right">
+              <span className="text-10 font-mono text-warning shrink-0 min-w-[2.5rem] text-right">
                 {countdownLabel}
               </span>
             )}
@@ -775,7 +775,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
         )}
         {/* Expired indicator */}
         {needsApproval && remainingSecs === 0 && (
-          <span className="text-10 text-red-500 dark:text-red-400 shrink-0">
+          <span className="text-10 text-danger-icon shrink-0">
             Timed out
           </span>
         )}
@@ -787,13 +787,13 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
           // "non-success" terminations) but is amber, not red, to signal that
           // the user caused it — distinct from a tool error.
           <X
-            className="h-3 w-3 shrink-0 text-amber-500"
+            className="h-3 w-3 shrink-0 text-warning"
             aria-label={t("exploreBlock.cancelledByUser")}
           />
         ) : isError ? (
-          <X className="h-3 w-3 shrink-0 text-red-500" />
+          <X className="h-3 w-3 shrink-0 text-danger-icon" />
         ) : isPendingResult && !showProgress && !showApproval ? (
-          <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-zinc-300 dark:bg-zinc-500" />
+          <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-surface-strong" />
         ) : null}
         <button onClick={() => setShowDetails(!showDetails)}>
           {showDetails ? (
@@ -806,12 +806,12 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
       {showDetails && (
         <div className="mt-0.5 ml-5 space-y-0.5">
           {/* Call params */}
-          <pre className="rounded bg-zinc-100 p-2 text-text-secondary dark:bg-zinc-800  whitespace-pre-wrap break-all" style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
+          <pre className="rounded bg-surface p-2 text-text-secondary  whitespace-pre-wrap break-all" style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
             {call.content}
           </pre>
           {/* Result */}
           {result && (
-            <pre className={`rounded p-2 whitespace-pre-wrap break-all ${isError ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400" : "bg-[var(--color-accent)]/10 text-text-secondary dark:bg-[var(--color-accent)]/10 "}`} style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
+            <pre className={`rounded p-2 whitespace-pre-wrap break-all ${isError ? "bg-danger-surface text-danger-text" : "bg-[var(--color-accent)]/10 text-text-secondary dark:bg-[var(--color-accent)]/10 "}`} style={{ fontSize: EXPLORE_DETAIL_FONT_SIZE }}>
               {/* ADR-035 D9.2: backend already truncates tool_result to first 5 lines
                   in ALL paths (MQTT + HTTP); frontend does NOT re-truncate. */}
               {result.content}

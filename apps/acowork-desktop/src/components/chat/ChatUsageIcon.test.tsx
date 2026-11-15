@@ -324,7 +324,7 @@ describe("ChatUsageIcon", () => {
     // header" report).
     const ALLOWED = ["text-sm", "text-xs", "text-10", "text-11", "text-[clamp(1.125rem,4.5vw,1.375rem)]"];
     // Only size-looking utilities (text-sm / text-10 / text-[13px] /
-    // text-xl …) — colors (`text-red-600`), alignment (`text-center`) and
+    // text-xl …) — colors (`text-danger-text`), alignment (`text-center`) and
     // the `text-text-*` tokens are not sizes.
     const SIZE_RE = /^text-(\[.*\]|base|lg|sm|xs|\d+|\d?xl)$/;
     const steps = [...dialog.querySelectorAll<HTMLElement>("*")].flatMap((el) =>

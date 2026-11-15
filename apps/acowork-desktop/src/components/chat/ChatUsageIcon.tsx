@@ -311,7 +311,7 @@ export function ChatUsageIcon({
               onClick={() => setOpen(false)}
               aria-label={t("chatUsage.close")}
               title={t("chatUsage.close")}
-              className="rounded p-1 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+              className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
             >
               <X size={14} strokeWidth={2.25} />
             </button>
@@ -353,7 +353,7 @@ export function ChatUsageIcon({
                   onClick={openWindowEditor}
                   aria-label={t("contextUsage.editWindow")}
                   title={t("contextUsage.editWindow")}
-                  className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-100 hover:text-zinc-700  dark:hover:bg-zinc-700/50 dark:hover:text-zinc-100"
+                  className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary  dark:hover:bg-[var(--color-accent)]/15"
                 >
                   <Pencil size={11} strokeWidth={2.25} />
                 </button>
@@ -396,7 +396,7 @@ export function ChatUsageIcon({
                         setWindowError(null);
                       }}
                       className={cn(
-                        "rounded border border-zinc-200 px-1.5 py-0.5 text-10 text-text-secondary transition-colors",
+                        "rounded border border-border-outer px-1.5 py-0.5 text-10 text-text-secondary transition-colors",
                         "hover:border-indigo-300 hover:text-indigo-600",
                         "dark:border-zinc-700  dark:hover:border-indigo-500/50 dark:hover:text-indigo-300",
                       )}
@@ -406,7 +406,7 @@ export function ChatUsageIcon({
                   ))}
                 </div>
                 {windowError != null && (
-                  <p className="mt-1.5 text-10 leading-snug text-red-600 dark:text-red-400">
+                  <p className="mt-1.5 text-10 leading-snug text-danger-text">
                     {windowError}
                   </p>
                 )}
@@ -421,7 +421,7 @@ export function ChatUsageIcon({
                   <button
                     type="button"
                     onClick={() => setEditingWindow(false)}
-                    className="rounded px-2 py-1 text-11 text-text-tertiary transition-colors hover:bg-zinc-100  dark:hover:bg-zinc-700/50"
+                    className="rounded px-2 py-1 text-11 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                   >
                     {t("contextUsage.cancel")}
                   </button>

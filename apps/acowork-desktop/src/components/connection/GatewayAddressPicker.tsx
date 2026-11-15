@@ -107,9 +107,9 @@ export function GatewayAddressPicker({
   };
 
   const dotClass = (state: Reachability | undefined): string => {
-    if (state === "online") return "bg-emerald-500";
-    if (state === "offline") return "bg-zinc-300 dark:bg-zinc-600";
-    return "bg-amber-400 animate-pulse";
+    if (state === "online") return "bg-ok-solid";
+    if (state === "offline") return "bg-surface-strong";
+    return "bg-warning-solid animate-pulse";
   };
 
   // One rich row per option — dot + URL + tag — rendered inside the
@@ -177,7 +177,7 @@ export function GatewayAddressPicker({
       </div>
 
       {invalidDraft ? (
-        <p role="alert" className="text-11 leading-snug text-red-500">
+        <p role="alert" className="text-11 leading-snug text-danger-icon">
           {t("connection.invalidUrl")}
         </p>
       ) : null}

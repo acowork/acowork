@@ -66,7 +66,7 @@ const LOG_MAX_LIMIT = 200;
 const LOG_STEP = 50;
 
 const BUTTON_CLASS =
-    "rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-90 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in disabled:opacity-20 disabled:cursor-not-allowed";
+    "rounded-full bg-surface-hover border border-border-outer shadow-md p-1.5 opacity-90 hover:opacity-100 focus-visible:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-all animate-in fade-in zoom-in disabled:opacity-20 disabled:cursor-not-allowed";
 
 const CONTAINER_CLASS =
     "absolute top-10 right-4 z-10 flex items-center gap-2";

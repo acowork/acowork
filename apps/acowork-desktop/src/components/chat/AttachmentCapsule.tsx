@@ -49,9 +49,9 @@ export function AttachmentCapsule({
   const interactive = !!onClick && !pending;
   const classes = cn(
     "inline-flex items-center gap-1.5 rounded-md border border-border-outer",
-    "bg-zinc-50 text-xs text-text-secondary dark:bg-zinc-800",
+    "bg-surface-subtle text-xs text-text-secondary",
     compact ? "px-2.5 py-1" : "px-3 py-1.5",
-    interactive && "cursor-pointer hover:bg-zinc-100 dark:hover:bg-zinc-700",
+    interactive && "cursor-pointer hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
     pending && "opacity-60",
     className,
   );

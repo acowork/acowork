@@ -82,9 +82,9 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
   }, [autoDismissMs, onDismiss]);
 
   const style: Record<ToastType, string> = {
-    success: "text-green-600 dark:text-green-400",
-    error: "text-red-500 dark:text-red-400",
-    warning: "text-yellow-500 dark:text-yellow-400",
+    success: "text-ok",
+    error: "text-danger-icon",
+    warning: "text-warning",
     info: "text-[var(--color-accent)]",
   };
 
@@ -108,14 +108,14 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       {toast.action && (
         <button
           onClick={toast.action.onClick}
-          className="shrink-0 text-xs font-medium text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300"
+          className="shrink-0 text-xs font-medium text-text-tertiary hover:text-text-secondary"
         >
           {toast.action.label}
         </button>
       )}
       <button
         onClick={onDismiss}
-        className="shrink-0 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+        className="shrink-0 text-text-tertiary hover:text-text-tertiary"
         aria-label="Dismiss"
       >
         ✕

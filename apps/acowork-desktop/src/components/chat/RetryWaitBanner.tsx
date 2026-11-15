@@ -123,7 +123,7 @@ export function RetryWaitBanner() {
       <div
         role="status"
         aria-live="polite"
-        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-border-outer bg-zinc-50 px-4 py-2 text-text-secondary select-none  dark:bg-zinc-800/40 "
+        className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-border-outer bg-surface-subtle px-4 py-2 text-text-secondary select-none  "
         style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}
       >
         <span className="flex shrink-0 items-center gap-1.5">
@@ -143,9 +143,9 @@ export function RetryWaitBanner() {
 
         <div className="ml-auto flex items-center gap-1.5">
           {/* Countdown progress bar */}
-          <div className="hidden sm:block h-1.5 w-16 rounded-full bg-zinc-200 dark:bg-zinc-700">
+          <div className="hidden sm:block h-1.5 w-16 rounded-full bg-surface-hover">
             <div
-              className="h-full rounded-full bg-zinc-400 transition-[width] duration-1000 ease-linear dark:bg-zinc-500"
+              className="h-full rounded-full bg-loading transition-[width] duration-1000 ease-linear"
               style={{
                 width: `${Math.max(0, Math.min(100, ((totalSec - remainingSec) / totalSec) * 100))}%`,
               }}

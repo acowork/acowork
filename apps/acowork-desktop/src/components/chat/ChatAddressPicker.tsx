@@ -452,7 +452,7 @@ export function ChatAddressPicker({
                       "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border",
                       checked
                         ? "border-transparent text-[var(--color-accent)]"
-                        : "border-zinc-300 text-transparent hover:border-zinc-400 hover:text-text-tertiary dark:border-zinc-600 dark:hover:border-zinc-500",
+                        : "border-border-strong text-transparent hover:border-border-strong hover:text-text-tertiary",
                       refDisabled && "cursor-not-allowed opacity-40",
                     )}
                   >
@@ -523,7 +523,7 @@ export function ChatAddressPicker({
             onClick={() =>
               void fetchChatSessions(instanceId, chatSessionId, surface, 1)
             }
-            className="rounded px-1 text-brand-primary hover:bg-zinc-100 dark:hover:bg-zinc-800"
+            className="rounded px-1 text-brand-primary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("common.retry")}
           </button>
@@ -544,7 +544,7 @@ export function ChatAddressPicker({
             }
             disabled={currentPage <= 1 || loading}
             aria-label={t("chatView.address.prevPage")}
-            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30 dark:hover:bg-[var(--color-accent)]/15"
           >
             <ChevronLeft className="h-3.5 w-3.5" />
           </button>
@@ -561,7 +561,7 @@ export function ChatAddressPicker({
             }
             disabled={currentPage >= totalPages || loading}
             aria-label={t("chatView.address.nextPage")}
-            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-zinc-100 disabled:opacity-30 dark:hover:bg-zinc-800"
+            className="inline-flex items-center rounded-md px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-30 dark:hover:bg-[var(--color-accent)]/15"
           >
             <ChevronRight className="h-3.5 w-3.5" />
           </button>

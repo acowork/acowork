@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, type ReactNode } from "react";
+import { useState, useEffect, useCallback, useSyncExternalStore, type ReactNode } from "react";
 import { useGatewayStore } from "../../stores/gatewayStore";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useChatStore } from "../../stores/chatStore";
@@ -26,6 +26,13 @@ import { OutlineSettingsIcon as SettingsIcon } from "../common/SettingsIcon";
 import { Tooltip } from "../common/Tooltip";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { log } from "../../lib/logger";
+import {
+  DEFAULT_THEME_PACK,
+  THEME_PACKS,
+  getActiveThemePack,
+  setThemePack,
+  subscribeThemePacks,
+} from "../../styles/themePacks";
 
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
 
@@ -334,7 +341,7 @@ export function GatewayTab() {
                 </button>
               </div>
               {relayDraftInvalid && (
-                <p role="alert" className="mt-1 text-11 text-red-500">
+                <p role="alert" className="mt-1 text-11 text-danger-icon">
                   {t("settings.relayUrlMustBeHttps")}
                 </p>
               )}
@@ -374,12 +381,12 @@ export function GatewayTab() {
             <span
               className={cn(
                 "h-2 w-2 rounded-full",
-                localIsRunning ? "bg-emerald-500" : localIsStarting ? "bg-amber-500" : "bg-zinc-400",
+                localIsRunning ? "bg-ok-solid" : localIsStarting ? "bg-warning-solid" : "bg-loading",
               )}
             />
             <span className={cn(
-              localIsRunning ? "text-emerald-600 dark:text-emerald-400" :
-                localIsStarting ? "text-amber-600 dark:text-amber-400" :
+              localIsRunning ? "text-ok" :
+                localIsStarting ? "text-warning" :
                   "text-text-tertiary"
             )}>
               {localIsRunning ? t("settings.running") : localIsStarting ? t("settings.starting") : t("settings.stopped")}
@@ -450,12 +457,12 @@ export function GatewayTab() {
               <span
                 className={cn(
                   "h-2 w-2 rounded-full",
-                  status === "connected" ? "bg-emerald-500" : status === "error" ? "bg-red-500" : "bg-zinc-400",
+                  status === "connected" ? "bg-ok-solid" : status === "error" ? "bg-danger-solid" : "bg-loading",
                 )}
               />
               <span className={cn(
-                status === "connected" ? "text-emerald-600 dark:text-emerald-400" :
-                  status === "error" ? "text-red-600 dark:text-red-400" :
+                status === "connected" ? "text-ok" :
+                  status === "error" ? "text-danger-text" :
                     "text-text-tertiary"
               )}>
                 {status === "connected" ? t("settings.connected") : status === "error" ? t("settings.error") : t("settings.disconnected")}
@@ -696,15 +703,15 @@ function RelayTunnelPanel() {
             <span
               className={cn(
                 "h-2 w-2 rounded-full",
-                connected ? "bg-emerald-500" : relayError ? "bg-red-500" : "bg-zinc-400",
+                connected ? "bg-ok-solid" : relayError ? "bg-danger-solid" : "bg-loading",
               )}
             />
             <span
               className={cn(
                 connected
-                  ? "text-emerald-600 dark:text-emerald-400"
+                  ? "text-ok"
                   : relayError
-                    ? "text-red-600 dark:text-red-400"
+                    ? "text-danger-text"
                     : "text-text-tertiary",
               )}
             >
@@ -745,7 +752,7 @@ function RelayTunnelPanel() {
           {relayStatus?.last_error && (
             <div className="flex items-center gap-2">
               <span className="text-text-tertiary">{t("settings.relayLastError")}</span>
-              <span className="text-red-600 dark:text-red-400">{relayStatus.last_error}</span>
+              <span className="text-danger-text">{relayStatus.last_error}</span>
             </div>
           )}
         </div>
@@ -791,7 +798,7 @@ function RecentEventsLog() {
                   className={cn(
                     "flex-1 truncate",
                     isErr
-                      ? "text-red-600 dark:text-red-300"
+                      ? "text-danger-text"
                       : "text-text-tertiary ",
                   )}
                   title={entry.reason}
@@ -859,10 +866,10 @@ function NodesTree({
                 <span
                   className={cn(
                     "h-1.5 w-1.5 rounded-full",
-                    node ? (node.online ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500") : "bg-zinc-400 dark:bg-zinc-500",
+                    node ? (node.online ? "bg-ok-solid" : "bg-loading") : "bg-loading",
                   )}
                 />
-                <span className={node?.online ? "text-emerald-600 dark:text-emerald-400" : "text-text-tertiary"}>
+                <span className={node?.online ? "text-ok" : "text-text-tertiary"}>
                   {node ? (node.online ? t("settings.nodesOnline") : t("settings.nodesOffline")) : t("settings.nodesOffline")}
                 </span>
               </span>
@@ -874,7 +881,7 @@ function NodesTree({
                 {node?.max_agents !== undefined && <span className="text-text-tertiary">/{node.max_agents}</span>}
               </span>
             }
-            bodyClassName="bg-zinc-50 dark:bg-zinc-900/60"
+            bodyClassName="bg-surface-subtle"
           >
             {nodeAgents.length === 0 ? (
               <div className="px-3 py-3 text-xs text-text-tertiary">{t("settings.noAgentsRunning")}</div>
@@ -945,7 +952,7 @@ function RuntimeRow({ agent, padding }: { agent: AgentListResponse; padding?: "d
             (debug_state), not startup intent (dev_mode) — an agent can be
             flipped into DevMode at runtime without restart. */}
         {agent.debug_state === "enabled" && (
-          <span className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-10 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+          <span className="inline-flex items-center gap-1 rounded bg-warning-surface-hover px-1.5 py-0.5 text-10 text-warning-quiet">
             <Bug className="h-3 w-3" />
             {t("settings.debug")}
           </span>
@@ -955,18 +962,30 @@ function RuntimeRow({ agent, padding }: { agent: AgentListResponse; padding?: "d
   );
 }
 
-/** Appearance settings */
-function AppearanceTab() {
+/** Appearance settings. Exported for its focused test — the tab owns no
+ *  gateway/network state, so it renders standalone. */
+export function AppearanceTab() {
   const { t } = useTranslation();
   const { theme, setTheme, fontSize, setFontSize, contentWidth, setContentWidth, opacity, setOpacity, accentColor, customAccent, setAccentColor } = useSettingsStore();
   const [showResetConfirm, setShowResetConfirm] = useState(false);
   // Level-1 collapsible cards (same grammar as the Setup panel), default open
   const [themeOpen, setThemeOpen] = useState(true);
+  const [themePackOpen, setThemePackOpen] = useState(true);
   const [accentOpen, setAccentOpen] = useState(true);
   const [contentWidthOpen, setContentWidthOpen] = useState(true);
   const [fontSizeOpen, setFontSizeOpen] = useState(true);
   const [opacityOpen, setOpacityOpen] = useState(true);
   const [resetOpen, setResetOpen] = useState(true);
+
+  // Theme packs are plain DOM state (a class on <html>), not store state.
+  // Subscribe via themePacks' listener set so this tab re-renders when the
+  // OTHER door (the title-bar appearance menu) changes the pack while this
+  // tab is mounted — and vice versa. Two doors, one state.
+  const activePack = useSyncExternalStore(subscribeThemePacks, getActiveThemePack);
+  const themePackOptions = [
+    { label: t("settings.themeDefault"), value: DEFAULT_THEME_PACK },
+    ...THEME_PACKS.map((p) => ({ label: p.name, value: p.id })),
+  ];
 
   // Content width options: 40-100%, step 10
   const contentWidths = [
@@ -1007,6 +1026,31 @@ function AppearanceTab() {
               { label: t("settings.system"), value: "system" as const },
             ]}
             onChange={setTheme}
+          />
+        </ExpandableRow>
+      </ListBox>
+
+      {/* Theme pack — the palette layer on top of the light/dark mode above.
+          Orthogonal to the mode: a pack ships BOTH light and dark token sets
+          and follows whatever mode is active. "Default" restores the built-in
+          :root/.dark palette; every other option is a CSS file dropped into
+          styles/themes/ (auto-discovered, nothing to register here). This is
+          the second door to the same state the title-bar appearance menu
+          drives. */}
+      <ListBox dividers={false}>
+        <ExpandableRow
+          open={themePackOpen}
+          onToggle={() => setThemePackOpen((v) => !v)}
+          title={t("settings.themePack")}
+          ariaLabel={t("settings.themePack")}
+          bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset p-3"
+        >
+          <RadioGroup
+            name="themePack"
+            value={activePack}
+            options={themePackOptions}
+            onChange={setThemePack}
+            noWrap
           />
         </ExpandableRow>
       </ListBox>
@@ -1110,7 +1154,7 @@ function AppearanceTab() {
             confirmLabel={t("settings.reset")}
             destructive
             onConfirm={() => {
-              setTheme(DEFAULT_THEME); setFontSize(DEFAULT_FONT_SIZE); setContentWidth(DEFAULT_CONTENT_WIDTH); setOpacity(DEFAULT_OPACITY); setAccentColor(DEFAULT_ACCENT_COLOR);
+              setTheme(DEFAULT_THEME); setFontSize(DEFAULT_FONT_SIZE); setContentWidth(DEFAULT_CONTENT_WIDTH); setOpacity(DEFAULT_OPACITY); setAccentColor(DEFAULT_ACCENT_COLOR); setThemePack(DEFAULT_THEME_PACK);
               setShowResetConfirm(false);
             }}
             onCancel={() => setShowResetConfirm(false)}

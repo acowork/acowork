@@ -36,7 +36,7 @@ interface TaskListPagerProps {
  * 的命中框在页脚这种密集控件里很难点中。图标保持 12px，只把命中区放大。
  */
 const ARROW_CN =
-  "inline-flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-zinc-100 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-zinc-700";
+  "inline-flex h-6 w-6 items-center justify-center rounded transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-[var(--color-accent)]/15";
 
 export function TaskListPager({
   page,

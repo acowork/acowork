@@ -27,6 +27,7 @@ import { SetiIcon } from "../common/SetiIcon";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
 import type { MonacoLanguageClient } from "monaco-languageclient";
 import { log } from "../../lib/logger";
+import { readThemeVar } from "../../lib/themeVars";
 
 /** A single LSP workspace/symbol result, normalized for display. */
 interface LspSymbolResult {
@@ -395,7 +396,7 @@ export function SymbolSearchPanel({
                     left: "50%",
                     transform: "translateX(-50%)",
                     width: "60%",
-                    backgroundColor: colors.widgetBg,
+                    backgroundColor: readThemeVar("--color-widget-bg", colors.widgetBg),
                     boxShadow: colors.shadow,
                     borderRadius: 4,
                     zIndex: 2550,

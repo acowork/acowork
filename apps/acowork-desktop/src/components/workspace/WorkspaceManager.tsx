@@ -131,7 +131,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
           </h2>
           <button
             onClick={onClose}
-            className="rounded-md p-1 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-300"
+            className="rounded-md p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
           >
             <X className="h-5 w-5" />
           </button>
@@ -140,7 +140,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
         {/* Content */}
         <div className="max-h-[600px] overflow-y-auto">
           {readWriteCount > 0 && (
-            <div className="mx-6 mt-4 flex items-center gap-2 rounded-md bg-orange-50 px-3 py-2 text-xs text-orange-700 dark:bg-orange-900/20 dark:text-orange-400">
+            <div className="mx-6 mt-4 flex items-center gap-2 rounded-md bg-warning-surface px-3 py-2 text-xs text-warning-quiet">
               <AlertCircle className="h-4 w-4" />
               <span>{readWriteCount} read-write director{readWriteCount > 1 ? "ies" : "y"} — Agent can modify files</span>
             </div>
@@ -180,8 +180,8 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
                       value={dir.access}
                       onChange={(v) => handleAccessChange(dir, v as "read-only" | "read-write")}
                       className={`rounded-md border px-2 py-1.5 text-xs font-medium ${dir.access === "read-write"
-                        ? "border-orange-300 bg-orange-50 text-orange-700 dark:border-orange-700 dark:bg-orange-900/30 dark:text-orange-400"
-                        : "border-zinc-300 bg-zinc-50 text-text-secondary dark:border-zinc-600 dark:bg-zinc-800 "
+                        ? "border-warning-border bg-warning-surface text-warning-quiet"
+                        : "border-border-strong bg-surface-subtle text-text-secondary "
                         }`}
                       options={[
                         { value: "read-only", label: "🔒 Read-only" },
@@ -192,7 +192,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
                     {/* Delete Button */}
                     <button
                       onClick={() => setDeleteConfirm({ open: true, id: dir.id, name: dir.alias || dir.path.split(/[\/\\]/).filter(Boolean).pop() || dir.path })}
-                      className="rounded-md p-1.5 text-text-tertiary hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-900/20 dark:hover:text-red-400"
+                      className="rounded-md p-1.5 text-text-tertiary hover:bg-danger-surface hover:text-danger-text"
 
                     >
                       <Trash2 className="h-4 w-4" />
@@ -215,7 +215,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
           </button>
           <button
             onClick={onClose}
-            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"
+            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           >
             Done
           </button>
@@ -305,7 +305,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
       <div className="w-full max-w-lg rounded-md bg-modal-surface shadow-xl">
         <div className="flex items-center justify-between border-b border-border-divider px-6 py-4">
           <h3 className="text-base font-semibold text-text ">Add Workspace</h3>
-          <button onClick={onClose} className="rounded-md p-1 text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-800">
+          <button onClick={onClose} className="rounded-md p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
             <X className="h-5 w-5" />
           </button>
         </div>
@@ -326,7 +326,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
               <button
                 onClick={handleBrowse}
                 disabled={gatewayMode === "relay"}
-                className="rounded-md border border-zinc-300 px-3 py-2 text-sm hover:bg-zinc-50 disabled:opacity-40 dark:border-zinc-600 dark:hover:bg-zinc-700"
+                className="rounded-md border border-border-strong px-3 py-2 text-sm hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
               >
                 {gatewayMode === "remote" ? t("workspace.remoteBrowseBtn") : t("workspace.buttonBrowse")}
               </button>
@@ -354,7 +354,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
               <label
                 className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 ${access === "read-only"
                   ? "border-[var(--color-accent)]/50"
-                  : "border-zinc-300 dark:border-zinc-600"
+                  : "border-border-strong"
                   }`}
                 style={access === "read-only" ? { backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)" } : undefined}
               >
@@ -378,8 +378,8 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
 
               <label
                 className={`flex cursor-pointer items-start gap-3 rounded-md border p-3 ${access === "read-write"
-                  ? "border-orange-500 bg-orange-50 dark:border-orange-600 dark:bg-orange-900/20"
-                  : "border-zinc-300 dark:border-zinc-600"
+                  ? "border-warning bg-warning-surface"
+                  : "border-border-strong"
                   }`}
               >
                 <input
@@ -394,7 +394,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
                   <div className="text-sm font-medium text-text ">
                     ✏️ Read-write
                   </div>
-                  <div className="flex items-center gap-1 text-xs text-orange-600 dark:text-orange-400">
+                  <div className="flex items-center gap-1 text-xs text-warning-quiet">
                     <AlertCircle className="h-3 w-3" />
                     Agent can modify and delete files
                   </div>
@@ -407,7 +407,7 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
         <div className="flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
           <button
             onClick={onClose}
-            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"
+            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           >
             Cancel
           </button>
@@ -457,8 +457,8 @@ function ConfirmPermissionChange({
       <div className="fixed inset-0 z-50 flex items-center justify-center bg-modal-overlay">
       <div className="w-full max-w-md rounded-md bg-modal-surface shadow-xl">
         <div className="flex items-start gap-3 px-6 py-5">
-          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-orange-100 dark:bg-orange-900/30">
-            <AlertCircle className="h-5 w-5 text-orange-600 dark:text-orange-400" />
+          <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-full bg-warning-surface-hover">
+            <AlertCircle className="h-5 w-5 text-warning-quiet" />
           </div>
           <div className="flex-1">
             <h3 className="text-base font-semibold text-text ">
@@ -476,13 +476,13 @@ function ConfirmPermissionChange({
         <div className="flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
           <button
             onClick={onCancel}
-            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-800"
+            className="rounded-md px-4 py-2 text-sm font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           >
             Cancel
           </button>
           <button
             onClick={onConfirm}
-            className="rounded-md bg-orange-600 px-4 py-2 text-sm font-medium text-white hover:bg-orange-700"
+            className="rounded-md bg-warning-solid px-4 py-2 text-sm font-medium text-white hover:bg-warning-solid/90"
           >
             Confirm
           </button>

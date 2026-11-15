@@ -5,7 +5,7 @@
  * - 顶部搜索框（StyledInput + Search icon）
  * - 项目列表 + 选中高亮（与 AgentList 同款：accent/90 + text-white）
  * - 任务计数徽章（待审核数字色高亮）
- * - 底部独立 + 按钮（与 AgentList 同款：p-1.5 + hover:bg-nav-control）
+ * - 底部独立 + 按钮（与 AgentList 同款：p-1.5 + hover:bg-[var(--color-accent)]/10）
  * - 新建项目（对话框）/ 删除项目（ConfirmDialog 二次确认）
  */
 
@@ -164,7 +164,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                         "rounded-full px-1.5 text-10 font-medium",
                         active
                           ? "bg-white/20 text-white"
-                          : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
+                          : "bg-warning-surface-hover text-warning-quiet",
                       )}
                     >
                       {c.submitted}
@@ -175,7 +175,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                       "rounded-full px-1.5 text-10",
                       active
                         ? "bg-white/20 text-white"
-                        : "bg-zinc-100 text-text-tertiary group-hover:bg-zinc-200 dark:bg-zinc-800 ",
+                        : "bg-surface text-text-tertiary group-hover:bg-surface-hover ",
                     )}
                   >
                     {c.total}
@@ -203,13 +203,13 @@ export function ProjectSidebar({ width }: { width?: number }) {
         </div>
       )}
 
-      {/* 底部新建按钮（与 AgentList 同款：p-1.5 包住，hover:bg-nav-control） */}
+      {/* 底部新建按钮（与 AgentList 同款：p-1.5 包住，hover:bg-[var(--color-accent)]/10） */}
       <div className="p-1.5">
         <button
           type="button"
           onClick={() => openCreate()}
           disabled={healthy === false}
-          className="flex w-full items-center justify-center rounded-md px-0 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-nav-control focus-visible:bg-nav-control disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent "
+          className="flex w-full items-center justify-center rounded-md px-0 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 focus-visible:bg-nav-control disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-transparent "
           aria-label={t("pm.newProject")}
           title={t("pm.newProject")}
         >
@@ -250,7 +250,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
               <button
                 type="button"
                 onClick={() => closeCreate()}
-                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+                className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                 disabled={saving}
               >
                 {t("common.cancel")}
@@ -258,7 +258,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
               <button
                 type="button"
                 onClick={handleCreate}
-                className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="rounded-md bg-btn-solid px-3 py-1.5 text-xs font-medium text-white hover:bg-btn-solid-hover hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 disabled:opacity-50"
                 disabled={saving}
               >
                 {saving ? t("common.saving") : t("common.create")}

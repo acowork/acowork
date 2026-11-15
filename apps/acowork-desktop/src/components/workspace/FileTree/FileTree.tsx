@@ -513,7 +513,7 @@ export function FileTree({
                         )}
                         <button
                             type="button"
-                            className="rounded border border-zinc-300 px-3 py-1 text-xs hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-800"
+                            className="rounded border border-border-strong px-3 py-1 text-xs hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                             onClick={() => void fetchTree(agentId, workspaceId, "")}
                         >
                             {t("workspace.retry") ?? "Retry"}

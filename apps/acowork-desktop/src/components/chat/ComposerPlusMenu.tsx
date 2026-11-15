@@ -366,7 +366,7 @@ export function ComposerPlusMenu({
           aria-expanded={open}
           className={cn(
             buttonClassName ?? toolbarIconButton,
-            open && (openClassName ?? "bg-zinc-200 text-text dark:bg-zinc-700"),
+            open && (openClassName ?? "bg-surface-hover text-text"),
           )}
         >
           <PlusGlyph />
@@ -818,7 +818,7 @@ function HintLine({ text, tone }: { text: string; tone?: "error" }) {
     <div
       className={cn(
         "px-2 py-3 text-center text-xs",
-        tone === "error" ? "text-red-500 dark:text-red-400" : "text-text-tertiary",
+        tone === "error" ? "text-danger-icon" : "text-text-tertiary",
       )}
     >
       {text}

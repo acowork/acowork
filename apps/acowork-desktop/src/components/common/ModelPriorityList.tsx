@@ -83,7 +83,7 @@ export function ModelPriorityList({
   };
 
   const iconBtn =
-    "p-0.5 rounded text-text-tertiary hover:text-text hover:bg-panel-inset disabled:opacity-40 disabled:pointer-events-none";
+    "p-0.5 rounded text-text-tertiary hover:text-text hover:bg-[var(--color-accent)]/10 disabled:opacity-40 disabled:pointer-events-none";
 
   return (
     // `text-11` is this component's own size step; every child (rows, the

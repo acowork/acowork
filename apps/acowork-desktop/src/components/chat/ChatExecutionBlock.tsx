@@ -11,7 +11,7 @@
  *
  * The visual language is copied from the execution surface's `ExploreBlock`,
  * because a run of rounds is the same kind of object as a run of tool calls: an
- * avatar and name above, a `bg-zinc-100/60` pill as the collapse header, a
+ * avatar and name above, a `bg-surface/60` pill as the collapse header, a
  * `border-l-2` list under it, one row per item with a status glyph and a
  * chevron, and the pair's content in two stacked panels under the open row. The
  * only invention here is what a row pairs: `user` / `assistant` instead of
@@ -627,22 +627,37 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                       gray text, which read as no different from an idle run.
                       An idle block keeps the bare tertiary span: no capsule,
                       no fill — the shape itself is the status. */}
+                  {/* The header is ONE line, always. The run's name and the state
+                      word are both flex items here, and a flex item without
+                      `min-w-0` shrinks to its MIN-content width — so the words
+                      wrap into two or three lines and the card grows tall
+                      instead of getting narrower. `min-w-0` + `truncate` is the
+                      fix: the item may shrink past its content, and the text
+                      then shortens with an ellipsis instead of wrapping. The
+                      working capsule shrinks the same way (its own text is the
+                      one that has to give way), so both states keep the same
+                      one-line height. */}
                   {inProgress ? (
                     <span
                       data-testid="exec-block-working-capsule"
-                      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-accent-strong px-2 py-0.5 font-medium text-white"
+                      className="inline-flex min-w-0 shrink items-center gap-1 rounded-full bg-accent-strong px-2 py-0.5 font-medium text-white"
                     >
-                      {t("chatView.block.roundCount", { count: block.rounds.length })}
-                      {shownState && (
-                        <>
-                          {" · "}
-                          {shownState}
-                        </>
-                      )}
-                      <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                      <span className="min-w-0 truncate">
+                        {t("chatView.block.roundCount", { count: block.rounds.length })}
+                        {shownState && (
+                          <>
+                            {" · "}
+                            {shownState}
+                          </>
+                        )}
+                      </span>
+                      <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
                     </span>
                   ) : (
-                    <span className="text-text-tertiary">
+                    <span
+                      data-testid="exec-block-state"
+                      className="min-w-0 truncate text-text-tertiary"
+                    >
                       ({t("chatView.block.roundCount", { count: block.rounds.length })}
                       {shownState && (
                         <>
@@ -683,7 +698,7 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                      *  labels, this one unfolds a whole question/answer pair per
                      *  round, so 144px showed barely one row of prose. */
                     maxHeight={288}
-                    containerClassName="flex-none ml-2 mt-1 mb-2 rounded-md border-l-2 border-zinc-300 bg-zinc-100/60 dark:border-zinc-600 dark:bg-zinc-800/30"
+                    containerClassName="flex-none ml-2 mt-1 mb-2 rounded-md border-l-2 border-border-strong bg-surface/60"
                     className="pl-3 pr-2 py-2 overscroll-contain"
                     onViewportWheel={(event) => {
                       if (event.deltaY !== 0) event.stopPropagation();
@@ -857,7 +872,7 @@ function RoundItem({
 
   return (
     <div className="min-w-0" data-seq={round.roundRow.seq}>
-      <div className="flex min-w-0 w-full items-center gap-2 rounded-md bg-zinc-100 px-2.5 py-1.5 text-left transition-colors hover:bg-zinc-200 dark:bg-zinc-700/50 dark:hover:bg-zinc-700">
+      <div className="flex min-w-0 w-full items-center gap-2 rounded-md bg-surface-hover px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
         <button
           className="flex min-w-0 flex-1 items-center gap-2"
           onClick={() => setOpen((v) => !v)}
@@ -871,19 +886,19 @@ function RoundItem({
           </span>
         </button>
         {inProgress ? (
-          <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-zinc-300 dark:bg-zinc-500" />
+          <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-surface-strong" />
         ) : status === "waiting" ? (
-          <Pause className="h-3 w-3 shrink-0 text-amber-500" />
+          <Pause className="h-3 w-3 shrink-0 text-warning" />
         ) : failed ? (
-          <X className="h-3 w-3 shrink-0 text-red-500" />
+          <X className="h-3 w-3 shrink-0 text-danger-icon" />
         ) : userStopped ? (
-          <X className="h-3 w-3 shrink-0 text-amber-500" />
+          <X className="h-3 w-3 shrink-0 text-warning" />
         ) : entry?.status === "unreachable" ? (
-          <X className="h-3 w-3 shrink-0 text-amber-500" />
+          <X className="h-3 w-3 shrink-0 text-warning" />
         ) : status === "completed" ? (
           <Check className="h-3 w-3 shrink-0" style={{ color: "var(--color-accent)" }} />
         ) : (
-          <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-zinc-300 dark:bg-zinc-500" />
+          <span className="h-3 w-3 shrink-0 animate-pulse rounded-full bg-surface-strong" />
         )}
         <button
           onClick={() => setOpen((v) => !v)}
@@ -1019,7 +1034,7 @@ function RoundBody({
   if (entry.status === "unreachable") {
     return (
       <div
-        className="flex flex-wrap items-center gap-2 rounded bg-red-50 p-2 text-red-600 dark:bg-red-900/20 dark:text-red-400"
+        className="flex flex-wrap items-center gap-2 rounded bg-danger-surface p-2 text-danger-text"
         style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
       >
         <span>{t("chatView.block.unreachable")}</span>
@@ -1046,7 +1061,7 @@ function RoundBody({
   if (body) {
     return (
       <div
-        className={`rounded p-2 ${failed ? "bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400" : "bg-chat-bubble text-text-secondary"}`}
+        className={`rounded p-2 ${failed ? "bg-danger-surface text-danger-text" : "bg-chat-bubble text-text-secondary"}`}
         style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
       >
         <ChatMarkdown content={body} />
@@ -1058,7 +1073,7 @@ function RoundBody({
   // because how it ended is a fact the transcript owes the reader.
   return (
     <div
-      className="rounded bg-zinc-100 p-2 text-text-tertiary dark:bg-zinc-800"
+      className="rounded bg-surface p-2 text-text-tertiary"
       style={{ fontSize: BLOCK_DETAIL_FONT_SIZE }}
     >
       {status ? t(statusKey(status)) : t("chatView.block.unknown")}
@@ -1149,7 +1164,7 @@ function BlockCardActions({
   };
 
   const failedNote = failed ? (
-    <span className="text-red-500">{t("chatView.block.answerFailed")}</span>
+    <span className="text-danger-icon">{t("chatView.block.answerFailed")}</span>
   ) : undefined;
 
   // A viewer who is not a round's answerer (D10): the question shows, the

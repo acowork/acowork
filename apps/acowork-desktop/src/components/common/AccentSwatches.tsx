@@ -132,7 +132,7 @@ export function AccentSwatches({
           {hasCustom ? (
             <span
               data-accent-edit-badge=""
-              className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600"
+              className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-btn-solid text-white shadow-sm"
             >
               <Pencil className="h-2 w-2" strokeWidth={2.5} />
             </span>

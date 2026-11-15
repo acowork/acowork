@@ -160,7 +160,7 @@ export function GroupResponderCard({
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           </div>
         ) : error ? (
-          <p className="text-10 text-red-500">{error}</p>
+          <p className="text-10 text-danger-icon">{error}</p>
         ) : (
           <div className="space-y-2">
             <p className="text-10 leading-relaxed text-text-tertiary">
@@ -182,7 +182,7 @@ export function GroupResponderCard({
                 ...(stale && responder ? [{ value: responder, label: responder.slice(0, 8) }] : []),
               ]}
             />
-            {stale && <p className="text-10 text-amber-600">{t("groupResponder.missing")}</p>}
+            {stale && <p className="text-10 text-warning">{t("groupResponder.missing")}</p>}
           </div>
         )}
       </ExpandableRow>

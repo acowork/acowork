@@ -167,10 +167,10 @@ interface ChatScrollSnapshot {
 // — nothing is running, and the pause banners own the paused state.
 const PHASE_DOTS: Partial<Record<ProcessingPhase, string>> = {
   thinking: "bg-purple-500",
-  waiting: "bg-zinc-400 dark:bg-zinc-500",
+  waiting: "bg-loading",
   streaming: "bg-[var(--color-accent)]",
-  tool_executing: "bg-blue-500",
-  waiting_approval: "bg-yellow-500",
+  tool_executing: "bg-info-solid",
+  waiting_approval: "bg-warning-solid",
 };
 
 const MAX_SCROLL_SNAPSHOTS = 64;
@@ -405,12 +405,12 @@ function ConnectionStatusBanner({
     effectiveConnection === "disconnected" ||
     effectiveConnection === "idle";
   const containerCls = isWarn
-    ? "border-amber-300/60 bg-amber-50 text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-100"
-    : "border-sky-300/60 bg-sky-50 text-sky-900 dark:border-sky-700/60 dark:bg-sky-950/40 dark:text-sky-100";
-  const iconCls = isWarn ? "text-amber-500 dark:text-amber-300" : "text-sky-500 dark:text-sky-300";
+    ? "border-warning-border/60 bg-warning-surface text-warning-quiet"
+    : "border-info/60 bg-info-surface text-info";
+  const iconCls = isWarn ? "text-warning" : "text-info";
   const retryCls = isWarn
-    ? "text-amber-700 dark:text-amber-200 tabular-nums"
-    : "text-sky-700 dark:text-sky-200 tabular-nums";
+    ? "text-warning-quiet tabular-nums"
+    : "text-info tabular-nums";
 
   const retryText =
     secondsRemaining === null
@@ -443,7 +443,7 @@ function ConnectionStatusBanner({
           disabled={reconnecting}
           className={cn(
             "flex-shrink-0 rounded border px-2 py-0.5 text-xs font-medium transition-colors",
-            "border-amber-400/70 text-amber-800 hover:bg-amber-100",
+            "border-warning-border/70 text-warning-quiet hover:bg-warning-surface-hover",
             "dark:border-amber-600/70 dark:text-amber-200 dark:hover:bg-amber-900/40",
             reconnecting && "opacity-60",
           )}
@@ -458,7 +458,7 @@ function ConnectionStatusBanner({
           disabled={reconnecting}
           className={cn(
             "flex-shrink-0 rounded border px-2 py-0.5 text-xs font-medium transition-colors",
-            "border-amber-400/70 text-amber-800 hover:bg-amber-100",
+            "border-warning-border/70 text-warning-quiet hover:bg-warning-surface-hover",
             "dark:border-amber-600/70 dark:text-amber-200 dark:hover:bg-amber-900/40",
             reconnecting && "opacity-60",
           )}
@@ -2058,7 +2058,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
       <div className={shellCn}>
         <div className="flex flex-1 items-center justify-center">
           <div className="text-center">
-            <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+            <div className="mx-auto h-8 w-8 animate-spin rounded-full border-2 border-border-strong border-t-zinc-600 dark:border-t-zinc-300" />
             <p className="mt-3 text-xs text-text-tertiary ">Loading session...</p>
           </div>
         </div>
@@ -2079,12 +2079,12 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         {/* LLM config warning */}
         {llmAvailability === "missing" && (
           <div
-            className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 rounded-t-xl dark:border-amber-900 dark:bg-amber-950"
+            className="flex items-center gap-2 border-b border-warning-border bg-warning-surface px-4 py-2 rounded-t-xl"
             role="alert"
             data-testid="llm-availability-missing"
           >
-            <AlertTriangle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
-            <span className="text-xs text-amber-700 dark:text-amber-300">
+            <AlertTriangle className="h-4 w-4 text-warning" />
+            <span className="text-xs text-warning-quiet">
               {t("chatPanel.llmNotConfigured")}
             </span>
           </div>
@@ -2207,7 +2207,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                 never stack. */}
             {isCompacting && (
               <div className="mt-1 ml-12 flex items-center gap-1.5" role="status">
-                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-amber-500 animate-pulse" />
+                <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-warning-solid animate-pulse" />
                 <span className="thinking-shimmer text-text-tertiary " style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}>
                   {t("chatPanel.compacting")}
                 </span>
@@ -2246,7 +2246,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
 {/* Iteration limit pause — hint + Continue button */}
             {iterationLimitPaused && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-border-outer bg-zinc-50 px-4 py-2 text-text-secondary select-none  dark:bg-zinc-800/40 ">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-border-outer bg-surface-subtle px-4 py-2 text-text-secondary select-none  ">
                   <span
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                   >
@@ -2267,7 +2267,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
             )}
             {loopDetectedPaused && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-border-outer bg-zinc-50 px-4 py-2 text-text-secondary select-none  dark:bg-zinc-800/40 ">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-border-outer bg-surface-subtle px-4 py-2 text-text-secondary select-none  ">
                   <span
                     style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}
                   >
@@ -2287,7 +2287,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
             {/* Ask question cards — shown when LLM asks the user questions */}
             {serverError && (
               <div className="mt-1.5 flex justify-center px-6">
-                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-amber-500/30 bg-amber-500/10 px-4 py-2 text-amber-600 select-none dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-400">
+                <div className="inline-flex flex-wrap items-center gap-x-2 gap-y-2 rounded-md border border-warning-border/30 bg-warning-solid/10 px-4 py-2 text-warning select-none">
                   <AlertTriangle className="h-4 w-4 shrink-0" />
                   <div className="min-w-0 flex-1">
                     <div className="whitespace-pre-wrap break-words" style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.85)" }}>
@@ -2299,10 +2299,10 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                     </div>
                     {serverError.errorDetail && (
                       <details className="mt-1">
-                        <summary className="cursor-pointer text-xs text-amber-500/70 hover:text-amber-500 select-none">
+                        <summary className="cursor-pointer text-xs text-warning/70 hover:text-warning select-none">
                           Details
                         </summary>
-                        <pre className="mt-1 max-h-40 overflow-auto rounded bg-black/5 dark:bg-white/5 p-2 text-xs text-amber-500/70 whitespace-pre-wrap break-all">
+                        <pre className="mt-1 max-h-40 overflow-auto rounded bg-black/5 dark:bg-white/5 p-2 text-xs text-warning/70 whitespace-pre-wrap break-all">
                           {serverError.errorDetail}
                         </pre>
                       </details>
@@ -2328,7 +2328,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                             log.warn("[ChatPanel] retry failed:", err);
                           });
                       }}
-                      className="flex w-fit items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
+                      className="flex w-fit items-center gap-1 rounded bg-warning-solid px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
                       style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                     >
                       <RefreshCw className="h-3 w-3" />
@@ -2340,7 +2340,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                           clearServerError(selectedAgentId, currentSessionId);
                         }
                       }}
-                      className="flex w-fit items-center gap-1 rounded bg-amber-500 px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
+                      className="flex w-fit items-center gap-1 rounded bg-warning-solid px-2 py-0.5 text-11 font-medium text-white transition-colors hover:brightness-90"
                       style={{ fontSize: "calc(var(--ui-font-size, 0.875rem) * 0.9)" }}
                     >
                       <X className="h-3 w-3" />
@@ -2365,7 +2365,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                       <button
                         onClick={() => setCurrentQuestionIndex((i) => Math.max(0, i - 1))}
                         disabled={currentQuestionIndex === 0}
-                        className="rounded p-0.5 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        className="rounded p-0.5 text-text-tertiary hover:text-text-tertiary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                         aria-label={t("askQuestionCard.previous")}
                       >
                         <ChevronLeft className="h-3.5 w-3.5" />
@@ -2378,8 +2378,8 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                             onClick={() => setCurrentQuestionIndex(idx)}
                             className={`h-1.5 w-1.5 rounded-full transition-all ${
                               idx === currentQuestionIndex
-                                ? "bg-zinc-500 dark:bg-zinc-300 w-3"
-                                : "bg-zinc-300 dark:bg-zinc-600 hover:bg-zinc-400 dark:hover:bg-zinc-500"
+                                ? "bg-loading w-3"
+                                : "bg-surface-strong hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                             }`}
                             aria-label={`${t("askQuestionCard.goTo")} ${idx + 1}`}
                           />
@@ -2388,7 +2388,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                       <button
                         onClick={() => setCurrentQuestionIndex((i) => Math.min(pendingQuestions.length - 1, i + 1))}
                         disabled={currentQuestionIndex === pendingQuestions.length - 1}
-                        className="rounded p-0.5 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300 disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                        className="rounded p-0.5 text-text-tertiary hover:text-text-tertiary disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
                         aria-label={t("askQuestionCard.next")}
                       >
                         <ChevronRight className="h-3.5 w-3.5" />
@@ -2411,12 +2411,12 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
               Default opacity is reduced so the button does not visually crowd
               the chat content; it goes fully opaque on hover/focus for clear
               affordance. The existing `transition-all` covers the opacity
-              animation, and the `hover:bg-zinc-200` background change is
+              animation, and the `hover:bg-[var(--color-accent)]/10` background change is
               independent of the opacity change so both compose cleanly. */}
           {scrollController.showScrollToTop && (
             <button
               onClick={scrollController.jumpToTop}
-              className="absolute top-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+              className="absolute top-3 right-4 z-10 rounded-full bg-surface-hover border border-border-outer shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-all animate-in fade-in zoom-in"
               aria-label="Scroll to top"
             >
               <ChevronsUp className="h-4 w-4 text-text-tertiary " />
@@ -2428,7 +2428,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           {scrollController.showScrollToBottom && (
             <button
               onClick={scrollController.jumpToBottom}
-              className="absolute bottom-3 right-4 z-10 rounded-full bg-zinc-100 dark:bg-zinc-700 border border-zinc-200 dark:border-zinc-600 shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-zinc-200 dark:hover:bg-zinc-600 transition-all animate-in fade-in zoom-in"
+              className="absolute bottom-3 right-4 z-10 rounded-full bg-surface-hover border border-border-outer shadow-md p-1.5 opacity-40 hover:opacity-100 focus-visible:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-all animate-in fade-in zoom-in"
               aria-label={t("chatPanel.ariaLabelScrollToBottom")}
             >
               <ChevronsDown className="h-4 w-4 text-text-tertiary " />
@@ -2439,9 +2439,9 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         {/* Todo list box — above the message queue, same collapsible style.
           Shows current task list from todo_write tool calls. */}
         {todos.length > 0 && (
-          <div className="mx-12 mb-0 rounded-t-md border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden">
+          <div className="mx-12 mb-0 rounded-t-md border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden">
             <button
-              className="flex items-center w-full px-2.5 py-1.5 border-b border-border-divider hover:bg-zinc-100 dark:hover:bg-zinc-700/30 transition-colors"
+              className="flex items-center w-full px-2.5 py-1.5 border-b border-border-divider hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-colors"
               onClick={() => session.setTodosCollapsed(!session.todosCollapsed)}
             >
               {session.todosCollapsed ? (
@@ -2521,7 +2521,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           from the local draft queue below (which is frontend-only). */}
         {pendingIntents.length > 0 && (
           <div className={cn(
-            "mx-12 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
+            "mx-12 mb-0 border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden",
             todos.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-border-divider">
@@ -2554,7 +2554,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           flush against input, slightly narrower for layered depth */}
         {queuedMessages.length > 0 && (
           <div className={cn(
-            "mx-12 mb-0 border border-b-0 border-zinc-200 dark:border-zinc-800 bg-zinc-50/80 dark:bg-zinc-800/60 overflow-hidden",
+            "mx-12 mb-0 border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden",
             todos.length > 0 || pendingIntents.length > 0 ? "" : "rounded-t-md"
           )}>
             <div className="flex items-center px-2.5 py-1.5 border-b border-border-divider">
@@ -2584,7 +2584,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                     <button
                       type="button"
                       onClick={() => handleRemoveQueued(i)}
-                      className="rounded-sm p-0.5 text-text-tertiary hover:text-red-500 hover:bg-red-50 dark:hover:text-red-400 dark:hover:bg-red-900/30"
+                      className="rounded-sm p-0.5 text-text-tertiary hover:text-danger-icon hover:bg-danger-surface"
                       aria-label={`Remove message ${i + 1}`}
                     >
                       <X size={12} />
@@ -2642,7 +2642,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                   return (
                     <div
                       key={p.tempId}
-                      className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700"
+                      className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border-outer"
                     >
                       <img
                         src={p.localUrl ?? `/api/agents/${selectedAgentId ?? ""}/files/${item.documentId}`}
@@ -2652,7 +2652,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                       <button
                         type="button"
                         onClick={() => handleRemovePending(p.tempId)}
-                        className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                        className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-danger-solid text-white opacity-0 transition-opacity group-hover:opacity-100"
                         aria-label={`Remove ${item.filename}`}
                       >
                         <X size={10} />
@@ -2665,7 +2665,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                   return (
                     <div
                       key={p.tempId}
-                      className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 dark:border-zinc-700"
+                      className="group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border-outer"
                     >
                       <img
                         src={p.localUrl}
@@ -2675,7 +2675,7 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                       <button
                         type="button"
                         onClick={() => handleRemovePending(p.tempId)}
-                        className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
+                        className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-danger-solid text-white opacity-0 transition-opacity group-hover:opacity-100"
                         aria-label="Remove attachment"
                       >
                         <X size={10} />
@@ -2951,7 +2951,7 @@ function UnsupportedImageDialog({
               className={`flex w-full items-center justify-between px-2.5 py-1.5 text-xs transition-colors rounded-md text-text-secondary  ${listRowHover}`}
             >
               <span className="flex items-center gap-1.5 min-w-0">
-                <Image size={12} className="shrink-0 text-blue-400" />
+                <Image size={12} className="shrink-0 text-info" />
                 <span className="font-medium truncate">
                   {(() => {
                     if (!m.name.includes('/')) return m.name;
@@ -2976,7 +2976,7 @@ function UnsupportedImageDialog({
         <div className="shrink-0 flex items-center justify-end gap-2 border-t border-border-divider px-6 py-4">
           <button
             onClick={onClose}
-            className="rounded-md px-4 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100  dark:hover:bg-zinc-700"
+            className="rounded-md px-4 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("chatPanel.close")}
           </button>
@@ -3268,7 +3268,7 @@ export function ModelMenu({
         <div
           className={cn(
             "absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
-            "border-zinc-200 bg-modal-surface dark:border-border-outer",
+            "border-border-outer bg-modal-surface dark:border-border-outer",
           )}
           style={{ width: `${menuWidth}px` }}
         >
@@ -3350,7 +3350,7 @@ export function ModelMenu({
                           <span className="flex items-center gap-0.5 ml-2">
                             {m.tool_call && <Wrench size={10} className="text-text-tertiary" />}
                             {m.reasoning && <Brain size={10} className="text-purple-400" />}
-                            {m.input_modalities?.includes('image') && <Image size={10} className="text-blue-400" />}
+                            {m.input_modalities?.includes('image') && <Image size={10} className="text-info" />}
                             {/* ADR-103 D11 position 2 — the `R` letter badge.
                                 A letter has no meaning for a screen reader, so
                                 it always carries title + aria-label. The badge
@@ -3395,7 +3395,7 @@ export function ModelMenu({
                                   {badge.kind === "degraded" && (
                                     <span
                                       aria-hidden="true"
-                                      className="ml-0.5 inline-block h-1 w-1 rounded-full bg-amber-500 align-middle"
+                                      className="ml-0.5 inline-block h-1 w-1 rounded-full bg-warning-solid align-middle"
                                     />
                                   )}
                                 </span>
@@ -3434,7 +3434,7 @@ export function ModelMenu({
               setShowAddDialog(true);
               closeMenu();
             }}
-            className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-zinc-200 hover:text-zinc-900 dark:bg-white/10  dark:hover:bg-white/15 dark:hover:text-zinc-100"
+            className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-surface px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text  dark:hover:bg-[var(--color-accent)]/15"
           >
             <Plus className="h-3.5 w-3.5" />
             {t("chatPanel.addModel")}
@@ -3453,7 +3453,7 @@ export function ModelMenu({
             ref={flyoutRef}
             onMouseEnter={cancelClose}
             onMouseLeave={scheduleClose}
-            className="fixed z-50 overflow-hidden rounded-md border shadow-lg border-zinc-200 bg-modal-surface dark:border-border-outer"
+            className="fixed z-50 overflow-hidden rounded-md border shadow-lg border-border-outer bg-modal-surface dark:border-border-outer"
             style={{
               top: flyoutPos?.top ?? 0,
               left: flyoutPos?.left ?? 0,
@@ -3609,7 +3609,7 @@ export function ReasoningEffortMenu({
         <div
           className={cn(
             "absolute bottom-full left-0 z-50 mb-1 overflow-hidden rounded-md border shadow-lg",
-            "border-zinc-200 bg-modal-surface dark:border-border-outer",
+            "border-border-outer bg-modal-surface dark:border-border-outer",
           )}
           style={{ width: "140px" }}
         >

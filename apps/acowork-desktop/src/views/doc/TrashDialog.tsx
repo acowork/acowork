@@ -107,7 +107,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
             type="button"
             aria-label={t("common.close")}
             onClick={onClose}
-            className="rounded p-1 text-text-tertiary hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
+            className="rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
           >
             <X className="h-4 w-4" />
           </button>
@@ -143,7 +143,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
                       title={t("doc.restore")}
                       aria-label={t("doc.restore")}
                       onClick={() => void handleRestore(entry)}
-                      className="rounded p-1 text-text-tertiary hover:bg-zinc-200 hover:text-emerald-600 dark:hover:bg-zinc-700"
+                      className="rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-ok dark:hover:bg-[var(--color-accent)]/15"
                     >
                       <ArchiveRestore className="h-3.5 w-3.5" />
                     </button>
@@ -153,7 +153,7 @@ export function TrashDialog({ open, onClose, disabled }: TrashDialogProps) {
                     title={t("doc.purge")}
                     aria-label={t("doc.purge")}
                     onClick={() => setPurgeTarget(entry)}
-                    className="rounded p-1 text-text-tertiary hover:bg-zinc-200 hover:text-red-500 dark:hover:bg-zinc-700"
+                    className="rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-danger-icon dark:hover:bg-[var(--color-accent)]/15"
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>

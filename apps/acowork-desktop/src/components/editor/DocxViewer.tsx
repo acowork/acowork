@@ -67,7 +67,7 @@ export default function DocxViewer(props: ViewerFileProps) {
                     <span className="max-w-[80%] truncate font-mono text-10">{renderError}</span>
                 </div>
             ) : (
-                <div ref={hostRef} className="h-full overflow-auto bg-zinc-100 dark:bg-zinc-900">
+                <div ref={hostRef} className="h-full overflow-auto bg-surface-subtle">
                     <div ref={containerRef} data-testid="docx-preview-container" />
                 </div>
             )}

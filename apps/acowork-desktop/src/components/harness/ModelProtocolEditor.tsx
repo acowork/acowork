@@ -119,7 +119,7 @@ export function ModelProtocolEditor({
                 ? t("harness.probeSendsOneRequest")
                 : t("harness.probeNeedsSaveFirst")
             }
-            className="rounded border border-border-outer px-2 py-1 text-xs text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-800"
+            className="rounded border border-border-outer px-2 py-1 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
           >
             {verifying ? t("harness.probeRunning") : t("harness.probeButton")}
           </button>
@@ -149,7 +149,7 @@ export function ModelProtocolEditor({
           <span className="text-accent-green">{t("harness.probeVerified")}</span>
         )}
         {badge.kind === "degraded" && (
-          <span className="text-amber-500">
+          <span className="text-warning">
             {badge.stripped.length
               ? t("harness.probeDegradedFields", { fields: badge.stripped.join(" / ") })
               : t("harness.probeDegraded")}
@@ -160,7 +160,7 @@ export function ModelProtocolEditor({
           <span className="text-text-tertiary">{t("harness.probeDeclared")}</span>
         )}
         {badge.kind === "blocked" && blockedKey && (
-          <span className="text-amber-500">
+          <span className="text-warning">
             {t("harness.probeBlocked")}: {t(blockedKey)}
             {badge.detail ? ` — ${badge.detail}` : ""}
           </span>

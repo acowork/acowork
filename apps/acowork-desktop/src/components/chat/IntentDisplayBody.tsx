@@ -56,7 +56,7 @@ export function IntentDisplayBody({
           <summary className="cursor-pointer text-text-tertiary">
             {t("chatView.block.rawEnvelope")}
           </summary>
-          <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-zinc-100 p-2 text-text-tertiary dark:bg-zinc-800">
+          <pre className="mt-1 whitespace-pre-wrap break-words rounded bg-surface p-2 text-text-tertiary">
             {raw}
           </pre>
         </details>

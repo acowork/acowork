@@ -2,7 +2,7 @@
  * The button surface vocabulary is closed: `btn-solid` and `btn-accent`.
  *
  * Why this file exists:
- *   These classes replaced hand-rolled `bg-zinc-200` / `border-zinc-300`
+ *   These classes replaced hand-rolled `bg-surface-hover` / `border-border-strong`
  *   button surfaces (globals.css "Button surface variants"), and the app
  *   settled on solid fills — a neutral tone for secondary actions and the
  *   accent fill for the one primary/confirm action in a dialog (including
@@ -134,5 +134,20 @@ describe("button surface variants", () => {
     const tones = [...code.matchAll(/(?<![\w-])(btn-[a-z0-9-]+)/g)].map((m) => m[1]);
     expect(tones.length, "expected the two account-action buttons").toBeGreaterThan(0);
     expect(new Set(tones)).toEqual(new Set(["btn-solid"]));
+  });
+
+  it("btn-solid hover keeps its opaque fill and echoes the accent with a ring", () => {
+    // The CSS-class buttons (Settings / AgentSetup "Reset", …) are NOT
+    // Tailwind `hover:bg-*` call sites, so the hover-tint migration cannot
+    // reach them. They must still carry the same accent hover cue as the
+    // hand-written solid buttons — an inset ring, never a translucent wash.
+    for (const selector of [".btn-solid:hover {", ".dark .btn-solid:hover {"]) {
+      const start = css.indexOf(selector);
+      expect(start, `missing ${selector}`).toBeGreaterThan(-1);
+      const rule = css.slice(start, css.indexOf("}", start));
+      expect(rule, `${selector} lost its accent cue`).toContain("--color-accent");
+      expect(rule, `${selector} must keep an opaque fill`).toMatch(/background:\s*#[0-9a-f]{6}/i);
+      expect(rule).not.toMatch(/background:\s*color-mix/);
+    }
   });
 });

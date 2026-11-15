@@ -260,7 +260,7 @@ export function MemoryPanel() {
           uses. */}
       {healthBanner && stats && (
         <div
-          className="flex items-center gap-2 border-b border-amber-200 bg-amber-50 px-panel-gutter py-2 text-amber-900 dark:border-amber-900/60 dark:bg-amber-950/40 dark:text-amber-100"
+          className="flex items-center gap-2 border-b border-warning-border bg-warning-surface px-panel-gutter py-2 text-warning-quiet"
           role="alert"
           data-testid="index-health-banner"
         >
@@ -311,7 +311,7 @@ export function MemoryPanel() {
 
       {/* Error banner */}
       {error && (
-        <div className="border-b border-red-200 dark:border-red-900">
+        <div className="border-b border-danger-border">
           <ErrorBox message={error} className="!rounded-none !border-0" />
         </div>
       )}

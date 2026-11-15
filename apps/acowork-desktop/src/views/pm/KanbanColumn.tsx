@@ -139,8 +139,8 @@ export function KanbanColumn({
           className={cn(
             COUNT_BADGE_BASE_CN,
             status === "submitted"
-              ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
-              : "bg-zinc-200 text-text-secondary dark:bg-zinc-700 ",
+              ? "bg-warning-surface-hover text-warning-quiet"
+              : "bg-surface-hover text-text-secondary ",
           )}
         >
           {tasks.length}
@@ -217,7 +217,7 @@ export function KanbanColumn({
               onClick={() => onPageChange(Math.max(1, bounds.page - 1))}
               disabled={bounds.page <= 1}
               aria-label={t("pm.board.pagePrev")}
-              className="rounded p-0.5 transition-colors hover:bg-zinc-100 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-zinc-700"
+              className="rounded p-0.5 transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-[var(--color-accent)]/15"
             >
               <ChevronLeft className="h-3 w-3" aria-hidden />
             </button>
@@ -229,7 +229,7 @@ export function KanbanColumn({
               onClick={() => onPageChange(Math.min(bounds.totalPages, bounds.page + 1))}
               disabled={bounds.page >= bounds.totalPages}
               aria-label={t("pm.board.pageNext")}
-              className="rounded p-0.5 transition-colors hover:bg-zinc-100 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-zinc-700"
+              className="rounded p-0.5 transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-30 dark:hover:bg-[var(--color-accent)]/15"
             >
               <ChevronRight className="h-3 w-3" aria-hidden />
             </button>

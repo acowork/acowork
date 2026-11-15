@@ -158,7 +158,7 @@ export function LoginView() {
         )}
 
         {error && (
-          <p role="alert" className="text-xs text-red-500">
+          <p role="alert" className="text-xs text-danger-icon">
             {error}
           </p>
         )}

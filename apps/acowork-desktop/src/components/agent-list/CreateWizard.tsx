@@ -622,7 +622,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
             onClick={busy ? undefined : onClose}
             disabled={busy}
             aria-label={t("agentDetailDialog.ariaLabelClose")}
-            className="text-text-tertiary hover:text-zinc-600 disabled:opacity-50 dark:hover:text-zinc-300"
+            className="text-text-tertiary hover:text-text-tertiary disabled:opacity-50"
           >
             <XIcon className="h-4 w-4" />
           </button>
@@ -639,8 +639,8 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                 <div
                   className={cn(
                     "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
-                    active && "bg-zinc-200 text-text dark:bg-zinc-700",
-                    passed && "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+                    active && "bg-surface-hover text-text",
+                    passed && "bg-ok-surface text-ok",
                     !active && !passed && "text-text-tertiary",
                   )}
                 >
@@ -651,7 +651,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                   <div
                     className={cn(
                       "mx-1 h-px w-4",
-                      i < stepIndex ? "bg-green-300 dark:bg-green-600" : "bg-zinc-200 dark:bg-zinc-600",
+                      i < stepIndex ? "bg-ok/40" : "bg-surface-hover",
                     )}
                   />
                 )}
@@ -674,7 +674,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                   aria-label={t("createWizard.fieldAgentId")}
                   aria-invalid={state.agentId.trim() !== "" && !isValidAgentId(state.agentId) || undefined}
                   className={cn(
-                    state.agentId.trim() !== "" && !isValidAgentId(state.agentId) && "border-red-400",
+                    state.agentId.trim() !== "" && !isValidAgentId(state.agentId) && "border-danger-border",
                   )}
                   fontMono
                 />
@@ -744,7 +744,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                   disabled={busy}
                   invalid={!!labelError}
                 />
-                {labelError && <p className="mt-1 text-10 text-red-500">{labelError}</p>}
+                {labelError && <p className="mt-1 text-10 text-danger-icon">{labelError}</p>}
               </Field>
             </div>
           )}
@@ -1118,7 +1118,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                     type="button"
                     onClick={addCapability}
                     disabled={busy}
-                    className="flex shrink-0 items-center gap-1 rounded border border-border-outer px-2 py-1 text-10 font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+                    className="flex shrink-0 items-center gap-1 rounded border border-border-outer px-2 py-1 text-10 font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
                   >
                     <Plus className="h-3 w-3" />
                     {t("createWizard.capabilityAdd")}
@@ -1147,7 +1147,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                                 placeholder={t("createWizard.capabilityActionPlaceholder")}
                                 aria-label={t("createWizard.capabilityAction")}
                                 aria-invalid={actionInvalid || undefined}
-                                className={cn("font-mono", actionInvalid && "border-red-400")}
+                                className={cn("font-mono", actionInvalid && "border-danger-border")}
                                 disabled={busy}
                               />
                             </Field>
@@ -1157,7 +1157,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                             aria-label={t("createWizard.capabilityRemove")}
                             onClick={() => removeCapability(cap.uid)}
                             disabled={busy}
-                            className="mb-1 p-1 text-text-tertiary hover:text-red-500 disabled:opacity-50"
+                            className="mb-1 p-1 text-text-tertiary hover:text-danger-icon disabled:opacity-50"
                           >
                             <XIcon className="h-3.5 w-3.5" />
                           </button>
@@ -1194,7 +1194,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                                       "rounded px-1.5 py-0.5 text-10 font-medium",
                                       on
                                         ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)]"
-                                        : "bg-zinc-100 text-text-tertiary dark:bg-zinc-700",
+                                        : "bg-surface-hover text-text-tertiary",
                                     )}
                                   >
                                     {skill.name}
@@ -1270,7 +1270,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
                 <ErrorBox message={previewError} />
               ) : preview ? (
                 <>
-                  <div className="max-h-[320px] overflow-auto rounded-md bg-zinc-50 px-4 py-3 dark:bg-zinc-700/50">
+                  <div className="max-h-[320px] overflow-auto rounded-md bg-surface-subtle px-4 py-3">
                     <pre className="whitespace-pre-wrap font-mono text-xs text-text-secondary">
                       {preview.toml}
                     </pre>
@@ -1311,7 +1311,7 @@ export function CreateWizard({ open, onCreated, onClose, nodeId }: CreateWizardP
           <button
             onClick={stepIndex === 0 ? onClose : handleBack}
             disabled={busy}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 disabled:opacity-50 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
           >
             {stepIndex === 0 ? t("common.cancel") : t("common.back")}
           </button>
@@ -1361,7 +1361,7 @@ function Field({
     <div>
       <label className="mb-1 block text-xs font-medium text-text-tertiary">
         {label}
-        {required && <span className="ml-0.5 text-red-500">*</span>}
+        {required && <span className="ml-0.5 text-danger-icon">*</span>}
         {hint && <span className="ml-1 font-normal text-text-tertiary">({hint})</span>}
       </label>
       {children}
@@ -1403,10 +1403,10 @@ function ConfigNumberField({
         onChange={(e) => onChange(e.target.value)}
         aria-label={label}
         aria-invalid={!!error || undefined}
-        className={cn(error && "border-red-400")}
+        className={cn(error && "border-danger-border")}
         disabled={disabled}
       />
-      <p className={cn("mt-1 text-10", error ? "text-red-500" : "text-text-tertiary")}>
+      <p className={cn("mt-1 text-10", error ? "text-danger-icon" : "text-text-tertiary")}>
         {error === "range"
           ? t("createWizard.issueConfigRange")
           : error === "integer"
@@ -1527,7 +1527,7 @@ function SkillDropzone({
                 )}
               </p>
               {row.status === "error" ? (
-                <p className="text-10 text-red-500">{row.error}</p>
+                <p className="text-10 text-danger-icon">{row.error}</p>
               ) : row.entry ? (
                 <>
                   <p className="truncate text-10 text-text-tertiary">{row.entry.description}</p>
@@ -1549,7 +1549,7 @@ function SkillDropzone({
               aria-label={t("createWizard.removeSkillAriaLabel")}
               onClick={() => onRemove(row.uid)}
               disabled={disabled}
-              className="p-1 text-text-tertiary hover:text-red-500 disabled:opacity-50"
+              className="p-1 text-text-tertiary hover:text-danger-icon disabled:opacity-50"
             >
               <XIcon className="h-3.5 w-3.5" />
             </button>

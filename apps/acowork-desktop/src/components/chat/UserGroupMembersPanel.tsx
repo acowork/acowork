@@ -232,7 +232,7 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
                       aria-label={t("groupMembers.rename")}
                       title={t("groupMembers.renameTitle")}
                       data-testid="group-rename-button"
-                      className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-nav-item-hover hover:text-zinc-600 dark:hover:text-zinc-300"
+                      className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary"
                     >
                       <Pencil className="h-3 w-3" />
                     </button>
@@ -300,7 +300,7 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
                       disabled={busy === p.id}
                       onClick={() => void doRemove(p.id)}
                       aria-label={t("groupMembers.removeAria", { name: who.name })}
-                      className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-zinc-500 text-white opacity-0 transition-opacity hover:bg-red-500 focus:opacity-100 group-hover:opacity-100 [div:hover>&]:opacity-100 disabled:opacity-40"
+                      className="absolute -right-1 -top-1 flex h-4 w-4 items-center justify-center rounded-full bg-loading text-white opacity-0 transition-opacity hover:bg-danger-solid focus:opacity-100 group-hover:opacity-100 [div:hover>&]:opacity-100 disabled:opacity-40"
                     >
                       <X className="h-2.5 w-2.5" />
                     </button>
@@ -378,7 +378,7 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
               <button
                 type="button"
                 onClick={() => setDeleteOpen(true)}
-                className="inline-flex items-center gap-1.5 rounded-md border border-red-300/70 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-800/70 dark:text-red-400 dark:hover:bg-red-950/40"
+                className="inline-flex items-center gap-1.5 rounded-md border border-danger-border/70 px-3 py-1.5 text-xs font-medium text-danger-text transition-colors hover:bg-danger-surface disabled:cursor-not-allowed disabled:opacity-40"
               >
                 <Trash2 className="h-3.5 w-3.5" />
                 {t("groupMembers.delete")}
@@ -472,7 +472,7 @@ function RenameDialog({
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
             aria-label={t("common.close")}
           >
             ×
@@ -489,14 +489,14 @@ function RenameDialog({
             placeholder={t("groupMembers.renamePlaceholder")}
             className="h-8 w-full rounded-md border border-border-outer bg-panel-block px-2 text-xs text-text outline-none placeholder:text-text-disabled focus:border-[var(--color-accent)]/50"
           />
-          {error && <p className="mt-2 text-11 text-red-600 dark:text-red-400">{error}</p>}
+          {error && <p className="mt-2 text-11 text-danger-text">{error}</p>}
         </div>
         <footer className="flex items-center justify-end gap-2 border-t border-border-divider px-5 py-3">
           <button
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="rounded-md px-3 py-1.5 text-xs text-text-secondary hover:bg-zinc-100 disabled:opacity-40 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("newGroup.cancel")}
           </button>
@@ -609,7 +609,7 @@ function InviteDialog({
           <button
             type="button"
             onClick={onClose}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
             aria-label={t("common.close")}
           >
             ×
@@ -646,7 +646,7 @@ function InviteDialog({
                       aria-pressed={on}
                       className={cn(
                         "flex w-full items-center gap-2 rounded-md px-3 py-1.5 text-left transition-colors",
-                        on ? "bg-accent-strong/10" : "hover:bg-zinc-50 dark:hover:bg-zinc-800/60",
+                        on ? "bg-accent-strong/10" : "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                       )}
                     >
                       {c.isAgent ? (
@@ -682,7 +682,7 @@ function InviteDialog({
             type="button"
             onClick={onClose}
             disabled={busy}
-            className="rounded-md px-3 py-1.5 text-xs text-text-secondary hover:bg-zinc-100 disabled:opacity-40 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("newGroup.cancel")}
           </button>

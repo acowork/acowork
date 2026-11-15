@@ -82,7 +82,7 @@ export function FileStatusCluster({
 
     return (
         <div
-            className="flex items-center justify-between gap-4 rounded-md border border-zinc-200/50 bg-zinc-100/80 px-3 py-px text-11 text-text-tertiary select-none dark:border-zinc-700/60 dark:bg-zinc-800/75 "
+            className="flex items-center justify-between gap-4 rounded-md border border-border-outer/50 bg-surface/80 px-3 py-px text-11 text-text-tertiary select-none "
         >
             {isEdit ? (
                 <>

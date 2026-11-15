@@ -238,7 +238,7 @@ export function ModelMultiSelect({
               "rounded px-2 py-0.5 text-xs font-medium",
               capabilityFilter.includes("tool_call")
                 ? "bg-accent-green/10 text-accent-green"
-                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700 ",
+                : "bg-surface-hover text-text-secondary hover:bg-[var(--color-accent)]/10 ",
             )}
           >
             🔧 {t("harness.toolCalling")}
@@ -250,7 +250,7 @@ export function ModelMultiSelect({
               "rounded px-2 py-0.5 text-xs font-medium",
               capabilityFilter.includes("reasoning")
                 ? "bg-purple-100 text-purple-700 dark:bg-purple-900 dark:text-purple-300"
-                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700 ",
+                : "bg-surface-hover text-text-secondary hover:bg-[var(--color-accent)]/10 ",
             )}
           >
             🧠 {t("harness.reasoning")}
@@ -261,8 +261,8 @@ export function ModelMultiSelect({
             className={cn(
               "rounded px-2 py-0.5 text-xs font-medium",
               capabilityFilter.includes("image")
-                ? "bg-sky-100 text-sky-700 dark:bg-sky-900 dark:text-sky-300"
-                : "bg-zinc-100 text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700 ",
+                ? "bg-info-surface text-info"
+                : "bg-surface-hover text-text-secondary hover:bg-[var(--color-accent)]/10 ",
             )}
           >
             🖼️ {t("harness.image")}
@@ -379,7 +379,7 @@ export function ModelMultiSelect({
           <label className="mb-1 block text-xs text-text-tertiary">
             {showModelCapEditor ? t("harness.modelCapabilities") : t("harness.protocolSection")}
             {showModelCapEditor && (
-              <span className="ml-1 text-xs text-amber-500">({t("harness.manualInputRequired")})</span>
+              <span className="ml-1 text-xs text-warning">({t("harness.manualInputRequired")})</span>
             )}
           </label>
           {/* D11: the request count must be visible before saving. Rendered in
@@ -390,7 +390,7 @@ export function ModelMultiSelect({
             const est = protocols.estimate(models);
             if (est.models === 0) return null;
             return (
-              <p className="mb-1 text-xs text-amber-500">
+              <p className="mb-1 text-xs text-warning">
                 {t("harness.probeSaveCost", {
                   models: est.models,
                   requests: est.requests,

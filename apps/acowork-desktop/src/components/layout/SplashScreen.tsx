@@ -642,7 +642,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                     {timedOut ? (
                         <>
                             <div className="flex items-center gap-2">
-                                <div className="h-2 w-2 animate-pulse rounded-full bg-amber-500" />
+                                <div className="h-2 w-2 animate-pulse rounded-full bg-warning-solid" />
                                 <p className="max-w-md text-center text-sm break-words text-text-secondary ">
                                     {bootError
                                         ? t("splashScreen.bootFailed", { error: bootError })
@@ -726,7 +726,7 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                                 />
                             )}
                             {/* Progress bar */}
-                            <div className="h-0.5 w-48 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                            <div className="h-0.5 w-48 overflow-hidden rounded-full bg-surface-hover">
                                 <div
                                     className="h-full animate-[pulse_1.5s_ease-in-out_infinite] rounded-full"
                                     style={{

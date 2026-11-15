@@ -54,7 +54,7 @@ const EMPTY_CHANGES: GitChangeDto[] = [];
  *  decorations (absolute, shadow, animate-in) which would look out
  *  of place inside the flat file-list footer. */
 const PAGINATION_BUTTON_CLASS =
-  "inline-flex items-center justify-center rounded-full border border-zinc-200 bg-zinc-100 p-1 text-text-tertiary transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:opacity-30 dark:border-zinc-600 dark:bg-zinc-700  dark:hover:bg-zinc-600";
+  "inline-flex items-center justify-center rounded-full border border-border-outer bg-surface-hover p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 disabled:cursor-not-allowed disabled:opacity-30  dark:hover:bg-[var(--color-accent)]/15";
 
 interface GitStatusPanelProps {
   agentId: string;
@@ -68,34 +68,34 @@ function statusMeta(c: GitChangeDto): { icon: React.ReactNode; color: string; la
   if (c.index === "conflicted" || c.worktree === "conflicted") {
     return {
       icon: <GitMerge size={13} />,
-      color: "text-red-500 dark:text-red-400",
+      color: "text-danger-icon",
       labelKey: "gitStatus.conflicted",
     };
   }
   if (c.index === "renamed" || c.index === "added") {
     return {
       icon: c.index === "renamed" ? <ArrowRightLeft size={13} /> : <FilePlus size={13} />,
-      color: c.staged ? "text-emerald-600 dark:text-emerald-400" : "text-text-tertiary ",
+      color: c.staged ? "text-ok" : "text-text-tertiary ",
       labelKey: c.index === "renamed" ? "gitStatus.renamed" : "gitStatus.added",
     };
   }
   if (c.index === "deleted" || c.worktree === "deleted") {
     return {
       icon: <FileMinus size={13} />,
-      color: "text-red-500 dark:text-red-400",
+      color: "text-danger-icon",
       labelKey: "gitStatus.deleted",
     };
   }
   if (c.worktree === "untracked") {
     return {
       icon: <FilePlus size={13} />,
-      color: "text-sky-500 dark:text-sky-400",
+      color: "text-info",
       labelKey: "gitStatus.untracked",
     };
   }
   return {
     icon: <Pencil size={13} />,
-    color: "text-amber-500 dark:text-amber-400",
+    color: "text-warning",
     labelKey: "gitStatus.modified",
   };
 }
@@ -319,7 +319,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
       return (
         <div
           className={`flex h-full items-center justify-center gap-1.5 text-xs ${
-            denied ? "text-text-tertiary" : "text-red-500"
+            denied ? "text-text-tertiary" : "text-danger-icon"
           }`}
         >
           {denied ? <Lock size={13} /> : <AlertCircle size={13} />} {error}
@@ -405,7 +405,7 @@ export function GitStatusPanel({ agentId, workspaceId }: GitStatusPanelProps) {
               )}
               {c.staged && (
                 <span
-                  className="shrink-0 rounded bg-emerald-100 px-1 text-11 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300"
+                  className="shrink-0 rounded bg-ok-surface px-1 text-11 text-ok"
                   title={t("gitStatus.staged")}
                 >
                   {t("gitStatus.staged")}

@@ -110,10 +110,10 @@ interface WireChatMessage {
 }
 
 const ROLE_BADGE_CLASSES: Record<string, string> = {
-  user: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300",
-  assistant: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300",
-  tool: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300",
-  system: "bg-zinc-200 text-text-secondary dark:bg-zinc-700 ",
+  user: "bg-info-surface text-info",
+  assistant: "bg-ok-surface text-ok",
+  tool: "bg-warning-surface-hover text-warning-quiet",
+  system: "bg-surface-hover text-text-secondary ",
 };
 
 function MessagesView({ content }: { content?: string }) {
@@ -147,12 +147,12 @@ function MessagesView({ content }: { content?: string }) {
           return (
             <div
               key={i}
-              className="rounded border-[0.5px] border-zinc-300 bg-zinc-50 px-1.5 py-0.5 dark:border-zinc-600 dark:bg-zinc-800/60"
+              className="rounded border-[0.5px] border-border-strong bg-surface-subtle px-1.5 py-0.5"
             >
               <div className="flex flex-wrap items-center gap-1.5 text-9">
                 <span className={cn(
                   "rounded px-1 py-px font-medium uppercase",
-                  ROLE_BADGE_CLASSES[role] ?? "bg-zinc-200 text-text-secondary dark:bg-zinc-700",
+                  ROLE_BADGE_CLASSES[role] ?? "bg-surface-hover text-text-secondary",
                 )}>{role}</span>
                 {m.name && <span className="font-mono text-text-tertiary">{m.name}</span>}
                 <span className="ml-auto font-mono text-text-tertiary">#{i}</span>
@@ -202,8 +202,8 @@ export function ControlButton({
           disabled
             ? "cursor-not-allowed text-text-secondary "
             : active
-              ? "bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-              : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-700  dark:hover:bg-zinc-700 dark:hover:text-zinc-200"
+              ? "bg-warning-surface-hover text-warning-quiet"
+              : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary  dark:hover:bg-[var(--color-accent)]/15"
         )}
       >
         {children}
@@ -359,7 +359,7 @@ export function SnapshotNode({
                 e.stopPropagation();
                 onRewind(snapshot.iteration);
               }}
-              className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+              className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
             >
               <Rewind className="h-3 w-3" />
             </button>
@@ -381,7 +381,7 @@ export function SnapshotNode({
           if (rp?.thinking_mode) items.push(`thinking: ${rp.thinking_mode}`);
           if (items.length === 0) return null;
           return (
-            <div className="mx-2 mt-1 overflow-x-auto rounded border-[0.5px] border-zinc-200 bg-zinc-100/60 px-2 py-1 font-mono text-10 text-text-tertiary dark:border-zinc-700 dark:bg-zinc-800/40 ">
+            <div className="mx-2 mt-1 overflow-x-auto rounded border-[0.5px] border-border-outer bg-surface/60 px-2 py-1 font-mono text-10 text-text-tertiary ">
               {items.map((item) => (
                 <div key={item} className="whitespace-nowrap leading-4">
                   {item}
@@ -395,7 +395,7 @@ export function SnapshotNode({
           by SECTION_ORDER (build() injection order); unknown keys sort last
           and fall back to the raw key as label. */}
       {!collapsed && (
-            <div className="ml-2 mt-1 rounded-md border-l-2 border-zinc-300 bg-panel-inset-2 pl-2 pr-1.5 py-1.5 space-y-0.5 dark:border-zinc-600">
+            <div className="ml-2 mt-1 rounded-md border-l-2 border-border-strong bg-panel-inset-2 pl-2 pr-1.5 py-1.5 space-y-0.5">
           {[...snapshot.sections]
             .sort((a, b) => {
               const ia = SECTION_ORDER.indexOf(a.key);
@@ -411,7 +411,7 @@ export function SnapshotNode({
             return (
               <div key={sectionKey}>
                 {/* Section header */}
-                <div className="flex w-full items-center gap-1.5 rounded-md bg-zinc-50 pl-2 pr-2 py-1.5 text-left transition-colors hover:bg-zinc-100 dark:bg-zinc-800/40 dark:hover:bg-zinc-800/60">
+                <div className="flex w-full items-center gap-1.5 rounded-md bg-surface-subtle pl-2 pr-2 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
                   <button
                     onClick={() => onToggleSection(sectionKey)}
                     className="flex flex-1 items-center gap-1.5"
@@ -447,7 +447,7 @@ export function SnapshotNode({
                         }
                       }
                     }}
-                    className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                    className="rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
                   >
                     <Edit3 className="h-2.5 w-2.5" />
                   </button>
@@ -457,7 +457,7 @@ export function SnapshotNode({
 
                 {/* Section content (lazy-loaded or inline-editing) */}
                 {isExpanded && (
-                  <OverlayScrollbar maxHeight={192} containerClassName="flex-none mx-2 mb-1.5 w-[calc(100%-1rem)] rounded border-[0.5px] border-zinc-300 bg-zinc-50 text-text-secondary dark:border-zinc-600 dark:bg-zinc-900/40" className="p-2">
+                  <OverlayScrollbar maxHeight={192} containerClassName="flex-none mx-2 mb-1.5 w-[calc(100%-1rem)] rounded border-[0.5px] border-border-strong bg-surface-subtle text-text-secondary" className="p-2">
                     {sectionKey === "messages" ? (
                       <MessagesView content={cachedContent?.content} />
                     ) : editingSection &&
@@ -474,11 +474,11 @@ export function SnapshotNode({
                           <button onClick={() => onSaveEdit(sectionKey, editingSection.current)} className="flex items-center gap-0.5 rounded bg-accent-strong px-2 py-0.5 text-10 text-white transition-opacity hover:opacity-90">
                             <Check className="h-2.5 w-2.5" />Apply
                           </button>
-                          <button onClick={onCancelEdit} className="flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700">
+                          <button onClick={onCancelEdit} className="flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
                             <X className="h-2.5 w-2.5" />Cancel
                           </button>
                           <Tooltip content={t("debugPanel.copyContent")} variant="plain">
-                            <button onClick={() => handleCopy(editingSection.current)} className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700">
+                            <button onClick={() => handleCopy(editingSection.current)} className="ml-auto flex items-center gap-0.5 rounded px-2 py-0.5 text-10 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
                               {copied ? <><Check className="h-2.5 w-2.5" />Copied</> : <><Copy className="h-2.5 w-2.5" />Copy</>}
                             </button>
                           </Tooltip>

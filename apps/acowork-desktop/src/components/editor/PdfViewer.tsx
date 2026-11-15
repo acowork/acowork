@@ -208,9 +208,9 @@ export default function PdfViewer(props: PdfViewerProps) {
     }, [bytes, props.fileName, props.onAddDocumentToChat]);
 
     const headerBtn =
-        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-hover hover:text-text disabled:opacity-50";
+        "inline-flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text disabled:opacity-50";
     const toolBtn =
-        "inline-flex h-6 shrink-0 items-center rounded border border-border-default px-2 text-11 transition-colors hover:bg-hover";
+        "inline-flex h-6 shrink-0 items-center rounded border border-border-default px-2 text-11 transition-colors hover:bg-[var(--color-accent)]/10";
     const onAddRegionToChat = props.onAddRegionToChat;
     // One slot, two entries: framing needs the picker, the whole document
     // needs the bytes — neither is offered before the preview itself has

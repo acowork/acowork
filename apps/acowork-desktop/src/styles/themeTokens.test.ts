@@ -17,9 +17,12 @@
  *   to `tsc` (it is a string), and invisible to Tailwind (it emits the
  *   declaration verbatim). The only cheap check left is the name itself.
  *
+ * `var(--color-*, literal)` is also a red line now. A fallback renders, so a
+ * typo degrades to a literal instead of vanishing — which is worse for theme
+ * packs: the literal always wins and the pack can never recolour that surface.
+ * All such fallbacks were removed when the theme-pack contract landed.
+ *
  * What it deliberately does NOT police:
- *   - `var(--x, fallback)` — a fallback renders, so a typo degrades to the
- *     fallback rather than to nothing. Still worth fixing, not a red line.
  *   - non-`--color-*` families (`--space-*`, `--ui-*`, `--text-*`): the
  *     component layer almost never names those by hand, and each has its own
  *     generator. Widen this list when one bites.
@@ -78,10 +81,32 @@ function undefinedColorTokens(): Array<{ token: string; file: string }> {
   return hits;
 }
 
+/** `var(--color-*, fallback)` uses — literals a theme pack cannot override. */
+function fallbackColorTokens(): Array<{ token: string; file: string }> {
+  const hits: Array<{ token: string; file: string }> = [];
+  for (const file of sourceFiles()) {
+    const rel = file.slice(ROOT.length + 1).replace(/\\/g, "/");
+    const code = readFileSync(file, "utf8")
+      .replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/\/\/[^\n]*/g, "");
+    for (const m of code.matchAll(/var\((--color-[a-zA-Z0-9-]+)\s*,/g)) {
+      hits.push({ token: m[1], file: rel });
+    }
+  }
+  return hits;
+}
+
 describe("theme colour tokens resolve", () => {
   it("names no --color-* token that globals.css does not declare", () => {
     const hits = undefinedColorTokens();
     // Sorted `token @ file` list so a failure says which dot went invisible.
+    expect(
+      hits.map((h) => `${h.token}  <-  ${h.file}`).sort(),
+    ).toEqual([]);
+  });
+
+  it("uses no --color-* fallback literal that a theme pack cannot override", () => {
+    const hits = fallbackColorTokens();
     expect(
       hits.map((h) => `${h.token}  <-  ${h.file}`).sort(),
     ).toEqual([]);

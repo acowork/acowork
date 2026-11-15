@@ -271,7 +271,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                       <button
                         type="button"
                         onClick={() => onConnect(providerId, item)}
-                        className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                        className="rounded-md bg-surface-hover px-3 py-1 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                       >
                         {t("harness.connect")}
                       </button>
@@ -288,7 +288,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
             <button
               type="button"
               onClick={onAddCustom}
-              className="flex w-full items-center gap-2 rounded-md border-2 border-dashed border-zinc-300 px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-zinc-600  dark:hover:border-[var(--color-accent)] dark:hover:text-[var(--color-accent)]"
+              className="flex w-full items-center gap-2 rounded-md border-2 border-dashed border-border-strong px-3 py-2 text-xs font-medium text-text-secondary transition-colors hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]  dark:hover:border-[var(--color-accent)] dark:hover:text-[var(--color-accent)]"
             >
               <Plus className="h-4 w-4" />
               {t("harness.addCustomProvider")}
@@ -321,7 +321,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                         <button
                           type="button"
                           onClick={() => onConnect(providerId, item)}
-                          className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                          className="rounded-md bg-surface-hover px-3 py-1 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                         >
                           {t("harness.connect")}
                         </button>
@@ -365,10 +365,10 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                   className={cn(
                     "flex h-7 w-7 items-center justify-center rounded-md border transition-colors",
                     refreshStatus.kind === "error"
-                      ? "border-red-300 bg-red-50 text-red-600 hover:bg-red-100 dark:border-red-700 dark:bg-red-950 dark:text-red-400"
+                      ? "border-danger-border bg-danger-surface text-danger-text hover:bg-danger-surface-hover"
                       : refreshStatus.kind === "ok"
-                      ? "border-emerald-300 bg-emerald-50 text-emerald-600 dark:border-emerald-700 dark:bg-emerald-950 dark:text-emerald-400"
-                      : "border-zinc-300 bg-modal-surface text-text-secondary hover:bg-zinc-100 dark:border-zinc-600 dark:hover:bg-zinc-700",
+                      ? "border-ok/60 bg-ok-surface text-ok"
+                      : "border-border-strong bg-modal-surface text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                     refreshStatus.kind === "loading" && "cursor-wait opacity-70",
                   )}
                 >
@@ -397,7 +397,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                         <progress
                           max={100}
                           value={Math.min(100, Math.round((refreshStatus.bytes / refreshStatus.total) * 100))}
-                          className="h-1 w-16 appearance-none overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700 [&::-webkit-progress-bar]:bg-zinc-200 [&::-webkit-progress-bar]:dark:bg-zinc-700 [&::-webkit-progress-value]:bg-blue-500 [&::-moz-progress-bar]:bg-blue-500"
+                          className="h-1 w-16 appearance-none overflow-hidden rounded-full bg-surface-hover [&::-webkit-progress-bar]:bg-zinc-200 [&::-webkit-progress-bar]:dark:bg-zinc-700 [&::-webkit-progress-value]:bg-blue-500 [&::-moz-progress-bar]:bg-blue-500"
                         />
                       </>
                     ) : (
@@ -406,12 +406,12 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                   </span>
                 )}
                 {refreshStatus.kind === "ok" && (
-                  <span className="text-10 text-emerald-600 dark:text-emerald-400">
+                  <span className="text-10 text-ok">
                     {t("harness.refreshCatalogSuccess", { providers: refreshStatus.providers, models: refreshStatus.models })}
                   </span>
                 )}
                 {refreshStatus.kind === "error" && (
-                  <span className="max-w-[180px] truncate text-10 text-red-600 dark:text-red-400">
+                  <span className="max-w-[180px] truncate text-10 text-danger-text">
                     {refreshStatus.message}
                   </span>
                 )}
@@ -421,7 +421,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                     value={providerSearchTerm}
                     onChange={(e) => setProviderSearchTerm(e.target.value)}
                     placeholder={t("harness.searchProviders")}
-                    className="w-[170px] pl-7 pr-2 placeholder-zinc-400 dark:placeholder-zinc-500"
+                    className="w-[170px] pl-7 pr-2 placeholder-text-disabled"
                   />
                   <Search className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-text-tertiary" />
                 </div>
@@ -450,7 +450,7 @@ export function ProviderPicker({ providers, keys, onConnect, onAddCustom, onCata
                             <button
                               type="button"
                               onClick={() => onConnect(providerId, item)}
-                              className="rounded-md bg-zinc-100 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-zinc-200 dark:bg-zinc-700  dark:hover:bg-zinc-600"
+                              className="rounded-md bg-surface-hover px-3 py-1 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                             >
                               {t("harness.addKey")}
                             </button>

@@ -157,19 +157,19 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           // No `font-medium`: a bold strip read as heavier than the file
           // names it labels.
           "text-[length:var(--ui-text-size)] tracking-wide",
-          "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
+          "text-text-tertiary hover:text-text-secondary",
           "transition-colors duration-150",
           "border-y border-nav-divider/40 dark:border-zinc-600/40",
           // Subtle elevation when expanded. Collapsed = transparent so the
           // banner blends into `bg-right-panel` (the workspace surface);
-          // expanded = `bg-zinc-50` / `dark:bg-zinc-900/40` so the banner
+          // expanded = `bg-surface-subtle` / `` so the banner
           // reads as the active "section" header above the file list
           // (the list itself stays on the workspace surface — no change
           // there — so the band of contrast sits on the banner only).
           // Same elevation pair as FileEditorPanel's diff header
           // (FileEditorPanel.tsx L1531), keeping strip elevations
           // consistent across panels.
-          isExpanded && "bg-zinc-50 dark:bg-zinc-900/40",
+          isExpanded && "bg-surface-subtle",
         )}
       >
       <ChevronRight
@@ -230,8 +230,8 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
                 className={cn(
                   "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                   historyAnchor || viewingCommit
-                    ? "text-[var(--color-accent)] bg-zinc-200 dark:bg-zinc-700"
-                    : "text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300",
+                    ? "text-[var(--color-accent)] bg-surface-hover"
+                    : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15",
                 )}
               >
                 <Clock className="h-3.5 w-3.5" />
@@ -256,7 +256,7 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
                     void refresh(agentId, workspaceId);
                   }
                 }}
-                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:hover:text-zinc-300"
+                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
               >
                 <RefreshCw className="h-3.5 w-3.5" />
               </span>

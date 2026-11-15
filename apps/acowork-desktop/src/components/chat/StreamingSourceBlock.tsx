@@ -146,7 +146,7 @@ export const StreamingSourceBlock = React.memo(function StreamingSourceBlock({
             manuallyCollapsed.current = false;
           }
         }}
-        className="flex items-center gap-2 text-text-tertiary hover:text-zinc-700  dark:hover:text-zinc-300 transition-colors"
+        className="flex items-center gap-2 text-text-tertiary hover:text-text-secondary  transition-colors"
         style={{ fontSize: HEADER_FONT_SIZE }}
       >
         <Icon className="h-3 w-3 shrink-0" />
@@ -163,7 +163,7 @@ export const StreamingSourceBlock = React.memo(function StreamingSourceBlock({
 
       {expanded && (
         <div
-          className="w-full ml-5 mt-1 pl-3 py-2 bg-zinc-50 dark:bg-zinc-800/50 text-text-tertiary  border-l-2 border-zinc-300 dark:border-zinc-600 overflow-hidden"
+          className="w-full ml-5 mt-1 pl-3 py-2 bg-surface-subtle text-text-tertiary  border-l-2 border-border-strong overflow-hidden"
           style={{ maxHeight: `${maxVisibleLines * LINE_HEIGHT_REM}rem` }}
         >
           {showTruncationNotice && (

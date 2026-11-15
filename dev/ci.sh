@@ -826,6 +826,89 @@ run_agent_skill_tool_redline() {
     echo "agent-skill file_write red line: OK (allowed: debugging, refactoring, testing)"
 }
 
+# Desktop CSS theme-pack contract. A theme is one CSS file under
+# src/styles/themes/, scoped to its own id, and may only override tokens that
+# globals.css declares. Without this gate a new literal colour or an invented
+# --color-* name silently escapes every theme pack.
+run_css_theme_redline() {
+    echo "Checking desktop CSS theme-pack contract..."
+    local styles="$SCRIPT_DIR/../apps/acowork-desktop/src/styles"
+    local src="$SCRIPT_DIR/../apps/acowork-desktop/src"
+    local offenders="" declared="" names="" pack id name
+
+    # 1. `var(--color-*, literal)` is a hidden hard-coded colour: the literal
+    #    always wins, so no theme pack can recolour that surface.
+    offenders=$(grep -rnE 'var\(--color-[a-zA-Z0-9-]+[[:space:]]*,' "$src" \
+        --include='*.ts' --include='*.tsx' --include='*.css' \
+        | grep -vE '\.(test|spec)\.' || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: --color-* var() fallbacks bypass the theme contract:"
+        echo "$offenders"
+        exit 1
+    fi
+
+    declared=$(grep -oE -- '--[a-zA-Z0-9-]+[[:space:]]*:' "$styles/globals.css" \
+        | sed -E 's/[[:space:]]*:$//' | sort -u)
+
+    for pack in "$styles"/themes/*.css; do
+        [ -f "$pack" ] || continue
+        id=$(basename "$pack" .css)
+        if ! grep -qF ":root.theme-$id" "$pack"; then
+            echo "ERROR: $pack has no :root.theme-$id scope."
+            exit 1
+        fi
+        names=$(grep -oE -- '^[[:space:]]*--[a-zA-Z0-9-]+[[:space:]]*:' "$pack" \
+            | sed -E 's/^[[:space:]]*//; s/[[:space:]]*:$//' | sort -u)
+        for name in $names; do
+            if ! printf '%s\n' "$declared" | grep -qxF -- "$name"; then
+                echo "ERROR: $pack overrides undeclared token $name."
+                echo "       Declare it in globals.css first (theme-pack contract)."
+                exit 1
+            fi
+        done
+    done
+
+    # 2. A theme scope must live in themes/, never hand-edited into
+    #    globals.css or a component. themePacks.ts is .ts and deliberately
+    #    out of scope here — it documents the selector in a comment.
+    offenders=$(grep -rnF ':root.theme-' "$src" \
+        --include='*.css' --include='*.tsx' \
+        | grep -v '/styles/themes/' || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: theme scope declared outside styles/themes/:"
+        echo "$offenders"
+        exit 1
+    fi
+
+    # 3. A bare palette class (`bg-zinc-100`, `text-red-600`, …) is a
+    #    compile-time literal: no theme pack can ever recolour it, and it
+    #    silently re-hardcodes what the codemod migrated. Allowed:
+    #    - variant-prefixed (`dark:`/`hover:`) — dark-only and hover steps
+    #      are legitimate; the light side carries the semantic token.
+    #    - cross-mode solid fills: bg-zinc-800/900/950, border-zinc-800/900,
+    #      text-zinc-100/200/300 (dark-chrome-on-any-surface: terminal
+    #      blocks, inverse tooltips, avatar badges, dark primary buttons).
+    #    scripts/theme-codemod.mjs is outside src/ and not scanned.
+    offenders=$(grep -rnE --include='*.tsx' --include='*.ts' \
+        -- '([[:space:]"'"'"'`]|^)(bg|text|border|ring|divide)-(zinc|red|green|emerald|amber|yellow|blue|sky|orange|slate|gray)-[0-9]+' "$src" \
+        | grep -vE '\.(test|spec)\.' \
+        | grep -vE ':[0-9]+:[[:space:]]*(//|\*|/\*)' \
+        | grep -vE '(bg|ring|divide)-zinc-(800|900|950)' \
+        | grep -vE 'border-zinc-(800|900)' \
+        | grep -vE 'text-zinc-(100|200|300)' \
+        || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: bare Tailwind palette classes bypass the theme tokens"
+        echo "       (a theme pack can never recolour them). Use the semantic"
+        echo "       utilities (bg-surface, text-text-tertiary, bg-danger-surface…)"
+        echo "       or extend the contract in globals.css:"
+        echo "$offenders"
+        exit 1
+    fi
+
+    echo "CSS theme-pack contract: OK"
+}
+
 # Every red line in one list. `check` and `all` both call this, so a gate can
 # no longer be added to one mode and quietly missing from the other — the
 # previous split had `run_node_redline` and `run_mqtt_redline` reachable only
@@ -847,6 +930,7 @@ run_all_redlines() {
     run_lsp_registry_redline
     run_ort_api_redline
     run_agent_skill_tool_redline
+    run_css_theme_redline
 }
 
 run_clippy() {

@@ -27,7 +27,7 @@ export interface ProjectAvatarProps {
 }
 
 const BASE_RING =
-  "rounded-md object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60";
+  "rounded-md object-cover ring-1 ring-border-strong/60";
 
 export function ProjectAvatar({ project, size = 20, className }: ProjectAvatarProps) {
   const icon = parseProjectIcon(project.metadata);

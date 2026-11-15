@@ -117,7 +117,7 @@ export function CreateAccountModal({ open, onClose, onCreated }: CreateAccountMo
           </label>
           <p className="text-10 text-text-tertiary">{t("account.inviteHint")}</p>
           {error && (
-            <p role="alert" className="text-11 text-red-500">
+            <p role="alert" className="text-11 text-danger-icon">
               {error}
             </p>
           )}
@@ -127,7 +127,7 @@ export function CreateAccountModal({ open, onClose, onCreated }: CreateAccountMo
           <button
             type="button"
             onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-xs text-text-tertiary hover:bg-hover-overlay"
+            className="rounded-md px-3 py-1.5 text-xs text-text-tertiary hover:bg-[var(--color-accent)]/10"
           >
             {t("common.cancel")}
           </button>

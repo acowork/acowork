@@ -575,7 +575,7 @@ export function LspTab() {
                   aria-label={t("harnessLsp.addServer")}
                   onClick={() => setForm({ mode: "add" })}
                   disabled={!adminUrl}
-                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-40 dark:hover:bg-zinc-700 dark:text-zinc-300 transition-colors"
+                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15 dark:text-zinc-300 transition-colors"
                 >
                   <Plus className="h-3.5 w-3.5" />
                 </button>
@@ -588,7 +588,7 @@ export function LspTab() {
                   aria-label={refreshing ? t("harnessLsp.refreshing") : t("harnessLsp.refresh")}
                   onClick={() => void loadAll({ force: true })}
                   disabled={refreshing || !adminUrl}
-                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-zinc-700 dark:text-zinc-300 transition-colors"
+                  className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary disabled:opacity-60 dark:hover:bg-[var(--color-accent)]/15 dark:text-zinc-300 transition-colors"
                 >
                   {refreshing ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -620,7 +620,7 @@ export function LspTab() {
 
           {/* A write that costs a relay restart, said out loud (§5.6-2) */}
           {restartNotice && (
-            <div className="mx-3 mt-2 rounded bg-amber-100 px-2 py-1.5 text-10 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400">
+            <div className="mx-3 mt-2 rounded bg-warning-surface-hover px-2 py-1.5 text-10 text-warning-quiet">
               {restartNotice}
             </div>
           )}
@@ -629,7 +629,7 @@ export function LspTab() {
               and the preset's version is being ignored — say so rather than
               silently hiding it. */}
           {conflicts.length > 0 && (
-            <div className="mx-3 mt-2 rounded bg-zinc-100 px-2 py-1.5 text-10 text-text-secondary dark:bg-zinc-700">
+            <div className="mx-3 mt-2 rounded bg-surface-hover px-2 py-1.5 text-10 text-text-secondary">
               {t("harnessLsp.conflicts", { names: conflicts.join(", ") })}
             </div>
           )}
@@ -707,11 +707,11 @@ export function LspTab() {
               <h3 className="text-sm font-semibold">
                 {t("harnessLsp.scriptContent")} — {LANGUAGE_LABELS[scriptDialog.name] ?? scriptDialog.name}
               </h3>
-              <span className="rounded bg-zinc-100 px-2 py-0.5 text-10 font-mono text-text-tertiary dark:bg-zinc-700">
+              <span className="rounded bg-surface-hover px-2 py-0.5 text-10 font-mono text-text-tertiary">
                 {scriptDialog.filename}
               </span>
             </div>
-            <pre className="max-h-96 overflow-auto rounded-md bg-zinc-50 p-4 text-11 leading-relaxed dark:bg-zinc-900/50">
+            <pre className="max-h-96 overflow-auto rounded-md bg-surface-subtle p-4 text-11 leading-relaxed">
               <code>{scriptDialog.script}</code>
             </pre>
             {/* D14: showing the script is the user's gate — the run button
@@ -808,7 +808,7 @@ function LspServerCard({
           <button
             onClick={onEdit}
             aria-label={t("harnessLsp.editServer")}
-            className="inline-flex items-center justify-center rounded p-1.5 text-text-tertiary hover:bg-zinc-200 hover:text-zinc-600 dark:hover:bg-zinc-700 dark:text-zinc-300 transition-colors"
+            className="inline-flex items-center justify-center rounded p-1.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15 dark:text-zinc-300 transition-colors"
           >
             <Pencil className="h-3 w-3" />
           </button>
@@ -816,7 +816,7 @@ function LspServerCard({
             <button
               onClick={onDelete}
               aria-label={t("harnessLsp.deleteServer")}
-              className="inline-flex items-center justify-center rounded p-1.5 text-text-tertiary hover:bg-red-100 hover:text-red-600 dark:hover:bg-red-900/30 dark:text-zinc-300 transition-colors"
+              className="inline-flex items-center justify-center rounded p-1.5 text-text-tertiary hover:bg-danger-surface-hover hover:text-danger-text dark:text-zinc-300 transition-colors"
             >
               <Trash2 className="h-3 w-3" />
             </button>
@@ -855,7 +855,7 @@ function LspServerCard({
           {entry.install_script && healthStatus === "installed" && (
             <span
               data-testid="lsp-installed-indicator"
-              className="inline-flex items-center gap-1 rounded bg-green-100 px-2 py-1 text-11 font-medium text-green-700 dark:bg-green-900/30 dark:text-green-400"
+              className="inline-flex items-center gap-1 rounded bg-ok-surface px-2 py-1 text-11 font-medium text-ok"
             >
               <CheckCircle2 className="h-3 w-3" />
               {t("harnessLsp.installed")}
@@ -874,13 +874,13 @@ function LspServerCard({
           - "error": error message is rendered below. */}
       <div className="flex flex-wrap items-center gap-2">
         <span className="text-xs font-semibold">{langLabel}</span>
-        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-tertiary dark:bg-zinc-700">
+        <span className="rounded bg-surface-hover px-1.5 py-0.5 text-10 text-text-tertiary">
           {entry.source === "preset" ? t("harnessLsp.sourcePreset") : t("harnessLsp.sourceCustom")}
         </span>
         {healthStatus === "unknown" && (
           <span
             data-testid="lsp-pending-badge"
-            className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700 "
+            className="inline-flex items-center gap-1 rounded bg-surface-hover px-1.5 py-0.5 text-10 text-text-secondary "
           >
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
             {t("harnessLsp.pendingCheck")}
@@ -889,14 +889,14 @@ function LspServerCard({
         {healthStatus === "checking" && (
           <span
             data-testid="lsp-checking-badge"
-            className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-10 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+            className="inline-flex items-center gap-1 rounded bg-warning-surface-hover px-1.5 py-0.5 text-10 text-warning-quiet"
           >
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
             {t("harnessLsp.checking")}
           </span>
         )}
         {healthStatus === "installed" && (
-          <span className="inline-flex items-center gap-1 rounded bg-green-100 px-1.5 py-0.5 text-10 text-green-700 dark:bg-green-900/30 dark:text-green-400">
+          <span className="inline-flex items-center gap-1 rounded bg-ok-surface px-1.5 py-0.5 text-10 text-ok">
             <CheckCircle2 className="h-2.5 w-2.5" />
             {t("harnessLsp.installed")}
           </span>
@@ -907,14 +907,14 @@ function LspServerCard({
         {isInstalling && (
           <span
             data-testid="lsp-installing-badge"
-            className="inline-flex items-center gap-1 rounded bg-amber-100 px-1.5 py-0.5 text-10 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+            className="inline-flex items-center gap-1 rounded bg-warning-surface-hover px-1.5 py-0.5 text-10 text-warning-quiet"
           >
             <Loader2 className="h-2.5 w-2.5 animate-spin" />
             {t("harnessLsp.installing")}
           </span>
         )}
         {healthStatus === "not_installed" && !isInstalling && (
-          <span className="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-10 text-red-700 dark:bg-red-900/30 dark:text-red-400">
+          <span className="inline-flex items-center gap-1 rounded bg-danger-surface-hover px-1.5 py-0.5 text-10 text-danger-text">
             <XCircle className="h-2.5 w-2.5" />
             {entry.install_state === "failed"
               ? t("harnessLsp.installFailed")
@@ -922,7 +922,7 @@ function LspServerCard({
           </span>
         )}
         {healthStatus === "error" && (
-          <span className="inline-flex items-center gap-1 rounded bg-red-100 px-1.5 py-0.5 text-10 text-red-700 dark:bg-red-900/30 dark:text-red-400">
+          <span className="inline-flex items-center gap-1 rounded bg-danger-surface-hover px-1.5 py-0.5 text-10 text-danger-text">
             <XCircle className="h-2.5 w-2.5" />
             {t("harnessLsp.checkFailed")}
           </span>
@@ -938,7 +938,7 @@ function LspServerCard({
 
       {/* Health error */}
       {healthError && (
-        <p className="mt-1.5 text-10 text-red-500 break-all">{healthError}</p>
+        <p className="mt-1.5 text-10 text-danger-icon break-all">{healthError}</p>
       )}
 
       {/* Candidates list */}
@@ -948,7 +948,7 @@ function LspServerCard({
           {entry.candidates.map((cmd) => (
             <code
               key={cmd}
-              className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-text-secondary dark:bg-zinc-700 "
+              className="rounded bg-surface-hover px-1.5 py-0.5 text-10 font-mono text-text-secondary "
             >
               {cmd}
             </code>
@@ -960,7 +960,7 @@ function LspServerCard({
       {entry.install_hint && (
         <div className="mt-1.5 flex items-center gap-1">
           <span className="text-10 text-text-tertiary">{t("harnessLsp.installHint")}:</span>
-          <code className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-amber-600 dark:bg-zinc-700 dark:text-amber-400">
+          <code className="rounded bg-surface-hover px-1.5 py-0.5 text-10 font-mono text-warning">
             {entry.install_hint}
           </code>
         </div>
@@ -972,12 +972,12 @@ function LspServerCard({
         <div className="mt-1.5">
           <button
             onClick={() => setShowOutput(!showOutput)}
-            className="text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+            className="text-10 text-text-tertiary hover:text-text-tertiary"
           >
             {showOutput ? "Hide output" : "Show output"}
           </button>
           {showOutput && (
-            <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-zinc-50 p-2 text-10 leading-relaxed dark:bg-zinc-900/50">
+            <pre className="mt-1 max-h-40 overflow-auto rounded-md bg-surface-subtle p-2 text-10 leading-relaxed">
               <code>{entry.install_stderr || entry.install_stdout}</code>
             </pre>
           )}
@@ -989,25 +989,25 @@ function LspServerCard({
         <div className="mt-1.5">
           <div className="flex items-center gap-2 mb-1">
             {installResult.success ? (
-              <span className="inline-flex items-center gap-1 text-10 text-green-600 dark:text-green-400">
+              <span className="inline-flex items-center gap-1 text-10 text-ok">
                 <CheckCircle2 className="h-2.5 w-2.5" />
                 {t("harnessLsp.installSuccess")}
               </span>
             ) : (
-              <span className="inline-flex items-center gap-1 text-10 text-red-600 dark:text-red-400">
+              <span className="inline-flex items-center gap-1 text-10 text-danger-text">
                 <XCircle className="h-2.5 w-2.5" />
                 {t("harnessLsp.installFailed")}
               </span>
             )}
             <button
               onClick={() => setShowOutput(!showOutput)}
-              className="text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+              className="text-10 text-text-tertiary hover:text-text-tertiary"
             >
               {showOutput ? "Hide output" : "Show output"}
             </button>
           </div>
           {showOutput && (
-            <pre className="max-h-40 overflow-auto rounded-md bg-zinc-50 p-2 text-10 leading-relaxed dark:bg-zinc-900/50">
+            <pre className="max-h-40 overflow-auto rounded-md bg-surface-subtle p-2 text-10 leading-relaxed">
               <code>{installResult.stdout || installResult.stderr || "(no output)"}</code>
             </pre>
           )}
@@ -1145,7 +1145,7 @@ function LspServerFormDialog({
         </h3>
 
         {isPreset && (
-          <p className="mb-3 rounded bg-zinc-100 px-2 py-1.5 text-10 text-text-secondary dark:bg-zinc-700">
+          <p className="mb-3 rounded bg-surface-hover px-2 py-1.5 text-10 text-text-secondary">
             {t("harnessLsp.presetEditNote")}
           </p>
         )}
@@ -1201,7 +1201,7 @@ function LspServerFormDialog({
             <div className="space-y-1.5">
               {(isPreset ? overrideRows : splitList(candidates)).map((c) => (
                 <div key={c} className="flex items-center gap-2">
-                  <code className="w-40 shrink-0 truncate rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-text-secondary dark:bg-zinc-700">
+                  <code className="w-40 shrink-0 truncate rounded bg-surface-hover px-1.5 py-0.5 text-10 font-mono text-text-secondary">
                     {c}
                   </code>
                   <StyledInput
@@ -1244,7 +1244,7 @@ function LspServerFormDialog({
           )}
 
           {formError && (
-            <div className="rounded bg-red-100 px-2 py-1.5 text-10 text-red-700 dark:bg-red-900/30 dark:text-red-400">
+            <div className="rounded bg-danger-surface-hover px-2 py-1.5 text-10 text-danger-text">
               {formError}
             </div>
           )}
@@ -1253,7 +1253,7 @@ function LspServerFormDialog({
         <div className="mt-5 flex justify-end gap-2">
           <button
             onClick={onCancel}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-zinc-100 dark:hover:bg-zinc-700"
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("common.cancel")}
           </button>
