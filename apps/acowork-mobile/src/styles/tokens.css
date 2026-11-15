@@ -57,6 +57,12 @@
   --radius-md: 12px;
   --radius-lg: 16px;
 
+  /* The chat transcript's own avatar (the one beside a speaker's name). The
+   * bubbles are bounded by the OTHER side's avatar, so this is the number the
+   * gutter is derived from — a bubble that starts at the near avatar's edge
+   * and may run to the far avatar's edge. */
+  --chat-avatar-size: 36px;
+
   --touch-min: 44px;
   --tabbar-height: 56px;
   --tabbar-icon: 26px;

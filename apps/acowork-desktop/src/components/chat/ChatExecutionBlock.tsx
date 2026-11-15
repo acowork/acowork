@@ -627,22 +627,37 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                       gray text, which read as no different from an idle run.
                       An idle block keeps the bare tertiary span: no capsule,
                       no fill — the shape itself is the status. */}
+                  {/* The header is ONE line, always. The run's name and the state
+                      word are both flex items here, and a flex item without
+                      `min-w-0` shrinks to its MIN-content width — so the words
+                      wrap into two or three lines and the card grows tall
+                      instead of getting narrower. `min-w-0` + `truncate` is the
+                      fix: the item may shrink past its content, and the text
+                      then shortens with an ellipsis instead of wrapping. The
+                      working capsule shrinks the same way (its own text is the
+                      one that has to give way), so both states keep the same
+                      one-line height. */}
                   {inProgress ? (
                     <span
                       data-testid="exec-block-working-capsule"
-                      className="inline-flex shrink-0 items-center gap-1 rounded-full bg-accent-strong px-2 py-0.5 font-medium text-white"
+                      className="inline-flex min-w-0 shrink items-center gap-1 rounded-full bg-accent-strong px-2 py-0.5 font-medium text-white"
                     >
-                      {t("chatView.block.roundCount", { count: block.rounds.length })}
-                      {shownState && (
-                        <>
-                          {" · "}
-                          {shownState}
-                        </>
-                      )}
-                      <Loader2 className="h-3 w-3 animate-spin" aria-hidden="true" />
+                      <span className="min-w-0 truncate">
+                        {t("chatView.block.roundCount", { count: block.rounds.length })}
+                        {shownState && (
+                          <>
+                            {" · "}
+                            {shownState}
+                          </>
+                        )}
+                      </span>
+                      <Loader2 className="h-3 w-3 shrink-0 animate-spin" aria-hidden="true" />
                     </span>
                   ) : (
-                    <span className="text-text-tertiary">
+                    <span
+                      data-testid="exec-block-state"
+                      className="min-w-0 truncate text-text-tertiary"
+                    >
                       ({t("chatView.block.roundCount", { count: block.rounds.length })}
                       {shownState && (
                         <>

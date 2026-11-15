@@ -154,22 +154,35 @@ function renderRow(row: ChatMessageRow, over: Partial<RowProps> = {}): string {
 
 /** Render the transcript the surface renders: the layout folds it, so a block is
  *  reached through an item, never by hand. */
-/** The block is COLLAPSED by default (the desktop state machine, copied), so
- *  a static render no longer shows the rounds. Helpers that assert on the
- *  BODY therefore mount live and open every folded block the way a reader
- *  taps it — the fold itself is a separate, explicitly-named subject. */
-function renderOpenHtml(node: ReactNode, open = true): string {
+/** The block is COLLAPSED by default, and so is every round inside it (the
+ *  desktop state machine, copied). Helpers that assert on the BODY therefore
+ *  mount live and open every folded block the way a reader taps it, plus the
+ *  NEWEST round of each — the same pair the desktop harness opens. The fold
+ *  itself is a separate, explicitly-named subject. */
+function renderOpenHtml(node: ReactNode, open = true, openRound = true): string {
   const host = document.createElement('div')
   document.body.append(host)
   ;(globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true
   const root = createRoot(host)
   act(() => root.render(node))
-  if (open)
+  if (open) {
     act(() => {
-    host
-      .querySelectorAll<HTMLButtonElement>('.explore-toggle[aria-expanded="false"]')
-      .forEach((b) => b.click())
-  })
+      host
+        .querySelectorAll<HTMLButtonElement>('.explore-toggle[aria-expanded="false"]')
+        .forEach((b) => b.click())
+    })
+    // The newest round of each block, and only that one: opening every round
+    // would paint the older rounds' panels too, which is not what a reader
+    // sees and is not what these assertions are about.
+    if (openRound)
+      act(() => {
+        const cards = Array.from(host.querySelectorAll('.chat-run-card'))
+        for (const card of cards) {
+          const rows = card.querySelectorAll<HTMLButtonElement>('.chat-run-row[aria-expanded="false"]')
+          rows[rows.length - 1]?.click()
+        }
+      })
+  }
   const html = host.innerHTML
   act(() => root.unmount())
   host.remove()
@@ -393,6 +406,30 @@ describe('liveness is positive evidence only (D9)', () => {
     // The retired per-round "处理中…" line is gone: the block header carries the
     // session's state, and a round carries its own read.
     expect(html).not.toContain('处理中')
+  })
+
+  /** The desktop card's rule, copied: a working run wears the round count and
+   *  the live state word as a FILLED capsule, so the shape itself says
+   *  "working". An idle run keeps the bare gray text — no capsule, no fill. */
+  it('a working run wears the status as a capsule; an idle one does not', () => {
+    seed(
+      entryOf({
+        status: 'pending',
+        source: 'runtime',
+        projection: { round_id: 'r1', terminal: false, status: 'in_progress' },
+      }),
+    )
+    const working = renderRows([refRow()])
+    expect(working).toContain('exec-block-working-capsule')
+    expect(working).toContain('explore-toggle-live')
+    // The state word rides INSIDE the capsule.
+    expect(working).toMatch(/explore-toggle-live[^>]*>[\s\S]*执行中/)
+
+    seed(entryOf({ status: 'ok', projection: { round_id: 'r1', terminal: true, status: 'completed' } }))
+    const idle = renderRows([refRow()])
+    expect(idle).not.toContain('exec-block-working-capsule')
+    expect(idle).not.toContain('explore-toggle-live')
+    expect(idle).toContain('explore-toggle-summary')
   })
 
   it('an unreachable read is an outage with a retry, never a run in flight', () => {
@@ -809,6 +846,43 @@ describe('collapsed by default, answer bubble under the block (the desktop shape
     const html = renderFolded(onlyBlock([triggerRow('u1', '帮我整理报表'), refRow()]))
     // The fold hides the ROUNDS; the agent's newest words are not behind it.
     expect(html).toContain('data-run-answer')
+    expect(html).toContain('报表已整理好。')
+  })
+
+  /** The desktop state machine, copied: a round's PAIR is folded too. The
+   *  freshest round used to unfold by itself, so an expanded block was twice
+   *  as tall and the reader sat inside a fold they never opened — the run's
+   *  latest answer is already the card's body. */
+  it('an OPEN block still folds every round, including the newest', () => {
+    seedEntries({
+      'ag|s1|r1': entryOf({
+        ref: 'ag|s1|r1',
+        projection: {
+          round_id: 'r1',
+          terminal: true,
+          status: 'completed',
+          user: { body: '帮我整理报表', ts: '1' },
+          answer: { body: '报表已整理好。', ts: '2' },
+          card: null,
+        },
+      }),
+    })
+    // The block is OPEN (the reader tapped the header), the round is NOT.
+    const html = renderOpenHtml(
+      <ItemView
+        item={onlyBlock([triggerRow('u1', '帮我整理报表'), refRow()])}
+        hasFollowUp={false}
+        {...rowProps()}
+      />,
+      true,
+      false,
+    )
+    expect(html).toContain('explore-body')
+    expect(html).toContain('第 1 轮')
+    // The round's question panel is behind the row's own fold.
+    expect(html).toContain('chat-run-row')
+    expect(html).not.toContain('chat-run-question')
+    // …and the answer is on screen anyway, in the card's body.
     expect(html).toContain('报表已整理好。')
   })
 
