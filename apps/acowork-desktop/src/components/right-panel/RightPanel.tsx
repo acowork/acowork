@@ -682,7 +682,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       </ControlButton>
                       {hasPendingPatches && (
                         <>
-                          <div className="mx-1 h-4 w-px bg-zinc-200 dark:bg-zinc-700" />
+                          <div className="mx-1 h-4 w-px bg-surface-hover" />
                           <ControlButton
                             onClick={() => reExecute(activeSessionId).catch(log.error)}
                             title={t("rightPanel.buttonReExecute")}
@@ -752,7 +752,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                                   setSnapshotsOpen(true);
                                   setSnapshotPage((p) => Math.max(0, p - 1));
                                 }}
-                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-text-disabled  dark:hover:bg-[var(--color-accent)]/15 dark:disabled:hover:bg-transparent"
                               >
                                 <ChevronLeft className="h-3.5 w-3.5" />
                               </button>
@@ -767,7 +767,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                                   setSnapshotsOpen(true);
                                   setSnapshotPage((p) => Math.min(snapshotTotalPages - 1, p + 1));
                                 }}
-                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-zinc-400  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 dark:disabled:hover:bg-transparent dark:disabled:hover:text-zinc-500"
+                                className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-text-disabled  dark:hover:bg-[var(--color-accent)]/15 dark:disabled:hover:bg-transparent"
                               >
                                 <ChevronRight className="h-3.5 w-3.5" />
                               </button>
@@ -923,7 +923,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       {formatPercent(contextUsage.usage_percent)}%
                     </span>
                   </div>
-                  <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden dark:bg-zinc-700 mb-1.5">
+                  <div className="h-1.5 rounded-full bg-surface-hover overflow-hidden mb-1.5">
                     <div
                       className="h-full rounded-full transition-all duration-300"
                       style={{ backgroundColor: "var(--color-accent)", width: `${contextUsage.usage_percent}%` }}
@@ -964,7 +964,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                     </span>
                   </div>
                   {cacheHitRateLabel !== null && (
-                    <div className="h-1.5 rounded-full bg-zinc-200 overflow-hidden dark:bg-zinc-700 mb-1.5">
+                    <div className="h-1.5 rounded-full bg-surface-hover overflow-hidden mb-1.5">
                       <div
                         className="h-full rounded-full transition-all duration-300"
                         style={{ backgroundColor: "var(--color-accent)", width: `${cacheHitRatePercent}%` }}
@@ -1060,11 +1060,11 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       // (blue), "waiting_approval" (yellow), "paused"
                       // (amber), and "idle" / unknown (zinc).
                       getProcessingPhase(sessionStatus) === "streaming" && "bg-[var(--color-accent)]",
-                      getProcessingPhase(sessionStatus) === "waiting" && "bg-zinc-400 dark:bg-zinc-500",
-                      getProcessingPhase(sessionStatus) === "tool_executing" && "bg-blue-400",
-                      getProcessingPhase(sessionStatus) === "waiting_approval" && "bg-yellow-400",
-                      getProcessingPhase(sessionStatus) === "paused" && "bg-amber-400",
-                      (getProcessingPhase(sessionStatus) === "idle" || !sessionStatus) && "bg-zinc-300 dark:bg-zinc-600",
+                      getProcessingPhase(sessionStatus) === "waiting" && "bg-loading",
+                      getProcessingPhase(sessionStatus) === "tool_executing" && "bg-info-solid",
+                      getProcessingPhase(sessionStatus) === "waiting_approval" && "bg-warning-solid",
+                      getProcessingPhase(sessionStatus) === "paused" && "bg-warning-solid",
+                      (getProcessingPhase(sessionStatus) === "idle" || !sessionStatus) && "bg-surface-strong",
                     )}
                   />
                   {sessionStatus ? sessionStatus.status.replace(/_/g, " ") : "\u2014"}
@@ -1096,7 +1096,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       <span
                         className={cn(
                           "inline-block h-2 w-2 rounded-full",
-                          selectedAgent.alive ? "bg-[var(--color-accent)]" : "bg-zinc-300 dark:bg-zinc-600",
+                          selectedAgent.alive ? "bg-[var(--color-accent)]" : "bg-surface-strong",
                         )}
                       />
                       <span className="text-text-secondary ">

@@ -126,7 +126,7 @@ export function CompressionHistoryCard({
               void load();
             }}
             title={t("rightPanel.buttonRefresh")}
-            className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
+            className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary  dark:hover:bg-[var(--color-accent)]/15"
           >
             <RefreshCw className="h-3.5 w-3.5" />
           </button>
@@ -142,7 +142,7 @@ export function CompressionHistoryCard({
       )}
 
       {error && (
-        <div className="py-3 text-center text-xs text-red-500">
+        <div className="py-3 text-center text-xs text-danger-icon">
           {t("rightPanel.compressionHistoryError")}: {error}
         </div>
       )}
@@ -209,10 +209,10 @@ export function CompressionHistoryCard({
  *  amber so an unexpected deep compaction stands out at a glance. */
 function cnLevel(level: number): string {
   if (level >= 8) {
-    return "rounded bg-amber-100 px-1 py-0.5 text-10 font-medium text-amber-700 dark:bg-amber-900/30 dark:text-amber-400";
+    return "rounded bg-warning-surface-hover px-1 py-0.5 text-10 font-medium text-warning-quiet";
   }
   if (level >= 5) {
-    return "rounded bg-orange-50 px-1 py-0.5 text-10 font-medium text-orange-600 dark:bg-orange-900/20 dark:text-orange-400";
+    return "rounded bg-warning-surface px-1 py-0.5 text-10 font-medium text-warning-quiet";
   }
-  return "rounded bg-zinc-100 px-1 py-0.5 text-10 font-medium text-text-secondary dark:bg-zinc-800 ";
+  return "rounded bg-surface px-1 py-0.5 text-10 font-medium text-text-secondary ";
 }

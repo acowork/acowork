@@ -133,7 +133,7 @@ export function AttachedContextChips({ surface = "exec" }: { surface?: "exec" | 
                 get a button-in-button DOM structure. */}
             <button
               type="button"
-              className="mr-0.5 rounded p-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
+              className="mr-0.5 rounded p-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
               onClick={handleRemove}
               aria-label={`Remove ${item.name}`}
             >

@@ -139,8 +139,8 @@ export function KanbanColumn({
           className={cn(
             COUNT_BADGE_BASE_CN,
             status === "submitted"
-              ? "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300"
-              : "bg-zinc-200 text-text-secondary dark:bg-zinc-700 ",
+              ? "bg-warning-surface-hover text-warning-quiet"
+              : "bg-surface-hover text-text-secondary ",
           )}
         >
           {tasks.length}

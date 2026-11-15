@@ -16,7 +16,7 @@ export function KvList({ rows, className }: KvListProps) {
   return (
     <div
       className={cn(
-        "overflow-x-auto rounded-md border border-border-outer bg-zinc-100/60 px-2 py-1 font-mono text-10 leading-4 text-text-tertiary  dark:bg-zinc-800/40 ",
+        "overflow-x-auto rounded-md border border-border-outer bg-surface/60 px-2 py-1 font-mono text-10 leading-4 text-text-tertiary  ",
         className,
       )}
     >

@@ -87,7 +87,7 @@ describe("avatar pickers and frames", () => {
   const sites = [
     { rel: "components/settings/ProfileTab.tsx", cls: "h-12 w-12 rounded-lg object-cover" },
     { rel: "components/right-panel/AgentSetupTab.tsx", cls: "h-12 w-12 rounded-lg object-cover" },
-    { rel: "views/pm/pmMembers.tsx", cls: "rounded-lg bg-zinc-200" },
+    { rel: "views/pm/pmMembers.tsx", cls: "rounded-lg bg-surface-hover" },
   ];
 
   it.each(sites)("$rel keeps its thumbnail square", ({ rel, cls }) => {

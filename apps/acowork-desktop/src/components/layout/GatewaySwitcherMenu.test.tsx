@@ -221,7 +221,7 @@ describe("GatewaySwitcherMenu outage trigger", () => {
     render(<GatewaySwitcherMenu />);
     const btn = pill();
     expect(btn.className).not.toMatch(/animate-\[.*fade/);
-    expect(btn.className).toContain("bg-amber-500");
+    expect(btn.className).toContain("bg-warning-solid");
     expect(btn.querySelector(".animate-pulse")).toBeTruthy();
   });
 

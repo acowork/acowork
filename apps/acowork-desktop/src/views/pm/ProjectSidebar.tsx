@@ -164,7 +164,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                         "rounded-full px-1.5 text-10 font-medium",
                         active
                           ? "bg-white/20 text-white"
-                          : "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
+                          : "bg-warning-surface-hover text-warning-quiet",
                       )}
                     >
                       {c.submitted}
@@ -175,7 +175,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
                       "rounded-full px-1.5 text-10",
                       active
                         ? "bg-white/20 text-white"
-                        : "bg-zinc-100 text-text-tertiary group-hover:bg-zinc-200 dark:bg-zinc-800 ",
+                        : "bg-surface text-text-tertiary group-hover:bg-surface-hover ",
                     )}
                   >
                     {c.total}
@@ -258,7 +258,7 @@ export function ProjectSidebar({ width }: { width?: number }) {
               <button
                 type="button"
                 onClick={handleCreate}
-                className="rounded-md bg-zinc-800 px-3 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="rounded-md bg-btn-solid px-3 py-1.5 text-xs font-medium text-white hover:bg-btn-solid-hover hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 disabled:opacity-50"
                 disabled={saving}
               >
                 {saving ? t("common.saving") : t("common.create")}

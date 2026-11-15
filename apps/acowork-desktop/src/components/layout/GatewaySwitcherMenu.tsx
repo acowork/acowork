@@ -208,7 +208,7 @@ export function GatewaySwitcherMenu({
           aria-expanded={open}
           aria-label={t("titleBar.gatewayStatus")}
           onClick={toggle}
-          className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full bg-amber-500 pr-2 pl-2.5 text-xs font-medium text-white transition-colors hover:bg-amber-600 dark:bg-amber-600 dark:hover:bg-amber-500"
+          className="inline-flex h-6 shrink-0 items-center gap-1.5 rounded-full bg-warning-solid pr-2 pl-2.5 text-xs font-medium text-white transition-colors hover:bg-warning-solid"
         >
           {/* Breathing = the outage is live and unattended. Pinned to the
               icon, not the whole pill: pulsing the label would flicker the
@@ -355,7 +355,7 @@ function RowVerdict({
     return (
       <span className="flex shrink-0 items-center gap-1.5 text-11 text-text-secondary">
         {t("settings.connected")}
-        <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+        <span className="h-1.5 w-1.5 rounded-full bg-ok-solid" />
       </span>
     );
   }
@@ -378,7 +378,7 @@ function RowVerdict({
   }
   return (
     <span className="flex shrink-0 items-center gap-1.5">
-      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+      <span className="h-1.5 w-1.5 rounded-full bg-ok-solid" />
       <span className="text-11 text-text-tertiary tabular-nums">
         {Math.round(probe?.latencyMs ?? 0)}ms
       </span>

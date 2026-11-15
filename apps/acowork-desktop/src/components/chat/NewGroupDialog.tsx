@@ -239,7 +239,7 @@ export function NewGroupDialog({ onClose }: NewGroupDialogProps) {
         </OverlayScrollbar>
 
         <footer className="flex items-center gap-2 border-t border-border-divider px-5 py-3">
-          {error && <span className="mr-auto truncate text-11 text-red-500">{error}</span>}
+          {error && <span className="mr-auto truncate text-11 text-danger-icon">{error}</span>}
           {!error && (
             <span className="mr-auto text-11 text-text-tertiary">
               {t("newGroup.selected", { count: selected.size })}

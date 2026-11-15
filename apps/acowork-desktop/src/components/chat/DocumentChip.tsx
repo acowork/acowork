@@ -28,12 +28,12 @@ export interface DocumentChipProps {
 function formatIcon(format: string) {
   switch (format) {
     case "pdf":
-      return <FileText className="h-4 w-4 shrink-0 text-red-500" />;
+      return <FileText className="h-4 w-4 shrink-0 text-danger-icon" />;
     case "docx":
     case "pptx":
       return <FileSpreadsheet className="h-4 w-4 shrink-0 text-[var(--color-accent)]" />;
     case "xlsx":
-      return <Table className="h-4 w-4 shrink-0 text-green-600" />;
+      return <Table className="h-4 w-4 shrink-0 text-ok" />;
     default:
       return <FileText className="h-4 w-4 shrink-0 text-text-tertiary" />;
   }
@@ -58,9 +58,9 @@ export function DocumentChip({
   // padding, radius, background or font the way the two surfaces once did.
   const statusFrame =
     status === "uploading"
-      ? "border-border-divider bg-zinc-50 animate-pulse dark:bg-zinc-800"
+      ? "border-border-divider bg-surface-subtle animate-pulse"
       : status === "error"
-        ? "border-red-400 bg-red-50 dark:border-red-500 dark:bg-red-900/20"
+        ? "border-danger-border bg-danger-surface"
         : undefined;
 
   return (
@@ -85,12 +85,12 @@ export function DocumentChip({
         <Loader className="h-3 w-3 shrink-0 animate-spin text-text-tertiary" />
       )}
       {status === "success" && (
-        <Check className="h-3 w-3 shrink-0 text-green-500" />
+        <Check className="h-3 w-3 shrink-0 text-ok" />
       )}
       {status === "error" && (
         <>
-          <AlertCircle className="h-3 w-3 shrink-0 text-red-500" />
-          <span className="text-red-500 dark:text-red-400">
+          <AlertCircle className="h-3 w-3 shrink-0 text-danger-icon" />
+          <span className="text-danger-icon">
             {errorMessage || t("documentChip.uploadFailed")}
           </span>
         </>
@@ -100,7 +100,7 @@ export function DocumentChip({
       {onRemove && (
         <button
           type="button"
-          className="ml-0.5 rounded p-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
+          className="ml-0.5 rounded p-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
           onClick={(e) => {
             e.stopPropagation();
             onRemove();

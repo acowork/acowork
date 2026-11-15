@@ -20,7 +20,7 @@ export function ServiceOfflineBanner() {
   return (
     <div
       role="alert"
-      className="flex shrink-0 items-center justify-between gap-2 border-b border-amber-300/60 bg-amber-50 px-4 py-2 text-xs text-amber-800 dark:border-amber-800/60 dark:bg-amber-950/50 dark:text-amber-200"
+      className="flex shrink-0 items-center justify-between gap-2 border-b border-warning-border/60 bg-warning-surface px-4 py-2 text-xs text-warning-quiet"
     >
       <span className="flex min-w-0 items-center gap-2">
         <span aria-hidden>⚠️</span>
@@ -29,7 +29,7 @@ export function ServiceOfflineBanner() {
       <button
         type="button"
         onClick={() => void check()}
-        className="shrink-0 rounded-md px-2 py-0.5 text-11 font-medium text-amber-900 hover:bg-amber-100 dark:text-amber-100 dark:hover:bg-amber-900"
+        className="shrink-0 rounded-md px-2 py-0.5 text-11 font-medium text-warning-quiet hover:bg-warning-surface-hover"
       >
         {t("common.retry")}
       </button>

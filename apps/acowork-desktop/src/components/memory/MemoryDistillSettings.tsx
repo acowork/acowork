@@ -275,7 +275,7 @@ export function MemoryDistillSettings({
             {distillerStatus.last_run.error ? (
               <>
                 <span aria-hidden>·</span>
-                <span className="text-[var(--color-danger,#e5484d)]">
+                <span className="text-[var(--color-destructive)]">
                   {t("memoryPanel.distillerRunFailed", {
                     error: distillerStatus.last_run.error,
                   })}

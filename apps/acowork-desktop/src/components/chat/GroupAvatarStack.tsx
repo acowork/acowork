@@ -72,7 +72,7 @@ export function GroupAvatarStack({
         // Footprint + rounding mirror the 40px agent / user avatar so the
         // composite lines up with the rows above and below it.
         "flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-lg",
-        "bg-zinc-100 ring-1 ring-zinc-300/60 dark:bg-zinc-800 dark:ring-zinc-600/60",
+        "bg-surface ring-1 ring-border-strong/60",
         className,
       )}
       style={{ padding: pad }}
@@ -89,7 +89,7 @@ export function GroupAvatarStack({
             return (
               <div
                 key={i}
-                className="rounded-[2px] bg-zinc-200 dark:bg-zinc-700"
+                className="rounded-[2px] bg-surface-hover"
                 style={{ width: tile, height: tile }}
               />
             );

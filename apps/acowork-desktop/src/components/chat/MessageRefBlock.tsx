@@ -71,7 +71,7 @@ export const MessageRefBlock = memo(function MessageRefBlock({
         type="button"
         onClick={() => setExpanded((v) => !v)}
         aria-expanded={expanded}
-        className="flex w-fit max-w-full items-center gap-2 rounded-md bg-zinc-50 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:bg-zinc-800/30 dark:hover:bg-[var(--color-accent)]/15"
+        className="flex w-fit max-w-full items-center gap-2 rounded-md bg-surface-subtle px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
         style={{ fontSize: CARD_FONT_SIZE }}
       >
         <Quote className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
@@ -88,7 +88,7 @@ export const MessageRefBlock = memo(function MessageRefBlock({
         // bubble's own side; the text inside stays left-aligned (markdown
         // right-aligned would be unreadable).
         <div
-          className="mt-1 w-full overflow-y-auto rounded-md border-r-2 border-zinc-300 bg-zinc-50 py-2 pl-3 pr-2 dark:border-zinc-600 dark:bg-zinc-800/30"
+          className="mt-1 w-full overflow-y-auto rounded-md border-r-2 border-border-strong bg-surface-subtle py-2 pl-3 pr-2"
           style={{ maxHeight: "240px" }}
         >
           <ChatMarkdown content={content} style={{ fontSize: CARD_FONT_SIZE }} />

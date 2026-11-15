@@ -326,7 +326,7 @@ function FilePreview({ hit, agentId, workspaceId }: { hit: FileHit; agentId: str
                             key={n}
                             className={
                                 isMatch
-                                    ? "bg-yellow-100/60 text-text dark:bg-yellow-500/15"
+                                    ? "bg-warning-surface-hover/60 text-text"
                                     : "text-text-secondary"
                             }
                         >
@@ -610,7 +610,7 @@ function PreviewHeader({
                 >
                     {copied ? (
                         <>
-                            <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" aria-hidden="true" />
+                            <Check className="h-3 w-3 text-ok" aria-hidden="true" />
                             {t("common.copied")}
                         </>
                     ) : (

@@ -70,7 +70,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
           <button
             ref={closeRef}
             onClick={onClose}
-            className="text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+            className="text-text-tertiary hover:text-text-tertiary"
             aria-label={t("agentDetailDialog.ariaLabelClose")}
           >
             ✕
@@ -81,7 +81,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
         <div className="space-y-3 px-5 py-4 text-xs">
           {loading && (
             <div className="flex items-center justify-center py-8">
-              <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+              <div className="h-5 w-5 animate-spin rounded-full border-2 border-border-strong border-t-zinc-600 dark:border-t-zinc-300" />
             </div>
           )}
 
@@ -105,7 +105,7 @@ export function AgentDetailDialog({ open, agentId, onClose }: AgentDetailDialogP
                   <span
                     className={cn(
                       "inline-block h-2 w-2 rounded-full",
-                      detail.alive ? "bg-[var(--color-accent)]" : "bg-zinc-300 dark:bg-zinc-600",
+                      detail.alive ? "bg-[var(--color-accent)]" : "bg-surface-strong",
                     )}
                   />
                   {detail.alive ? t("agentDetailDialog.statusRunning") : t("agentDetailDialog.statusStopped")}

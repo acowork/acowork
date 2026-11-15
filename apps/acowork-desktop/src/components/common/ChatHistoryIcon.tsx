@@ -24,9 +24,9 @@ function Bubble({ filled }: { filled: boolean }) {
       />
       {/* Dots stay paper-coloured (cut out) when the bubble is filled, so the
           "more" reading survives the active state. */}
-      <circle cx="8.5" cy="11.5" r="1" fill={filled ? "var(--color-chat-body, #fff)" : "currentColor"} stroke="none" />
-      <circle cx="12" cy="11.5" r="1" fill={filled ? "var(--color-chat-body, #fff)" : "currentColor"} stroke="none" />
-      <circle cx="15.5" cy="11.5" r="1" fill={filled ? "var(--color-chat-body, #fff)" : "currentColor"} stroke="none" />
+      <circle cx="8.5" cy="11.5" r="1" fill={filled ? "var(--color-chat-body)" : "currentColor"} stroke="none" />
+      <circle cx="12" cy="11.5" r="1" fill={filled ? "var(--color-chat-body)" : "currentColor"} stroke="none" />
+      <circle cx="15.5" cy="11.5" r="1" fill={filled ? "var(--color-chat-body)" : "currentColor"} stroke="none" />
     </>
   );
 }

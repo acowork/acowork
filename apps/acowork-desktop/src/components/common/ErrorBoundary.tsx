@@ -28,7 +28,7 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-page-bg">
       <div className="mx-auto max-w-md text-center">
-        <AlertTriangle className="mx-auto h-12 w-12 text-amber-500" />
+        <AlertTriangle className="mx-auto h-12 w-12 text-warning" />
         <h2 className="mt-4 text-lg font-semibold text-text ">
           {t("errorBoundary.title")}
         </h2>
@@ -36,7 +36,7 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
           {t("errorBoundary.description")}
         </p>
         {error && (
-          <p className="mt-2 max-h-24 overflow-auto rounded bg-zinc-100 p-2 text-xs text-text-tertiary dark:bg-zinc-800  select-text">
+          <p className="mt-2 max-h-24 overflow-auto rounded bg-surface p-2 text-xs text-text-tertiary  select-text">
             {error.message}
           </p>
         )}
@@ -49,7 +49,7 @@ function ErrorDisplay({ error, autoRetried, onRetry, onRefresh }: ErrorDisplayPr
           <div className="mt-6 flex items-center justify-center gap-3">
             <button
               onClick={onRetry}
-              className="flex items-center gap-2 rounded-md bg-zinc-200 px-4 py-2 text-sm font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
+              className="flex items-center gap-2 rounded-md bg-surface-hover px-4 py-2 text-sm font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
             >
               <RefreshCw className="h-4 w-4" />
               {t("errorBoundary.retry")}

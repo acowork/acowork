@@ -662,7 +662,7 @@ export function AgentList({ width }: AgentListProps) {
           {attention && (
             <span
               data-testid="agent-attention-dot"
-              className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-red-500"
+              className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-danger-solid"
               title={t("agentList.dotAttention")}
               aria-label={t("agentList.dotAttention")}
             />
@@ -685,7 +685,7 @@ export function AgentList({ width }: AgentListProps) {
                   aria-label={busyAgentIds.has(id) && agent.alive ? t("agentList.dotBusy") : agent.alive ? t("agentList.dotOnline") : t("agentList.dotOffline")}
                   className={cn(
                     "h-1.5 w-1.5 shrink-0 rounded-full",
-                    agent.alive ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500",
+                    agent.alive ? "bg-ok-solid" : "bg-loading",
                     agent.alive && busyAgentIds.has(id) && "dot-breathing",
                   )}
                 />
@@ -729,7 +729,7 @@ export function AgentList({ width }: AgentListProps) {
                       "block h-2.5 w-2/3 animate-pulse rounded",
                       selectedAgentId === id
                         ? "bg-modal-surface/40"
-                        : "bg-zinc-300/60 dark:bg-zinc-600/60",
+                        : "bg-surface-strong/60",
                     )}
                   />
                 ) : (
@@ -765,13 +765,13 @@ export function AgentList({ width }: AgentListProps) {
           create); no dismiss control — a closable first-run reminder
           would just re-appear every launch. */}
       {!isCollapsed && localNode && !localNode.enrolled && (
-        <div className="flex items-start gap-2 border-b border-amber-300/60 bg-amber-50/80 px-3 py-2 text-xs text-amber-900 backdrop-blur-sm dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-100">
-          <Server className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-500 dark:text-amber-300" />
+        <div className="flex items-start gap-2 border-b border-warning-border/60 bg-warning-surface/80 px-3 py-2 text-xs text-warning-quiet backdrop-blur-sm">
+          <Server className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" />
           <span className="min-w-0 flex-1">{t("agentList.localNodeBanner")}</span>
           <button
             onClick={() => void handleCreateLocalNode()}
             disabled={creatingNode}
-            className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium transition-colors hover:bg-amber-200/60 disabled:opacity-50 dark:hover:bg-amber-900/60"
+            className="shrink-0 rounded-md px-2 py-0.5 text-xs font-medium transition-colors hover:bg-warning-surface-hover/60 disabled:opacity-50"
           >
             {t("agentList.createLocalNode")}
           </button>
@@ -821,7 +821,7 @@ export function AgentList({ width }: AgentListProps) {
 
         {loading && agentsList.length === 0 && (
           <div className="flex items-center justify-center py-8">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+            <div className="h-5 w-5 animate-spin rounded-full border-2 border-border-strong border-t-zinc-600 dark:border-t-zinc-300" />
           </div>
         )}
 
@@ -902,7 +902,7 @@ export function AgentList({ width }: AgentListProps) {
                 aria-expanded={!groupsCollapsed}
                 aria-label={t("agentList.projectGroupsBanner")}
                 data-testid="project-group-header"
-                className="flex h-6 min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-xs font-medium text-text-tertiary transition-colors duration-150 hover:text-zinc-600 dark:hover:text-zinc-300"
+                className="flex h-6 min-w-0 flex-1 items-center gap-1.5 px-3 text-left text-xs font-medium text-text-tertiary transition-colors duration-150 hover:text-text-tertiary"
               >
                 <ChevronRight
                   className={cn("h-3 w-3 shrink-0 transition-transform duration-150", !groupsCollapsed && "rotate-90")}
@@ -944,7 +944,7 @@ export function AgentList({ width }: AgentListProps) {
                     {/* Unread count on the avatar's top-right corner, the IM
                         position the user rows use for the same signal. */}
                     {unread > 0 && (
-                      <span className="absolute -right-1.5 -top-1.5 rounded-full bg-red-500 px-1.5 text-10 font-medium leading-4 text-white">
+                      <span className="absolute -right-1.5 -top-1.5 rounded-full bg-danger-solid px-1.5 text-10 font-medium leading-4 text-white">
                         {unread > 99 ? "99+" : unread}
                       </span>
                     )}
@@ -1222,7 +1222,7 @@ function NodeGroupHeader({
         // case-folded either.
         "text-xs font-medium",
         "text-text-tertiary ",
-        "hover:text-zinc-600 dark:hover:text-zinc-300",
+        "hover:text-text-tertiary",
         "transition-colors duration-150",
         // Same fill as the right-panel card title bars (ListBox's
         // `bg-panel-block`), one step above `nav-surface`, so the node
@@ -1261,7 +1261,7 @@ function NodeGroupHeader({
         <span
           className={cn(
             "h-1.5 w-1.5 shrink-0 rounded-full",
-            online ? "bg-emerald-500" : "bg-zinc-400 dark:bg-zinc-500",
+            online ? "bg-ok-solid" : "bg-loading",
           )}
           aria-hidden
         />
@@ -1275,7 +1275,7 @@ function NodeGroupHeader({
           title={permissionsLabel}
           aria-label={permissionsLabel}
           data-testid="node-permissions-btn"
-          className="mr-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:text-zinc-300"
+          className="mr-2 flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary"
         >
           {/* ponytail: icon only shrinks to 90% (14 -> 12.6px) for a lighter
               glyph; the button box stays h-6 w-6 so padding + hit area are

@@ -934,7 +934,7 @@ export function WorkspaceExplorer() {
                         <Tooltip content={t("workspace.newFile")} variant="plain">
                             <button
                                 onClick={handleNewFile}
-                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
                             >
                                 <FilePlus className="h-3.5 w-3.5" />
                             </button>
@@ -944,7 +944,7 @@ export function WorkspaceExplorer() {
                         <Tooltip content={t("workspace.newFolder")} variant="plain">
                             <button
                                 onClick={handleNewFolder}
-                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
                             >
                                 <FolderPlus className="h-3.5 w-3.5" />
                             </button>
@@ -954,7 +954,7 @@ export function WorkspaceExplorer() {
                         <Tooltip content={t("workspace.refresh")} variant="plain">
                             <button
                                 onClick={handleRefresh}
-                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
+                                className="inline-flex items-center justify-center rounded h-6 w-6 transition-colors text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
                             >
                                 <RefreshCw className="h-3.5 w-3.5" />
                             </button>
@@ -988,7 +988,7 @@ export function WorkspaceExplorer() {
                                 setSearchQuery("");
                                 searchInputRef.current?.focus();
                             }}
-                            className="text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+                            className="text-10 text-text-tertiary hover:text-text-tertiary"
                             title={t("workspace.ariaLabelClearSearch")}
                         >
                             <X className="h-3 w-3" />

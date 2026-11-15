@@ -239,7 +239,7 @@ function ImageAttachmentThumbnail({
 
   return (
     <div
-      className={"group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 bg-zinc-100 dark:border-zinc-700 dark:bg-zinc-800" + (pending ? " opacity-60" : "")}
+      className={"group relative h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border-outer bg-surface" + (pending ? " opacity-60" : "")}
       title={pending ? "等待服务器确认..." : `${item.filename} (${item.format})`}
       style={aspectRatio ? { aspectRatio } : undefined}
     >
@@ -273,7 +273,7 @@ function ImageAttachmentThumbnail({
         <button
           type="button"
           onClick={onRemove}
-          className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-red-500 text-white opacity-0 transition-opacity group-hover:opacity-100"
+          className="absolute -right-0.5 -top-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-danger-solid text-white opacity-0 transition-opacity group-hover:opacity-100"
           aria-label={`Remove ${item.filename}`}
         >
           <X size={10} />

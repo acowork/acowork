@@ -305,7 +305,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
             // `text-xs` + normal case, matching the user row names below and
             // the node header in the agent list — same sidebar, same role.
             "text-xs font-medium text-text-tertiary",
-            "transition-colors duration-150 hover:text-zinc-600 dark:hover:text-zinc-300",
+            "transition-colors duration-150 hover:text-text-tertiary",
           )}
         >
           <ChevronRight
@@ -342,7 +342,7 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
           )}
 
           {actionError && (
-            <div role="alert" className="px-3 py-1 text-10 text-red-500">
+            <div role="alert" className="px-3 py-1 text-10 text-danger-icon">
               {actionError}
             </div>
           )}

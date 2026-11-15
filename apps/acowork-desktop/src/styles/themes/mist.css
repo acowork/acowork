@@ -1,0 +1,95 @@
+/*
+ * Mist theme pack — cool blue-grey light / slate blue dark.
+ *
+ * App-style palette (not a code-editor theme): a calm blue washes the
+ * whole UI at low saturation, the way messaging apps tint their shells.
+ *
+ * Same contract as paper.css (the reference pack): file name is the id, only contract tokens
+ * from globals.css are overridden, and both light and dark scopes exist.
+ */
+
+:root.theme-mist {
+  --color-bg: hsl(211 30% 96%);
+  --color-page-bg: hsl(212 22% 91%);
+  --color-panel-block: hsl(211 26% 94%);
+  --color-panel-inset: hsl(212 20% 89%);
+  --color-panel-inset-2: hsl(212 18% 85%);
+  --color-modal-surface: hsl(212 35% 98%);
+  --color-editor-canvas: hsl(211 28% 95%);
+  --color-nav-surface: hsl(212 20% 89%);
+  --color-nav-item-hover: hsl(212 18% 83%);
+  --color-nav-divider: hsl(213 15% 79%);
+  --color-right-panel: hsl(211 24% 93%);
+  --color-chat-body: hsl(211 28% 95%);
+  --color-chat-title: hsl(212 18% 87%);
+  --color-chat-input-bg: hsl(212 35% 98%);
+  --color-input-bg: hsl(212 35% 98%);
+  --color-border-outer: hsl(213 18% 76%);
+  --color-border-divider: hsl(213 16% 83%);
+  --color-menu-divider: hsl(213 16% 81%);
+  --color-text: hsl(216 22% 28%);
+  --color-text-secondary: hsl(215 16% 40%);
+  --color-text-tertiary: hsl(214 12% 52%);
+  --color-text-disabled: hsl(213 10% 66%);
+  --color-menu-text: hsl(216 20% 30%);
+  --color-menu-icon: hsl(214 13% 56%);
+  --color-menu-danger: hsl(352 65% 45%);
+  --color-menu-danger-hover: hsl(352 70% 95%);
+  --color-menu-warning: hsl(38 75% 40%);
+  --color-menu-warning-hover: hsl(38 85% 94%);
+  --color-danger-surface: hsl(352 70% 96%);
+  --color-danger-surface-hover: hsl(352 70% 92%);
+  --color-danger-border: hsl(352 50% 85%);
+  --color-danger-text: hsl(352 65% 42%);
+  --color-danger-text-strong: hsl(352 70% 32%);
+  --color-danger-icon: hsl(352 65% 52%);
+  --color-control-track: hsl(213 18% 76%);
+  --color-control-outline: hsl(214 14% 60%);
+  --color-highlight-locate: hsl(210 75% 60% / 0.16);
+  --color-muted: hsl(212 22% 90%);
+  --color-muted-foreground: hsl(214 14% 46%);
+  --shadow-menu: 0 4px 6px -1px hsl(215 25% 35% / 0.12), 0 2px 4px -2px hsl(215 25% 35% / 0.12);
+}
+
+:root.theme-mist.dark {
+  --color-bg: hsl(217 25% 16%);
+  --color-page-bg: hsl(218 24% 12%);
+  --color-panel-block: hsl(216 22% 21%);
+  --color-panel-inset: hsl(218 23% 13%);
+  --color-panel-inset-2: hsl(218 24% 10%);
+  --color-modal-surface: hsl(216 22% 25%);
+  --color-editor-canvas: hsl(217 24% 17%);
+  --color-nav-surface: hsl(218 23% 13%);
+  --color-nav-item-hover: hsl(217 22% 23%);
+  --color-nav-divider: hsl(216 18% 29%);
+  --color-right-panel: hsl(217 24% 18%);
+  --color-chat-body: hsl(217 25% 16%);
+  --color-chat-title: hsl(217 21% 22%);
+  --color-chat-input-bg: hsl(216 22% 25%);
+  --color-input-bg: hsl(216 22% 25%);
+  --color-border-outer: hsl(216 16% 33%);
+  --color-border-divider: hsl(216 17% 27%);
+  --color-menu-divider: hsl(216 17% 30%);
+  --color-text: hsl(213 30% 88%);
+  --color-text-secondary: hsl(213 22% 76%);
+  --color-text-tertiary: hsl(214 16% 63%);
+  --color-text-disabled: hsl(214 12% 47%);
+  --color-menu-text: hsl(213 28% 86%);
+  --color-menu-icon: hsl(213 16% 57%);
+  --color-menu-danger: hsl(352 85% 72%);
+  --color-menu-danger-hover: hsl(352 50% 26% / 0.3);
+  --color-menu-warning: hsl(38 85% 68%);
+  --color-menu-warning-hover: hsl(38 50% 22% / 0.3);
+  --color-danger-surface: hsl(352 40% 23%);
+  --color-danger-surface-hover: hsl(352 40% 29%);
+  --color-danger-border: hsl(352 32% 36%);
+  --color-danger-text: hsl(352 80% 76%);
+  --color-danger-text-strong: hsl(352 85% 86%);
+  --color-danger-icon: hsl(352 85% 72%);
+  --color-control-track: hsl(216 15% 35%);
+  --color-control-outline: hsl(213 18% 55%);
+  --color-highlight-locate: hsl(210 80% 70% / 0.24);
+  --color-muted: hsl(217 22% 22%);
+  --color-muted-foreground: hsl(212 20% 70%);
+  --shadow-menu-dark: 0 4px 6px -1px hsl(220 40% 3% / 0.55), 0 2px 4px -2px hsl(220 40% 3% / 0.55);
+}

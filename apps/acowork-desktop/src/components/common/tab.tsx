@@ -29,7 +29,7 @@ export function TabItem({ active, className, children, ...rest }: TabItemProps) 
                 "group relative flex items-center gap-1 pl-2.5 pr-1.5 py-[var(--tab-py)] min-w-[60px] max-w-[160px] cursor-pointer transition-colors shrink-0",
                 active
                     ? "text-text-secondary "
-                    : "text-text-tertiary  hover:text-zinc-700 dark:hover:text-zinc-300",
+                    : "text-text-tertiary  hover:text-text-secondary",
                 className,
             )}
             {...rest}
@@ -54,7 +54,7 @@ export function TabButton({ active, className, children, ...rest }: TabButtonPro
                 "relative px-3 py-2 text-sm transition-colors whitespace-nowrap shrink-0",
                 active
                     ? "font-semibold text-text-secondary "
-                    : "font-normal text-text-tertiary hover:text-zinc-700  dark:hover:text-zinc-300",
+                    : "font-normal text-text-tertiary hover:text-text-secondary ",
                 className,
             )}
             {...rest}

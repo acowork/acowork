@@ -84,7 +84,7 @@ export function TagInput({
     <div
       className={cn(
         "flex min-h-[var(--ui-input-py)] w-full flex-wrap items-center gap-1 rounded-md border bg-input-bg px-2 py-[calc(var(--ui-input-py)/2)]",
-        invalid ? "border-red-400 dark:border-red-500" : "border-input-border",
+        invalid ? "border-danger-border" : "border-input-border",
         disabled && "opacity-60",
         className,
       )}
@@ -93,7 +93,7 @@ export function TagInput({
       {value.map((chip, index) => (
         <span
           key={`${chip}-${index}`}
-          className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-medium text-text-secondary dark:bg-zinc-700"
+          className="inline-flex items-center gap-1 rounded bg-surface-hover px-1.5 py-0.5 text-10 font-medium text-text-secondary"
         >
           {chip}
           <button

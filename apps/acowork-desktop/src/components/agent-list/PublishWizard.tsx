@@ -392,8 +392,8 @@ export function PublishWizard({
                 <div
                   className={cn(
                     "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-medium transition-colors",
-                    active && "bg-zinc-200 text-text dark:bg-zinc-700 ",
-                    passed && "bg-green-100 text-green-700 dark:bg-green-900/30 dark:text-green-400",
+                    active && "bg-surface-hover text-text ",
+                    passed && "bg-ok-surface text-ok",
                     !active && !passed && "text-text-tertiary ",
                   )}
                 >
@@ -409,8 +409,8 @@ export function PublishWizard({
                     className={cn(
                       "mx-1 h-px w-4",
                       i < stepIndex
-                        ? "bg-green-300 dark:bg-green-600"
-                        : "bg-zinc-200 dark:bg-zinc-600",
+                        ? "bg-ok/40"
+                        : "bg-surface-strong",
                     )}
                   />
                 )}
@@ -439,9 +439,9 @@ export function PublishWizard({
                   key={i}
                   className={cn(
                     "flex items-start gap-2 rounded-md px-3 py-2 text-xs",
-                    item.status === "ok" && "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400",
-                    item.status === "warn" && "bg-yellow-50 text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-400",
-                    item.status === "error" && "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400",
+                    item.status === "ok" && "bg-ok-surface text-ok",
+                    item.status === "warn" && "bg-warning-surface text-warning-quiet",
+                    item.status === "error" && "bg-danger-surface text-danger-text",
                   )}
                 >
                   {item.status === "ok" ? (
@@ -469,9 +469,9 @@ export function PublishWizard({
                 />
               )}
               {checkResult.warnings.length > 0 && (
-                <div className="rounded-md bg-yellow-50 px-3 py-2 dark:bg-yellow-900/20">
+                <div className="rounded-md bg-warning-surface px-3 py-2">
                   {checkResult.warnings.map((w, i) => (
-                    <p key={i} className="text-xs text-yellow-700 dark:text-yellow-400">
+                    <p key={i} className="text-xs text-warning-quiet">
                       {w}
                     </p>
                   ))}
@@ -508,7 +508,7 @@ export function PublishWizard({
                   <h3 className="text-xs font-medium text-text-secondary ">
                     Build Result
                   </h3>
-                  <div className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
+                  <div className="rounded-md bg-ok-surface px-3 py-2 text-xs text-ok">
                     <p>
                       Package built:{" "}
                       <span className="font-mono">{buildResult.output_path}</span>
@@ -533,8 +533,8 @@ export function PublishWizard({
                 className={cn(
                   "rounded-md px-3 py-2 text-xs",
                   signResult.signed
-                    ? "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400"
-                    : "bg-yellow-50 text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-400",
+                    ? "bg-ok-surface text-ok"
+                    : "bg-warning-surface text-warning-quiet",
                 )}
               >
                 <p>
@@ -553,7 +553,7 @@ export function PublishWizard({
               <h3 className="text-xs font-medium text-text-secondary ">
                 Export Result
               </h3>
-              <div className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
+              <div className="rounded-md bg-ok-surface px-3 py-2 text-xs text-ok">
                 <p>
                   Status: {exportResult.status}
                 </p>
@@ -587,7 +587,7 @@ export function PublishWizard({
               )}
 
               {librarySave.status === "saved" && (
-                <div className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
+                <div className="rounded-md bg-ok-surface px-3 py-2 text-xs text-ok">
                   <p className="flex items-center gap-1.5">
                     <Check className="h-3.5 w-3.5" />
                     <span>
@@ -601,7 +601,7 @@ export function PublishWizard({
               )}
 
               {librarySave.status === "remote_skipped" && (
-                <div className="rounded-md bg-yellow-50 px-3 py-2 text-xs text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-400">
+                <div className="rounded-md bg-warning-surface px-3 py-2 text-xs text-warning-quiet">
                   <p>
                     {t("publishWizard.libraryRemoteSkipped", {
                       node: owningNodeLabel ?? t("publishWizard.libraryRemoteNodeUnknown"),
@@ -612,7 +612,7 @@ export function PublishWizard({
               )}
 
               {librarySave.status === "failed" && (
-                <div className="rounded-md bg-yellow-50 px-3 py-2 text-xs text-yellow-700 dark:bg-yellow-900/20 dark:text-yellow-400">
+                <div className="rounded-md bg-warning-surface px-3 py-2 text-xs text-warning-quiet">
                   <p>{t("publishWizard.librarySaveFailed", { error: librarySave.message })}</p>
                   <button
                     onClick={() => void copyIntoLibrary(signResult?.output_path ?? "")}
@@ -766,7 +766,7 @@ function AvatarPickerSubForm({
       <AvatarPreview selection={value} agentId={agentId} />
 
       {/* Mode tabs */}
-      <div className="grid grid-cols-3 gap-1 rounded-md bg-zinc-100 p-1 text-xs dark:bg-zinc-900/50">
+      <div className="grid grid-cols-3 gap-1 rounded-md bg-surface-subtle p-1 text-xs">
         <ModeTab
           active={value.kind === "builtin"}
           onClick={() => {
@@ -808,7 +808,7 @@ function AvatarPickerSubForm({
                   className={cn(
                     "flex aspect-square items-center justify-center rounded-md p-0.5 transition-colors",
                     active
-                      ? "bg-zinc-200 dark:bg-zinc-600"
+                      ? "bg-surface-strong"
                       : "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                   )}
                   title={iconId}
@@ -842,7 +842,7 @@ function AvatarPickerSubForm({
               type="button"
               onClick={handlePickFile}
               disabled={disabled}
-              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-800 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
+              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
             >
               Replace
             </button>
@@ -850,7 +850,7 @@ function AvatarPickerSubForm({
               type="button"
               onClick={handleClearPackaged}
               disabled={disabled}
-              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-red-600 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
+              className="rounded-md px-2 py-1 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-danger-text disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
               aria-label={t("publishWizard.ariaLabelRemoveAvatar")}
             >
               <XIcon className="h-3.5 w-3.5" />
@@ -902,7 +902,7 @@ function ModeTab({
         "rounded-md px-2 py-1 font-medium transition-colors disabled:opacity-50",
         active
           ? "bg-modal-surface text-text shadow-sm "
-          : "text-text-tertiary hover:text-zinc-800  dark:hover:text-zinc-200",
+          : "text-text-tertiary hover:text-text ",
       )}
     >
       {children}
@@ -919,7 +919,7 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
           src={src}
           alt={selection.iconId}
           draggable={false}
-          className="h-16 w-16 rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60"
+          className="h-16 w-16 rounded-full object-cover ring-1 ring-border-strong/60"
         />
         <div>
           <div className="text-xs font-medium text-text-secondary ">
@@ -943,7 +943,7 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
         <AuthedImage
           src={url}
           alt={selection.relativePath}
-          className="h-16 w-16 rounded-full object-cover ring-1 ring-zinc-300/60 dark:ring-zinc-600/60"
+          className="h-16 w-16 rounded-full object-cover ring-1 ring-border-strong/60"
           // Nothing to show until the file is readable — keep the slot.
           fallback={<div className="h-16 w-16" />}
         />
@@ -960,7 +960,7 @@ function AvatarPreview({ selection, agentId }: { selection: AvatarSelection; age
   }
   return (
     <div className="flex items-center gap-3 rounded-md border border-dashed border-border-outer px-3 py-2">
-      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-text-tertiary dark:bg-zinc-800">
+      <div className="flex h-16 w-16 items-center justify-center rounded-full bg-surface text-text-tertiary">
         <ImagePlus className="h-6 w-6" />
       </div>
       <div>

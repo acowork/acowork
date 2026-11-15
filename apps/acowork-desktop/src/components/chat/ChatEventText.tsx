@@ -83,7 +83,7 @@ export function ChatEventText({
         // transcript ended up with a red that outshouted a failed run.
         "text-[var(--color-warning-quiet)]"
       : tone === "danger"
-        ? "text-red-500"
+        ? "text-danger-icon"
         : "text-text-tertiary";
 
   // `data-event-text` is the axis made greppable: the regression tests assert

@@ -467,7 +467,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
                                   e.stopPropagation();
                                   setConfirmDelete(null);
                                 }}
-                                className="rounded bg-zinc-200 px-2 py-0.5 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-600  dark:hover:bg-[var(--color-accent)]/15"
+                                className="rounded bg-surface-strong px-2 py-0.5 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                               >
                                 {t("workspace.cancel")}
                               </button>
@@ -499,8 +499,8 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
                             >
                               {dir.access === "read-write" ? (
                                 <>
-                                  <ShieldOff className="h-3 w-3 text-orange-600 dark:text-orange-400" />
-                                  <span className="font-medium text-orange-700 dark:text-orange-400">RW</span>
+                                  <ShieldOff className="h-3 w-3 text-warning-quiet" />
+                                  <span className="font-medium text-warning-quiet">RW</span>
                                 </>
                               ) : (
                                 <>
@@ -528,7 +528,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
               // denied the list has no business offering the add path
               // either. One gate, both buttons.
               disabled={gatewayMode === "relay" || deniedReason === "manage"}
-              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-900 disabled:opacity-40 disabled:hover:bg-transparent dark:bg-white/10  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100"
+              className="mx-3 mt-2 mb-2.5 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md bg-surface px-3 py-[var(--ui-btn-py)] text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text disabled:opacity-40 disabled:hover:bg-transparent  dark:hover:bg-[var(--color-accent)]/15"
             >
               <FolderPlus className="h-3.5 w-3.5" />
               {t("workspace.addWorkspace")}

@@ -256,7 +256,7 @@ export function MemberManagerSection({ project }: { project: PmProject }) {
                             type="button"
                             disabled={busyId === m.instance_id}
                             onClick={() => handleRemove(m.instance_id)}
-                            className="rounded-md px-2 py-1 text-11 text-red-600 hover:bg-red-50 disabled:opacity-40 dark:text-red-400 dark:hover:bg-red-950/40"
+                            className="rounded-md px-2 py-1 text-11 text-danger-text hover:bg-danger-surface disabled:opacity-40"
                           >
                             {t("pm.removeMember")}
                           </button>

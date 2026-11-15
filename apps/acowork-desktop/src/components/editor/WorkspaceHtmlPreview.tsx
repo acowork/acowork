@@ -87,7 +87,7 @@ export function WorkspaceHtmlPreview({ agentId, workspaceId, relPath, fileName }
     if (state.status === "error") {
         return (
             <div className="flex h-full w-full flex-col items-center justify-center gap-3 bg-right-panel px-6 text-center">
-                <AlertCircle className="h-8 w-8 text-amber-500" />
+                <AlertCircle className="h-8 w-8 text-warning" />
                 <span className="text-sm text-text-secondary">{t("fileEditor.htmlPreviewFailed")}</span>
                 <span className="max-w-md break-words text-xs text-text-tertiary">{state.message}</span>
                 <button

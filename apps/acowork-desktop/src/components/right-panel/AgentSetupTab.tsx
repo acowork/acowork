@@ -981,7 +981,7 @@ export function AgentSetupTab() {
       {selectedAgent?.can_manage === false && (
         <div
           role="note"
-          className="mb-2 rounded-md border border-[var(--color-warning,#f5a623)]/40 bg-[var(--color-warning,#f5a623)]/10 px-3 py-2 text-11 text-text-secondary"
+          className="mb-2 rounded-md border border-[var(--color-warning)]/40 bg-[var(--color-warning)]/10 px-3 py-2 text-11 text-text-secondary"
         >
           {t("apiError.readOnlyBanner")}
         </div>
@@ -1010,7 +1010,7 @@ export function AgentSetupTab() {
                   if (!avatarPopupOpen) computeAvatarPopupPos();
                   setAvatarPopupOpen((v) => !v);
                 }}
-                className="relative block rounded-lg ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
+                className="relative block rounded-lg ring-1 ring-border-strong/60 transition hover:ring-border-strong"
               >
                 <AgentAvatar
                   agentId={selectedAgentId}
@@ -1020,7 +1020,7 @@ export function AgentSetupTab() {
                   size={64}
                 />
                 {/* Pencil badge */}
-                <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600">
+                <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-btn-solid text-white shadow-sm">
                   <svg viewBox="0 0 16 16" className="h-3 w-3 fill-current" xmlns="http://www.w3.org/2000/svg">
                     <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L11.5 7l-3-3-.31.31a.75.75 0 0 0-.177.764l.93 3.251a.75.75 0 0 1-.927.928l-3.251-.93Z" />
                   </svg>
@@ -1049,8 +1049,8 @@ export function AgentSetupTab() {
                       <button
                         onClick={() => setAvatarTab("custom")}
                         className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"
-                          ? "border-b-2 border-zinc-800 text-text dark:border-zinc-200 "
-                          : "text-text-tertiary hover:text-zinc-600 "
+                          ? "border-b-2 border-text text-text "
+                          : "text-text-tertiary hover:text-text-tertiary "
                           }`}
                       >
                         Custom
@@ -1058,8 +1058,8 @@ export function AgentSetupTab() {
                       <button
                         onClick={() => setAvatarTab("builtin")}
                         className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "builtin"
-                          ? "border-b-2 border-zinc-800 text-text dark:border-zinc-200 "
-                          : "text-text-tertiary hover:text-zinc-600 "
+                          ? "border-b-2 border-text text-text "
+                          : "text-text-tertiary hover:text-text-tertiary "
                           }`}
                       >
                         Builtin
@@ -1072,7 +1072,7 @@ export function AgentSetupTab() {
                         <button
                           onClick={handleUploadClick}
                           disabled={avatarBusy}
-                          className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-text-tertiary transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600  dark:hover:border-zinc-400"
+                          className="flex aspect-square items-center justify-center rounded-md border border-dashed border-border-strong text-text-tertiary transition-colors hover:border-border-strong hover:text-text-tertiary disabled:opacity-50 "
                         >
                           <span className="text-lg">+</span>
                         </button>
@@ -1082,8 +1082,8 @@ export function AgentSetupTab() {
                             <div
                               key={asset.relative_path}
                               className={`group relative aspect-square overflow-hidden rounded-md border-2 transition-colors ${isSelected
-                                ? "border-zinc-800 dark:border-zinc-200"
-                                : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
+                                ? "border-text"
+                                : "border-transparent hover:border-border-strong"
                                 }`}
                             >
                               <AuthedImage
@@ -1098,7 +1098,7 @@ export function AgentSetupTab() {
                                   handleDeleteAvatar(asset.relative_path);
                                 }}
                                 disabled={avatarBusy}
-                                className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded bg-red-500/80 text-[8px] text-white opacity-0 transition-opacity group-hover:opacity-100"
+                                className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded bg-danger-solid/80 text-[8px] text-white opacity-0 transition-opacity group-hover:opacity-100"
                               >
                                 ×
                               </button>
@@ -1119,7 +1119,7 @@ export function AgentSetupTab() {
                               onClick={() => handleSelectBuiltin(iconId)}
                               disabled={avatarBusy}
                               className={`flex items-center justify-center rounded-md p-1 transition-colors ${isSelected
-                                ? "bg-zinc-200 dark:bg-zinc-600"
+                                ? "bg-surface-strong"
                                 : "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                                 }`}
                             >
@@ -1340,7 +1340,7 @@ export function AgentSetupTab() {
                   log.error("[AgentSetupTab] Error opening shell risk rules:", e);
                 }
               }}
-              className="mt-1 text-9 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300 underline underline-offset-2 transition-colors"
+              className="mt-1 text-9 text-text-tertiary hover:text-text-tertiary underline underline-offset-2 transition-colors"
             >
               {t("agentSetup.editRiskRules")}
             </button>
@@ -1365,8 +1365,8 @@ export function AgentSetupTab() {
                   );
                 }}
                 className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
-                  bg-zinc-200 dark:bg-zinc-700
-                  accent-zinc-600 dark:accent-zinc-400"
+                  bg-surface-hover
+                  accent-text-disabled"
               />
               <span className="w-10 text-right text-xs text-text-secondary  tabular-nums">
                 {ratioPct}%
@@ -1523,8 +1523,8 @@ export function AgentSetupTab() {
                   saveField("temperature", parseFloat(e.target.value));
                 }}
                 className="flex-1 h-1.5 rounded-full appearance-none cursor-pointer
-                  bg-zinc-200 dark:bg-zinc-700
-                  accent-zinc-600 dark:accent-zinc-400"
+                  bg-surface-hover
+                  accent-text-disabled"
               />
               <span className="w-10 text-right text-xs text-text-secondary  tabular-nums">
                 {profile.temperature !== undefined ? profile.temperature.toFixed(2) : "—"}

@@ -94,7 +94,7 @@ export function TaskTreePicker({
               onClick={() => toggleBranch(task.id)}
               aria-label={t(open ? "pm.task.collapse" : "pm.task.expand")}
               aria-expanded={open}
-              className="w-4 shrink-0 text-center text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+              className="w-4 shrink-0 text-center text-10 text-text-tertiary hover:text-text-tertiary"
             >
               {open ? "▾" : "▸"}
             </button>
@@ -271,7 +271,7 @@ export function DependencyPicker({
             return (
               <li
                 key={id}
-                className="inline-flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-medium text-text-secondary dark:bg-zinc-700"
+                className="inline-flex items-center gap-1 rounded bg-surface-hover px-1.5 py-0.5 text-10 font-medium text-text-secondary"
               >
                 <span className="max-w-40 truncate">{title}</span>
                 <button

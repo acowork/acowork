@@ -142,7 +142,7 @@ export function SkillBrowser() {
           <button
             onClick={handleImportClick}
             disabled={importing || loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:border-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
+            className="inline-flex items-center gap-1.5 rounded-md border border-border-outer px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50  dark:hover:bg-[var(--color-accent)]/15"
           >
             <FolderPlus className={cn("h-3.5 w-3.5", importing && "animate-pulse")} />
             Import
@@ -150,7 +150,7 @@ export function SkillBrowser() {
           <button
             onClick={handleRefresh}
             disabled={loading}
-            className="inline-flex items-center gap-1.5 rounded-md border border-zinc-200 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:border-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
+            className="inline-flex items-center gap-1.5 rounded-md border border-border-outer px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 disabled:opacity-50  dark:hover:bg-[var(--color-accent)]/15"
           >
             <RefreshCw className={cn("h-3.5 w-3.5", loading && "animate-spin")} />
             Refresh
@@ -160,7 +160,7 @@ export function SkillBrowser() {
 
       {/* Error banner */}
       {error && (
-        <div className="border-b border-red-200 dark:border-red-900">
+        <div className="border-b border-danger-border">
           <ErrorBox message={error} className="!rounded-none !border-0" />
         </div>
       )}
@@ -205,7 +205,7 @@ export function SkillBrowser() {
                       className={cn(
                         "flex w-full flex-col gap-1.5 px-4 py-3 text-left transition-colors",
                         isSelected
-                          ? "bg-zinc-100 dark:bg-zinc-800"
+                          ? "bg-surface"
                           : "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                       )}
                     >
@@ -226,7 +226,7 @@ export function SkillBrowser() {
                             </span>
                           ))}
                           {skill.triggers.length > 3 && (
-                            <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-tertiary dark:bg-zinc-800 ">
+                            <span className="rounded bg-surface px-1.5 py-0.5 text-10 text-text-tertiary ">
                               +{skill.triggers.length - 3}
                             </span>
                           )}
@@ -274,7 +274,7 @@ export function SkillBrowser() {
               </h3>
               <button
                 onClick={handleCloseDialog}
-                className="rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
+                className="rounded p-1 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -283,7 +283,7 @@ export function SkillBrowser() {
             {/* Description */}
             <p className="mb-4 text-xs text-text-tertiary ">
               Select a skill ZIP package to import. The ZIP must contain a{" "}
-              <code className="rounded bg-zinc-100 px-1 py-0.5 text-text-secondary dark:bg-zinc-700 ">
+              <code className="rounded bg-surface-hover px-1 py-0.5 text-text-secondary ">
                 SKILL.md
               </code>{" "}
               file with YAML frontmatter.
@@ -298,7 +298,7 @@ export function SkillBrowser() {
                 "mb-3 cursor-pointer rounded-md border-2 border-dashed p-6 text-center transition-colors",
                 selectedFile
                   ? "border-[var(--color-accent)]/40"
-                  : "border-zinc-300 hover:border-zinc-400 dark:border-zinc-600 dark:hover:border-zinc-500",
+                  : "border-border-strong hover:border-border-strong",
               )}
               style={selectedFile ? { backgroundColor: "color-mix(in srgb, var(--color-accent) 10%, transparent)" } : undefined}
             >
@@ -345,7 +345,7 @@ export function SkillBrowser() {
                 className={cn(
                   "inline-flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
                   !selectedFile || importing
-                    ? "cursor-not-allowed bg-zinc-200 text-text-tertiary dark:bg-zinc-700 "
+                    ? "cursor-not-allowed bg-surface-hover text-text-tertiary "
                     : "text-white",
                 )}
                 style={selectedFile && !importing ? { backgroundColor: "var(--color-accent-strong)" } : undefined}

@@ -112,14 +112,14 @@ export function ProjectsView() {
           style={{ width: sidebar.width }}
         >
           {[0, 1, 2, 3, 4].map((i) => (
-            <div key={i} className="h-9 rounded-md bg-zinc-100 dark:bg-zinc-800" />
+            <div key={i} className="h-9 rounded-md bg-surface" />
           ))}
         </div>
         <div className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 bg-page-bg p-6")}>
-          <div className="h-8 w-48 animate-pulse rounded-md bg-zinc-100 dark:bg-zinc-800" />
+          <div className="h-8 w-48 animate-pulse rounded-md bg-surface" />
           <div className="mt-6 flex gap-4">
             {[0, 1, 2, 3].map((i) => (
-              <div key={i} className="h-64 flex-1 animate-pulse rounded-md bg-zinc-100 dark:bg-zinc-800" />
+              <div key={i} className="h-64 flex-1 animate-pulse rounded-md bg-surface" />
             ))}
           </div>
         </div>
@@ -150,7 +150,7 @@ export function ProjectsView() {
             )}
           >
             <div className="flex flex-col items-center justify-center gap-4 p-8">
-              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-zinc-100 text-3xl dark:bg-zinc-800">
+              <div className="flex h-16 w-16 items-center justify-center rounded-full bg-surface text-3xl">
                 📋
               </div>
               <h2 className="text-base font-semibold text-text-secondary ">
@@ -161,7 +161,7 @@ export function ProjectsView() {
               </p>
               <button
                 type="button"
-                className="rounded-md bg-zinc-800 px-4 py-1.5 text-xs font-medium text-white hover:bg-zinc-700 hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+                className="rounded-md bg-btn-solid px-4 py-1.5 text-xs font-medium text-white hover:bg-btn-solid-hover hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 disabled:opacity-50"
                 onClick={() => usePmProjectStore.getState().openCreate()}
               >
                 {t("pm.newProject")}

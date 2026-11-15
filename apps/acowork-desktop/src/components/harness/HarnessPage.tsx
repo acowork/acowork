@@ -423,8 +423,8 @@ function ProvidersTab() {
                             className={cn(
                               "rounded p-0.5",
                               isDefault
-                                ? "text-amber-500"
-                                : "text-text-tertiary hover:text-amber-500 dark:hover:text-amber-400",
+                                ? "text-warning"
+                                : "text-text-tertiary hover:text-warning",
                             )}
                           >
                             <Star className="h-3.5 w-3.5" />
@@ -453,18 +453,18 @@ function ProvidersTab() {
                       <span className="text-xs" style={{ color: "var(--color-accent)" }}>{t("harness.active")}</span>
                       {isCustom ? (
                         <Tooltip content={t("harness.customProviderNoKey")} variant="plain">
-                          <span className="rounded bg-blue-100 px-1.5 py-0.5 text-10 text-blue-700 dark:bg-blue-900/30 dark:text-blue-400">
+                          <span className="rounded bg-info-surface px-1.5 py-0.5 text-10 text-info">
                             🔧 {t("harness.custom")}
                           </span>
                         </Tooltip>
                       ) : isLocal ? (
                         <Tooltip content={t("harness.localProviderNoKey")} variant="plain">
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700 ">
+                          <span className="rounded bg-surface-hover px-1.5 py-0.5 text-10 text-text-secondary ">
                             🏠 {t("harness.local")}
                           </span>
                         </Tooltip>
                       ) : (
-                        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700">
+                        <span className="rounded bg-surface-hover px-1.5 py-0.5 text-10 text-text-secondary">
                           {t("harness.keysCount", { count: accounts.length })}
                         </span>
                       )}
@@ -479,7 +479,7 @@ function ProvidersTab() {
                       )}
                       {first?.compact_model && (
                         <Tooltip content={t("harness.compactModelHint")} variant="plain">
-                          <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700 ">
+                          <span className="rounded bg-surface-hover px-1.5 py-0.5 text-10 text-text-secondary ">
                             {t("harness.compact")}: {first?.compact_model}
                           </span>
                         </Tooltip>
@@ -1047,13 +1047,13 @@ export function McpTab() {
                 >
                   <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                     <span className="truncate text-xs font-medium text-text-secondary ">{preset.name}</span>
-                    <span className="shrink-0 rounded bg-zinc-100 px-1 py-0.5 text-10 text-text-tertiary dark:bg-zinc-700">
+                    <span className="shrink-0 rounded bg-surface-hover px-1 py-0.5 text-10 text-text-tertiary">
                       {preset.category}
                     </span>
                   </div>
                   <p className="mt-0.5 line-clamp-1 text-10 text-text-tertiary">{preset.description}</p>
                   {preset.required_env.length > 0 && (
-                    <p className="mt-0.5 text-10 text-amber-500">
+                    <p className="mt-0.5 text-10 text-warning">
                       {t("harnessMcp.requires")}{preset.required_env.join(", ")}
                     </p>
                   )}
@@ -1091,11 +1091,11 @@ export function McpTab() {
               >
                 <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5">
                   <span className="truncate text-xs font-medium text-text-secondary ">{server.display_name?.trim() || server.name}</span>
-                  <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 font-mono text-text-tertiary dark:bg-zinc-700">
+                  <span className="rounded bg-surface-hover px-1.5 py-0.5 text-10 font-mono text-text-tertiary">
                     {server.transport}
                   </span>
                   {server.has_secrets && (
-                    <span className="text-10 text-amber-500 shrink-0">{t("harnessMcp.hasApiKey")}</span>
+                    <span className="text-10 text-warning shrink-0">{t("harnessMcp.hasApiKey")}</span>
                   )}
                 </div>
                 {/* When a friendly alias is set, still surface the immutable
@@ -1181,9 +1181,9 @@ export function McpTab() {
                           key={i}
                           className={cn(
                             "text-10",
-                            m.kind === "error" && "text-red-500",
-                            m.kind === "warn" && "text-amber-500",
-                            m.kind === "ok" && "text-green-600",
+                            m.kind === "error" && "text-danger-icon",
+                            m.kind === "warn" && "text-warning",
+                            m.kind === "ok" && "text-ok",
                           )}
                         >
                           {m.text}
@@ -1293,7 +1293,7 @@ export function McpTab() {
             <div className="mt-4 flex justify-end gap-2">
               <button
                 onClick={closeForm}
-                className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:border-zinc-600  dark:hover:bg-[var(--color-accent)]/15"
+                className="inline-flex items-center gap-1 rounded-md border border-border-strong px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
               >
                 {t("common.cancel")}
               </button>
@@ -1338,7 +1338,7 @@ export function McpTab() {
               </button>
               <button
                 onClick={() => { setActivePreset(null); setPresetEnvForm({}); }}
-                className="inline-flex items-center gap-1 rounded-md border border-zinc-300 px-3 py-1 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:border-zinc-600  dark:hover:bg-[var(--color-accent)]/15"
+                className="inline-flex items-center gap-1 rounded-md border border-border-strong px-3 py-1 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
               >
                 {t("common.cancel")}
               </button>

@@ -452,7 +452,7 @@ export function ChatAddressPicker({
                       "inline-flex h-5 w-5 shrink-0 items-center justify-center rounded border",
                       checked
                         ? "border-transparent text-[var(--color-accent)]"
-                        : "border-zinc-300 text-transparent hover:border-zinc-400 hover:text-text-tertiary dark:border-zinc-600 dark:hover:border-zinc-500",
+                        : "border-border-strong text-transparent hover:border-border-strong hover:text-text-tertiary",
                       refDisabled && "cursor-not-allowed opacity-40",
                     )}
                   >

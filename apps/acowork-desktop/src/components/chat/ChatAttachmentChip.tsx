@@ -120,7 +120,7 @@ export function ChatAttachmentChip({
       aria-label={interactive ? attachment.filename : undefined}
       title={attachment.filename}
       className={
-        "relative inline-block h-14 w-14 shrink-0 overflow-hidden rounded-md border border-zinc-200 align-top dark:border-zinc-700"
+        "relative inline-block h-14 w-14 shrink-0 overflow-hidden rounded-md border border-border-outer align-top"
         + (interactive
           ? " cursor-pointer transition-shadow hover:ring-2 hover:ring-[var(--color-accent)]/50"
           : "")

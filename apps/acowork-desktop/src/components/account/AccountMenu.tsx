@@ -58,7 +58,7 @@ export function AccountMenu({ onOpenProfile }: AccountMenuProps) {
       <Tooltip content={t("navBar.editProfile")} variant="plain" position="right">
         <button
           onClick={onOpenProfile}
-          className="mb-3 flex items-center justify-center rounded-md transition-colors duration-150 hover:ring-2 hover:ring-zinc-400 dark:hover:ring-zinc-500"
+          className="mb-3 flex items-center justify-center rounded-md transition-colors duration-150 hover:ring-2 hover:ring-border-strong"
           aria-label={t("navBar.editProfile")}
         >
           {avatar}
@@ -75,7 +75,7 @@ export function AccountMenu({ onOpenProfile }: AccountMenuProps) {
           // 与微信一致。`openAt` 内部已 preventDefault 掉浏览器原生菜单。
           onClick={onOpenProfile}
           onContextMenu={(e) => menu.openAt(e)}
-          className="mb-3 flex items-center justify-center rounded-md transition-colors duration-150 hover:ring-2 hover:ring-zinc-400 dark:hover:ring-zinc-500"
+          className="mb-3 flex items-center justify-center rounded-md transition-colors duration-150 hover:ring-2 hover:ring-border-strong"
           aria-label={t("account.menuAriaLabel")}
         >
           {avatar}

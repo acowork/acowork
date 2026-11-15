@@ -166,7 +166,7 @@ export function TaskFieldPicker({
         <button
           type="button"
           onClick={onClose}
-          className="rounded bg-zinc-800 px-2 py-0.5 text-10 font-medium text-white hover:bg-zinc-700 hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 dark:bg-zinc-700 dark:hover:bg-zinc-600"
+          className="rounded bg-btn-solid px-2 py-0.5 text-10 font-medium text-white hover:bg-btn-solid-hover hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70"
         >
           {t("pm.list.fields.done")}
         </button>

@@ -844,7 +844,7 @@ export function AgentLibraryDialog({ open, initialNodeId, onClose }: AgentLibrar
                 }
               />
               {localError && (
-                <div className="flex items-start gap-2 rounded-md bg-red-50 p-2 text-xs text-red-700 dark:bg-red-900/20 dark:text-red-300">
+                <div className="flex items-start gap-2 rounded-md bg-danger-surface p-2 text-xs text-danger-text">
                   <X className="mt-0.5 h-3.5 w-3.5 shrink-0" />
                   {localError}
                 </div>
@@ -1053,7 +1053,7 @@ function HubAgentCard({
       {chips.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {chips.map((chip) => (
-            <span key={chip} className="rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700">
+            <span key={chip} className="rounded bg-surface-hover px-1.5 py-0.5 text-10 text-text-secondary">
               {chip}
             </span>
           ))}
@@ -1061,7 +1061,7 @@ function HubAgentCard({
       )}
 
       {deprecation.flagged && (
-        <div className="flex items-start gap-1.5 rounded-md bg-amber-50 px-2 py-1 text-xs text-amber-700 dark:bg-amber-900/20 dark:text-amber-300">
+        <div className="flex items-start gap-1.5 rounded-md bg-warning-surface px-2 py-1 text-xs text-warning-quiet">
           <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0" />
           <span>{deprecation.reason ?? t("agentHub.deprecated")}</span>
         </div>
@@ -1102,7 +1102,7 @@ function HubAvatar({ src, initial, name }: { src: string | null; initial: string
     return (
       <div
         aria-label={name}
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-zinc-100 text-sm font-semibold text-text-secondary dark:bg-zinc-700"
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-surface-hover text-sm font-semibold text-text-secondary"
       >
         {initial}
       </div>

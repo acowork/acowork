@@ -536,7 +536,7 @@ const MessageBubble = React.memo(function MessageBubble({
         <div className="min-w-0 flex flex-col ml-12" onContextMenu={onContextMenu}>
           <div className="max-w-[var(--content-max-width)] rounded-md rounded-bl-sm bg-chat-bubble px-4 py-2.5  select-text break-words overflow-hidden" style={fontSizeStyle}>
             <div className="flex items-start gap-2 min-w-0">
-              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-warning" />
               <div className="min-w-0 flex-1">
                 <div className="whitespace-pre-wrap break-words">{message.content}</div>
                 {message.errorDetail && (
@@ -787,7 +787,7 @@ const MessageBubble = React.memo(function MessageBubble({
   if (message.type === "tool_call") {
     return (
       <div className="flex justify-start">
-        <div className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:border-zinc-700 dark:bg-zinc-800/50  dark:hover:bg-[var(--color-accent)]/15">
+        <div className="flex w-full items-center gap-2 rounded-md border border-border-outer bg-surface-subtle px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15">
           <button
             className="flex flex-1 items-start gap-2 min-w-0"
             onClick={() => setExpanded(!expanded)}
@@ -807,7 +807,7 @@ const MessageBubble = React.memo(function MessageBubble({
       <>
         <div className="flex justify-start" onContextMenu={onContextMenu}>
           <button
-            className="flex w-full items-center gap-2 rounded-md border border-zinc-200 bg-zinc-50 px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 dark:border-zinc-700 dark:bg-zinc-800/50  dark:hover:bg-[var(--color-accent)]/15"
+            className="flex w-full items-center gap-2 rounded-md border border-border-outer bg-surface-subtle px-3 py-1.5 text-left text-xs text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
             onClick={() => setExpanded(!expanded)}
           >
             <Wrench className="h-3 w-3 shrink-0" />
@@ -817,7 +817,7 @@ const MessageBubble = React.memo(function MessageBubble({
             {expanded ? <ChevronDown className="ml-2 h-3 w-3 shrink-0" /> : <ChevronRight className="ml-2 h-3 w-3 shrink-0" />}
           </button>
           {expanded && (
-            <pre className="mt-1 max-w-full overflow-x-auto rounded-md bg-zinc-50 p-3 text-xs text-text-secondary dark:bg-zinc-800/50  select-text">
+            <pre className="mt-1 max-w-full overflow-x-auto rounded-md bg-surface-subtle p-3 text-xs text-text-secondary  select-text">
               {message.content}
             </pre>
           )}

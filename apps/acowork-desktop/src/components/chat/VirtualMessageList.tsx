@@ -545,7 +545,7 @@ export const VirtualMessageList = React.forwardRef<
       {/* Loading more indicator at top */}
       {adapter.isLoading && (
         <div className="flex items-center justify-center py-2">
-          <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+          <span className="inline-block h-4 w-4 animate-spin rounded-full border-2 border-border-strong border-t-zinc-600 dark:border-t-zinc-300" />
           <span className="ml-1.5 text-10 text-text-tertiary ">Loading more...</span>
         </div>
       )}
@@ -554,7 +554,7 @@ export const VirtualMessageList = React.forwardRef<
       {isLoadingSession && messages.length === 0 && (
         <div className="absolute inset-0 flex items-center justify-center">
           <div className="text-center">
-            <span className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+            <span className="inline-block h-8 w-8 animate-spin rounded-full border-2 border-border-strong border-t-zinc-600 dark:border-t-zinc-300" />
             <p className="mt-3 text-xs text-text-tertiary ">Loading conversation...</p>
           </div>
         </div>
@@ -562,13 +562,13 @@ export const VirtualMessageList = React.forwardRef<
 
       {loadError && !isLoadingSession && (
         <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-4">
-          <div className="max-w-md rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 dark:border-red-900 dark:bg-red-950 dark:text-red-300">
+          <div className="max-w-md rounded-md border border-danger-border bg-danger-surface p-3 text-xs text-danger-text">
             {t("chatPanel.sessionLoadFailed")}
-            {loadError && <div className="mt-1 text-red-500 dark:text-red-400">{loadError}</div>}
+            {loadError && <div className="mt-1 text-danger-icon">{loadError}</div>}
           </div>
           <button
             onClick={() => onRetryLoadSession?.()}
-            className="rounded-md bg-zinc-100 px-3 py-1.5 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
+            className="rounded-md bg-surface-hover px-3 py-1.5 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
           >
             {t("chatPanel.retry")}
           </button>
@@ -612,7 +612,7 @@ export const VirtualMessageList = React.forwardRef<
                   // target block (ChatPanel clears pendingLocate after 5s).
                   ...(highlightBlockIndex === virtualRow.index
                     ? {
-                        backgroundColor: "var(--color-highlight-locate, rgba(59, 130, 246, 0.14))",
+                        backgroundColor: "var(--color-highlight-locate)",
                         borderRadius: 8,
                         transition: "background-color 0.6s ease",
                       }

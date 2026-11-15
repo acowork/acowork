@@ -458,7 +458,7 @@ export function ImageViewer({
                         only, leaving the box the geometry module divides by intact. */}
                     <div
                         data-testid="image-viewer-stage"
-                        className="image-checkerboard relative m-auto shrink-0 ring-1 ring-zinc-300/60 dark:ring-zinc-600/60"
+                        className="image-checkerboard relative m-auto shrink-0 ring-1 ring-border-strong/60"
                         style={
                             natural
                                 ? { width: natural.width * scale, height: natural.height * scale }
@@ -513,14 +513,14 @@ export function ImageViewer({
             {/* Zoom cluster — top-right of the preview, same shape as the
                 chat's Mermaid viewer toolbar so the two read as one control. */}
             {natural && (
-                <div className="absolute right-2 top-2 flex items-center gap-0.5 rounded-md border border-black/10 bg-white/90 px-1 py-0.5 shadow-sm backdrop-blur dark:border-white/10 dark:bg-zinc-800/90">
+                <div className="absolute right-2 top-2 flex items-center gap-0.5 rounded-md border border-black/10 bg-surface/90 px-1 py-0.5 shadow-sm backdrop-blur dark:border-white/10">
                     <button
                         type="button"
                         onClick={() => zoomFromCentre(zoomStepFactor(-1))}
                         disabled={scale <= MIN_ZOOM}
                         aria-label={t("fileEditor.imageViewer.zoomOut")}
                         title={t("fileEditor.imageViewer.zoomOut")}
-                        className="flex items-center justify-center rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
+                        className="flex items-center justify-center rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
                     >
                         <ZoomOut className="h-3.5 w-3.5" />
                     </button>
@@ -536,7 +536,7 @@ export function ImageViewer({
                         disabled={scale >= MAX_ZOOM}
                         aria-label={t("fileEditor.imageViewer.zoomIn")}
                         title={t("fileEditor.imageViewer.zoomIn")}
-                        className="flex items-center justify-center rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
+                        className="flex items-center justify-center rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
                     >
                         <ZoomIn className="h-3.5 w-3.5" />
                     </button>
@@ -546,7 +546,7 @@ export function ImageViewer({
                         onClick={fitToViewport}
                         aria-label={t("fileEditor.imageViewer.fit")}
                         title={t("fileEditor.imageViewer.fit")}
-                        className="flex items-center justify-center rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
+                        className="flex items-center justify-center rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
                     >
                         <Maximize2 className="h-3.5 w-3.5" />
                     </button>

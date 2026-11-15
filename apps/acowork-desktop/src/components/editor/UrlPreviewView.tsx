@@ -113,7 +113,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
     return (
         <div className="flex h-full w-full flex-col">
             {/* ── Navigation Toolbar ── */}
-            <div className="flex shrink-0 items-center gap-1 border-b border-border-divider bg-zinc-50 px-2 py-1.5 dark:bg-zinc-800">
+            <div className="flex shrink-0 items-center gap-1 border-b border-border-divider bg-surface-subtle px-2 py-1.5">
                 {/* Back */}
                 <button
                     onClick={() => { try { iframeRef.current?.contentWindow?.history.back(); } catch {} }}
@@ -150,7 +150,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                         onFocus={() => { setUrlInputValue(currentUrl); setIsEditingUrl(true); }}
                         onBlur={handleUrlBlur}
                         onKeyDown={handleUrlKeyDown}
-                        className="w-full border-0 bg-transparent px-2 py-1 text-xs text-text-secondary outline-none placeholder-zinc-400 focus:ring-0  dark:focus:text-zinc-100"
+                        className="w-full border-0 bg-transparent px-2 py-1 text-xs text-text-secondary outline-none placeholder-text-disabled focus:ring-0  dark:focus:text-zinc-100"
                         placeholder={currentUrl}
                     />
                 </div>
@@ -160,7 +160,7 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                     href={currentUrl}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-sky-600 transition-colors hover:bg-sky-50 dark:text-sky-400 dark:hover:bg-sky-950"
+                    className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-info transition-colors hover:bg-info-surface"
                     title={t("fileEditor.openInBrowser")}
                 >
                     <ExternalLink className="h-3.5 w-3.5" />
@@ -179,13 +179,13 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
 
                 {/* Slow-load hint (shows after 5s if page hasn't loaded) — non-blocking */}
                 {showSlowHint && loading && (
-                    <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center gap-2 bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950 dark:text-amber-300">
+                    <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center gap-2 bg-warning-surface px-3 py-2 text-xs text-warning-quiet">
                         <span>{t("fileEditor.iframeBlockedHint")}</span>
                         <a
                             href={currentUrl}
                             target="_blank"
                             rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 font-medium text-sky-600 underline underline-offset-2 hover:text-sky-700 dark:text-sky-400 dark:hover:text-sky-300"
+                            className="inline-flex items-center gap-1 font-medium text-info underline underline-offset-2 hover:text-info"
                         >
                             {t("fileEditor.openInBrowser")}
                             <ExternalLink className="h-3 w-3" />

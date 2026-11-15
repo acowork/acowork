@@ -71,7 +71,7 @@ export function PmSettingsPanel({ width, onResizeStart, onClose }: PmSettingsPan
             type="button"
             onClick={onClose}
             aria-label={t("common.close")}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
+            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
           >
             ×
           </button>
@@ -326,7 +326,7 @@ function ProjectActionsSection({ project }: { project: PmProject }) {
         type="button"
         disabled={offline}
         onClick={() => setConfirmDelete(true)}
-        className="w-full rounded-md border border-red-300/70 px-3 py-1.5 text-xs font-medium text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:border-red-800/70 dark:text-red-400 dark:hover:bg-red-950/40"
+        className="w-full rounded-md border border-danger-border/70 px-3 py-1.5 text-xs font-medium text-danger-text transition-colors hover:bg-danger-surface disabled:cursor-not-allowed disabled:opacity-40"
       >
         {t("common.deleteProject")}
       </button>
@@ -353,9 +353,9 @@ function ServiceStatusSection() {
 
   const state =
     healthy === true
-      ? { label: t("pm.settingsPanel.serviceOnline"), cls: "text-emerald-600 dark:text-emerald-400" }
+      ? { label: t("pm.settingsPanel.serviceOnline"), cls: "text-ok" }
       : healthy === false
-        ? { label: t("pm.settingsPanel.serviceOffline"), cls: "text-red-600 dark:text-red-400" }
+        ? { label: t("pm.settingsPanel.serviceOffline"), cls: "text-danger-text" }
         : { label: t("pm.settingsPanel.serviceUnknown"), cls: "text-text-tertiary" };
 
   return (

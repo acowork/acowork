@@ -34,7 +34,7 @@ export function NavButton({ active, onClick, tooltip, tooltipPosition = "right",
                     "relative flex h-10 w-10 items-center justify-center rounded-md transition-colors duration-150",
                     active
                         ? "hover:bg-[var(--color-accent)]/10"
-                        : "text-text-tertiary hover:text-zinc-600 hover:bg-[var(--color-accent)]/10  dark:hover:text-zinc-300",
+                        : "text-text-tertiary hover:text-text-tertiary hover:bg-[var(--color-accent)]/10 ",
                     className,
                 )}
                 style={active ? { color: "var(--color-accent)" } : undefined}

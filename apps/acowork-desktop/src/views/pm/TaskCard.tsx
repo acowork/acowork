@@ -139,9 +139,9 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
           // 让两段共用外圆角，与设置面板的卡片同一副骨架。
           "group w-full overflow-hidden rounded-md border border-border-outer text-left transition-colors",
           SURFACE_HEAD_CN,
-          "hover:border-zinc-300 dark:hover:border-zinc-600",
+          "hover:border-border-strong",
           "focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[var(--color-accent)]",
-          needsReview && "border-amber-300 dark:border-amber-700/60",
+          needsReview && "border-warning-border",
           isDragging && "opacity-40",
           dropOver && "ring-2 ring-[var(--color-accent)]",
           depth > 0 && "ml-4",
@@ -154,7 +154,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
         <div
           className={cn(
             "flex items-start gap-1.5 px-2.5 py-1.5",
-            needsReview && "bg-amber-50/70 dark:bg-amber-950/40",
+            needsReview && "bg-warning-surface/70",
           )}
         >
           <TaskTypeIcon type={task.type} className="mt-0.5 text-xs leading-none" />
@@ -174,7 +174,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
           <PriorityBadge priority={task.priority} />
 
           {task.is_blocked && (
-            <span className="inline-flex items-center gap-0.5 text-red-600 dark:text-red-400" title="blocked">
+            <span className="inline-flex items-center gap-0.5 text-danger-text" title="blocked">
               🔒
             </span>
           )}
@@ -190,7 +190,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
             <span
               className={cn(
                 "inline-flex items-center gap-0.5",
-                overdue ? "font-medium text-red-600 dark:text-red-400" : "",
+                overdue ? "font-medium text-danger-text" : "",
               )}
             >
               <span aria-hidden>📅</span>
@@ -231,11 +231,11 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
             Agent 刚建的任务等人类批准开工（批准后 status 仍留在待办列，
             由 Agent 自己 pm_claim_task 推进）。第三段同样是发丝线分隔。 */}
         {needsReview && (
-          <div className="border-t border-amber-200/70 bg-panel-inset px-2.5 py-1.5 dark:border-amber-800/40">
+          <div className="border-t border-warning-border/70 bg-panel-inset px-2.5 py-1.5">
             {creatorName && (
               <p className="mb-1.5 text-10 text-text-tertiary ">
                 {t("pm.review.createdByLabel")}{" "}
-                <span className="font-medium text-amber-700 dark:text-amber-300">{creatorName}</span>
+                <span className="font-medium text-warning-quiet">{creatorName}</span>
               </p>
             )}
             <div className="flex items-center gap-1.5">
@@ -247,7 +247,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
                   void handleApprove();
                 }}
                 onKeyDown={(e) => e.stopPropagation()}
-                className="rounded bg-green-600 px-2 py-0.5 text-10 font-medium text-white hover:bg-green-500 disabled:cursor-not-allowed disabled:opacity-40 dark:bg-green-700 dark:hover:bg-green-600"
+                className="rounded bg-ok-solid px-2 py-0.5 text-10 font-medium text-white hover:bg-ok-solid/90 disabled:cursor-not-allowed disabled:opacity-40"
               >
                 ✓ {t("pm.review.approve")}
               </button>
@@ -259,7 +259,7 @@ export function TaskCard({ task, onOpenTask, className, depth = 0 }: TaskCardPro
                   setRejecting(true);
                 }}
                 onKeyDown={(e) => e.stopPropagation()}
-                className="rounded bg-red-600 px-2 py-0.5 text-10 font-medium text-white hover:bg-red-500 dark:bg-red-700 dark:hover:bg-red-600"
+                className="rounded bg-danger-solid px-2 py-0.5 text-10 font-medium text-white hover:bg-danger-solid"
               >
                 ✗ {t("pm.review.reject")}
               </button>

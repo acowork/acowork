@@ -54,13 +54,13 @@ const NAME_KEY: Record<ServiceType, string> = {
  *  red = offline. */
 function dotCls(row: ServiceHealth): string {
   if (!row.online) {
-    return "bg-red-500";
+    return "bg-danger-solid";
   }
   if (row.latency_ms > 800) {
     // Slow but reachable — amber so the user can see something is off
-    return "bg-amber-500";
+    return "bg-warning-solid";
   }
-  return "bg-emerald-500";
+  return "bg-ok-solid";
 }
 
 /** Per-group label key. */
@@ -143,7 +143,7 @@ export function ServicesPanel() {
               (legacy per-endpoint walk on a pre-P2 Gateway). */}
           {report && (
             <span
-              className="shrink-0 whitespace-nowrap rounded-full border border-zinc-300 px-1.5 py-px text-10 leading-4 text-text-tertiary dark:border-zinc-600 "
+              className="shrink-0 whitespace-nowrap rounded-full border border-border-strong px-1.5 py-px text-10 leading-4 text-text-tertiary "
               data-testid="services-source"
             >
               {t(
@@ -174,7 +174,7 @@ export function ServicesPanel() {
 
       {/* Gateway-down banner (only when the full report says so) */}
       {report && !report.gateway_reachable && (
-        <div className="rounded-md border border-red-300/60 bg-red-50 px-3 py-2 text-xs text-red-900 dark:border-red-700/60 dark:bg-red-950/40 dark:text-red-100">
+        <div className="rounded-md border border-danger-border/60 bg-danger-surface px-3 py-2 text-xs text-danger-text-strong">
           {t("settings.services.gatewayDownHint")}
         </div>
       )}
@@ -232,7 +232,7 @@ export function ServicesPanel() {
 
       {/* Empty state — first render before any diagnose() call */}
       {!report && !loading && (
-        <div className="rounded-md border border-dashed border-zinc-300 px-3 py-6 text-center text-xs text-text-tertiary dark:border-zinc-700 ">
+        <div className="rounded-md border border-dashed border-border-strong px-3 py-6 text-center text-xs text-text-tertiary ">
           {t("settings.services.emptyHint")}
         </div>
       )}

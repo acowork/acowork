@@ -54,7 +54,7 @@ function MenuButton({
       onClick={onClick}
       className={cn(
         "flex h-6 w-6 shrink-0 items-center justify-center rounded text-text-tertiary transition-colors",
-        "hover:bg-[var(--color-accent)]/10 hover:text-zinc-800 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100",
+        "hover:bg-[var(--color-accent)]/10 hover:text-text dark:hover:bg-[var(--color-accent)]/15",
       )}
     >
       <Icon className="h-3 w-3" aria-hidden />
@@ -88,13 +88,13 @@ export function TableBubbleMenu({ editor, readOnly }: TableBubbleMenuProps) {
       <MenuButton icon={ArrowDown} label={t("doc.tbAddRowAfter")} onClick={() => chain().addRowAfter().run()} />
       <MenuButton icon={ArrowLeft} label={t("doc.tbAddColumnBefore")} onClick={() => chain().addColumnBefore().run()} />
       <MenuButton icon={ArrowRight} label={t("doc.tbAddColumnAfter")} onClick={() => chain().addColumnAfter().run()} />
-      <span className="mx-0.5 h-4 w-px bg-zinc-200 dark:bg-zinc-700" aria-hidden />
+      <span className="mx-0.5 h-4 w-px bg-surface-hover" aria-hidden />
       <MenuButton icon={TableRowsSplit} label={t("doc.tbDeleteRow")} onClick={() => chain().deleteRow().run()} />
       <MenuButton icon={TableColumnsSplit} label={t("doc.tbDeleteColumn")} onClick={() => chain().deleteColumn().run()} />
-      <span className="mx-0.5 h-4 w-px bg-zinc-200 dark:bg-zinc-700" aria-hidden />
+      <span className="mx-0.5 h-4 w-px bg-surface-hover" aria-hidden />
       <MenuButton icon={PanelTop} label={t("doc.tbToggleHeaderRow")} onClick={() => chain().toggleHeaderRow().run()} />
       <MenuButton icon={PanelLeft} label={t("doc.tbToggleHeaderColumn")} onClick={() => chain().toggleHeaderColumn().run()} />
-      <span className="mx-0.5 h-4 w-px bg-zinc-200 dark:bg-zinc-700" aria-hidden />
+      <span className="mx-0.5 h-4 w-px bg-surface-hover" aria-hidden />
       <MenuButton icon={Trash2} label={t("doc.tbDeleteTable")} onClick={() => chain().deleteTable().run()} />
     </BubbleMenu>
   );

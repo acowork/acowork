@@ -79,7 +79,7 @@ export function RejectDialog({ open, taskTitle, onConfirm, onCancel }: RejectDia
           <button
             type="button"
             onClick={handleConfirm}
-            className="rounded-md bg-red-600 px-4 py-1.5 text-xs font-medium text-white hover:bg-red-500 dark:bg-red-700 dark:hover:bg-red-600"
+            className="rounded-md bg-danger-solid px-4 py-1.5 text-xs font-medium text-white hover:bg-danger-solid"
           >
             {t("pm.reject.confirm")}
           </button>

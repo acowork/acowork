@@ -206,7 +206,7 @@ export function NoNodeBanner({
                 <p className="text-10 text-text-tertiary">{t("agentHub.remoteNodeHostHint")}</p>
               )}
               <div className="flex items-start gap-2">
-                <code className="min-w-0 flex-1 overflow-x-auto rounded bg-zinc-100 px-2 py-1.5 text-10 text-text-secondary dark:bg-zinc-700">
+                <code className="min-w-0 flex-1 overflow-x-auto rounded bg-surface-hover px-2 py-1.5 text-10 text-text-secondary">
                   {command}
                 </code>
                 <button

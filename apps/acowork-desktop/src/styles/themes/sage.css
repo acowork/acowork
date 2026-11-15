@@ -1,0 +1,95 @@
+/*
+ * Sage theme pack — grey-green light / mossy dark.
+ *
+ * App-style palette (not a code-editor theme): a restful green tint
+ * across the whole UI at low saturation.
+ *
+ * Same contract as paper.css (the reference pack): file name is the id, only contract tokens
+ * from globals.css are overridden, and both light and dark scopes exist.
+ */
+
+:root.theme-sage {
+  --color-bg: hsl(150 14% 96%);
+  --color-page-bg: hsl(150 10% 91%);
+  --color-panel-block: hsl(150 12% 94%);
+  --color-panel-inset: hsl(150 10% 89%);
+  --color-panel-inset-2: hsl(150 9% 85%);
+  --color-modal-surface: hsl(150 16% 98%);
+  --color-editor-canvas: hsl(150 13% 95%);
+  --color-nav-surface: hsl(150 10% 89%);
+  --color-nav-item-hover: hsl(150 9% 83%);
+  --color-nav-divider: hsl(150 8% 79%);
+  --color-right-panel: hsl(150 11% 93%);
+  --color-chat-body: hsl(150 13% 95%);
+  --color-chat-title: hsl(150 9% 87%);
+  --color-chat-input-bg: hsl(150 16% 98%);
+  --color-input-bg: hsl(150 16% 98%);
+  --color-border-outer: hsl(150 9% 76%);
+  --color-border-divider: hsl(150 8% 83%);
+  --color-menu-divider: hsl(150 8% 81%);
+  --color-text: hsl(160 12% 26%);
+  --color-text-secondary: hsl(158 10% 38%);
+  --color-text-tertiary: hsl(155 8% 50%);
+  --color-text-disabled: hsl(150 7% 66%);
+  --color-menu-text: hsl(159 11% 28%);
+  --color-menu-icon: hsl(154 9% 55%);
+  --color-menu-danger: hsl(4 60% 43%);
+  --color-menu-danger-hover: hsl(4 65% 95%);
+  --color-menu-warning: hsl(38 70% 39%);
+  --color-menu-warning-hover: hsl(38 80% 94%);
+  --color-danger-surface: hsl(4 65% 96%);
+  --color-danger-surface-hover: hsl(4 65% 92%);
+  --color-danger-border: hsl(4 45% 84%);
+  --color-danger-text: hsl(4 60% 41%);
+  --color-danger-text-strong: hsl(4 65% 31%);
+  --color-danger-icon: hsl(4 60% 50%);
+  --color-control-track: hsl(150 9% 76%);
+  --color-control-outline: hsl(152 10% 60%);
+  --color-highlight-locate: hsl(150 40% 45% / 0.16);
+  --color-muted: hsl(150 11% 90%);
+  --color-muted-foreground: hsl(155 10% 44%);
+  --shadow-menu: 0 4px 6px -1px hsl(150 15% 30% / 0.12), 0 2px 4px -2px hsl(150 15% 30% / 0.12);
+}
+
+:root.theme-sage.dark {
+  --color-bg: hsl(160 9% 15%);
+  --color-page-bg: hsl(160 9% 11%);
+  --color-panel-block: hsl(160 8% 20%);
+  --color-panel-inset: hsl(160 9% 12%);
+  --color-panel-inset-2: hsl(160 9% 10%);
+  --color-modal-surface: hsl(160 9% 24%);
+  --color-editor-canvas: hsl(160 9% 16%);
+  --color-nav-surface: hsl(160 9% 12%);
+  --color-nav-item-hover: hsl(160 8% 22%);
+  --color-nav-divider: hsl(160 7% 28%);
+  --color-right-panel: hsl(160 9% 17%);
+  --color-chat-body: hsl(160 9% 15%);
+  --color-chat-title: hsl(160 8% 21%);
+  --color-chat-input-bg: hsl(160 8% 24%);
+  --color-input-bg: hsl(160 8% 24%);
+  --color-border-outer: hsl(160 6% 32%);
+  --color-border-divider: hsl(160 7% 26%);
+  --color-menu-divider: hsl(160 7% 29%);
+  --color-text: hsl(140 15% 86%);
+  --color-text-secondary: hsl(140 12% 74%);
+  --color-text-tertiary: hsl(140 10% 62%);
+  --color-text-disabled: hsl(140 8% 46%);
+  --color-menu-text: hsl(142 14% 84%);
+  --color-menu-icon: hsl(145 10% 56%);
+  --color-menu-danger: hsl(4 75% 68%);
+  --color-menu-danger-hover: hsl(4 45% 25% / 0.3);
+  --color-menu-warning: hsl(40 80% 68%);
+  --color-menu-warning-hover: hsl(40 45% 22% / 0.3);
+  --color-danger-surface: hsl(4 35% 22%);
+  --color-danger-surface-hover: hsl(4 35% 28%);
+  --color-danger-border: hsl(4 30% 36%);
+  --color-danger-text: hsl(4 70% 74%);
+  --color-danger-text-strong: hsl(4 75% 84%);
+  --color-danger-icon: hsl(4 75% 68%);
+  --color-control-track: hsl(160 6% 34%);
+  --color-control-outline: hsl(150 10% 54%);
+  --color-highlight-locate: hsl(150 40% 55% / 0.24);
+  --color-muted: hsl(160 8% 21%);
+  --color-muted-foreground: hsl(140 12% 68%);
+  --shadow-menu-dark: 0 4px 6px -1px hsl(170 20% 2% / 0.55), 0 2px 4px -2px hsl(170 20% 2% / 0.55);
+}

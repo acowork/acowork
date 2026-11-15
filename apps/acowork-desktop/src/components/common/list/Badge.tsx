@@ -23,7 +23,7 @@ export interface BadgeProps extends HTMLAttributes<HTMLSpanElement> {
 }
 
 const toneClasses: Record<BadgeTone, string> = {
-  neutral: "bg-zinc-100 text-text-tertiary dark:bg-zinc-800 ",
+  neutral: "bg-surface text-text-tertiary ",
   accent:
     "bg-[var(--color-accent)]/10 text-[var(--color-accent)] dark:bg-[var(--color-accent)]/20",
   success: "bg-[var(--color-ok)]/12 text-[var(--color-ok)]",

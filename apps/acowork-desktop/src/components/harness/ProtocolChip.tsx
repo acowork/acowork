@@ -22,7 +22,7 @@ export function ProtocolChip({ badge }: { badge: ProtocolBadge }) {
   if (badge.kind === "none") return null;
   if (badge.kind === "blocked") {
     return (
-      <span className="text-amber-500" title={t(`harness.probeBlockedReason_${badge.reason}`)}>
+      <span className="text-warning" title={t(`harness.probeBlockedReason_${badge.reason}`)}>
         {t("harness.probeBlockedShort")}
       </span>
     );
@@ -49,7 +49,7 @@ export function ProtocolChip({ badge }: { badge: ProtocolBadge }) {
       <span aria-hidden="true">Ⓡ</span>
       {t("harness.shapeResponses")}
       {badge.kind === "degraded" && (
-        <span className="h-1.5 w-1.5 rounded-full bg-amber-500" aria-hidden="true" />
+        <span className="h-1.5 w-1.5 rounded-full bg-warning-solid" aria-hidden="true" />
       )}
     </span>
   );

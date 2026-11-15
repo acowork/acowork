@@ -2,7 +2,7 @@
  * The button surface vocabulary is closed: `btn-solid` and `btn-accent`.
  *
  * Why this file exists:
- *   These classes replaced hand-rolled `bg-zinc-200` / `border-zinc-300`
+ *   These classes replaced hand-rolled `bg-surface-hover` / `border-border-strong`
  *   button surfaces (globals.css "Button surface variants"), and the app
  *   settled on solid fills — a neutral tone for secondary actions and the
  *   accent fill for the one primary/confirm action in a dialog (including

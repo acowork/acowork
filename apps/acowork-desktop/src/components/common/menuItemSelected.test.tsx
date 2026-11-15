@@ -75,9 +75,12 @@ describe("the popup cursor highlight", () => {
   });
 
   it("leaves the destructive / warning variants their own hue", () => {
+    // Pinned by TOKEN, not by hex: a theme pack must be free to recolour
+    // these variants. What matters is that each keeps its own hue instead of
+    // falling back to the accent tint used by ordinary rows.
     const css = read("styles/globals.css");
-    expect(css).toMatch(/--danger:hover \{[^}]*red/);
-    expect(css).toMatch(/--warning:hover \{[^}]*#fffbeb/);
+    expect(css).toMatch(/--danger:hover \{[^}]*--color-menu-danger-hover/);
+    expect(css).toMatch(/--warning:hover \{[^}]*--color-menu-warning-hover/);
   });
 });
 
@@ -103,7 +106,7 @@ it.each(MENUS)("%s routes every selected row through it", (rel, expected, banned
   // pull the token in, so a new menu row cannot ship text-only by default.
   expect(src.split("menuItemSelected").length - 1).toBe(expected + 1);
   // The hand-rolled two-space hover string these rows used before is gone.
-  expect(src).not.toContain('"hover:bg-zinc-50  dark:hover:bg-zinc-700/50"');
+  expect(src).not.toContain('"hover:bg-surface-subtle "');
   // A selected row's LABEL must not re-apply the accent foreground behind
   // the token's back. Scoped to the label expressions, not the whole file:
   // the check mark and the surrounding badges stay accent on purpose.
@@ -148,7 +151,10 @@ describe("interactiveHover — one highlight for buttons and list rows", () => {
   });
 
   it("solid primary buttons echo the accent with a ring, never a wash", () => {
-    expect(dialogButtonPrimary).toContain("bg-zinc-800");
+    // Pinned by TOKEN: the solid fill is the cross-mode btn-solid token
+    // (light/dark values live in globals.css), not a literal zinc class.
+    expect(dialogButtonPrimary).toContain("bg-btn-solid");
+    expect(dialogButtonPrimary).toContain("hover:bg-btn-solid-hover");
     expect(dialogButtonPrimary).toContain("hover:ring-2");
     expect(dialogButtonPrimary).toContain("hover:ring-[var(--color-accent)]/70");
     expect(dialogButtonPrimary).not.toContain("hover:bg-[var(--color-accent)]");
@@ -162,10 +168,11 @@ describe("interactiveHover — one highlight for buttons and list rows", () => {
         .split(/\r?\n/)
         .forEach((line, i) => {
           if (!NEUTRAL_BUTTON_HOVER.test(line)) return;
-          // Solid dark primary buttons keep their opaque fill and darken it
-          // by one step. They may keep that neutral hover ONLY while they
-          // also echo the accent with a hover ring (see dialogButtonPrimary).
-          if (/bg-zinc-(?:800|900)/.test(line) &&
+          // Solid primary buttons keep their opaque fill (btn-solid token or a
+          // whitelisted cross-mode zinc class) and darken it by one step.
+          // They may keep that neutral hover ONLY while they also echo the
+          // accent with a hover ring (see dialogButtonPrimary).
+          if (/(?:bg-zinc-(?:800|900)|bg-btn-solid)\b/.test(line) &&
               line.includes("hover:ring-[var(--color-accent)]")) return;
           offenders.push(`${relative(srcDir, file)}:${i + 1}`);
         });

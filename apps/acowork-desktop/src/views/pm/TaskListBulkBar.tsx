@@ -68,7 +68,7 @@ export function TaskListBulkBar({ count, onOpen, onDelete, onClear }: TaskListBu
         type="button"
         onClick={onDelete}
         aria-label={t("pm.list.bulkDelete")}
-        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-border-outer bg-panel-block px-2 text-xs text-red-600 hover:bg-[var(--color-accent)]/10 dark:text-red-400 dark:hover:bg-[var(--color-accent)]/15"
+        className="inline-flex h-6 shrink-0 items-center gap-1 rounded-md border border-border-outer bg-panel-block px-2 text-xs text-danger-text hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
       >
         <span aria-hidden>🗑</span>
         {t("common.delete")}

@@ -143,7 +143,7 @@ export function GroupChatPromptCard({ sessionId }: { sessionId: string }) {
         aria-label={t("groupChatPrompt.edit")}
         title={t("groupChatPrompt.edit")}
         data-testid="group-chat-prompt-edit"
-        className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:text-zinc-300"
+        className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary"
       >
         <Pencil className="h-3 w-3" />
       </button>
@@ -155,7 +155,7 @@ export function GroupChatPromptCard({ sessionId }: { sessionId: string }) {
           aria-label={t("groupChatPrompt.restore")}
           title={t("groupChatPrompt.restore")}
           data-testid="group-chat-prompt-restore"
-          className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:cursor-not-allowed disabled:opacity-40 dark:hover:text-zinc-300"
+          className="flex h-5 w-5 items-center justify-center rounded text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary disabled:cursor-not-allowed disabled:opacity-40"
         >
           {busy ? (
             <Loader2 className="h-3 w-3 animate-spin" />
@@ -183,14 +183,14 @@ export function GroupChatPromptCard({ sessionId }: { sessionId: string }) {
             <Loader2 className="h-3.5 w-3.5 animate-spin" />
           </div>
         ) : error ? (
-          <p className="text-10 text-red-500">{error}</p>
+          <p className="text-10 text-danger-icon">{error}</p>
         ) : (
           <div className="space-y-2">
             <p className="text-10 leading-relaxed text-text-tertiary">
               {t(editable ? "groupChatPrompt.hint" : "groupChatPrompt.readOnlyHint")}
             </p>
             <div className="flex items-center justify-between gap-2">
-              <span className={`text-10 ${bytes > MAX_BYTES ? "text-red-500" : "text-text-tertiary"}`}>
+              <span className={`text-10 ${bytes > MAX_BYTES ? "text-danger-icon" : "text-text-tertiary"}`}>
                 {bytes} / {MAX_BYTES}
               </span>
               {editable && (

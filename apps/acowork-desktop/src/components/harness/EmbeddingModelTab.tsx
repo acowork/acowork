@@ -542,7 +542,7 @@ export function EmbeddingModelTab() {
                             <span
                                 className={cn(
                                     "h-2 w-2 rounded-full",
-                                    serviceRunning ? "bg-[var(--color-accent)]" : "bg-zinc-400",
+                                    serviceRunning ? "bg-[var(--color-accent)]" : "bg-loading",
                                 )}
                             />
                             <span className={cn(
@@ -578,8 +578,8 @@ export function EmbeddingModelTab() {
                                     <span className="flex items-center gap-1 text-11">
                                         {testResult.success ? (
                                             <>
-                                                <CheckCircle2 className="h-3 w-3 text-green-500" />
-                                                <span className="text-green-600 dark:text-green-400">
+                                                <CheckCircle2 className="h-3 w-3 text-ok" />
+                                                <span className="text-ok">
                                                     {t("embedding.testPassed")}
                                                     {testResult.dimension && ` (${testResult.dimension}d)`}
                                                     {testResult.latency_ms != null && ` ${testResult.latency_ms}ms`}
@@ -587,8 +587,8 @@ export function EmbeddingModelTab() {
                                             </>
                                         ) : (
                                             <>
-                                                <XCircle className="h-3 w-3 text-red-500" />
-                                                <span className="text-red-600 dark:text-red-400">
+                                                <XCircle className="h-3 w-3 text-danger-icon" />
+                                                <span className="text-danger-text">
                                                     {testResult.error ?? t("embedding.testFailed")}
                                                 </span>
                                             </>
@@ -646,7 +646,7 @@ export function EmbeddingModelTab() {
                                     aria-label={loading ? t("embedding.loading") : t("embedding.refresh")}
                                     onClick={loadModels}
                                     disabled={loading}
-                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary disabled:opacity-60 dark:hover:bg-[var(--color-accent)]/15 transition-colors"
                                 >
                                     {loading ? (
                                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -712,7 +712,7 @@ export function EmbeddingModelTab() {
                                 <button
                                     aria-label={t("embedding.addCustomProvider")}
                                     onClick={() => setCustomDialogOpen(true)}
-                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15 transition-colors"
                                 >
                                     <Plus className="h-3.5 w-3.5" />
                                 </button>
@@ -725,7 +725,7 @@ export function EmbeddingModelTab() {
                                     aria-label={cloudLoading ? t("embedding.loading") : t("embedding.refresh")}
                                     onClick={loadCloudProviders}
                                     disabled={cloudLoading}
-                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 disabled:opacity-60 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
+                                    className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary disabled:opacity-60 dark:hover:bg-[var(--color-accent)]/15 transition-colors"
                                 >
                                     {cloudLoading ? (
                                         <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -749,7 +749,7 @@ export function EmbeddingModelTab() {
                             </span>
                             <span className="text-text-tertiary">· {cloudActive.dimension}d</span>
                             {!cloudActive.has_api_key && (
-                                <span className="text-amber-600 dark:text-amber-400">
+                                <span className="text-warning">
                                     · {t("embedding.apiKeyMissing")}
                                 </span>
                             )}
@@ -759,7 +759,7 @@ export function EmbeddingModelTab() {
                     {/* Cloud error inline (kept as an emphasised box —
                         errors need to read at a glance). */}
                     {cloudError && (
-                        <div className="mx-3 mt-2 rounded border border-red-200 bg-red-50 px-2 py-1 text-11 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+                        <div className="mx-3 mt-2 rounded border border-danger-border bg-danger-surface px-2 py-1 text-11 text-danger-text">
                             {cloudError}
                         </div>
                     )}
@@ -867,7 +867,7 @@ export function EmbeddingModelTab() {
  *
  * Standard settings-card chrome (ListBox + ListRow), the same grammar as the
  * sibling service-status / local-models cards. It was a hand-rolled
- * `border-amber-200 bg-amber-50` box, which read as an alert that never
+ * `border-warning-border bg-warning-surface` box, which read as an alert that never
  * cleared — the tint had nothing to do with severity, only with "this box needs
  * a rebuild".
  *
@@ -956,7 +956,7 @@ function MigrationPanel({
                                             user is actively waiting on. */}
                                         {inFlight && (
                                             <div className="flex w-24 items-center gap-1">
-                                                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                                                <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-hover">
                                                     <div
                                                         className="h-full rounded-full bg-[var(--color-accent)] transition-all"
                                                         style={{ width: `${pct}%` }}
@@ -1175,7 +1175,7 @@ function ModelCard({
             {/* Download progress bar */}
             {isDownloading && typeof progress === "number" && (
                 <div className="mt-2 space-y-1">
-                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+                    <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-hover">
                         <div
                             className="h-full rounded-full transition-all duration-300"
                             style={{
@@ -1278,7 +1278,7 @@ function CloudProviderCard({
                     {!keyEditing ? (
                         hasKey ? (
                             <>
-                                <span className="inline-flex items-center gap-1 rounded bg-green-50 px-1.5 py-0.5 text-10 font-medium text-green-700 dark:bg-green-950 dark:text-green-300">
+                                <span className="inline-flex items-center gap-1 rounded bg-ok-surface px-1.5 py-0.5 text-10 font-medium text-ok">
                                     <CheckCircle2 className="h-2.5 w-2.5" />
                                     Key
                                 </span>
@@ -1323,7 +1323,7 @@ function CloudProviderCard({
                                 value={keyDraft}
                                 onChange={(e) => onChangeKeyDraft(e.target.value)}
                                 placeholder={provider.env[0] ?? "API Key"}
-                                className="w-44 rounded-md border border-zinc-300 px-2 py-1 text-11 dark:border-zinc-600 dark:bg-zinc-800"
+                                className="w-44 rounded-md border border-border-strong px-2 py-1 text-11 dark:bg-zinc-800"
                                 autoFocus
                                 onKeyDown={(e) => {
                                     if (e.key === "Enter") onSubmitKey();
@@ -1359,8 +1359,8 @@ function CloudProviderCard({
                 <div className="mb-2 flex items-center gap-1 text-11">
                     {testResult.success ? (
                         <>
-                            <CheckCircle2 className="h-3 w-3 text-green-500" />
-                            <span className="text-green-600 dark:text-green-400">
+                            <CheckCircle2 className="h-3 w-3 text-ok" />
+                            <span className="text-ok">
                                 {t("embedding.testPassed")}
                                 {testResult.dimension && ` (${testResult.dimension}d)`}
                                 {testResult.latency_ms != null && ` ${testResult.latency_ms}ms`}
@@ -1368,8 +1368,8 @@ function CloudProviderCard({
                         </>
                     ) : (
                         <>
-                            <XCircle className="h-3 w-3 text-red-500" />
-                            <span className="text-red-600 dark:text-red-400">
+                            <XCircle className="h-3 w-3 text-danger-icon" />
+                            <span className="text-danger-text">
                                 {testResult.error ?? t("embedding.testFailed")}
                             </span>
                         </>
@@ -1385,7 +1385,7 @@ function CloudProviderCard({
                     return (
                         <div
                             key={m.id}
-                            className="flex items-center justify-between rounded border border-zinc-100 px-2 py-1.5 text-11 dark:border-zinc-800"
+                            className="flex items-center justify-between rounded border border-border-outer px-2 py-1.5 text-11"
                         >
                             <div className="flex min-w-0 items-center gap-2">
                                 <span className="font-medium">{m.name || m.id}</span>
@@ -1668,7 +1668,7 @@ function AddCustomEmbeddingProviderDialog({
                             <button
                                 type="button"
                                 onClick={addModel}
-                                className="inline-flex items-center gap-1 text-11 text-text-tertiary hover:text-zinc-700  dark:hover:text-zinc-200"
+                                className="inline-flex items-center gap-1 text-11 text-text-tertiary hover:text-text-secondary "
                             >
                                 <Plus className="h-3 w-3" />
                                 {t("embedding.customAddModel")}
@@ -1678,7 +1678,7 @@ function AddCustomEmbeddingProviderDialog({
                             {models.map((m, idx) => (
                                 <div
                                     key={idx}
-                                    className="rounded border border-border-outer bg-zinc-50 p-2  dark:bg-zinc-800"
+                                    className="rounded border border-border-outer bg-surface-subtle p-2 "
                                 >
                                     <div className="mb-1 grid grid-cols-2 gap-2">
                                         <input
@@ -1725,7 +1725,7 @@ function AddCustomEmbeddingProviderDialog({
                                             <button
                                                 type="button"
                                                 onClick={() => removeModel(idx)}
-                                                className="ml-auto text-text-tertiary hover:text-red-500"
+                                                className="ml-auto text-text-tertiary hover:text-danger-icon"
                                                 title={t("embedding.customRemoveModel")}
                                             >
                                                 <Trash2 className="h-3 w-3" />
@@ -1739,7 +1739,7 @@ function AddCustomEmbeddingProviderDialog({
 
                     {/* Inline error */}
                     {error && (
-                        <div className="rounded border border-red-200 bg-red-50 px-2 py-1.5 text-11 text-red-700 dark:border-red-800 dark:bg-red-950 dark:text-red-300">
+                        <div className="rounded border border-danger-border bg-danger-surface px-2 py-1.5 text-11 text-danger-text">
                             {error}
                         </div>
                     )}

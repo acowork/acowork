@@ -277,7 +277,7 @@ export function PromptsSkillsCard({
             }}
             aria-label={t("debugFiles.reload")}
             title={t("debugFiles.reload")}
-            className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200 dark:disabled:hover:bg-transparent"
+            className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-[var(--color-accent)]/15 dark:disabled:hover:bg-transparent"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${reloading ? "animate-spin" : ""}`} />
           </button>
@@ -289,7 +289,7 @@ export function PromptsSkillsCard({
               <Loader2 className="h-3.5 w-3.5 animate-spin" />
             </div>
           ) : error ? (
-            <p className="px-3 py-2 text-10 text-red-500">{error}</p>
+            <p className="px-3 py-2 text-10 text-danger-icon">{error}</p>
           ) : entries.length === 0 ? (
             <EmptyState message={t("debugFiles.empty")} />
           ) : (

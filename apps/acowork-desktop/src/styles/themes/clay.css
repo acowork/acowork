@@ -1,0 +1,95 @@
+/*
+ * Clay theme pack — terracotta light / warm earth dark.
+ *
+ * App-style palette (not a code-editor theme): a warm terracotta tint
+ * across the whole UI at low saturation.
+ *
+ * Same contract as paper.css (the reference pack): file name is the id, only contract tokens
+ * from globals.css are overridden, and both light and dark scopes exist.
+ */
+
+:root.theme-clay {
+  --color-bg: hsl(24 30% 95%);
+  --color-page-bg: hsl(22 22% 90%);
+  --color-panel-block: hsl(23 26% 93%);
+  --color-panel-inset: hsl(22 20% 88%);
+  --color-panel-inset-2: hsl(21 18% 84%);
+  --color-modal-surface: hsl(26 35% 97%);
+  --color-editor-canvas: hsl(23 28% 94%);
+  --color-nav-surface: hsl(22 20% 88%);
+  --color-nav-item-hover: hsl(21 17% 82%);
+  --color-nav-divider: hsl(20 15% 77%);
+  --color-right-panel: hsl(23 24% 92%);
+  --color-chat-body: hsl(23 28% 94%);
+  --color-chat-title: hsl(22 18% 86%);
+  --color-chat-input-bg: hsl(26 35% 97%);
+  --color-input-bg: hsl(26 35% 97%);
+  --color-border-outer: hsl(19 18% 73%);
+  --color-border-divider: hsl(20 20% 80%);
+  --color-menu-divider: hsl(20 19% 78%);
+  --color-text: hsl(20 15% 27%);
+  --color-text-secondary: hsl(19 12% 39%);
+  --color-text-tertiary: hsl(18 10% 51%);
+  --color-text-disabled: hsl(18 8% 66%);
+  --color-menu-text: hsl(20 14% 29%);
+  --color-menu-icon: hsl(20 10% 55%);
+  --color-menu-danger: hsl(8 70% 43%);
+  --color-menu-danger-hover: hsl(8 75% 95%);
+  --color-menu-warning: hsl(32 80% 38%);
+  --color-menu-warning-hover: hsl(32 85% 94%);
+  --color-danger-surface: hsl(8 75% 96%);
+  --color-danger-surface-hover: hsl(8 75% 92%);
+  --color-danger-border: hsl(8 55% 84%);
+  --color-danger-text: hsl(8 70% 41%);
+  --color-danger-text-strong: hsl(8 75% 31%);
+  --color-danger-icon: hsl(8 70% 50%);
+  --color-control-track: hsl(19 18% 73%);
+  --color-control-outline: hsl(20 10% 60%);
+  --color-highlight-locate: hsl(20 70% 55% / 0.16);
+  --color-muted: hsl(22 22% 89%);
+  --color-muted-foreground: hsl(18 12% 45%);
+  --shadow-menu: 0 4px 6px -1px hsl(20 20% 30% / 0.12), 0 2px 4px -2px hsl(20 20% 30% / 0.12);
+}
+
+:root.theme-clay.dark {
+  --color-bg: hsl(20 10% 15%);
+  --color-page-bg: hsl(20 10% 11%);
+  --color-panel-block: hsl(20 10% 20%);
+  --color-panel-inset: hsl(20 10% 12%);
+  --color-panel-inset-2: hsl(20 10% 10%);
+  --color-modal-surface: hsl(20 10% 24%);
+  --color-editor-canvas: hsl(20 10% 16%);
+  --color-nav-surface: hsl(20 10% 12%);
+  --color-nav-item-hover: hsl(20 9% 22%);
+  --color-nav-divider: hsl(20 8% 28%);
+  --color-right-panel: hsl(20 10% 17%);
+  --color-chat-body: hsl(20 10% 15%);
+  --color-chat-title: hsl(20 9% 21%);
+  --color-chat-input-bg: hsl(20 9% 24%);
+  --color-input-bg: hsl(20 9% 24%);
+  --color-border-outer: hsl(20 7% 32%);
+  --color-border-divider: hsl(20 8% 26%);
+  --color-menu-divider: hsl(20 8% 29%);
+  --color-text: hsl(30 15% 86%);
+  --color-text-secondary: hsl(28 11% 74%);
+  --color-text-tertiary: hsl(27 9% 62%);
+  --color-text-disabled: hsl(27 7% 46%);
+  --color-menu-text: hsl(30 13% 84%);
+  --color-menu-icon: hsl(27 9% 56%);
+  --color-menu-danger: hsl(8 80% 68%);
+  --color-menu-danger-hover: hsl(8 48% 25% / 0.3);
+  --color-menu-warning: hsl(32 85% 68%);
+  --color-menu-warning-hover: hsl(32 48% 22% / 0.3);
+  --color-danger-surface: hsl(8 35% 22%);
+  --color-danger-surface-hover: hsl(8 35% 28%);
+  --color-danger-border: hsl(8 28% 35%);
+  --color-danger-text: hsl(8 75% 74%);
+  --color-danger-text-strong: hsl(8 80% 84%);
+  --color-danger-icon: hsl(8 80% 68%);
+  --color-control-track: hsl(20 7% 34%);
+  --color-control-outline: hsl(22 10% 54%);
+  --color-highlight-locate: hsl(20 80% 60% / 0.24);
+  --color-muted: hsl(20 9% 21%);
+  --color-muted-foreground: hsl(28 12% 68%);
+  --shadow-menu-dark: 0 4px 6px -1px hsl(15 20% 2% / 0.55), 0 2px 4px -2px hsl(15 20% 2% / 0.55);
+}

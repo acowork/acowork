@@ -109,10 +109,10 @@ export function ProjectIconPicker({ project, value, disabled, onChange, size = 6
           setOpen((v) => !v);
         }}
         aria-label={t("pm.iconPicker.title")}
-        className="relative block rounded-lg ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 disabled:cursor-not-allowed disabled:opacity-50 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
+        className="relative block rounded-lg ring-1 ring-border-strong/60 transition hover:ring-border-strong disabled:cursor-not-allowed disabled:opacity-50"
       >
         <ProjectAvatar project={project} size={size} />
-        <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600">
+        <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-btn-solid text-white shadow-sm">
           <svg viewBox="0 0 16 16" className="h-3 w-3 fill-current" xmlns="http://www.w3.org/2000/svg">
             <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L11.5 7l-3-3-.31.31a.75.75 0 0 0-.177.764l.93 3.251a.75.75 0 0 1-.927.928l-3.251-.93Z" />
           </svg>
@@ -138,7 +138,7 @@ export function ProjectIconPicker({ project, value, disabled, onChange, size = 6
                     onClick={() => fileInputRef.current?.click()}
                     disabled={busy}
                     aria-label={t("pm.iconPicker.upload")}
-                    className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-text-tertiary transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600 dark:hover:border-zinc-400"
+                    className="flex aspect-square items-center justify-center rounded-md border border-dashed border-border-strong text-text-tertiary transition-colors hover:border-border-strong hover:text-text-tertiary disabled:opacity-50"
                   >
                     <span className="text-lg">+</span>
                   </button>
@@ -147,8 +147,8 @@ export function ProjectIconPicker({ project, value, disabled, onChange, size = 6
                       key={asset.relative_path}
                       className={`relative aspect-square overflow-hidden rounded-md border-2 transition-colors ${
                         value?.kind === "custom" && value.path === asset.relative_path
-                          ? "border-zinc-800 dark:border-zinc-200"
-                          : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
+                          ? "border-text"
+                          : "border-transparent hover:border-border-strong"
                       }`}
                     >
                       <AuthedImage

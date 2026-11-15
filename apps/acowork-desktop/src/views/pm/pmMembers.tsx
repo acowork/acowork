@@ -186,7 +186,7 @@ export function MemberAvatar({
   if (member.unresolved) {
     return (
       <div
-        className={`flex shrink-0 items-center justify-center rounded-lg bg-zinc-200 text-10 text-text-tertiary dark:bg-zinc-700 ${className ?? ""}`}
+        className={`flex shrink-0 items-center justify-center rounded-lg bg-surface-hover text-10 text-text-tertiary ${className ?? ""}`}
         style={{ width: size, height: size }}
       >
         ?

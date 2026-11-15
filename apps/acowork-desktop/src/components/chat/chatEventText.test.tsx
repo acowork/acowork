@@ -36,7 +36,7 @@ describe("ChatEventText — the transcript's single event-text tier", () => {
     expect(el.getAttribute("role")).toBeNull();
     expect(el.getAttribute("data-tone")).toBe("quiet");
     expect(el.querySelector(".thinking-shimmer")).toBeNull();
-    expect(el.querySelector(".text-red-500")).toBeNull();
+    expect(el.querySelector(".text-danger-icon")).toBeNull();
   });
 
   it("a fault of the run is danger, and a retry-able one is warn", () => {
@@ -44,7 +44,7 @@ describe("ChatEventText — the transcript's single event-text tier", () => {
     // actually failed; a send the Chat could not deliver is an action the human
     // may take, not a fault.
     render(<ChatEventText text="failed" tone="danger" />);
-    expect(document.querySelector(".text-red-500")).toBeTruthy();
+    expect(document.querySelector(".text-danger-icon")).toBeTruthy();
 
     document.body.innerHTML = "";
     render(<ChatEventText text="not delivered" tone="warn" />);
@@ -52,7 +52,7 @@ describe("ChatEventText — the transcript's single event-text tier", () => {
     expect(warn.getAttribute("data-tone")).toBe("warn");
     // The theme token, never a hard-coded hue: it has to read on both themes.
     expect(warn.innerHTML).toContain("--color-warning-quiet");
-    expect(warn.querySelector(".text-red-500")).toBeNull();
+    expect(warn.querySelector(".text-danger-icon")).toBeNull();
   });
 
   it("a trailing affordance rides the same line (the block's retry)", () => {

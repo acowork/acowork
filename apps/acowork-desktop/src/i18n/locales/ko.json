@@ -600,6 +600,8 @@
     "light": "라이트",
     "dark": "다크",
     "system": "시스템 따라가기",
+    "themePack": "컬러 테마",
+    "themeDefault": "기본값",
     "accentColor": "강조 색상",
     "contentWidth": "콘텐츠 너비",
     "contentWidthHint": "메시지, 도구 호출, 사고의 최대 표시 너비",

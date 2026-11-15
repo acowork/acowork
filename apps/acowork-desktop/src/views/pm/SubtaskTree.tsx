@@ -20,10 +20,10 @@ import { listRowHover } from "../../lib/ui-styles";
 import type { PmTaskResponse, TaskStatus } from "../../lib/pm-types";
 
 const STATUS_STYLE: Partial<Record<TaskStatus, string>> = {
-  done: "text-green-600 dark:text-green-400",
-  in_progress: "text-blue-600 dark:text-blue-400",
-  submitted: "text-amber-600 dark:text-amber-400",
-  rejected: "text-red-600 dark:text-red-400",
+  done: "text-ok",
+  in_progress: "text-info",
+  submitted: "text-warning",
+  rejected: "text-danger-text",
   cancelled: "text-text-tertiary ",
   pending: "text-text-tertiary ",
 };
@@ -74,7 +74,7 @@ function SubtaskRow({ task, depth, byId, childrenByParent, onSelect }: SubtaskRo
         {hasChildren ? (
           <button
             type="button"
-            className="w-4 shrink-0 text-center text-10 text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+            className="w-4 shrink-0 text-center text-10 text-text-tertiary hover:text-text-tertiary"
             onClick={(e) => {
               e.stopPropagation();
               setCollapsed((v) => !v);

@@ -81,7 +81,7 @@ export function MermaidNodeView({ node, editor }: NodeViewProps) {
   return (
     <NodeViewWrapper
       data-mermaid-nodeview
-      className="mermaid-nodeview group relative my-2 overflow-x-auto rounded-md border border-border-outer bg-zinc-50  dark:bg-zinc-900/50"
+      className="mermaid-nodeview group relative my-2 overflow-x-auto rounded-md border border-border-outer bg-surface-subtle "
     >
       {/* 渲染态：图 / 占位 / 失败回退（代码） */}
       {!isEditing && svg && (
@@ -116,7 +116,7 @@ export function MermaidNodeView({ node, editor }: NodeViewProps) {
           onClick={() => setEditing(true)}
           aria-label={t("doc.mermaidEdit")}
           title={t("doc.mermaidEdit")}
-          className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded bg-white/90 text-text-tertiary opacity-0 shadow transition-opacity hover:text-zinc-800 group-hover:opacity-100 dark:bg-zinc-800/90 dark:hover:text-zinc-100"
+          className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded bg-surface/90 text-text-tertiary opacity-0 shadow transition-opacity hover:text-text group-hover:opacity-100"
         >
           <Pencil className="h-3 w-3" aria-hidden />
         </button>
@@ -127,7 +127,7 @@ export function MermaidNodeView({ node, editor }: NodeViewProps) {
           onClick={() => setEditing(false)}
           aria-label={t("doc.mermaidPreview")}
           title={t("doc.mermaidPreview")}
-          className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded bg-white/90 text-text-tertiary shadow hover:text-zinc-800 dark:bg-zinc-800/90 dark:hover:text-zinc-100"
+          className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded bg-surface/90 text-text-tertiary shadow hover:text-text"
         >
           <Eye className="h-3 w-3" aria-hidden />
         </button>

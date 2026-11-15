@@ -57,7 +57,7 @@ export function AskQuestionCard({ event, agentId, sessionId, onAnswer }: AskQues
         countdownLabel ? (
           countdownLabel !== "expired" ? (
             <span
-              className="text-10 font-mono text-amber-600 dark:text-amber-400 shrink-0 min-w-[2.5rem] text-right"
+              className="text-10 font-mono text-warning shrink-0 min-w-[2.5rem] text-right"
               aria-label={t("askQuestionCard.expiresIn")}
             >
               {countdownLabel}

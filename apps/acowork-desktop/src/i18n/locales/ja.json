@@ -601,6 +601,8 @@
     "light": "ライト",
     "dark": "ダーク",
     "system": "システムに従う",
+    "themePack": "カラーテーマ",
+    "themeDefault": "デフォルト",
     "accentColor": "アクセントカラー",
     "contentWidth": "コンテンツ幅",
     "contentWidthHint": "メッセージ、ツール呼び出し、思考の最大表示幅",

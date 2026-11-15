@@ -156,7 +156,7 @@ export function SkillMenuList({
                   />
                 )}
                 {!isActive && skill.triggers.length > 0 && (
-                  <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-tertiary dark:bg-zinc-700">
+                  <span className="shrink-0 rounded bg-surface-hover px-1.5 py-0.5 text-10 text-text-tertiary">
                     {skill.triggers.length}
                   </span>
                 )}
@@ -175,10 +175,10 @@ export function SkillMenuList({
         onClick={handleImportClick}
         disabled={readOnly || !selectedAgentId}
         className={cn(
-          "mt-1 flex w-full items-center justify-center gap-1.5 rounded-md bg-zinc-100 px-2 py-1.5 text-xs font-medium text-text-secondary transition-colors",
+          "mt-1 flex w-full items-center justify-center gap-1.5 rounded-md bg-surface px-2 py-1.5 text-xs font-medium text-text-secondary transition-colors",
           readOnly
             ? "cursor-not-allowed opacity-50"
-            : "hover:bg-[var(--color-accent)]/10 hover:text-zinc-900 dark:bg-white/10 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100",
+            : "hover:bg-[var(--color-accent)]/10 hover:text-text dark:bg-white/10 dark:hover:bg-[var(--color-accent)]/15",
         )}
       >
         <FolderPlus className="h-3.5 w-3.5" />
@@ -214,7 +214,7 @@ export function SkillMenuList({
                   "mb-3 cursor-pointer rounded-md border-2 border-dashed p-6 text-center transition-colors",
                   selectedFile
                     ? "border-[var(--color-accent)]/40"
-                    : "border-zinc-300 hover:border-zinc-400 dark:border-zinc-600 dark:hover:border-zinc-500",
+                    : "border-border-strong hover:border-border-strong",
                 )}
                 style={
                   selectedFile
@@ -259,7 +259,7 @@ export function SkillMenuList({
                 />
               )}
               {importSuccess && (
-                <div className="mb-3 flex items-center gap-2 rounded-md bg-green-50 p-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-300">
+                <div className="mb-3 flex items-center gap-2 rounded-md bg-ok-surface p-2 text-xs text-ok">
                   <Check className="h-3.5 w-3.5 shrink-0" />
                   {importSuccess}
                 </div>

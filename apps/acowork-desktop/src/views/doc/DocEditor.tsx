@@ -257,7 +257,7 @@ export function DocEditor() {
         "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
         mode === key
           ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-          : "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
+          : "text-text-tertiary hover:text-text-secondary",
       )}
     >
       {(() => {
@@ -299,9 +299,9 @@ export function DocEditor() {
           <div className="flex items-center gap-2 text-10 text-text-tertiary">
             <span className="truncate">{doc.path}</span>
             <span aria-label={t("doc.versionLabel")}>v{doc.meta.version}</span>
-            {dirty && <span className="text-amber-500">{t("doc.unsaved")}</span>}
+            {dirty && <span className="text-warning">{t("doc.unsaved")}</span>}
             {savedTick % 2 === 1 && !dirty && (
-              <span className="inline-flex items-center gap-0.5 text-emerald-600">
+              <span className="inline-flex items-center gap-0.5 text-ok">
                 <Check className="h-2.5 w-2.5" aria-hidden />
                 {t("doc.saved")}
               </span>
@@ -326,7 +326,7 @@ export function DocEditor() {
                 "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
                 engine === "rich"
                   ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                  : "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
+                  : "text-text-tertiary hover:text-text-secondary",
               )}
             >
               <Type className="h-3 w-3" aria-hidden />
@@ -342,7 +342,7 @@ export function DocEditor() {
                 "flex items-center gap-1 rounded px-2 py-0.5 transition-colors",
                 engine === "source"
                   ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)]"
-                  : "text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-200",
+                  : "text-text-tertiary hover:text-text-secondary",
               )}
             >
               <Braces className="h-3 w-3" aria-hidden />
@@ -370,7 +370,7 @@ export function DocEditor() {
             "flex shrink-0 items-center gap-1 rounded-md px-2 py-1 text-11 font-medium transition-colors disabled:opacity-40",
             dirty
               ? "bg-accent-strong text-white hover:opacity-90"
-              : "border border-zinc-200 text-text-tertiary dark:border-zinc-700",
+              : "border border-border-outer text-text-tertiary",
           )}
         >
           {saving ? <Loader2 className="h-3 w-3 animate-spin" aria-hidden /> : <Save className="h-3 w-3" aria-hidden />}
@@ -380,12 +380,12 @@ export function DocEditor() {
 
       {/* ── 409 版本冲突 / 错误 banner ─────────────────────── */}
       {conflict && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-11 text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/25 dark:text-amber-200">
+        <div className="flex shrink-0 items-center gap-2 border-b border-warning-border bg-warning-surface px-3 py-1.5 text-11 text-warning-quiet">
           <span className="flex-1">{t("doc.versionConflict")}</span>
           <button
             type="button"
             onClick={() => void reload()}
-            className="inline-flex items-center gap-1 rounded bg-amber-600 px-2 py-0.5 font-medium text-white hover:bg-amber-700"
+            className="inline-flex items-center gap-1 rounded bg-warning-solid px-2 py-0.5 font-medium text-white hover:bg-amber-700"
           >
             <RefreshCw className="h-3 w-3" aria-hidden />
             {t("doc.refreshNow")}
@@ -393,7 +393,7 @@ export function DocEditor() {
         </div>
       )}
       {saveError && !conflict && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-red-200 bg-red-50 px-3 py-1.5 text-11 text-red-700 dark:border-red-800/40 dark:bg-red-900/25 dark:text-red-200">
+        <div className="flex shrink-0 items-center gap-2 border-b border-danger-border bg-danger-surface px-3 py-1.5 text-11 text-danger-text">
           <span className="flex-1">{saveError}</span>
         </div>
       )}
@@ -406,7 +406,7 @@ export function DocEditor() {
 
       {/* rich 引擎加载失败 → 显式降级提示（ADR-079 §7：不静默回退） */}
       {mode !== "preview" && engine === "rich" && richFailed && (
-        <div className="flex shrink-0 items-center gap-2 border-b border-amber-200 bg-amber-50 px-3 py-1.5 text-11 text-amber-800 dark:border-amber-800/40 dark:bg-amber-900/25 dark:text-amber-200">
+        <div className="flex shrink-0 items-center gap-2 border-b border-warning-border bg-warning-surface px-3 py-1.5 text-11 text-warning-quiet">
           <span className="flex-1">{t("doc.richLoadFailed")}</span>
         </div>
       )}

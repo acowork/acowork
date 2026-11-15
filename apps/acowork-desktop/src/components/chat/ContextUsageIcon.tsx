@@ -447,7 +447,7 @@ const handleCompressSummary = () => {
               onClick={() => setOpen(false)}
               aria-label={t("contextUsage.close")}
               title={t("contextUsage.close")}
-              className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100"
+              className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary  dark:hover:bg-[var(--color-accent)]/15"
             >
               <X size={14} strokeWidth={2.25} />
             </button>
@@ -475,7 +475,7 @@ const handleCompressSummary = () => {
                 disabled={readOnly}
                 aria-label={t("contextUsage.editWindow")}
                 title={readOnly ? t("chatPanel.readOnlySession") : t("contextUsage.editWindow")}
-                className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent  dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100"
+                className="ml-1 rounded p-0.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent  dark:hover:bg-[var(--color-accent)]/15"
               >
                 <Pencil size={11} strokeWidth={2.25} />
               </button>
@@ -514,7 +514,7 @@ const handleCompressSummary = () => {
                         setWindowError(null);
                       }}
                       className={cn(
-                        "rounded border border-zinc-200 px-1.5 py-0.5 text-10 text-text-secondary transition-colors",
+                        "rounded border border-border-outer px-1.5 py-0.5 text-10 text-text-secondary transition-colors",
                         "hover:border-indigo-300 hover:text-indigo-600",
                         "dark:border-zinc-700  dark:hover:border-indigo-500/50 dark:hover:text-indigo-300",
                       )}
@@ -524,12 +524,12 @@ const handleCompressSummary = () => {
                   ))}
                 </div>
                 {draftExceedsModel && (
-                  <p className="mt-1.5 text-10 leading-snug text-amber-600 dark:text-amber-400">
+                  <p className="mt-1.5 text-10 leading-snug text-warning">
                     {t("contextUsage.windowEffectiveHint", { setting: formatTokens(draftAbs ?? 0), model: formatTokens(modelWindow ?? 0) })}
                   </p>
                 )}
                 {windowError != null && (
-                  <p className="mt-1.5 text-10 leading-snug text-red-600 dark:text-red-400">{windowError}</p>
+                  <p className="mt-1.5 text-10 leading-snug text-danger-text">{windowError}</p>
                 )}
                 <div className="mt-2 flex items-center gap-1.5">
                   <button
@@ -552,7 +552,7 @@ const handleCompressSummary = () => {
             )}
 
             <div
-              className="mt-3 flex h-2 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700"
+              className="mt-3 flex h-2 overflow-hidden rounded-full bg-surface-hover"
               role="progressbar"
               aria-label={t("contextUsage.usageBarLabel")}
               aria-valuemin={0}
@@ -663,7 +663,7 @@ const handleCompressSummary = () => {
               "mx-3 mb-2.5 mt-2 flex w-[calc(100%-1.5rem)] items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium transition-colors",
               isCompacting
                 ? "bg-[var(--color-accent)]/10 text-[var(--color-accent)] hover:bg-[var(--color-accent)]/20"
-                : "bg-zinc-100 text-text-secondary hover:bg-[var(--color-accent)]/10 hover:text-zinc-900 dark:bg-white/10 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-100",
+                : "bg-surface text-text-secondary hover:bg-[var(--color-accent)]/10 hover:text-text dark:hover:bg-[var(--color-accent)]/15",
               "disabled:cursor-not-allowed disabled:opacity-40",
             )}
           >

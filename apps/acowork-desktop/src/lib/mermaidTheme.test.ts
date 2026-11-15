@@ -175,18 +175,18 @@ describe("mermaid dark palette — contrast contract", () => {
 
 describe("tokensFor", () => {
   it("returns dark tokens for an explicit dark preference", () => {
-    expect(tokensFor("dark", "light")).toBe(DARK_TOKENS);
+    expect(tokensFor("dark", "light")).toStrictEqual(DARK_TOKENS);
   });
 
   it("returns light tokens for an explicit light preference", () => {
-    expect(tokensFor("light", "dark")).toBe(LIGHT_TOKENS);
+    expect(tokensFor("light", "dark")).toStrictEqual(LIGHT_TOKENS);
   });
 
   it("resolves system against the OS theme", () => {
     // Must agree with applyTheme() in settingsStore, otherwise diagrams
     // desync from the .dark class on <html>.
-    expect(tokensFor("system", "dark")).toBe(DARK_TOKENS);
-    expect(tokensFor("system", "light")).toBe(LIGHT_TOKENS);
+    expect(tokensFor("system", "dark")).toStrictEqual(DARK_TOKENS);
+    expect(tokensFor("system", "light")).toStrictEqual(LIGHT_TOKENS);
   });
 
   it("returns a stable reference so memo deps do not thrash", () => {
@@ -209,9 +209,13 @@ describe("isDarkTheme", () => {
   });
 
   it("agrees with tokensFor on every combination", () => {
+    // tokensFor now overlays live CSS-var reads, so identity is not the dark
+    // marker any more — secondaryColor is one entry it never overlays.
+    const isDarkTokens = (t: MermaidTokens) =>
+      t.themeVariables.secondaryColor === DARK_TOKENS.themeVariables.secondaryColor;
     for (const theme of ["light", "dark", "system"] as const) {
       for (const os of ["light", "dark"] as const) {
-        expect(isDarkTheme(theme, os)).toBe(tokensFor(theme, os) === DARK_TOKENS);
+        expect(isDarkTheme(theme, os)).toBe(isDarkTokens(tokensFor(theme, os)));
       }
     }
   });

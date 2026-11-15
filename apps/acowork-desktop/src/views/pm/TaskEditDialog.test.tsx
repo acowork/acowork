@@ -735,10 +735,10 @@ describe("where saving and deleting land", () => {
     expect(button.tagName).toBe("BUTTON");
     expect(button.textContent).toContain("pm.task.delete");
     const tokens = button.className.split(/\s+/);
-    expect(tokens).toContain("bg-red-600");
+    expect(tokens).toContain("bg-danger-solid");
     expect(tokens).toContain("text-white");
-    expect(tokens).not.toContain("border-red-200");
-    expect(tokens).not.toContain("bg-red-50");
+    expect(tokens).not.toContain("border-danger-border");
+    expect(tokens).not.toContain("bg-danger-surface");
     // 位置：底栏最左，且与 保存 之间隔着那块 flex-1
     const footer = screen.getByRole("dialog").querySelector("footer") as HTMLElement;
     expect(footer.contains(button)).toBe(true);

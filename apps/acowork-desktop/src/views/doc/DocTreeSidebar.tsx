@@ -156,7 +156,7 @@ export function DocTreeSidebar({ width }: { width?: number }) {
       {/* ── 底部：离线提示（回收站入口已迁入右侧齿轮轨唤出的 DocSettingsPanel） ─────────────────────────── */}
       {healthy === false && (
         <div className="border-t border-border-divider p-1">
-          <div className="rounded-md bg-amber-50 px-2 py-1 text-11 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300">
+          <div className="rounded-md bg-warning-surface px-2 py-1 text-11 text-warning-quiet">
             {t("doc.offlineHint")}
           </div>
         </div>
@@ -221,7 +221,7 @@ function IconBtn({
         e.stopPropagation();
         onClick();
       }}
-      className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 focus-visible:bg-nav-item-hover focus-visible:text-text-secondary disabled:opacity-30 dark:hover:text-zinc-100 dark:focus-visible:text-text"
+      className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary focus-visible:bg-nav-item-hover focus-visible:text-text-secondary disabled:opacity-30 dark:focus-visible:text-text"
     >
       {children}
     </button>
@@ -402,9 +402,9 @@ function DirRow({
           {isLoading ? (
             <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-text-tertiary" aria-hidden />
           ) : isOpen ? (
-            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-sky-500" aria-hidden />
+            <FolderOpen className="h-3.5 w-3.5 shrink-0 text-info" aria-hidden />
           ) : (
-            <Folder className="h-3.5 w-3.5 shrink-0 text-sky-500" aria-hidden />
+            <Folder className="h-3.5 w-3.5 shrink-0 text-info" aria-hidden />
           )}
           {/* `font-medium` 与 chat 侧边栏的 agent 名一致（见 SectionPane）——
               行高比 pm/harness/settings 密一档，字重保持同档才不会显轻。 */}

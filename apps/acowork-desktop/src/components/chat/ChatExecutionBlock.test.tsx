@@ -938,7 +938,7 @@ describe("ChatExecutionBlock", () => {
     // the same card whose body carries the answer (the shared card recipe) —
     // worn one step LIGHTER than an interaction card's banner, because a run's
     // banner sits in the transcript and must not out-shout its answer.
-    expect(header.className).toContain("bg-zinc-100/60");
+    expect(header.className).toContain("bg-surface/60");
     expect(header.className).toContain("border-b");
     // The highlight color is a button background, never a border or a title.
     expect(header.className).not.toContain("--color-accent");

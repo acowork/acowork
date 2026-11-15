@@ -178,7 +178,7 @@ export function OnboardingFlow({ onComplete }: { onComplete?: () => void }) {
                 key={i}
                 className={cn(
                   "h-1 flex-1 rounded-full transition-colors",
-                  i < state.currentStep ? "bg-zinc-800 dark:bg-zinc-200" : "bg-zinc-200 dark:bg-zinc-700",
+                  i < state.currentStep ? "bg-text" : "bg-surface-hover",
                 )}
               />
             ))}
@@ -225,7 +225,7 @@ function WelcomeStep({ onNext, onSkip }: { onNext: () => void; onSkip: () => voi
         </button>
         <button
           onClick={onSkip}
-          className="w-full py-1.5 text-xs text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-300"
+          className="w-full py-1.5 text-xs text-text-tertiary hover:text-text-tertiary"
         >
           {t("onboarding.welcome.skip")}
         </button>
@@ -286,13 +286,13 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
               <span className="text-text-tertiary">{t("onboarding.gateway.checking")}</span>
             ) : status === "connected" ? (
               <>
-                <span className="h-2 w-2 rounded-full bg-green-500" />
-                <span className="text-green-600 dark:text-green-400">{t("onboarding.gateway.connectedShort")}</span>
+                <span className="h-2 w-2 rounded-full bg-ok-solid" />
+                <span className="text-ok">{t("onboarding.gateway.connectedShort")}</span>
               </>
             ) : (
               <>
-                <span className="h-2 w-2 rounded-full bg-red-500" />
-                <span className="text-red-600 dark:text-red-400">{t("onboarding.gateway.cannotConnect")}</span>
+                <span className="h-2 w-2 rounded-full bg-danger-solid" />
+                <span className="text-danger-text">{t("onboarding.gateway.cannotConnect")}</span>
               </>
             )}
           </div>
@@ -309,7 +309,7 @@ function GatewayStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => voi
       </div>
 
       <div className="mt-6 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
+        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-text-secondary">
           {t("onboarding.gateway.back")}
         </button>
         <button
@@ -406,7 +406,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
               {configuredProviders.map((id) => (
                 <span
                   key={id}
-                  className="flex items-center gap-1 rounded bg-zinc-100 px-1.5 py-0.5 text-10 text-text-secondary dark:bg-zinc-700"
+                  className="flex items-center gap-1 rounded bg-surface-hover px-1.5 py-0.5 text-10 text-text-secondary"
                 >
                   <ProviderLogo providerId={id} size={12} />
                   {providers.find((p) => p.id === id)?.name ?? id}
@@ -448,7 +448,7 @@ function ApiKeyStep({ onNext, onPrev }: { onNext: () => void; onPrev: () => void
       />
 
       <div className="mt-6 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
+        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-text-secondary">
           {t("onboarding.apiKey.back")}
         </button>
         <button
@@ -537,7 +537,7 @@ function IdentityStep({
       </div>
 
       <div className="mt-6 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
+        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-text-secondary">
           {t("onboarding.identity.back")}
         </button>
         <button
@@ -865,7 +865,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
             </div>
             <button
               onClick={() => setSelectedAgents(selectedAgents.length === RECOMMENDED_AGENTS.length ? [] : RECOMMENDED_AGENTS.map((agent) => agent.resourceName))}
-              className="text-xs text-text-tertiary hover:text-zinc-800 dark:hover:text-zinc-200"
+              className="text-xs text-text-tertiary hover:text-text"
             >
               {selectedAgents.length === RECOMMENDED_AGENTS.length ? t("onboarding.installAgent.clear") : t("onboarding.installAgent.selectAll")}
             </button>
@@ -876,14 +876,14 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
               return (
                 <label
                   key={agent.resourceName}
-                  className="flex cursor-pointer gap-2 rounded-md border border-zinc-100 p-2.5 hover:bg-[var(--color-accent)]/10 dark:border-zinc-800 dark:hover:bg-[var(--color-accent)]/15"
+                  className="flex cursor-pointer gap-2 rounded-md border border-border-outer p-2.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                 >
                   <input
                     type="checkbox"
                     checked={selectedAgents.includes(agent.resourceName)}
                     onChange={() => toggleRecommendedAgent(agent.resourceName)}
                     disabled={installInFlight}
-                    className="mt-0.5 h-4 w-4 rounded border-zinc-300"
+                    className="mt-0.5 h-4 w-4 rounded border-border-strong"
                   />
                   <span className="flex-1">
                     <span className="block text-xs font-medium">{agent.name} · {agent.role}</span>
@@ -894,12 +894,12 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
                     <span className="self-center text-10">
                       {op.state === "pending" && <span className="text-text-tertiary">{t("onboarding.installAgent.opPending")}</span>}
                       {op.state === "submitted" && op.operationId && (
-                        <span className="text-blue-600 dark:text-blue-400">
+                        <span className="text-info">
                           {t("onboarding.installAgent.opSubmitted", { opId: op.operationId.slice(0, 8) })}
                         </span>
                       )}
-                      {op.state === "completed" && <span className="text-green-600 dark:text-green-400">{t("onboarding.installAgent.opCompleted")}</span>}
-                      {op.state === "failed" && <span className="text-red-600 dark:text-red-400">{t("onboarding.installAgent.opFailed")}</span>}
+                      {op.state === "completed" && <span className="text-ok">{t("onboarding.installAgent.opCompleted")}</span>}
+                      {op.state === "failed" && <span className="text-danger-text">{t("onboarding.installAgent.opFailed")}</span>}
                     </span>
                   )}
                 </label>
@@ -924,7 +924,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
           onClick={handleInstallFromFile}
           disabled={installInFlight || noAvailableNode}
           title={noAvailableNode ? t("agentHub.noAvailableNode") : undefined}
-          className="w-full rounded-md border border-zinc-200 p-3 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:border-zinc-700 dark:hover:bg-[var(--color-accent)]/15"
+          className="w-full rounded-md border border-border-outer p-3 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
         >
           <span className="text-11 font-medium">{t("onboarding.installAgent.fromFileTitle")}</span>
           <p className="mt-0.5 text-10 text-text-tertiary">{t("onboarding.installAgent.fromFileSubtitle")}</p>
@@ -939,7 +939,7 @@ function InstallAgentStep({ onComplete, onPrev }: { onComplete: () => void; onPr
       </div>
 
       <div className="mt-6 flex justify-between">
-        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-zinc-700 dark:hover:text-zinc-300">
+        <button onClick={onPrev} className="rounded-md px-3 py-[var(--ui-btn-py)] text-xs text-text-tertiary hover:text-text-secondary">
           {t("onboarding.installAgent.back")}
         </button>
         <button

@@ -47,8 +47,8 @@ describe("dropdown theme", () => {
     expect(DROPDOWN_TRIGGER_SMALL_CLASS).not.toContain("bg-");
     expect(DROPDOWN_TRIGGER_SMALL_CLASS).toContain("h-7");
     const src = readSource("./Dropdown.tsx");
-    expect(src).not.toContain("focus:border-zinc-400");
-    expect(src).not.toContain("focus:ring-zinc-400");
+    expect(src).not.toContain("focus:border-border-strong");
+    expect(src).not.toContain("focus:ring-border-strong");
     expect(src).not.toContain("bg-dropdown-bg");
   });
 

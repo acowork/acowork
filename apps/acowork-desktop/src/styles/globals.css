@@ -18,6 +18,46 @@
   --color-text-disabled: hsl(0 0% 70%);
   /* disabled state (light) */
 
+  /* Danger surface palette — the themeable replacement for the
+     `bg-red-50 dark:bg-red-900/20` pair. Being in @theme makes Tailwind emit
+     `bg-danger-surface` / `border-danger-border` / `text-danger-text`
+     utilities that read var(--color-danger-*), so a theme pack recolours them
+     by overriding the variables alone. No `dark:` prefix: .dark flips the
+     values below. */
+  --color-danger-surface: hsl(0 86% 97%);
+  --color-danger-surface-hover: hsl(0 93% 94%);
+  --color-danger-border: hsl(0 93% 82%);
+  --color-danger-text: hsl(0 74% 42%);
+  --color-danger-text-strong: hsl(0 74% 32%);
+  --color-danger-icon: hsl(0 84% 60%);
+
+  /* Neutral surface ladder — the themeable replacement for the zinc palette
+     classes (`bg-zinc-100 dark:bg-zinc-800` etc). Values are the EXACT shades
+     they replace, so the codemod migration is visually a no-op; a theme pack
+     recolours the whole app by overriding these variables alone. */
+  --color-surface: #f4f4f5;
+  --color-surface-subtle: #fafafa;
+  --color-surface-hover: #e4e4e7;
+  --color-surface-strong: #d4d4d8;
+  --color-border-strong: #d4d4d8;
+
+  /* Status surface / solid fills — same recipe as the danger set above, for
+     success (green/emerald), warning (amber) and info (sky/blue). */
+  --color-ok-surface: #f0fdf4;
+  --color-ok-solid: #10b981;
+  --color-warning-surface: #fffbeb;
+  --color-warning-surface-hover: #fef3c7;
+  --color-warning-solid: #f59e0b;
+  --color-info: #0369a1;
+  --color-info-surface: #f0f9ff;
+  --color-info-solid: #0284c7;
+  --color-danger-solid: #dc2626;
+  /* Cross-mode solid button fill — the deliberately-dark primary buttons
+     (bg-zinc-800 + white text) that keep their depth in BOTH themes; dark
+     lifts one step. Replaces the `bg-zinc-800 dark:bg-zinc-700` pair. */
+  --color-btn-solid: #27272a;
+  --color-btn-solid-hover: #3f3f46;
+
   /* Semantic status colors — foreground values for Badge tones
      (success / warning). Consumers write `text-ok` / `bg-ok/12` /
      `text-warning` and the .dark block below flips the value, so
@@ -401,6 +441,59 @@
      token so the list header can move without dragging dialogs. */
   --ui-list-header-h: 2.75rem;
 
+  /* ── Theme-pack contract ───────────────────────────────────────────────
+     This block is the list of tokens a theme pack (src/styles/themes/*.css)
+     may override. A pack declaring an undeclared --* name fails the CI red
+     line and the themePacks.test.ts contract test. Values here are the light
+     defaults; the .dark block flips the colour-bearing ones.
+
+     Two of these used to be written only by settingsStore at runtime, so the
+     pre-JS frame had no value at all and a theme pack had nothing to
+     override. Declaring the defaults here makes the cascade complete. */
+  --content-max-width: 100%;
+  --app-opacity: 1;
+
+  /* Aliases replacing `var(--token, #literal)` fallbacks. A fallback hides
+     an undeclared token: the literal always wins, so a theme pack can never
+     recolour that surface. Every --color-* reference must now name a token
+     declared here or in @theme, with no fallback. */
+  --color-border: var(--color-border-outer);
+  --color-highlight-locate: hsl(212 92% 55% / 0.14);
+  --color-menu-text: hsl(240 4% 25%);
+  --color-menu-icon: hsl(240 4% 65%);
+  --color-menu-danger: hsl(0 72% 51%);
+  --color-menu-danger-hover: hsl(0 86% 97%);
+  --color-menu-warning: hsl(32 95% 44%);
+  --color-menu-warning-hover: hsl(48 100% 96%);
+  --color-menu-divider: hsl(240 5% 90%);
+  --color-control-track: hsl(240 5% 83%);
+  --color-control-outline: hsl(240 4% 65%);
+
+  /* Diagram (mermaid) surfaces. The SVG bakes its palette at render time, so
+     the renderer reads these live (mermaidTheme.ts) instead of hard-coding
+     hex; fallbacks there keep the pinned values when CSS vars are absent. */
+  --color-diagram-node-fill: #f8fafc;
+  --color-diagram-node-border: #cbd5e1;
+  --color-diagram-line: #94a3b8;
+
+  /* Command-palette / symbol-search widget chrome (VS Code style panels). */
+  --color-widget-bg: #F3F3F3;
+
+  /* Elevation + stacking — previously literal at every call site. */
+  --shadow-menu: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+  --shadow-menu-dark: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.5);
+  --z-behind: -1;
+  --z-overlay: 30;
+  --z-menu: 100;
+
+  /* Component geometry — one-off sizes promoted to named tokens. */
+  --size-menu-min: 160px;
+  --size-menu-compact-min: 120px;
+  --size-menu-font: 0.75rem;
+  --size-menu-icon: 0.875rem;
+  --size-scrollbar-thumb: 8px;
+  --size-doc-cell-pad-y: 6px;
+  --size-doc-cell-pad-x: 12px;
 
   /* Radio group tokens */
   --ui-radio-size: 1rem;
@@ -595,16 +688,16 @@
 
    To tweak intensity or hue behavior, edit the values here (or in
    lib/accentPresets.ts, which is the TS-side source of truth). */
-:root.accent-blue   { --glass-tint-light: 217 8% 92%; --glass-tint-dark: 217 8% 14%; }
-:root.accent-indigo { --glass-tint-light: 243 8% 92%; --glass-tint-dark: 243 8% 14%; }
-:root.accent-violet { --glass-tint-light: 258 8% 92%; --glass-tint-dark: 258 8% 14%; }
-:root.accent-cyan   { --glass-tint-light: 189 8% 92%; --glass-tint-dark: 189 8% 14%; }
-:root.accent-teal   { --glass-tint-light: 173 8% 92%; --glass-tint-dark: 173 8% 14%; }
-:root.accent-green  { --glass-tint-light: 158 8% 92%; --glass-tint-dark: 158 8% 14%; }
-:root.accent-rose   { --glass-tint-light: 350 8% 92%; --glass-tint-dark: 350 8% 14%; }
-:root.accent-orange { --glass-tint-light:  24 8% 92%; --glass-tint-dark:  24 8% 14%; }
-:root.accent-amber  { --glass-tint-light:  38 8% 92%; --glass-tint-dark:  38 8% 14%; }
-:root.accent-pink   { --glass-tint-light: 330 8% 92%; --glass-tint-dark: 330 8% 14%; }
+:root.accent-blue   { --color-accent: #3b82f6; --glass-tint-light: 217 8% 92%; --glass-tint-dark: 217 8% 14%; }
+:root.accent-indigo { --color-accent: #6366f1; --glass-tint-light: 243 8% 92%; --glass-tint-dark: 243 8% 14%; }
+:root.accent-violet { --color-accent: #8b5cf6; --glass-tint-light: 258 8% 92%; --glass-tint-dark: 258 8% 14%; }
+:root.accent-cyan   { --color-accent: #06b6d4; --glass-tint-light: 189 8% 92%; --glass-tint-dark: 189 8% 14%; }
+:root.accent-teal   { --color-accent: #14b8a6; --glass-tint-light: 173 8% 92%; --glass-tint-dark: 173 8% 14%; }
+:root.accent-green  { --color-accent: #00C375; --glass-tint-light: 158 8% 92%; --glass-tint-dark: 158 8% 14%; }
+:root.accent-rose   { --color-accent: #f43f5e; --glass-tint-light: 350 8% 92%; --glass-tint-dark: 350 8% 14%; }
+:root.accent-orange { --color-accent: #f97316; --glass-tint-light:  24 8% 92%; --glass-tint-dark:  24 8% 14%; }
+:root.accent-amber  { --color-accent: #f59e0b; --glass-tint-light:  38 8% 92%; --glass-tint-dark:  38 8% 14%; }
+:root.accent-pink   { --color-accent: #ec4899; --glass-tint-light: 330 8% 92%; --glass-tint-dark: 330 8% 14%; }
 
 /* Dark mode overrides */
 .dark {
@@ -794,6 +887,54 @@
   /* zinc-700 — gentle gray on dark surfaces */
   --ui-scrollbar-thumb-hover: #52525b;
   /* zinc-600 — slightly brighter on hover */
+
+  /* Theme-pack contract (dark counterparts). Kept next to the other dark
+     overrides so a pack author can see the full two-mode contract in one
+     file: light in :root, dark here. */
+  --color-danger-surface: hsl(0 45% 16%);
+  --color-danger-surface-hover: hsl(0 45% 21%);
+  --color-danger-border: hsl(0 45% 30%);
+  --color-danger-text: hsl(0 91% 71%);
+  --color-danger-text-strong: hsl(0 91% 82%);
+  --color-danger-icon: hsl(0 91% 71%);
+
+  /* Surface ladder (dark) — zinc-800/900/700/600 as replaced. */
+  --color-surface: #27272a;
+  --color-surface-subtle: #18181b;
+  --color-surface-hover: #3f3f46;
+  --color-surface-strong: #52525b;
+  --color-border-strong: #52525b;
+
+  /* Status surface / solid (dark). */
+  --color-ok-surface: rgb(20 83 45 / 0.2);
+  --color-ok-solid: #34d399;
+  --color-warning-surface: rgb(120 53 15 / 0.3);
+  --color-warning-surface-hover: rgb(120 53 15 / 0.4);
+  --color-warning-solid: #fbbf24;
+  --color-info: #38bdf8;
+  --color-info-surface: rgb(12 74 110 / 0.2);
+  --color-info-solid: #0284c7;
+  --color-danger-solid: #ef4444;
+  --color-btn-solid: #3f3f46;
+  --color-btn-solid-hover: #52525b;
+  --color-highlight-locate: hsl(212 92% 55% / 0.22);
+  --color-menu-text: hsl(240 5% 85%);
+  --color-menu-icon: hsl(240 4% 46%);
+  --color-menu-danger: hsl(0 91% 71%);
+  --color-menu-danger-hover: hsl(0 63% 24% / 0.2);
+  --color-menu-warning: hsl(45 96% 60%);
+  --color-menu-warning-hover: hsl(32 89% 28% / 0.2);
+  --color-menu-divider: hsl(0 0% 20%);
+  --color-control-track: hsl(240 4% 36%);
+  --color-control-outline: hsl(240 4% 46%);
+
+  /* Diagram (mermaid) surfaces (dark). */
+  --color-diagram-node-fill: #1e1f24;
+  --color-diagram-node-border: #3f3f46;
+  --color-diagram-line: #a1a1aa;
+
+  /* Command-palette / symbol-search widget chrome (dark). */
+  --color-widget-bg: #252526;
 }
 
 /* Base styles */
@@ -977,7 +1118,7 @@ body {
   position: absolute;
   inset: 0;
   pointer-events: none;
-  z-index: -1;
+  z-index: var(--z-behind);
   background-image:
     radial-gradient(circle at 0 0, rgba(0, 0, 0, 0.18) 1px, transparent 2px);
   background-size: 1em 1em;
@@ -1676,13 +1817,13 @@ input[type="range"] {
 /* Track */
 input[type="range"]::-webkit-slider-runnable-track {
   height: 4px;
-  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #d4d4d8 var(--progress, 0%));
+  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), var(--color-control-track) var(--progress, 0%));
   border-radius: 2px;
 }
 
 input[type="range"]::-moz-range-track {
   height: 4px;
-  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #d4d4d8 var(--progress, 0%));
+  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), var(--color-control-track) var(--progress, 0%));
   border-radius: 2px;
 }
 
@@ -1706,11 +1847,11 @@ input[type="range"]::-moz-range-thumb {
 
 /* Dark mode */
 .dark input[type="range"]::-webkit-slider-runnable-track {
-  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #52525b var(--progress, 0%));
+  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), var(--color-control-track) var(--progress, 0%));
 }
 
 .dark input[type="range"]::-moz-range-track {
-  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), #52525b var(--progress, 0%));
+  background: linear-gradient(to right, var(--color-accent) var(--progress, 0%), var(--color-control-track) var(--progress, 0%));
 }
 
 /* ── Radio — fully custom, no browser dark-outline artifact ── */
@@ -1720,7 +1861,7 @@ input[type="radio"] {
   width: 16px;
   height: 16px;
   margin: 0;
-  border: 2px solid #a1a1aa;
+  border: 2px solid var(--color-control-outline);
   border-radius: 50%;
   cursor: pointer;
   transition: border-color 0.15s, background-color 0.15s;
@@ -1860,34 +2001,29 @@ input[type="radio"]:checked {
    - Subtle shadow + 1px zinc border on both themes. */
 .context-menu {
   position: fixed;
-  z-index: 100;
-  min-width: 160px;
+  z-index: var(--z-menu);
+  min-width: var(--size-menu-min);
   border-radius: var(--radius-md);
   border: 1px solid var(--color-border-outer);
   background-color: var(--color-modal-surface);
   padding: 0.25rem 0;
-  box-shadow:
-    0 4px 6px -1px rgb(0 0 0 / 0.1),
-    0 2px 4px -2px rgb(0 0 0 / 0.1);
-  font-size: 0.75rem;
+  box-shadow: var(--shadow-menu);
+  font-size: var(--size-menu-font);
   /* text-xs — locked; do not inherit from the surrounding `--ui-font-size` */
   user-select: none;
   -webkit-user-select: none;
 }
 
 .dark .context-menu {
-  /* border-outer / modal-surface auto-flip in the .dark block, so
-     this rule is now a no-op placeholder — kept for future dark-only
-     overrides (e.g. heavier shadow on dark) without rewriting call
-     sites. */
-  box-shadow:
-    0 4px 6px -1px rgb(0 0 0 / 0.5),
-    0 2px 4px -2px rgb(0 0 0 / 0.5);
+  /* Elevation is the only menu value that does not auto-flip with the
+     palette: dark surfaces need a heavier shadow to separate from the
+     background. Both strengths live in the theme-pack contract. */
+  box-shadow: var(--shadow-menu-dark);
 }
 
 /* Compact variant for single-action menus (e.g. chat-message copy). */
 .context-menu.context-menu--compact {
-  min-width: 120px;
+  min-width: var(--size-menu-compact-min);
 }
 
 /* Menu item — full-width row, icon + label, hover highlight. */
@@ -1898,8 +2034,7 @@ input[type="radio"]:checked {
   gap: 0.5rem;
   padding: 0.375rem 0.75rem;
   /* py-1.5 px-3 — matches the legacy per-component rules */
-  color: #3f3f46;
-  /* zinc-700 */
+  color: var(--color-menu-text);
   background-color: transparent;
   border: none;
   text-align: left;
@@ -1930,8 +2065,8 @@ input[type="radio"]:checked {
 }
 
 .dark .context-menu-item {
-  color: #d4d4d8;
-  /* zinc-300 */
+  /* --color-menu-text flips in .dark; kept as a hook for dark-only tweaks. */
+  color: var(--color-menu-text);
 }
 
 .dark .context-menu-item:hover {
@@ -1946,80 +2081,68 @@ input[type="radio"]:checked {
 /* Icon hint inside a menu item — soft gray, keeps visual hierarchy. */
 .context-menu-item .context-menu-item__icon {
   flex-shrink: 0;
-  width: 0.875rem;
-  height: 0.875rem;
-  color: #a1a1aa;
-  /* zinc-400 */
+  width: var(--size-menu-icon);
+  height: var(--size-menu-icon);
+  color: var(--color-menu-icon);
 }
 
 .dark .context-menu-item .context-menu-item__icon {
-  color: #71717a;
-  /* zinc-500 */
+  color: var(--color-menu-icon);
 }
 
-/* Destructive action (delete, uninstall) — red text + red-tinted hover. */
+/* Destructive action (delete, uninstall) — red text + red-tinted hover.
+   Both variants read the same two tokens; .dark flips the values, so the
+   dark rules below are hooks rather than second colour definitions. */
 .context-menu-item.context-menu-item--danger {
-  color: #dc2626;
-  /* red-600 */
+  color: var(--color-menu-danger);
 }
 
 .context-menu-item.context-menu-item--danger:hover {
-  background-color: #fef2f2;
-  /* red-50 */
+  background-color: var(--color-menu-danger-hover);
 }
 
 .dark .context-menu-item.context-menu-item--danger {
-  color: #f87171;
-  /* red-400 */
+  color: var(--color-menu-danger);
 }
 
 .dark .context-menu-item.context-menu-item--danger:hover {
-  background-color: rgb(127 29 29 / 0.2);
-  /* red-900/20 */
+  background-color: var(--color-menu-danger-hover);
 }
 
 .context-menu-item.context-menu-item--danger .context-menu-item__icon {
-  color: #ef4444;
-  /* red-500 */
+  color: var(--color-danger-icon);
 }
 
-/* Warning action (debug start, restart in debug) — amber text + amber-tinted hover. */
+/* Warning action (debug start, restart in debug). */
 .context-menu-item.context-menu-item--warning {
-  color: #d97706;
-  /* amber-600 */
+  color: var(--color-menu-warning);
 }
 
 .context-menu-item.context-menu-item--warning:hover {
-  background-color: #fffbeb;
-  /* amber-50 */
+  background-color: var(--color-menu-warning-hover);
 }
 
 .dark .context-menu-item.context-menu-item--warning {
-  color: #fbbf24;
-  /* amber-400 */
+  color: var(--color-menu-warning);
 }
 
 .dark .context-menu-item.context-menu-item--warning:hover {
-  background-color: rgb(120 53 15 / 0.2);
-  /* amber-900/20 */
+  background-color: var(--color-menu-warning-hover);
 }
 
 .context-menu-item.context-menu-item--warning .context-menu-item__icon {
-  color: #d97706;
-  /* amber-600 */
+  color: var(--color-menu-warning);
 }
 
 .dark .context-menu-item.context-menu-item--warning .context-menu-item__icon {
-  color: #fbbf24;
-  /* amber-400 */
+  color: var(--color-menu-warning);
 }
 
 /* Divider between groups of items. */
 .context-menu-divider {
   height: 0;
   margin: 0.25rem 0;
-  border-top: 1px solid #e4e4e7;
-  /* zinc-200 */
+  border-top: 1px solid var(--color-menu-divider);
 }
 
 .dark .context-menu-divider {
@@ -2176,15 +2299,15 @@ input[type="radio"]:checked {
   min-width: 100%;
   margin: 0.5em 0;
   overflow: hidden;
-  border: 1px solid var(--color-border, #d4d4d8);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-md);
 }
 
 .doc-rich-content td,
 .doc-rich-content th {
-  border-right: 1px solid var(--color-border, #d4d4d8);
-  border-bottom: 1px solid var(--color-border, #d4d4d8);
-  padding: 6px 12px;
+  border-right: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--color-border);
+  padding: var(--size-doc-cell-pad-y) var(--size-doc-cell-pad-x);
   vertical-align: top;
   min-width: 3em;
   position: relative;
@@ -2202,7 +2325,8 @@ input[type="radio"]:checked {
 
 .dark .doc-rich-content td,
 .dark .doc-rich-content th {
-  border-color: #3f3f46;
+  /* --color-border is an alias of --color-border-outer, which flips in .dark. */
+  border-color: var(--color-border);
 }
 
 /* 表头：底色 + 加粗 + 单行（色板同 chat prose th，.dark 自动翻转；
@@ -2257,7 +2381,7 @@ input[type="radio"]:checked {
   float: left;
   height: 0;
   pointer-events: none;
-  color: var(--color-zinc-400, #a1a1aa);
+  color: var(--color-text-disabled);
 }
 
 /* Overlay scrollbar used by the Agent sidebar: native scrolling remains in the
@@ -2287,8 +2411,8 @@ input[type="radio"]:checked {
 .overlay-scrollbar-track {
   position: absolute;
   inset: 0 0 0 auto;
-  width: 8px;
-  z-index: 30;
+  width: var(--size-scrollbar-thumb);
+  z-index: var(--z-overlay);
   box-sizing: border-box;
   pointer-events: none;
   opacity: 0;
@@ -2297,8 +2421,8 @@ input[type="radio"]:checked {
 .overlay-scrollbar-track-x {
   position: absolute;
   inset: auto 0 0 0;
-  height: 8px;
-  z-index: 30;
+  height: var(--size-scrollbar-thumb);
+  z-index: var(--z-overlay);
   box-sizing: border-box;
   pointer-events: none;
   opacity: 0;

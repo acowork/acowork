@@ -117,7 +117,7 @@ export function CreateAccountModal({ open, onClose, onCreated }: CreateAccountMo
           </label>
           <p className="text-10 text-text-tertiary">{t("account.inviteHint")}</p>
           {error && (
-            <p role="alert" className="text-11 text-red-500">
+            <p role="alert" className="text-11 text-danger-icon">
               {error}
             </p>
           )}

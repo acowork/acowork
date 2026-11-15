@@ -1321,7 +1321,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                             setConversationHits([]);
                         }}
                     />
-                    <div className="flex h-full flex-1 items-center gap-1.5 border-l border-zinc-200 px-5 py-1.5 dark:border-zinc-700">
+                    <div className="flex h-full flex-1 items-center gap-1.5 border-l border-border-outer px-5 py-1.5">
                         <Search className="h-3 w-3 shrink-0 text-text-tertiary" />
                         <input
                             ref={inputRef}
@@ -1406,7 +1406,7 @@ export function GlobalSearchDialog({ onNavigate }: GlobalSearchDialogProps) {
                                 }}
                                 className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                                     tab === tabDef.key
-                                        ? "bg-zinc-200 text-text dark:bg-zinc-700"
+                                        ? "bg-surface-hover text-text"
                                         : "text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                                 }`}
                             >

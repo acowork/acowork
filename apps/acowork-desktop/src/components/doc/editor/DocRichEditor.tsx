@@ -138,7 +138,7 @@ export function DocRichEditor({
       <div
         className={cn(
           "flex shrink-0 items-center justify-end border-t border-border-divider px-3 py-0.5 text-10 tabular-nums",
-          overLimit ? "text-red-500" : "text-text-tertiary",
+          overLimit ? "text-danger-icon" : "text-text-tertiary",
         )}
       >
         {t("doc.charCount", { count: charCount, limit: RICH_EDITOR_CHAR_LIMIT })}

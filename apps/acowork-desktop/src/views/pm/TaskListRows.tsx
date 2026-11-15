@@ -216,7 +216,7 @@ function TitleCell({
       )}
       {needsReview && (
         <span
-          className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500"
+          className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning-solid"
           title={t("pm.list.review.pending")}
           aria-hidden
         />
@@ -348,8 +348,8 @@ function PlainCell({
         <span
           className={cn(
             mono,
-            overdue && "font-medium text-red-600 dark:text-red-400",
-            !overdue && left !== null && left <= 1 && "text-amber-600 dark:text-amber-400",
+            overdue && "font-medium text-danger-text",
+            !overdue && left !== null && left <= 1 && "text-warning",
           )}
         >
           {formatDueDate(task.due_at)}
@@ -387,7 +387,7 @@ function PlainCell({
       const n = task.blocked_by?.length ?? 0;
       if (!task.is_blocked && !n) return dash;
       return (
-        <span className="inline-flex items-center gap-1 text-red-600 dark:text-red-400">
+        <span className="inline-flex items-center gap-1 text-danger-text">
           <span aria-hidden>🔒</span>
           {n || 1}
         </span>
@@ -415,7 +415,7 @@ function PlainCell({
         <span
           className={cn(
             mono,
-            n >= 3 && "font-semibold text-red-600 dark:text-red-400",
+            n >= 3 && "font-semibold text-danger-text",
           )}
         >
           {n}
@@ -476,7 +476,7 @@ export function TaskListGroupHeaderRow({
         <span className="flex items-center gap-1.5 text-11 font-medium text-text-secondary">
           <span aria-hidden>▾</span>
           <span className="min-w-0 truncate">{label}</span>
-          <span className="rounded bg-zinc-200 px-1 tabular-nums text-10 text-text-tertiary dark:bg-zinc-800">
+          <span className="rounded bg-surface-hover px-1 tabular-nums text-10 text-text-tertiary">
             {count}
           </span>
         </span>
@@ -546,7 +546,7 @@ export function TaskListSkeletonRows({
           <td className={TD_BASE_CN} />
           <td colSpan={colCount - 1} className={TD_BASE_CN}>
             <div
-              className="h-3 w-2/3 animate-pulse rounded bg-zinc-100 dark:bg-zinc-800"
+              className="h-3 w-2/3 animate-pulse rounded bg-surface"
               aria-label="loading"
             />
           </td>

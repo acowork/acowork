@@ -148,7 +148,7 @@ export function ProjectHeader({
             />
           ) : (
             <h2
-              className="cursor-text text-base font-semibold text-text hover:text-zinc-600  dark:hover:text-zinc-300"
+              className="cursor-text text-base font-semibold text-text hover:text-text-tertiary "
               onClick={() => {
                 setTitleDraft(project.title);
                 setEditingTitle(true);
@@ -223,12 +223,12 @@ export function ProjectHeader({
               <strong className={COUNT_BADGE_NEUTRAL_CN}>{inProgress}</strong>
             </span>
             {submitted > 0 && (
-              <span className="flex items-center gap-1 text-amber-600 dark:text-amber-400">
+              <span className="flex items-center gap-1 text-warning">
                 {t("pm.board.submitted")}:
                 <strong
                   className={cn(
                     COUNT_BADGE_BASE_CN,
-                    "bg-amber-100 text-amber-700 dark:bg-amber-900/50 dark:text-amber-300",
+                    "bg-warning-surface-hover text-warning-quiet",
                   )}
                 >
                   {submitted}

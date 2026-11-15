@@ -474,7 +474,7 @@ export function AddProviderFlow({
           {step !== "picker" && (
             <button
               onClick={() => setStep("picker")}
-              className="text-text-tertiary hover:text-zinc-600 dark:hover:text-zinc-200"
+              className="text-text-tertiary hover:text-text-tertiary"
               aria-label={t("common.back")}
             >
               <ChevronLeft className="h-4 w-4" />
@@ -506,7 +506,7 @@ export function AddProviderFlow({
               {/* Provider display (read-only) */}
               <div>
                 <label className="mb-1 block text-xs text-text-tertiary">{t("harness.provider")}</label>
-                <div className="w-full rounded-md border border-border-outer bg-zinc-50 px-3 py-2 text-xs  dark:bg-zinc-900">
+                <div className="w-full rounded-md border border-border-outer bg-surface-subtle px-3 py-2 text-xs ">
                   {selectedProviderName}
                 </div>
               </div>
@@ -618,7 +618,7 @@ export function AddProviderFlow({
 
               {/* Test result */}
               {testResult && testResult.success && (
-                <div className="rounded-md bg-green-50 px-3 py-2 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
+                <div className="rounded-md bg-ok-surface px-3 py-2 text-xs text-ok">
                   {testResult.message}
                 </div>
               )}
@@ -746,7 +746,7 @@ export function AddProviderFlow({
                   </p>
                   {/* Pretty-printed demo — gives users something to copy
                       from so they know where the schema starts and ends. */}
-                  <pre className="max-h-[160px] overflow-auto rounded-md bg-zinc-50 px-2 py-1.5 font-mono text-10 text-text-tertiary dark:bg-zinc-900">
+                  <pre className="max-h-[160px] overflow-auto rounded-md bg-surface-subtle px-2 py-1.5 font-mono text-10 text-text-tertiary">
                     {OFFLINE_JSON_EXAMPLE}
                   </pre>
                   <div className="flex justify-end">
@@ -768,7 +768,7 @@ export function AddProviderFlow({
                       defaultValue: "Paste model JSON here, or click \"Use this example\" above",
                     })}
                     rows={5}
-                    className="w-full resize-y rounded-md border border-border-divider bg-transparent px-2 py-1.5 font-mono text-11 outline-none focus:border-zinc-400 dark:focus:border-zinc-500"
+                    className="w-full resize-y rounded-md border border-border-divider bg-transparent px-2 py-1.5 font-mono text-11 outline-none focus:border-border-strong"
                   />
                   {customJsonError && <ErrorBox message={customJsonError} />}
                   <div className="flex justify-end">
@@ -776,7 +776,7 @@ export function AddProviderFlow({
                       type="button"
                       onClick={handleImportCustomJson}
                       disabled={!customJsonInput.trim()}
-                      className="rounded-md bg-zinc-200 px-3 py-1.5 text-xs font-medium text-text hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-[var(--color-accent)]/15"
+                      className="rounded-md bg-surface-hover px-3 py-1.5 text-xs font-medium text-text hover:bg-[var(--color-accent)]/10 disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
                     >
                       {t("harness.customJsonImport", { defaultValue: "Import" })}
                     </button>
@@ -786,7 +786,7 @@ export function AddProviderFlow({
 
               {/* Model discovery status */}
               {customModelsLoading && (
-                <div className="rounded-md bg-zinc-50 px-3 py-2 text-xs text-text-tertiary dark:bg-zinc-900">
+                <div className="rounded-md bg-surface-subtle px-3 py-2 text-xs text-text-tertiary">
                   {t("harness.discoveringModels")}
                 </div>
               )}
@@ -828,12 +828,12 @@ export function AddProviderFlow({
           {/* Status on the left */}
           <div className="flex-1 min-w-0">
             {step === "add" && testResult && testResult.success && (
-              <div className="truncate rounded-md bg-green-50 px-3 py-1.5 text-xs text-green-700 dark:bg-green-900/20 dark:text-green-400">
+              <div className="truncate rounded-md bg-ok-surface px-3 py-1.5 text-xs text-ok">
                 {testResult.message}
               </div>
             )}
             {step === "add" && testResult && !testResult.success && (
-              <div className="truncate text-xs text-red-600 dark:text-red-400" title={testResult.message}>
+              <div className="truncate text-xs text-danger-text" title={testResult.message}>
                 {testResult.message}
               </div>
             )}

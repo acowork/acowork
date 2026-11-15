@@ -381,7 +381,7 @@ export function RunBlockActionRow({
           className={cn(
             "flex h-6 min-w-0 items-center overflow-hidden rounded-full bg-transparent transition-[max-width,background-color] ease-out",
             open
-              ? `${DRAWER_MAX_WIDTH} bg-zinc-100 duration-200 dark:bg-zinc-800/60`
+              ? `${DRAWER_MAX_WIDTH} bg-surface duration-200`
               : `${DRAWER_CLOSED_WIDTH} duration-150 ease-in`,
           )}
         >

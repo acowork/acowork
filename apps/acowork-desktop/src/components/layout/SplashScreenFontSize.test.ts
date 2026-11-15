@@ -6,7 +6,7 @@
  *   The timeout-recovery view was hand-styled ahead of the token tiers: the
  *   Gateway-address field was a raw `<input>` spelling `px-3 py-1.5 text-sm`
  *   with hardcoded `zinc` colours, and the retry action was a
- *   `bg-zinc-200 px-5 py-2 text-sm` button. Both read a notch larger than the
+ *   `bg-surface-hover px-5 py-2 text-sm` button. Both read a notch larger than the
  *   equivalent controls everywhere else (`StyledInput` owns the `text-xs` +
  *   `--ui-input-py` pair; filled action buttons take vertical padding from
  *   `--ui-btn-py`), so the splash looked off next to the main UI. This pins

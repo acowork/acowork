@@ -18,8 +18,10 @@ interface ErrorBoxProps {
 /**
  * ErrorBox — standardized inline error display.
  *
- * Replaces the dozens of hand-rolled `<div class="bg-red-50 ... text-red-700">{error}</div>`
- * blocks across the app. Adds:
+ * Replaces the dozens of hand-rolled `<div class="bg-danger-surface ... text-danger-text">{error}</div>`
+ * blocks across the app. Colour now comes from the `--color-danger-*` tokens
+ * in @theme, so a theme pack recolours it by overriding variables — no
+ * `dark:` double-write, no literal hex in the component. Adds:
  *   - `user-select: text` + `data-error` (CSS hook to opt out of body user-select:none)
  *   - One-click Copy button with copied feedback
  *   - Optional collapsible details for long error bodies
@@ -58,20 +60,19 @@ export function ErrorBox({ message, details, onClose, className }: ErrorBoxProps
             role="alert"
             data-error="true"
             className={cn(
-                "rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-700 select-text",
-                "dark:border-red-800 dark:bg-red-900/20 dark:text-red-400",
+                "rounded-md border border-danger-border bg-danger-surface p-3 text-xs text-danger-text select-text",
                 className,
             )}
         >
             <div className="flex items-start gap-2">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-red-500 dark:text-red-400" />
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 shrink-0 text-danger-icon" />
                 <div className="min-w-0 flex-1">
                     <p className="break-words whitespace-pre-wrap">{message}</p>
                     {hasDetails && (
                         <button
                             type="button"
                             onClick={() => setShowDetails((v) => !v)}
-                            className="mt-1 inline-flex items-center gap-0.5 text-11 font-medium text-red-700 hover:text-red-900 dark:text-red-400 dark:hover:text-red-300"
+                            className="mt-1 inline-flex items-center gap-0.5 text-11 font-medium text-danger-text hover:text-danger-text-strong"
                         >
                             {showDetails ? (
                                 <ChevronDown className="h-3 w-3" />
@@ -91,8 +92,8 @@ export function ErrorBox({ message, details, onClose, className }: ErrorBoxProps
                         className={cn(
                             "inline-flex h-6 items-center gap-1 rounded px-1.5 text-11 font-medium transition-colors",
                             copied
-                                ? "text-green-700 dark:text-green-400"
-                                : "text-red-700 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/40",
+                                ? "text-ok"
+                                : "text-danger-text hover:bg-danger-surface-hover",
                         )}
                     >
                         {copied ? (
@@ -112,7 +113,7 @@ export function ErrorBox({ message, details, onClose, className }: ErrorBoxProps
                             type="button"
                             onClick={onClose}
                             aria-label={t("common.ariaLabelDismiss")}
-                            className="inline-flex h-6 w-6 items-center justify-center rounded text-red-700 hover:bg-red-100 dark:text-red-400 dark:hover:bg-red-900/40"
+                            className="inline-flex h-6 w-6 items-center justify-center rounded text-danger-text hover:bg-danger-surface-hover"
                         >
                             <X className="h-3 w-3" />
                         </button>
@@ -120,7 +121,7 @@ export function ErrorBox({ message, details, onClose, className }: ErrorBoxProps
                 </div>
             </div>
             {hasDetails && showDetails && (
-                <pre className="mt-2 max-h-48 overflow-auto rounded bg-red-100/60 p-2 text-11 leading-relaxed text-red-800 break-all whitespace-pre-wrap dark:bg-red-950/40 dark:text-red-300">
+                <pre className="mt-2 max-h-48 overflow-auto rounded bg-danger-surface-hover/60 p-2 text-11 leading-relaxed text-danger-text break-all whitespace-pre-wrap">
                     {details}
                 </pre>
             )}

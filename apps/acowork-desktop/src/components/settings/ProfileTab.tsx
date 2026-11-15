@@ -312,7 +312,7 @@ export function ProfileTab() {
                 if (!avatarPopupOpen) computeAvatarPopupPos();
                 setAvatarPopupOpen((v) => !v);
               }}
-              className="relative block rounded-lg ring-1 ring-zinc-300/60 transition hover:ring-zinc-400 dark:ring-zinc-600/60 dark:hover:ring-zinc-400"
+              className="relative block rounded-lg ring-1 ring-border-strong/60 transition hover:ring-border-strong"
             >
               <UserAvatar
                 size={64}
@@ -320,7 +320,7 @@ export function ProfileTab() {
                 builtinAvatarId={profile.backendBuiltinAvatarId ?? undefined}
               />
               {/* Pencil badge */}
-              <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-zinc-800 text-white shadow-sm dark:bg-zinc-600">
+              <span className="absolute -bottom-0.5 -right-0.5 flex h-5 w-5 items-center justify-center rounded-full bg-btn-solid text-white shadow-sm">
                 <svg viewBox="0 0 16 16" className="h-3 w-3 fill-current" xmlns="http://www.w3.org/2000/svg">
                   <path d="M11.013 1.427a1.75 1.75 0 0 1 2.474 0l1.086 1.086a1.75 1.75 0 0 1 0 2.474l-8.61 8.61c-.21.21-.47.364-.756.445l-3.251.93a.75.75 0 0 1-.927-.928l.929-3.25c.081-.286.235-.547.445-.758l8.61-8.61Zm.176 4.823L11.5 7l-3-3-.31.31a.75.75 0 0 0-.177.764l.93 3.251a.75.75 0 0 1-.927.928l-3.251-.93Z" />
                 </svg>
@@ -355,8 +355,8 @@ export function ProfileTab() {
                     <button
                       onClick={() => setAvatarTab("custom")}
                       className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "custom"
-                        ? "border-b-2 border-zinc-800 text-text dark:border-zinc-200 "
-                        : "text-text-tertiary hover:text-zinc-600 "
+                        ? "border-b-2 border-text text-text "
+                        : "text-text-tertiary hover:text-text-tertiary "
                         }`}
                     >
                       Custom
@@ -364,8 +364,8 @@ export function ProfileTab() {
                     <button
                       onClick={() => setAvatarTab("builtin")}
                       className={`px-3 py-1 text-xs font-medium transition-colors ${avatarTab === "builtin"
-                        ? "border-b-2 border-zinc-800 text-text dark:border-zinc-200 "
-                        : "text-text-tertiary hover:text-zinc-600 "
+                        ? "border-b-2 border-text text-text "
+                        : "text-text-tertiary hover:text-text-tertiary "
                         }`}
                     >
                       Builtin
@@ -378,7 +378,7 @@ export function ProfileTab() {
                       <button
                         onClick={handleUploadClick}
                         disabled={avatarBusy}
-                        className="flex aspect-square items-center justify-center rounded-md border border-dashed border-zinc-300 text-text-tertiary transition-colors hover:border-zinc-400 hover:text-zinc-600 disabled:opacity-50 dark:border-zinc-600  dark:hover:border-zinc-400"
+                        className="flex aspect-square items-center justify-center rounded-md border border-dashed border-border-strong text-text-tertiary transition-colors hover:border-border-strong hover:text-text-tertiary disabled:opacity-50 "
                       >
                         <span className="text-lg">+</span>
                       </button>
@@ -388,8 +388,8 @@ export function ProfileTab() {
                           <div
                             key={asset.relative_path}
                             className={`group relative aspect-square overflow-hidden rounded-md border-2 transition-colors ${isSelected
-                              ? "border-zinc-800 dark:border-zinc-200"
-                              : "border-transparent hover:border-zinc-300 dark:hover:border-zinc-600"
+                              ? "border-text"
+                              : "border-transparent hover:border-border-strong"
                               }`}
                           >
                             <AuthedImage
@@ -404,7 +404,7 @@ export function ProfileTab() {
                                 handleDeleteAvatar(asset.relative_path);
                               }}
                               disabled={avatarBusy}
-                              className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded bg-red-500/80 text-[8px] text-white opacity-0 transition-opacity group-hover:opacity-100"
+                              className="absolute right-0.5 top-0.5 flex h-4 w-4 items-center justify-center rounded bg-danger-solid/80 text-[8px] text-white opacity-0 transition-opacity group-hover:opacity-100"
                             >
                               ×
                             </button>
@@ -425,7 +425,7 @@ export function ProfileTab() {
                             onClick={() => handleSelectBuiltin(iconId)}
                             disabled={avatarBusy}
                             className={`flex items-center justify-center rounded-md p-1 transition-colors ${isSelected
-                              ? "bg-zinc-200 dark:bg-zinc-600"
+                              ? "bg-surface-strong"
                               : "hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                               }`}
                           >
@@ -528,7 +528,7 @@ export function ProfileTab() {
           trailing={
             <span onClick={(e) => e.stopPropagation()} className="flex shrink-0 items-center gap-2">
               {savedMsg && (
-                <span className={`text-10 ${savedMsg === "saved" ? "text-[var(--color-accent)]" : "text-red-500"}`}>
+                <span className={`text-10 ${savedMsg === "saved" ? "text-[var(--color-accent)]" : "text-danger-icon"}`}>
                   {savedMsg === "saved" ? t("settings.saved") : t("settings.saveFailed")}
                 </span>
               )}
@@ -694,11 +694,11 @@ function PairingCard() {
               </p>
             </>
           ) : qr && expired ? (
-            <p className="text-xs text-red-500">{t("settings.pairingExpired")}</p>
+            <p className="text-xs text-danger-icon">{t("settings.pairingExpired")}</p>
           ) : error === "no-lan" ? (
-            <p className="text-center text-xs text-red-500">{t("settings.pairingNoLan")}</p>
+            <p className="text-center text-xs text-danger-icon">{t("settings.pairingNoLan")}</p>
           ) : error === "failed" ? (
-            <p className="text-xs text-red-500">{t("settings.pairingFailed")}</p>
+            <p className="text-xs text-danger-icon">{t("settings.pairingFailed")}</p>
           ) : null}
 
           <button

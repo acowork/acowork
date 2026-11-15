@@ -1,0 +1,95 @@
+/*
+ * Dusk theme pack — soft violet light / deep plum dark.
+ *
+ * App-style palette (not a code-editor theme): an evening lavender tint
+ * across the whole UI at low saturation.
+ *
+ * Same contract as paper.css (the reference pack): file name is the id, only contract tokens
+ * from globals.css are overridden, and both light and dark scopes exist.
+ */
+
+:root.theme-dusk {
+  --color-bg: hsl(250 25% 96%);
+  --color-page-bg: hsl(250 18% 91%);
+  --color-panel-block: hsl(250 21% 94%);
+  --color-panel-inset: hsl(250 16% 89%);
+  --color-panel-inset-2: hsl(250 14% 85%);
+  --color-modal-surface: hsl(250 30% 98%);
+  --color-editor-canvas: hsl(250 23% 95%);
+  --color-nav-surface: hsl(250 16% 89%);
+  --color-nav-item-hover: hsl(250 14% 83%);
+  --color-nav-divider: hsl(250 12% 79%);
+  --color-right-panel: hsl(250 19% 93%);
+  --color-chat-body: hsl(250 22% 95%);
+  --color-chat-title: hsl(250 14% 87%);
+  --color-chat-input-bg: hsl(250 30% 98%);
+  --color-input-bg: hsl(250 30% 98%);
+  --color-border-outer: hsl(250 14% 76%);
+  --color-border-divider: hsl(250 12% 83%);
+  --color-menu-divider: hsl(250 12% 81%);
+  --color-text: hsl(250 22% 28%);
+  --color-text-secondary: hsl(249 16% 40%);
+  --color-text-tertiary: hsl(248 12% 52%);
+  --color-text-disabled: hsl(248 10% 66%);
+  --color-menu-text: hsl(250 20% 30%);
+  --color-menu-icon: hsl(249 13% 56%);
+  --color-menu-danger: hsl(348 65% 46%);
+  --color-menu-danger-hover: hsl(348 70% 95%);
+  --color-menu-warning: hsl(38 75% 40%);
+  --color-menu-warning-hover: hsl(38 85% 94%);
+  --color-danger-surface: hsl(348 70% 96%);
+  --color-danger-surface-hover: hsl(348 70% 92%);
+  --color-danger-border: hsl(348 50% 85%);
+  --color-danger-text: hsl(348 65% 43%);
+  --color-danger-text-strong: hsl(348 70% 33%);
+  --color-danger-icon: hsl(348 65% 53%);
+  --color-control-track: hsl(250 14% 76%);
+  --color-control-outline: hsl(249 13% 60%);
+  --color-highlight-locate: hsl(255 60% 62% / 0.16);
+  --color-muted: hsl(250 18% 90%);
+  --color-muted-foreground: hsl(248 14% 46%);
+  --shadow-menu: 0 4px 6px -1px hsl(250 20% 35% / 0.12), 0 2px 4px -2px hsl(250 20% 35% / 0.12);
+}
+
+:root.theme-dusk.dark {
+  --color-bg: hsl(249 18% 14%);
+  --color-page-bg: hsl(249 18% 11%);
+  --color-panel-block: hsl(249 17% 19%);
+  --color-panel-inset: hsl(249 17% 12%);
+  --color-panel-inset-2: hsl(249 18% 9%);
+  --color-modal-surface: hsl(249 18% 23%);
+  --color-editor-canvas: hsl(249 18% 15%);
+  --color-nav-surface: hsl(249 17% 12%);
+  --color-nav-item-hover: hsl(249 16% 21%);
+  --color-nav-divider: hsl(249 14% 27%);
+  --color-right-panel: hsl(249 18% 16%);
+  --color-chat-body: hsl(249 18% 14%);
+  --color-chat-title: hsl(249 16% 20%);
+  --color-chat-input-bg: hsl(249 17% 23%);
+  --color-input-bg: hsl(249 17% 23%);
+  --color-border-outer: hsl(249 13% 31%);
+  --color-border-divider: hsl(249 14% 25%);
+  --color-menu-divider: hsl(249 14% 28%);
+  --color-text: hsl(251 25% 87%);
+  --color-text-secondary: hsl(251 18% 75%);
+  --color-text-tertiary: hsl(250 13% 62%);
+  --color-text-disabled: hsl(250 11% 46%);
+  --color-menu-text: hsl(251 23% 85%);
+  --color-menu-icon: hsl(250 14% 57%);
+  --color-menu-danger: hsl(348 80% 72%);
+  --color-menu-danger-hover: hsl(348 50% 26% / 0.3);
+  --color-menu-warning: hsl(40 85% 68%);
+  --color-menu-warning-hover: hsl(40 50% 22% / 0.3);
+  --color-danger-surface: hsl(348 35% 22%);
+  --color-danger-surface-hover: hsl(348 35% 28%);
+  --color-danger-border: hsl(348 28% 35%);
+  --color-danger-text: hsl(348 75% 76%);
+  --color-danger-text-strong: hsl(348 80% 86%);
+  --color-danger-icon: hsl(348 80% 72%);
+  --color-control-track: hsl(249 12% 33%);
+  --color-control-outline: hsl(250 15% 55%);
+  --color-highlight-locate: hsl(255 70% 70% / 0.24);
+  --color-muted: hsl(249 16% 20%);
+  --color-muted-foreground: hsl(250 16% 68%);
+  --shadow-menu-dark: 0 4px 6px -1px hsl(255 30% 2% / 0.55), 0 2px 4px -2px hsl(255 30% 2% / 0.55);
+}

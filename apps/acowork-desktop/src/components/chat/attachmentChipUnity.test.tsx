@@ -35,9 +35,11 @@ vi.mock("../../i18n/useTranslation", () => ({
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const sourceOf = (file: string) => readFileSync(resolve(__dirname, file), "utf8");
 
-/** The capsule's own frame signature — padding and radius included. A chip
- *  that re-inlines it instead of composing the component matches this. */
-const FRAME = "rounded-md border border-border-outer";
+/** The capsule's own frame signature — the full flex+gap preamble plus
+ *  padding and radius. A chip that re-inlines it instead of composing the
+ *  component matches this; a plain bordered thumbnail does NOT (it shares
+ *  only the border utilities, which is deliberate visual unity). */
+const FRAME = "inline-flex items-center gap-1.5 rounded-md border border-border-outer";
 
 describe("one frame", () => {
   it.each([

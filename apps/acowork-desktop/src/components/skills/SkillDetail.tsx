@@ -84,12 +84,12 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
         </p>
         <div className="mt-3 flex flex-wrap gap-2 text-xs text-text-tertiary ">
           {detail.version && (
-            <span className="rounded bg-zinc-100 px-2 py-0.5 dark:bg-zinc-800">
+            <span className="rounded bg-surface px-2 py-0.5">
               Version: {detail.version}
             </span>
           )}
           {detail.author && (
-            <span className="rounded bg-zinc-100 px-2 py-0.5 dark:bg-zinc-800">
+            <span className="rounded bg-surface px-2 py-0.5">
               Author: {detail.author}
             </span>
           )}
@@ -125,7 +125,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
             {detail.tool_deps.map((tool) => (
               <span
                 key={tool}
-                className="rounded-full bg-zinc-100 px-2.5 py-0.5 text-xs font-medium text-text-secondary dark:bg-zinc-800 "
+                className="rounded-full bg-surface px-2.5 py-0.5 text-xs font-medium text-text-secondary "
               >
                 {tool}
               </span>
@@ -139,7 +139,7 @@ export function SkillDetail({ detail, loading, onBack }: SkillDetailProps) {
         <h3 className="text-xs font-semibold uppercase tracking-wider text-text-tertiary ">
           Instructions
         </h3>
-        <div className="mt-2 rounded-md border border-border-outer bg-zinc-50 p-4  dark:bg-zinc-800/50">
+        <div className="mt-2 rounded-md border border-border-outer bg-surface-subtle p-4 ">
           <pre className="whitespace-pre-wrap text-sm text-text-secondary ">
             {detail.instructions}
           </pre>

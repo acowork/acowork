@@ -148,7 +148,7 @@ export default function SheetViewer(props: ViewerFileProps) {
                 </div>
             )}
             {sheet.truncatedBy > 0 && (
-                <div className="shrink-0 border-b border-amber-300/60 bg-amber-50/95 px-3 py-1 text-11 text-amber-900 dark:bg-amber-950/60 dark:text-amber-100">
+                <div className="shrink-0 border-b border-warning-border/60 bg-warning-surface/95 px-3 py-1 text-11 text-warning-quiet">
                     {t("fileEditor.sheetViewer.tooLarge", { rows: sheet.rows.length })}
                 </div>
             )}

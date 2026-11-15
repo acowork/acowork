@@ -321,7 +321,7 @@ export function ChatHistoryDialog({
               onClick={() => setCategory(tab.key)}
               className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                 category === tab.key
-                  ? "bg-zinc-200 text-text dark:bg-zinc-700"
+                  ? "bg-surface-hover text-text"
                   : "text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
               }`}
             >
@@ -367,7 +367,7 @@ export function ChatHistoryDialog({
               {t("chatHistory.loading")}
             </div>
           ) : error && hits.length === 0 ? (
-            <div className="flex h-full items-center justify-center px-6 text-center text-xs text-red-500">
+            <div className="flex h-full items-center justify-center px-6 text-center text-xs text-danger-icon">
               {t("chatHistory.error")}
             </div>
           ) : hits.length === 0 ? (

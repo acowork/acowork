@@ -111,9 +111,16 @@ function applyOpacity(opacity: number) {
   document.documentElement.style.setProperty("--app-opacity", String(opacity));
 }
 
-/** Apply accent preset to the DOM. */
+/** Apply accent preset to the DOM.
+ *
+ * Shipped presets set NO inline value: `:root.accent-{id}` in globals.css
+ * supplies `--color-accent` and the glass tints, so a theme pack (whose CSS
+ * loads after globals.css) may re-own the accent token. An inline value would
+ * outrank every stylesheet and strand the accent outside theming. A custom
+ * accent is the one case that must be inline — there is no CSS class for an
+ * arbitrary hex — and it deliberately wins over any theme pack: the user
+ * picked that exact colour. */
 function applyAccentPreset(preset: AccentPreset) {
-  document.documentElement.style.setProperty("--color-accent", preset.hex);
   const classList = document.documentElement.classList;
   for (const cls of Array.from(classList)) {
     if (cls.startsWith("accent-")) classList.remove(cls);
@@ -122,9 +129,11 @@ function applyAccentPreset(preset: AccentPreset) {
 
   const style = document.documentElement.style;
   if (preset.id === CUSTOM_ACCENT_ID) {
+    style.setProperty("--color-accent", preset.hex);
     style.setProperty("--glass-tint-light", preset.glassTintLight);
     style.setProperty("--glass-tint-dark", preset.glassTintDark);
   } else {
+    style.removeProperty("--color-accent");
     style.removeProperty("--glass-tint-light");
     style.removeProperty("--glass-tint-dark");
   }

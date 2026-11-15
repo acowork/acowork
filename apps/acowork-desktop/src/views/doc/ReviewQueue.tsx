@@ -107,7 +107,7 @@ export function ReviewQueue() {
         className={cn(
           "flex w-full items-center gap-2 px-3 py-1 text-left text-11 transition-colors",
           pendingCount > 0
-            ? "bg-amber-50 text-amber-800 hover:bg-amber-100 dark:bg-amber-900/20 dark:text-amber-200 dark:hover:bg-amber-900/30"
+            ? "bg-warning-surface text-warning-quiet hover:bg-warning-surface-hover"
             : "text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
         )}
       >
@@ -132,7 +132,7 @@ export function ReviewQueue() {
               <button
                 type="button"
                 onClick={() => void loadPending()}
-                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15"
+                className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
               >
                 <RefreshCw className="h-3 w-3" />
                 {t("common.refresh")}
@@ -153,7 +153,7 @@ export function ReviewQueue() {
                 >
                   <div className="flex items-center gap-1.5 truncate text-xs text-text-secondary ">
                     <span className="truncate font-medium">{req.path}</span>
-                    <span className="shrink-0 rounded bg-zinc-100 px-1 text-10 text-text-tertiary dark:bg-zinc-800 ">
+                    <span className="shrink-0 rounded bg-surface px-1 text-10 text-text-tertiary ">
                       base v{req.base_version}
                     </span>
                   </div>
@@ -167,7 +167,7 @@ export function ReviewQueue() {
                     type="button"
                     disabled={busyId === req.request_id}
                     onClick={() => void handleApprove(req)}
-                    className="inline-flex items-center gap-0.5 rounded bg-emerald-600 px-1.5 py-0.5 text-10 font-medium text-white hover:bg-emerald-700 disabled:opacity-40"
+                    className="inline-flex items-center gap-0.5 rounded bg-ok-solid px-1.5 py-0.5 text-10 font-medium text-white hover:bg-ok-solid/90 disabled:opacity-40"
                   >
                     <Check className="h-2.5 w-2.5" aria-hidden />
                     {t("doc.approve")}
@@ -179,7 +179,7 @@ export function ReviewQueue() {
                       setNoteTarget(req);
                       setNote("");
                     }}
-                    className="inline-flex items-center gap-0.5 rounded border border-zinc-200 px-1.5 py-0.5 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:border-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
+                    className="inline-flex items-center gap-0.5 rounded border border-border-outer px-1.5 py-0.5 text-10 text-text-tertiary hover:bg-[var(--color-accent)]/10 disabled:opacity-40  dark:hover:bg-[var(--color-accent)]/15"
                   >
                     <X className="h-2.5 w-2.5" aria-hidden />
                     {t("doc.reject")}
@@ -214,7 +214,7 @@ export function ReviewQueue() {
               <button
                 type="button"
                 onClick={() => setNoteTarget(null)}
-                className="rounded-md border border-zinc-200 px-2 py-1 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10 dark:border-zinc-700  dark:hover:bg-[var(--color-accent)]/15"
+                className="rounded-md border border-border-outer px-2 py-1 text-xs text-text-secondary hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
               >
                 {t("common.cancel")}
               </button>
@@ -222,7 +222,7 @@ export function ReviewQueue() {
                 type="button"
                 disabled={busyId === noteTarget.request_id}
                 onClick={() => void handleRejectConfirm()}
-                className="rounded-md bg-red-600 px-2 py-1 text-xs font-medium text-white hover:bg-red-700 disabled:opacity-40"
+                className="rounded-md bg-danger-solid px-2 py-1 text-xs font-medium text-white hover:bg-danger-solid disabled:opacity-40"
               >
                 {t("doc.rejectConfirm")}
               </button>

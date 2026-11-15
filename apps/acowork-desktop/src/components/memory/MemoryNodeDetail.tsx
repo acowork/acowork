@@ -163,7 +163,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
 
   return (
     <div
-      className="flex flex-1 flex-col overflow-hidden rounded-md border border-zinc-400/70 bg-panel-inset-2 dark:border-zinc-600"
+      className="flex flex-1 flex-col overflow-hidden rounded-md border border-border-strong/70 bg-panel-inset-2"
       onContextMenu={onContextMenu}
     >
       {/* Header */}
@@ -250,7 +250,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
               {decayLabel}
             </span>
           </div>
-          <div className="h-2 w-full overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-700">
+          <div className="h-2 w-full overflow-hidden rounded-full bg-surface-hover">
             <div
               className={cn("h-full rounded-full transition-all", getDecayColor(node.decay_score))}
               style={{ width: `${node.decay_score * 100}%` }}
@@ -266,7 +266,7 @@ export function MemoryNodeDetail({ node, onClose, onDelete }: MemoryNodeDetailPr
       <div className="border-t border-border-divider p-3">
         <button
           onClick={handleDelete}
-          className="inline-flex w-full items-center justify-center gap-1 rounded border border-red-200 bg-red-50 px-2 py-1.5 text-11 font-medium text-red-700 hover:bg-red-100 dark:border-red-900 dark:bg-red-950 dark:text-red-400 dark:hover:bg-red-900"
+          className="inline-flex w-full items-center justify-center gap-1 rounded border border-danger-border bg-danger-surface px-2 py-1.5 text-11 font-medium text-danger-text hover:bg-danger-surface-hover"
         >
           <Trash2 className="h-3 w-3" />
           Delete Node

@@ -179,7 +179,7 @@ export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpene
           <Tooltip content={t("sessionTabBar.clearAll")} variant="plain">
             <button
               onClick={() => setConfirmClearAll(true)}
-              className="rounded p-1 transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300"
+              className="rounded p-1 transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15"
             >
               <Trash2 className="h-3 w-3" />
             </button>
@@ -294,7 +294,7 @@ export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpene
                   <button
                     onClick={(e) => { e.stopPropagation(); setConfirmDelete(session.session_id); }}
                     disabled={deletingId !== null || rowReadOnly}
-                    className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-600 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:hover:bg-red-900/20 dark:hover:text-red-400"
+                    className="rounded p-1 text-text-tertiary opacity-0 transition-all group-hover:opacity-100 hover:bg-danger-surface hover:text-danger-text disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent"
                   >
                     <Trash2 className="h-3 w-3" />
                   </button>
@@ -341,8 +341,8 @@ export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpene
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-red-100 dark:bg-red-900/30">
-                <TriangleAlert className="h-5 w-5 text-red-600 dark:text-red-400" />
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-danger-surface-hover">
+                <TriangleAlert className="h-5 w-5 text-danger-text" />
               </div>
               <div className="flex-1">
                 <h3 className="text-sm font-medium text-text ">
@@ -364,7 +364,7 @@ export function SessionListDropdown({ agentId, activeSessionId, onClose, onOpene
               <button
                 onClick={() => void handleClearAll()}
                 disabled={clearing}
-                className="rounded bg-red-600 px-3 py-1.5 text-xs text-white transition-colors hover:bg-red-700 disabled:opacity-50"
+                className="rounded bg-danger-solid px-3 py-1.5 text-xs text-white transition-colors hover:bg-danger-solid disabled:opacity-50"
               >
                 {clearing ? t("sessionTabBar.clearing") : t("sessionTabBar.clearAllConfirm")}
               </button>
@@ -807,7 +807,7 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
               {attention && (
                 <span
                   data-testid="session-tab-attention-dot"
-                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-red-500"
+                  className="h-1.5 w-1.5 shrink-0 rounded-full bg-danger-solid"
                   title={t("sessionTabBar.attention")}
                   aria-label={t("sessionTabBar.attention")}
                 />
@@ -888,7 +888,7 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
               <button
                 onClick={onOpenChatHistory}
                 aria-label={t("chatHistory.title")}
-                className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
+                className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15 transition-colors"
               >
                 <OutlineChatHistoryIcon size={14} />
               </button>
@@ -906,7 +906,7 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
           <Tooltip content={t("sessionTabBar.newConversation")} variant="plain">
             <button
               onClick={handleNew}
-              className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300 transition-colors"
+              className="inline-flex items-center justify-center rounded h-6 w-6 text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15 transition-colors"
             >
               <Plus className="h-3.5 w-3.5 shrink-0" />
             </button>
@@ -928,8 +928,8 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
               className={cn(
                 "inline-flex items-center justify-center rounded h-6 w-6 transition-colors",
                 listOpen
-                  ? "text-[var(--color-accent)] bg-zinc-200 dark:bg-zinc-700"
-                  : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-600 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-300",
+                  ? "text-[var(--color-accent)] bg-surface-hover"
+                  : "text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-tertiary dark:hover:bg-[var(--color-accent)]/15",
               )}
             >
               <Clock className="h-3.5 w-3.5" />
@@ -958,8 +958,8 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-start gap-3">
-              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-amber-100 dark:bg-amber-900/30">
-                <TriangleAlert className="h-5 w-5 text-amber-600 dark:text-amber-400" />
+              <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-warning-surface-hover">
+                <TriangleAlert className="h-5 w-5 text-warning" />
               </div>
               <div className="flex-1">
                 <h3 className="text-sm font-medium text-text ">

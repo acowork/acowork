@@ -155,7 +155,7 @@ export function ChatTurnHeader({ identities, text, className }: ChatTurnHeaderPr
       <div className="flex items-start gap-2">
         <div className="w-10 shrink-0" />
         <span className="flex items-center gap-1.5">
-          <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-500 animate-pulse" />
+          <span className="shrink-0 h-1.5 w-1.5 rounded-full bg-loading animate-pulse" />
           <span
             className="thinking-shimmer text-text-tertiary"
             style={{ fontSize: "var(--ui-font-size, 0.875rem)" }}

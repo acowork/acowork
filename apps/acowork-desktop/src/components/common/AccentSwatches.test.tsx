@@ -183,7 +183,9 @@ describe("custom accent persistence and DOM", () => {
     setAccent(CUSTOM);
     setAccent("red");
     expect(useSettingsStore.getState().accentColor).toBe(BLUE);
-    expect(root().style.getPropertyValue("--color-accent")).toBe(BLUE);
+    // BLUE is a shipped preset: the accent class owns the token, no inline.
+    expect(root().style.getPropertyValue("--color-accent")).toBe("");
+    expect(root().classList).toContain("accent-blue");
     expect(localStorage.getItem("acowork-accent-color")).toBe(BLUE);
   });
 

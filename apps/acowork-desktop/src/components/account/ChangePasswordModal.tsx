@@ -114,10 +114,10 @@ export function ChangePasswordModal({ open, onClose }: ChangePasswordModalProps)
             />
           </label>
           {mismatch && (
-            <p className="text-11 text-red-500">{t("account.passwordMismatch")}</p>
+            <p className="text-11 text-danger-icon">{t("account.passwordMismatch")}</p>
           )}
           {error && (
-            <p role="alert" className="text-11 text-red-500">
+            <p role="alert" className="text-11 text-danger-icon">
               {error}
             </p>
           )}

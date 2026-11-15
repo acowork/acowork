@@ -185,7 +185,7 @@ export function TitleBar({
               <Square className="h-3 w-3" />
             </button>
             <button
-              className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-red-500 hover:text-white  dark:hover:bg-red-600"
+              className="flex h-8 w-8 items-center justify-center rounded text-text-secondary hover:bg-danger-solid hover:text-white "
               onClick={handleClose}
             >
               <X className="h-3.5 w-3.5" />

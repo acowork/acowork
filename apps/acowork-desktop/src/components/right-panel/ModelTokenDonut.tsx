@@ -107,7 +107,7 @@ export function ModelTokenDonut({ items, consistent }: ModelTokenDonutProps) {
                                 key={`${s.provider}|${s.model}`}
                                 d={slicePath(start, sweep)}
                                 fill={s.color}
-                                stroke="var(--color-bg-card, #fff)"
+                                stroke="var(--color-modal-surface)"
                                 strokeWidth="0.3"
                                 opacity={hovered == null || isHovered ? 1 : 0.55}
                                 onMouseEnter={() => setHovered(i)}

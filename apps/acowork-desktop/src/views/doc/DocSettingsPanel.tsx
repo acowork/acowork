@@ -55,7 +55,7 @@ export function DocSettingsPanel({ width, onResizeStart, onClose }: DocSettingsP
             type="button"
             onClick={onClose}
             aria-label={t("common.close")}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
+            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
           >
             ×
           </button>
@@ -143,9 +143,9 @@ function ServiceStatusSection() {
 
   const state =
     healthy === true
-      ? { label: t("doc.settingsPanel.serviceOnline"), cls: "text-emerald-600 dark:text-emerald-400" }
+      ? { label: t("doc.settingsPanel.serviceOnline"), cls: "text-ok" }
       : healthy === false
-        ? { label: t("doc.settingsPanel.serviceOffline"), cls: "text-red-600 dark:text-red-400" }
+        ? { label: t("doc.settingsPanel.serviceOffline"), cls: "text-danger-text" }
         : { label: t("doc.settingsPanel.serviceUnknown"), cls: "text-text-tertiary" };
 
   return (

@@ -22,7 +22,7 @@
 //! The body renders with no implicit chrome; add the hairline + padding
 //! via `bodyClassName` (see the surface rule in ListBox). When the body
 //! is an expanded sub-surface, pass a deeper tone via `bodyClassName`
-//! (e.g. `rounded-b-md border-t … bg-zinc-50 dark:bg-zinc-900/60`) so
+//! (e.g. `rounded-b-md border-t … bg-surface-subtle`) so
 //! level-1 header vs level-2 rows stay visually separated, and set the
 //! header `surface="inset"` so its hover stays legible above that body.
 //!
@@ -103,7 +103,7 @@ export function ExpandableRow({
         className={cn(
           "flex w-full items-center gap-2 text-left transition-colors",
           variant === "section"
-            ? "min-h-[30px] rounded-md bg-zinc-100 px-2.5 hover:bg-[var(--color-accent)]/10 dark:bg-zinc-700/60 dark:hover:bg-[var(--color-accent)]/15"
+            ? "min-h-[30px] rounded-md bg-surface-hover px-2.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
             : surface === "inset"
               ? cn("min-h-[36px] px-3", listRowHoverInset)
               : cn("min-h-[36px] px-3", listRowHover),

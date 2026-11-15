@@ -22,4 +22,4 @@ export const COUNT_BADGE_BASE_CN =
   "rounded-full px-1.5 py-px text-10 font-medium tabular-nums";
 
 export const COUNT_BADGE_NEUTRAL_CN =
-  `${COUNT_BADGE_BASE_CN} bg-zinc-200 text-text-secondary dark:bg-zinc-700`;
+  `${COUNT_BADGE_BASE_CN} bg-surface-hover text-text-secondary`;

@@ -424,7 +424,7 @@ function TaskDialogPane({
             <button
               type="button"
               onClick={() => requestLeave()}
-              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-sm text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-zinc-700 dark:hover:bg-[var(--color-accent)]/15 dark:hover:text-zinc-200"
+              className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-sm text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
               aria-label={t("common.close")}
             >
               ×
@@ -453,7 +453,7 @@ function TaskDialogPane({
                 onClick={() => setTab(key)}
                 className={`rounded-full px-3 py-1.5 text-xs font-medium transition-colors ${
                   activeTab === key
-                    ? "bg-zinc-200 text-text dark:bg-zinc-700"
+                    ? "bg-surface-hover text-text"
                     : "text-text-tertiary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
                 }`}
               >
@@ -479,7 +479,7 @@ function TaskDialogPane({
               {/* A load failure is a fact about the ROW, not about one tab, so
                   it sits above the tab body and stays visible on every tab. */}
               {error && (
-                <div className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700 dark:bg-amber-950/40 dark:text-amber-300">
+                <div className="rounded-md bg-warning-surface px-3 py-2 text-xs text-warning-quiet">
                   {error}
                   <button
                     type="button"
@@ -544,7 +544,7 @@ function TaskDialogPane({
               <button
                 type="button"
                 onClick={() => setConfirmDelete(true)}
-                className="inline-flex items-center justify-center gap-1 rounded-md bg-red-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-red-500 dark:bg-red-700 dark:hover:bg-red-600"
+                className="inline-flex items-center justify-center gap-1 rounded-md bg-danger-solid px-3 py-1.5 text-xs font-medium text-white hover:bg-danger-solid"
               >
                 <Trash2 className="h-3 w-3" aria-hidden />
                 {t("pm.task.delete")}
@@ -678,7 +678,7 @@ function BasicInfoTab({
         // 哪一处才是当前值。
         <div
           data-testid="task-audit"
-          className="rounded-md bg-zinc-50 px-3 py-2 text-11 text-text-tertiary dark:bg-zinc-800/60"
+          className="rounded-md bg-surface-subtle px-3 py-2 text-11 text-text-tertiary"
         >
           <div className="flex flex-wrap items-center gap-x-2.5 gap-y-1">
             <span>
@@ -694,7 +694,7 @@ function BasicInfoTab({
           {/* A dispatch failure is a durable task fact — surfacing it here is
               the only place a stuck row explains itself. */}
           {row.status === "pending" && !row.dispatched_at && row.dispatch_error && (
-            <p className="mt-1.5 rounded bg-amber-100 px-2 py-1 text-amber-800 dark:bg-amber-950/50 dark:text-amber-300">
+            <p className="mt-1.5 rounded bg-warning-surface-hover px-2 py-1 text-warning-quiet">
               {row.dispatch_attempts >= 5
                 ? t("pm.task.dispatchAbandoned", { error: row.dispatch_error })
                 : t("pm.task.dispatchFailed", {
@@ -764,7 +764,7 @@ function BasicInfoTab({
               placeholder={{ value: "", label: t("pm.task.unassigned") }}
             />
           ) : (
-            <p className="rounded-md border border-dashed border-zinc-300 px-2 py-1.5 text-11 text-text-tertiary dark:border-zinc-600">
+            <p className="rounded-md border border-dashed border-border-strong px-2 py-1.5 text-11 text-text-tertiary">
               {t("pm.assigneeNoMembersHint")}
             </p>
           )}
@@ -849,7 +849,7 @@ function RelatedTasksTab({
           <button
             type="button"
             onClick={onAddSubtask}
-            className="mt-2 w-full rounded-md border border-dashed border-zinc-300 px-3 py-1.5 text-xs text-text-tertiary hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] dark:border-zinc-600"
+            className="mt-2 w-full rounded-md border border-dashed border-border-strong px-3 py-1.5 text-xs text-text-tertiary hover:border-[var(--color-accent)] hover:text-[var(--color-accent)]"
           >
             + {t("pm.task.addSubtask")}
           </button>
@@ -893,7 +893,7 @@ function Attachments({
           type="button"
           disabled={uploading}
           onClick={() => fileInputRef.current?.click()}
-          className="inline-flex items-center gap-1.5 rounded-md border border-zinc-300 bg-white px-2.5 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-600 dark:bg-zinc-800 dark:hover:bg-[var(--color-accent)]/15"
+          className="inline-flex items-center gap-1.5 rounded-md border border-border-strong bg-surface px-2.5 py-1.5 text-xs font-medium text-text-secondary transition-colors hover:bg-[var(--color-accent)]/10 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-[var(--color-accent)]/15"
         >
           <span aria-hidden>⬆</span>
           {uploading ? t("pm.task.uploading") : t("pm.task.uploadAttachment")}
@@ -945,7 +945,7 @@ function Attachments({
                 aria-label={t("pm.task.deleteAttachment")}
                 title={t("pm.task.deleteAttachment")}
                 onClick={() => onDelete(att.id)}
-                className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/50 text-10 text-white opacity-0 transition-opacity hover:bg-red-600 focus-visible:opacity-100 group-hover:opacity-100"
+                className="absolute right-1 top-1 flex h-5 w-5 items-center justify-center rounded-full bg-black/50 text-10 text-white opacity-0 transition-opacity hover:bg-danger-solid focus-visible:opacity-100 group-hover:opacity-100"
               >
                 ✕
               </button>
@@ -977,7 +977,7 @@ function Field({
     <label className={cn("block", className)}>
       <span className="mb-1 block text-11 font-medium text-text-tertiary">
         {label}
-        {required && <span className="ml-0.5 text-red-500">*</span>}
+        {required && <span className="ml-0.5 text-danger-icon">*</span>}
       </span>
       {children}
     </label>

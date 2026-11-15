@@ -3,6 +3,7 @@ import ReactDOM from "react-dom/client";
 import App from "./App";
 import "./i18n"; // i18n initialization (must run before any useTranslation call)
 import "./styles/globals.css";
+import { initThemePacks } from "./styles/themePacks";
 import { initMonaco } from "./lib/monacoBootstrap";
 import { installMainThreadProbe, installLongTaskObserver } from "./lib/mainThreadProbe";
 import { installAuthFetchInterceptor } from "./lib/authFetch";
@@ -107,6 +108,11 @@ if (typeof navigator !== "undefined" && navigator.clipboard) {
 // based on the persisted preference from localStorage.
 import "./stores/settingsStore";
 import { useSettingsStore } from "./stores/settingsStore";
+
+// Theme packs are discovered from styles/themes/*.css at build time. Apply the
+// persisted one after settingsStore has set the .dark class, so an active pack
+// always sees the correct light/dark mode on its first paint.
+initThemePacks();
 
 // Font size steps for Ctrl+/Ctrl- global shortcuts.
 const FONT_SIZE_STEPS = [0.75, 0.875, 1.0, 1.125, 1.25];

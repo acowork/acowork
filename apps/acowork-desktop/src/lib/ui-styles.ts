@@ -29,7 +29,7 @@ export const inputBase =
 
 /** Read-only input field */
 export const inputReadonly =
-  "rounded border border-zinc-200 bg-zinc-50 px-3 py-[var(--ui-input-py)] text-xs dark:border-zinc-700 dark:bg-zinc-800 ";
+  "rounded border border-border-outer bg-surface-subtle px-3 py-[var(--ui-input-py)] text-xs ";
 
 // Note: dropdown styling was historically provided via `selectBase` and
 // `selectArrowStyle` here. It now lives in
@@ -39,7 +39,7 @@ export const inputReadonly =
 
 /** Font-mono input (for API keys, codes) */
 export const inputMono =
-  "rounded border border-zinc-200 px-3 py-[var(--ui-input-py)] font-mono text-xs dark:border-zinc-700 dark:bg-zinc-900 ";
+  "rounded border border-border-outer px-3 py-[var(--ui-input-py)] font-mono text-xs dark:bg-zinc-900 ";
 
 // ── Button styles ───────────────────────────────────────────────────
 
@@ -57,7 +57,7 @@ export const inputMono =
  * dropdown rows wear — no neutral grey button chrome.
  */
 export const toolbarButton =
-  `inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs transition-colors text-text-tertiary ${interactiveHover} hover:text-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent`;
+  `inline-flex items-center gap-1 rounded px-2 py-1.5 text-xs transition-colors text-text-tertiary ${interactiveHover} hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent`;
 
 /**
  * Composer right-cluster icon button — visibility / context-usage /
@@ -75,7 +75,7 @@ export const toolbarButton =
  * up while refusing the click.
  */
 export const toolbarIconButton =
-  `inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors text-text-tertiary ${interactiveHover} hover:text-zinc-700 dark:hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent`;
+  `inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md transition-colors text-text-tertiary ${interactiveHover} hover:text-text-secondary disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-transparent dark:disabled:hover:bg-transparent`;
 
 // Toolbar "open / active" chrome now lives in
 // `components/common/dropdownTheme.ts` (`DROPDOWN_TRIGGER_ACTIVE_CLASS`).
@@ -169,7 +169,7 @@ export const dialogButton =
  * accent without losing the block.
  */
 export const dialogButtonPrimary =
-  "w-20 rounded bg-zinc-800 px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-white hover:bg-zinc-700 hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 disabled:opacity-50 dark:bg-zinc-700 dark:hover:bg-zinc-600";
+  "w-20 rounded bg-btn-solid px-3 py-[var(--ui-btn-py)] text-xs font-medium text-center text-white hover:bg-btn-solid-hover hover:ring-2 hover:ring-inset hover:ring-[var(--color-accent)]/70 disabled:opacity-50";
 
 /** Dialog secondary action (Cancel) — text button, shares the accent wash. */
 export const dialogButtonSecondary =
@@ -197,7 +197,7 @@ export const chatCardShell = "overflow-hidden rounded-md border border-chat-bord
 const chatCardTitleBarBase =
   "flex w-full items-center gap-[7px] border-b border-border-divider px-3 py-[7px] text-left text-xs font-medium text-text";
 export const chatCardTitleBar = `${chatCardTitleBarBase} bg-chat-title`;
-export const chatCardTitleBarMuted = `${chatCardTitleBarBase} bg-zinc-100/60 dark:bg-chat-title`;
+export const chatCardTitleBarMuted = `${chatCardTitleBarBase} bg-surface/60 dark:bg-chat-title`;
 export const chatCardBody = "bg-chat-bubble px-3 py-2.5";
 
 // ── Interaction-card buttons ────────────────────────────────────────
@@ -212,7 +212,7 @@ export const chatCardBody = "bg-chat-bubble px-3 py-2.5";
  * allowed to paint (see `chatCardChrome.test.tsx`).
  */
 export const cardButtonNeutral =
-  `rounded-md border border-zinc-300 px-2 py-0.5 text-11 font-medium text-text-secondary transition-colors ${interactiveHover} disabled:opacity-50 dark:border-zinc-500`;
+  `rounded-md border border-border-strong px-2 py-0.5 text-11 font-medium text-text-secondary transition-colors ${interactiveHover} disabled:opacity-50`;
 
 export const cardButtonAccent =
   "rounded-md px-2 py-0.5 text-11 font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50";
@@ -250,7 +250,7 @@ export const composerChip =
   "inline-flex items-center gap-1 rounded border border-border-outer bg-[var(--color-accent)]/10 px-1.5 py-0.5 text-xs font-medium text-text-tertiary";
 
 export const testResultSuccess =
-  "bg-green-50 text-green-700 dark:bg-green-900/20 dark:text-green-400";
+  "bg-ok-surface text-ok";
 
 export const testResultError =
-  "bg-red-50 text-red-700 dark:bg-red-900/20 dark:text-red-400";
+  "bg-danger-surface text-danger-text";

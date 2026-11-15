@@ -34,8 +34,8 @@ const KIND_I18N: Record<PmActivityKind, string> = {
 /** 结论用颜色区分，但颜色不是唯一通道（正文标签本身也在行上）。 */
 const KIND_TONE: Record<PmActivityKind, string> = {
   submitted: "text-[var(--color-accent)]",
-  approved: "text-emerald-600 dark:text-emerald-400",
-  rejected: "text-red-600 dark:text-red-400",
+  approved: "text-ok",
+  rejected: "text-danger-text",
   comment: "text-text-secondary",
 };
 

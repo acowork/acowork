@@ -77,13 +77,13 @@ const CHOICE_PENDING_MAX_MS = 20_000;
 function statusTone(status?: string | null): string {
   switch (status) {
     case "working":
-      return "bg-amber-500 animate-pulse";
+      return "bg-warning-solid animate-pulse";
     case "idle":
-      return "bg-emerald-500";
+      return "bg-ok-solid";
     case "errored":
-      return "bg-red-500";
+      return "bg-danger-solid";
     default:
-      return "bg-zinc-400 dark:bg-zinc-600";
+      return "bg-loading";
   }
 }
 

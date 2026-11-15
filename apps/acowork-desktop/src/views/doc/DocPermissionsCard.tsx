@@ -210,7 +210,7 @@ export function DocPermissionsCard({ kind, id, name }: DocPermissionsCardProps) 
     <div className="text-xs">
       {loading && !perms && (
         <div className="flex items-center justify-center py-6">
-          <div className="h-4 w-4 animate-spin rounded-full border-2 border-zinc-300 border-t-zinc-600 dark:border-zinc-600 dark:border-t-zinc-300" />
+          <div className="h-4 w-4 animate-spin rounded-full border-2 border-border-strong border-t-zinc-600 dark:border-t-zinc-300" />
         </div>
       )}
 
@@ -250,7 +250,7 @@ export function DocPermissionsCard({ kind, id, name }: DocPermissionsCardProps) 
                   "flex-1 rounded-md px-2 py-1 text-11 font-medium transition-colors",
                   mode === m
                     ? "bg-accent-strong text-white"
-                    : "bg-zinc-100 text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-800 dark:hover:bg-[var(--color-accent)]/15",
+                    : "bg-surface text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                   !canManage && "cursor-not-allowed opacity-60 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                 )}
               >
@@ -307,7 +307,7 @@ export function DocPermissionsCard({ kind, id, name }: DocPermissionsCardProps) 
                                   "rounded px-1.5 py-0.5 text-10 font-medium",
                                   roles[userId] === r
                                     ? "bg-accent-strong text-white"
-                                    : "bg-zinc-100 text-text-secondary hover:bg-[var(--color-accent)]/10 dark:bg-zinc-800 dark:hover:bg-[var(--color-accent)]/15",
+                                    : "bg-surface text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                                 )}
                               >
                                 {t(`doc.permissions.role_${r}`)}
