@@ -118,6 +118,7 @@ impl Tool for McpInstallTool {
         let name = params["name"].as_str().unwrap_or("").trim();
         if name.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Parameter 'name' is required and must be non-empty".to_string()),
@@ -132,6 +133,7 @@ impl Tool for McpInstallTool {
             "http" => McpTransportDef::Http,
             other => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!(
@@ -146,6 +148,7 @@ impl Tool for McpInstallTool {
         let command = params["command"].as_str().unwrap_or("").trim();
         if command.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Parameter 'command' is required".to_string()),
@@ -186,6 +189,7 @@ impl Tool for McpInstallTool {
                 "local"
             };
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!(
@@ -224,6 +228,7 @@ impl Tool for McpInstallTool {
 
         if let Err(e) = save_agent_mcp_config(work_dir_path, &updated_config) {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!("Failed to save agent_mcp.json: {}", e)),
@@ -258,6 +263,7 @@ impl Tool for McpInstallTool {
                 }
 
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!(
                         "MCP server '{}' installed and verified. Available tools ({}): [{}]. \
@@ -285,6 +291,7 @@ impl Tool for McpInstallTool {
                 let _ = save_agent_mcp_config(work_dir_path, &rollback_config);
 
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!(

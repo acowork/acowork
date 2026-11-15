@@ -2635,6 +2635,7 @@ mod tests {
                 .and_then(|v| v.as_str())
                 .unwrap_or("no message");
             Ok(acowork_core::tools::traits::ToolResult {
+                content_parts: None,
                 ok: true,
                 content: format!("Echo: {message}"),
                 error: None,
@@ -3585,6 +3586,7 @@ mod tests {
             ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 tokio::time::sleep(std::time::Duration::from_millis(self.delay_ms)).await;
                 Ok(acowork_core::tools::traits::ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!("{} done", self.name),
                     error: None,
@@ -3698,6 +3700,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some("Intentional failure".to_string()),
@@ -3722,6 +3725,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: "Success!".to_string(),
                     error: None,
@@ -3817,6 +3821,7 @@ mod tests {
                 // while avoiding a 60s hang if timeout logic breaks.
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 Ok(acowork_core::tools::traits::ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: "Should not reach".to_string(),
                     error: None,
@@ -3962,6 +3967,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: self.output.clone(),
                     error: None,
@@ -4103,6 +4109,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: "Fast result".to_string(),
                     error: None,
@@ -4132,6 +4139,7 @@ mod tests {
                 // 5s is plenty to verify timeout works without risking a 60s hang.
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 Ok(acowork_core::tools::traits::ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: "Should not reach".to_string(),
                     error: None,
@@ -4274,6 +4282,7 @@ mod tests {
                 // Sleep longer than tool_timeout (100ms) but shorter than iteration_timeout (30s)
                 tokio::time::sleep(std::time::Duration::from_millis(300)).await;
                 Ok(acowork_core::tools::traits::ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: "Should not reach".to_string(),
                     error: None,
@@ -4396,6 +4405,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
                 Ok(acowork_core::tools::traits::ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: "Echo result".to_string(),
                     error: None,
@@ -5229,6 +5239,7 @@ mod tests {
                 },
             );
             Ok(acowork_core::tools::traits::ToolResult {
+                content_parts: None,
                 ok: true,
                 content: "model switched".to_string(),
                 error: None,

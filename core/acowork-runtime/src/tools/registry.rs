@@ -146,6 +146,7 @@ mod tests {
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: format!("Mock {} executed", self.name),
                 error: None,

@@ -218,6 +218,7 @@ impl Tool for RateLimitedTool {
     ) -> acowork_core::error::Result<ToolResult> {
         if let Err(e) = self.check_rate_limit() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(e),
@@ -429,6 +430,7 @@ impl Tool for PathGuardedTool {
                         // Write tools require ReadWrite access
                         if self.is_write_tool() && access != WorkspaceAccess::ReadWrite {
                             return Ok(ToolResult {
+                                content_parts: None,
                                 ok: false,
                                 content: String::new(),
                                 error: Some(format!(
@@ -453,6 +455,7 @@ impl Tool for PathGuardedTool {
                                     && resolved_access != WorkspaceAccess::ReadWrite
                                 {
                                     return Ok(ToolResult {
+                                        content_parts: None,
                                         ok: false,
                                         content: String::new(),
                                         error: Some(format!(
@@ -466,6 +469,7 @@ impl Tool for PathGuardedTool {
                             }
                             Err(e) => {
                                 return Ok(ToolResult {
+                                    content_parts: None,
                                     ok: false,
                                     content: String::new(),
                                     error: Some(e),
@@ -476,6 +480,7 @@ impl Tool for PathGuardedTool {
                     }
                     Err(e) => {
                         return Ok(ToolResult {
+                            content_parts: None,
                             ok: false,
                             content: String::new(),
                             error: Some(e),
@@ -517,6 +522,7 @@ mod tests {
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: params.to_string(),
                 error: None,
@@ -541,6 +547,7 @@ mod tests {
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: format!("Read: {}", params["path"].as_str().unwrap_or("")),
                 error: None,
@@ -766,6 +773,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<ToolResult> {
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
                     error: None,
@@ -815,6 +823,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<ToolResult> {
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!("Edited: {}", params["path"].as_str().unwrap_or("")),
                     error: None,
@@ -922,6 +931,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<ToolResult> {
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
                     error: None,
@@ -1007,6 +1017,7 @@ mod tests {
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: self.ok,
                 content: self.content.clone(),
                 error: self.error.clone(),
@@ -1271,6 +1282,7 @@ mod tests {
             // Same contract as the session-aware builtins: reachable only
             // without context — the test below must NOT land here.
             Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("ctx_echo requires session context".to_string()),
@@ -1283,6 +1295,7 @@ mod tests {
             ctx: &ToolContext,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: format!(
                     "{}|{}",
@@ -1440,6 +1453,7 @@ mod tests {
             ) -> acowork_core::error::Result<ToolResult> {
                 let n = self.counter.fetch_add(1, Ordering::SeqCst);
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!("call #{n}"),
                     error: None,

@@ -56,6 +56,7 @@ impl Tool for FileWriteTool {
         let is_append = mode == "append";
         if path.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'path'".to_string()),
@@ -94,6 +95,7 @@ impl Tool for FileWriteTool {
 
         match write_result {
             Ok(()) => Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: format!(
                     "{} {} bytes to {path}",
@@ -113,6 +115,7 @@ impl Tool for FileWriteTool {
                     "file_write: failed to write file"
                 );
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Failed to write file: {e}")),

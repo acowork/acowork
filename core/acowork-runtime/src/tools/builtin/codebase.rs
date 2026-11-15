@@ -142,6 +142,7 @@ impl Tool for CodebaseTool {
 
         if language.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'language' parameter".to_string()),
@@ -157,6 +158,7 @@ impl Tool for CodebaseTool {
             "definition" => {
                 if file.is_empty() || line.is_none() || character.is_none() {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some(
@@ -178,6 +180,7 @@ impl Tool for CodebaseTool {
             "references" => {
                 if file.is_empty() || line.is_none() || character.is_none() {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some(
@@ -200,6 +203,7 @@ impl Tool for CodebaseTool {
             "hover" => {
                 if file.is_empty() || line.is_none() || character.is_none() {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some(
@@ -220,6 +224,7 @@ impl Tool for CodebaseTool {
             "symbol" => {
                 if query.is_empty() {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some("Action 'symbol' requires 'query'".to_string()),
@@ -231,6 +236,7 @@ impl Tool for CodebaseTool {
             "diagnostic" => {
                 if file.is_empty() {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some("Action 'diagnostic' requires 'file'".to_string()),
@@ -247,6 +253,7 @@ impl Tool for CodebaseTool {
             }
             _ => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!(
@@ -284,6 +291,7 @@ impl Tool for CodebaseTool {
                     let shaped = shape_lsp_result(action, result);
                     let content = serde_json::to_string_pretty(&shaped).unwrap_or_default();
                     Ok(ToolResult {
+                        content_parts: None,
                         ok: true,
                         content,
                         error: None,
@@ -295,6 +303,7 @@ impl Tool for CodebaseTool {
                         .unwrap_or("Unknown LSP error")
                         .to_string();
                     Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some(error_msg),
@@ -303,6 +312,7 @@ impl Tool for CodebaseTool {
                 }
             }
             Err(e) => Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!("Failed to reach LSP Relay: {e}")),

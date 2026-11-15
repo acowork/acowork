@@ -206,6 +206,7 @@ mod tests {
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: String::new(),
                 error: None,

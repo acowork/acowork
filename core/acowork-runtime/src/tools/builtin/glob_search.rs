@@ -56,6 +56,7 @@ impl Tool for GlobSearchTool {
 
         if pattern.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'pattern'".to_string()),
@@ -67,6 +68,7 @@ impl Tool for GlobSearchTool {
             Ok(gs) => gs,
             Err(e) => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Invalid glob pattern: {e}")),
@@ -83,6 +85,7 @@ impl Tool for GlobSearchTool {
         let search_base = Path::new(work_dir.unwrap_or(resolver_ref.agent_home()));
         if !search_base.exists() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: "No files matched the pattern".to_string(),
                 error: None,
@@ -129,6 +132,7 @@ impl Tool for GlobSearchTool {
 
         if results.is_empty() {
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: "No files matched the pattern".to_string(),
                 error: None,
@@ -150,6 +154,7 @@ impl Tool for GlobSearchTool {
             // The byte-level 32 KB hard cap is enforced by the
             // OutputBoundedTool wrapper around the whole tool stack.
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content,
                 error: None,

@@ -254,6 +254,7 @@ impl Tool for AskUserQuestionTool {
                 // Return the parsed params as content — the AgentLoop will
                 // intercept this and handle the question flow
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: serde_json::to_string(&parsed).unwrap_or_else(|_| params.to_string()),
                     error: None,
@@ -261,6 +262,7 @@ impl Tool for AskUserQuestionTool {
                 })
             }
             Err(e) => Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(e),

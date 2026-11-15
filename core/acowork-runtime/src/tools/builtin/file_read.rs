@@ -51,6 +51,7 @@ impl Tool for FileReadTool {
         let path = params["path"].as_str().unwrap_or("");
         if path.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'path' parameter".to_string()),
@@ -63,6 +64,7 @@ impl Tool for FileReadTool {
             Some(v) => v,
             None => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some("Missing required 'start_line' parameter. Use content_search first to locate line numbers, then request a specific range (≤100 lines).".to_string()),
@@ -74,6 +76,7 @@ impl Tool for FileReadTool {
             Some(v) => v,
             None => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some("Missing required 'end_line' parameter".to_string()),
@@ -91,6 +94,7 @@ impl Tool for FileReadTool {
         let start_line_raw = start_line_raw.max(1);
         if end_line_raw < start_line_raw {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!(
@@ -108,6 +112,7 @@ impl Tool for FileReadTool {
             start_line_raw + super::MAX_LINES_PER_CALL as u64 - 1
         } else if requested > super::MAX_LINES_PER_CALL {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!(
@@ -138,6 +143,7 @@ impl Tool for FileReadTool {
             Ok(meta) => {
                 if meta.len() > MAX_FILE_SIZE_BYTES {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some(format!(
@@ -150,6 +156,7 @@ impl Tool for FileReadTool {
             }
             Err(e) => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Failed to read file metadata: {e}")),
@@ -165,6 +172,7 @@ impl Tool for FileReadTool {
 
                 if total == 0 {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: true,
                         content: "[File is empty]".to_string(),
                         error: None,
@@ -177,6 +185,7 @@ impl Tool for FileReadTool {
 
                 if s >= e {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: true,
                         content: format!("[No lines in range, file has {total} lines]"),
                         error: None,
@@ -223,6 +232,7 @@ impl Tool for FileReadTool {
                 // numbered lines and lets the wrapper enforce the cap.
 
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content,
                     error: None,
@@ -238,6 +248,7 @@ impl Tool for FileReadTool {
                     "file_read: failed to read file"
                 );
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Failed to read file: {e}")),

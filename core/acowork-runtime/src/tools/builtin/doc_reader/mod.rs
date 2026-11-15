@@ -147,6 +147,7 @@ impl Tool for DocReaderTool {
         let raw_path = params["path"].as_str().unwrap_or("");
         if raw_path.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'path' parameter".to_string()),
@@ -164,6 +165,7 @@ impl Tool for DocReaderTool {
             Ok(meta) => {
                 if meta.len() > MAX_DOC_SIZE_BYTES {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some(format!(
@@ -176,6 +178,7 @@ impl Tool for DocReaderTool {
             }
             Err(e) => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Failed to read file metadata: {e}")),
@@ -240,6 +243,7 @@ impl Tool for DocReaderTool {
                         // rare case where the inner tool didn't already
                         // truncate to fit.
                         Ok(ToolResult {
+                            content_parts: None,
                             ok: true,
                             content: text,
                             error: None,
@@ -247,6 +251,7 @@ impl Tool for DocReaderTool {
                         })
                     }
                     Err(e) => Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some(format!(
@@ -307,6 +312,7 @@ impl Tool for DocReaderTool {
                 // here. The wrapper's TRUNCATED_OUTPUT_MARKER carries
                 // the actionable guidance for the LLM.
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: text,
                     error: None,
@@ -314,6 +320,7 @@ impl Tool for DocReaderTool {
                 })
             }
             Err(e) => Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(e),

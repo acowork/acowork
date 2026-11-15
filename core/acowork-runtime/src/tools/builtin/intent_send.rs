@@ -100,6 +100,7 @@ impl IntentSendTool {
 
     fn fail(content: impl Into<String>) -> ToolResult {
         ToolResult {
+            content_parts: None,
             ok: false,
             content: String::new(),
             error: Some(content.into()),
@@ -243,6 +244,7 @@ impl Tool for IntentSendTool {
             .to_string();
         match body.get("status").and_then(|v| v.as_str()) {
             Some("delivered") => Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: format!(
                     "Intent delivered to '{target}' action='{action}' (message_id: {message_id}, conversation_id: {conversation_id}). \

@@ -85,6 +85,7 @@ impl Tool for McpUninstallTool {
         let name = params["name"].as_str().unwrap_or("").trim();
         if name.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Parameter 'name' is required".to_string()),
@@ -100,6 +101,7 @@ impl Tool for McpUninstallTool {
         // ── Check: cannot uninstall catalog MCP ──
         if current_config.is_catalog(name) {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!(
@@ -118,6 +120,7 @@ impl Tool for McpUninstallTool {
 
         if current_config.local.len() == local_count_before {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!(
@@ -132,6 +135,7 @@ impl Tool for McpUninstallTool {
         // ── Save updated config ──
         if let Err(e) = save_agent_mcp_config(work_dir_path, &current_config) {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!("Failed to save agent_mcp.json: {}", e)),
@@ -150,6 +154,7 @@ impl Tool for McpUninstallTool {
         }
 
         Ok(ToolResult {
+            content_parts: None,
             ok: true,
             content: format!(
                 "MCP server '{}' uninstalled from local config. \

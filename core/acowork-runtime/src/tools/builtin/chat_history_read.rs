@@ -39,6 +39,7 @@ impl ChatHistoryReadTool {
 
     fn fail(content: impl Into<String>) -> ToolResult {
         ToolResult {
+            content_parts: None,
             ok: false,
             content: String::new(),
             error: Some(content.into()),
@@ -140,6 +141,7 @@ impl Tool for ChatHistoryReadTool {
             return Ok(Self::fail(format!("chat history not available (HTTP {status}): {detail}")));
         }
         Ok(ToolResult {
+            content_parts: None,
             ok: true,
             content: body.to_string(),
             error: None,

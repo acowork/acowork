@@ -119,6 +119,7 @@ impl acowork_core::tools::Tool for McpToolWrapper {
 
         match self.registry.call_tool(&self.prefixed_name, args).await {
             Ok(output) => Ok(acowork_core::tools::ToolResult {
+                content_parts: None,
                 ok: true,
                 content: output,
                 error: None,
@@ -128,6 +129,7 @@ impl acowork_core::tools::Tool for McpToolWrapper {
                 let msg = e.to_string();
                 let classified = classify_mcp_error(&msg);
                 Ok(acowork_core::tools::ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("[{}] {}", classified, msg)),

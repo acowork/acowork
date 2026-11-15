@@ -3374,6 +3374,7 @@ mod tests {
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
             Ok(acowork_core::tools::traits::ToolResult {
+                content_parts: None,
                 ok: true,
                 content: params.to_string(),
                 error: None,

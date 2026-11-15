@@ -54,6 +54,7 @@ impl Tool for WebFetchTool {
         let url = params["url"].as_str().unwrap_or("");
         if url.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'url'".to_string()),
@@ -79,6 +80,7 @@ impl Tool for WebFetchTool {
                     text
                 };
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: truncated,
                     error: None,
@@ -86,6 +88,7 @@ impl Tool for WebFetchTool {
                 })
             }
             Err(e) => Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!("Fetch failed: {e}")),
