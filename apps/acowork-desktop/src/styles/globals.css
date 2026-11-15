@@ -453,6 +453,16 @@
   --content-max-width: 100%;
   --app-opacity: 1;
 
+  /* ── Global tint-strength knob ─────────────────────────────────────────
+     USER-TUNABLE. Every theme pack's surface saturation reads this one
+     value (surfaces 1x, borders 0.85x, icon/controls 0.7x, text 0.45x).
+     Lower it (10%, 6%, 3%…) to wash the packs towards neutral zinc; raise
+     it for stronger colour. Danger/warning semantic colours and the muted
+     slate are NOT scaled by this knob. Light default 12%, dark 18%: dark
+     surfaces sit at lower lightness, so they need more chroma for the
+     same perceived tint. */
+  --theme-chroma: 8%;
+
   /* Aliases replacing `var(--token, #literal)` fallbacks. A fallback hides
      an undeclared token: the literal always wins, so a theme pack can never
      recolour that surface. Every --color-* reference must now name a token
@@ -891,6 +901,8 @@
   /* Theme-pack contract (dark counterparts). Kept next to the other dark
      overrides so a pack author can see the full two-mode contract in one
      file: light in :root, dark here. */
+  --theme-chroma: 8%;
+  /* Dark counterpart of the global tint-strength knob (see :root block). */
   --color-danger-surface: hsl(0 45% 16%);
   --color-danger-surface-hover: hsl(0 45% 21%);
   --color-danger-border: hsl(0 45% 30%);
