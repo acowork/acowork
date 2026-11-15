@@ -1,5 +1,5 @@
 /**
- * ExtensionsView — 扩展面板（VSCode Extensions 风格）的两栏胶囊布局。
+ * ExtensionsView — 应用面板（VSCode Extensions 风格）的两栏胶囊布局。
  *
  * 形状统一走全局胶囊布局（CAPSULE_PANE_CN，见 components/common/capsule.ts）：
  * 左栏搜索 + 列表胶囊（bg-nav-surface），右栏详情胶囊（bg-page-bg），
@@ -39,14 +39,14 @@ interface Extension {
     name: string;
 }
 
-/** 恒空：Gateway 扩展清单端点尚未落地。接入时替换为 store 的列表。 */
+/** 恒空：Gateway 应用清单端点尚未落地。接入时替换为 store 的列表。 */
 const EXTENSIONS: Extension[] = [];
 
 const ariaLabel = {
-    search: "Search extensions",
-    list: "Extensions list",
-    detail: "Extension details",
-    resizeSidebar: "Resize extensions sidebar",
+    search: "Search apps",
+    list: "Apps list",
+    detail: "App details",
+    resizeSidebar: "Resize apps sidebar",
 };
 
 export function ExtensionsView() {
@@ -147,7 +147,7 @@ export function ExtensionsView() {
                         接入真实数据后这里换成 "无匹配" / 空态文案。 */}
                     {visible.length === 0 && (
                         <div className="px-3 py-8 text-center text-xs text-text-tertiary">
-                            No extensions available yet.
+                            No apps available yet.
                         </div>
                     )}
                 </div>
@@ -163,7 +163,7 @@ export function ExtensionsView() {
 
                 底色取 `bg-page-bg`（不是 `bg-right-panel`）：`--color-right-panel`
                 是 chat 侧那个 6-tab 侧栏 / 右侧检视器专用、比 page-bg 深一档的
-                "raised surface"，而本栏是扩展详情的**内容主区**，对应 pm 的
+                "raised surface"，而本栏是应用详情的**内容主区**，对应 pm 的
                 ProjectBoard、doc 的 DocEditor —— 那两处都是 `bg-page-bg`。
                 左栏 list 同样不是 chat 的 AgentList 色系，而是和
                 ProjectSidebar / DocTreeSidebar 共用 `bg-nav-surface`。 */}
