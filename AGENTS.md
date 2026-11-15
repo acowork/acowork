@@ -18,6 +18,12 @@ script is the contract and the workflow is only a scheduler: `redlines` (the 14 
 `core` (check + clippy + test + integration + strict embed), `packages` (shipped `.agent`
 freshness + hub mirror interop), `web` (desktop + mobile `npm run test` and `build`).
 
+**Releases** are separate: an annotated `v*` tag triggers
+`.github/workflows/release.yml` (three-platform Tauri bundles → draft GitHub
+Release). [`RELEASING.md`](RELEASING.md) is the release contract; `VERSION` is
+the single source of truth, kept in sync by `dev/common/version.mjs` and gated
+by `dev/ci.sh check`.
+
 ```bash
 cd core
 cargo build --release          # all workspace members

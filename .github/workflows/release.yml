@@ -1,0 +1,217 @@
+name: Release
+
+# Release automation for an annotated v* tag. The PR gate deliberately does
+# NOT bundle Tauri installers (see ci.yml); this workflow is where the native
+# shells get built. See RELEASING.md for the release contract.
+#
+# The workflow creates a DRAFT Release. A human verifies the assets and
+# presses Publish — nothing reaches users automatically.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    name: Verify tag and tree
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Tag matches VERSION
+        run: node dev/common/version.mjs assert "$GITHUB_REF_NAME"
+      - name: All version declarations agree
+        run: node dev/common/version.mjs check
+      - name: Architecture red lines
+        run: ./dev/ci.sh redlines
+
+  build:
+    name: Desktop installers (${{ matrix.os }})
+    needs: verify
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            pack: pwsh ./dev/desktop/windows/package_desktop_windows.ps1
+          - os: macos-latest
+            pack: bash ./dev/desktop/macos/package_desktop_macos.sh
+          - os: ubuntu-22.04
+            pack: bash ./dev/desktop/linux/package_desktop_linux.sh
+    env:
+      # The packaging scripts copy sidecars from <root>/target/release, while
+      # the npm core:build:* scripts run cargo with --manifest-path core/. Pin
+      # the target dir so both agree; Tauri's bundle output follows it too.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      # Optional: set only if Tauri cannot infer the identity from the .p12.
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+      # Reserved until createUpdaterArtifacts is enabled (RELEASING.md §4).
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/acowork-desktop/package-lock.json
+
+      # Cache registry downloads only. Caching target/ across tags risks reusing
+      # a stale sidecar binary, which is exactly the class of bug a release
+      # build must not have.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: release-registry-${{ matrix.os }}-${{ hashFiles('core/Cargo.lock') }}
+
+      - name: Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            patchelf \
+            rpm \
+            file
+
+      - name: Install npm dependencies
+        working-directory: apps/acowork-desktop
+        run: npm ci
+
+      # Prepare ORT before the first cargo build so dev/ort_env.js makes the
+      # same feature decision on every platform, and the packaging scripts
+      # find the .ort/ tree they expect.
+      - name: Prepare ONNX Runtime (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./dev/common/setup_ort.ps1 -Version 1.22.0 -NoMirror
+      - name: Prepare ONNX Runtime (Linux / macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: ./dev/common/setup_ort.sh --no-mirror
+
+      - name: Build core release binaries
+        working-directory: apps/acowork-desktop
+        run: npm run core:build:release
+
+      # This script stages the nine sidecar binaries + ORT dll, then invokes
+      # `npm run tauri build` (whose beforeBuildCommand rebuilds core and the
+      # frontend incrementally).
+      - name: Stage sidecars and bundle installers
+        run: ${{ matrix.pack }}
+
+      # PFX path: only valid when the private key is
+      # exportable. Public-CA OV/EV certificates issued after June 2023 are
+      # hardware-bound — replace this step with a cloud signing action.
+      - name: Sign Windows installers
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE != ''
+        shell: pwsh
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP 'codesign.pfx'
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          try {
+            $files = @()
+            foreach ($dir in @('target/release/bundle', 'apps/acowork-desktop/src-tauri/target/release/bundle')) {
+              if (Test-Path $dir) {
+                $files += Get-ChildItem -Path $dir -Recurse -File -Include '*.msi', '*.exe'
+              }
+            }
+            if ($files.Count -eq 0) { throw 'No Windows installers found to sign' }
+            foreach ($file in $files) {
+              & signtool sign /fd SHA256 /f $pfx /p $env:WINDOWS_CERTIFICATE_PASSWORD /tr http://timestamp.digicert.com /td SHA256 $file.FullName
+              if ($LASTEXITCODE -ne 0) { throw "signtool failed for $($file.FullName)" }
+            }
+          } finally {
+            Remove-Item $pfx -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Collect installers
+        shell: bash
+        run: |
+          mkdir -p release-assets
+          for dir in target/release/bundle apps/acowork-desktop/src-tauri/target/release/bundle; do
+            [ -d "$dir" ] || continue
+            find "$dir" -type f \
+              \( -name '*.msi' -o -name '*.exe' -o -name '*.dmg' -o -name '*.deb' \
+                 -o -name '*.rpm' -o -name '*.AppImage' -o -name '*.app.tar.gz' \
+                 -o -name '*.sig' \) \
+              -exec cp -f {} release-assets/ \;
+          done
+          ls -lh release-assets
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          path: release-assets/*
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: Draft GitHub Release
+    needs: [verify, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS.txt
+        working-directory: release-assets
+        run: |
+          find . -maxdepth 1 -type f ! -name 'SHA256SUMS.txt' -print0 \
+            | sort -z | xargs -0 sha256sum > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Generate release notes
+        run: |
+          PREV=$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null || true)
+          if [ -z "$PREV" ]; then
+            printf '## %s\n\nInitial release — see the commit history for the full list of changes.\n' "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+          else
+            node dev/common/gen_changelog.mjs "$PREV" "$GITHUB_REF_NAME" > RELEASE_NOTES.md
+          fi
+          cat RELEASE_NOTES.md
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          draft: true
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          body_path: RELEASE_NOTES.md
+          files: release-assets/*

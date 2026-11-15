@@ -1,6 +1,6 @@
 #!/bin/bash
 # CI script for ACowork.AI
-# Usage: ./dev/ci.sh [redlines|check|clippy|test|integration|smoke|all]
+# Usage: ./dev/ci.sh [redlines|versions|check|clippy|test|integration|smoke|all]
 
 set -e
 
@@ -44,6 +44,19 @@ if [ "${GITHUB_ACTIONS:-}" = "true" ]; then
 fi
 
 echo "=== ACowork.AI CI ==="
+
+# Version consistency: VERSION at the repository root is the single source of
+# truth, and dev/common/version.mjs verifies every generated copy. Keep this
+# gate reachable from BOTH `check` and `all` — a bump that updates one file and
+# forgets the other seven otherwise ships an installer with the wrong version.
+run_version_gate() {
+    echo "Checking version consistency..."
+    if ! command -v node >/dev/null 2>&1; then
+        echo "ERROR: node >= 18 is required for the version gate (see CONTRIBUTING.md)" >&2
+        exit 1
+    fi
+    node "$SCRIPT_DIR/common/version.mjs" check
+}
 
 run_check() {
     echo "Running cargo check..."
@@ -1004,8 +1017,12 @@ case "$MODE" in
     redlines)
         run_all_redlines
         ;;
+    versions)
+        run_version_gate
+        ;;
     check)
         run_all_redlines
+        run_version_gate
         run_check
         ;;
     clippy)
@@ -1022,6 +1039,7 @@ case "$MODE" in
         ;;
     all)
         run_all_redlines
+        run_version_gate
         run_check
         run_clippy
         run_test
@@ -1030,7 +1048,7 @@ case "$MODE" in
         ;;
     *)
         echo "Unknown mode: $MODE"
-        echo "Usage: $0 [redlines|check|clippy|test|integration|smoke|all]"
+        echo "Usage: $0 [redlines|versions|check|clippy|test|integration|smoke|all]"
         exit 1
         ;;
 esac
