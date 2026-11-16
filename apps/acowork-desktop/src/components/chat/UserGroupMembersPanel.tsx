@@ -189,10 +189,10 @@ export function UserGroupMembersPanel({ group, width, onResizeStart }: Props) {
   };
 
   return (
-    <div className="relative ml-1 flex shrink-0 flex-col" style={{ width }}>
+    <div className="relative ml-0.5 flex shrink-0 flex-col" style={{ width }}>
       {onResizeStart && (
         <div
-          className="group absolute -left-1 top-0 bottom-0 z-10 w-1 cursor-col-resize"
+          className="group absolute -left-[3px] top-0 bottom-0 z-10 w-1 cursor-col-resize"
           onMouseDown={onResizeStart}
         >
           <div className="absolute inset-y-0 left-0 w-1 rounded-full transition-colors group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60" />

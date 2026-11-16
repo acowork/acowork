@@ -52,14 +52,14 @@ export const MIN_CHAT_WIDTH = 338;
 
 /**
  * Horizontal cost of everything in the row that is neither a pane nor sized by
- * a pane: NavBar 48 + right rail 40 + two 4px resize handles + the right
- * panel's 4px `ml-1` gutter = 100.
+ * a pane: NavBar 48 + right rail 40 + two 2px resize handles + the right
+ * panel's 2px `ml-0.5` gutter = 94.
  *
- * The gutter is counted even when the right panel is hidden, which makes the
- * fit 4px conservative — it can clamp 4px earlier than strictly necessary.
- * Not worth branching a second constant over.
+ * The file handle and right gutter are counted even when their panes are
+ * hidden, so the fit can be up to 4px conservative. Not worth branching
+ * a second constant over.
  */
-export const CHROME_WIDTH = 100;
+export const CHROME_WIDTH = 94;
 
 /**
  * ── The file pane's upper bound ────────────────────────────────────────────

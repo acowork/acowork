@@ -1160,19 +1160,19 @@ export function AppLayout() {
           // outlines them as floating surfaces. The non-chat view branches
           // below (settings/harness/pm/docs/extensions) keep their wrappers
           // transparent for the same reason.
-          <div className="flex flex-1 overflow-hidden rounded-xl">
+          <div className="chat-pane-row flex flex-1 overflow-hidden rounded-xl">
             {/* Agent list — resizable */}
             <AgentList width={sidebarWidth} />
 
             {/* Resize handle */}
             <div
-              className="group relative w-1 shrink-0 cursor-col-resize select-none"
+              className="group relative z-10 w-0.5 shrink-0 cursor-col-resize select-none"
               onMouseDown={handleMouseDown}
               role="separator"
               aria-label={t("appLayout.ariaLabelResizeSidebar")}
             >
               {/* Visible divider line — removed, use glass bg as separator */}
-              <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
+              <div className="absolute inset-y-0 -left-px w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
             </div>
 
             {/* Middle panel — agent session takes priority; an open group or
@@ -1187,12 +1187,12 @@ export function AppLayout() {
               <>
                 {/* Resize handle between chat and file editor */}
                 <div
-                  className="group relative w-1 shrink-0 cursor-col-resize select-none"
+                  className="group relative z-10 w-0.5 shrink-0 cursor-col-resize select-none"
                   onMouseDown={handleMouseDownFile}
                   role="separator"
                   aria-label={t("appLayout.ariaLabelResizeFileEditor")}
                 >
-                  <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
+                  <div className="absolute inset-y-0 -left-px w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors rounded-full" />
                 </div>
                 <ChunkLoadBoundary
                   key={editorLoadAttempt}
@@ -1263,7 +1263,7 @@ export function AppLayout() {
                 keep the four-capsule layout intact, but an empty frame only
                 widened the gap to the 40px right rail without adding
                 information — worse, the placeholder was a separate element
-                from RightPanel and so missed that panel's `ml-1` gutter,
+                from RightPanel and so missed that panel's `ml-0.5` gutter,
                 making the chat pane and the frame touch. No panel, no
                 gutter to get wrong. */}
             {!rightPanelCollapsed && selectedAgentId && (

@@ -85,11 +85,11 @@ describe("fitPanesToViewport", () => {
     // Agent list at its 400px max is the widest pane here; the 300px file pane
     // pays first (down to its 200 minimum), and any remaining deficit comes
     // out of the right pane. The split tracks MIN_CHAT_WIDTH (288 → 338):
-    // 1300 - chrome - MIN_CHAT_WIDTH - 400 - 300 - 300 = -138 deficit, 100
-    // from the file pane, 38 from the right pane.
+    // 1300 - chrome - MIN_CHAT_WIDTH - 400 - 300 - 300 = -132 deficit, 100
+    // from the file pane, 32 from the right pane.
     const r = fitPanesToViewport({ windowWidth: 1300, sidebarWidth: 400, fileWidth: 300, rightWidth: 300 });
     expect(r.fileWidth).toBe(200);
-    expect(r.rightWidth).toBe(262);
+    expect(r.rightWidth).toBe(268);
   });
 
   it("is idempotent", () => {
