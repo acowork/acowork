@@ -182,12 +182,23 @@ describe("DateTimePicker clock", () => {
   it("defaults a fresh field to the current minute, not midnight", () => {
     // Midnight would be a lie: a task scheduled at 00:00 the user never asked
     // for. The fresh field starts at "now", the way the form pre-fills it.
-    const { onChange } = open("");
-    const hour = hourSelect().value;
-    const minute = minuteSelect().value;
-    fireEvent.click(day("2026-11-20"));
-    expect(onChange).toHaveBeenCalledWith(`2026-11-20T${hour}:${minute}`);
-    expect(hour).not.toBe("00");
+    //
+    // Pin only `Date`: the component reads `new Date()` for this default, and
+    // asserting `hour !== "00"` made the suite fail whenever it ran during the
+    // 00:xx hour. A fixed clock tests the actual contract ("defaults to the
+    // current minute") instead of the time of day.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-11-06T09:37:00"));
+    try {
+      const { onChange } = open("");
+      const hour = hourSelect().value;
+      const minute = minuteSelect().value;
+      expect(`${hour}:${minute}`).toBe("09:37");
+      fireEvent.click(day("2026-11-20"));
+      expect(onChange).toHaveBeenCalledWith(`2026-11-20T${hour}:${minute}`);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("survives the clock dropdown's own portal", () => {
