@@ -2520,3 +2520,62 @@ mod tests {
         );
     }
 }
+
+/// design 29 §6.1 on the wire: a real `ContextBuilder` request carries
+/// exactly two `cache_control` breakpoints — Block A's system block and Block
+/// B's tail — and the tail one follows the append-only history to the newest
+/// message. Anything beyond two would be wasted against Anthropic's
+/// four-breakpoint cap.
+#[test]
+fn builder_request_carries_two_breakpoints_and_the_tail_moves() {
+    use crate::agent::context::ContextBuilder;
+    use crate::agent::history::HistoryManager;
+
+    let builder = ContextBuilder::new("Static kernel".to_string())
+        .with_override_model("claude-sonnet-4-5".to_string());
+    let mut history = HistoryManager::new(10_000);
+    history.append(ChatMessage::user("First turn"));
+    history.append(ChatMessage::assistant("First reply"));
+    history.append(ChatMessage::user("Second turn"));
+
+    let body = |req: &ChatRequest| {
+        serde_json::to_value(AnthropicProvider::build_wire_request(req, false)).unwrap()
+    };
+    let breakpoints = |v: &serde_json::Value| {
+        let sys = v["system"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b.get("cache_control").is_some())
+            .count();
+        let msgs = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| m.get("cache_control").is_some())
+            .count();
+        sys + msgs
+    };
+
+    let first = body(&builder.build(&history, None, 32_768));
+    // Reproduce the snapshot: `cargo test ... breakpoints -- --nocapture`.
+    println!("round 1: {}", serde_json::to_string_pretty(&first).unwrap());
+    assert_eq!(breakpoints(&first), 2);
+    assert_eq!(first["system"][0]["cache_control"]["type"], "ephemeral");
+    assert!(first["messages"][1].get("cache_control").is_none());
+    assert!(
+        first["messages"][2].get("cache_control").is_some(),
+        "Block B tail must carry the breakpoint: {first}"
+    );
+
+    history.append(ChatMessage::assistant("Second reply"));
+    history.append(ChatMessage::user("Third turn"));
+    let second = body(&builder.build(&history, None, 32_768));
+    println!("round 2: {}", serde_json::to_string_pretty(&second).unwrap());
+    assert_eq!(breakpoints(&second), 2);
+    assert!(second["messages"][2].get("cache_control").is_none());
+    assert!(
+        second["messages"][4].get("cache_control").is_some(),
+        "breakpoint must move to the new tail: {second}"
+    );
+}

@@ -930,6 +930,12 @@ impl ContextBuilder {
             max_tokens = ?max_tokens,
             "Final max_tokens for ChatRequest"
         );
+
+        // Block B tail breakpoint (design 29 §6.1) — applied last so it lands
+        // on the message that is actually sent, after every sanitize/filter
+        // pass above.
+        mark_tail_cache_breakpoint(&mut messages);
+
         ChatRequest {
             model,
             messages,
@@ -941,6 +947,26 @@ impl ContextBuilder {
             reasoning_effort: self.reasoning_effort,
             thinking_mode: self.thinking_mode.clone(),
         }
+    }
+}
+
+/// Place the trailing prompt-cache breakpoint (design 29 §6.1). Block A's
+/// system message carries the first one; this puts the second on Block B's
+/// last message. Shared by the main execution path and the chat router so the
+/// two cannot drift on where the mark lands.
+///
+/// Walks back to the last message a provider can carry the mark on: Anthropic
+/// rejects `cache_control` on a `tool_result`, and the main path's tail is a
+/// tool result on every tool round — marking that one would silently drop the
+/// breakpoint for exactly the rounds with the longest history.
+///
+/// Only the mark moves. `messages` is this request's own copy, so the
+/// append-only history itself stays byte-identical (ADR-060).
+pub(crate) fn mark_tail_cache_breakpoint(messages: &mut [ChatMessage]) {
+    if let Some(last) = messages.iter_mut().rev().find(|m| {
+        matches!(m.role, MessageRole::User | MessageRole::Assistant) && m.tool_call_id.is_none()
+    }) {
+        last.cache_control = Some(CacheControl::Ephemeral);
     }
 }
 
@@ -1348,6 +1374,81 @@ mod tests {
                 .filter(|m| m.role == MessageRole::User && m.content == "Turn")
                 .count(),
             1
+        );
+    }
+
+    /// design 29 §6.1: Block A and Block B's tail each carry one ephemeral
+    /// breakpoint, and the tail one follows the history as it grows. The
+    /// history itself is never rewritten (ADR-060 append-only).
+    #[test]
+    fn test_block_b_tail_breakpoint_moves_with_history() {
+        let eph = Some(acowork_core::providers::traits::CacheControl::Ephemeral);
+        let breakpoints = |r: &ChatRequest| {
+            r.messages
+                .iter()
+                .filter(|m| m.cache_control == eph)
+                .count()
+        };
+
+        let mut history = HistoryManager::new(10000);
+        history.append(ChatMessage::user("First turn"));
+        history.append(ChatMessage::assistant("First reply"));
+        history.append(ChatMessage::user("Second turn"));
+
+        let builder =
+            ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
+        let first = builder.build(&history, None, 32_768);
+        assert_eq!(breakpoints(&first), 2, "Block A + Block B tail, exactly two");
+        assert_eq!(first.messages[0].cache_control, eph);
+        assert_eq!(first.messages[3].cache_control, eph, "tail is the breakpoint");
+        // ADR-060: the stored history is untouched — only the request copy
+        // carries the mark.
+        assert!(history.messages().iter().all(|m| m.cache_control.is_none()));
+
+        history.append(ChatMessage::assistant("Second reply"));
+        history.append(ChatMessage::user("Third turn"));
+        let second = builder.build(&history, None, 32_768);
+        assert_eq!(breakpoints(&second), 2);
+        assert_eq!(second.messages[3].cache_control, None, "old tail mark released");
+        assert_eq!(
+            second.messages.last().unwrap().cache_control,
+            eph,
+            "mark moved to the new tail"
+        );
+    }
+
+    /// A tool round's tail is a `tool_result`, which Anthropic rejects
+    /// `cache_control` on — the mark steps back to the assistant turn instead
+    /// of being dropped for the round with the longest history.
+    #[test]
+    fn test_block_b_tail_breakpoint_skips_tool_result() {
+        use acowork_core::providers::traits::{FunctionCall, ToolCall};
+
+        let mut history = HistoryManager::new(10000);
+        history.append(ChatMessage::user("Turn"));
+        history.append(ChatMessage::assistant_with_tools(
+            "",
+            vec![ToolCall {
+                id: "toolu_1".to_string(),
+                call_type: "function".to_string(),
+                function: FunctionCall {
+                    name: "test_tool".to_string(),
+                    arguments: "{}".to_string(),
+                },
+            }],
+        ));
+        history.append(ChatMessage::tool("toolu_1", "ok"));
+
+        let builder =
+            ContextBuilder::new("Kernel".to_string()).with_override_model("gpt-4".to_string());
+        let request = builder.build(&history, None, 32_768);
+
+        assert_eq!(request.messages[3].role, MessageRole::Tool);
+        assert_eq!(request.messages[3].cache_control, None);
+        assert_eq!(
+            request.messages[2].cache_control,
+            Some(acowork_core::providers::traits::CacheControl::Ephemeral),
+            "breakpoint lands on the last cacheable message"
         );
     }
 
