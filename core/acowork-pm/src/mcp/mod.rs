@@ -4726,11 +4726,14 @@ mod tests {
     /// and a stub that echoed the input could not tell that apart from the
     /// old store-the-string behavior.
     ///
-    /// The stub mounts the **real** Gateway-facing path (the shared
-    /// constant the doc service registers its route from). The old stub
-    /// mounted the same wrong path the implementation used, so the mock
-    /// and the code agreed with each other and every test stayed green
-    /// while the production call 404'd.
+    /// The path comes from `DOC_REFS_VALIDATE_GATEWAY_PATH`, the same
+    /// shared constant the implementation builds its URL from — so by
+    /// construction this stub can no longer catch a wrong path (the old
+    /// stub mounted the same wrong literal the code did, and the two
+    /// agreed with each other while production 404'd). The path itself is
+    /// checked against the **real** doc router in
+    /// `tests/doc_refs_route_e2e.rs`; what this stub checks is the
+    /// payload/verdict handling, which needs no real service.
     async fn stub_doc(found: &[(&'static str, &'static str)]) -> String {
         let found: Vec<(String, String)> = found
             .iter()
