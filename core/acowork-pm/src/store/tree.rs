@@ -4,7 +4,9 @@
 //!
 //! - `new(config)` —— 构造 + 创建根目录
 //! - `rebuild_index()` —— 从文件系统 walkdir 重建内存索引（启动时 / 崩溃恢复）
-//! - `PmStore` trait 方法 —— 全部走 `Arc<TreePmStore>`，handler 通过 axum `State<ApiState>` 访问
+//! - `PmStore` trait 方法 —— business layer holds `Arc<dyn PmStore>` (ADR-117 D6),
+//!   handlers reach it through axum `State<ApiState>`; `PmMaintenance` carries
+//!   the lifecycle / derived-read hooks
 //!
 //! ## 完整实现分阶段交付
 //!
@@ -12,7 +14,8 @@
 //! - **P1（本文件）**：`rebuild_index` walkdir 实现 + 全部 CRUD / 子树 / reparent /
 //!   状态机 / 附件实现
 //! - **P3**：依赖图深层运算（`compute_blocked` 已实现；跨项目环检测增强）
-//! - **P5+**：可选 SQLite 后端（替换 trait impl）
+//! - **ADR-117 D6**：`PmStore` 对象化 + `PmMaintenance` 侧接口，SQLite /
+//!   dual 后端由工厂按 `storage_backend` 装配（实施中）
 //!
 //! ## 物理布局
 //!
@@ -60,15 +63,86 @@ use super::corrupt::{quarantine_copy, CorruptRecord, CorruptRegistry};
 use super::index::{TaskEntry, TaskIndex};
 
 // ────────────────────────────────────────────────────────────────────────────
+// PmMaintenance — lifecycle / derived reads (ADR-117 D6)
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Backend capabilities that are **not** one of the 31 `PmStore` business
+/// mutations: lifecycle, dispatch support, derived reads, project assets and
+/// diagnostics.
+///
+/// ADR-117 D6 keeps `PmStore` object-safe while moving everything else the
+/// HTTP / MCP / dispatch layers historically reached for on the *concrete*
+/// `TreePmStore` into this side interface. Each backend answers these with
+/// whatever it actually owns (a query, an on-disk asset, a derived index);
+/// `DualPmStore` delegates them to the tree backend that stays the commit
+/// point. No implementation is forced to fabricate a `TaskEntry` or a
+/// `walkdir` it does not have.
+#[async_trait]
+pub trait PmMaintenance: Send + Sync {
+    /// Rebuild derived state from the authority (the tree's in-memory index).
+    async fn rebuild_index(&self) -> Result<()>;
+
+    /// One-shot `start_at` backfill on legacy pending tasks; returns rows changed.
+    async fn migrate_null_start_at(&self) -> Result<usize>;
+
+    /// Flush pending writes before the process exits.
+    async fn shutdown(&self) -> Result<()>;
+
+    /// Candidate task ids for one dispatch tick, already filtered and capped.
+    fn dispatch_due_ids(&self, now: DateTime<Utc>, limit: usize) -> Vec<TaskId>;
+
+    /// Physical nesting depth used when shaping `TaskResponse`.
+    fn task_depth(&self, task_id: &TaskId) -> u8;
+
+    /// Parent id used when shaping `TaskResponse`.
+    fn parent_of(&self, task_id: &TaskId) -> Option<TaskId>;
+
+    /// Shared registry surfaced by `/health` (ADR-117 D4 layer 1).
+    fn corrupt_registry(&self) -> CorruptRegistry;
+
+    // ── Derived tallies ────────────────────────────────────────────
+
+    /// Task count for one project, used by board headers and MCP summaries.
+    fn project_task_count(&self, project_id: &ProjectId) -> usize;
+
+    // ── Project assets (icons) ─────────────────────────────────────
+    //
+    // Icons are filesystem assets in every backend (ADR-061 decision 5 keeps
+    // binaries out of the DB), so they belong to the backend interface and
+    // are never projected into SQLite.
+
+    async fn list_project_icons(&self, project_id: &ProjectId) -> Result<Vec<String>>;
+    async fn write_project_icon(
+        &self,
+        project_id: &ProjectId,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<()>;
+    async fn read_project_icon(
+        &self,
+        project_id: &ProjectId,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>>;
+
+    // ── Dispatch support ───────────────────────────────────────────
+
+    fn is_dispatch_blocked(&self, task: &Task) -> bool;
+    async fn dispatch_identity(&self, id: &TaskId) -> Result<Option<String>>;
+    async fn mark_dispatched(&self, id: &TaskId) -> Result<()>;
+    async fn record_dispatch_failure(&self, id: &TaskId, reason: &str) -> Result<u32>;
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // PmStore trait
 // ────────────────────────────────────────────────────────────────────────────
 
 /// PM 存储抽象。
 ///
-/// 业务层（HTTP handlers / MCP tools）只依赖此 trait，**不**直接引用 [`TreePmStore`]。
-/// 未来 P5+ 切 SQLite 仅需替换实现，业务代码 0 改动。
+/// 业务层（HTTP handlers / MCP tools / dispatch）只依赖此 trait，**不**直接引用
+/// [`TreePmStore`]；ADR-117 D6 起统一用 `Arc<dyn PmStore>`，由工厂按
+/// `storage_backend` 装配。所有实现必须同时提供 [`PmMaintenance`] 的维护钩子。
 #[async_trait]
-pub trait PmStore: Send + Sync {
+pub trait PmStore: PmMaintenance + Send + Sync {
     // ── Project operations ─────────────────────────────────────────
 
     /// Create a project, deriving the creator's kind from the value
@@ -924,6 +998,83 @@ fn seeded_activity(record: &Task) -> Vec<TaskActivity> {
     let mut activity = TaskActivity::submitted(result);
     activity.id = TaskActivity::seeded_id(&record.id);
     vec![activity]
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// PmMaintenance impl for TreePmStore (ADR-117 D6)
+// ────────────────────────────────────────────────────────────────────────────
+
+#[async_trait]
+impl PmMaintenance for TreePmStore {
+    async fn rebuild_index(&self) -> Result<()> {
+        // Inherent method, named explicitly so the trait method cannot recurse.
+        TreePmStore::rebuild_index(self).await
+    }
+
+    async fn migrate_null_start_at(&self) -> Result<usize> {
+        TreePmStore::migrate_null_start_at(self).await
+    }
+
+    async fn shutdown(&self) -> Result<()> {
+        TreePmStore::shutdown(self).await
+    }
+
+    fn dispatch_due_ids(&self, now: DateTime<Utc>, limit: usize) -> Vec<TaskId> {
+        TreePmStore::dispatch_due_ids(self, now, limit)
+    }
+
+    fn task_depth(&self, task_id: &TaskId) -> u8 {
+        self.index_entry(task_id).map(|e| e.depth).unwrap_or(0)
+    }
+
+    fn parent_of(&self, task_id: &TaskId) -> Option<TaskId> {
+        TreePmStore::parent_of(self, task_id)
+    }
+
+    fn corrupt_registry(&self) -> CorruptRegistry {
+        TreePmStore::corrupt_registry(self)
+    }
+
+    fn project_task_count(&self, project_id: &ProjectId) -> usize {
+        TreePmStore::project_task_count(self, project_id)
+    }
+
+    async fn list_project_icons(&self, project_id: &ProjectId) -> Result<Vec<String>> {
+        TreePmStore::list_project_icons(self, project_id).await
+    }
+
+    async fn write_project_icon(
+        &self,
+        project_id: &ProjectId,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        TreePmStore::write_project_icon(self, project_id, name, bytes).await
+    }
+
+    async fn read_project_icon(
+        &self,
+        project_id: &ProjectId,
+        name: &str,
+    ) -> Result<Option<(String, Vec<u8>)>> {
+        TreePmStore::read_project_icon(self, project_id, name).await
+    }
+
+    fn is_dispatch_blocked(&self, task: &Task) -> bool {
+        TreePmStore::is_dispatch_blocked(self, task)
+    }
+
+    async fn dispatch_identity(&self, id: &TaskId) -> Result<Option<String>> {
+        TreePmStore::dispatch_identity(self, id).await
+    }
+
+    async fn mark_dispatched(&self, id: &TaskId) -> Result<()> {
+        TreePmStore::mark_dispatched(self, id).await
+    }
+
+    async fn record_dispatch_failure(&self, id: &TaskId, reason: &str) -> Result<u32> {
+        TreePmStore::record_dispatch_failure(self, id, reason).await
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────

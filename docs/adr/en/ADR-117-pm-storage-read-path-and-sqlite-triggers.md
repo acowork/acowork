@@ -1,6 +1,6 @@
-# ADR-117: PM storage evolution — the tree stays authoritative, fix the read path first, start the SQLite migration only when a trigger fires
+# ADR-117: PM storage evolution — the tree stays the default authority, fix the read path first, then roll out SQLite behind a configurable dual-backend switch
 
-**Status**: Decided (read-path fix and D4's three corruption-defence layers implemented; SQLite migration not started — triggers in §3 D5)
+**Status**: Decided and amended (read-path fix and D4's three corruption-defence layers implemented; on 2026-11-16 the user explicitly started the SQLite migration unconditionally, with `filetree` / `db` / `dual` backends and a flag-gated rollout — implementation in progress, see §3 D6)
 **Date**: 2026-11-16
 **Decided by**: 大鱼
 **Predecessors**:
@@ -14,23 +14,23 @@
 
 ### 1.1 One sentence
 
-**Not migrating to SQLite. Fixing the read path first.** The directory tree (ADR-061) remains PM's single source of truth; SQLite is recorded as a **migration plan with quantitative triggers**, not as "we'll see".
+**Fix the read path first, then add SQLite as a configurable second implementation.** The read path and D4 corruption defence are done; the migration was a plan with quantitative triggers until the user started it unconditionally on 2026-11-16. The directory tree (ADR-061) remains the **default authority**, and SQLite arrives as a second implementation behind the same `PmStore` trait, switched by the three-state `storage_backend` config. Hard invariant throughout: **exactly one commit point at any time**, never an equal-weight dual write.
 
 ### 1.2 Key decisions
 
 | # | Decision | Outcome |
 |---|---|---|
-| D1 | Storage authority | **The tree stays.** `task.json` / `project.json` plus physical nesting remain the only truth. All four ADR-061 reasons still hold (literal = logical / single atomic directory operation / zero redundancy so no double-write / idempotent walkdir rebuild). No second store this round |
+| D1 | Storage authority | **The tree stays the default; config decides the authority.** Under `filetree` / `dual`, `task.json` / `project.json` plus physical nesting are the only commit point; under `db`, `SqlitePmStore` takes over. All four ADR-061 reasons still hold for the tree backend (literal = logical / single atomic directory operation / zero redundancy so no double-write / idempotent walkdir rebuild). The new backend's hard constraint is **one truth at a time**, never an equal-weight dual write |
 | D2 | Read path | **Reads must go through the in-memory index.** Any implementation that filters on the index and then "tops it up" with `get_task()` is a defect: when the index already holds the field, hitting the disk is pure waste. `compute_blocked_by` and the project badge tally are fixed |
 | D3 | New contract | `GET /projects/counts` (index-only, `total` / `submitted` per project). The home screen no longer does an N+1 over full task entities to render badges |
 | D4 | Corruption defence | **Independent of storage format, implemented (see §5).** Three layers: leave a bad file **in place** and copy a forensic duplicate into `.corrupt/`, keep the last parseable version as `.bak` before overwriting, and **guard `shell` against protected prefixes** (`~/.acowork/`, whose path comes from the single source `acowork-core::workspace`). Layer three is the actual stop-loss; one and two only guarantee "damage is recoverable" |
-| D5 | Migration trigger | The SQLite migration starts **only when one of the quantified conditions in §3 D5 holds**. Never "because it feels like it will get slow" |
-| D6 | Migration method | If triggered: follow ADR-082 — keep the `PmStore` trait boundary, add a SQLite backend, **run the test suite against both**, switch under a flag, then delete the old one. No big-bang rewrite |
+| D5 | Migration trigger | The T1-T4 quantitative gates **were overridden by the user's explicit instruction on 2026-11-16**: the migration starts unconditionally. T1-T4 are demoted to scale baselines / regression criteria, no longer gating conditions — see §3 D5 |
+| D6 | Migration method | Keep the `PmStore` trait object-safe; extract a `PmMaintenance` side interface for startup / dispatch / derived reads / project assets / diagnostics (everything non-CRUD) so a DB backend is not forced to implement tree-only operations; a factory assembles `storage_backend = filetree \| db \| dual`; `dual` = tree as the only commit point plus a synchronous DB projection (projection failure never fails a write, and a lagging DB is fully rebuildable); importer and rollout contract in §3 D6 |
 
 ### 1.3 Explicitly out of scope
 
 - Attachments (`attachments/`) do not move into the DB. Binaries stay on the filesystem, metadata stays in `task.json` (ADR-061 decision 5).
-- No "tree + SQLite dual write". Dual write means two truths, which is exactly what ADR-061's zero-redundancy rule exists to prevent.
+- No **equal-weight** "tree + SQLite dual write". Dual write means two truths, which is exactly what ADR-061's zero-redundancy rule exists to prevent. D6's `dual` is not dual write but a **one-way projection**: after the tree commits, best-effort sync into SQLite; the DB never decides write success, never becomes the truth, and is fully rebuildable (see §3 D6).
 - No storage-format change for corruption defence (see §2.3).
 - No TTL cache on the read path. A cache introduces "the index is no longer the truth", at a consistency risk far larger than the gain.
 
@@ -118,9 +118,11 @@ Two fixes:
 
 ### D5: Triggers for the SQLite migration
 
-**Scope first**: these are **human decision gates evaluated before a release**, not runtime auto-detection. The PM process does not watch task counts, does not evaluate `elapsed_ms`, and never imports data or switches backends on its own; the `elapsed_ms` log field only makes the threshold *evaluable*. Every step in D6 is likewise a development / ops action that needs its own scheduling and human confirmation. **This ADR contains no runtime auto-migration or auto-switch mechanism** — auto-migration would tie an irreversible data move to a momentary runtime metric, with far too large a failure domain (one Defender cold-start scan is enough to trip a "> 1 s" threshold).
+**Status change (2026-11-16)**: the user explicitly started the migration unconditionally ("start now, dual backend + flag-gated rollout"). **T1-T4 are therefore no longer gating conditions**; they are demoted to scale baselines and regression criteria. We still record `count` / `elapsed_ms` before each release to build a curve that informs whether `db` should become primary, but they do not block this implementation. The earlier "starts only if one holds" wording is retired.
 
-The migration starts only when at least one of T1-T4 holds (both sub-conditions of T1 must hold together); when none holds, it does not start:
+**Boundary (still valid)**: these are **human decision inputs evaluated before a release**, not runtime auto-detection. The PM process does not watch task counts, does not evaluate `elapsed_ms`, and never imports data or switches backends on its own; the `elapsed_ms` log field only makes the threshold *evaluable*. Every step in D6 is likewise a development / ops action that needs its own scheduling and human confirmation. **This ADR contains no runtime auto-migration or auto-switch mechanism** — auto-migration would tie an irreversible data move to a momentary runtime metric, with far too large a failure domain (one Defender cold-start scan is enough to trip a "> 1 s" threshold). The backend is chosen **once, at startup**, from configuration.
+
+T1-T4 (now scale baselines / regression criteria; both sub-conditions of T1 must hold together):
 
 | # | Trigger | Why |
 |---|---|---|
@@ -131,17 +133,36 @@ The migration starts only when at least one of T1-T4 holds (both sub-conditions 
 
 Measure the T1 baseline now and record it (rebuild time versus `count`) so a future decision has data.
 
-### D6: Migration method (if triggered)
+### D6: Migration method (three-state backend + flag-gated rollout)
 
-Follow the ADR-082 path that worked:
+**Configuration**: `PmConfig.storage_backend`, resolved in this order — `CLI --storage-backend` > env `ACOWORK_PM_STORAGE_BACKEND` > TOML `storage_backend` > default `filetree`. A factory assembles it **once at startup**; there is **no runtime switching** (switching = restart, so the process never reads half of one state and half of another).
 
-1. Leave the 31-method `PmStore` trait boundary alone; add `SqlitePmStore`.
-2. **Run the suite against both backends** — all 164 tests green on each.
-3. One-shot import: `walkdir` the tree into the database; make the importer idempotent.
-4. Flag-gated rollout → observe → delete the old implementation.
-5. Attachments stay on the filesystem; the DB stores `storage_path`.
+| Value | Meaning | Commit point | Business reads |
+|---|---|---|---|
+| `filetree` | Today's behaviour, `TreePmStore` | Tree | Tree + in-memory index |
+| `dual` | Observation mode: tree commits, SQLite projects synchronously | **Tree (only)** | Tree + in-memory index, identical to `filetree`; the DB is for offline reconciliation only |
+| `db` | Target state, `SqlitePmStore` | SQLite | SQLite |
 
-**No** rewrite-then-switch.
+**Four rules for `dual`** (the line between it and the rejected "always dual-write" in §4):
+
+1. Project only **after** the tree commits. The write result is **decided by the tree alone**; a projection failure only warns and increments a counter — it never returns an error and never rolls back the tree.
+2. The DB is **disposable derived data**: if it is missing, behind, or fails validation at startup, rebuild it wholesale from the tree (tens of milliseconds at current scale). No `write_seq`, no startup reconciliation, no conflict resolution.
+3. The DB never serves a business read. A lagging DB therefore cannot change what a user sees; it only affects how fresh offline reconciliation is.
+4. Switching to `db` requires a **maintenance window**: stop writes → full import → `MigrationReport` must pass → change config and restart. Reads must never be flipped to the DB while `dual` is live.
+
+**Trait boundary**: the 31 business methods of `PmStore` stay object-safe and HTTP / MCP / dispatch depend on `Arc<dyn PmStore>`. The reconnaissance also found **15 methods the business layer historically called directly on the concrete `TreePmStore`** (startup rebuild / `start_at` backfill / dispatch candidate scan and state recording / derived reads such as `depth`, `parent_id` and per-project task counts / project icon I/O / the corrupt-file registry / `shutdown`). None of them are business mutations, so all 15 move into a `PmMaintenance` side interface (`PmStore: PmMaintenance`) that each backend answers with whatever it actually owns; `DualPmStore` delegates the hooks to the tree. A DB backend is thus neither forced to implement `walkdir`-style operations nor to fabricate a `TaskEntry`. Icons stay on the filesystem under ADR-061 decision 5 and are never projected into SQLite.
+
+**JSON → SQLite import contract** (filling the gap in the first draft of D6):
+
+1. **Dry-run first**: read-only scan of the whole tree producing a `MigrationReport` (project / task / attachment counts, skipped entries, a reason for every inconsistency) without writing anything; abort on any blocking finding.
+2. **Consistency checks**: directory name ↔ `task.id` ↔ `project_id` must agree. `define_id!`'s `#[serde(transparent)]` Deserialize **does not call `parse()`**, so the importer must explicitly `parse::<TaskId>()` / `parse::<ProjectId>()` instead of trusting ID strings inside JSON. Fields with `#[serde(default)]` must distinguish a legitimate default from semantic damage, and every default taken must be recorded in the report.
+3. **Model inversion**: physical `children/` nesting → `parent_id` / `depth`, with cycle detection and a `max_task_depth` check.
+4. **Sidecar ownership**: enumerate `activity.json`, `project.json`, icons, `attachments/`, `children/`, `.trash/`, `.corrupt/`, `.bak` one by one. Only business entities are imported; forensic copies and backups never enter the DB.
+5. **Attachment base path**: `AttachmentMeta.storage_path` / `thumb_path` are **relative to the task directory**, so the DB must also persist the `task_dir` base. Binaries stay on the filesystem (ADR-061 decision 5).
+6. **Write safety**: bound parameters, one all-or-nothing transaction, skip a non-empty target (idempotency gate), `PRAGMA integrity_check` + `foreign_key_check`, and `user_version` for the schema version. Reuse the stage → commit → report pattern from `acowork-memory/src/sqlite/legacy_import.rs` and `acowork-user/src/chat_sessions.rs`; **ADR-082 §4's "delete the import code afterwards" does not apply to PM production data**.
+7. **Rollback window**: during `dual`, flip back to `filetree` at any time (the DB is only a projection and can be dropped). After switching to `db`, keep a read-only archive of the tree for at least one release; rollback = stop → flip back to `filetree` → restore from the archive.
+
+**Rollout and acceptance order**: ① three-state config + factory → ② object-safe `PmStore` + `PmMaintenance` → ③ `SqlitePmStore` + importer → ④ `DualPmStore` → ⑤ **run the existing suite against both** `filetree` and `db` (same cases, no DB-specific skips) → ⑥ observe `dual` with offline reconciliation fully green → ⑦ switch to `db` in a maintenance window → ⑧ delete the old implementation after one release. **No** rewrite-then-switch.
 
 ---
 
@@ -154,7 +175,7 @@ Follow the ADR-082 path that worked:
 | Keep the N+1 but add an HTTP cache on `/projects/{pid}/tasks` | A cache introduces "the index is not the truth" and needs invalidation. The home screen never wanted task entities; fixing the caller is 60 lines, caching is more work for worse semantics |
 | Store `total` / `submitted` inside `project.json` | Violates ADR-061's zero-redundancy rule (double write, guaranteed drift). Counts are derived; they belong on the index side |
 | Use filesystem ACLs to block external writes | Cannot stop a same-user Agent process (same identity). Ineffective for this threat model |
-| Always dual-write (write JSON + SQLite, read only from DB, JSON as backup) | Writes really are single-task and cheap (one process, one writer; one extra transaction costs ~1-3 ms), so **performance is not the issue**. The problem is two commit points that are not atomic together: a file `rename` is atomic, a DB transaction is atomic, the pair is not — the number of crash windows equals the number of writes, so lighter and more frequent writes mean more windows. Making it reliable needs a `write_seq` plus startup reconciliation, which turns the JSON "backup" into a versioned second master and breaks ADR-061's zero-redundancy rule (dual write was already rejected in §1.3). Falling back to "single write to DB + one-way JSON export" has one commit point, but it **triggers D5 unconditionally**: the read path is already fixed (155 ms to 8 ms), `rebuild_index` is 55 ms and not a bottleneck, so there is no gain at this scale while giving up "fix data in a text editor" and the tree-as-authority invariant. PM writes are not all single-task either: `reparent_task` updates a whole subtree's `depth`/`dir_path`, `delete_task` removes a subtree, `delete_project` archives a whole project, and a dispatch tick writes `dispatched_at` in bulk. Verdict: not worth it; the tree stays authoritative |
+| Always dual-write (write JSON + SQLite, read only from DB, JSON as backup) | Writes really are single-task and cheap (one process, one writer; one extra transaction costs ~1-3 ms), so **performance is not the issue**. The problem is two commit points that are not atomic together: a file `rename` is atomic, a DB transaction is atomic, the pair is not — the number of crash windows equals the number of writes, so lighter and more frequent writes mean more windows. Making it reliable needs a `write_seq` plus startup reconciliation, which turns the JSON "backup" into a versioned second master and breaks ADR-061's zero-redundancy rule (dual write was already rejected in §1.3). Falling back to "single write to DB + one-way JSON export" has one commit point, but it **triggers D5 unconditionally**: the read path is already fixed (155 ms to 8 ms), `rebuild_index` is 55 ms and not a bottleneck, so there is no gain at this scale while giving up "fix data in a text editor" and the tree-as-authority invariant. PM writes are not all single-task either: `reparent_task` updates a whole subtree's `depth`/`dir_path`, `delete_task` removes a subtree, `delete_project` archives a whole project, and a dispatch tick writes `dispatched_at` in bulk. Verdict: not worth it; the tree stays authoritative. **This does not rehabilitate §3 D6's `dual`**: `dual` has one commit point (the tree), the DB neither decides write success nor serves business reads, and it is fully rebuildable — a one-way projection, not a dual write |
 
 ---
 
@@ -182,6 +203,14 @@ Follow the ADR-082 path that worked:
 | `core/acowork-pm/src/store/atomic.rs` | D4-2: keep `*.json.bak` before overwrite only when the target parses (staged + renamed atomically, one copy, overwritten, failures only warn) + 2 unit tests |
 | `core/acowork-core/src/workspace.rs` | D4-3: new `PLATFORM_DATA_DIR` / `platform_data_dir()`, the single source for protected prefixes |
 | `core/acowork-runtime/src/tools/builtin/shell.rs` | D4-3: `protected_prefix_hit()` + rejection before spawn (shared by bash / powershell / shell) + 4 unit tests |
+| `core/acowork-pm/src/config.rs` | D6-①: `StorageBackend` (`filetree` / `db` / `dual`) + the `storage_backend` field, from CLI / env / TOML, default `filetree` |
+| `core/acowork-pm/src/store/tree.rs` | D6-②: new `PmMaintenance` side interface; `PmStore: PmMaintenance` stays object-safe; `TreePmStore` implements the maintenance hooks |
+| `core/acowork-pm/src/api/{mod,routes,tasks}.rs`, `mcp/{mod,tools}.rs`, `dispatch.rs`, `server.rs` | D6-②: `Arc<TreePmStore>` → `Arc<dyn PmStore>`; `index_entry().depth` replaced by `task_depth()` |
+| `core/acowork-pm/src/health.rs` | D6-①: `/health` exposes the effective `storage_backend` so a rollout can confirm the config actually took effect |
+
+**Migration progress (this round)**: D6 steps ① config and ② trait objectification / factory assembly are done; ③ `SqlitePmStore` + importer, ④ `DualPmStore` and ⑤ dual-backend test runs are still in progress. For now `storage_backend = db | dual` is therefore **rejected explicitly by the factory with a stage hint**, never silently downgraded to `filetree` — configuration must be honest, because the worst rollout failure is believing you are on the DB while still running on the tree.
+
+**D6 verification this round**: `cargo test -p acowork-pm` fully green (lib **177 passed** plus 9 integration / doc test suites); `cargo clippy -p acowork-pm --all-targets -- -D warnings` clean; `./dev/ci.sh redlines` all 14 green. Eight new cases: config 5 (three-state parsing / TOML round-trip / invalid values rejected / authority predicate / DB path), server 2 (unwired backends fail hard, default backend returns an object-safe handle), health 1 (`/health` exposes the effective backend).
 
 **D4 verification this round**: `cargo test -p acowork-pm --lib` → **169 passed** (+5); `cargo test -p acowork-runtime --lib shell` → **77 passed** (+4); `cargo clippy -p acowork-core|acowork-pm|acowork-runtime --lib -- -D warnings` passes on all three crates; `./dev/ci.sh redlines` all 14 green. The workspace-wide `--all-targets -D warnings` run is still blocked by 8 **pre-existing** clippy errors in `acowork-gateway` (`supervisor.rs` / `ticket.rs` / `auth_middleware.rs`), unrelated to this change.
 
@@ -238,6 +267,8 @@ Conclusion: **at the current scale the rebuild (55 ms) is not the bottleneck.** 
 - `project_counts` is an O(N) memory pass. At 10 000 tasks it is a few milliseconds, acceptable; beyond that, D5 T1 applies.
 - D4's three layers are implemented, but layer 3 is only string-level misuse mitigation: variable interpolation, relative paths after a `cd`, and interpreter one-liners still get through; if the store ever moves to SQLite, `shell` can write `pm.sqlite` just as well. OS-level sandboxing remains the end state.
 - Layer 2's "parseable" check stops at JSON syntax: an object like `{"id": 123}` with a wrong field type still counts as a good version and can overwrite `.bak`, displacing the real previous version. Closing that gap needs a `DeserializeOwned` bound on `atomic_write_json`, which the current `activity.json` writer (`&[TaskActivity]`, a slice) does not satisfy, so it is untouched this round. The `.bak` write itself is now atomic, so a backup can no longer be destroyed by its own partial write — but the "semantically broken yet syntactically valid" hole remains.
+- The three-state config turns backend choice into a **startup decision**: changing config while running has no effect, and every switch needs a restart plus a maintenance window. The upside is a simple state machine with no half-migrated state; the cost is that one rollout can observe only one configuration, with no online A/B.
+- With `PmStore` objectified, every business call pays one dynamic dispatch (negligible next to the file I/O inside those 31 methods), but `Arc<dyn PmStore>` also means the concrete implementation is no longer visible at compile time. Regression coverage must come from dual-backend test runs, not from the type system.
 
 **Neutral**
 

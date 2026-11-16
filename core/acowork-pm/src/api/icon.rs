@@ -22,7 +22,6 @@ use axum::Json;
 
 use super::ApiState;
 use crate::error::{PmError, Result};
-use crate::store::tree::PmStore;
 use crate::types::ProjectId;
 
 /// 项目图标允许的上传扩展名（与 store 侧 `icon_ext` 白名单一致）。

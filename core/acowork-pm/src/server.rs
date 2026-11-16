@@ -13,8 +13,8 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::config::PmConfig;
-use crate::error::Result;
+use crate::config::{PmConfig, StorageBackend};
+use crate::error::{PmError, Result};
 use crate::mcp::{AgentDirectory, NoopAgentDirectory};
 use crate::store::tree::{PmStore, TreePmStore};
 
@@ -25,7 +25,8 @@ use crate::store::tree::{PmStore, TreePmStore};
 /// - 关闭时调用 [`PmService::shutdown`] 优雅停机（flush 写、关闭 store）
 pub struct PmService {
     pub config: PmConfig,
-    pub store: Arc<TreePmStore>,
+    /// ADR-117 D6: concrete backend is chosen once at startup by [`build_store`].
+    pub store: Arc<dyn PmStore>,
     /// Agent 目录契约（设计 §9.1）：`pm_create_task` 校验 assignee 存在。
     /// 默认 `Noop`（不校验）；Phase 3（ADR-064）将注入 HTTP 实现（查 Gateway
     /// `/api/agents`）。
@@ -34,6 +35,24 @@ pub struct PmService {
     /// project group chat provisioning (`None` = standalone/test mode,
     /// provisioning skipped).
     pub gateway: Option<(String, Option<String>)>,
+}
+
+/// ADR-117 D6: assemble the configured backend exactly once at startup.
+///
+/// `db` / `dual` are deliberately rejected with a stage hint rather than
+/// silently falling back to the tree: during a rollout, believing you are on
+/// SQLite while still committing to the tree is worse than a hard failure.
+/// Wiring them is D6 steps 3-4 (`SqlitePmStore` + importer, `DualPmStore`).
+async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
+    match config.storage_backend {
+        StorageBackend::FileTree => {
+            Ok(Arc::new(TreePmStore::new(config.clone()).await?) as Arc<dyn PmStore>)
+        }
+        other => Err(PmError::Internal(format!(
+            "storage_backend={other} is not wired yet (ADR-117 D6 steps 3-4: \
+             SqlitePmStore / DualPmStore in progress); use --storage-backend filetree"
+        ))),
+    }
 }
 
 impl PmService {
@@ -70,7 +89,7 @@ impl PmService {
     ) -> Result<Self> {
         config.validate()?;
 
-        let store = Arc::new(TreePmStore::new(config.clone()).await?);
+        let store = build_store(&config).await?;
 
         // 启动时重建索引（如果配置开启）
         if config.index_rebuild_on_start {
@@ -141,6 +160,7 @@ impl PmService {
                         .merge(crate::health::health_route(
                             self.config.data_dir.clone(),
                             self.store.corrupt_registry(),
+                            self.config.storage_backend,
                         ));
                     tracing::info!(addr = %addr, "PM server listening (full router)");
                     tokio::spawn(async move {
@@ -239,5 +259,49 @@ impl PmService {
     /// 优雅停机（flush 待写、关闭 store）。
     pub async fn shutdown(&self) -> Result<()> {
         self.store.shutdown().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::TaskId;
+
+    fn test_config(backend: StorageBackend, data_dir: &std::path::Path) -> PmConfig {
+        PmConfig {
+            data_dir: data_dir.to_path_buf(),
+            index_rebuild_on_start: false,
+            storage_backend: backend,
+            ..Default::default()
+        }
+    }
+
+    /// A rollout must never look like it is on SQLite while still running on
+    /// the tree: unwired backends fail loudly instead of silently degrading.
+    #[tokio::test]
+    async fn build_store_rejects_unwired_backends_explicitly() {
+        let tmp = tempfile::tempdir().unwrap();
+        for backend in [StorageBackend::Db, StorageBackend::Dual] {
+            let cfg = test_config(backend, tmp.path());
+            // `Arc<dyn PmStore>` is not `Debug`, so avoid `unwrap_err()`.
+            let err = match build_store(&cfg).await {
+                Ok(_) => panic!("{backend} must be rejected until D6 steps 3-4 land"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains(backend.as_str()), "error was: {err}");
+            assert!(err.contains("not wired yet"), "error was: {err}");
+        }
+    }
+
+    /// The default backend returns an object-safe handle: both business and
+    /// maintenance methods are reachable without naming the concrete type.
+    #[tokio::test]
+    async fn build_store_returns_an_object_safe_tree_by_default() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = test_config(StorageBackend::FileTree, tmp.path());
+        let store = build_store(&cfg).await.unwrap();
+        assert!(store.list_projects().await.unwrap().is_empty());
+        assert_eq!(store.task_depth(&TaskId("t-nonexistent".into())), 0);
+        assert!(store.corrupt_registry().read().is_empty());
     }
 }

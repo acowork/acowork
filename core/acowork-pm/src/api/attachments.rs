@@ -21,7 +21,6 @@ use crate::types::{AttachmentId, AttachmentKind, AttachmentMeta};
 
 use super::ApiState;
 use crate::error::{PmError, Result};
-use crate::store::tree::PmStore;
 
 // ────────────────────────────────────────────────────────────────────────────
 // 常量：MIME 白名单 / 危险类型黑名单

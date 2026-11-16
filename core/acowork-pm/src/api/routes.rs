@@ -32,7 +32,7 @@ use axum::Router;
 
 use crate::config::PmConfig;
 use crate::mcp::AgentDirectory;
-use crate::store::tree::TreePmStore;
+use crate::store::tree::PmStore;
 
 use super::{attachments, icon, projects, search, tasks, ApiState};
 
@@ -45,7 +45,7 @@ use super::{attachments, icon, projects, search, tasks, ApiState};
 /// 但保留在 [`ApiState`] 中供未来 P1+ 扩展使用（如 handlers 读取
 /// `config.max_attachment_size` 做上传校验）。
 pub fn pm_router(
-    store: Arc<TreePmStore>,
+    store: Arc<dyn PmStore>,
     config: PmConfig,
     agent_dir: Arc<dyn AgentDirectory>,
     gateway: Option<(String, Option<String>)>,

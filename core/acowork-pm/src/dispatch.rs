@@ -36,7 +36,7 @@ use std::time::Duration;
 use chrono::Utc;
 
 use crate::gateway_client::GatewayClient;
-use crate::store::tree::{PmStore, TreePmStore};
+use crate::store::tree::PmStore;
 use crate::types::Task;
 
 /// The human-readable dispatch text — what the project group chat shows
@@ -155,7 +155,7 @@ pub fn metrics_snapshot() -> serde_json::Value {
 /// per-conversation request budget; `shutdown` stops the loop between
 /// ticks on the service's graceful-shutdown signal.
 pub fn spawn_scanner(
-    store: Arc<TreePmStore>,
+    store: Arc<dyn PmStore>,
     gateway: (String, Option<String>),
     interval: Duration,
     per_tick: usize,

@@ -12,7 +12,6 @@ use axum::Json;
 use serde::{Deserialize, Serialize};
 
 use super::ApiState;
-use crate::store::tree::PmStore;
 use crate::types::TaskFilter;
 
 #[derive(Debug, Deserialize)]
@@ -161,7 +160,7 @@ mod tests {
     use super::*;
     use crate::config::PmConfig;
     use crate::mcp::NoopAgentDirectory;
-    use crate::store::tree::TreePmStore;
+    use crate::store::tree::{PmStore, TreePmStore};
     use crate::types::{CreateProject, CreateTask, Priority, ProjectId, TaskId, TaskType};
     use std::sync::Arc;
     use tempfile::tempdir;

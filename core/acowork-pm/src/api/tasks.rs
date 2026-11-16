@@ -10,7 +10,6 @@ use crate::types::{
 };
 
 use super::ApiState;
-use crate::store::tree::PmStore;
 
 // ────────────────────────────────────────────────────────────────────────────
 // GET /projects/:pid/tasks
@@ -29,7 +28,7 @@ pub async fn list(
     let mut out = Vec::with_capacity(tasks.len());
     for task in tasks {
         let tid = task.id.clone();
-        let depth = state.store.index_entry(&tid).map(|e| e.depth).unwrap_or(0);
+        let depth = state.store.task_depth(&tid);
         let parent_id = state.store.parent_of(&tid);
         let blocked_by = state.store.compute_blocked_by(&tid).await?;
         out.push(crate::types::TaskResponse {
@@ -87,7 +86,7 @@ pub async fn get(
         .get_task(&tid)
         .await?
         .ok_or(crate::error::PmError::TaskNotFound(tid.to_string()))?;
-    let depth = state.store.index_entry(&tid).map(|e| e.depth).unwrap_or(0);
+    let depth = state.store.task_depth(&tid);
     let parent_id = state.store.parent_of(&tid);
     let blocked_by = state.store.compute_blocked_by(&tid).await?;
 

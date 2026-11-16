@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use clap::Parser;
 
-use acowork_pm::{HttpAgentDirectory, PmConfig, PmService};
+use acowork_pm::{HttpAgentDirectory, PmConfig, PmService, StorageBackend};
 
 /// CLI 参数。
 #[derive(Parser)]
@@ -36,6 +36,11 @@ struct Cli {
     /// 数据目录覆盖（默认 `$HOME/.acowork/acowork-pm`）
     #[arg(long)]
     data_dir: Option<PathBuf>,
+
+    /// ADR-117 D6: storage backend (`filetree` | `db` | `dual`).
+    /// Overrides `ACOWORK_PM_STORAGE_BACKEND`; resolved once at startup.
+    #[arg(long, value_name = "BACKEND")]
+    storage_backend: Option<String>,
 
     /// 把实际绑定的端口写入此文件（供 Gateway supervisor 读取）
     #[arg(long)]
@@ -86,6 +91,32 @@ async fn main() {
     acowork_core::logging::install_panic_hook();
 
     let mut config = PmConfig::default();
+
+    // ADR-117 D6: resolve the storage backend once at startup. An invalid
+    // value must fail loudly — silently degrading to `filetree` would make a
+    // rollout look like it is on SQLite while still running on the tree.
+    if let Some(raw) = std::env::var("ACOWORK_PM_STORAGE_BACKEND")
+        .ok()
+        .filter(|v| !v.trim().is_empty())
+    {
+        match raw.parse::<StorageBackend>() {
+            Ok(backend) => config.storage_backend = backend,
+            Err(e) => {
+                tracing::error!(error = %e, "Invalid ACOWORK_PM_STORAGE_BACKEND");
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Some(raw) = cli.storage_backend.as_deref() {
+        match raw.parse::<StorageBackend>() {
+            Ok(backend) => config.storage_backend = backend,
+            Err(e) => {
+                tracing::error!(error = %e, "Invalid --storage-backend");
+                std::process::exit(1);
+            }
+        }
+    }
+
     if let Some(dir) = cli.data_dir {
         config.data_dir = dir;
     }

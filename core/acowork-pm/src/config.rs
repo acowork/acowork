@@ -10,7 +10,64 @@
 //! 不再由 Gateway 内嵌/覆写。
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// ADR-117 D6: the storage backend the PM service commits to.
+///
+/// Exactly one commit point is allowed at any time. `Dual` is **not** a dual
+/// write: the tree commits first and SQLite is a best-effort, disposable
+/// projection of that commit (see ADR-117 §3 D6). `Dual` therefore never
+/// changes the write result and never serves a business read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageBackend {
+    /// Directory tree is the authority. Today's behaviour, the default.
+    #[default]
+    FileTree,
+    /// SQLite is the authority. `SqlitePmStore` owns every commit.
+    Db,
+    /// Tree commits; SQLite mirrors the result for offline reconciliation.
+    Dual,
+}
+
+impl StorageBackend {
+    /// Canonical config/CLI spelling of this variant.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FileTree => "filetree",
+            Self::Db => "db",
+            Self::Dual => "dual",
+        }
+    }
+
+    /// Whether this backend keeps the directory tree as the commit point.
+    pub const fn tree_is_authority(self) -> bool {
+        matches!(self, Self::FileTree | Self::Dual)
+    }
+}
+
+impl FromStr for StorageBackend {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "filetree" | "file_tree" | "tree" => Ok(Self::FileTree),
+            "db" | "sqlite" => Ok(Self::Db),
+            "dual" => Ok(Self::Dual),
+            other => Err(format!(
+                "unknown storage backend `{other}` (expected filetree | db | dual)"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for StorageBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// PM 服务运行时配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +80,17 @@ pub struct PmConfig {
     /// `acowork-node/` 平级），不再嵌套在 Gateway 数据目录下。
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+
+    /// ADR-117 D6: which backend owns commits. Defaults to `filetree`.
+    ///
+    /// The standalone process resolves this once at startup, in order:
+    /// `--storage-backend` (CLI) > `ACOWORK_PM_STORAGE_BACKEND` (env) >
+    /// `PmConfig::default()`. The field is also serde-deserializable so a
+    /// future `--config` TOML path can set it; there is **no runtime
+    /// switching** — changing backends requires a restart (and, for `db`,
+    /// a maintenance window).
+    #[serde(default)]
+    pub storage_backend: StorageBackend,
 
     /// HTTP 监听地址（**legacy**，独立进程模式由 CLI `--host`/`--port` 覆盖）。
     ///
@@ -170,6 +238,7 @@ impl Default for PmConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
+            storage_backend: StorageBackend::default(),
             bind_addr: default_bind_addr(),
             port: default_port(),
             enabled: default_true(),
@@ -217,6 +286,14 @@ impl PmConfig {
     /// Trash 根目录 = `{data_dir}/.trash`。
     pub fn trash_dir(&self) -> PathBuf {
         self.data_dir.join(".trash")
+    }
+
+    /// ADR-117 D6: SQLite file used by the `db` and `dual` backends.
+    ///
+    /// Kept beside `projects/` rather than inside it, so a tree rebuild or a
+    /// project archive can never sweep the database away.
+    pub fn sqlite_path(&self) -> PathBuf {
+        self.data_dir.join("pm.sqlite")
     }
 }
 
@@ -279,5 +356,67 @@ mod tests {
             std::env::remove_var("ACOWORK_PM_HOME");
         }
         assert_eq!(dir, tmp);
+    }
+
+    // ── ADR-117 D6: three-state storage backend ────────────────────
+
+    #[test]
+    fn storage_backend_defaults_to_filetree() {
+        let cfg = PmConfig::default();
+        assert_eq!(cfg.storage_backend, StorageBackend::FileTree);
+        assert!(cfg.storage_backend.tree_is_authority());
+    }
+
+    #[test]
+    fn storage_backend_parses_all_three_states() {
+        for (raw, expected) in [
+            ("filetree", StorageBackend::FileTree),
+            ("file_tree", StorageBackend::FileTree),
+            ("tree", StorageBackend::FileTree),
+            ("DB", StorageBackend::Db),
+            ("sqlite", StorageBackend::Db),
+            (" dual ", StorageBackend::Dual),
+        ] {
+            assert_eq!(raw.parse::<StorageBackend>().unwrap(), expected, "input: {raw}");
+        }
+        let err = "mongodb".parse::<StorageBackend>().unwrap_err();
+        assert!(err.contains("unknown storage backend"), "error was: {err}");
+    }
+
+    #[test]
+    fn storage_backend_roundtrips_through_display_and_toml() {
+        for backend in [
+            StorageBackend::FileTree,
+            StorageBackend::Db,
+            StorageBackend::Dual,
+        ] {
+            assert_eq!(
+                backend.to_string().parse::<StorageBackend>().unwrap(),
+                backend
+            );
+            let cfg: PmConfig = toml::from_str(&format!("storage_backend = \"{backend}\"\n"))
+                .expect("valid backend must deserialize");
+            assert_eq!(cfg.storage_backend, backend);
+        }
+        // A typo must fail loudly, never silently degrade to `filetree`
+        // (ADR-117 §3 D6: configuration must be honest).
+        assert!(toml::from_str::<PmConfig>("storage_backend = \"mongo\"\n").is_err());
+    }
+
+    #[test]
+    fn only_db_backend_gives_up_tree_authority() {
+        assert!(!StorageBackend::Db.tree_is_authority());
+        assert!(StorageBackend::Dual.tree_is_authority());
+        assert_eq!(StorageBackend::Dual.as_str(), "dual");
+    }
+
+    #[test]
+    fn sqlite_path_sits_beside_projects_not_inside_it() {
+        let cfg = PmConfig {
+            data_dir: PathBuf::from("/tmp/pm-data"),
+            ..Default::default()
+        };
+        assert_eq!(cfg.sqlite_path(), PathBuf::from("/tmp/pm-data/pm.sqlite"));
+        assert_ne!(cfg.sqlite_path(), cfg.projects_dir());
     }
 }

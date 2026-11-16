@@ -66,7 +66,7 @@ pub mod ui;
 // ────────────────────────────────────────────────────────────────────────────
 
 // Config
-pub use config::PmConfig;
+pub use config::{PmConfig, StorageBackend};
 
 // Errors
 pub use error::{PmError, Result};
@@ -79,7 +79,7 @@ pub use types::{
 
 // Storage
 pub use store::index::TaskIndex;
-pub use store::tree::{PmStore, TreePmStore};
+pub use store::tree::{PmMaintenance, PmStore, TreePmStore};
 
 // API
 pub use api::routes::pm_router;
