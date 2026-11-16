@@ -2,7 +2,7 @@
 # A multi-skilled senior engineer for code review, architecture, debugging, refactoring, testing, and documentation.
 
 agent_id = "github.ponytail"
-version = "1.0.0"
+version = "1.0.1"
 name = "Ponytail"
 role = "Senior Software Engineer"
 description = "The best code is the code you never wrote."
@@ -46,6 +46,12 @@ type = "Shell"
 # --- Filesystem ---
 [[tools]]
 name = "file_edit"
+
+[[tools]]
+name = "image_read"
+
+[[tools]]
+name = "doc_reader"
 
 # --- Shell (platform-detected; declare all three for cross-platform opt-in) ---
 [[tools]]
