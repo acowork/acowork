@@ -2,7 +2,7 @@
 # A quality management agent for test strategy, test planning, defect management, release acceptance, and regression control.
 
 agent_id = "com.acowork.quality-assurance"
-version = "1.1.0"
+version = "1.1.1"
 name = "QA"
 role = "Quality Assurance Manager"
 description = "A quality assurance and quality management agent skilled in quality strategy, test planning, test case design, defect triage, regression management, release acceptance, and continuous quality improvement."
@@ -47,6 +47,9 @@ type = "Network"
 # published with `doc_write`, so `file_write` is NOT declared here.
 [[tools]]
 name = "file_read"
+
+[[tools]]
+name = "image_read"
 
 [[tools]]
 name = "file_edit"
