@@ -50,6 +50,16 @@ describe("theme packs", () => {
     expect(THEME_PACKS.find((p) => p.id === REF_PACK)?.name).toBe("Paper");
   });
 
+  it("parses a preview hue from every pack's light --color-bg", () => {
+    for (const pack of THEME_PACKS) {
+      expect(pack.hue, `${pack.id} hue`).not.toBeNull();
+      expect(pack.hue!).toBeGreaterThanOrEqual(0);
+      expect(pack.hue!).toBeLessThan(360);
+    }
+    // paper.css light block: `--color-bg: hsl(40 var(--theme-chroma) 96%)`
+    expect(THEME_PACKS.find((p) => p.id === REF_PACK)?.hue).toBe(40);
+  });
+
   it("overrides only tokens declared in the globals.css contract", () => {
     const declared = declaredTokens();
     for (const pack of THEME_PACKS) {

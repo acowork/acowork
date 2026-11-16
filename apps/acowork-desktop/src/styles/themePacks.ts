@@ -24,10 +24,41 @@ const ATTR = "data-theme-pack";
 export const DEFAULT_THEME_PACK = "default";
 
 const modules = import.meta.glob("./themes/*.css", { eager: true });
+// Raw text of the same files: the side-effect glob above bundles the CSS but
+// leaves nothing readable at runtime, so the picker's per-pack tint reads the
+// hue out of the source instead of a second registry to keep in sync.
+const rawModules = import.meta.glob("./themes/*.css", {
+  eager: true,
+  query: "?raw",
+  import: "default",
+}) as Record<string, string>;
 
 export interface ThemePack {
   id: string;
   name: string;
+  /** Representative hue of the pack, in degrees, or null when the pack has
+   *  no tint to show. It is the hue of the pack's light-mode `--color-bg` —
+   *  i.e. exactly the tint the whole UI takes on when the pack is active, so
+   *  a picker coloured with it previews what picking it does. */
+  hue: number | null;
+}
+
+/** First `--color-bg: hsl(H ...)` is the light block (the dark block comes
+ *  later in the file); pull H out of it. */
+function hueFromCss(css: string): number | null {
+  const m = css.match(/--color-bg:\s*hsl\((\d+(?:\.\d+)?)/);
+  return m ? Number(m[1]) : null;
+}
+
+/**
+ * Preview colour of a pack: its hue at the live `--theme-chroma` saturation
+ * — i.e. the tint the app takes on when the pack is picked. Pure CSS `var()`
+ * so the browser resolves the knob per light/dark mode and follows it when
+ * the user turns it; no JS read-back needed. Returns undefined for an
+ * untinted pack so callers can fall back to their neutral colour.
+ */
+export function packTint(hue: number | null): string | undefined {
+  return hue === null ? undefined : `hsl(${hue} var(--theme-chroma) 50%)`;
 }
 
 function idFromPath(path: string): string {
@@ -45,7 +76,7 @@ function displayName(id: string): string {
 export const THEME_PACKS: ThemePack[] = Object.keys(modules)
   .map((path) => {
     const id = idFromPath(path);
-    return { id, name: displayName(id) };
+    return { id, name: displayName(id), hue: hueFromCss(rawModules[path] ?? "") };
   })
   .sort((a, b) => a.id.localeCompare(b.id));
 

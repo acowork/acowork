@@ -30,6 +30,7 @@ import {
   DEFAULT_THEME_PACK,
   THEME_PACKS,
   getActiveThemePack,
+  packTint,
   setThemePack,
   subscribeThemePacks,
 } from "../../styles/themePacks";
@@ -984,7 +985,13 @@ export function AppearanceTab() {
   const activePack = useSyncExternalStore(subscribeThemePacks, getActiveThemePack);
   const themePackOptions = [
     { label: t("settings.themeDefault"), value: DEFAULT_THEME_PACK },
-    ...THEME_PACKS.map((p) => ({ label: p.name, value: p.id })),
+    // Each pack's dot previews its tint (shared `packTint` with the
+    // title-bar menu's row icons); "Default" has none and keeps zinc.
+    ...THEME_PACKS.map((p) => ({
+      label: p.name,
+      value: p.id,
+      dotColor: packTint(p.hue),
+    })),
   ];
 
   // Content width options: 40-100%, step 10
