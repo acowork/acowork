@@ -55,6 +55,12 @@ struct Cli {
     #[arg(long)]
     data_dir: Option<PathBuf>,
 
+    /// TOML 配置文件（未指定时，若 `./acowork-pm.toml` 存在则加载）。
+    /// 优先级：CLI > 环境变量 > 本文件 > `PmConfig::default()`。
+    /// 文件缺失/非法（含未知字段）时失败方式见 `load_config_baseline`。
+    #[arg(long, value_name = "PATH")]
+    config: Option<PathBuf>,
+
     /// ADR-117 D6: storage backend (`filetree` | `db` | `dual`).
     /// Overrides `ACOWORK_PM_STORAGE_BACKEND`; resolved once at startup.
     #[arg(long, value_name = "BACKEND")]
@@ -103,6 +109,43 @@ struct Cli {
     command: Option<Command>,
 }
 
+/// ADR-117 D6 / `config.rs` contract: `CLI > env > TOML > default`.
+///
+/// An explicit `--config` is mandatory when given; otherwise the conventional
+/// `./acowork-pm.toml` is loaded only if it actually exists. Malformed TOML
+/// (including unknown fields, via `deny_unknown_fields`) is a hard failure —
+/// silently falling back to defaults would make a rollout believe its config
+/// took effect when it did not.
+fn load_config_baseline(explicit: Option<&std::path::Path>) -> PmConfig {
+    let path = match explicit {
+        Some(p) => Some(p.to_path_buf()),
+        None => {
+            let conventional = PathBuf::from("acowork-pm.toml");
+            conventional.is_file().then_some(conventional)
+        }
+    };
+    let Some(path) = path else {
+        return PmConfig::default();
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::error!(path = %path.display(), error = %e, "cannot read PM config file");
+            std::process::exit(1);
+        }
+    };
+    match toml::from_str::<PmConfig>(&text) {
+        Ok(cfg) => {
+            tracing::info!(path = %path.display(), "PM config loaded from TOML");
+            cfg
+        }
+        Err(e) => {
+            tracing::error!(path = %path.display(), error = %e, "invalid PM config file");
+            std::process::exit(1);
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() {
     let cli = Cli::parse();
@@ -111,7 +154,13 @@ async fn main() {
     acowork_core::logging::init_subprocess_logging(&cli.log_level);
     acowork_core::logging::install_panic_hook();
 
-    let mut config = PmConfig::default();
+    // ADR-117 D6 / config.rs contract: CLI > env > TOML > default.
+    let mut config = load_config_baseline(cli.config.as_deref());
+
+    // Environment variables override the TOML baseline.
+    if let Some(dir) = std::env::var_os("ACOWORK_PM_DATA_DIR").filter(|v| !v.is_empty()) {
+        config.data_dir = PathBuf::from(dir);
+    }
 
     // ADR-117 D6: resolve the storage backend once at startup. An invalid
     // value must fail loudly — silently degrading to `filetree` would make a
@@ -171,6 +220,24 @@ async fn main() {
                 }
                 Err(e) => {
                     tracing::error!(error = %e, "PM migration failed");
+                    // A refused `--apply` is almost always a blocking finding
+                    // (bad ID, unreadable file, path traversal). Print the
+                    // read-only dry-run report so an operator can fix those
+                    // without having to rerun a second command — and so a
+                    // half-understood failure cannot be mistaken for "the
+                    // import wrote something".
+                    if *apply {
+                        match acowork_pm::pm_import_dry_run(&config) {
+                            Ok(report) => eprintln!(
+                                "{}",
+                                serde_json::to_string_pretty(&report)
+                                    .unwrap_or_else(|e| e.to_string())
+                            ),
+                            Err(scan_err) => {
+                                tracing::error!(error = %scan_err, "PM dry-run re-scan also failed");
+                            }
+                        }
+                    }
                     std::process::exit(1);
                 }
             }
@@ -230,25 +297,26 @@ async fn main() {
                 .filter(|t| !t.is_empty()),
         )
     });
-    let agent_dir: Arc<dyn acowork_pm::AgentDirectory> = if let Some((gw_url, auth_token)) =
-        gateway_info.clone()
-    {
-        // Gateway auth 开启时经 env 传入 Bearer token（避免 CLI 参数暴露在进程列表）。
-        let dir = Arc::new(HttpAgentDirectory::new(
-            gw_url,
-            auth_token,
-            Duration::from_secs(cli.agent_sync_interval_secs),
-        ));
-        dir.start();
-        tracing::info!(
-            sync_interval_secs = cli.agent_sync_interval_secs,
-            "Agent directory (HTTP) started — assignee existence validated against Gateway"
-        );
-        dir
-    } else {
-        tracing::warn!("No --gateway-url — using permissive AgentDirectory (assignee not validated)");
-        Arc::new(acowork_pm::NoopAgentDirectory)
-    };
+    let agent_dir: Arc<dyn acowork_pm::AgentDirectory> =
+        if let Some((gw_url, auth_token)) = gateway_info.clone() {
+            // Gateway auth 开启时经 env 传入 Bearer token（避免 CLI 参数暴露在进程列表）。
+            let dir = Arc::new(HttpAgentDirectory::new(
+                gw_url,
+                auth_token,
+                Duration::from_secs(cli.agent_sync_interval_secs),
+            ));
+            dir.start();
+            tracing::info!(
+                sync_interval_secs = cli.agent_sync_interval_secs,
+                "Agent directory (HTTP) started — assignee existence validated against Gateway"
+            );
+            dir
+        } else {
+            tracing::warn!(
+                "No --gateway-url — using permissive AgentDirectory (assignee not validated)"
+            );
+            Arc::new(acowork_pm::NoopAgentDirectory)
+        };
 
     let service = match PmService::with_gateway(config.clone(), agent_dir, gateway_info).await {
         Ok(svc) => Arc::new(svc),

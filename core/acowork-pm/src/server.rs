@@ -58,18 +58,21 @@ async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
             Ok(Arc::new(TreePmStore::new(config.clone()).await?) as Arc<dyn PmStore>)
         }
         StorageBackend::Db => {
+            // A refused startup must not leave a `pm.sqlite` behind: merely
+            // opening one creates its WAL/schema/`user_version`, which would
+            // make a later `migrate --apply` see a "non-empty" target and
+            // silently skip. Check the missing-DB case *before* opening.
+            if !config.sqlite_path().exists() {
+                let report = import::dry_run(config)?;
+                if report.projects > 0 {
+                    return Err(empty_db_error(&report));
+                }
+            }
             let store = SqlitePmStore::open(config.clone())?;
             if store.is_empty()? {
                 let report = import::dry_run(config)?;
                 if report.projects > 0 {
-                    return Err(PmError::Internal(format!(
-                        "storage_backend=db but pm.sqlite is empty while the tree still holds \
-                         {} project(s) (blocking findings: {}); run \
-                         `acowork-pm --data-dir <dir> migrate --apply` in a stop-the-world \
-                         window before switching",
-                        report.projects,
-                        report.blocking.len()
-                    )));
+                    return Err(empty_db_error(&report));
                 }
             }
             Ok(Arc::new(store) as Arc<dyn PmStore>)
@@ -79,6 +82,18 @@ async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
             Ok(Arc::new(DualPmStore::new(tree, config.clone())) as Arc<dyn PmStore>)
         }
     }
+}
+
+/// Shared refusal message for "the operator skipped the import window".
+fn empty_db_error(report: &import::MigrationReport) -> PmError {
+    PmError::Internal(format!(
+        "storage_backend=db but pm.sqlite is empty while the tree still holds \
+         {} project(s) (blocking findings: {}); run \
+         `acowork-pm --data-dir <dir> migrate --apply` in a stop-the-world \
+         window before switching",
+        report.projects,
+        report.blocking.len()
+    ))
 }
 
 impl PmService {
@@ -177,17 +192,30 @@ impl PmService {
         let mut port = bind.port();
         let max_port = port.saturating_add(20);
 
+        // ADR-117 D6 step 6: `/health` reads the *live* projection counters
+        // of this store instance. Only `DualPmStore` implements the provider;
+        // the default `PmMaintenance::projection_health` returns `None` for
+        // every other backend.
+        let projection: Option<Arc<dyn Fn() -> serde_json::Value + Send + Sync>> =
+            if self.config.storage_backend == StorageBackend::Dual {
+                let store = self.store.clone();
+                Some(Arc::new(move || {
+                    store.projection_health().unwrap_or(serde_json::Value::Null)
+                }))
+            } else {
+                None
+            };
+
         loop {
             match tokio::net::TcpListener::bind(SocketAddr::new(host, port)).await {
                 Ok(listener) => {
                     let addr = listener.local_addr()?;
-                    let router = self
-                        .router()
-                        .merge(crate::health::health_route(
-                            self.config.data_dir.clone(),
-                            self.store.corrupt_registry(),
-                            self.config.storage_backend,
-                        ));
+                    let router = self.router().merge(crate::health::health_route(
+                        self.config.data_dir.clone(),
+                        self.store.corrupt_registry(),
+                        self.config.storage_backend,
+                        projection.clone(),
+                    ));
                     tracing::info!(addr = %addr, "PM server listening (full router)");
                     tokio::spawn(async move {
                         if let Err(e) = axum::serve(listener, router).await {
@@ -258,10 +286,16 @@ impl PmService {
                     }
                 }
                 if failed == 0 {
-                    tracing::info!("group chat backfill complete (all projects have their group chat)");
+                    tracing::info!(
+                        "group chat backfill complete (all projects have their group chat)"
+                    );
                     return;
                 }
-                tracing::warn!(failed, attempt, "group chat backfill: some projects could not be provisioned");
+                tracing::warn!(
+                    failed,
+                    attempt,
+                    "group chat backfill: some projects could not be provisioned"
+                );
             }
         });
     }
@@ -292,6 +326,7 @@ impl PmService {
 mod tests {
     use super::*;
     use crate::types::TaskId;
+    use std::path::PathBuf;
 
     fn test_config(backend: StorageBackend, data_dir: &std::path::Path) -> PmConfig {
         PmConfig {
@@ -355,6 +390,16 @@ mod tests {
         };
         assert!(err.contains("migrate --apply"), "error was: {err}");
         assert!(err.contains("1 project(s)"), "error was: {err}");
+        // A refused startup must leave *no* database behind. Otherwise a
+        // later `migrate --apply` sees a non-empty target, skips the import,
+        // and the operator correctly concludes the data vanished.
+        assert!(!db_cfg.sqlite_path().exists(), "refusal created pm.sqlite");
+        for suffix in ["-wal", "-shm"] {
+            assert!(
+                !PathBuf::from(format!("{}{suffix}", db_cfg.sqlite_path().display())).exists(),
+                "refusal created a pm.sqlite{suffix} sidecar"
+            );
+        }
     }
 
     /// The default backend returns an object-safe handle: both business and

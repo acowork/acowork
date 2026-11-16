@@ -25,7 +25,13 @@ pub async fn atomic_write_json<T: serde::Serialize>(path: &Path, value: &T) -> R
     let tmp = path.with_extension("json.tmp");
     let json = serde_json::to_string_pretty(value)?;
     fs::write(&tmp, json.as_bytes()).await?;
-    fs::rename(&tmp, path).await?;
+    if let Err(e) = fs::rename(&tmp, path).await {
+        // The authoritative file is untouched; the staged copy must not be
+        // left behind as an orphan that a later crash could confuse with a
+        // pending write.
+        let _ = fs::remove_file(&tmp).await;
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -59,9 +65,16 @@ async fn backup_last_good(path: &Path) {
         return;
     }
     // rename replaces the previous backup atomically on the same filesystem.
-    // On failure the old .bak survives intact; only the staged copy is lost.
+    // On failure the old .bak survives intact. Clean up the staged copy too:
+    // `walk_tasks` ignores `.bak.tmp`, but leaving one behind on every failed
+    // write grows the data directory and makes the next attempt ambiguous.
     if let Err(e) = fs::rename(&tmp, &bak).await {
         tracing::warn!(path = %bak.display(), error = %e, "failed to keep .bak before overwrite");
+        if let Err(cleanup) = fs::remove_file(&tmp).await
+            && cleanup.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %tmp.display(), error = %cleanup, "failed to remove staged .bak copy");
+        }
     }
 }
 
@@ -78,7 +91,8 @@ pub async fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T>
 pub async fn rename_or_fallback(from: &Path, to: &Path) -> Result<()> {
     match fs::rename(from, to).await {
         Ok(()) => Ok(()),
-        Err(e) if e.raw_os_error() == Some(18) /* EXDEV */ || e.kind() == std::io::ErrorKind::CrossesDevices => {
+        Err(e) if e.raw_os_error() == Some(18) /* EXDEV */ || e.kind() == std::io::ErrorKind::CrossesDevices =>
+        {
             // 跨设备：copy + remove
             fs::create_dir_all(to.parent().unwrap_or_else(|| Path::new("."))).await?;
             fs::copy(from, to).await?;
@@ -109,7 +123,10 @@ pub fn validate_id_format(id: &str, prefix: &str, kind: &str) -> Result<()> {
         return Err(PmError::InvalidId(format!("{}: {}", kind, id)));
     }
     let suffix = &id[prefix.len()..];
-    if !suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    if !suffix
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         return Err(PmError::InvalidId(format!("{}: {}", kind, id)));
     }
     Ok(())
@@ -142,7 +159,9 @@ mod tests {
     async fn atomic_write_then_read() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("test.json");
-        atomic_write_json(&path, &serde_json::json!({"a": 1})).await.unwrap();
+        atomic_write_json(&path, &serde_json::json!({"a": 1}))
+            .await
+            .unwrap();
         let val: serde_json::Value = read_json(&path).await.unwrap();
         assert_eq!(val["a"], 1);
     }
@@ -156,7 +175,10 @@ mod tests {
         atomic_write_json(&path, &serde_json::json!({"v": 1}))
             .await
             .unwrap();
-        assert!(!bak.exists(), "a first write has no previous version to keep");
+        assert!(
+            !bak.exists(),
+            "a first write has no previous version to keep"
+        );
 
         atomic_write_json(&path, &serde_json::json!({"v": 2}))
             .await
@@ -167,6 +189,47 @@ mod tests {
         assert!(
             !path.with_file_name("task.json.bak.tmp").exists(),
             "the staged copy must be renamed away, never left behind"
+        );
+    }
+
+    /// A failed `.bak` rename must not leave `*.json.bak.tmp` behind: those
+    /// orphans are invisible to the index but accumulate on every write.
+    #[tokio::test]
+    async fn failed_bak_rename_cleans_up_its_staged_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("task.json");
+        atomic_write_json(&path, &serde_json::json!({"v": 1}))
+            .await
+            .unwrap();
+        // A directory at the .bak path makes `rename(file -> dir)` fail on
+        // both POSIX and Windows while keeping the target file writable.
+        std::fs::create_dir(path.with_file_name("task.json.bak")).unwrap();
+        atomic_write_json(&path, &serde_json::json!({"v": 2}))
+            .await
+            .unwrap();
+        let current: serde_json::Value = read_json(&path).await.unwrap();
+        assert_eq!(current["v"], 2);
+        assert!(
+            !path.with_file_name("task.json.bak.tmp").exists(),
+            "staged .bak copy must be removed after a failed rename"
+        );
+    }
+
+    /// Same for the authoritative write itself: a failed rename must not
+    /// leave a staged `*.json.tmp` that looks like a pending write.
+    #[tokio::test]
+    async fn failed_atomic_write_cleans_up_its_staged_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("task.json");
+        std::fs::create_dir(&path).unwrap(); // rename file -> directory fails
+        assert!(
+            atomic_write_json(&path, &serde_json::json!({"v": 1}))
+                .await
+                .is_err()
+        );
+        assert!(
+            !path.with_extension("json.tmp").exists(),
+            "staged write must be removed after a failed rename"
         );
     }
 

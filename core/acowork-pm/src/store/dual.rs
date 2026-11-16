@@ -43,24 +43,54 @@ use super::tree::{PmMaintenance, PmStore};
 
 // ── Projection metrics ──────────────────────────────────────────────
 //
-// Process-global, like `dispatch::metrics_snapshot()`: there is one PM store
-// per process, and `/health` needs to read the counters without a handle to
-// the concrete `DualPmStore`.
+// Instance-scoped, unlike the earlier process-global counters. A test binary
+// (or a hot restart in the same process) can hold several `DualPmStore`s, and
+// globals made one store's `/health` report another store's failures.
 
-static PROJECTION_OK: AtomicU64 = AtomicU64::new(0);
-static PROJECTION_FAILED: AtomicU64 = AtomicU64::new(0);
-static PROJECTION_LAST_ERROR: Mutex<Option<String>> = Mutex::new(None);
-static PROJECTION_LAST_REPORT: Mutex<Option<String>> = Mutex::new(None);
+struct ProjectionMetrics {
+    ok: AtomicU64,
+    failed: AtomicU64,
+    /// Reset on any success. Cumulative `failed` answers "did it ever break",
+    /// this one answers "is it broken right now" — the signal an operator
+    /// actually needs during a grey rollout.
+    consecutive_failures: AtomicU64,
+    last_error: Mutex<Option<String>>,
+    last_report: Mutex<Option<String>>,
+}
 
-/// `/health` payload for the `dual` rollout. `failed > 0` means the DB is
-/// stale — a reconciliation problem, **not** a service problem.
-pub fn projection_snapshot() -> Value {
-    json!({
-        "ok": PROJECTION_OK.load(Ordering::Relaxed),
-        "failed": PROJECTION_FAILED.load(Ordering::Relaxed),
-        "last_error": (*PROJECTION_LAST_ERROR.lock()).clone(),
-        "last_report": (*PROJECTION_LAST_REPORT.lock()).clone(),
-    })
+impl ProjectionMetrics {
+    fn new() -> Self {
+        Self {
+            ok: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
+            consecutive_failures: AtomicU64::new(0),
+            last_error: Mutex::new(None),
+            last_report: Mutex::new(None),
+        }
+    }
+
+    fn record_ok(&self, summary: String) {
+        self.ok.fetch_add(1, Ordering::Relaxed);
+        self.consecutive_failures.store(0, Ordering::Relaxed);
+        *self.last_report.lock() = Some(summary);
+        *self.last_error.lock() = None;
+    }
+
+    fn record_failure(&self, msg: String) {
+        self.failed.fetch_add(1, Ordering::Relaxed);
+        self.consecutive_failures.fetch_add(1, Ordering::Relaxed);
+        *self.last_error.lock() = Some(msg);
+    }
+
+    fn snapshot(&self) -> Value {
+        json!({
+            "ok": self.ok.load(Ordering::Relaxed),
+            "failed": self.failed.load(Ordering::Relaxed),
+            "consecutive_failures": self.consecutive_failures.load(Ordering::Relaxed),
+            "last_error": (*self.last_error.lock()).clone(),
+            "last_report": (*self.last_report.lock()).clone(),
+        })
+    }
 }
 
 /// Delegate a read straight to the tree. SQLite is never consulted.
@@ -75,6 +105,9 @@ macro_rules! dual_read {
 macro_rules! dual_write {
     ($store:expr, $method:ident $(, $arg:expr)* $(,)?) => {{
         let out = $store.tree.$method($($arg),*).await?;
+        // Publishing the sequence number *after* the tree commit lets a
+        // projection that scanned a mixed state detect itself and re-scan.
+        $store.tree_write_seq.fetch_add(1, Ordering::SeqCst);
         $store.project();
         Ok(out)
     }};
@@ -91,6 +124,12 @@ pub struct DualPmStore {
     /// that the *older* scan commits last and leaves the DB behind the tree
     /// while both writes report success.
     projection_lock: Mutex<()>,
+    /// Incremented after every committed tree write. Tree writes are not
+    /// serialized against projections (that would stall PM on an O(tree)
+    /// scan), so a projection uses this to detect that it read a state which
+    /// changed under it and re-run instead of committing a mixed snapshot.
+    tree_write_seq: AtomicU64,
+    metrics: ProjectionMetrics,
 }
 
 impl DualPmStore {
@@ -98,11 +137,20 @@ impl DualPmStore {
     /// fresh tree snapshot (iron rule 2). Never fails on a DB problem.
     pub fn new(tree: Arc<dyn PmStore>, config: PmConfig) -> Self {
         let db = open_projection(&config);
+        let metrics = ProjectionMetrics::new();
+        if db.is_none() {
+            // Count the unavailable projection once, not on every write —
+            // otherwise `failed` grows with traffic and stops meaning
+            // "a projection attempt failed".
+            metrics.record_failure("sqlite projection is unavailable".into());
+        }
         let store = Self {
             tree,
             config,
             db,
             projection_lock: Mutex::new(()),
+            tree_write_seq: AtomicU64::new(0),
+            metrics,
         };
         store.project();
         store
@@ -120,26 +168,43 @@ impl DualPmStore {
         // final DB state always comes from the freshest completed scan.
         let _guard = self.projection_lock.lock();
         let Some(db) = &self.db else {
-            PROJECTION_FAILED.fetch_add(1, Ordering::Relaxed);
-            *PROJECTION_LAST_ERROR.lock() = Some("sqlite projection is unavailable".into());
+            // `new()` already recorded the permanent unavailability once.
             return;
         };
-        match db.rebuild_projection(&self.config) {
-            Ok(report) => {
-                PROJECTION_OK.fetch_add(1, Ordering::Relaxed);
-                *PROJECTION_LAST_REPORT.lock() = Some(report.summary());
-                *PROJECTION_LAST_ERROR.lock() = None;
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                PROJECTION_FAILED.fetch_add(1, Ordering::Relaxed);
-                *PROJECTION_LAST_ERROR.lock() = Some(msg.clone());
-                tracing::warn!(
-                    error = %msg,
-                    "dual projection failed — tree commit stands, DB is stale"
-                );
+        const MAX_ATTEMPTS: usize = 4;
+        for attempt in 0..MAX_ATTEMPTS {
+            let before = self.tree_write_seq.load(Ordering::SeqCst);
+            match db.rebuild_projection(&self.config) {
+                Ok(report) => {
+                    if self.tree_write_seq.load(Ordering::SeqCst) != before {
+                        // A tree write committed while we were scanning. The
+                        // snapshot we just wrote may be a mixed intermediate
+                        // state (e.g. a subtree half-moved by reparent), so
+                        // re-scan instead of leaving stale derived data that
+                        // would only be fixed by the next write or restart.
+                        tracing::debug!(attempt, "re-projecting after a concurrent tree commit");
+                        continue;
+                    }
+                    self.metrics.record_ok(report.summary());
+                    return;
+                }
+                Err(e) => {
+                    let msg = e.to_string();
+                    self.metrics.record_failure(msg.clone());
+                    tracing::warn!(
+                        error = %msg,
+                        "dual projection failed — tree commit stands, DB is stale"
+                    );
+                    return;
+                }
             }
         }
+        // Sustained writes kept landing during every scan. The DB still holds
+        // a valid (if possibly stale) snapshot, but `/health` must say the
+        // projection did not converge so `reconcile` gets run before cutover.
+        self.metrics.record_failure(
+            "projection did not converge: tree writes kept landing during the scan".into(),
+        );
     }
 }
 
@@ -148,13 +213,32 @@ impl DualPmStore {
 /// legal because in `dual` mode SQLite is derived data; `db` mode must never
 /// do this.
 fn open_projection(config: &PmConfig) -> Option<SqlitePmStore> {
+    if config.storage_backend != StorageBackend::Dual {
+        // Belt and braces alongside `assert_dual_projection` in the importer:
+        // never even open a DB that might be a `db`-mode authority.
+        tracing::error!(backend = %config.storage_backend, "refusing to open a projection for a non-dual backend");
+        return None;
+    }
     if let Ok(db) = SqlitePmStore::open(config.clone()) {
         return Some(db);
     }
+    // Never delete. `open()` can fail for transient reasons (another
+    // process holding a lock, an AV scan, permissions, a full disk), and a
+    // healthy DB must not be destroyed because of one. Quarantine the file
+    // plus WAL sidecars under a timestamp so recovery stays possible.
     let path = config.sqlite_path();
+    let stamp = chrono::Utc::now().format("%Y%m%dT%H%M%SZ");
     for suffix in ["", "-wal", "-shm"] {
-        let candidate = PathBuf::from(format!("{}{suffix}", path.display()));
-        let _ = std::fs::remove_file(candidate);
+        let from = PathBuf::from(format!("{}{suffix}", path.display()));
+        if from.exists() {
+            let to = PathBuf::from(format!("{}.quarantine-{stamp}{suffix}", path.display()));
+            if let Err(e) = std::fs::rename(&from, &to) {
+                tracing::warn!(
+                    path = %from.display(), error = %e,
+                    "could not quarantine a broken projection DB"
+                );
+            }
+        }
     }
     match SqlitePmStore::open(config.clone()) {
         Ok(db) => Some(db),
@@ -178,13 +262,20 @@ impl PmMaintenance for DualPmStore {
     }
 
     async fn migrate_null_start_at(&self) -> Result<usize> {
-        dual_write!(self, migrate_null_start_at)
+        // Startup calls this unconditionally; a no-op backfill must not
+        // trigger a full-tree projection.
+        let n = self.tree.migrate_null_start_at().await?;
+        if n > 0 {
+            self.project();
+        }
+        Ok(n)
     }
 
     async fn shutdown(&self) -> Result<()> {
-        let out = self.tree.shutdown().await?;
-        self.project();
-        Ok(out)
+        // The tree's shutdown is a no-op and `new()` / every committed write
+        // already projected. Rewriting the DB here only slows shutdown and
+        // can turn a clean exit into a spurious projection failure.
+        self.tree.shutdown().await
     }
 
     fn dispatch_due_ids(&self, now: chrono::DateTime<chrono::Utc>, limit: usize) -> Vec<TaskId> {
@@ -205,6 +296,10 @@ impl PmMaintenance for DualPmStore {
 
     fn project_task_count(&self, project_id: &ProjectId) -> usize {
         self.tree.project_task_count(project_id)
+    }
+
+    fn projection_health(&self) -> Option<Value> {
+        Some(self.metrics.snapshot())
     }
 
     async fn list_project_icons(&self, project_id: &ProjectId) -> Result<Vec<String>> {
@@ -440,6 +535,7 @@ mod tests {
         AttachmentId, AttachmentKind, CreateProject, CreateTask, Dependency, Priority,
         ReviewStatus, TaskFilter, TaskStatus, TaskType, UpdateTask,
     };
+    use rusqlite::OptionalExtension;
     use std::path::Path;
 
     fn cfg(dir: &Path, backend: StorageBackend) -> PmConfig {
@@ -652,11 +748,12 @@ mod tests {
         assert_eq!(report.props_mismatch.len(), 1, "{}", report.summary());
     }
 
-    /// Iron rule 1: a projection failure must not surface in the write
-    /// result. A corrupt `task.json` in the tree makes the full-tree scan
-    /// blocking, which is exactly the failure mode worth proving.
+    /// D4 × D6: a corrupt tree file must not stall the disposable projection.
+    /// The tree skips it, so the mirror skips it too — but the cutover gate
+    /// (`reconcile`, which uses the stricter one-shot migration policy) must
+    /// still refuse a green light while the tree contains damaged data.
     #[tokio::test]
-    async fn a_failed_projection_never_fails_the_tree_commit() {
+    async fn a_corrupt_tree_file_does_not_stall_the_projection() {
         let tmp = tempfile::tempdir().unwrap();
         let config = cfg(tmp.path(), StorageBackend::Dual);
         let tree: Arc<dyn PmStore> = Arc::new(TreePmStore::new(config.clone()).await.unwrap());
@@ -674,11 +771,9 @@ mod tests {
             )
             .await
             .unwrap();
-        let before = projection_snapshot()["failed"].as_u64().unwrap();
-
         // Simulate the D4 incident: an external process writes a broken
-        // task.json into the tree. The tree keeps serving; the scan cannot
-        // faithfully project that file.
+        // task.json into the tree. The tree keeps serving; the projection
+        // must mirror the remaining healthy entities.
         let bad = config
             .projects_dir()
             .join(project.id.as_str())
@@ -703,14 +798,30 @@ mod tests {
             "still committed"
         );
 
-        let after = projection_snapshot();
-        assert!(
-            after["failed"].as_u64().unwrap() > before,
-            "a blocked projection must be counted: {after}"
-        );
-        // Metrics are process-global and other tests may project concurrently,
-        // so assert the durable signal: the stale DB must fail the cutover
-        // gate rather than looking healthy.
+        // Do not assert on process-global counters (parallel tests share
+        // them); read the DB directly to prove the projection kept updating.
+        {
+            let conn = rusqlite::Connection::open(config.sqlite_path()).unwrap();
+            let title: Option<String> = conn
+                .query_row(
+                    "SELECT title FROM tasks WHERE id = ?1",
+                    [task.id.as_str()],
+                    |row| row.get(0),
+                )
+                .optional()
+                .unwrap();
+            assert_eq!(title.as_deref(), Some("still committed"));
+            let bad_rows: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE id = 't-bad0001'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(bad_rows, 0, "the unreadable task must be skipped");
+        }
+        // The one-shot migration gate still sees a damaged tree: a damaged
+        // tree must never be allowed to become the sole authority.
         let report = reconcile(&config).unwrap();
         assert!(!report.is_consistent(), "{}", report.summary());
         assert!(!report.blocking.is_empty(), "{}", report.summary());
@@ -861,5 +972,52 @@ mod tests {
         assert_eq!(report.db_tasks, 1, "{}", report.summary());
         assert_eq!(report.db_attachments, 1, "{}", report.summary());
         assert_eq!(report.db_activity, 3, "{}", report.summary());
+    }
+
+    /// Metrics are per store instance, not process-global: two `dual` stores
+    /// in one process (tests, or a hot restart) must not report each other's
+    /// counters, and `projection_health` must be reachable through the trait
+    /// object that `/health` actually holds.
+    #[tokio::test]
+    async fn projection_metrics_are_instance_scoped_and_report_consecutive_failures() {
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        async fn mk(config: PmConfig) -> Arc<dyn PmStore> {
+            let tree: Arc<dyn PmStore> = Arc::new(TreePmStore::new(config.clone()).await.unwrap());
+            Arc::new(DualPmStore::new(tree, config)) as Arc<dyn PmStore>
+        }
+        let a = mk(cfg(a_dir.path(), StorageBackend::Dual)).await;
+        let b = mk(cfg(b_dir.path(), StorageBackend::Dual)).await;
+
+        let a_snapshot = a
+            .projection_health()
+            .expect("dual exposes projection health");
+        assert_eq!(a_snapshot["ok"], 1, "startup projects once: {a_snapshot}");
+        assert_eq!(a_snapshot["failed"], 0);
+        assert_eq!(a_snapshot["consecutive_failures"], 0);
+
+        // A write on `a` must not change `b`'s counters.
+        a.create_project_as(project_input("only a"), "human", MemberKind::User)
+            .await
+            .unwrap();
+        let a_snapshot = a.projection_health().unwrap();
+        let b_snapshot = b.projection_health().unwrap();
+        assert_eq!(a_snapshot["ok"], 2, "{a_snapshot}");
+        assert_eq!(b_snapshot["ok"], 1, "b leaked a's counters: {b_snapshot}");
+
+        // `consecutive_failures` is a "broken right now" signal: it grows on
+        // failure and resets on the very next success, while `failed` stays
+        // cumulative.
+        let metrics = ProjectionMetrics::new();
+        metrics.record_failure("one".into());
+        metrics.record_failure("two".into());
+        assert_eq!(metrics.snapshot()["consecutive_failures"], 2);
+        metrics.record_ok("recovered".into());
+        let snapshot = metrics.snapshot();
+        assert_eq!(snapshot["consecutive_failures"], 0);
+        assert_eq!(snapshot["failed"], 2);
+        assert_eq!(snapshot["ok"], 1);
+        assert_eq!(snapshot["last_error"], Value::Null);
+        assert_eq!(snapshot["last_report"], "recovered");
     }
 }

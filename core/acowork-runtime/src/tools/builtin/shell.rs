@@ -212,8 +212,17 @@ impl ShellTool {
 ///
 /// All three shell tool names (`bash`, `powershell`, `shell`) funnel through
 /// this one `ShellTool::execute`, so a single check covers every platform.
+///
+/// Only *write-intent* commands are blocked. Rejecting every mention of the
+/// prefix also killed legitimate diagnostics (`grep -r "~/.acowork"`,
+/// `ls ~/.acowork/acowork-pm`), which pushed agents towards workarounds and
+/// made the guard useless. Like the prefix match itself, write-intent is a
+/// heuristic — it is explicitly not a security boundary.
 fn protected_prefix_hit(command: &str) -> Option<String> {
     let normalized = command.replace('\\', "/").to_ascii_lowercase();
+    if !looks_like_write(&normalized) {
+        return None;
+    }
     let mut needles = vec![
         "~/.acowork".to_string(),
         "$home/.acowork".to_string(),
@@ -221,13 +230,90 @@ fn protected_prefix_hit(command: &str) -> Option<String> {
         "$userprofile/.acowork".to_string(),
         "${userprofile}/.acowork".to_string(),
         "%userprofile%/.acowork".to_string(),
+        "$acowork_pm_home".to_string(),
+        "${acowork_pm_home}".to_string(),
+        "%acowork_pm_home%".to_string(),
+        "$acowork_pm_data_dir".to_string(),
+        "${acowork_pm_data_dir}".to_string(),
+        "%acowork_pm_data_dir%".to_string(),
     ];
     if let Some(dir) = acowork_core::workspace::platform_data_dir() {
-        needles.push(dir.to_string_lossy().replace('\\', "/").to_ascii_lowercase());
+        needles.push(
+            dir.to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase(),
+        );
+    }
+    // PM's data directory can be relocated by config. Guard that resolved
+    // path too — otherwise `ACOWORK_PM_HOME` installs have no protection at
+    // all. Very short / non-path values are skipped so an env var like `.`
+    // cannot turn the guard into a blanket shell block.
+    for key in ["ACOWORK_PM_HOME", "ACOWORK_PM_DATA_DIR"] {
+        if let Some(value) = std::env::var_os(key).filter(|v| !v.is_empty()) {
+            let needle = value
+                .to_string_lossy()
+                .replace('\\', "/")
+                .to_ascii_lowercase();
+            if needle.len() >= 8 && needle.contains('/') {
+                needles.push(needle);
+            }
+        }
     }
     needles
         .into_iter()
         .find(|needle| normalized.contains(needle.as_str()))
+}
+
+/// Coarse shell write-intent detection (lowercase, `/`-normalized input).
+///
+/// Intentionally over-inclusive for mutation verbs: a false rejection costs
+/// one tool call, while a false negative is the data-corruption incident this
+/// guard exists to prevent. Read-only inspection verbs (`cat`, `grep`, `ls`,
+/// `find`, `stat`, `head`, `tail`, `Select-String`, `Get-Content`) are not in
+/// the list.
+fn looks_like_write(command: &str) -> bool {
+    const WRITE_TOKENS: &[&str] = &[
+        ">>",
+        ">",
+        "tee ",
+        "tee\t",
+        "rm ",
+        "rm\t",
+        "rm -",
+        "mv ",
+        "cp ",
+        "cp -",
+        "mkdir",
+        "touch ",
+        "sed -i",
+        "perl -pi",
+        "dd ",
+        "truncate ",
+        "install ",
+        "chmod ",
+        "chown ",
+        "ln -",
+        "unlink ",
+        "del ",
+        "erase ",
+        "copy ",
+        "move ",
+        "rename ",
+        "sqlite3 ",
+        "set-content",
+        "add-content",
+        "out-file",
+        "new-item",
+        "remove-item",
+        "move-item",
+        "copy-item",
+        "rename-item",
+        "set-item",
+        "clear-content",
+    ];
+    // `>` alone also matches `->` in prose, but a command mentioning the
+    // platform data dir alongside `>` is already suspicious enough.
+    WRITE_TOKENS.iter().any(|token| command.contains(token))
 }
 
 #[async_trait]
@@ -468,6 +554,48 @@ mod tests {
         }
     }
 
+    /// Read-only inspection of the platform data dir is legitimate. A guard
+    /// that rejects every mention of the prefix pushed agents towards
+    /// workarounds and made diagnostics impossible.
+    #[test]
+    fn protected_prefix_guard_allows_read_only_inspection() {
+        for cmd in [
+            "ls -la ~/.acowork/acowork-pm/projects",
+            "cat ~/.acowork/acowork-pm/projects/p-1/project.json",
+            "grep -r \"~/.acowork\" ./docs",
+            "find $HOME/.acowork -name 'task.json' -maxdepth 6",
+            "Get-Content $HOME/.acowork/acowork-pm/acowork-pm.toml",
+            "Select-String -Path ./src/* -Pattern '%USERPROFILE%/.acowork'",
+        ] {
+            assert!(
+                protected_prefix_hit(cmd).is_none(),
+                "read-only command should be allowed: {cmd}"
+            );
+        }
+    }
+
+    /// A relocated PM data dir must be protected too; otherwise
+    /// `ACOWORK_PM_HOME` / `ACOWORK_PM_DATA_DIR` installs get no guard at all.
+    #[test]
+    fn protected_prefix_guard_covers_a_custom_pm_data_dir() {
+        static ENV_LOCK: Mutex<()> = Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap();
+        let custom = "/var/lib/acowork-custom-pm-home-xyz";
+        // SAFETY: edition 2024; serialized by ENV_LOCK, and no other test in
+        // this binary reads these two variables.
+        unsafe {
+            std::env::set_var("ACOWORK_PM_DATA_DIR", custom);
+        }
+        let cmd = format!("echo x >> {custom}/projects/p-1/tasks/t-1/task.json");
+        assert!(
+            protected_prefix_hit(&cmd).is_some(),
+            "custom PM data dir must be protected: {cmd}"
+        );
+        unsafe {
+            std::env::remove_var("ACOWORK_PM_DATA_DIR");
+        }
+    }
+
     #[test]
     fn protected_prefix_guard_matches_expanded_home_when_available() {
         if let Some(dir) = acowork_core::workspace::platform_data_dir() {
@@ -496,7 +624,10 @@ mod tests {
         assert!(!result.ok);
         let err = result.error.unwrap();
         assert!(err.contains("platform data directory"));
-        assert!(!err.contains("not found"), "guard must run before binary_exists");
+        assert!(
+            !err.contains("not found"),
+            "guard must run before binary_exists"
+        );
     }
 
     #[tokio::test]

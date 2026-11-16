@@ -251,7 +251,11 @@ pub fn import(config: &PmConfig) -> Result<MigrationReport> {
 /// commit and once at startup; a failure is best-effort and must never be
 /// propagated into the write result.
 pub fn rebuild_into(conn: &mut Connection, config: &PmConfig) -> Result<MigrationReport> {
-    let (report, batch) = scan(config)?;
+    assert_dual_projection(config)?;
+    // A projection is disposable: mirror exactly what the tree can serve.
+    // `import` keeps the stricter Blocking policy because it creates a new
+    // authority, where silently dropping an entity is permanent data loss.
+    let (report, batch) = scan_with_policy(config, CorruptPolicy::SkipAndRecord)?;
     if report.has_blocking_issues() {
         return Err(blocking_error(&report));
     }
@@ -282,7 +286,54 @@ pub fn rebuild(config: &PmConfig) -> Result<MigrationReport> {
 
 // ── Scan ──────────────────────────────────────────────────────────────────
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CorruptPolicy {
+    /// One-shot migration into a new authority: dropping an unreadable
+    /// entity would turn a recoverable tree defect into permanent data loss.
+    Blocking,
+    /// Disposable `dual` projection: `TreePmStore` already skips unreadable
+    /// files, so the mirror must skip them too. One broken tree file must not
+    /// stall every subsequent projection for the rest of the process life.
+    SkipAndRecord,
+}
+
+fn corrupt_entity(
+    report: &mut MigrationReport,
+    path: &Path,
+    reason: String,
+    policy: CorruptPolicy,
+) {
+    match policy {
+        CorruptPolicy::Blocking => block(report, path, reason),
+        CorruptPolicy::SkipAndRecord => report.skipped.push(SkippedEntry {
+            path: path.display().to_string(),
+            reason: format!("{reason} (tree skips this file too; projection mirrors it)"),
+        }),
+    }
+}
+
+/// A tree scan may overwrite `pm.sqlite` only while the tree is authoritative.
+/// In `db` mode SQLite is the sole commit point, and a stale tree scan would
+/// silently resurrect an older snapshot (ADR-117 §3 D6 iron rule 4).
+fn assert_dual_projection(config: &PmConfig) -> Result<()> {
+    if config.storage_backend != crate::config::StorageBackend::Dual {
+        return Err(PmError::Internal(
+            "a tree scan must never overwrite pm.sqlite unless storage_backend=dual \
+             (in db mode SQLite is the authority)"
+                .into(),
+        ));
+    }
+    Ok(())
+}
+
 fn scan(config: &PmConfig) -> Result<(MigrationReport, ImportBatch)> {
+    scan_with_policy(config, CorruptPolicy::Blocking)
+}
+
+fn scan_with_policy(
+    config: &PmConfig,
+    policy: CorruptPolicy,
+) -> Result<(MigrationReport, ImportBatch)> {
     let mut report = MigrationReport {
         source_dir: config.data_dir.display().to_string(),
         ..Default::default()
@@ -293,11 +344,16 @@ fn scan(config: &PmConfig) -> Result<(MigrationReport, ImportBatch)> {
         return Ok((report, batch));
     }
 
-    let mut project_dirs: Vec<PathBuf> = std::fs::read_dir(&projects_dir)?
-        .filter_map(|e| e.ok())
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-        .map(|e| e.path())
-        .collect();
+    // `filter_map(|e| e.ok())` used to swallow an unreadable directory entry.
+    // For a one-shot authority migration that can silently omit a whole
+    // project, so I/O errors now propagate instead of being dropped.
+    let mut project_dirs: Vec<PathBuf> = Vec::new();
+    for entry in std::fs::read_dir(&projects_dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            project_dirs.push(entry.path());
+        }
+    }
     project_dirs.sort();
 
     for dir in project_dirs {
@@ -306,23 +362,55 @@ fn scan(config: &PmConfig) -> Result<(MigrationReport, ImportBatch)> {
             .and_then(|n| n.to_str())
             .unwrap_or_default()
             .to_string();
-        // Directory names that are not project ids are sidecars (`.trash/`,
-        // `.corrupt/`, scratch dirs), not data. Never block on them.
-        let Ok(pid) = name.parse::<ProjectId>() else {
+        if !name.starts_with("p-") {
             report.skipped.push(SkippedEntry {
                 path: dir.display().to_string(),
                 reason: "not a p-* project directory (sidecar)".into(),
             });
             continue;
+        }
+        // Looks like a project but fails the id grammar: block rather than
+        // treating it as a sidecar, otherwise it silently disappears from the
+        // new authority while dry-run still reports zero blocking findings.
+        let Ok(pid) = name.parse::<ProjectId>() else {
+            block(
+                &mut report,
+                &dir,
+                format!(
+                    "project directory `{name}` looks like a project but fails ProjectId::parse"
+                ),
+            );
+            continue;
         };
         let project_json = dir.join("project.json");
+        if !project_json.exists() {
+            // A db-mode asset-only directory can land here. Only a directory
+            // that actually holds tasks is a damaged project.
+            let has_tasks = std::fs::read_dir(dir.join("tasks"))
+                .map(|mut it| it.next().is_some())
+                .unwrap_or(false);
+            if has_tasks {
+                block(
+                    &mut report,
+                    &dir,
+                    "project directory has tasks/ but no project.json".into(),
+                );
+            } else {
+                report.skipped.push(SkippedEntry {
+                    path: dir.display().to_string(),
+                    reason: "project dir without project.json (asset-only or unfinished)".into(),
+                });
+            }
+            continue;
+        }
         let project: Project = match read_entity(&project_json) {
             Ok(p) => p,
             Err(e) => {
-                block(
+                corrupt_entity(
                     &mut report,
                     &project_json,
                     format!("unreadable project.json: {e}"),
+                    policy,
                 );
                 continue;
             }
@@ -354,7 +442,7 @@ fn scan(config: &PmConfig) -> Result<(MigrationReport, ImportBatch)> {
         });
         report.projects += 1;
 
-        scan_tasks(config, &dir, &pid, &mut report, &mut batch)?;
+        scan_tasks(config, &dir, &pid, &mut report, &mut batch, policy)?;
     }
     Ok((report, batch))
 }
@@ -366,6 +454,7 @@ fn scan_tasks(
     pid: &ProjectId,
     report: &mut MigrationReport,
     batch: &mut ImportBatch,
+    policy: CorruptPolicy,
 ) -> Result<()> {
     let tasks_root = project_dir.join("tasks");
     if !tasks_root.exists() {
@@ -374,11 +463,13 @@ fn scan_tasks(
     // (directory, parent task id, depth)
     let mut stack: Vec<(PathBuf, Option<TaskId>, u8)> = vec![(tasks_root, None, 0)];
     while let Some((dir, parent_id, depth)) = stack.pop() {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&dir)?
-            .filter_map(|e| e.ok())
-            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-            .map(|e| e.path())
-            .collect();
+        let mut entries: Vec<PathBuf> = Vec::new();
+        for entry in std::fs::read_dir(&dir)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                entries.push(entry.path());
+            }
+        }
         entries.sort();
         for task_dir in entries {
             let name = task_dir
@@ -417,10 +508,12 @@ fn scan_tasks(
             let task: Task = match read_entity(&json_path) {
                 Ok(t) => t,
                 Err(e) => {
-                    // A corrupt task.json is blocking for a migration: silently
-                    // dropping one entity would turn a recoverable tree defect
-                    // into permanent data loss in the new authority.
-                    block(report, &json_path, format!("unreadable task.json: {e}"));
+                    corrupt_entity(
+                        report,
+                        &json_path,
+                        format!("unreadable task.json: {e}"),
+                        policy,
+                    );
                     continue;
                 }
             };
@@ -456,17 +549,48 @@ fn scan_tasks(
                 ],
             )?;
 
+            // Nested ids are just as untrusted as the directory names:
+            // `define_id!` deserializes any string without calling `parse()`.
+            if task
+                .depends_on
+                .iter()
+                .any(|d| d.task_id.as_str().parse::<TaskId>().is_err())
+                || task.result.as_ref().is_some_and(|r| {
+                    r.attachment_ids
+                        .iter()
+                        .any(|a| a.as_str().parse::<crate::types::AttachmentId>().is_err())
+                })
+            {
+                block(
+                    report,
+                    &json_path,
+                    "task contains an invalid nested id (depends_on / result.attachment_ids)"
+                        .into(),
+                );
+                continue;
+            }
+
             // Contract 5: the base path for relative attachment storage_path.
-            let rel_dir = task_dir
-                .strip_prefix(&config.data_dir)
-                .unwrap_or(&task_dir)
-                .to_string_lossy()
-                .replace('\\', "/");
+            let rel_dir = match task_dir.strip_prefix(&config.data_dir) {
+                Ok(rel) => rel.to_string_lossy().replace('\\', "/"),
+                Err(_) => {
+                    block(
+                        report,
+                        &task_dir,
+                        format!(
+                            "task dir {} is not under data_dir {}",
+                            task_dir.display(),
+                            config.data_dir.display()
+                        ),
+                    );
+                    continue;
+                }
+            };
 
             for att in &task.attachments {
                 collect_attachment(report, batch, &task_dir, &tid, &rel_dir, att)?;
             }
-            collect_activity(report, batch, &task_dir, &tid)?;
+            collect_activity(report, batch, &task_dir, &tid, &task, policy)?;
 
             batch.tasks.push(TaskRow {
                 id: tid.to_string(),
@@ -498,6 +622,18 @@ fn scan_tasks(
     Ok(())
 }
 
+/// A relative path made only of normal components. `contains("..")` alone is
+/// not enough: `PathBuf::join` replaces the base entirely when the argument
+/// is absolute (`/etc/hosts`, `C:\...`), so a leading root must be rejected
+/// too. The same check is applied again at the DB read point.
+pub(crate) fn safe_rel(path: &str) -> bool {
+    let p = Path::new(path);
+    !path.is_empty()
+        && !p.is_absolute()
+        && p.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 fn collect_attachment(
     report: &mut MigrationReport,
     batch: &mut ImportBatch,
@@ -506,16 +642,23 @@ fn collect_attachment(
     rel_dir: &str,
     att: &AttachmentMeta,
 ) -> Result<()> {
-    if att.storage_path.contains("..") {
-        block(
-            report,
-            &task_dir.join("task.json"),
-            format!(
-                "attachment `{}` storage_path escapes the task dir: `{}`",
-                att.id, att.storage_path
-            ),
-        );
-        return Ok(());
+    for (field, value) in [
+        ("storage_path", Some(att.storage_path.as_str())),
+        ("thumb_path", att.thumb_path.as_deref()),
+    ] {
+        if let Some(value) = value
+            && !safe_rel(value)
+        {
+            block(
+                report,
+                &task_dir.join("task.json"),
+                format!(
+                    "attachment `{}` {field} escapes the task dir: `{value}`",
+                    att.id
+                ),
+            );
+            return Ok(());
+        }
     }
     if att
         .id
@@ -545,19 +688,47 @@ fn collect_activity(
     batch: &mut ImportBatch,
     task_dir: &Path,
     tid: &TaskId,
+    task: &Task,
+    policy: CorruptPolicy,
 ) -> Result<()> {
     let path = task_dir.join("activity.json");
-    if !path.exists() {
-        return Ok(());
-    }
-    let rows: Vec<TaskActivity> = match read_entity(&path) {
-        Ok(v) => v,
-        Err(e) => {
-            block(report, &path, format!("unreadable activity.json: {e}"));
-            return Ok(());
+    // `TreePmStore::load_activity` seeds a Submitted row from `task.result`
+    // when a pre-history task has no `activity.json` on disk. The importer
+    // must mirror that *business read path* exactly: otherwise those tasks
+    // lose their history after a `db` cutover, while `reconcile` compares
+    // 0 rows against 0 rows and reports a false green light.
+    let rows: Vec<TaskActivity> = if !path.exists() {
+        crate::store::tree::seeded_activity(task)
+    } else {
+        match read_entity(&path) {
+            Ok(v) => v,
+            Err(e) => {
+                corrupt_entity(
+                    report,
+                    &path,
+                    format!("unreadable activity.json: {e}"),
+                    policy,
+                );
+                return Ok(());
+            }
         }
     };
     for (seq, row) in rows.iter().enumerate() {
+        // `#[serde(transparent)]` trusts every id inside JSON, so re-parse
+        // the nested ones as well as the directory / entity ids.
+        if row.id.as_str().parse::<crate::types::ActivityId>().is_err()
+            || row
+                .attachment_ids
+                .iter()
+                .any(|a| a.as_str().parse::<crate::types::AttachmentId>().is_err())
+        {
+            block(
+                report,
+                &path,
+                format!("activity row {seq} contains an invalid nested id"),
+            );
+            return Ok(());
+        }
         batch.activity.push(ActivityRow {
             task_id: tid.to_string(),
             seq: seq as i64,
@@ -629,15 +800,21 @@ pub struct ReconcileReport {
     pub extra_in_db: Vec<String>,
     /// Entity keys present in both whose `props` JSON differs.
     pub props_mismatch: Vec<String>,
+    /// Entity keys whose projected columns differ. `db` mode reads
+    /// `parent_id` / `depth` / `status` / ... instead of decoding `props`,
+    /// so a columns-only drift would otherwise pass the cutover gate unseen.
+    pub column_mismatch: Vec<String>,
     pub blocking: Vec<String>,
 }
 
 impl ReconcileReport {
-    /// True only when every entity and every `props` blob agrees.
+    /// True only when every entity, every `props` blob and every projected
+    /// column agrees.
     pub fn is_consistent(&self) -> bool {
         self.missing_in_db.is_empty()
             && self.extra_in_db.is_empty()
             && self.props_mismatch.is_empty()
+            && self.column_mismatch.is_empty()
             && self.blocking.is_empty()
             && self.tree_projects == self.db_projects
             && self.tree_tasks == self.db_tasks
@@ -647,7 +824,7 @@ impl ReconcileReport {
 
     pub fn summary(&self) -> String {
         format!(
-            "consistent={} projects={}/{} tasks={}/{} attachments={}/{} activity={}/{} missing={} extra={} mismatch={}",
+            "consistent={} projects={}/{} tasks={}/{} attachments={}/{} activity={}/{} missing={} extra={} mismatch={} col_mismatch={}",
             self.is_consistent(),
             self.tree_projects,
             self.db_projects,
@@ -659,64 +836,220 @@ impl ReconcileReport {
             self.db_activity,
             self.missing_in_db.len(),
             self.extra_in_db.len(),
-            self.props_mismatch.len()
+            self.props_mismatch.len(),
+            self.column_mismatch.len()
         )
     }
 }
 
-fn tree_snapshot(batch: &ImportBatch) -> HashMap<String, String> {
+#[derive(Debug, Clone, Default)]
+struct SnapshotValue {
+    props: String,
+    /// Projected columns that the `db` backend reads instead of `props`.
+    columns: String,
+}
+
+/// Both sides must build this string from the same field order, otherwise a
+/// purely cosmetic difference would show up as a permanent red light.
+#[allow(clippy::too_many_arguments)]
+fn task_columns(
+    project_id: &str,
+    parent_id: Option<&str>,
+    depth: i64,
+    task_dir: &str,
+    status: &str,
+    review_status: &str,
+    priority: &str,
+    task_type: &str,
+    title: &str,
+    assignee: Option<&str>,
+    start_at: Option<&str>,
+    due_at: Option<&str>,
+    dispatched_at: Option<&str>,
+    created_at: &str,
+    updated_at: &str,
+) -> String {
+    format!(
+        "{project_id}|{}|{depth}|{task_dir}|{status}|{review_status}|{priority}|{task_type}|{title}|{}|{}|{}|{}|{created_at}|{updated_at}",
+        parent_id.unwrap_or(""),
+        assignee.unwrap_or(""),
+        start_at.unwrap_or(""),
+        due_at.unwrap_or(""),
+        dispatched_at.unwrap_or(""),
+    )
+}
+
+fn tree_snapshot(batch: &ImportBatch) -> HashMap<String, SnapshotValue> {
     let mut out = HashMap::new();
     for p in &batch.projects {
-        out.insert(format!("project:{}", p.id), p.props.clone());
+        out.insert(
+            format!("project:{}", p.id),
+            SnapshotValue {
+                props: p.props.clone(),
+                columns: format!("{}|{}|{}", p.status, p.created_at, p.updated_at),
+            },
+        );
     }
     for t in &batch.tasks {
-        out.insert(format!("task:{}", t.id), t.props.clone());
+        out.insert(
+            format!("task:{}", t.id),
+            SnapshotValue {
+                props: t.props.clone(),
+                columns: task_columns(
+                    &t.project_id,
+                    t.parent_id.as_deref(),
+                    t.depth as i64,
+                    &t.task_dir,
+                    &t.status,
+                    &t.review_status,
+                    &t.priority,
+                    &t.task_type,
+                    &t.title,
+                    t.assignee.as_deref(),
+                    t.start_at.as_deref(),
+                    t.due_at.as_deref(),
+                    t.dispatched_at.as_deref(),
+                    &t.created_at,
+                    &t.updated_at,
+                ),
+            },
+        );
     }
     for a in &batch.attachments {
-        out.insert(format!("attachment:{}", a.id), a.props.clone());
+        out.insert(
+            format!("attachment:{}", a.id),
+            SnapshotValue {
+                props: a.props.clone(),
+                columns: format!("{}|{}", a.task_id, a.task_dir),
+            },
+        );
     }
     for a in &batch.activity {
-        out.insert(format!("activity:{}:{}", a.task_id, a.seq), a.props.clone());
+        out.insert(
+            format!("activity:{}:{}", a.task_id, a.seq),
+            SnapshotValue {
+                props: a.props.clone(),
+                columns: format!("{}|{}", a.task_id, a.seq),
+            },
+        );
     }
     out
 }
 
-fn db_snapshot(conn: &Connection) -> Result<HashMap<String, String>> {
+fn db_snapshot(conn: &Connection) -> Result<HashMap<String, SnapshotValue>> {
     let mut out = HashMap::new();
-    for (table, prefix) in [
-        ("projects", "project"),
-        ("tasks", "task"),
-        ("attachments", "attachment"),
-    ] {
-        let sql = format!("SELECT id, props FROM {table}");
-        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, props, status, created_at, updated_at FROM projects")
+            .map_err(db_err)?;
         let rows = stmt
             .query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    format!(
+                        "{}|{}|{}",
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?
+                    ),
+                ))
             })
             .map_err(db_err)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(db_err)?;
-        for (id, props) in rows {
-            out.insert(format!("{prefix}:{id}"), props);
+        for (id, props, columns) in rows {
+            out.insert(format!("project:{id}"), SnapshotValue { props, columns });
         }
     }
-    let mut stmt = conn
-        .prepare("SELECT task_id, seq, props FROM activity")
-        .map_err(db_err)?;
-    let rows = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, i64>(1)?,
-                row.get::<_, String>(2)?,
-            ))
-        })
-        .map_err(db_err)?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(db_err)?;
-    for (task_id, seq, props) in rows {
-        out.insert(format!("activity:{task_id}:{seq}"), props);
+    {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, props, project_id, parent_id, depth, task_dir, status,
+                        review_status, priority, task_type, title, assignee,
+                        start_at, due_at, dispatched_at, created_at, updated_at
+                 FROM tasks",
+            )
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                let parent_id: Option<String> = row.get(3)?;
+                let assignee: Option<String> = row.get(11)?;
+                let start_at: Option<String> = row.get(12)?;
+                let due_at: Option<String> = row.get(13)?;
+                let dispatched_at: Option<String> = row.get(14)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    task_columns(
+                        &row.get::<_, String>(2)?,
+                        parent_id.as_deref(),
+                        row.get::<_, i64>(4)?,
+                        &row.get::<_, String>(5)?,
+                        &row.get::<_, String>(6)?,
+                        &row.get::<_, String>(7)?,
+                        &row.get::<_, String>(8)?,
+                        &row.get::<_, String>(9)?,
+                        &row.get::<_, String>(10)?,
+                        assignee.as_deref(),
+                        start_at.as_deref(),
+                        due_at.as_deref(),
+                        dispatched_at.as_deref(),
+                        &row.get::<_, String>(15)?,
+                        &row.get::<_, String>(16)?,
+                    ),
+                ))
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        for (id, props, columns) in rows {
+            out.insert(format!("task:{id}"), SnapshotValue { props, columns });
+        }
+    }
+    {
+        let mut stmt = conn
+            .prepare("SELECT id, props, task_id, task_dir FROM attachments")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    format!("{}|{}", row.get::<_, String>(2)?, row.get::<_, String>(3)?),
+                ))
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        for (id, props, columns) in rows {
+            out.insert(format!("attachment:{id}"), SnapshotValue { props, columns });
+        }
+    }
+    {
+        let mut stmt = conn
+            .prepare("SELECT task_id, seq, props FROM activity")
+            .map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        for (task_id, seq, props) in rows {
+            out.insert(
+                format!("activity:{task_id}:{seq}"),
+                SnapshotValue {
+                    props,
+                    columns: format!("{task_id}|{seq}"),
+                },
+            );
+        }
     }
     Ok(out)
 }
@@ -782,7 +1115,12 @@ pub fn reconcile(config: &PmConfig) -> Result<ReconcileReport> {
     out.extra_in_db = db_keys.difference(&tree_keys).cloned().collect();
     out.props_mismatch = tree_keys
         .intersection(&db_keys)
-        .filter(|k| tree[k.as_str()] != db[k.as_str()])
+        .filter(|k| tree[k.as_str()].props != db[k.as_str()].props)
+        .cloned()
+        .collect();
+    out.column_mismatch = tree_keys
+        .intersection(&db_keys)
+        .filter(|k| tree[k.as_str()].columns != db[k.as_str()].columns)
         .cloned()
         .collect();
     Ok(out)

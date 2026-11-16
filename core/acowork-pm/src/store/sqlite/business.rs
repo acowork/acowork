@@ -143,7 +143,11 @@ impl SqlitePmStore {
     fn asset_base(&self, rel_dir: &str) -> std::path::PathBuf {
         let path = Path::new(rel_dir);
         if path.is_absolute() {
-            path.to_path_buf()
+            // `rel_dir` comes from a DB row. A tampered absolute value used
+            // to make `join` discard `data_dir` entirely, so reads and writes
+            // could escape to any path on the machine. Confine it instead.
+            tracing::warn!(dir = %rel_dir, "absolute task_dir in DB — confining to data_dir/_confined");
+            self.config.data_dir.join("_confined")
         } else {
             self.config.data_dir.join(path)
         }
@@ -165,6 +169,17 @@ impl SqlitePmStore {
         meta: AttachmentMeta,
         dir_override: Option<String>,
     ) -> Result<()> {
+        // Validate paths before they ever reach a row: both the importer and
+        // the HTTP upload path converge here, and a relative path with `..`
+        // or an absolute path would otherwise be trusted at read time.
+        if !super::import::safe_rel(&meta.storage_path)
+            || meta
+                .thumb_path
+                .as_deref()
+                .is_some_and(|p| !super::import::safe_rel(p))
+        {
+            return Err(PmError::PathTraversal(format!("attachment {}", meta.id)));
+        }
         self.with_conn_mut(|conn| {
             let tx = conn.transaction().map_err(db_err)?;
             let mut task = load_task_from(&tx, task_id)?
@@ -509,8 +524,14 @@ impl PmStore for SqlitePmStore {
             submitted_at: None,
         };
         let rel_dir = self.new_task_asset_dir(&task_id);
-        std::fs::create_dir_all(self.asset_base(&rel_dir).join("attachments"))?;
-        self.insert_task(&task, parent.as_ref(), depth, &rel_dir)?;
+        let asset_root = self.asset_base(&rel_dir);
+        std::fs::create_dir_all(asset_root.join("attachments"))?;
+        if let Err(e) = self.insert_task(&task, parent.as_ref(), depth, &rel_dir) {
+            // No DB row was committed. Roll back the just-created asset tree
+            // so a failed create does not leave an orphan directory behind.
+            let _ = std::fs::remove_dir_all(&asset_root);
+            return Err(e);
+        }
         Ok(task)
     }
 
@@ -660,16 +681,19 @@ impl PmStore for SqlitePmStore {
             return Err(PmError::TaskNotFound(id.to_string()));
         }
         let ids = self.subtree_ids(id)?;
-        // Only DB-owned asset roots are removed from disk. Rows imported from
-        // the tree keep their archive files so a rollback can restore them.
-        for tid in &ids {
-            if let Some((_, _, rel)) = self.task_meta(tid)?
-                && Self::is_db_owned_asset_dir(&rel)
-            {
-                let _ = std::fs::remove_dir_all(self.asset_base(&rel));
-            }
+        // Snapshot the DB-owned asset roots *before* the rows disappear, but
+        // only unlink them **after** the DB transaction commits. Deleting the
+        // binaries first would leave live metadata pointing at files that no
+        // longer exist whenever the row delete fails — irreversible data loss
+        // for an operation the caller was told had failed.
+        let doomed = self.db_owned_asset_dirs(&ids)?;
+        self.delete_task_rows(&ids)?;
+        for rel in doomed {
+            // Best-effort garbage collection: a failed unlink leaves an
+            // orphan directory, never a broken reference.
+            let _ = std::fs::remove_dir_all(self.asset_base(&rel));
         }
-        self.delete_task_rows(&ids)
+        Ok(())
     }
 
     async fn reparent_task(&self, id: &TaskId, input: ReparentTask) -> Result<()> {
@@ -716,6 +740,33 @@ impl PmStore for SqlitePmStore {
         }
         let delta = new_depth as i64 - old_depth as i64;
         let ids = self.subtree_ids(id)?;
+        // The moved root fitting under `max_task_depth` is not enough: every
+        // descendant shifts by the same delta, so the deepest one decides.
+        // Mirror `TreePmStore::reparent_task`, which checks the whole subtree
+        // before moving any directory.
+        let deepest = self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare("SELECT depth FROM tasks WHERE id = ?1")
+                .map_err(db_err)?;
+            let mut deepest = old_depth as i64;
+            for tid in &ids {
+                let d: Option<i64> = stmt
+                    .query_row(params![tid.as_str()], |row| row.get(0))
+                    .optional()
+                    .map_err(db_err)?;
+                if let Some(d) = d {
+                    deepest = deepest.max(d);
+                }
+            }
+            Ok(deepest)
+        })?;
+        let resulting_deepest = deepest + delta;
+        if resulting_deepest > self.config.max_task_depth as i64 {
+            return Err(PmError::MaxDepthExceeded {
+                depth: resulting_deepest.max(0) as u8,
+                max: self.config.max_task_depth,
+            });
+        }
         self.with_conn_mut(|conn| {
             let tx = conn.transaction().map_err(db_err)?;
             for tid in &ids {
@@ -730,8 +781,12 @@ impl PmStore for SqlitePmStore {
                     )
                     .map_err(db_err)?;
                 } else {
+                    // Clamp at zero: a legacy row with an inconsistent
+                    // `depth` plus a negative delta would otherwise store a
+                    // negative value that `task_meta` casts to `u8` and wraps
+                    // into a bogus huge depth.
                     tx.execute(
-                        "UPDATE tasks SET depth = depth + ?2 WHERE id = ?1",
+                        "UPDATE tasks SET depth = MAX(0, depth + ?2) WHERE id = ?1",
                         params![tid.as_str(), delta],
                     )
                     .map_err(db_err)?;
@@ -1007,6 +1062,17 @@ impl PmStore for SqlitePmStore {
         } else {
             self.new_task_asset_dir(task_id)
         };
+        // Validate before touching the filesystem. `register_attachment_in`
+        // repeats this at commit time, but doing it here first means an
+        // invalid relative path cannot leave orphan binaries behind.
+        if !super::import::safe_rel(&meta.storage_path)
+            || meta
+                .thumb_path
+                .as_deref()
+                .is_some_and(|p| !super::import::safe_rel(p))
+        {
+            return Err(PmError::PathTraversal(format!("attachment {}", meta.id)));
+        }
         let base = self.asset_base(&rel_dir);
         let att_dir = base.join("attachments").join(meta.id.as_str());
         std::fs::create_dir_all(&att_dir)?;
@@ -1022,7 +1088,12 @@ impl PmStore for SqlitePmStore {
                 .unwrap_or("thumb.jpg");
             std::fs::write(att_dir.join(thumb_name), bytes)?;
         }
-        self.register_attachment_in(task_id, meta.clone(), Some(rel_dir))?;
+        if let Err(e) = self.register_attachment_in(task_id, meta.clone(), Some(rel_dir)) {
+            // FS-first means a rejected registration (too many attachments,
+            // missing task, DB locked) would otherwise leak the binaries.
+            let _ = std::fs::remove_dir_all(&att_dir);
+            return Err(e);
+        }
         Ok(meta)
     }
 
@@ -1041,7 +1112,23 @@ impl PmStore for SqlitePmStore {
         } else {
             meta.storage_path.clone()
         };
-        let bytes = std::fs::read(self.asset_base(&rel_dir).join(&rel_path))?;
+        if !super::import::safe_rel(&rel_path) {
+            return Err(PmError::PathTraversal(rel_path));
+        }
+        let base = self.asset_base(&rel_dir);
+        let full = base.join(&rel_path);
+        // Even with a component-level whitelist, resolve symlinks and make
+        // sure the final file is still inside the task's asset root.
+        let canonical_base = base.canonicalize()?;
+        let canonical_file = match full.canonicalize() {
+            Ok(p) if p.starts_with(&canonical_base) => p,
+            Ok(_) => return Err(PmError::PathTraversal(rel_path)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(PmError::AttachmentNotFound(att_id.to_string()));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let bytes = std::fs::read(canonical_file)?;
         Ok(Some((meta, bytes)))
     }
 
@@ -1114,6 +1201,174 @@ mod tests {
             uploaded_by: "human".into(),
             uploaded_at: Utc::now(),
         }
+    }
+
+    /// `dispatch_identity` must replay the persisted generation id with no
+    /// write at all — matching `TreePmStore`. Writing on every scanner tick
+    /// bumps `updated_at` forever and, under `dual`, triggers a full-tree
+    /// projection every minute for a task that has not changed.
+    #[tokio::test]
+    async fn dispatch_identity_replays_without_rewriting_the_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = new_store(tmp.path());
+        let project = db
+            .create_project_as(
+                CreateProject {
+                    title: "dispatch parity".into(),
+                    description: String::new(),
+                    metadata: Default::default(),
+                },
+                "human",
+                MemberKind::User,
+            )
+            .await
+            .unwrap();
+        let task = db
+            .create_task_as(
+                &project.id,
+                task_input("due task", None),
+                "human",
+                MemberKind::User,
+            )
+            .await
+            .unwrap();
+
+        let first = db
+            .dispatch_identity(&task.id)
+            .await
+            .unwrap()
+            .expect("first attempt mints an identity");
+        let persisted = db.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(
+            persisted.dispatch_message_id.as_deref(),
+            Some(first.as_str())
+        );
+        let updated_at = persisted.updated_at;
+
+        let second = db.dispatch_identity(&task.id).await.unwrap().unwrap();
+        assert_eq!(first, second, "a retry must replay the same identity");
+        let after = db.load_task(&task.id).unwrap().unwrap();
+        assert_eq!(
+            after.updated_at, updated_at,
+            "a replay must not rewrite the task row"
+        );
+    }
+
+    /// Same subtree-depth rule as `TreePmStore::reparent_task`, expressed on
+    /// projected columns rather than directories.
+    #[tokio::test]
+    async fn reparent_rejects_when_the_subtree_would_exceed_max_depth() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = SqlitePmStore::open(PmConfig {
+            data_dir: tmp.path().to_path_buf(),
+            max_task_depth: 2,
+            ..Default::default()
+        })
+        .unwrap();
+        let project = db
+            .create_project_as(
+                CreateProject {
+                    title: "depth".into(),
+                    description: String::new(),
+                    metadata: Default::default(),
+                },
+                "human",
+                MemberKind::User,
+            )
+            .await
+            .unwrap();
+        async fn make(
+            db: &SqlitePmStore,
+            pid: &ProjectId,
+            title: &str,
+            parent: Option<TaskId>,
+        ) -> Task {
+            db.create_task_as(pid, task_input(title, parent), "human", MemberKind::User)
+                .await
+                .unwrap()
+        }
+        let target_root = make(&db, &project.id, "target root", None).await;
+        let target_child = make(
+            &db,
+            &project.id,
+            "target child",
+            Some(target_root.id.clone()),
+        )
+        .await;
+        let mover = make(&db, &project.id, "mover", None).await;
+        let mover_child = make(&db, &project.id, "mover child", Some(mover.id.clone())).await;
+
+        let err = db
+            .reparent_task(
+                &mover.id,
+                ReparentTask {
+                    new_parent: Some(target_child.id.clone()),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PmError::MaxDepthExceeded { .. }),
+            "error was: {err:?}"
+        );
+        assert_eq!(db.task_depth(&mover.id), 0);
+        assert_eq!(db.task_depth(&mover_child.id), 1);
+        assert_eq!(db.parent_of(&mover.id), None);
+    }
+
+    /// An invalid attachment path must be rejected before any file is
+    /// written, and a rejected registration must not leave orphan binaries.
+    #[tokio::test]
+    async fn attachment_writes_leave_no_orphans_on_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = new_store(tmp.path());
+        let project = db
+            .create_project_as(
+                CreateProject {
+                    title: "attachments".into(),
+                    description: String::new(),
+                    metadata: Default::default(),
+                },
+                "human",
+                MemberKind::User,
+            )
+            .await
+            .unwrap();
+        let task = db
+            .create_task_as(
+                &project.id,
+                task_input("root", None),
+                "human",
+                MemberKind::User,
+            )
+            .await
+            .unwrap();
+
+        let mut bad = attachment_meta();
+        bad.storage_path = "../../escaped.txt".into();
+        let err = db
+            .write_attachment(&task.id, bad.clone(), b"x".to_vec(), None)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, PmError::PathTraversal(_)),
+            "error was: {err:?}"
+        );
+
+        let asset_root = db.asset_base(
+            &db.task_meta(&task.id)
+                .unwrap()
+                .map(|(_, _, dir)| dir)
+                .unwrap(),
+        );
+        assert!(
+            !asset_root
+                .join("attachments")
+                .join(bad.id.as_str())
+                .exists(),
+            "invalid attachment left an orphan directory"
+        );
+        assert!(db.list_attachments(&task.id).await.unwrap().is_empty());
     }
 
     /// One end-to-end pass over the whole business surface. The point is not

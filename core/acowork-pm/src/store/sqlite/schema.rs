@@ -90,28 +90,63 @@ CREATE TABLE IF NOT EXISTS activity (
 /// WAL is enabled so a read-only reconciliation pass during a `dual` rollout
 /// does not block the writer. `foreign_keys` is a per-connection pragma and
 /// must be set on every open, not just at creation time.
+///
+/// The version gate runs **before** any DDL. A database this binary cannot
+/// understand must be left byte-for-byte untouched: converging `IF NOT EXISTS`
+/// tables or stamping `user_version` on it would destroy the evidence an
+/// operator needs to decide whether to restore, migrate or rebuild it.
 pub fn open(path: &Path) -> Result<Connection> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let conn = Connection::open(path).map_err(db_err)?;
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;\nPRAGMA synchronous = NORMAL;\nPRAGMA foreign_keys = ON;",
-    )
-    .map_err(db_err)?;
-    conn.execute_batch(SCHEMA_SQL).map_err(db_err)?;
 
+    // Read-only gate first: `PRAGMA journal_mode = WAL` and any DDL are
+    // writes, so a database we are going to refuse must be inspected *before*
+    // either runs. Otherwise a version-skewed authority would be modified on
+    // the very startup that rejects it.
     let current = user_version(&conn)?;
     if current == 0 {
-        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
-            .map_err(db_err)?;
+        // `user_version = 0` means "fresh" *only* when there is no schema at
+        // all. An unversioned DB from an older build already has these tables
+        // and must not be silently adopted as v1 — its column layout may be
+        // different in ways `IF NOT EXISTS` cannot detect.
+        if has_pm_tables(&conn)? {
+            return Err(PmError::Internal(format!(
+                "pm.sqlite has PM tables but user_version=0 (unversioned legacy database); \
+                 this binary understands v{SCHEMA_VERSION} only — refusing to adopt it silently"
+            )));
+        }
     } else if current != SCHEMA_VERSION {
         return Err(PmError::Internal(format!(
             "pm.sqlite schema v{current} is not understood by this binary (v{SCHEMA_VERSION}); \
              refusing to open a database we cannot migrate"
         )));
     }
+
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;\nPRAGMA synchronous = NORMAL;\nPRAGMA foreign_keys = ON;",
+    )
+    .map_err(db_err)?;
+    conn.execute_batch(SCHEMA_SQL).map_err(db_err)?;
+    if current == 0 {
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION)
+            .map_err(db_err)?;
+    }
     Ok(conn)
+}
+
+/// Whether any PM-owned table already exists (regardless of `user_version`).
+fn has_pm_tables(conn: &Connection) -> Result<bool> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' \
+             AND name IN ('meta', 'projects', 'tasks', 'attachments', 'activity')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(db_err)?;
+    Ok(n > 0)
 }
 
 pub fn user_version(conn: &Connection) -> Result<u32> {
@@ -130,13 +165,37 @@ pub fn is_empty(conn: &Connection) -> Result<bool> {
 
 /// `PRAGMA integrity_check` + `PRAGMA foreign_key_check`, run inside the
 /// import transaction before commit so a half-imported database is impossible.
+///
+/// `integrity_check` returns **one row per problem** plus a final `ok` row;
+/// `query_row` would read only the first and mis-report a multi-error DB.
 pub fn verify(conn: &Connection) -> Result<()> {
-    let result: String = conn
-        .query_row("PRAGMA integrity_check", [], |row| row.get(0))
+    let mut stmt = conn.prepare("PRAGMA integrity_check").map_err(db_err)?;
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(db_err)?
+        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(db_err)?;
-    if result != "ok" {
+    drop(stmt);
+    let problems: Vec<&str> = rows
+        .iter()
+        .map(String::as_str)
+        .filter(|r| *r != "ok")
+        .collect();
+    if !problems.is_empty() {
+        let shown = problems
+            .iter()
+            .take(5)
+            .copied()
+            .collect::<Vec<_>>()
+            .join("; ");
         return Err(PmError::Internal(format!(
-            "pm.sqlite integrity_check failed: {result}"
+            "pm.sqlite integrity_check failed with {} problem(s): {shown}{}",
+            problems.len(),
+            if problems.len() > 5 {
+                " (truncated)"
+            } else {
+                ""
+            }
         )));
     }
     let mut stmt = conn.prepare("PRAGMA foreign_key_check").map_err(db_err)?;
@@ -153,4 +212,87 @@ pub fn verify(conn: &Connection) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite::OpenFlags;
+
+    fn read_only(path: &Path) -> Connection {
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap()
+    }
+
+    fn table_names(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name")
+            .unwrap();
+        stmt.query_map([], |row| row.get(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    /// A refused version-skewed DB must be left completely untouched — not
+    /// even `journal_mode` is allowed to change on the startup that rejects
+    /// it, because in `db` mode that file is the authority.
+    #[test]
+    fn open_refuses_a_version_skewed_db_without_converging_schema() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pm.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION + 1)
+                .unwrap();
+        }
+        let err = open(&path).unwrap_err().to_string();
+        assert!(err.contains("not understood"), "error was: {err}");
+
+        let conn = read_only(&path);
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION + 1);
+        assert!(
+            table_names(&conn).is_empty(),
+            "a refused open must not add tables"
+        );
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap();
+        assert_ne!(mode.to_ascii_lowercase(), "wal", "journal mode was changed");
+    }
+
+    /// `user_version = 0` with PM tables already present is an unversioned
+    /// legacy schema, not a fresh database. Stamping v1 onto it would let
+    /// `IF NOT EXISTS` hide a column-layout mismatch.
+    #[test]
+    fn open_refuses_an_unversioned_db_that_already_has_pm_tables() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pm.sqlite");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch("CREATE TABLE projects (id TEXT PRIMARY KEY);")
+                .unwrap();
+        }
+        let err = open(&path).unwrap_err().to_string();
+        assert!(err.contains("user_version=0"), "error was: {err}");
+
+        let conn = read_only(&path);
+        assert_eq!(user_version(&conn).unwrap(), 0);
+        assert_eq!(table_names(&conn), vec!["projects".to_string()]);
+    }
+
+    #[test]
+    fn fresh_db_is_fully_created_and_passes_verification() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("nested/pm.sqlite");
+        let conn = open(&path).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        assert_eq!(table_names(&conn).len(), 5);
+        verify(&conn).unwrap();
+        assert!(is_empty(&conn).unwrap());
+        // Opening an already-versioned DB is idempotent.
+        drop(conn);
+        let conn = open(&path).unwrap();
+        assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
+        verify(&conn).unwrap();
+    }
 }

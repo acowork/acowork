@@ -262,6 +262,36 @@ impl SqlitePmStore {
         })
     }
 
+    /// Every DB-owned asset root referenced by these tasks, from **both**
+    /// `tasks.task_dir` and `attachments.task_dir`. An imported task keeps its
+    /// archive path in `tasks`, but attachments uploaded after the import are
+    /// redirected to `assets/tasks/{tid}`, so looking at only one table would
+    /// leave orphaned binaries behind after a subtree delete.
+    pub(super) fn db_owned_asset_dirs(&self, ids: &[TaskId]) -> Result<Vec<String>> {
+        self.with_conn(|conn| {
+            let mut out = std::collections::BTreeSet::new();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT task_dir FROM tasks WHERE id = ?1
+                     UNION SELECT task_dir FROM attachments WHERE task_id = ?1",
+                )
+                .map_err(db_err)?;
+            for id in ids {
+                let rows = stmt
+                    .query_map(params![id.as_str()], |row| row.get::<_, String>(0))
+                    .map_err(db_err)?
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .map_err(db_err)?;
+                for rel in rows {
+                    if rel.starts_with("assets/tasks/") {
+                        out.insert(rel);
+                    }
+                }
+            }
+            Ok(out.into_iter().collect())
+        })
+    }
+
     pub(super) fn delete_task_rows(&self, ids: &[TaskId]) -> Result<()> {
         self.with_conn_mut(|conn| {
             let tx = conn.transaction().map_err(db_err)?;
@@ -282,7 +312,20 @@ impl SqlitePmStore {
         })
     }
 
+    /// Writable icon root for `db` mode. Deliberately outside `projects/`:
+    /// an upload used to `create_dir_all` a `p-*` directory inside the tree
+    /// archive with no `project.json`, which the importer then reported as a
+    /// damaged project and blocked every subsequent `dual` projection.
     fn icon_dir(&self, project_id: &ProjectId) -> PathBuf {
+        self.config
+            .data_dir
+            .join("assets/projects")
+            .join(project_id.as_str())
+            .join("icon")
+    }
+
+    /// Read-only fallback for icons uploaded while the tree was authoritative.
+    fn archived_icon_dir(&self, project_id: &ProjectId) -> PathBuf {
         self.config
             .projects_dir()
             .join(project_id.as_str())
@@ -561,22 +604,27 @@ impl PmMaintenance for SqlitePmStore {
     }
 
     async fn list_project_icons(&self, project_id: &ProjectId) -> Result<Vec<String>> {
-        let dir = self.icon_dir(project_id);
-        let mut out = Vec::new();
-        let entries = match std::fs::read_dir(&dir) {
-            Ok(e) => e,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
-            Err(e) => return Err(e.into()),
-        };
-        for entry in entries {
-            let entry = entry?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if name.starts_with("icon-") && icon_content_type(&name).is_some() {
-                out.push(name);
+        let mut out = std::collections::BTreeSet::new();
+        // New writes live under `assets/projects/`; the archive is still
+        // readable so icons uploaded before a cutover do not disappear.
+        for dir in [
+            self.icon_dir(project_id),
+            self.archived_icon_dir(project_id),
+        ] {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            };
+            for entry in entries {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with("icon-") && icon_content_type(&name).is_some() {
+                    out.insert(name);
+                }
             }
         }
-        out.sort();
-        Ok(out)
+        Ok(out.into_iter().collect())
     }
 
     async fn write_project_icon(
@@ -599,12 +647,22 @@ impl PmMaintenance for SqlitePmStore {
         project_id: &ProjectId,
         name: &str,
     ) -> Result<Option<(String, Vec<u8>)>> {
-        let path = self.icon_dir(project_id).join(name);
-        match std::fs::read(&path) {
-            Ok(bytes) => Ok(icon_content_type(name).map(|ct| (ct.to_string(), bytes))),
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-            Err(e) => Err(e.into()),
+        if name.contains('/') || name.contains('\\') || name.contains("..") {
+            return Err(PmError::PathTraversal(name.to_string()));
         }
+        for dir in [
+            self.icon_dir(project_id),
+            self.archived_icon_dir(project_id),
+        ] {
+            match std::fs::read(dir.join(name)) {
+                Ok(bytes) => {
+                    return Ok(icon_content_type(name).map(|ct| (ct.to_string(), bytes)));
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        Ok(None)
     }
 
     fn is_dispatch_blocked(&self, task: &Task) -> bool {
@@ -618,13 +676,17 @@ impl PmMaintenance for SqlitePmStore {
         let Some(mut task) = self.load_task(id)? else {
             return Ok(None);
         };
+        // Same order and semantics as `TreePmStore::dispatch_identity`: a
+        // persisted generation identity is returned verbatim with NO write.
+        // Re-saving it on every scanner tick would bump `updated_at` forever
+        // and, under `dual`, trigger a full-tree projection every minute.
+        if let Some(existing) = task.dispatch_message_id.clone() {
+            return Ok(Some(existing));
+        }
         if task.status != TaskStatus::Pending || task.dispatched_at.is_some() {
             return Ok(None);
         }
-        let minted = task
-            .dispatch_message_id
-            .clone()
-            .unwrap_or_else(|| format!("pm-{}", uuid::Uuid::new_v4()));
+        let minted = format!("pm-{}", uuid::Uuid::new_v4());
         task.dispatch_message_id = Some(minted.clone());
         task.updated_at = Utc::now();
         self.save_task(&task)?;
@@ -708,5 +770,68 @@ mod tests {
             Err(e) => e.to_string(),
         };
         assert!(err.contains("not understood"), "error was: {err}");
+    }
+
+    /// `db` mode must never write icons into `projects/` — that directory is
+    /// the read-only rollback source, and an icon-only `p-*` directory there
+    /// makes the importer report a damaged project and block every `dual`
+    /// projection. Archived icons stay readable after the cutover.
+    #[tokio::test]
+    async fn icons_live_outside_the_tree_archive_and_archived_ones_stay_readable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = test_config(tmp.path());
+        let store = SqlitePmStore::open(cfg.clone()).unwrap();
+        let pid = ProjectId("p-icons".into());
+
+        let archived = store.archived_icon_dir(&pid);
+        std::fs::create_dir_all(&archived).unwrap();
+        std::fs::write(archived.join("icon-old.png"), b"legacy").unwrap();
+
+        store
+            .write_project_icon(&pid, "icon-new.png", b"fresh")
+            .await
+            .unwrap();
+        assert!(
+            store.icon_dir(&pid).join("icon-new.png").exists(),
+            "new icon must land in the DB-owned asset root"
+        );
+        assert!(
+            !archived.join("icon-new.png").exists(),
+            "the tree archive must stay untouched"
+        );
+
+        let listed = store.list_project_icons(&pid).await.unwrap();
+        assert_eq!(listed, vec!["icon-new.png", "icon-old.png"]);
+
+        let (ct, bytes) = store
+            .read_project_icon(&pid, "icon-new.png")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ct, "image/png");
+        assert_eq!(bytes, b"fresh");
+        let (_, legacy) = store
+            .read_project_icon(&pid, "icon-old.png")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(legacy, b"legacy");
+
+        // Files that are not icons are not listed, and a traversal name is
+        // rejected on both write and read.
+        std::fs::write(store.icon_dir(&pid).join("notes.txt"), b"x").unwrap();
+        assert_eq!(store.list_project_icons(&pid).await.unwrap().len(), 2);
+        assert!(
+            store
+                .read_project_icon(&pid, "../project.json")
+                .await
+                .is_err()
+        );
+        assert!(
+            store
+                .write_project_icon(&pid, "..\\escape.png", b"x")
+                .await
+                .is_err()
+        );
     }
 }

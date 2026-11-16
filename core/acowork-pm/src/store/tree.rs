@@ -130,6 +130,17 @@ pub trait PmMaintenance: Send + Sync {
     async fn dispatch_identity(&self, id: &TaskId) -> Result<Option<String>>;
     async fn mark_dispatched(&self, id: &TaskId) -> Result<()>;
     async fn record_dispatch_failure(&self, id: &TaskId, reason: &str) -> Result<u32>;
+
+    // ── Rollout diagnostics ────────────────────────────────────────
+
+    /// ADR-117 D6 step 6: instance-scoped projection health for `/health`.
+    /// Only `DualPmStore` returns `Some`; the default keeps every other
+    /// backend free of the concept. Instance-scoped (not a process global) so
+    /// two stores in one process — tests, or a hot restart — cannot report
+    /// each other's counters.
+    fn projection_health(&self) -> Option<serde_json::Value> {
+        None
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -533,6 +544,19 @@ impl TreePmStore {
                     }
                 };
                 let task_path = entry.path();
+                // Descend into `children/` *before* reading this task.json.
+                // A corrupt or missing parent record must never hide healthy
+                // descendants from the index (ADR-117 D4 layer 1): the tree
+                // walk is structural, while the record read is per-entity.
+                let children_dir = task_path.join("children");
+                match fs::try_exists(&children_dir).await {
+                    Ok(true) => stack.push((children_dir, depth.saturating_add(1))),
+                    Ok(false) => {}
+                    Err(e) => {
+                        *skipped += 1;
+                        tracing::warn!(dir = %children_dir.display(), error = %e, "children dir unreadable — subtree skipped");
+                    }
+                }
                 let json_path = task_path.join("task.json");
                 match fs::try_exists(&json_path).await {
                     Ok(true) => {}
@@ -593,16 +617,6 @@ impl TreePmStore {
                 for dep in &task.depends_on {
                     if dep.kind == DependencyKind::Blocks {
                         index.add_dependency(task_id.clone(), dep.task_id.clone());
-                    }
-                }
-
-                let children_dir = task_path.join("children");
-                match fs::try_exists(&children_dir).await {
-                    Ok(true) => stack.push((children_dir, depth + 1)),
-                    Ok(false) => {}
-                    Err(e) => {
-                        *skipped += 1;
-                        tracing::warn!(dir = %children_dir.display(), error = %e, "children dir unreadable — subtree skipped");
                     }
                 }
             }
@@ -1760,6 +1774,28 @@ impl PmStore for TreePmStore {
 
         if target_dir == old_dir {
             return Ok(());
+        }
+
+        // The moved root fitting under `max_task_depth` is not enough: every
+        // descendant keeps its relative height, so the deepest one decides.
+        // `SqlitePmStore::reparent_task` applies the same check to its
+        // `depth` column — the two backends must not drift on this rule.
+        let subtree_height = {
+            let index = self.index.read();
+            index
+                .by_id
+                .values()
+                .filter(|e| e.dir_path.starts_with(&old_dir))
+                .map(|e| e.depth.saturating_sub(entry.depth))
+                .max()
+                .unwrap_or(0)
+        };
+        let resulting_deepest = new_depth.saturating_add(subtree_height);
+        if resulting_deepest > self.config.max_task_depth {
+            return Err(PmError::MaxDepthExceeded {
+                depth: resulting_deepest,
+                max: self.config.max_task_depth,
+            });
         }
 
         // mv 目录（0 文件写）
@@ -3225,6 +3261,71 @@ mod tests {
     /// 负路径 2:深度超限被拒绝(`max_task_depth` 配置生效)。
     ///
     /// 实现契约:`if new_depth > max_task_depth` 严格大于,所以
+    /// Reparent 不能只校验被移动的根：整棵子树会一起平移，最深的孙节点
+    /// 才是决定因素。`SqlitePmStore::reparent_task` 有同样的校验，两后端
+    /// 在这条规则上必须一致。
+    #[tokio::test]
+    async fn reparent_rejects_when_the_subtree_would_exceed_max_depth() {
+        let mut cfg = test_config();
+        cfg.max_task_depth = 2;
+        let store = TreePmStore::new(cfg).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: "".into(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        let target_root = store
+            .create_task(&p.id, create_task_input("target root"), "human")
+            .await
+            .unwrap();
+        let target_child = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    parent_task_id: Some(target_root.id.clone()),
+                    ..create_task_input("target child")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        let mover = store
+            .create_task(&p.id, create_task_input("mover"), "human")
+            .await
+            .unwrap();
+        let mover_child = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    parent_task_id: Some(mover.id.clone()),
+                    ..create_task_input("mover child")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        // mover 落成 depth=2 是合法的，但它的子会变成 depth=3。
+        let err = store
+            .reparent_task(
+                &mover.id,
+                ReparentTask {
+                    new_parent: Some(target_child.id.clone()),
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, PmError::MaxDepthExceeded { .. }), "error was: {err:?}");
+        // 拒绝发生在任何目录移动之前，索引与磁盘都不变。
+        assert_eq!(store.index_entry(&mover.id).unwrap().depth, 0);
+        assert_eq!(store.index_entry(&mover_child.id).unwrap().depth, 1);
+        assert_eq!(store.parent_of(&mover.id), None);
+    }
+
     /// - max=1 允许 depth 0(根)和 depth 1(子):1 > 1 = false
     /// - max=1 拒绝 depth 2(孙):2 > 1 = true
     /// 这里设 max=1,先确认 child(depth=1)合法,再确认 grandchild(depth=2)被拒。

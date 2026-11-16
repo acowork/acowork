@@ -1,10 +1,11 @@
 //! PM 服务配置加载。
 //!
-//! 配置来源（按优先级降序）：
+//! 配置来源（按优先级降序，由 `main.rs` 的独立进程入口实现）：
 //!
-//! 1. 环境变量（`ACOWORK_PM_*`）
-//! 2. TOML 配置文件（通过 `--config <path>` 传入，默认 `./acowork-pm.toml`）
-//! 3. [`PmConfig::default`]
+//! 1. CLI 参数（`--data-dir` / `--storage-backend` / …）
+//! 2. 环境变量（`ACOWORK_PM_*`）
+//! 3. TOML 配置文件（`--config <path>`；未指定时若 `./acowork-pm.toml` 存在则加载）
+//! 4. [`PmConfig::default`]
 //!
 //! ADR-064：PM 作为独立进程运行，数据目录独立解析为 `$HOME/.acowork/acowork-pm/`，
 //! 不再由 Gateway 内嵌/覆写。
@@ -25,10 +26,13 @@ use std::str::FromStr;
 pub enum StorageBackend {
     /// Directory tree is the authority. Today's behaviour, the default.
     #[default]
+    #[serde(alias = "file_tree", alias = "tree", alias = "FILETREE")]
     FileTree,
     /// SQLite is the authority. `SqlitePmStore` owns every commit.
+    #[serde(alias = "sqlite", alias = "DB")]
     Db,
     /// Tree commits; SQLite mirrors the result for offline reconciliation.
+    #[serde(alias = "DUAL")]
     Dual,
 }
 
@@ -85,8 +89,7 @@ pub struct PmConfig {
     ///
     /// The standalone process resolves this once at startup, in order:
     /// `--storage-backend` (CLI) > `ACOWORK_PM_STORAGE_BACKEND` (env) >
-    /// `PmConfig::default()`. The field is also serde-deserializable so a
-    /// future `--config` TOML path can set it; there is **no runtime
+    /// `--config` TOML > [`PmConfig::default`]. There is **no runtime
     /// switching** — changing backends requires a restart (and, for `db`,
     /// a maintenance window).
     #[serde(default)]
@@ -188,16 +191,12 @@ fn default_data_dir() -> PathBuf {
     if let Some(profile) = std::env::var_os("USERPROFILE")
         && !profile.is_empty()
     {
-        return PathBuf::from(profile)
-            .join(".acowork")
-            .join("acowork-pm");
+        return PathBuf::from(profile).join(".acowork").join("acowork-pm");
     }
     if let Some(home) = std::env::var_os("HOME")
         && !home.is_empty()
     {
-        return PathBuf::from(home)
-            .join(".acowork")
-            .join("acowork-pm");
+        return PathBuf::from(home).join(".acowork").join("acowork-pm");
     }
     PathBuf::from(".").join(".acowork-pm")
 }
@@ -261,9 +260,7 @@ impl PmConfig {
         use crate::error::PmError;
 
         if self.max_task_depth == 0 {
-            return Err(PmError::Internal(
-                "max_task_depth must be > 0".to_string(),
-            ));
+            return Err(PmError::Internal("max_task_depth must be > 0".to_string()));
         }
         if self.max_attachment_size == 0 {
             return Err(PmError::Internal(
@@ -339,8 +336,10 @@ mod tests {
             "default data dir should be under $HOME/.acowork/acowork-pm, got: {s}"
         );
         // 不再解析到 ProjectDirs 的 com/acowork/pm 布局
-        assert!(!s.contains("com") || !s.contains("acowork") || !s.contains("pm"),
-            "must not fall back to ProjectDirs layout: {s}");
+        assert!(
+            !s.contains("com") || !s.contains("acowork") || !s.contains("pm"),
+            "must not fall back to ProjectDirs layout: {s}"
+        );
     }
 
     /// ADR-064: `ACOWORK_PM_HOME` 环境变量覆盖默认数据目录。
@@ -377,7 +376,11 @@ mod tests {
             ("sqlite", StorageBackend::Db),
             (" dual ", StorageBackend::Dual),
         ] {
-            assert_eq!(raw.parse::<StorageBackend>().unwrap(), expected, "input: {raw}");
+            assert_eq!(
+                raw.parse::<StorageBackend>().unwrap(),
+                expected,
+                "input: {raw}"
+            );
         }
         let err = "mongodb".parse::<StorageBackend>().unwrap_err();
         assert!(err.contains("unknown storage backend"), "error was: {err}");
@@ -401,6 +404,30 @@ mod tests {
         // A typo must fail loudly, never silently degrade to `filetree`
         // (ADR-117 §3 D6: configuration must be honest).
         assert!(toml::from_str::<PmConfig>("storage_backend = \"mongo\"\n").is_err());
+    }
+
+    /// `FromStr` (CLI / env) and serde (TOML) must accept the same spellings.
+    /// Otherwise `--storage-backend sqlite` works but `acowork-pm.toml` with
+    /// the same value silently fails to load, which a rollout would read as
+    /// "the config file took effect".
+    #[test]
+    fn storage_backend_serde_aliases_match_fromstr() {
+        for raw in [
+            "filetree",
+            "file_tree",
+            "tree",
+            "FILETREE",
+            "db",
+            "sqlite",
+            "DB",
+            "dual",
+            "DUAL",
+        ] {
+            let from_str = raw.parse::<StorageBackend>().unwrap();
+            let cfg: PmConfig = toml::from_str(&format!("storage_backend = \"{raw}\"\n"))
+                .unwrap_or_else(|e| panic!("serde rejected {raw}: {e}"));
+            assert_eq!(cfg.storage_backend, from_str, "spelling: {raw}");
+        }
     }
 
     #[test]
