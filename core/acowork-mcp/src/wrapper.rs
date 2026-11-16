@@ -13,13 +13,37 @@ use crate::protocol::McpToolDef;
 
 /// Maximum decoded image payload exposed from an MCP result.
 const MAX_MCP_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+/// Maximum number of images accepted from one MCP tool result.
+const MAX_MCP_IMAGES_PER_RESULT: usize = 6;
+/// Maximum combined decoded image payload exposed from one MCP result.
+const MAX_MCP_IMAGE_BYTES_PER_RESULT: usize = 24 * 1024 * 1024;
 /// MCP image MIME types supported by the provider image pipeline.
 const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+#[derive(Clone, Copy)]
+struct ImageLimits {
+    per_image_bytes: usize,
+    total_bytes: usize,
+    count: usize,
+}
+
+const MCP_IMAGE_LIMITS: ImageLimits = ImageLimits {
+    per_image_bytes: MAX_MCP_IMAGE_BYTES,
+    total_bytes: MAX_MCP_IMAGE_BYTES_PER_RESULT,
+    count: MAX_MCP_IMAGES_PER_RESULT,
+};
 
 /// Convert a raw MCP tool result to the tool's text and multimodal channels.
 /// Text blocks are joined in their original relative order; image parts retain
 /// their relative order and are injected by the runtime immediately afterward.
 fn parse_tool_result(output: &str) -> (String, Option<Vec<ContentPart>>) {
+    parse_tool_result_with_limits(output, MCP_IMAGE_LIMITS)
+}
+
+fn parse_tool_result_with_limits(
+    output: &str,
+    limits: ImageLimits,
+) -> (String, Option<Vec<ContentPart>>) {
     let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
         return (output.to_string(), None);
     };
@@ -30,6 +54,7 @@ fn parse_tool_result(output: &str) -> (String, Option<Vec<ContentPart>>) {
     let mut text_blocks = Vec::new();
     let mut image_parts = Vec::new();
     let mut warnings = Vec::new();
+    let mut total_image_bytes = 0usize;
 
     for item in items {
         match item.get("type").and_then(serde_json::Value::as_str) {
@@ -43,10 +68,18 @@ fn parse_tool_result(output: &str) -> (String, Option<Vec<ContentPart>>) {
                     .get("mimeType")
                     .and_then(serde_json::Value::as_str)
                     .unwrap_or_default();
-                let data = item
-                    .get("data")
-                    .and_then(serde_json::Value::as_str)
-                    .unwrap_or_default();
+                let Some(data) = item.get("data").and_then(serde_json::Value::as_str) else {
+                    warnings.push(
+                        "MCP image omitted: image data is missing or invalid; ask the MCP tool to return a valid image".to_string(),
+                    );
+                    continue;
+                };
+                if data.is_empty() {
+                    warnings.push(
+                        "MCP image omitted: image data is empty; ask the MCP tool to return a valid image".to_string(),
+                    );
+                    continue;
+                }
 
                 if !SUPPORTED_IMAGE_MIME_TYPES.contains(&mime_type) {
                     warnings.push(format!(
@@ -57,7 +90,7 @@ fn parse_tool_result(output: &str) -> (String, Option<Vec<ContentPart>>) {
                 }
 
                 // Reject by the encoded size before allocating a decoded copy.
-                let encoded_limit = MAX_MCP_IMAGE_BYTES.div_ceil(3) * 4;
+                let encoded_limit = limits.per_image_bytes.div_ceil(3) * 4;
                 if data.len() > encoded_limit {
                     warnings.push(
                         "MCP image omitted: image too large (> 8 MiB); ask the MCP tool to resize, crop, or re-encode it".to_string(),
@@ -66,7 +99,7 @@ fn parse_tool_result(output: &str) -> (String, Option<Vec<ContentPart>>) {
                 }
 
                 let decoded = match base64::engine::general_purpose::STANDARD.decode(data) {
-                    Ok(decoded) if decoded.len() <= MAX_MCP_IMAGE_BYTES => decoded,
+                    Ok(decoded) if decoded.len() <= limits.per_image_bytes => decoded,
                     Ok(_) => {
                         warnings.push(
                             "MCP image omitted: image too large (> 8 MiB); ask the MCP tool to resize, crop, or re-encode it".to_string(),
@@ -80,6 +113,21 @@ fn parse_tool_result(output: &str) -> (String, Option<Vec<ContentPart>>) {
                         continue;
                     }
                 };
+                if image_parts.len() >= limits.count {
+                    warnings.push(format!(
+                        "MCP image omitted: result exceeds the limit of {} images; ask the MCP tool to return fewer images",
+                        limits.count
+                    ));
+                    continue;
+                }
+                if total_image_bytes.saturating_add(decoded.len()) > limits.total_bytes {
+                    warnings.push(format!(
+                        "MCP image omitted: combined image payload exceeds {} MiB; ask the MCP tool to return fewer or smaller images",
+                        limits.total_bytes / (1024 * 1024)
+                    ));
+                    continue;
+                }
+                total_image_bytes += decoded.len();
                 drop(decoded);
                 image_parts.push(ContentPart::ImageUrl {
                     image_url: ImageUrlPart {
@@ -246,6 +294,31 @@ mod tests {
     use acowork_core::tools::Tool;
     use serde_json::json;
 
+    #[tokio::test]
+    async fn execute_preserves_image_content_from_mock_mcp_transport() {
+        let image_data = base64::engine::general_purpose::STANDARD.encode([1_u8, 2, 3]);
+        let registry = crate::client::registry_with_mock_tool_result(json!({
+            "content": [
+                { "type": "text", "text": "rendered" },
+                { "type": "image", "mimeType": "image/png", "data": image_data }
+            ]
+        }));
+        let def = make_def("render", Some("Test image tool"), json!({}));
+        let wrapper = McpToolWrapper::new("mcp_test__render".to_string(), def, registry);
+        let result = wrapper.execute(json!({}), None).await.unwrap();
+
+        assert!(result.ok);
+        assert_eq!(result.content, "rendered");
+        let parts = result.content_parts.expect("MCP image must become a part");
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, format!("data:image/png;base64,{image_data}"))
+            }
+            other => panic!("expected ImageUrl part, got {other:?}"),
+        }
+    }
+
     #[test]
     fn parses_mixed_text_and_image_content_in_stable_order() {
         let image_data = "aGVsbG8=";
@@ -301,6 +374,62 @@ mod tests {
         assert!(content.contains("unsupported mimeType"));
         assert!(content.contains("too large"));
         assert!(content.contains("resize, crop, or re-encode"));
+    }
+
+    #[test]
+    fn rejects_missing_empty_and_non_string_image_data() {
+        for image in [
+            json!({ "type": "image", "mimeType": "image/png" }),
+            json!({ "type": "image", "mimeType": "image/png", "data": "" }),
+            json!({ "type": "image", "mimeType": "image/png", "data": 42 }),
+        ] {
+            let (content, parts) = parse_tool_result(&json!({ "content": [image] }).to_string());
+            assert!(parts.is_none());
+            assert!(
+                content.contains("image data is"),
+                "unexpected output: {content}"
+            );
+        }
+    }
+
+    #[test]
+    fn enforces_combined_size_and_image_count_limits_per_result() {
+        let limits = ImageLimits {
+            per_image_bytes: 4,
+            total_bytes: 5,
+            count: 4,
+        };
+        let data_4 = base64::engine::general_purpose::STANDARD.encode([1, 2, 3, 4]);
+        let data_2 = base64::engine::general_purpose::STANDARD.encode([5, 6]);
+        let output = json!({
+            "content": [
+                { "type": "image", "mimeType": "image/png", "data": data_4 },
+                { "type": "image", "mimeType": "image/png", "data": data_2 },
+                { "type": "image", "mimeType": "image/png", "data": data_2 },
+                { "type": "image", "mimeType": "image/png", "data": data_2 }
+            ]
+        })
+        .to_string();
+        let (content, parts) = parse_tool_result_with_limits(&output, limits);
+        assert!(content.contains("combined image payload exceeds"));
+        assert_eq!(
+            parts.expect("only first image fits the byte budget").len(),
+            1
+        );
+
+        let count_limited = ImageLimits {
+            per_image_bytes: 4,
+            total_bytes: 100,
+            count: 2,
+        };
+        let (count_content, count_parts) = parse_tool_result_with_limits(&output, count_limited);
+        assert!(count_content.contains("limit of 2 images"));
+        assert_eq!(
+            count_parts
+                .expect("two images should fit the count limit")
+                .len(),
+            2
+        );
     }
 
     #[test]

@@ -123,12 +123,13 @@ impl McpClient {
         let is_stdio = matches!(config.transport, crate::config::McpTransportDef::Stdio);
         let outer_bound = if is_stdio { None } else { recv_timeout };
 
-        let mut transport = create_transport_with(&config, sink, recv_timeout).with_context(|| {
-            format!(
-                "failed to create transport for MCP server `{}`",
-                config.name
-            )
-        })?;
+        let mut transport =
+            create_transport_with(&config, sink, recv_timeout).with_context(|| {
+                format!(
+                    "failed to create transport for MCP server `{}`",
+                    config.name
+                )
+            })?;
 
         // ── Initialize handshake ──────────────────────────────────────────
         let init_req = JsonRpcRequest::new(
@@ -535,6 +536,64 @@ impl McpRegistry {
             server.disconnect().await;
         }
     }
+}
+
+#[cfg(test)]
+pub(crate) fn registry_with_mock_tool_result(result: serde_json::Value) -> Arc<McpRegistry> {
+    use std::sync::atomic::{AtomicBool, AtomicU64};
+
+    use crate::protocol::{JSONRPC_VERSION, JsonRpcResponse};
+    use crate::transport::McpTransportConn;
+    use tokio::sync::Mutex;
+
+    struct MockTransport {
+        result: serde_json::Value,
+    }
+
+    #[async_trait::async_trait]
+    impl McpTransportConn for MockTransport {
+        async fn send_and_recv(
+            &mut self,
+            request: &JsonRpcRequest,
+        ) -> anyhow::Result<JsonRpcResponse> {
+            Ok(JsonRpcResponse {
+                jsonrpc: JSONRPC_VERSION.to_string(),
+                id: request.id.clone(),
+                result: Some(self.result.clone()),
+                error: None,
+            })
+        }
+
+        async fn close(&mut self) -> anyhow::Result<()> {
+            Ok(())
+        }
+    }
+
+    let server_name = "test".to_string();
+    let tool_def = McpToolDef {
+        name: "render".to_string(),
+        description: Some("Test image tool".to_string()),
+        input_schema: serde_json::json!({}),
+    };
+    let config = McpServerConfig {
+        name: server_name.clone(),
+        ..Default::default()
+    };
+    let client = McpClient {
+        meta: Arc::new(McpServerMeta {
+            config,
+            tools: vec![tool_def.clone()],
+        }),
+        transport: Arc::new(Mutex::new(McpTransportState {
+            transport: Some(Box::new(MockTransport { result })),
+        })),
+        next_id: Arc::new(AtomicU64::new(3)),
+        is_alive: Arc::new(AtomicBool::new(true)),
+    };
+    Arc::new(McpRegistry {
+        servers: vec![client],
+        tool_index: IndexMap::from([("mcp_test__render".to_string(), (0, tool_def))]),
+    })
 }
 
 #[cfg(test)]
