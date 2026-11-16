@@ -21,6 +21,11 @@
   --color-nav-divider: hsl(213 calc(var(--theme-chroma) * 0.85) 79%);
   --color-right-panel: hsl(211 var(--theme-chroma) 93%);
   --color-chat-body: hsl(211 var(--theme-chroma) 95%);
+  /* The assistant bubble is a WHITE card on the pack's tinted chat plane.
+     Without this the bubble keeps the default palette's translucent
+     near-white, which composites into the tinted plane and vanishes
+     (plane/bubble contrast 1.01 — the bubble is invisible). */
+  --color-chat-bubble: hsl(211 var(--theme-chroma) 100%);
   --color-chat-title: hsl(212 var(--theme-chroma) 87%);
   --color-chat-input-bg: hsl(211 var(--theme-chroma) 96%);
   --color-chat-input-border: hsl(213 calc(var(--theme-chroma) * 0.55) 85%);
@@ -66,6 +71,11 @@
   --color-nav-divider: hsl(216 calc(var(--theme-chroma) * 0.85) 35%);
   --color-right-panel: hsl(217 var(--theme-chroma) 11.7%);
   --color-chat-body: hsl(217 var(--theme-chroma) 8%);
+  /* The dark bubble keeps the default palette's translucent character, in the
+     pack's own hue. Declared HERE because the light scope above still
+     matches a dark root — a token only the light scope sets would leak its
+     white value into dark mode. */
+  --color-chat-bubble: hsl(217 var(--theme-chroma) 15.7% / 0.3);
   --color-chat-title: hsl(217 var(--theme-chroma) 13%);
   --color-chat-input-bg: hsl(216 var(--theme-chroma) 11.7%);
   --color-chat-input-border: var(--color-border-outer);
