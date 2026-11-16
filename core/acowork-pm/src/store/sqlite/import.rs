@@ -25,10 +25,11 @@
 //! action, not a request path. Keeping it free of `await` makes "dry-run
 //! writes nothing" trivially auditable.
 
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use rusqlite::params;
+use rusqlite::{Connection, OpenFlags, params};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -138,27 +139,10 @@ pub fn dry_run(config: &PmConfig) -> Result<MigrationReport> {
     Ok(report)
 }
 
-/// Scan, then import in one transaction. Refuses to run on a non-empty DB or
-/// on any blocking finding; the caller reviews [`dry_run`] first.
-pub fn import(config: &PmConfig) -> Result<MigrationReport> {
-    let (report, batch) = scan(config)?;
-    if report.has_blocking_issues() {
-        return Err(PmError::Internal(format!(
-            "PM import blocked ({} finding(s)); run dry_run first: {}",
-            report.blocking.len(),
-            report.blocking.join(" | ")
-        )));
-    }
-
-    let mut conn = schema::open(&config.sqlite_path())?;
-    if !schema::is_empty(&conn)? {
-        return Err(PmError::Internal(
-            "pm.sqlite already holds projects — import is one-shot; delete the DB to re-import"
-                .into(),
-        ));
-    }
-
-    let tx = conn.transaction().map_err(db_err)?;
+/// Insert a scanned batch into an open transaction. Shared by the one-shot
+/// import and the `dual` full rebuild, so the two can never disagree on how a
+/// tree entity becomes a row.
+fn insert_batch(tx: &Connection, batch: &ImportBatch, source_dir: &str) -> Result<()> {
     for p in &batch.projects {
         tx.execute(
             "INSERT INTO projects (id, status, created_at, updated_at, props)
@@ -221,13 +205,79 @@ pub fn import(config: &PmConfig) -> Result<MigrationReport> {
     .map_err(db_err)?;
     tx.execute(
         "INSERT INTO meta (key, value) VALUES ('source_dir', ?1)",
-        params![report.source_dir],
+        params![source_dir],
     )
     .map_err(db_err)?;
+    Ok(())
+}
 
+fn blocking_error(report: &MigrationReport) -> PmError {
+    PmError::Internal(format!(
+        "PM import blocked ({} finding(s)); run dry_run first: {}",
+        report.blocking.len(),
+        report.blocking.join(" | ")
+    ))
+}
+
+/// Scan, then import in one transaction. Refuses to run on a non-empty DB or
+/// on any blocking finding; the caller reviews [`dry_run`] first.
+pub fn import(config: &PmConfig) -> Result<MigrationReport> {
+    let (report, batch) = scan(config)?;
+    if report.has_blocking_issues() {
+        return Err(blocking_error(&report));
+    }
+
+    let mut conn = schema::open(&config.sqlite_path())?;
+    if !schema::is_empty(&conn)? {
+        return Err(PmError::Internal(
+            "pm.sqlite already holds projects — import is one-shot; delete the DB to re-import"
+                .into(),
+        ));
+    }
+
+    let tx = conn.transaction().map_err(db_err)?;
+    insert_batch(&tx, &batch, &report.source_dir)?;
     schema::verify(&tx)?;
     tx.commit().map_err(db_err)?;
     Ok(report)
+}
+
+/// Replace the whole DB with a fresh scan of the tree in one transaction.
+///
+/// This is the `dual` backend's projection primitive and the ADR-117 D6
+/// "DB is disposable, rebuild from the tree" guarantee. Unlike [`import`] it
+/// is idempotent and never gated on emptiness: an empty / stale / corrupt
+/// projection is simply overwritten. `dual` calls this after every tree
+/// commit and once at startup; a failure is best-effort and must never be
+/// propagated into the write result.
+pub fn rebuild_into(conn: &mut Connection, config: &PmConfig) -> Result<MigrationReport> {
+    let (report, batch) = scan(config)?;
+    if report.has_blocking_issues() {
+        return Err(blocking_error(&report));
+    }
+    let tx = conn.transaction().map_err(db_err)?;
+    // Clear self-references first so cascading deletes cannot leave a dangling
+    // `parent_id` behind, then remove every entity table explicitly.
+    tx.execute_batch(
+        "UPDATE tasks SET parent_id = NULL;
+         DELETE FROM activity;
+         DELETE FROM attachments;
+         DELETE FROM tasks;
+         DELETE FROM projects;
+         DELETE FROM meta;",
+    )
+    .map_err(db_err)?;
+    insert_batch(&tx, &batch, &report.source_dir)?;
+    schema::verify(&tx)?;
+    tx.commit().map_err(db_err)?;
+    Ok(report)
+}
+
+/// Convenience wrapper for operator / startup callers that do not already
+/// hold a connection.
+pub fn rebuild(config: &PmConfig) -> Result<MigrationReport> {
+    let mut conn = schema::open(&config.sqlite_path())?;
+    rebuild_into(&mut conn, config)
 }
 
 // ── Scan ──────────────────────────────────────────────────────────────────
@@ -558,6 +608,186 @@ fn block(report: &mut MigrationReport, path: &Path, reason: String) {
         .push(format!("{}: {reason}", path.display()));
 }
 
+// ── Offline reconciliation (ADR-117 D6 step 6) ──────────────────────────
+
+/// Result of comparing the authoritative tree against a `dual` projection.
+/// `props` is compared verbatim, so a field-level drift (not just a missing
+/// row) is visible without decoding either side.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReconcileReport {
+    pub tree_projects: usize,
+    pub db_projects: usize,
+    pub tree_tasks: usize,
+    pub db_tasks: usize,
+    pub tree_attachments: usize,
+    pub db_attachments: usize,
+    pub tree_activity: usize,
+    pub db_activity: usize,
+    /// Entity keys present in the tree but absent from the DB.
+    pub missing_in_db: Vec<String>,
+    /// Entity keys present in the DB but no longer in the tree (a stale row).
+    pub extra_in_db: Vec<String>,
+    /// Entity keys present in both whose `props` JSON differs.
+    pub props_mismatch: Vec<String>,
+    pub blocking: Vec<String>,
+}
+
+impl ReconcileReport {
+    /// True only when every entity and every `props` blob agrees.
+    pub fn is_consistent(&self) -> bool {
+        self.missing_in_db.is_empty()
+            && self.extra_in_db.is_empty()
+            && self.props_mismatch.is_empty()
+            && self.blocking.is_empty()
+            && self.tree_projects == self.db_projects
+            && self.tree_tasks == self.db_tasks
+            && self.tree_attachments == self.db_attachments
+            && self.tree_activity == self.db_activity
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "consistent={} projects={}/{} tasks={}/{} attachments={}/{} activity={}/{} missing={} extra={} mismatch={}",
+            self.is_consistent(),
+            self.tree_projects,
+            self.db_projects,
+            self.tree_tasks,
+            self.db_tasks,
+            self.tree_attachments,
+            self.db_attachments,
+            self.tree_activity,
+            self.db_activity,
+            self.missing_in_db.len(),
+            self.extra_in_db.len(),
+            self.props_mismatch.len()
+        )
+    }
+}
+
+fn tree_snapshot(batch: &ImportBatch) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    for p in &batch.projects {
+        out.insert(format!("project:{}", p.id), p.props.clone());
+    }
+    for t in &batch.tasks {
+        out.insert(format!("task:{}", t.id), t.props.clone());
+    }
+    for a in &batch.attachments {
+        out.insert(format!("attachment:{}", a.id), a.props.clone());
+    }
+    for a in &batch.activity {
+        out.insert(format!("activity:{}:{}", a.task_id, a.seq), a.props.clone());
+    }
+    out
+}
+
+fn db_snapshot(conn: &Connection) -> Result<HashMap<String, String>> {
+    let mut out = HashMap::new();
+    for (table, prefix) in [
+        ("projects", "project"),
+        ("tasks", "task"),
+        ("attachments", "attachment"),
+    ] {
+        let sql = format!("SELECT id, props FROM {table}");
+        let mut stmt = conn.prepare(&sql).map_err(db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_err)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(db_err)?;
+        for (id, props) in rows {
+            out.insert(format!("{prefix}:{id}"), props);
+        }
+    }
+    let mut stmt = conn
+        .prepare("SELECT task_id, seq, props FROM activity")
+        .map_err(db_err)?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(db_err)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    for (task_id, seq, props) in rows {
+        out.insert(format!("activity:{task_id}:{seq}"), props);
+    }
+    Ok(out)
+}
+
+/// Read-only comparison of the tree and the DB projection. Never writes —
+/// this is the operator's gate before switching `dual` → `db` (ADR-117 D6
+/// step 6). Counts come from the live tables, not from the report, so a
+/// duplicated row is caught even when the key set happens to match.
+///
+/// Deliberately does **not** call [`schema::open`]: that helper creates the
+/// directory, applies DDL and bumps `user_version`, which would silently
+/// conjure an empty `pm.sqlite` on a tree-only install. A gate that can
+/// create its own evidence is not a gate.
+pub fn reconcile(config: &PmConfig) -> Result<ReconcileReport> {
+    let (report, batch) = scan(config)?;
+    let mut out = ReconcileReport {
+        tree_projects: report.projects,
+        tree_tasks: report.tasks,
+        tree_attachments: report.attachments,
+        tree_activity: report.activity_rows,
+        blocking: report.blocking,
+        ..Default::default()
+    };
+    let path = config.sqlite_path();
+    if !path.is_file() {
+        out.blocking.push(format!(
+            "no projection to reconcile: {} does not exist",
+            path.display()
+        ));
+        return Ok(out);
+    }
+    let conn = Connection::open_with_flags(
+        &path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(db_err)?;
+    let version = schema::user_version(&conn)?;
+    if version != schema::SCHEMA_VERSION {
+        out.blocking.push(format!(
+            "pm.sqlite schema v{version} does not match this binary (v{})",
+            schema::SCHEMA_VERSION
+        ));
+        return Ok(out);
+    }
+    if let Err(e) = schema::verify(&conn) {
+        out.blocking.push(e.to_string());
+        return Ok(out);
+    }
+    let count = |sql: &str| -> Result<usize> {
+        let n: i64 = conn.query_row(sql, [], |row| row.get(0)).map_err(db_err)?;
+        Ok(n as usize)
+    };
+    out.db_projects = count("SELECT COUNT(*) FROM projects")?;
+    out.db_tasks = count("SELECT COUNT(*) FROM tasks")?;
+    out.db_attachments = count("SELECT COUNT(*) FROM attachments")?;
+    out.db_activity = count("SELECT COUNT(*) FROM activity")?;
+
+    let tree = tree_snapshot(&batch);
+    let db = db_snapshot(&conn)?;
+    let tree_keys: BTreeSet<String> = tree.keys().cloned().collect();
+    let db_keys: BTreeSet<String> = db.keys().cloned().collect();
+    out.missing_in_db = tree_keys.difference(&db_keys).cloned().collect();
+    out.extra_in_db = db_keys.difference(&tree_keys).cloned().collect();
+    out.props_mismatch = tree_keys
+        .intersection(&db_keys)
+        .filter(|k| tree[k.as_str()] != db[k.as_str()])
+        .cloned()
+        .collect();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -769,5 +999,56 @@ mod tests {
                 .any(|b| b.contains("unreadable task.json"))
         );
         assert!(!config.sqlite_path().exists());
+    }
+
+    /// A cutover gate must not create the evidence it is supposed to inspect:
+    /// `schema::open()` would conjure an empty `pm.sqlite` (plus DDL and WAL
+    /// sidecars) on a tree-only install.
+    #[tokio::test]
+    async fn reconcile_never_creates_a_db_on_a_tree_only_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, _, _, _) = seed_tree(tmp.path()).await;
+        assert!(!config.sqlite_path().exists());
+
+        let report = reconcile(&config).unwrap();
+        assert!(!report.is_consistent(), "{}", report.summary());
+        assert!(
+            report.blocking.iter().any(|b| b.contains("does not exist")),
+            "{}",
+            report.summary()
+        );
+        assert!(report.tree_tasks > 0);
+        assert!(
+            !config.sqlite_path().exists(),
+            "reconcile must be strictly read-only"
+        );
+    }
+
+    #[tokio::test]
+    async fn reconcile_is_consistent_after_the_one_shot_import() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, _, _, _) = seed_tree(tmp.path()).await;
+        import(&config).unwrap();
+        let report = reconcile(&config).unwrap();
+        assert!(report.is_consistent(), "{}", report.summary());
+    }
+
+    #[tokio::test]
+    async fn reconcile_refuses_a_version_skewed_db() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, _, _, _) = seed_tree(tmp.path()).await;
+        import(&config).unwrap();
+        {
+            let conn = Connection::open(config.sqlite_path()).unwrap();
+            conn.pragma_update(None, "user_version", schema::SCHEMA_VERSION + 1)
+                .unwrap();
+        }
+        let report = reconcile(&config).unwrap();
+        assert!(!report.is_consistent(), "{}", report.summary());
+        assert!(
+            report.blocking.iter().any(|b| b.contains("schema v")),
+            "{}",
+            report.summary()
+        );
     }
 }

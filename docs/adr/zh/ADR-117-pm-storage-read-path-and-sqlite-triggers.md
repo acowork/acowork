@@ -1,6 +1,6 @@
 # ADR-117：PM 存储演进 — 树存储仍为默认权威，先修读路径，SQLite 迁移以可配置双后端推进
 
-**状态**：已定案并修订（读路径修复 + D4 防损坏三层已实施；2026-11-16 用户显式无条件启动 SQLite 迁移，采用 `filetree` / `db` / `dual` 三态后端 + 灰度切换；D6 ①②③ 已落地、`db` 可装配，④ `DualPmStore` 起待做，见 §3 D6）
+**状态**：已定案并修订（读路径修复 + D4 防损坏三层已实施；2026-11-16 用户显式无条件启动 SQLite 迁移，采用 `filetree` / `db` / `dual` 三态后端 + 灰度切换；D6 ①–⑥ 已落地，三态均可装配、`dual` 可对账，⑦ 停机切 `db` / ⑧ 删旧实现待人工排期，见 §3 D6）
 **日期**：2026-11-16
 **决策者**：大鱼
 **前置**：
@@ -162,9 +162,11 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 6. **写入安全**：参数绑定、单事务 all-or-nothing、目标非空即跳过（幂等门）、`PRAGMA integrity_check` + `foreign_key_check`、`user_version` 记 schema 版本。可复用 `acowork-memory/src/sqlite/legacy_import.rs` 与 `acowork-user/src/chat_sessions.rs` 的 stage → commit → report 范式；**ADR-082 §4 的「用完即删导入代码」不适用于 PM 生产数据**。
 7. **回滚窗口**：`dual` 期间随时改回 `filetree`（DB 只是投影，删掉即可）；切到 `db` 后保留树的只读归档至少一个发布周期，回滚 = 停机 → 改回 `filetree` → 从归档恢复。
 
-**灰度与验收顺序**：① 三态配置 + 工厂 ✅ → ② `PmStore` 对象化 + `PmMaintenance` ✅ → ③ `SqlitePmStore` + 导入器 ✅ → ④ `DualPmStore` ⏳ → ⑤ 现有测试对 `filetree` / `db` **双跑**（同一批用例，不允许为 DB 特例跳过）⏳ → ⑥ `dual` 灰度观察、离线对账全绿 → ⑦ 停机窗口切 `db` → ⑧ 观察一个周期后删旧实现。**禁止**一次性重写后再切。
+**灰度与验收顺序**：① 三态配置 + 工厂 ✅ → ② `PmStore` 对象化 + `PmMaintenance` ✅ → ③ `SqlitePmStore` + 导入器 ✅ → ④ `DualPmStore` ✅ → ⑤ 现有测试对 `filetree` / `db` / `dual` **三跑**（同一批用例，不允许为 DB 特例跳过）✅ → ⑥ `dual` 灰度观察、离线对账能力 ✅ → ⑦ 停机窗口切 `db` ⏳（人工） → ⑧ 观察一个周期后删旧实现 ⏳（人工）。**禁止**一次性重写后再切；⑥ 的「对账全绿」仍需在真实灰度窗口用 `reconcile` 实跑确认，代码完成不等于生产验收完成。
 
 ③ 的落地边界：`SqlitePmStore` 已实现全部 31 个 `PmStore` 业务方法 + 15 个 `PmMaintenance` 维护钩子，`db` 已可由工厂装配并服务于 REST / MCP / dispatch；导入器是**显式运维命令** `acowork-pm --data-dir <dir> migrate`（缺省只读 dry-run，`--apply` 才写库），不是启动时的运行时副作用。工厂对「空 DB + 非空树」硬失败，强制先走停机窗口；对 `db` 模式下新上传的附件写入 `{data_dir}/assets/tasks/{tid}/`，不污染作为回滚源的树归档。
+
+④⑤⑥ 的落地边界：`DualPmStore` 把 31 个业务方法与 15 个维护钩子全部委托给树——读用 `dual_read!`、写用 `dual_write!`（树提交成功后才投影，投影结果被丢弃）。投影采用**全量扫描 + 单事务全量替换**，而非 31 个手写增量钩子，代价是每次写 O(tree)、收益是灰度期不可能漏字段 / sidecar / 子树；一把 `projection_lock` 串行化「扫描 → 替换」，防止并发写时较旧快照后提交覆盖较新快照。DB 打不开时降级为纯树服务，绝不阻断业务。`reconcile` 是**只读** gate：只读打开 `pm.sqlite`（不调用会建表 / 设 WAL / 改 `user_version` 的 `schema::open`），缺库、版本倾斜、完整性失败一律不给绿灯，逐字比对实体 key 集合与 `props` blob，不一致时 CLI 退出码非零。`/health.details.projection` 暴露 `ok` / `failed` / `last_error` / `last_report`，把「DB 落后」变成对账信号而非服务故障。
 
 ---
 
@@ -217,10 +219,19 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 | `core/acowork-pm/src/store/tree.rs` | D6-③：5 个规则辅助函数改 `pub(super)`，供两个后端共用，杜绝逻辑漂移 |
 | `core/acowork-pm/src/server.rs` | D6-③：`build_store()` 装配 `db`；空 DB 且树非空时硬失败并提示 `migrate --apply`；`dual` 仍明确拒绝（④ 待做）；3 个单测 |
 | `core/acowork-pm/src/main.rs`、`lib.rs` | D6-③：新增 `migrate [--apply]` 运维子命令（缺省 dry-run，打印 JSON 报告）+ 导入器 / `SqlitePmStore` re-export |
+| `core/acowork-pm/src/store/dual.rs` | D6-④⑤⑥：新建 `DualPmStore`；树唯一提交点 + 写后全量投影；`dual_read!` / `dual_write!` 委托 31 个 `PmStore` + 15 个 `PmMaintenance` 方法；`projection_lock` 防旧扫描后提交；DB 不可打开时降级为树-only；6 个单测 |
+| `core/acowork-pm/src/store/sqlite/import.rs` | D6-④⑥：抽 `insert_batch()` 供一次性导入与投影重建共用；新增 `rebuild_into()` / `rebuild()` 单事务全量替换与 `reconcile()` / `ReconcileReport`（实体 key 集合 + `props` 逐字比对）；对账强制只读打开，缺库 / 版本倾斜 / 完整性失败一律不给绿灯；+3 个单测 |
+| `core/acowork-pm/src/store/sqlite/mod.rs` | D6-④：`SqlitePmStore::rebuild_projection()`，仅供 `dual` 覆盖派生数据，`db` 模式不调用 |
+| `core/acowork-pm/src/store/mod.rs` | D6-④：导出 `dual` 模块并更新模块文档 |
+| `core/acowork-pm/src/server.rs` | D6-④：`build_store()` 三态全接线；`dual` 启动时重建投影；把原「明确拒绝 `dual`」测试换成「可装配且启动即对账一致」 |
+| `core/acowork-pm/src/health.rs` | D6-⑥：`dual` 时暴露 `details.projection`（ok / failed / last_error / last_report），投影落后是对账信号而非服务故障 |
+| `core/acowork-pm/src/main.rs`、`lib.rs` | D6-⑥：新增 `reconcile` 只读子命令（不一致时 exit 1）+ `DualPmStore` / `rebuild` / `reconcile` / `ReconcileReport` re-export |
 
-**迁移进度（本轮）**：D6 的 ① 配置、② trait 对象化 / 工厂装配、③ `SqlitePmStore` + 导入器均已落地，`storage_backend=db` 已可装配；④ `DualPmStore`、⑤ 现有测试对 `filetree` / `db` 双跑、⑥ 灰度对账仍待做。`storage_backend=dual` 目前由工厂**明确拒绝并给出 ④ 阶段提示**，绝不静默降级到 `filetree`——配置必须诚实，灰度期最怕的是「以为在 DB 上跑，其实还是树」。`db` 也已加一道闸：空 DB 旁边还有非空树时拒绝启动，避免跳过停机窗口后「启动成功但看板全空」被误判为数据丢失。
+**迁移进度（本轮）**：D6 的 ① 配置、② trait 对象化 / 工厂装配、③ `SqlitePmStore` + 导入器、④ `DualPmStore`、⑤ 三后端同批用例、⑥ 离线对账与 `/health` 投影指标均已落地；`filetree` / `db` / `dual` **三态全部可装配**，`dual` 启动即重建投影且业务读始终走树。⑦ 停机窗口切 `db`、⑧ 观察一个发布周期后删旧实现是**人工运维动作**，代码已备好 gate（`migrate --apply` + `reconcile`）但尚未执行。`db` 的空库 + 非空树硬失败闸仍在；`dual` 不再被拒绝，但也绝不因为 DB 挂了而静默改变提交点。提交前复审修掉两处：`reconcile` 原会经 `schema::open()` 凭空建库（改为只读打开 + 缺库判不一致），`project()` 原允许并发投影交错（改为串行锁）。
 
-**D6 本轮验证**：`cargo test -p acowork-pm` 全量通过（lib **188 passed** + 9 个集成 / 文档测试套件共 42 例全绿）；`cargo clippy -p acowork-pm --all-targets -- -D warnings` 干净；`./dev/ci.sh redlines` 14 条全绿；`acowork-pm --data-dir <tmp> migrate` 实跑 dry-run 输出报告且目录内零文件产生。本轮新增 11 个用例：schema / 连接 2（幂等打开 + 校验、新 schema 版本拒绝）、导入器 5（dry-run 只读、全量往返 + 父子反转 + 幂等门、伪造 ID 阻断、坏 JSON 阻断、新附件不写归档）、业务流 2（31 方法端到端冒烟、依赖存在时 dispatch 不死锁）、server 2（`db` 对象安全可装配、跳过导入时硬失败）。
+**D6 ③ 验证（上一轮）**：`cargo test -p acowork-pm` 全量通过（lib **188 passed** + 9 个集成 / 文档测试套件共 42 例全绿）；`cargo clippy -p acowork-pm --all-targets -- -D warnings` 干净；`./dev/ci.sh redlines` 14 条全绿；`acowork-pm --data-dir <tmp> migrate` 实跑 dry-run 输出报告且目录内零文件产生。该轮新增 11 个用例：schema / 连接 2（幂等打开 + 校验、新 schema 版本拒绝）、导入器 5（dry-run 只读、全量往返 + 父子反转 + 幂等门、伪造 ID 阻断、坏 JSON 阻断、新附件不写归档）、业务流 2（31 方法端到端冒烟、依赖存在时 dispatch 不死锁）、server 2（`db` 对象安全可装配、跳过导入时硬失败）。
+
+**D6 ④⑤⑥ 验证（本轮）**：`cargo test -p acowork-pm` 全量通过（lib **197 passed** + 集成 / 文档测试共 42 例全绿，合计 239 例）；`cargo clippy -p acowork-pm --all-targets -- -D warnings` 干净；`./dev/ci.sh redlines` 14 条全绿；`git diff --check` 通过。本轮落地 10 个新用例（`dual.rs` 6：三后端同一断言集、篡改 DB 后业务读仍走树且对账发现漂移、投影失败不影响树提交、启动时重建 stale 投影、并发写后对账一致、混合写流后逐字一致；`import.rs` 3：对账不建库、导入后对账一致、版本倾斜拒绝；`server.rs` 1：`dual` 可装配且启动即一致），其中 `server.rs` 那条替换了原「拒绝 `dual`」测试，故相对 ③ 的 lib 计数净增 9。
 
 **D4 本轮验证**：`cargo test -p acowork-pm --lib` → **169 passed**（+5）；`cargo test -p acowork-runtime --lib shell` → **77 passed**（+4）；`cargo clippy -p acowork-core|acowork-pm|acowork-runtime --lib -- -D warnings` 三个 crate 全通过；`./dev/ci.sh redlines` 14 条全绿。全 workspace `--all-targets -D warnings` 仍被 `acowork-gateway` 的 8 个**既有** clippy 错误（`supervisor.rs` / `ticket.rs` / `auth_middleware.rs`）拦下，与本轮改动无关。
 
@@ -281,6 +292,9 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 - `PmStore` 对象化后所有业务调用多一次动态分发（相对 31 个方法里的文件 I/O 可忽略），但 `Arc<dyn PmStore>` 也意味着编译期不再能看出具体实现，回归必须靠双后端双跑覆盖，不能靠类型系统。
 - SQLite 后端把「单写者」从操作系统文件语义搬到了一把进程内 `Mutex<Connection>`：所有语句都在临界区内同步执行，正确但牺牲了并发读（WAL 目前只用于 `dual` 期离线对账）。若将来出现多进程访问同一 `pm.sqlite`，这把锁不再够用，必须改成连接层事务 / busy timeout 策略。
 - `db` 模式下导入任务的附件二进制仍指向树归档路径，删除这些任务只删 DB 行、不删归档文件；新上传的附件改写到 `assets/tasks/{tid}/`。好处是归档始终可回滚，代价是 `db` 运行一段时间后 `projects/` 会残留已删除任务的旧二进制，需在第 ⑧ 步删旧实现时统一清理。
+- `dual` 用「每次写后全量扫树 + 单事务全量替换 DB」换灰度期最关键的「不可能漏字段 / sidecar / 子树」，代价是每次写 O(tree) 写放大。当前 85 任务 / 55 ms 冷重建可接受；规模上来后应改增量投影，而不是跳过 ⑤/⑥ 直接切 `db`。
+- 投影是同步阻塞调用（rusqlite 无 async I/O），并由一把进程内 `projection_lock` 串行化，避免并发写时较旧扫描后提交覆盖较新快照。收益是 DB 最终状态总来自最后一次完成的扫描；代价是高并发写会排队，且这把锁只在本进程有效——多进程写同一 `pm.sqlite` 不在 `dual` 的支持范围。
+- `/health.details.projection` 的计数是进程级全局量，重启即清零；`failed > 0` 只说明 DB 可能落后，不能单独作为切 `db` 依据，必须以停机窗口里 `reconcile` 的报告为准。
 
 **中性**
 

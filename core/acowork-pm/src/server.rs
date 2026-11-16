@@ -16,7 +16,8 @@ use std::sync::Arc;
 use crate::config::{PmConfig, StorageBackend};
 use crate::error::{PmError, Result};
 use crate::mcp::{AgentDirectory, NoopAgentDirectory};
-use crate::store::sqlite::{import, SqlitePmStore};
+use crate::store::dual::DualPmStore;
+use crate::store::sqlite::{SqlitePmStore, import};
 use crate::store::tree::{PmStore, TreePmStore};
 
 /// PM 服务运行实例。
@@ -40,14 +41,17 @@ pub struct PmService {
 
 /// ADR-117 D6: assemble the configured backend exactly once at startup.
 ///
-/// `dual` is deliberately rejected with a stage hint rather than silently
-/// falling back to the tree: during a rollout, believing you are on SQLite
-/// while still committing to the tree is worse than a hard failure. Wiring it
-/// is D6 step 4 (`DualPmStore`).
+/// All three backends are assembled exactly once at startup; there is no
+/// runtime switching (ADR-117 §3 D6).
 ///
 /// `db` refuses to start on an empty database while the tree still holds
 /// projects — that shape means the operator skipped the stop-the-world import
 /// window, and serving an empty board would look exactly like data loss.
+///
+/// `dual` always starts with a full projection rebuild. Its DB is disposable:
+/// a missing / stale / corrupt projection is rebuilt from the tree, and a DB
+/// that cannot be opened at all never blocks PM from serving (the tree is the
+/// only commit point).
 async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
     match config.storage_backend {
         StorageBackend::FileTree => {
@@ -70,10 +74,10 @@ async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
             }
             Ok(Arc::new(store) as Arc<dyn PmStore>)
         }
-        other => Err(PmError::Internal(format!(
-            "storage_backend={other} is not wired yet (ADR-117 D6 step 4: \
-             DualPmStore in progress); use --storage-backend filetree|db"
-        ))),
+        StorageBackend::Dual => {
+            let tree: Arc<dyn PmStore> = Arc::new(TreePmStore::new(config.clone()).await?);
+            Ok(Arc::new(DualPmStore::new(tree, config.clone())) as Arc<dyn PmStore>)
+        }
     }
 }
 
@@ -298,19 +302,19 @@ mod tests {
         }
     }
 
-    /// A rollout must never look like it is on SQLite while still running on
-    /// the tree: unwired backends fail loudly instead of silently degrading.
+    /// D6 step 4: `dual` is wireable, object-safe, and starts from a rebuilt
+    /// projection (an empty tree and an empty DB must already reconcile).
     #[tokio::test]
-    async fn build_store_rejects_unwired_backends_explicitly() {
+    async fn dual_backend_is_wireable_and_starts_consistent() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = test_config(StorageBackend::Dual, tmp.path());
-        // `Arc<dyn PmStore>` is not `Debug`, so avoid `unwrap_err()`.
-        let err = match build_store(&cfg).await {
-            Ok(_) => panic!("dual must be rejected until D6 step 4 lands"),
-            Err(e) => e.to_string(),
-        };
-        assert!(err.contains("dual"), "error was: {err}");
-        assert!(err.contains("not wired yet"), "error was: {err}");
+        let store = build_store(&cfg).await.unwrap();
+        assert!(store.list_projects().await.unwrap().is_empty());
+        assert_eq!(store.task_depth(&TaskId("t-nonexistent".into())), 0);
+        assert!(
+            import::reconcile(&cfg).unwrap().is_consistent(),
+            "startup must rebuild the projection from the tree"
+        );
     }
 
     #[tokio::test]

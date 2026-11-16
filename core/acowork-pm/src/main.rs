@@ -30,6 +30,10 @@ enum Command {
         #[arg(long)]
         apply: bool,
     },
+    /// ADR-117 D6 step 6: read-only tree ↔ SQLite reconciliation report.
+    /// Exits non-zero when any entity or `props` blob disagrees, so it can be
+    /// used as the gate before a `dual` → `db` cutover.
+    Reconcile,
 }
 
 /// CLI 参数。
@@ -148,28 +152,49 @@ async fn main() {
     // ADR-117 D6 contract 1 + 7: the migration is an explicit operator
     // action, never a runtime side effect of starting the service. The tree
     // is only read; the rollback source is never deleted.
-    if let Some(Command::Migrate { apply }) = cli.command.as_ref() {
-        let outcome = if *apply {
-            acowork_pm::pm_import(&config)
-        } else {
-            acowork_pm::pm_import_dry_run(&config)
-        };
-        match outcome {
-            Ok(report) => {
-                println!(
-                    "{}",
-                    serde_json::to_string_pretty(&report).unwrap_or_else(|e| e.to_string())
-                );
-                if report.has_blocking_issues() {
+    match cli.command.as_ref() {
+        Some(Command::Migrate { apply }) => {
+            let outcome = if *apply {
+                acowork_pm::pm_import(&config)
+            } else {
+                acowork_pm::pm_import_dry_run(&config)
+            };
+            match outcome {
+                Ok(report) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).unwrap_or_else(|e| e.to_string())
+                    );
+                    if report.has_blocking_issues() {
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "PM migration failed");
                     std::process::exit(1);
                 }
             }
-            Err(e) => {
-                tracing::error!(error = %e, "PM migration failed");
-                std::process::exit(1);
-            }
+            return;
         }
-        return;
+        Some(Command::Reconcile) => {
+            match acowork_pm::pm_reconcile(&config) {
+                Ok(report) => {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&report).unwrap_or_else(|e| e.to_string())
+                    );
+                    if !report.is_consistent() {
+                        std::process::exit(1);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "PM reconciliation failed");
+                    std::process::exit(1);
+                }
+            }
+            return;
+        }
+        None => {}
     }
 
     if !config.enabled {

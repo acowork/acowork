@@ -38,6 +38,13 @@ pub fn health_route(
                         "data_dir": data_dir.display().to_string(),
                         "storage_backend": storage_backend.as_str(),
                         "dispatch": crate::dispatch::metrics_snapshot(),
+                        // ADR-117 D6 step 6: a stale dual projection is a
+                        // reconciliation signal, never a service failure.
+                        "projection": if storage_backend == StorageBackend::Dual {
+                            crate::store::dual::projection_snapshot()
+                        } else {
+                            serde_json::Value::Null
+                        },
                         "corrupt_count": files.len(),
                         "corrupt_files": files,
                     })),

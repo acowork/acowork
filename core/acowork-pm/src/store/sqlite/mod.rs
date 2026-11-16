@@ -72,6 +72,13 @@ impl SqlitePmStore {
         self.with_conn(schema::is_empty)
     }
 
+    /// Replace the whole DB with a fresh scan of the tree, in one transaction.
+    /// This is **only** for the `dual` projection path: in `db` mode the DB
+    /// is the authority and must never be overwritten by a tree scan.
+    pub fn rebuild_projection(&self, config: &PmConfig) -> Result<import::MigrationReport> {
+        self.with_conn_mut(|conn| import::rebuild_into(conn, config))
+    }
+
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
         self.conn
             .lock()
