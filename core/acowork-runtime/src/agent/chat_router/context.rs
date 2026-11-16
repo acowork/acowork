@@ -23,7 +23,7 @@
 use std::collections::HashSet;
 
 use acowork_core::protocol::{AttachmentLabel, ChatAttachmentMeta};
-use acowork_core::providers::traits::{CacheControl, ChatMessage};
+use acowork_core::providers::traits::ChatMessage;
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -305,10 +305,9 @@ pub fn build_block_b(
 
     let mut messages: Vec<ChatMessage> = projected.into_iter().map(|(_, m, _)| m).collect();
     // Anthropic breakpoint at the end of the append-only prefix (design 29
-    // §6.1). Providers with automatic prefix caching ignore the field.
-    if let Some(last) = messages.last_mut() {
-        last.cache_control = Some(CacheControl::Ephemeral);
-    }
+    // §6.1). Shared with the main execution path so the two cannot drift;
+    // providers with automatic prefix caching ignore the field.
+    crate::agent::context::mark_tail_cache_breakpoint(&mut messages);
 
     BlockB {
         anchor_seq: anchor,
@@ -1254,7 +1253,10 @@ mod tests {
         let rows = vec![row(1, "user_message", "u1", "a"), row(2, "user_message", "u1", "b")];
         let block = build_block_b(&rows, 0, &ids(&[]), "a1", &WindowBudget::default());
         assert!(block.messages[0].cache_control.is_none());
-        assert!(matches!(block.messages[1].cache_control, Some(CacheControl::Ephemeral)));
+        assert!(matches!(
+            block.messages[1].cache_control,
+            Some(acowork_core::providers::traits::CacheControl::Ephemeral)
+        ));
     }
 
     #[test]

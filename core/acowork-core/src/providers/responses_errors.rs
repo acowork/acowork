@@ -193,8 +193,15 @@ pub fn classify_http_error(status: u16, body: &str) -> ProviderError {
 /// Classify an in-band `response.failed` stream event (ADR-103 D8).
 ///
 /// Partial output may already have been delivered, so the result is never
-/// retryable — this is the same reason the ADR forbids waiting for `[DONE]`
-/// and pretending a truncated stream succeeded.
+/// retried blindly — this is the same reason the ADR forbids waiting for
+/// `[DONE]` and pretending a truncated stream succeeded.
+///
+/// One exception: rate-limit codes ([`is_rate_limit_code`]). The failure is
+/// an admission decision, not a content failure, and it clears on its own
+/// once the window passes — observed 2026-11-16 (gpt-6-luna via Azure
+/// swedencentral): the turn died instantly and the user's manual retries
+/// kept failing until the window expired. Marking it retryable routes it
+/// into the loop's tiered backoff (fast → long → persistent) instead.
 pub fn in_band_failure(code: &str, message: &str) -> StreamError {
     let code = code.trim();
     StreamError {
@@ -204,9 +211,17 @@ pub fn in_band_failure(code: &str, message: &str) -> StreamError {
             format!("{code}: {message}")
         },
         error_type: ProviderErrorType::InBandFailure,
-        retryable: false,
+        retryable: is_rate_limit_code(code),
         status_code: None,
     }
+}
+
+/// True when a Responses-API error code names a rate limit / throttling
+/// rejection (Azure uses `rate_limit_exceeded`, providers also say
+/// `requests_throttled`, `ThrottlingError`, `too_many_requests`).
+pub fn is_rate_limit_code(code: &str) -> bool {
+    let c = code.to_lowercase();
+    c.contains("rate_limit") || c.contains("throttl") || c.contains("too_many_requests")
 }
 
 /// Classify "the stream ended without the terminal event" (ADR-103 D6.1/D8).
@@ -381,7 +396,7 @@ mod tests {
     }
 
     #[test]
-    fn in_band_failure_keeps_the_code_and_is_never_retryable() {
+    fn in_band_failure_keeps_the_code_and_is_not_retried_blindly() {
         let err = in_band_failure("server_error", "upstream exploded");
         assert_eq!(err.error_type, ProviderErrorType::InBandFailure);
         assert!(!err.retryable);
@@ -389,6 +404,24 @@ mod tests {
 
         let bare = in_band_failure("", "no code");
         assert_eq!(bare.message, "no code");
+    }
+
+    #[test]
+    fn rate_limit_in_band_failure_is_retryable() {
+        // 2026-11-16: gpt-6-luna via Azure swedencentral returned
+        // `rate_limit_exceeded` in-band; the turn died and manual retries
+        // kept failing until the window passed. Admission failures must
+        // route into the retry ladder, not surface immediately.
+        for code in [
+            "rate_limit_exceeded",
+            "requests_throttled",
+            "ThrottlingError",
+            "too_many_requests",
+        ] {
+            let err = in_band_failure(code, "slow down");
+            assert!(err.retryable, "{code} must be retried with backoff");
+        }
+        assert!(!in_band_failure("server_error", "boom").retryable);
     }
 
     #[test]

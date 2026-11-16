@@ -32,8 +32,8 @@ use acowork_core::error::Result;
 use acowork_core::manifest::AgentManifest;
 use acowork_core::protocol::{ModelCapabilitiesInfo, ProviderListItem, ProviderModelEntry};
 use acowork_core::providers::traits::{
-    ChatMessage, ChatRequest, ChatResponse, FunctionCall, MessageRole, Provider, StreamEvent,
-    ToolCall, UsageInfo,
+    CacheControl, ChatMessage, ChatRequest, ChatResponse, FunctionCall, MessageRole, Provider,
+    StreamEvent, ToolCall, UsageInfo,
 };
 use async_trait::async_trait;
 use futures_core::Stream;
@@ -530,6 +530,20 @@ fn assert_block_v2_layout(msgs: &[ChatMessage], current: &str) {
     assert!(
         !msgs.iter().any(|m| m.content.contains("## Todo Task List")),
         "ADR-060 v2: no Block C snapshot — todo state lives in Block B's tool result"
+    );
+    // design 29 §6.1: exactly two prompt-cache breakpoints — Block A's system
+    // message and Block B's tail — on the production chain. A third would be
+    // wasted against Anthropic's four-breakpoint cap.
+    let marks: Vec<usize> = msgs
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| m.cache_control == Some(CacheControl::Ephemeral))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(
+        marks,
+        vec![0, n - 1],
+        "breakpoints must be Block A + Block B tail, got {marks:?}"
     );
 }
 

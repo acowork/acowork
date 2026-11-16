@@ -187,6 +187,8 @@ Anthropic cache 的 4 个 breakpoint 限制(2026 年初)并不严格——实际
 
 Block A 末尾一个 `cache_control: ephemeral` 即是最小可行方案(v2 修订:原 Block C 已移除,不再需要第二个 breakpoint;压缩注入的 todo_write 轮是标准 Tool 消息,无需 cache_control)。
 
+> **勘误(2026-11-16)**:上述「单个 breakpoint」结论已被 design 29 §6.1 取代——请求需在 **Block A 的 system message 与 Block B 的最后一条消息**各带一个 `cache_control: ephemeral`,否则 Anthropic 上古历史段(约 90% token)完全不进缓存。实现见 `agent/context.rs::mark_tail_cache_breakpoint`(主执行与 chat_router 共用),断点总数 2(上限 4);tool_result 上不得标记,断点回退到最近一条可标记消息。
+
 ---
 
 ## 4. 设计目标

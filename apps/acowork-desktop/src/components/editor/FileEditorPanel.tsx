@@ -571,14 +571,49 @@ export function FileEditorPanel({ width }: { width: number }) {
         };
     }, []);
 
+    // Apply a navigation queued while the editor / model was not ready yet.
+    // Deferred one frame: @monaco-editor/react restores the saved view state
+    // right after binding a model, which would overwrite an immediate jump.
+    const applyPendingNavigation = useCallback(() => {
+        const nav = pendingNavigationRef.current;
+        if (!nav) return;
+        pendingNavigationRef.current = null;
+        requestAnimationFrame(() => {
+            const ed = editorRef.current;
+            if (!ed) return;
+            const currentModel = ed.getModel();
+            const lineCount = currentModel ? currentModel.getLineCount() : nav.line;
+            const safeLine = Math.min(Math.max(nav.line, 1), lineCount);
+            ed.setPosition({ lineNumber: safeLine, column: nav.column });
+            ed.revealLineInCenter(safeLine);
+            if (nav.endColumn !== undefined) {
+                ed.setSelection({
+                    startLineNumber: safeLine,
+                    startColumn: nav.column,
+                    endLineNumber: nav.endLineNumber ?? safeLine,
+                    endColumn: nav.endColumn,
+                });
+                ed.revealRangeInCenter({
+                    startLineNumber: safeLine,
+                    startColumn: nav.column,
+                    endLineNumber: nav.endLineNumber ?? safeLine,
+                    endColumn: nav.endColumn,
+                });
+            }
+            log.debug(`[FileEditorPanel] deferred navigation applied to line: ${safeLine}`);
+        });
+    }, []);
+
     // Jump to cursorLine when search result navigates to a file.
     // Must handle two cases:
     //   1. File already active → same model, navigate directly.
     //   2. New file (loading) → model not yet switched; defer via
     //      pendingNavigationRef so onDidChangeModel applies it.
+    // `loading` is a dep so the jump waits for the content: revealing a line
+    // in a not-yet-filled model clamps to line 1 and would be lost.
     useEffect(() => {
         const line = activeFile?.cursorLine;
-        if (!line) return;
+        if (!line || activeFile!.loading) return;
 
         const ed = editorRef.current;
         let sameModel = false;
@@ -596,7 +631,8 @@ export function FileEditorPanel({ width }: { width: number }) {
             ed!.setPosition({ lineNumber: line, column: 1 });
         } else {
             // Model hasn't switched yet (or editor not mounted) —
-            // defer to onDidChangeModel for correct model.
+            // defer to onDidChangeModel, or to the editor mount when Monaco
+            // creates the editor with the target model already bound.
             pendingNavigationRef.current = { line, column: 1 };
         }
 
@@ -606,7 +642,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                 f.id === activeFile!.id ? { ...f, cursorLine: undefined } : f,
             ),
         }));
-    }, [activeFile?.id, activeFile?.cursorLine]);
+    }, [activeFile?.id, activeFile?.cursorLine, activeFile?.loading]);
 
     // Determine Monaco theme based on app theme.
     // For "system" mode we read `osTheme` from the settings store, which
@@ -709,37 +745,7 @@ export function FileEditorPanel({ width }: { width: number }) {
             }
 
             // Apply pending cross-file navigation (takes priority over restored view state).
-            // Deferred via requestAnimationFrame so that @monaco-editor/react's internal
-            // viewState restoration (which runs AFTER onDidChangeModel) does not override
-            // our navigation target.
-            if (pendingNavigationRef.current) {
-                const nav = pendingNavigationRef.current;
-                pendingNavigationRef.current = null;
-                requestAnimationFrame(() => {
-                    const ed = editorRef.current;
-                    if (!ed) return;
-                    const currentModel = ed.getModel();
-                    const lineCount = currentModel ? currentModel.getLineCount() : nav.line;
-                    const safeLine = Math.min(Math.max(nav.line, 1), lineCount);
-                    ed.setPosition({ lineNumber: safeLine, column: nav.column });
-                    ed.revealLineInCenter(safeLine);
-                    if (nav.endColumn !== undefined) {
-                        ed.setSelection({
-                            startLineNumber: safeLine,
-                            startColumn: nav.column,
-                            endLineNumber: nav.endLineNumber ?? safeLine,
-                            endColumn: nav.endColumn,
-                        });
-                        ed.revealRangeInCenter({
-                            startLineNumber: safeLine,
-                            startColumn: nav.column,
-                            endLineNumber: nav.endLineNumber ?? safeLine,
-                            endColumn: nav.endColumn,
-                        });
-                    }
-                    log.debug(`[LSP] onDidChangeModel — deferred navigation applied to line: ${safeLine}`);
-                });
-            }
+            applyPendingNavigation();
 
             // Sync store active file when the model switch was triggered by
             // Monaco internals (peek widget) rather than React state. If the
@@ -1044,7 +1050,25 @@ export function FileEditorPanel({ width }: { width: number }) {
         // Note: handleEditorMount only runs once now (Editor is no longer keyed
         // by activeFile.id), so all listeners and the openCodeEditor override
         // above are registered exactly once for the lifetime of this panel.
-    }, [saveFile]);
+
+        // The editor can be CREATED with the target model already bound — this
+        // is what happens the first time a file is opened from a chat link with
+        // a `#L42` anchor: the panel mounts lazily and Monaco finishes its
+        // bootstrap after the file content has arrived, so `editor.create()`
+        // binds the model directly. @monaco-editor/react only calls setModel()
+        // when the `path` prop CHANGES, so onDidChangeModel never fires for that
+        // first bind and a navigation queued behind the loading spinner would
+        // be dropped — the file opened at line 1 until you clicked again.
+        const mountModel = editor.getModel();
+        if (mountModel && mountModel.uri.scheme === "file") {
+            const mountRelPath = mountModel.uri.path.replace(/^\/+/, "");
+            const store = useFileEditorStore.getState();
+            const mounted = store.openFiles.find((f) => f.id === store.activeFileId);
+            if (mounted && !mounted.loading && mounted.relPath === mountRelPath) {
+                applyPendingNavigation();
+            }
+        }
+    }, [saveFile, applyPendingNavigation]);
 
     // ── Save view state before model switch ──────────────────────────────
     // The cleanup of this effect fires during React's effect-cleanup phase,

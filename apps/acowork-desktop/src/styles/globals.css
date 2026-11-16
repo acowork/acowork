@@ -648,6 +648,18 @@
   --glass-tint-dark:  0 0% 14%;
 }
 
+/* Match the default chat pane outline contrast to the theme packs without
+   changing borders inside the panes or other pages. */
+:root:not([data-theme-pack]) .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel),
+:root:not([data-theme-pack]) .chat-pane-row > .relative > .bg-right-panel {
+  border-color: hsl(0 0% 75%);
+}
+
+:root.dark:not([data-theme-pack]) .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel),
+:root.dark:not([data-theme-pack]) .chat-pane-row > .relative > .bg-right-panel {
+  border-color: var(--color-border-outer);
+}
+
 /* Right-panel page gutter — single token, one place to tune.
    Consumed by right-panel tab containers that need their list cards to
    sit off the panel edges and off the hairline dividers above/below

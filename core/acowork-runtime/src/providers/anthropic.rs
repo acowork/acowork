@@ -331,10 +331,6 @@ struct AnthropicMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<serde_json::Value>,
-    /// ADR-060: cache breakpoint hint (ephemeral). Not set on tool_result
-    /// messages — Anthropic forbids cache_control on tool_result blocks.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    cache_control: Option<AnthropicCacheControl>,
 }
 
 /// Anthropic tool specification
@@ -509,6 +505,26 @@ fn build_anthropic_content(msg: &ChatMessage) -> serde_json::Value {
     serde_json::Value::Array(blocks)
 }
 
+/// Put the prompt-cache breakpoint on the message's **last content block**.
+///
+/// `cache_control` belongs to the content-block schema (text / image /
+/// document / tool_use / tool_result), which is where the Messages API reads
+/// it; a `cache_control` sibling of `role`/`content` is not a field of
+/// `MessageParam` at all, so marking the message object would send a breakpoint
+/// nobody honours. The mark always lands on the block the message ends with,
+/// so the cached prefix is the same bytes either way.
+fn mark_last_content_block(content: &mut serde_json::Value) {
+    let mark = serde_json::to_value(AnthropicCacheControl::ephemeral())
+        .unwrap_or_else(|_| serde_json::json!({ "type": "ephemeral" }));
+    if let Some(block) = content
+        .as_array_mut()
+        .and_then(|blocks| blocks.last_mut())
+        .and_then(|b| b.as_object_mut())
+    {
+        block.insert("cache_control".to_string(), mark);
+    }
+}
+
 /// Parse a data URI into (media_type, base64_data).
 /// E.g. "data:image/png;base64,iVBOR..." → ("image/png", "iVBOR...")
 /// Anthropic's `(media_type, base64_data)` for an image URL.
@@ -528,8 +544,9 @@ fn image_source_fields(uri: &str) -> (&str, &str) {
 /// and tool messages to use `tool_result` content blocks.
 ///
 /// ADR-060: multiple System messages are appended (never overwrite) into
-/// the top-level `system` content-block array; `cache_control` hints are
-/// mapped to message-level `cache_control` (user/assistant only).
+/// the top-level `system` content-block array. A `cache_control` hint becomes
+/// a breakpoint on the last content block of the user/assistant message
+/// (design 29 §6.1) — never on a `tool_result`.
 fn convert_messages(
     messages: &[ChatMessage],
 ) -> (Vec<AnthropicMessage>, Option<Vec<AnthropicSystemBlock>>) {
@@ -557,19 +574,16 @@ fn convert_messages(
                 // tool_result blocks (Anthropic API rejects it).
                 let is_tool_result = msg.tool_call_id.is_some()
                     || (msg.tool_call_id.is_none() && msg.content.starts_with("{\"tool_call_id\""));
-                let cache_control = if is_tool_result {
-                    None
-                } else if msg.cache_control
-                    == Some(acowork_core::providers::traits::CacheControl::Ephemeral)
+                let mut content = build_anthropic_content(msg);
+                if !is_tool_result
+                    && msg.cache_control
+                        == Some(acowork_core::providers::traits::CacheControl::Ephemeral)
                 {
-                    Some(AnthropicCacheControl::ephemeral())
-                } else {
-                    None
-                };
+                    mark_last_content_block(&mut content);
+                }
                 converted.push(AnthropicMessage {
                     role: "user".to_string(),
-                    content: Some(build_anthropic_content(msg)),
-                    cache_control,
+                    content: Some(content),
                 });
             }
             MessageRole::Assistant => {
@@ -608,21 +622,20 @@ fn convert_messages(
                     }
                 }
 
-                let cache_control = if msg.cache_control
-                    == Some(acowork_core::providers::traits::CacheControl::Ephemeral)
-                {
-                    Some(AnthropicCacheControl::ephemeral())
-                } else {
+                let mut content = if content_blocks.is_empty() {
                     None
+                } else {
+                    Some(serde_json::Value::Array(content_blocks))
                 };
+                if msg.cache_control
+                    == Some(acowork_core::providers::traits::CacheControl::Ephemeral)
+                    && let Some(content) = content.as_mut()
+                {
+                    mark_last_content_block(content);
+                }
                 converted.push(AnthropicMessage {
                     role: "assistant".to_string(),
-                    content: if content_blocks.is_empty() {
-                        None
-                    } else {
-                        Some(serde_json::Value::Array(content_blocks))
-                    },
-                    cache_control,
+                    content,
                 });
             }
             MessageRole::Tool => {
@@ -660,7 +673,6 @@ fn convert_messages(
                         "tool_use_id": tool_call_id,
                         "content": result_content
                     })])),
-                    cache_control: None,
                 });
             }
         }
@@ -869,7 +881,6 @@ impl AnthropicProvider {
                 content: Some(serde_json::Value::String(
                     "[Context too large — all conversation history was trimmed. Please start a new conversation or reduce attached files.]".to_string()
                 )),
-                cache_control: None,
             }]
         } else {
             messages
@@ -1435,6 +1446,23 @@ mod tests {
     use super::*;
     use acowork_core::providers::ReasoningEffort;
 
+    /// The prompt-cache breakpoint a converted message carries, read from its
+    /// last content block. design 29 §6.1: `cache_control` is a content-block
+    /// field, never a sibling of `role`/`content`.
+    fn block_breakpoint(msg: &AnthropicMessage) -> Option<&serde_json::Value> {
+        msg.content.as_ref()?.as_array()?.last()?.get("cache_control")
+    }
+
+    /// No message may carry a message-level `cache_control` — the schema has
+    /// no such field, so it would be a breakpoint nobody honours.
+    fn assert_no_message_level_mark(msg: &AnthropicMessage) {
+        let json = serde_json::to_value(msg).unwrap();
+        assert!(
+            json.get("cache_control").is_none(),
+            "cache_control must live on a content block, not on the message: {json}"
+        );
+    }
+
     /// The extended-thinking budget grows with the level, and the two new
     /// levels (minimal / xhigh) get their own budgets instead of falling
     /// into the catch-all arm.
@@ -1628,14 +1656,21 @@ mod tests {
 
         assert_eq!(converted.len(), 4); // todo, asst, plain, tool
         assert_eq!(converted[0].role, "user");
-        assert!(converted[0].cache_control.is_some()); // Block C breakpoint
-        assert!(converted[1].cache_control.is_some()); // Block B tail breakpoint
-        assert!(converted[2].cache_control.is_none()); // plain user
-        assert!(converted[3].cache_control.is_none()); // tool_result must not carry it
+        assert!(block_breakpoint(&converted[0]).is_some()); // Block C breakpoint
+        assert!(block_breakpoint(&converted[1]).is_some()); // Block B tail breakpoint
+        assert_eq!(
+            block_breakpoint(&converted[1]).unwrap()["type"],
+            "ephemeral"
+        );
+        assert!(block_breakpoint(&converted[2]).is_none()); // plain user
+        assert!(block_breakpoint(&converted[3]).is_none()); // tool_result must not carry it
         assert_eq!(
             converted[3].content.as_ref().unwrap()[0]["type"],
             "tool_result"
         );
+        for msg in &converted {
+            assert_no_message_level_mark(msg);
+        }
     }
 
     #[test]
@@ -1659,7 +1694,8 @@ mod tests {
         assert_eq!(converted.len(), 1);
         let msg = &converted[0];
         assert_eq!(msg.role, "user"); // Anthropic requires tool_result in user role
-        assert!(msg.cache_control.is_none());
+        assert!(block_breakpoint(msg).is_none());
+        assert_no_message_level_mark(msg);
         let content = msg.content.as_ref().unwrap();
         let blocks = content.as_array().unwrap();
         assert!(blocks[0]["type"] == "tool_result");
@@ -1697,7 +1733,7 @@ mod tests {
         assert_eq!(converted[1].role, "user");
         assert_eq!(converted[2].role, "user");
         // tool_result: cache_control suppressed, content is a tool_result block.
-        assert!(converted[1].cache_control.is_none());
+        assert!(block_breakpoint(&converted[1]).is_none());
         assert_eq!(
             converted[1].content.as_ref().unwrap()[0]["type"],
             "tool_result"
@@ -1707,9 +1743,8 @@ mod tests {
             "toolu_01"
         );
         // Block C (todo snapshot) keeps its ephemeral breakpoint.
-        assert!(converted[2].cache_control.is_some());
         assert_eq!(
-            converted[2].cache_control.as_ref().unwrap().cache_type,
+            block_breakpoint(&converted[2]).unwrap()["type"],
             "ephemeral"
         );
         // The todo text survives as a plain text block.
@@ -2519,4 +2554,73 @@ mod tests {
             "extended thinking must be replaced by the adaptive shape"
         );
     }
+}
+
+/// design 29 §6.1 on the wire: a real `ContextBuilder` request carries
+/// exactly two `cache_control` breakpoints — Block A's system block and Block
+/// B's tail — and the tail one follows the append-only history to the newest
+/// message. Anything beyond two would be wasted against Anthropic's
+/// four-breakpoint cap.
+#[test]
+fn builder_request_carries_two_breakpoints_and_the_tail_moves() {
+    use crate::agent::context::ContextBuilder;
+    use crate::agent::history::HistoryManager;
+
+    let builder = ContextBuilder::new("Static kernel".to_string())
+        .with_override_model("claude-sonnet-4-5".to_string());
+    let mut history = HistoryManager::new(10_000);
+    history.append(ChatMessage::user("First turn"));
+    history.append(ChatMessage::assistant("First reply"));
+    history.append(ChatMessage::user("Second turn"));
+
+    let body = |req: &ChatRequest| {
+        serde_json::to_value(AnthropicProvider::build_wire_request(req, false)).unwrap()
+    };
+    let breakpoints = |v: &serde_json::Value| {
+        let sys = v["system"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|b| b.get("cache_control").is_some())
+            .count();
+        let msgs = v["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|m| {
+                m["content"]
+                    .as_array()
+                    .is_some_and(|blocks| blocks.iter().any(|b| b.get("cache_control").is_some()))
+            })
+            .count();
+        sys + msgs
+    };
+
+    let first = body(&builder.build(&history, None, 32_768));
+    // Reproduce the snapshot: `cargo test ... breakpoints -- --nocapture`.
+    println!("round 1: {}", serde_json::to_string_pretty(&first).unwrap());
+    assert_eq!(breakpoints(&first), 2);
+    assert_eq!(first["system"][0]["cache_control"]["type"], "ephemeral");
+    assert!(first["messages"][1]["content"][0].get("cache_control").is_none());
+    assert!(
+        first["messages"][2]["content"][0].get("cache_control").is_some(),
+        "Block B tail must carry the breakpoint on its last content block: {first}"
+    );
+    for msg in first["messages"].as_array().unwrap() {
+        assert!(
+            msg.get("cache_control").is_none(),
+            "no message-level cache_control — the schema has no such field: {msg}"
+        );
+    }
+
+    history.append(ChatMessage::assistant("Second reply"));
+    history.append(ChatMessage::user("Third turn"));
+    let second = body(&builder.build(&history, None, 32_768));
+    println!("round 2: {}", serde_json::to_string_pretty(&second).unwrap());
+    assert_eq!(breakpoints(&second), 2);
+    assert!(second["messages"][2]["content"][0].get("cache_control").is_none());
+    assert!(
+        second["messages"][4]["content"][0].get("cache_control").is_some(),
+        "breakpoint must move to the new tail: {second}"
+    );
 }

@@ -13,7 +13,7 @@ pub use error_patterns::{
     is_missing_endpoint_body, is_retryable, is_stream_decode_error,
 };
 pub use mock::{MockProvider, MockResponse};
-pub use responses_errors::{classify_http_error, in_band_failure, truncated_stream};
+pub use responses_errors::{classify_http_error, in_band_failure, is_rate_limit_code, truncated_stream};
 pub use traits::{
     ChatMessage, ChatRequest, ChatResponse, ContentPart, FunctionCall, ImageUrlPart, MessageRole,
     Provider, ProviderError, ProviderErrorType, ReasoningEffort, StreamError, StreamEvent,

@@ -110,11 +110,7 @@ export function AgentList({ width }: AgentListProps) {
 
   const agentsList = useMemo(() => Object.values(agentsMap).map((s) => s.meta), [agentsMap]);
 
-  // ADR-073 §4: view mode is decided automatically by `gatewayMode`. In
-  // an off-site mode (remote LAN or relay — multi-node Gateway) the
-  // sidebar groups agents by node and shows a collapsible 1/3-height
-  // header per node; in local mode the pre-existing flat list renders
-  // unchanged.
+  // Connection mode still controls the local-node enrollment prompt.
   const gatewayMode = useSettingsStore((s) => s.gatewayMode);
   const isRemoteMode = gatewayMode !== "local";
 
@@ -125,8 +121,7 @@ export function AgentList({ width }: AgentListProps) {
   const nodes = useAgentStore((s) => s.nodes);
 
   // ADR-073 §4: collapsible per-node groups. Default = all expanded (empty
-  // Set = nothing collapsed). State is component-local — switching modes
-  // or remounting resets it, which is acceptable for a sidebar view.
+  // Set = nothing collapsed). State is component-local and resets on remount.
   const [collapsedNodes, setCollapsedNodes] = useState<Set<string>>(new Set());
   const toggleNode = useCallback((nodeId: string) => {
     setCollapsedNodes((prev) => {
@@ -567,15 +562,15 @@ export function AgentList({ width }: AgentListProps) {
       : projectGroups;
   }, [projectGroups, searchQuery]);
 
-  // ADR-073 §4: in remote mode we partition agents by `node_id` so each
+  // ADR-073 §4: partition agents by `node_id` so each
   // group renders below a collapsible 1/3-height header. Groups are
   // emitted in `nodes` order (Gateway's natural ordering); any agents
   // whose `node_id` is missing or unknown to the Gateway fall into a
   // trailing "unknown" bucket so they never silently disappear.
-  const nodeGroups = useMemo(() => {
-    if (!isRemoteMode) return null;
-    return partitionAgentsByNode(filteredAgents, nodes);
-  }, [isRemoteMode, filteredAgents, nodes]);
+  const nodeGroups = useMemo(
+    () => partitionAgentsByNode(filteredAgents, nodes),
+    [filteredAgents, nodes],
+  );
 
   // A search is an agent-first intent ("find agent X"), so agent-less node
   // groups are dropped while one is active — otherwise the matches are
@@ -583,13 +578,10 @@ export function AgentList({ width }: AgentListProps) {
   // an empty node stays reachable (e.g. to install its first agent).
   const searching = searchQuery.trim().length > 0;
   const visibleGroups = useMemo(() => {
-    if (!nodeGroups) return null;
     return searching ? nodeGroups.filter((g) => g.agents.length > 0) : nodeGroups;
   }, [nodeGroups, searching]);
 
-  // Shared row renderer for both local (flat) and remote (grouped) modes.
-  // `total` lets the row compute whether it is the last in its visual
-  // scope (so the divider is drawn correctly inside remote groups too).
+  // `total` lets the row draw the divider correctly within each node group.
   const renderAgentItem = (agent: AgentInfo, index: number, total: number) => {
     // ADR-073: the sidebar row is an INSTANCE. `id` is the
     // canonical addressing key (instance_id, with legacy
@@ -825,8 +817,7 @@ export function AgentList({ width }: AgentListProps) {
           </div>
         )}
 
-        {visibleGroups
-          ? visibleGroups.map((group) => {
+        {visibleGroups.map((group) => {
               const collapsed = collapsedNodes.has(group.nodeId);
               const nodeOnline = group.node?.online ?? false;
               return (
@@ -876,15 +867,13 @@ export function AgentList({ width }: AgentListProps) {
                     group.agents.map((agent, index) => renderAgentItem(agent, index, group.agents.length))}
                 </Fragment>
               );
-            })
-          : filteredAgents.map((agent, index) => renderAgentItem(agent, index, filteredAgents.length))}
+            })}
 
-{!loading &&
-          (visibleGroups ? visibleGroups.length === 0 : filteredAgents.length === 0) && (
-            <div className="px-3 py-8 text-center text-xs text-text-tertiary ">
-              {agentsList.length === 0 ? t("agentList.noAgentsInstalled") : t("agentList.noMatchingAgents")}
-            </div>
-          )}
+        {!loading && visibleGroups.length === 0 && (
+          <div className="px-3 py-8 text-center text-xs text-text-tertiary ">
+            {agentsList.length === 0 ? t("agentList.noAgentsInstalled") : t("agentList.noMatchingAgents")}
+          </div>
+        )}
 
         {/* Project group chats + user-created `user_group`s (design 27 §4.4,
             ADR-098 P1): one row per group session. Creating a group lives in

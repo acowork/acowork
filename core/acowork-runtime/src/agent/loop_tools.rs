@@ -15,7 +15,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use acowork_core::providers::traits::{ChatMessage, ToolCall};
+use acowork_core::providers::traits::{ChatMessage, ContentPart, ToolCall};
 use acowork_core::tools::traits::{Tool, ToolContext};
 use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
@@ -34,6 +34,27 @@ use super::loop_approval::{
 use crate::agent::inbound::InboundMessage;
 use crate::util::text::TextPreview;
 
+/// Normalized tool output, including non-text payloads for history injection.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ToolOutput {
+    pub content: String,
+    pub is_transient: bool,
+    pub parts: Vec<ContentPart>,
+    /// Parsed source path for a multimodal tool result label.
+    pub image_path: Option<String>,
+}
+
+impl From<(String, bool)> for ToolOutput {
+    fn from((content, is_transient): (String, bool)) -> Self {
+        Self {
+            content,
+            is_transient,
+            parts: Vec::new(),
+            image_path: None,
+        }
+    }
+}
+
 impl AgentLoop {
     /// Execute tool calls in parallel with per-tool timeout and iteration-level deadline.
     ///
@@ -48,7 +69,7 @@ impl AgentLoop {
     pub(crate) async fn execute_tools_parallel(
         &mut self,
         tool_calls: &[ToolCall],
-    ) -> (Vec<(String, bool)>, Option<ControlDecision>) {
+    ) -> (Vec<ToolOutput>, Option<ControlDecision>) {
         if tool_calls.is_empty() {
             return (Vec::new(), None);
         }
@@ -70,8 +91,8 @@ impl AgentLoop {
             Duration::from_millis(self.core.config.timeouts.iteration_timeout_ms);
 
         // Channel to collect results from spawned tasks
-        // Each item: (original_index, (content, is_transient))
-        let (tx, mut rx) = mpsc::channel::<(usize, (String, bool))>(tool_calls.len());
+        // Each item carries ordered text, transient status and any payload parts.
+        let (tx, mut rx) = mpsc::channel::<(usize, ToolOutput)>(tool_calls.len());
 
         // Clone shared state for spawned tasks
         let approval_handle = self.approval_handle.clone();
@@ -114,7 +135,19 @@ impl AgentLoop {
                 // borrowing `self` across the spawn.
                 let git_nudge = self.core.git_nudge.clone();
                 let agent_id = self.core.config.agent_id.clone();
+                let model = self.resolve_current_model(None);
+                let supports_image_input = self
+                    .core
+                    .get_model_capabilities(&model)
+                    .and_then(|caps| {
+                        caps.modalities
+                            .map(|m| m.input.iter().any(|item| item == "image"))
+                    })
+                    .unwrap_or(true);
+                let image_read_budget = self.image_read_budget.clone();
                 let tool_ctx = ToolContext {
+                    supports_image_input,
+                    image_read_budget: Some(image_read_budget),
                     work_dir,
                     session_id: session_id.clone(),
                     current_user_message: self.current_turn_user_message.clone(),
@@ -123,7 +156,11 @@ impl AgentLoop {
                         .conversation
                         .as_ref()
                         .and_then(|c| c.chat_session_id()),
-                    initiator: self.session.conversation.as_ref().and_then(|c| c.initiator()),
+                    initiator: self
+                        .session
+                        .conversation
+                        .as_ref()
+                        .and_then(|c| c.initiator()),
                 };
 
                 // ADR-045: per-tool cancel token. Created BEFORE `spawn`
@@ -155,7 +192,7 @@ impl AgentLoop {
                             )
                             .await
                             {
-                                let _ = tx.send((idx, (rejection, false))).await;
+                                let _ = tx.send((idx, ToolOutput::from((rejection, false)))).await;
                                 return;
                             }
                         } else if let Some(ref gate) = approval_gate {
@@ -171,7 +208,7 @@ impl AgentLoop {
                             )
                             .await
                             {
-                                let _ = tx.send((idx, (rejection, false))).await;
+                                let _ = tx.send((idx, ToolOutput::from((rejection, false)))).await;
                                 return;
                             }
                         }
@@ -240,7 +277,7 @@ impl AgentLoop {
                         // Branch A: tool completes (or per-tool timeout fires)
                         res = tokio::time::timeout(
                             tool_timeout,
-                            execute_single_tool(
+                            execute_single_tool_output(
                                 &tools,
                                 &tc,
                                 &tool_ctx,
@@ -249,15 +286,15 @@ impl AgentLoop {
                             ),
                         ) => {
                             match res {
-                                Ok((content, transient)) => (content, transient),
-                                Err(_) => (
+                                Ok(output) => output,
+                                Err(_) => ToolOutput::from((
                                     format!(
                                         "Error: Tool '{}' timed out after {}ms",
                                         tc.function.name,
                                         tool_timeout.as_millis()
                                     ),
                                     false,
-                                ),
+                                )),
                             }
                         }
                         // Branch B: user cancelled via CancelTool MQTT command.
@@ -269,7 +306,7 @@ impl AgentLoop {
                                 tool_name = %tc.function.name,
                                 "ADR-045: tool cancelled by user — returning CancelledByUser to LLM"
                             );
-                            (
+                            ToolOutput::from((
                                 // The "Error: " prefix is load-bearing —
                                 // `looks_like_tool_error` keys off it to
                                 // surface a red ✗ in the UI. The plain
@@ -282,7 +319,7 @@ impl AgentLoop {
                                     tc.function.name
                                 ),
                                 false,
-                            )
+                            ))
                         }
                     };
 
@@ -312,7 +349,7 @@ impl AgentLoop {
         // Collect results with iteration-level deadline.
         // In Gateway mode, also listen for approval requests from spawned tasks.
         let mut deadline = Instant::now() + iteration_timeout;
-        let mut collected: Vec<(usize, (String, bool))> = Vec::with_capacity(all_indices.len());
+        let mut collected: Vec<(usize, ToolOutput)> = Vec::with_capacity(all_indices.len());
         let total = all_indices.len();
         let mut interrupt: Option<ControlDecision> = None;
 
@@ -709,18 +746,18 @@ impl AgentLoop {
         }
 
         // Build final results in original order
-        let results: Vec<(String, bool)> = (0..tool_calls.len())
+        let results: Vec<ToolOutput> = (0..tool_calls.len())
             .map(|idx| {
                 if let Some(pos) = collected.iter().find(|(i, _)| *i == idx) {
                     pos.1.clone()
                 } else {
-                    (
+                    ToolOutput::from((
                         format!(
                             "Error: iteration timed out, tool {} not completed",
                             tool_calls[idx].function.name
                         ),
                         false,
-                    )
+                    ))
                 }
             })
             .collect();
@@ -728,7 +765,7 @@ impl AgentLoop {
         // If iteration timed out with incomplete tools, add a system note
         let incomplete_count = results
             .iter()
-            .filter(|(r, _)| r.contains("iteration timed out"))
+            .filter(|output| output.content.contains("iteration timed out"))
             .count();
         if incomplete_count > 0 {
             tracing::warn!(
@@ -758,6 +795,7 @@ impl AgentLoop {
 /// `tool_call.function.arguments` a second time would risk the nudge
 /// disagreeing with what actually ran. `None` disables the nudge
 /// (tests, CLI mode).
+#[cfg(test)]
 pub(crate) async fn execute_single_tool(
     tools: &[Arc<dyn Tool>],
     tool_call: &ToolCall,
@@ -765,6 +803,17 @@ pub(crate) async fn execute_single_tool(
     git_nudge: Option<&crate::agent::git_nudge::GitNudgeSlots>,
     agent_id: &str,
 ) -> (String, bool) {
+    let output = execute_single_tool_output(tools, tool_call, ctx, git_nudge, agent_id).await;
+    (output.content, output.is_transient)
+}
+
+pub(crate) async fn execute_single_tool_output(
+    tools: &[Arc<dyn Tool>],
+    tool_call: &ToolCall,
+    ctx: &ToolContext,
+    git_nudge: Option<&crate::agent::git_nudge::GitNudgeSlots>,
+    agent_id: &str,
+) -> ToolOutput {
     let work_dir = ctx.work_dir.as_deref();
     let tool_name = &tool_call.function.name;
     let params_str = &tool_call.function.arguments;
@@ -790,7 +839,7 @@ pub(crate) async fn execute_single_tool(
                 params_preview = %raw.preview(200),
                 "Failed to parse tool call arguments as JSON — returning error to LLM with raw content as hint"
             );
-            return (
+            return ToolOutput::from((
                 format!(
                     "Error: Tool '{tool_name}' arguments are not valid JSON and could not be parsed: {reason}.\n\
                      This call was NOT executed. Your original raw arguments are preserved below for reference:\n\n\
@@ -798,7 +847,7 @@ pub(crate) async fn execute_single_tool(
                     raw.preview(200)
                 ),
                 false,
-            );
+            ));
         }
     };
 
@@ -806,14 +855,14 @@ pub(crate) async fn execute_single_tool(
     // special error marker when arguments are truncated. Skip actual execution
     // and return a clear error so the LLM knows to regenerate (not retry blindly).
     if let Some("TOOL_CALL_INCOMPLETE") = params.get("error").and_then(|v| v.as_str()) {
-        return (
+        return ToolOutput::from((
             params
                 .get("message")
                 .and_then(|v| v.as_str())
                 .unwrap_or("Tool call arguments were not valid JSON")
                 .to_string(),
             false,
-        );
+        ));
     }
 
     // Find the tool
@@ -842,10 +891,7 @@ pub(crate) async fn execute_single_tool(
                 // construction. Read-only tools never reach here.
                 if is_shell_tool(&tool.name()) {
                     crate::agent::git_nudge::maybe_nudge_after_shell(
-                        git_nudge,
-                        agent_id,
-                        work_dir,
-                        &params,
+                        git_nudge, agent_id, work_dir, &params,
                     )
                     .await;
                 }
@@ -868,11 +914,19 @@ pub(crate) async fn execute_single_tool(
                         )
                     }
                 };
-                (content, transient)
+                ToolOutput {
+                    content,
+                    is_transient: transient,
+                    image_path: params
+                        .get("path")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
+                    parts: result.content_parts.unwrap_or_default(),
+                }
             }
-            Err(e) => (format!("Tool execution error: {e}"), false),
+            Err(e) => ToolOutput::from((format!("Tool execution error: {e}"), false)),
         },
-        None => (format!("Unknown tool: {tool_name}"), false),
+        None => ToolOutput::from((format!("Unknown tool: {tool_name}"), false)),
     }
 }
 
@@ -1336,14 +1390,14 @@ impl AgentLoop {
     /// results back in original order. Also merges with pre-blocked results
     /// from `pre_check_loop_detection`.
     ///
-    /// Returns `(tool_results, interrupt)` where each tool_result is `(content, is_transient)`.
-    /// `is_transient` propagates from `ToolResult.transient` (ADR-032 C3a).
+    /// Returns normalized tool outputs with text, transient status and multimodal parts.
+    /// Payloads are preserved across parallel execution and returned in call order.
     pub(crate) async fn dispatch_and_merge_tools(
         &mut self,
         calls_to_execute: Vec<ToolCall>,
         deduped_calls: &[ToolCall],
         blocked_info: &[(usize, LoopPattern)],
-    ) -> (Vec<(String, bool)>, Option<ControlDecision>) {
+    ) -> (Vec<ToolOutput>, Option<ControlDecision>) {
         // ADR-049: Transition from `LlmStreaming` to `ToolExecuting` at the
         // entry of tool dispatch. The frontend then shows the "running tool"
         // indicator instead of "replying". Special tools (`ask_user_question`,
@@ -1416,25 +1470,24 @@ impl AgentLoop {
         let todo_result_map: std::collections::HashMap<usize, (String, bool)> =
             todo_write_results.into_iter().collect();
 
-        let mut final_results: Vec<(usize, (String, bool))> = Vec::new();
+        let mut final_results: Vec<(usize, ToolOutput)> = Vec::new();
         for (parallel_idx, result) in parallel_results.into_iter().enumerate() {
             if let Some((orig_idx, _)) = parallel_calls.get(parallel_idx) {
                 final_results.push((*orig_idx, result));
             }
         }
         for (orig_idx, result) in &ask_result_map {
-            final_results.push((*orig_idx, result.clone()));
+            final_results.push((*orig_idx, ToolOutput::from(result.clone())));
         }
         for (orig_idx, result) in &todo_result_map {
-            final_results.push((*orig_idx, result.clone()));
+            final_results.push((*orig_idx, ToolOutput::from(result.clone())));
         }
         final_results.sort_by_key(|(idx, _)| *idx);
 
-        let executed_results: Vec<(String, bool)> =
-            final_results.into_iter().map(|(_, r)| r).collect();
+        let executed_results: Vec<ToolOutput> = final_results.into_iter().map(|(_, r)| r).collect();
 
         // Merge executed results with pre-blocked results, preserving original order
-        let mut tool_results: Vec<(String, bool)> = Vec::with_capacity(deduped_calls.len());
+        let mut tool_results: Vec<ToolOutput> = Vec::with_capacity(deduped_calls.len());
         let mut executed_iter = executed_results.into_iter();
         for idx in 0..deduped_calls.len() {
             if let Some(pos) = blocked_info.iter().position(|(i, _)| *i == idx) {
@@ -1449,9 +1502,13 @@ impl AgentLoop {
                     }
                 };
                 // Blocked results are never transient
-                tool_results.push((msg.to_string(), false));
+                tool_results.push(ToolOutput::from((msg.to_string(), false)));
             } else {
-                tool_results.push(executed_iter.next().unwrap_or(("".to_string(), false)));
+                tool_results.push(
+                    executed_iter
+                        .next()
+                        .unwrap_or_else(|| ToolOutput::from((String::new(), false))),
+                );
             }
         }
 
@@ -1623,6 +1680,57 @@ fn looks_like_tool_error(result_content: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct ImagePartsToolForArgsTest;
+
+    #[async_trait::async_trait]
+    impl Tool for ImagePartsToolForArgsTest {
+        fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
+            acowork_core::tools::traits::ToolSpec {
+                name: "image_read".into(),
+                description: "test image output".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _params: serde_json::Value,
+            _work_dir: Option<&str>,
+        ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            Ok(acowork_core::tools::traits::ToolResult {
+                ok: true,
+                content: "image result".into(),
+                content_parts: Some(vec![ContentPart::image_url("data:image/png;base64,AAAA")]),
+                error: None,
+                token_usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn image_tool_output_keeps_path_from_recovered_arguments() {
+        let call = ToolCall {
+            id: "tc-image-recovered".into(),
+            call_type: "function".into(),
+            function: acowork_core::providers::traits::FunctionCall {
+                name: "image_read".into(),
+                arguments: "Image input follows: {\"path\":\"/tmp/recovered.png\"}".into(),
+            },
+        };
+        let tools: Vec<Arc<dyn Tool>> = vec![Arc::new(ImagePartsToolForArgsTest)];
+        let output = execute_single_tool_output(
+            &tools,
+            &call,
+            &ToolContext::default(),
+            None,
+            "test-agent",
+        )
+        .await;
+
+        assert_eq!(output.image_path.as_deref(), Some("/tmp/recovered.png"));
+        assert_eq!(output.parts.len(), 1);
+    }
 
     // ── Shell approval threshold semantics ──────────────────────────────
 

@@ -3,6 +3,10 @@ import { type ReactNode } from "react";
 interface RadioOption<T> {
     label: ReactNode;
     value: T;
+    /** Optional fill for the UNSELECTED dot (e.g. a theme pack's preview
+     *  tint, so the row shows what picking it does). The selected dot keeps
+     *  the accent treatment — selection must stay louder than preview. */
+    dotColor?: string;
 }
 
 interface RadioGroupProps<T> {
@@ -36,7 +40,17 @@ export function RadioGroup<T>({
                             onChange={() => onChange(opt.value)}
                             className="peer sr-only"
                         />
-                        <span className="block h-[var(--ui-radio-size)] w-[var(--ui-radio-size)] rounded-full bg-[var(--ui-radio-bg)] peer-checked:bg-[var(--color-accent)] peer-checked:ring-2 peer-checked:ring-[var(--color-accent)] peer-checked:ring-offset-1 peer-checked:ring-offset-white dark:peer-checked:ring-offset-zinc-800" />
+                        <span
+                            className="block h-[var(--ui-radio-size)] w-[var(--ui-radio-size)] rounded-full bg-[var(--ui-radio-bg)] peer-checked:bg-[var(--color-accent)] peer-checked:ring-2 peer-checked:ring-[var(--color-accent)] peer-checked:ring-offset-1 peer-checked:ring-offset-white dark:peer-checked:ring-offset-zinc-800"
+                            // Only while unselected: an inline colour would
+                            // outrank the `peer-checked:` accent classes and
+                            // silence the selection signal.
+                            style={
+                                opt.dotColor && value !== opt.value
+                                    ? { backgroundColor: opt.dotColor }
+                                    : undefined
+                            }
+                        />
                     </span>
                     {opt.label}
                 </label>

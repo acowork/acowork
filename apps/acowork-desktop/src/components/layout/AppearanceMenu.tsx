@@ -1,5 +1,5 @@
 import { useRef, useState, useSyncExternalStore } from "react";
-import { Check, Layers, Monitor, Moon, Palette, Sun } from "lucide-react";
+import { Check, Monitor, Moon, Palette, Sun } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
@@ -11,6 +11,7 @@ import {
   DEFAULT_THEME_PACK,
   THEME_PACKS,
   getActiveThemePack,
+  packTint,
   setThemePack,
   subscribeThemePacks,
 } from "../../styles/themePacks";
@@ -94,17 +95,19 @@ export function AppearanceMenu() {
 
       {open && (
         <div className={titleBarMenuPanel}>
-          {/* Theme mode — three rows, one per mode. The active row carries
-              the app-wide `listRowSelected` tint and a check mark, the
-              same vocabulary the Gateway menu uses for "the current
-              address". `radiogroup`/`radio` (not `menuitemradio`): this
-              is a set of mutually exclusive choices, and a `menuitemradio`
-              would claim a `menu` ancestor the panel does not have. */}
+          {/* Theme mode — a horizontal segmented control, the same grammar
+              the PM header uses for Board/List (ProjectHeader.tsx): bordered
+              inset track, the active segment lifted on the page sheet with a
+              shadow. Deliberately NOT the row list the pack section below
+              uses — mode and palette are different decisions and the two
+              shapes keep them apart at a glance. Radio semantics stay (not
+              PM's `aria-pressed`): this is a mutually exclusive choice and
+              the tests read it as radios. */}
           <div className="border-b border-border-divider pb-2" role="radiogroup" aria-label={t("settings.theme")}>
             <p className="px-1 pb-1.5 text-xs text-text-tertiary">
               {t("settings.theme")}
             </p>
-            <div className="flex flex-col gap-0.5">
+            <div className="flex items-center justify-center gap-0.5 rounded-md border border-border-outer bg-panel-block p-0.5">
               {THEME_ROWS.map(({ value, icon: Icon }) => {
                 const current = theme === value;
                 return (
@@ -114,20 +117,25 @@ export function AppearanceMenu() {
                     role="radio"
                     aria-checked={current}
                     onClick={() => setTheme(value)}
+                    // `flex-1` keeps the three segments as equal thirds of
+                    // the track — content-sized segments left the wide track
+                    // half empty. `whitespace-nowrap` is what keeps a long
+                    // CJK label on one line instead of breaking the row.
                     className={cn(
-                      "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs transition-colors",
-                      current ? listRowSelected : listRowHover,
+                      "flex h-6 flex-1 items-center justify-center gap-1 whitespace-nowrap rounded px-2 text-xs font-medium transition-colors",
+                      // `ring-border-outer` on the lifted segment: in
+                      // light mode page-bg (white) over panel-block (98%)
+                      // is a 2% step — invisible. Dark mode's 8-vs-16.7%
+                      // step carries the shape on its own and the hairline
+                      // disappears into it. Ring, not border: it must not
+                      // steal 1px of content box when selection moves.
+                      current
+                        ? "bg-page-bg text-text shadow-sm ring-1 ring-border-outer"
+                        : "text-text-tertiary hover:text-text",
                     )}
                   >
-                    <Icon className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
-                    <span className="flex-1">{t(`settings.${value}`)}</span>
-                    {current && (
-                      <Check
-                        className="h-3 w-3 shrink-0"
-                        style={{ color: "var(--color-accent)" }}
-                        aria-hidden="true"
-                      />
-                    )}
+                    <Icon className="h-3.5 w-3.5 shrink-0" />
+                    {t(`settings.${value}`)}
                   </button>
                 );
               })}
@@ -150,7 +158,7 @@ export function AppearanceMenu() {
               </p>
               <div className="flex flex-col gap-0.5">
                 {[
-                  { id: DEFAULT_THEME_PACK, name: t("settings.themeDefault") },
+                  { id: DEFAULT_THEME_PACK, name: t("settings.themeDefault"), hue: null as number | null },
                   ...THEME_PACKS,
                 ].map((pack) => {
                   const current = activePack === pack.id;
@@ -166,7 +174,19 @@ export function AppearanceMenu() {
                         current ? listRowSelected : listRowHover,
                       )}
                     >
-                      <Layers className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
+                      {/* The row preview is a colour dot — same grammar as
+                          the Settings ▸ Appearance radio dots, and both
+                          sides take the colour from the shared `packTint`.
+                          The Layers glyph it replaces was not a theme icon
+                          anyway; "Default" has no tint of its own and
+                          keeps the neutral radio-dot zinc. */}
+                      <span
+                        className="h-3.5 w-3.5 shrink-0 rounded-full"
+                        style={{
+                          backgroundColor:
+                            packTint(pack.hue) ?? "var(--ui-radio-bg)",
+                        }}
+                      />
                       <span className="flex-1">{pack.name}</span>
                       {current && (
                         <Check
@@ -185,7 +205,7 @@ export function AppearanceMenu() {
           {/* Accent color — a swatch grid, matching the Settings ▸
               Appearance tab's swatches (same size, same ring treatment)
               so the two read as the same control. */}
-          <div className="pt-2">
+          <div className="pt-2 pb-2">
             {/* `pb-3`, not the theme section's `pb-1.5`: the selected swatch
                 is `scale-110` with a `ring-2 ring-offset-2`, so its paint
                 reaches ~6px past the top of its 36px box. A 6px label gap is

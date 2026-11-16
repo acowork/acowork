@@ -24,13 +24,13 @@ use std::io::{Cursor, Read};
 use std::path::Path;
 
 use acowork_core::providers::traits::{ContentPart, ImageUrlPart};
-use acowork_core::tools::traits::{Tool, ToolResult, ToolSpec};
+use acowork_core::tools::traits::{Tool, ToolContext, ToolResult, ToolSpec};
 use async_trait::async_trait;
 use image::codecs::jpeg::JpegEncoder;
 use image::{ImageFormat, ImageReader, Limits};
 use serde_json::Value;
 
-use crate::agent::attachment_to_image::{build_data_url, MAX_INLINE_IMAGE_BYTES};
+use crate::agent::attachment_to_image::{MAX_INLINE_IMAGE_BYTES, build_data_url};
 
 /// Hard ceiling on either source dimension before decoding (design doc
 /// §4.6: header pre-check first, decoder `Limits` as the second net).
@@ -40,6 +40,24 @@ const MAX_SOURCE_PIXELS: u64 = 64_000_000;
 /// Fixed JPEG re-encode quality when downscaling. Constant, never
 /// content-derived: the payload must be byte-stable across calls.
 const JPEG_QUALITY: u8 = 85;
+const DEFAULT_MAX_IMAGES_PER_TURN: usize = 6;
+const DEFAULT_MAX_BASE64_BYTES_PER_TURN: usize = 24 * 1024 * 1024;
+
+fn max_images_per_turn() -> usize {
+    std::env::var("ACOWORK_IMAGE_READ_MAX_IMAGES_PER_TURN")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_IMAGES_PER_TURN)
+}
+
+fn max_base64_bytes_per_turn() -> usize {
+    std::env::var("ACOWORK_IMAGE_READ_MAX_BASE64_BYTES_PER_TURN")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_MAX_BASE64_BYTES_PER_TURN)
+}
 
 /// Long-side cap per `detail` level (design doc §4.2 table).
 fn detail_max_side(detail: &Detail) -> Option<u32> {
@@ -77,10 +95,26 @@ struct Sniffed {
     mime: &'static str,
 }
 
-const PNG: Sniffed = Sniffed { name: "png", format: ImageFormat::Png, mime: "image/png" };
-const JPEG: Sniffed = Sniffed { name: "jpeg", format: ImageFormat::Jpeg, mime: "image/jpeg" };
-const GIF: Sniffed = Sniffed { name: "gif", format: ImageFormat::Gif, mime: "image/gif" };
-const WEBP: Sniffed = Sniffed { name: "webp", format: ImageFormat::WebP, mime: "image/webp" };
+const PNG: Sniffed = Sniffed {
+    name: "png",
+    format: ImageFormat::Png,
+    mime: "image/png",
+};
+const JPEG: Sniffed = Sniffed {
+    name: "jpeg",
+    format: ImageFormat::Jpeg,
+    mime: "image/jpeg",
+};
+const GIF: Sniffed = Sniffed {
+    name: "gif",
+    format: ImageFormat::Gif,
+    mime: "image/gif",
+};
+const WEBP: Sniffed = Sniffed {
+    name: "webp",
+    format: ImageFormat::WebP,
+    mime: "image/webp",
+};
 
 /// Identify the format from the first 12 bytes.
 ///
@@ -189,6 +223,47 @@ impl Tool for ImageReadTool {
         work_dir: Option<&str>,
     ) -> acowork_core::error::Result<ToolResult> {
         Ok(execute_inner(params, work_dir))
+    }
+
+    async fn execute_with_context(
+        &self,
+        params: Value,
+        ctx: &ToolContext,
+    ) -> acowork_core::error::Result<ToolResult> {
+        if !ctx.supports_image_input {
+            return Ok(fail(
+                "current model has no image input capability; switch to a vision model, or ask the user to describe it",
+            ));
+        }
+        let Some(budget) = ctx.image_read_budget.as_ref() else {
+            return Ok(execute_inner(params, ctx.work_dir.as_deref()));
+        };
+        let mut guard = budget.lock().expect("image budget mutex poisoned");
+        let max_images = max_images_per_turn();
+        if guard.images >= max_images {
+            return Ok(fail(format!(
+                "image_read turn limit reached: this turn has already read {max_images} images; continue based on the images already available, or wait for the next turn"
+            )));
+        }
+        let result = execute_inner(params, ctx.work_dir.as_deref());
+        if result.ok {
+            let bytes = result
+                .content_parts
+                .as_ref()
+                .and_then(|parts| parts.first())
+                .and_then(image_part_base64_bytes)
+                .unwrap_or(0);
+            let max_bytes = max_base64_bytes_per_turn();
+            if guard.base64_bytes.saturating_add(bytes) > max_bytes {
+                return Ok(fail(format!(
+                    "image_read turn byte limit reached: this turn has used the configured {} MiB image-data limit; continue based on the images already available, or wait for the next turn",
+                    max_bytes / (1024 * 1024)
+                )));
+            }
+            guard.images += 1;
+            guard.base64_bytes += bytes;
+        }
+        Ok(result)
     }
 }
 
@@ -332,8 +407,7 @@ fn execute_inner(params: Value, work_dir: Option<&str>) -> ToolResult {
             ));
         }
         let mut buf = Vec::with_capacity(meta.len() as usize);
-        if let Err(e) = std::fs::File::open(&full_path).and_then(|mut f| f.read_to_end(&mut buf))
-        {
+        if let Err(e) = std::fs::File::open(&full_path).and_then(|mut f| f.read_to_end(&mut buf)) {
             return fail(format!("failed to read {path}: {e}"));
         }
         (buf, src_w, src_h, false, sniffed.mime)
@@ -378,6 +452,22 @@ fn execute_inner(params: Value, work_dir: Option<&str>) -> ToolResult {
     }
 }
 
+fn image_part_base64_bytes(part: &ContentPart) -> Option<usize> {
+    match part {
+        ContentPart::ImageUrl { image_url } => {
+            let encoded = image_url.url.split_once(',')?.1;
+            let padding = encoded
+                .as_bytes()
+                .iter()
+                .rev()
+                .take_while(|byte| **byte == b'=')
+                .count();
+            Some(encoded.len().saturating_mul(3) / 4 - padding)
+        }
+        _ => None,
+    }
+}
+
 fn detail_name(detail: &Detail) -> &'static str {
     match detail {
         Detail::Auto => "auto",
@@ -406,7 +496,10 @@ fn sniff_head(path: &Path) -> std::io::Result<Option<&'static Sniffed>> {
     Ok(sniff_magic(&read_head(path, 12)?))
 }
 
-fn open_reader(path: &Path, format: ImageFormat) -> std::io::Result<ImageReader<std::io::BufReader<std::fs::File>>> {
+fn open_reader(
+    path: &Path,
+    format: ImageFormat,
+) -> std::io::Result<ImageReader<std::io::BufReader<std::fs::File>>> {
     let file = std::fs::File::open(path)?;
     Ok(ImageReader::with_format(
         std::io::BufReader::new(file),
@@ -517,6 +610,92 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn no_vision_fails_before_touching_image_path() {
+        let ctx = ToolContext {
+            supports_image_input: false,
+            ..Default::default()
+        };
+        let result = ImageReadTool::new()
+            .execute_with_context(serde_json::json!({"path":"missing.png"}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert_eq!(
+            result.error.as_deref(),
+            Some(
+                "current model has no image input capability; switch to a vision model, or ask the user to describe it"
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn per_turn_image_count_budget_rejects_next_call_actionably() {
+        use acowork_core::tools::traits::ImageReadBudget;
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sample(dir.path(), "s.png", 40, 30);
+        let budget = Arc::new(Mutex::new(ImageReadBudget {
+            images: 6,
+            base64_bytes: 0,
+        }));
+        let ctx = ToolContext {
+            work_dir: Some(dir.path().to_string_lossy().into_owned()),
+            image_read_budget: Some(budget),
+            ..Default::default()
+        };
+        let result = ImageReadTool::new()
+            .execute_with_context(serde_json::json!({"path":path}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("already read 6 images; continue based on the images already available, or wait for the next turn"));
+    }
+
+    #[tokio::test]
+    async fn per_turn_base64_budget_rejects_next_call_actionably() {
+        use acowork_core::tools::traits::ImageReadBudget;
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sample(dir.path(), "s.png", 40, 30);
+        let budget = Arc::new(Mutex::new(ImageReadBudget {
+            images: 1,
+            base64_bytes: DEFAULT_MAX_BASE64_BYTES_PER_TURN - 1,
+        }));
+        let ctx = ToolContext {
+            work_dir: Some(dir.path().to_string_lossy().into_owned()),
+            image_read_budget: Some(budget),
+            ..Default::default()
+        };
+        let result = ImageReadTool::new()
+            .execute_with_context(serde_json::json!({"path":path}), &ctx)
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        assert!(result.error.unwrap().contains("configured 24 MiB image-data limit; continue based on the images already available, or wait for the next turn"));
+    }
+
+    #[tokio::test]
+    async fn successful_reads_accumulate_per_turn_image_budget() {
+        use acowork_core::tools::traits::ImageReadBudget;
+        use std::sync::{Arc, Mutex};
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_sample(dir.path(), "s.png", 40, 30);
+        let budget = Arc::new(Mutex::new(ImageReadBudget::default()));
+        let ctx = ToolContext {
+            work_dir: Some(dir.path().to_string_lossy().into_owned()),
+            image_read_budget: Some(budget.clone()),
+            ..Default::default()
+        };
+        let result = ImageReadTool::new()
+            .execute_with_context(serde_json::json!({"path":path}), &ctx)
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert_eq!(budget.lock().unwrap().images, 1);
+        assert!(budget.lock().unwrap().base64_bytes > 0);
+    }
+
     #[test]
     fn four_formats_round_trip() {
         let dir = tempfile::tempdir().unwrap();
@@ -561,7 +740,11 @@ mod tests {
         assert_eq!(part_dims(&r), (Some(512), Some(384)));
 
         let r = call(&p, Some("auto"));
-        assert_eq!(part_dims(&r), (Some(1568), Some(1176)), "auto behaves as high");
+        assert_eq!(
+            part_dims(&r),
+            (Some(1568), Some(1176)),
+            "auto behaves as high"
+        );
     }
 
     /// Small helper so the test above reads linearly.
@@ -606,7 +789,11 @@ mod tests {
         assert!(!r.content.contains("scaled"));
         let uri = part_url(&r);
         let (_, b64) = parse_data_uri(&uri).unwrap();
-        assert_eq!(base64_decode(b64), raw, "already under the cap: no re-encode");
+        assert_eq!(
+            base64_decode(b64),
+            raw,
+            "already under the cap: no re-encode"
+        );
     }
 
     /// Deterministic photo-like noise (fixed-seed LCG) — the content a
@@ -699,7 +886,10 @@ mod tests {
             e.starts_with("not a supported image (png/jpeg/gif/webp); got "),
             "{e}"
         );
-        assert!(e.ends_with("; use file_read for text or doc_reader for pdf/docx"), "{e}");
+        assert!(
+            e.ends_with("; use file_read for text or doc_reader for pdf/docx"),
+            "{e}"
+        );
 
         // 3. svg
         let svg = dir.path().join("icon.svg");
@@ -714,7 +904,10 @@ mod tests {
         let huge = dir.path().join("huge.png");
         gradient(9000, 10).save(&huge).unwrap();
         let r = call(&huge, None);
-        assert_eq!(r.error.unwrap(), "image dimensions 9000x10 exceed the decode budget");
+        assert_eq!(
+            r.error.unwrap(),
+            "image dimensions 9000x10 exceed the decode budget"
+        );
 
         // 5. URL rejection (SSRF surface)
         let r = execute_inner(
@@ -752,7 +945,9 @@ mod tests {
 
     #[test]
     fn magic_sniffing_accepts_only_the_four() {
-        assert!(sniff_magic(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]).is_some());
+        assert!(
+            sniff_magic(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]).is_some()
+        );
         assert!(sniff_magic(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0]).is_some());
         assert!(sniff_magic(b"GIF89a\x01\x00\x01\x00\x00\x00").is_some());
         assert!(sniff_magic(b"RIFF\x24\x00\x00\x00WEBPVP8 ").is_some());

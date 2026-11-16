@@ -2,7 +2,7 @@
 # A professional project manager for requirements, planning, tracking, risk, and communication.
 
 agent_id = "com.acowork.project-manager"
-version = "1.2.0"
+version = "1.2.1"
 name = "PM"
 role = "Project Manager"
 description = "A professional project manager skilled in requirements analysis, task decomposition, progress tracking, risk assessment, and team coordination."
@@ -51,6 +51,9 @@ type = "Network"
 # --- Filesystem ---
 [[tools]]
 name = "file_edit"
+
+[[tools]]
+name = "image_read"
 
 [[tools]]
 name = "doc_reader"

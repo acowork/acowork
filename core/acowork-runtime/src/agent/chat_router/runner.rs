@@ -1690,6 +1690,8 @@ async fn execute_info_tool(
         raw
     };
     let ctx = ToolContext {
+        supports_image_input: true,
+        image_read_budget: None,
         work_dir: Some(deps.work_dir.clone()),
         // The router turn belongs to the chat, not to any execution
         // session: no session-node exclusion, and the user's message is

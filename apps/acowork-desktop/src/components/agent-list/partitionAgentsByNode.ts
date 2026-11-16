@@ -1,5 +1,5 @@
 /**
- * ADR-073 §4: pure helper that builds the remote-mode sidebar's per-node
+ * ADR-073 §4: pure helper that builds the sidebar's per-node
  * groups. Kept side-effect-free so it is trivially unit-testable without
  * mocking stores.
  *

@@ -192,6 +192,8 @@ Anthropic's 4-breakpoint limit (early 2026) is not strict — the actual limit h
 
 One `cache_control: ephemeral` at the end of Block A is the minimal viable solution (v2 revision: the original Block C has been removed, so no second breakpoint is needed; the compaction-injected `todo_write` turn is a standard Tool message and needs no cache_control).
 
+> **Erratum (2026-11-16)**: the single-breakpoint conclusion above is superseded by design 29 §6.1 — a request carries one `cache_control: ephemeral` on **Block A's system message and one on Block B's last message**; without the second, Anthropic re-prices the whole history prefix (~90% of tokens) on every call. Implementation: `agent/context.rs::mark_tail_cache_breakpoint`, shared by the main execution path and the chat router. Two breakpoints total (cap is four); a `tool_result` cannot carry the mark, so the breakpoint steps back to the nearest markable message.
+
 ---
 
 ## 4. Design Goals

@@ -619,9 +619,11 @@ impl ContentPart {
 ///   message (user/assistant) or on the system content-block.
 /// - **OpenAI / Ollama**: ignored — block position alone determines cache.
 ///
-/// ADR-060: Block A (static kernel) and Block C (dynamic todo snapshot)
-/// carry `Ephemeral` breakpoints; Block B (append-only history) carries
-/// `None` so a stable prefix stays byte-identical across turns.
+/// design 29 §6.1: Block A (static kernel) and Block B's *last* message carry
+/// `Ephemeral` breakpoints — the mark moves with the tail, the history bytes
+/// before it stay identical (ADR-060 append-only). Set it through
+/// `agent::context::mark_tail_cache_breakpoint` rather than by hand, so the
+/// main execution path and the chat router cannot drift.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum CacheControl {

@@ -479,10 +479,10 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
   }, [selectedAgentId, selectedAgent?.alive, agentStatusOpen, agentTotalSignal, refetchTokenStats]);
 
   return (
-    <div className="relative flex flex-col shrink-0 ml-1" style={{ width }}>
+    <div className="relative flex flex-col shrink-0 ml-0.5" style={{ width }}>
       {/* Resize handle overlay — sits at the left edge */}
       <div
-        className="absolute -left-1 top-0 bottom-0 w-1 cursor-col-resize z-10 group"
+        className="absolute -left-[3px] top-0 bottom-0 w-1 cursor-col-resize z-10 group"
         onMouseDown={onResizeStart}
       >
         <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />

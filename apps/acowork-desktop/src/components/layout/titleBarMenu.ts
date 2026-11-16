@@ -28,9 +28,15 @@ import {
 
 /** Popover surface: right-aligned under its trigger, one step above the
  *  title bar, on the page background so the panel reads as a sheet of the
- *  app rather than a floating widget. */
+ *  app rather than a floating widget.
+ *
+ *  `z-40`, not `z-30`: the overlay scrollbar's thumb sits at
+ *  `--z-overlay: 30` and lists are mounted after the title bar, so an
+ *  equal level lost the tie to DOM order — a chat scrollbar painted over
+ *  the open panel. One rung above the scrollbar, one below the dialogs'
+ *  `z-50`. */
 export const titleBarMenuPanel =
-  "absolute right-0 z-30 mt-1 w-80 rounded-lg border border-border-outer bg-page-bg p-2 shadow-lg";
+  "absolute right-0 z-40 mt-1 w-80 rounded-lg border border-border-outer bg-page-bg p-2 shadow-lg";
 
 /** Glyph-button chrome for a title-bar trigger. `open` switches the
  *  button from "idle" to "pressed" so the user can see which popover is
