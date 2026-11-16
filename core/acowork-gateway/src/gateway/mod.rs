@@ -114,14 +114,22 @@ impl Gateway {
     /// ADR-114: there is no "local mode" to short-circuit this any more —
     /// the account system always exists, so the question is always asked.
     pub fn is_first_boot_restricted(&self) -> bool {
-        crate::cli::user_setup_required(self.config.user.data_dir.as_deref()).unwrap_or(false)
+        crate::cli::user_setup_required(
+            self.config.user.data_dir.as_deref(),
+            self.config.user.config.as_deref(),
+        )
+        .unwrap_or(false)
     }
 
     /// Apply the first-boot admin password — used by the daemon's TTY
     /// prompt path (ADR-076 §决策 12 v2). Errors if the admin already has
     /// a password.
     pub fn set_admin_password(&self, password: &str) -> Result<(), String> {
-        crate::cli::user_admin_setup(self.config.user.data_dir.as_deref(), password)
+        crate::cli::user_admin_setup(
+            self.config.user.data_dir.as_deref(),
+            self.config.user.config.as_deref(),
+            password,
+        )
     }
 
     fn cleanup_orphaned_runtimes(&self) -> usize {
@@ -849,7 +857,10 @@ impl Gateway {
         // is the correct semantics there — the machine is the owner) and
         // on a first boot before any admin exists.
         let default_owner: Option<String> = if mqtt_config.auth_enabled {
-            crate::cli::user_first_admin(self.config.user.data_dir.as_deref())
+            crate::cli::user_first_admin(
+                self.config.user.data_dir.as_deref(),
+                self.config.user.config.as_deref(),
+            )
         } else {
             None
         };
