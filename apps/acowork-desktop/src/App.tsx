@@ -13,8 +13,6 @@ import { useAuthStore } from "./stores/authStore";
 import { initMqttListener } from "./stores/chatStore";
 import { initWorkspaceFsListener } from "./lib/workspaceFsEvents";
 import { initDocTreeChangeListener } from "./lib/docFsEvents";
-import { useGatewayStore } from "./stores/gatewayStore";
-import { useSettingsStore } from "./stores/settingsStore";
 import { useConnectionStore } from "./stores/connectionStore";
 import { log } from "./lib/logger";
 import { isRecoveryReload, clearRecoveryReload } from "./lib/recoveryReload";
@@ -114,21 +112,6 @@ function App() {
       }
     };
     showWindow();
-  }, []);
-
-  // Connection lifecycle → gateway URL history. Record ONLY on a genuine
-  // CONNECTED transition: a URL the user typed but never reached must never
-  // become a "known-good" address (that was how a wrong remote address kept
-  // winning the next boot).
-  useEffect(() => {
-    const unsub = useGatewayStore.subscribe((state, prev) => {
-      if (state.status === "connected" && prev.status !== "connected") {
-        useSettingsStore.getState().recordGatewayUrl(
-          useSettingsStore.getState().gatewayUrl,
-        );
-      }
-    });
-    return unsub;
   }, []);
 
   // NOTE: a steady-state drop (laptop woke from sleep / switched Wi-Fi)

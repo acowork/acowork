@@ -97,6 +97,7 @@ import {
     startGatewayDeathWatch,
     stopGatewayDeathWatch,
 } from "./gatewayStore";
+import { useSettingsStore } from "./settingsStore";
 
 function resetStore() {
     useGatewayStore.setState({
@@ -280,6 +281,26 @@ describe("gatewayStore.gatewayAlive (single-authority liveness)", () => {
         expect(s.status).toBe("connected");
         expect(s.gatewayAlive).toBe("alive");
         expect(s.health?.status).toBe("healthy");
+    });
+
+    it("a successful probe records the address as known-good (the pickers' list)", async () => {
+        // Regression: switching from one connected Gateway to another never
+        // produced a `connected` edge (`connectionStore.restart()` keeps
+        // `status`), so a URL that really connected never reached the
+        // history — both address pickers were left with the loopback row.
+        useSettingsStore.setState({
+            gatewayUrl: "http://192.168.1.20:19876",
+            gatewayUrlHistory: [],
+            lastGoodUrl: null,
+        });
+        useGatewayStore.setState({ status: "connected" });
+
+        await useGatewayStore.getState().checkHealth();
+
+        expect(useSettingsStore.getState().gatewayUrlHistory).toEqual([
+            "http://192.168.1.20:19876",
+        ]);
+        expect(useSettingsStore.getState().lastGoodUrl).toBe("http://192.168.1.20:19876");
     });
 
     it("markGatewayAlive records a CONNACK proof", () => {

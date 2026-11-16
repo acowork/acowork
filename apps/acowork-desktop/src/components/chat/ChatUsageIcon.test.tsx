@@ -339,6 +339,23 @@ describe("ChatUsageIcon", () => {
     expect(headerSize("contextUsage.cacheHitLabel")).toBe("text-sm");
     expect(headerSize("chatUsage.byModel")).toBe("text-sm");
     expect(headerSize("chatUsage.byAgent")).toBe("text-sm");
+
+    // Dividers share the same vertical rhythm and align with section content:
+    // the cache divider is inset from the popover, while model/agent dividers
+    // sit inside the already-inset usage column.
+    const dividers = [...dialog.querySelectorAll<HTMLElement>("[data-usage-divider]")];
+    expect(dividers).toHaveLength(3);
+    expect(dividers[0].className).toContain("my-1");
+    expect(dividers[0].className).toContain("border-t");
+    expect(dividers[0].nextElementSibling?.getAttribute("class")).toContain("pt-1");
+    expect(dividers[0].nextElementSibling?.getAttribute("class")).toContain("pb-1");
+    expect(dividers[1].className).toContain("my-1");
+    expect(dividers[1].nextElementSibling?.getAttribute("class")).toContain("pt-2");
+    for (const divider of dividers.slice(1)) {
+      expect(divider.className).toContain("my-1");
+      expect(divider.className).toContain("border-t");
+      expect(divider.parentElement?.className).toContain("px-3");
+    }
   });
 
   it("splits by agent only when more than one participant carries a row", async () => {

@@ -10,19 +10,20 @@
 
 :root.theme-sage {
   --color-bg: hsl(150 var(--theme-chroma) 96%);
-  --color-page-bg: hsl(150 var(--theme-chroma) 91%);
-  --color-panel-block: hsl(150 var(--theme-chroma) 94%);
-  --color-panel-inset: hsl(150 var(--theme-chroma) 89%);
-  --color-panel-inset-2: hsl(150 var(--theme-chroma) 85%);
+  --color-page-bg: hsl(150 var(--theme-chroma) 97%);
+  --color-panel-block: hsl(150 var(--theme-chroma) 96%);
+  --color-panel-inset: hsl(150 var(--theme-chroma) 98%);
+  --color-panel-inset-2: hsl(150 var(--theme-chroma) 96%);
   --color-modal-surface: hsl(150 var(--theme-chroma) 98%);
   --color-editor-canvas: hsl(150 var(--theme-chroma) 95%);
-  --color-nav-surface: hsl(150 var(--theme-chroma) 89%);
+  --color-nav-surface: hsl(150 var(--theme-chroma) 93%);
   --color-nav-item-hover: hsl(150 var(--theme-chroma) 83%);
   --color-nav-divider: hsl(150 calc(var(--theme-chroma) * 0.85) 79%);
   --color-right-panel: hsl(150 var(--theme-chroma) 93%);
   --color-chat-body: hsl(150 var(--theme-chroma) 95%);
   --color-chat-title: hsl(150 var(--theme-chroma) 87%);
-  --color-chat-input-bg: hsl(150 var(--theme-chroma) 93%);
+  --color-chat-input-bg: hsl(150 var(--theme-chroma) 96%);
+  --color-chat-input-border: hsl(150 calc(var(--theme-chroma) * 0.55) 85%);
   --color-input-bg: hsl(150 var(--theme-chroma) 96%);
   --color-input-border: hsl(150 calc(var(--theme-chroma) * 0.85) 88%);
   --color-border-outer: hsl(150 calc(var(--theme-chroma) * 0.85) 76%);
@@ -67,6 +68,7 @@
   --color-chat-body: hsl(160 var(--theme-chroma) 8%);
   --color-chat-title: hsl(160 var(--theme-chroma) 13%);
   --color-chat-input-bg: hsl(160 var(--theme-chroma) 11.7%);
+  --color-chat-input-border: var(--color-border-outer);
   --color-input-bg: hsl(159 var(--theme-chroma) 16.7%);
   --color-input-border: hsl(158 calc(var(--theme-chroma) * 0.85) 18%);
   --color-border-outer: hsl(160 calc(var(--theme-chroma) * 0.85) 13%);

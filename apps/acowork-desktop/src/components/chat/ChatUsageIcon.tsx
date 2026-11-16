@@ -90,6 +90,8 @@ import {
 import { cn } from "../../lib/utils";
 import { toolbarIconButton } from "../../lib/ui-styles";
 
+const USAGE_DIVIDER_CLASS = "my-1 border-t border-border-divider";
+
 /** Same precision contract as `RightPanel.formatTokenCount` /
  *  `ContextUsageIcon.formatTokens`: 2 decimals for M, 1 for K. */
 function formatTokens(n: number | undefined): string {
@@ -434,8 +436,8 @@ export function ChatUsageIcon({
           {/* ── Cache hit rate block (exec surface's layout) ───────── */}
           {hasCache && (
             <>
-              <div className="border-t border-border-divider" />
-              <div className="px-3 pt-2 pb-3">
+              <div data-usage-divider="" className={`${USAGE_DIVIDER_CLASS} mx-3`} />
+              <div className="px-3 pb-1 pt-1">
                 <div className="text-sm font-normal text-text-secondary ">
                   {t("contextUsage.cacheHitLabel")}
                 </div>
@@ -458,7 +460,7 @@ export function ChatUsageIcon({
             </>
           )}
 
-          <div className="px-3 pb-3 pt-1 text-xs">
+          <div className="px-3 pb-2 pt-0 text-xs">
             {summary && summary.llmCallCount > 0 ? (
               <>
                 {/* The cumulative counters (LLM calls / total input /
@@ -470,7 +472,8 @@ export function ChatUsageIcon({
                     place the serving model appears. */}
                 {segments.length > 0 && (
                   <>
-                    <div className="mt-2 border-t border-border-divider pt-2">
+                    <div data-usage-divider="" className={USAGE_DIVIDER_CLASS} />
+                    <div className="pt-2">
                       {/* Section header = the popover's ONE header step
                           (`text-sm`, the cache block's size), with the
                           measure in the label itself — the exec surface's
@@ -510,31 +513,34 @@ export function ChatUsageIcon({
                   </>
                 )}
                 {multiAgent && (
-                  <div className="mt-2 border-t border-border-divider pt-2">
-                    <div className="mb-1 text-sm font-normal text-text-secondary">
-                      {t("chatUsage.byAgent")}
-                    </div>
-                    {summary.perAgent.map(({ agentId, row }) => (
-                      <div
-                        key={agentId}
-                        className="flex items-center justify-between py-0.5"
-                      >
-                        <span className="truncate text-text-secondary">
-                          {resolveName?.(agentId) || agentId.slice(0, 8)}
-                        </span>
-                        {/* Tokens only. The call count used to ride along
-                            as a bare `· 4` — a second unlabelled number,
-                            and one the docstring above already promised
-                            not to render (ledger bookkeeping). */}
-                        <span className="ml-2 shrink-0 font-mono text-text-tertiary">
-                          {formatTokens(
-                            (row?.tokens.total_input ?? 0) +
-                              (row?.tokens.total_output ?? 0),
-                          )}
-                        </span>
+                  <>
+                    <div data-usage-divider="" className={USAGE_DIVIDER_CLASS} />
+                    <div className="pt-2">
+                      <div className="mb-1 text-sm font-normal text-text-secondary">
+                        {t("chatUsage.byAgent")}
                       </div>
-                    ))}
-                  </div>
+                      {summary.perAgent.map(({ agentId, row }) => (
+                        <div
+                          key={agentId}
+                          className="flex items-center justify-between py-0.5"
+                        >
+                          <span className="truncate text-text-secondary">
+                            {resolveName?.(agentId) || agentId.slice(0, 8)}
+                          </span>
+                          {/* Tokens only. The call count used to ride along
+                              as a bare `· 4` — a second unlabelled number,
+                              and one the docstring above already promised
+                              not to render (ledger bookkeeping). */}
+                          <span className="ml-2 shrink-0 font-mono text-text-tertiary">
+                            {formatTokens(
+                              (row?.tokens.total_input ?? 0) +
+                                (row?.tokens.total_output ?? 0),
+                            )}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
                 )}
               </>
             ) : (

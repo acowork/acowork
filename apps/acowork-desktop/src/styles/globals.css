@@ -39,6 +39,8 @@
   --color-surface-subtle: #fafafa;
   --color-surface-hover: #e4e4e7;
   --color-surface-strong: #d4d4d8;
+  /* Loading / offline indicators use the theme-aware zinc-400 equivalent. */
+  --color-loading: var(--color-surface-strong);
   --color-border-strong: #d4d4d8;
 
   /* Status surface / solid fills — same recipe as the danger set above, for
@@ -915,6 +917,7 @@
   --color-surface-subtle: #18181b;
   --color-surface-hover: #3f3f46;
   --color-surface-strong: #52525b;
+  --color-loading: var(--color-surface-strong);
   --color-border-strong: #52525b;
 
   /* Status surface / solid (dark). */

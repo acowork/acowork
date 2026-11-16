@@ -2441,7 +2441,10 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
         {todos.length > 0 && (
           <div className="mx-12 mb-0 rounded-t-md border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden">
             <button
-              className="flex items-center w-full px-2.5 py-1.5 border-b border-border-divider hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-colors"
+              className={cn(
+                "flex items-center w-full px-2.5 py-1.5 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15 transition-colors",
+                !session.todosCollapsed && "border-b border-border-divider"
+              )}
               onClick={() => session.setTodosCollapsed(!session.todosCollapsed)}
             >
               {session.todosCollapsed ? (
