@@ -474,6 +474,27 @@ function toWireRefs(
   }));
 }
 
+/** ADR-106 revision (2026-11-16): append the human's own words to a Chat
+ *  session as an ordinary archive-only `user_message`, keyed by a
+ *  caller-submitted `messageId` so a retry of the same send cannot produce
+ *  a second bubble. This is the execution composer's MIRROR write: the
+ *  human surface writes human speech (the chat store refuses a
+ *  Runtime-authored `user_message`, and the Runtime must not impersonate a
+ *  person), and the row triggers nothing — it is not delivered to the Chat
+ *  Router, it wakes no session, it routes no turn. On failure the caller
+ *  degrades to "no mirror": the execution turn runs exactly as it did
+ *  before this revision, reference row unthreaded. */
+export async function appendMirrorUserMessage(
+  chatSessionId: string,
+  body: string,
+  messageId: string,
+): Promise<void> {
+  await req("POST", `/api/chat-sessions/${encodeURIComponent(chatSessionId)}/messages`, {
+    body,
+    message_id: messageId,
+  });
+}
+
 /** Post one turn into a Chat session. Goes through the intent channel
  *  (`POST /api/intents/chat-message`), NOT the session-scoped write: the
  *  durable row lands before delivery resolves (design 27 §5.1), and only

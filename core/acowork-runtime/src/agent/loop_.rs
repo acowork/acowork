@@ -1014,7 +1014,7 @@ impl AgentLoop {
             &session_id,
             &instance_id,
         );
-        crate::agent::intent_turn::append_chat_row(
+        let attempt = crate::agent::intent_turn::append_chat_row(
             &instance_id,
             &gateway_host,
             &node_token,
@@ -1024,8 +1024,49 @@ impl AgentLoop {
             "",
             meta,
         )
-        .await
-        .map_err(crate::error::RuntimeError::Ipc)
+        .await;
+        match attempt {
+            Ok(()) => Ok(()),
+            // ADR-106 revision (2026-11-16): the store refused the reference.
+            // When the coordinate was a MIRROR CLAIM this is the one refusal
+            // that is not a fault — the claim is the human surface's promise
+            // about its own write, and the promise can be stale (the Chat was
+            // deleted between the mirror append and this round; the row was
+            // never there). The contract says such a claim is *dropped, not
+            // corrected*: retry once as an origin row — unthreaded, no
+            // `opened_new`, the pre-revision shape — so the round runs and
+            // the human's work is not punished for the surface's bookkeeping.
+            // A refusal on a router-supplied coordinate is a real fault (the
+            // row that asked exists by construction) and still fails loudly.
+            Err(e) if self.turn_reference.mirror_claim => {
+                tracing::warn!(
+                    session_id = %session_id,
+                    chat_session_id = %chat_session_id,
+                    error = %e,
+                    "execution_round: mirror-claim coordinate refused; writing the reference unthreaded"
+                );
+                let degraded = self.turn_reference.degraded_mirror_claim();
+                let meta = crate::agent::intent_turn::execution_round_meta(
+                    round_id,
+                    &degraded,
+                    &session_id,
+                    &instance_id,
+                );
+                crate::agent::intent_turn::append_chat_row(
+                    &instance_id,
+                    &gateway_host,
+                    &node_token,
+                    chat_session_id,
+                    crate::agent::intent_turn::KIND_EXECUTION_ROUND,
+                    self.turn_surface.answerable_by.as_deref().unwrap_or(""),
+                    "",
+                    meta,
+                )
+                .await
+                .map_err(crate::error::RuntimeError::Ipc)
+            }
+            Err(e) => Err(crate::error::RuntimeError::Ipc(e)),
+        }
     }
 
     /// Close the round opened by [`Self::run`] / [`Self::replay`] (ADR-106 D2).

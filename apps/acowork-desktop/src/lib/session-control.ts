@@ -319,6 +319,12 @@ export function sendMessage(
   body: {
     content: string;
     message_id: string;
+    /** ADR-106 revision (2026-11-16): the id of the Chat row this surface has
+     *  already written with the same words (the execution composer's mirror
+     *  of a bound session's FIRST message). The Runtime honors it only for
+     *  the first round of a chat-bound session; a round without the claim —
+     *  or without a mirror — stays unthreaded, exactly as before. */
+    chat_trigger_row_id?: string;
     /** Slash-command *name* only; the Runtime resolves the instructions. */
     command?: string;
     /** Opaque JSON string (not an object) — the Runtime parses it. */

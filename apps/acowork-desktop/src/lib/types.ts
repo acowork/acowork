@@ -1622,11 +1622,13 @@ export interface SessionInfo {
    * from one (the router's `dispatch(new)`, a Chat-surface `+`, or a PM task
    * dispatched from a project group — design 27 §8.2).
    *
-   * It is history, not a routing flag. The execution composer no longer reads
-   * it: ADR-100 Rev. 8 (D14) canceled the chat mirror, so every execution-view
-   * send goes to `POST /sessions/{sid}/messages` and chat gains no row. The
-   * binding still names where a turn's interaction cards may land and which
-   * chat the session belongs to.
+   * It is history, not a routing flag. ADR-100 Rev. 8 (D14) canceled the
+   * per-message chat mirror; ADR-106's revision of 2026-11-16 restored ONE
+   * row of it: the execution composer reads this id to mirror the session's
+   * FIRST human message into that Chat as an archive-only `user_message`
+   * (no Router, no delivery), so the round's card is not the first thing the
+   * Chat shows. Every later execution-view send still goes to
+   * `POST /sessions/{sid}/messages` alone and chat gains no row.
    *
    * Absent on responses from a Runtime predating the binding — `undefined`
    * means "no chat", which is the correct fallback, not a bug.

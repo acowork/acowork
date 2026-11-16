@@ -243,6 +243,16 @@ pub struct PostMessageRequest {
     /// these ids are the only client-supplied attachment fact.
     #[serde(default)]
     pub attachment_ids: Vec<String>,
+    /// ADR-106 revision (2026-11-16): an optional client-submitted row id.
+    /// The write entry already treats a submitted `meta.message_id` as the
+    /// idempotency key (a repeat returns the stored row and appends nothing);
+    /// this exposes that key to the human archive surface, whose one caller
+    /// needs it: the execution composer mirrors a human's first words into
+    /// the bound Chat before posting them to the session, and a retry of
+    /// that pair must not produce a second bubble. Absent = the store mints
+    /// one, exactly as every prior call.
+    #[serde(default)]
+    pub message_id: String,
 }
 
 /// `POST /api/chat-sessions/{session_id}/participants` — invite one or more
@@ -941,6 +951,9 @@ async fn post_message(
     let from = ctx.effective_user_id().to_string();
     let dir = data_dir(&state)?;
     let attachment_ids = req.attachment_ids;
+    // A submitted id is the store's idempotency key (see `PostMessageRequest`);
+    // an empty one means "mint it", the pre-existing behavior.
+    let message_id = req.message_id.trim().to_string();
     let message = offload(move || {
         let msg = SessionMessage {
             seq: 0,
@@ -949,7 +962,10 @@ async fn post_message(
             kind: chat_sessions::KIND_USER_MESSAGE.to_string(),
             body,
             to: String::new(),
-            meta: IntentMeta::default(),
+            meta: IntentMeta {
+                message_id,
+                ..IntentMeta::default()
+            },
             attachment_ids,
             attachments: Vec::new(),
         };
@@ -3691,6 +3707,91 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// ADR-106 revision (2026-11-16): the human archive surface may submit
+    /// the row id. One producer needs this today — the execution composer
+    /// mirrors the FIRST message of a chat-bound session before posting it
+    /// to the session, and a retry of that pair must reuse the stored row
+    /// instead of doubling the bubble. The store already treated a submitted
+    /// `meta.message_id` as its idempotency key; this endpoint was the one
+    /// writer that could not hand it one.
+    #[tokio::test]
+    async fn human_post_message_honors_a_submitted_message_id_idempotently() {
+        let dir = test_support::temp_dir("chatsessmirror");
+        let app = router(&dir);
+        let admin = login(&app, "root", test_support::PWD).await;
+        let (alice, alice_token) = make_user(&app, &admin, "mirroralice").await;
+        let (bob, _bob_token) = make_user(&app, &admin, "mirrorbob").await;
+        let resp = app
+            .clone()
+            .oneshot(req(
+                "POST",
+                "/api/chat-sessions",
+                Some(&format!(
+                    r#"{{"kind":"user_group","participants":["{alice}","{bob}"]}}"#
+                )),
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let session_id = json(resp).await["session_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        let post = |message_id: &str| {
+            let app = app.clone();
+            let token = alice_token.clone();
+            let sid = session_id.clone();
+            let message_id = message_id.to_string();
+            async move {
+                app.oneshot(req(
+                    "POST",
+                    &format!("/api/chat-sessions/{sid}/messages"),
+                    Some(&format!(
+                        r#"{{"body":"first words","message_id":"{message_id}"}}"#
+                    )),
+                    Some(&token),
+                ))
+                .await
+                .unwrap()
+            }
+        };
+
+        let first = post("msg-mirror-1").await;
+        assert_eq!(first.status(), StatusCode::CREATED);
+        let v = json(first).await;
+        assert_eq!(v["meta"]["message_id"], "msg-mirror-1");
+        let seq = v["seq"].as_u64().unwrap();
+
+        // A retry under the same id returns the stored row — same seq, no
+        // second line — because the id, not the call, is the fact.
+        let again = post("msg-mirror-1").await;
+        assert_eq!(again.status(), StatusCode::CREATED);
+        let v2 = json(again).await;
+        assert_eq!(v2["seq"].as_u64().unwrap(), seq, "a retry must not double the row");
+
+        // A different id is a different human message and lands as its own row.
+        let second = post("msg-mirror-2").await;
+        assert_eq!(second.status(), StatusCode::CREATED);
+        assert_ne!(json(second).await["seq"].as_u64().unwrap(), seq);
+
+        let resp = app
+            .oneshot(req(
+                "GET",
+                &format!("/api/chat-sessions/{session_id}/messages"),
+                None,
+                Some(&alice_token),
+            ))
+            .await
+            .unwrap();
+        let page = json(resp).await;
+        let rows = page["messages"].as_array().unwrap();
+        assert_eq!(rows.len(), 2, "the retry appended nothing");
+        assert_eq!(rows[0]["kind"], "user_message");
+        assert_eq!(rows[0]["body"], "first words");
     }
 
     #[tokio::test]

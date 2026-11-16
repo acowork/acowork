@@ -259,6 +259,7 @@ impl E2eHarness {
                     SessionMessage::ChatMessage {
                         content: content.to_string(),
                         message_id: message_id.to_string(),
+                        chat_trigger_row_id: String::new(),
                         active_skill: None,
                         attached_items: None,
                         content_parts: None,

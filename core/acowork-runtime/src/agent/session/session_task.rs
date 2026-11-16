@@ -83,6 +83,15 @@ pub enum SessionMessage {
     ChatMessage {
         content: String,
         message_id: String,
+        /// ADR-106 revision (2026-11-16): the id of the Chat row the sending
+        /// surface claims to have written for these same words. Only the
+        /// execution surface's FIRST message carries one — the surface appends
+        /// the sentence to the bound Chat as an ordinary archive-only
+        /// `user_message` before posting here, so the Chat can show the human's
+        /// words beside the card they produce. Honored only where it can be
+        /// true (chat-bound session, first round); otherwise dropped and the
+        /// reference row stays unthreaded. Empty = no claim.
+        chat_trigger_row_id: String,
         /// Per-turn skill instructions the user explicitly selected via a chat
         /// `command` (resolved against the agent's `SkillRegistry`). Turn-scoped:
         /// `None` means "no skill selected this turn" and clears only this slot —
@@ -334,6 +343,7 @@ impl std::fmt::Debug for SessionMessage {
             SessionMessage::ChatMessage {
                 content,
                 message_id,
+                chat_trigger_row_id,
                 active_skill,
                 attached_items,
                 content_parts,
@@ -343,6 +353,7 @@ impl std::fmt::Debug for SessionMessage {
                 .debug_struct("ChatMessage")
                 .field("content", &content.chars().take(64).collect::<String>())
                 .field("message_id", message_id)
+                .field("chat_trigger_row_id", chat_trigger_row_id)
                 .field("has_skill", &active_skill.is_some())
                 .field(
                     "attached_count",
@@ -1037,6 +1048,7 @@ impl SessionTask {
                 Some(SessionMessage::ChatMessage {
                     content,
                     message_id,
+                    chat_trigger_row_id,
                     active_skill,
                     attached_items,
                     content_parts,
@@ -1223,12 +1235,42 @@ impl SessionTask {
                         surface.chat_session_id = bound;
                     }
                     // ADR-106 D3: a turn composed against the execution surface
-                    // answers no Chat row — the human's words are not in the
-                    // transcript (Rev. 8: execution-surface messages never enter
-                    // the Chat channel) — so its reference row is written
-                    // unthreaded, and the routing did not open anything.
+                    // answers no Chat row of the Chat's own making — the human
+                    // typed it here, not there (Rev. 8: execution-surface
+                    // messages never enter the Chat channel *through the
+                    // Router*) — so its reference row is written unthreaded,
+                    // and the routing did not open anything.
+                    //
+                    // ADR-106 revision (2026-11-16) carves one exception out
+                    // of that, and the exception is a CLAIM, not a derivation:
+                    // the surface that took the human's first words may have
+                    // already appended them to the bound Chat as an ordinary
+                    // archive-only `user_message` (the human surface writes
+                    // human speech; the Runtime never impersonates it), and it
+                    // says so with that row's id. The claim is honored only
+                    // where it can be true — chat-bound, and the side table
+                    // names no round before this turn's `open_round`. A claim
+                    // that cannot be honored is dropped, not corrected: the
+                    // round then runs exactly as every execution-surface
+                    // round ran before this revision.
+                    let first_round = agent_loop
+                        .session
+                        .conversation
+                        .as_ref()
+                        .and_then(|conv| {
+                            crate::rounds::fold_or_rebuild(
+                                conv.rounds_index_path(),
+                                conv.session_path(),
+                            )
+                            .ok()
+                        })
+                        .is_some_and(|rounds| rounds.is_empty());
                     agent_loop.turn_reference =
-                        crate::agent::intent_turn::TurnReference::default();
+                        crate::agent::intent_turn::TurnReference::from_exec_mirror_claim(
+                            &chat_trigger_row_id,
+                            !surface.chat_session_id.is_empty(),
+                            first_round,
+                        );
 
                     let final_content_parts: Option<
                         Vec<acowork_core::providers::traits::ContentPart>,
@@ -1528,6 +1570,11 @@ impl SessionTask {
                     // that owes no write-back (`response`) has no such row and
                     // stays unthreaded rather than pointing at its own intent id.
                     agent_loop.turn_reference = crate::agent::intent_turn::TurnReference {
+                        // Router-supplied coordinate: the row it names exists
+                        // by construction (the Router wrote it before
+                        // delivering), so a refusal here is a fault, not a
+                        // stale mirror claim — see `mirror_claim`.
+                        mirror_claim: false,
                         trigger_message_id: if write_back {
                             chat_row_id.clone()
                         } else {
