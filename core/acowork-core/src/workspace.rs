@@ -59,6 +59,30 @@ pub fn migrated_marker_path(work_dir: impl AsRef<Path>) -> PathBuf {
 /// service, so the service-side check would be unreachable code.
 pub const STORE_IMPORT_MAX_BYTES: u64 = 64 * 1024 * 1024;
 
+/// Directory shared by every local service under the user's home:
+/// `{home}/.acowork/{service}/...` (ADR-064 PM, ADR-084 user, ADR-101 memory).
+/// Spelled once here because the shell misuse guard (ADR-117 D4 layer 3)
+/// must not re-derive it inside the Runtime crate.
+pub const PLATFORM_DATA_DIR: &str = ".acowork";
+
+/// Absolute platform data directory for the current user, when a home
+/// environment variable is available. Windows has no `HOME`, only
+/// `USERPROFILE`; an empty value is treated as unset.
+pub fn platform_data_dir() -> Option<PathBuf> {
+    #[cfg(windows)]
+    if let Some(profile) = std::env::var_os("USERPROFILE")
+        && !profile.is_empty()
+    {
+        return Some(PathBuf::from(profile).join(PLATFORM_DATA_DIR));
+    }
+    if let Some(home) = std::env::var_os("HOME")
+        && !home.is_empty()
+    {
+        return Some(PathBuf::from(home).join(PLATFORM_DATA_DIR));
+    }
+    None
+}
+
 /// Path of the workspace store: `{work_dir}/memory/private.sqlite`.
 pub fn store_path(work_dir: impl AsRef<Path>) -> PathBuf {
     work_dir.as_ref().join(MEMORY_DIR).join(STORE_FILE)

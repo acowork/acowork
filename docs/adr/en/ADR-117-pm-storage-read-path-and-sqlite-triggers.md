@@ -1,6 +1,6 @@
 # ADR-117: PM storage evolution — the tree stays authoritative, fix the read path first, start the SQLite migration only when a trigger fires
 
-**Status**: Decided (read-path fix implemented; SQLite migration not started — triggers in §3 D5)
+**Status**: Decided (read-path fix and D4's three corruption-defence layers implemented; SQLite migration not started — triggers in §3 D5)
 **Date**: 2026-11-16
 **Decided by**: 大鱼
 **Predecessors**:
@@ -23,7 +23,7 @@
 | D1 | Storage authority | **The tree stays.** `task.json` / `project.json` plus physical nesting remain the only truth. All four ADR-061 reasons still hold (literal = logical / single atomic directory operation / zero redundancy so no double-write / idempotent walkdir rebuild). No second store this round |
 | D2 | Read path | **Reads must go through the in-memory index.** Any implementation that filters on the index and then "tops it up" with `get_task()` is a defect: when the index already holds the field, hitting the disk is pure waste. `compute_blocked_by` and the project badge tally are fixed |
 | D3 | New contract | `GET /projects/counts` (index-only, `total` / `submitted` per project). The home screen no longer does an N+1 over full task entities to render badges |
-| D4 | Corruption defence | **Independent of storage format.** Three layers: quarantine unparseable files into `.corrupt/`, keep the last good content as `.bak` before overwriting, and **guard `shell` against protected prefixes** (`~/.acowork/`). Layer three is the actual stop-loss; one and two only guarantee "damage is recoverable" |
+| D4 | Corruption defence | **Independent of storage format, implemented (see §5).** Three layers: leave a bad file **in place** and copy a forensic duplicate into `.corrupt/`, keep the last parseable version as `.bak` before overwriting, and **guard `shell` against protected prefixes** (`~/.acowork/`, whose path comes from the single source `acowork-core::workspace`). Layer three is the actual stop-loss; one and two only guarantee "damage is recoverable" |
 | D5 | Migration trigger | The SQLite migration starts **only when one of the quantified conditions in §3 D5 holds**. Never "because it feels like it will get slow" |
 | D6 | Migration method | If triggered: follow ADR-082 — keep the `PmStore` trait boundary, add a SQLite backend, **run the test suite against both**, switch under a flag, then delete the old one. No big-bang rewrite |
 
@@ -106,19 +106,21 @@ Two fixes:
 - The route is a static segment coexisting with `/projects/{pid}` (`matchit` prefers literals); a router-level test locks this down.
 - Boundary against existing endpoints: `enable/disable` is App admission and unrelated; this is purely a list projection.
 
-### D4: Three corruption-defence layers, format-independent (**not yet implemented**)
+### D4: Three corruption-defence layers, format-independent (**implemented**)
 
-1. **Quarantine**: when `walk_tasks` meets an unparseable `task.json`, move it to `{data_dir}/.corrupt/{ts}/…` (keep the original, never delete), continue the rebuild, and surface the list through `/health` or `/diagnostics`.
-2. **Keep the last good version**: before overwriting, `atomic_write_json` copies the old content to `*.json.bak` **only if the target currently parses**. Parse-first prevents a PM write from replacing the only good backup with content an external process already corrupted. The `.bak` suffix keeps `walk_tasks` from treating it as a `.json` to index.
-3. **Guard `shell` against protected prefixes**: scan the command string before execution; on a hit against `~/.acowork/` (including `$HOME` / `$USERPROFILE` / expanded absolute forms, separators normalised) reject and point at "platform data directory — use the corresponding App's API".
+1. **Forensic copy**: when `walk_tasks` meets an unparseable `task.json`, it **copies** it to `{data_dir}/.corrupt/{project_id}/{task_id}/task.json` and **leaves the original in the authoritative tree** — moving it away would delete the task from the tree, which directly contradicts ADR-061's "the tree is the authority". The fixed path (rather than `{ts}/`) stops repeated restarts from accumulating duplicates. The rebuild continues, and records (project / task / original path / copy path / error / time) are exposed as `corrupt_files` / `corrupt_count` on `GET /health`; the list is rebuilt from scratch on every `rebuild_index`, so a repaired file drops off. `skipped` now counts every skipped entry, and the remaining `?` propagations in `rebuild_index` / `walk_tasks` are gone — `walk_tasks` no longer returns `Result` at all — so an I/O failure can no longer take the service down or drop an entire project.
+2. **Keep the last good version**: before overwriting, `atomic_write_json` writes the old content to `*.json.bak` **only if the target currently parses as JSON** (one copy per file, overwritten, no rotation, and itself staged + renamed so a half-written backup cannot destroy the only good copy). An already-corrupt target leaves `.bak` alone, so the only good backup cannot be replaced by garbage; a failed backup only logs a warning and never blocks the write. Scans look only for `task.json` / `project.json`, so `.bak` is never indexed. **Boundary**: "parses" means valid JSON syntax, not "deserializes into the PM schema"; a JSON object with a wrong field type still counts as good and can overwrite `.bak` (see §6).
+3. **Guard `shell` against protected prefixes**: `ShellTool::execute` scans `command` before any spawn; a hit against `~/.acowork/` (including `$HOME` / `$USERPROFILE` / `%USERPROFILE%` and the absolute path expanded from `acowork_core::workspace::platform_data_dir()`, with separators and case normalised) is rejected with a pointer to "platform data directory — use the corresponding App's API". All three shell tool names (`bash` / `powershell` / `shell`) share this one implementation, and the path constant lives in `acowork-core`, so PM's data directory is not hard-coded into the Runtime.
 
-**State the boundary honestly**: string scanning cannot stop variable interpolation or relative paths after a `cd`. It is **misuse mitigation, not a security boundary**. The threat model is "an Agent writes the wrong path", not "a malicious attacker", and that covers the overwhelming majority of real cases. The end state is OS-level sandboxing (Windows Job Object / AppContainer, Linux namespaces), out of scope here.
+**State the boundary honestly**: string scanning cannot stop variable interpolation, relative paths after a `cd`, or an interpreter one-liner. It is **misuse mitigation, not a security boundary**. The threat model is "an Agent writes the wrong path", not "a malicious attacker"; the end state is OS-level sandboxing (Windows Job Object / AppContainer, Linux namespaces), out of scope here. Note that `shell` is wrapped by `PathGuardedTool` but is not in `is_filesystem_tool()`, so the guard belongs to the tool itself rather than to the path-validation layer.
 
 > None of this depends on the storage format. If SQLite happens later, layers 1 and 2 map directly (quarantine bad rows, snapshot before write) and layer 3 is unchanged.
 
 ### D5: Triggers for the SQLite migration
 
-Any one of these starts it; absent all of them, it does not start:
+**Scope first**: these are **human decision gates evaluated before a release**, not runtime auto-detection. The PM process does not watch task counts, does not evaluate `elapsed_ms`, and never imports data or switches backends on its own; the `elapsed_ms` log field only makes the threshold *evaluable*. Every step in D6 is likewise a development / ops action that needs its own scheduling and human confirmation. **This ADR contains no runtime auto-migration or auto-switch mechanism** — auto-migration would tie an irreversible data move to a momentary runtime metric, with far too large a failure domain (one Defender cold-start scan is enough to trip a "> 1 s" threshold).
+
+The migration starts only when at least one of T1-T4 holds (both sub-conditions of T1 must hold together); when none holds, it does not start:
 
 | # | Trigger | Why |
 |---|---|---|
@@ -152,6 +154,7 @@ Follow the ADR-082 path that worked:
 | Keep the N+1 but add an HTTP cache on `/projects/{pid}/tasks` | A cache introduces "the index is not the truth" and needs invalidation. The home screen never wanted task entities; fixing the caller is 60 lines, caching is more work for worse semantics |
 | Store `total` / `submitted` inside `project.json` | Violates ADR-061's zero-redundancy rule (double write, guaranteed drift). Counts are derived; they belong on the index side |
 | Use filesystem ACLs to block external writes | Cannot stop a same-user Agent process (same identity). Ineffective for this threat model |
+| Always dual-write (write JSON + SQLite, read only from DB, JSON as backup) | Writes really are single-task and cheap (one process, one writer; one extra transaction costs ~1-3 ms), so **performance is not the issue**. The problem is two commit points that are not atomic together: a file `rename` is atomic, a DB transaction is atomic, the pair is not — the number of crash windows equals the number of writes, so lighter and more frequent writes mean more windows. Making it reliable needs a `write_seq` plus startup reconciliation, which turns the JSON "backup" into a versioned second master and breaks ADR-061's zero-redundancy rule (dual write was already rejected in §1.3). Falling back to "single write to DB + one-way JSON export" has one commit point, but it **triggers D5 unconditionally**: the read path is already fixed (155 ms to 8 ms), `rebuild_index` is 55 ms and not a bottleneck, so there is no gain at this scale while giving up "fix data in a text editor" and the tree-as-authority invariant. PM writes are not all single-task either: `reparent_task` updates a whole subtree's `depth`/`dir_path`, `delete_task` removes a subtree, `delete_project` archives a whole project, and a dispatch tick writes `dispatched_at` in bulk. Verdict: not worth it; the tree stays authoritative |
 
 ---
 
@@ -173,6 +176,14 @@ Follow the ADR-082 path that worked:
 | `apps/acowork-desktop/src/views/pm/ProjectBoard.tsx` | Same skeleton colour fix; the view now derives `loading` from "this project has never loaded successfully" |
 | `apps/acowork-desktop/src/views/ProjectsView.boot.test.tsx` | 5 new cases: loading never reaches the empty state / 503 shows booting / 4xx also never empty / only a successful empty response shows empty / board is loading on project switch |
 | `src/i18n/locales/{zh-CN,en}.json` | Added `pm.loadingProjects` / `pm.bootingTitle` / `pm.bootingDesc` / `pm.bootingRetry`; also fixed `pm.offlineHint` in zh-CN, which still carried the English string |
+| `core/acowork-pm/src/store/corrupt.rs` | D4-1 new: `CorruptRecord` / `CorruptRegistry` / `quarantine_copy` (fixed path, idempotent, original untouched) + 2 unit tests |
+| `core/acowork-pm/src/store/tree.rs` | D4-1: `TreePmStore` holds the corrupt-file registry; `rebuild_index` / `walk_tasks` lose the remaining `?` propagations (`walk_tasks` no longer returns `Result`), count every skipped entry, and copy + record bad files; new `corrupt_files()` / `corrupt_registry()` + 1 end-to-end test (corrupt → forensic copy → repair → list clears) |
+| `core/acowork-pm/src/health.rs`, `server.rs` | D4-1: `/health` gains `corrupt_files` / `corrupt_count`, sharing the store's registry |
+| `core/acowork-pm/src/store/atomic.rs` | D4-2: keep `*.json.bak` before overwrite only when the target parses (staged + renamed atomically, one copy, overwritten, failures only warn) + 2 unit tests |
+| `core/acowork-core/src/workspace.rs` | D4-3: new `PLATFORM_DATA_DIR` / `platform_data_dir()`, the single source for protected prefixes |
+| `core/acowork-runtime/src/tools/builtin/shell.rs` | D4-3: `protected_prefix_hit()` + rejection before spawn (shared by bash / powershell / shell) + 4 unit tests |
+
+**D4 verification this round**: `cargo test -p acowork-pm --lib` → **169 passed** (+5); `cargo test -p acowork-runtime --lib shell` → **77 passed** (+4); `cargo clippy -p acowork-core|acowork-pm|acowork-runtime --lib -- -D warnings` passes on all three crates; `./dev/ci.sh redlines` all 14 green. The workspace-wide `--all-targets -D warnings` run is still blocked by 8 **pre-existing** clippy errors in `acowork-gateway` (`supervisor.rs` / `ticket.rs` / `auth_middleware.rs`), unrelated to this change.
 
 **The first-load state machine (why this was a bug, not just a missing animation)**
 
@@ -225,7 +236,8 @@ Conclusion: **at the current scale the rebuild (55 ms) is not the bottleneck.** 
 
 - `/projects/{pid}/tasks` still returns full entities (503 KB). The board needs that; it is not a defect — but it must never be reused to compute badge counts.
 - `project_counts` is an O(N) memory pass. At 10 000 tasks it is a few milliseconds, acceptable; beyond that, D5 T1 applies.
-- D4's three layers are unimplemented, so external writes are still possible — no longer fatal, since tolerance is in place.
+- D4's three layers are implemented, but layer 3 is only string-level misuse mitigation: variable interpolation, relative paths after a `cd`, and interpreter one-liners still get through; if the store ever moves to SQLite, `shell` can write `pm.sqlite` just as well. OS-level sandboxing remains the end state.
+- Layer 2's "parseable" check stops at JSON syntax: an object like `{"id": 123}` with a wrong field type still counts as a good version and can overwrite `.bak`, displacing the real previous version. Closing that gap needs a `DeserializeOwned` bound on `atomic_write_json`, which the current `activity.json` writer (`&[TaskActivity]`, a slice) does not satisfy, so it is untouched this round. The `.bak` write itself is now atomic, so a backup can no longer be destroyed by its own partial write — but the "semantically broken yet syntactically valid" hole remains.
 
 **Neutral**
 
@@ -236,7 +248,7 @@ Conclusion: **at the current scale the rebuild (55 ms) is not the bottleneck.** 
 ## 7. Open questions
 
 1. ~~**How to measure T1**: `rebuild_index` logs `count` / `skipped` but no duration.~~ **Resolved**: the log line now carries `elapsed_ms`; first reading is 55 ms at 85 tasks (§5). Record it before each release so a curve exists.
-2. **Should `.corrupt/` surface in the UI**: today only the log has the path, and users do not read logs. Leaning towards a non-blocking notice on the project list.
+2. ~~**Should `.corrupt/` surface in the UI**~~ **Partly resolved**: the list (original and copy paths included) is exposed as `corrupt_files` on `/health`; the Desktop UI is not wired up yet — leaning towards a non-blocking notice on the project list.
 3. **Beyond the command scan**: should PM's data directory carry a process-held `.lock` recording the last writer, for post-hoc attribution? Observable only, not preventive.
 4. **`/projects` itself still opens 4 files**: not worth changing at this project count. At hundreds of projects, `list_projects` should also read from the index (which currently holds no project entries — a `by_project_meta` map would be needed).
 5. **Attachment metadata lives inside `task.json`**: one corrupt file also loses attachment index entries. The `attachments/` directories survive and are rebuildable, but the rebuild rules are undefined.

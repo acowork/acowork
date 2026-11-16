@@ -138,7 +138,10 @@ impl PmService {
                     let addr = listener.local_addr()?;
                     let router = self
                         .router()
-                        .merge(crate::health::health_route(self.config.data_dir.clone()));
+                        .merge(crate::health::health_route(
+                            self.config.data_dir.clone(),
+                            self.store.corrupt_registry(),
+                        ));
                     tracing::info!(addr = %addr, "PM server listening (full router)");
                     tokio::spawn(async move {
                         if let Err(e) = axum::serve(listener, router).await {

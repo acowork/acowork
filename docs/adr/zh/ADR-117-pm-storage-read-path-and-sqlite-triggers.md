@@ -1,6 +1,6 @@
 # ADR-117：PM 存储演进 — 树存储仍为权威，先修读路径，SQLite 迁移按触发条件启动
 
-**状态**：已定案（读路径修复已实施；SQLite 迁移未启动，触发条件见 §3 D5）
+**状态**：已定案（读路径修复 + D4 防损坏三层已实施；SQLite 迁移未启动，触发条件见 §3 D5）
 **日期**：2026-11-16
 **决策者**：大鱼
 **前置**：
@@ -23,7 +23,7 @@
 | D1 | 存储权威 | **树存储保留**。`task.json` / `project.json` + 物理嵌套仍是唯一真相，ADR-061 的四条理由（字面=逻辑 / 单一原子目录操作 / 零冗余无双写 / walkdir 重建幂等）全部继续成立。本轮不引入第二存储 |
 | D2 | 读路径 | **读必须走内存索引**。任何「拿索引筛完再用 `get_task()` 补一刀」的实现都视为缺陷：索引已经持有该字段时，读盘是纯浪费。已修 `compute_blocked_by` 与项目徽章计数 |
 | D3 | 新契约 | 新增 `GET /projects/counts`（index-only，返回每项目 `total` / `submitted`）。首页徽章不再 N+1 拉全量任务实体 |
-| D4 | 防损坏 | **与存储格式无关**。三层：坏文件隔离到 `.corrupt/`、写前保留上一版合法内容（`.bak`）、**shell 工具受保护前缀守卫**（`~/.acowork/`）。第三层是真正的止损点，前两层只保证「坏了不丢、能恢复」 |
+| D4 | 防损坏 | **与存储格式无关，已实施（见 §5）**。三层：坏文件**留原地**并复制取证副本到 `.corrupt/`、写前保留上一版合法内容（`.bak`）、**shell 工具受保护前缀守卫**（`~/.acowork/`，路径由 `acowork-core::workspace` 单点提供）。第三层是真正的止损点，前两层只保证「坏了不丢、能恢复」 |
 | D5 | 迁移触发 | SQLite 迁移**只在下列任一条件成立时启动**，见 §3 D5 的量化门槛。不因「感觉会变慢」而启动 |
 | D6 | 迁移方式 | 若触发：照 ADR-082 的路子——`PmStore` trait 边界不动，新增 SQLite 后端，**双后端测试双跑**、灰度切换、再删旧实现。禁止一次性重写 |
 
@@ -106,19 +106,21 @@ ADR-061 不变。`task.json` / `project.json` 与物理嵌套仍是唯一真相�
 - 路由是静态段，与 `/projects/{pid}` 共存（`matchit` 静态优先），已加路由级测试锁死。
 - 与既有端点边界：`enable/disable` 那套属于 App 准入，跟这个无关；这里只是列表投影。
 
-### D4：防损坏按「介质无关」三层做（**待实施**）
+### D4：防损坏按「介质无关」三层做（**已实施**）
 
-1. **坏文件隔离**：`walk_tasks` 遇到不可解析的 `task.json` 时移入 `{data_dir}/.corrupt/{ts}/…`（保留原文件，不删），索引继续，坏文件清单通过 `/health` 或 `/diagnostics` 暴露。
-2. **写前保留上一版**：`atomic_write_json` 在覆盖前，**仅当目标当前可解析**时把旧内容 copy 成 `*.json.bak`。可解析才覆盖，避免外部写坏后 PM 下一次写把唯一好备份顶掉。`.bak` 后缀不会被 `walk_tasks` 当 `.json` 扫到。
-3. **shell 受保护前缀守卫**：`shell` 执行前扫描命令串，命中 `~/.acowork/`（含 `$HOME` / `$USERPROFILE` / 展开后的绝对路径，分隔符归一化）即拒绝并指向「平台数据目录，请用对应 App 的 API」。
+1. **坏文件取证**：`walk_tasks` 遇到不可解析的 `task.json` 时**复制**一份到 `{data_dir}/.corrupt/{project_id}/{task_id}/task.json`，**原文件留在权威树里不动**——移走会让任务从树上消失，与 ADR-061「树是权威」直接冲突。固定路径（而非 `{ts}/`）保证重启不累积副本；索引继续，记录（project / task / 原路径 / 副本路径 / 错误 / 时间）经 `GET /health` 的 `corrupt_files` / `corrupt_count` 暴露，每次 `rebuild_index` 从零刷新，修好即消失。同时把 `skipped` 补齐为「所有被跳过的条目」并消掉 `rebuild_index` / `walk_tasks` 残留的 `?`，`walk_tasks` 因此不再返回 `Result`——IO 层失败不再能打挂启动或丢掉整个项目。
+2. **写前保留上一版**：`atomic_write_json` 覆盖前，**仅当目标当前是合法 JSON** 才把旧内容写成 `*.json.bak`（单文件一份、覆盖式、不轮转，且同样走 `tmp` + `rename` 原子替换——备份自身写一半也不能毁掉唯一好版本）。目标已坏时不动 `.bak`，避免把唯一好备份顶掉；备份失败只告警、绝不阻断写。`.bak` 不会被只找 `task.json` / `project.json` 的扫描读到。**边界**：这里的「合法」只指 JSON 语法可解析，不等于能反序列化成 `Task`；字段类型错误的 JSON 仍会被当成好版本覆盖 `.bak`（见 §6）。
+3. **shell 受保护前缀守卫**：`ShellTool::execute` 在任何 spawn 之前扫描 `command`，命中 `~/.acowork/`（含 `$HOME` / `$USERPROFILE` / `%USERPROFILE%` / 由 `acowork_core::workspace::platform_data_dir()` 展开的绝对路径，分隔符与大小写归一化）即拒绝并指向「平台数据目录，请用对应 App 的 API」。三个 shell 工具名（`bash` / `powershell` / `shell`）共用这一处实现，路径常量放在 `acowork-core`，避免把 PM 数据目录硬编码进 Runtime。
 
-**边界要说清**：字符串扫描挡不住变量拼接与 `cd` 后的相对路径，它是**防误伤**而不是安全边界。威胁模型是「Agent 误写」，不是「恶意攻击者」，这已经覆盖绝大多数真实场景。真正的最终形态是 OS 级沙箱（Windows Job Object / AppContainer、Linux namespace），本轮不做。
+**边界要说清**：字符串扫描挡不住变量拼接、`cd` 后的相对路径与解释器一行流，它是**防误伤**而不是安全边界。威胁模型是「Agent 误写」，不是「恶意攻击者」；真正的最终形态是 OS 级沙箱（Windows Job Object / AppContainer、Linux namespace），本轮不做。另：`shell` 虽被 `PathGuardedTool` 包装，但不在 `is_filesystem_tool()` 名单里，所以守卫落在工具自身而不是路径校验层。
 
 > 这三层与存储格式无关。即使将来迁了 SQLite，第 1、2 层语义照搬（坏行隔离、写前快照），第 3 层一字不改。
 
 ### D5：SQLite 迁移的触发条件
 
-任一条成立即可启动，缺一条就不启动：
+**边界（先说清）**：这些是**发布前由人判定的立项门槛**，不是运行时自动检测。PM 进程不监控任务数、不评估 `elapsed_ms`、不会自行导入数据或切换存储后端；日志里的 `elapsed_ms` 只是让门槛「可评估」。D6 的每一步同样是开发 / 运维动作，需单独排期与人工确认。**本 ADR 不包含任何运行时自动迁移或自动切换机制**——自动迁移等于把一次不可逆的数据搬迁绑到运行时瞬时指标上，故障域过大（一次 Defender 冷启动扫描就够让「> 1 秒」误触发）。
+
+T1–T4 任一成立才启动（T1 内部两个条件须同时满足）；全部不成立则不启动：
 
 | # | 触发条件 | 理由 |
 |---|---|---|
@@ -152,6 +154,7 @@ ADR-061 不变。`task.json` / `project.json` 与物理嵌套仍是唯一真相�
 | 保留 N+1 但给 `/projects/{pid}/tasks` 加 HTTP 缓存 | 缓存会把「索引不是真相」的前提引入；且首页要的本来就不是任务实体。修调用点 60 行，加缓存要处理失效，得不偿失 |
 | 把 `total` / `submitted` 直接塞进 `project.json` | 违反 ADR-061 零冗余字段（会引入双写与不一致）。计数是派生数据，必须留在索引侧 |
 | 用文件 ACL 挡住外部写入 | 挡不住同用户的 Agent 进程（同一身份），只挡其他用户。对本威胁模型无效 |
+| 始终双写（写 JSON + SQLite、读只读 DB、JSON 作备份） | 写确为单任务级轻量操作（单进程单写者，多一次事务约 1–3 ms），**性能不是问题**；但两个介质各有一个提交点且组合不原子——文件 `rename` 原子、DB 事务原子，二者一起并不原子，崩溃窗口数 = 写次数，写越频繁窗口越多。要可靠就得加 `write_seq` + 启动对账，JSON 从「备份」变成带版本的第二主，违反 ADR-061 零冗余（§1.3 已否决双写）。退一步改成「DB 单写 + 单向导出 JSON」虽只有一个提交点，却等于**无条件触发 D5**：读路径已修（155 ms → 8 ms）、`rebuild_index` 55 ms 非瓶颈，当前规模零收益，还要放弃「文本编辑器修数据」与目录树即权威。另外 PM 的写并非全是单任务：`reparent_task` 改整棵子树 `depth`/`dir_path`、`delete_task` 删子树、`delete_project` 整体归档、派发 tick 批量写 `dispatched_at`。结论：性价比不足，维持树权威 |
 
 ---
 
@@ -173,6 +176,14 @@ ADR-061 不变。`task.json` / `project.json` 与物理嵌套仍是唯一真相�
 | `apps/acowork-desktop/src/views/pm/ProjectBoard.tsx` | 骨架同样改 `surface-strong`；外层按「该项目尚未成功加载」判定 loading |
 | `apps/acowork-desktop/src/views/ProjectsView.boot.test.tsx` | 新增 5 个用例：加载中不可达空态 / 503 显示启动中 / 4xx 也不落空态 / 成功且为空才显示空态 / 切项目时看板为 loading |
 | `src/i18n/locales/{zh-CN,en}.json` | 新增 `pm.loadingProjects` / `pm.bootingTitle` / `pm.bootingDesc` / `pm.bootingRetry`；顺手把 zh-CN 里 `pm.offlineHint` 的英文原样修正为中文 |
+| `core/acowork-pm/src/store/corrupt.rs` | D4-1 新增：`CorruptRecord` / `CorruptRegistry` / `quarantine_copy`（固定路径、幂等、原文件不动）+ 2 个单测 |
+| `core/acowork-pm/src/store/tree.rs` | D4-1：`TreePmStore` 持有坏文件 registry；`rebuild_index` / `walk_tasks` 消掉残留 `?`（`walk_tasks` 不再返回 `Result`）、补齐 `skipped`、坏文件复制取证并记录；新增 `corrupt_files()` / `corrupt_registry()` + 1 个端到端单测（损坏 → 取证 → 修复 → 清单清空） |
+| `core/acowork-pm/src/health.rs`、`server.rs` | D4-1：`/health` 新增 `corrupt_files` / `corrupt_count`，与 store 共享同一 registry |
+| `core/acowork-pm/src/store/atomic.rs` | D4-2：覆盖前仅当目标可解析时保留 `*.json.bak`（`tmp` + `rename` 原子替换、单份、覆盖式、失败只告警）+ 2 个单测 |
+| `core/acowork-core/src/workspace.rs` | D4-3：新增 `PLATFORM_DATA_DIR` / `platform_data_dir()`，受保护前缀的单一来源 |
+| `core/acowork-runtime/src/tools/builtin/shell.rs` | D4-3：`protected_prefix_hit()` + spawn 前拒绝（bash / powershell / shell 三工具共用）+ 4 个单测 |
+
+**D4 本轮验证**：`cargo test -p acowork-pm --lib` → **169 passed**（+5）；`cargo test -p acowork-runtime --lib shell` → **77 passed**（+4）；`cargo clippy -p acowork-core|acowork-pm|acowork-runtime --lib -- -D warnings` 三个 crate 全通过；`./dev/ci.sh redlines` 14 条全绿。全 workspace `--all-targets -D warnings` 仍被 `acowork-gateway` 的 8 个**既有** clippy 错误（`supervisor.rs` / `ticket.rs` / `auth_middleware.rs`）拦下，与本轮改动无关。
 
 **首屏状态机（为什么这是 bug 而不只是动画）**
 
@@ -225,7 +236,8 @@ ADR-061 不变。`task.json` / `project.json` 与物理嵌套仍是唯一真相�
 
 - `/projects/{pid}/tasks` 仍然返回全量实体（503 KB）。这是看板需要的，不是缺陷；但**不能**再被首页徽章复用。
 - `project_counts` 每次都是 O(N) 内存遍历。10 000 任务时约数毫秒，可接受；再往上就该走 D5 的 T1 了。
-- D4 三层未实施，外部直写的风险仍在，只是不再致命（容错已生效）。
+- D4 三层已实施，但第 3 层只是字符串级防误伤：变量拼接、`cd` 后的相对路径、解释器一行流仍可绕过；将来若迁库，shell 也同样能写 `pm.sqlite`。OS 级沙箱仍是最终形态。
+- D4 第 2 层的「合法」只到 JSON 语法层：`{"id": 123}` 这类字段类型错误仍会被当作好版本写进 `.bak`，顶掉真正的上一版。要做到 schema 级校验，需给 `atomic_write_json` 加 `DeserializeOwned` 约束，而 `activity.json` 目前以 `&[TaskActivity]` 切片写入、不满足该约束，本轮未改。`.bak` 本身已改成原子替换，所以备份不会再被自身写一半毁掉，但「语义损坏被当好版本」这个口子还在。
 
 **中性**
 
@@ -236,7 +248,7 @@ ADR-061 不变。`task.json` / `project.json` 与物理嵌套仍是唯一真相�
 ## 7. 开放问题
 
 1. ~~**T1 基线怎么量**：`rebuild_index` 只打印 `count` / `skipped`，没有耗时。~~ **已解决**：日志新增 `elapsed_ms`，首次测得 85 任务 55 ms（见 §5）。后续应在每次发布前记一次该值，形成曲线。
-2. **`.corrupt/` 要不要在 UI 暴露**：只知道日志里有路径，用户未必看日志。倾向在项目列表给一条非阻断提示。
+2. ~~**`.corrupt/` 要不要在 UI 暴露**~~ **部分解决**：坏文件清单（含原路径与副本路径）已通过 `/health` 的 `corrupt_files` 暴露；Desktop UI 尚未接，倾向在项目列表给一条非阻断提示。
 3. **shell 守卫的兜底**：字符串扫描之外，是否给 PM 数据目录加一个「进程自己持有的 `.lock`」用于事后归因（记录最后写入者）？只解决可观测，不解决阻断。
 4. **`/projects` 本身仍是 4 次读盘**：项目数少时不值得改；若项目数上百，`list_projects` 也该走索引（索引里目前没有 project 条目，需要新增 `by_project_meta`）。
 5. **attachment 元数据在 `task.json` 里**：单文件损坏会连带丢附件索引。`attachments/` 目录本身还在，可重建，但重建规则尚未定义。

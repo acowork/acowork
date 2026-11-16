@@ -56,6 +56,7 @@ use crate::types::{
 use super::atomic::{
     atomic_write_json, check_not_reserved, read_json, rename_or_fallback, validate_id_format,
 };
+use super::corrupt::{quarantine_copy, CorruptRecord, CorruptRegistry};
 use super::index::{TaskEntry, TaskIndex};
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -264,6 +265,10 @@ pub struct TreePmStore {
     pub(crate) projects_dir: PathBuf,
     pub(crate) trash_dir: PathBuf,
     pub(crate) index: Arc<RwLock<TaskIndex>>,
+    /// Unreadable `task.json` files found during the last index rebuild.
+    /// Shared with `/health` (ADR-117 D4 layer 1) and refreshed from
+    /// scratch on every rebuild, so a repaired file drops off the list.
+    corrupt: CorruptRegistry,
     /// Serializes the read-check-write of `claim_task` so the assignee
     /// compare-and-set is atomic (G1-b). Two members racing to claim the same
     /// unassigned task must yield exactly one winner; without this critical
@@ -292,6 +297,7 @@ impl TreePmStore {
             projects_dir,
             trash_dir,
             index: Arc::new(RwLock::new(TaskIndex::new())),
+            corrupt: Arc::new(RwLock::new(Vec::new())),
             claim_lock: tokio::sync::Mutex::new(()),
         })
     }
@@ -307,11 +313,33 @@ impl TreePmStore {
         // tell you whether a store is 50 ms or 5 s away from ready.
         let started = std::time::Instant::now();
         let mut index = TaskIndex::new();
+        let mut corrupt = Vec::<CorruptRecord>::new();
         let mut projects = fs::read_dir(&self.projects_dir).await?;
         let mut skipped = 0usize;
 
-        while let Some(proj) = projects.next_entry().await? {
-            if !proj.file_type().await?.is_dir() {
+        // Every directory-level failure degrades to a warning plus a skip.
+        // The index is derived data: a partial index is strictly better than
+        // a service that refuses to start. `next_entry` failures break rather
+        // than continue, because a broken stream can keep failing forever.
+        loop {
+            let proj = match projects.next_entry().await {
+                Ok(Some(entry)) => entry,
+                Ok(None) => break,
+                Err(e) => {
+                    skipped += 1;
+                    tracing::warn!(error = %e, "project directory entry unreadable — stopped scanning");
+                    break;
+                }
+            };
+            let is_dir = match proj.file_type().await {
+                Ok(t) => t.is_dir(),
+                Err(e) => {
+                    skipped += 1;
+                    tracing::warn!(path = %proj.path().display(), error = %e, "project entry type unreadable — skipped");
+                    continue;
+                }
+            };
+            if !is_dir {
                 continue;
             }
             let name = proj.file_name().to_string_lossy().into_owned();
@@ -331,51 +359,69 @@ impl TreePmStore {
                 }
             };
             let tasks_dir = proj.path().join("tasks");
-            if !fs::try_exists(&tasks_dir).await? {
-                continue;
+            match fs::try_exists(&tasks_dir).await {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(e) => {
+                    skipped += 1;
+                    tracing::warn!(project = %project_id, error = %e, "tasks dir unreadable — project skipped");
+                    continue;
+                }
             }
-            // One unreadable project must not hide every other project: the
-            // index is derived data, the tree is the authority, so a partial
-            // index is strictly better than no store at all.
-            if let Err(e) = self.walk_tasks(&tasks_dir, &project_id, 0, &mut index).await {
-                skipped += 1;
-                tracing::warn!(
-                    project = %project_id,
-                    dir = %tasks_dir.display(),
-                    error = %e,
-                    "project tasks unreadable — skipped, other projects still indexed"
-                );
-            }
+            // Every I/O failure inside the walk degrades to a warning and a
+            // skip, so the function cannot fail. One unreadable project must
+            // not hide every other project: the index is derived data, the
+            // tree is the authority, and a partial index beats no store.
+            self.walk_tasks(
+                &tasks_dir,
+                &project_id,
+                0,
+                &mut index,
+                &mut skipped,
+                &mut corrupt,
+            )
+            .await;
         }
 
         let count = index.len();
+        let corrupt_count = corrupt.len();
         *self.index.write() = index;
+        *self.corrupt.write() = corrupt;
         let elapsed_ms = started.elapsed().as_millis();
-        tracing::info!(count, skipped, elapsed_ms, "PM index rebuilt");
+        tracing::info!(count, skipped, corrupt_count, elapsed_ms, "PM index rebuilt");
         Ok(())
     }
 
-    /// 迭代扫描 `tasks/`（或 `children/`）目录，填充索引。
-    ///
-    /// 用显式栈做 DFS（避免递归 `async fn` 的 E0733 无限大小 future）；
-    /// 项目 ID 整树不变，栈仅携带目录路径与深度。
+    /// Snapshot of unreadable files from the last rebuild (ADR-117 D4).
+    pub fn corrupt_files(&self) -> Vec<CorruptRecord> {
+        self.corrupt.read().clone()
+    }
+
+    /// Shared handle for the `/health` route.
+    pub fn corrupt_registry(&self) -> CorruptRegistry {
+        self.corrupt.clone()
+    }
+
+    /// Walk `tasks/` (or `children/`) with an explicit stack: an async
+    /// recursive fn would produce an infinitely-sized future (E0733).
+    /// The project id is constant for the whole tree; the stack carries only
+    /// the directory path and the physical depth.
     async fn walk_tasks(
         &self,
         root_dir: &Path,
         project_id: &ProjectId,
         root_depth: u8,
         index: &mut TaskIndex,
-    ) -> Result<()> {
+        skipped: &mut usize,
+        corrupt: &mut Vec<CorruptRecord>,
+    ) {
         let mut stack: Vec<(PathBuf, u8)> = vec![(root_dir.to_path_buf(), root_depth)];
         while let Some((dir, depth)) = stack.pop() {
             let mut entries = match fs::read_dir(&dir).await {
                 Ok(e) => e,
                 Err(e) => {
-                    tracing::warn!(
-                        dir = %dir.display(),
-                        error = %e,
-                        "task dir unreadable — skipped"
-                    );
+                    *skipped += 1;
+                    tracing::warn!(dir = %dir.display(), error = %e, "task dir unreadable — skipped");
                     continue;
                 }
             };
@@ -384,22 +430,16 @@ impl TreePmStore {
                     Ok(Some(entry)) => entry,
                     Ok(None) => break,
                     Err(e) => {
-                        tracing::warn!(
-                            dir = %dir.display(),
-                            error = %e,
-                            "task dir entry unreadable — stopped scanning this dir"
-                        );
+                        *skipped += 1;
+                        tracing::warn!(dir = %dir.display(), error = %e, "task dir entry unreadable — stopped scanning this dir");
                         break;
                     }
                 };
                 let is_dir = match entry.file_type().await {
                     Ok(t) => t.is_dir(),
                     Err(e) => {
-                        tracing::warn!(
-                            path = %entry.path().display(),
-                            error = %e,
-                            "task entry unreadable — skipped"
-                        );
+                        *skipped += 1;
+                        tracing::warn!(path = %entry.path().display(), error = %e, "task entry unreadable — skipped");
                         continue;
                     }
                 };
@@ -413,28 +453,41 @@ impl TreePmStore {
                 let task_id = match parse_task_id(&name) {
                     Ok(id) => id,
                     Err(e) => {
-                        tracing::warn!(
-                            dir = %entry.path().display(),
-                            error = %e,
-                            "unrecognised task directory — skipped"
-                        );
+                        *skipped += 1;
+                        tracing::warn!(dir = %entry.path().display(), error = %e, "unrecognised task directory — skipped");
                         continue;
                     }
                 };
                 let task_path = entry.path();
                 let json_path = task_path.join("task.json");
-                if !fs::try_exists(&json_path).await? {
-                    tracing::warn!(task = %name, "task dir missing task.json, skipping");
-                    continue;
+                match fs::try_exists(&json_path).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        *skipped += 1;
+                        tracing::warn!(task = %name, "task dir missing task.json, skipping");
+                        continue;
+                    }
+                    Err(e) => {
+                        *skipped += 1;
+                        tracing::warn!(path = %json_path.display(), error = %e, "task.json stat failed — skipped");
+                        continue;
+                    }
                 }
                 // A single unreadable `task.json` must never take the store
-                // down: the file is the authority and stays untouched for a
-                // manual repair, only this task's index entry is lost. Before
-                // this, one file with trailing bytes after its closing brace
-                // made `PmService::build` fail and the whole app look empty.
+                // down. The file stays in place (the tree is the authority):
+                // we copy it aside for forensics and record it so `/health`
+                // can surface it (ADR-117 D4 layer 1).
                 let task: Task = match read_json(&json_path).await {
                     Ok(t) => t,
                     Err(e) => {
+                        *skipped += 1;
+                        let quarantine_path = quarantine_copy(
+                            &self.config.data_dir,
+                            project_id.as_str(),
+                            &name,
+                            &json_path,
+                        )
+                        .await;
                         tracing::error!(
                             project = %project_id,
                             task = %name,
@@ -442,6 +495,16 @@ impl TreePmStore {
                             error = %e,
                             "unreadable task.json — task skipped, store continues"
                         );
+                        corrupt.push(CorruptRecord {
+                            project_id: project_id.to_string(),
+                            task_id: name.clone(),
+                            path: json_path.display().to_string(),
+                            quarantine_path: quarantine_path
+                                .as_ref()
+                                .map(|p| p.display().to_string()),
+                            error: e.to_string(),
+                            detected_at: Utc::now(),
+                        });
                         continue;
                     }
                 };
@@ -459,14 +522,17 @@ impl TreePmStore {
                     }
                 }
 
-                // 子任务目录入栈
                 let children_dir = task_path.join("children");
-                if fs::try_exists(&children_dir).await? {
-                    stack.push((children_dir, depth + 1));
+                match fs::try_exists(&children_dir).await {
+                    Ok(true) => stack.push((children_dir, depth + 1)),
+                    Ok(false) => {}
+                    Err(e) => {
+                        *skipped += 1;
+                        tracing::warn!(dir = %children_dir.display(), error = %e, "children dir unreadable — subtree skipped");
+                    }
                 }
             }
         }
-        Ok(())
     }
 
     /// 迭代收集目录下所有直接子任务 ID（不含自身）。
@@ -2866,6 +2932,80 @@ mod tests {
         assert_eq!(store.indexed_task_count(), 2);
         assert_eq!(store.get_task(&b.id).await.unwrap().unwrap().id, b.id);
         assert_eq!(store.index_entry(&b.id).unwrap().depth, 1);
+    }
+
+    #[tokio::test]
+    async fn corrupt_task_file_stays_in_tree_and_is_quarantined() {
+        let dir = tempdir().unwrap();
+        let config = PmConfig {
+            data_dir: dir.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        };
+        let store = TreePmStore::new(config.clone()).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject {
+                    title: "P".into(),
+                    description: "".into(),
+                    metadata: Default::default(),
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let good = store
+            .create_task(&p.id, create_task_input("good"), "human")
+            .await
+            .unwrap();
+        let bad = store
+            .create_task(&p.id, create_task_input("bad"), "human")
+            .await
+            .unwrap();
+        let bad_path = store
+            .index_entry(&bad.id)
+            .unwrap()
+            .dir_path
+            .join("task.json");
+        let original = std::fs::read(&bad_path).unwrap();
+        let mut damaged = original.clone();
+        damaged.extend_from_slice(b"trailing junk");
+        std::fs::write(&bad_path, &damaged).unwrap();
+
+        store.rebuild_index().await.unwrap();
+
+        // Only the damaged task drops out of the derived index; the store
+        // still starts and every other task is usable.
+        assert_eq!(store.indexed_task_count(), 1);
+        assert!(store.index_entry(&good.id).is_some());
+        assert!(store.index_entry(&bad.id).is_none());
+        // The authoritative file is neither moved nor deleted.
+        assert_eq!(std::fs::read(&bad_path).unwrap(), damaged);
+        // A forensic copy plus a health-visible record exist.
+        let quarantine = crate::store::corrupt::quarantine_path(
+            &config.data_dir,
+            p.id.as_str(),
+            bad.id.as_str(),
+        );
+        assert_eq!(std::fs::read(&quarantine).unwrap(), damaged);
+        let records = store.corrupt_files();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].task_id, bad.id.as_str());
+        assert_eq!(records[0].project_id, p.id.as_str());
+        assert_eq!(records[0].path, bad_path.display().to_string());
+        assert_eq!(
+            records[0].quarantine_path.as_deref(),
+            Some(quarantine.display().to_string()).as_deref()
+        );
+        assert!(!records[0].error.is_empty());
+        assert_eq!(store.corrupt_registry().read().len(), 1);
+
+        // Repairing the file clears the record on the next rebuild.
+        std::fs::write(&bad_path, &original).unwrap();
+        store.rebuild_index().await.unwrap();
+        assert_eq!(store.indexed_task_count(), 2);
+        assert!(store.corrupt_files().is_empty());
+        assert!(store.corrupt_registry().read().is_empty());
     }
 
     // ── 负路径覆盖 (ADR-061 P1 补测) ─────────────────────────────

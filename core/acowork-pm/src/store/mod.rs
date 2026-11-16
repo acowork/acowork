@@ -24,5 +24,6 @@
 //! ```
 
 pub mod atomic;
+pub mod corrupt;
 pub mod index;
 pub mod tree;

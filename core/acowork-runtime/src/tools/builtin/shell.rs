@@ -202,6 +202,34 @@ impl ShellTool {
     }
 }
 
+/// ADR-117 D4 layer 3: misuse mitigation for writes into the platform data
+/// directory, NOT a security boundary. Plain string matching cannot stop
+/// variable interpolation, a `cd` followed by a relative path, or an
+/// interpreter one-liner (`python -c ...`). The threat model is an agent
+/// accidentally writing `~/.acowork/...`, not a malicious attacker; the end
+/// state is OS-level sandboxing (Windows Job Object / AppContainer, Linux
+/// namespaces), which is out of scope here.
+///
+/// All three shell tool names (`bash`, `powershell`, `shell`) funnel through
+/// this one `ShellTool::execute`, so a single check covers every platform.
+fn protected_prefix_hit(command: &str) -> Option<String> {
+    let normalized = command.replace('\\', "/").to_ascii_lowercase();
+    let mut needles = vec![
+        "~/.acowork".to_string(),
+        "$home/.acowork".to_string(),
+        "${home}/.acowork".to_string(),
+        "$userprofile/.acowork".to_string(),
+        "${userprofile}/.acowork".to_string(),
+        "%userprofile%/.acowork".to_string(),
+    ];
+    if let Some(dir) = acowork_core::workspace::platform_data_dir() {
+        needles.push(dir.to_string_lossy().replace('\\', "/").to_ascii_lowercase());
+    }
+    needles
+        .into_iter()
+        .find(|needle| normalized.contains(needle.as_str()))
+}
+
 #[async_trait]
 impl Tool for ShellTool {
     fn spec(&self) -> ToolSpec {
@@ -221,6 +249,26 @@ impl Tool for ShellTool {
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'command' parameter".to_string()),
+                token_usage: None,
+            });
+        }
+
+        if let Some(hit) = protected_prefix_hit(command) {
+            tracing::warn!(
+                tool = %self.tool_name,
+                matched = %hit,
+                "shell: blocked access to the platform data directory"
+            );
+            return Ok(ToolResult {
+                content_parts: None,
+                ok: false,
+                content: String::new(),
+                error: Some(format!(
+                    "Command rejected: it targets the platform data directory (`{hit}`). \
+                     Files under ~/.acowork/ are owned by the platform services — use the \
+                     corresponding app's API (PM: pm_* tools / REST, memory, doc) instead of \
+                     writing to them directly. This command was NOT executed: {command}"
+                )),
                 token_usage: None,
             });
         }
@@ -393,6 +441,62 @@ mod tests {
 
     fn make_tool(name: &str, binary: &str) -> ShellTool {
         ShellTool::new(name, name, binary, binary, "-c")
+    }
+
+    #[test]
+    fn protected_prefix_guard_rejects_platform_data_writes() {
+        for cmd in [
+            "echo x >> ~/.acowork/acowork-pm/projects/p-1/tasks/t-1/task.json",
+            "echo x >> $HOME/.acowork/acowork-pm/task.json",
+            "echo x >> ${HOME}/.acowork/acowork-node/x",
+            r"echo x >> %USERPROFILE%\.acowork\acowork-user\x.json",
+            "echo x >> $USERPROFILE/.acowork/x",
+        ] {
+            assert!(protected_prefix_hit(cmd).is_some(), "should reject: {cmd}");
+        }
+    }
+
+    #[test]
+    fn protected_prefix_guard_allows_unrelated_commands() {
+        for cmd in [
+            "echo hello",
+            "ls -la ./workspace",
+            "cat ./src/.acowork-notes.txt",
+            "python -c 'print(1)'",
+        ] {
+            assert!(protected_prefix_hit(cmd).is_none(), "should allow: {cmd}");
+        }
+    }
+
+    #[test]
+    fn protected_prefix_guard_matches_expanded_home_when_available() {
+        if let Some(dir) = acowork_core::workspace::platform_data_dir() {
+            let cmd = format!("echo x >> {}/acowork-pm/task.json", dir.display());
+            assert!(protected_prefix_hit(&cmd).is_some(), "should reject: {cmd}");
+        }
+    }
+
+    #[tokio::test]
+    async fn protected_prefix_guard_runs_before_the_binary_check() {
+        // A non-existent binary proves the guard rejects before any spawn.
+        let tool = ShellTool::new(
+            "powershell",
+            "PowerShell",
+            "definitely_does_not_exist_shell_xyz",
+            "/definitely/not/a/real/path/pwsh.exe",
+            "-Command",
+        );
+        let result = tool
+            .execute(
+                serde_json::json!({"command": "echo x >> ~/.acowork/acowork-pm/task.json"}),
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(!result.ok);
+        let err = result.error.unwrap();
+        assert!(err.contains("platform data directory"));
+        assert!(!err.contains("not found"), "guard must run before binary_exists");
     }
 
     #[tokio::test]
