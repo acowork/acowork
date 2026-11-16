@@ -1059,6 +1059,7 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
                       // (gray), "streaming" (accent), "tool_executing"
                       // (blue), "waiting_approval" (yellow), "paused"
                       // (amber), and "idle" / unknown (zinc).
+                      getProcessingPhase(sessionStatus) === "thinking" && "bg-purple-500",
                       getProcessingPhase(sessionStatus) === "streaming" && "bg-[var(--color-accent)]",
                       getProcessingPhase(sessionStatus) === "waiting" && "bg-loading",
                       getProcessingPhase(sessionStatus) === "tool_executing" && "bg-info-solid",
