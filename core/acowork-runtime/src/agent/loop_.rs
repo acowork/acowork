@@ -111,9 +111,7 @@ pub enum ChunkEvent {
     /// deadline expiry, or all tiers failed). Replaces `CompactingEnded` on
     /// every non-success path so the frontend can reset its dual-state
     /// button and show a reason-specific toast.
-    CompactionCancelled {
-        reason: CompactionCancelReason,
-    },
+    CompactionCancelled { reason: CompactionCancelReason },
     /// Iteration limit reached — agent loop paused
     IterationLimitPaused {
         iteration: u32,
@@ -458,6 +456,9 @@ pub struct AgentLoop {
     /// message is already in history and re-embedding it would misattribute
     /// it to the replayed turn).
     pub(crate) current_turn_user_message: Option<String>,
+    /// Per-turn read_image budget shared by parallel tool calls.
+    pub(crate) image_read_budget:
+        Arc<std::sync::Mutex<acowork_core::tools::traits::ImageReadBudget>>,
 
     /// ADR-032 C4b: Compression action receiver.
     ///
@@ -632,6 +633,7 @@ impl AgentLoop {
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             current_turn_user_message: None,
+            image_read_budget: Arc::new(std::sync::Mutex::new(Default::default())),
             compress_action_rx: None,
             pending_intent: None,
             chat_writeback: None,
@@ -641,8 +643,7 @@ impl AgentLoop {
             turn_message_refs: Vec::new(),
             turn_user_row_meta: None,
             last_config_version: 0,
-            last_config_snapshot:
-                crate::agent::session_config::SessionConfigSnapshot::default(),
+            last_config_snapshot: crate::agent::session_config::SessionConfigSnapshot::default(),
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -711,6 +712,7 @@ impl AgentLoop {
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             current_turn_user_message: None,
+            image_read_budget: Arc::new(std::sync::Mutex::new(Default::default())),
             compress_action_rx: None,
             pending_intent: None,
             chat_writeback: None,
@@ -720,8 +722,7 @@ impl AgentLoop {
             turn_message_refs: Vec::new(),
             turn_user_row_meta: None,
             last_config_version: 0,
-            last_config_snapshot:
-                crate::agent::session_config::SessionConfigSnapshot::default(),
+            last_config_snapshot: crate::agent::session_config::SessionConfigSnapshot::default(),
             turn_outcome: crate::agent::intent_turn::TurnOutcome::Completed,
         };
         // Inject approval_handle into SessionCore so execute_tools_parallel can detect Gateway mode
@@ -758,6 +759,8 @@ impl AgentLoop {
 
         let work_dir = self.session_core.current_work_dir.read().unwrap().clone();
         let ctx = acowork_core::tools::traits::ToolContext {
+            supports_image_input: true,
+            image_read_budget: None,
             work_dir,
             session_id: self.session_core.session_id.clone(),
             current_user_message: self.current_turn_user_message.clone(),
@@ -766,7 +769,11 @@ impl AgentLoop {
                 .conversation
                 .as_ref()
                 .and_then(|c| c.chat_session_id()),
-            initiator: self.session.conversation.as_ref().and_then(|c| c.initiator()),
+            initiator: self
+                .session
+                .conversation
+                .as_ref()
+                .and_then(|c| c.initiator()),
         };
         match tool.execute_with_context(params, &ctx).await {
             Ok(result) if result.ok => Ok(result.content),
@@ -889,8 +896,7 @@ impl AgentLoop {
         // execution across two blocks. After a restart the writer holds no round and
         // the answer degrades into a new one — a fresh block, not a corrupt one.
         let conversation = self.session.conversation.clone();
-        let continuing =
-            self.turn_outcome == crate::agent::intent_turn::TurnOutcome::Waiting;
+        let continuing = self.turn_outcome == crate::agent::intent_turn::TurnOutcome::Waiting;
         if let Some(conv) = &conversation {
             let inbound = message_id
                 .as_deref()
@@ -1289,10 +1295,21 @@ impl AgentLoop {
                     "Expired previous rounds' inlined documents at the round boundary"
                 );
             }
+            let reclaimed_images = self
+                .session
+                .history
+                .reclaim_image_parts_over_budget(HistoryManager::configured_image_token_budget());
+            if reclaimed_images > 0 {
+                tracing::debug!(
+                    reclaimed_images,
+                    "Reclaimed image parts at the round boundary"
+                );
+            }
             // Per-turn text for ToolContext (kept for the WHOLE turn).
             // Lives on this per-session loop, never on agent-shared tool
             // instances.
             self.current_turn_user_message = Some(user_message.to_string());
+            *self.image_read_budget.lock().unwrap() = Default::default();
             // ADR-060 §5.5 erratum: the message is appended to history only.
             // It is NOT re-staged as a "Block D" tail duplicate — `build()`
             // reads the current user message from Block B's tail.
@@ -1374,9 +1391,8 @@ impl AgentLoop {
                 // Claim released on every exit path below — the spawned task
                 // holds it for its whole lifetime, the synchronous resume
                 // path drops it at the end of this block.
-                let _title_claim = TitleTaskClaim::new(Arc::clone(
-                    &self.session_core.title_task_in_flight,
-                ));
+                let _title_claim =
+                    TitleTaskClaim::new(Arc::clone(&self.session_core.title_task_in_flight));
 
                 // Check if the conversation already has a title from a
                 // previous session run (session resume case). If so,
@@ -1806,10 +1822,7 @@ impl AgentLoop {
                         // `ContinueExecution`; a chat-bound turn ADDITIONALLY
                         // records the round's `pause` card so the Chat block
                         // offers the same Continue.
-                        let loop_summary = format!(
-                            "Loop detected ({}). Reply to continue.",
-                            msg
-                        );
+                        let loop_summary = format!("Loop detected ({}). Reply to continue.", msg);
                         if !self.human_can_reach_pause()
                             && (self.pending_intent.is_some()
                                 || self.turn_surface.has_human == Some(false))
@@ -1820,7 +1833,9 @@ impl AgentLoop {
                                 "Intent responder hit loop detection — aborting with receipt"
                             );
                             self.transition_status(SessionStatus::Idle);
-                            return Ok(format!("[aborted] Loop detected before finishing this intent request: {msg}"));
+                            return Ok(format!(
+                                "[aborted] Loop detected before finishing this intent request: {msg}"
+                            ));
                         }
                         // Only the path that waits below can be answered, so
                         // only it records a card.
@@ -2460,14 +2475,22 @@ impl AgentLoop {
             .dispatch_and_merge_tools(calls_to_execute, &deduped_calls, &blocked_info)
             .await;
 
-        // Split tagged results into content strings + transient flags
-        // (ADR-032 C3a: transient tool results bypass permanent history).
+        // Keep text, transient status and payloads aligned with deduped calls.
         let mut tool_contents: Vec<String> = Vec::with_capacity(tagged_results.len());
-        let transient_flags: Vec<bool> = tagged_results.iter().map(|(_, t)| *t).collect();
-        for (content, _) in tagged_results {
-            tool_contents.push(content);
+        let transient_flags: Vec<bool> = tagged_results.iter().map(|out| out.is_transient).collect();
+        let mut image_parts = Vec::new();
+        let mut image_labels = Vec::new();
+        for (tc, output) in deduped_calls.iter().zip(tagged_results.iter()) {
+            tool_contents.push(output.content.clone());
+            if !output.parts.is_empty() {
+                let label = output.image_path.as_deref().map(|path| {
+                    let escaped = path.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
+                    format!("<tool_image tool=\"{}\" path=\"{}\"/>", tc.function.name, escaped)
+                }).unwrap_or_else(|| format!("<tool_image tool=\"{}\"/>", tc.function.name));
+                image_labels.push(label);
+                image_parts.extend(output.parts.iter().cloned());
+            }
         }
-
         // ── ⑧ Persist + emit + append + pre-trim tool results ──
         self.persist_and_emit_tool_results(&deduped_calls, &tool_contents);
         // Single 90% projected-input line, enforced again before appending
@@ -2521,6 +2544,22 @@ impl AgentLoop {
             } else {
                 self.session.history.append(msg);
             }
+        }
+        if !image_parts.is_empty() {
+            let label = image_labels.join("
+");
+            if let Some(conversation) = self.session.conversation.as_ref() {
+                // JSONL stores the recoverable path label only; inline base64 is
+                // deliberately kept in memory and never persisted.
+                conversation.append_message("user", &label, None);
+            }
+            self.session.history.append(ChatMessage {
+                role: acowork_core::providers::traits::MessageRole::User,
+                name: Some("tool_image".to_string()),
+                content: label,
+                content_parts: Some(image_parts),
+                ..Default::default()
+            });
         }
 
         // ── ⑨ Post-execution loop detection ──
@@ -2683,6 +2722,69 @@ mod tests {
                 token_usage: None,
             })
         }
+    }
+
+    struct ImagePartsTool;
+
+    #[async_trait::async_trait]
+    impl Tool for ImagePartsTool {
+        fn spec(&self) -> acowork_core::tools::traits::ToolSpec {
+            acowork_core::tools::traits::ToolSpec {
+                name: "fake_image".into(), description: "returns one image part".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        async fn execute(
+            &self, _params: serde_json::Value, _work_dir: Option<&str>,
+        ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
+            Ok(acowork_core::tools::traits::ToolResult {
+                ok: true, content: "image: /tmp/shot.png".into(),
+                content_parts: Some(vec![acowork_core::providers::traits::ContentPart::image_url(
+                    "data:image/png;base64,AAAA",
+                )]),
+                error: None, token_usage: None,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_image_parts_reach_followup_provider_request() {
+        let provider = Arc::new(MockProvider::tool_call_then_text(
+            "fake_image",
+            r#"{"path":"/tmp/shot.png"}"#,
+            "done",
+        ));
+        let tools = entries(vec![Arc::new(ImagePartsTool)]);
+        let (mut agent_loop, _) = AgentLoop::new(
+            RuntimeConfig::default(), test_manifest(), provider.clone(), tools,
+            test_budget(), None, None,
+        );
+        let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
+        let result = agent_loop
+            .run("read image", &mut context_builder, None, None, None, None)
+            .await;
+        assert!(result.is_ok(), "tool image turn failed: {result:?}");
+        let request = provider.last_request().expect("follow-up request sent");
+        let image_message = request.messages.iter().find(|message| {
+            message.role == acowork_core::providers::traits::MessageRole::User
+                && message.name.as_deref() == Some("tool_image")
+        }).expect("image user message reaches the provider");
+        assert!(image_message.content.contains("/tmp/shot.png"));
+        assert!(image_message.content_parts.as_ref().is_some_and(|parts| {
+            parts.iter().any(|part| matches!(
+                part, acowork_core::providers::traits::ContentPart::ImageUrl { .. }
+            ))
+        }));
+
+        // The same in-memory message is reclaimed only when the explicit
+        // budget is exceeded; the durable path label remains available.
+        assert_eq!(agent_loop.history_mut().reclaim_image_parts_over_budget(0), 1);
+        let reclaimed = agent_loop.history().messages().iter().find(|message| {
+            message.name.as_deref() == Some("tool_image")
+        }).expect("tool image label remains in history");
+        assert!(reclaimed.content.contains("/tmp/shot.png"));
+        assert!(reclaimed.content_parts.is_none());
     }
 
     fn test_manifest() -> acowork_core::AgentManifest {
@@ -4576,7 +4678,14 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, &ToolContext::default(), None, "test-agent").await;
+        let (result, _transient) = execute_single_tool(
+            &raw_tools(&tools),
+            &tc,
+            &ToolContext::default(),
+            None,
+            "test-agent",
+        )
+        .await;
 
         // Must NOT contain "Echo:" — tool was never called
         assert!(
@@ -4620,7 +4729,14 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, &ToolContext::default(), None, "test-agent").await;
+        let (result, _transient) = execute_single_tool(
+            &raw_tools(&tools),
+            &tc,
+            &ToolContext::default(),
+            None,
+            "test-agent",
+        )
+        .await;
 
         // Must NOT execute the tool
         assert!(
@@ -4666,7 +4782,14 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, &ToolContext::default(), None, "test-agent").await;
+        let (result, _transient) = execute_single_tool(
+            &raw_tools(&tools),
+            &tc,
+            &ToolContext::default(),
+            None,
+            "test-agent",
+        )
+        .await;
 
         // Tool WAS executed because we recovered the JSON
         assert!(
@@ -4691,7 +4814,14 @@ mod tests {
             },
         };
 
-        let (result, _transient) = execute_single_tool(&raw_tools(&tools), &tc, &ToolContext::default(), None, "test-agent").await;
+        let (result, _transient) = execute_single_tool(
+            &raw_tools(&tools),
+            &tc,
+            &ToolContext::default(),
+            None,
+            "test-agent",
+        )
+        .await;
         assert_eq!(
             result, "Echo: hello world",
             "Valid tool call should execute normally, got: {}",
@@ -4903,12 +5033,9 @@ mod tests {
         // the router's framing as a reference part.
         let words = "提交一下本地修改";
         let background = "只改测试，别动实现；上一个会话已经跑过 clippy。";
-        agent_loop.turn_message_refs =
-            vec![acowork_core::MessageRef::chat_background(background)];
-        let llm_message = crate::agent::intent_turn::render_user_turn(
-            words,
-            &agent_loop.turn_message_refs,
-        );
+        agent_loop.turn_message_refs = vec![acowork_core::MessageRef::chat_background(background)];
+        let llm_message =
+            crate::agent::intent_turn::render_user_turn(words, &agent_loop.turn_message_refs);
 
         let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
         let result = agent_loop
@@ -5245,7 +5372,12 @@ mod tests {
         );
         // The turn is closed in history with an empty assistant message.
         assert!(matches!(
-            agent_loop.session.history.messages().last().map(|m| &m.role),
+            agent_loop
+                .session
+                .history
+                .messages()
+                .last()
+                .map(|m| &m.role),
             Some(MessageRole::Assistant)
         ));
     }
@@ -5273,12 +5405,11 @@ mod tests {
             _params: serde_json::Value,
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<acowork_core::tools::traits::ToolResult> {
-            self.conversation.apply_config(
-                &crate::agent::session_config::SessionConfigDelta {
+            self.conversation
+                .apply_config(&crate::agent::session_config::SessionConfigDelta {
                     model: Some("switched-model".to_string()),
                     ..Default::default()
-                },
-            );
+                });
             Ok(acowork_core::tools::traits::ToolResult {
                 content_parts: None,
                 ok: true,
@@ -5443,7 +5574,4 @@ mod tests {
             conversation.config_version()
         );
     }
-
 }
-
-

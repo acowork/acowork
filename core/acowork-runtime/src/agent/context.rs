@@ -2031,10 +2031,27 @@ mod tests {
     fn text_only_caps() -> ModelCapabilitiesInfo {
         let mut caps = test_caps(200_000, 8_192);
         caps.modalities = Some(acowork_core::protocol::ModelModalities {
-            input: vec!["text".into(), "image".into()],
+            input: vec!["text".into()],
             output: vec!["text".into()],
         });
         caps
+    }
+
+    #[test]
+    fn injected_tool_image_is_filtered_for_text_only_model() {
+        let mut history = HistoryManager::new(10_000);
+        let mut injected = ChatMessage::user_multimodal(
+            "<tool_image path=\"/tmp/shot.png\"/>",
+            vec![ContentPart::image_url("data:image/png;base64,AAAA")],
+        );
+        injected.name = Some("tool_image".into());
+        history.append(injected);
+
+        let builder = ContextBuilder::new("You are a helper.".to_string());
+        let request = builder.build(&history, Some(&text_only_caps()), 32_768);
+        let image = request.messages.last().unwrap();
+        assert_eq!(image.content, "<tool_image path=\"/tmp/shot.png\"/>");
+        assert!(image.content_parts.is_none());
     }
 
     fn document_turn(text: &str) -> ChatMessage {

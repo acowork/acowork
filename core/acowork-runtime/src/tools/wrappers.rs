@@ -1352,6 +1352,8 @@ mod tests {
         // ever saw their bare `execute()` fallback.
         let tool = full_stack(Arc::new(CtxEchoTool), &["/allowed"], 60);
         let ctx = ToolContext {
+            supports_image_input: true,
+            image_read_budget: None,
             work_dir: None,
             session_id: Some("sess-1".to_string()),
             current_user_message: None,

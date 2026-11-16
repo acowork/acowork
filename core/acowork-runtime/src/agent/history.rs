@@ -708,6 +708,95 @@ impl HistoryManager {
         dropped
     }
 
+    /// Default session-wide budget for retained image parts (approximately eight
+    /// 1568px screenshots at common provider rates).
+    pub const DEFAULT_IMAGE_TOKEN_BUDGET: u64 = 12_000;
+
+    /// Resolve the independently configurable session image-token budget.
+    /// `ACOWORK_IMAGE_TOKEN_BUDGET` overrides the default (12k tokens).
+    pub fn configured_image_token_budget() -> u64 {
+        std::env::var("ACOWORK_IMAGE_TOKEN_BUDGET")
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(Self::DEFAULT_IMAGE_TOKEN_BUDGET)
+    }
+
+    /// Reclaim oldest inline image parts only when cumulative image tokens exceed
+    /// the session budget. Labels remain in message text so the model can reopen
+    /// the image by path. This is deliberately independent of document expiry.
+    pub fn reclaim_image_parts_over_budget(&mut self, budget: u64) -> usize {
+        use crate::token::counter::estimate_image_tokens;
+        use acowork_core::providers::traits::ContentPart;
+
+        let image_token_total = |messages: &[ChatMessage], protocol: &ProtocolType| {
+            messages
+                .iter()
+                .filter(|msg| msg.name.as_deref() == Some("tool_image"))
+                .flat_map(|msg| msg.content_parts.iter().flatten())
+                .filter_map(|part| match part {
+                    ContentPart::ImageUrl { image_url } => Some(estimate_image_tokens(
+                        protocol,
+                        image_url.width,
+                        image_url.height,
+                        image_url.detail.as_deref(),
+                    )),
+                    _ => None,
+                })
+                .sum::<u64>()
+        };
+        let protocol_type = self.protocol_type.clone();
+        let before_tokens = image_token_total(&self.messages, &protocol_type);
+        if before_tokens <= budget {
+            return 0;
+        }
+
+        let mut remaining = before_tokens;
+        let mut dropped: Vec<(usize, u64, String)> = Vec::new();
+        for (message_index, msg) in self.messages_mut().iter_mut().enumerate() {
+            if msg.name.as_deref() != Some("tool_image") {
+                continue;
+            }
+            let Some(parts) = msg.content_parts.as_mut() else {
+                continue;
+            };
+            let label = msg.content.clone();
+            let mut retained = Vec::with_capacity(parts.len());
+            for part in parts.drain(..) {
+                match part {
+                    ContentPart::ImageUrl { image_url } if remaining > budget => {
+                        let tokens = estimate_image_tokens(
+                            &protocol_type,
+                            image_url.width,
+                            image_url.height,
+                            image_url.detail.as_deref(),
+                        );
+                        remaining = remaining.saturating_sub(tokens);
+                        dropped.push((message_index, tokens, label.clone()));
+                    }
+                    other => retained.push(other),
+                }
+            }
+            *parts = retained;
+            if parts.is_empty() {
+                msg.content_parts = None;
+            }
+        }
+        if !dropped.is_empty() {
+            let dropped_tokens: u64 = dropped.iter().map(|(_, tokens, _)| *tokens).sum();
+            let dropped_messages: Vec<usize> = dropped.iter().map(|(index, _, _)| *index).collect();
+            let dropped_labels: Vec<&str> =
+                dropped.iter().map(|(_, _, label)| label.as_str()).collect();
+            tracing::info!(
+                budget_tokens = budget, before_tokens, after_tokens = remaining,
+                dropped_images = dropped.len(), dropped_tokens, message_indices = ?dropped_messages,
+                labels = ?dropped_labels, "Reclaimed oldest image parts over session budget"
+            );
+            self.recalibrate_tokens();
+            self.recompute_byte_counters();
+        }
+        dropped.len()
+    }
+
     /// Sanitize message history to remove or fix corrupted entries.
     ///
     /// This prevents LLM 400 errors caused by invalid tool_call data when
@@ -1455,9 +1544,7 @@ impl HistoryManager {
     fn round_token_cost(&self, assistant: &ChatMessage, tool: &ChatMessage) -> u64 {
         self.counter
             .count_message(assistant, Some(&self.protocol_type))
-            + self
-                .counter
-                .count_message(tool, Some(&self.protocol_type))
+            + self.counter.count_message(tool, Some(&self.protocol_type))
     }
 
     /// Choose which snapshotted skill rounds fit a recall budget.
@@ -1711,7 +1798,8 @@ impl HistoryManager {
         // Fast path: same round already injected by a prior compression.
         if let Some((asst, _)) = self.find_last_todo_write_round()
             && asst.tool_calls.as_ref().is_some_and(|tcs| {
-                tcs.iter().any(|tc| self.injected_round_call_ids.contains(&tc.id))
+                tcs.iter()
+                    .any(|tc| self.injected_round_call_ids.contains(&tc.id))
             })
         {
             return RecallResult::SkippedAlreadyInjected;
@@ -2114,6 +2202,7 @@ impl HistoryManager {
 mod tests {
     use super::*;
     use crate::agent::compression_constants::MIN_COMPRESSION_RATIO;
+    use acowork_core::providers::traits::ContentPart;
 
     fn make_message(role: MessageRole, content: &str) -> ChatMessage {
         ChatMessage {
@@ -2131,6 +2220,97 @@ mod tests {
         assert!(hm.token_count() > 0);
     }
 
+    fn sized_image(width: u32, height: u32, label: &str) -> ContentPart {
+        use acowork_core::providers::traits::{ContentPart, ImageUrlPart};
+        ContentPart::ImageUrl {
+            image_url: ImageUrlPart {
+                url: format!("data:image/png;base64,{label}"),
+                detail: Some("high".into()),
+                width: Some(width),
+                height: Some(height),
+            },
+        }
+    }
+
+    #[test]
+    fn image_parts_are_retained_across_rounds_below_budget() {
+        let image = sized_image(512, 512, "FIRST");
+        let mut hm = HistoryManager::new(100_000);
+        hm.set_protocol_type(ProtocolType::OpenAI);
+        let mut image_message =
+            ChatMessage::user_multimodal("<tool_image path=\"/tmp/first.png\"/>", vec![image]);
+        image_message.name = Some("tool_image".into());
+        hm.append(image_message);
+        let before = hm.token_count();
+        assert_eq!(hm.reclaim_image_parts_over_budget(12_000), 0);
+        assert_eq!(hm.reclaim_image_parts_over_budget(12_000), 0);
+        assert!(hm.token_count() >= before);
+        assert!(
+            hm.messages()[0]
+                .content_parts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
+        );
+    }
+
+    #[test]
+    fn image_budget_reclaims_oldest_parts_but_keeps_path_labels() {
+        let mut hm = HistoryManager::new(100_000);
+        hm.set_protocol_type(ProtocolType::OpenAI);
+        let mut old_image = ChatMessage::user_multimodal(
+            "<tool_image path=\"/tmp/old.png\"/>",
+            vec![sized_image(512, 512, "OLD")],
+        );
+        old_image.name = Some("tool_image".into());
+        hm.append(old_image);
+        hm.append(ChatMessage::assistant("continue"));
+        let mut new_image = ChatMessage::user_multimodal(
+            "<tool_image path=\"/tmp/new.png\"/>",
+            vec![sized_image(512, 512, "NEW")],
+        );
+        new_image.name = Some("tool_image".into());
+        hm.append(new_image);
+        let old_tokens = hm.token_count();
+
+        assert_eq!(hm.reclaim_image_parts_over_budget(300), 1);
+        assert!(hm.messages()[0].content.contains("/tmp/old.png"));
+        assert!(hm.messages()[0].content_parts.is_none());
+        assert!(hm.messages()[2].content.contains("/tmp/new.png"));
+        assert!(
+            hm.messages()[2]
+                .content_parts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
+        );
+        assert!(hm.token_count() < old_tokens);
+        assert_eq!(hm.reclaim_image_parts_over_budget(300), 0);
+    }
+
+    #[test]
+    fn tool_image_user_message_survives_sanitization_after_tool_result() {
+        let tool_call = make_tool_call("tc_image", "image_read", r#"{"path":"/tmp/shot.png"}"#);
+        let mut messages = vec![
+            ChatMessage::assistant_with_tools("", vec![tool_call]),
+            ChatMessage::tool("tc_image", "image metadata"),
+            ChatMessage {
+                role: MessageRole::User,
+                name: Some("tool_image".into()),
+                content: "<tool_image path=\"/tmp/shot.png\"/>".into(),
+                content_parts: Some(vec![sized_image(512, 512, "IMAGE")]),
+                ..Default::default()
+            },
+        ];
+        HistoryManager::sanitize_messages(&mut messages);
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[1].role, MessageRole::Tool);
+        assert_eq!(messages[2].role, MessageRole::User);
+        assert_eq!(messages[2].name.as_deref(), Some("tool_image"));
+    }
+
     /// A round's inlined PDF must not outlive the round. The part is the
     /// largest thing history can hold, and `count_message` prices it at
     /// pages × 1500 on every recomputation, so a stale one weighs on the
@@ -2142,7 +2322,10 @@ mod tests {
         let doc_heavy = ContentPart::document("JVBERi0xLjQ=".repeat(400), "a.pdf", Some(30));
         let with_both = ChatMessage::user_multimodal(
             "read this pdf, and this screenshot",
-            vec![doc_heavy, ContentPart::image_url("data:image/png;base64,AAAA")],
+            vec![
+                doc_heavy,
+                ContentPart::image_url("data:image/png;base64,AAAA"),
+            ],
         );
         let doc_only = ChatMessage::user_multimodal(
             "just the pdf",
@@ -2170,7 +2353,10 @@ mod tests {
         let msgs = hm.messages();
         assert_eq!(msgs[0].content, "read this pdf, and this screenshot");
         assert!(
-            matches!(msgs[0].content_parts.as_deref(), Some([ContentPart::ImageUrl { .. }])),
+            matches!(
+                msgs[0].content_parts.as_deref(),
+                Some([ContentPart::ImageUrl { .. }])
+            ),
             "images keep their round-independent treatment, got {:?}",
             msgs[0].content_parts
         );
@@ -3897,8 +4083,7 @@ mod tests {
         let removed_assistant = make_todo_write_assistant("tc_removed");
         let removed_tool = make_todo_write_tool("tc_removed");
 
-        let (_, injected) =
-            hm.inject_round_after_marker(removed_assistant, removed_tool);
+        let (_, injected) = hm.inject_round_after_marker(removed_assistant, removed_tool);
         assert!(injected, "splice path must signal injected=true");
 
         let msgs = hm.messages();
@@ -4029,8 +4214,7 @@ mod tests {
         // Simulates "compression removed a previous todo_write round".
         let new_assistant = make_todo_write_assistant("tc_injected");
         let new_tool = make_todo_write_tool("tc_injected");
-        let (returned_tokens, injected) =
-            hm.inject_round_after_marker(new_assistant, new_tool);
+        let (returned_tokens, injected) = hm.inject_round_after_marker(new_assistant, new_tool);
 
         assert!(
             returned_tokens > tokens_before,
@@ -4115,8 +4299,7 @@ mod tests {
         // First injection: succeeds.
         let new_assistant = make_todo_write_assistant("tc_injected");
         let new_tool = make_todo_write_tool("tc_injected");
-        let (_tokens_1, injected_1) =
-            hm.inject_round_after_marker(new_assistant, new_tool);
+        let (_tokens_1, injected_1) = hm.inject_round_after_marker(new_assistant, new_tool);
         assert!(injected_1, "first injection must succeed");
         let len_after_first = hm.messages().len();
 
@@ -4134,8 +4317,7 @@ mod tests {
         // otherwise we'd write duplicate synthetic rows to conversation.jsonl.
         let again_assistant = make_todo_write_assistant("tc_injected");
         let again_tool = make_todo_write_tool("tc_injected");
-        let (_tokens_2, injected_2) =
-            hm.inject_round_after_marker(again_assistant, again_tool);
+        let (_tokens_2, injected_2) = hm.inject_round_after_marker(again_assistant, again_tool);
         assert!(
             !injected_2,
             "second injection of the same round must be skipped (injected_round_call_ids gate)"
@@ -4151,8 +4333,7 @@ mod tests {
         // gate is per-call-id, not a global kill switch.
         let fresh_assistant = make_todo_write_assistant("tc_fresh");
         let fresh_tool = make_todo_write_tool("tc_fresh");
-        let (_tokens_3, injected_3) =
-            hm.inject_round_after_marker(fresh_assistant, fresh_tool);
+        let (_tokens_3, injected_3) = hm.inject_round_after_marker(fresh_assistant, fresh_tool);
         assert!(
             injected_3,
             "a NEW todo_write call (different id) must still inject — gate is per-id"
@@ -4236,8 +4417,7 @@ mod tests {
             .iter()
             .filter(|m| {
                 matches!(m.role, MessageRole::Tool)
-                    && m.name.as_deref()
-                        == Some(crate::tools::builtin::load_skill::TOOL_NAME)
+                    && m.name.as_deref() == Some(crate::tools::builtin::load_skill::TOOL_NAME)
             })
             .map(|m| serde_json::to_string(m).map(|s| s.len()).unwrap_or(0))
             .sum();
@@ -4589,7 +4769,10 @@ mod tests {
         append_marker(&mut hm);
         let (assistant, tool) = candidates[0].clone();
         let (_, injected) = hm.inject_round_after_marker(assistant, tool);
-        assert!(injected, "the round is absent from the tail, so the splice must happen");
+        assert!(
+            injected,
+            "the round is absent from the tail, so the splice must happen"
+        );
         assert_eq!(
             hm.skills_loaded_bytes(),
             before,

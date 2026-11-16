@@ -1,5 +1,6 @@
 //! Tool trait and related types
 
+use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,7 +34,7 @@ pub struct ToolResult {
     /// is the channel for tools whose real output is multimodal bytes
     /// (the `image_read` builtin, MCP `ImageContent`, future PDF page
     /// renders). The agent loop appends them as a user-role message
-    /// immediately after the tool result — provider-native
+    /// immediately after the tool result; provider-native
     /// `tool_result` image blocks cover only 2 of the 5 supported
     /// protocols, so they are deliberately not the transport here.
     /// `OutputBoundedTool` truncates `content` only; parts pass
@@ -67,8 +68,12 @@ pub struct TokenUsage {
 ///
 /// Owned fields (not `&str`) so the struct can be moved into parallel
 /// tool-execution tasks.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ToolContext {
+    /// Whether the active model accepts image input; unknown capabilities default to true.
+    pub supports_image_input: bool,
+    /// Shared per-turn image_read accounting owned by the session loop.
+    pub image_read_budget: Option<Arc<Mutex<ImageReadBudget>>>,
     /// Caller-resolved workspace directory (same semantics as
     /// [`Tool::execute`]'s `work_dir` argument).
     pub work_dir: Option<String>,
@@ -84,7 +89,7 @@ pub struct ToolContext {
     /// like `chat_history_read` can resolve the source chat without requiring
     /// the agent to carry internal ids in its text output.
     pub chat_session_id: Option<String>,
-    /// ADR-076 §决策 4 (rev.): the session's initiator — a human account id
+    /// ADR-076 decision 4 (rev.): the session's initiator, a human account id
     /// for a human-started session, an agent instance id for an
     /// agent-started one (the two are indistinguishable by format, so the
     /// consumer that needs the distinction resolves it against the installed
@@ -95,6 +100,20 @@ pub struct ToolContext {
     /// `None` for a turn that belongs to no execution session (the chat
     /// router).
     pub initiator: Option<String>,
+}
+
+impl Default for ToolContext {
+    fn default() -> Self {
+        Self { supports_image_input: true, image_read_budget: None, work_dir: None,
+            session_id: None, current_user_message: None, chat_session_id: None, initiator: None }
+    }
+}
+
+/// Accounting for successful image_read results in a single user turn.
+#[derive(Debug, Default)]
+pub struct ImageReadBudget {
+    pub images: usize,
+    pub base64_bytes: usize,
 }
 
 /// Core Tool trait that all tools must implement
@@ -158,7 +177,7 @@ mod tests {
 
         let serialized = serde_json::to_value(&spec).unwrap();
 
-        // 验证序列化后使用 "parameters" 而不是 "input_schema"
+        // Verify serialization uses "parameters" instead of "input_schema"
         assert!(
             serialized.get("parameters").is_some(),
             "Should have 'parameters' field"
@@ -168,7 +187,7 @@ mod tests {
             "Should NOT have 'input_schema' field"
         );
 
-        // 验证 parameters 内容正确
+        // Verify the parameters content is correct
         let params = serialized.get("parameters").unwrap();
         assert!(params.get("properties").unwrap().get("command").is_some());
 
