@@ -456,6 +456,10 @@ pub struct AgentLoop {
     /// message is already in history and re-embedding it would misattribute
     /// it to the replayed turn).
     pub(crate) current_turn_user_message: Option<String>,
+    /// Fresh re-sends spent this turn after the output-budget nudge ladder
+    /// was exhausted (see `loop_session::handle_output_budget_exhausted`).
+    /// Reset at every `run()` entry alongside the other per-turn state.
+    pub(crate) output_budget_resends: u32,
     /// Per-turn read_image budget shared by parallel tool calls.
     pub(crate) image_read_budget:
         Arc<std::sync::Mutex<acowork_core::tools::traits::ImageReadBudget>>,
@@ -633,6 +637,7 @@ impl AgentLoop {
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             current_turn_user_message: None,
+            output_budget_resends: 0,
             image_read_budget: Arc::new(std::sync::Mutex::new(Default::default())),
             compress_action_rx: None,
             pending_intent: None,
@@ -712,6 +717,7 @@ impl AgentLoop {
             pending_tool_cancels: std::collections::HashMap::new(),
             pending_transient_tool_msgs: Vec::new(),
             current_turn_user_message: None,
+            output_budget_resends: 0,
             image_read_budget: Arc::new(std::sync::Mutex::new(Default::default())),
             compress_action_rx: None,
             pending_intent: None,
@@ -1310,6 +1316,7 @@ impl AgentLoop {
             // instances.
             self.current_turn_user_message = Some(user_message.to_string());
             *self.image_read_budget.lock().unwrap() = Default::default();
+            self.output_budget_resends = 0;
             // ADR-060 §5.5 erratum: the message is appended to history only.
             // It is NOT re-staged as a "Block D" tail duplicate — `build()`
             // reads the current user message from Block B's tail.
@@ -5240,8 +5247,11 @@ mod tests {
         // shift the whole sequence (title gen only runs when unset).
         conversation.set_title("pre-set");
 
-        // nudge #1 → nudge #2 → budget spent (error + empty turn).
+        // nudge #1 → nudge #2 → fresh resend → budget spent (error + empty
+        // turn). The resend appends nothing, so only two internal rows land
+        // in the JSONL even though the model is invoked four times.
         let provider = Arc::new(MockProvider::new(vec![
+            MockResponse::Raw(Box::new(exhausted_response())),
             MockResponse::Raw(Box::new(exhausted_response())),
             MockResponse::Raw(Box::new(exhausted_response())),
             MockResponse::Raw(Box::new(exhausted_response())),
@@ -5263,11 +5273,12 @@ mod tests {
             .expect("loop must not error");
         assert_eq!(reply, "", "exhausted turn returns an empty reply");
 
-        // The model was re-invoked for both nudges and the final attempt.
+        // The model was re-invoked for both nudges, the fresh resend, and
+        // the final give-up attempt.
         assert_eq!(
             provider.call_count(),
-            3,
-            "expected exactly 3 LLM calls (nudge, nudge, give-up)"
+            4,
+            "expected exactly 4 LLM calls (nudge, nudge, resend, give-up)"
         );
 
         conversation.flush_pending().await.expect("flush");
@@ -5357,8 +5368,29 @@ mod tests {
             "precondition: a streaming line is open"
         );
 
-        let _ = agent_loop
+        // Nudge budget spent, but the per-turn fresh-resend allowance is
+        // still available: first call re-sends (loop continues, streaming
+        // line stays open — the nudge path's contract), second call
+        // exhausts the ladder and surfaces.
+        let resend = agent_loop
             .handle_output_budget_exhausted(&exhausted_response(), 3)
+            .await;
+        assert!(
+            matches!(resend, super::IterationResult::Nudged),
+            "spent nudge budget must first spend the fresh-resend allowance"
+        );
+        assert!(
+            !agent_loop
+                .session_core
+                .streaming_lines
+                .read()
+                .unwrap()
+                .is_empty(),
+            "a continuing path leaves the streaming line to the next iteration"
+        );
+
+        let _ = agent_loop
+            .handle_output_budget_exhausted(&exhausted_response(), 4)
             .await;
 
         assert!(

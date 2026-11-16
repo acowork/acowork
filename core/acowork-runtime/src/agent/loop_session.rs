@@ -32,6 +32,14 @@ pub(crate) const INTERNAL_NUDGE_NAME: &str = "internal_nudge";
 /// Maximum nudges injected per user turn before the failure is surfaced.
 pub(crate) const MAX_OUTPUT_BUDGET_NUDGES: usize = 2;
 
+/// Fresh re-sends allowed per user turn once the nudge budget is spent.
+/// The truncated reasoning never enters history, so a resend re-invokes the
+/// LLM on the same context — a plain re-sample, which is exactly what the
+/// user's manual "Retry" did successfully (observed 2026-11-16,
+/// MiniMax-M3.1-Flash session 20261116_204305_dfdb90: the failure is
+/// probabilistic — the model sometimes fits its thinking in the budget).
+pub(crate) const MAX_OUTPUT_BUDGET_RESENDS: u32 = 1;
+
 /// Instruction injected into history after an output-budget exhaustion.
 const OUTPUT_BUDGET_NUDGE: &str = "Your previous reply was cut off by the output token limit \
 and produced no content and no tool calls. Respond now with a direct answer or a tool call — \
@@ -654,6 +662,28 @@ impl super::loop_::AgentLoop {
                 conversation.append_internal_message("user", OUTPUT_BUDGET_NUDGE);
             }
 
+            return super::loop_::IterationResult::Nudged;
+        }
+
+        // Nudge budget spent: before surfacing, spend the per-turn
+        // fresh-resend allowance. The truncated reasoning never entered
+        // history and the trailing nudge already gives the model a user
+        // turn to answer, so this re-invokes the LLM on the same context —
+        // a plain re-sample, the automated version of the manual Retry that
+        // observably recovers. Counter is in-memory (reset at each `run()`),
+        // never history-derived: a restart mid-turn costs at most one extra
+        // attempt, and a history marker would leak into the LLM context.
+        if self.output_budget_resends < MAX_OUTPUT_BUDGET_RESENDS {
+            self.output_budget_resends += 1;
+            tracing::warn!(
+                iteration,
+                attempt = self.output_budget_resends,
+                max_attempts = MAX_OUTPUT_BUDGET_RESENDS,
+                finish_reason = ?response.finish_reason,
+                reasoning_tokens,
+                completion_tokens,
+                "Output budget exhausted with nudge budget spent — re-sending one fresh attempt"
+            );
             return super::loop_::IterationResult::Nudged;
         }
 
