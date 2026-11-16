@@ -3,6 +3,7 @@ import { getGatewayUrl } from "../lib/config";
 import type { HealthResponse, GatewayStatus, LocalGatewayState, GatewayOwnership, GatewayBootResult, AgentMigrationProgress, MigrationAgentEntry, MemoryServiceStatus, SystemStatusResponse } from "../lib/types";
 import { fetchMigrationProgress } from "../lib/gateway-api";
 import { log } from "../lib/logger";
+import { useSettingsStore } from "./settingsStore";
 
 // ── Gateway liveness: single-authority model ─────────────────────────
 //
@@ -441,6 +442,16 @@ export const useGatewayStore = create<GatewayStore>((set, get) => ({
     switch (outcome.kind) {
       case "ok":
         set({ status: "connected", health: outcome.health, gatewayAlive: "alive" });
+        // This address just answered `/health` → it is a known-good address.
+        // Recorded HERE, at the one place that learns the fact, instead of on
+        // a `status` edge: `connectionStore.restart()` does not reset
+        // `status`, so switching from one connected Gateway to another never
+        // produced a connected edge and the new address never reached the
+        // history — leaving both address pickers with nothing but the
+        // loopback row. `recordGatewayUrl` no-ops for a duplicate of the
+        // front, so polling `checkHealth` costs nothing.
+        const settings = useSettingsStore.getState();
+        settings.recordGatewayUrl(settings.gatewayUrl);
         log.debug(
           `[checkHealth] OK prev=${prev} → connected (${outcome.latencyMs.toFixed(1)}ms)`,
         );
