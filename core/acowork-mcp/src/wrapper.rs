@@ -4,10 +4,107 @@
 
 use std::sync::Arc;
 
+use acowork_core::providers::traits::{ContentPart, ImageUrlPart};
 use async_trait::async_trait;
+use base64::Engine;
 
 use crate::client::McpRegistry;
 use crate::protocol::McpToolDef;
+
+/// Maximum decoded image payload exposed from an MCP result.
+const MAX_MCP_IMAGE_BYTES: usize = 8 * 1024 * 1024;
+/// MCP image MIME types supported by the provider image pipeline.
+const SUPPORTED_IMAGE_MIME_TYPES: &[&str] = &["image/png", "image/jpeg", "image/gif", "image/webp"];
+
+/// Convert a raw MCP tool result to the tool's text and multimodal channels.
+/// Text blocks are joined in their original relative order; image parts retain
+/// their relative order and are injected by the runtime immediately afterward.
+fn parse_tool_result(output: &str) -> (String, Option<Vec<ContentPart>>) {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(output) else {
+        return (output.to_string(), None);
+    };
+    let Some(items) = value.get("content").and_then(serde_json::Value::as_array) else {
+        return (output.to_string(), None);
+    };
+
+    let mut text_blocks = Vec::new();
+    let mut image_parts = Vec::new();
+    let mut warnings = Vec::new();
+
+    for item in items {
+        match item.get("type").and_then(serde_json::Value::as_str) {
+            Some("text") => {
+                if let Some(text) = item.get("text").and_then(serde_json::Value::as_str) {
+                    text_blocks.push(text.to_string());
+                }
+            }
+            Some("image") => {
+                let mime_type = item
+                    .get("mimeType")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+                let data = item
+                    .get("data")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default();
+
+                if !SUPPORTED_IMAGE_MIME_TYPES.contains(&mime_type) {
+                    warnings.push(format!(
+                        "MCP image omitted: unsupported mimeType `{}`; ask the MCP tool for PNG, JPEG, GIF, or WebP output",
+                        if mime_type.is_empty() { "(missing)" } else { mime_type }
+                    ));
+                    continue;
+                }
+
+                // Reject by the encoded size before allocating a decoded copy.
+                let encoded_limit = MAX_MCP_IMAGE_BYTES.div_ceil(3) * 4;
+                if data.len() > encoded_limit {
+                    warnings.push(
+                        "MCP image omitted: image too large (> 8 MiB); ask the MCP tool to resize, crop, or re-encode it".to_string(),
+                    );
+                    continue;
+                }
+
+                let decoded = match base64::engine::general_purpose::STANDARD.decode(data) {
+                    Ok(decoded) if decoded.len() <= MAX_MCP_IMAGE_BYTES => decoded,
+                    Ok(_) => {
+                        warnings.push(
+                            "MCP image omitted: image too large (> 8 MiB); ask the MCP tool to resize, crop, or re-encode it".to_string(),
+                        );
+                        continue;
+                    }
+                    Err(_) => {
+                        warnings.push(
+                            "MCP image omitted: invalid base64 data; ask the MCP tool to return a valid image".to_string(),
+                        );
+                        continue;
+                    }
+                };
+                drop(decoded);
+                image_parts.push(ContentPart::ImageUrl {
+                    image_url: ImageUrlPart {
+                        url: format!("data:{mime_type};base64,{data}"),
+                        detail: None,
+                        width: None,
+                        height: None,
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+
+    let content_parts = (!image_parts.is_empty()).then_some(image_parts);
+    // Keep the legacy serialized result byte-for-byte for text-only tools.
+    // Once an image is present (or an image needs an actionable downgrade),
+    // expose the MCP text blocks directly alongside the image channel.
+    if content_parts.is_none() && warnings.is_empty() {
+        return (output.to_string(), None);
+    }
+
+    text_blocks.extend(warnings);
+    (text_blocks.join("\n"), content_parts)
+}
 
 /// Classify an MCP error as permanent, transient, or permission-related.
 ///
@@ -118,13 +215,16 @@ impl acowork_core::tools::Tool for McpToolWrapper {
         };
 
         match self.registry.call_tool(&self.prefixed_name, args).await {
-            Ok(output) => Ok(acowork_core::tools::ToolResult {
-                content_parts: None,
-                ok: true,
-                content: output,
-                error: None,
-                token_usage: None,
-            }),
+            Ok(output) => {
+                let (content, content_parts) = parse_tool_result(&output);
+                Ok(acowork_core::tools::ToolResult {
+                    content_parts,
+                    ok: true,
+                    content,
+                    error: None,
+                    token_usage: None,
+                })
+            }
             Err(e) => {
                 let msg = e.to_string();
                 let classified = classify_mcp_error(&msg);
@@ -145,6 +245,75 @@ mod tests {
     use super::*;
     use acowork_core::tools::Tool;
     use serde_json::json;
+
+    #[test]
+    fn parses_mixed_text_and_image_content_in_stable_order() {
+        let image_data = "aGVsbG8=";
+        let (content, parts) = parse_tool_result(
+            &json!({
+                "content": [
+                    { "type": "text", "text": "first" },
+                    { "type": "image", "mimeType": "image/png", "data": image_data },
+                    { "type": "text", "text": "second" }
+                ]
+            })
+            .to_string(),
+        );
+
+        assert_eq!(content, "first\nsecond");
+        let parts = parts.expect("image part should be preserved");
+        assert_eq!(parts.len(), 1);
+        match &parts[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(image_url.url, format!("data:image/png;base64,{image_data}"));
+            }
+            other => panic!("expected image URL part, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_text_only_content_without_parts() {
+        let text_result = json!({
+            "content": [
+                { "type": "text", "text": "hello" },
+                { "type": "text", "text": "world" }
+            ]
+        })
+        .to_string();
+        let (content, parts) = parse_tool_result(&text_result);
+        assert_eq!(content, text_result);
+        assert!(parts.is_none());
+    }
+
+    #[test]
+    fn reports_unsupported_and_oversized_images_in_text() {
+        let too_large = "A".repeat((MAX_MCP_IMAGE_BYTES.div_ceil(3) * 4) + 4);
+        let (content, parts) = parse_tool_result(
+            &json!({
+                "content": [
+                    { "type": "image", "mimeType": "image/svg+xml", "data": "PHN2Zz4=" },
+                    { "type": "image", "mimeType": "image/png", "data": too_large }
+                ]
+            })
+            .to_string(),
+        );
+        assert!(parts.is_none());
+        assert!(content.contains("unsupported mimeType"));
+        assert!(content.contains("too large"));
+        assert!(content.contains("resize, crop, or re-encode"));
+    }
+
+    #[test]
+    fn reports_invalid_image_base64() {
+        let (content, parts) = parse_tool_result(
+            &json!({
+                "content": [{ "type": "image", "mimeType": "image/png", "data": "not base64!" }]
+            })
+            .to_string(),
+        );
+        assert!(parts.is_none());
+        assert!(content.contains("invalid base64 data"));
+    }
 
     fn make_def(name: &str, description: Option<&str>, schema: serde_json::Value) -> McpToolDef {
         McpToolDef {

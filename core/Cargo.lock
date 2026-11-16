@@ -190,6 +190,7 @@ dependencies = [
  "acowork-core",
  "anyhow",
  "async-trait",
+ "base64 0.22.1",
  "futures-util",
  "indexmap",
  "reqwest",
