@@ -650,7 +650,7 @@ mod tests {
         use axum::{Router, routing::get};
         use tower::ServiceExt;
 
-        let dir = std::env::temp_dir().join(format!("acowork-mw-svc-{}", std::process::id()));
+        let dir = crate::test_support::unique_temp_dir("mw-svc");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -727,7 +727,7 @@ mod tests {
         use axum::{Router, routing::get};
         use tower::ServiceExt;
 
-        let dir = std::env::temp_dir().join(format!("acowork-mw-scope-{}", std::process::id()));
+        let dir = crate::test_support::unique_temp_dir("mw-scope");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -847,7 +847,7 @@ mod tests {
         use axum::{Router, routing::get};
         use tower::ServiceExt;
 
-        let dir = std::env::temp_dir().join(format!("acowork-mw-chatscope-{}", std::process::id()));
+        let dir = crate::test_support::unique_temp_dir("mw-chatscope");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

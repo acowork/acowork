@@ -2955,7 +2955,7 @@ mod tests {
 
         // ── Gateway state with the mock Runtime registered ──
         let dir =
-            std::env::temp_dir().join(format!("acowork-test-debug-proxy-{}", std::process::id()));
+            crate::test_support::unique_temp_dir(format!("acowork-test-debug-proxy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let gw_state = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
@@ -3088,7 +3088,7 @@ mod tests {
         });
 
         // ── Gateway state with the mock Runtime registered ──
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-mcp-tools-proxy-{}",
             std::process::id()
         ));
@@ -3207,7 +3207,7 @@ mod tests {
             axum::serve(listener, runtime_app).await.unwrap();
         });
 
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-json-get-{}",
             std::process::id()
         ));
@@ -3334,7 +3334,9 @@ mod tests {
         use tokio::sync::RwLock as TokioRwLock;
 
         let shared_state: crate::http::routes::SharedHttpState = StdArc::new(TokioRwLock::new(
-            GatewayState::new(std::env::temp_dir().to_str().unwrap_or("/tmp")),
+            GatewayState::new(
+                &crate::test_support::unique_temp_dir("proxy-state").to_string_lossy(),
+            ),
         ));
         {
             let mut gw = shared_state.write().await;
@@ -3402,7 +3404,9 @@ mod tests {
         use tokio::sync::RwLock as TokioRwLock;
 
         let shared_state: crate::http::routes::SharedHttpState = StdArc::new(TokioRwLock::new(
-            GatewayState::new(std::env::temp_dir().to_str().unwrap_or("/tmp")),
+            GatewayState::new(
+                &crate::test_support::unique_temp_dir("proxy-state").to_string_lossy(),
+            ),
         ));
         {
             let mut gw = shared_state.write().await;
@@ -3587,7 +3591,7 @@ mod tests {
         // run in parallel (observed as a spurious FAILED).
         static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-health-proxy-{}-{}-{}",
             std::process::id(),
             agent_id,
@@ -3694,7 +3698,7 @@ mod tests {
     async fn health_route_returns_503_when_agent_not_registered() {
         use tower::util::ServiceExt;
 
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-health-proxy-unreg-{}",
             std::process::id()
         ));

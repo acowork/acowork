@@ -604,7 +604,7 @@ mod tests {
     fn bare_state() -> AppState {
         use tokio::sync::RwLock;
 
-        let dir = std::env::temp_dir().join(format!("acowork-preview-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::unique_temp_dir("preview");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let mut gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
         // ADR-114: even anonymous requests traverse the auth middleware,

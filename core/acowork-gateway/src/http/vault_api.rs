@@ -137,7 +137,7 @@ mod tests {
 
     #[test]
     fn lock_and_unlock_roundtrip_demotes_and_restores_readiness() {
-        let dir = std::env::temp_dir().join("acowork-test-vaultapi-roundtrip");
+        let dir = crate::test_support::unique_temp_dir("acowork-test-vaultapi-roundtrip");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.to_string_lossy().to_string();
@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn lock_on_locked_vault_returns_bad_request() {
-        let dir = std::env::temp_dir().join("acowork-test-vaultapi-already-locked");
+        let dir = crate::test_support::unique_temp_dir("acowork-test-vaultapi-already-locked");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.to_string_lossy().to_string();
@@ -190,7 +190,7 @@ mod tests {
 
     #[test]
     fn unlock_with_empty_password_rejected() {
-        let dir = std::env::temp_dir().join("acowork-test-vaultapi-empty-pw");
+        let dir = crate::test_support::unique_temp_dir("acowork-test-vaultapi-empty-pw");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let dir = dir.to_string_lossy().to_string();

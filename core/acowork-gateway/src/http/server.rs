@@ -498,7 +498,7 @@ mod tests {
 
     #[test]
     fn test_write_pidfile() {
-        let dir = std::env::temp_dir().join("acowork-test-pidfile");
+        let dir = crate::test_support::unique_temp_dir("acowork-test-pidfile");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -525,7 +525,7 @@ mod tests {
 
     #[test]
     fn test_pidfile_guard_cleanup_on_drop() {
-        let dir = std::env::temp_dir().join("acowork-test-pidfile-drop");
+        let dir = crate::test_support::unique_temp_dir("acowork-test-pidfile-drop");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -550,7 +550,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_stale_pidfile_removes_file() {
-        let dir = std::env::temp_dir().join("acowork-test-pidfile-stale");
+        let dir = crate::test_support::unique_temp_dir("acowork-test-pidfile-stale");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -573,7 +573,7 @@ mod tests {
 
     #[test]
     fn test_cleanup_stale_pidfile_no_file() {
-        let dir = std::env::temp_dir().join("acowork-test-pidfile-none");
+        let dir = crate::test_support::unique_temp_dir("acowork-test-pidfile-none");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

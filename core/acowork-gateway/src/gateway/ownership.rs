@@ -672,7 +672,7 @@ mod tests {
         // owned rows are untouched. (Restart protection against
         // re-adopting a deliberately released row is the marker file in
         // `gateway/mod.rs`, not the store's job.)
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-adopt-{}-{}",
             std::process::id(),
             line!()

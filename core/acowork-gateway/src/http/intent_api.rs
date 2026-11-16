@@ -4081,7 +4081,7 @@ mod accept_route_tests {
     }
 
     async fn state_with(mailbox: Arc<IntentMailbox>) -> AppState {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-intent-accept-{}",
             std::process::id()
         ));
@@ -4283,7 +4283,7 @@ mod project_group_deleted_route_tests {
     use tower::ServiceExt;
 
     fn state(user_ready: bool) -> AppState {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-intent-deleted-{}",
             std::process::id()
         ));
@@ -4410,7 +4410,7 @@ mod task_dispatch_human_tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-dispatch-human-{}",
             std::process::id()
         ));
@@ -4703,7 +4703,7 @@ mod pin_reference_rounds_tests {
         let port = listener.local_addr().unwrap().port();
         tokio::spawn(async move { axum::serve(listener, runtime_app).await.unwrap() });
 
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-pin-refs-{}",
             std::process::id()
         ));
@@ -4764,7 +4764,7 @@ mod aware_users_seed_tests {
     /// (`instance_id`, `owner`, `guests`). The store is backed by a unique
     /// temp dir so it starts empty; we then write the rows directly.
     fn state_with_owners(rows: &[(&str, Option<&str>, &[&str])]) -> AppState {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-seed-{}-{}",
             std::process::id(),
             uuid::Uuid::new_v4()
@@ -4915,7 +4915,7 @@ mod doc_review_receipt_tests {
     }
 
     fn bare_state() -> AppState {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-doc-receipt-{}",
             uuid::Uuid::new_v4()
         ));

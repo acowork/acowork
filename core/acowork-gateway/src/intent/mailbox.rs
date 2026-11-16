@@ -763,7 +763,7 @@ mod tests {
 
     #[test]
     fn conversation_count_survives_reload() {
-        let dir = std::env::temp_dir().join(format!("acowork-mailbox-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::unique_temp_dir("mailbox");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("intent_mailbox.json");
         {
@@ -786,7 +786,7 @@ mod tests {
         // burn a §6.5 R4 budget slot (the task starves permanently once
         // the conversation hits the cap) and pile duplicate rows into the
         // chat log. One generation = one entry = one slot, across reloads.
-        let dir = std::env::temp_dir().join(format!("acowork-mailbox-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::unique_temp_dir("mailbox");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("intent_mailbox.json");
         {

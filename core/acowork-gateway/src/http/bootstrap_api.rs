@@ -97,17 +97,12 @@ mod tests {
     use crate::gateway::state::GatewayState;
     use crate::http::auth::HttpAuth;
 
-    /// Unique temp dir per test — a pid-only key makes these tests race
-    /// when they run in parallel (`remove_dir_all` under another test's
-    /// open vault → "Cannot create a file when that file already exists").
+    /// Unique temp dir per test — the shared helper's sequence number keeps
+    /// parallel tests from sharing a path (a shared path means one test's
+    /// `remove_dir_all` deletes another test's open vault → "Cannot create a
+    /// file when that file already exists").
     fn unique_temp_dir() -> std::path::PathBuf {
-        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        std::env::temp_dir().join(format!(
-            "acowork-test-bootstrap-api-{}-{}",
-            std::process::id(),
-            seq
-        ))
+        crate::test_support::unique_temp_dir("bootstrap-api")
     }
 
     /// AppState with a live orchestrator attached; returns the registry

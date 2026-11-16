@@ -103,7 +103,7 @@ mod tests {
 
     #[test]
     fn test_auth_token_file_write() {
-        let dir = std::env::temp_dir().join("acowork-test-auth-token");
+        let dir = crate::test_support::unique_temp_dir("auth-token");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -119,7 +119,7 @@ mod tests {
 
     #[test]
     fn test_auth_disabled_no_token_file() {
-        let dir = std::env::temp_dir().join("acowork-test-auth-no-token");
+        let dir = crate::test_support::unique_temp_dir("auth-no-token");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

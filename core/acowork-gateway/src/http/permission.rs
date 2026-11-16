@@ -904,7 +904,7 @@ mod tests {
         }
 
         fn base_state() -> AppState {
-            let dir = std::env::temp_dir().join(format!(
+            let dir = crate::test_support::unique_temp_dir(format!(
                 "acowork-perm-e2e-{}",
                 uuid::Uuid::new_v4()
             ));

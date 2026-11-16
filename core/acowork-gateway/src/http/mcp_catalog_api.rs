@@ -701,7 +701,7 @@ mod tests {
     #[test]
     fn test_catalog_save_load_roundtrip() {
         let dir =
-            std::env::temp_dir().join(format!("acowork-test-mcp-catalog-{}", std::process::id()));
+            crate::test_support::unique_temp_dir(format!("acowork-test-mcp-catalog-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 
@@ -957,7 +957,7 @@ mod tests {
 
     #[test]
     fn test_load_nonexistent_catalog() {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-mcp-catalog-empty-{}",
             std::process::id()
         ));

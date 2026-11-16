@@ -34,7 +34,7 @@ const PROVIDER: &str = "acme-gw";
 const MODEL: &str = "acme-large";
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
+    let dir = crate::test_support::unique_temp_dir(format!(
         "acowork-probe-{}-{}-{}",
         tag,
         std::process::id(),

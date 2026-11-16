@@ -376,7 +376,7 @@ mod tests {
         nodes: &[(&str, OwnerRecord)],
         agents: &[(&str, OwnerRecord)],
     ) -> AppState {
-        let dir = std::env::temp_dir().join(format!("acowork-acl-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::unique_temp_dir("acl");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
         let mut st = AppState::new(
@@ -578,7 +578,7 @@ mod tests {
         // `can_manage` treats a missing store as "manage" — the
         // historical behaviour for single-user setups — but that must
         // not become a silent hole in a multi_user Gateway.
-        let dir = std::env::temp_dir().join(format!("acowork-acl-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::unique_temp_dir("acl");
         std::fs::create_dir_all(&dir).expect("temp dir");
         let gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
         let st = AppState::new(
