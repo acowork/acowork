@@ -110,6 +110,7 @@ impl Tool for ContextAbandonTool {
             Some(_) => {
                 tracing::warn!("context_abandon called with empty tool_call_id");
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some("tool_call_id must be a non-empty string".to_string()),
@@ -119,6 +120,7 @@ impl Tool for ContextAbandonTool {
             None => {
                 tracing::warn!("context_abandon called without tool_call_id parameter");
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some("Missing required parameter 'tool_call_id'".to_string()),
@@ -141,6 +143,7 @@ impl Tool for ContextAbandonTool {
         );
 
         Ok(ToolResult {
+            content_parts: None,
             ok: true,
             content: format!(
                 "Tool result '{}' will be replaced with a placeholder.",

@@ -873,6 +873,18 @@ pub(crate) struct SendMessageBody {
     pub(crate) content: String,
     #[serde(default)]
     pub(crate) message_id: String,
+    /// ADR-106 revision (2026-11-16): the id of the `user_message` row the
+    /// execution surface just appended to this session's bound Chat with the
+    /// same words. Optional: absent (or empty) is every pre-existing client,
+    /// and the round then runs unthreaded as before. The Runtime honors it
+    /// only for the first round of a chat-bound session — a claim it cannot
+    /// honor is dropped, never corrected, so a lying client degrades to the
+    /// old shape rather than to a phantom thread. (The two checkable gates
+    /// run here; the row's existence is verified by the store when the
+    /// reference lands, and a refusal there retries the write unthreaded —
+    /// `TurnReference::degraded_mirror_claim`.)
+    #[serde(default)]
+    pub(crate) chat_trigger_row_id: String,
     /// Slash-command *name* only; the Runtime resolves it against the
     /// agent's SkillRegistry (client-supplied instructions are ignored).
     #[serde(default)]
@@ -986,6 +998,7 @@ pub(crate) async fn post_send_message(
         InboundMessage::ChatMessage {
             content: body.content,
             message_id: body.message_id,
+            chat_trigger_row_id: body.chat_trigger_row_id,
             command: body.command,
             params_json: body.params_json,
             // The Gateway verified this caller before proxying, and

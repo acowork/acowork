@@ -842,8 +842,13 @@ optional unless noted):
 
 ```json
 // POST .../messages — equivalent to the former mqtt ChatMessage (`params_json`
-// is a STRING; the Runtime parses attached_items / content_parts out of it)
-{ "content": "...", "message_id": "...", "command": "", "params_json": "{}" }
+// is a STRING; the Runtime parses attached_items / content_parts out of it).
+// `chat_trigger_row_id` is optional (ADR-106 revision 2026-11-16): when the
+// execution surface has mirrored its FIRST message into the bound Chat as an
+// archive-only `user_message`, this is that row's id; the Runtime honors the
+// claim only for the first round of a chat-bound session, and drops it —
+// leaving the reference row unthreaded — otherwise.
+{ "content": "...", "message_id": "...", "chat_trigger_row_id": "", "command": "", "params_json": "{}" }
 
 // POST .../approval  /  .../answer  — the human-in-the-loop replies
 { "approved": true }

@@ -80,6 +80,7 @@ impl Tool for RagQueryTool {
         let query = params["query"].as_str().unwrap_or("").trim();
         if query.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'query' parameter".to_string()),
@@ -98,6 +99,7 @@ impl Tool for RagQueryTool {
 
         if results.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: "No relevant results found in enterprise knowledge base.".to_string(),
                 error: None,
@@ -125,6 +127,7 @@ impl Tool for RagQueryTool {
         );
 
         Ok(ToolResult {
+            content_parts: None,
             ok: true,
             content,
             error: None,

@@ -91,6 +91,7 @@ impl Tool for TodoWriteTool {
         _work_dir: Option<&str>,
     ) -> acowork_core::error::Result<ToolResult> {
         Ok(ToolResult {
+            content_parts: None,
             ok: false,
             content: String::new(),
             error: Some(

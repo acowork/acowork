@@ -1240,7 +1240,7 @@ mod tests {
     }
 
     fn test_state() -> AppState {
-        let dir = std::env::temp_dir().join(format!("acowork-chatblocks-{}", uuid::Uuid::new_v4()));
+        let dir = crate::test_support::unique_temp_dir("chatblocks");
         let _ = std::fs::create_dir_all(&dir);
         let gw = crate::gateway::state::GatewayState::new(&dir.to_string_lossy());
         AppState::new(

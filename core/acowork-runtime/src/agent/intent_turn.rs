@@ -182,6 +182,66 @@ pub struct TurnReference {
     /// never from a peer's params — a chip naming a task the sender invented
     /// would be a claim the Chat has no way to check.
     pub task_id: Option<String>,
+    /// The trigger coordinate is a MIRROR CLAIM (ADR-106 revision
+    /// 2026-11-16): a human surface says it wrote these words into the Chat
+    /// under this id, and the loop passed its two checkable gates — but the
+    /// row's existence is only verified by the store when the reference row
+    /// lands (D15 refuses a coordinate that resolves to nothing). The marker
+    /// is what lets `publish_round_reference` tell "the store refused my
+    /// unverifiable claim" (degrade to an origin row, the round runs) from a
+    /// router-supplied coordinate failing (a real fault — surface it).
+    pub mirror_claim: bool,
+}
+
+impl TurnReference {
+    /// The reference for a turn composed against the execution surface
+    /// (ADR-106 D3, with the 2026-11-16 mirror revision).
+    ///
+    /// Such a turn answers no Chat row the Chat itself produced, so the
+    /// reference is the empty one — unless the surface CLAIMS it has already
+    /// appended these same words to the bound Chat as an archive-only
+    /// `user_message` and hands over that row's id. A claim is a fact about
+    /// the human surface's own write, which the loop has no view on; what the
+    /// loop CAN check is that honoring it would not be a lie: the turn must
+    /// be chat-bound (a row in another Chat is not a thread) and this must
+    /// be the session's first round (an opener claim on a mid-run round would
+    /// stamp `opened_new` on a session that was open long ago). Anything the
+    /// check refuses degrades to the pre-revision shape — unthreaded, not
+    /// `opened_new` — rather than to a phantom thread or a false "new task".
+    pub(crate) fn from_exec_mirror_claim(
+        claim: &str,
+        chat_bound: bool,
+        first_round: bool,
+    ) -> Self {
+        if claim.trim().is_empty() || !chat_bound || !first_round {
+            return Self::default();
+        }
+        Self {
+            trigger_message_id: claim.trim().to_string(),
+            // Truth, not a fake: this round did open the session, and
+            // `opened_new` is what tells the layout the trigger row keeps its
+            // own bubble (design 27 §5.5, the chat-origin presentation pair).
+            opened_new: Some(true),
+            mirror_claim: true,
+            ..Self::default()
+        }
+    }
+
+    /// The pre-revision shape of an execution-surface reference: unthreaded,
+    /// no `opened_new`. `publish_round_reference` falls back to this when the
+    /// store refuses a mirror claim's coordinate (D15) — the promise that "a
+    /// claim that cannot be honored is dropped, not corrected" is only true
+    /// end-to-end if the round still runs after the refusal. Presentation
+    /// facts that do not name a row (`round_name`, `task_id`) are kept: they
+    /// owe no resolution, and dropping them would punish the block for a
+    /// coordinate the human surface could not keep alive.
+    pub(crate) fn degraded_mirror_claim(&self) -> Self {
+        Self {
+            round_name: self.round_name.clone(),
+            task_id: self.task_id.clone(),
+            ..Self::default()
+        }
+    }
 }
 
 /// How a turn ended, in the Chat-facing vocabulary: the status of the
@@ -1839,6 +1899,9 @@ mod tests {
             opened_new,
             round_name: brief.map(str::to_string),
             task_id: task_id.map(str::to_string),
+            // The transport's hand-over is router-shaped: its coordinate
+            // names a row that exists by construction, never a mirror claim.
+            mirror_claim: false,
         }
     }
 
@@ -1876,6 +1939,78 @@ mod tests {
                 .get("opened_new")
                 .is_none()
         );
+    }
+
+    /// ADR-106 revision (2026-11-16): the execution surface's mirror claim.
+    /// The claim names a Chat row the HUMAN surface wrote with the same
+    /// words; the loop honors it only where honoring cannot be a lie. Each
+    /// refusal degrades to the pre-revision shape — unthreaded, no
+    /// `opened_new` — never to a phantom thread or a false "new task".
+    #[test]
+    fn exec_mirror_claim_is_honored_only_for_a_first_round_in_a_bound_session() {
+        // The honored case: chat-bound, first round, a real row id.
+        let r = TurnReference::from_exec_mirror_claim("msg-9f2c", true, true);
+        assert_eq!(r.trigger_message_id, "msg-9f2c");
+        assert_eq!(r.opened_new, Some(true));
+        // The reference row built from it threads under the mirrored bubble.
+        let m = execution_round_meta(
+            "r:1f0c",
+            &r,
+            "20260101_000000_abcdef",
+            "inst-1",
+        );
+        assert_eq!(m["in_reply_to"], "msg-9f2c");
+        assert_eq!(m["opened_new"], true);
+
+        // No claim (every pre-revision client, the MQTT path, the Continue
+        // button): the default unthreaded reference, exactly as before.
+        let r = TurnReference::from_exec_mirror_claim("", true, true);
+        assert!(r.trigger_message_id.is_empty());
+        assert_eq!(r.opened_new, None);
+
+        // Not chat-bound: the row lives in no Chat this round could thread
+        // under, so the claim is dropped rather than pointed at nothing.
+        let r = TurnReference::from_exec_mirror_claim("msg-9f2c", false, true);
+        assert!(r.trigger_message_id.is_empty());
+
+        // Not the first round: stamping `opened_new` on a session that
+        // opened long ago would be the false "new task" the field's own
+        // doc forbids faking.
+        let r = TurnReference::from_exec_mirror_claim("msg-9f2c", true, false);
+        assert!(r.trigger_message_id.is_empty());
+        assert_eq!(r.opened_new, None);
+    }
+
+    /// ADR-106 revision (2026-11-16), the store's half: the loop's two gates
+    /// cannot see whether the claimed row EXISTS — only the store's
+    /// coordinate resolution (D15) can, and it runs when the reference row
+    /// lands. A refusal there must not kill the round (the contract says the
+    /// claim is *dropped*); `degraded_mirror_claim` is the shape the retry
+    /// writes: the pre-revision reference — unthreaded, no `opened_new` —
+    /// keeping only the presentation facts that owe no resolution.
+    #[test]
+    fn a_refused_mirror_claim_degrades_to_an_unthreaded_origin_reference() {
+        let claimed = TurnReference::from_exec_mirror_claim("msg-9f2c", true, true);
+        assert!(claimed.mirror_claim, "an honored claim must be marked");
+        let degraded = claimed.degraded_mirror_claim();
+        assert!(degraded.trigger_message_id.is_empty());
+        assert_eq!(degraded.opened_new, None);
+        assert!(!degraded.mirror_claim, "the fallback is no longer a claim");
+        // A row the exec branch names for the list header owes nothing to the
+        // thread — dropping it would punish the block for the surface's
+        // bookkeeping, so it survives the degradation.
+        let named = TurnReference {
+            round_name: Some("修复分页不满屏".into()),
+            task_id: Some("t-a4f21dbc".into()),
+            ..claimed.clone()
+        };
+        let degraded = named.degraded_mirror_claim();
+        assert_eq!(degraded.round_name.as_deref(), Some("修复分页不满屏"));
+        assert_eq!(degraded.task_id.as_deref(), Some("t-a4f21dbc"));
+        assert!(degraded.trigger_message_id.is_empty());
+        // A router-supplied reference is never a claim: its coordinate
+        // exists by construction, so a refusal there stays a loud fault.
+        assert!(!TurnReference::default().mirror_claim);
     }
 
     /// The producer's half of the cross-process contract, and the regression for

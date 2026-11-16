@@ -1276,7 +1276,7 @@ data_dir = "/tmp/test-data"
         let _lock = ENV_LOCK.lock().unwrap();
         let prev_home = std::env::var_os("ACOWORK_HOME");
         let prev_node_home = std::env::var_os("ACOWORK_NODE_HOME");
-        let tmp = std::env::temp_dir().join("acowork-test-pkg-default");
+        let tmp = crate::test_support::unique_temp_dir("pkg-default");
         let _ = std::fs::create_dir_all(&tmp);
         unsafe { std::env::set_var("ACOWORK_HOME", &tmp) };
         unsafe { std::env::set_var("ACOWORK_NODE_HOME", "/tmp/sim-node-home") };
@@ -1306,7 +1306,7 @@ data_dir = "/tmp/test-data"
     fn test_local_node_cli_overrides_toml() {
         let _lock = ENV_LOCK.lock().unwrap();
         let prev_home = std::env::var_os("ACOWORK_HOME");
-        let tmp = std::env::temp_dir().join("acowork-test-cli-overrides-toml");
+        let tmp = crate::test_support::unique_temp_dir("cli-overrides-toml");
         let _ = std::fs::create_dir_all(&tmp);
         unsafe { std::env::set_var("ACOWORK_HOME", &tmp) };
 
@@ -1329,7 +1329,7 @@ data_dir = "/tmp/test-data"
     fn test_config_from_cli_defaults() {
         let _lock = ENV_LOCK.lock().unwrap();
         // Use a temp home directory so no real config file is read.
-        let tmp = std::env::temp_dir().join("acowork-test-config-defaults");
+        let tmp = crate::test_support::unique_temp_dir("config-defaults");
         let _ = std::fs::create_dir_all(&tmp);
         unsafe { std::env::set_var("ACOWORK_HOME", tmp.to_str().unwrap()) };
         unsafe { std::env::set_var("ACOWORK_GATEWAY_LOG_LEVEL", "info") };
@@ -1355,7 +1355,7 @@ data_dir = "/tmp/test-data"
         let _lock = ENV_LOCK.lock().unwrap();
         let prev_home = std::env::var_os("ACOWORK_HOME");
         let prev_http_port = std::env::var_os("ACOWORK_GATEWAY_HTTP_PORT");
-        let tmp = std::env::temp_dir().join("acowork-test-cli-http-addr");
+        let tmp = crate::test_support::unique_temp_dir("cli-http-addr");
         let _ = std::fs::create_dir_all(&tmp);
         unsafe { std::env::set_var("ACOWORK_HOME", tmp.to_str().unwrap()) };
         unsafe { std::env::remove_var("ACOWORK_GATEWAY_HTTP_PORT") };
@@ -1385,7 +1385,7 @@ data_dir = "/tmp/test-data"
         let _lock = ENV_LOCK.lock().unwrap();
         let prev_home = std::env::var_os("ACOWORK_HOME");
         let prev_http_port = std::env::var_os("ACOWORK_GATEWAY_HTTP_PORT");
-        let tmp = std::env::temp_dir().join("acowork-test-cli-http-env-precedence");
+        let tmp = crate::test_support::unique_temp_dir("cli-http-env-precedence");
         let _ = std::fs::create_dir_all(&tmp);
         unsafe { std::env::set_var("ACOWORK_HOME", tmp.to_str().unwrap()) };
         // env says 22000, CLI says 22100 → CLI (highest priority) wins.
@@ -1411,7 +1411,7 @@ data_dir = "/tmp/test-data"
         let _lock = ENV_LOCK.lock().unwrap();
         let prev_home = std::env::var_os("ACOWORK_HOME");
         let prev_mqtt_port = std::env::var_os("ACOWORK_GATEWAY_MQTT_PORT");
-        let tmp = std::env::temp_dir().join("acowork-test-cli-mqtt-addr");
+        let tmp = crate::test_support::unique_temp_dir("cli-mqtt-addr");
         let _ = std::fs::create_dir_all(&tmp);
         unsafe { std::env::set_var("ACOWORK_HOME", tmp.to_str().unwrap()) };
         unsafe { std::env::remove_var("ACOWORK_GATEWAY_MQTT_PORT") };
@@ -1438,7 +1438,7 @@ data_dir = "/tmp/test-data"
     fn test_config_from_cli_invalid_addr_is_error() {
         let _lock = ENV_LOCK.lock().unwrap();
         let prev_home = std::env::var_os("ACOWORK_HOME");
-        let tmp = std::env::temp_dir().join("acowork-test-cli-invalid-addr");
+        let tmp = crate::test_support::unique_temp_dir("cli-invalid-addr");
         let _ = std::fs::create_dir_all(&tmp);
         unsafe { std::env::set_var("ACOWORK_HOME", tmp.to_str().unwrap()) };
 
@@ -1533,7 +1533,7 @@ data_dir = "/tmp/test-data"
     fn write_toml_config(label: &str, body: &str) -> PathBuf {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!(
+        let path = crate::test_support::unique_temp_dir(format!(
             "acowork-test-pm-config-{label}-{}-{unique}.toml",
             std::process::id(),
         ));
@@ -1546,7 +1546,7 @@ data_dir = "/tmp/test-data"
     fn test_from_cli_reads_explicit_pm_section() {
         let _lock = ENV_LOCK.lock().unwrap();
         // 让 default_config_path() 找不到,避免污染
-        let tmp_home = std::env::temp_dir().join("acowork-test-pm-config-explicit-home");
+        let tmp_home = crate::test_support::unique_temp_dir("pm-config-explicit-home");
         let _ = std::fs::remove_dir_all(&tmp_home);
         std::fs::create_dir_all(&tmp_home).unwrap();
         unsafe { std::env::set_var("ACOWORK_HOME", tmp_home.to_str().unwrap()) };
@@ -1579,7 +1579,7 @@ mcp_http_path = "/custom/pm/mcp"
     #[test]
     fn test_from_cli_omitted_pm_section_uses_defaults() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let tmp_home = std::env::temp_dir().join("acowork-test-pm-config-omitted-home");
+        let tmp_home = crate::test_support::unique_temp_dir("pm-config-omitted-home");
         let _ = std::fs::remove_dir_all(&tmp_home);
         std::fs::create_dir_all(&tmp_home).unwrap();
         unsafe { std::env::set_var("ACOWORK_HOME", tmp_home.to_str().unwrap()) };
@@ -1606,7 +1606,7 @@ data_dir = "/tmp/gw-omitted-test-data"
     #[test]
     fn test_from_cli_partial_pm_section_uses_serde_default() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let tmp_home = std::env::temp_dir().join("acowork-test-pm-config-partial-home");
+        let tmp_home = crate::test_support::unique_temp_dir("pm-config-partial-home");
         let _ = std::fs::remove_dir_all(&tmp_home);
         std::fs::create_dir_all(&tmp_home).unwrap();
         unsafe { std::env::set_var("ACOWORK_HOME", tmp_home.to_str().unwrap()) };

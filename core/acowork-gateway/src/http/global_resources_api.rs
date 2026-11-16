@@ -409,7 +409,7 @@ mod tests {
     const GATEWAY_GENERATION: &str = "6a7b8c9d-0e1f-4022-8132-e24c5d6e7f8a";
 
     async fn test_state_with_snapshot(snapshot: Option<BootstrapSnapshot>) -> AppState {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-global-resources-api-{}-{}",
             std::process::id(),
             DIR_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)

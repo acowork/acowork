@@ -314,6 +314,12 @@ impl Cli {
         // Captured before `config` is moved into `Gateway::new`: the
         // `admin-setup` subcommand delegates to the owning process (ADR-084).
         let user_data_dir = config.user.data_dir.clone();
+        // The user service's own TOML (`[user].config`): it carries the
+        // password policy, the bootstrap administrator and the registration
+        // flag (ADR-084 §决策 3). Forwarded to every `acowork-user`
+        // invocation so the one-shot CLI path enforces the same policy as
+        // the supervised service.
+        let user_config = config.user.config.clone();
         // ADR-076 §决策 12 v2: the `admin-setup` subcommand needs the
         // configured password policy + resolved auth mode to validate the
         // new password. Captured here so we can still build the gateway
@@ -485,7 +491,7 @@ impl Cli {
                 // owner up front. Before the first administrator exists
                 // there is nothing to bind and the row stays ownerless —
                 // the claim endpoint is the manual fallback.
-                let owner = user_first_admin(user_data_dir.as_deref());
+                let owner = user_first_admin(user_data_dir.as_deref(), user_config.as_deref());
                 let plaintext = store.create_token(ttl, owner);
                 println!("Enrollment token created (one-time, TTL {}m):", ttl.as_secs() / 60);
                 println!("{plaintext}");
@@ -510,7 +516,8 @@ impl Cli {
                 // Gateway would be a second writer.
                 let mut password = read_admin_password(password_file.as_deref(), password_stdin)
                     .map_err(GatewayError::Config)?;
-                let result = user_admin_setup(user_data_dir.as_deref(), &password);
+                let result =
+                    user_admin_setup(user_data_dir.as_deref(), user_config.as_deref(), &password);
                 // Zeroize the local buffer immediately — the Argon2id hash
                 // is the only durable artifact.
                 zeroize::Zeroize::zeroize(&mut password);
@@ -893,10 +900,25 @@ fn user_binary() -> std::path::PathBuf {
 /// The top-level flags must precede the subcommand (`global = true` is not
 /// set on them, so `admin-setup --data-dir X` would be parsed as a
 /// subcommand argument and silently ignored).
-fn user_command(user_data_dir: Option<&std::path::Path>) -> std::process::Command {
+///
+/// `--config` is forwarded for the same reason the supervisor forwards it
+/// ([`crate::lifecycle::user_supervisor`]): the password policy, the
+/// bootstrap administrator and the registration flag belong to the *user
+/// service's* own TOML (ADR-084 §决策 3), and that file is only reachable
+/// through this flag. Without it the one-shot `admin-setup` runs under the
+/// service's **default** policy while the supervised service runs under the
+/// configured one — so `acowork-gateway admin-setup` would accept a password
+/// the running service would reject, and vice versa. One policy, one source.
+fn user_command(
+    user_data_dir: Option<&std::path::Path>,
+    user_config: Option<&std::path::Path>,
+) -> std::process::Command {
     let mut cmd = std::process::Command::new(user_binary());
     if let Some(dir) = user_data_dir {
         cmd.arg("--data-dir").arg(dir);
+    }
+    if let Some(path) = user_config {
+        cmd.arg("--config").arg(path);
     }
     cmd
 }
@@ -905,12 +927,17 @@ fn user_command(user_data_dir: Option<&std::path::Path>) -> std::process::Comman
 ///
 /// `user_data_dir` is the `[user].data_dir` override — `None` (the usual
 /// case) lets the service resolve its own default, so this can never
-/// disagree with the copy `restricted_mode` gates on.
+/// disagree with the copy `restricted_mode` gates on. `user_config` is the
+/// `[user].config` TOML the supervisor also passes, so the policy seen here
+/// is the one the running service enforces.
 ///
 /// `Err` when the service cannot be asked at all — the caller decides whether
 /// that is fatal (`admin-setup`) or merely means "do not prompt" (boot).
-pub fn user_setup_required(user_data_dir: Option<&std::path::Path>) -> Result<bool, String> {
-    let output = user_command(user_data_dir)
+pub fn user_setup_required(
+    user_data_dir: Option<&std::path::Path>,
+    user_config: Option<&std::path::Path>,
+) -> Result<bool, String> {
+    let output = user_command(user_data_dir, user_config)
         .args(["admin-setup", "--check"])
         .output()
         .map_err(|e| format!("failed to run `acowork-user admin-setup --check`: {e}"))?;
@@ -931,8 +958,11 @@ pub fn user_setup_required(user_data_dir: Option<&std::path::Path>) -> Result<bo
 /// `None` (no admin yet / service not installed) is not an error — the
 /// caller keeps the old ownerless behavior and the claim endpoint
 /// (`POST /api/{nodes,agents}/{id}/claim`) remains as the fallback.
-pub fn user_first_admin(user_data_dir: Option<&std::path::Path>) -> Option<String> {
-    let output = user_command(user_data_dir)
+pub fn user_first_admin(
+    user_data_dir: Option<&std::path::Path>,
+    user_config: Option<&std::path::Path>,
+) -> Option<String> {
+    let output = user_command(user_data_dir, user_config)
         .arg("first-admin")
         .stderr(std::process::Stdio::null())
         .output()
@@ -945,10 +975,17 @@ pub fn user_first_admin(user_data_dir: Option<&std::path::Path>) -> Option<Strin
 }
 
 /// Set the first-boot admin password, via the owning process.
-pub fn user_admin_setup(user_data_dir: Option<&std::path::Path>, password: &str) -> Result<(), String> {
+///
+/// `user_config` is forwarded so the configured `password_policy` decides —
+/// the same file the supervised service reads (ADR-084 §决策 3).
+pub fn user_admin_setup(
+    user_data_dir: Option<&std::path::Path>,
+    user_config: Option<&std::path::Path>,
+    password: &str,
+) -> Result<(), String> {
     use std::io::Write;
 
-    let mut child = user_command(user_data_dir)
+    let mut child = user_command(user_data_dir, user_config)
         .args(["admin-setup", "--password-stdin"])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())

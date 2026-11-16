@@ -823,7 +823,7 @@ mod tests {
     use super::*;
 
     fn temp_vault_dir(name: &str) -> String {
-        let dir = std::env::temp_dir().join(format!("acowork-test-vaultfacade-{name}"));
+        let dir = crate::test_support::unique_temp_dir(format!("vaultfacade-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir.to_string_lossy().to_string()

@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::error::Result;
+use crate::providers::traits::ContentPart;
 
 /// Tool specification (name, description, input schema)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -25,6 +26,21 @@ pub struct ToolResult {
     pub ok: bool,
     /// Result content (text or structured data)
     pub content: String,
+    /// Non-text result payloads (images, documents).
+    ///
+    /// The `content` string stays the *only* thing the 32 KB
+    /// [`crate`] output cap and the transcript persist; `content_parts`
+    /// is the channel for tools whose real output is multimodal bytes
+    /// (the `image_read` builtin, MCP `ImageContent`, future PDF page
+    /// renders). The agent loop appends them as a user-role message
+    /// immediately after the tool result — provider-native
+    /// `tool_result` image blocks cover only 2 of the 5 supported
+    /// protocols, so they are deliberately not the transport here.
+    /// `OutputBoundedTool` truncates `content` only; parts pass
+    /// through untouched by design (a truncated base64 payload is
+    /// corrupt, not smaller).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_parts: Option<Vec<ContentPart>>,
     /// Optional error message
     #[serde(default)]
     pub error: Option<String>,

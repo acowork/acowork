@@ -69,6 +69,14 @@ axum.workspace = true
 # base64-encoded content for image / PDF / archive types).
 base64.workspace = true
 
+# Raster decode/scale/encode for the `image_read` builtin tool
+# (design doc t-65a1a89e). Only the four formats the tool sniffs and
+# the five provider protocols all accept; no default features so the
+# rest of the format matrix (and rayon) stays out of the binary.
+# Already in the workspace dependency graph via acowork-user — not a
+# new third-party.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp"] }
+
 # File system watching
 notify.workspace = true
 

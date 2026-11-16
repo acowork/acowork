@@ -82,3 +82,13 @@ image = { version = "0.25", optional = true }
 [dev-dependencies]
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+# `doc_refs_route_e2e`: the doc_refs validation regression runs against the
+# REAL doc service (its own router, its own route table) instead of a stub
+# that mocked the same wrong path the implementation used — the mock and
+# the code agreeing with each other is what let the 404 ship green.
+# Dev-only: PM never links the doc service in production.
+acowork-doc = { workspace = true }
+async-trait.workspace = true
+reqwest.workspace = true
+axum.workspace = true
+serde_json.workspace = true

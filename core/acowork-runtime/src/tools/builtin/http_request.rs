@@ -182,6 +182,7 @@ impl HttpRequestTool {
                 };
 
                 ToolResult {
+                    content_parts: None,
                     ok: status.is_success(),
                     content: format!(
                         "HTTP {} {} {}",
@@ -198,6 +199,7 @@ impl HttpRequestTool {
                 }
             }
             Err(e) => ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!("Failed to read response body: {e}")),
@@ -227,6 +229,7 @@ impl Tool for HttpRequestTool {
         let url = params["url"].as_str().unwrap_or("");
         if url.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'url' parameter".to_string()),
@@ -237,6 +240,7 @@ impl Tool for HttpRequestTool {
         // Validate URL scheme
         if !url.starts_with("http://") && !url.starts_with("https://") {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("URL must start with http:// or https://".to_string()),
@@ -273,6 +277,7 @@ impl Tool for HttpRequestTool {
         match req.send().await {
             Ok(resp) => Ok(Self::process_response(resp, &method_str).await),
             Err(e) => Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!("HTTP {method_str} request failed: {e}")),

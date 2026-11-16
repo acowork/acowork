@@ -217,6 +217,7 @@ impl Tool for ShellTool {
 
         if command.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'command' parameter".to_string()),
@@ -248,6 +249,7 @@ impl Tool for ShellTool {
                 "shell: binary not found at runtime"
             );
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(error_msg),
@@ -342,6 +344,7 @@ impl Tool for ShellTool {
                 );
 
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: output.status.success(),
                     content,
                     error: if output.status.success() {
@@ -359,6 +362,7 @@ impl Tool for ShellTool {
                     "shell: failed to execute command"
                 );
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Failed to execute command: {e}")),
@@ -372,6 +376,7 @@ impl Tool for ShellTool {
                     "shell: spawn_blocking task panicked"
                 );
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Internal error: shell task panicked: {join_err}")),

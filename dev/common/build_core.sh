@@ -891,7 +891,7 @@ if [ "$START_GATEWAY" = "true" ]; then
             echo ""
             echo -e "${YELLOW}[setup] First-boot detected (admin password not set), but no interactive TTY is attached.${NC}"
             echo -e "${YELLOW}        Run admin-setup manually before starting the gateway:${NC}"
-            echo -e "${YELLOW}          $GATEWAY_EXE --auth-mode multi_user admin-setup --password-file <pwfile>${NC}"
+            echo -e "${YELLOW}          $GATEWAY_EXE admin-setup --password-file <pwfile>${NC}"
             echo ""
             exit 1
         fi
@@ -949,6 +949,10 @@ if [ "$START_GATEWAY" = "true" ]; then
         # $TMPDIR; we still immediately shred/remove it in the cleanup
         # trap, even on admin-setup failure.
         _tmp_pw="$(mktemp -t acowork-admin-pw.XXXXXX 2>/dev/null || mktemp)"
+        # Captures the Gateway's stderr so the real failure reason can be
+        # replayed. It holds no secret, but it is still removed by the same
+        # trap — an interrupted setup must not leave temp files behind.
+        _setup_err=""
         cleanup_pw() {
             if [ -n "${_tmp_pw:-}" ] && [ -f "$_tmp_pw" ]; then
                 if command -v shred >/dev/null 2>&1; then
@@ -957,14 +961,35 @@ if [ "$START_GATEWAY" = "true" ]; then
                     rm -f "$_tmp_pw"
                 fi
             fi
+            if [ -n "${_setup_err:-}" ] && [ -f "$_setup_err" ]; then
+                rm -f "$_setup_err"
+            fi
             unset _PW1 _PW2 2>/dev/null || true
         }
         trap cleanup_pw EXIT INT TERM
 
         printf '%s' "$_PW1" > "$_tmp_pw"
         echo -e "${GRAY}  Setting admin password...${NC}"
-        if ! "$GATEWAY_EXE" --auth-mode multi_user admin-setup --password-file "$_tmp_pw"; then
-            echo -e "${RED}ERROR: admin-setup failed. Likely a password-policy violation -- check [multi_user].password_policy in gateway.toml.${NC}"
+        # ADR-114: no `--auth-mode` — the account system is always present.
+        # The flag was removed in the ADR-114 commit, but this script kept
+        # passing it, so clap aborted the whole line and the fresh install
+        # dead-ended here (reported as a password-policy problem, which it
+        # never was).
+        #
+        # The Gateway's own stderr is captured and replayed: it carries the
+        # real reason (policy violation, an already-set password, a missing
+        # binary), and the old code threw it away and printed a guess that
+        # pointed at a `[multi_user]` section which no longer exists.
+        _setup_err="$(mktemp 2>/dev/null || mktemp)"
+        if ! "$GATEWAY_EXE" admin-setup --password-file "$_tmp_pw" 2>"$_setup_err"; then
+            echo -e "${RED}ERROR: admin-setup failed.${NC}"
+            if [ -s "$_setup_err" ]; then
+                echo -e "${RED}  Gateway said:${NC}"
+                sed 's/^/    /' "$_setup_err" >&2
+            fi
+            echo -e "${RED}  If the password was rejected, the policy lives in the user service's${NC}"
+            echo -e "${RED}  own TOML ([password_policy] in acowork-user.toml, pointed at by${NC}"
+            echo -e "${RED}  [user].config in gateway.toml) — not in gateway.toml itself.${NC}"
             cleanup_pw
             trap - EXIT INT TERM
             exit 1

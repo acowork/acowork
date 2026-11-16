@@ -9,11 +9,18 @@
 //! | Gateway public | doc internal |
 //! |----------------|--------------|
 //! | `/api/doc/health` | `/health` |
-//! | `/api/doc/api/tree` | `/api/tree` |
+//! | `/api/doc/tree` | `/tree` |
+//! | `/api/doc/docs/{id}` | `/docs/{id}` |
 //! | `/api/doc/mcp` | `/mcp` |
 //!
-//! The doc router keeps its internal `/api/*` prefix; this proxy strips only
-//! the `/api/doc` Gateway prefix before forwarding.
+//! The doc router mounts its routes **bare** — it has no `/api` base of its
+//! own (`core/acowork-doc/src/api/router.rs`). This proxy strips exactly its
+//! `/api/doc` prefix and forwards the remainder verbatim, so a doubled
+//! `api` (`/api/doc/api/tree`) reaches the doc service as `/api/tree` and
+//! 404s. That is not hypothetical: PM shipped exactly that shape for
+//! `doc_refs` validation and every `pm_submit_task` carrying `doc_refs`
+//! failed with `404` until the path came from the shared
+//! [`acowork_core::doc_layout::DOC_REFS_VALIDATE_ROUTE`] constant.
 //!
 //! ## Not-ready semantics
 //!
@@ -237,7 +244,7 @@ mod tests {
     fn test_app_state() -> AppState {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-doc-proxy-{}-{}",
             std::process::id(),
             unique
@@ -260,16 +267,23 @@ mod tests {
         )
     }
 
-    /// Start a mock doc server on `127.0.0.1:0` (internal paths keep the
-    /// `/api` prefix, as the doc router does). Returns the port.
+    /// Start a mock doc server on `127.0.0.1:0` (bare internal paths, as the
+    /// doc router mounts them). Returns the port.
+    ///
+    /// Mock upstream registered with the **real** doc route shapes (bare —
+    /// no `/api` base). An earlier version mounted `/api/tree` and
+    /// `/api/docs/{id}`, inventing a prefix the doc router does not have:
+    /// the mock and the assumption agreed with each other, so these tests
+    /// stayed green while the true mapping was wrong. Keep these in sync
+    /// with `core/acowork-doc/src/api/router.rs`.
     async fn start_mock_doc_server() -> u16 {
         let app = axum::Router::new()
             .route(
-                "/api/tree",
+                "/tree",
                 get(|| async { axum::Json(serde_json::json!({ "dirs": [] })) }),
             )
             .route(
-                "/api/docs/{id}",
+                "/docs/{id}",
                 get(|Path(id): Path<String>| async move {
                     axum::Json(serde_json::json!({ "doc_id": id, "content": "# hi" }))
                 }),
@@ -303,7 +317,7 @@ mod tests {
     fn authenticated_app_state() -> AppState {
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-doc-proxy-mu-{}-{}",
             std::process::id(),
             unique
@@ -337,7 +351,7 @@ mod tests {
 
         let request = Request::builder()
             .method("GET")
-            .uri("/api/doc/api/tree")
+            .uri("/api/doc/tree")
             // ADR-114: always-on bearer gate — the internal service token
             // passes it without a user identity so the 503 under test is
             // the proxy's, not the auth gate's 401.
@@ -349,7 +363,7 @@ mod tests {
         assert_eq!(
             response.status(),
             StatusCode::SERVICE_UNAVAILABLE,
-            "GET /api/doc/api/tree with doc_process=None should return 503"
+            "GET /api/doc/tree with doc_process=None should return 503"
         );
         assert_eq!(
             response
@@ -369,7 +383,7 @@ mod tests {
 
         let request = Request::builder()
             .method("GET")
-            .uri("/api/doc/api/docs/doc-1")
+            .uri("/api/doc/docs/doc-1")
             .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
@@ -378,11 +392,11 @@ mod tests {
         assert_eq!(
             response.status(),
             StatusCode::SERVICE_UNAVAILABLE,
-            "nested /api/doc/api/docs/* with doc_process=None should return 503"
+            "nested /api/doc/docs/* with doc_process=None should return 503"
         );
     }
 
-    /// `doc_process = Some`: `GET /api/doc/api/tree` transparently forwards.
+    /// `doc_process = Some`: `GET /api/doc/tree` transparently forwards.
     #[tokio::test]
     async fn forwards_to_doc_process() {
         let state = test_app_state();
@@ -393,7 +407,7 @@ mod tests {
 
         let request = Request::builder()
             .method("GET")
-            .uri("/api/doc/api/tree")
+            .uri("/api/doc/tree")
             .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
@@ -402,7 +416,7 @@ mod tests {
         assert_eq!(
             response.status(),
             StatusCode::OK,
-            "GET /api/doc/api/tree with doc_process=Some should return 200"
+            "GET /api/doc/tree with doc_process=Some should return 200"
         );
 
         let bytes = to_bytes(response.into_body(), 64 * 1024)
@@ -418,7 +432,7 @@ mod tests {
         );
     }
 
-    /// `doc_process = Some`: nested path `/api/doc/api/docs/{id}` forwards.
+    /// `doc_process = Some`: nested path `/api/doc/docs/{id}` forwards.
     #[tokio::test]
     async fn forwards_nested_path() {
         let state = test_app_state();
@@ -429,7 +443,7 @@ mod tests {
 
         let request = Request::builder()
             .method("GET")
-            .uri("/api/doc/api/docs/doc-42")
+            .uri("/api/doc/docs/doc-42")
             .header("authorization", "Bearer test-svc-token")
             .body(Body::empty())
             .expect("build request");
@@ -438,7 +452,7 @@ mod tests {
         assert_eq!(
             response.status(),
             StatusCode::OK,
-            "nested /api/doc/api/docs/doc-42 should be forwarded and return 200"
+            "nested /api/doc/docs/doc-42 should be forwarded and return 200"
         );
 
         let bytes = to_bytes(response.into_body(), 64 * 1024)

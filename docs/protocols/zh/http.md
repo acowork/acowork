@@ -885,8 +885,11 @@ Gateway 必须鉴权，Runtime 必须校验 owner。ADR-076 §决策 4 把**所�
 
 ```json
 // POST .../messages — 等价原 mqtt ChatMessage（params_json 是**字符串**，
-// Runtime 自行从中解析 attached_items / content_parts）
-{ "content": "...", "message_id": "...", "command": "", "params_json": "{}" }
+// Runtime 自行从中解析 attached_items / content_parts）。
+// `chat_trigger_row_id` 可选（ADR-106 修订 2026-11-16）：执行面镜像首轮时，
+// 人的面已把同一句话写成绑定 Chat 的 archive-only `user_message`，此字段是
+// 那行的 id；Runtime 仅在 chat-bound 且首轮时兑现，否则丢弃、引用行不挂 thread。
+{ "content": "...", "message_id": "...", "chat_trigger_row_id": "", "command": "", "params_json": "{}" }
 
 // POST .../stop  &  POST .../continue —— reason 缺省/空串归一为 "user_requested"
 { "reason": "user_requested" }

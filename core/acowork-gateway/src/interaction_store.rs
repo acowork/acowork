@@ -100,7 +100,7 @@ mod tests {
     use super::*;
 
     fn tempdir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("acowork-test-interaction-{name}"));
+        let dir = crate::test_support::unique_temp_dir(format!("interaction-{name}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

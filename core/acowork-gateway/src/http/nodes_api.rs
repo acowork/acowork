@@ -591,7 +591,7 @@ mod tests {
         use std::sync::atomic::{AtomicU64, Ordering};
         static COUNTER: AtomicU64 = AtomicU64::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-nodes-api-{}-{}",
             std::process::id(),
             unique
@@ -845,7 +845,7 @@ mod tests {
         visibility: Visibility,
     ) -> AppState {
         let mut state = test_app_state();
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-node-vis-{}-{}",
             std::process::id(),
             node_id
@@ -948,7 +948,7 @@ mod tests {
     fn state_with_node_owner(node_id: &str, owner: Option<&str>, guests: &[&str]) -> AppState {
         // mutable: ownership store is wired in after construction
         let mut state = test_app_state();
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-node-perms-{}-{}",
             std::process::id(),
             node_id

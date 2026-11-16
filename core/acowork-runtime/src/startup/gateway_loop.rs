@@ -952,6 +952,7 @@ async fn dispatch_inbound(
         InboundMessage::ChatMessage {
             content,
             message_id,
+            chat_trigger_row_id,
             command,
             params_json,
             answerable_by,
@@ -1066,6 +1067,7 @@ async fn dispatch_inbound(
                     SessionMessage::ChatMessage {
                         content,
                         message_id: message_id.clone(),
+                        chat_trigger_row_id,
                         active_skill,
                         attached_items,
                         content_parts,

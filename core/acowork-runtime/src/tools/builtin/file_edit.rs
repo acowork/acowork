@@ -391,6 +391,7 @@ impl Tool for FileEditTool {
 
         if path.is_empty() || old_text.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing required parameters".to_string()),
@@ -424,6 +425,7 @@ impl Tool for FileEditTool {
                     "file_edit: failed to read file"
                 );
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Failed to read file: {e}")),
@@ -446,6 +448,7 @@ impl Tool for FileEditTool {
             Ok(outcome) => outcome,
             Err(error) => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(error),
@@ -456,6 +459,7 @@ impl Tool for FileEditTool {
 
         if match_outcome.end < match_outcome.start || match_outcome.end > content.len() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Internal matching error: invalid replacement range".into()),
@@ -472,6 +476,7 @@ impl Tool for FileEditTool {
 
         match tokio::fs::write(&full_path, &new_content).await {
             Ok(()) => Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: format!(
                     "Edited {path}: replaced 1 occurrence ({} bytes){}",
@@ -494,6 +499,7 @@ impl Tool for FileEditTool {
                     "file_edit: failed to write file"
                 );
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!("Failed to write file: {e}")),

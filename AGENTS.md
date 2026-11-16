@@ -183,3 +183,4 @@ Deployment topology (single-machine remote, accounts, relay): [docs/runbooks/](d
 - Do NOT just read the code and guess to provide possible conclusions; you must confirm the root cause through logs and debugging before giving a definitive conclusion.
 - Do NOT build end-to-end test executables into the default Cargo `target/` directory. Compile them with `CARGO_TARGET_DIR=target-e2e` (e.g. `CARGO_TARGET_DIR=target-e2e cargo test --test <e2e_test> --no-run`), so the test binaries never collide with the files locked by the running Gateway/Runtime processes.
 - Do NOT wrap file paths in quotes — use Markdown links relative to the working directory: `[src/lib/foo.ts](src/lib/foo.ts)`.
+- Do NOT run grep in the project root or `core/`; `target/` and `core/target/` is too large.

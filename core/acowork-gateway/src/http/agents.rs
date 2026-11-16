@@ -2834,7 +2834,7 @@ mod tests {
     /// agent-ownership store wired in.
     async fn state_with_installed(inst: &str) -> AppState {
         let mut state = test_state();
-        let dir = std::env::temp_dir().join(format!("acowork-test-agent-perms-{}", inst));
+        let dir = crate::test_support::unique_temp_dir(format!("agent-perms-{inst}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         state.agent_owners = Some(ownership::new_shared_agent_owners(&dir));
@@ -2910,7 +2910,7 @@ mod tests {
     /// denormalized `node_id` — so that is the field these tests set.
     async fn state_with_shared_agent_on_node(inst: &str, node_id: &str) -> AppState {
         let mut state = test_state();
-        let dir = std::env::temp_dir().join(format!("acowork-test-agent-node-{}", inst));
+        let dir = crate::test_support::unique_temp_dir(format!("agent-node-{inst}"));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         state.agent_owners = Some(ownership::new_shared_agent_owners(&dir));

@@ -304,6 +304,10 @@ acowork-lsp-relay = { path = "acowork-lsp-relay" }
 acowork-mqtt-session = { path = "acowork-mqtt-session" }
 acowork-pm = { path = "acowork-pm" }
 acowork-relay = { path = "acowork-relay" }
+# Dev-only: `acowork-pm`'s `doc_refs_route_e2e` regression runs against the
+# real doc service so the PM→doc route cannot drift again (the stub and the
+# implementation once agreed on the same wrong path, and CI stayed green).
+acowork-doc = { path = "acowork-doc" }
 # Dev-only: see the workspace member note above. Referenced from
 # `[dev-dependencies]` only.
 acowork-eval = { path = "acowork-eval" }

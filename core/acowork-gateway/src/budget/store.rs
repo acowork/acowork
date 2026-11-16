@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn test_budget_store_persistence() {
-        let dir = std::env::temp_dir().join(format!("acowork-test-budget-{}", std::process::id()));
+        let dir = crate::test_support::unique_temp_dir("budget");
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
 

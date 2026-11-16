@@ -29,10 +29,10 @@ import { cn } from "../lib/utils";
 import { listRowHover } from "../lib/ui-styles";
 
 const ariaLabel = {
-    search: "Search extensions",
-    list: "Extensions list",
-    detail: "Extension details",
-    resizeSidebar: "Resize extensions sidebar",
+    search: "Search apps",
+    list: "Apps list",
+    detail: "App details",
+    resizeSidebar: "Resize apps sidebar",
 };
 
 function statusColor(app: AppDto): string {
@@ -183,7 +183,7 @@ export function ExtensionsView() {
                     {/* 空列表时保持诚实的空态，绝不塞假条目。 */}
                     {visible.length === 0 && (
                         <div className="px-3 py-8 text-center text-xs text-text-tertiary">
-                            No extensions available yet.
+                            No apps available yet.
                         </div>
                     )}
                 </div>

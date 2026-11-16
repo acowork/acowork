@@ -95,6 +95,7 @@ impl Tool for ContentSearchTool {
         let pattern = params["pattern"].as_str().unwrap_or("");
         if pattern.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("Missing 'pattern'".to_string()),
@@ -105,6 +106,7 @@ impl Tool for ContentSearchTool {
         let output_mode = params["output_mode"].as_str().unwrap_or("content");
         if !matches!(output_mode, "content" | "files_with_matches" | "count") {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(format!(
@@ -121,6 +123,7 @@ impl Tool for ContentSearchTool {
                 Ok(r) => r,
                 Err(e) => {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some(format!("Invalid regex: {e}")),
@@ -136,6 +139,7 @@ impl Tool for ContentSearchTool {
                 Ok(r) => r,
                 Err(e) => {
                     return Ok(ToolResult {
+                        content_parts: None,
                         ok: false,
                         content: String::new(),
                         error: Some(format!("Invalid regex: {e}")),
@@ -162,6 +166,7 @@ impl Tool for ContentSearchTool {
                     Ok(gs) => Some(gs),
                     Err(e) => {
                         return Ok(ToolResult {
+                            content_parts: None,
                             ok: false,
                             content: String::new(),
                             error: Some(format!("Invalid 'include' glob: {e}")),
@@ -198,6 +203,7 @@ impl Tool for ContentSearchTool {
 
         if search_roots.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: "No search directories found".to_string(),
                 error: None,
@@ -399,6 +405,7 @@ impl Tool for ContentSearchTool {
 
         if results.is_empty() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: "No matches found".to_string(),
                 error: None,
@@ -445,6 +452,7 @@ impl Tool for ContentSearchTool {
         // propagates everywhere without per-tool edits.
 
         Ok(ToolResult {
+            content_parts: None,
             ok: true,
             content: output,
             error: None,

@@ -137,6 +137,7 @@ impl Tool for LoadSkillTool {
             Some(s) if !s.trim().is_empty() => s.trim().to_string(),
             _ => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some("Missing required parameter 'name'".to_string()),
@@ -150,6 +151,7 @@ impl Tool for LoadSkillTool {
             Some(s) => s,
             None => {
                 return Ok(ToolResult {
+                    content_parts: None,
                     ok: false,
                     content: String::new(),
                     error: Some(format!(
@@ -176,6 +178,7 @@ impl Tool for LoadSkillTool {
         });
 
         Ok(ToolResult {
+            content_parts: None,
             ok: true,
             content: serde_json::to_string_pretty(&body).unwrap_or_else(|_| {
                 // Fall back to a minimal hand-rolled payload if serde

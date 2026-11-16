@@ -280,7 +280,7 @@ describe("extensions view wears the two-column capsule layout", () => {
     // impossible to tell real data from placeholder data in review.
     const { container } = render(<ExtensionsView />);
     expect(screen.queryAllByRole("option")).toHaveLength(0);
-    expect(container.textContent).toContain("No extensions available yet.");
+    expect(container.textContent).toContain("No apps available yet.");
   });
 
   it("links the list to the detail column", () => {

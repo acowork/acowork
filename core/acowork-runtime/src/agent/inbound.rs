@@ -245,6 +245,13 @@ pub enum InboundMessage {
     ChatMessage {
         content: String,
         message_id: String,
+        /// ADR-106 revision (2026-11-16): the Chat row id the sending surface
+        /// claims already holds these same words (see the matching field on
+        /// `SessionMessage::ChatMessage`). Only the HTTP write path can carry
+        /// one — the MQTT path has no such producer, and the Runtime's
+        /// execution-surface branch drops the claim unless the round really
+        /// opens a chat-bound session.
+        chat_trigger_row_id: String,
         command: String,
         params_json: String,
         /// The account that typed this message, when the transport carries one

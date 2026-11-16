@@ -1392,7 +1392,7 @@ mod tests {
         //    - memory_process pointing at the mock service (ADR-101: the
         //      rebuild is the service's endpoint now, so `memory_proxy` must
         //      have a port to route to)
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-start-migration-{}",
             std::process::id()
         ));
@@ -1696,7 +1696,7 @@ mod tests {
             error: None,
         };
 
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_support::unique_temp_dir(format!(
             "acowork-test-migration-collision-{}",
             std::process::id()
         ));

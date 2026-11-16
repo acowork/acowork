@@ -846,10 +846,26 @@ if ($Start) {
         try {
             [System.IO.File]::WriteAllText($tmpPw, $plain1, $utf8NoBom)
             Write-Host "  Setting admin password..." -ForegroundColor Gray
-            & $gatewayExe --auth-mode multi_user admin-setup --password-file $tmpPw | Out-Null
+            # ADR-114: no `--auth-mode` — the account system is always
+            # present. The flag was removed in the ADR-114 commit, but this
+            # script kept passing it, so clap aborted the whole line and the
+            # fresh install dead-ended here (reported as a password-policy
+            # problem, which it never was).
+            #
+            # The Gateway's own output is captured and replayed: it carries
+            # the real reason (policy violation, an already-set password), and
+            # the old code piped it to Out-Null and printed a guess that
+            # pointed at a `[multi_user]` section which no longer exists.
+            $setupOutput = & $gatewayExe admin-setup --password-file $tmpPw 2>&1
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "ERROR: admin-setup failed (exit code $LASTEXITCODE)." -ForegroundColor Red
-                Write-Host "       Likely a password-policy violation 鈥?check [multi_user].password_policy in gateway.toml." -ForegroundColor Red
+                if ($setupOutput) {
+                    Write-Host "       Gateway said:" -ForegroundColor Red
+                    $setupOutput | ForEach-Object { Write-Host "         $_" -ForegroundColor Red }
+                }
+                Write-Host "       If the password was rejected, the policy lives in the user" -ForegroundColor Red
+                Write-Host "       service's own TOML ([password_policy] in acowork-user.toml, pointed" -ForegroundColor Red
+                Write-Host "       at by [user].config in gateway.toml) — not in gateway.toml." -ForegroundColor Red
                 exit 1
             }
             Write-Host "  Admin password set." -ForegroundColor Green

@@ -8,7 +8,7 @@ import { useAgentStore } from "./agentStore";
 import { useGatewayStore, stopGatewayDeathWatch } from "./gatewayStore";
 import { useUserProfileStore } from "./userProfileStore";
 import { useAuthStore } from "./authStore";
-import { wakeAgentChat } from "./chatSessionStore";
+import { wakeAgentChat, appendMirrorUserMessage } from "./chatSessionStore";
 import { useProjectGroupStore } from "./projectGroupStore";
 import { useWorkspaceStore } from "./workspaceStore";
 import { releaseAdapterSession, clearOptimisticEntries, clearAllOptimisticEntries, ingestStreamDelta, ingestRecordComplete, getChatAdapterSession } from "../components/chat/chatAdapterStore";
@@ -2471,6 +2471,43 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     // optimistic render and the backend-persisted message must share the same ID.
     const userMsgId = `msg-${crypto.randomUUID()}`;
 
+    // ADR-106 revision (2026-11-16): the execution composer's mirror.
+    // A message typed into a session that is BOUND to a Chat used to live
+    // only in the session's own transcript, so the Chat showed the round's
+    // card with no sentence above it — a task that appeared out of nowhere.
+    // The FIRST human message of such a session is now appended to that Chat
+    // as an ordinary archive-only `user_message` (by this human surface —
+    // the store refuses a Runtime-authored one, and the row routes nothing),
+    // keyed by `userMsgId` so a retry of this very send reuses the row
+    // instead of doubling it. The exec POST then carries the id as
+    // `chat_trigger_row_id`; the Runtime honors the claim only for the first
+    // round of a chat-bound session, and the round's reference row threads
+    // under the bubble — the same [bubble][block] pair a chat-originated
+    // turn produces. Follow-up sends are NOT mirrored: their words are the
+    // session's working transcript, they stay the block's own round lines
+    // (ADR-100 Rev. 8 stands for everything after the opener).
+    let chatTriggerRowId: string | undefined;
+    const mirrorChatSessionId =
+      !command && content.trim()
+        ? (useAgentStore.getState().agents[agentId]?.sessions.find(
+            (s) => s.session_id === sessionId,
+          )?.chat_session_id ?? undefined)
+        : undefined;
+    if (mirrorChatSessionId && sessionId) {
+      const isFirstMessage =
+        (getSessionState(get(), agentId, sessionId).messages?.length ?? 0) === 0;
+      if (isFirstMessage) {
+        try {
+          await appendMirrorUserMessage(mirrorChatSessionId, content, userMsgId);
+          chatTriggerRowId = userMsgId;
+        } catch (e) {
+          // No mirror, no claim: the turn runs unthreaded, exactly the shape
+          // every execution-surface send had before this revision.
+          log.debug("[ChatStore] chat mirror append failed (non-fatal):", e);
+        }
+      }
+    }
+
     // ADR-046: Build the unified `attached_items` payload from BOTH upload
     // payloads (`attachedItems`) AND workspace refs (`attachedContext`).
     // They are collected into one list FIRST so that every attachment gets
@@ -2589,15 +2626,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       // ADR-076 §决策 4: HTTP, not MQTT — the send is a user action, so the
       // Gateway authenticates the caller and the Runtime checks ownership.
       //
-      // A message typed in an execution view belongs to that session and to
-      // nothing else: it is NOT mirrored into the bound Chat session. The
-      // mirror is what used to force a delivery pin, so that the copy written
-      // to the transcript would not be re-routed by the router into a new
-      // execution session. Without the mirror there is one write path here,
-      // and the bubble, the attachment entries and the reconcile all key on
-      // `userMsgId`.
+      // A message typed in an execution view belongs to that session: it is
+      // not delivered to the Chat Router and wakes nothing (ADR-100 Rev. 8).
+      // The one exception is the FIRST message of a chat-bound session: its
+      // words were already appended to the Chat above as an archive-only
+      // mirror row, and `chat_trigger_row_id` hands the Runtime that row's
+      // id so the round's reference thread lands under the bubble instead
+      // of the card appearing unthreaded. No delivery rides the mirror —
+      // one write path here, and the bubble, the attachment entries and the
+      // reconcile all key on `userMsgId`.
       await sessionControl.sendMessage(agentId, sessionId!, {
         message_id: userMsgId,
+        ...(chatTriggerRowId ? { chat_trigger_row_id: chatTriggerRowId } : {}),
         content,
         command: command ?? "",
         params_json: paramsJson,

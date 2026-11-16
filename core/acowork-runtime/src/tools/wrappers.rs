@@ -218,6 +218,7 @@ impl Tool for RateLimitedTool {
     ) -> acowork_core::error::Result<ToolResult> {
         if let Err(e) = self.check_rate_limit() {
             return Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some(e),
@@ -381,6 +382,7 @@ impl PathGuardedTool {
                 | "glob_search"
                 | "content_search"
                 | "doc_reader"
+                | "image_read"
         )
     }
 
@@ -429,6 +431,7 @@ impl Tool for PathGuardedTool {
                         // Write tools require ReadWrite access
                         if self.is_write_tool() && access != WorkspaceAccess::ReadWrite {
                             return Ok(ToolResult {
+                                content_parts: None,
                                 ok: false,
                                 content: String::new(),
                                 error: Some(format!(
@@ -453,6 +456,7 @@ impl Tool for PathGuardedTool {
                                     && resolved_access != WorkspaceAccess::ReadWrite
                                 {
                                     return Ok(ToolResult {
+                                        content_parts: None,
                                         ok: false,
                                         content: String::new(),
                                         error: Some(format!(
@@ -466,6 +470,7 @@ impl Tool for PathGuardedTool {
                             }
                             Err(e) => {
                                 return Ok(ToolResult {
+                                    content_parts: None,
                                     ok: false,
                                     content: String::new(),
                                     error: Some(e),
@@ -476,6 +481,7 @@ impl Tool for PathGuardedTool {
                     }
                     Err(e) => {
                         return Ok(ToolResult {
+                            content_parts: None,
                             ok: false,
                             content: String::new(),
                             error: Some(e),
@@ -517,6 +523,7 @@ mod tests {
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: params.to_string(),
                 error: None,
@@ -541,6 +548,7 @@ mod tests {
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: format!("Read: {}", params["path"].as_str().unwrap_or("")),
                 error: None,
@@ -620,6 +628,40 @@ mod tests {
                 .unwrap()
                 .contains("outside all allowed workspace directories")
         );
+    }
+
+    /// `image_read` must be guarded exactly like `file_read` (design
+    /// doc t-65a1a89e §4.6): the denial wording is the wrapper's, so
+    /// the tool name has to be in `is_filesystem_tool`'s list. This
+    /// test fails the moment someone drops it from that match arm.
+    #[tokio::test]
+    async fn test_path_guarded_image_read_denial_matches_file_read() {
+        let resolver = || {
+            test_resolver(vec![WorkspaceDir {
+                id: "test-ws".to_string(),
+                path: "/tmp/agent-workdir".to_string(),
+                access: WorkspaceAccess::ReadWrite,
+                last_active: false,
+                prompt_file: None,
+            }])
+        };
+        let denied = |tool: Arc<dyn Tool>| {
+            let guarded = PathGuardedTool::new(tool, resolver());
+            async move {
+                guarded
+                    .execute(serde_json::json!({ "path": "/etc/passwd.png" }), None)
+                    .await
+                    .unwrap()
+                    .error
+                    .unwrap()
+            }
+        };
+        let img = denied(Arc::new(
+            crate::tools::builtin::image_read::ImageReadTool::new(),
+        ))
+        .await;
+        let txt = denied(Arc::new(crate::tools::builtin::file_read::FileReadTool::new())).await;
+        assert_eq!(img, txt, "path-escape denial must be identical to file_read's");
     }
 
     #[tokio::test]
@@ -766,6 +808,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<ToolResult> {
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
                     error: None,
@@ -815,6 +858,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<ToolResult> {
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!("Edited: {}", params["path"].as_str().unwrap_or("")),
                     error: None,
@@ -922,6 +966,7 @@ mod tests {
                 _work_dir: Option<&str>,
             ) -> acowork_core::error::Result<ToolResult> {
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!("Wrote: {}", params["path"].as_str().unwrap_or("")),
                     error: None,
@@ -1007,6 +1052,7 @@ mod tests {
             _work_dir: Option<&str>,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: self.ok,
                 content: self.content.clone(),
                 error: self.error.clone(),
@@ -1271,6 +1317,7 @@ mod tests {
             // Same contract as the session-aware builtins: reachable only
             // without context — the test below must NOT land here.
             Ok(ToolResult {
+                content_parts: None,
                 ok: false,
                 content: String::new(),
                 error: Some("ctx_echo requires session context".to_string()),
@@ -1283,6 +1330,7 @@ mod tests {
             ctx: &ToolContext,
         ) -> acowork_core::error::Result<ToolResult> {
             Ok(ToolResult {
+                content_parts: None,
                 ok: true,
                 content: format!(
                     "{}|{}",
@@ -1440,6 +1488,7 @@ mod tests {
             ) -> acowork_core::error::Result<ToolResult> {
                 let n = self.counter.fetch_add(1, Ordering::SeqCst);
                 Ok(ToolResult {
+                    content_parts: None,
                     ok: true,
                     content: format!("call #{n}"),
                     error: None,
