@@ -16,6 +16,7 @@ use std::sync::Arc;
 use crate::config::{PmConfig, StorageBackend};
 use crate::error::{PmError, Result};
 use crate::mcp::{AgentDirectory, NoopAgentDirectory};
+use crate::store::sqlite::{import, SqlitePmStore};
 use crate::store::tree::{PmStore, TreePmStore};
 
 /// PM 服务运行实例。
@@ -39,18 +40,39 @@ pub struct PmService {
 
 /// ADR-117 D6: assemble the configured backend exactly once at startup.
 ///
-/// `db` / `dual` are deliberately rejected with a stage hint rather than
-/// silently falling back to the tree: during a rollout, believing you are on
-/// SQLite while still committing to the tree is worse than a hard failure.
-/// Wiring them is D6 steps 3-4 (`SqlitePmStore` + importer, `DualPmStore`).
+/// `dual` is deliberately rejected with a stage hint rather than silently
+/// falling back to the tree: during a rollout, believing you are on SQLite
+/// while still committing to the tree is worse than a hard failure. Wiring it
+/// is D6 step 4 (`DualPmStore`).
+///
+/// `db` refuses to start on an empty database while the tree still holds
+/// projects — that shape means the operator skipped the stop-the-world import
+/// window, and serving an empty board would look exactly like data loss.
 async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
     match config.storage_backend {
         StorageBackend::FileTree => {
             Ok(Arc::new(TreePmStore::new(config.clone()).await?) as Arc<dyn PmStore>)
         }
+        StorageBackend::Db => {
+            let store = SqlitePmStore::open(config.clone())?;
+            if store.is_empty()? {
+                let report = import::dry_run(config)?;
+                if report.projects > 0 {
+                    return Err(PmError::Internal(format!(
+                        "storage_backend=db but pm.sqlite is empty while the tree still holds \
+                         {} project(s) (blocking findings: {}); run \
+                         `acowork-pm --data-dir <dir> migrate --apply` in a stop-the-world \
+                         window before switching",
+                        report.projects,
+                        report.blocking.len()
+                    )));
+                }
+            }
+            Ok(Arc::new(store) as Arc<dyn PmStore>)
+        }
         other => Err(PmError::Internal(format!(
-            "storage_backend={other} is not wired yet (ADR-117 D6 steps 3-4: \
-             SqlitePmStore / DualPmStore in progress); use --storage-backend filetree"
+            "storage_backend={other} is not wired yet (ADR-117 D6 step 4: \
+             DualPmStore in progress); use --storage-backend filetree|db"
         ))),
     }
 }
@@ -281,16 +303,54 @@ mod tests {
     #[tokio::test]
     async fn build_store_rejects_unwired_backends_explicitly() {
         let tmp = tempfile::tempdir().unwrap();
-        for backend in [StorageBackend::Db, StorageBackend::Dual] {
-            let cfg = test_config(backend, tmp.path());
-            // `Arc<dyn PmStore>` is not `Debug`, so avoid `unwrap_err()`.
-            let err = match build_store(&cfg).await {
-                Ok(_) => panic!("{backend} must be rejected until D6 steps 3-4 land"),
-                Err(e) => e.to_string(),
-            };
-            assert!(err.contains(backend.as_str()), "error was: {err}");
-            assert!(err.contains("not wired yet"), "error was: {err}");
-        }
+        let cfg = test_config(StorageBackend::Dual, tmp.path());
+        // `Arc<dyn PmStore>` is not `Debug`, so avoid `unwrap_err()`.
+        let err = match build_store(&cfg).await {
+            Ok(_) => panic!("dual must be rejected until D6 step 4 lands"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("dual"), "error was: {err}");
+        assert!(err.contains("not wired yet"), "error was: {err}");
+    }
+
+    #[tokio::test]
+    async fn db_backend_is_object_safe_and_serves_an_empty_fresh_install() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = test_config(StorageBackend::Db, tmp.path());
+        let store = build_store(&cfg).await.unwrap();
+        assert!(store.list_projects().await.unwrap().is_empty());
+        assert_eq!(store.task_depth(&TaskId("t-nonexistent".into())), 0);
+        assert!(store.corrupt_registry().read().is_empty());
+    }
+
+    /// The stop-the-world import window is a hard precondition, not a
+    /// suggestion: an empty DB beside a populated tree must never come up and
+    /// render an empty board.
+    #[tokio::test]
+    async fn db_backend_refuses_to_start_when_the_import_was_skipped() {
+        use crate::types::CreateProject;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let tree_cfg = test_config(StorageBackend::FileTree, tmp.path());
+        let tree = TreePmStore::new(tree_cfg).await.unwrap();
+        tree.create_project(
+            CreateProject {
+                title: "still on the tree".into(),
+                description: String::new(),
+                metadata: Default::default(),
+            },
+            "human",
+        )
+        .await
+        .unwrap();
+
+        let db_cfg = test_config(StorageBackend::Db, tmp.path());
+        let err = match build_store(&db_cfg).await {
+            Ok(_) => panic!("empty db beside a populated tree must be refused"),
+            Err(e) => e.to_string(),
+        };
+        assert!(err.contains("migrate --apply"), "error was: {err}");
+        assert!(err.contains("1 project(s)"), "error was: {err}");
     }
 
     /// The default backend returns an object-safe handle: both business and

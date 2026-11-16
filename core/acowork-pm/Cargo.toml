@@ -58,6 +58,10 @@ uuid.workspace = true
 # Concurrency
 parking_lot.workspace = true
 
+# ADR-117 D6: SQLite backend + one-shot JSON importer.
+# Reuses the workspace-wide bundled SQLite so no system library is needed.
+rusqlite.workspace = true
+
 # File watching + traversal
 notify.workspace = true
 ignore.workspace = true

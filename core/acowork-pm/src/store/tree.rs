@@ -900,14 +900,14 @@ fn parse_project_id(s: &str) -> Result<ProjectId> {
     ProjectId::parse(s).map_err(|_| PmError::InvalidId(format!("project: {}", s)))
 }
 
-fn parse_task_id(s: &str) -> Result<TaskId> {
+pub(super) fn parse_task_id(s: &str) -> Result<TaskId> {
     validate_id_format(s, "t-", "task")?;
     check_not_reserved(s)?;
     TaskId::parse(s).map_err(|_| PmError::InvalidId(format!("task: {}", s)))
 }
 
 /// 状态流转合法校验（对齐设计文档 §4 状态机图）。
-fn validate_transition(from: TaskStatus, to: TaskStatus, task_id: &TaskId) -> Result<()> {
+pub(super) fn validate_transition(from: TaskStatus, to: TaskStatus, task_id: &TaskId) -> Result<()> {
     // The table lives on `TaskStatus` so the error message and the check
     // cannot disagree (design 32 T1-6).
     let legal = from.legal_successors();
@@ -945,7 +945,7 @@ fn validate_transition(from: TaskStatus, to: TaskStatus, task_id: &TaskId) -> Re
 /// ——审批是一个显式的、可审计的写入动作（`review_status=approved` + 记
 /// `updated_at`），比在闸门里开一个人类特权后门更简单也更可查。代价：人类
 /// 想强推一个 Agent 建的垃圾任务，得先点一次"批准"再改状态。
-fn ensure_creation_approved(task: &Task) -> Result<()> {
+pub(super) fn ensure_creation_approved(task: &Task) -> Result<()> {
     if task.review_status == ReviewStatus::Pending && task.status == TaskStatus::Pending {
         return Err(PmError::ReviewNotApproved {
             task_id: task.id.to_string(),
@@ -954,7 +954,7 @@ fn ensure_creation_approved(task: &Task) -> Result<()> {
     Ok(())
 }
 
-fn priority_rank(p: Priority) -> u8 {
+pub(super) fn priority_rank(p: Priority) -> u8 {
     match p {
         Priority::Urgent => 0,
         Priority::High => 1,
@@ -991,7 +991,7 @@ fn parent_id_of_entry(entry: &TaskEntry) -> Option<TaskId> {
 ///
 /// ID 是**确定性**的（[`TaskActivity::seeded_id`]）：同一条 `result` 反复
 /// 读出来的身份不变，前端的列表 key 才不会因为刷新而重建 DOM。
-fn seeded_activity(record: &Task) -> Vec<TaskActivity> {
+pub(super) fn seeded_activity(record: &Task) -> Vec<TaskActivity> {
     let Some(result) = record.result.as_ref() else {
         return Vec::new();
     };

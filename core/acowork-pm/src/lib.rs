@@ -79,6 +79,11 @@ pub use types::{
 
 // Storage
 pub use store::index::TaskIndex;
+pub use store::sqlite::import::{
+    dry_run as pm_import_dry_run, import as pm_import, MigrationReport as PmMigrationReport,
+    SkippedEntry as PmMigrationSkippedEntry,
+};
+pub use store::sqlite::{schema as pm_sqlite_schema, SqlitePmStore};
 pub use store::tree::{PmMaintenance, PmStore, TreePmStore};
 
 // API

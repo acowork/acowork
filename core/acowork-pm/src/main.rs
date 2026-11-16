@@ -14,9 +14,23 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 
 use acowork_pm::{HttpAgentDirectory, PmConfig, PmService, StorageBackend};
+
+/// Operator actions that exit instead of starting the HTTP service.
+#[derive(Subcommand)]
+enum Command {
+    /// ADR-117 D6: scan the JSON tree and (optionally) import it into pm.sqlite.
+    /// Without `--apply` this is a read-only dry run that prints a
+    /// MigrationReport and never creates or writes the database.
+    Migrate {
+        /// Commit the import. Requires a stop-the-world window: stop all PM
+        /// writers, review the dry-run report first, then switch the backend.
+        #[arg(long)]
+        apply: bool,
+    },
+}
 
 /// CLI 参数。
 #[derive(Parser)]
@@ -80,6 +94,9 @@ struct Cli {
     /// 日志级别
     #[arg(long, default_value = "info")]
     log_level: String,
+
+    #[command(subcommand)]
+    command: Option<Command>,
 }
 
 #[tokio::main]
@@ -126,6 +143,33 @@ async fn main() {
     if let Err(e) = config.validate() {
         tracing::error!(error = %e, "Invalid PM config");
         std::process::exit(1);
+    }
+
+    // ADR-117 D6 contract 1 + 7: the migration is an explicit operator
+    // action, never a runtime side effect of starting the service. The tree
+    // is only read; the rollback source is never deleted.
+    if let Some(Command::Migrate { apply }) = cli.command.as_ref() {
+        let outcome = if *apply {
+            acowork_pm::pm_import(&config)
+        } else {
+            acowork_pm::pm_import_dry_run(&config)
+        };
+        match outcome {
+            Ok(report) => {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&report).unwrap_or_else(|e| e.to_string())
+                );
+                if report.has_blocking_issues() {
+                    std::process::exit(1);
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "PM migration failed");
+                std::process::exit(1);
+            }
+        }
+        return;
     }
 
     if !config.enabled {

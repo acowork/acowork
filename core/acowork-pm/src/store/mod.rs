@@ -4,7 +4,8 @@
 //!
 //! - [`atomic`] —— 原子写 + 路径校验工具
 //! - [`index`] —— 二级内存索引（按 project / assignee / 状态 / 反向依赖图）
-//! - [`tree`] —— `TreePmStore` + `PmStore` trait（基于目录树的实现）
+//! - [`tree`] —— `TreePmStore` + `PmStore` / `PmMaintenance` trait（基于目录树的实现）
+//! - [`sqlite`] —— ADR-117 D6：SQLite schema、JSON → DB 导入器与 `db` 后端（实施中）
 //!
 //! ## 数据流
 //!
@@ -26,4 +27,5 @@
 pub mod atomic;
 pub mod corrupt;
 pub mod index;
+pub mod sqlite;
 pub mod tree;
