@@ -76,7 +76,13 @@ pub fn doc_router(state: DocState) -> Router {
         // ── search ──────────────────────────────────────────────────
         .route("/search", get(s::search))
         // ── reference validation (G4: `pm_submit_task` doc_refs) ───
-        .route("/refs/validate", post(rf::validate_refs))
+        // The route comes from the shared constant: PM builds its Gateway
+        // URL from the same one, so the two cannot drift apart (the bug
+        // this replaced was PM calling `/api/doc/api/refs/validate`).
+        .route(
+            acowork_core::doc_layout::DOC_REFS_VALIDATE_ROUTE,
+            post(rf::validate_refs),
+        )
         // ── permissions (design §9) ───────────────────────────────────
         .route("/permissions/{kind}/{id}", get(p::get_permissions))
         .route("/permissions/{kind}/{id}", put(p::put_permissions))

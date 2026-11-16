@@ -25,6 +25,36 @@
 /// design 32 §5.5; agents must not invent new names.
 pub const PROJECT_DOC_ROOT: &str = "项目管理";
 
+/// The doc service's **internal** route for batch doc-reference validation
+/// (`POST /refs/validate`) — the endpoint `pm_submit_task` calls to learn
+/// whether a submitted `doc_refs` entry resolves (design 32 §3, plan §7 G4).
+///
+/// It lives here, in the crate both the Doc service and PM already depend
+/// on, because it is a **wire contract between two services**: the Doc
+/// service registers the route with this constant, PM builds its URL from
+/// this constant, and the Gateway's doc proxy strips only its own `/api/doc`
+/// public prefix. A second copy of the string is a bug waiting to happen —
+/// and it *was* one: PM shipped `/api/doc/api/refs/validate` (the Doc
+/// service's route with an extra `/api` glued on) while the Doc service
+/// registered `/refs/validate`, so every `pm_submit_task` carrying
+/// `doc_refs` failed with a 404 that no unit test caught, because the PM
+/// test stub mocked the same wrong path the implementation used.
+///
+/// Note the shape: **no `/api` prefix**. The doc router mounts its REST
+/// routes without one (`core/acowork-doc/src/api/router.rs`), and the
+/// Gateway's doc proxy forwards `/api/doc/{rest}` → `{doc}/{rest}`.
+///
+/// The public (Gateway-facing) form is [`DOC_REFS_VALIDATE_GATEWAY_PATH`].
+pub const DOC_REFS_VALIDATE_ROUTE: &str = "/refs/validate";
+
+/// The same endpoint as seen through the Gateway's doc reverse proxy:
+/// `POST /api/doc/refs/validate` — what PM actually calls.
+///
+/// The Gateway mounts the doc proxy at `/api/doc/{*rest}` and forwards
+/// `{rest}` to the doc process unchanged, so the public path is the doc
+/// route with the Gateway's own `/api/doc` prefix in front of it.
+pub const DOC_REFS_VALIDATE_GATEWAY_PATH: &str = "/api/doc/refs/validate";
+
 /// The document directory of one project, as a Doc path
 /// (`项目管理/p-1a2b3c/`-style, **without** a trailing slash so it can be
 /// joined with `/`).
@@ -131,5 +161,31 @@ mod tests {
             assert!(seen.insert(area), "area `{area}` is declared twice");
         }
         assert_eq!(DOC_AREAS.len(), 5);
+    }
+
+    /// The doc route carries **no** `/api` prefix: the doc router mounts
+    /// its REST routes bare, and the Gateway's doc proxy strips only its
+    /// own `/api/doc` public prefix. A stray `/api` here is exactly the
+    /// 404 bug (PM called `/api/doc/api/refs/validate`).
+    #[test]
+    fn the_refs_validate_route_carries_no_api_prefix() {
+        assert_eq!(DOC_REFS_VALIDATE_ROUTE, "/refs/validate");
+        assert!(
+            !DOC_REFS_VALIDATE_ROUTE.starts_with("/api"),
+            "the doc router mounts REST routes without an `/api` prefix: {}",
+            DOC_REFS_VALIDATE_ROUTE
+        );
+    }
+
+    /// The Gateway-facing path is the doc route behind the Gateway's own
+    /// `/api/doc` prefix — and **only** that prefix.
+    #[test]
+    fn the_gateway_path_is_the_doc_route_behind_the_gateway_prefix() {
+        assert_eq!(DOC_REFS_VALIDATE_GATEWAY_PATH, "/api/doc/refs/validate");
+        assert_eq!(
+            DOC_REFS_VALIDATE_GATEWAY_PATH,
+            format!("/api/doc{DOC_REFS_VALIDATE_ROUTE}"),
+            "the Gateway strips exactly `/api/doc`; the rest reaches the doc service verbatim"
+        );
     }
 }

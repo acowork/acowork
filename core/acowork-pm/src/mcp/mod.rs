@@ -4725,13 +4725,19 @@ mod tests {
     /// submitted path: the G4 fix records what the doc service resolved,
     /// and a stub that echoed the input could not tell that apart from the
     /// old store-the-string behavior.
+    ///
+    /// The stub mounts the **real** Gateway-facing path (the shared
+    /// constant the doc service registers its route from). The old stub
+    /// mounted the same wrong path the implementation used, so the mock
+    /// and the code agreed with each other and every test stayed green
+    /// while the production call 404'd.
     async fn stub_doc(found: &[(&'static str, &'static str)]) -> String {
         let found: Vec<(String, String)> = found
             .iter()
             .map(|(r, id)| (r.to_string(), id.to_string()))
             .collect();
         let app = Router::new().route(
-            "/api/doc/api/refs/validate",
+            acowork_core::doc_layout::DOC_REFS_VALIDATE_GATEWAY_PATH,
             post(move |Json(body): Json<Value>| {
                 let found = found.clone();
                 async move {
@@ -4766,7 +4772,7 @@ mod tests {
     /// broken call, not an outage.
     async fn stub_doc_rejecting() -> String {
         let app = Router::new().route(
-            "/api/doc/api/refs/validate",
+            acowork_core::doc_layout::DOC_REFS_VALIDATE_GATEWAY_PATH,
             post(|| async {
                 (
                     axum::http::StatusCode::BAD_REQUEST,
