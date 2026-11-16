@@ -79,6 +79,19 @@ export interface PmProjectMember {
   role?: string | null;
 }
 
+/**
+ * Per-project task tallies from `GET /api/pm/projects/counts`.
+ *
+ * Answers the badge numbers (`total` / `submitted`) in one index-only call.
+ * Replaces the previous approach of fetching every task entity per project
+ * and counting client-side.
+ */
+export interface PmProjectCounts {
+  project_id: string;
+  total: number;
+  submitted: number;
+}
+
 /** 项目元数据 */
 export interface PmProject {
   id: string;

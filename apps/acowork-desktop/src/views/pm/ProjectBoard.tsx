@@ -172,17 +172,21 @@ export function ProjectBoard({
     );
   }
 
-  // 加载骨架
+  // 加载骨架（同样用 surface-strong：`bg-surface` 在深色主题的 page-bg 上
+  // 只有约 1.25:1 对比度，骨架实际是隐形的）
   if (loading) {
     return (
       <main className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 bg-page-bg")}>
         <div className="shrink-0 border-b border-border-divider px-4 py-3">
-          <div className="h-5 w-40 animate-pulse rounded bg-surface" />
-          <div className="mt-2 h-3 w-64 animate-pulse rounded bg-surface" />
+          <div className="h-5 w-40 animate-pulse rounded bg-surface-strong/60" />
+          <div className="mt-2 h-3 w-64 animate-pulse rounded bg-surface-strong/60" />
         </div>
         <div className="flex flex-1 gap-3 p-3">
           {[0, 1, 2, 3].map((i) => (
-            <div key={i} className="flex-1 animate-pulse rounded-md bg-surface" />
+            <div
+              key={i}
+              className="flex-1 animate-pulse rounded-md bg-surface-strong/60"
+            />
           ))}
         </div>
       </main>

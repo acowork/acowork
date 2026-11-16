@@ -11,7 +11,7 @@
  * 本项目内选中项由 usePmProjectStore.selected 维护。
  */
 
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDragResize } from "../hooks/useDragResize";
 import { SplitHandle } from "../components/common/SplitHandle";
 import { CAPSULE_PANE_CN } from "../components/common/capsule";
@@ -39,9 +39,14 @@ export function ProjectsView() {
   const selected = usePmProjectStore((s) => s.selected);
   const loadingProjects = usePmProjectStore((s) => s.loading);
   const loadProjects = usePmProjectStore((s) => s.loadProjects);
+  const projectsUpdatedAt = usePmProjectStore((s) => s.updatedAt);
+  const projectError = usePmProjectStore((s) => s.error);
+  const projectErrorStatus = usePmProjectStore((s) => s.errorStatus);
 
   const boardLoading = usePmBoardStore((s) => s.loading);
   const boardError = usePmBoardStore((s) => s.error);
+  const boardProjectId = usePmBoardStore((s) => s.projectId);
+  const boardUpdatedAt = usePmBoardStore((s) => s.updatedAt);
   const loadTasks = usePmBoardStore((s) => s.loadTasks);
   const clearBoard = usePmBoardStore((s) => s.clear);
 
@@ -81,6 +86,39 @@ export function ProjectsView() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // 冷启动时 Gateway 会先接受 `/api/pm/*`、PM 进程还在重建索引，于是首屏
+  // 的第一次加载合法地拿到 503。这个状态以前直接落到空状态（「你有 0 个
+  // 项目」），看起来像数据丢了。现在改成：先给可见的启动反馈，再按有上限
+  // 的退避自动重试——就绪后自己出现，不需要用户反复点重试。
+  //
+  // 只对 503 和网络层失败重试；4xx 是真错误（如 401），重试没有意义。
+  const bootAttempts = useRef(0);
+  const [bootEverFailed, setBootEverFailed] = useState(false);
+
+  useEffect(() => {
+    if (projectError !== null) setBootEverFailed(true);
+  }, [projectError]);
+
+  useEffect(() => {
+    const notReady =
+      projectsUpdatedAt === null &&
+      projectError !== null &&
+      (projectErrorStatus === 503 || projectErrorStatus === null);
+    if (!notReady) {
+      bootAttempts.current = 0;
+      return;
+    }
+    if (bootAttempts.current >= 15) return;
+    // 1s → 2s → 4s → 8s（封顶），首次索引重建通常几秒内结束。
+    const delay = Math.min(1000 * 2 ** Math.min(bootAttempts.current, 3), 8000);
+    const timer = setTimeout(() => {
+      bootAttempts.current += 1;
+      // silent：不要把 `loading` 打开，否则骨架会被替换成空白。
+      void loadProjects({ silent: true });
+    }, delay);
+    return () => clearTimeout(timer);
+  }, [projectsUpdatedAt, projectError, projectErrorStatus, loadProjects]);
+
   // 健康轮询：启动 + 每 30s
   useEffect(() => {
     const timer = setInterval(() => checkHealth(), 30_000);
@@ -103,25 +141,58 @@ export function ProjectsView() {
     checkHealth();
   }, [loadProjects, loadTasks, selected, checkHealth]);
 
-  // 三态：加载骨架
-  if (loadingProjects && projects.length === 0) {
+  // 首次加载态：还没有任何一次成功响应。
+  //
+  // 必须与「加载成功但确实没有项目」分开。旧实现把二者混在
+  // `projects.length === 0 && !loadingProjects` 里，于是冷启动（PM 未就绪
+  // → 503）和真正的空库走了同一条分支，用户看到的是「还没有项目」——
+  // 既像卡死，又像数据丢失。
+  //
+  // 对比度也一并修了：骨架块原来是 `bg-surface`(#27272a) 压在
+  // `bg-page-bg`(#131316) 上，约 1.25:1，深色主题下几乎不可见，再叠
+  // `animate-pulse` 的 50% 透明度就是「什么都没发生」。现在用
+  // `surface-strong` + 明确的 spinner 与文案。
+  if (projectsUpdatedAt === null) {
     return (
       <div className="flex h-full w-full overflow-hidden">
         <div
-          className={cn(CAPSULE_PANE_CN, "shrink-0 animate-pulse space-y-2 bg-nav-surface p-3")}
+          className={cn(CAPSULE_PANE_CN, "shrink-0 space-y-2 bg-nav-surface p-3")}
           style={{ width: sidebar.width }}
         >
           {[0, 1, 2, 3, 4].map((i) => (
-            <div key={i} className="h-9 rounded-md bg-surface" />
+            <div
+              key={i}
+              className="h-9 animate-pulse rounded-md bg-surface-strong/60"
+            />
           ))}
         </div>
-        <div className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 bg-page-bg p-6")}>
-          <div className="h-8 w-48 animate-pulse rounded-md bg-surface" />
-          <div className="mt-6 flex gap-4">
-            {[0, 1, 2, 3].map((i) => (
-              <div key={i} className="h-64 flex-1 animate-pulse rounded-md bg-surface" />
-            ))}
-          </div>
+        <div
+          className={cn(
+            CAPSULE_PANE_CN,
+            "flex min-w-0 flex-1 flex-col items-center justify-center gap-3 bg-page-bg p-6",
+          )}
+        >
+          <span
+            aria-hidden
+            className="h-7 w-7 animate-spin rounded-full border-2 border-surface-strong border-t-[var(--color-accent)]"
+          />
+          <p role="status" className="text-sm font-medium text-text-secondary">
+            {bootEverFailed ? t("pm.bootingTitle") : t("pm.loadingProjects")}
+          </p>
+          {bootEverFailed && (
+            <>
+              <p className="max-w-sm text-center text-xs leading-relaxed text-text-tertiary">
+                {t("pm.bootingDesc")}
+              </p>
+              <button
+                type="button"
+                onClick={handleRetry}
+                className="rounded-md bg-btn-solid px-3 py-1 text-xs font-medium text-white hover:bg-btn-solid-hover"
+              >
+                {t("common.retry")}
+              </button>
+            </>
+          )}
         </div>
       </div>
     );
@@ -186,7 +257,16 @@ export function ProjectsView() {
         {/* 右侧看板 — flex-1 */}
         <ProjectBoard
           project={selected}
-          loading={boardLoading}
+          // `loadTasks` is called with `silent: true` on project switch, so
+          // `boardLoading` is false and the board's own skeleton (which keys
+          // off this prop) never renders — the switch looked like a freeze
+          // while 500 KB of tasks came back. Treat "no successful load for
+          // this project yet" as loading.
+          loading={
+            boardLoading ||
+            (selected !== null &&
+              (boardProjectId !== selected.id || boardUpdatedAt === null))
+          }
           error={boardError}
           onRetry={handleRetry}
           onOpenTask={handleOpenTask}

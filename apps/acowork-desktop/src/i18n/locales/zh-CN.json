@@ -2138,6 +2138,10 @@
     "projects": "项目",
     "emptyTitle": "还没有项目",
     "emptyDesc": "创建你的第一个项目，开始使用看板。",
+    "loadingProjects": "正在加载项目…",
+    "bootingTitle": "项目服务正在启动",
+    "bootingDesc": "首次启动需要重建任务索引，任务越多耗时越长。就绪后会自动显示，无需刷新页面。",
+    "bootingRetry": "仍在等待服务响应…",
     "newProject": "新建项目",
     "newProjectTitleRequired": "请输入项目标题",
     "newProjectPlaceholder": "项目标题",
@@ -2420,7 +2424,7 @@
       "reasonPlaceholder": "拒绝理由（可选）...",
       "confirm": "拒绝"
     },
-    "offlineHint": "PM service offline — board is read-only"
+    "offlineHint": "PM 服务离线，看板当前为只读。"
   },
   "debugFiles": {
     "title": "提示词与技能",

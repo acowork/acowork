@@ -13,6 +13,7 @@ import type {
   CreateTaskInput,
   PmAttachmentMeta,
   PmProject,
+  PmProjectCounts,
   PmTask,
   PmTaskActivity,
   PmTaskResponse,
@@ -86,6 +87,18 @@ function normalizeProject(p: PmProject): PmProject {
 
 export function listProjects() {
   return request<PmProject[]>("/projects").then((list) => list.map(normalizeProject));
+}
+
+/**
+ * Per-project task tallies (`total` / `submitted`) in one index-only call.
+ *
+ * The badge counts used to be derived client-side from
+ * `listProjectTasks(pid)` per project — a full 503 KB task payload for the
+ * largest project, just to read `.length` and one `filter`. Server answers
+ * this from the in-memory index, so it costs no disk reads.
+ */
+export function listProjectCounts() {
+  return request<PmProjectCounts[]>("/projects/counts");
 }
 
 export function createProject(input: CreateProjectInput) {

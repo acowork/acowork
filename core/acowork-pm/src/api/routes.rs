@@ -63,6 +63,9 @@ pub fn pm_router(
             "/projects",
             get(projects::list).post(projects::create),
         )
+        // Static segment, declared before the `{pid}` route for readability;
+        // `matchit` prefers a literal over a parameter either way.
+        .route("/projects/counts", get(projects::counts))
         .route(
             "/projects/{pid}",
             get(projects::get)

@@ -23,6 +23,28 @@ pub async fn list(State(state): State<ApiState>) -> Result<Json<Vec<Project>>, c
 }
 
 // ────────────────────────────────────────────────────────────────────────────
+// GET /projects/counts
+// ────────────────────────────────────────────────────────────────────────────
+
+/// Per-project task tallies (`total` / `submitted`).
+///
+/// Exists so the desktop home screen stops paging through full task lists to
+/// render two numbers: `/projects/{pid}/tasks` returns every task entity
+/// (503 KB for the largest project in a real store) and the caller only ever
+/// did `.length` plus one `filter`. Answered from the in-memory index, so it
+/// never opens a `task.json`.
+///
+/// Registered on a static path segment — `matchit` prefers it over
+/// `/projects/{pid}`, so no conflict with the project detail route.
+#[tracing::instrument(skip(state))]
+pub async fn counts(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<crate::types::ProjectCounts>>, crate::error::PmError> {
+    let counts = state.store.project_counts().await?;
+    Ok(Json(counts))
+}
+
+// ────────────────────────────────────────────────────────────────────────────
 // POST /projects
 // ────────────────────────────────────────────────────────────────────────────
 
@@ -639,5 +661,61 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v["title"], "Before", "a description edit must not touch the title");
         assert_eq!(v["description"], "just a note");
+    }
+
+    /// `GET /projects/counts` is a **static** segment living beside
+    /// `/projects/{pid}`. `matchit` prefers a literal over a parameter, so the
+    /// tally route must win, and the detail route must keep resolving for a
+    /// real id. A collision here would surface as `400 invalid id: counts`
+    /// from the detail handler, which is why this is asserted at the router
+    /// level rather than only against the store.
+    #[tokio::test]
+    async fn project_counts_route_does_not_shadow_project_detail() {
+        let (router, _tmp) = test_router().await;
+        let pid = create_project(&router, "human", "P").await;
+        for title in ["a", "b"] {
+            assert_eq!(
+                call(
+                    &router,
+                    Method::POST,
+                    &format!("/projects/{pid}/tasks"),
+                    "human",
+                    false,
+                    &format!(r#"{{"title":"{title}"}}"#),
+                )
+                .await,
+                StatusCode::OK
+            );
+        }
+
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/projects/counts")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK, "the literal route must not be read as {{pid}}");
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v[0]["project_id"], pid);
+        assert_eq!(v[0]["total"], 2);
+        assert_eq!(v[0]["submitted"], 0);
+
+        // The parameterised route still resolves for an actual project id.
+        let resp = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/projects/{pid}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 }

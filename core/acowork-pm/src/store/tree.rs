@@ -35,6 +35,7 @@
 //! - Reparent = `mv` 目录（0 文件写），DFS 防环 + 深度限制
 
 use std::cmp::Reverse;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -91,6 +92,14 @@ pub trait PmStore: Send + Sync {
     async fn list_projects(&self) -> Result<Vec<Project>>;
     async fn update_project(&self, id: &ProjectId, input: UpdateProject) -> Result<Project>;
     async fn delete_project(&self, id: &ProjectId, cascade: bool) -> Result<()>;
+
+    /// Task tallies per project, answered from the in-memory index.
+    ///
+    /// Returns one entry per project that currently has at least one task;
+    /// callers treat a missing project as `{ total: 0, submitted: 0 }`.
+    /// Zero disk reads — this exists so the desktop home screen never has to
+    /// page through full task entities to render a badge.
+    async fn project_counts(&self) -> Result<Vec<crate::types::ProjectCounts>>;
 
     // ── Member operations ───────────────────────────────────────────
 
@@ -292,8 +301,14 @@ impl TreePmStore {
     /// 启动时由 [`crate::server::PmService::new`] 调用（如果配置开启）。
     /// 崩溃后调用幂等——从 `task.json` 全量重建，**无修复逻辑**（物理是权威，无冗余可漂移）。
     pub async fn rebuild_index(&self) -> Result<()> {
+        // Cold-start cost is O(tasks) disk opens and is the one shape that
+        // grows linearly with the store (ADR-117 D5 T1). Logging the duration
+        // is what makes that threshold evaluable at all — `count` alone cannot
+        // tell you whether a store is 50 ms or 5 s away from ready.
+        let started = std::time::Instant::now();
         let mut index = TaskIndex::new();
         let mut projects = fs::read_dir(&self.projects_dir).await?;
+        let mut skipped = 0usize;
 
         while let Some(proj) = projects.next_entry().await? {
             if !proj.file_type().await?.is_dir() {
@@ -303,18 +318,40 @@ impl TreePmStore {
             if !name.starts_with("p-") {
                 continue;
             }
-            let project_id = parse_project_id(&name)?;
+            let project_id = match parse_project_id(&name) {
+                Ok(id) => id,
+                Err(e) => {
+                    skipped += 1;
+                    tracing::warn!(
+                        dir = %name,
+                        error = %e,
+                        "unrecognised project directory — skipped, index continues"
+                    );
+                    continue;
+                }
+            };
             let tasks_dir = proj.path().join("tasks");
             if !fs::try_exists(&tasks_dir).await? {
                 continue;
             }
-            self.walk_tasks(&tasks_dir, &project_id, 0, &mut index)
-                .await?;
+            // One unreadable project must not hide every other project: the
+            // index is derived data, the tree is the authority, so a partial
+            // index is strictly better than no store at all.
+            if let Err(e) = self.walk_tasks(&tasks_dir, &project_id, 0, &mut index).await {
+                skipped += 1;
+                tracing::warn!(
+                    project = %project_id,
+                    dir = %tasks_dir.display(),
+                    error = %e,
+                    "project tasks unreadable — skipped, other projects still indexed"
+                );
+            }
         }
 
         let count = index.len();
         *self.index.write() = index;
-        tracing::info!(count, "PM index rebuilt");
+        let elapsed_ms = started.elapsed().as_millis();
+        tracing::info!(count, skipped, elapsed_ms, "PM index rebuilt");
         Ok(())
     }
 
@@ -331,23 +368,83 @@ impl TreePmStore {
     ) -> Result<()> {
         let mut stack: Vec<(PathBuf, u8)> = vec![(root_dir.to_path_buf(), root_depth)];
         while let Some((dir, depth)) = stack.pop() {
-            let mut entries = fs::read_dir(&dir).await?;
-            while let Some(entry) = entries.next_entry().await? {
-                if !entry.file_type().await?.is_dir() {
+            let mut entries = match fs::read_dir(&dir).await {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!(
+                        dir = %dir.display(),
+                        error = %e,
+                        "task dir unreadable — skipped"
+                    );
+                    continue;
+                }
+            };
+            loop {
+                let entry = match entries.next_entry().await {
+                    Ok(Some(entry)) => entry,
+                    Ok(None) => break,
+                    Err(e) => {
+                        tracing::warn!(
+                            dir = %dir.display(),
+                            error = %e,
+                            "task dir entry unreadable — stopped scanning this dir"
+                        );
+                        break;
+                    }
+                };
+                let is_dir = match entry.file_type().await {
+                    Ok(t) => t.is_dir(),
+                    Err(e) => {
+                        tracing::warn!(
+                            path = %entry.path().display(),
+                            error = %e,
+                            "task entry unreadable — skipped"
+                        );
+                        continue;
+                    }
+                };
+                if !is_dir {
                     continue;
                 }
                 let name = entry.file_name().to_string_lossy().into_owned();
                 if !name.starts_with("t-") {
                     continue;
                 }
-                let task_id = parse_task_id(&name)?;
+                let task_id = match parse_task_id(&name) {
+                    Ok(id) => id,
+                    Err(e) => {
+                        tracing::warn!(
+                            dir = %entry.path().display(),
+                            error = %e,
+                            "unrecognised task directory — skipped"
+                        );
+                        continue;
+                    }
+                };
                 let task_path = entry.path();
                 let json_path = task_path.join("task.json");
                 if !fs::try_exists(&json_path).await? {
                     tracing::warn!(task = %name, "task dir missing task.json, skipping");
                     continue;
                 }
-                let task: Task = read_json(&json_path).await?;
+                // A single unreadable `task.json` must never take the store
+                // down: the file is the authority and stays untouched for a
+                // manual repair, only this task's index entry is lost. Before
+                // this, one file with trailing bytes after its closing brace
+                // made `PmService::build` fail and the whole app look empty.
+                let task: Task = match read_json(&json_path).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        tracing::error!(
+                            project = %project_id,
+                            task = %name,
+                            path = %json_path.display(),
+                            error = %e,
+                            "unreadable task.json — task skipped, store continues"
+                        );
+                        continue;
+                    }
+                };
 
                 index.insert(
                     task_id.clone(),
@@ -862,6 +959,32 @@ impl PmStore for TreePmStore {
         project.updated_at = Utc::now();
         atomic_write_json(&path, &project).await?;
         Ok(project)
+    }
+
+    async fn project_counts(&self) -> Result<Vec<crate::types::ProjectCounts>> {
+        // One pass over `by_id` and no `task.json` is opened. Iterating
+        // `by_id` rather than `by_project` keeps `total` authoritative: a
+        // stale entry in the reverse index can never inflate a count.
+        let index = self.index.read();
+        let mut tallies: HashMap<ProjectId, (usize, usize)> = HashMap::new();
+        for entry in index.by_id.values() {
+            let slot = tallies.entry(entry.project_id.clone()).or_insert((0, 0));
+            slot.0 += 1;
+            if entry.status == TaskStatus::Submitted {
+                slot.1 += 1;
+            }
+        }
+        let mut out: Vec<crate::types::ProjectCounts> = tallies
+            .into_iter()
+            .map(|(project_id, (total, submitted))| crate::types::ProjectCounts {
+                project_id,
+                total,
+                submitted,
+            })
+            .collect();
+        // Deterministic order so the endpoint is diffable in tests.
+        out.sort_by(|a, b| a.project_id.as_str().cmp(b.project_id.as_str()));
+        Ok(out)
     }
 
     async fn delete_project(&self, id: &ProjectId, _cascade: bool) -> Result<()> {
@@ -1745,25 +1868,43 @@ impl PmStore for TreePmStore {
         self.find_tasks(&filter).await
     }
 
+    /// Answered **entirely from the in-memory index**.
+    ///
+    /// `TaskEntry::blocks` is `task.depends_on` filtered to
+    /// `kind == Blocks` (see `TaskEntry::from_task`), so the forward edges
+    /// are already resident; only the dependency's status has to be looked
+    /// up, and that is indexed too.
+    ///
+    /// This used to `get_task()` first — one `task.json` read per call —
+    /// even though the disk read existed only to reach `depends_on`. The
+    /// task list handler calls this **once per returned task**, so a single
+    /// 82-task project paid 82 extra file opens on every board render, for
+    /// data the index already held. Worse on a cold cache, where each open
+    /// also pays an AV first-touch scan.
+    ///
+    /// The blocking predicate is deliberately identical to the dispatch
+    /// scanner's gate (`tree.rs` due-set filter): Done/Cancelled satisfies a
+    /// prerequisite, anything else — including a dangling id — blocks.
     async fn compute_blocked_by(&self, task_id: &TaskId) -> Result<Vec<TaskId>> {
-        let task = self
-            .get_task(task_id)
-            .await?
+        let index = self.index.read();
+        let entry = index
+            .by_id
+            .get(task_id)
             .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
 
-        let mut blocked = Vec::new();
-        for dep in &task.depends_on {
-            if dep.kind != DependencyKind::Blocks {
-                continue;
-            }
-            let status = self.index.read().by_id.get(&dep.task_id).map(|e| e.status);
-            match status {
-                // 被依赖任务已完成 / 取消 → 不再阻塞
-                Some(TaskStatus::Done) | Some(TaskStatus::Cancelled) => {}
-                // 未完成或不存在（悬挂引用）→ 阻塞
-                _ => blocked.push(dep.task_id.clone()),
-            }
-        }
+        let blocked = entry
+            .blocks
+            .iter()
+            .filter(|dep| {
+                !matches!(
+                    index.by_id.get(*dep).map(|e| e.status),
+                    // 被依赖任务已完成 / 取消 → 不再阻塞
+                    Some(TaskStatus::Done) | Some(TaskStatus::Cancelled)
+                    // 未完成或不存在（悬挂引用）→ 阻塞
+                )
+            })
+            .cloned()
+            .collect();
         Ok(blocked)
     }
 
@@ -4057,5 +4198,151 @@ mod tests {
         assert!(done.dispatched_at.is_some());
         assert_eq!((done.dispatch_attempts, done.dispatch_error), (0, None),
             "a delivered generation carries no stale failure onto the task surface");
+    }
+
+    /// A store whose `data_dir` outlives the helper, so the test can delete
+    /// files underneath it. `test_config()` drops its `tempdir` on return,
+    /// which makes it useless for I/O-outage assertions.
+    fn store_with_stable_dir() -> (tempfile::TempDir, PmConfig) {
+        let dir = tempdir().unwrap();
+        let cfg = PmConfig {
+            data_dir: dir.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        };
+        (dir, cfg)
+    }
+
+    /// `compute_blocked_by` must answer from the index alone.
+    ///
+    /// Proven by deletion rather than by an I/O spy: if the implementation
+    /// still went through `get_task()` to reach `depends_on`, removing the
+    /// dependency's `task.json` would turn this into `TaskNotFound`. The
+    /// index-backed version does not care.
+    #[tokio::test]
+    async fn compute_blocked_by_answers_from_the_index_not_from_disk() {
+        let (_dir, cfg) = store_with_stable_dir();
+        let store = TreePmStore::new(cfg).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: String::new(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let blocker = store
+            .create_task(&p.id, create_task_input("blocker"), "human")
+            .await
+            .unwrap();
+        let dependent = store
+            .create_task(
+                &p.id,
+                CreateTask {
+                    depends_on: vec![crate::types::Dependency {
+                        task_id: blocker.id.clone(),
+                        kind: crate::types::DependencyKind::Blocks,
+                    }],
+                    ..create_task_input("dependent")
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.compute_blocked_by(&dependent.id).await.unwrap(),
+            vec![blocker.id.clone()]
+        );
+
+        fs::remove_file(store.task_dir(&p.id, &blocker.id).join("task.json"))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            store.compute_blocked_by(&dependent.id).await.unwrap(),
+            vec![blocker.id.clone()],
+            "blocked_by must not depend on the dependency's task.json being readable"
+        );
+    }
+
+    /// `project_counts` must answer from the index alone.
+    ///
+    /// This is the endpoint the desktop home screen calls to render its
+    /// badges; it replaced an N+1 over `/projects/{pid}/tasks` that paged
+    /// every task entity (503 KB for one real project) to compute two
+    /// integers. Deleting every `task.json` proves the tallies never touch
+    /// the disk.
+    #[tokio::test]
+    async fn project_counts_answer_from_the_index_not_from_disk() {
+        let (_dir, cfg) = store_with_stable_dir();
+        let store = TreePmStore::new(cfg).await.unwrap();
+        let p = store
+            .create_project(
+                CreateProject { title: "P".into(), description: String::new(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        let inst = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
+        add_member(&store, &p.id, inst).await;
+
+        let a = store
+            .create_task(&p.id, create_task_input("a"), "human")
+            .await
+            .unwrap();
+        let b = store
+            .create_task(
+                &p.id,
+                CreateTask { assignee: Some(inst.into()), ..create_task_input("b") },
+                "human",
+            )
+            .await
+            .unwrap();
+        store.claim_task(&b.id, inst).await.unwrap();
+        store
+            .submit_task(&b.id, "done", vec![], vec![], inst)
+            .await
+            .unwrap();
+        let c = store
+            .create_task(&p.id, create_task_input("c"), "human")
+            .await
+            .unwrap();
+
+        let counts = store.project_counts().await.unwrap();
+        assert_eq!(counts.len(), 1, "one project holds every task");
+        assert_eq!(counts[0].project_id, p.id);
+        assert_eq!((counts[0].total, counts[0].submitted), (3, 1));
+
+        for tid in [&a.id, &b.id, &c.id] {
+            fs::remove_file(store.task_dir(&p.id, tid).join("task.json"))
+                .await
+                .unwrap();
+        }
+
+        let after = store.project_counts().await.unwrap();
+        assert_eq!(
+            (after[0].total, after[0].submitted),
+            (3, 1),
+            "counts must survive every task.json disappearing from disk"
+        );
+
+        // Projects without tasks are omitted; the client seeds zeros for the
+        // projects it knows about, so absence must stay the contract.
+        let empty = store
+            .create_project(
+                CreateProject { title: "Empty".into(), description: String::new(), metadata: Default::default() },
+                "human",
+            )
+            .await
+            .unwrap();
+        assert!(
+            !store
+                .project_counts()
+                .await
+                .unwrap()
+                .iter()
+                .any(|row| row.project_id == empty.id),
+            "a project with no tasks must not appear in the tallies"
+        );
     }
 }

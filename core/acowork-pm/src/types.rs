@@ -864,6 +864,25 @@ pub enum TaskSort {
 // API 响应包装（响应层补充派生字段）
 // ────────────────────────────────────────────────────────────────────────────
 
+/// Per-project task tallies for the project list / navigation badge.
+///
+/// The desktop home screen needs exactly two integers per project
+/// (`total`, `submitted`). Before this existed it called
+/// `GET /projects/{pid}/tasks` once per project and did
+/// `tasks.length` / `tasks.filter(...)` client-side — a 503 KB payload and
+/// ~160 file opens for the biggest project, to render two numbers.
+///
+/// Computed **from the in-memory index only**, so it costs one pass over
+/// `TaskIndex::by_id` with no disk reads and no task materialisation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectCounts {
+    pub project_id: ProjectId,
+    /// All tasks in the project, any status.
+    pub total: usize,
+    /// Tasks currently in `submitted` (awaiting review).
+    pub submitted: usize,
+}
+
 /// 任务完整响应（包含派生字段）。
 ///
 /// 序列化时附带 `is_blocked` / `blocked_by` / `depth` / `parent_id`，

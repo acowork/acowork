@@ -23,6 +23,16 @@ interface PmProjectState {
   selected: PmProject | null;
   loading: boolean;
   error: string | null;
+  /**
+   * HTTP status behind `error`, when the failure came from the PM API.
+   *
+   * The first load has to tell three situations apart, and the message text
+   * cannot do it: `503` means the service is **still booting** (the Gateway
+   * proxy has no upstream yet), which is normal for a few seconds on a cold
+   * start and must not be rendered as "your projects are gone". `null` means
+   * a network/DNS-level failure. Any other status is a real error.
+   */
+  errorStatus: number | null;
   /** 上次成功加载时间戳（用于 30s 缓存） */
   updatedAt: number | null;
   /** 项目任务计数（侧边栏徽章）：pid → { total, submitted } */
@@ -62,6 +72,7 @@ export const usePmProjectStore = create<PmProjectState>((set, get) => ({
   selected: null,
   loading: false,
   error: null,
+  errorStatus: null,
   updatedAt: null,
   counts: {},
   creating: false,
@@ -75,18 +86,29 @@ export const usePmProjectStore = create<PmProjectState>((set, get) => ({
       return;
     }
     if (get().loading) return;
-    set({ loading: !silent, error: null });
+    set({ loading: !silent, error: null, errorStatus: null });
     try {
       const projects = await pmApi.listProjects();
       // 保留选中项（若仍存在）；否则自动选中第一个
       const selectedId = get().selected?.id;
       const selected =
         projects.find((p) => p.id === selectedId) ?? projects[0] ?? null;
-      set({ projects, selected, loading: false, error: null, updatedAt: Date.now() });
+      set({
+        projects,
+        selected,
+        loading: false,
+        error: null,
+        errorStatus: null,
+        updatedAt: Date.now(),
+      });
       // 异步刷新计数徽章（不阻塞主流程）
       void get().refreshCounts();
     } catch (e) {
-      set({ loading: false, error: e instanceof Error ? e.message : String(e) });
+      set({
+        loading: false,
+        error: e instanceof Error ? e.message : String(e),
+        errorStatus: e instanceof pmApi.PmApiError ? e.status : null,
+      });
       log.warn("[pm:project] loadProjects failed:", e);
     }
   },
@@ -209,20 +231,26 @@ export const usePmProjectStore = create<PmProjectState>((set, get) => ({
   refreshCounts: async () => {
     const projects = get().projects;
     const counts: Record<string, { total: number; submitted: number }> = {};
-    await Promise.all(
-      projects.map(async (p) => {
-        try {
-          const tasks = await pmApi.listProjectTasks(p.id);
-          counts[p.id] = {
-            total: tasks.length,
-            submitted: tasks.filter((t) => t.status === "submitted").length,
-          };
-        } catch {
-          // 单项目拉取失败不阻塞整体
-          counts[p.id] = { total: 0, submitted: 0 };
-        }
-      }),
-    );
+    // Seed every known project first: the endpoint omits projects that hold
+    // no tasks, and a missing key would render `undefined` in the badge.
+    for (const p of projects) counts[p.id] = { total: 0, submitted: 0 };
+    try {
+      // One index-only call. This used to be `listProjectTasks(pid)` per
+      // project — 83 task entities / 503 KB for the largest project in a
+      // real store, fetched only to read `.length` and count `submitted`.
+      // It also re-read every task.json twice on the server (list + the
+      // per-task blocked_by check), so the board paid ~160 file opens per
+      // render just to display two integers per project.
+      const rows = await pmApi.listProjectCounts();
+      for (const row of rows) {
+        counts[row.project_id] = {
+          total: row.total,
+          submitted: row.submitted,
+        };
+      }
+    } catch {
+      // Keep the zeroed seed: a failed tally must not blank the board.
+    }
     set({ counts });
   },
 
