@@ -101,6 +101,9 @@ pub struct AppState {
     /// and never persisted — a restart invalidates every outstanding preview
     /// link, which is the intended blast-radius bound for a capability URL.
     pub workspace_preview_secret: crate::http::workspace_preview::SharedPreviewTicketSecret,
+    /// ADR-116: in-memory HMAC key for app webview session tickets. Separate
+    /// from the preview key so the two capability domains cannot cross-verify.
+    pub app_session_secret: crate::app::ticket::SharedAppSessionSecret,
 }
 
 impl AppState {
@@ -129,6 +132,7 @@ impl AppState {
             workspace_preview_secret: Arc::new(
                 crate::http::workspace_preview::PreviewTicketSecret::random(),
             ),
+            app_session_secret: Arc::new(crate::app::ticket::AppSessionSecret::random()),
         }
     }
 }
@@ -364,8 +368,15 @@ pub fn build_router(state: AppState) -> Router {
         // agent-scoped panel paths `/api/agents/{id}/memory/*`, which until now
         // were Runtime proxies). Not-ready → 503 + `Retry-After`, same contract.
         .merge(crate::http::memory_proxy::memory_proxy_routes())
+        // ADR-116: hosted applications. The control-plane routes are exact
+        // paths and stay behind the bearer gate; the app-scoped wildcard is
+        // ticket-authenticated inside `app::proxy`. Order matters: exact
+        // routes are merged before the catch-all.
+        .merge(crate::app::api::app_routes())
+        .merge(crate::app::platform::platform_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())
+        .merge(crate::app::proxy::app_proxy_routes())
         // Design doc 24 §6.3: relay tunnel management.
         .merge(crate::http::relay_api::relay_routes())
         .with_state(state)

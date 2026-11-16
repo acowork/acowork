@@ -48,6 +48,7 @@ pub mod service;
 pub mod state;
 pub mod store;
 pub mod types;
+pub mod ui;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Re-exports: core types (crate-level public API)

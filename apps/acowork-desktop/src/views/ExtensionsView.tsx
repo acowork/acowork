@@ -1,46 +1,32 @@
 /**
- * ExtensionsView — 扩展面板（VSCode Extensions 风格）的两栏胶囊布局。
+ * ExtensionsView — the hosted-application workbench (ADR-116).
  *
- * 形状统一走全局胶囊布局（CAPSULE_PANE_CN，见 components/common/capsule.ts）：
- * 左栏搜索 + 列表胶囊（bg-nav-surface），右栏详情胶囊（bg-page-bg），
- * 与 ProjectSidebar / DocTreeSidebar + ProjectBoard / DocEditor 同一套
- * 圆角 + 发丝边框 + 底色分工。视图容器保持透明，让 AppLayout 的窗口毛玻璃透出。
+ * Two-column capsule layout shared with PM / DOC: search + list on the left
+ * (`bg-nav-surface`), detail / app frame on the right (`bg-page-bg`). The
+ * right column is a CONTENT main area, not the chat view's 6-tab inspector
+ * (`bg-right-panel`), so it uses `bg-page-bg` like ProjectBoard / DocEditor.
  *
- * 底色分工（别抄错，这是本文件最容易错的一处）：本视图是 "列表 + 详情"
- * 两栏，对标 pm / doc，不是 chat 的 "正文 + 右侧检视器"。
- *   - 左栏 list     → bg-nav-surface（同 ProjectSidebar / DocTreeSidebar）
- *   - 右栏 详情主区 → bg-page-bg（同 ProjectBoard / DocEditor）
- * chat 的 `bg-right-panel` 是那个 6-tab 侧栏 / 右侧检视器专用的、比 page-bg
- * 深一档的 raised surface，套到这里会让详情栏比左栏还深、层级读反。
+ * The list is driven by `GET /api/apps` (Gateway app registry). Selecting an
+ * app shows its declared contract; "Open" loads the app's own front end in a
+ * sandboxed iframe. The Desktop contributes the container and the
+ * postMessage bridge only — the app owns the page, the Gateway owns identity
+ * and routing. Note this view is about *applications*, not the Agent Hub
+ * (PRD F7): keep those two concepts separate.
  *
- * 数据尚未接入：`core/acowork-gateway/src/http/extensions.rs` 还在计划中，
- * desktop 侧没有 store / API，所以 EXTENSIONS 恒为空数组。空列表区域保留
- * 滚动根（`min-h-0 flex-1 overflow-y-auto`）而不是塞假条目 —— 假数据会让
- * "哪些是真的" 变得不可验证，等真数据接上时这些占位直接被覆盖即可。
- *
- * TODO(extensions): 真正接入 extension 数据时统一补 `extensions` 命名空间
- * （搜索占位符 / 无结果文案 / 空态），5 个语言包同步。
- * TODO(i18n): 下面的 `ariaLabel` / 搜索占位符 / 空态文案是硬编码英文。
- * 5 个语言包都没有 `extensions` 命名空间，且改动前本视图就是硬编码英文（没走
- * i18n），所以本票维持现状；接入数据时与上面那条一起做。**不要**借用
- * `pm.searchPlaceholder` 这类 pm 命名空间的 key —— 语义不对。
+ * The aria labels / placeholders remain hardcoded English: no `extensions`
+ * i18n namespace exists yet, and introducing one here would be unrelated to
+ * wiring the data. 5 locales stay untouched.
  */
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Search } from "lucide-react";
+import { AppFrame } from "../components/apps/AppFrame";
 import { CAPSULE_PANE_CN } from "../components/common/capsule";
 import { SplitHandle } from "../components/common/SplitHandle";
 import { StyledInput } from "../components/common/StyledInput";
 import { useDragResize } from "../hooks/useDragResize";
+import { listApps, setAppEnabled, type AppDto } from "../lib/apps-api";
 import { cn } from "../lib/utils";
 import { listRowHover } from "../lib/ui-styles";
-
-interface Extension {
-    id: string;
-    name: string;
-}
-
-/** 恒空：Gateway 扩展清单端点尚未落地。接入时替换为 store 的列表。 */
-const EXTENSIONS: Extension[] = [];
 
 const ariaLabel = {
     search: "Search extensions",
@@ -49,9 +35,35 @@ const ariaLabel = {
     resizeSidebar: "Resize extensions sidebar",
 };
 
+function statusColor(app: AppDto): string {
+    if (app.status === "ready") return "bg-ok-solid";
+    if (app.status === "disabled") return "bg-text-tertiary";
+    return "bg-warning-solid";
+}
+
 export function ExtensionsView() {
     const [query, setQuery] = useState("");
     const [selectedId, setSelectedId] = useState<string | null>(null);
+    const [apps, setApps] = useState<AppDto[]>([]);
+    const [openedId, setOpenedId] = useState<string | null>(null);
+    const [busy, setBusy] = useState(false);
+    const [actionError, setActionError] = useState<string | null>(null);
+
+    const reload = async () => {
+        if (typeof fetch !== "function") return;
+        try {
+            const next = await listApps();
+            setApps(next);
+            setActionError(null);
+        } catch {
+            // Gateway unreachable / not yet authenticated: keep the honest
+            // empty state rather than rendering placeholder rows.
+        }
+    };
+
+    useEffect(() => {
+        void reload();
+    }, []);
 
     // 与 pm / docs 左侧栏一致的可拖动宽度（localStorage 持久化）
     const sidebar = useDragResize({
@@ -61,9 +73,11 @@ export function ExtensionsView() {
         maxWidth: 400,
     });
 
-    const visible = EXTENSIONS.filter((e) =>
-        e.name.toLowerCase().includes(query.trim().toLowerCase()),
+    const visible = apps.filter((e) =>
+        `${e.name} ${e.id}`.toLowerCase().includes(query.trim().toLowerCase()),
     );
+    const selected = apps.find((e) => e.id === selectedId) ?? null;
+    const opened = apps.find((e) => e.id === openedId) ?? null;
 
     // 上下键在可见项之间移动选中（标准 listbox 模式）；列表为空时无事发生。
     const moveSelection = (key: string) => {
@@ -73,6 +87,22 @@ export function ExtensionsView() {
             ? Math.min(at + 1, visible.length - 1)
             : Math.max(at - 1, 0);
         setSelectedId(visible[next]?.id ?? visible[0].id);
+    };
+
+    const toggle = async (app: AppDto) => {
+        setBusy(true);
+        setActionError(null);
+        try {
+            await setAppEnabled(app.id, !app.enabled);
+            // Disabling the app we are currently viewing must close its
+            // iframe immediately; the session is no longer valid there.
+            if (app.enabled) setOpenedId(null);
+            await reload();
+        } catch (e) {
+            setActionError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setBusy(false);
+        }
     };
 
     return (
@@ -126,7 +156,10 @@ export function ExtensionsView() {
                                 type="button"
                                 role="option"
                                 aria-selected={active}
-                                onClick={() => setSelectedId(e.id)}
+                                onClick={() => {
+                                    setSelectedId(e.id);
+                                    setOpenedId(null);
+                                }}
                                 className={cn(
                                     "relative flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-left transition-colors duration-150",
                                     active
@@ -136,15 +169,18 @@ export function ExtensionsView() {
                                         "row-divider-b",
                                 )}
                             >
+                                <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusColor(e))} />
                                 <span className={cn("min-w-0 flex-1 truncate", active && "text-white")}>
                                     {e.name}
+                                </span>
+                                <span className={cn("shrink-0 text-[11px]", active ? "text-white/80" : "text-text-tertiary")}>
+                                    {e.version}
                                 </span>
                             </button>
                         );
                     })}
 
-                    {/* 列表恒空时的占位：胶囊内的空白滚动根，不是裸 div。
-                        接入真实数据后这里换成 "无匹配" / 空态文案。 */}
+                    {/* 空列表时保持诚实的空态，绝不塞假条目。 */}
                     {visible.length === 0 && (
                         <div className="px-3 py-8 text-center text-xs text-text-tertiary">
                             No extensions available yet.
@@ -158,21 +194,80 @@ export function ExtensionsView() {
                 ariaLabel={ariaLabel.resizeSidebar}
             />
 
-            {/* 右栏：详情占位胶囊。纯框不塞假数据，只保证两栏布局的边框与
-                底色到位，撑满右栏。
-
-                底色取 `bg-page-bg`（不是 `bg-right-panel`）：`--color-right-panel`
-                是 chat 侧那个 6-tab 侧栏 / 右侧检视器专用、比 page-bg 深一档的
-                "raised surface"，而本栏是扩展详情的**内容主区**，对应 pm 的
-                ProjectBoard、doc 的 DocEditor —— 那两处都是 `bg-page-bg`。
-                左栏 list 同样不是 chat 的 AgentList 色系，而是和
-                ProjectSidebar / DocTreeSidebar 共用 `bg-nav-surface`。 */}
+            {/* 右栏：详情 / 应用 iframe。底色取 `bg-page-bg`（内容主区），
+                不是 chat 的 `bg-right-panel`。 */}
             <div
                 id="extensions-detail"
                 role="tabpanel"
                 aria-label={ariaLabel.detail}
-                className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 bg-page-bg")}
-            />
+                className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 overflow-hidden bg-page-bg")}
+            >
+                {opened ? (
+                    <div className="flex h-full min-h-0 flex-col">
+                        <div className="flex shrink-0 items-center justify-end gap-2 border-b border-border-divider px-3 py-1.5">
+                            <span className="mr-auto text-xs text-text-tertiary">{opened.name}</span>
+                            <button
+                                type="button"
+                                onClick={() => setOpenedId(null)}
+                                className="rounded-md border border-border-divider px-2 py-1 text-xs text-text-secondary"
+                            >
+                                Back
+                            </button>
+                        </div>
+                        <div className="min-h-0 flex-1">
+                            <AppFrame app={opened} />
+                        </div>
+                    </div>
+                ) : selected ? (
+                    <div className="flex h-full flex-col gap-4 overflow-y-auto p-5 text-xs">
+                        <div>
+                            <div className="text-sm text-text-primary">{selected.name}</div>
+                            <div className="mt-1 text-text-tertiary">
+                                {selected.description || selected.id}
+                            </div>
+                        </div>
+                        <dl className="grid grid-cols-[120px_1fr] gap-y-2 text-text-secondary">
+                            <dt className="text-text-tertiary">Status</dt>
+                            <dd className="flex items-center gap-2">
+                                <span className={cn("h-1.5 w-1.5 rounded-full", statusColor(selected))} />
+                                {selected.status}
+                                {selected.port ? ` · port ${selected.port}` : ""}
+                            </dd>
+                            <dt className="text-text-tertiary">Version</dt>
+                            <dd>{selected.version}</dd>
+                            <dt className="text-text-tertiary">Runtime</dt>
+                            <dd>{selected.runtime}{selected.builtin ? " · built-in" : ""}</dd>
+                            <dt className="text-text-tertiary">MCP</dt>
+                            <dd className="break-all">{selected.mcp_gateway_path}</dd>
+                            <dt className="text-text-tertiary">App UI</dt>
+                            <dd className="break-all">/api/apps/{selected.id}{selected.ui_path}</dd>
+                            <dt className="text-text-tertiary">Permissions</dt>
+                            <dd>{selected.permissions.join(", ") || "none"}</dd>
+                        </dl>
+                        {actionError && (
+                            <div className="text-danger-text">{actionError}</div>
+                        )}
+                        <div className="mt-auto flex items-center justify-end gap-2 border-t border-border-divider pt-3">
+                            <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void toggle(selected)}
+                                className="rounded-md border border-border-divider px-3 py-1.5 text-xs text-text-secondary disabled:opacity-50"
+                            >
+                                {selected.enabled ? "Disable" : "Enable"}
+                            </button>
+                            <button
+                                type="button"
+                                disabled={!selected.enabled || selected.status !== "ready"}
+                                onClick={() => setOpenedId(selected.id)}
+                                className="rounded-md btn-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                            >
+                                Open app
+                            </button>
+                        </div>
+                    </div>
+                ) : null}
+            </div>
         </div>
     );
 }

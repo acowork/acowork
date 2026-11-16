@@ -56,6 +56,7 @@ pub mod mqtt_proto {
 pub mod account;
 pub mod addr;
 pub mod agent_instance_id;
+pub mod app;
 pub mod auth;
 pub mod avatar;
 pub mod budget;

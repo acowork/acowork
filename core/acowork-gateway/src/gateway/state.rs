@@ -392,6 +392,16 @@ pub struct GatewayState {
     /// `None` is the pluggability switch — no server in the catalog, no tools,
     /// and the Desktop hides the memory panel.
     pub memory_mcp_url: Option<String>,
+    /// ADR-116: declarative registry of hosted applications. Built-in PM /
+    /// DOC declarations are compiled in; user-installed manifests are layered
+    /// from `{data_dir}/apps/*.toml`. The std lock (not tokio) is intentional:
+    /// `build_available_mcps` is synchronous and must read the registry
+    /// without an await point.
+    pub app_registry: Arc<std::sync::RwLock<acowork_core::app::AppRegistry>>,
+    /// ADR-116: runtime state of apps managed by the generic supervisor.
+    /// Legacy PM / DOC keep their own slots above; `app::registry` projects
+    /// both runtimes into one port-resolution function.
+    pub app_processes: crate::app::registry::AppProcessTable,
 }
 
 impl GatewayState {
@@ -431,6 +441,10 @@ impl GatewayState {
             doc_mcp_url: None,
             memory_process: None,
             memory_mcp_url: None,
+            app_registry: Arc::new(std::sync::RwLock::new(
+                acowork_core::app::AppRegistry::load(std::path::Path::new(vault_dir)),
+            )),
+            app_processes: std::collections::HashMap::new(),
         }
     }
 

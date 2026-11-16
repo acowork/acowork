@@ -57,6 +57,9 @@ impl DocService {
         axum::Router::new()
             .merge(crate::api::router::doc_router((*self.state).clone()))
             .merge(crate::mcp::mcp_router((*self.state).clone()))
+            // ADR-116: DOC-owned front end, reached through
+            // `/api/apps/doc/ui/*`. The Desktop only supplies the iframe.
+            .merge(crate::ui::ui_router())
             .layer(axum::extract::DefaultBodyLimit::max(limit))
     }
 

@@ -115,6 +115,9 @@ impl PmService {
             self.agent_dir.clone(),
             self.gateway.clone(),
         ))
+        // ADR-116: the app's own front end, reached through
+        // `/api/apps/pm/ui/*`. PM owns this bundle, not the Desktop.
+        .merge(crate::ui::ui_router())
     }
 
     /// 在给定地址上 serve 全量路由（REST + MCP + `/health`）。

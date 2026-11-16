@@ -755,6 +755,46 @@ impl Gateway {
             };
         }
 
+        // ADR-116: launch every enabled app declared with
+        // `process.runtime = "generic"` through the framework supervisor.
+        // Built-in PM / DOC are `legacy` and were started above by their
+        // ADR-064 supervisors; both runtimes project into the same process
+        // table that `app::registry::resolve_app_port` reads.
+        let generic_apps: Vec<acowork_core::app::AppManifest> = {
+            let gw = shared_state.read().await;
+            gw.app_registry
+                .read()
+                .map(|r| {
+                    r.all()
+                        .filter(|m| {
+                            m.process.runtime == acowork_core::app::AppRuntime::Generic
+                                && r.is_enabled(&m.id)
+                        })
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        for manifest in generic_apps {
+            let bin_name = if cfg!(windows) {
+                format!("{}.exe", manifest.process.binary)
+            } else {
+                manifest.process.binary.clone()
+            };
+            let cfg = crate::app::supervisor::config_from_manifest(
+                &manifest,
+                crate::lifecycle::process::sibling_binary(&bin_name),
+                data_dir_path.clone(),
+                data_dir_path.join("logs"),
+                format!("http://127.0.0.1:{}", http_config.port),
+                format!("http://127.0.0.1:{}/health", http_config.port),
+                Some(internal_service_token.clone()),
+                Some(publisher_token.clone()),
+            );
+            crate::app::supervisor::start_generic_app_supervisor(cfg, shared_state.clone());
+            tracing::info!(app = %manifest.id, "generic app supervisor started (ADR-116)");
+        }
+
         // Rebuild resource cache from MCP catalog at startup.
         // provider_list.json is loaded by load_resource_cache() above;
         // it is the source of truth for provider config. No rebuild needed.

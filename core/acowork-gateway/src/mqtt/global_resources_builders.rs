@@ -347,22 +347,33 @@ pub(crate) fn build_available_mcps(gw: &GatewayState) -> AvailableMcps {
         })
         .collect();
 
-    // T3-4: 自动注入 pm MCP（设计 §6.1 / §21）。
+    // ADR-116: Gateway-hosted MCP servers are published from the app registry
+    // instead of one hardcoded `if let` per service. Disabling an app in
+    // `/api/apps` removes its catalog entry on the next hot push; installing
+    // a new app with `mcp.auto_inject = true` adds one without a code change.
     //
-    // `pm_mcp_url` 在 `Gateway::run` 启动时设置（`Some` ⇔ PM 服务已启动且
-    // `pm.auto_inject_mcp = true`）。注入后，每个 Agent 的 catalog 都会出现
-    // `name = "pm"` 的 HTTP MCP server，Agent 启动即可调用 `pm_*` 工具。
+    // Legacy PM / DOC keep their existing `*_mcp_url` fields (set at startup
+    // from `[pm].auto_inject_mcp` / `[doc].auto_inject_mcp` and re-derived by
+    // the advertise-host watchdog), so this change does not alter the wire
+    // contract or the config switches. Generic apps derive the URL from the
+    // manifest's declared Gateway-facing path.
     let mut servers = servers;
-    if let Some(pm_url) = &gw.pm_mcp_url {
-        servers.push(gateway_hosted_mcp_ref("pm", pm_url.clone()));
-    }
-
-    // D3-4: 自动注入 doc MCP（设计 §6）。`doc_mcp_url` 在 `Gateway::run`
-    // 启动时设置（`Some` ⇔ doc 服务已启动且 `doc.auto_inject_mcp = true`）。
-    // 注入后 Agent catalog 出现 `name = "doc"` 的 HTTP MCP server，Agent
-    // 启动即可调用 `doc_*` 工具（读写文档 + PR 式审核提交）。
-    if let Some(doc_url) = &gw.doc_mcp_url {
-        servers.push(gateway_hosted_mcp_ref("doc", doc_url.clone()));
+    if let Ok(registry) = gw.app_registry.read() {
+        for manifest in registry.catalog_apps() {
+            let url = match manifest.process.legacy_slot.as_deref() {
+                Some("pm") => gw.pm_mcp_url.clone(),
+                Some("doc") => gw.doc_mcp_url.clone(),
+                _ => Some(format!(
+                    "http://{}:{}{}",
+                    gw.advertise_host, gw.http_port, manifest.mcp.gateway_path
+                )),
+            };
+            let Some(url) = url else { continue };
+            if servers.iter().any(|s| s.id == manifest.id) {
+                continue;
+            }
+            servers.push(gateway_hosted_mcp_ref(&manifest.id, url));
+        }
     }
 
     // ADR-101: auto-inject the memory MCP. `memory_mcp_url` is set in

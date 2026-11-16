@@ -208,6 +208,22 @@ fn is_public_path(path: &str) -> bool {
     if path.starts_with(crate::http::workspace_preview::PREVIEW_PATH_PREFIX) {
         return true;
     }
+    // ADR-116: app webview channels. Same reason as the workspace preview —
+    // an iframe document and its sub-resource loads cannot carry an
+    // `Authorization` header. Three channels only: `ui` (static bundle
+    // bytes), `api` (app REST, session ticket verified in `app::proxy` before
+    // a byte is forwarded), and `session` (one-time ticket → cookie exchange).
+    // Control-plane paths (`/api/apps`, `/api/apps/{id}/enable|disable`,
+    // `/api/apps/{id}/session-ticket`) deliberately do NOT match here and
+    // stay behind the bearer gate.
+    if let Some(rest) = path.strip_prefix("/api/apps/") {
+        if let Some((id, tail)) = rest.split_once('/') {
+            let channel = tail.split('/').next().unwrap_or("");
+            if !id.is_empty() && matches!(channel, "ui" | "api" | "session") {
+                return true;
+            }
+        }
+    }
     // `/api/providers/{id}/logo` — a public brand mark (a models.dev SVG), no
     // user data in it. It has to be reachable without a token because the
     // Desktop renders it via `<img src>`, and an `<img>` cannot carry an
