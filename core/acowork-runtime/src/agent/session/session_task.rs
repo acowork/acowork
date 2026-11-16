@@ -833,9 +833,8 @@ impl SessionTask {
         if let Some(conv) = agent_loop.session.conversation()
             && !conv.interveners().is_empty()
         {
-            context_builder.set_operator_presence(operator_presence_note(
-                conv.initiator().as_deref(),
-            ));
+            context_builder
+                .set_operator_presence(operator_presence_note(conv.initiator().as_deref()));
         }
 
         // Mirror the identity onto SessionState so compaction paths
@@ -885,7 +884,8 @@ impl SessionTask {
         // (no persisted tokens / no caps) is a legitimate skip — the
         // first live `ChunkEvent::ContextUsage` will fill the gap.
         if let Some(ref conv) = agent_loop.session.conversation
-            && let Some(ctx) = crate::agent::context::build_persisted_ctx_usage(&agent_loop.core, conv)
+            && let Some(ctx) =
+                crate::agent::context::build_persisted_ctx_usage(&agent_loop.core, conv)
             && let Some(ref tx) = chunk_tx
         {
             let _ = tx
@@ -1514,10 +1514,8 @@ impl SessionTask {
                     // borrows are still free. Same value the loop sees through
                     // `turn_surface`.
                     let chat_id = surface.chat_session_id.clone();
-                    let brief = crate::agent::intent_turn::brief_for_system_block(
-                        &kind,
-                        &assignment_brief,
-                    );
+                    let brief =
+                        crate::agent::intent_turn::brief_for_system_block(&kind, &assignment_brief);
                     if !brief.is_empty() {
                         context_builder.set_task_brief(brief.to_string());
                     }
@@ -1542,7 +1540,11 @@ impl SessionTask {
                     let (responder, write_back) =
                         crate::agent::intent_turn::turn_kind_semantics(&kind, &message_id);
                     let turn_ctx = || {
-                        crate::agent::intent_turn::IntentTurnContext::new(&message_id, &from, &action)
+                        crate::agent::intent_turn::IntentTurnContext::new(
+                            &message_id,
+                            &from,
+                            &action,
+                        )
                     };
                     agent_loop.pending_intent = if responder { Some(turn_ctx()) } else { None };
                     agent_loop.chat_writeback = if write_back { Some(turn_ctx()) } else { None };
@@ -1649,120 +1651,118 @@ impl SessionTask {
                     let mut intent_content_parts: Option<
                         Vec<acowork_core::providers::traits::ContentPart>,
                     > = None;
-                    let mut intent_attached_items: Option<Vec<acowork_core::protocol::AttachedItem>> =
-                        if chat_attachment_ids.is_empty() {
-                            None
-                        } else if chat_id.is_empty() {
-                            tracing::warn!(
-                                session_id = %session_id,
-                                message_id = %message_id,
-                                "chat attachments carry ids but the Intent has no chat session — skipped"
-                            );
+                    let mut intent_attached_items: Option<
+                        Vec<acowork_core::protocol::AttachedItem>,
+                    > = if chat_attachment_ids.is_empty() {
+                        None
+                    } else if chat_id.is_empty() {
+                        tracing::warn!(
+                            session_id = %session_id,
+                            message_id = %message_id,
+                            "chat attachments carry ids but the Intent has no chat session — skipped"
+                        );
+                        None
+                    } else {
+                        let gateway_host = agent_loop
+                            .core
+                            .config
+                            .gateway_host
+                            .clone()
+                            .unwrap_or_else(|| "127.0.0.1".to_string());
+                        let node_token = agent_loop
+                            .core
+                            .config
+                            .mqtt_password
+                            .clone()
+                            .unwrap_or_default();
+                        let instance = agent_loop.core.config.agent_instance_id.clone();
+                        // Design 27 §5.3.1: a group @ fan-out's per-target
+                        // `message_id` matches no durable row; the shared
+                        // `user_message` (`in_reply_to`) carries the
+                        // attachments. A 1:1 chat message leaves
+                        // `in_reply_to` empty and pulls by `message_id`.
+                        let attach_coord = if in_reply_to.is_empty() {
+                            &message_id
+                        } else {
+                            &in_reply_to
+                        };
+                        let mut pulled = Vec::new();
+                        for aid in &chat_attachment_ids {
+                            match crate::agent::intent_turn::pull_chat_attachment(
+                                &gateway_host,
+                                &node_token,
+                                &instance,
+                                &chat_id,
+                                aid,
+                                attach_coord,
+                            )
+                            .await
+                            {
+                                Ok((filename, mime, bytes)) => pulled.push(PulledAttachment {
+                                    filename,
+                                    mime,
+                                    bytes,
+                                }),
+                                Err(e) => tracing::warn!(
+                                    session_id = %session_id,
+                                    attachment_id = %aid,
+                                    error = %e,
+                                    "chat attachment pull failed, turn continues without it"
+                                ),
+                            }
+                        }
+                        let items = materialize_pulled_attachments(
+                            agent_loop.core.attachment_service(),
+                            &session_id,
+                            pulled,
+                        )
+                        .await;
+                        if items.is_empty() {
                             None
                         } else {
-                            let gateway_host = agent_loop
-                                .core
-                                .config
-                                .gateway_host
-                                .clone()
-                                .unwrap_or_else(|| "127.0.0.1".to_string());
-                            let node_token = agent_loop
-                                .core
-                                .config
-                                .mqtt_password
-                                .clone()
-                                .unwrap_or_default();
-                            let instance = agent_loop.core.config.agent_instance_id.clone();
-                            // Design 27 §5.3.1: a group @ fan-out's per-target
-                            // `message_id` matches no durable row; the shared
-                            // `user_message` (`in_reply_to`) carries the
-                            // attachments. A 1:1 chat message leaves
-                            // `in_reply_to` empty and pulls by `message_id`.
-                            let attach_coord = if in_reply_to.is_empty() {
-                                &message_id
-                            } else {
-                                &in_reply_to
-                            };
-                            let mut pulled = Vec::new();
-                            for aid in &chat_attachment_ids {
-                                match crate::agent::intent_turn::pull_chat_attachment(
-                                    &gateway_host,
-                                    &node_token,
-                                    &instance,
-                                    &chat_id,
-                                    aid,
-                                    attach_coord,
+                            // Images and documents flow to the LLM the same
+                            // way they do on the execution surface; a derive
+                            // failure only drops the parts (the file hint
+                            // below already stands). The hint itself is
+                            // built once, after the workspace references
+                            // join this turn's attachment list.
+                            let caps = agent_loop
+                                .session
+                                .model
+                                .as_deref()
+                                .and_then(|m| agent_loop.get_model_capabilities(m));
+                            match (
+                                crate::agent::attachment_to_document::derive_document_parts(
+                                    agent_loop.core.attachment_service(),
+                                    &items,
+                                    caps.as_ref(),
                                 )
-                                .await
-                                {
-                                    Ok((filename, mime, bytes)) => pulled.push(PulledAttachment {
-                                        filename,
-                                        mime,
-                                        bytes,
-                                    }),
-                                    Err(e) => tracing::warn!(
-                                        session_id = %session_id,
-                                        attachment_id = %aid,
-                                        error = %e,
-                                        "chat attachment pull failed, turn continues without it"
-                                    ),
+                                .await,
+                                crate::agent::attachment_to_image::derive_image_parts(
+                                    agent_loop.core.attachment_service(),
+                                    &items,
+                                )
+                                .await,
+                            ) {
+                                (Ok(documents), Ok(images)) => {
+                                    intent_content_parts = merge_turn_parts(None, documents, images)
                                 }
+                                (Err(e), _) | (_, Err(e)) => tracing::warn!(
+                                    session_id = %session_id,
+                                    error = %e,
+                                    "chat attachment content parts unavailable, hint only"
+                                ),
                             }
-                            let items = materialize_pulled_attachments(
-                                agent_loop.core.attachment_service(),
-                                &session_id,
-                                pulled,
-                            )
-                            .await;
-                            if items.is_empty() {
-                                None
-                            } else {
-                                // Images and documents flow to the LLM the same
-                                // way they do on the execution surface; a derive
-                                // failure only drops the parts (the file hint
-                                // below already stands). The hint itself is
-                                // built once, after the workspace references
-                                // join this turn's attachment list.
-                                let caps = agent_loop
-                                    .session
-                                    .model
-                                    .as_deref()
-                                    .and_then(|m| agent_loop.get_model_capabilities(m));
-                                match (
-                                    crate::agent::attachment_to_document::derive_document_parts(
-                                        agent_loop.core.attachment_service(),
-                                        &items,
-                                        caps.as_ref(),
-                                    )
-                                    .await,
-                                    crate::agent::attachment_to_image::derive_image_parts(
-                                        agent_loop.core.attachment_service(),
-                                        &items,
-                                    )
-                                    .await,
-                                ) {
-                                    (Ok(documents), Ok(images)) => {
-                                        intent_content_parts =
-                                            merge_turn_parts(None, documents, images)
-                                    }
-                                    (Err(e), _) | (_, Err(e)) => tracing::warn!(
-                                        session_id = %session_id,
-                                        error = %e,
-                                        "chat attachment content parts unavailable, hint only"
-                                    ),
-                                }
-                                Some(items)
-                            }
-                        };
+                            Some(items)
+                        }
+                    };
                     // ADR-100: the workspace references ("Add to Chat") join
                     // the pulled uploads. They need no pull — the path is
                     // node-local and this agent's own tools read it — so they
                     // arrive as parsed. One hint for the union, in the order the
                     // composer attached them.
-                    intent_attached_items = merge_intent_attachments(
-                        intent_attached_items.take(),
-                        attached_items,
-                    );
+                    intent_attached_items =
+                        merge_intent_attachments(intent_attached_items.take(), attached_items);
                     if let Some(items) = intent_attached_items.as_ref() {
                         llm_message = build_attachment_hint(
                             &llm_message,
@@ -1805,8 +1805,10 @@ impl SessionTask {
                             if let Some(ctx) = ctx {
                                 // System write-back (§7.1) — the model had
                                 // no tool that could produce this.
-                                let body =
-                                    crate::agent::intent_turn::truncate_response_body(&response, 64 * 1024);
+                                let body = crate::agent::intent_turn::truncate_response_body(
+                                    &response,
+                                    64 * 1024,
+                                );
                                 if let Err(e) = crate::agent::intent_turn::post_intent_response(
                                     &agent_loop.core.config.agent_instance_id,
                                     &agent_loop
@@ -2228,9 +2230,7 @@ impl SessionTask {
                             if let Some(conv) = agent_loop.session.conversation() {
                                 conv.append_message(
                                     "system",
-                                    &format!(
-                                        "The retry ended without finishing: {user_message}. "
-                                    ),
+                                    &format!("The retry ended without finishing: {user_message}. "),
                                     Some(serde_json::json!({
                                         "notice": "turn_failed",
                                         "error_type": error_type,
@@ -2584,7 +2584,11 @@ pub(crate) fn refresh_builtin_tools_dependents(
 /// values are fine: `safe_extension` collapses anything off the whitelist to
 /// `bin`, exactly as a direct execution-view upload would.
 fn forwarded_format(filename: &str, mime: &str) -> String {
-    if let Some(ext) = filename.rsplit('.').next().filter(|e| !e.is_empty() && *e != filename) {
+    if let Some(ext) = filename
+        .rsplit('.')
+        .next()
+        .filter(|e| !e.is_empty() && *e != filename)
+    {
         return ext.to_ascii_lowercase();
     }
     if let Some(sub) = mime.split('/').nth(1) {
@@ -2699,8 +2703,8 @@ fn merge_turn_parts(
     documents: Vec<acowork_core::providers::traits::ContentPart>,
     images: Vec<acowork_core::providers::traits::ContentPart>,
 ) -> Option<Vec<acowork_core::providers::traits::ContentPart>> {
-    let mut all: Vec<acowork_core::providers::traits::ContentPart> = frontend_parts
-        .unwrap_or_default();
+    let mut all: Vec<acowork_core::providers::traits::ContentPart> =
+        frontend_parts.unwrap_or_default();
     if all.is_empty() && documents.is_empty() && images.is_empty() {
         return None;
     }
@@ -2721,6 +2725,14 @@ fn merge_turn_parts(
 /// budget, a mid-session model switch that drops the part) this line is the
 /// only pointer the agent has left to the file. See
 /// [`crate::agent::attachment_to_document`] for the gate.
+fn is_image_filename(path: &str) -> bool {
+    let ext = path.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "svg"
+    )
+}
+
 fn build_attachment_hint(
     user_content: &str,
     items: Option<&[acowork_core::protocol::AttachedItem]>,
@@ -2736,20 +2748,13 @@ fn build_attachment_hint(
 
     let hint_lines: Vec<String> = items
         .iter()
-        .filter_map(|item| match item {
-            acowork_core::protocol::AttachedItem::AttachedFile {
-                abs_path, name, ..
-            } => Some(format!(
-                "- file: `{}`{}",
-                abs_path,
-                if name.is_empty() || name == abs_path {
-                    String::new()
-                } else {
-                    // The name the user saw is usually repo-relative; it tells
-                    // the Agent which project the file matters in.
-                    format!(" ({name})")
-                }
-            )),
+        .map(|item| match item {
+            acowork_core::protocol::AttachedItem::AttachedFile { abs_path, name, .. } => {
+                let is_image = is_image_filename(abs_path);
+                let suffix = if name.is_empty() || name == abs_path || is_image { String::new() } else { format!(" ({name})") };
+                let action = if is_image { " (image — open with `image_read`)" } else { "" };
+                format!("- file: `{abs_path}`{action}{suffix}")
+            },
             acowork_core::protocol::AttachedItem::AttachedSelection {
                 abs_path,
                 start_line,
@@ -2761,7 +2766,7 @@ fn build_attachment_hint(
                 } else {
                     format!(" (L{})", start_line)
                 };
-                Some(format!("- file: `{}`{}", abs_path, line_info))
+                format!("- file: `{}`{}", abs_path, line_info)
             }
             acowork_core::protocol::AttachedItem::FileUpload {
                 document_id,
@@ -2781,21 +2786,32 @@ fn build_attachment_hint(
                     Some(wd) => format!("{}/files/{}", wd.trim_end_matches('/'), on_disk),
                     None => format!("<work_dir>/files/{}", on_disk),
                 };
-                Some(format!(
+                format!(
                     "- file: `{}` (id={}, format={}, path={})",
                     filename, document_id, format, path_str
-                ))
+                )
             }
-            // Image upload flows through the multimodal
-            // ContentPart::ImageUrl path above — no prompt hint needed.
-            acowork_core::protocol::AttachedItem::ImageUpload { .. } => None,
+            acowork_core::protocol::AttachedItem::ImageUpload {
+                document_id, filename, format, width, height, ..
+            } => {
+                let on_disk = on_disk_name(document_id, format, filename);
+                let path = match work_dir {
+                    Some(wd) => format!("{}/files/{on_disk}", wd.trim_end_matches('/')),
+                    None => format!("<work_dir>/files/{on_disk}"),
+                };
+                let dimensions = match (width, height) {
+                    (Some(w), Some(h)) => format!(", {w}x{h}"),
+                    _ => String::new(),
+                };
+                format!("- image: `{filename}` (id={document_id}{dimensions}) — pixels were attached to this message; reopen with `image_read` on `{path}` if you need it again")
+            },
             // A folder reference used to produce no line at all, so adding a
             // directory to the conversation was invisible to the Agent that
             // was asked about it. It cannot be read as a file, but the path is
             // actionable with the tools the Agent already has.
             acowork_core::protocol::AttachedItem::AttachedFolder {
                 abs_path, name, ..
-            } => Some(format!(
+            } => format!(
                 "- folder: `{}`{} — list it before answering",
                 abs_path,
                 if name.is_empty() || name == abs_path {
@@ -2803,7 +2819,7 @@ fn build_attachment_hint(
                 } else {
                     format!(" ({name})")
                 }
-            )),
+            ),
         })
         .collect();
 
@@ -2815,7 +2831,7 @@ fn build_attachment_hint(
         };
         enriched = format!(
             "{}[Attached workspace files & uploads — the user pointed at these \
-             to make the request. Open them (`read_file` / `doc_reader`, list a \
+             to make the request. Open them (`file_read` / `doc_reader`, list a \
              folder with `bash`) before answering; do not describe contents you \
              have not read.]\n{}",
             sep,
@@ -2913,13 +2929,18 @@ mod tests {
 
         assert!(merge_intent_attachments(None, Vec::new()).is_none());
         assert_eq!(
-            merge_intent_attachments(None, vec![reference()]).unwrap().len(),
+            merge_intent_attachments(None, vec![reference()])
+                .unwrap()
+                .len(),
             1,
             "a reference-only routed turn is still an attached turn"
         );
         let both = merge_intent_attachments(Some(vec![upload.clone()]), vec![reference()]).unwrap();
         assert_eq!(both.len(), 2);
-        assert_eq!(both[0], upload, "the pulled upload keeps its slot ahead of the reference");
+        assert_eq!(
+            both[0], upload,
+            "the pulled upload keeps its slot ahead of the reference"
+        );
     }
 
     /// The turn's part list reads text, then whole documents, then images, and
@@ -3019,6 +3040,37 @@ mod tests {
         assert!(s.contains("- file: `/work/lib.rs` (L7)"), "got: {s}");
     }
 
+    #[test]
+    fn test_build_attachment_hint_image_file_has_image_read_action_and_fixed_file_read_name() {
+        let items = vec![acowork_core::protocol::AttachedItem::AttachedFile {
+            abs_path: "E:/ws/shot.png".to_string(),
+            name: "shot.png".to_string(),
+            client_id: None,
+        }];
+        let s = build_attachment_hint("inspect", Some(&items), Some("E:/ws"));
+        assert!(
+            s.contains("- file: `E:/ws/shot.png` (image — open with `image_read`)"),
+            "{s}"
+        );
+        assert!(s.contains("`file_read` / `doc_reader`"), "{s}");
+        assert!(!s.contains("`read_file`"), "{s}");
+    }
+
+    #[test]
+    fn test_build_attachment_hint_image_upload_emits_image_read_path() {
+        let items = vec![acowork_core::protocol::AttachedItem::ImageUpload {
+            document_id: "0123456789ab-3".to_string(),
+            filename: "shot.png".to_string(),
+            format: "png".to_string(),
+            size_bytes: 123,
+            width: Some(1280),
+            height: Some(800),
+            client_id: None,
+        }];
+        let s = build_attachment_hint("look", Some(&items), Some("E:/ws"));
+        assert!(s.contains("- image: `shot.png` (id=0123456789ab-3, 1280x800) — pixels were attached to this message; reopen with `image_read` on `E:/ws/files/shot_0123456789ab-3.png` if you need it again"), "{s}");
+    }
+
     /// REGRESSION: `FileUpload` MUST show up in the hint block with
     /// `(id, format, path)` triple — pre-revision the filter_map
     /// returned `None` for this variant, leaving docx/pptx/xlsx/pdf
@@ -3100,7 +3152,7 @@ mod tests {
 
     /// Mixed attachments preserve order and the prompt hint contains
     /// every hintable variant — workspace file first, file_upload
-    /// second — while image_upload (multimodal) is silently skipped.
+    /// second — image_upload also carries its reopenable on-disk path.
     #[test]
     fn test_build_attachment_hint_mixed_items_in_order() {
         let items = vec![
@@ -3134,8 +3186,12 @@ mod tests {
             "workspace hint must come before upload hint, got: {s}"
         );
         assert!(
-            !s.contains("screen.png"),
-            "image_upload must not appear in hint (multimodal path)"
+            s.contains("screen.png"),
+            "image_upload path hint must be present"
+        );
+        assert!(
+            s.contains("/work/files/screen_img1.png"),
+            "canonical image path must appear: {s}"
         );
     }
 
@@ -3181,7 +3237,7 @@ mod tests {
     }
 
     // ── Design 27 §4.2.1 chat-attachment forwarding ──────────────────
-    use super::{forwarded_format, materialize_pulled_attachments, PulledAttachment};
+    use super::{PulledAttachment, forwarded_format, materialize_pulled_attachments};
 
     #[test]
     fn forwarded_format_prefers_filename_extension() {
@@ -3248,4 +3304,3 @@ mod tests {
         assert!(std::fs::read_dir(&files_dir).unwrap().count() >= 2);
     }
 }
-
