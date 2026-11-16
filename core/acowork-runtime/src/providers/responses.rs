@@ -494,7 +494,7 @@ fn map_response(body: serde_json::Value) -> Result<ChatResponse, ProviderError> 
             user_message: format!("模型返回失败：{message}"),
             status_code: None,
             error_type: acowork_core::providers::traits::ProviderErrorType::ServerError,
-            retryable: false,
+            retryable: acowork_core::providers::is_rate_limit_code(code),
             retry_after_ms: None,
         });
     }
