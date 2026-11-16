@@ -13,19 +13,19 @@
 
 :root.theme-paper {
   --color-bg: hsl(40 var(--theme-chroma) 96%);
-  --color-page-bg: hsl(38 var(--theme-chroma) 91%);
-  --color-panel-block: hsl(39 var(--theme-chroma) 94%);
-  --color-panel-inset: hsl(37 var(--theme-chroma) 89%);
-  --color-panel-inset-2: hsl(36 var(--theme-chroma) 85%);
+  --color-page-bg: hsl(38 var(--theme-chroma) 97%);
+  --color-panel-block: hsl(39 var(--theme-chroma) 96%);
+  --color-panel-inset: hsl(37 var(--theme-chroma) 98%);
+  --color-panel-inset-2: hsl(36 var(--theme-chroma) 96%);
   --color-modal-surface: hsl(42 var(--theme-chroma) 98%);
   --color-editor-canvas: hsl(40 var(--theme-chroma) 95%);
-  --color-nav-surface: hsl(37 var(--theme-chroma) 89%);
+  --color-nav-surface: hsl(37 var(--theme-chroma) 93%);
   --color-nav-item-hover: hsl(36 var(--theme-chroma) 83%);
   --color-nav-divider: hsl(35 calc(var(--theme-chroma) * 0.85) 78%);
   --color-right-panel: hsl(39 var(--theme-chroma) 93%);
   --color-chat-body: hsl(40 var(--theme-chroma) 95%);
   --color-chat-title: hsl(38 var(--theme-chroma) 87%);
-  --color-chat-input-bg: hsl(40 var(--theme-chroma) 93%);
+  --color-chat-input-bg: hsl(40 var(--theme-chroma) 96%);
   --color-chat-input-border: hsl(33 calc(var(--theme-chroma) * 0.55) 85%);
   --color-input-bg: hsl(40 var(--theme-chroma) 96%);
   --color-input-border: hsl(34 calc(var(--theme-chroma) * 0.85) 88%);
