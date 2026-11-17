@@ -25,12 +25,12 @@
       <td width="50%" align="center" valign="top">
         <img src="./assets/1.jpg" alt="Multi-Agent Collaboration &amp; Memory" width="100%" />
         <br />
-        <em>Collaborate with multiple agents — each with private memory, real-time context awareness, and tool execution.</em>
+        <em>Collaborate with multiple agents — seperated chat session and execute session.</em>
       </td>
       <td width="50%" align="center" valign="top">
         <img src="./assets/2.jpg" alt="Debug Panel &amp; Context Snapshots" width="100%" />
         <br />
-        <em>Full-stack development framework with iterative debugging, token tracking, and context snapshots for deep insight into AI reasoning.</em>
+        <em>People and AI agents work together in one group</em>
       </td>
     </tr>
   </table>
