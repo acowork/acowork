@@ -40,6 +40,16 @@ pub struct AnthropicProvider {
     /// (unit tests / standalone), in which case the cold-path corrections still
     /// run but nothing is remembered.
     compat_cache: Option<Arc<AnthropicCompatCache>>,
+    /// Reasoning levels the target model declares
+    /// (`models.dev reasoning_options.effort.values`). `None` = unknown.
+    ///
+    /// Needed because the adaptive thinking shape cannot express "do not
+    /// think": the block must stay (the model refuses to run without it), so
+    /// `Off` has to pick a *depth*. Picking it from the model's own declared
+    /// set is the only way to stay inside what the model accepts — a made-up
+    /// level is silently ignored by some vendors and answered with HTTP 400
+    /// by others.
+    supported_reasoning_levels: Option<Vec<String>>,
 }
 
 impl AnthropicProvider {
@@ -82,6 +92,7 @@ impl AnthropicProvider {
             stream_read_timeout,
             provider_id: None,
             compat_cache: None,
+            supported_reasoning_levels: None,
         }
     }
 
@@ -99,6 +110,30 @@ impl AnthropicProvider {
     /// it the corrections still run but are not remembered across requests.
     pub fn set_compat_cache(&mut self, cache: Arc<AnthropicCompatCache>) {
         self.compat_cache = Some(cache);
+    }
+
+    /// Declare the reasoning levels the target model supports. Used to pick
+    /// the depth for `Off` in adaptive mode, where "no thinking" cannot be
+    /// expressed on the wire.
+    pub fn set_supported_reasoning_levels(&mut self, levels: Vec<String>) {
+        self.supported_reasoning_levels = Some(levels);
+    }
+
+    /// The shallowest reasoning level the target model declares.
+    ///
+    /// `None` when the model declares no set (unknown) — the caller then
+    /// falls back to the protocol's shallowest level.
+    fn shallowest_supported_level(&self) -> Option<&'static str> {
+        use acowork_core::providers::ReasoningEffort;
+        self.supported_reasoning_levels
+            .as_ref()?
+            .iter()
+            .filter_map(|level| {
+                let effort = ReasoningEffort::from_str_loose(level)?;
+                Some((effort.rank()?, adaptive_effort_str(&effort)))
+            })
+            .min_by_key(|(rank, _)| *rank)
+            .map(|(_, wire)| wire)
     }
 }
 
@@ -225,11 +260,30 @@ struct AnthropicOutputConfig {
     effort: String,
 }
 
+/// The Anthropic adaptive shape defines low / medium / high / xhigh / max.
+///
+/// "minimal" is an OpenAI / Gemini spelling: an Anthropic-protocol model either
+/// rejects it or silently falls back to its default depth, so `Minimal` is sent
+/// as the shallowest level this shape does define.
+fn adaptive_effort_str(effort: &acowork_core::providers::ReasoningEffort) -> &'static str {
+    use acowork_core::providers::ReasoningEffort;
+    match effort {
+        ReasoningEffort::Minimal => "low",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::XHigh => "xhigh",
+        _ => "max",
+    }
+}
+
 /// Map `ReasoningEffort` to Anthropic's `thinking` + `output_config` blocks.
 ///
 /// Supports two modes controlled by `thinking_mode`:
 /// - **"extended"** (default): `{ type: "enabled", budget_tokens: N }`
 /// - **"adaptive"**: `{ type: "adaptive" }` + `output_config: { effort: "..." }`
+/// - **"disabled"**: `{ type: "disabled" }` — an explicit request to not think,
+///   independent of `reasoning_effort` (used by the title / summary paths).
 ///
 /// Extended mode budget allocation:
 /// - `None` → no thinking block (model uses its own default behavior)
@@ -240,9 +294,10 @@ struct AnthropicOutputConfig {
 /// - `Max` → min(31999, max_output - 1)
 ///
 /// Adaptive mode effort mapping:
-/// - `None` → no thinking block (model uses adaptive default)
-/// - `Off` → disabled
-/// - `Low` → "low", `Medium` → "medium", `High` → "high", `Max` → "max"
+/// - `None` / `Auto` → no thinking block (model uses adaptive default)
+/// - `Off` → adaptive + `adaptive_off_level` (the model refuses `disabled`)
+/// - `Minimal` → "low", `Low` → "low", `Medium` → "medium", `High` → "high",
+///   `XHigh` → "xhigh", `Max` → "max"
 ///
 /// Returns `(thinking_config, output_config, adjusted_temperature)`.
 /// When thinking is enabled, temperature is forced to `None` (Anthropic requires 1.0).
@@ -251,6 +306,10 @@ fn map_anthropic_thinking(
     thinking_mode: Option<&str>,
     max_output: u32,
     original_temperature: Option<f64>,
+    // `adaptive_off_level`: the depth to use for `Off` in adaptive mode,
+    // where "no thinking" cannot be expressed on the wire. `None` = fall
+    // back to the protocol's shallowest level.
+    adaptive_off_level: Option<&str>,
 ) -> (
     Option<AnthropicThinking>,
     Option<AnthropicOutputConfig>,
@@ -258,6 +317,20 @@ fn map_anthropic_thinking(
 ) {
     use acowork_core::providers::ReasoningEffort;
     let is_adaptive = thinking_mode == Some("adaptive");
+
+    // An explicit `thinking_mode: "disabled"` wins over the effort level: the
+    // title / summary paths set it so a reasoning model does not silo the
+    // answer into `reasoning_content`. It is a separate axis from the effort
+    // level, and it used to be dropped here — the Anthropic path only ever
+    // looked at `reasoning_effort`, so every one of those calls silently kept
+    // thinking (and then failed with "content was empty").
+    if thinking_mode == Some("disabled") {
+        return (
+            Some(AnthropicThinking::Disabled),
+            None,
+            original_temperature,
+        );
+    }
 
     // None: reasoning_effort not set at all — omit thinking block entirely
     // so the model uses its own built-in default behavior.
@@ -271,6 +344,28 @@ fn map_anthropic_thinking(
         }
         Some(ReasoningEffort::Off) => {
             // Explicitly disable thinking (both extended and adaptive).
+            //
+            // Adaptive mode is the exception: MiniMax-M3.1-Flash answers
+            // `thinking.type="disabled"` with HTTP 400 ("requires adaptive
+            // thinking"), so the level cannot be expressed as a disabled
+            // block. The block itself must stay, because the model refuses to
+            // run without it — so `Off` has to name a *depth* instead.
+            //
+            // The depth comes from the model's own declared support set
+            // (`supported_reasoning_levels`), because a made-up level is
+            // silently ignored by some vendors and rejected by others: an
+            // earlier version sent "minimal" (an OpenAI / Gemini spelling the
+            // Anthropic shape does not define) and MiniMax fell back to its
+            // default depth, which made `off` cost MORE than `low`.
+            if is_adaptive {
+                return (
+                    Some(AnthropicThinking::Adaptive),
+                    Some(AnthropicOutputConfig {
+                        effort: adaptive_off_level.unwrap_or("low").to_string(),
+                    }),
+                    None,
+                );
+            }
             return (
                 Some(AnthropicThinking::Disabled),
                 None,
@@ -281,20 +376,11 @@ fn map_anthropic_thinking(
     };
 
     if is_adaptive {
-        // Adaptive thinking: map effort to output_config.effort string
-        let effort_str = match effort {
-            ReasoningEffort::Minimal => "minimal",
-            ReasoningEffort::Low => "low",
-            ReasoningEffort::Medium => "medium",
-            ReasoningEffort::High => "high",
-            ReasoningEffort::XHigh => "xhigh",
-            ReasoningEffort::Max => "max",
-            _ => "medium",
-        };
+        // Adaptive thinking: map effort to output_config.effort string.
         return (
             Some(AnthropicThinking::Adaptive),
             Some(AnthropicOutputConfig {
-                effort: effort_str.to_string(),
+                effort: adaptive_effort_str(effort).to_string(),
             }),
             None, // temperature must be omitted
         );
@@ -864,7 +950,11 @@ impl AnthropicProvider {
     ///
     /// Shared by both entry points: they used to carry two near-identical
     /// copies that had already drifted (`stream: None` vs `Some(true)`).
-    fn build_wire_request(request: &ChatRequest, stream: bool) -> AnthropicRequest {
+    fn build_wire_request(
+        request: &ChatRequest,
+        stream: bool,
+        adaptive_off_level: Option<&str>,
+    ) -> AnthropicRequest {
         let (messages, system) = convert_messages(&request.messages);
 
         // Anthropic API requires at least one non-system message. When context
@@ -892,6 +982,7 @@ impl AnthropicProvider {
             request.thinking_mode.as_deref(),
             effective_max_tokens,
             request.temperature,
+            adaptive_off_level,
         );
 
         AnthropicRequest {
@@ -913,7 +1004,11 @@ impl AnthropicProvider {
         request: &ChatRequest,
         stream: bool,
     ) -> acowork_core::error::Result<reqwest::Response> {
-        let wire = Self::build_wire_request(request, stream);
+        let wire = Self::build_wire_request(
+            request,
+            stream,
+            self.shallowest_supported_level(),
+        );
 
         tracing::debug!(
             request_len = serde_json::to_string(&wire).map(|s| s.len()).unwrap_or(0),
@@ -1473,6 +1568,7 @@ mod tests {
             None,
             32_000,
             None,
+            None,
         ) {
             (Some(AnthropicThinking::Enabled { budget_tokens }), _, _) => budget_tokens,
             (other, _, _) => panic!("expected enabled thinking, got {other:?}"),
@@ -1494,16 +1590,116 @@ mod tests {
             Some("adaptive"),
             32_000,
             None,
+            None,
         ) {
             (_, Some(cfg), _) => cfg.effort,
             (_, None, _) => panic!("expected an output_config"),
         };
-        assert_eq!(effort_of(ReasoningEffort::Minimal), "minimal");
+        assert_eq!(effort_of(ReasoningEffort::Minimal), "low");
         assert_eq!(effort_of(ReasoningEffort::Low), "low");
         assert_eq!(effort_of(ReasoningEffort::Medium), "medium");
         assert_eq!(effort_of(ReasoningEffort::High), "high");
         assert_eq!(effort_of(ReasoningEffort::XHigh), "xhigh");
         assert_eq!(effort_of(ReasoningEffort::Max), "max");
+    }
+
+    /// `thinking_mode: "disabled"` is its own axis — the title / summary
+    /// paths set it so a reasoning model does not silo the answer into
+    /// `reasoning_content`. The Anthropic path used to drop it (only
+    /// `reasoning_effort` was read), so those calls kept thinking and then
+    /// failed with "content was empty".
+    #[test]
+    fn disabled_thinking_mode_sends_the_disabled_block() {
+        let (thinking, output_config, _) =
+            map_anthropic_thinking(None, Some("disabled"), 32_000, None, None);
+        assert!(
+            matches!(thinking, Some(AnthropicThinking::Disabled)),
+            "thinking_mode=disabled must send the disabled block, got {thinking:?}"
+        );
+        assert!(
+            output_config.is_none(),
+            "the disabled shape carries no output_config"
+        );
+    }
+
+    /// `thinking_mode: "disabled"` wins over the effort level — it is the
+    /// explicit "do not think" switch, and the effort level is a depth knob
+    /// that only makes sense once thinking is on.
+    #[test]
+    fn disabled_thinking_mode_overrides_the_effort_level() {
+        let (thinking, _, _) = map_anthropic_thinking(
+            Some(&ReasoningEffort::High),
+            Some("disabled"),
+            32_000,
+            None,
+            None,
+        );
+        assert!(
+            matches!(thinking, Some(AnthropicThinking::Disabled)),
+            "an explicit disabled mode must win over the effort level, got {thinking:?}"
+        );
+    }
+
+    /// Regression (2026-11-17): MiniMax-M3.1-Flash answers
+    /// `thinking.type="disabled"` with HTTP 400 —
+    /// *"requires adaptive thinking; thinking.type=\"disabled\" ... is not
+    /// allowed"*. The compat trim reacts to that 400 by switching the request
+    /// to the adaptive shape, but `apply_trim` only rewrites `thinking_mode`;
+    /// the `Off` level still short-circuited `map_anthropic_thinking` before
+    /// the adaptive branch, so the retry sent the very same `disabled` block
+    /// and the turn died.
+    ///
+    /// In adaptive mode `Off` must therefore go out as the adaptive shape with
+    /// the shallowest level — a `disabled` block is refused outright, and the
+    /// model refuses to run without an adaptive block at all.
+    #[test]
+    fn adaptive_mode_never_sends_the_disabled_block() {
+        let (thinking, output_config, _) = map_anthropic_thinking(
+            Some(&ReasoningEffort::Off),
+            Some("adaptive"),
+            32_000,
+            None,
+            None,
+        );
+        assert!(
+            matches!(thinking, Some(AnthropicThinking::Adaptive)),
+            "adaptive mode must send the adaptive block, got {thinking:?}"
+        );
+        assert_eq!(
+            output_config.map(|c| c.effort).as_deref(),
+            Some("low"),
+            "adaptive mode must use a level the Anthropic shape defines \
+             ('minimal' is an OpenAI / Gemini spelling and is not accepted)"
+        );
+    }
+
+    /// `Off` in adaptive mode must pick the depth from the model's *own*
+    /// declared support set — a made-up level is silently ignored by some
+    /// vendors (MiniMax fell back to its default depth, which made `off`
+    /// cost MORE than `low`) and rejected by others.
+    #[test]
+    fn adaptive_off_uses_the_models_shallowest_declared_level() {
+        let provider = |levels: &[&str]| {
+            let mut p = AnthropicProvider::new(None);
+            p.set_supported_reasoning_levels(levels.iter().map(|s| s.to_string()).collect());
+            p
+        };
+
+        // MiniMax declares low..max — the shallowest is low.
+        assert_eq!(
+            provider(&["low", "medium", "high", "xhigh", "max"]).shallowest_supported_level(),
+            Some("low")
+        );
+        // A model that declares minimal uses it (mapped to the Anthropic
+        // shape's shallowest spelling).
+        assert_eq!(
+            provider(&["minimal", "low", "medium"]).shallowest_supported_level(),
+            Some("low")
+        );
+        // Unknown set -> the caller falls back to the protocol default.
+        assert_eq!(provider(&[]).shallowest_supported_level(), None);
+        // auto / off carry no depth and are skipped.
+        assert_eq!(provider(&["auto", "off"]).shallowest_supported_level(), None);
     }
 
     /// Regression (chat image + text): the turn reached the model as the image
@@ -2574,7 +2770,7 @@ fn builder_request_carries_two_breakpoints_and_the_tail_moves() {
     history.append(ChatMessage::user("Second turn"));
 
     let body = |req: &ChatRequest| {
-        serde_json::to_value(AnthropicProvider::build_wire_request(req, false)).unwrap()
+        serde_json::to_value(AnthropicProvider::build_wire_request(req, false, None)).unwrap()
     };
     let breakpoints = |v: &serde_json::Value| {
         let sys = v["system"]

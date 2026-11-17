@@ -765,6 +765,11 @@ pub(crate) async fn phase_a_init_agent(config: &RuntimeConfig) -> Result<AgentBo
                         compat_cache: Some(compat_cache_arc),
                         responses_compat_cache: Some(responses_cache_arc),
                         anthropic_compat_cache: Some(anthropic_cache_arc),
+                        supported_reasoning_levels: chosen_model.and_then(|m| {
+                            m.capabilities
+                                .as_ref()
+                                .map(|c| c.reasoning_efforts.clone())
+                        }),
                     };
 
                     let provider = crate::providers::router::create_provider_with_wiring(

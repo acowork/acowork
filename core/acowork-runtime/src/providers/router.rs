@@ -79,6 +79,13 @@ pub struct ProviderWiring {
     /// Its own file and payload type, for the same D7.3 reason.
     pub anthropic_compat_cache:
         Option<Arc<crate::providers::anthropic_compat::AnthropicCompatCache>>,
+    /// Reasoning levels the target model declares
+    /// (`models.dev reasoning_options.effort.values`).
+    ///
+    /// The Anthropic provider needs them because the adaptive thinking shape
+    /// cannot express "do not think" — `Off` must name a depth instead, and
+    /// the only safe depth is the one the model itself declares.
+    pub supported_reasoning_levels: Option<Vec<String>>,
 }
 
 /// Create a provider based on protocol type.
@@ -336,6 +343,9 @@ fn install_anthropic_wiring(provider: &mut AnthropicProvider, wiring: &ProviderW
     if let Some(cache) = wiring.anthropic_compat_cache.clone() {
         provider.set_compat_cache(cache);
     }
+    if let Some(levels) = wiring.supported_reasoning_levels.clone() {
+        provider.set_supported_reasoning_levels(levels);
+    }
 }
 
 /// Infer protocol type from provider name for standalone mode.
@@ -506,6 +516,7 @@ mod adr103_router_tests {
             compat_cache: None,
             responses_compat_cache: None,
             anthropic_compat_cache: None,
+            supported_reasoning_levels: None,
         };
         let p = create_provider_with_wiring(
             "openai",

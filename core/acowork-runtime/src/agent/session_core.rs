@@ -852,6 +852,9 @@ impl SessionCore {
             compat_cache: compat_cache.cloned(),
             responses_compat_cache: responses_compat_cache.cloned(),
             anthropic_compat_cache: anthropic_compat_cache.cloned(),
+            supported_reasoning_levels: model_id
+                .and_then(|mid| provider_meta.models.iter().find(|m| m.id == mid))
+                .and_then(|m| m.capabilities.reasoning_efforts.clone()),
         };
         let raw = crate::providers::router::create_provider_with_wiring(
             &provider_meta.id,

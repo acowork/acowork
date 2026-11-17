@@ -38,6 +38,8 @@ const OK_BODY: &str =
     r#"{"content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn","usage":{"input_tokens":3,"output_tokens":2}}"#;
 const TEMPERATURE_400: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"`temperature` is deprecated for this model."}}"#;
 const THINKING_400: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"\"thinking.type.enabled\" is not supported for this model. Use \"thinking.type.adaptive\" and \"output_config.effort\" to control thinking behavior."}}"#;
+/// MiniMax-M3.1-Flash's answer to a request that asks it not to think.
+const DISABLED_THINKING_400: &str = r#"{"type":"error","error":{"type":"invalid_request_error","message":"invalid params, model \"MiniMax-M3.1-Flash\" requires adaptive thinking; thinking.type=\"disabled\" (including reasoning.effort=none) is not allowed (2013)"}}"#;
 
 /// A scripted Messages endpoint: it rejects whatever the request still
 /// carries. Unlike a fixed script queue this stays correct no matter how many
@@ -98,10 +100,18 @@ impl MockMessages {
                     bodies_c.lock().unwrap().push(body.clone());
 
                     // Reject in the order the real endpoint did.
-                    let (status, reason, resp_body) = if body.contains("\"temperature\"") {
-                        (400, "Bad Request", TEMPERATURE_400)
+                    //
+                    // The `disabled` check comes first: MiniMax answers a
+                    // request that asks it not to think with the thinking
+                    // complaint, not the temperature one — and a request that
+                    // carries both must surface the thinking complaint first,
+                    // or the test would measure the temperature trim instead.
+                    let (status, reason, resp_body) = if body.contains("\"type\":\"disabled\"") {
+                        (400, "Bad Request", DISABLED_THINKING_400)
                     } else if body.contains("\"type\":\"enabled\"") {
                         (400, "Bad Request", THINKING_400)
+                    } else if body.contains("\"temperature\"") {
+                        (400, "Bad Request", TEMPERATURE_400)
                     } else {
                         (200, "OK", OK_BODY)
                     };
@@ -275,6 +285,105 @@ async fn extended_thinking_is_replaced_by_the_adaptive_shape() {
         !bodies[1].contains("\"temperature\""),
         "adaptive thinking and temperature never travel together: {}",
         bodies[1]
+    );
+
+    mock.stop().await;
+}
+
+/// Regression (2026-11-17): MiniMax-M3.1-Flash refuses to not think.
+///
+/// Its 400 reads *"invalid params, model \"MiniMax-M3.1-Flash\" requires
+/// adaptive thinking; thinking.type=\"disabled\" (including
+/// reasoning.effort=none) is not allowed"*. The user picked the `Off` effort
+/// level, which maps to `thinking: { type: "disabled" }` — so the request was
+/// rejected outright.
+///
+/// The compat trim saw the word "adaptive" and retried with the adaptive
+/// shape, but the retry carried the very same `disabled` block: `Off`
+/// short-circuited `map_anthropic_thinking` before the adaptive branch, so
+/// the trim's rewrite of `thinking_mode` was dead code. The turn died on the
+/// second 400 with the same body.
+///
+/// The retry must now go out with the adaptive shape and no `disabled` block.
+#[tokio::test]
+async fn disabled_thinking_is_replaced_by_the_adaptive_shape() {
+    let mock = MockMessages::start().await;
+    let mut provider = AnthropicProvider::with_base_url(Some(&mock.base_url()), Some("k"));
+    provider.set_provider_id(PROVIDER_ID.to_string());
+
+    let mut request = chat_request();
+    request.reasoning_effort = Some(ReasoningEffort::Off);
+
+    let resp = provider
+        .chat(request)
+        .await
+        .expect("the adaptive shape must be accepted");
+    assert_eq!(resp.content, "ok");
+
+    let bodies = mock.bodies();
+    assert_eq!(bodies.len(), 2, "expected: disabled thinking, then adaptive");
+    assert!(
+        bodies[0].contains("\"disabled\""),
+        "the first request goes out exactly as asked: {}",
+        bodies[0]
+    );
+    assert!(
+        bodies[1].contains("\"adaptive\"") && !bodies[1].contains("\"disabled\""),
+        "the retry must use the adaptive shape, never a disabled block: {}",
+        bodies[1]
+    );
+    // The level must be one the Anthropic adaptive shape defines. "minimal"
+    // is an OpenAI / Gemini spelling: MiniMax silently falls back to its
+    // default depth for it, which made `off` cost MORE than `low`.
+    assert!(
+        bodies[1].contains("\"effort\":\"low\""),
+        "the adaptive retry must carry a defined level: {}",
+        bodies[1]
+    );
+    assert!(
+        !bodies[1].contains("minimal"),
+        "the adaptive shape has no 'minimal' level: {}",
+        bodies[1]
+    );
+
+    mock.stop().await;
+}
+
+/// The depth sent for `Off` in adaptive mode comes from the model's own
+/// declared support set (`models.dev reasoning_options.effort.values`),
+/// which the Gateway delivers per model and the Runtime hands to the
+/// provider. Without it the provider would have to invent a level — and an
+/// invented one is silently ignored by some vendors (MiniMax fell back to
+/// its default depth, making `off` cost MORE than `low`).
+#[tokio::test]
+async fn adaptive_off_takes_its_depth_from_the_models_declared_levels() {
+    let mock = MockMessages::start().await;
+    let mut provider = AnthropicProvider::with_base_url(Some(&mock.base_url()), Some("k"));
+    provider.set_provider_id(PROVIDER_ID.to_string());
+    // MiniMax-M3.1-Flash declares exactly these levels.
+    provider.set_supported_reasoning_levels(
+        ["low", "medium", "high", "xhigh", "max"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+    );
+
+    let mut request = chat_request();
+    request.reasoning_effort = Some(ReasoningEffort::Off);
+    request.thinking_mode = Some("adaptive".to_string());
+
+    let resp = provider
+        .chat(request)
+        .await
+        .expect("the adaptive shape must be accepted");
+    assert_eq!(resp.content, "ok");
+
+    let bodies = mock.bodies();
+    assert_eq!(bodies.len(), 1, "no retry needed: {}", bodies.join(" | "));
+    assert!(
+        bodies[0].contains("\"effort\":\"low\""),
+        "the depth must come from the model's declared set: {}",
+        bodies[0]
     );
 
     mock.stop().await;

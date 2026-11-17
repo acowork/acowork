@@ -1202,6 +1202,11 @@ impl AgentCore {
             compat_cache: self.compat_cache.clone(),
             responses_compat_cache: self.responses_compat_cache.clone(),
             anthropic_compat_cache: self.anthropic_compat_cache.clone(),
+            supported_reasoning_levels: provider_meta
+                .compact_model
+                .as_deref()
+                .and_then(|mid| provider_meta.models.iter().find(|m| m.id == mid))
+                .and_then(|m| m.capabilities.reasoning_efforts.clone()),
         };
         // ADR-103 D2: the compact provider is built for the provider's
         // compact model — consume the model-level protocol/base_url the
