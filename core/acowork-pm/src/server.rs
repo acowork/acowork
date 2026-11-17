@@ -41,9 +41,10 @@ pub struct PmService {
 /// ADR-117 D6 (single-backend cutover): SQLite is the only commit point.
 ///
 /// On the first start the JSON tree is imported into `pm.sqlite` in one
-/// transaction. This path never writes to the tree, so it stays a byte-for-byte
-/// rollback source and continues to host attachment binaries. A blocking scan
-/// finding aborts startup instead of creating a half-empty authority.
+/// transaction, its binaries are relocated into `assets/`, and the tree is
+/// renamed to `projects.retired`. From then on `pm.sqlite` + `assets/` are the
+/// only data source. A blocking scan finding aborts startup instead of
+/// creating a half-empty authority.
 async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
     if config.storage_backend != StorageBackend::Db {
         return Err(PmError::Internal(format!(
@@ -56,7 +57,9 @@ async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
     Ok(Arc::new(SqlitePmStore::open(config.clone())?) as Arc<dyn PmStore>)
 }
 
-/// One-shot startup import. Idempotent: a non-empty v1 database is left alone.
+/// One-shot startup import + archive retirement. Idempotent: a non-empty v1
+/// database is left alone, while retirement re-runs until the tree has really
+/// been renamed (a crash between the two steps is recoverable).
 ///
 /// The probe uses a read-only connection so deciding "do we need to import?"
 /// cannot create WAL sidecars, DDL or a `user_version` stamp on a database we
@@ -86,30 +89,28 @@ fn ensure_sqlite_authority(config: &PmConfig) -> Result<()> {
             schema::is_empty(&conn)?
         }
     };
-    if !needs_import {
-        return Ok(());
+    if needs_import {
+        let report = import::dry_run(config)?;
+        if report.has_blocking_issues() {
+            return Err(PmError::Internal(format!(
+                "startup import blocked ({} finding(s)): {}",
+                report.blocking.len(),
+                report.blocking.join(" | ")
+            )));
+        }
+        if report.projects > 0 {
+            let report = import::import(config)?;
+            tracing::info!(
+                projects = report.projects,
+                tasks = report.tasks,
+                activity_rows = report.activity_rows,
+                "one-shot JSON -> SQLite import complete"
+            );
+        }
     }
-
-    let report = import::dry_run(config)?;
-    if report.has_blocking_issues() {
-        return Err(PmError::Internal(format!(
-            "startup import blocked ({} finding(s)): {}",
-            report.blocking.len(),
-            report.blocking.join(" | ")
-        )));
-    }
-    if report.projects == 0 {
-        // Fresh install: let `schema::open()` create an empty authority.
-        return Ok(());
-    }
-
-    let report = import::import(config)?;
-    tracing::info!(
-        projects = report.projects,
-        tasks = report.tasks,
-        activity_rows = report.activity_rows,
-        "one-shot JSON -> SQLite import complete; the tree is left intact as a rollback source"
-    );
+    // Always run, even when the rows were imported by an earlier start: a
+    // crash between the import and this step must not leave two data sources.
+    import::retire_tree_archive(config)?;
     Ok(())
 }
 
@@ -419,9 +420,13 @@ mod tests {
         assert_eq!(projects[0].title, "migrated from the tree");
         assert!(cfg.sqlite_path().exists(), "import must create pm.sqlite");
         assert_eq!(
-            count_tree_files(&tmp.path().join("projects")),
+            count_tree_files(&tmp.path().join("projects.retired")),
             tree_before,
-            "import must not modify the tree"
+            "retirement must preserve every tree file"
+        );
+        assert!(
+            !tmp.path().join("projects").exists(),
+            "projects/ must no longer be a live data source"
         );
 
         let again = build_store(&cfg)

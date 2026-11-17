@@ -1126,12 +1126,151 @@ pub fn reconcile(config: &PmConfig) -> Result<ReconcileReport> {
     Ok(out)
 }
 
+/// Retire the JSON tree after a successful import (ADR-117 step ⑧, automated).
+///
+/// Two kinds of binary are still referenced by rows that came from the tree:
+/// project icons under `projects/{pid}/icon/` and task attachment binaries
+/// under `projects/{pid}/tasks/{tid}/attachments/`. Both are copied into
+/// DB-owned `assets/`, the `task_dir` columns are rewritten, and `projects/`
+/// is renamed so no runtime path can read the archive again. Nothing is ever
+/// deleted — the renamed directory stays as a recoverable snapshot.
+///
+/// Idempotent and resumable: a process that committed the import but died
+/// before finishing this runs it again on the next start.
+pub fn retire_tree_archive(config: &PmConfig) -> Result<()> {
+    let projects = config.projects_dir();
+    if !projects.is_dir() {
+        return Ok(());
+    }
+    let retired = config.data_dir.join("projects.retired");
+    if retired.exists() {
+        return Err(PmError::Internal(format!(
+            "cannot retire {}: {} already exists",
+            projects.display(),
+            retired.display()
+        )));
+    }
+
+    // The icon API namespace (`projects/{pid}/icon/...` in metadata.icon.path)
+    // is a logical URL prefix, not a filesystem path: `read_project_icon()`
+    // looks in `assets/projects/{pid}/icon` first, so no metadata rewrite is
+    // needed and already-rendered front-end URLs keep working.
+    copy_project_icons(config, &projects)?;
+
+    let mut conn = schema::open(&config.sqlite_path())?;
+    let tx = conn.transaction().map_err(db_err)?;
+    relocate_task_assets(config, &tx)?;
+    tx.commit().map_err(db_err)?;
+
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM tasks WHERE task_dir LIKE 'projects/%') \
+                  + (SELECT COUNT(*) FROM attachments WHERE task_dir LIKE 'projects/%')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(db_err)?;
+    if remaining != 0 {
+        return Err(PmError::Internal(format!(
+            "{remaining} row(s) still point into projects/; archive left in place"
+        )));
+    }
+    drop(conn);
+
+    std::fs::rename(&projects, &retired)?;
+    tracing::info!(
+        path = %retired.display(),
+        "JSON tree retired; pm.sqlite + assets/ are now the only data source"
+    );
+    Ok(())
+}
+
+fn copy_project_icons(config: &PmConfig, projects: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(projects)? {
+        let entry = entry?;
+        if !entry.path().is_dir() {
+            continue;
+        }
+        let pid = entry.file_name().to_string_lossy().into_owned();
+        let Ok(files) = std::fs::read_dir(entry.path().join("icon")) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let name = file.file_name().to_string_lossy().into_owned();
+            if !name.starts_with("icon-") {
+                continue;
+            }
+            let dst_dir = config
+                .data_dir
+                .join("assets/projects")
+                .join(&pid)
+                .join("icon");
+            std::fs::create_dir_all(&dst_dir)?;
+            let dst = dst_dir.join(&name);
+            if !dst.exists() {
+                std::fs::copy(file.path(), &dst)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn relocate_task_assets(config: &PmConfig, tx: &Connection) -> Result<()> {
+    let mut stmt = tx
+        .prepare("SELECT id, task_dir FROM tasks WHERE task_dir LIKE 'projects/%'")
+        .map_err(db_err)?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(db_err)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    drop(stmt);
+
+    for (tid, rel_dir) in rows {
+        // `storage_path` is relative to `task_dir`, so moving the whole
+        // `attachments/` subtree and rewriting that one column is enough.
+        let src = config.data_dir.join(&rel_dir).join("attachments");
+        let new_rel = format!("assets/tasks/{tid}");
+        if src.is_dir() {
+            copy_dir_all(&src, &config.data_dir.join(&new_rel).join("attachments"))?;
+        }
+        tx.execute(
+            "UPDATE tasks SET task_dir = ?1 WHERE id = ?2",
+            params![new_rel, tid],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "UPDATE attachments SET task_dir = ?1 WHERE task_id = ?2",
+            params![new_rel, tid],
+        )
+        .map_err(db_err)?;
+    }
+    Ok(())
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
+    std::fs::create_dir_all(dst)?;
+    for entry in std::fs::read_dir(src)? {
+        let entry = entry?;
+        let to = dst.join(entry.file_name());
+        if entry.path().is_dir() {
+            copy_dir_all(&entry.path(), &to)?;
+        } else if !to.exists() {
+            std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::sqlite::SqlitePmStore;
     use crate::store::tree::{PmMaintenance, PmStore as _, TreePmStore};
-    use crate::types::{CreateProject, CreateTask, Dependency, MemberKind, Priority, TaskType};
+    use crate::types::{
+        AttachmentId, AttachmentKind, AttachmentMeta, CreateProject, CreateTask, Dependency,
+        MemberKind, Priority, TaskType,
+    };
 
     fn task_input(title: &str, parent: Option<TaskId>) -> CreateTask {
         CreateTask {
@@ -1202,6 +1341,94 @@ mod tests {
         assert_eq!(report.attachments, 0);
         // A dry run must not even create the database file.
         assert!(!config.sqlite_path().exists());
+    }
+
+    /// Retiring the archive must leave `pm.sqlite` + `assets/` as the only
+    /// data source: icons and attachment binaries are physically relocated,
+    /// `task_dir` columns are rewritten, and `projects/` is renamed (not
+    /// deleted). Re-running on the next start is a no-op.
+    #[tokio::test]
+    async fn retire_tree_archive_relocates_binaries_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, pid, root_id, _) = seed_tree(tmp.path()).await;
+        let store = TreePmStore::new(config.clone()).await.unwrap();
+        // `TreePmStore::new` deliberately does not walk the tree; the caller
+        // decides when to rebuild. Without this the lookup below sees no task.
+        store.rebuild_index().await.unwrap();
+        let att_id = AttachmentId::generate();
+        let meta = AttachmentMeta {
+            id: att_id.clone(),
+            filename: "notes.txt".into(),
+            kind: AttachmentKind::File,
+            content_type: "text/plain".into(),
+            size: 5,
+            sha256: "deadbeef".into(),
+            storage_path: format!("attachments/{}/original.txt", att_id.as_str()),
+            thumb_path: None,
+            width: None,
+            height: None,
+            uploaded_by: "human".into(),
+            uploaded_at: Utc::now(),
+        };
+        store
+            .write_attachment(&root_id, meta, b"hello".to_vec(), None)
+            .await
+            .unwrap();
+
+        let icon_dir = config.projects_dir().join(pid.as_str()).join("icon");
+        std::fs::create_dir_all(&icon_dir).unwrap();
+        std::fs::write(icon_dir.join("icon-01.png"), b"png").unwrap();
+
+        let report = import(&config).unwrap();
+        assert_eq!(report.attachments, 1);
+        retire_tree_archive(&config).unwrap();
+
+        assert!(!config.projects_dir().is_dir(), "projects/ must be retired");
+        let retired = config.data_dir.join("projects.retired");
+        assert!(retired.is_dir(), "the archive must stay recoverable");
+        assert_eq!(
+            std::fs::read(retired.join(pid.as_str()).join("icon/icon-01.png")).unwrap(),
+            b"png".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(
+                config
+                    .data_dir
+                    .join("assets/projects")
+                    .join(pid.as_str())
+                    .join("icon/icon-01.png")
+            )
+            .unwrap(),
+            b"png".to_vec()
+        );
+        assert_eq!(
+            std::fs::read(
+                config
+                    .data_dir
+                    .join("assets/tasks")
+                    .join(root_id.as_str())
+                    .join("attachments")
+                    .join(att_id.as_str())
+                    .join("original.txt")
+            )
+            .unwrap(),
+            b"hello".to_vec()
+        );
+
+        let conn = schema::open(&config.sqlite_path()).unwrap();
+        let n: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM tasks WHERE task_dir LIKE 'projects/%') \
+                      + (SELECT COUNT(*) FROM attachments WHERE task_dir LIKE 'projects/%')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0, "no row may still point into the retired tree");
+        drop(conn);
+
+        // A crash between import and retirement is recoverable on next start.
+        retire_tree_archive(&config).unwrap();
     }
 
     #[tokio::test]
