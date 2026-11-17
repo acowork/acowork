@@ -20,6 +20,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { SIDEBAR_GROUP_BANNER_CN } from "../common/sidebarGroupBanner";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(resolve(__dirname, "AgentList.tsx"), "utf8");
@@ -74,9 +75,15 @@ describe("NodeGroupHeader", () => {
     // also drives ListBox's card (right-panel Agent Status / Session
     // Status titles). Both themes auto-flip, so a `dark:` pair would
     // drift from the token by definition.
+    //
+    // The fill now arrives through the shared banner constant (the band
+    // is a floating pill), so the assertion follows the constant rather
+    // than a literal in this file — a literal here is what let the three
+    // banners drift apart on geometry in the first place.
     const header = src.slice(src.indexOf("function NodeGroupHeader"));
-    expect(header).toContain("bg-panel-block");
-    expect(header).not.toMatch(/bg-panel-block[^\n]*dark:bg-/);
+    expect(header).toContain("SIDEBAR_GROUP_BANNER_CN");
+    expect(SIDEBAR_GROUP_BANNER_CN).toContain("bg-panel-block");
+    expect(SIDEBAR_GROUP_BANNER_CN).not.toMatch(/bg-panel-block[^\n]*dark:bg-/);
   });
 });
 

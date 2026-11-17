@@ -45,6 +45,7 @@ import type { DirectoryUser, UserAccount } from "../../lib/types";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
 import { COUNT_BADGE_NEUTRAL_CN } from "../common/sidebarCountBadge";
+import { SIDEBAR_GROUP_BANNER_CN } from "../common/sidebarGroupBanner";
 import { UserAvatar } from "../common/UserAvatar";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import {
@@ -293,7 +294,10 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
 
   return (
     <div data-testid="user-list">
-      <div className="flex h-6 items-center border-y border-nav-divider/40 bg-panel-block dark:border-zinc-600/40">
+      {/* Same band as the node band and the project-groups band — see
+          `sidebarGroupBanner.ts`. `w-full` matches the user rows below
+          it: the band and the rows share one edge-to-edge width. */}
+      <div className={cn(SIDEBAR_GROUP_BANNER_CN, "w-full")}>
         <button
           type="button"
           onClick={() => setCollapsed((c) => !c)}

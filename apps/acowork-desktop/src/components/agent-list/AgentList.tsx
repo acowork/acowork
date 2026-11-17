@@ -18,6 +18,7 @@ import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
 import { COUNT_BADGE_NEUTRAL_CN } from "../common/sidebarCountBadge";
+import { SIDEBAR_GROUP_BANNER_CN } from "../common/sidebarGroupBanner";
 import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor, MessagesSquare } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { invoke } from "@tauri-apps/api/core";
@@ -884,7 +885,11 @@ export function AgentList({ width }: AgentListProps) {
             (no account) hides the whole section. */}
         {selfUserId && (
           <div data-testid="project-group-section">
-            <div className="flex h-6 items-center border-y border-nav-divider/40 bg-panel-block dark:border-zinc-600/40">
+            {/* Same band as the node band and the Users band — see
+                `sidebarGroupBanner.ts`. `w-full` matches the agent rows
+                below it: the band and the rows share one edge-to-edge
+                width, so neither looks inset against the other. */}
+            <div className={cn(SIDEBAR_GROUP_BANNER_CN, "w-full")}>
               <button
                 type="button"
                 onClick={() => setGroupsCollapsed((c) => !c)}
@@ -1199,9 +1204,15 @@ function NodeGroupHeader({
     <div
       data-testid="node-group-header"
       className={cn(
+        // The banner's shape (rounded band + its fill) comes from the
+        // shared constant so the node band, the project-groups band and
+        // the Users band cannot drift apart.
+        SIDEBAR_GROUP_BANNER_CN,
         // h-6 (24px) — a touch taller than a third of the agent row's
         // ~56px, so the node label has comfortable breathing room.
-        "flex h-6 w-full items-center text-left",
+        // `w-full` so the band is edge-to-edge like the agent rows below
+        // it — the band and the rows share one width.
+        "w-full items-center text-left",
         // `text-xs` + normal case, matching the agent / user row names
         // right below it. This header was `text-10 uppercase tracking-wide`
         // — nominally a size SMALLER than the rows, but caps + letter
@@ -1213,14 +1224,6 @@ function NodeGroupHeader({
         "text-text-tertiary ",
         "hover:text-text-tertiary",
         "transition-colors duration-150",
-        // Same fill as the right-panel card title bars (ListBox's
-        // `bg-panel-block`), one step above `nav-surface`, so the node
-        // strip reads as a raised band instead of a bare hairline on the
-        // sidebar. Both themes flip via the token — no `dark:` pair.
-        "bg-panel-block",
-        // Dedicated divider on BOTH edges so the header reads as its own
-        // row when it sits between agent rows / above an empty group.
-        "border-y border-nav-divider/40 dark:border-zinc-600/40",
       )}
     >
       {/* Collapse toggle — a real button filling the row; the permissions
