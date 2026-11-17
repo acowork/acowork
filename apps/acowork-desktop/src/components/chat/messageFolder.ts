@@ -113,8 +113,73 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
     exploreStartMsgIdx = -1;
   };
 
+  // ── Ownership pre-pass ────────────────────────────────────
+  // Which part row belongs to which user row.  Computed BEFORE the main
+  // loop, because a part row that PRECEDES its user row would otherwise be
+  // emitted as a standalone `system` block before the folder ever got to
+  // the user row that owns it.
+  //
+  // Why that order happens at all: the Runtime writes the user row and its
+  // attachment rows with the SAME millisecond timestamp (`write_attached_items`
+  // runs in the same batch as the user row), so their relative order is
+  // decided by whatever assembled the array — not by the log.
+  // `mergeMessageWindow` fills `server` first and then `cache`, and its
+  // stable sort keeps that insertion order for equal timestamps: a server
+  // page holding the attachment rows lands them BEFORE a cached user row of
+  // the same millisecond.  A forward-only scan then found no parts, the
+  // attachments stayed standalone `system` blocks, and `MessageBubble`
+  // rendered them as CENTERED notices — the pictures appeared in the middle
+  // of the screen, detached from the turn they belong to, while the
+  // reference part (which happened to sort after the user row) folded
+  // correctly and stayed right-aligned.  Switching sessions reloaded the
+  // pages in a different order, which is why the same turn appeared
+  // right-aligned one minute and centered the next.
+  //
+  // Each user row claims the contiguous run of part rows immediately before
+  // and after it, within the fold window.  Contiguity is what keeps a
+  // block's `items` a contiguous span of the raw array, which
+  // `blockIndexOfRawMessage` relies on to map a raw index to its block.
+  // User rows are visited in array order and a part is claimed at most
+  // once, so the assignment is unambiguous.
+  const ownerOfPart = new Map<number, number>(); // part index -> user index
+  const partsByUser = new Map<number, number[]>(); // user index -> part indices
+
+  for (let u = 0; u < messages.length; u++) {
+    if (messages[u].type !== "user") continue;
+    const userMsg = messages[u];
+    const leading: number[] = [];
+    for (let k = u - 1; k >= 0; k--) {
+      const prev = messages[k];
+      if (!isUserTurnPart(prev)) break;
+      if (ownerOfPart.has(k)) break;
+      if (userMsg.timestamp - prev.timestamp > ATTACHMENT_FOLD_WINDOW_MS) break;
+      leading.unshift(k);
+    }
+    const trailing: number[] = [];
+    for (let j = u + 1; j < messages.length; j++) {
+      const next = messages[j];
+      if (!isUserTurnPart(next)) break;
+      if (ownerOfPart.has(j)) break;
+      if (next.timestamp - userMsg.timestamp > ATTACHMENT_FOLD_WINDOW_MS) break;
+      trailing.push(j);
+    }
+    const owned = [...leading, ...trailing];
+    if (owned.length === 0) continue;
+    for (const k of owned) ownerOfPart.set(k, u);
+    partsByUser.set(u, owned);
+  }
+
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i];
+
+    // A part row is never a block of its own: it belongs to the user row
+    // the pre-pass assigned it to, and is emitted with that row.
+    if (ownerOfPart.has(i)) {
+      // Still ends an open explore group: the part row physically sits
+      // between two explore runs, so the group before it must close here.
+      flushExplore();
+      continue;
+    }
 
     if (
       msg.type === "tool_call" ||
@@ -127,21 +192,12 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
       flushExplore();
 
       // ── user_with_parts folding ──────────────────────────────
-      // If this is a user message, look ahead for the part entries that
-      // belong to it (attachments and references alike, same batch,
-      // within the fold window).
+      // The user row plus the part rows the pre-pass assigned to it.  The
+      // words lead; the parts follow in the order they were logged.
       if (msg.type === "user") {
-        const parts: ChatMessage[] = [];
-        let j = i + 1;
-        while (
-          j < messages.length &&
-          isUserTurnPart(messages[j]) &&
-          messages[j].timestamp - msg.timestamp <= ATTACHMENT_FOLD_WINDOW_MS
-        ) {
-          parts.push(messages[j]);
-          j++;
-        }
-        if (parts.length > 0) {
+        const owned = partsByUser.get(i);
+        if (owned && owned.length > 0) {
+          const parts = owned.map((k) => messages[k]);
           const items = [msg, ...parts];
           const blockId = `block-${msg.id}`;
           blocks.push({
@@ -149,12 +205,14 @@ export function foldMessages(messages: ChatMessage[]): MessageBlock[] {
             type: "user_with_parts",
             items,
             rawCount: items.length,
-            anchorToLatest: j - 1 === lastIdx,
+            // The block's span ends at its LAST row — a part row can sit
+            // after the user row, so the user row's own index is not the
+            // end of the block.
+            anchorToLatest: Math.max(i, ...owned) === lastIdx,
             hasFollowUpReply: false,
             // ADR-050 C3: see note in the explore_group branch above.
             isLive: false,
           });
-          i = j - 1; // skip the consumed part entries
           continue;
         }
       }

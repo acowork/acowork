@@ -198,9 +198,21 @@ export function UserWithAttachmentsBubble({
           className="mt-[2px] text-xs text-text-tertiary"
         />
 
-        {/* Attachment chips — rendered above the text bubble */}
+        {/* Attachment chips — rendered above the text bubble.
+
+            They are a ROW, not a column: `flex-wrap justify-end` lays them
+            out horizontally and wraps to the next line when they no longer
+            fit, with the row hugging the turn's own (right) edge.  This is
+            the same grammar the chat surface uses for its attachments
+            (`AgentChatView` / `GroupChatPanel`), so one turn reads the same
+            way on both surfaces.
+
+            It used to be `flex flex-col items-end` — one chip per line.  A
+            turn carrying three screenshots therefore painted a tall column
+            of 56px tiles where the chat surface painted a single line of
+            three, and the two surfaces disagreed about the same turn. */}
         {attachments.length > 0 && (
-          <div className="mt-2 flex flex-col items-end gap-1">
+          <div className="mt-2 flex max-w-full flex-wrap justify-end gap-1.5">
             {attachments.map((attMsg) => {
               const item = metadataToAttachedItem(attMsg);
               if (!item) return null;

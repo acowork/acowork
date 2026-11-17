@@ -91,6 +91,13 @@ import {
 const ATTACHMENT_CHIP_HEIGHT_PX = 32;
 const ATTACHMENT_THUMB_HEIGHT_PX = 56;
 
+/** Gap between two lines of wrapped attachment chips. Matches the `gap-1.5`
+ *  (6px) the chip row uses. */
+const ATTACHMENT_CHIP_GAP_PX = 6;
+
+/** Gap between the attachment chip row and the turn's name row / bubble. */
+const ATTACHMENT_ROW_TO_BUBBLE_GAP_PX = 8;
+
 // ── Text-bubble content height ──────────────────────────────────────────
 
 // ── Measured-height cache (see file header) ────────────────────────
@@ -216,6 +223,61 @@ export function estimateBlockHeight(
       const leftColumn = USER_AVATAR_TOP_OFFSET_PX + USER_AVATAR_SIZE_PX;
       // The flex container is `items-start`, so total height = max of the
       // two columns.  This mirrors the actual rendered DOM.
+      return Math.max(rightColumn, leftColumn);
+    }
+    case "user_with_parts": {
+      // A user turn that carries parts (ADR-046 attachments, ADR-107
+      // references).  Without this branch the block fell through to
+      // `SAFE_FALLBACK_HEIGHT` (60px) — but a turn with three screenshot
+      // tiles and a bubble is easily 200px tall, so the virtualizer
+      // reserved a fraction of the real height and the rows below it
+      // overlapped the chips.
+      //
+      // The layout (see `UserWithAttachmentsBubble`) is: name row →
+      // attachment chip row (wrapped, right-aligned) → bubble → reference
+      // cards → meta row.  Only the chip row and the bubble are sized
+      // here; the reference card and the meta row are left to
+      // `measureElement` + the ResizeObserver, which corrects the estimate
+      // the moment the block is in view — the same contract the explore
+      // block relies on.
+      const msg = block.items[0];
+      const content = msg?.content ?? "";
+      const hasName = !!msg?.senderDisplayName;
+
+      // The chip row: one line per wrapped row of chips.  The chips are
+      // 56px (thumbnail) or 32px (capsule); the tallest chip in the row
+      // sets the row's height.  How many chips fit on a line depends on
+      // the container width and the chip width, so the row count is
+      // derived rather than assumed.
+      //
+      // Only ATTACHMENT parts are chips.  A reference part (ADR-107) is a
+      // card, not a chip — it is rendered by `MessageRefBlock` below the
+      // bubble and its height is left to `measureElement`, so counting it
+      // here would inflate the row.
+      const chipParts = block.items.slice(1).filter(
+        (m) => (m.metadata?.type as string | undefined) !== "context_ref",
+      );
+      const chipCount = chipParts.length;
+      // A thumbnail is 56×56; a capsule is at most that wide too (it holds
+      // a 16px glyph plus a truncated filename), so the widest chip sets
+      // the row's height and the narrowest sets how many fit per line.
+      // The narrow case (a capsule) fits more per line, so the row count
+      // is derived from the thumbnail width — the conservative choice.
+      const chipWidth = ATTACHMENT_THUMB_HEIGHT_PX;
+      const chipsPerRow = containerWidth > 0
+        ? Math.max(1, Math.floor((containerWidth + ATTACHMENT_CHIP_GAP_PX) / (chipWidth + ATTACHMENT_CHIP_GAP_PX)))
+        : chipCount;
+      const chipRows = chipCount > 0 ? Math.ceil(chipCount / chipsPerRow) : 0;
+      const chipRowHeight = chipRows * ATTACHMENT_THUMB_HEIGHT_PX
+        + Math.max(0, chipRows - 1) * ATTACHMENT_CHIP_GAP_PX;
+
+      const bubbleHeight = estimateTextBubbleHeight(content, containerWidth);
+      const rightColumn =
+        (hasName ? USER_NAME_TOP_GAP_PX + USER_NAME_LINE_HEIGHT_PX : 0)
+        + (chipRows > 0 ? ATTACHMENT_ROW_TO_BUBBLE_GAP_PX + chipRowHeight : 0)
+        + USER_NAME_TO_BUBBLE_GAP_PX
+        + bubbleHeight;
+      const leftColumn = USER_AVATAR_TOP_OFFSET_PX + USER_AVATAR_SIZE_PX;
       return Math.max(rightColumn, leftColumn);
     }
     case "assistant":
