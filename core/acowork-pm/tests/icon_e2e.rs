@@ -13,9 +13,9 @@
 
 use std::sync::Arc;
 
-use acowork_pm::{PmConfig, TreePmStore};
+use acowork_pm::{PmConfig, SqlitePmStore};
 use axum::body::Body;
-use axum::http::{header, Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
 struct TestApp {
@@ -28,11 +28,11 @@ impl TestApp {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = PmConfig {
             data_dir: tmp.path().to_path_buf(),
-            index_rebuild_on_start: false,
             ..Default::default()
         };
-        let store = Arc::new(TreePmStore::new(cfg.clone()).await.unwrap());
-        let router = acowork_pm::pm_router(store, cfg, Arc::new(acowork_pm::NoopAgentDirectory), None);
+        let store = Arc::new(SqlitePmStore::open(cfg.clone()).unwrap());
+        let router =
+            acowork_pm::pm_router(store, cfg, Arc::new(acowork_pm::NoopAgentDirectory), None);
         Self { router, _tmp: tmp }
     }
 
@@ -49,18 +49,26 @@ impl TestApp {
             .unwrap();
         let resp = self.router.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         json["id"].as_str().unwrap().to_string()
     }
 
     /// POST a multipart icon upload; returns (status, body-json).
-    async fn upload_icon(&self, pid: &str, filename: &str, bytes: &[u8]) -> (StatusCode, serde_json::Value) {
+    async fn upload_icon(
+        &self,
+        pid: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> (StatusCode, serde_json::Value) {
         let boundary = "----acowork-icon-test-boundary";
         let mut body: Vec<u8> = Vec::new();
         body.extend_from_slice(format!("--{boundary}\r\n").as_bytes());
         body.extend_from_slice(
-            format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n").as_bytes(),
+            format!("Content-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+                .as_bytes(),
         );
         body.extend_from_slice(b"Content-Type: application/octet-stream\r\n\r\n");
         body.extend_from_slice(bytes);
@@ -69,12 +77,17 @@ impl TestApp {
         let req = Request::builder()
             .method(Method::POST)
             .uri(format!("/projects/{pid}/icon"))
-            .header(header::CONTENT_TYPE, format!("multipart/form-data; boundary={boundary}"))
+            .header(
+                header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={boundary}"),
+            )
             .body(Body::from(body))
             .unwrap();
         let resp = self.router.clone().oneshot(req).await.unwrap();
         let status = resp.status();
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let json = if bytes.is_empty() {
             serde_json::Value::Null
         } else {
@@ -84,7 +97,11 @@ impl TestApp {
     }
 
     async fn get(&self, uri: &str) -> axum::response::Response {
-        let req = Request::builder().method(Method::GET).uri(uri).body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap();
         self.router.clone().oneshot(req).await.unwrap()
     }
 }
@@ -111,7 +128,9 @@ async fn upload_list_and_serve_roundtrip() {
     // Assets list returns both, sorted.
     let resp = app.get(&format!("/projects/{pid}/icon-assets")).await;
     assert_eq!(resp.status(), StatusCode::OK);
-    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
     let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let assets = list["assets"].as_array().unwrap();
     assert_eq!(assets.len(), 2, "{list}");
@@ -120,7 +139,10 @@ async fn upload_list_and_serve_roundtrip() {
 
     // Serve returns the image bytes with a png content-type.
     let resp = app
-        .get(&format!("/projects/{pid}/icon-file?path={}", urlencoding(&rel1)))
+        .get(&format!(
+            "/projects/{pid}/icon-file?path={}",
+            urlencoding(&rel1)
+        ))
         .await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert_eq!(
@@ -128,7 +150,9 @@ async fn upload_list_and_serve_roundtrip() {
         "image/png",
         "served icon must carry its image content-type"
     );
-    let served = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let served = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
     assert_eq!(&served[..], PNG_BYTES, "byte-for-byte roundtrip");
 }
 
@@ -139,7 +163,11 @@ async fn rejects_non_image_and_outside_namespace_and_unknown_project() {
 
     // Non-image extension → 400 (mime rejected).
     let (status, _) = app.upload_icon(&pid, "evil.exe", b"MZ\x90\x00").await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "exe upload must be rejected");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "exe upload must be rejected"
+    );
 
     // Upload one real icon so a serve target exists.
     app.upload_icon(&pid, "ok.png", PNG_BYTES).await;
@@ -147,14 +175,24 @@ async fn rejects_non_image_and_outside_namespace_and_unknown_project() {
     // Path outside this project's namespace → 400.
     let other = format!("projects/{pid}/tasks/tx/icon-01.png");
     let resp = app
-        .get(&format!("/projects/{pid}/icon-file?path={}", urlencoding(&other)))
+        .get(&format!(
+            "/projects/{pid}/icon-file?path={}",
+            urlencoding(&other)
+        ))
         .await;
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST, "cross-namespace path must be rejected");
+    assert_eq!(
+        resp.status(),
+        StatusCode::BAD_REQUEST,
+        "cross-namespace path must be rejected"
+    );
 
     // Traversal smuggled into the filename segment → rejected (400), never a 500.
     let trick = format!("projects/{pid}/icon/../../secret.txt");
     let resp = app
-        .get(&format!("/projects/{pid}/icon-file?path={}", urlencoding(&trick)))
+        .get(&format!(
+            "/projects/{pid}/icon-file?path={}",
+            urlencoding(&trick)
+        ))
         .await;
     assert!(
         resp.status() == StatusCode::BAD_REQUEST,
@@ -166,9 +204,16 @@ async fn rejects_non_image_and_outside_namespace_and_unknown_project() {
     // never exists, so the byte lookup misses → 404 (never a 500 / leak).
     let ghost = "projects/p-doesnotexist/icon/icon-01.png".to_string();
     let resp = app
-        .get(&format!("/projects/p-doesnotexist/icon-file?path={}", urlencoding(&ghost)))
+        .get(&format!(
+            "/projects/p-doesnotexist/icon-file?path={}",
+            urlencoding(&ghost)
+        ))
         .await;
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND, "unknown project icon must 404");
+    assert_eq!(
+        resp.status(),
+        StatusCode::NOT_FOUND,
+        "unknown project icon must 404"
+    );
 }
 
 /// Minimal percent-encoding for the query value (only `/` needs escaping here).

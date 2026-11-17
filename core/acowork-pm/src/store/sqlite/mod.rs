@@ -1,4 +1,4 @@
-//! SQLite backend for PM (ADR-117 D6 step 3).
+//! SQLite backend for PM (ADR-117): the sole storage authority.
 //!
 //! `SqlitePmStore` owns a `rusqlite::Connection` behind a `std::sync::Mutex`:
 //! PM has a single writer and every statement is sub-millisecond, so a short
@@ -8,13 +8,13 @@
 //!
 //! The schema stores each entity's verbatim JSON in `props` plus projected
 //! columns for filtering. Business mutations therefore load → mutate → save a
-//! `Task` / `Project`, reusing the *same* rule helpers as the tree backend so
-//! the two implementations cannot drift. Attachment binaries and project icons
-//! stay on the filesystem (ADR-061 decision 5); `tasks.task_dir` holds the
-//! base path those relative asset paths are resolved against.
+//! `Task` / `Project`, reusing the shared rule helpers in `store::rules` so
+//! validation and state-machine logic have one definition. Attachment binaries
+//! and project icons stay on the filesystem (ADR-061 decision 5);
+//! `tasks.task_dir` holds the base path those relative asset paths are
+//! resolved against.
 
 mod business;
-pub mod import;
 pub mod schema;
 
 use std::path::{Path, PathBuf};
@@ -23,13 +23,14 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension, params};
+use serde_json::{Value, json};
 
 use crate::config::PmConfig;
 use crate::error::{PmError, Result};
-use crate::store::corrupt::{CorruptRecord, CorruptRegistry};
 use crate::types::{DependencyKind, Project, ProjectId, ReviewStatus, Task, TaskId, TaskStatus};
 
-use super::tree::{PmMaintenance, parse_task_id, priority_rank};
+use crate::store::contract::PmMaintenance;
+use crate::store::rules::{parse_task_id, priority_rank};
 
 /// Convert a `rusqlite` failure into the PM error envelope without adding a
 /// new `PmError` variant (which would ripple through `http_status` and
@@ -55,10 +56,8 @@ pub(super) fn task_asset_rel(project_id: &str, task_id: &str) -> String {
 
 /// Only DB-owned asset roots may be physically deleted. The strict shape check
 /// (`assets/projects/p-*/tasks/t-*`) keeps the sibling `icon/` directory and
-/// retired tree paths out of the deletable set.
-///
-/// Older flat rows (`assets/tasks/{tid}`) were upgraded once during the
-/// cutover; a fresh install only ever produces the canonical layout below.
+/// any non-canonical path out of the deletable set, so a malformed `task_dir`
+/// can never turn a delete into an arbitrary `remove_dir_all`.
 pub(super) fn is_db_owned_asset_dir(rel_dir: &str) -> bool {
     let parts: Vec<&str> = rel_dir.split('/').collect();
     parts.len() == 5
@@ -72,11 +71,8 @@ pub(super) fn is_db_owned_asset_dir(rel_dir: &str) -> bool {
 pub struct SqlitePmStore {
     pub(super) config: PmConfig,
     conn: Arc<Mutex<Connection>>,
-    /// The DB backend has no unparseable-file concept. `/health` still needs a
-    /// handle, so it gets an always-empty shared registry.
-    corrupt: CorruptRegistry,
     /// Serializes the read-check-write of `claim_task` so the assignee
-    /// compare-and-set stays atomic across both backends (G1-b / A5).
+    /// compare-and-set stays atomic across concurrent callers (G1-b / A5).
     claim_lock: tokio::sync::Mutex<()>,
 }
 
@@ -88,19 +84,12 @@ impl SqlitePmStore {
         Ok(Self {
             config,
             conn: Arc::new(Mutex::new(conn)),
-            corrupt: Arc::new(parking_lot::RwLock::new(Vec::<CorruptRecord>::new())),
             claim_lock: tokio::sync::Mutex::new(()),
         })
     }
 
     pub fn config(&self) -> &PmConfig {
         &self.config
-    }
-
-    /// True when no project has been imported yet. The startup factory uses
-    /// this to refuse an empty `db` backend when the tree still holds data.
-    pub fn is_empty(&self) -> Result<bool> {
-        self.with_conn(schema::is_empty)
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -250,10 +239,8 @@ impl SqlitePmStore {
         })
     }
 
-    /// Stable asset root for tasks created *in DB mode*. Deliberately outside
-    /// the retired tree archive: switching to `db` must never write into the
-    /// recoverable snapshot. Grouped under the owning project so icons and
-    /// task binaries share one subtree.
+    /// Stable asset root for a task, grouped under the owning project so icons
+    /// and task binaries share one subtree.
     pub(super) fn new_task_asset_dir(&self, project_id: &ProjectId, id: &TaskId) -> String {
         task_asset_rel(project_id.as_str(), id.as_str())
     }
@@ -288,10 +275,9 @@ impl SqlitePmStore {
     }
 
     /// Every DB-owned asset root referenced by these tasks, from **both**
-    /// `tasks.task_dir` and `attachments.task_dir`. An imported task keeps its
-    /// archive path in `tasks`, but attachments uploaded after the import are
-    /// redirected to its DB-owned root, so looking at only one table would
-    /// leave orphaned binaries behind after a subtree delete.
+    /// `tasks.task_dir` and `attachments.task_dir`; either table may carry the
+    /// only reference to a directory, so reading just one would leave orphaned
+    /// binaries behind after a subtree delete.
     pub(super) fn db_owned_asset_dirs(&self, ids: &[TaskId]) -> Result<Vec<String>> {
         self.with_conn(|conn| {
             let mut out = std::collections::BTreeSet::new();
@@ -337,9 +323,8 @@ impl SqlitePmStore {
         })
     }
 
-    /// Icon root: `assets/projects/{pid}/icon/`. Icons uploaded before the
-    /// cutover were copied here by `retire_tree_archive()`, so there is exactly
-    /// one physical location and no runtime dependency on the retired archive.
+    /// Icon root: `assets/projects/{pid}/icon/` — the one physical location
+    /// for a project's icons.
     fn icon_dir(&self, project_id: &ProjectId) -> PathBuf {
         self.config
             .data_dir
@@ -466,7 +451,7 @@ fn icon_content_type(name: &str) -> Option<&'static str> {
 }
 
 /// Dependency gate over an already-loaded task. A dangling blocker blocks,
-/// Done / Cancelled satisfies — identical to `TreePmStore::is_dispatch_blocked`.
+/// Done / Cancelled satisfies the dependency-block rule.
 /// Takes the connection explicitly so the dispatch scan can stay inside one
 /// critical section instead of re-entering the connection `Mutex`.
 fn dispatch_blocked(conn: &Connection, task: &Task) -> Result<bool> {
@@ -488,12 +473,6 @@ fn dispatch_blocked(conn: &Connection, task: &Task) -> Result<bool> {
 
 #[async_trait]
 impl PmMaintenance for SqlitePmStore {
-    /// The DB *is* the authority; there is no derived in-memory index to
-    /// rebuild. Kept as a successful verify so startup code is backend-agnostic.
-    async fn rebuild_index(&self) -> Result<()> {
-        self.with_conn(schema::verify)
-    }
-
     /// Backfill `start_at` on legacy pending rows, updating `props` and the
     /// projected column together. Idempotent by construction.
     async fn migrate_null_start_at(&self) -> Result<usize> {
@@ -601,8 +580,51 @@ impl PmMaintenance for SqlitePmStore {
             .and_then(|(parent, _, _)| parent)
     }
 
-    fn corrupt_registry(&self) -> CorruptRegistry {
-        self.corrupt.clone()
+    fn storage_diagnostics(&self) -> Value {
+        let conn = match self.conn.lock() {
+            Ok(guard) => guard,
+            Err(e) => {
+                return json!({ "error": format!("sqlite connection lock poisoned: {e}") });
+            }
+        };
+        let schema_version: i64 = conn
+            .pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap_or(-1);
+        let integrity: String = conn
+            .query_row("PRAGMA integrity_check", [], |r| r.get(0))
+            .unwrap_or_else(|_| "unavailable".to_string());
+
+        let mut rows = serde_json::Map::new();
+        let mut decode_failures = 0u64;
+        for table in ["projects", "tasks", "attachments", "activity"] {
+            let count: i64 = conn
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap_or(-1);
+            rows.insert(table.to_string(), json!(count));
+            // A corrupt `props` blob is the SQLite equivalent of an
+            // unparseable task.json: surface it instead of returning a
+            // permanently-empty health counter.
+            let mut stmt = match conn.prepare(&format!("SELECT props FROM {table}")) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            let blobs = match stmt.query_map([], |r| r.get::<_, String>(0)) {
+                Ok(b) => b,
+                Err(_) => continue,
+            };
+            for blob in blobs {
+                match blob {
+                    Ok(s) if serde_json::from_str::<Value>(&s).is_ok() => {}
+                    _ => decode_failures += 1,
+                }
+            }
+        }
+        json!({
+            "schema_version": schema_version,
+            "integrity": integrity,
+            "rows": rows,
+            "props_decode_failures": decode_failures,
+        })
     }
 
     fn project_task_count(&self, project_id: &ProjectId) -> usize {
@@ -668,7 +690,7 @@ impl PmMaintenance for SqlitePmStore {
 
     fn is_dispatch_blocked(&self, task: &Task) -> bool {
         // Fail closed: an unreadable blocker blocks, exactly like a dangling
-        // index reference does on the tree backend.
+        // dependency reference.
         self.with_conn(|conn| dispatch_blocked(conn, task))
             .unwrap_or(true)
     }
@@ -677,7 +699,7 @@ impl PmMaintenance for SqlitePmStore {
         let Some(mut task) = self.load_task(id)? else {
             return Ok(None);
         };
-        // Same order and semantics as `TreePmStore::dispatch_identity`: a
+        // A persisted generation identity is returned verbatim with NO write.
         // persisted generation identity is returned verbatim with NO write.
         // Re-saving it on every scanner tick would bump `updated_at` forever
         // for a task that has not changed.
@@ -744,13 +766,19 @@ mod tests {
                 schema::user_version(&store.conn.lock().unwrap()).unwrap(),
                 1
             );
-            assert!(schema::is_empty(&store.conn.lock().unwrap()).unwrap());
+            assert_eq!(
+                store.storage_diagnostics()["rows"]["projects"],
+                0,
+                "a fresh database must be empty"
+            );
             store.shutdown().await.unwrap();
         }
         // Reopening converges without downgrading or duplicating tables.
         let store = SqlitePmStore::open(cfg).unwrap();
-        store.rebuild_index().await.unwrap();
-        assert!(store.corrupt_registry().read().is_empty());
+        schema::verify(&store.conn.lock().unwrap()).unwrap();
+        let diag = store.storage_diagnostics();
+        assert_eq!(diag["props_decode_failures"], 0);
+        assert_eq!(diag["integrity"], "ok");
     }
 
     #[tokio::test]
@@ -773,8 +801,8 @@ mod tests {
         assert!(err.contains("not understood"), "error was: {err}");
     }
 
-    /// Icons live in the DB-owned `assets/projects/{pid}/icon/` root; the
-    /// retired tree archive is neither written nor read at runtime.
+    /// Icons live in the DB-owned `assets/projects/{pid}/icon/` root; no
+    /// legacy directory is ever created.
     #[tokio::test]
     async fn icons_live_in_the_project_asset_root() {
         let tmp = tempfile::tempdir().unwrap();
@@ -791,8 +819,8 @@ mod tests {
             "new icon must land in the DB-owned asset root"
         );
         assert!(
-            !store.config.projects_dir().exists(),
-            "the retired tree archive must never be recreated"
+            !store.config.data_dir.join("projects").exists(),
+            "no legacy JSON tree directory must be created"
         );
 
         let listed = store.list_project_icons(&pid).await.unwrap();

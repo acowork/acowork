@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use acowork_doc::config::DocConfig;
 use acowork_doc::server::DocService;
-use acowork_pm::store::tree::TreePmStore;
+use acowork_pm::SqlitePmStore;
 use acowork_pm::types::TaskId;
 use acowork_pm::{AgentDirectory, PmConfig, PmStore};
 use axum::Router;
@@ -86,14 +86,13 @@ async fn spawn_doc_behind_gateway_prefix() -> (String, tempfile::TempDir) {
 
 /// PM's MCP router wired to the doc proxy base URL, plus the store handle
 /// (the human-side approval the MCP surface deliberately has no tool for).
-async fn pm_mcp(gateway_base: String) -> (Router, Arc<TreePmStore>, tempfile::TempDir) {
+async fn pm_mcp(gateway_base: String) -> (Router, Arc<SqlitePmStore>, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = PmConfig {
         data_dir: tmp.path().to_path_buf(),
-        index_rebuild_on_start: false,
         ..Default::default()
     };
-    let store = Arc::new(TreePmStore::new(cfg).await.unwrap());
+    let store = Arc::new(SqlitePmStore::open(cfg).unwrap());
     let router = acowork_pm::mcp::mcp_router(
         store.clone(),
         Arc::new(OneAgent) as Arc<dyn AgentDirectory>,
@@ -115,11 +114,7 @@ async fn call(router: &Router, id: u64, name: &str, args: Value) -> Value {
         .header("x-mcp-actor", AGENT)
         .body(axum::body::Body::from(payload.to_string()))
         .unwrap();
-    let resp = router
-        .clone()
-        .oneshot(req)
-        .await
-        .expect("router responds");
+    let resp = router.clone().oneshot(req).await.expect("router responds");
     let bytes = axum::body::to_bytes(resp.into_body(), 1024 * 1024)
         .await
         .unwrap();

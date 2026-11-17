@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://acowork.dev/schemas/pm/project.schema.json",
   "title": "PM Project",
-  "description": "项目元数据文件（{data}/acowork-pm/projects/{pid}/project.json）的校验契约。\n\n与 Rust 类型 `acowork_pm::types::Project` 严格一一对应（serde deny_unknown_fields → additionalProperties: false）。\n\n物理存储约定（见 docs/design/zh/21-pm-project-management.md §3.2）：\n- 一个项目 = 一棵完整目录树，本文件只存项目元数据；\n- **不含** tasks 数组（任务分散在 tasks/ 子目录下）；\n- **不含** task_ids 索引（运行时由 TaskIndex 内存维护）。",
+  "description": "项目元数据契约（SQLite `projects.props` 中 `acowork_pm::types::Project` 的 JSON 序列化，serde deny_unknown_fields → additionalProperties: false）。\n\n**不含** tasks 数组（任务在 `tasks` 表）；**不含** task_ids 索引（聚合值由 SQLite 查询实时计算）。",
   "type": "object",
   "required": [
     "id",

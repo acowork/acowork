@@ -1,4 +1,4 @@
-//! SQLite schema for the PM authority (ADR-117 D6 step 3).
+//! SQLite schema for the PM authority (ADR-117).
 //!
 //! The layout follows the ADR-082 pattern that already works in
 //! `acowork-memory`: `props` holds the verbatim JSON serialization of the
@@ -153,17 +153,8 @@ pub fn user_version(conn: &Connection) -> Result<u32> {
         .map_err(db_err)
 }
 
-/// Idempotency gate: a database that already holds projects is not an import
-/// target. Merging two histories is a different, much harder problem.
-pub fn is_empty(conn: &Connection) -> Result<bool> {
-    let n: i64 = conn
-        .query_row("SELECT COUNT(*) FROM projects", [], |row| row.get(0))
-        .map_err(db_err)?;
-    Ok(n == 0)
-}
-
-/// `PRAGMA integrity_check` + `PRAGMA foreign_key_check`, run inside the
-/// import transaction before commit so a half-imported database is impossible.
+/// `PRAGMA integrity_check` + `PRAGMA foreign_key_check`, run on every open
+/// so a structurally broken database is refused before any write.
 ///
 /// `integrity_check` returns **one row per problem** plus a final `ok` row;
 /// `query_row` would read only the first and mis-report a multi-error DB.
@@ -287,7 +278,6 @@ mod tests {
         assert_eq!(user_version(&conn).unwrap(), SCHEMA_VERSION);
         assert_eq!(table_names(&conn).len(), 5);
         verify(&conn).unwrap();
-        assert!(is_empty(&conn).unwrap());
         // Opening an already-versioned DB is idempotent.
         drop(conn);
         let conn = open(&path).unwrap();

@@ -58,7 +58,10 @@ macro_rules! define_id {
                     return Err(Self(s.to_string()));
                 }
                 let suffix = &s[$prefix.len()..];
-                if !suffix.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+                if !suffix
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-')
+                {
                     return Err(Self(s.to_string()));
                 }
                 Ok(Self(s.to_string()))
@@ -78,9 +81,8 @@ macro_rules! define_id {
         impl std::str::FromStr for $name {
             type Err = crate::error::PmError;
             fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
-                Self::parse(s).map_err(|_| {
-                    crate::error::PmError::InvalidId(format!("{}: {}", $kind, s))
-                })
+                Self::parse(s)
+                    .map_err(|_| crate::error::PmError::InvalidId(format!("{}: {}", $kind, s)))
             }
         }
     };
@@ -150,7 +152,7 @@ impl TaskStatus {
     /// was wrong. An agent that cannot run `pm_update_task` a second time on a
     /// guess needs the legal moves in the first error.
     ///
-    /// ([`validate_transition`]: crate::store::tree::validate_transition)
+    /// ([`validate_transition`]: crate::store::rules::validate_transition)
     pub fn legal_successors(self) -> &'static [TaskStatus] {
         match self {
             // `pending → rejected`: a human rejects an agent-created task that
@@ -299,8 +301,8 @@ pub struct ProjectMember {
 
 /// 项目元数据。
 ///
-/// **不含** `tasks` 数组（任务分散存储在 `tasks/` 子目录下）。
-/// **不含** `task_ids` 索引（运行时由 [`crate::store::index::TaskIndex`] 维护）。
+/// **不含** `tasks` 数组（任务独立存于 `tasks` 表）。
+/// **不含** `task_ids` 索引（聚合值由 SQLite 查询实时计算）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Project {
@@ -641,7 +643,7 @@ impl TaskActivity {
     }
 
     /// 历史遗留数据补种用的**确定性** ID（见
-    /// [`crate::store::tree`] 的 `seeded_activity`）：同一个 `result`
+    /// [`crate::store::rules::seeded_activity`]：同一个 `result`
     /// 无论被读多少次，衍生的那条提交记录 ID 恒定，前端 key 因此稳定。
     pub fn seeded_id(task_id: &TaskId) -> ActivityId {
         ActivityId(format!("act-seed-{}", &task_id.as_str()[2..]))
@@ -708,9 +710,7 @@ where
 {
     struct ClearableVisitor<T>(std::marker::PhantomData<T>);
 
-    impl<'de, T: serde::de::DeserializeOwned> serde::de::Visitor<'de>
-        for ClearableVisitor<T>
-    {
+    impl<'de, T: serde::de::DeserializeOwned> serde::de::Visitor<'de> for ClearableVisitor<T> {
         type Value = Option<Option<T>>;
 
         fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -872,8 +872,8 @@ pub enum TaskSort {
 /// `tasks.length` / `tasks.filter(...)` client-side — a 503 KB payload and
 /// ~160 file opens for the biggest project, to render two numbers.
 ///
-/// Computed **from the in-memory index only**, so it costs one pass over
-/// `TaskIndex::by_id` with no disk reads and no task materialisation.
+/// Computed with one grouped SQL query, so it never materialises full task
+/// entities or opens per-task files.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProjectCounts {
     pub project_id: ProjectId,

@@ -67,7 +67,7 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use crate::error::PmError;
-use crate::store::tree::PmStore;
+use crate::store::contract::PmStore;
 
 // ── 状态与契约 ────────────────────────────────────────────────────────────
 
@@ -296,7 +296,11 @@ pub async fn jsonrpc_endpoint(
 
     // 批处理不支持（客户端单发）→ -32600 Invalid Request
     if parsed.is_array() {
-        return rpc_error(None, INVALID_REQUEST, "batch requests are not supported".into());
+        return rpc_error(
+            None,
+            INVALID_REQUEST,
+            "batch requests are not supported".into(),
+        );
     }
 
     let req: JsonRpcRequest = match serde_json::from_value(parsed) {
@@ -305,7 +309,11 @@ pub async fn jsonrpc_endpoint(
     };
 
     if req.jsonrpc != JSONRPC_VERSION {
-        return rpc_error(req.id.clone(), INVALID_REQUEST, "invalid jsonrpc version".into());
+        return rpc_error(
+            req.id.clone(),
+            INVALID_REQUEST,
+            "invalid jsonrpc version".into(),
+        );
     }
 
     handle_request(state, actor, req).await
@@ -350,20 +358,21 @@ async fn handle_request(state: McpState, actor: Option<String>, req: JsonRpcRequ
                 .get("name")
                 .and_then(Value::as_str)
                 .map(str::to_string);
-            let args = params
-                .get("arguments")
-                .cloned()
-                .unwrap_or(Value::Null);
+            let args = params.get("arguments").cloned().unwrap_or(Value::Null);
 
             let Some(name) = name else {
-                return rpc_error(id, INVALID_PARAMS, "tools/call requires a `name` field".into());
+                return rpc_error(
+                    id,
+                    INVALID_PARAMS,
+                    "tools/call requires a `name` field".into(),
+                );
             };
 
             match tools::dispatch(&state, actor.as_deref(), &name, args).await {
                 Ok(result) => {
                     // 规范化 MCP content 块：数据序列化为 JSON 文本
-                    let text = serde_json::to_string(&result)
-                        .unwrap_or_else(|_| "null".to_string());
+                    let text =
+                        serde_json::to_string(&result).unwrap_or_else(|_| "null".to_string());
                     let envelope = json!({
                         "content": [ { "type": "text", "text": text } ],
                         "isError": false
@@ -418,7 +427,8 @@ fn rpc_error(id: Option<Value>, code: i32, message: String) -> Response {
 mod tests {
     use super::*;
     use crate::config::PmConfig;
-    use crate::store::tree::{PmStore, TreePmStore};
+    use crate::store::contract::PmStore;
+    use crate::store::sqlite::SqlitePmStore;
     use crate::types::{ProjectId, ProjectStatus, TaskId, UpdateProject};
     use axum::routing::get;
     use std::time::Duration;
@@ -446,10 +456,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = PmConfig {
             data_dir: tmp.path().to_path_buf(),
-            index_rebuild_on_start: false,
             ..Default::default()
         };
-        let store = Arc::new(TreePmStore::new(cfg).await.unwrap());
+        let store = Arc::new(SqlitePmStore::open(cfg).unwrap());
         (
             McpState {
                 store,
@@ -624,7 +633,10 @@ mod tests {
     /// 人类批准一个 Agent 创建的任务（`review_status: pending → approved`）。
     /// Agent 侧任何"建完就 claim / 改状态"的测试都必须先过这一关，否则撞审批闸门。
     async fn approve_creation(store: &Arc<dyn PmStore>, tid: &str) {
-        store.review_task(&TaskId(tid.to_string()), true, "human", None).await.unwrap();
+        store
+            .review_task(&TaskId(tid.to_string()), true, "human", None)
+            .await
+            .unwrap();
     }
 
     /// 白名单 Agent 目录（测试桩）：仅当 agent_id 在白名单内才返回 true。
@@ -718,16 +730,15 @@ mod tests {
 
     /// 断言 JSON-RPC 错误：返回 (code, message 前缀, 完整 message)。
     fn assert_rpc_error(v: &Value) -> (i32, String, String) {
-        let msg = v["error"]["message"].as_str().unwrap_or_default().to_string();
+        let msg = v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         let prefix = msg
             .split_once(':')
             .map(|(p, _)| p.trim().to_string())
             .unwrap_or_else(|| msg.clone());
-        (
-            v["error"]["code"].as_i64().unwrap_or(0) as i32,
-            prefix,
-            msg,
-        )
+        (v["error"]["code"].as_i64().unwrap_or(0) as i32, prefix, msg)
     }
 
     /// e2e：Agent 完整生命周期 —— create_project → create_task(assignee+due_at)
@@ -774,24 +785,48 @@ mod tests {
         assert_eq!(task["assignee"], agent);
 
         // 3. 人类尚未批准 → claim 409 review_not_approved
-        let v = call_tool(&router, Some(agent), 12, "pm_claim_task", json!({ "task_id": tid }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            12,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         let (code, prefix, msg) = assert_rpc_error(&v);
         assert_eq!(prefix, "review_not_approved", "unapproved claim msg: {msg}");
         assert_eq!(code, INTERNAL_ERROR, "unapproved claim code: {msg}");
 
         // 人类批准创建 → review_status=approved，status 仍为 pending
         approve_creation(&store, &tid).await;
-        let v = call_tool(&router, Some(agent), 13, "pm_get_task", json!({ "task_id": tid }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            13,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         let chk = tool_text(&v);
         // Approval is read from `review_status` — there is no separate flag.
-        assert_eq!(chk["review_status"], "approved", "approved after review: {chk}");
-        assert_eq!(chk["status"], "pending", "creation approval keeps status: {chk}");
+        assert_eq!(
+            chk["review_status"], "approved",
+            "approved after review: {chk}"
+        );
+        assert_eq!(
+            chk["status"], "pending",
+            "creation approval keeps status: {chk}"
+        );
 
         // 4. claim（assignee 本人，批准后放行）
-        let v = call_tool(&router, Some(agent), 14, "pm_claim_task", json!({ "task_id": tid }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            14,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert!(v["error"].is_null(), "claim failed: {v}");
         assert_eq!(tool_text(&v)["status"], "in_progress");
 
@@ -808,8 +843,14 @@ mod tests {
         assert_eq!(tool_text(&v)["status"], "submitted");
 
         // 6. check（创建者可查；结果审核尚未发生，review_status 仍为已批准）
-        let v = call_tool(&router, Some(agent), 16, "pm_get_task", json!({ "task_id": tid }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            16,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert!(v["error"].is_null(), "check failed: {v}");
         let chk = tool_text(&v);
         assert_eq!(chk["status"], "submitted");
@@ -844,9 +885,18 @@ mod tests {
         let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
 
         // 非 assignee：claim / submit / update 均 403
-        let v = call_tool(&router, Some(intruder), 22, "pm_claim_task", json!({ "task_id": tid }))
-            .await;
-        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "claim by non-assignee: {v}");
+        let v = call_tool(
+            &router,
+            Some(intruder),
+            22,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert_eq!(
+            v["error"]["code"], CODE_FORBIDDEN,
+            "claim by non-assignee: {v}"
+        );
 
         let v = call_tool(
             &router,
@@ -856,7 +906,10 @@ mod tests {
             json!({ "task_id": tid, "text": "x" }),
         )
         .await;
-        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "submit by non-assignee: {v}");
+        assert_eq!(
+            v["error"]["code"], CODE_FORBIDDEN,
+            "submit by non-assignee: {v}"
+        );
 
         let v = call_tool(
             &router,
@@ -866,7 +919,10 @@ mod tests {
             json!({ "task_id": tid, "title": "hijack" }),
         )
         .await;
-        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "update by non-assignee: {v}");
+        assert_eq!(
+            v["error"]["code"], CODE_FORBIDDEN,
+            "update by non-assignee: {v}"
+        );
 
         // G1-b: an unassigned task is no longer frozen. A project MEMBER may
         // claim it; a NON-member still cannot, and the rejection now names the
@@ -889,7 +945,10 @@ mod tests {
             json!({ "task_id": tid2 }),
         )
         .await;
-        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "claim unassigned by non-member: {v}");
+        assert_eq!(
+            v["error"]["code"], CODE_FORBIDDEN,
+            "claim unassigned by non-member: {v}"
+        );
         assert!(
             v["error"]["message"]
                 .as_str()
@@ -907,7 +966,14 @@ mod tests {
         let (router, store) = test_router_and_store().await;
         let owner = "agent-owner";
 
-        let v = call_tool(&router, Some(owner), 40, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            40,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         let v = call_tool(
             &router,
@@ -918,21 +984,50 @@ mod tests {
         )
         .await;
         let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
-        assert!(tool_text(&v)["assignee"].is_null(), "fresh task has no assignee: {v}");
+        assert!(
+            tool_text(&v)["assignee"].is_null(),
+            "fresh task has no assignee: {v}"
+        );
 
         // A3: still awaiting human approval → the approval gate wins over the
         // new self-claim path.
-        let v = call_tool(&router, Some(owner), 42, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            42,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         let (_, prefix, _) = assert_rpc_error(&v);
-        assert_eq!(prefix, "review_not_approved", "unapproved member claim: {v}");
+        assert_eq!(
+            prefix, "review_not_approved",
+            "unapproved member claim: {v}"
+        );
 
         // A1: after approval, the member claims it and becomes the assignee.
         approve_creation(&store, &tid).await;
-        let v = call_tool(&router, Some(owner), 43, "pm_claim_task", json!({ "task_id": tid })).await;
-        assert!(v["error"].is_null(), "member claim of unassigned failed: {v}");
+        let v = call_tool(
+            &router,
+            Some(owner),
+            43,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert!(
+            v["error"].is_null(),
+            "member claim of unassigned failed: {v}"
+        );
         let claimed = tool_text(&v);
-        assert_eq!(claimed["status"], "in_progress", "claim → in_progress: {claimed}");
-        assert_eq!(claimed["assignee"], owner, "claim wrote assignee = actor: {claimed}");
+        assert_eq!(
+            claimed["status"], "in_progress",
+            "claim → in_progress: {claimed}"
+        );
+        assert_eq!(
+            claimed["assignee"], owner,
+            "claim wrote assignee = actor: {claimed}"
+        );
     }
 
     /// G1-b / A2: a non-member may not claim an unassigned task; the rejection
@@ -944,7 +1039,14 @@ mod tests {
         let owner = "agent-owner";
         let stranger = "agent-stranger";
 
-        let v = call_tool(&router, Some(owner), 44, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            44,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         let v = call_tool(
             &router,
@@ -958,14 +1060,34 @@ mod tests {
         // Approve so the ONLY thing that can reject the stranger is membership.
         approve_creation(&store, &tid).await;
 
-        let v = call_tool(&router, Some(stranger), 46, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(stranger),
+            46,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "stranger claim: {v}");
         let msg = v["error"]["message"].as_str().unwrap_or_default();
         assert!(msg.contains("not a member"), "must say not-a-member: {v}");
-        assert!(!msg.contains("no assignee"), "must NOT say no-assignee: {v}");
+        assert!(
+            !msg.contains("no assignee"),
+            "must NOT say no-assignee: {v}"
+        );
 
-        let v = call_tool(&router, Some(owner), 47, "pm_get_task", json!({ "task_id": tid })).await;
-        assert!(tool_text(&v)["assignee"].is_null(), "stranger claim must not assign: {v}");
+        let v = call_tool(
+            &router,
+            Some(owner),
+            47,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert!(
+            tool_text(&v)["assignee"].is_null(),
+            "stranger claim must not assign: {v}"
+        );
     }
 
     /// G1-b / A4: the dependency gate still fires for a member claiming an
@@ -975,9 +1097,23 @@ mod tests {
         let (router, store) = test_router_and_store().await;
         let owner = "agent-owner";
 
-        let v = call_tool(&router, Some(owner), 48, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            48,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
-        let v = call_tool(&router, Some(owner), 49, "pm_create_task", json!({ "project_id": pid, "title": "blocker" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            49,
+            "pm_create_task",
+            json!({ "project_id": pid, "title": "blocker" }),
+        )
+        .await;
         let blocker = tool_text(&v)["id"].as_str().unwrap().to_string();
         let v = call_tool(
             &router,
@@ -992,7 +1128,14 @@ mod tests {
         approve_creation(&store, &blocker).await;
         approve_creation(&store, &blocked).await;
 
-        let v = call_tool(&router, Some(owner), 51, "pm_claim_task", json!({ "task_id": blocked })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            51,
+            "pm_claim_task",
+            json!({ "task_id": blocked }),
+        )
+        .await;
         let (_, prefix, _) = assert_rpc_error(&v);
         assert_eq!(prefix, "dependency_not_satisfied", "blocked claim: {v}");
     }
@@ -1005,10 +1148,21 @@ mod tests {
         let owner = "agent-owner";
         let other = "agent-other";
 
-        let v = call_tool(&router, Some(owner), 52, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            52,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         store
-            .add_project_member(&pid.parse().unwrap(), other, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                other,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         let v = call_tool(
@@ -1023,10 +1177,23 @@ mod tests {
         approve_creation(&store, &tid).await;
 
         // owner is a member but not the assignee → still forbidden, "assigned to".
-        let v = call_tool(&router, Some(owner), 54, "pm_claim_task", json!({ "task_id": tid })).await;
-        assert_eq!(v["error"]["code"], CODE_FORBIDDEN, "claim assigned-to-other: {v}");
+        let v = call_tool(
+            &router,
+            Some(owner),
+            54,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert_eq!(
+            v["error"]["code"], CODE_FORBIDDEN,
+            "claim assigned-to-other: {v}"
+        );
         let msg = v["error"]["message"].as_str().unwrap_or_default();
-        assert!(msg.contains("assigned to instance"), "must name the assignee: {v}");
+        assert!(
+            msg.contains("assigned to instance"),
+            "must name the assignee: {v}"
+        );
     }
 
     // ── G1-c: owner-level adoption of unassigned / orphaned tasks ──────
@@ -1041,10 +1208,21 @@ mod tests {
         let owner = "agent-owner";
         let target = "agent-target";
 
-        let v = call_tool(&router, Some(owner), 60, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            60,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         store
-            .add_project_member(&pid.parse().unwrap(), target, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                target,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         let v = call_tool(
@@ -1093,23 +1271,40 @@ mod tests {
     async fn e2e_owner_adopts_task_orphaned_by_reinstall() {
         let ghost = "agent-ghost-uninstalled";
         let target = "agent-target";
-        let (router, store) = test_router_store_with_dir(Arc::new(
-            WhitelistAgentDirectory::new(&["agent-owner", target]),
-        ))
-        .await;
+        let (router, store) =
+            test_router_store_with_dir(Arc::new(WhitelistAgentDirectory::new(&[
+                "agent-owner",
+                target,
+            ])))
+            .await;
         let owner = "agent-owner";
 
-        let v = call_tool(&router, Some(owner), 63, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            63,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         // Seed the orphan state at the store level: the store's gate is
         // membership-only, so a since-uninstalled member can still be written
         // there — exactly the situation a reinstall leaves behind.
         store
-            .add_project_member(&pid.parse().unwrap(), ghost, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                ghost,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         store
-            .add_project_member(&pid.parse().unwrap(), target, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                target,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         let v = call_tool(
@@ -1146,7 +1341,9 @@ mod tests {
 
         let history = store.list_activity(&tid.parse().unwrap()).await.unwrap();
         assert!(
-            history.iter().any(|a| a.text.contains(ghost) && a.text.contains(target)),
+            history
+                .iter()
+                .any(|a| a.text.contains(ghost) && a.text.contains(target)),
             "the trace must show the dead instance being replaced: {history:?}"
         );
     }
@@ -1164,10 +1361,21 @@ mod tests {
         let dir = Arc::new(WhitelistAgentDirectory::new(&[owner, member, stranger]));
         let (router, store) = test_router_store_with_dir(dir).await;
 
-        let v = call_tool(&router, Some(owner), 66, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            66,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         store
-            .add_project_member(&pid.parse().unwrap(), member, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                member,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         let v = call_tool(
@@ -1204,11 +1412,24 @@ mod tests {
         .await;
         let (_, prefix, msg) = assert_rpc_error(&v);
         assert_eq!(prefix, "assignee_not_project_member", "unexpected: {v}");
-        assert!(msg.contains(stranger), "must name the rejected instance: {v}");
+        assert!(
+            msg.contains(stranger),
+            "must name the rejected instance: {v}"
+        );
 
         // And the task is still unassigned after both refusals.
-        let v = call_tool(&router, Some(owner), 70, "pm_get_task", json!({ "task_id": tid })).await;
-        assert!(tool_text(&v)["assignee"].is_null(), "refused adoption must not half-apply: {v}");
+        let v = call_tool(
+            &router,
+            Some(owner),
+            70,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert!(
+            tool_text(&v)["assignee"].is_null(),
+            "refused adoption must not half-apply: {v}"
+        );
     }
 
     /// G1-c / A5: the creator's minimal fix right — non-status fields on
@@ -1219,10 +1440,21 @@ mod tests {
         let owner = "agent-owner";
         let creator = "agent-creator";
 
-        let v = call_tool(&router, Some(owner), 71, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            71,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         store
-            .add_project_member(&pid.parse().unwrap(), creator, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                creator,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         // The creator is a member but NOT the project owner.
@@ -1263,7 +1495,10 @@ mod tests {
         .await;
         let (_, prefix, msg) = assert_rpc_error(&v);
         assert_eq!(prefix, "forbidden", "creator must not adopt: {v}");
-        assert!(msg.contains("only the project owner"), "must say who may: {v}");
+        assert!(
+            msg.contains("only the project owner"),
+            "must say who may: {v}"
+        );
 
         // Negative 2: status stays with the assignee and the human surfaces.
         let v = call_tool(
@@ -1288,10 +1523,21 @@ mod tests {
         let owner = "agent-owner";
         let worker = "agent-worker";
 
-        let v = call_tool(&router, Some(owner), 76, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            76,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         store
-            .add_project_member(&pid.parse().unwrap(), worker, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                worker,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         let v = call_tool(
@@ -1315,8 +1561,19 @@ mod tests {
         .await;
         let (_, prefix, _) = assert_rpc_error(&v);
         assert_eq!(prefix, "forbidden", "owner must not drive status: {v}");
-        let v = call_tool(&router, Some(owner), 79, "pm_get_task", json!({ "task_id": tid })).await;
-        assert_eq!(tool_text(&v)["status"], "pending", "refused status write must not apply: {v}");
+        let v = call_tool(
+            &router,
+            Some(owner),
+            79,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert_eq!(
+            tool_text(&v)["status"],
+            "pending",
+            "refused status write must not apply: {v}"
+        );
 
         // Owner may still rename it (field right, no status in the call).
         let v = call_tool(
@@ -1331,7 +1588,14 @@ mod tests {
 
         // The assignee path is untouched: approved + claimed → status moves.
         approve_creation(&store, &tid).await;
-        call_tool(&router, Some(worker), 81, "pm_claim_task", json!({ "task_id": tid })).await;
+        call_tool(
+            &router,
+            Some(worker),
+            81,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         let v = call_tool(
             &router,
             Some(worker),
@@ -1341,7 +1605,10 @@ mod tests {
         )
         .await;
         // in_progress → submitted is the assignee's legal move (via store FSM).
-        assert!(v["error"].is_null(), "assignee status path must stay open: {v}");
+        assert!(
+            v["error"].is_null(),
+            "assignee status path must stay open: {v}"
+        );
     }
 
     /// G1-c / A6: a caller who is neither assignee, owner, nor creator keeps
@@ -1354,10 +1621,21 @@ mod tests {
         let assignee = "agent-assignee";
         let stranger = "agent-stranger";
 
-        let v = call_tool(&router, Some(owner), 83, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            83,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         store
-            .add_project_member(&pid.parse().unwrap(), assignee, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                assignee,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
 
@@ -1409,7 +1687,10 @@ mod tests {
             json!({ "task_id": tid2, "title": "hijack" }),
         )
         .await;
-        let msg = v["error"]["message"].as_str().unwrap_or_default().to_string();
+        let msg = v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         assert_eq!(
             msg,
             format!(
@@ -1418,7 +1699,6 @@ mod tests {
             "wording must be byte-identical to the historical message"
         );
     }
-
 
     /// 匿名只读：list/get 允许；写操作 / 自查工具要求身份（401 语义）。
     #[tokio::test]
@@ -1454,7 +1734,10 @@ mod tests {
             ("pm_get_task", json!({ "task_id": tid })),
         ] {
             let v = call_tool(&router, None, 32, name, args).await;
-            assert!(v["error"].is_null(), "anonymous {name} should be allowed: {v}");
+            assert!(
+                v["error"].is_null(),
+                "anonymous {name} should be allowed: {v}"
+            );
         }
 
         // 匿名写操作 → 未认证（CODE_UNAUTHENTICATED）
@@ -1467,8 +1750,7 @@ mod tests {
         ] {
             let v = call_tool(&router, None, 33, name, args).await;
             assert_eq!(
-                v["error"]["code"],
-                CODE_UNAUTHENTICATED,
+                v["error"]["code"], CODE_UNAUTHENTICATED,
                 "anonymous {name} should be rejected: {v}"
             );
         }
@@ -1618,8 +1900,14 @@ mod tests {
         .await;
         let tid_b = tool_text(&v)["id"].as_str().unwrap().to_string();
         // B 深度 = 1，parent = A
-        let v = call_tool(&router, Some(agent), 50, "pm_get_task", json!({ "task_id": tid_b }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            50,
+            "pm_get_task",
+            json!({ "task_id": tid_b }),
+        )
+        .await;
         assert_eq!(tool_text(&v)["depth"], 1);
         assert_eq!(tool_text(&v)["parent_id"], tid_a);
 
@@ -1636,8 +1924,14 @@ mod tests {
         assert_eq!(code, INTERNAL_ERROR, "cycle error msg: {msg}");
         assert_eq!(prefix, "cycle_detected", "unexpected: {msg}");
         // A 层级不变
-        let v = call_tool(&router, Some(agent), 52, "pm_get_task", json!({ "task_id": tid_a }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            52,
+            "pm_get_task",
+            json!({ "task_id": tid_a }),
+        )
+        .await;
         assert_eq!(tool_text(&v)["depth"], 0);
 
         // 提升 B 为根（parent_task_id=null）
@@ -1650,8 +1944,14 @@ mod tests {
         )
         .await;
         assert!(v["error"].is_null(), "reparent to root failed: {v}");
-        let v = call_tool(&router, Some(agent), 54, "pm_get_task", json!({ "task_id": tid_b }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            54,
+            "pm_get_task",
+            json!({ "task_id": tid_b }),
+        )
+        .await;
         assert_eq!(tool_text(&v)["depth"], 0);
         assert_eq!(tool_text(&v)["parent_id"], Value::Null);
     }
@@ -1675,13 +1975,21 @@ mod tests {
 
         // 联动指派：agent-other 也要是成员才能被指派
         store
-            .add_project_member(&pid.parse().unwrap(), other, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                other,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
 
         // 两个给自己的任务 + 一个给别人的任务
         for i in 0..3 {
-            let (title, assignee) = if i < 2 { ("mine", agent) } else { ("others", other) };
+            let (title, assignee) = if i < 2 {
+                ("mine", agent)
+            } else {
+                ("others", other)
+            };
             let v = call_tool(
                 &router,
                 Some(agent),
@@ -1712,8 +2020,14 @@ mod tests {
         // status 过滤：把第一个 claim 后，pending 只剩 1 个
         let my_tid = mine["tasks"][0]["id"].as_str().unwrap().to_string();
         approve_creation(&store, &my_tid).await;
-        let v = call_tool(&router, Some(agent), 57, "pm_claim_task", json!({ "task_id": my_tid }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            57,
+            "pm_claim_task",
+            json!({ "task_id": my_tid }),
+        )
+        .await;
         assert!(v["error"].is_null(), "claim failed: {v}");
         let v = call_tool(
             &router,
@@ -1757,7 +2071,10 @@ mod tests {
             json!({ "project_id": pid, "title": "T", "asignee": "agent-a" }),
         )
         .await;
-        let msg = v["error"]["message"].as_str().unwrap_or_default().to_string();
+        let msg = v["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         assert!(msg.contains("asignee"), "must name the offending key: {v}");
         assert!(
             msg.contains("assignee"),
@@ -2097,11 +2414,7 @@ mod tests {
         });
         let gw = format!("http://127.0.0.1:{port}");
 
-        let dir = Arc::new(HttpAgentDirectory::new(
-            gw,
-            None,
-            Duration::from_secs(3600),
-        ));
+        let dir = Arc::new(HttpAgentDirectory::new(gw, None, Duration::from_secs(3600)));
         dir.refresh().await;
 
         // 第一次断言:role = "Project Manager"
@@ -2113,7 +2426,10 @@ mod tests {
         dir.refresh().await;
 
         // 第二次断言:role 已收敛(否则 PM 永远拿不到 manifest 升级后的 role)
-        let info = dir.agent_info(instance).await.expect("cached meta after refresh");
+        let info = dir
+            .agent_info(instance)
+            .await
+            .expect("cached meta after refresh");
         assert_eq!(
             info.role.as_deref(),
             Some("Senior Software Engineer"),
@@ -2149,12 +2465,18 @@ mod tests {
         let proj = tool_text(&v);
         let pid_str = proj["id"].as_str().unwrap().to_string();
         let pid: ProjectId = pid_str.parse().unwrap();
-        store.add_project_member(&pid, worker, crate::types::MemberKind::Agent).await.unwrap();
+        store
+            .add_project_member(&pid, worker, crate::types::MemberKind::Agent)
+            .await
+            .unwrap();
 
         // pm_create_project 返回值带 created_by_meta
         assert_eq!(proj["created_by"], creator);
         assert_eq!(proj["created_by_meta"]["instance_id"], creator);
-        assert_eq!(proj["created_by_meta"]["agent_id"], "com.acowork.senior-engineer");
+        assert_eq!(
+            proj["created_by_meta"]["agent_id"],
+            "com.acowork.senior-engineer"
+        );
         assert_eq!(proj["created_by_meta"]["name"], "Senior Engineer");
 
         let v = call_tool(
@@ -2199,7 +2521,10 @@ mod tests {
         )
         .await;
         let list_tasks_text = tool_text(&v);
-        let tasks = list_tasks_text["tasks"].as_array().expect("list_tasks returns an envelope").clone();
+        let tasks = list_tasks_text["tasks"]
+            .as_array()
+            .expect("list_tasks returns an envelope")
+            .clone();
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0]["assignee_meta"]["name"], "Architect");
         assert_eq!(tasks[0]["created_by_meta"]["name"], "Senior Engineer");
@@ -2208,17 +2533,14 @@ mod tests {
         assert_eq!(tasks[0]["created_by"], creator);
 
         // pm_list_projects：每个 project 带 created_by_meta
-        let v = call_tool(
-            &router,
-            Some(creator),
-            104,
-            "pm_list_projects",
-            json!({}),
-        )
-        .await;
+        let v = call_tool(&router, Some(creator), 104, "pm_list_projects", json!({})).await;
         let list_projects_text = tool_text(&v);
         let projs = list_projects_text.as_array().unwrap();
-        assert!(projs.iter().any(|p| p["created_by_meta"]["name"] == "Senior Engineer"));
+        assert!(
+            projs
+                .iter()
+                .any(|p| p["created_by_meta"]["name"] == "Senior Engineer")
+        );
 
         // pm_list_tasks(assignee="me")（worker 自查）：assignee_meta 是自己，created_by_meta 是 creator
         let v = call_tool(
@@ -2270,8 +2592,7 @@ mod tests {
                 None
             }
         }
-        let (router, store) =
-            test_router_store_with_dir(Arc::new(ExistsButNoMetaDirectory)).await;
+        let (router, store) = test_router_store_with_dir(Arc::new(ExistsButNoMetaDirectory)).await;
 
         // 人类创建（actor = "human"）：created_by_meta 应该为 null
         let v = call_tool(
@@ -2322,9 +2643,12 @@ mod tests {
         impl RecordingAgentDirectory {
             fn new() -> (Self, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
                 let queried = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-                (Self {
-                    queried: queried.clone(),
-                }, queried)
+                (
+                    Self {
+                        queried: queried.clone(),
+                    },
+                    queried,
+                )
             }
         }
         #[async_trait::async_trait]
@@ -2362,7 +2686,11 @@ mod tests {
         // 不查询，assignee 正常查询
         let ghost = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";
         store
-            .add_project_member(&pid_str.parse().unwrap(), ghost, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid_str.parse().unwrap(),
+                ghost,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         let v = call_tool(
@@ -2396,14 +2724,7 @@ mod tests {
         .await;
         assert!(v["error"].is_null(), "get_project failed: {v}");
         // 列表：created_by = "human" → 批量查询被过滤 → 无新增查询
-        let v = call_tool(
-            &router,
-            Some("human"),
-            123,
-            "pm_list_projects",
-            json!({}),
-        )
-        .await;
+        let v = call_tool(&router, Some("human"), 123, "pm_list_projects", json!({})).await;
         assert!(v["error"].is_null(), "list_projects failed: {v}");
         {
             let q = queried.lock().unwrap();
@@ -2461,8 +2782,14 @@ mod tests {
         let tid_b = tool_text(&v)["id"].as_str().unwrap().to_string();
 
         // B 被 A 阻塞 → is_blocked=true
-        let v = call_tool(&router, Some(agent), 69, "pm_get_task", json!({ "task_id": tid_b }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            69,
+            "pm_get_task",
+            json!({ "task_id": tid_b }),
+        )
+        .await;
         let b = tool_text(&v);
         assert_eq!(b["is_blocked"], true, "B should be blocked: {b}");
         assert_eq!(b["blocked_by"][0], tid_a);
@@ -2472,8 +2799,14 @@ mod tests {
         approve_creation(&store, &tid_b).await;
 
         // claim B → 409 dependency_not_satisfied
-        let v = call_tool(&router, Some(agent), 70, "pm_claim_task", json!({ "task_id": tid_b }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            70,
+            "pm_claim_task",
+            json!({ "task_id": tid_b }),
+        )
+        .await;
         let (code, prefix, msg) = assert_rpc_error(&v);
         assert_eq!(code, INTERNAL_ERROR, "dep error msg: {msg}");
         assert_eq!(prefix, "dependency_not_satisfied", "unexpected: {msg}");
@@ -2486,14 +2819,29 @@ mod tests {
             .submit_task(&tid_a_typed, "done by agent", vec![], vec![], agent)
             .await
             .unwrap();
-        store.review_task(&tid_a_typed, true, "human", None).await.unwrap();
-        let v = call_tool(&router, Some(agent), 71, "pm_get_task", json!({ "task_id": tid_a }))
-            .await;
+        store
+            .review_task(&tid_a_typed, true, "human", None)
+            .await
+            .unwrap();
+        let v = call_tool(
+            &router,
+            Some(agent),
+            71,
+            "pm_get_task",
+            json!({ "task_id": tid_a }),
+        )
+        .await;
         assert_eq!(tool_text(&v)["status"], "done", "A should be done: {v}");
 
         // B 不再被阻塞 → 可 claim
-        let v = call_tool(&router, Some(agent), 72, "pm_claim_task", json!({ "task_id": tid_b }))
-            .await;
+        let v = call_tool(
+            &router,
+            Some(agent),
+            72,
+            "pm_claim_task",
+            json!({ "task_id": tid_b }),
+        )
+        .await;
         assert!(v["error"].is_null(), "claim B after dep done failed: {v}");
         assert_eq!(tool_text(&v)["status"], "in_progress");
     }
@@ -2573,7 +2921,11 @@ mod tests {
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         // 联动指派：agent-other 也要是成员才能被指派
         store
-            .add_project_member(&pid.parse().unwrap(), other, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                other,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         for (i, (title, a)) in [("T1", agent), ("T2", other)].into_iter().enumerate() {
@@ -2597,7 +2949,10 @@ mod tests {
             .iter()
             .map(|p| p["title"].as_str().unwrap())
             .collect();
-        assert!(!titles.contains(&"archived-proj"), "archived shown by default: {projs}");
+        assert!(
+            !titles.contains(&"archived-proj"),
+            "archived shown by default: {projs}"
+        );
 
         // include_archived=true：归档项目出现
         let v = call_tool(
@@ -2610,7 +2965,11 @@ mod tests {
         .await;
         let projs = tool_text(&v);
         assert!(
-            projs.as_array().unwrap().iter().any(|p| p["title"] == "archived-proj"),
+            projs
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|p| p["title"] == "archived-proj"),
             "archived missing with include_archived: {projs}"
         );
 
@@ -2670,7 +3029,10 @@ mod tests {
             json!({ "task_id": tid, "parent_task_id": null }),
         )
         .await;
-        assert_eq!(v["error"]["code"], CODE_UNAUTHENTICATED, "anonymous reparent: {v}");
+        assert_eq!(
+            v["error"]["code"], CODE_UNAUTHENTICATED,
+            "anonymous reparent: {v}"
+        );
     }
 
     // ── P0: dispatch usability (design 32 §3.3 / plan T0-1..T0-3) ──────
@@ -2702,8 +3064,16 @@ mod tests {
     #[tokio::test]
     async fn pm_list_agents_returns_instance_ids_and_filters_query() {
         let dir = Arc::new(MapAgentDirectory::new(&[
-            ("11111111-1111-4111-8111-111111111111", "com.acowork.architect", "Architect"),
-            ("22222222-2222-4222-8222-222222222222", "com.acowork.qa", "QA Bot"),
+            (
+                "11111111-1111-4111-8111-111111111111",
+                "com.acowork.architect",
+                "Architect",
+            ),
+            (
+                "22222222-2222-4222-8222-222222222222",
+                "com.acowork.qa",
+                "QA Bot",
+            ),
         ]));
         dir.set(
             "11111111-1111-4111-8111-111111111111",
@@ -2720,7 +3090,10 @@ mod tests {
         let v = call_tool(&router, Some("pm-actor"), 1, "pm_list_agents", json!({})).await;
         let got = tool_text(&v);
         assert_eq!(got["total"], 2, "{got}");
-        assert_eq!(got["mode"], "directory", "no project_id = the invitable set");
+        assert_eq!(
+            got["mode"], "directory",
+            "no project_id = the invitable set"
+        );
         assert_eq!(got["directory_available"], true);
         assert_eq!(
             got["agents"][0]["online"], true,
@@ -2733,7 +3106,10 @@ mod tests {
             .iter()
             .map(|a| a["instance_id"].as_str().unwrap())
             .collect();
-        assert!(ids.contains(&"11111111-1111-4111-8111-111111111111"), "{ids:?}");
+        assert!(
+            ids.contains(&"11111111-1111-4111-8111-111111111111"),
+            "{ids:?}"
+        );
         assert_eq!(
             got["agents"][0]["agent_id"].as_str(),
             Some("com.acowork.architect"),
@@ -2845,7 +3221,10 @@ mod tests {
         )
         .await;
         let got_q = tool_text(&v);
-        assert_eq!(got_q["count"], 1, "the instance name is searchable: {got_q}");
+        assert_eq!(
+            got_q["count"], 1,
+            "the instance name is searchable: {got_q}"
+        );
         assert_eq!(got_q["agents"][0]["instance_id"], kevin);
 
         // 3. 排序键 = 实例名：SSE.Cassie 在 SSE.Kevin 之前
@@ -2966,8 +3345,14 @@ mod tests {
             .iter()
             .find(|a| a["instance_id"] == "eng-inst")
             .unwrap();
-        assert_eq!(eng["role"], "Senior Software Engineer", "roster rows carry directory metadata");
-        assert_eq!(eng["online"], false, "`false` is a real answer, distinct from null");
+        assert_eq!(
+            eng["role"], "Senior Software Engineer",
+            "roster rows carry directory metadata"
+        );
+        assert_eq!(
+            eng["online"], false,
+            "`false` is a real answer, distinct from null"
+        );
 
         // The contract is proven by acting on it, not by reading it.
         let v = call_tool(
@@ -2978,7 +3363,10 @@ mod tests {
             json!({ "project_id": pid, "title": "T", "assignee": "eng-inst" }),
         )
         .await;
-        assert!(v["error"].is_null(), "a listed member must be dispatchable: {v}");
+        assert!(
+            v["error"].is_null(),
+            "a listed member must be dispatchable: {v}"
+        );
     }
 
     /// Roster mode must NOT inherit directory mode's 503. The assignable keys
@@ -3008,7 +3396,10 @@ mod tests {
             got["agents"][0]["instance_id"].is_string(),
             "the id is still usable even with no metadata: {got}"
         );
-        assert!(got["agents"][0]["name"].is_null(), "unreported metadata is null, not invented");
+        assert!(
+            got["agents"][0]["name"].is_null(),
+            "unreported metadata is null, not invented"
+        );
     }
 
     /// Creates a project owned by `actor` and returns its project_id.
@@ -3089,15 +3480,20 @@ mod tests {
             .await;
             assert!(v["error"].is_null(), "attempt {i} failed: {v}");
         }
-        let got = tool_text(&call_tool(
-            &router,
-            Some("owner-inst"),
-            3,
-            "pm_add_project_member",
-            json!({ "project_id": pid, "instance_id": "target-inst" }),
-        )
-        .await);
-        assert_eq!(got["already_member"], true, "second add must be observable: {got}");
+        let got = tool_text(
+            &call_tool(
+                &router,
+                Some("owner-inst"),
+                3,
+                "pm_add_project_member",
+                json!({ "project_id": pid, "instance_id": "target-inst" }),
+            )
+            .await,
+        );
+        assert_eq!(
+            got["already_member"], true,
+            "second add must be observable: {got}"
+        );
 
         // And the roster really has them once — not twice.
         let v = call_tool(
@@ -3247,8 +3643,14 @@ mod tests {
 
         // The assignee can too.
         approve_creation(&store, &tid).await;
-        call_tool(&router, Some("eng-inst"), 5, "pm_claim_task", json!({ "task_id": tid }))
-            .await;
+        call_tool(
+            &router,
+            Some("eng-inst"),
+            5,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         let v = call_tool(
             &router,
             Some("eng-inst"),
@@ -3300,10 +3702,21 @@ mod tests {
         let owner = "agent-owner";
         let worker = "agent-worker";
 
-        let v = call_tool(&router, Some(owner), 90, "pm_create_project", json!({ "title": "P" })).await;
+        let v = call_tool(
+            &router,
+            Some(owner),
+            90,
+            "pm_create_project",
+            json!({ "title": "P" }),
+        )
+        .await;
         let pid = tool_text(&v)["id"].as_str().unwrap().to_string();
         store
-            .add_project_member(&pid.parse().unwrap(), worker, crate::types::MemberKind::Agent)
+            .add_project_member(
+                &pid.parse().unwrap(),
+                worker,
+                crate::types::MemberKind::Agent,
+            )
             .await
             .unwrap();
         // The task's creator is `worker`, its assignee is `worker` after the
@@ -3383,7 +3796,10 @@ mod tests {
         let got = tool_text(&v);
         assert_eq!(got["total"], 5, "{got}");
         assert_eq!(got["returned"], 2, "{got}");
-        assert_eq!(got["truncated"], true, "must flag that older entries exist: {got}");
+        assert_eq!(
+            got["truncated"], true,
+            "must flag that older entries exist: {got}"
+        );
         // The tail (most recent), oldest-first within the page.
         assert_eq!(got["activity"][0]["text"], "note-3", "{got}");
         assert_eq!(got["activity"][1]["text"], "note-4", "{got}");
@@ -3466,8 +3882,14 @@ mod tests {
         )
         .await;
         let found = tool_text(&v);
-        assert_eq!(found["count"], 1, "role query should find the engineer: {found}");
-        let target = found["agents"][0]["instance_id"].as_str().unwrap().to_string();
+        assert_eq!(
+            found["count"], 1,
+            "role query should find the engineer: {found}"
+        );
+        let target = found["agents"][0]["instance_id"]
+            .as_str()
+            .unwrap()
+            .to_string();
         assert_eq!(target, "eng-inst");
 
         // 4. Invite — the M7 unlock, no human needed.
@@ -3533,7 +3955,10 @@ mod tests {
             }),
         )
         .await;
-        assert!(v["error"].is_null(), "the dispatcher must be able to comment: {v}");
+        assert!(
+            v["error"].is_null(),
+            "the dispatcher must be able to comment: {v}"
+        );
 
         // 8. Follow-up: an agent-created task waits for human approval, and the
         //    tool says so instead of pretending it is already dispatched.
@@ -3626,7 +4051,8 @@ mod tests {
         )
         .await;
         assert_eq!(
-            tool_text(&v)["doc_path"], expected,
+            tool_text(&v)["doc_path"],
+            expected,
             "retitle must not move the directory"
         );
     }
@@ -3744,7 +4170,10 @@ mod tests {
             task["assignee"], actor,
             "the sentinel must resolve to the caller: {task}"
         );
-        assert_ne!(task["assignee"], "me", "the literal sentinel must never be stored");
+        assert_ne!(
+            task["assignee"], "me",
+            "the literal sentinel must never be stored"
+        );
 
         // The persisted task — not just the response projection — carries the UUID.
         let tid = task["id"].as_str().unwrap().to_string();
@@ -3784,7 +4213,10 @@ mod tests {
         )
         .await;
         let t = tool_text(&v);
-        assert_eq!(t["total"], 1, "the self-assigned task must be findable: {t}");
+        assert_eq!(
+            t["total"], 1,
+            "the self-assigned task must be findable: {t}"
+        );
         assert_eq!(t["tasks"][0]["assignee"], actor);
     }
 
@@ -3860,7 +4292,8 @@ mod tests {
             .await;
             assert!(v["error"].is_null(), "`{spelling}` must resolve: {v}");
             assert_eq!(
-                tool_text(&v)["assignee"], actor,
+                tool_text(&v)["assignee"],
+                actor,
                 "`{spelling}` must resolve to the caller"
             );
         }
@@ -3877,12 +4310,9 @@ mod tests {
         let agent = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
         let pid = project_with_owner(&router, agent, "Gates").await;
 
-        for (i, bogus) in [
-            "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d",
-            "com.acowork.foo",
-        ]
-        .iter()
-        .enumerate()
+        for (i, bogus) in ["5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d", "com.acowork.foo"]
+            .iter()
+            .enumerate()
         {
             let v = call_tool(
                 &router,
@@ -3895,10 +4325,7 @@ mod tests {
             let (code, prefix, msg) = assert_rpc_error(&v);
             assert_eq!(code, INTERNAL_ERROR, "unexpected: {msg}");
             assert_eq!(prefix, "bad_request", "unexpected: {msg}");
-            assert!(
-                msg.contains("assignee instance not found"),
-                "msg: {msg}"
-            );
+            assert!(msg.contains("assignee instance not found"), "msg: {msg}");
         }
     }
 
@@ -4002,7 +4429,10 @@ mod tests {
         .await;
         let t = tool_text(&v);
         assert_eq!(t["total"], 1, "children of root: {t}");
-        assert_eq!(t["tasks"][0]["parent_id"], root, "rows expose the link as parent_id");
+        assert_eq!(
+            t["tasks"][0]["parent_id"], root,
+            "rows expose the link as parent_id"
+        );
 
         let v = call_tool(
             &router,
@@ -4099,7 +4529,6 @@ mod tests {
         assert_eq!(v["error"]["code"].as_i64(), None, "valid sort: {v}");
     }
 
-
     // ── G6: updated_since — the delta query (plan §7) ────────────────────
 
     /// "What changed since my last read" without re-reading everything.
@@ -4150,7 +4579,11 @@ mod tests {
             json!({ "project_id": pid, "updated_since": future }),
         )
         .await;
-        assert_eq!(tool_text(&v)["total"], 0, "empty delta is a legal answer: {v}");
+        assert_eq!(
+            tool_text(&v)["total"],
+            0,
+            "empty delta is a legal answer: {v}"
+        );
 
         // The delta composes with the other filters — a status filter on
         // the same window still answers from the index, not a re-read.
@@ -4269,7 +4702,11 @@ mod tests {
             json!({ "task_id": leaf, "parent_task_id": null }),
         )
         .await;
-        assert_eq!(tool_text(&v)["parent_id"], Value::Null, "null promotes to root");
+        assert_eq!(
+            tool_text(&v)["parent_id"],
+            Value::Null,
+            "null promotes to root"
+        );
 
         // Omitting the key leaves the position alone.
         create_task(
@@ -4348,7 +4785,6 @@ mod tests {
         );
     }
 
-
     // ── T1-3: pm_update_project ──────────────────────────────────────────
 
     #[tokio::test]
@@ -4418,7 +4854,6 @@ mod tests {
         assert_eq!(t["title"], "Renamed", "an unrelated field must survive");
     }
 
-
     // ── T1-6: a rejected transition names the moves that are legal ───────
 
     #[tokio::test]
@@ -4444,7 +4879,14 @@ mod tests {
         .await;
         let tid = tool_text(&v)["id"].as_str().unwrap().to_string();
         approve_creation(&store, &tid).await;
-        call_tool(&router, Some(agent), 4, "pm_claim_task", json!({ "task_id": tid })).await;
+        call_tool(
+            &router,
+            Some(agent),
+            4,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
 
         // in_progress → done is not a legal move (the work must be submitted).
         let v = call_tool(
@@ -4565,12 +5007,7 @@ mod tests {
         // Human approval is the one step no agent can perform — do what the
         // REST review endpoint does, then let the scanner run.
         store
-            .review_task(
-                &TaskId::parse(&tid).unwrap(),
-                true,
-                "human",
-                Some("go"),
-            )
+            .review_task(&TaskId::parse(&tid).unwrap(), true, "human", Some("go"))
             .await
             .unwrap();
 
@@ -4592,19 +5029,32 @@ mod tests {
             waited += 20;
         }
         let pushes = seen.lock().unwrap().clone();
-        assert_eq!(pushes.len(), 1, "one wake-up per task generation: {pushes:?}");
+        assert_eq!(
+            pushes.len(),
+            1,
+            "one wake-up per task generation: {pushes:?}"
+        );
         let push = &pushes[0];
 
         // 2. The envelope addresses the right agent and identifies itself —
         //    `message_id` is the dedupe key across retries and restarts.
         assert_eq!(push["task_id"], tid.as_str(), "{push}");
         assert_eq!(push["target_agent"], "eng-inst", "{push}");
-        assert_eq!(push["owner"], "pm-inst", "the dispatcher, not the assignee sent it: {push}");
+        assert_eq!(
+            push["owner"], "pm-inst",
+            "the dispatcher, not the assignee sent it: {push}"
+        );
         assert_eq!(push["project_id"], pid.as_str(), "{push}");
-        assert!(!push["message_id"].as_str().unwrap_or_default().is_empty(), "{push}");
+        assert!(
+            !push["message_id"].as_str().unwrap_or_default().is_empty(),
+            "{push}"
+        );
         let message = push["message"].as_str().unwrap();
         assert!(message.contains("Fix invoice rounding"), "{message}");
-        assert!(message.contains("Round to cents at line level."), "{message}");
+        assert!(
+            message.contains("Round to cents at line level."),
+            "{message}"
+        );
 
         // 3. The brief is the playbook: exact tool names, both 409 branches,
         //    and the doc leg — a stripped-down brief is what sends an agent
@@ -4622,7 +5072,10 @@ mod tests {
             "no doc_path",
             "Never fall back to writing local files",
         ] {
-            assert!(brief.contains(needle), "brief is missing `{needle}`: {brief}");
+            assert!(
+                brief.contains(needle),
+                "brief is missing `{needle}`: {brief}"
+            );
         }
         assert!(
             !brief.contains("repository attached to this conversation"),
@@ -4688,7 +5141,11 @@ mod tests {
 
         // The claimed task leaves the candidate set, so no further push.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert_eq!(seen.lock().unwrap().len(), 1, "claimed tasks are not re-pushed");
+        assert_eq!(
+            seen.lock().unwrap().len(),
+            1,
+            "claimed tasks are not re-pushed"
+        );
 
         store
             .review_task(&TaskId::parse(&tid).unwrap(), true, "human", None)
@@ -4798,10 +5255,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = PmConfig {
             data_dir: tmp.path().to_path_buf(),
-            index_rebuild_on_start: false,
             ..Default::default()
         };
-        let store: Arc<dyn PmStore> = Arc::new(TreePmStore::new(cfg).await.unwrap());
+        let store: Arc<dyn PmStore> = Arc::new(SqlitePmStore::open(cfg).unwrap());
         let state = McpState {
             store: store.clone(),
             agent_dir: Arc::new(NoopAgentDirectory),
@@ -4842,14 +5298,20 @@ mod tests {
     /// render the deliverables as links that survive a rename.
     #[tokio::test(flavor = "multi_thread")]
     async fn submit_with_doc_refs_records_and_reads_back() {
-        let (router, store) = mcp_state_with_gateway(
-            stub_doc(&[("项目管理/p-1/技术方案/x.md", "doc-4f2a")]).await,
-        )
-        .await;
+        let (router, store) =
+            mcp_state_with_gateway(stub_doc(&[("项目管理/p-1/技术方案/x.md", "doc-4f2a")]).await)
+                .await;
         let actor = "g4-eng";
         let tid = claimable_task(&router, &store, actor, 2).await;
 
-        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert!(v["error"].is_null(), "claim: {v}");
 
         let v = call_tool(
@@ -4873,7 +5335,14 @@ mod tests {
             1
         );
 
-        let v = call_tool(&router, Some(actor), 5, "pm_get_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         let chk = tool_text(&v);
         assert_eq!(chk["status"], "submitted");
         assert_eq!(
@@ -4897,7 +5366,14 @@ mod tests {
         .await;
         let actor = "g4-eng-dup";
         let tid = claimable_task(&router, &store, actor, 2).await;
-        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert!(v["error"].is_null(), "claim: {v}");
 
         let v = call_tool(
@@ -4913,7 +5389,10 @@ mod tests {
         )
         .await;
         assert!(v["error"].is_null(), "submit: {v}");
-        let refs = tool_text(&v)["result"]["doc_refs"].as_array().unwrap().clone();
+        let refs = tool_text(&v)["result"]["doc_refs"]
+            .as_array()
+            .unwrap()
+            .clone();
         assert_eq!(refs, vec![json!("doc-4f2a")], "one doc, one entry");
     }
 
@@ -4926,7 +5405,14 @@ mod tests {
         let (router, store) = mcp_state_with_gateway(stub_doc_rejecting().await).await;
         let actor = "g4-eng-4xx";
         let tid = claimable_task(&router, &store, actor, 2).await;
-        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert!(v["error"].is_null(), "claim: {v}");
 
         let v = call_tool(
@@ -4939,10 +5425,24 @@ mod tests {
         .await;
         let (_, prefix, msg) = assert_rpc_error(&v);
         assert_eq!(prefix, "bad_request", "msg: {msg}");
-        assert!(msg.contains("too many refs"), "doc's own text must survive: {msg}");
+        assert!(
+            msg.contains("too many refs"),
+            "doc's own text must survive: {msg}"
+        );
 
-        let v = call_tool(&router, Some(actor), 5, "pm_get_task", json!({ "task_id": tid })).await;
-        assert_eq!(tool_text(&v)["status"], "in_progress", "refusal must not transition");
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
+        assert_eq!(
+            tool_text(&v)["status"],
+            "in_progress",
+            "refusal must not transition"
+        );
     }
 
     /// G4 refusal: an unresolved ref fails the submission loudly — it is
@@ -4953,7 +5453,14 @@ mod tests {
         let (router, store) = mcp_state_with_gateway(stub_doc(&[]).await).await;
         let actor = "g4-eng2";
         let tid = claimable_task(&router, &store, actor, 2).await;
-        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert!(v["error"].is_null(), "claim: {v}");
 
         let v = call_tool(
@@ -4972,7 +5479,14 @@ mod tests {
             "the offending ref must be named: {msg}"
         );
 
-        let v = call_tool(&router, Some(actor), 5, "pm_get_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            5,
+            "pm_get_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert_eq!(
             tool_text(&v)["status"],
             "in_progress",
@@ -4987,7 +5501,14 @@ mod tests {
         let (router, store) = test_router_and_store().await;
         let actor = "g4-noweb";
         let tid = claimable_task(&router, &store, actor, 2).await;
-        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert!(v["error"].is_null(), "claim: {v}");
 
         let v = call_tool(
@@ -5012,7 +5533,14 @@ mod tests {
         let (router, store) = mcp_state_with_gateway(stub_doc(&[]).await).await;
         let actor = "g4-legacy";
         let tid = claimable_task(&router, &store, actor, 2).await;
-        let v = call_tool(&router, Some(actor), 3, "pm_claim_task", json!({ "task_id": tid })).await;
+        let v = call_tool(
+            &router,
+            Some(actor),
+            3,
+            "pm_claim_task",
+            json!({ "task_id": tid }),
+        )
+        .await;
         assert!(v["error"].is_null(), "claim: {v}");
 
         let v = call_tool(

@@ -83,7 +83,7 @@ struct Cli {
     log_level: String,
 }
 
-/// ADR-117 D6 / `config.rs` contract: `CLI > env > TOML > default`.
+/// Config precedence: `CLI > env > TOML > default`.
 ///
 /// An explicit `--config` is mandatory when given; otherwise the conventional
 /// `./acowork-pm.toml` is loaded only if it actually exists. Malformed TOML
@@ -128,25 +128,12 @@ async fn main() {
     acowork_core::logging::init_subprocess_logging(&cli.log_level);
     acowork_core::logging::install_panic_hook();
 
-    // ADR-117 D6 / config.rs contract: CLI > env > TOML > default.
+    // CLI > env > TOML > default.
     let mut config = load_config_baseline(cli.config.as_deref());
 
     // Environment variables override the TOML baseline.
     if let Some(dir) = std::env::var_os("ACOWORK_PM_DATA_DIR").filter(|v| !v.is_empty()) {
         config.data_dir = PathBuf::from(dir);
-    }
-
-    // ADR-117: the three-state rollout is gone. `deny_unknown_fields` already
-    // rejects a leftover `storage_backend` key in TOML, and clap rejects an
-    // unknown `--storage-backend` flag; refuse a leftover env value too, so an
-    // old deployment cannot believe it is still running on the tree.
-    if let Some(raw) = std::env::var("ACOWORK_PM_STORAGE_BACKEND")
-        .ok()
-        .filter(|v| !v.trim().is_empty())
-        && !raw.trim().eq_ignore_ascii_case("db")
-    {
-        tracing::error!(value = %raw, "ACOWORK_PM_STORAGE_BACKEND is retired; SQLite is the only backend");
-        std::process::exit(1);
     }
 
     if let Some(dir) = cli.data_dir {

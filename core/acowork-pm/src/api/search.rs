@@ -7,8 +7,8 @@
 //! 返回统一 `PmSearchHit`（`kind: "project" | "task"`），Desktop 按
 //! `kind` 决定跳转 ProjectBoard / TaskDetailDrawer。
 
-use axum::extract::{Query, State};
 use axum::Json;
+use axum::extract::{Query, State};
 use serde::{Deserialize, Serialize};
 
 use super::ApiState;
@@ -160,7 +160,8 @@ mod tests {
     use super::*;
     use crate::config::PmConfig;
     use crate::mcp::NoopAgentDirectory;
-    use crate::store::tree::{PmStore, TreePmStore};
+    use crate::store::contract::PmStore;
+    use crate::store::sqlite::SqlitePmStore;
     use crate::types::{CreateProject, CreateTask, Priority, ProjectId, TaskId, TaskType};
     use std::sync::Arc;
     use tempfile::tempdir;
@@ -169,12 +170,11 @@ mod tests {
         let dir = tempdir().unwrap();
         PmConfig {
             data_dir: dir.path().to_path_buf(),
-            index_rebuild_on_start: false,
             ..Default::default()
         }
     }
 
-    async fn seed(store: &TreePmStore) -> (ProjectId, TaskId) {
+    async fn seed(store: &SqlitePmStore) -> (ProjectId, TaskId) {
         let p = store
             .create_project(
                 CreateProject {
@@ -214,7 +214,7 @@ mod tests {
 
     #[tokio::test]
     async fn empty_query_returns_nothing() {
-        let store = TreePmStore::new(test_config()).await.unwrap();
+        let store = SqlitePmStore::open(test_config()).unwrap();
         seed(&store).await;
         let state = ApiState {
             store: Arc::new(store),
@@ -222,15 +222,21 @@ mod tests {
             agent_dir: Arc::new(NoopAgentDirectory),
             gateway: None,
         };
-        let Json(hits) = search(State(state), Query(SearchParams { q: "".into(), limit: None }))
-            .await
-            .unwrap();
+        let Json(hits) = search(
+            State(state),
+            Query(SearchParams {
+                q: "".into(),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
         assert!(hits.is_empty());
     }
 
     #[tokio::test]
     async fn title_ranks_above_description() {
-        let store = TreePmStore::new(test_config()).await.unwrap();
+        let store = SqlitePmStore::open(test_config()).unwrap();
         // 项目 A：title 命中（score 10）。
         store
             .create_project(
@@ -261,9 +267,15 @@ mod tests {
             agent_dir: Arc::new(NoopAgentDirectory),
             gateway: None,
         };
-        let Json(hits) = search(State(state), Query(SearchParams { q: "搜索".into(), limit: None }))
-            .await
-            .unwrap();
+        let Json(hits) = search(
+            State(state),
+            Query(SearchParams {
+                q: "搜索".into(),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(hits.len(), 2);
         assert_eq!(hits[0].title, "搜索标题项目");
         assert!(hits[0].score > hits[1].score);
@@ -271,7 +283,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_matches_title_description_and_assignee() {
-        let store = TreePmStore::new(test_config()).await.unwrap();
+        let store = SqlitePmStore::open(test_config()).unwrap();
         let (pid, tid) = seed(&store).await;
         let state = ApiState {
             store: Arc::new(store),
@@ -280,15 +292,27 @@ mod tests {
             gateway: None,
         };
         // 任务 description 命中（"…assignee 加权"）。
-        let Json(desc_hits) = search(State(state.clone()), Query(SearchParams { q: "加权".into(), limit: None }))
-            .await
-            .unwrap();
+        let Json(desc_hits) = search(
+            State(state.clone()),
+            Query(SearchParams {
+                q: "加权".into(),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(desc_hits.len(), 1);
         assert_eq!(desc_hits[0].task_id.as_deref(), Some(tid.as_str()));
         // 任务 assignee 命中。
-        let Json(assignee_hits) = search(State(state), Query(SearchParams { q: "agent-1".into(), limit: None }))
-            .await
-            .unwrap();
+        let Json(assignee_hits) = search(
+            State(state),
+            Query(SearchParams {
+                q: "agent-1".into(),
+                limit: None,
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(assignee_hits.len(), 1);
         assert_eq!(assignee_hits[0].kind, "task");
         assert_eq!(assignee_hits[0].project_id, pid.as_str());
@@ -296,7 +320,7 @@ mod tests {
 
     #[tokio::test]
     async fn limit_is_respected() {
-        let store = TreePmStore::new(test_config()).await.unwrap();
+        let store = SqlitePmStore::open(test_config()).unwrap();
         seed(&store).await;
         let state = ApiState {
             store: Arc::new(store),
@@ -304,9 +328,15 @@ mod tests {
             agent_dir: Arc::new(NoopAgentDirectory),
             gateway: None,
         };
-        let Json(hits) = search(State(state), Query(SearchParams { q: "搜索".into(), limit: Some(1) }))
-            .await
-            .unwrap();
+        let Json(hits) = search(
+            State(state),
+            Query(SearchParams {
+                q: "搜索".into(),
+                limit: Some(1),
+            }),
+        )
+        .await
+        .unwrap();
         assert_eq!(hits.len(), 1);
     }
 }

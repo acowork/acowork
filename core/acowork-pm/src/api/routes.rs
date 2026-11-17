@@ -27,14 +27,14 @@
 
 use std::sync::Arc;
 
-use axum::routing::{delete, get, patch, post};
 use axum::Router;
+use axum::routing::{delete, get, patch, post};
 
 use crate::config::PmConfig;
 use crate::mcp::AgentDirectory;
-use crate::store::tree::PmStore;
+use crate::store::contract::PmStore;
 
-use super::{attachments, icon, projects, search, tasks, ApiState};
+use super::{ApiState, attachments, icon, projects, search, tasks};
 
 /// 构建 PM API 路由树（内部路径**不带** `/api` 前缀）。
 ///
@@ -59,10 +59,7 @@ pub fn pm_router(
 
     Router::new()
         // ── Projects ─────────────────────────────────────────────
-        .route(
-            "/projects",
-            get(projects::list).post(projects::create),
-        )
+        .route("/projects", get(projects::list).post(projects::create))
         // Static segment, declared before the `{pid}` route for readability;
         // `matchit` prefers a literal over a parameter either way.
         .route("/projects/counts", get(projects::counts))
@@ -72,10 +69,7 @@ pub fn pm_router(
                 .patch(projects::update)
                 .delete(projects::delete),
         )
-        .route(
-            "/projects/{pid}/members",
-            post(projects::add_member),
-        )
+        .route("/projects/{pid}/members", post(projects::add_member))
         .route(
             "/projects/{pid}/members/{instance_id}",
             delete(projects::remove_member),
@@ -95,9 +89,7 @@ pub fn pm_router(
         )
         .route(
             "/tasks/{tid}",
-            get(tasks::get)
-                .patch(tasks::update)
-                .delete(tasks::delete),
+            get(tasks::get).patch(tasks::update).delete(tasks::delete),
         )
         .route("/tasks/{tid}/parent", patch(tasks::reparent))
         .route("/tasks/{tid}/claim", post(tasks::claim))

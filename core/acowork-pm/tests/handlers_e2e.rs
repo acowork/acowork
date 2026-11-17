@@ -29,14 +29,14 @@
 
 use std::sync::Arc;
 
-use acowork_pm::{PmConfig, TreePmStore};
+use acowork_pm::{PmConfig, SqlitePmStore};
 use axum::body::Body;
-use axum::http::{header, Method, Request, StatusCode};
+use axum::http::{Method, Request, StatusCode, header};
 use tower::ServiceExt;
 
 // ── Test harness ──────────────────────────────────────────────────────
 
-/// 测试装置：tempdir + TreePmStore + Router<()>。
+/// 测试装置：tempdir + SqlitePmStore + Router<()>。
 struct TestApp {
     router: axum::Router,
     _tmp: tempfile::TempDir,
@@ -47,16 +47,11 @@ impl TestApp {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = PmConfig {
             data_dir: tmp.path().to_path_buf(),
-            index_rebuild_on_start: false,
             ..Default::default()
         };
-        let store = Arc::new(TreePmStore::new(cfg.clone()).await.unwrap());
-        let router = acowork_pm::pm_router(
-            store,
-            cfg,
-            Arc::new(acowork_pm::NoopAgentDirectory),
-            None,
-        );
+        let store = Arc::new(SqlitePmStore::open(cfg.clone()).unwrap());
+        let router =
+            acowork_pm::pm_router(store, cfg, Arc::new(acowork_pm::NoopAgentDirectory), None);
         Self { router, _tmp: tmp }
     }
 
@@ -74,7 +69,11 @@ impl TestApp {
     }
 
     fn request_no_body(method: Method, uri: &str) -> Request<Body> {
-        Request::builder().method(method).uri(uri).body(Body::empty()).unwrap()
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
     }
 
     fn request_with_actor(method: Method, uri: &str, body: serde_json::Value) -> Request<Body> {
@@ -90,7 +89,9 @@ impl TestApp {
 
 async fn body_json(resp: axum::response::Response) -> (StatusCode, serde_json::Value) {
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
     let json: serde_json::Value = if bytes.is_empty() {
         serde_json::Value::Null
     } else {
@@ -110,7 +111,9 @@ async fn body_json(resp: axum::response::Response) -> (StatusCode, serde_json::V
 /// 这类错误当前未通过自定义 extractor 包装到 `PmError::ErrorEnvelope`。
 async fn body_text(resp: axum::response::Response) -> (StatusCode, String) {
     let status = resp.status();
-    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
     (status, String::from_utf8_lossy(&bytes).into_owned())
 }
 
@@ -146,11 +149,8 @@ async fn post_projects_then_list_returns_it() {
 #[tokio::test]
 async fn post_projects_x_actor_propagates() {
     let app = TestApp::new().await;
-    let create = TestApp::request_with_actor(
-        Method::POST,
-        "/projects",
-        serde_json::json!({"title": "X"}),
-    );
+    let create =
+        TestApp::request_with_actor(Method::POST, "/projects", serde_json::json!({"title": "X"}));
     let (status, body) = body_json(app.router().oneshot(create).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["created_by"], "human-alice");
@@ -212,18 +212,12 @@ async fn delete_project_returns_204() {
     let app = TestApp::new().await;
     let router = app.router();
 
-    let create = TestApp::json_request(
-        Method::POST,
-        "/projects",
-        serde_json::json!({"title": "X"}),
-    );
+    let create =
+        TestApp::json_request(Method::POST, "/projects", serde_json::json!({"title": "X"}));
     let (_, body) = body_json(router.clone().oneshot(create).await.unwrap()).await;
     let pid = body["id"].as_str().unwrap().to_string();
 
-    let del = TestApp::request_no_body(
-        Method::DELETE,
-        &format!("/projects/{pid}?cascade=true"),
-    );
+    let del = TestApp::request_no_body(Method::DELETE, &format!("/projects/{pid}?cascade=true"));
     let resp = router.oneshot(del).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
@@ -259,10 +253,7 @@ async fn post_then_list_tasks_in_project() {
     assert!(body["id"].as_str().unwrap().starts_with("t-"));
 
     // GET /projects/:pid/tasks
-    let list = TestApp::request_no_body(
-        Method::GET,
-        &format!("/projects/{pid}/tasks"),
-    );
+    let list = TestApp::request_no_body(Method::GET, &format!("/projects/{pid}/tasks"));
     let (status, body) = body_json(router.oneshot(list).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.as_array().unwrap().len(), 1);
@@ -283,7 +274,9 @@ async fn a_non_member_cannot_create_a_task() {
         .uri(format!("/projects/{pid}/tasks"))
         .header(header::CONTENT_TYPE, "application/json")
         .header("x-actor", "human-bob")
-        .body(Body::from(serde_json::json!({"title": "not mine"}).to_string()))
+        .body(Body::from(
+            serde_json::json!({"title": "not mine"}).to_string(),
+        ))
         .unwrap();
     let (status, body) = body_json(router.clone().oneshot(by_outsider).await.unwrap()).await;
     assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
@@ -292,7 +285,11 @@ async fn a_non_member_cannot_create_a_task() {
     // The project owner keeps the right, and the refusal left nothing behind.
     let by_owner = TestApp::request_no_body(Method::GET, &format!("/projects/{pid}/tasks"));
     let (_, body) = body_json(router.oneshot(by_owner).await.unwrap()).await;
-    assert_eq!(body.as_array().unwrap().len(), 0, "refused task must not be stored");
+    assert_eq!(
+        body.as_array().unwrap().len(),
+        0,
+        "refused task must not be stored"
+    );
 }
 
 #[tokio::test]
@@ -378,10 +375,7 @@ async fn delete_task_returns_204() {
     let (_, body) = body_json(router.clone().oneshot(create).await.unwrap()).await;
     let tid = body["id"].as_str().unwrap().to_string();
 
-    let del = TestApp::request_no_body(
-        Method::DELETE,
-        &format!("/tasks/{tid}?cascade=true"),
-    );
+    let del = TestApp::request_no_body(Method::DELETE, &format!("/tasks/{tid}?cascade=true"));
     let resp = router.oneshot(del).await.unwrap();
     assert_eq!(resp.status(), StatusCode::NO_CONTENT);
 }
@@ -526,10 +520,7 @@ async fn activity_endpoints_record_submits_and_replies() {
     let (status, _) = body_json(router.clone().oneshot(review).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
 
-    let get_activity = TestApp::request_no_body(
-        Method::GET,
-        &format!("/tasks/{tid}/activity"),
-    );
+    let get_activity = TestApp::request_no_body(Method::GET, &format!("/tasks/{tid}/activity"));
     let (status, body) = body_json(router.clone().oneshot(get_activity).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
@@ -667,10 +658,8 @@ async fn members_crud_error_paths() {
     );
     let (status, _) = body_json(router.clone().oneshot(with_task).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
-    let rm_alice = TestApp::request_no_body(
-        Method::DELETE,
-        &format!("/projects/{pid}/members/{alice}"),
-    );
+    let rm_alice =
+        TestApp::request_no_body(Method::DELETE, &format!("/projects/{pid}/members/{alice}"));
     let (status, body) = body_json(router.clone().oneshot(rm_alice).await.unwrap()).await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"]["code"], "member_has_open_tasks");
@@ -764,10 +753,7 @@ async fn list_attachments_empty_returns_200() {
     let (_, body) = body_json(router.clone().oneshot(create).await.unwrap()).await;
     let tid = body["id"].as_str().unwrap().to_string();
 
-    let list = TestApp::request_no_body(
-        Method::GET,
-        &format!("/tasks/{tid}/attachments"),
-    );
+    let list = TestApp::request_no_body(Method::GET, &format!("/tasks/{tid}/attachments"));
     let (status, body) = body_json(router.oneshot(list).await.unwrap()).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body.as_array().unwrap().len(), 0);
@@ -825,7 +811,9 @@ async fn upload_download_delete_attachment_roundtrip() {
         resp.headers().get(header::CONTENT_TYPE).unwrap(),
         "text/plain"
     );
-    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+    let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+        .await
+        .unwrap();
     assert_eq!(&bytes[..], file_content);
 
     // 列表 → 1 条

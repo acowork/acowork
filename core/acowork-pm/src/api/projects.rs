@@ -1,10 +1,12 @@
 //! `projects` handlers（**P1 实现**）。内部路径不带 `/api` 前缀，
 //! 公开路径为 `/api/pm/projects/*`（见 [`routes::pm_router`]）。
 
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 
-use crate::types::{AddProjectMember, CreateProject, MemberKind, Project, ProjectId, UpdateProject};
+use crate::types::{
+    AddProjectMember, CreateProject, MemberKind, Project, ProjectId, UpdateProject,
+};
 
 use super::ApiState;
 
@@ -16,7 +18,9 @@ use super::ApiState;
 ///
 /// 支持未来扩展：`?status=active&include_archived=true`。
 #[tracing::instrument(skip(state))]
-pub async fn list(State(state): State<ApiState>) -> Result<Json<Vec<Project>>, crate::error::PmError> {
+pub async fn list(
+    State(state): State<ApiState>,
+) -> Result<Json<Vec<Project>>, crate::error::PmError> {
     let projects = state.store.list_projects().await?;
     Ok(Json(projects))
 }
@@ -70,16 +74,15 @@ pub async fn create(
     // ensured idempotently in the chat domain through the Gateway.
     // Best-effort — a missing chat must not fail project creation.
     if let Some((gw_url, token)) = &state.gateway {
-        let provisioner = crate::gateway_client::GatewayClient::new(
-            gw_url.clone(),
-            token.clone(),
-        );
+        let provisioner = crate::gateway_client::GatewayClient::new(gw_url.clone(), token.clone());
         let pid = project.id.as_str().to_string();
         let title = project.title.clone();
         let participants = group_participants(&project);
         let owner = project.owner().to_string();
         tokio::spawn(async move {
-            provisioner.ensure_group(&pid, &title, &participants, &owner).await;
+            provisioner
+                .ensure_group(&pid, &title, &participants, &owner)
+                .await;
         });
     }
     Ok(Json(project))
@@ -199,10 +202,7 @@ fn require_governance(
         .get("x-actor")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("unknown");
-    let is_admin = headers
-        .get("x-actor-admin")
-        .and_then(|v| v.to_str().ok())
-        == Some("true");
+    let is_admin = headers.get("x-actor-admin").and_then(|v| v.to_str().ok()) == Some("true");
     if project.can_govern(actor, is_admin) {
         return Ok(());
     }
@@ -353,9 +353,7 @@ pub async fn add_member(
     require_governance(&headers, &current, "add a member")?;
     // 校验 Agent 存在（宽松目录跳过）。Agent 成员必须是真实存在的实例；
     // 人类成员只受“同一 instance_id 不能重复”约束（store 层）。
-    if input.kind == MemberKind::Agent
-        && !state.agent_dir.agent_exists(&input.instance_id).await
-    {
+    if input.kind == MemberKind::Agent && !state.agent_dir.agent_exists(&input.instance_id).await {
         return Err(crate::error::PmError::BadRequest(format!(
             "agent instance not found in agent directory: {}",
             input.instance_id
@@ -488,7 +486,10 @@ mod tests {
         let got = group_participants(&p);
         assert_eq!(got.iter().filter(|x| *x == "u-owner").count(), 1);
         // No members yet: the owner alone is the set.
-        assert_eq!(group_participants(&project("u-owner", &[])), vec!["u-owner".to_string()]);
+        assert_eq!(
+            group_participants(&project("u-owner", &[])),
+            vec!["u-owner".to_string()]
+        );
     }
 
     // ── The governance gate (HTTP surface) ──────────────────────────────
@@ -496,7 +497,7 @@ mod tests {
     use crate::api::routes::pm_router;
     use crate::{NoopAgentDirectory, PmConfig};
     use axum::body::Body;
-    use axum::http::{header, Method, Request, StatusCode};
+    use axum::http::{Method, Request, StatusCode, header};
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -504,11 +505,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = PmConfig {
             data_dir: tmp.path().to_path_buf(),
-            index_rebuild_on_start: false,
             ..Default::default()
         };
-        let store = Arc::new(crate::TreePmStore::new(cfg.clone()).await.unwrap());
-        (pm_router(store, cfg, Arc::new(NoopAgentDirectory), None), tmp)
+        let store = Arc::new(crate::SqlitePmStore::open(cfg.clone()).unwrap());
+        (
+            pm_router(store, cfg, Arc::new(NoopAgentDirectory), None),
+            tmp,
+        )
     }
 
     /// One call as `actor` (optionally an admin, per the trusted
@@ -556,7 +559,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         v["id"].as_str().unwrap().to_string()
     }
@@ -584,7 +589,11 @@ mod tests {
         );
 
         let mutations = [
-            ("PATCH", format!("/projects/{pid}"), r#"{"title":"Hijacked"}"#),
+            (
+                "PATCH",
+                format!("/projects/{pid}"),
+                r#"{"title":"Hijacked"}"#,
+            ),
             (
                 "POST",
                 format!("/projects/{pid}/members"),
@@ -603,12 +612,28 @@ mod tests {
         }
 
         assert_eq!(
-            call(&router, Method::PATCH, &format!("/projects/{pid}"), "u-admin", true, r#"{"title":"Renamed by admin"}"#).await,
+            call(
+                &router,
+                Method::PATCH,
+                &format!("/projects/{pid}"),
+                "u-admin",
+                true,
+                r#"{"title":"Renamed by admin"}"#
+            )
+            .await,
             StatusCode::OK,
             "an admin may (the flag is Gateway-injected, never client-claimed)"
         );
         assert_eq!(
-            call(&router, Method::PATCH, &format!("/projects/{pid}"), "u-owner", false, r#"{"title":"Renamed by owner"}"#).await,
+            call(
+                &router,
+                Method::PATCH,
+                &format!("/projects/{pid}"),
+                "u-owner",
+                false,
+                r#"{"title":"Renamed by owner"}"#
+            )
+            .await,
             StatusCode::OK,
             "the owner may"
         );
@@ -624,11 +649,27 @@ mod tests {
         let (router, _tmp) = test_router().await;
         let pid = create_project(&router, "com.acowork.agent-instance", "Filed by an agent").await;
         assert_eq!(
-            call(&router, Method::PATCH, &format!("/projects/{pid}"), "human", false, r#"{"title":"Renamed by the local human"}"#).await,
+            call(
+                &router,
+                Method::PATCH,
+                &format!("/projects/{pid}"),
+                "human",
+                false,
+                r#"{"title":"Renamed by the local human"}"#
+            )
+            .await,
             StatusCode::OK
         );
         assert_eq!(
-            call(&router, Method::DELETE, &format!("/projects/{pid}"), "human", false, "").await,
+            call(
+                &router,
+                Method::DELETE,
+                &format!("/projects/{pid}"),
+                "human",
+                false,
+                ""
+            )
+            .await,
             StatusCode::NO_CONTENT
         );
     }
@@ -642,7 +683,15 @@ mod tests {
         let (router, _tmp) = test_router().await;
         let pid = create_project(&router, "u-owner", "Before").await;
         assert_eq!(
-            call(&router, Method::PATCH, &format!("/projects/{pid}"), "u-owner", false, r#"{"description":"just a note"}"#).await,
+            call(
+                &router,
+                Method::PATCH,
+                &format!("/projects/{pid}"),
+                "u-owner",
+                false,
+                r#"{"description":"just a note"}"#
+            )
+            .await,
             StatusCode::OK
         );
         let resp = router
@@ -656,9 +705,14 @@ mod tests {
             )
             .await
             .unwrap();
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(v["title"], "Before", "a description edit must not touch the title");
+        assert_eq!(
+            v["title"], "Before",
+            "a description edit must not touch the title"
+        );
         assert_eq!(v["description"], "just a note");
     }
 
@@ -697,8 +751,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(resp.status(), StatusCode::OK, "the literal route must not be read as {{pid}}");
-        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::OK,
+            "the literal route must not be read as {{pid}}"
+        );
+        let bytes = axum::body::to_bytes(resp.into_body(), 64 * 1024)
+            .await
+            .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(v[0]["project_id"], pid);
         assert_eq!(v[0]["total"], 2);

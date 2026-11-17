@@ -36,7 +36,7 @@ use std::time::Duration;
 use chrono::Utc;
 
 use crate::gateway_client::GatewayClient;
-use crate::store::tree::PmStore;
+use crate::store::contract::PmStore;
 use crate::types::Task;
 
 /// The human-readable dispatch text — what the project group chat shows
@@ -130,7 +130,8 @@ pub struct DispatchMetrics {
     pub abandoned: std::sync::atomic::AtomicU64,
 }
 
-static METRICS: std::sync::LazyLock<DispatchMetrics> = std::sync::LazyLock::new(DispatchMetrics::default);
+static METRICS: std::sync::LazyLock<DispatchMetrics> =
+    std::sync::LazyLock::new(DispatchMetrics::default);
 
 fn bump(m: &std::sync::atomic::AtomicU64) {
     m.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -183,8 +184,7 @@ pub fn spawn_scanner(
             // Prune backoff bookkeeping for tasks that left the candidate
             // set (claimed, cancelled, unassigned…) so the map cannot grow
             // without bound.
-            let due_set: std::collections::HashSet<_> =
-                due.iter().cloned().collect();
+            let due_set: std::collections::HashSet<_> = due.iter().cloned().collect();
             retries.retain(|tid, _| due_set.contains(tid));
             if due.is_empty() {
                 continue;
@@ -196,10 +196,8 @@ pub fn spawn_scanner(
             // it as the execution session's initiator. Cached per tick —
             // several tasks of one project are dispatched together, and the
             // owner is stable within a tick.
-            let mut project_owners: std::collections::HashMap<
-                crate::types::ProjectId,
-                String,
-            > = std::collections::HashMap::new();
+            let mut project_owners: std::collections::HashMap<crate::types::ProjectId, String> =
+                std::collections::HashMap::new();
             for tid in due {
                 if dispatched >= per_tick {
                     break;
@@ -209,8 +207,7 @@ pub fn spawn_scanner(
                 let Ok(Some(task)) = store.get_task(&tid).await else {
                     continue;
                 };
-                if task.status != crate::types::TaskStatus::Pending
-                    || task.dispatched_at.is_some()
+                if task.status != crate::types::TaskStatus::Pending || task.dispatched_at.is_some()
                 {
                     continue; // raced with a claim/reassign between filter and read
                 }
@@ -343,7 +340,10 @@ pub fn spawn_scanner(
                 }
             }
             if dispatched > 0 {
-                tracing::info!(count = dispatched, "PM dispatch scanner pushed task intents");
+                tracing::info!(
+                    count = dispatched,
+                    "PM dispatch scanner pushed task intents"
+                );
             }
         }
     });
@@ -387,16 +387,25 @@ mod tests {
         assert!(brief.contains("t-test1"), "task_id must appear");
         assert!(brief.contains("pm_claim_task"), "claim step must appear");
         assert!(brief.contains("pm_submit_task"), "submit step must appear");
-        assert!(brief.contains("review_not_approved"), "review gate branch must appear");
+        assert!(
+            brief.contains("review_not_approved"),
+            "review gate branch must appear"
+        );
         assert!(
             brief.contains("409 dependency_not_satisfied"),
             "dependency gate branch must appear"
         );
         // The doc leg: the deliverable path is read from the tool, and an
         // absent path is reported rather than replaced by a local file.
-        assert!(brief.contains("pm_get_project"), "doc_path source must be named");
+        assert!(
+            brief.contains("pm_get_project"),
+            "doc_path source must be named"
+        );
         assert!(brief.contains("`doc_path`"), "doc_path must be named");
-        assert!(brief.contains("no doc_path"), "the no-path branch must appear");
+        assert!(
+            brief.contains("no doc_path"),
+            "the no-path branch must appear"
+        );
         assert!(
             brief.contains("Never fall back to writing local files"),
             "the local-file fallback must be forbidden in so many words"
@@ -409,7 +418,10 @@ mod tests {
             !brief.contains("repository attached to this conversation"),
             "the repo-as-delivery-venue instruction must be gone: {brief}"
         );
-        assert!(!brief.contains("p-test1"), "project_id is not needed to claim");
+        assert!(
+            !brief.contains("p-test1"),
+            "project_id is not needed to claim"
+        );
     }
 
     #[test]
@@ -422,7 +434,11 @@ mod tests {
         assert_eq!(next_retry_delay(2), Some(Duration::from_secs(300)));
         assert_eq!(next_retry_delay(3), Some(Duration::from_secs(900)));
         assert_eq!(next_retry_delay(4), Some(Duration::from_secs(1800)));
-        assert_eq!(next_retry_delay(5), None, "the 5th failure abandons the generation");
+        assert_eq!(
+            next_retry_delay(5),
+            None,
+            "the 5th failure abandons the generation"
+        );
         assert_eq!(next_retry_delay(u32::MAX), None);
         // Monotonic gaps: each retry waits longer than the last.
         let gaps: Vec<Duration> = (1..=4).filter_map(next_retry_delay).collect();

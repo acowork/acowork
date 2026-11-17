@@ -1,12 +1,12 @@
 //! `tasks` handlers（**P1 实现**）。内部路径不带 `/api` 前缀，
 //! 公开路径为 `/api/pm/tasks/*`（见 [`routes::pm_router`]）。
 
-use axum::extract::{Path, State};
 use axum::Json;
+use axum::extract::{Path, State};
 
 use crate::types::{
-    AttachmentId, CreateTask, MemberKind, ProjectId, ReparentTask, ReviewStatus, Task, TaskActivity,
-    TaskFilter, TaskId, TaskStatus, UpdateTask,
+    AttachmentId, CreateTask, MemberKind, ProjectId, ReparentTask, ReviewStatus, Task,
+    TaskActivity, TaskFilter, TaskId, TaskStatus, UpdateTask,
 };
 
 use super::ApiState;
@@ -126,7 +126,7 @@ pub async fn update(
 
 /// 删除任务。
 ///
-/// Query: `?cascade=true` 强制级联删除子树（默认 false，子任务被提升为顶层）。
+/// Query: `?cascade=true` 强制级联删除子树（默认 false，有子任务时返回 409）。
 #[tracing::instrument(skip(state))]
 pub async fn delete(
     State(state): State<ApiState>,
@@ -136,8 +136,12 @@ pub async fn delete(
     let tid = tid.parse::<TaskId>()?;
     // Design 27 §2.1 T2-a: deletion ends the task's logical execution
     // context like a terminal status would — snapshot the subtree first
-    // (`delete_task` cascades regardless of the flag).
-    let closing = state.store.closing_task_contexts(&tid).await.unwrap_or_default();
+    // (the snapshot is taken before the delete removes the rows).
+    let closing = state
+        .store
+        .closing_task_contexts(&tid)
+        .await
+        .unwrap_or_default();
     state.store.delete_task(&tid, query.cascade).await?;
     close_task_contexts(&state.gateway, closing).await;
     Ok(axum::http::StatusCode::NO_CONTENT)
@@ -147,9 +151,6 @@ pub async fn delete(
 pub struct DeleteTaskQuery {
     #[serde(default)]
     pub cascade: bool,
-    /// `?promote_children=true` —— 子任务提升为父项目的顶层（默认 false，cascade 时忽略）。
-    #[serde(default)]
-    pub promote_children: bool,
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -183,10 +184,9 @@ pub async fn claim(
     headers: axum::http::HeaderMap,
 ) -> Result<Json<Task>, crate::error::PmError> {
     let tid = tid.parse::<TaskId>()?;
-    let actor = headers
-        .get("x-actor")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
+    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).ok_or(
+        crate::error::PmError::Internal("missing X-Actor header".to_string()),
+    )?;
     // Design 27 §5.4: no dispatch here — the claimer is the assignee itself
     // (it is already awake, doing the claiming). Push dispatch happens at
     // the moment of *assignment* (`create` with an agent assignee, or
@@ -210,10 +210,9 @@ pub async fn submit(
     Json(input): Json<SubmitTaskRequest>,
 ) -> Result<Json<Task>, crate::error::PmError> {
     let tid = tid.parse::<TaskId>()?;
-    let actor = headers
-        .get("x-actor")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
+    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).ok_or(
+        crate::error::PmError::Internal("missing X-Actor header".to_string()),
+    )?;
     let task = state
         .store
         .submit_task(&tid, &input.text, input.attachment_ids, vec![], actor)
@@ -242,10 +241,9 @@ pub async fn review(
     Json(input): Json<ReviewTaskRequest>,
 ) -> Result<Json<Task>, crate::error::PmError> {
     let tid = tid.parse::<TaskId>()?;
-    let reviewer = headers
-        .get("x-actor")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(crate::error::PmError::Internal("missing X-Actor header".to_string()))?;
+    let reviewer = headers.get("x-actor").and_then(|v| v.to_str().ok()).ok_or(
+        crate::error::PmError::Internal("missing X-Actor header".to_string()),
+    )?;
     // review 可由 human 完成（REST 路径默认 X-Actor=human）或 instance 完成（MCP 路径）
     let before = state.store.get_task(&tid).await?;
     let task = state
@@ -300,13 +298,13 @@ pub async fn add_activity(
     Json(input): Json<AddActivityRequest>,
 ) -> Result<Json<TaskActivity>, crate::error::PmError> {
     let tid = tid.parse::<TaskId>()?;
-    let actor = headers
-        .get("x-actor")
-        .and_then(|v| v.to_str().ok())
-        .ok_or(crate::error::PmError::Internal(
-            "missing X-Actor header".to_string(),
-        ))?;
-    let entry = state.store.add_task_comment(&tid, &input.text, actor).await?;
+    let actor = headers.get("x-actor").and_then(|v| v.to_str().ok()).ok_or(
+        crate::error::PmError::Internal("missing X-Actor header".to_string()),
+    )?;
+    let entry = state
+        .store
+        .add_task_comment(&tid, &input.text, actor)
+        .await?;
     Ok(Json(entry))
 }
 

@@ -14,10 +14,10 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use crate::config::PmConfig;
-use crate::error::{PmError, Result};
+use crate::error::Result;
 use crate::mcp::{AgentDirectory, NoopAgentDirectory};
-use crate::store::sqlite::{SqlitePmStore, import, schema};
-use crate::store::tree::PmStore;
+use crate::store::contract::PmStore;
+use crate::store::sqlite::SqlitePmStore;
 
 /// PM 服务运行实例。
 ///
@@ -26,7 +26,7 @@ use crate::store::tree::PmStore;
 /// - 关闭时调用 [`PmService::shutdown`] 优雅停机（flush 写、关闭 store）
 pub struct PmService {
     pub config: PmConfig,
-    /// ADR-117 D6: concrete backend is chosen once at startup by [`build_store`].
+    /// SQLite is the only backend; `build_store()` simply opens `pm.sqlite`.
     pub store: Arc<dyn PmStore>,
     /// Agent 目录契约（设计 §9.1）：`pm_create_task` 校验 assignee 存在。
     /// 默认 `Noop`（不校验）；Phase 3（ADR-064）将注入 HTTP 实现（查 Gateway
@@ -38,77 +38,15 @@ pub struct PmService {
     pub gateway: Option<(String, Option<String>)>,
 }
 
-/// ADR-117 D6 (single-backend cutover): SQLite is the only commit point.
-///
-/// On the first start the JSON tree is imported into `pm.sqlite` in one
-/// transaction, its binaries are relocated into `assets/`, and the tree is
-/// renamed to `projects.retired`. From then on `pm.sqlite` + `assets/` are the
-/// only data source. A blocking scan finding aborts startup instead of
-/// creating a half-empty authority.
+/// SQLite is the only commit point. A fresh data directory gets an empty v1
+/// database; a version-skewed database is refused by `schema::open()` before
+/// any write. There is no import step, no archive and no second data source.
 async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
-    ensure_sqlite_authority(config)?;
     Ok(Arc::new(SqlitePmStore::open(config.clone())?) as Arc<dyn PmStore>)
 }
 
-/// One-shot startup import + archive retirement. Idempotent: a non-empty v1
-/// database is left alone, while retirement re-runs until the tree has really
-/// been renamed (a crash between the two steps is recoverable).
-///
-/// The probe uses a read-only connection so deciding "do we need to import?"
-/// cannot create WAL sidecars, DDL or a `user_version` stamp on a database we
-/// might refuse. `import()` runs its own blocking scan and a single transaction.
-fn ensure_sqlite_authority(config: &PmConfig) -> Result<()> {
-    let path = config.sqlite_path();
-    let needs_import = if !path.is_file() {
-        true
-    } else {
-        let conn = rusqlite::Connection::open_with_flags(
-            &path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .map_err(|e| PmError::Internal(format!("sqlite: {e}")))?;
-        let version = schema::user_version(&conn)?;
-        if version == 0 {
-            // A zero-byte / unversioned file. `import()` calls `schema::open()`,
-            // which refuses to adopt a DB that already has PM tables.
-            true
-        } else if version != schema::SCHEMA_VERSION {
-            return Err(PmError::Internal(format!(
-                "pm.sqlite schema v{version} is not understood by this binary (v{}); \
-                 refusing to start over an unmigrated database",
-                schema::SCHEMA_VERSION
-            )));
-        } else {
-            schema::is_empty(&conn)?
-        }
-    };
-    if needs_import {
-        let report = import::dry_run(config)?;
-        if report.has_blocking_issues() {
-            return Err(PmError::Internal(format!(
-                "startup import blocked ({} finding(s)): {}",
-                report.blocking.len(),
-                report.blocking.join(" | ")
-            )));
-        }
-        if report.projects > 0 {
-            let report = import::import(config)?;
-            tracing::info!(
-                projects = report.projects,
-                tasks = report.tasks,
-                activity_rows = report.activity_rows,
-                "one-shot JSON -> SQLite import complete"
-            );
-        }
-    }
-    // Always run, even when the rows were imported by an earlier start: a
-    // crash between the import and this step must not leave two data sources.
-    import::retire_tree_archive(config)?;
-    Ok(())
-}
-
 impl PmService {
-    /// 构造服务实例（**不**启动 server，仅初始化 store + 重建索引）。
+    /// 构造服务实例（**不**启动 server，仅打开 SQLite 并回填 `start_at`）。
     ///
     /// 使用宽松 Agent 目录（不做 assignee 存在性校验）。生产环境建议用
     /// [`PmService::with_agent_directory`] 注入真实目录。
@@ -142,11 +80,6 @@ impl PmService {
         config.validate()?;
 
         let store = build_store(&config).await?;
-
-        // 启动时重建索引（如果配置开启）
-        if config.index_rebuild_on_start {
-            store.rebuild_index().await?;
-        }
 
         // 一次性回填 `start_at`：改动前建的任务该字段全是 null，而新规则
         // 「没有开始时间 = 不派发」会把它们整体冻住。回填成 `now`（旧缺省值
@@ -207,9 +140,12 @@ impl PmService {
             match tokio::net::TcpListener::bind(SocketAddr::new(host, port)).await {
                 Ok(listener) => {
                     let addr = listener.local_addr()?;
+                    let store = self.store.clone();
+                    let diagnostics: Arc<dyn Fn() -> serde_json::Value + Send + Sync> =
+                        Arc::new(move || store.storage_diagnostics());
                     let router = self.router().merge(crate::health::health_route(
                         self.config.data_dir.clone(),
-                        self.store.corrupt_registry(),
+                        diagnostics,
                     ));
                     tracing::info!(addr = %addr, "PM server listening (full router)");
                     tokio::spawn(async move {
@@ -320,106 +256,76 @@ impl PmService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::store::tree::TreePmStore;
-    use crate::types::TaskId;
+    use crate::types::{CreateProject, TaskId};
 
     fn test_config(data_dir: &std::path::Path) -> PmConfig {
         PmConfig {
             data_dir: data_dir.to_path_buf(),
-            index_rebuild_on_start: false,
             ..Default::default()
         }
     }
 
     #[tokio::test]
-    async fn db_backend_is_object_safe_and_serves_an_empty_fresh_install() {
+    async fn fresh_install_builds_an_empty_sqlite_authority() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = test_config(tmp.path());
         let store = build_store(&cfg).await.unwrap();
         assert!(store.list_projects().await.unwrap().is_empty());
         assert_eq!(store.task_depth(&TaskId("t-nonexistent".into())), 0);
-        assert!(store.corrupt_registry().read().is_empty());
-    }
-
-    /// The whole point of the single-backend cutover: an existing JSON tree is
-    /// imported on the first start with no operator command, and a second
-    /// start is a no-op. The tree is renamed (never deleted) so the snapshot
-    /// stays recoverable.
-    #[tokio::test]
-    async fn startup_imports_the_existing_tree_automatically() {
-        use crate::types::CreateProject;
-
-        let tmp = tempfile::tempdir().unwrap();
-        let tree_cfg = test_config(tmp.path());
-        let tree = TreePmStore::new(tree_cfg).await.unwrap();
-        tree.create_project(
-            CreateProject {
-                title: "migrated from the tree".into(),
-                description: String::new(),
-                metadata: Default::default(),
-            },
-            "human",
-        )
-        .await
-        .unwrap();
-        let tree_before = count_tree_files(&tmp.path().join("projects"));
-
-        let cfg = test_config(tmp.path());
-        let store = build_store(&cfg)
-            .await
-            .expect("first start must import the tree automatically");
-        let projects = store.list_projects().await.unwrap();
-        assert_eq!(projects.len(), 1, "imported project must be visible");
-        assert_eq!(projects[0].title, "migrated from the tree");
-        assert!(cfg.sqlite_path().exists(), "import must create pm.sqlite");
-        assert_eq!(
-            count_tree_files(&tmp.path().join("projects.retired")),
-            tree_before,
-            "retirement must preserve every tree file"
-        );
+        assert!(cfg.sqlite_path().exists(), "opening must create pm.sqlite");
         assert!(
-            !tmp.path().join("projects").exists(),
-            "projects/ must no longer be a live data source"
+            !cfg.data_dir.join("projects").exists(),
+            "no JSON tree is created"
         );
-
-        let again = build_store(&cfg)
-            .await
-            .expect("second start must be idempotent");
-        assert_eq!(again.list_projects().await.unwrap().len(), 1);
     }
 
-    fn count_tree_files(root: &std::path::Path) -> usize {
-        fn walk(path: &std::path::Path, n: &mut usize) {
-            if let Ok(entries) = std::fs::read_dir(path) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.is_dir() {
-                        walk(&p, n);
-                    } else {
-                        *n += 1;
-                    }
-                }
-            }
-        }
-        let mut n = 0;
-        walk(root, &mut n);
-        n
-    }
-
-    /// Zero-config start: `PmConfig::default()` (with only data_dir pointed at
-    /// a temp dir) must build the SQLite authority without any operator step.
     #[tokio::test]
-    async fn default_config_builds_the_sqlite_authority() {
+    async fn storage_diagnostics_reflect_real_database_state() {
         let tmp = tempfile::tempdir().unwrap();
-        let cfg = PmConfig {
-            data_dir: tmp.path().to_path_buf(),
-            index_rebuild_on_start: false,
-            ..Default::default()
-        };
+        let cfg = test_config(tmp.path());
         let store = build_store(&cfg).await.unwrap();
-        assert!(store.list_projects().await.unwrap().is_empty());
-        assert_eq!(store.task_depth(&TaskId("t-nonexistent".into())), 0);
-        assert!(store.corrupt_registry().read().is_empty());
-        assert!(cfg.sqlite_path().exists());
+        let before = store.storage_diagnostics();
+        assert_eq!(before["schema_version"], 1);
+        assert_eq!(before["integrity"], "ok");
+        assert_eq!(before["rows"]["projects"], 0);
+        assert_eq!(before["props_decode_failures"], 0);
+
+        store
+            .create_project(
+                CreateProject {
+                    title: "diagnostics".into(),
+                    description: String::new(),
+                    metadata: Default::default(),
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let after = store.storage_diagnostics();
+        assert_eq!(after["rows"]["projects"], 1, "diagnostics must be live");
+    }
+
+    #[tokio::test]
+    async fn writes_survive_reopening_the_same_database() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = test_config(tmp.path());
+        let first = build_store(&cfg).await.unwrap();
+        first
+            .create_project(
+                CreateProject {
+                    title: "persisted".into(),
+                    description: String::new(),
+                    metadata: Default::default(),
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        drop(first);
+
+        let second = build_store(&cfg).await.unwrap();
+        let projects = second.list_projects().await.unwrap();
+        assert_eq!(projects.len(), 1);
+        assert_eq!(projects[0].title, "persisted");
     }
 }

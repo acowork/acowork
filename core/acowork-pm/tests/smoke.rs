@@ -4,13 +4,12 @@
 //! - crate 可被外部使用
 //! - 关键 re-export 存在
 //! - PmConfig 默认值合法
-//! - TreePmStore 可构造（无需重建索引）
+//! - SqlitePmStore 可在空数据目录建库
 
-use acowork_pm::{PmConfig, ProjectId, TaskId, AttachmentId};
+use acowork_pm::{AttachmentId, PmConfig, PmMaintenance, ProjectId, TaskId};
 
 #[test]
 fn crate_re_exports_compile() {
-    // 编译期验证：这些类型必须从 lib.rs 顶层导出
     let _: ProjectId = ProjectId::generate();
     let _: TaskId = TaskId::generate();
     let _: AttachmentId = AttachmentId::generate();
@@ -23,24 +22,23 @@ fn default_config_is_valid() {
 }
 
 #[test]
-fn config_projects_dir_is_under_data_dir() {
+fn sqlite_path_is_under_data_dir() {
     let cfg = PmConfig::default();
-    assert!(cfg.projects_dir().starts_with(&cfg.data_dir));
-    assert!(cfg.trash_dir().starts_with(&cfg.data_dir));
+    assert!(cfg.sqlite_path().starts_with(&cfg.data_dir));
 }
 
-#[tokio::test]
-async fn store_constructs_with_tempdir() {
+#[test]
+fn store_constructs_with_tempdir() {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = PmConfig {
         data_dir: tmp.path().to_path_buf(),
         ..Default::default()
     };
-
-    let store = acowork_pm::TreePmStore::new(cfg)
-        .await
-        .expect("store construction should succeed");
-    assert_eq!(store.indexed_task_count(), 0);
+    let store =
+        acowork_pm::SqlitePmStore::open(cfg.clone()).expect("store construction should succeed");
+    assert_eq!(store.config().data_dir, cfg.data_dir);
+    assert!(cfg.sqlite_path().exists());
+    assert_eq!(store.storage_diagnostics()["rows"]["projects"], 0);
 }
 
 #[test]

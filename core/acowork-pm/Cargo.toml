@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
-description = "Project & Task management service — directory-tree storage, dependency graph, parent-child task tree, attachments, REST API + MCP tools"
+description = "Project & Task management service — SQLite storage, dependency graph, parent-child task tree, attachments, REST API + MCP tools"
 
 [lib]
 name = "acowork_pm"
@@ -30,7 +30,6 @@ acowork-core.workspace = true
 tokio.workspace = true
 async-trait.workspace = true
 futures-util.workspace = true
-tokio-stream.workspace = true
 
 # Serialization
 serde.workspace = true
@@ -38,7 +37,6 @@ serde_json.workspace = true
 indexmap.workspace = true
 
 # Error handling
-anyhow.workspace = true
 thiserror.workspace = true
 
 # Logging
@@ -55,17 +53,9 @@ reqwest.workspace = true
 chrono.workspace = true
 uuid.workspace = true
 
-# Concurrency
-parking_lot.workspace = true
-
-# ADR-117 D6: SQLite backend + one-shot JSON importer.
-# Reuses the workspace-wide bundled SQLite so no system library is needed.
+# ADR-117: SQLite is the sole storage authority. The workspace-wide bundled
+# SQLite means no system library is needed.
 rusqlite.workspace = true
-
-# File watching + traversal
-notify.workspace = true
-ignore.workspace = true
-regex.workspace = true
 
 # Configuration
 toml.workspace = true

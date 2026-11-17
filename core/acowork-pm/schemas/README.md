@@ -44,7 +44,7 @@
 | POST | `/api/pm/projects/{pid}/tasks` | 新建任务 | ✅ |
 | GET | `/api/pm/tasks/{tid}` | 任务详情（含 `is_blocked`/`blocked_by`/`depth` 派生字段） | ✅ |
 | PATCH | `/api/pm/tasks/{tid}` | 更新任务（全字段可选） | ✅ |
-| DELETE | `/api/pm/tasks/{tid}?cascade=&promote_children=` | 删除任务（子树级联） | ✅ |
+| DELETE | `/api/pm/tasks/{tid}?cascade=true` | 删除任务（子树级联） | ✅ |
 | PATCH | `/api/pm/tasks/{tid}/parent` | 移动任务（`new_parent=null` 提升为根；DFS 防环） | ✅ |
 | POST | `/api/pm/tasks/{tid}/claim` | Agent 认领（pending → in_progress） | ✅ |
 | POST | `/api/pm/tasks/{tid}/submit` | Agent 提交结果（in_progress → submitted） | ✅ |

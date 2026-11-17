@@ -65,16 +65,6 @@ pub struct PmConfig {
     #[serde(default = "default_max_attachments_per_task")]
     pub max_attachments_per_task: usize,
 
-    /// 已删除项目/任务在 `.trash/` 中保留天数。
-    ///
-    /// 默认 `30`。过期后下次启动时清理。
-    #[serde(default = "default_trash_retention_days")]
-    pub trash_retention_days: u32,
-
-    /// 启动时强制 walkdir 重建索引（开发期 true，生产期 false 走增量）。
-    #[serde(default = "default_index_rebuild_on_start")]
-    pub index_rebuild_on_start: bool,
-
     /// 启用图片附件缩略图生成（需 `image-thumb` feature）。
     ///
     /// 默认 `true`。关闭可加速上传但前端预览需直接拉原图。
@@ -154,14 +144,6 @@ fn default_max_attachments_per_task() -> usize {
     20
 }
 
-fn default_trash_retention_days() -> u32 {
-    30
-}
-
-fn default_index_rebuild_on_start() -> bool {
-    true
-}
-
 fn default_thumbnail_max_edge() -> u32 {
     256
 }
@@ -176,8 +158,6 @@ impl Default for PmConfig {
             max_task_depth: default_max_task_depth(),
             max_attachment_size: default_max_attachment_size(),
             max_attachments_per_task: default_max_attachments_per_task(),
-            trash_retention_days: default_trash_retention_days(),
-            index_rebuild_on_start: default_index_rebuild_on_start(),
             generate_thumbnails: default_true(),
             thumbnail_max_edge: default_thumbnail_max_edge(),
             auto_inject_mcp: default_true(),
@@ -207,20 +187,7 @@ impl PmConfig {
         Ok(())
     }
 
-    /// 项目根目录 = `{data_dir}/projects`。
-    pub fn projects_dir(&self) -> PathBuf {
-        self.data_dir.join("projects")
-    }
-
-    /// Trash 根目录 = `{data_dir}/.trash`。
-    pub fn trash_dir(&self) -> PathBuf {
-        self.data_dir.join(".trash")
-    }
-
     /// SQLite database path — the single authority.
-    ///
-    /// Kept beside `projects/` rather than inside it, so a tree rebuild or a
-    /// project archive can never sweep the database away.
     pub fn sqlite_path(&self) -> PathBuf {
         self.data_dir.join("pm.sqlite")
     }
@@ -296,24 +263,17 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cfg.sqlite_path(), PathBuf::from("/tmp/pm-data/pm.sqlite"));
-        assert_ne!(cfg.sqlite_path(), cfg.projects_dir());
     }
 
-    /// The three-state rollout config is gone. A stale `storage_backend` key
-    /// must fail loudly instead of being silently ignored — otherwise an old
-    /// deployment would keep running while believing it had switched backends.
+    /// Unknown config keys must fail loudly rather than being silently ignored.
     #[test]
-    fn retired_storage_backend_key_is_rejected() {
+    fn unknown_config_keys_are_rejected() {
         assert_eq!(STORAGE_BACKEND, "db");
-        for value in ["filetree", "dual", "db"] {
-            let text = format!("storage_backend = \"{value}\"\n");
-            let err = toml::from_str::<PmConfig>(&text).unwrap_err();
-            assert!(
-                err.to_string().contains("unknown field"),
-                "unexpected error for {value}: {err}"
-            );
-        }
-        // A config without the retired key still loads with the only backend.
+        let err = toml::from_str::<PmConfig>("typo_option = 1\n").unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "error was: {err}"
+        );
         assert!(toml::from_str::<PmConfig>("data_dir = \"/tmp/pm-data\"\n").is_ok());
     }
 }

@@ -15,7 +15,7 @@
 //! 1. **T4-3 远程全链路**：人类 REST 建项目 + 建任务（指派远程 Agent）→ 远程
 //!    Agent 经 MCP HTTP `pm_claim_task` → `pm_submit_task` → 人类 REST 查询
 //!    看板确认任务已 submitted（看板刷新）。
-//! 2. **T4-2 身份校验**（设计 §9.2）：非 assignee 调 `pm_claim_task` / 
+//! 2. **T4-2 身份校验**（设计 §9.2）：非 assignee 调 `pm_claim_task` /
 //!    `pm_submit_task` 返回 JSON-RPC Forbidden（-32002）。
 //! 3. **§9.3 匿名只读**：无 `X-MCP-Actor` 调 `pm_list_projects` 允许；调
 //!    `pm_claim_task` 拒绝（Unauthenticated -32001）。
@@ -45,13 +45,13 @@ async fn start_remote_server() -> (String, tempfile::TempDir) {
     let tmp = tempfile::tempdir().unwrap();
     let cfg = PmConfig {
         data_dir: tmp.path().to_path_buf(),
-        index_rebuild_on_start: false,
         ..Default::default()
     };
 
     // ADR-073: whitelist contains agent_instance_id (UUID)
-    let agent_dir: Arc<dyn AgentDirectory> =
-        Arc::new(WhitelistDir(vec!["3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d".to_string()]));
+    let agent_dir: Arc<dyn AgentDirectory> = Arc::new(WhitelistDir(vec![
+        "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d".to_string(),
+    ]));
     let svc = PmService::with_agent_directory(cfg, agent_dir)
         .await
         .expect("PmService should start");
@@ -69,12 +69,7 @@ async fn start_remote_server() -> (String, tempfile::TempDir) {
 }
 
 /// 模拟人类在 UI 添加项目成员（REST POST /members）。
-async fn add_member_via_rest(
-    client: &reqwest::Client,
-    base: &str,
-    pid: &str,
-    instance_id: &str,
-) {
+async fn add_member_via_rest(client: &reqwest::Client, base: &str, pid: &str, instance_id: &str) {
     let resp = client
         .post(format!("{base}/projects/{pid}/members"))
         .header("x-actor", "human")
@@ -120,7 +115,9 @@ async fn mcp_call(
         200,
         "MCP endpoint should return 200 for valid JSON-RPC"
     );
-    resp.json::<Value>().await.expect("JSON-RPC response should parse")
+    resp.json::<Value>()
+        .await
+        .expect("JSON-RPC response should parse")
 }
 
 /// 断言 tools/call 成功，并返回工具结果（`result.content[0].text` 解析后的 Value）。
@@ -191,7 +188,10 @@ async fn remote_agent_claim_submit_full_chain() {
     assert_eq!(resp.status(), 200, "human creates task via REST");
     let task: Value = resp.json().await.unwrap();
     let tid = task["id"].as_str().unwrap().to_string();
-    assert_eq!(task["status"], "pending", "human-created task starts as pending");
+    assert_eq!(
+        task["status"], "pending",
+        "human-created task starts as pending"
+    );
 
     // ── 3. 远程 Agent 自查（pm_list_tasks，过滤 assignee 自己）──────────
     let v = mcp_call(
@@ -204,8 +204,8 @@ async fn remote_agent_claim_submit_full_chain() {
     )
     .await;
     let tasks = tool_result(&v);
-    let tids: Vec<String> = tasks
-        ["tasks"].as_array()
+    let tids: Vec<String> = tasks["tasks"]
+        .as_array()
         .unwrap()
         .iter()
         .filter_map(|t| t["id"].as_str().map(|s| s.to_string()))
@@ -216,10 +216,20 @@ async fn remote_agent_claim_submit_full_chain() {
     );
 
     // ── 4. 远程 Agent claim（pending → in_progress）─────────────────────
-    let v = mcp_call(&client, &base, Some(actor), 2, "pm_claim_task", json!({ "task_id": tid }))
-        .await;
+    let v = mcp_call(
+        &client,
+        &base,
+        Some(actor),
+        2,
+        "pm_claim_task",
+        json!({ "task_id": tid }),
+    )
+    .await;
     let claimed = tool_result(&v);
-    assert_eq!(claimed["status"], "in_progress", "claim should move to in_progress");
+    assert_eq!(
+        claimed["status"], "in_progress",
+        "claim should move to in_progress"
+    );
 
     // ── 5. 远程 Agent submit（in_progress → submitted）──────────────────
     let v = mcp_call(
@@ -232,7 +242,10 @@ async fn remote_agent_claim_submit_full_chain() {
     )
     .await;
     let submitted = tool_result(&v);
-    assert_eq!(submitted["status"], "submitted", "submit should move to submitted");
+    assert_eq!(
+        submitted["status"], "submitted",
+        "submit should move to submitted"
+    );
 
     // ── 6. 看板刷新：人类 REST 查询任务，确认远程结果已落盘 ─────────────
     let resp = client
@@ -297,7 +310,11 @@ async fn non_assignee_mutation_rejected_over_http() {
     assert_rpc_error(&v, -32002);
 
     // 任务未被改变（仍是 pending）
-    let resp = client.get(format!("{base}/tasks/{tid}")).send().await.unwrap();
+    let resp = client
+        .get(format!("{base}/tasks/{tid}"))
+        .send()
+        .await
+        .unwrap();
     let board: Value = resp.json().await.unwrap();
     assert_eq!(board["status"], "pending", "intruder claim must not mutate");
 
@@ -314,8 +331,15 @@ async fn non_assignee_mutation_rejected_over_http() {
     assert_rpc_error(&v, -32002);
 
     // 拥有者仍可正常 claim → in_progress（身份边界正确）
-    let v = mcp_call(&client, &base, Some(owner), 3, "pm_claim_task", json!({ "task_id": tid }))
-        .await;
+    let v = mcp_call(
+        &client,
+        &base,
+        Some(owner),
+        3,
+        "pm_claim_task",
+        json!({ "task_id": tid }),
+    )
+    .await;
     let claimed = tool_result(&v);
     assert_eq!(claimed["status"], "in_progress");
 }
@@ -334,13 +358,30 @@ async fn anonymous_readonly_allowed_mutation_rejected() {
     tool_result(&v); // 不 panic 即成功
 
     // 匿名 get（任意 id）→ 允许只读，404 是业务错误而非鉴权错误
-    let v = mcp_call(&client, &base, None, 2, "pm_get_task", json!({ "task_id": "t-nonexistent" }))
-        .await;
-    assert!(v["error"].is_object(), "anonymous get on missing task returns error");
+    let v = mcp_call(
+        &client,
+        &base,
+        None,
+        2,
+        "pm_get_task",
+        json!({ "task_id": "t-nonexistent" }),
+    )
+    .await;
+    assert!(
+        v["error"].is_object(),
+        "anonymous get on missing task returns error"
+    );
 
     // 匿名 claim → Unauthenticated（-32001）
-    let v = mcp_call(&client, &base, None, 3, "pm_claim_task", json!({ "task_id": "t-x" }))
-        .await;
+    let v = mcp_call(
+        &client,
+        &base,
+        None,
+        3,
+        "pm_claim_task",
+        json!({ "task_id": "t-x" }),
+    )
+    .await;
     assert_rpc_error(&v, -32001);
 }
 
@@ -355,7 +396,7 @@ async fn different_instance_ids_isolated() {
     let (base, _tmp) = start_remote_server().await;
     let client = reqwest::Client::new();
     let alice = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d"; // 白名单内
-    let bob = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d";   // 不在白名单（pm_create_task 用 alice 建任务指给 bob 时应被拒）
+    let bob = "5d2e1100-7e4b-4d2a-b6f1-1a91b07e4c2d"; // 不在白名单（pm_create_task 用 alice 建任务指给 bob 时应被拒）
 
     // ── Alice 建任务指派给自己 ─────────────────────────────────────
     let resp = client
@@ -363,8 +404,13 @@ async fn different_instance_ids_isolated() {
         .header("x-actor", "human")
         .header("content-type", "application/json")
         .body(json!({ "title": "P" }).to_string())
-        .send().await.unwrap();
-    let pid = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+        .send()
+        .await
+        .unwrap();
+    let pid = resp.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 联动指派：人类先添加 alice 为项目成员
     add_member_via_rest(&client, &base, &pid, alice).await;
@@ -374,31 +420,56 @@ async fn different_instance_ids_isolated() {
         .header("x-actor", "human")
         .header("content-type", "application/json")
         .body(json!({ "title": "T", "assignee": alice }).to_string())
-        .send().await.unwrap();
-    let tid = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+        .send()
+        .await
+        .unwrap();
+    let tid = resp.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // ── Bob（非白名单）试图创建任务指派给自己 → BadRequest（§9.1，映射 -32603）────
     let v = mcp_call(
-        &client, &base, Some(bob), 1, "pm_create_task",
+        &client,
+        &base,
+        Some(bob),
+        1,
+        "pm_create_task",
         json!({ "project_id": pid, "title": "Bob task", "assignee": bob }),
-    ).await;
-    assert_rpc_error(&v, -32603 /* InternalError per PmError::mcp_error_code for non-{Unauth,Forbidden} */);
+    )
+    .await;
+    assert_rpc_error(
+        &v, -32603, /* InternalError per PmError::mcp_error_code for non-{Unauth,Forbidden} */
+    );
 
     // ── Bob（非 assignee）试图 claim alice 的任务 → Forbidden ─────────
     let v = mcp_call(
-        &client, &base, Some(bob), 2, "pm_claim_task",
+        &client,
+        &base,
+        Some(bob),
+        2,
+        "pm_claim_task",
         json!({ "task_id": tid }),
-    ).await;
+    )
+    .await;
     assert_rpc_error(&v, -32002);
 
     // ── Alice（合法 assignee）claim → in_progress ────────────────────
     let v = mcp_call(
-        &client, &base, Some(alice), 3, "pm_claim_task",
+        &client,
+        &base,
+        Some(alice),
+        3,
+        "pm_claim_task",
         json!({ "task_id": tid }),
-    ).await;
+    )
+    .await;
     let claimed = tool_result(&v);
     assert_eq!(claimed["status"], "in_progress");
-    assert_eq!(claimed["assignee"], alice, "claim must persist actor as instance_id");
+    assert_eq!(
+        claimed["assignee"], alice,
+        "claim must persist actor as instance_id"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -414,7 +485,6 @@ async fn start_remote_server_with(whitelist: Vec<String>) -> (String, tempfile::
     let tmp = tempfile::tempdir().unwrap();
     let cfg = PmConfig {
         data_dir: tmp.path().to_path_buf(),
-        index_rebuild_on_start: false,
         ..Default::default()
     };
     let agent_dir: Arc<dyn AgentDirectory> = Arc::new(WhitelistDir(whitelist));
@@ -435,11 +505,8 @@ async fn multi_instance_same_package_tasks_are_isolated() {
     // 两个 instance 都是 "com.acowork.architect" 包，但 instance_id 不同。
     let workspace_a = "3f8c2a91-7e4b-4d2a-b6f1-1a91b07e4c2d";
     let workspace_b = "a91b07e4-c2d3-4f8b-a91b-07e4c2d34f8b";
-    let (base, _tmp) = start_remote_server_with(vec![
-        workspace_a.to_string(),
-        workspace_b.to_string(),
-    ])
-    .await;
+    let (base, _tmp) =
+        start_remote_server_with(vec![workspace_a.to_string(), workspace_b.to_string()]).await;
     let client = reqwest::Client::new();
 
     // 建项目
@@ -448,8 +515,13 @@ async fn multi_instance_same_package_tasks_are_isolated() {
         .header("x-actor", "human")
         .header("content-type", "application/json")
         .body(json!({ "title": "P" }).to_string())
-        .send().await.unwrap();
-    let pid = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+        .send()
+        .await
+        .unwrap();
+    let pid = resp.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // 联动指派：人类先添加两个 instance 为项目成员
     add_member_via_rest(&client, &base, &pid, workspace_a).await;
@@ -461,65 +533,121 @@ async fn multi_instance_same_package_tasks_are_isolated() {
         .header("x-actor", "human")
         .header("content-type", "application/json")
         .body(json!({ "title": "Task A", "assignee": workspace_a }).to_string())
-        .send().await.unwrap();
-    let tid_a = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+        .send()
+        .await
+        .unwrap();
+    let tid_a = resp.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let resp = client
         .post(format!("{base}/projects/{pid}/tasks"))
         .header("x-actor", "human")
         .header("content-type", "application/json")
         .body(json!({ "title": "Task B", "assignee": workspace_b }).to_string())
-        .send().await.unwrap();
-    let tid_b = resp.json::<Value>().await.unwrap()["id"].as_str().unwrap().to_string();
+        .send()
+        .await
+        .unwrap();
+    let tid_b = resp.json::<Value>().await.unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // ── workspace-a 自查：能看到 Task A，看不到 Task B ──────────────
     let v = mcp_call(
-        &client, &base, Some(workspace_a), 1, "pm_list_tasks",
+        &client,
+        &base,
+        Some(workspace_a),
+        1,
+        "pm_list_tasks",
         json!({ "project_id": pid, "assignee": "me" }),
-    ).await;
+    )
+    .await;
     let my_tasks_a: Vec<String> = tool_result(&v)["tasks"]
-        .as_array().unwrap().iter()
+        .as_array()
+        .unwrap()
+        .iter()
         .filter_map(|t| t["id"].as_str().map(String::from))
         .collect();
-    assert!(my_tasks_a.contains(&tid_a), "workspace-a must see its own task");
-    assert!(!my_tasks_a.contains(&tid_b), "workspace-a must NOT see workspace-b's task");
+    assert!(
+        my_tasks_a.contains(&tid_a),
+        "workspace-a must see its own task"
+    );
+    assert!(
+        !my_tasks_a.contains(&tid_b),
+        "workspace-a must NOT see workspace-b's task"
+    );
 
     // ── workspace-b 自查：能看到 Task B，看不到 Task A ──────────────
     let v = mcp_call(
-        &client, &base, Some(workspace_b), 2, "pm_list_tasks",
+        &client,
+        &base,
+        Some(workspace_b),
+        2,
+        "pm_list_tasks",
         json!({ "project_id": pid, "assignee": "me" }),
-    ).await;
+    )
+    .await;
     let my_tasks_b: Vec<String> = tool_result(&v)["tasks"]
-        .as_array().unwrap().iter()
+        .as_array()
+        .unwrap()
+        .iter()
         .filter_map(|t| t["id"].as_str().map(String::from))
         .collect();
-    assert!(my_tasks_b.contains(&tid_b), "workspace-b must see its own task");
-    assert!(!my_tasks_b.contains(&tid_a), "workspace-b must NOT see workspace-a's task");
+    assert!(
+        my_tasks_b.contains(&tid_b),
+        "workspace-b must see its own task"
+    );
+    assert!(
+        !my_tasks_b.contains(&tid_a),
+        "workspace-b must NOT see workspace-a's task"
+    );
 
     // ── workspace-a claim Task B → Forbidden（核心 ADR-073 不变量）──
     let v = mcp_call(
-        &client, &base, Some(workspace_a), 3, "pm_claim_task",
+        &client,
+        &base,
+        Some(workspace_a),
+        3,
+        "pm_claim_task",
         json!({ "task_id": tid_b }),
-    ).await;
+    )
+    .await;
     assert_rpc_error(&v, -32002);
 
     // ── workspace-b claim Task A → Forbidden ─────────────────────────
     let v = mcp_call(
-        &client, &base, Some(workspace_b), 4, "pm_claim_task",
+        &client,
+        &base,
+        Some(workspace_b),
+        4,
+        "pm_claim_task",
         json!({ "task_id": tid_a }),
-    ).await;
+    )
+    .await;
     assert_rpc_error(&v, -32002);
 
     // ── 各自 claim 自己的任务 → 互不干扰 ──────────────────────────
     let v = mcp_call(
-        &client, &base, Some(workspace_a), 5, "pm_claim_task",
+        &client,
+        &base,
+        Some(workspace_a),
+        5,
+        "pm_claim_task",
         json!({ "task_id": tid_a }),
-    ).await;
+    )
+    .await;
     assert_eq!(tool_result(&v)["status"], "in_progress");
 
     let v = mcp_call(
-        &client, &base, Some(workspace_b), 6, "pm_claim_task",
+        &client,
+        &base,
+        Some(workspace_b),
+        6,
+        "pm_claim_task",
         json!({ "task_id": tid_b }),
-    ).await;
+    )
+    .await;
     assert_eq!(tool_result(&v)["status"], "in_progress");
 }

@@ -11,9 +11,8 @@
 //! `parent_id` / `depth` / `status` / `task_dir` 等列供查询。附件与项目图标
 //! 二进制仍在文件系统，按 `assets/projects/{pid}/` 分组。
 //!
-//! 首次启动把历史的 `projects/` JSON 树一次性导入，并把原目录改名为
-//! `projects.retired` 作为可恢复快照；此后不再读取它。旧的目录树实现留在
-//! `store::tree`，仅作为归档格式参考、规则 helpers 与测试夹具。
+//! 空数据目录首次启动会直接建立空的 v1 库；不再读取任何 JSON 树，
+//! 也没有第二提交点、灰度配置或运行时后端切换。
 //!
 //! ## 跨服务集成
 //!
@@ -62,9 +61,8 @@ pub use types::{
 };
 
 // Storage
-pub use store::index::TaskIndex;
+pub use store::contract::{PmMaintenance, PmStore};
 pub use store::sqlite::{SqlitePmStore, schema as pm_sqlite_schema};
-pub use store::tree::{PmMaintenance, PmStore, TreePmStore};
 
 // API
 pub use api::routes::pm_router;

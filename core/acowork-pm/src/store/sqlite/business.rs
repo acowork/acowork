@@ -1,23 +1,18 @@
-//! `PmStore` business methods for the SQLite backend (ADR-117 D6 step 3).
+//! `PmStore` business methods for the SQLite backend (ADR-117).
 //!
 //! Every mutation is load → mutate → save on the verbatim `props` JSON, with
-//! the projected columns refreshed in the same statement. The validation and
-//! state-machine helpers are imported from `store::tree` rather than copied:
-//! `validate_transition`, `ensure_creation_approved`, `parse_task_id`,
-//! `priority_rank` and `seeded_activity` are the single source of truth for
-//! both backends, which is the whole point of running the same test suite
-//! against them (D6 step 5).
+//! the projected columns refreshed in the same statement. Validation and
+//! state-machine helpers come from `store::rules` — `validate_transition`,
+//! `ensure_creation_approved`, `parse_task_id`, `priority_rank` and
+//! `seeded_activity` — so there is exactly one definition of each rule.
 //!
 //! Two places where the DB is deliberately *not* a mechanical translation of
-//! the tree:
+//! the old directory tree:
 //! - physical `children/` nesting is a `parent_id` + `depth` update, so
 //!   `reparent_task` touches columns instead of renaming directories;
-//! - DB-created tasks keep their binaries under
-//!   `assets/projects/{pid}/tasks/{tid}`, outside the retired tree archive,
-//!   so switching to `db` never writes into the recoverable snapshot. This
-//!   shares the `{pid}` subtree with `icon/`, letting `delete_project` clean
-//!   every binary of a project in one pass. Imported tasks keep their original
-//!   `task_dir` until retirement rewrites it.
+//! - each task keeps its binaries under `assets/projects/{pid}/tasks/{tid}`,
+//!   sharing the `{pid}` subtree with `icon/`, letting `delete_project` clean
+//!   every binary of a project in one pass.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -35,9 +30,9 @@ use crate::types::{
 };
 
 use super::{SqlitePmStore, db_err, load_task_from, update_task_row};
-use crate::store::tree::{
-    PmStore, ensure_creation_approved, parse_task_id, priority_rank, seeded_activity,
-    validate_transition,
+use crate::store::contract::PmStore;
+use crate::store::rules::{
+    ensure_creation_approved, parse_task_id, priority_rank, seeded_activity, validate_transition,
 };
 
 // ── Activity helpers ────────────────────────────────────────────────
@@ -154,29 +149,20 @@ impl SqlitePmStore {
         }
     }
 
-    /// Only DB-owned asset roots may be physically deleted. Imported tasks
-    /// point into the retired tree archive, which is never touched here.
+    /// Only DB-owned asset roots may be physically deleted.
     fn is_db_owned_asset_dir(rel_dir: &str) -> bool {
         super::is_db_owned_asset_dir(rel_dir)
     }
 
-    /// `dir_override` lets `write_attachment` redirect newly uploaded
-    /// binaries for *imported* tasks into a DB-owned root, so a `db` rollout
-    /// never writes into the tree archive it must be able to roll back to.
-    fn register_attachment_in(
-        &self,
-        task_id: &TaskId,
-        meta: AttachmentMeta,
-        dir_override: Option<String>,
-    ) -> Result<()> {
-        // Validate paths before they ever reach a row: both the importer and
-        // the HTTP upload path converge here, and a relative path with `..`
-        // or an absolute path would otherwise be trusted at read time.
-        if !super::import::safe_rel(&meta.storage_path)
+    /// Persist attachment metadata under the task's own asset root.
+    fn register_attachment_in(&self, task_id: &TaskId, meta: AttachmentMeta) -> Result<()> {
+        // Validate paths before they ever reach a row: a relative path with
+        // `..` or an absolute path would otherwise be trusted at read time.
+        if !crate::store::rules::safe_rel(&meta.storage_path)
             || meta
                 .thumb_path
                 .as_deref()
-                .is_some_and(|p| !super::import::safe_rel(p))
+                .is_some_and(|p| !crate::store::rules::safe_rel(p))
         {
             return Err(PmError::PathTraversal(format!("attachment {}", meta.id)));
         }
@@ -193,16 +179,13 @@ impl SqlitePmStore {
                     meta.id
                 )));
             }
-            let rel_dir = match dir_override {
-                Some(dir) => dir,
-                None => tx
-                    .query_row(
-                        "SELECT task_dir FROM tasks WHERE id = ?1",
-                        params![task_id.as_str()],
-                        |row| row.get(0),
-                    )
-                    .map_err(db_err)?,
-            };
+            let rel_dir: String = tx
+                .query_row(
+                    "SELECT task_dir FROM tasks WHERE id = ?1",
+                    params![task_id.as_str()],
+                    |row| row.get(0),
+                )
+                .map_err(db_err)?;
             task.attachments.push(meta.clone());
             task.updated_at = Utc::now();
             update_task_row(&tx, &task)?;
@@ -319,12 +302,27 @@ impl PmStore for SqlitePmStore {
         Ok(out)
     }
 
-    async fn delete_project(&self, id: &ProjectId, _cascade: bool) -> Result<()> {
+    async fn delete_project(&self, id: &ProjectId, cascade: bool) -> Result<()> {
         if self.load_project(id)?.is_none() {
             return Err(PmError::ProjectNotFound(id.to_string()));
         }
+        if !cascade {
+            let n: i64 = self.with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM tasks WHERE project_id = ?1",
+                    params![id.as_str()],
+                    |r| r.get(0),
+                )
+                .map_err(db_err)
+            })?;
+            if n > 0 {
+                return Err(PmError::Conflict(format!(
+                    "project {id} still has {n} task(s); pass cascade=true to delete them"
+                )));
+            }
+        }
         // `tasks.project_id` is ON DELETE CASCADE; attachments and activity
-        // cascade from tasks. The retired tree snapshot is never touched.
+        // cascade from tasks.
         self.delete_project_row(id)?;
         // ADR-117 asset layout: icons and every task binary of a project live
         // under one `{pid}` subtree, so one best-effort removal leaves no
@@ -691,11 +689,17 @@ impl PmStore for SqlitePmStore {
         Ok(task)
     }
 
-    async fn delete_task(&self, id: &TaskId, _cascade: bool) -> Result<()> {
+    async fn delete_task(&self, id: &TaskId, cascade: bool) -> Result<()> {
         if self.load_task(id)?.is_none() {
             return Err(PmError::TaskNotFound(id.to_string()));
         }
         let ids = self.subtree_ids(id)?;
+        if !cascade && ids.len() > 1 {
+            return Err(PmError::Conflict(format!(
+                "task {id} has {} child task(s); pass cascade=true to delete the subtree",
+                ids.len() - 1
+            )));
+        }
         // Snapshot the DB-owned asset roots *before* the rows disappear, but
         // only unlink them **after** the DB transaction commits. Deleting the
         // binaries first would leave live metadata pointing at files that no
@@ -757,7 +761,7 @@ impl PmStore for SqlitePmStore {
         let ids = self.subtree_ids(id)?;
         // The moved root fitting under `max_task_depth` is not enough: every
         // descendant shifts by the same delta, so the deepest one decides.
-        // Mirror `TreePmStore::reparent_task`, which checks the whole subtree
+        // Check the whole subtree after the move, not just the root task
         // before moving any directory.
         let deepest = self.with_conn(|conn| {
             let mut stmt = conn
@@ -1015,7 +1019,7 @@ impl PmStore for SqlitePmStore {
     }
 
     async fn register_attachment(&self, task_id: &TaskId, meta: AttachmentMeta) -> Result<()> {
-        self.register_attachment_in(task_id, meta, None)
+        self.register_attachment_in(task_id, meta)
     }
 
     async fn delete_attachment(&self, att_id: &AttachmentId) -> Result<()> {
@@ -1070,24 +1074,17 @@ impl PmStore for SqlitePmStore {
         let (_, _, current_rel) = self
             .task_meta(task_id)?
             .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
-        // Imported tasks point into the retired tree archive. New binaries must
-        // not mutate that snapshot, so they get a project-scoped DB-owned root.
-        let rel_dir = if Self::is_db_owned_asset_dir(&current_rel) {
-            current_rel
-        } else {
-            let task = self
-                .load_task(task_id)?
-                .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
-            self.new_task_asset_dir(&task.project_id, task_id)
-        };
+        // Every row is created by `create_task_as`, so `task_dir` is already
+        // the DB-owned project-scoped root.
+        let rel_dir = current_rel;
         // Validate before touching the filesystem. `register_attachment_in`
         // repeats this at commit time, but doing it here first means an
         // invalid relative path cannot leave orphan binaries behind.
-        if !super::import::safe_rel(&meta.storage_path)
+        if !crate::store::rules::safe_rel(&meta.storage_path)
             || meta
                 .thumb_path
                 .as_deref()
-                .is_some_and(|p| !super::import::safe_rel(p))
+                .is_some_and(|p| !crate::store::rules::safe_rel(p))
         {
             return Err(PmError::PathTraversal(format!("attachment {}", meta.id)));
         }
@@ -1106,7 +1103,7 @@ impl PmStore for SqlitePmStore {
                 .unwrap_or("thumb.jpg");
             std::fs::write(att_dir.join(thumb_name), bytes)?;
         }
-        if let Err(e) = self.register_attachment_in(task_id, meta.clone(), Some(rel_dir)) {
+        if let Err(e) = self.register_attachment_in(task_id, meta.clone()) {
             // FS-first means a rejected registration (too many attachments,
             // missing task, DB locked) would otherwise leak the binaries.
             let _ = std::fs::remove_dir_all(&att_dir);
@@ -1130,7 +1127,7 @@ impl PmStore for SqlitePmStore {
         } else {
             meta.storage_path.clone()
         };
-        if !super::import::safe_rel(&rel_path) {
+        if !crate::store::rules::safe_rel(&rel_path) {
             return Err(PmError::PathTraversal(rel_path));
         }
         let base = self.asset_base(&rel_dir);
@@ -1175,7 +1172,7 @@ impl PmStore for SqlitePmStore {
 mod tests {
     use super::*;
     use crate::config::PmConfig;
-    use crate::store::tree::PmMaintenance;
+    use crate::store::contract::PmMaintenance;
     use crate::types::{
         AttachmentId, AttachmentKind, CreateProject, CreateTask, Dependency, Priority, TaskType,
     };
@@ -1222,7 +1219,7 @@ mod tests {
     }
 
     /// `dispatch_identity` must replay the persisted generation id with no
-    /// write at all — matching `TreePmStore`. Writing on every scanner tick
+    /// write at all. Writing on every scanner tick
     /// would bump `updated_at` forever for a task that has not changed.
     #[tokio::test]
     async fn dispatch_identity_replays_without_rewriting_the_row() {
@@ -1271,7 +1268,7 @@ mod tests {
         );
     }
 
-    /// Same subtree-depth rule as `TreePmStore::reparent_task`, expressed on
+    /// Same whole-subtree depth rule, expressed on
     /// projected columns rather than directories.
     #[tokio::test]
     async fn reparent_rejects_when_the_subtree_would_exceed_max_depth() {
@@ -1511,12 +1508,12 @@ mod tests {
         // Deleting a root cascades through the subtree.
         let contexts = db.closing_task_contexts(&root.id).await.unwrap();
         assert_eq!(contexts.len(), 2);
-        db.delete_task(&root.id, false).await.unwrap();
+        db.delete_task(&root.id, true).await.unwrap();
         assert!(db.get_task(&child.id).await.unwrap().is_none());
         assert!(db.project_counts().await.unwrap().is_empty());
 
-        db.delete_project(&pid, false).await.unwrap();
-        let err = db.delete_project(&pid, false).await.unwrap_err();
+        db.delete_project(&pid, true).await.unwrap();
+        let err = db.delete_project(&pid, true).await.unwrap_err();
         assert_eq!(err.error_code(), "project_not_found");
     }
 
@@ -1567,5 +1564,51 @@ mod tests {
             .unwrap();
         // Still blocked: the prerequisite is Done only after a submit+approve.
         assert!(db.dispatch_due_ids(Utc::now(), 10).is_empty());
+    }
+
+    /// The `cascade` flag is a real contract: refusing a destructive delete
+    /// must leave every row intact, and `cascade=true` must remove the subtree.
+    #[tokio::test]
+    async fn delete_without_cascade_refuses_to_destroy_children() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = new_store(tmp.path());
+        let project = db
+            .create_project(
+                CreateProject {
+                    title: "cascade contract".into(),
+                    description: String::new(),
+                    metadata: Default::default(),
+                },
+                "human",
+            )
+            .await
+            .unwrap();
+        let root = db
+            .create_task(&project.id, task_input("root", None), "human")
+            .await
+            .unwrap();
+        db.create_task(
+            &project.id,
+            task_input("child", Some(root.id.clone())),
+            "human",
+        )
+        .await
+        .unwrap();
+
+        let err = db.delete_task(&root.id, false).await.unwrap_err();
+        assert_eq!(err.http_status(), 409);
+        assert_eq!(err.error_code(), "conflict");
+        assert!(
+            db.get_task(&root.id).await.unwrap().is_some(),
+            "a refused delete must not remove any row"
+        );
+
+        let err = db.delete_project(&project.id, false).await.unwrap_err();
+        assert_eq!(err.http_status(), 409);
+        assert!(db.get_project(&project.id).await.unwrap().is_some());
+
+        db.delete_project(&project.id, true).await.unwrap();
+        assert!(db.get_project(&project.id).await.unwrap().is_none());
+        assert!(db.get_task(&root.id).await.unwrap().is_none());
     }
 }

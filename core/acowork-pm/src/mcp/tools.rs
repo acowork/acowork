@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 
 use crate::error::{PmError, Result};
 use crate::mcp::{AgentDirectory, AgentEntry, AgentInfo, McpState};
-use crate::store::tree::PmStore;
+use crate::store::contract::PmStore;
 use crate::types::{
     CreateProject, CreateTask, Dependency, MemberKind, Priority, ProjectId, ProjectStatus,
     ReparentTask, ReviewStatus, Task, TaskFilter, TaskId, TaskResponse, TaskSort, TaskStatus,
@@ -666,7 +666,13 @@ async fn task_to_value(
         lookup_agent_meta(agent_dir, task.assignee.as_deref()),
         lookup_agent_meta(agent_dir, Some(&task.created_by)),
     );
-    task_to_value_with_meta(store, task, assignee_meta.as_ref(), created_by_meta.as_ref()).await
+    task_to_value_with_meta(
+        store,
+        task,
+        assignee_meta.as_ref(),
+        created_by_meta.as_ref(),
+    )
+    .await
 }
 
 /// [`task_to_value`] 的查表变体：`assignee_meta` / `created_by_meta` 已由
@@ -768,9 +774,7 @@ async fn tasks_to_values(
     for task in tasks {
         let assignee_meta = task.assignee.as_deref().and_then(|id| meta.get(id));
         let created_by_meta = meta.get(&task.created_by);
-        out.push(
-            task_to_value_with_meta(store, task, assignee_meta, created_by_meta).await?,
-        );
+        out.push(task_to_value_with_meta(store, task, assignee_meta, created_by_meta).await?);
     }
     Ok(out)
 }
@@ -1222,7 +1226,12 @@ async fn pm_update_task(state: &McpState, actor: &str, args: Value) -> Result<Va
     if let Some(new_parent) = &a.parent_task_id {
         state
             .store
-            .reparent_task(&a.task_id, ReparentTask { new_parent: new_parent.clone() })
+            .reparent_task(
+                &a.task_id,
+                ReparentTask {
+                    new_parent: new_parent.clone(),
+                },
+            )
             .await?;
         // `update_task` returned the pre-move record; the caller needs the
         // stored one so the response reflects the new position.
@@ -1380,7 +1389,10 @@ async fn validate_doc_refs(
             // contract — there is nothing canonical to record, so treat it
             // as unresolved rather than storing an empty link.
             if id.is_empty() {
-                unresolved.push(format!("{} (found without doc_id)", o["ref"].as_str().unwrap_or("?")));
+                unresolved.push(format!(
+                    "{} (found without doc_id)",
+                    o["ref"].as_str().unwrap_or("?")
+                ));
             } else if !canonical.contains(&id) {
                 canonical.push(id);
             }
@@ -1548,12 +1560,7 @@ async fn pm_list_agents(state: &McpState, _actor: &str, args: Value) -> Result<V
     // package ("SSE.Cassie" / "SSE.Kevin"). Rows without metadata compare as
     // the empty string and sort first — they are the least dispatch-like
     // entries and belong where they get noticed.
-    let sort_key = |r: &Row| {
-        r.info
-            .as_ref()
-            .map(|i| i.name.clone())
-            .unwrap_or_default()
-    };
+    let sort_key = |r: &Row| r.info.as_ref().map(|i| i.name.clone()).unwrap_or_default();
     rows.sort_by(|x, y| {
         sort_key(x)
             .cmp(&sort_key(y))

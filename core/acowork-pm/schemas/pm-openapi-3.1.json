@@ -120,12 +120,12 @@
         "summary": "删除任务（子树级联）",
         "operationId": "deleteTask",
         "parameters": [
-          { "name": "cascade", "in": "query", "required": false, "description": "强制级联删除子树（默认 false）", "schema": { "type": "boolean", "default": false } },
-          { "name": "promote_children", "in": "query", "required": false, "description": "子任务提升为项目顶层（默认 false；cascade 时忽略）", "schema": { "type": "boolean", "default": false } }
+          { "name": "cascade", "in": "query", "required": false, "description": "强制级联删除子树（默认 false，有子任务时返回 409）", "schema": { "type": "boolean", "default": false } }
         ],
         "responses": {
           "204": { "description": "删除成功" },
-          "404": { "$ref": "#/components/responses/NotFound" }
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" }
         }
       }
     },

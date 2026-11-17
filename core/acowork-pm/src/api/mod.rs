@@ -36,7 +36,7 @@ use std::sync::Arc;
 
 use crate::config::PmConfig;
 use crate::mcp::AgentDirectory;
-use crate::store::tree::PmStore;
+use crate::store::contract::PmStore;
 
 /// API 层共享状态（axum `State<ApiState>`）。
 ///
