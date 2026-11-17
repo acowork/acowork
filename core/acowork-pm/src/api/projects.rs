@@ -7,7 +7,6 @@ use axum::Json;
 use crate::types::{AddProjectMember, CreateProject, MemberKind, Project, ProjectId, UpdateProject};
 
 use super::ApiState;
-use crate::store::tree::PmStore;
 
 // ────────────────────────────────────────────────────────────────────────────
 // GET /projects

@@ -67,14 +67,14 @@ use axum::{Json, Router};
 use serde_json::{Value, json};
 
 use crate::error::PmError;
-use crate::store::tree::TreePmStore;
+use crate::store::tree::PmStore;
 
 // ── 状态与契约 ────────────────────────────────────────────────────────────
 
 /// MCP 服务端状态（axum `State<McpState>`）。
 #[derive(Clone)]
 pub struct McpState {
-    pub store: Arc<TreePmStore>,
+    pub store: Arc<dyn PmStore>,
     pub agent_dir: Arc<dyn AgentDirectory>,
     /// Gateway base URL + internal-service token, same value and same
     /// degradation rule as [`crate::api::ApiState::gateway`]: `None` (PM
@@ -208,7 +208,7 @@ impl AgentDirectory for NoopAgentDirectory {
 /// 返回 `Router<()>`（内部 `.with_state(McpState)`），与 REST `pm_router`
 /// 合并后由 Gateway `nest_service("/api/pm", ...)` 挂载。
 pub fn mcp_router(
-    store: Arc<TreePmStore>,
+    store: Arc<dyn PmStore>,
     agent_dir: Arc<dyn AgentDirectory>,
     gateway: Option<(String, Option<String>)>,
 ) -> Router {
@@ -418,7 +418,7 @@ fn rpc_error(id: Option<Value>, code: i32, message: String) -> Response {
 mod tests {
     use super::*;
     use crate::config::PmConfig;
-    use crate::store::tree::PmStore;
+    use crate::store::tree::{PmStore, TreePmStore};
     use crate::types::{ProjectId, ProjectStatus, TaskId, UpdateProject};
     use axum::routing::get;
     use std::time::Duration;
@@ -603,7 +603,7 @@ mod tests {
     /// `store.add_project_member(...)` 等 store 接口的前置准备。
     async fn test_router_store_with_dir(
         agent_dir: Arc<dyn AgentDirectory>,
-    ) -> (Router, Arc<TreePmStore>) {
+    ) -> (Router, Arc<dyn PmStore>) {
         let (state, _tmp) = test_mcp_state_with_dir(agent_dir).await;
         let router = Router::new()
             .route("/mcp", post(jsonrpc_endpoint))
@@ -613,7 +613,7 @@ mod tests {
 
     /// 建 router + 暴露 store（供 human review / archive 等 MCP 之外的
     /// 前置状态构造，模拟人类审批侧）。
-    async fn test_router_and_store() -> (Router, Arc<TreePmStore>) {
+    async fn test_router_and_store() -> (Router, Arc<dyn PmStore>) {
         let (state, _tmp) = test_mcp_state().await;
         let router = Router::new()
             .route("/mcp", post(jsonrpc_endpoint))
@@ -623,7 +623,7 @@ mod tests {
 
     /// 人类批准一个 Agent 创建的任务（`review_status: pending → approved`）。
     /// Agent 侧任何"建完就 claim / 改状态"的测试都必须先过这一关，否则撞审批闸门。
-    async fn approve_creation(store: &TreePmStore, tid: &str) {
+    async fn approve_creation(store: &Arc<dyn PmStore>, tid: &str) {
         store.review_task(&TaskId(tid.to_string()), true, "human", None).await.unwrap();
     }
 
@@ -4712,7 +4712,7 @@ mod tests {
     /// Agent-created tasks need human approval before claim, and there is
     /// no approve tool on the MCP surface — a test that needs a claimable
     /// task drives the store directly, exactly like [`approve_creation`].
-    async fn approve_task(store: &Arc<TreePmStore>, tid: &str) {
+    async fn approve_task(store: &Arc<dyn PmStore>, tid: &str) {
         store
             .review_task(&TaskId(tid.to_string()), true, "human", None)
             .await
@@ -4794,14 +4794,14 @@ mod tests {
     /// MCP state wired to a gateway URL (the doc-validation stub), with the
     /// store handle exposed — G4 tests need both the tool surface and the
     /// human-side store operations the tool surface deliberately lacks.
-    async fn mcp_state_with_gateway(gateway_url: String) -> (Router, Arc<TreePmStore>) {
+    async fn mcp_state_with_gateway(gateway_url: String) -> (Router, Arc<dyn PmStore>) {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = PmConfig {
             data_dir: tmp.path().to_path_buf(),
             index_rebuild_on_start: false,
             ..Default::default()
         };
-        let store = Arc::new(TreePmStore::new(cfg).await.unwrap());
+        let store: Arc<dyn PmStore> = Arc::new(TreePmStore::new(cfg).await.unwrap());
         let state = McpState {
             store: store.clone(),
             agent_dir: Arc::new(NoopAgentDirectory),
@@ -4820,7 +4820,7 @@ mod tests {
     /// Claimable task for `actor`: created, assigned to self, human-approved.
     async fn claimable_task(
         router: &Router,
-        store: &Arc<TreePmStore>,
+        store: &Arc<dyn PmStore>,
         actor: &str,
         id: u64,
     ) -> String {

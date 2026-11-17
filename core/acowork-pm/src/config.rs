@@ -1,16 +1,77 @@
 //! PM 服务配置加载。
 //!
-//! 配置来源（按优先级降序）：
+//! 配置来源（按优先级降序，由 `main.rs` 的独立进程入口实现）：
 //!
-//! 1. 环境变量（`ACOWORK_PM_*`）
-//! 2. TOML 配置文件（通过 `--config <path>` 传入，默认 `./acowork-pm.toml`）
-//! 3. [`PmConfig::default`]
+//! 1. CLI 参数（`--data-dir` / `--storage-backend` / …）
+//! 2. 环境变量（`ACOWORK_PM_*`）
+//! 3. TOML 配置文件（`--config <path>`；未指定时若 `./acowork-pm.toml` 存在则加载）
+//! 4. [`PmConfig::default`]
 //!
 //! ADR-064：PM 作为独立进程运行，数据目录独立解析为 `$HOME/.acowork/acowork-pm/`，
 //! 不再由 Gateway 内嵌/覆写。
 
 use serde::{Deserialize, Serialize};
+use std::fmt;
 use std::path::PathBuf;
+use std::str::FromStr;
+
+/// ADR-117 D6: the storage backend the PM service commits to.
+///
+/// SQLite is now the only assembled backend. `FileTree` / `Dual` are kept as
+/// types so an archived TOML or an old config value still deserializes, but
+/// [`crate::server::build_store`] rejects them at startup instead of silently
+/// running a second, stale commit point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum StorageBackend {
+    /// Retired. Kept for config compatibility only.
+    #[serde(alias = "file_tree", alias = "tree", alias = "FILETREE")]
+    FileTree,
+    /// SQLite is the authority and the default. `SqlitePmStore` owns every commit.
+    #[default]
+    #[serde(alias = "sqlite", alias = "DB")]
+    Db,
+    /// Retired. Kept for config compatibility only.
+    #[serde(alias = "DUAL")]
+    Dual,
+}
+
+impl StorageBackend {
+    /// Canonical config/CLI spelling of this variant.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::FileTree => "filetree",
+            Self::Db => "db",
+            Self::Dual => "dual",
+        }
+    }
+
+    /// Whether this backend keeps the directory tree as the commit point.
+    pub const fn tree_is_authority(self) -> bool {
+        matches!(self, Self::FileTree | Self::Dual)
+    }
+}
+
+impl FromStr for StorageBackend {
+    type Err = String;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "filetree" | "file_tree" | "tree" => Ok(Self::FileTree),
+            "db" | "sqlite" => Ok(Self::Db),
+            "dual" => Ok(Self::Dual),
+            other => Err(format!(
+                "unknown storage backend `{other}` (expected filetree | db | dual)"
+            )),
+        }
+    }
+}
+
+impl fmt::Display for StorageBackend {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// PM 服务运行时配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -23,6 +84,15 @@ pub struct PmConfig {
     /// `acowork-node/` 平级），不再嵌套在 Gateway 数据目录下。
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
+
+    /// ADR-117 D6: which backend owns commits. Defaults to `db`.
+    ///
+    /// There is one backend: SQLite. On the first start `build_store()` imports
+    /// the JSON tree into `pm.sqlite` in a single transaction; from then on the
+    /// tree is a read-only archive of binaries and a rollback source. There is
+    /// no runtime switching and no operator migration step.
+    #[serde(default)]
+    pub storage_backend: StorageBackend,
 
     /// HTTP 监听地址（**legacy**，独立进程模式由 CLI `--host`/`--port` 覆盖）。
     ///
@@ -120,16 +190,12 @@ fn default_data_dir() -> PathBuf {
     if let Some(profile) = std::env::var_os("USERPROFILE")
         && !profile.is_empty()
     {
-        return PathBuf::from(profile)
-            .join(".acowork")
-            .join("acowork-pm");
+        return PathBuf::from(profile).join(".acowork").join("acowork-pm");
     }
     if let Some(home) = std::env::var_os("HOME")
         && !home.is_empty()
     {
-        return PathBuf::from(home)
-            .join(".acowork")
-            .join("acowork-pm");
+        return PathBuf::from(home).join(".acowork").join("acowork-pm");
     }
     PathBuf::from(".").join(".acowork-pm")
 }
@@ -170,6 +236,7 @@ impl Default for PmConfig {
     fn default() -> Self {
         Self {
             data_dir: default_data_dir(),
+            storage_backend: StorageBackend::default(),
             bind_addr: default_bind_addr(),
             port: default_port(),
             enabled: default_true(),
@@ -192,9 +259,7 @@ impl PmConfig {
         use crate::error::PmError;
 
         if self.max_task_depth == 0 {
-            return Err(PmError::Internal(
-                "max_task_depth must be > 0".to_string(),
-            ));
+            return Err(PmError::Internal("max_task_depth must be > 0".to_string()));
         }
         if self.max_attachment_size == 0 {
             return Err(PmError::Internal(
@@ -217,6 +282,14 @@ impl PmConfig {
     /// Trash 根目录 = `{data_dir}/.trash`。
     pub fn trash_dir(&self) -> PathBuf {
         self.data_dir.join(".trash")
+    }
+
+    /// ADR-117 D6: SQLite file used by the `db` and `dual` backends.
+    ///
+    /// Kept beside `projects/` rather than inside it, so a tree rebuild or a
+    /// project archive can never sweep the database away.
+    pub fn sqlite_path(&self) -> PathBuf {
+        self.data_dir.join("pm.sqlite")
     }
 }
 
@@ -262,8 +335,10 @@ mod tests {
             "default data dir should be under $HOME/.acowork/acowork-pm, got: {s}"
         );
         // 不再解析到 ProjectDirs 的 com/acowork/pm 布局
-        assert!(!s.contains("com") || !s.contains("acowork") || !s.contains("pm"),
-            "must not fall back to ProjectDirs layout: {s}");
+        assert!(
+            !s.contains("com") || !s.contains("acowork") || !s.contains("pm"),
+            "must not fall back to ProjectDirs layout: {s}"
+        );
     }
 
     /// ADR-064: `ACOWORK_PM_HOME` 环境变量覆盖默认数据目录。
@@ -279,5 +354,95 @@ mod tests {
             std::env::remove_var("ACOWORK_PM_HOME");
         }
         assert_eq!(dir, tmp);
+    }
+
+    // ── ADR-117 D6: three-state storage backend ────────────────────
+
+    #[test]
+    fn storage_backend_defaults_to_db() {
+        let cfg = PmConfig::default();
+        assert_eq!(cfg.storage_backend, StorageBackend::Db);
+        assert!(!cfg.storage_backend.tree_is_authority());
+    }
+
+    #[test]
+    fn storage_backend_parses_all_three_states() {
+        for (raw, expected) in [
+            ("filetree", StorageBackend::FileTree),
+            ("file_tree", StorageBackend::FileTree),
+            ("tree", StorageBackend::FileTree),
+            ("DB", StorageBackend::Db),
+            ("sqlite", StorageBackend::Db),
+            (" dual ", StorageBackend::Dual),
+        ] {
+            assert_eq!(
+                raw.parse::<StorageBackend>().unwrap(),
+                expected,
+                "input: {raw}"
+            );
+        }
+        let err = "mongodb".parse::<StorageBackend>().unwrap_err();
+        assert!(err.contains("unknown storage backend"), "error was: {err}");
+    }
+
+    #[test]
+    fn storage_backend_roundtrips_through_display_and_toml() {
+        for backend in [
+            StorageBackend::FileTree,
+            StorageBackend::Db,
+            StorageBackend::Dual,
+        ] {
+            assert_eq!(
+                backend.to_string().parse::<StorageBackend>().unwrap(),
+                backend
+            );
+            let cfg: PmConfig = toml::from_str(&format!("storage_backend = \"{backend}\"\n"))
+                .expect("valid backend must deserialize");
+            assert_eq!(cfg.storage_backend, backend);
+        }
+        // A typo must fail loudly, never silently degrade to `filetree`
+        // (ADR-117 §3 D6: configuration must be honest).
+        assert!(toml::from_str::<PmConfig>("storage_backend = \"mongo\"\n").is_err());
+    }
+
+    /// `FromStr` (CLI / env) and serde (TOML) must accept the same spellings.
+    /// Otherwise `--storage-backend sqlite` works but `acowork-pm.toml` with
+    /// the same value silently fails to load, which a rollout would read as
+    /// "the config file took effect".
+    #[test]
+    fn storage_backend_serde_aliases_match_fromstr() {
+        for raw in [
+            "filetree",
+            "file_tree",
+            "tree",
+            "FILETREE",
+            "db",
+            "sqlite",
+            "DB",
+            "dual",
+            "DUAL",
+        ] {
+            let from_str = raw.parse::<StorageBackend>().unwrap();
+            let cfg: PmConfig = toml::from_str(&format!("storage_backend = \"{raw}\"\n"))
+                .unwrap_or_else(|e| panic!("serde rejected {raw}: {e}"));
+            assert_eq!(cfg.storage_backend, from_str, "spelling: {raw}");
+        }
+    }
+
+    #[test]
+    fn only_db_backend_gives_up_tree_authority() {
+        assert!(!StorageBackend::Db.tree_is_authority());
+        assert!(StorageBackend::Dual.tree_is_authority());
+        assert_eq!(StorageBackend::Dual.as_str(), "dual");
+    }
+
+    #[test]
+    fn sqlite_path_sits_beside_projects_not_inside_it() {
+        let cfg = PmConfig {
+            data_dir: PathBuf::from("/tmp/pm-data"),
+            ..Default::default()
+        };
+        assert_eq!(cfg.sqlite_path(), PathBuf::from("/tmp/pm-data/pm.sqlite"));
+        assert_ne!(cfg.sqlite_path(), cfg.projects_dir());
     }
 }

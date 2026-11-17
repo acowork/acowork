@@ -12,7 +12,7 @@
 //! [`ApiState`] 通过 axum `State` 注入到每个 handler。
 //!
 //! **ADR-061 简化**：保留 `ApiState` 为 struct（不是 type alias）。
-//! - `store: Arc<TreePmStore>` —— handlers 主要依赖
+//! - `store: Arc<dyn PmStore>` —— handlers 主要依赖（ADR-117 D6：后端由工厂装配）
 //! - `config: PmConfig` —— 当前为 future-use（handlers 未直接读 config；store 构造时已持有 config 副本）。
 //! - **State 类型独立于 Gateway 的 `AppState`** —— [`crate::api::routes::pm_router`]
 //!   在内部用 `.with_state(ApiState)` 注入并消耗 state，对外呈现为
@@ -21,7 +21,7 @@
 //!   与 Gateway 的 `AppState` 不同，故只能用 `nest_service` 接受任意 `Service`）。
 //!
 //! **为什么不用 type alias**：handlers 内部大量使用多行链式调用
-//! `state\n  .store\n  .method()`，type alias 后 `state: Arc<TreePmStore>` 没有
+//! `state\n  .store\n  .method()`，type alias 后 `state: Arc<dyn PmStore>` 没有
 //! `.store` 字段，所有多行链式调用要重构为 `state.method()`。保留 struct 让
 //! handlers 维持现状，**零 handler 改动**。
 
@@ -36,14 +36,14 @@ use std::sync::Arc;
 
 use crate::config::PmConfig;
 use crate::mcp::AgentDirectory;
-use crate::store::tree::TreePmStore;
+use crate::store::tree::PmStore;
 
 /// API 层共享状态（axum `State<ApiState>`）。
 ///
 /// 由 [`crate::api::routes::pm_router`] 在构造时用 `.with_state(state)` 注入到 router。
 #[derive(Clone)]
 pub struct ApiState {
-    pub store: Arc<TreePmStore>,
+    pub store: Arc<dyn PmStore>,
     pub config: PmConfig,
     /// Agent 目录（设计 §9.1）：`POST /projects/:pid/members` 添加成员时按
     /// instance_id 校验 Agent 存在。宽松实现（[`NoopAgentDirectory`]）跳过校验。

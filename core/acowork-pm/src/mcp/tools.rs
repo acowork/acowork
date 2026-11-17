@@ -31,7 +31,7 @@ use serde_json::{Value, json};
 
 use crate::error::{PmError, Result};
 use crate::mcp::{AgentDirectory, AgentEntry, AgentInfo, McpState};
-use crate::store::tree::{PmStore, TreePmStore};
+use crate::store::tree::PmStore;
 use crate::types::{
     CreateProject, CreateTask, Dependency, MemberKind, Priority, ProjectId, ProjectStatus,
     ReparentTask, ReviewStatus, Task, TaskFilter, TaskId, TaskResponse, TaskSort, TaskStatus,
@@ -656,7 +656,7 @@ fn agent_ref_value(instance_id: Option<&str>, info: Option<&AgentInfo>) -> Value
 /// 单条场景（get / create / claim / submit / update）直接查 meta；列表场景
 /// 请走 [`tasks_to_values`]（先批量去重查询，再复用 [`task_to_value_with_meta`]）。
 async fn task_to_value(
-    store: &Arc<TreePmStore>,
+    store: &Arc<dyn PmStore>,
     agent_dir: &dyn AgentDirectory,
     task: Task,
 ) -> Result<Value> {
@@ -673,13 +673,13 @@ async fn task_to_value(
 /// 调用方（如 [`tasks_to_values`] 的批量查询）解析好，此处只做派生字段
 /// 计算 + 序列化 + 附加，不再访问 `agent_dir`。
 async fn task_to_value_with_meta(
-    store: &Arc<TreePmStore>,
+    store: &Arc<dyn PmStore>,
     task: Task,
     assignee_meta: Option<&AgentInfo>,
     created_by_meta: Option<&AgentInfo>,
 ) -> Result<Value> {
     let tid = task.id.clone();
-    let depth = store.index_entry(&tid).map(|e| e.depth).unwrap_or(0);
+    let depth = store.task_depth(&tid);
     let parent_id = store.parent_of(&tid);
     let blocked_by = store.compute_blocked_by(&tid).await?;
 
@@ -745,7 +745,7 @@ async fn batch_lookup_agent_meta(
 /// `agent_dir`（单次列表至多一次批量查询），**再**逐条序列化查表组装。
 /// 避免每条任务独立查 `agent_info`，在冷缓存下退化成 N×2 次 HTTP。
 async fn tasks_to_values(
-    store: &Arc<TreePmStore>,
+    store: &Arc<dyn PmStore>,
     agent_dir: &dyn AgentDirectory,
     tasks: Vec<Task>,
     limit: usize,

@@ -4,8 +4,10 @@
 //! （见 [`routes::pm_router`]）。
 //!
 //! 与头像自定义上传对齐（`acowork-user` `profile_api`），但作用域是**项目**：
-//! 上传的图片落在 `{data_dir}/projects/{pid}/icon/icon-NN.{ext}`，引用由前端
-//! 存进 `project.metadata.icon`（本模块只管物理字节，不写 metadata）。
+//! 上传的图片由 store 落在 `{data_dir}/assets/projects/{pid}/icon/icon-NN.{ext}`，
+//! 引用由前端存进 `project.metadata.icon`（本模块只管物理字节，不写 metadata）。
+//! `?path=` 里的 `projects/{pid}/icon/` 是**逻辑命名空间**，只用于校验，
+//! 与物理目录无关；导入期会把旧归档里的图标迁到 `assets/` 下。
 //!
 //! - `POST /projects/{pid}/icon`          —— multipart 上传，返回相对路径（不自动选中）
 //! - `GET  /projects/{pid}/icon-assets`   —— 列出该项目已上传图标
@@ -22,7 +24,6 @@ use axum::Json;
 
 use super::ApiState;
 use crate::error::{PmError, Result};
-use crate::store::tree::PmStore;
 use crate::types::ProjectId;
 
 /// 项目图标允许的上传扩展名（与 store 侧 `icon_ext` 白名单一致）。

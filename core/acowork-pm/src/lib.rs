@@ -66,7 +66,7 @@ pub mod ui;
 // ────────────────────────────────────────────────────────────────────────────
 
 // Config
-pub use config::PmConfig;
+pub use config::{PmConfig, StorageBackend};
 
 // Errors
 pub use error::{PmError, Result};
@@ -78,8 +78,15 @@ pub use types::{
 };
 
 // Storage
+pub use store::dual::DualPmStore;
 pub use store::index::TaskIndex;
-pub use store::tree::{PmStore, TreePmStore};
+pub use store::sqlite::import::{
+    MigrationReport as PmMigrationReport, ReconcileReport as PmReconcileReport,
+    SkippedEntry as PmMigrationSkippedEntry, dry_run as pm_import_dry_run, import as pm_import,
+    rebuild as pm_projection_rebuild, reconcile as pm_reconcile,
+};
+pub use store::sqlite::{SqlitePmStore, schema as pm_sqlite_schema};
+pub use store::tree::{PmMaintenance, PmStore, TreePmStore};
 
 // API
 pub use api::routes::pm_router;
