@@ -1223,8 +1223,7 @@ mod tests {
 
     /// `dispatch_identity` must replay the persisted generation id with no
     /// write at all — matching `TreePmStore`. Writing on every scanner tick
-    /// bumps `updated_at` forever and, under `dual`, triggers a full-tree
-    /// projection every minute for a task that has not changed.
+    /// would bump `updated_at` forever for a task that has not changed.
     #[tokio::test]
     async fn dispatch_identity_replays_without_rewriting_the_row() {
         let tmp = tempfile::tempdir().unwrap();

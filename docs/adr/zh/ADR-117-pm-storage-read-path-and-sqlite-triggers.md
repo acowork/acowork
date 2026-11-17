@@ -1,6 +1,6 @@
 # ADR-117：PM 存储演进 — 先修读路径，最终收敛到 SQLite 单后端
 
-**状态**：已定案并修订（读路径修复 + D4 防损坏三层已实施；2026-11-16 启动 SQLite 迁移并落地三态灰度 ①–⑥；**2026-11-17 用户明确不再保留 `filetree`，收敛为 SQLite 单后端**：`PmConfig` 默认 `db`，`build_store()` 在首次启动自动一次性导入 JSON 树，`FileTree` / `Dual` 降级为配置兼容类型且装配时硬拒绝，⑦ 的停机窗口与手工运维步骤已由代码取代；⑧ 删旧实现仍待人工排期，见 §3 D6）
+**状态**：已定案并修订（读路径修复 + D4 防损坏三层已实施；2026-11-16 启动 SQLite 迁移并落地三态灰度 ①–⑥；**2026-11-17 用户明确不再保留 `filetree`，收敛为 SQLite 单后端**：`PmConfig` 默认 `db`，`build_store()` 在首次启动自动一次性导入 JSON 树，`FileTree` / `Dual` 降级为配置兼容类型且装配时硬拒绝，⑦ 的停机窗口与手工运维步骤已由代码取代；⑧ 过渡代码清理已于 2026-11-17 完成（删三态灰度框架、离线对账、运维子命令与一次性布局迁移），见 §3 D6 / §5）
 **日期**：2026-11-16
 **决策者**：大鱼
 **前置**：
@@ -14,23 +14,23 @@
 
 ### 1.1 一句话
 
-**先把读路径修对，再把 SQLite 做成可配置的第二实现。** 读路径与 D4 防损坏已落地；迁移原是带量化触发条件的预案，2026-11-16 由用户显式无条件启动。树存储（ADR-061）仍是**默认权威**，SQLite 作为同一 `PmStore` trait 下的第二实现引入，通过 `storage_backend` 三态配置灰度切换。全程硬约束：**任一时刻只有一个提交点**，不搞等权双写。
+**先把读路径修对，再把 SQLite 做成可配置的第二实现，最终收敛到 SQLite 单后端。** 读路径与 D4 防损坏已落地；迁移原是带量化触发条件的预案，2026-11-16 由用户显式无条件启动，先落地 `storage_backend = filetree | db | dual` 三态灰度，全程硬约束：**任一时刻只有一个提交点**、不搞等权双写。**2026-11-17 用户明确不再保留 `filetree`**，收敛为 SQLite 唯一后端：三态配置、`dual` 投影、`migrate` / `reconcile` 运维子命令与一次性布局迁移已在 ⑧ 全部删除，运行期只装配 `SqlitePmStore`；首次启动自动导入历史 JSON 树并把 `projects/` 收口为 `projects.retired`。
 
 ### 1.2 关键决策表
 
 | # | 决策 | 结论 |
 |---|---|---|
-| D1 | 存储权威 | **默认仍是树，权威由配置决定**。`filetree` / `dual` 下 `task.json` / `project.json` + 物理嵌套是唯一提交点；`db` 下由 `SqlitePmStore` 接管。ADR-061 的四条理由（字面=逻辑 / 单一原子目录操作 / 零冗余无双写 / walkdir 重建幂等）继续适用于树实现；新后端的硬约束是**同一时刻只有一个真相**，不引入等权双写 |
+| D1 | 存储权威 | **最终收敛为 SQLite 单后端（2026-11-17）**。`pm.sqlite` 是唯一提交点，`assets/projects/{pid}/` 存放二进制资产，`projects.retired` 只是可恢复快照；`filetree` / `dual` 及三态配置已随 ⑧ 删除。历史路径：ADR-061 的四条理由（字面=逻辑 / 单一原子目录操作 / 零冗余无双写 / walkdir 重建幂等）曾支撑树权威，灰度期由配置决定提交点；新后端的硬约束始终是**同一时刻只有一个真相**，不引入等权双写 |
 | D2 | 读路径 | **读必须走内存索引**。任何「拿索引筛完再用 `get_task()` 补一刀」的实现都视为缺陷：索引已经持有该字段时，读盘是纯浪费。已修 `compute_blocked_by` 与项目徽章计数 |
 | D3 | 新契约 | 新增 `GET /projects/counts`（index-only，返回每项目 `total` / `submitted`）。首页徽章不再 N+1 拉全量任务实体 |
 | D4 | 防损坏 | **与存储格式无关，已实施（见 §5）**。三层：坏文件**留原地**并复制取证副本到 `.corrupt/`、写前保留上一版合法内容（`.bak`）、**shell 工具受保护前缀守卫**（`~/.acowork/`，路径由 `acowork-core::workspace` 单点提供）。第三层是真正的止损点，前两层只保证「坏了不丢、能恢复」 |
 | D5 | 迁移触发 | 原定 T1–T4 量化门槛**已被 2026-11-16 用户的显式指令越过**：迁移无条件启动。T1–T4 降级为规模基线 / 回归判据，不再是立项门槛，见 §3 D5 |
-| D6 | 迁移方式 | `PmStore` trait 保持对象安全；抽出 `PmMaintenance` 侧接口承载启动 / 派发 / 派生读 / 图标资产 / 诊断等非 CRUD 后端能力，避免 DB 后端被迫实现树专属操作；`storage_backend = filetree \| db \| dual` 由工厂装配；`dual` = 树唯一提交点 + DB 同步投影（投影失败不影响写返回、落后可全量重建）；导入器与灰度契约见 §3 D6 |
+| D6 | 迁移方式 | `PmStore` trait 保持对象安全；抽出 `PmMaintenance` 侧接口承载启动 / 派发 / 派生读 / 图标资产 / 诊断等非 CRUD 后端能力，避免 DB 后端被迫实现树专属操作。三态灰度框架（工厂 + `DualPmStore` + `reconcile` / `migrate` 子命令）已在 ⑧ 删除；运行期只装配 `SqlitePmStore`，首次启动自动一次性导入 JSON 树并收口归档。导入契约与历史灰度设计见 §3 D6 |
 
 ### 1.3 明确不做
 
 - 不把附件（`attachments/`）迁进 DB。二进制永远留在文件系统，元数据在 `task.json`（ADR-061 决策 5 不变）。
-- 不引入「树 + SQLite **等权双写**」。双写是双份真相，违反 ADR-061 零冗余的初衷。D6 的 `dual` 不是双写而是**单向投影**：树提交成功后尽力把结果同步进 DB，DB 永不参与写成功判定、永不成为真相；投影失败只告警，落后了全量重建即可（见 §3 D6）。
+- 不引入「树 + SQLite **等权双写**」。双写是双份真相，违反 ADR-061 零冗余的初衷。D6 的 `dual` 不是双写而是**单向投影**：树提交成功后尽力把结果同步进 DB，DB 永不参与写成功判定、永不成为真相；投影失败只告警，落后了全量重建即可（见 §3 D6；该实现已在 ⑧ 删除）。
 - 不为防损坏而换存储格式（理由见 §2.3）。
 - 不给读路径加 TTL 缓存。缓存会把「索引已经不是真相」这个前提引入，收益远小于一致性风险。
 
@@ -133,9 +133,9 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 
 现在请先量一次 T1 的基线并记档（`rebuild_index` 耗时随 `count` 的变化），作为将来判断的依据。
 
-### D6：迁移方式（三态后端 + 灰度切换）
+### D6：迁移方式（历史：三态灰度 → SQLite 单后端）
 
-**配置**：`PmConfig.storage_backend` 三态，来源优先级 `CLI --storage-backend` > 环境变量 `ACOWORK_PM_STORAGE_BACKEND` > TOML `storage_backend` > 默认 `filetree`。进程启动时由工厂一次性装配，**运行中不可切换**（切换 = 重启，避免读到半套状态）。**本轮补上真实加载层**：`main.rs` 新增 `--config`（未指定时若 `./acowork-pm.toml` 存在则加载），`ACOWORK_PM_DATA_DIR` 接入；`StorageBackend` 的 serde alias 与 `FromStr` 统一，CLI 与 TOML 接受同一套拼写；无效值、非法 TOML、显式 `--config` 指向的缺失文件一律 `exit(1)`，绝不静默回退默认——灰度期最危险的正是「以为配置生效了其实没有」。
+**配置（历史，⑧ 已删除 `StorageBackend` / `storage_backend` / `--storage-backend`）**：`PmConfig.storage_backend` 三态，来源优先级 `CLI --storage-backend` > 环境变量 `ACOWORK_PM_STORAGE_BACKEND` > TOML `storage_backend` > 默认 `filetree`。当时由工厂一次性装配，**运行中不可切换**。**本轮补上真实加载层**：`main.rs` 新增 `--config`（未指定时若 `./acowork-pm.toml` 存在则加载），`ACOWORK_PM_DATA_DIR` 接入；`StorageBackend` 的 serde alias 与 `FromStr` 统一，CLI 与 TOML 接受同一套拼写；无效值、非法 TOML、显式 `--config` 指向的缺失文件一律 `exit(1)`。现在 `config.rs` 只留 `STORAGE_BACKEND = "db"` 常量：`deny_unknown_fields` 对遗留 `storage_backend` 键直接报错、clap 拒绝 `--storage-backend`、非 `db` 的 `ACOWORK_PM_STORAGE_BACKEND` 仍 `exit(1)`——旧部署不能误以为还能切回去。
 
 | 值 | 语义 | 提交点 | 业务读 |
 |---|---|---|---|
@@ -143,16 +143,16 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 | `dual` | 灰度观察态：树主写，SQLite 同步投影 | **树（唯一）** | 树 + 内存索引，与 `filetree` 完全一致；DB 仅供离线对账 |
 | `db` | 目标态：`SqlitePmStore` | SQLite | SQLite |
 
-**`dual` 的四条铁律**（与 §4 被否决的「始终双写」划清界限）：
+**`dual` 的四条铁律**（历史设计，实现已随 ⑧ 删除；与 §4 被否决的「始终双写」划清界限）：
 
 1. 树提交成功后才投影；写返回值**只由树决定**，投影失败仅 `warn` + 计数，绝不返回错误、绝不回滚树。
 2. DB 是**可丢弃的派生数据**：启动时若 DB 缺失 / 版本落后 / 校验不通过，从树全量重建（55 ms 量级）。不要求 `write_seq`、不做启动对账、不做冲突解决。
 3. DB 永不参与任何业务读；「DB 落后」不影响用户可见状态，只影响离线对账的新鲜度。
 4. 切到 `db` 前必须有一次**停机窗口**：停写 → 全量导入 → `MigrationReport` 校验通过 → 改配置重启。禁止在 `dual` 运行期间直接把读切到 DB。
 
-**trait 边界**：`PmStore` 的 31 个业务方法保持对象安全，HTTP / MCP / dispatch 一律依赖 `Arc<dyn PmStore>`。侦察时发现业务层历史上还直接调用了 15 个**只挂在具体 `TreePmStore` 上**的方法（启动重建 / `start_at` 回填 / 派发候选与状态记录 / `depth`、 `parent_id`、项目任务数等派生读 / 项目图标读写 / 坏文件 registry / `shutdown`），这些都不是业务变更，统一收进 `PmMaintenance` 侧接口（`PmStore: PmMaintenance`），各后端用自己真正拥有的东西回答；`DualPmStore` 把维护钩子委托给树实现。这样 DB 后端不必实现 `walkdir` 类操作，也不必伪造 `TaskEntry`。图标按 ADR-061 决策 5 始终留在文件系统，不进 DB 投影。
+**trait 边界**：`PmStore` 的 31 个业务方法保持对象安全，HTTP / MCP / dispatch 一律依赖 `Arc<dyn PmStore>`。侦察时发现业务层历史上还直接调用了 15 个**只挂在具体 `TreePmStore` 上**的方法（启动重建 / `start_at` 回填 / 派发候选与状态记录 / `depth`、 `parent_id`、项目任务数等派生读 / 项目图标读写 / 坏文件 registry / `shutdown`），这些都不是业务变更，统一收进 `PmMaintenance` 侧接口（`PmStore: PmMaintenance`），各后端用自己真正拥有的东西回答；当时的 `DualPmStore` 把维护钩子委托给树实现（⑧ 已删除）。这样 DB 后端不必实现 `walkdir` 类操作，也不必伪造 `TaskEntry`。图标按 ADR-061 决策 5 始终留在文件系统，不进 DB 投影。
 
-**JSON → SQLite 导入契约**（补齐初版 D6 的空白）：
+**JSON → SQLite 导入契约**（补齐初版 D6 的空白）：下列 1–6 / 8–10 条仍由 `import.rs` 在首次启动执行；涉及 `dual` / `reconcile` / `rebuild_into` / `CorruptPolicy` 的 7 / 11–13 条是历史灰度设计，⑧ 已删除对应实现。
 
 1. **dry-run 先行**：只读扫描全树，产出 `MigrationReport`（项目数 / 任务数 / 附件数 / 跳过项 / 每条不一致的原因），不写任何文件；报告存在阻断级问题即中止。
 2. **一致性校验**：目录名 ↔ `task.id` ↔ `project_id` 三者必须一致；`define_id!` 的 `#[serde(transparent)]` Deserialize **不调用 `parse()`**，所以导入器必须显式 `parse::<TaskId>()` / `parse::<ProjectId>()`，不能信任 JSON 内的 ID 字符串；`#[serde(default)]` 字段要区分「合法缺省」与「语义损坏」，缺省值须显式记进报告。
@@ -168,15 +168,17 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 12. **backend 硬闸**：`rebuild_into()` 断言 `storage_backend == dual`——`db` 模式下 DB 是权威，绝不能被树扫描覆盖；打开投影失败时把 `pm.sqlite`（含 `-wal` / `-shm`）rename 到 `.quarantine-<ts>`，绝不删除可能是健康的库。
 13. **对账不止比 `props`**：`parent_id` / `depth` / `status` / `task_dir` 等投影列一并比对（DB 后端实际读这些列），否则列漂移也能拿到假绿灯。
 
-**灰度与验收顺序**：① 三态配置 + 工厂 ✅ → ② `PmStore` 对象化 + `PmMaintenance` ✅ → ③ `SqlitePmStore` + 导入器 ✅ → ④ `DualPmStore` ✅ → ⑤ 现有测试对 `filetree` / `db` / `dual` **三跑**（同一批用例，不允许为 DB 特例跳过）✅ → ⑥ `dual` 灰度观察、离线对账能力 ✅ → ⑦ 切 `db` ✅（2026-11-17 改为启动期自动一次性导入，不再需要停机窗口与手工命令） → ⑧ 观察一个周期后删旧实现 ⏳（人工）。推分支前的全量 review 已把核实确凿的问题全部修完（见 §5）；⑦ 的自动化不改「任一时刻只有一个提交点」的硬约束，⑧ 仍不动。
+**灰度与验收顺序**：① 三态配置 + 工厂 ✅ → ② `PmStore` 对象化 + `PmMaintenance` ✅ → ③ `SqlitePmStore` + 导入器 ✅ → ④ `DualPmStore` ✅ → ⑤ 现有测试对 `filetree` / `db` / `dual` **三跑** ✅ → ⑥ `dual` 灰度观察、离线对账能力 ✅ → ⑦ 切 `db` ✅（2026-11-17 改为启动期自动一次性导入，不再需要停机窗口与手工命令） → ⑧ 删旧实现 ✅（2026-11-17 完成，见下文「⑧ 过渡代码清理」）。推分支前的全量 review 已把核实确凿的问题全部修完（见 §5）；⑦ 的自动化不改「任一时刻只有一个提交点」的硬约束，⑧ 只删退出运行路径的代码，不动这条活路径。
 
-**单后端落地（2026-11-17）**：`PmConfig::default()` 现为 `db`；`build_store()` 只装配 `SqlitePmStore`，首次启动用只读探针判空后自动执行 `dry_run` → 单事务 `import`，有阻断项则拒绝启动。随后每次启动都幂等执行 `retire_tree_archive()`：把项目图标与任务附件二进制复制到 `assets/projects/{pid}/` 下（`icon/` 与 `tasks/{tid}/` 同属一棵子树）、改写 `tasks` / `attachments` 的 `task_dir`、校验无行再指向 `projects/`，然后把 `projects/` 重命名为 `projects.retired`（只改名不删除，保留可恢复快照）。此后 `pm.sqlite` + `assets/` 是唯一数据源。`FileTree` / `Dual` 降级为配置兼容类型，装配时硬拒绝；`dual` 投影与 `reconcile` 退出运行路径，仅保留为历史工具。
+**单后端落地（2026-11-17）**：`PmConfig::default()` 现为 `db`；`build_store()` 只装配 `SqlitePmStore`，首次启动用只读探针判空后自动执行 `dry_run` → 单事务 `import`，有阻断项则拒绝启动。随后每次启动都幂等执行 `retire_tree_archive()`：把项目图标与任务附件二进制复制到 `assets/projects/{pid}/` 下（`icon/` 与 `tasks/{tid}/` 同属一棵子树）、改写 `tasks` / `attachments` 的 `task_dir`、校验无行再指向 `projects/`，然后把 `projects/` 重命名为 `projects.retired`（只改名不删除，保留可恢复快照）。此后 `pm.sqlite` + `assets/` 是唯一数据源。`FileTree` / `Dual` 降级为配置兼容类型，装配时硬拒绝；`dual` 投影与 `reconcile` 当时退出运行路径，随后在 ⑧ 中连同实现一并删除。
 
-**资产目录约定（2026-11-17 修订）**：`assets/` 按项目分组——`assets/projects/{pid}/icon/` 存项目图标、`assets/projects/{pid}/tasks/{tid}/attachments/` 存任务附件二进制，一个项目的全部二进制落在同一棵 `{pid}` 子树里，`delete_project` 可一次清理、不留孤儿目录。初版用平铺的 `assets/tasks/{tid}/`，与图标分属两个平级目录，删项目时无法按项目归集；现由 `import::normalize_asset_layout()` 在每次启动时幂等升级存量行（改写 `tasks` / `attachments` 的 `task_dir` 并 rename 物理目录，崩溃可续跑）。该布局成立的前提是 `create_task_as` / `reparent_task` 都拒绝跨项目父子关系，`tasks.project_id` 全生命周期不变，物理目录无需跨项目搬移。
+**资产目录约定（2026-11-17 修订）**：`assets/` 按项目分组——`assets/projects/{pid}/icon/` 存项目图标、`assets/projects/{pid}/tasks/{tid}/attachments/` 存任务附件二进制，一个项目的全部二进制落在同一棵 `{pid}` 子树里，`delete_project` 可一次清理、不留孤儿目录。初版用平铺的 `assets/tasks/{tid}/`，与图标分属两个平级目录，删项目时无法按项目归集；存量行由一次性的 `import::normalize_asset_layout()` 启动期迁移完成（真实库 93 行已于 2026-11-17 23:29 归位），该函数随 ⑧ 删除；全新安装只会生成规范布局。该布局成立的前提是 `create_task_as` / `reparent_task` 都拒绝跨项目父子关系，`tasks.project_id` 全生命周期不变，物理目录无需跨项目搬移。
 
-③ 的落地边界：`SqlitePmStore` 已实现全部 31 个 `PmStore` 业务方法 + 15 个 `PmMaintenance` 维护钩子，`db` 已可由工厂装配并服务于 REST / MCP / dispatch；导入器是**显式运维命令** `acowork-pm --data-dir <dir> migrate`（缺省只读 dry-run，`--apply` 才写库），不是启动时的运行时副作用。工厂对「空 DB + 非空树」硬失败，强制先走停机窗口；对 `db` 模式下新上传的附件写入 `{data_dir}/assets/` 下（现行按项目分组，见上文），不污染作为回滚源的树归档。**本轮 review 加固**：图标目录从 `projects/{pid}/icon`（回滚源）移到 `assets/projects/{pid}/icon` 并保留归档只读回退；`schema::open()` 把版本闸门前置到 WAL / DDL 之前，拒绝一个看不懂的库时不留任何写入（`user_version=0` 但已有 PM 表同样拒绝），`integrity_check` 改为收集全部结果行；`db` 启动拒绝路径先跑 dry-run 再决定是否建库，绝不凭空造出 `pm.sqlite` 让后续 `--apply` 误判「目标非空」。
+③ 的落地边界（历史，⑦/⑧ 已取代）：`SqlitePmStore` 已实现全部 31 个 `PmStore` 业务方法 + 15 个 `PmMaintenance` 维护钩子，`db` 已可由工厂装配并服务于 REST / MCP / dispatch；导入器是**显式运维命令** `acowork-pm --data-dir <dir> migrate`（缺省只读 dry-run，`--apply` 才写库），不是启动时的运行时副作用。工厂对「空 DB + 非空树」硬失败，强制先走停机窗口；对 `db` 模式下新上传的附件写入 `{data_dir}/assets/` 下（现行按项目分组，见上文），不污染作为回滚源的树归档。**本轮 review 加固**：图标目录从 `projects/{pid}/icon`（回滚源）移到 `assets/projects/{pid}/icon` 并保留归档只读回退；`schema::open()` 把版本闸门前置到 WAL / DDL 之前，拒绝一个看不懂的库时不留任何写入（`user_version=0` 但已有 PM 表同样拒绝），`integrity_check` 改为收集全部结果行；`db` 启动拒绝路径先跑 dry-run 再决定是否建库，绝不凭空造出 `pm.sqlite` 让后续 `--apply` 误判「目标非空」。
 
-④⑤⑥ 的落地边界：`DualPmStore` 把 31 个业务方法与 15 个维护钩子全部委托给树——读用 `dual_read!`、写用 `dual_write!`（树提交成功后才投影，投影结果被丢弃）。投影采用**全量扫描 + 单事务全量替换**，而非 31 个手写增量钩子，代价是每次写 O(tree)、收益是灰度期不可能漏字段 / sidecar / 子树；一把 `projection_lock` 串行化「扫描 → 替换」，防止并发写时较旧快照后提交覆盖较新快照。DB 打不开时降级为纯树服务，绝不阻断业务。`reconcile` 是**只读** gate：只读打开 `pm.sqlite`（不调用会建表 / 设 WAL / 改 `user_version` 的 `schema::open`），缺库、版本倾斜、完整性失败一律不给绿灯，逐字比对实体 key 集合与 `props` blob 及投影列，不一致时 CLI 退出码非零。`/health.details.projection` 由**实例级** provider 提供 `ok` / `failed` / `consecutive_failures` / `last_error` / `last_report`，把「DB 落后」变成对账信号而非服务故障。**本轮 review 加固**：`tree_write_seq` 让「扫描期间发生树写」的投影自动重扫，避免把半移动的子树状态提交进 DB；投影 DB 打不开时 quarantine 而非删除；非 `dual` backend 直接拒绝打开投影；`dispatch_identity` 与树端一致（已有身份直接返回、不写盘、不触发投影），`migrate_null_start_at` / `shutdown` 不再制造无谓投影；两后端的 `reparent_task` 现在都校验整棵子树平移后不超 `max_task_depth`，SQLite 的 `depth` 更新用 `MAX(0, …)` 防止负值回绕成 `u8` 巨值。
+④⑤⑥ 的落地边界（历史，实现已随 ⑧ 删除）：`DualPmStore` 把 31 个业务方法与 15 个维护钩子全部委托给树——读用 `dual_read!`、写用 `dual_write!`（树提交成功后才投影，投影结果被丢弃）。投影采用**全量扫描 + 单事务全量替换**，而非 31 个手写增量钩子，代价是每次写 O(tree)、收益是灰度期不可能漏字段 / sidecar / 子树；一把 `projection_lock` 串行化「扫描 → 替换」，防止并发写时较旧快照后提交覆盖较新快照。DB 打不开时降级为纯树服务，绝不阻断业务。`reconcile` 是**只读** gate：只读打开 `pm.sqlite`（不调用会建表 / 设 WAL / 改 `user_version` 的 `schema::open`），缺库、版本倾斜、完整性失败一律不给绿灯，逐字比对实体 key 集合与 `props` blob 及投影列，不一致时 CLI 退出码非零。`/health.details.projection` 由**实例级** provider 提供 `ok` / `failed` / `consecutive_failures` / `last_error` / `last_report`，把「DB 落后」变成对账信号而非服务故障。**本轮 review 加固**：`tree_write_seq` 让「扫描期间发生树写」的投影自动重扫，避免把半移动的子树状态提交进 DB；投影 DB 打不开时 quarantine 而非删除；非 `dual` backend 直接拒绝打开投影；`dispatch_identity` 与树端一致（已有身份直接返回、不写盘、不触发投影），`migrate_null_start_at` / `shutdown` 不再制造无谓投影；两后端的 `reparent_task` 现在都校验整棵子树平移后不超 `max_task_depth`，SQLite 的 `depth` 更新用 `MAX(0, …)` 防止负值回绕成 `u8` 巨值。
+
+**⑧ 过渡代码清理（2026-11-17）**：真实环境完成切库、归档作废与资产布局归位后，把只在迁移期有用的代码全部删除——`StorageBackend` 三态枚举与 `PmConfig.storage_backend`、`--storage-backend` CLI 参数、`store/dual.rs`（`DualPmStore` / 投影指标 / `dual_read!` / `dual_write!`）、`PmMaintenance::projection_health`、`rebuild_into()` / `rebuild()` / `reconcile()` / `ReconcileReport`、`CorruptPolicy` 双策略、`migrate` / `reconcile` 子命令及相关 re-export、`/health.details.projection`、图标对 `projects/` 归档的只读回退、一次性 `normalize_asset_layout()`。`config.rs` 仅保留 `STORAGE_BACKEND = "db"` 常量与「遗留配置必须响亮失败」的守卫；`ensure_sqlite_authority()` 只保留「只读判空 → dry-run → 单事务 import → `retire_tree_archive()`」这条唯一活路径。`store/tree.rs` / `index.rs` 不删：它们承载 `PmStore` / `PmMaintenance` trait 定义、被 SQLite 后端复用的 5 个规则 helpers，以及 9 个集成套件和导入器用例用来生成真实树布局的夹具；`build_store()` 不再装配它们。
 
 ---
 
@@ -248,12 +250,15 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 | `core/acowork-pm/src/server.rs` | 单后端：`build_store()` 只装配 `SqlitePmStore` 并在首次启动自动 `ensure_sqlite_authority()`（只读判空 → dry-run → 单事务 import → 版本闸门），每次启动再幂等收口归档；非 `db` 配置硬拒绝；4 个装配用例改写为「退役后端拒绝 / 首次启动自动导入且归档改名后文件数不变 / 二次启动幂等 / 零配置默认 db」 |
 | `core/acowork-pm/src/store/sqlite/import.rs` | 归档作废：新增 `retire_tree_archive()`（图标搬到 `assets/projects/{pid}/icon/`、附件搬到 `assets/projects/{pid}/tasks/{tid}/`、改写 `task_dir`、校验无残留引用、`projects/` → `projects.retired`）；崩溃后下次启动可续跑；新增「二进制搬迁 + 改名 + 幂等」回归用例 |
 | `core/acowork-pm/src/store/sqlite/{mod,business,import}.rs`、`server.rs`、`api/icon.rs` | 资产目录按项目分组：`task_asset_rel()` 统一生成 `assets/projects/{pid}/tasks/{tid}`，`is_db_owned_asset_dir()` 严格形状判定；`delete_project` 一次清理整棵 `{pid}` 子树；新增 `normalize_asset_layout()` 在启动期幂等升级存量平铺行（含 `attachments` 表与物理目录 rename）并接入 `ensure_sqlite_authority()`；新增 2 个回归用例（布局迁移 + 删项目清理） |
+| `config.rs` / `main.rs` / `health.rs` / `lib.rs` / `server.rs` / `store/{mod,dual,tree}.rs` / `store/sqlite/{mod,import,schema,business}.rs` | ⑧ 过渡代码清理：删三态配置、`DualPmStore`、投影 / 对账 / 重建、`migrate` / `reconcile` 子命令、归档图标回退与一次性布局迁移；`/health` 固定报告 `db`；新增「遗留 `storage_backend` 配置硬拒绝」回归用例 |
 
-**迁移进度（本轮）**：D6 的 ① 配置、② trait 对象化 / 工厂装配、③ `SqlitePmStore` + 导入器、④ `DualPmStore`、⑤ 三后端同批用例、⑥ 离线对账与 `/health` 投影指标均已落地；`filetree` / `db` / `dual` **三态全部可装配**，`dual` 启动即重建投影且业务读始终走树。⑦ 停机窗口切 `db`、⑧ 观察一个发布周期后删旧实现是**人工运维动作**，代码已备好 gate（`migrate --apply` + `reconcile`）但尚未执行。`db` 的空库 + 非空树硬失败闸仍在；`dual` 不再被拒绝，但也绝不因为 DB 挂了而静默改变提交点。提交前复审修掉两处：`reconcile` 原会经 `schema::open()` 凭空建库（改为只读打开 + 缺库判不一致），`project()` 原允许并发投影交错（改为串行锁）。推分支前的第二轮全量 review（三份交叉审查 + 逐条复核）又修掉 P0/P1 共 12 项和 P2/P3 一批，见上表 Review 行；**这一轮修完前不推分支**。
+**迁移进度（最终状态）**：D6 ①–⑧ 全部完成。2026-11-17 22:25 真实环境重启后自动导入并收口归档；22:45 UI 新建任务实测只落 `pm.sqlite` + WAL、`projects.retired` 零回写；23:29 再次重启完成 93 行资产布局归位；随后 ⑧ 删除全部过渡实现。当前 `pm.sqlite` + `assets/projects/{pid}/` 是唯一数据源，`projects.retired` 只是可恢复快照，运行期没有任何第二提交点。①–⑥ 的实现细节与两轮 review 记录保留在上表作为历史；当时 `migrate --apply` / `reconcile` 的 gate 已完成使命并随 ⑧ 删除。
 
-**推分支前 review 与真实数据复验（本轮）**：真实 `data_dir` = `C:\Users\nicholas\.acowork\acowork-pm`，先做完整备份到 `.workbuddy/backups/pm-data-20261116-2300`（robocopy 157/157 文件；Bash `cp` 两次被环境中断，改用 PowerShell 成功），再跑只读命令。初始 dry-run：`projects=4 tasks=91 activity_rows=168 skipped=[] blocking=[]`，精确盘点发现 **39 个任务缺 `activity.json`、其中 23 个带 `result`**——正是 `seeded_activity()` 的 legacy 形态，构成「切 db 后历史活动消失 + `reconcile` 假绿灯」。修完后复跑（真实数据期间自然增长到 92 任务 / 53 个 `activity.json` / 175 行 / 159 文件）：`activity_rows=198`，与 `175 + 23` 精确吻合；`skipped=[] blocking=[]`；前后文件数均 159、无 `pm.sqlite` 产生。`reconcile` 对纯树安装 `exit=1`、`blocking` 明确写「no projection to reconcile」，同样零写入。⑦/⑧ 未执行，也未对真实目录做任何 `--apply` 或其它写操作。
+**推分支前 review 与真实数据复验（本轮）**：真实 `data_dir` = `C:\Users\nicholas\.acowork\acowork-pm`，先做完整备份到 `.workbuddy/backups/pm-data-20261116-2300`（robocopy 157/157 文件；Bash `cp` 两次被环境中断，改用 PowerShell 成功），再跑只读命令。初始 dry-run：`projects=4 tasks=91 activity_rows=168 skipped=[] blocking=[]`，精确盘点发现 **39 个任务缺 `activity.json`、其中 23 个带 `result`**——正是 `seeded_activity()` 的 legacy 形态，构成「切 db 后历史活动消失 + `reconcile` 假绿灯」。修完后复跑（真实数据期间自然增长到 92 任务 / 53 个 `activity.json` / 175 行 / 159 文件）：`activity_rows=198`，与 `175 + 23` 精确吻合；`skipped=[] blocking=[]`；前后文件数均 159、无 `pm.sqlite` 产生。`reconcile` 对纯树安装 `exit=1`、`blocking` 明确写「no projection to reconcile」，同样零写入。（该轮当时）⑦/⑧ 未执行，也未对真实目录做任何 `--apply` 或其它写操作；后续 ⑦⑧ 已于 2026-11-17 完成。
 
-**本轮验证**：`cargo test -p acowork-pm` 全绿（lib **213 passed** + 9 个集成 / 文档套件共 42 例，合计 255）；`cargo test -p acowork-runtime --lib shell` 79 passed；`cargo clippy -p acowork-pm --all-targets -- -D warnings` 与 `cargo clippy -p acowork-runtime --lib -- -D warnings` 干净；`./dev/ci.sh redlines` 14 条全绿；`git diff --check` 干净；改动的 13 个 Rust 文件按 `--edition 2024 --config skip_children=true` 格式化（`tree.rs` 单独还原后精确重放，避免 694 行无关重排）。中英 ADR 同批更新并保持镜像。
+**Review 轮验证**：`cargo test -p acowork-pm` 全绿（lib **213 passed** + 9 个集成 / 文档套件共 42 例，合计 255）；`cargo test -p acowork-runtime --lib shell` 79 passed；`cargo clippy -p acowork-pm --all-targets -- -D warnings` 与 `cargo clippy -p acowork-runtime --lib -- -D warnings` 干净；`./dev/ci.sh redlines` 14 条全绿；`git diff --check` 干净；改动的 13 个 Rust 文件按 `--edition 2024 --config skip_children=true` 格式化（`tree.rs` 单独还原后精确重放，避免 694 行无关重排）。中英 ADR 同批更新并保持镜像。
+
+**⑧ 清理验证**：`cargo check -p acowork-pm --all-targets` 通过；`cargo test -p acowork-pm` 全绿（lib **199 passed** + 42 个集成 / 文档用例）；`cargo clippy -p acowork-pm --all-targets -- -D warnings` 干净；`./dev/ci.sh redlines` 14 条全绿；`git diff --check` 干净；新增 / 改动文件按 `--edition 2024 --config skip_children=true` 格式化。副本端到端冒烟：用 `projects.retired` 快照重建一份纯树安装，新二进制启动后自动导入 + 归档改名 + `/health` 报告 `db`，二次启动无导入日志；真实 `data_dir` 全程只读复核，未做任何写操作。中英 ADR 同批更新并保持镜像。
 
 **D6 ③ 验证（上一轮）**：`cargo test -p acowork-pm` 全量通过（lib **188 passed** + 9 个集成 / 文档测试套件共 42 例全绿）；`cargo clippy -p acowork-pm --all-targets -- -D warnings` 干净；`./dev/ci.sh redlines` 14 条全绿；`acowork-pm --data-dir <tmp> migrate` 实跑 dry-run 输出报告且目录内零文件产生。该轮新增 11 个用例：schema / 连接 2（幂等打开 + 校验、新 schema 版本拒绝）、导入器 5（dry-run 只读、全量往返 + 父子反转 + 幂等门、伪造 ID 阻断、坏 JSON 阻断、新附件不写归档）、业务流 2（31 方法端到端冒烟、依赖存在时 dispatch 不死锁）、server 2（`db` 对象安全可装配、跳过导入时硬失败）。
 
@@ -314,16 +319,16 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 - `project_counts` 每次都是 O(N) 内存遍历。10 000 任务时约数毫秒，可接受；再往上就该走 D5 的 T1 了。
 - D4 三层已实施，但第 3 层只是字符串级防误伤：变量拼接、`cd` 后的相对路径、解释器一行流仍可绕过；将来若迁库，shell 也同样能写 `pm.sqlite`。OS 级沙箱仍是最终形态。
 - D4 第 2 层的「合法」只到 JSON 语法层：`{"id": 123}` 这类字段类型错误仍会被当作好版本写进 `.bak`，顶掉真正的上一版。要做到 schema 级校验，需给 `atomic_write_json` 加 `DeserializeOwned` 约束，而 `activity.json` 目前以 `&[TaskActivity]` 切片写入、不满足该约束，本轮未改。`.bak` 本身已改成原子替换，所以备份不会再被自身写一半毁掉，但「语义损坏被当好版本」这个口子还在。
-- 三态配置把「后端选择」变成**启动期决策**：运行中改配置无效，切换必须重启并走停机窗口。好处是没有半套状态、状态机简单；代价是一次灰度只能观察一个配置，不能在线 AB。
-- `PmStore` 对象化后所有业务调用多一次动态分发（相对 31 个方法里的文件 I/O 可忽略），但 `Arc<dyn PmStore>` 也意味着编译期不再能看出具体实现，回归必须靠双后端双跑覆盖，不能靠类型系统。
-- SQLite 后端把「单写者」从操作系统文件语义搬到了一把进程内 `Mutex<Connection>`：所有语句都在临界区内同步执行，正确但牺牲了并发读（WAL 目前只用于 `dual` 期离线对账）。若将来出现多进程访问同一 `pm.sqlite`，这把锁不再够用，必须改成连接层事务 / busy timeout 策略。
-- `db` 模式下附件二进制不进 DB（ADR-061 决策 5），按 `assets/projects/{pid}/tasks/{tid}/` 与图标同属一棵 `{pid}` 子树；`delete_project` 一次清理整棵子树，`delete_task` 只清理任务自己的 DB-owned 目录。代价是 `task_dir` 是 DB 里的路径字符串，目录布局变更必须由 `normalize_asset_layout()` 这类启动期迁移兜住；跨项目父子关系被拒绝，所以 `{pid}` 段在任务全生命周期内稳定。
-- `dual` 用「每次写后全量扫树 + 单事务全量替换 DB」换灰度期最关键的「不可能漏字段 / sidecar / 子树」，代价是每次写 O(tree) 写放大。当前 85 任务 / 55 ms 冷重建可接受；规模上来后应改增量投影，而不是跳过 ⑤/⑥ 直接切 `db`。
-- 投影是同步阻塞调用（rusqlite 无 async I/O），由一把进程内 `projection_lock` 串行化「扫描 → 替换」，另用 `tree_write_seq` 检测扫描期间落下的树写并自动重扫（最多 4 次，超出记为一次失败）。收益是不会把半移动的子树状态提交进 DB；代价是高并发写会排队或触发重扫，且这两把同步原语只在本进程有效——多进程写同一 `pm.sqlite` 不在 `dual` 的支持范围。
-- `/health.details.projection` 的计数已改为**实例级** provider（经 `PmMaintenance::projection_health` 在每次探活时实时读取），不再被同进程里另一个 store 污染；仍随重启清零，`failed > 0` 只说明 DB 可能落后，不能单独作为切 `db` 依据，必须以停机窗口里 `reconcile` 的报告为准。
+- 三态配置（已随 ⑧ 删除）曾把「后端选择」变成**启动期决策**，切换必须重启并走停机窗口；现在没有后端可选，这个代价消失，但也彻底失去在线 AB 与运行时回滚能力。
+- `PmStore` 对象化后所有业务调用多一次动态分发（相对 31 个方法里的文件 I/O 可忽略），但 `Arc<dyn PmStore>` 也意味着编译期不再能看出具体实现，回归必须靠 SQLite 后端自身的测试覆盖，不能靠类型系统（三后端三跑已随 ⑧ 删除）。
+- SQLite 后端把「单写者」从操作系统文件语义搬到了一把进程内 `Mutex<Connection>`：所有语句都在临界区内同步执行，正确但牺牲了并发读（WAL 现在只用于让外部只读查看不阻塞写）。若将来出现多进程访问同一 `pm.sqlite`，这把锁不再够用，必须改成连接层事务 / busy timeout 策略。
+- `db` 模式下附件二进制不进 DB（ADR-061 决策 5），按 `assets/projects/{pid}/tasks/{tid}/` 与图标同属一棵 `{pid}` 子树；`delete_project` 一次清理整棵子树，`delete_task` 只清理任务自己的 DB-owned 目录。代价是 `task_dir` 是 DB 里的路径字符串，未来布局变更需要新的显式迁移（一次性 `normalize_asset_layout()` 已随 ⑧ 删除）；跨项目父子关系被拒绝，所以 `{pid}` 段在任务全生命周期内稳定。
+- `dual`（已随 ⑧ 删除）曾用「每次写后全量扫树 + 单事务全量替换 DB」换灰度期最关键的「不可能漏字段 / sidecar / 子树」，代价是每次写 O(tree) 写放大；单一后端下该代价完全消失。
+- 投影的 `projection_lock` / `tree_write_seq`（已随 ⑧ 删除）当时解决并发写下的半移动子树问题；现在单一 SQLite 事务天然保证一致性，不再存在跨介质的并发窗口。
+- `/health.details.projection` 的实例级计数（已随 ⑧ 删除）曾是「DB 落后」的对账信号；单一后端下 DB 就是权威，不存在「落后」这个状态，`/health` 固定报告 `db`。
 - `db_err()` 把全部 `rusqlite` 错误压成 `PmError::Internal`（HTTP 500）。这是有意的：新增错误变体会牵动 `http_status` / `error_code` 的客户端契约，而当前 SQLite 是单进程单写者，约束冲突几乎都意味着真实内部故障而不是用户输入错误。代价是客户端暂时无法区分「唯一键冲突」与「磁盘故障」，日志里才有细节。
 - 投影列中的时间戳用 `DateTime<Utc>::to_rfc3339()` 统一写 TEXT，`ORDER BY start_at` 依赖其字典序等于时间序。导入器与写路径都经过同一序列化，**前提是所有时间都是 UTC 且由该函数产出**；若将来接入外部手写的时间字符串，必须先把这一列迁成整数 epoch 或加归一化约束。
-- `create_task_as` / `write_attachment` 仍是 FS 先写、DB 后提交。本轮给两者的失败路径加了 best-effort 目录回滚，但进程在两次操作之间被 kill 仍可能留空目录 / 孤儿二进制；彻底解决需要启动期 GC 或把二进制也纳入事务，本轮不做，遗留由第 ⑧ 步统一清理。
+- `create_task_as` / `write_attachment` 仍是 FS 先写、DB 后提交。本轮给两者的失败路径加了 best-effort 目录回滚，但进程在两次操作之间被 kill 仍可能留空目录 / 孤儿二进制；彻底解决需要启动期 GC 或把二进制也纳入事务，本轮不做；⑧ 只删过渡代码，未引入启动期 GC，这个遗留仍在。
 - `schema::open()` 现在拒绝看不懂的库时不写任何字节，代价是「版本倾斜」与「空库」的恢复都必须由人显式介入（quarantine 后重建），不能再靠一次启动自动收敛；这是把「静默迁移」换成「显式报错」的必然取舍。
 - D4 第 3 层的写意图判据是有损的：包含 `>` 的只读文本、字符串里出现 `cp ` 之类 token，都可能被误拒；反过来变量拼接的写仍可绕过。它只是把事故概率压低，绝不写进任何安全承诺。
 - 收敛为单后端后不再有「改回 `filetree` 继续用」的运行时回滚路径：`projects/` 已改名为 `projects.retired` 且不再被任何运行时路径读取，切库后的新写只存在于 `pm.sqlite` + `assets/`。回滚必须停机、把 `projects.retired` 改回并换用旧二进制；收益是再没有两个可能分歧的提交点，代价是切换后不能无痛反悔。

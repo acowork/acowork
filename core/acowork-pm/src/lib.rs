@@ -5,31 +5,15 @@
 //! - **REST API**（axum）—— Gateway 反向代理到本服务（公开路径 `/api/pm/projects/*`、`/api/pm/tasks/*`、`/api/pm/attachments/*`，内部路径不带 `/api` 前缀）
 //! - **MCP tools**（HTTP Server）—— Agent 通过 MCP 协议调用 `pm_*` 工具
 //!
-//! ## 存储模型：目录树 + 物理嵌套即权威
+//! ## 存储模型：SQLite 权威（ADR-117）
 //!
-//! 一个项目 = 一棵完整目录树：
+//! `pm.sqlite` 是唯一提交点：实体以原始 JSON 存在 `props`，同时投影
+//! `parent_id` / `depth` / `status` / `task_dir` 等列供查询。附件与项目图标
+//! 二进制仍在文件系统，按 `assets/projects/{pid}/` 分组。
 //!
-//! ```text
-//! {data}/acowork-pm/projects/{pid}/
-//! ├── project.json
-//! └── tasks/
-//!     ├── {root_task_id}/
-//!     │   ├── task.json
-//!     │   ├── attachments/{att_id}/{original.{ext},thumb.jpg}
-//!     │   └── children/{child_task_id}/...
-//!     └── {another_root_task_id}/
-//! ```
-//!
-//! **核心不变量**：
-//!
-//! - 任务恒为目录（不用文件形态），避免二态分支
-//! - 子任务强制放在父任务的 `children/` 子目录下
-//! - `children/` 按需创建（首个子任务时 `mkdir`）
-//! - 删除任务 = `rm -rf` 目录树，原子级清理子树 + 附件
-//! - Reparent = `mv` 目录，**0 文件写**
-//! - **`task.json` 不存 `parent_id` / `subtask_ids` / `subtask_count`** —— 父子关系完全靠物理位置表达
-//!
-//! 物理结构损坏可由 `walkdir` 重建索引，**无修复逻辑**（因为没有冗余字段可漂移）。
+//! 首次启动把历史的 `projects/` JSON 树一次性导入，并把原目录改名为
+//! `projects.retired` 作为可恢复快照；此后不再读取它。旧的目录树实现留在
+//! `store::tree`，仅作为归档格式参考、规则 helpers 与测试夹具。
 //!
 //! ## 跨服务集成
 //!
@@ -66,7 +50,7 @@ pub mod ui;
 // ────────────────────────────────────────────────────────────────────────────
 
 // Config
-pub use config::{PmConfig, StorageBackend};
+pub use config::PmConfig;
 
 // Errors
 pub use error::{PmError, Result};
@@ -78,13 +62,7 @@ pub use types::{
 };
 
 // Storage
-pub use store::dual::DualPmStore;
 pub use store::index::TaskIndex;
-pub use store::sqlite::import::{
-    MigrationReport as PmMigrationReport, ReconcileReport as PmReconcileReport,
-    SkippedEntry as PmMigrationSkippedEntry, dry_run as pm_import_dry_run, import as pm_import,
-    rebuild as pm_projection_rebuild, reconcile as pm_reconcile,
-};
 pub use store::sqlite::{SqlitePmStore, schema as pm_sqlite_schema};
 pub use store::tree::{PmMaintenance, PmStore, TreePmStore};
 

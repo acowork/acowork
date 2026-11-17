@@ -1,33 +1,18 @@
-//! 存储层：项目 / 任务 / 附件的物理 IO + 内存索引。
+//! 存储层：SQLite 权威 + 文件系统二进制资产。
 //!
 //! ## 子模块
 //!
-//! - [`atomic`] —— 原子写 + 路径校验工具
-//! - [`index`] —— 二级内存索引（按 project / assignee / 状态 / 反向依赖图）
-//! - [`tree`] —— `TreePmStore` + `PmStore` / `PmMaintenance` trait（基于目录树的实现）
-//! - [`sqlite`] —— ADR-117 D6：SQLite schema、JSON → DB 导入器与 `db` 后端
-//! - [`dual`] —— ADR-117 D6：树唯一提交点 + SQLite 单向投影的灰度观察后端
-//!
-//! ## 数据流
-//!
-//! ```text
-//! HTTP API / MCP tool
-//!       ↓
-//!   PmStore trait
-//!       ↓
-//! TreePmStore::create_task / get_task / ...
-//!       ↓
-//! ┌──────────────┬───────────────────┐
-//! │ atomic_write │ index.update()    │
-//! │   (fs)       │   (内存 HashMap)  │
-//! └──────────────┴───────────────────┘
-//!       ↓                  ↓
-//!   task.json         TaskIndex
-//! ```
+//! - [`atomic`] —— 原子写 + 路径校验工具（导入测试与树夹具共用）
+//! - [`corrupt`] —— 坏文件取证副本与 `/health` 注册表
+//! - [`index`] —— 二级内存索引（树夹具使用）
+//! - [`sqlite`] —— 唯一运行后端：schema、一次性 JSON 导入、`SqlitePmStore`
+//! - [`tree`] —— **已退出运行路径**。保留为 JSON 归档格式的参考实现、
+//!   被 SQLite 后端复用的规则 helpers（`parse_task_id` /
+//!   `validate_transition` / `seeded_activity` 等），以及导入器测试用来生成
+//!   真实树布局的夹具；`build_store()` 不再装配它。
 
 pub mod atomic;
 pub mod corrupt;
-pub mod dual;
 pub mod index;
 pub mod sqlite;
 pub mod tree;

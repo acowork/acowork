@@ -57,9 +57,8 @@ pub(super) fn task_asset_rel(project_id: &str, task_id: &str) -> String {
 /// (`assets/projects/p-*/tasks/t-*`) keeps the sibling `icon/` directory and
 /// retired tree paths out of the deletable set.
 ///
-/// Rows written by older builds still use `assets/tasks/{tid}`; those are
-/// rewritten by `import::normalize_asset_layout()` on startup, so this
-/// predicate describes the canonical layout only.
+/// Older flat rows (`assets/tasks/{tid}`) were upgraded once during the
+/// cutover; a fresh install only ever produces the canonical layout below.
 pub(super) fn is_db_owned_asset_dir(rel_dir: &str) -> bool {
     let parts: Vec<&str> = rel_dir.split('/').collect();
     parts.len() == 5
@@ -102,13 +101,6 @@ impl SqlitePmStore {
     /// this to refuse an empty `db` backend when the tree still holds data.
     pub fn is_empty(&self) -> Result<bool> {
         self.with_conn(schema::is_empty)
-    }
-
-    /// Replace the whole DB with a fresh scan of the tree, in one transaction.
-    /// This is **only** for the `dual` projection path: in `db` mode the DB
-    /// is the authority and must never be overwritten by a tree scan.
-    pub fn rebuild_projection(&self, config: &PmConfig) -> Result<import::MigrationReport> {
-        self.with_conn_mut(|conn| import::rebuild_into(conn, config))
     }
 
     fn lock(&self) -> Result<std::sync::MutexGuard<'_, Connection>> {
@@ -345,22 +337,13 @@ impl SqlitePmStore {
         })
     }
 
-    /// Writable icon root for `db` mode. Deliberately outside `projects/`:
-    /// an upload used to `create_dir_all` a `p-*` directory inside the tree
-    /// archive with no `project.json`, which the importer then reported as a
-    /// damaged project and blocked every subsequent `dual` projection.
+    /// Icon root: `assets/projects/{pid}/icon/`. Icons uploaded before the
+    /// cutover were copied here by `retire_tree_archive()`, so there is exactly
+    /// one physical location and no runtime dependency on the retired archive.
     fn icon_dir(&self, project_id: &ProjectId) -> PathBuf {
         self.config
             .data_dir
             .join("assets/projects")
-            .join(project_id.as_str())
-            .join("icon")
-    }
-
-    /// Read-only fallback for icons uploaded while the tree was authoritative.
-    fn archived_icon_dir(&self, project_id: &ProjectId) -> PathBuf {
-        self.config
-            .projects_dir()
             .join(project_id.as_str())
             .join("icon")
     }
@@ -638,23 +621,16 @@ impl PmMaintenance for SqlitePmStore {
 
     async fn list_project_icons(&self, project_id: &ProjectId) -> Result<Vec<String>> {
         let mut out = std::collections::BTreeSet::new();
-        // New writes live under `assets/projects/`; the archive is still
-        // readable so icons uploaded before a cutover do not disappear.
-        for dir in [
-            self.icon_dir(project_id),
-            self.archived_icon_dir(project_id),
-        ] {
-            let entries = match std::fs::read_dir(&dir) {
-                Ok(e) => e,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            };
-            for entry in entries {
-                let entry = entry?;
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if name.starts_with("icon-") && icon_content_type(&name).is_some() {
-                    out.insert(name);
-                }
+        let entries = match std::fs::read_dir(self.icon_dir(project_id)) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        for entry in entries {
+            let entry = entry?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with("icon-") && icon_content_type(&name).is_some() {
+                out.insert(name);
             }
         }
         Ok(out.into_iter().collect())
@@ -683,19 +659,11 @@ impl PmMaintenance for SqlitePmStore {
         if name.contains('/') || name.contains('\\') || name.contains("..") {
             return Err(PmError::PathTraversal(name.to_string()));
         }
-        for dir in [
-            self.icon_dir(project_id),
-            self.archived_icon_dir(project_id),
-        ] {
-            match std::fs::read(dir.join(name)) {
-                Ok(bytes) => {
-                    return Ok(icon_content_type(name).map(|ct| (ct.to_string(), bytes)));
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(e.into()),
-            }
+        match std::fs::read(self.icon_dir(project_id).join(name)) {
+            Ok(bytes) => Ok(icon_content_type(name).map(|ct| (ct.to_string(), bytes))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e.into()),
         }
-        Ok(None)
     }
 
     fn is_dispatch_blocked(&self, task: &Task) -> bool {
@@ -712,7 +680,7 @@ impl PmMaintenance for SqlitePmStore {
         // Same order and semantics as `TreePmStore::dispatch_identity`: a
         // persisted generation identity is returned verbatim with NO write.
         // Re-saving it on every scanner tick would bump `updated_at` forever
-        // and, under `dual`, trigger a full-tree projection every minute.
+        // for a task that has not changed.
         if let Some(existing) = task.dispatch_message_id.clone() {
             return Ok(Some(existing));
         }
@@ -805,20 +773,14 @@ mod tests {
         assert!(err.contains("not understood"), "error was: {err}");
     }
 
-    /// `db` mode must never write icons into `projects/` — that directory is
-    /// the read-only rollback source, and an icon-only `p-*` directory there
-    /// makes the importer report a damaged project and block every `dual`
-    /// projection. Archived icons stay readable after the cutover.
+    /// Icons live in the DB-owned `assets/projects/{pid}/icon/` root; the
+    /// retired tree archive is neither written nor read at runtime.
     #[tokio::test]
-    async fn icons_live_outside_the_tree_archive_and_archived_ones_stay_readable() {
+    async fn icons_live_in_the_project_asset_root() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = test_config(tmp.path());
         let store = SqlitePmStore::open(cfg.clone()).unwrap();
         let pid = ProjectId("p-icons".into());
-
-        let archived = store.archived_icon_dir(&pid);
-        std::fs::create_dir_all(&archived).unwrap();
-        std::fs::write(archived.join("icon-old.png"), b"legacy").unwrap();
 
         store
             .write_project_icon(&pid, "icon-new.png", b"fresh")
@@ -829,12 +791,12 @@ mod tests {
             "new icon must land in the DB-owned asset root"
         );
         assert!(
-            !archived.join("icon-new.png").exists(),
-            "the tree archive must stay untouched"
+            !store.config.projects_dir().exists(),
+            "the retired tree archive must never be recreated"
         );
 
         let listed = store.list_project_icons(&pid).await.unwrap();
-        assert_eq!(listed, vec!["icon-new.png", "icon-old.png"]);
+        assert_eq!(listed, vec!["icon-new.png"]);
 
         let (ct, bytes) = store
             .read_project_icon(&pid, "icon-new.png")
@@ -843,17 +805,11 @@ mod tests {
             .unwrap();
         assert_eq!(ct, "image/png");
         assert_eq!(bytes, b"fresh");
-        let (_, legacy) = store
-            .read_project_icon(&pid, "icon-old.png")
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(legacy, b"legacy");
 
         // Files that are not icons are not listed, and a traversal name is
         // rejected on both write and read.
         std::fs::write(store.icon_dir(&pid).join("notes.txt"), b"x").unwrap();
-        assert_eq!(store.list_project_icons(&pid).await.unwrap().len(), 2);
+        assert_eq!(store.list_project_icons(&pid).await.unwrap().len(), 1);
         assert!(
             store
                 .read_project_icon(&pid, "../project.json")

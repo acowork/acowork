@@ -18,18 +18,18 @@
 //! 6. Bound parameters, one all-or-nothing transaction, a non-empty-target
 //!    idempotency gate, `integrity_check` + `foreign_key_check` before commit,
 //!    and a `user_version` stamp.
-//! 7. Nothing is deleted from the tree: rollback is a config flip back to
-//!    `filetree`, so the source stays a usable read-only archive.
+//! 7. Nothing is deleted from the tree: the import only reads it, and
+//!    `retire_tree_archive()` renames it to `projects.retired` afterwards so
+//!    it stays a recoverable snapshot.
 //!
-//! The scan is synchronous on purpose: it is a one-shot startup / operator
-//! action, not a request path. Keeping it free of `await` makes "dry-run
-//! writes nothing" trivially auditable.
+//! The scan is synchronous on purpose: it is a one-shot startup action, not a
+//! request path. Keeping it free of `await` makes "dry-run writes nothing"
+//! trivially auditable.
 
-use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
-use rusqlite::{Connection, OpenFlags, params};
+use rusqlite::{Connection, params};
 use serde::Serialize;
 use serde_json::Value;
 
@@ -139,9 +139,9 @@ pub fn dry_run(config: &PmConfig) -> Result<MigrationReport> {
     Ok(report)
 }
 
-/// Insert a scanned batch into an open transaction. Shared by the one-shot
-/// import and the `dual` full rebuild, so the two can never disagree on how a
-/// tree entity becomes a row.
+/// Insert a scanned batch into an open transaction. The one-shot startup
+/// import is the only caller, so there is exactly one place where a tree
+/// entity becomes a row.
 fn insert_batch(tx: &Connection, batch: &ImportBatch, source_dir: &str) -> Result<()> {
     for p in &batch.projects {
         tx.execute(
@@ -242,98 +242,7 @@ pub fn import(config: &PmConfig) -> Result<MigrationReport> {
     Ok(report)
 }
 
-/// Replace the whole DB with a fresh scan of the tree in one transaction.
-///
-/// This is the `dual` backend's projection primitive and the ADR-117 D6
-/// "DB is disposable, rebuild from the tree" guarantee. Unlike [`import`] it
-/// is idempotent and never gated on emptiness: an empty / stale / corrupt
-/// projection is simply overwritten. `dual` calls this after every tree
-/// commit and once at startup; a failure is best-effort and must never be
-/// propagated into the write result.
-pub fn rebuild_into(conn: &mut Connection, config: &PmConfig) -> Result<MigrationReport> {
-    assert_dual_projection(config)?;
-    // A projection is disposable: mirror exactly what the tree can serve.
-    // `import` keeps the stricter Blocking policy because it creates a new
-    // authority, where silently dropping an entity is permanent data loss.
-    let (report, batch) = scan_with_policy(config, CorruptPolicy::SkipAndRecord)?;
-    if report.has_blocking_issues() {
-        return Err(blocking_error(&report));
-    }
-    let tx = conn.transaction().map_err(db_err)?;
-    // Clear self-references first so cascading deletes cannot leave a dangling
-    // `parent_id` behind, then remove every entity table explicitly.
-    tx.execute_batch(
-        "UPDATE tasks SET parent_id = NULL;
-         DELETE FROM activity;
-         DELETE FROM attachments;
-         DELETE FROM tasks;
-         DELETE FROM projects;
-         DELETE FROM meta;",
-    )
-    .map_err(db_err)?;
-    insert_batch(&tx, &batch, &report.source_dir)?;
-    schema::verify(&tx)?;
-    tx.commit().map_err(db_err)?;
-    Ok(report)
-}
-
-/// Convenience wrapper for operator / startup callers that do not already
-/// hold a connection.
-pub fn rebuild(config: &PmConfig) -> Result<MigrationReport> {
-    let mut conn = schema::open(&config.sqlite_path())?;
-    rebuild_into(&mut conn, config)
-}
-
-// ── Scan ──────────────────────────────────────────────────────────────────
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum CorruptPolicy {
-    /// One-shot migration into a new authority: dropping an unreadable
-    /// entity would turn a recoverable tree defect into permanent data loss.
-    Blocking,
-    /// Disposable `dual` projection: `TreePmStore` already skips unreadable
-    /// files, so the mirror must skip them too. One broken tree file must not
-    /// stall every subsequent projection for the rest of the process life.
-    SkipAndRecord,
-}
-
-fn corrupt_entity(
-    report: &mut MigrationReport,
-    path: &Path,
-    reason: String,
-    policy: CorruptPolicy,
-) {
-    match policy {
-        CorruptPolicy::Blocking => block(report, path, reason),
-        CorruptPolicy::SkipAndRecord => report.skipped.push(SkippedEntry {
-            path: path.display().to_string(),
-            reason: format!("{reason} (tree skips this file too; projection mirrors it)"),
-        }),
-    }
-}
-
-/// A tree scan may overwrite `pm.sqlite` only while the tree is authoritative.
-/// In `db` mode SQLite is the sole commit point, and a stale tree scan would
-/// silently resurrect an older snapshot (ADR-117 §3 D6 iron rule 4).
-fn assert_dual_projection(config: &PmConfig) -> Result<()> {
-    if config.storage_backend != crate::config::StorageBackend::Dual {
-        return Err(PmError::Internal(
-            "a tree scan must never overwrite pm.sqlite unless storage_backend=dual \
-             (in db mode SQLite is the authority)"
-                .into(),
-        ));
-    }
-    Ok(())
-}
-
 fn scan(config: &PmConfig) -> Result<(MigrationReport, ImportBatch)> {
-    scan_with_policy(config, CorruptPolicy::Blocking)
-}
-
-fn scan_with_policy(
-    config: &PmConfig,
-    policy: CorruptPolicy,
-) -> Result<(MigrationReport, ImportBatch)> {
     let mut report = MigrationReport {
         source_dir: config.data_dir.display().to_string(),
         ..Default::default()
@@ -406,11 +315,10 @@ fn scan_with_policy(
         let project: Project = match read_entity(&project_json) {
             Ok(p) => p,
             Err(e) => {
-                corrupt_entity(
+                block(
                     &mut report,
                     &project_json,
                     format!("unreadable project.json: {e}"),
-                    policy,
                 );
                 continue;
             }
@@ -442,7 +350,7 @@ fn scan_with_policy(
         });
         report.projects += 1;
 
-        scan_tasks(config, &dir, &pid, &mut report, &mut batch, policy)?;
+        scan_tasks(config, &dir, &pid, &mut report, &mut batch)?;
     }
     Ok((report, batch))
 }
@@ -454,7 +362,6 @@ fn scan_tasks(
     pid: &ProjectId,
     report: &mut MigrationReport,
     batch: &mut ImportBatch,
-    policy: CorruptPolicy,
 ) -> Result<()> {
     let tasks_root = project_dir.join("tasks");
     if !tasks_root.exists() {
@@ -508,12 +415,7 @@ fn scan_tasks(
             let task: Task = match read_entity(&json_path) {
                 Ok(t) => t,
                 Err(e) => {
-                    corrupt_entity(
-                        report,
-                        &json_path,
-                        format!("unreadable task.json: {e}"),
-                        policy,
-                    );
+                    block(report, &json_path, format!("unreadable task.json: {e}"));
                     continue;
                 }
             };
@@ -590,7 +492,7 @@ fn scan_tasks(
             for att in &task.attachments {
                 collect_attachment(report, batch, &task_dir, &tid, &rel_dir, att)?;
             }
-            collect_activity(report, batch, &task_dir, &tid, &task, policy)?;
+            collect_activity(report, batch, &task_dir, &tid, &task)?;
 
             batch.tasks.push(TaskRow {
                 id: tid.to_string(),
@@ -689,26 +591,19 @@ fn collect_activity(
     task_dir: &Path,
     tid: &TaskId,
     task: &Task,
-    policy: CorruptPolicy,
 ) -> Result<()> {
     let path = task_dir.join("activity.json");
     // `TreePmStore::load_activity` seeds a Submitted row from `task.result`
     // when a pre-history task has no `activity.json` on disk. The importer
-    // must mirror that *business read path* exactly: otherwise those tasks
-    // lose their history after a `db` cutover, while `reconcile` compares
-    // 0 rows against 0 rows and reports a false green light.
+    // must mirror that *business read path* exactly: otherwise pre-history
+    // tasks silently lose their activity stream at the cutover.
     let rows: Vec<TaskActivity> = if !path.exists() {
         crate::store::tree::seeded_activity(task)
     } else {
         match read_entity(&path) {
             Ok(v) => v,
             Err(e) => {
-                corrupt_entity(
-                    report,
-                    &path,
-                    format!("unreadable activity.json: {e}"),
-                    policy,
-                );
+                block(report, &path, format!("unreadable activity.json: {e}"));
                 return Ok(());
             }
         }
@@ -779,354 +674,7 @@ fn block(report: &mut MigrationReport, path: &Path, reason: String) {
         .push(format!("{}: {reason}", path.display()));
 }
 
-// ── Offline reconciliation (ADR-117 D6 step 6) ──────────────────────────
-
-/// Result of comparing the authoritative tree against a `dual` projection.
-/// `props` is compared verbatim, so a field-level drift (not just a missing
-/// row) is visible without decoding either side.
-#[derive(Debug, Clone, Default, Serialize)]
-pub struct ReconcileReport {
-    pub tree_projects: usize,
-    pub db_projects: usize,
-    pub tree_tasks: usize,
-    pub db_tasks: usize,
-    pub tree_attachments: usize,
-    pub db_attachments: usize,
-    pub tree_activity: usize,
-    pub db_activity: usize,
-    /// Entity keys present in the tree but absent from the DB.
-    pub missing_in_db: Vec<String>,
-    /// Entity keys present in the DB but no longer in the tree (a stale row).
-    pub extra_in_db: Vec<String>,
-    /// Entity keys present in both whose `props` JSON differs.
-    pub props_mismatch: Vec<String>,
-    /// Entity keys whose projected columns differ. `db` mode reads
-    /// `parent_id` / `depth` / `status` / ... instead of decoding `props`,
-    /// so a columns-only drift would otherwise pass the cutover gate unseen.
-    pub column_mismatch: Vec<String>,
-    pub blocking: Vec<String>,
-}
-
-impl ReconcileReport {
-    /// True only when every entity, every `props` blob and every projected
-    /// column agrees.
-    pub fn is_consistent(&self) -> bool {
-        self.missing_in_db.is_empty()
-            && self.extra_in_db.is_empty()
-            && self.props_mismatch.is_empty()
-            && self.column_mismatch.is_empty()
-            && self.blocking.is_empty()
-            && self.tree_projects == self.db_projects
-            && self.tree_tasks == self.db_tasks
-            && self.tree_attachments == self.db_attachments
-            && self.tree_activity == self.db_activity
-    }
-
-    pub fn summary(&self) -> String {
-        format!(
-            "consistent={} projects={}/{} tasks={}/{} attachments={}/{} activity={}/{} missing={} extra={} mismatch={} col_mismatch={}",
-            self.is_consistent(),
-            self.tree_projects,
-            self.db_projects,
-            self.tree_tasks,
-            self.db_tasks,
-            self.tree_attachments,
-            self.db_attachments,
-            self.tree_activity,
-            self.db_activity,
-            self.missing_in_db.len(),
-            self.extra_in_db.len(),
-            self.props_mismatch.len(),
-            self.column_mismatch.len()
-        )
-    }
-}
-
-#[derive(Debug, Clone, Default)]
-struct SnapshotValue {
-    props: String,
-    /// Projected columns that the `db` backend reads instead of `props`.
-    columns: String,
-}
-
-/// Both sides must build this string from the same field order, otherwise a
-/// purely cosmetic difference would show up as a permanent red light.
-#[allow(clippy::too_many_arguments)]
-fn task_columns(
-    project_id: &str,
-    parent_id: Option<&str>,
-    depth: i64,
-    task_dir: &str,
-    status: &str,
-    review_status: &str,
-    priority: &str,
-    task_type: &str,
-    title: &str,
-    assignee: Option<&str>,
-    start_at: Option<&str>,
-    due_at: Option<&str>,
-    dispatched_at: Option<&str>,
-    created_at: &str,
-    updated_at: &str,
-) -> String {
-    format!(
-        "{project_id}|{}|{depth}|{task_dir}|{status}|{review_status}|{priority}|{task_type}|{title}|{}|{}|{}|{}|{created_at}|{updated_at}",
-        parent_id.unwrap_or(""),
-        assignee.unwrap_or(""),
-        start_at.unwrap_or(""),
-        due_at.unwrap_or(""),
-        dispatched_at.unwrap_or(""),
-    )
-}
-
-fn tree_snapshot(batch: &ImportBatch) -> HashMap<String, SnapshotValue> {
-    let mut out = HashMap::new();
-    for p in &batch.projects {
-        out.insert(
-            format!("project:{}", p.id),
-            SnapshotValue {
-                props: p.props.clone(),
-                columns: format!("{}|{}|{}", p.status, p.created_at, p.updated_at),
-            },
-        );
-    }
-    for t in &batch.tasks {
-        out.insert(
-            format!("task:{}", t.id),
-            SnapshotValue {
-                props: t.props.clone(),
-                columns: task_columns(
-                    &t.project_id,
-                    t.parent_id.as_deref(),
-                    t.depth as i64,
-                    &t.task_dir,
-                    &t.status,
-                    &t.review_status,
-                    &t.priority,
-                    &t.task_type,
-                    &t.title,
-                    t.assignee.as_deref(),
-                    t.start_at.as_deref(),
-                    t.due_at.as_deref(),
-                    t.dispatched_at.as_deref(),
-                    &t.created_at,
-                    &t.updated_at,
-                ),
-            },
-        );
-    }
-    for a in &batch.attachments {
-        out.insert(
-            format!("attachment:{}", a.id),
-            SnapshotValue {
-                props: a.props.clone(),
-                columns: format!("{}|{}", a.task_id, a.task_dir),
-            },
-        );
-    }
-    for a in &batch.activity {
-        out.insert(
-            format!("activity:{}:{}", a.task_id, a.seq),
-            SnapshotValue {
-                props: a.props.clone(),
-                columns: format!("{}|{}", a.task_id, a.seq),
-            },
-        );
-    }
-    out
-}
-
-fn db_snapshot(conn: &Connection) -> Result<HashMap<String, SnapshotValue>> {
-    let mut out = HashMap::new();
-    {
-        let mut stmt = conn
-            .prepare("SELECT id, props, status, created_at, updated_at FROM projects")
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    format!(
-                        "{}|{}|{}",
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?
-                    ),
-                ))
-            })
-            .map_err(db_err)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(db_err)?;
-        for (id, props, columns) in rows {
-            out.insert(format!("project:{id}"), SnapshotValue { props, columns });
-        }
-    }
-    {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, props, project_id, parent_id, depth, task_dir, status,
-                        review_status, priority, task_type, title, assignee,
-                        start_at, due_at, dispatched_at, created_at, updated_at
-                 FROM tasks",
-            )
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([], |row| {
-                let parent_id: Option<String> = row.get(3)?;
-                let assignee: Option<String> = row.get(11)?;
-                let start_at: Option<String> = row.get(12)?;
-                let due_at: Option<String> = row.get(13)?;
-                let dispatched_at: Option<String> = row.get(14)?;
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    task_columns(
-                        &row.get::<_, String>(2)?,
-                        parent_id.as_deref(),
-                        row.get::<_, i64>(4)?,
-                        &row.get::<_, String>(5)?,
-                        &row.get::<_, String>(6)?,
-                        &row.get::<_, String>(7)?,
-                        &row.get::<_, String>(8)?,
-                        &row.get::<_, String>(9)?,
-                        &row.get::<_, String>(10)?,
-                        assignee.as_deref(),
-                        start_at.as_deref(),
-                        due_at.as_deref(),
-                        dispatched_at.as_deref(),
-                        &row.get::<_, String>(15)?,
-                        &row.get::<_, String>(16)?,
-                    ),
-                ))
-            })
-            .map_err(db_err)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(db_err)?;
-        for (id, props, columns) in rows {
-            out.insert(format!("task:{id}"), SnapshotValue { props, columns });
-        }
-    }
-    {
-        let mut stmt = conn
-            .prepare("SELECT id, props, task_id, task_dir FROM attachments")
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    format!("{}|{}", row.get::<_, String>(2)?, row.get::<_, String>(3)?),
-                ))
-            })
-            .map_err(db_err)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(db_err)?;
-        for (id, props, columns) in rows {
-            out.insert(format!("attachment:{id}"), SnapshotValue { props, columns });
-        }
-    }
-    {
-        let mut stmt = conn
-            .prepare("SELECT task_id, seq, props FROM activity")
-            .map_err(db_err)?;
-        let rows = stmt
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(db_err)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(db_err)?;
-        for (task_id, seq, props) in rows {
-            out.insert(
-                format!("activity:{task_id}:{seq}"),
-                SnapshotValue {
-                    props,
-                    columns: format!("{task_id}|{seq}"),
-                },
-            );
-        }
-    }
-    Ok(out)
-}
-
-/// Read-only comparison of the tree and the DB projection. Never writes —
-/// this is the operator's gate before switching `dual` → `db` (ADR-117 D6
-/// step 6). Counts come from the live tables, not from the report, so a
-/// duplicated row is caught even when the key set happens to match.
-///
-/// Deliberately does **not** call [`schema::open`]: that helper creates the
-/// directory, applies DDL and bumps `user_version`, which would silently
-/// conjure an empty `pm.sqlite` on a tree-only install. A gate that can
-/// create its own evidence is not a gate.
-pub fn reconcile(config: &PmConfig) -> Result<ReconcileReport> {
-    let (report, batch) = scan(config)?;
-    let mut out = ReconcileReport {
-        tree_projects: report.projects,
-        tree_tasks: report.tasks,
-        tree_attachments: report.attachments,
-        tree_activity: report.activity_rows,
-        blocking: report.blocking,
-        ..Default::default()
-    };
-    let path = config.sqlite_path();
-    if !path.is_file() {
-        out.blocking.push(format!(
-            "no projection to reconcile: {} does not exist",
-            path.display()
-        ));
-        return Ok(out);
-    }
-    let conn = Connection::open_with_flags(
-        &path,
-        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(db_err)?;
-    let version = schema::user_version(&conn)?;
-    if version != schema::SCHEMA_VERSION {
-        out.blocking.push(format!(
-            "pm.sqlite schema v{version} does not match this binary (v{})",
-            schema::SCHEMA_VERSION
-        ));
-        return Ok(out);
-    }
-    if let Err(e) = schema::verify(&conn) {
-        out.blocking.push(e.to_string());
-        return Ok(out);
-    }
-    let count = |sql: &str| -> Result<usize> {
-        let n: i64 = conn.query_row(sql, [], |row| row.get(0)).map_err(db_err)?;
-        Ok(n as usize)
-    };
-    out.db_projects = count("SELECT COUNT(*) FROM projects")?;
-    out.db_tasks = count("SELECT COUNT(*) FROM tasks")?;
-    out.db_attachments = count("SELECT COUNT(*) FROM attachments")?;
-    out.db_activity = count("SELECT COUNT(*) FROM activity")?;
-
-    let tree = tree_snapshot(&batch);
-    let db = db_snapshot(&conn)?;
-    let tree_keys: BTreeSet<String> = tree.keys().cloned().collect();
-    let db_keys: BTreeSet<String> = db.keys().cloned().collect();
-    out.missing_in_db = tree_keys.difference(&db_keys).cloned().collect();
-    out.extra_in_db = db_keys.difference(&tree_keys).cloned().collect();
-    out.props_mismatch = tree_keys
-        .intersection(&db_keys)
-        .filter(|k| tree[k.as_str()].props != db[k.as_str()].props)
-        .cloned()
-        .collect();
-    out.column_mismatch = tree_keys
-        .intersection(&db_keys)
-        .filter(|k| tree[k.as_str()].columns != db[k.as_str()].columns)
-        .cloned()
-        .collect();
-    Ok(out)
-}
-
-/// Retire the JSON tree after a successful import (ADR-117 step ⑧, automated).
+/// Retire the JSON tree after a successful import (ADR-117 single-backend cutover).
 ///
 /// Two kinds of binary are still referenced by rows that came from the tree:
 /// project icons under `projects/{pid}/icon/` and task attachment binaries
@@ -1264,123 +812,6 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
             copy_dir_all(&entry.path(), &to)?;
         } else if !to.exists() {
             std::fs::copy(entry.path(), &to)?;
-        }
-    }
-    Ok(())
-}
-
-/// Upgrade rows written by builds that used the flat `assets/tasks/{tid}`
-/// layout to the project-scoped `assets/projects/{pid}/tasks/{tid}` layout.
-///
-/// Runs on every startup after archive retirement, so an installation that
-/// cut over before this layout existed needs no operator step. Idempotent and
-/// resumable: the physical move is a rename inside `data_dir`, and a crash
-/// after the move but before the DB commit is detected by the destination
-/// already existing — the leftover bytes are merged and the stale root is
-/// dropped. A task's `project_id` never changes (cross-project reparenting is
-/// rejected), so the new path is stable for the task's whole lifetime.
-pub fn normalize_asset_layout(config: &PmConfig) -> Result<()> {
-    if !config.sqlite_path().is_file() {
-        // Nothing was ever imported (e.g. an empty fresh install). Do not
-        // create a database just to find zero rows to migrate.
-        return Ok(());
-    }
-    let mut conn = schema::open(&config.sqlite_path())?;
-    let tx = conn.transaction().map_err(db_err)?;
-    let mut stmt = tx
-        .prepare(
-            "SELECT t.id, t.project_id FROM tasks t
-             WHERE t.task_dir LIKE 'assets/tasks/%'
-                OR EXISTS (SELECT 1 FROM attachments a
-                           WHERE a.task_id = t.id
-                             AND a.task_dir LIKE 'assets/tasks/%')",
-        )
-        .map_err(db_err)?;
-    let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
-        .map_err(db_err)?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(db_err)?;
-    drop(stmt);
-
-    if !rows.is_empty() {
-        tracing::info!(
-            rows = rows.len(),
-            "normalizing flat assets/tasks rows into the project-scoped asset layout"
-        );
-    }
-    for (tid, pid) in rows {
-        let old_rel = format!("assets/tasks/{tid}");
-        let new_rel = task_asset_rel(&pid, &tid);
-        let src = config.data_dir.join(&old_rel);
-        let dst = config.data_dir.join(&new_rel);
-        if src.is_dir() {
-            if !dst.exists() {
-                if let Some(parent) = dst.parent() {
-                    std::fs::create_dir_all(parent)?;
-                }
-                std::fs::rename(&src, &dst).map_err(|e| {
-                    PmError::Internal(format!(
-                        "cannot move {} to {}: {e}",
-                        src.display(),
-                        dst.display()
-                    ))
-                })?;
-            } else {
-                // A previous pass moved the bytes but died before committing.
-                copy_dir_all(&src, &dst)?;
-                std::fs::remove_dir_all(&src)?;
-            }
-        }
-        tx.execute(
-            "UPDATE tasks SET task_dir = ?1 WHERE id = ?2 AND task_dir = ?3",
-            params![new_rel, tid, old_rel],
-        )
-        .map_err(db_err)?;
-        tx.execute(
-            "UPDATE attachments SET task_dir = ?1 WHERE task_id = ?2 AND task_dir = ?3",
-            params![new_rel, tid, old_rel],
-        )
-        .map_err(db_err)?;
-    }
-    tx.commit().map_err(db_err)?;
-
-    let remaining: i64 = conn
-        .query_row(
-            "SELECT (SELECT COUNT(*) FROM tasks WHERE task_dir LIKE 'assets/tasks/%') \
-                  + (SELECT COUNT(*) FROM attachments WHERE task_dir LIKE 'assets/tasks/%')",
-            [],
-            |r| r.get(0),
-        )
-        .map_err(db_err)?;
-    if remaining != 0 {
-        return Err(PmError::Internal(format!(
-            "{remaining} row(s) still use the flat assets/tasks layout; refusing to start"
-        )));
-    }
-
-    // The flat root is an empty directory once every task has moved (most
-    // installs never had attachment binaries at all). Remove it so `assets/`
-    // has exactly one shape; anything unexpected inside is kept and reported
-    // rather than deleted, since those bytes belong to rows we do not own.
-    let flat_root = config.data_dir.join("assets/tasks");
-    if flat_root.is_dir() {
-        let empty = std::fs::read_dir(&flat_root)
-            .map(|mut entries| entries.next().is_none())
-            .unwrap_or(false);
-        if empty {
-            if let Err(e) = std::fs::remove_dir(&flat_root) {
-                tracing::warn!(
-                    path = %flat_root.display(),
-                    error = %e,
-                    "could not remove the empty flat asset root"
-                );
-            }
-        } else {
-            tracing::warn!(
-                path = %flat_root.display(),
-                "flat asset root is not empty; left in place for inspection"
-            );
         }
     }
     Ok(())
@@ -1557,92 +988,6 @@ mod tests {
         retire_tree_archive(&config).unwrap();
     }
 
-    /// Installations that cut over before the project-scoped layout existed
-    /// must be upgraded on the next start: both the DB rows and the physical
-    /// binaries move, with no flat `assets/tasks/` left behind.
-    #[tokio::test]
-    async fn normalize_asset_layout_migrates_flat_rows_and_is_idempotent() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (config, pid, root_id, _) = seed_tree(tmp.path()).await;
-        import(&config).unwrap();
-
-        // Simulate the previous build: flat rows plus one attachment binary.
-        let flat_root = format!("assets/tasks/{}", root_id.as_str());
-        let old_dir = config.data_dir.join(&flat_root);
-        std::fs::create_dir_all(old_dir.join("attachments/a-flat")).unwrap();
-        std::fs::write(
-            old_dir.join("attachments/a-flat/original.txt"),
-            b"carried-over",
-        )
-        .unwrap();
-        {
-            let conn = schema::open(&config.sqlite_path()).unwrap();
-            conn.execute("UPDATE tasks SET task_dir = 'assets/tasks/' || id", [])
-                .unwrap();
-            conn.execute(
-                "INSERT INTO attachments (id, task_id, task_dir, props) \
-                 VALUES ('a-flat', ?1, ?2, '{}')",
-                params![root_id.as_str(), flat_root],
-            )
-            .unwrap();
-        }
-
-        normalize_asset_layout(&config).unwrap();
-
-        let new_dir = config
-            .data_dir
-            .join("assets/projects")
-            .join(pid.as_str())
-            .join("tasks")
-            .join(root_id.as_str());
-        assert_eq!(
-            std::fs::read(new_dir.join("attachments/a-flat/original.txt")).unwrap(),
-            b"carried-over".to_vec(),
-            "the binary must move with the row"
-        );
-        assert!(!old_dir.exists(), "the flat root must be gone");
-        assert!(
-            !config.data_dir.join("assets/tasks").exists(),
-            "the empty flat root must be removed too"
-        );
-
-        let expected = format!(
-            "assets/projects/{}/tasks/{}",
-            pid.as_str(),
-            root_id.as_str()
-        );
-        let conn = schema::open(&config.sqlite_path()).unwrap();
-        let remaining: i64 = conn
-            .query_row(
-                "SELECT (SELECT COUNT(*) FROM tasks WHERE task_dir LIKE 'assets/tasks/%') \
-                      + (SELECT COUNT(*) FROM attachments WHERE task_dir LIKE 'assets/tasks/%')",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(remaining, 0, "no row may keep the flat layout");
-        let stored: String = conn
-            .query_row(
-                "SELECT task_dir FROM tasks WHERE id = ?1",
-                params![root_id.as_str()],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored, expected);
-        let att_dir: String = conn
-            .query_row(
-                "SELECT task_dir FROM attachments WHERE id = 'a-flat'",
-                [],
-                |r| r.get(0),
-            )
-            .unwrap();
-        assert_eq!(att_dir, expected, "attachment rows must move too");
-        drop(conn);
-
-        // A second start is a pure no-op.
-        normalize_asset_layout(&config).unwrap();
-    }
-
     /// Grouping by project means one `delete_project` cleans icons and every
     /// task binary without leaving orphan directories, while the tree archive
     /// (still present in this fixture) is never touched.
@@ -1813,56 +1158,5 @@ mod tests {
                 .any(|b| b.contains("unreadable task.json"))
         );
         assert!(!config.sqlite_path().exists());
-    }
-
-    /// A cutover gate must not create the evidence it is supposed to inspect:
-    /// `schema::open()` would conjure an empty `pm.sqlite` (plus DDL and WAL
-    /// sidecars) on a tree-only install.
-    #[tokio::test]
-    async fn reconcile_never_creates_a_db_on_a_tree_only_install() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (config, _, _, _) = seed_tree(tmp.path()).await;
-        assert!(!config.sqlite_path().exists());
-
-        let report = reconcile(&config).unwrap();
-        assert!(!report.is_consistent(), "{}", report.summary());
-        assert!(
-            report.blocking.iter().any(|b| b.contains("does not exist")),
-            "{}",
-            report.summary()
-        );
-        assert!(report.tree_tasks > 0);
-        assert!(
-            !config.sqlite_path().exists(),
-            "reconcile must be strictly read-only"
-        );
-    }
-
-    #[tokio::test]
-    async fn reconcile_is_consistent_after_the_one_shot_import() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (config, _, _, _) = seed_tree(tmp.path()).await;
-        import(&config).unwrap();
-        let report = reconcile(&config).unwrap();
-        assert!(report.is_consistent(), "{}", report.summary());
-    }
-
-    #[tokio::test]
-    async fn reconcile_refuses_a_version_skewed_db() {
-        let tmp = tempfile::tempdir().unwrap();
-        let (config, _, _, _) = seed_tree(tmp.path()).await;
-        import(&config).unwrap();
-        {
-            let conn = Connection::open(config.sqlite_path()).unwrap();
-            conn.pragma_update(None, "user_version", schema::SCHEMA_VERSION + 1)
-                .unwrap();
-        }
-        let report = reconcile(&config).unwrap();
-        assert!(!report.is_consistent(), "{}", report.summary());
-        assert!(
-            report.blocking.iter().any(|b| b.contains("schema v")),
-            "{}",
-            report.summary()
-        );
     }
 }

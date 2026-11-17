@@ -13,7 +13,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use crate::config::{PmConfig, StorageBackend};
+use crate::config::PmConfig;
 use crate::error::{PmError, Result};
 use crate::mcp::{AgentDirectory, NoopAgentDirectory};
 use crate::store::sqlite::{SqlitePmStore, import, schema};
@@ -46,22 +46,13 @@ pub struct PmService {
 /// only data source. A blocking scan finding aborts startup instead of
 /// creating a half-empty authority.
 async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
-    if config.storage_backend != StorageBackend::Db {
-        return Err(PmError::Internal(format!(
-            "storage_backend={} is retired; this build only supports db. \
-             Remove the override from acowork-pm.toml / ACOWORK_PM_STORAGE_BACKEND",
-            config.storage_backend
-        )));
-    }
     ensure_sqlite_authority(config)?;
     Ok(Arc::new(SqlitePmStore::open(config.clone())?) as Arc<dyn PmStore>)
 }
 
-/// One-shot startup import + archive retirement + asset-layout upgrade.
-/// Idempotent: a non-empty v1 database is left alone, while retirement and
-/// layout normalization re-run until the on-disk state really matches the
-/// canonical `assets/projects/{pid}/...` layout (a crash between two steps is
-/// recoverable on the next start).
+/// One-shot startup import + archive retirement. Idempotent: a non-empty v1
+/// database is left alone, while retirement re-runs until the tree has really
+/// been renamed (a crash between the two steps is recoverable).
 ///
 /// The probe uses a read-only connection so deciding "do we need to import?"
 /// cannot create WAL sidecars, DDL or a `user_version` stamp on a database we
@@ -113,9 +104,6 @@ fn ensure_sqlite_authority(config: &PmConfig) -> Result<()> {
     // Always run, even when the rows were imported by an earlier start: a
     // crash between the import and this step must not leave two data sources.
     import::retire_tree_archive(config)?;
-    // Upgrade installations that cut over with the flat assets/tasks/{tid}
-    // layout. A no-op once every row uses the project-scoped layout.
-    import::normalize_asset_layout(config)?;
     Ok(())
 }
 
@@ -215,20 +203,6 @@ impl PmService {
         let mut port = bind.port();
         let max_port = port.saturating_add(20);
 
-        // ADR-117 D6 step 6: `/health` reads the *live* projection counters
-        // of this store instance. Only `DualPmStore` implements the provider;
-        // the default `PmMaintenance::projection_health` returns `None` for
-        // every other backend.
-        let projection: Option<Arc<dyn Fn() -> serde_json::Value + Send + Sync>> =
-            if self.config.storage_backend == StorageBackend::Dual {
-                let store = self.store.clone();
-                Some(Arc::new(move || {
-                    store.projection_health().unwrap_or(serde_json::Value::Null)
-                }))
-            } else {
-                None
-            };
-
         loop {
             match tokio::net::TcpListener::bind(SocketAddr::new(host, port)).await {
                 Ok(listener) => {
@@ -236,8 +210,6 @@ impl PmService {
                     let router = self.router().merge(crate::health::health_route(
                         self.config.data_dir.clone(),
                         self.store.corrupt_registry(),
-                        self.config.storage_backend,
-                        projection.clone(),
                     ));
                     tracing::info!(addr = %addr, "PM server listening (full router)");
                     tokio::spawn(async move {
@@ -350,43 +322,19 @@ mod tests {
     use super::*;
     use crate::store::tree::TreePmStore;
     use crate::types::TaskId;
-    use std::path::PathBuf;
 
-    fn test_config(backend: StorageBackend, data_dir: &std::path::Path) -> PmConfig {
+    fn test_config(data_dir: &std::path::Path) -> PmConfig {
         PmConfig {
             data_dir: data_dir.to_path_buf(),
             index_rebuild_on_start: false,
-            storage_backend: backend,
             ..Default::default()
-        }
-    }
-
-    /// `filetree` / `dual` are config-compatibility types only: starting with
-    /// one must fail loudly instead of silently serving a stale commit point.
-    #[tokio::test]
-    async fn retired_backends_are_rejected_at_startup() {
-        let tmp = tempfile::tempdir().unwrap();
-        for backend in [StorageBackend::FileTree, StorageBackend::Dual] {
-            let cfg = test_config(backend, tmp.path());
-            let err = match build_store(&cfg).await {
-                Ok(_) => panic!("{backend} must not be assembled"),
-                Err(e) => e.to_string(),
-            };
-            assert!(err.contains("only supports db"), "error was: {err}");
-            assert!(!cfg.sqlite_path().exists(), "rejection created pm.sqlite");
-            for suffix in ["-wal", "-shm"] {
-                assert!(
-                    !PathBuf::from(format!("{}{suffix}", cfg.sqlite_path().display())).exists(),
-                    "rejection created a pm.sqlite{suffix} sidecar"
-                );
-            }
         }
     }
 
     #[tokio::test]
     async fn db_backend_is_object_safe_and_serves_an_empty_fresh_install() {
         let tmp = tempfile::tempdir().unwrap();
-        let cfg = test_config(StorageBackend::Db, tmp.path());
+        let cfg = test_config(tmp.path());
         let store = build_store(&cfg).await.unwrap();
         assert!(store.list_projects().await.unwrap().is_empty());
         assert_eq!(store.task_depth(&TaskId("t-nonexistent".into())), 0);
@@ -395,14 +343,14 @@ mod tests {
 
     /// The whole point of the single-backend cutover: an existing JSON tree is
     /// imported on the first start with no operator command, and a second
-    /// start is a no-op. The tree must stay intact as the rollback source and
-    /// as the host of attachment binaries.
+    /// start is a no-op. The tree is renamed (never deleted) so the snapshot
+    /// stays recoverable.
     #[tokio::test]
     async fn startup_imports_the_existing_tree_automatically() {
         use crate::types::CreateProject;
 
         let tmp = tempfile::tempdir().unwrap();
-        let tree_cfg = test_config(StorageBackend::FileTree, tmp.path());
+        let tree_cfg = test_config(tmp.path());
         let tree = TreePmStore::new(tree_cfg).await.unwrap();
         tree.create_project(
             CreateProject {
@@ -416,7 +364,7 @@ mod tests {
         .unwrap();
         let tree_before = count_tree_files(&tmp.path().join("projects"));
 
-        let cfg = test_config(StorageBackend::Db, tmp.path());
+        let cfg = test_config(tmp.path());
         let store = build_store(&cfg)
             .await
             .expect("first start must import the tree automatically");

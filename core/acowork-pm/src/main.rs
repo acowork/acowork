@@ -14,27 +14,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
+use clap::Parser;
 
-use acowork_pm::{HttpAgentDirectory, PmConfig, PmService, StorageBackend};
-
-/// Operator actions that exit instead of starting the HTTP service.
-#[derive(Subcommand)]
-enum Command {
-    /// ADR-117 D6: scan the JSON tree and (optionally) import it into pm.sqlite.
-    /// Without `--apply` this is a read-only dry run that prints a
-    /// MigrationReport and never creates or writes the database.
-    Migrate {
-        /// Commit the import. Requires a stop-the-world window: stop all PM
-        /// writers, review the dry-run report first, then switch the backend.
-        #[arg(long)]
-        apply: bool,
-    },
-    /// ADR-117 D6 step 6: read-only tree ↔ SQLite reconciliation report.
-    /// Exits non-zero when any entity or `props` blob disagrees, so it can be
-    /// used as the gate before a `dual` → `db` cutover.
-    Reconcile,
-}
+use acowork_pm::{HttpAgentDirectory, PmConfig, PmService};
 
 /// CLI 参数。
 #[derive(Parser)]
@@ -60,11 +42,6 @@ struct Cli {
     /// 文件缺失/非法（含未知字段）时失败方式见 `load_config_baseline`。
     #[arg(long, value_name = "PATH")]
     config: Option<PathBuf>,
-
-    /// ADR-117 D6: storage backend (`filetree` | `db` | `dual`).
-    /// Overrides `ACOWORK_PM_STORAGE_BACKEND`; resolved once at startup.
-    #[arg(long, value_name = "BACKEND")]
-    storage_backend: Option<String>,
 
     /// 把实际绑定的端口写入此文件（供 Gateway supervisor 读取）
     #[arg(long)]
@@ -104,9 +81,6 @@ struct Cli {
     /// 日志级别
     #[arg(long, default_value = "info")]
     log_level: String,
-
-    #[command(subcommand)]
-    command: Option<Command>,
 }
 
 /// ADR-117 D6 / `config.rs` contract: `CLI > env > TOML > default`.
@@ -162,29 +136,17 @@ async fn main() {
         config.data_dir = PathBuf::from(dir);
     }
 
-    // ADR-117 D6: resolve the storage backend once at startup. An invalid
-    // value must fail loudly — silently degrading to `filetree` would make a
-    // rollout look like it is on SQLite while still running on the tree.
+    // ADR-117: the three-state rollout is gone. `deny_unknown_fields` already
+    // rejects a leftover `storage_backend` key in TOML, and clap rejects an
+    // unknown `--storage-backend` flag; refuse a leftover env value too, so an
+    // old deployment cannot believe it is still running on the tree.
     if let Some(raw) = std::env::var("ACOWORK_PM_STORAGE_BACKEND")
         .ok()
         .filter(|v| !v.trim().is_empty())
+        && !raw.trim().eq_ignore_ascii_case("db")
     {
-        match raw.parse::<StorageBackend>() {
-            Ok(backend) => config.storage_backend = backend,
-            Err(e) => {
-                tracing::error!(error = %e, "Invalid ACOWORK_PM_STORAGE_BACKEND");
-                std::process::exit(1);
-            }
-        }
-    }
-    if let Some(raw) = cli.storage_backend.as_deref() {
-        match raw.parse::<StorageBackend>() {
-            Ok(backend) => config.storage_backend = backend,
-            Err(e) => {
-                tracing::error!(error = %e, "Invalid --storage-backend");
-                std::process::exit(1);
-            }
-        }
+        tracing::error!(value = %raw, "ACOWORK_PM_STORAGE_BACKEND is retired; SQLite is the only backend");
+        std::process::exit(1);
     }
 
     if let Some(dir) = cli.data_dir {
@@ -196,72 +158,6 @@ async fn main() {
     if let Err(e) = config.validate() {
         tracing::error!(error = %e, "Invalid PM config");
         std::process::exit(1);
-    }
-
-    // ADR-117 D6 contract 1 + 7: the migration is an explicit operator
-    // action, never a runtime side effect of starting the service. The tree
-    // is only read; the rollback source is never deleted.
-    match cli.command.as_ref() {
-        Some(Command::Migrate { apply }) => {
-            let outcome = if *apply {
-                acowork_pm::pm_import(&config)
-            } else {
-                acowork_pm::pm_import_dry_run(&config)
-            };
-            match outcome {
-                Ok(report) => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&report).unwrap_or_else(|e| e.to_string())
-                    );
-                    if report.has_blocking_issues() {
-                        std::process::exit(1);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "PM migration failed");
-                    // A refused `--apply` is almost always a blocking finding
-                    // (bad ID, unreadable file, path traversal). Print the
-                    // read-only dry-run report so an operator can fix those
-                    // without having to rerun a second command — and so a
-                    // half-understood failure cannot be mistaken for "the
-                    // import wrote something".
-                    if *apply {
-                        match acowork_pm::pm_import_dry_run(&config) {
-                            Ok(report) => eprintln!(
-                                "{}",
-                                serde_json::to_string_pretty(&report)
-                                    .unwrap_or_else(|e| e.to_string())
-                            ),
-                            Err(scan_err) => {
-                                tracing::error!(error = %scan_err, "PM dry-run re-scan also failed");
-                            }
-                        }
-                    }
-                    std::process::exit(1);
-                }
-            }
-            return;
-        }
-        Some(Command::Reconcile) => {
-            match acowork_pm::pm_reconcile(&config) {
-                Ok(report) => {
-                    println!(
-                        "{}",
-                        serde_json::to_string_pretty(&report).unwrap_or_else(|e| e.to_string())
-                    );
-                    if !report.is_consistent() {
-                        std::process::exit(1);
-                    }
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "PM reconciliation failed");
-                    std::process::exit(1);
-                }
-            }
-            return;
-        }
-        None => {}
     }
 
     if !config.enabled {

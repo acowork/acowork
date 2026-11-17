@@ -14,8 +14,9 @@
 //! - **P1（本文件）**：`rebuild_index` walkdir 实现 + 全部 CRUD / 子树 / reparent /
 //!   状态机 / 附件实现
 //! - **P3**：依赖图深层运算（`compute_blocked` 已实现；跨项目环检测增强）
-//! - **ADR-117 D6**：`PmStore` 对象化 + `PmMaintenance` 侧接口，SQLite /
-//!   dual 后端由工厂按 `storage_backend` 装配（实施中）
+//! - **ADR-117 D6**：`PmStore` 对象化 + `PmMaintenance` 侧接口；运行期只装配
+//!   `SqlitePmStore`，本文件保留为 JSON 归档格式参考、共享规则 helpers 与
+//!   导入器 / 集成测试的树夹具，**不再进入运行路径**
 //!
 //! ## 物理布局
 //!
@@ -72,11 +73,10 @@ use super::index::{TaskEntry, TaskIndex};
 ///
 /// ADR-117 D6 keeps `PmStore` object-safe while moving everything else the
 /// HTTP / MCP / dispatch layers historically reached for on the *concrete*
-/// `TreePmStore` into this side interface. Each backend answers these with
-/// whatever it actually owns (a query, an on-disk asset, a derived index);
-/// `DualPmStore` delegates them to the tree backend that stays the commit
-/// point. No implementation is forced to fabricate a `TaskEntry` or a
-/// `walkdir` it does not have.
+/// `TreePmStore` into this side interface. `SqlitePmStore` is the only backend
+/// assembled at runtime; it answers these with queries and on-disk assets
+/// rather than fabricating a `TaskEntry` or a `walkdir` it does not have.
+/// `TreePmStore` retains an implementation for the import fixtures.
 #[async_trait]
 pub trait PmMaintenance: Send + Sync {
     /// Rebuild derived state from the authority (the tree's in-memory index).
@@ -130,17 +130,6 @@ pub trait PmMaintenance: Send + Sync {
     async fn dispatch_identity(&self, id: &TaskId) -> Result<Option<String>>;
     async fn mark_dispatched(&self, id: &TaskId) -> Result<()>;
     async fn record_dispatch_failure(&self, id: &TaskId, reason: &str) -> Result<u32>;
-
-    // ── Rollout diagnostics ────────────────────────────────────────
-
-    /// ADR-117 D6 step 6: instance-scoped projection health for `/health`.
-    /// Only `DualPmStore` returns `Some`; the default keeps every other
-    /// backend free of the concept. Instance-scoped (not a process global) so
-    /// two stores in one process — tests, or a hot restart — cannot report
-    /// each other's counters.
-    fn projection_health(&self) -> Option<serde_json::Value> {
-        None
-    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -150,8 +139,8 @@ pub trait PmMaintenance: Send + Sync {
 /// PM 存储抽象。
 ///
 /// 业务层（HTTP handlers / MCP tools / dispatch）只依赖此 trait，**不**直接引用
-/// [`TreePmStore`]；ADR-117 D6 起统一用 `Arc<dyn PmStore>`，由工厂按
-/// `storage_backend` 装配。所有实现必须同时提供 [`PmMaintenance`] 的维护钩子。
+/// [`TreePmStore`]；ADR-117 D6 起统一用 `Arc<dyn PmStore>`，运行期由工厂装配
+/// 唯一的 `SqlitePmStore`。所有实现必须同时提供 [`PmMaintenance`] 的维护钩子。
 #[async_trait]
 pub trait PmStore: PmMaintenance + Send + Sync {
     // ── Project operations ─────────────────────────────────────────

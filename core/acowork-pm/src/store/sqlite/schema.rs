@@ -1,11 +1,10 @@
-//! SQLite schema for the PM `db` / `dual` backends (ADR-117 D6 step 3).
+//! SQLite schema for the PM authority (ADR-117 D6 step 3).
 //!
 //! The layout follows the ADR-082 pattern that already works in
 //! `acowork-memory`: `props` holds the verbatim JSON serialization of the
 //! domain struct, while a handful of projected columns carry the fields that
 //! filters, ordering and dispatch scans need. Keeping the JSON verbatim means
-//! adding a field to `Task` never requires a schema migration, and the dual
-//! backend can reconcile a projection by comparing `props` byte-for-byte.
+//! adding a field to `Task` never requires a schema migration.
 //!
 //! Three deliberate departures from the tree model (ADR-061 inversion):
 //! - physical `children/` nesting becomes `parent_id` + `depth`;
@@ -87,9 +86,9 @@ CREATE TABLE IF NOT EXISTS activity (
 
 /// Open (or create) the PM database and converge the schema.
 ///
-/// WAL is enabled so a read-only reconciliation pass during a `dual` rollout
-/// does not block the writer. `foreign_keys` is a per-connection pragma and
-/// must be set on every open, not just at creation time.
+/// WAL keeps readers (e.g. an operator inspecting the live DB) from blocking
+/// the writer. `foreign_keys` is a per-connection pragma and must be set on
+/// every open, not just at creation time.
 ///
 /// The version gate runs **before** any DDL. A database this binary cannot
 /// understand must be left byte-for-byte untouched: converging `IF NOT EXISTS`
