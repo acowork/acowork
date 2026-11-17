@@ -12,11 +12,12 @@
 //! the tree:
 //! - physical `children/` nesting is a `parent_id` + `depth` update, so
 //!   `reparent_task` touches columns instead of renaming directories;
-//! - DB-created tasks keep their binaries under `assets/tasks/{tid}`, outside
-//!   `projects/`, so switching to `db` never writes into the tree archive
-//!   that has to remain a usable rollback source. Imported tasks keep their
-//!   original `task_dir`; deleting one removes DB rows only, never archive
-//!   files.
+//! - DB-created tasks keep their binaries under
+//!   `assets/projects/{pid}/tasks/{tid}`, outside the retired tree archive,
+//!   so switching to `db` never writes into the recoverable snapshot. This
+//!   shares the `{pid}` subtree with `icon/`, letting `delete_project` clean
+//!   every binary of a project in one pass. Imported tasks keep their original
+//!   `task_dir` until retirement rewrites it.
 
 use std::cmp::Reverse;
 use std::collections::HashMap;
@@ -154,10 +155,9 @@ impl SqlitePmStore {
     }
 
     /// Only DB-owned asset roots may be physically deleted. Imported tasks
-    /// point into the tree archive, which stays read-only for the rollback
-    /// window (ADR-117 §3 D6 contract 7).
+    /// point into the retired tree archive, which is never touched here.
     fn is_db_owned_asset_dir(rel_dir: &str) -> bool {
-        rel_dir.starts_with("assets/tasks/")
+        super::is_db_owned_asset_dir(rel_dir)
     }
 
     /// `dir_override` lets `write_attachment` redirect newly uploaded
@@ -324,8 +324,23 @@ impl PmStore for SqlitePmStore {
             return Err(PmError::ProjectNotFound(id.to_string()));
         }
         // `tasks.project_id` is ON DELETE CASCADE; attachments and activity
-        // cascade from tasks. The tree archive on disk is left untouched.
-        self.delete_project_row(id)
+        // cascade from tasks. The retired tree snapshot is never touched.
+        self.delete_project_row(id)?;
+        // ADR-117 asset layout: icons and every task binary of a project live
+        // under one `{pid}` subtree, so one best-effort removal leaves no
+        // orphans. DB rows are already committed — a filesystem failure only
+        // leaves stale bytes, never an inconsistent store.
+        let root = self
+            .config
+            .data_dir
+            .join("assets/projects")
+            .join(id.as_str());
+        if root.is_dir()
+            && let Err(e) = std::fs::remove_dir_all(&root)
+        {
+            tracing::warn!(path = %root.display(), error = %e, "could not remove project assets");
+        }
+        Ok(())
     }
 
     // ── Members ─────────────────────────────────────────────────────
@@ -523,7 +538,7 @@ impl PmStore for SqlitePmStore {
             claimed_at: None,
             submitted_at: None,
         };
-        let rel_dir = self.new_task_asset_dir(&task_id);
+        let rel_dir = self.new_task_asset_dir(project_id, &task_id);
         let asset_root = self.asset_base(&rel_dir);
         std::fs::create_dir_all(asset_root.join("attachments"))?;
         if let Err(e) = self.insert_task(&task, parent.as_ref(), depth, &rel_dir) {
@@ -1055,12 +1070,15 @@ impl PmStore for SqlitePmStore {
         let (_, _, current_rel) = self
             .task_meta(task_id)?
             .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
-        // Imported tasks point into the tree archive. New binaries must not
-        // mutate that rollback source, so they get their own DB-owned root.
+        // Imported tasks point into the retired tree archive. New binaries must
+        // not mutate that snapshot, so they get a project-scoped DB-owned root.
         let rel_dir = if Self::is_db_owned_asset_dir(&current_rel) {
             current_rel
         } else {
-            self.new_task_asset_dir(task_id)
+            let task = self
+                .load_task(task_id)?
+                .ok_or_else(|| PmError::TaskNotFound(task_id.to_string()))?;
+            self.new_task_asset_dir(&task.project_id, task_id)
         };
         // Validate before touching the filesystem. `register_attachment_in`
         // repeats this at commit time, but doing it here first means an

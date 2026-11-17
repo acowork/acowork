@@ -57,9 +57,11 @@ async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
     Ok(Arc::new(SqlitePmStore::open(config.clone())?) as Arc<dyn PmStore>)
 }
 
-/// One-shot startup import + archive retirement. Idempotent: a non-empty v1
-/// database is left alone, while retirement re-runs until the tree has really
-/// been renamed (a crash between the two steps is recoverable).
+/// One-shot startup import + archive retirement + asset-layout upgrade.
+/// Idempotent: a non-empty v1 database is left alone, while retirement and
+/// layout normalization re-run until the on-disk state really matches the
+/// canonical `assets/projects/{pid}/...` layout (a crash between two steps is
+/// recoverable on the next start).
 ///
 /// The probe uses a read-only connection so deciding "do we need to import?"
 /// cannot create WAL sidecars, DDL or a `user_version` stamp on a database we
@@ -111,6 +113,9 @@ fn ensure_sqlite_authority(config: &PmConfig) -> Result<()> {
     // Always run, even when the rows were imported by an earlier start: a
     // crash between the import and this step must not leave two data sources.
     import::retire_tree_archive(config)?;
+    // Upgrade installations that cut over with the flat assets/tasks/{tid}
+    // layout. A no-op once every row uses the project-scoped layout.
+    import::normalize_asset_layout(config)?;
     Ok(())
 }
 

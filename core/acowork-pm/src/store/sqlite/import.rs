@@ -37,8 +37,8 @@ use crate::config::PmConfig;
 use crate::error::{PmError, Result};
 use crate::types::{AttachmentMeta, Project, ProjectId, Task, TaskActivity, TaskId};
 
-use super::db_err;
 use super::schema;
+use super::{db_err, task_asset_rel};
 
 /// Everything a dry run found. `blocking` is empty iff a real import may
 /// proceed; `skipped` records recoverable omissions that do not block.
@@ -1131,9 +1131,10 @@ pub fn reconcile(config: &PmConfig) -> Result<ReconcileReport> {
 /// Two kinds of binary are still referenced by rows that came from the tree:
 /// project icons under `projects/{pid}/icon/` and task attachment binaries
 /// under `projects/{pid}/tasks/{tid}/attachments/`. Both are copied into
-/// DB-owned `assets/`, the `task_dir` columns are rewritten, and `projects/`
-/// is renamed so no runtime path can read the archive again. Nothing is ever
-/// deleted — the renamed directory stays as a recoverable snapshot.
+/// `assets/projects/{pid}/` (icons beside `tasks/{tid}/`), the `task_dir`
+/// columns are rewritten, and `projects/` is renamed so no runtime path can
+/// read the archive again. Nothing is ever deleted — the renamed directory
+/// stays as a recoverable snapshot.
 ///
 /// Idempotent and resumable: a process that committed the import but died
 /// before finishing this runs it again on the next start.
@@ -1217,20 +1218,26 @@ fn copy_project_icons(config: &PmConfig, projects: &Path) -> Result<()> {
 
 fn relocate_task_assets(config: &PmConfig, tx: &Connection) -> Result<()> {
     let mut stmt = tx
-        .prepare("SELECT id, task_dir FROM tasks WHERE task_dir LIKE 'projects/%'")
+        .prepare("SELECT id, project_id, task_dir FROM tasks WHERE task_dir LIKE 'projects/%'")
         .map_err(db_err)?;
     let rows = stmt
-        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
         .map_err(db_err)?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(db_err)?;
     drop(stmt);
 
-    for (tid, rel_dir) in rows {
+    for (tid, pid, rel_dir) in rows {
         // `storage_path` is relative to `task_dir`, so moving the whole
         // `attachments/` subtree and rewriting that one column is enough.
         let src = config.data_dir.join(&rel_dir).join("attachments");
-        let new_rel = format!("assets/tasks/{tid}");
+        let new_rel = task_asset_rel(&pid, &tid);
         if src.is_dir() {
             copy_dir_all(&src, &config.data_dir.join(&new_rel).join("attachments"))?;
         }
@@ -1257,6 +1264,123 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<()> {
             copy_dir_all(&entry.path(), &to)?;
         } else if !to.exists() {
             std::fs::copy(entry.path(), &to)?;
+        }
+    }
+    Ok(())
+}
+
+/// Upgrade rows written by builds that used the flat `assets/tasks/{tid}`
+/// layout to the project-scoped `assets/projects/{pid}/tasks/{tid}` layout.
+///
+/// Runs on every startup after archive retirement, so an installation that
+/// cut over before this layout existed needs no operator step. Idempotent and
+/// resumable: the physical move is a rename inside `data_dir`, and a crash
+/// after the move but before the DB commit is detected by the destination
+/// already existing — the leftover bytes are merged and the stale root is
+/// dropped. A task's `project_id` never changes (cross-project reparenting is
+/// rejected), so the new path is stable for the task's whole lifetime.
+pub fn normalize_asset_layout(config: &PmConfig) -> Result<()> {
+    if !config.sqlite_path().is_file() {
+        // Nothing was ever imported (e.g. an empty fresh install). Do not
+        // create a database just to find zero rows to migrate.
+        return Ok(());
+    }
+    let mut conn = schema::open(&config.sqlite_path())?;
+    let tx = conn.transaction().map_err(db_err)?;
+    let mut stmt = tx
+        .prepare(
+            "SELECT t.id, t.project_id FROM tasks t
+             WHERE t.task_dir LIKE 'assets/tasks/%'
+                OR EXISTS (SELECT 1 FROM attachments a
+                           WHERE a.task_id = t.id
+                             AND a.task_dir LIKE 'assets/tasks/%')",
+        )
+        .map_err(db_err)?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))
+        .map_err(db_err)?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(db_err)?;
+    drop(stmt);
+
+    if !rows.is_empty() {
+        tracing::info!(
+            rows = rows.len(),
+            "normalizing flat assets/tasks rows into the project-scoped asset layout"
+        );
+    }
+    for (tid, pid) in rows {
+        let old_rel = format!("assets/tasks/{tid}");
+        let new_rel = task_asset_rel(&pid, &tid);
+        let src = config.data_dir.join(&old_rel);
+        let dst = config.data_dir.join(&new_rel);
+        if src.is_dir() {
+            if !dst.exists() {
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::rename(&src, &dst).map_err(|e| {
+                    PmError::Internal(format!(
+                        "cannot move {} to {}: {e}",
+                        src.display(),
+                        dst.display()
+                    ))
+                })?;
+            } else {
+                // A previous pass moved the bytes but died before committing.
+                copy_dir_all(&src, &dst)?;
+                std::fs::remove_dir_all(&src)?;
+            }
+        }
+        tx.execute(
+            "UPDATE tasks SET task_dir = ?1 WHERE id = ?2 AND task_dir = ?3",
+            params![new_rel, tid, old_rel],
+        )
+        .map_err(db_err)?;
+        tx.execute(
+            "UPDATE attachments SET task_dir = ?1 WHERE task_id = ?2 AND task_dir = ?3",
+            params![new_rel, tid, old_rel],
+        )
+        .map_err(db_err)?;
+    }
+    tx.commit().map_err(db_err)?;
+
+    let remaining: i64 = conn
+        .query_row(
+            "SELECT (SELECT COUNT(*) FROM tasks WHERE task_dir LIKE 'assets/tasks/%') \
+                  + (SELECT COUNT(*) FROM attachments WHERE task_dir LIKE 'assets/tasks/%')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(db_err)?;
+    if remaining != 0 {
+        return Err(PmError::Internal(format!(
+            "{remaining} row(s) still use the flat assets/tasks layout; refusing to start"
+        )));
+    }
+
+    // The flat root is an empty directory once every task has moved (most
+    // installs never had attachment binaries at all). Remove it so `assets/`
+    // has exactly one shape; anything unexpected inside is kept and reported
+    // rather than deleted, since those bytes belong to rows we do not own.
+    let flat_root = config.data_dir.join("assets/tasks");
+    if flat_root.is_dir() {
+        let empty = std::fs::read_dir(&flat_root)
+            .map(|mut entries| entries.next().is_none())
+            .unwrap_or(false);
+        if empty {
+            if let Err(e) = std::fs::remove_dir(&flat_root) {
+                tracing::warn!(
+                    path = %flat_root.display(),
+                    error = %e,
+                    "could not remove the empty flat asset root"
+                );
+            }
+        } else {
+            tracing::warn!(
+                path = %flat_root.display(),
+                "flat asset root is not empty; left in place for inspection"
+            );
         }
     }
     Ok(())
@@ -1405,7 +1529,9 @@ mod tests {
             std::fs::read(
                 config
                     .data_dir
-                    .join("assets/tasks")
+                    .join("assets/projects")
+                    .join(pid.as_str())
+                    .join("tasks")
                     .join(root_id.as_str())
                     .join("attachments")
                     .join(att_id.as_str())
@@ -1429,6 +1555,120 @@ mod tests {
 
         // A crash between import and retirement is recoverable on next start.
         retire_tree_archive(&config).unwrap();
+    }
+
+    /// Installations that cut over before the project-scoped layout existed
+    /// must be upgraded on the next start: both the DB rows and the physical
+    /// binaries move, with no flat `assets/tasks/` left behind.
+    #[tokio::test]
+    async fn normalize_asset_layout_migrates_flat_rows_and_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, pid, root_id, _) = seed_tree(tmp.path()).await;
+        import(&config).unwrap();
+
+        // Simulate the previous build: flat rows plus one attachment binary.
+        let flat_root = format!("assets/tasks/{}", root_id.as_str());
+        let old_dir = config.data_dir.join(&flat_root);
+        std::fs::create_dir_all(old_dir.join("attachments/a-flat")).unwrap();
+        std::fs::write(
+            old_dir.join("attachments/a-flat/original.txt"),
+            b"carried-over",
+        )
+        .unwrap();
+        {
+            let conn = schema::open(&config.sqlite_path()).unwrap();
+            conn.execute("UPDATE tasks SET task_dir = 'assets/tasks/' || id", [])
+                .unwrap();
+            conn.execute(
+                "INSERT INTO attachments (id, task_id, task_dir, props) \
+                 VALUES ('a-flat', ?1, ?2, '{}')",
+                params![root_id.as_str(), flat_root],
+            )
+            .unwrap();
+        }
+
+        normalize_asset_layout(&config).unwrap();
+
+        let new_dir = config
+            .data_dir
+            .join("assets/projects")
+            .join(pid.as_str())
+            .join("tasks")
+            .join(root_id.as_str());
+        assert_eq!(
+            std::fs::read(new_dir.join("attachments/a-flat/original.txt")).unwrap(),
+            b"carried-over".to_vec(),
+            "the binary must move with the row"
+        );
+        assert!(!old_dir.exists(), "the flat root must be gone");
+        assert!(
+            !config.data_dir.join("assets/tasks").exists(),
+            "the empty flat root must be removed too"
+        );
+
+        let expected = format!(
+            "assets/projects/{}/tasks/{}",
+            pid.as_str(),
+            root_id.as_str()
+        );
+        let conn = schema::open(&config.sqlite_path()).unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT (SELECT COUNT(*) FROM tasks WHERE task_dir LIKE 'assets/tasks/%') \
+                      + (SELECT COUNT(*) FROM attachments WHERE task_dir LIKE 'assets/tasks/%')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "no row may keep the flat layout");
+        let stored: String = conn
+            .query_row(
+                "SELECT task_dir FROM tasks WHERE id = ?1",
+                params![root_id.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored, expected);
+        let att_dir: String = conn
+            .query_row(
+                "SELECT task_dir FROM attachments WHERE id = 'a-flat'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(att_dir, expected, "attachment rows must move too");
+        drop(conn);
+
+        // A second start is a pure no-op.
+        normalize_asset_layout(&config).unwrap();
+    }
+
+    /// Grouping by project means one `delete_project` cleans icons and every
+    /// task binary without leaving orphan directories, while the tree archive
+    /// (still present in this fixture) is never touched.
+    #[tokio::test]
+    async fn delete_project_removes_the_whole_asset_subtree() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (config, pid, root_id, _) = seed_tree(tmp.path()).await;
+        import(&config).unwrap();
+        let project_assets = config.data_dir.join("assets/projects").join(pid.as_str());
+        std::fs::create_dir_all(project_assets.join("icon")).unwrap();
+        std::fs::write(project_assets.join("icon/icon-01.png"), b"png").unwrap();
+        let task_dir = project_assets.join("tasks").join(root_id.as_str());
+        std::fs::create_dir_all(task_dir.join("attachments")).unwrap();
+        std::fs::write(task_dir.join("attachments/f.bin"), b"bin").unwrap();
+
+        let db = SqlitePmStore::open(config.clone()).unwrap();
+        db.delete_project(&pid, true).await.unwrap();
+        assert!(
+            !project_assets.exists(),
+            "the whole {{pid}} asset subtree must be gone"
+        );
+        assert!(db.get_project(&pid).await.unwrap().is_none());
+        assert!(
+            config.projects_dir().is_dir(),
+            "the tree archive must never be touched"
+        );
     }
 
     #[tokio::test]
@@ -1516,7 +1756,16 @@ mod tests {
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(before, after, "the tree archive must stay read-only");
-        assert!(config.data_dir.join("assets/tasks").exists());
+        assert!(
+            config
+                .data_dir
+                .join("assets/projects")
+                .join(pid.as_str())
+                .join("tasks")
+                .join(root_id.as_str())
+                .exists(),
+            "new binaries must land under the owning project's subtree"
+        );
     }
 
     #[tokio::test]

@@ -38,6 +38,38 @@ pub(super) fn db_err(err: rusqlite::Error) -> PmError {
     PmError::Internal(format!("sqlite: {err}"))
 }
 
+/// Canonical asset root for a DB-owned task:
+/// `assets/projects/{pid}/tasks/{tid}`.
+///
+/// Icons already live at `assets/projects/{pid}/icon/`. Grouping task binaries
+/// under the same `{pid}` keeps one project's entire binary footprint in a
+/// single subtree, so deleting a project can clean it in one `remove_dir_all`
+/// and a project scan can find every asset without touching the DB.
+///
+/// This is safe because a task's `project_id` never changes: both
+/// `create_task_as` and `reparent_task` reject cross-project parents, so no
+/// physical directory ever has to move between project subtrees.
+pub(super) fn task_asset_rel(project_id: &str, task_id: &str) -> String {
+    format!("assets/projects/{project_id}/tasks/{task_id}")
+}
+
+/// Only DB-owned asset roots may be physically deleted. The strict shape check
+/// (`assets/projects/p-*/tasks/t-*`) keeps the sibling `icon/` directory and
+/// retired tree paths out of the deletable set.
+///
+/// Rows written by older builds still use `assets/tasks/{tid}`; those are
+/// rewritten by `import::normalize_asset_layout()` on startup, so this
+/// predicate describes the canonical layout only.
+pub(super) fn is_db_owned_asset_dir(rel_dir: &str) -> bool {
+    let parts: Vec<&str> = rel_dir.split('/').collect();
+    parts.len() == 5
+        && parts[0] == "assets"
+        && parts[1] == "projects"
+        && parts[2].starts_with("p-")
+        && parts[3] == "tasks"
+        && parts[4].starts_with("t-")
+}
+
 pub struct SqlitePmStore {
     pub(super) config: PmConfig,
     conn: Arc<Mutex<Connection>>,
@@ -227,10 +259,11 @@ impl SqlitePmStore {
     }
 
     /// Stable asset root for tasks created *in DB mode*. Deliberately outside
-    /// `projects/` so switching to `db` never writes into the tree archive
-    /// that must stay a usable rollback source for one release.
-    pub(super) fn new_task_asset_dir(&self, id: &TaskId) -> String {
-        format!("assets/tasks/{}", id.as_str())
+    /// the retired tree archive: switching to `db` must never write into the
+    /// recoverable snapshot. Grouped under the owning project so icons and
+    /// task binaries share one subtree.
+    pub(super) fn new_task_asset_dir(&self, project_id: &ProjectId, id: &TaskId) -> String {
+        task_asset_rel(project_id.as_str(), id.as_str())
     }
 
     /// Row ids of `id` plus its whole descendant subtree, parents first.
@@ -265,7 +298,7 @@ impl SqlitePmStore {
     /// Every DB-owned asset root referenced by these tasks, from **both**
     /// `tasks.task_dir` and `attachments.task_dir`. An imported task keeps its
     /// archive path in `tasks`, but attachments uploaded after the import are
-    /// redirected to `assets/tasks/{tid}`, so looking at only one table would
+    /// redirected to its DB-owned root, so looking at only one table would
     /// leave orphaned binaries behind after a subtree delete.
     pub(super) fn db_owned_asset_dirs(&self, ids: &[TaskId]) -> Result<Vec<String>> {
         self.with_conn(|conn| {
@@ -283,7 +316,7 @@ impl SqlitePmStore {
                     .collect::<std::result::Result<Vec<_>, _>>()
                     .map_err(db_err)?;
                 for rel in rows {
-                    if rel.starts_with("assets/tasks/") {
+                    if is_db_owned_asset_dir(&rel) {
                         out.insert(rel);
                     }
                 }
