@@ -1,6 +1,6 @@
-# ADR-117：PM 存储演进 — 树存储仍为默认权威，先修读路径，SQLite 迁移以可配置双后端推进
+# ADR-117：PM 存储演进 — 先修读路径，最终收敛到 SQLite 单后端
 
-**状态**：已定案并修订（读路径修复 + D4 防损坏三层已实施；2026-11-16 用户显式无条件启动 SQLite 迁移，采用 `filetree` / `db` / `dual` 三态后端 + 灰度切换；D6 ①–⑥ 已落地，三态均可装配、`dual` 可对账，推分支前全量 review 的修复已合入；⑦ 停机切 `db` / ⑧ 删旧实现待人工排期，见 §3 D6）
+**状态**：已定案并修订（读路径修复 + D4 防损坏三层已实施；2026-11-16 启动 SQLite 迁移并落地三态灰度 ①–⑥；**2026-11-17 用户明确不再保留 `filetree`，收敛为 SQLite 单后端**：`PmConfig` 默认 `db`，`build_store()` 在首次启动自动一次性导入 JSON 树，`FileTree` / `Dual` 降级为配置兼容类型且装配时硬拒绝，⑦ 的停机窗口与手工运维步骤已由代码取代；⑧ 删旧实现仍待人工排期，见 §3 D6）
 **日期**：2026-11-16
 **决策者**：大鱼
 **前置**：
@@ -168,7 +168,9 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 12. **backend 硬闸**：`rebuild_into()` 断言 `storage_backend == dual`——`db` 模式下 DB 是权威，绝不能被树扫描覆盖；打开投影失败时把 `pm.sqlite`（含 `-wal` / `-shm`）rename 到 `.quarantine-<ts>`，绝不删除可能是健康的库。
 13. **对账不止比 `props`**：`parent_id` / `depth` / `status` / `task_dir` 等投影列一并比对（DB 后端实际读这些列），否则列漂移也能拿到假绿灯。
 
-**灰度与验收顺序**：① 三态配置 + 工厂 ✅ → ② `PmStore` 对象化 + `PmMaintenance` ✅ → ③ `SqlitePmStore` + 导入器 ✅ → ④ `DualPmStore` ✅ → ⑤ 现有测试对 `filetree` / `db` / `dual` **三跑**（同一批用例，不允许为 DB 特例跳过）✅ → ⑥ `dual` 灰度观察、离线对账能力 ✅ → ⑦ 停机窗口切 `db` ⏳（人工） → ⑧ 观察一个周期后删旧实现 ⏳（人工）。**禁止**一次性重写后再切；⑥ 的「对账全绿」仍需在真实灰度窗口用 `reconcile` 实跑确认，代码完成不等于生产验收完成。推分支前的全量 review 已把核实确凿的问题全部修完（见 §5），但 ⑦/⑧ 仍不动。
+**灰度与验收顺序**：① 三态配置 + 工厂 ✅ → ② `PmStore` 对象化 + `PmMaintenance` ✅ → ③ `SqlitePmStore` + 导入器 ✅ → ④ `DualPmStore` ✅ → ⑤ 现有测试对 `filetree` / `db` / `dual` **三跑**（同一批用例，不允许为 DB 特例跳过）✅ → ⑥ `dual` 灰度观察、离线对账能力 ✅ → ⑦ 切 `db` ✅（2026-11-17 改为启动期自动一次性导入，不再需要停机窗口与手工命令） → ⑧ 观察一个周期后删旧实现 ⏳（人工）。推分支前的全量 review 已把核实确凿的问题全部修完（见 §5）；⑦ 的自动化不改「任一时刻只有一个提交点」的硬约束，⑧ 仍不动。
+
+**单后端落地（2026-11-17）**：`PmConfig::default()` 现为 `db`；`build_store()` 只装配 `SqlitePmStore`，首次启动用只读探针判空后自动执行 `dry_run` → 单事务 `import`，有阻断项则拒绝启动，二次启动幂等跳过；`projects/` 全程不被写入，保留为附件二进制归档与回滚源。`FileTree` / `Dual` 降级为配置兼容类型，装配时硬拒绝；`dual` 投影与 `reconcile` 退出运行路径，仅保留为历史工具。
 
 ③ 的落地边界：`SqlitePmStore` 已实现全部 31 个 `PmStore` 业务方法 + 15 个 `PmMaintenance` 维护钩子，`db` 已可由工厂装配并服务于 REST / MCP / dispatch；导入器是**显式运维命令** `acowork-pm --data-dir <dir> migrate`（缺省只读 dry-run，`--apply` 才写库），不是启动时的运行时副作用。工厂对「空 DB + 非空树」硬失败，强制先走停机窗口；对 `db` 模式下新上传的附件写入 `{data_dir}/assets/tasks/{tid}/`，不污染作为回滚源的树归档。**本轮 review 加固**：图标目录从 `projects/{pid}/icon`（回滚源）移到 `assets/projects/{pid}/icon` 并保留归档只读回退；`schema::open()` 把版本闸门前置到 WAL / DDL 之前，拒绝一个看不懂的库时不留任何写入（`user_version=0` 但已有 PM 表同样拒绝），`integrity_check` 改为收集全部结果行；`db` 启动拒绝路径先跑 dry-run 再决定是否建库，绝不凭空造出 `pm.sqlite` 让后续 `--apply` 误判「目标非空」。
 
@@ -240,6 +242,8 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 | `core/acowork-pm/src/store/sqlite/mod.rs` | Review-B/C：图标目录移出树归档并保留归档只读回退；`dispatch_identity` 与树端一致（已有身份直接返回、不写盘）；补图标回归用例 |
 | `core/acowork-pm/src/store/dual.rs` | Review-C：投影指标实例级 + `consecutive_failures`；`tree_write_seq` 并发收敛；投影 DB 打不开时 quarantine 而非删除；非 `dual` backend 拒绝打开投影 |
 | `core/acowork-pm/src/store/{corrupt,atomic}.rs`、`health.rs`、`server.rs`、`acowork-runtime/src/tools/builtin/shell.rs` | Review-C：取证副本原子化、失败清理 `.tmp`、`/health` 坏文件脱敏、shell 守卫改为写意图 + 自定义数据目录、`db` 拒绝启动路径零建库副作用 |
+| `core/acowork-pm/src/config.rs` | 单后端：`StorageBackend::default()` 改为 `Db`；`FileTree` / `Dual` 保留类型仅供旧 TOML 反序列化；字段注释改为唯一后端说明，默认断言用例同步更新 |
+| `core/acowork-pm/src/server.rs` | 单后端：`build_store()` 只装配 `SqlitePmStore` 并在首次启动自动 `ensure_sqlite_authority()`（只读判空 → dry-run → 单事务 import → 版本闸门）；非 `db` 配置硬拒绝；4 个装配用例改写为「退役后端拒绝 / 首次启动自动导入且树零改动 / 二次启动幂等 / 零配置默认 db」 |
 
 **迁移进度（本轮）**：D6 的 ① 配置、② trait 对象化 / 工厂装配、③ `SqlitePmStore` + 导入器、④ `DualPmStore`、⑤ 三后端同批用例、⑥ 离线对账与 `/health` 投影指标均已落地；`filetree` / `db` / `dual` **三态全部可装配**，`dual` 启动即重建投影且业务读始终走树。⑦ 停机窗口切 `db`、⑧ 观察一个发布周期后删旧实现是**人工运维动作**，代码已备好 gate（`migrate --apply` + `reconcile`）但尚未执行。`db` 的空库 + 非空树硬失败闸仍在；`dual` 不再被拒绝，但也绝不因为 DB 挂了而静默改变提交点。提交前复审修掉两处：`reconcile` 原会经 `schema::open()` 凭空建库（改为只读打开 + 缺库判不一致），`project()` 原允许并发投影交错（改为串行锁）。推分支前的第二轮全量 review（三份交叉审查 + 逐条复核）又修掉 P0/P1 共 12 项和 P2/P3 一批，见上表 Review 行；**这一轮修完前不推分支**。
 
@@ -318,6 +322,7 @@ T1–T4（现为规模基线 / 回归判据；T1 内部两个条件须同时满�
 - `create_task_as` / `write_attachment` 仍是 FS 先写、DB 后提交。本轮给两者的失败路径加了 best-effort 目录回滚，但进程在两次操作之间被 kill 仍可能留空目录 / 孤儿二进制；彻底解决需要启动期 GC 或把二进制也纳入事务，本轮不做，遗留由第 ⑧ 步统一清理。
 - `schema::open()` 现在拒绝看不懂的库时不写任何字节，代价是「版本倾斜」与「空库」的恢复都必须由人显式介入（quarantine 后重建），不能再靠一次启动自动收敛；这是把「静默迁移」换成「显式报错」的必然取舍。
 - D4 第 3 层的写意图判据是有损的：包含 `>` 的只读文本、字符串里出现 `cp ` 之类 token，都可能被误拒；反过来变量拼接的写仍可绕过。它只是把事故概率压低，绝不写进任何安全承诺。
+- 收敛为单后端后不再有「改回 `filetree` 继续用」的运行时回滚路径：树归档停在首次导入时点，`db` 期间的新写只存在于 `pm.sqlite`。回滚必须停机、用备份恢复树并换回旧二进制；收益是再没有两个可能分歧的提交点，代价是切换后不能无痛反悔。
 
 **中性**
 

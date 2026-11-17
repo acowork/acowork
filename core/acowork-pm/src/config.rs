@@ -17,21 +17,21 @@ use std::str::FromStr;
 
 /// ADR-117 D6: the storage backend the PM service commits to.
 ///
-/// Exactly one commit point is allowed at any time. `Dual` is **not** a dual
-/// write: the tree commits first and SQLite is a best-effort, disposable
-/// projection of that commit (see ADR-117 §3 D6). `Dual` therefore never
-/// changes the write result and never serves a business read.
+/// SQLite is now the only assembled backend. `FileTree` / `Dual` are kept as
+/// types so an archived TOML or an old config value still deserializes, but
+/// [`crate::server::build_store`] rejects them at startup instead of silently
+/// running a second, stale commit point.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageBackend {
-    /// Directory tree is the authority. Today's behaviour, the default.
-    #[default]
+    /// Retired. Kept for config compatibility only.
     #[serde(alias = "file_tree", alias = "tree", alias = "FILETREE")]
     FileTree,
-    /// SQLite is the authority. `SqlitePmStore` owns every commit.
+    /// SQLite is the authority and the default. `SqlitePmStore` owns every commit.
+    #[default]
     #[serde(alias = "sqlite", alias = "DB")]
     Db,
-    /// Tree commits; SQLite mirrors the result for offline reconciliation.
+    /// Retired. Kept for config compatibility only.
     #[serde(alias = "DUAL")]
     Dual,
 }
@@ -85,13 +85,12 @@ pub struct PmConfig {
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
-    /// ADR-117 D6: which backend owns commits. Defaults to `filetree`.
+    /// ADR-117 D6: which backend owns commits. Defaults to `db`.
     ///
-    /// The standalone process resolves this once at startup, in order:
-    /// `--storage-backend` (CLI) > `ACOWORK_PM_STORAGE_BACKEND` (env) >
-    /// `--config` TOML > [`PmConfig::default`]. There is **no runtime
-    /// switching** — changing backends requires a restart (and, for `db`,
-    /// a maintenance window).
+    /// There is one backend: SQLite. On the first start `build_store()` imports
+    /// the JSON tree into `pm.sqlite` in a single transaction; from then on the
+    /// tree is a read-only archive of binaries and a rollback source. There is
+    /// no runtime switching and no operator migration step.
     #[serde(default)]
     pub storage_backend: StorageBackend,
 
@@ -360,10 +359,10 @@ mod tests {
     // ── ADR-117 D6: three-state storage backend ────────────────────
 
     #[test]
-    fn storage_backend_defaults_to_filetree() {
+    fn storage_backend_defaults_to_db() {
         let cfg = PmConfig::default();
-        assert_eq!(cfg.storage_backend, StorageBackend::FileTree);
-        assert!(cfg.storage_backend.tree_is_authority());
+        assert_eq!(cfg.storage_backend, StorageBackend::Db);
+        assert!(!cfg.storage_backend.tree_is_authority());
     }
 
     #[test]

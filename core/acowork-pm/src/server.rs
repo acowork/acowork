@@ -16,9 +16,8 @@ use std::sync::Arc;
 use crate::config::{PmConfig, StorageBackend};
 use crate::error::{PmError, Result};
 use crate::mcp::{AgentDirectory, NoopAgentDirectory};
-use crate::store::dual::DualPmStore;
-use crate::store::sqlite::{SqlitePmStore, import};
-use crate::store::tree::{PmStore, TreePmStore};
+use crate::store::sqlite::{SqlitePmStore, import, schema};
+use crate::store::tree::PmStore;
 
 /// PM 服务运行实例。
 ///
@@ -39,61 +38,79 @@ pub struct PmService {
     pub gateway: Option<(String, Option<String>)>,
 }
 
-/// ADR-117 D6: assemble the configured backend exactly once at startup.
+/// ADR-117 D6 (single-backend cutover): SQLite is the only commit point.
 ///
-/// All three backends are assembled exactly once at startup; there is no
-/// runtime switching (ADR-117 §3 D6).
-///
-/// `db` refuses to start on an empty database while the tree still holds
-/// projects — that shape means the operator skipped the stop-the-world import
-/// window, and serving an empty board would look exactly like data loss.
-///
-/// `dual` always starts with a full projection rebuild. Its DB is disposable:
-/// a missing / stale / corrupt projection is rebuilt from the tree, and a DB
-/// that cannot be opened at all never blocks PM from serving (the tree is the
-/// only commit point).
+/// On the first start the JSON tree is imported into `pm.sqlite` in one
+/// transaction. This path never writes to the tree, so it stays a byte-for-byte
+/// rollback source and continues to host attachment binaries. A blocking scan
+/// finding aborts startup instead of creating a half-empty authority.
 async fn build_store(config: &PmConfig) -> Result<Arc<dyn PmStore>> {
-    match config.storage_backend {
-        StorageBackend::FileTree => {
-            Ok(Arc::new(TreePmStore::new(config.clone()).await?) as Arc<dyn PmStore>)
-        }
-        StorageBackend::Db => {
-            // A refused startup must not leave a `pm.sqlite` behind: merely
-            // opening one creates its WAL/schema/`user_version`, which would
-            // make a later `migrate --apply` see a "non-empty" target and
-            // silently skip. Check the missing-DB case *before* opening.
-            if !config.sqlite_path().exists() {
-                let report = import::dry_run(config)?;
-                if report.projects > 0 {
-                    return Err(empty_db_error(&report));
-                }
-            }
-            let store = SqlitePmStore::open(config.clone())?;
-            if store.is_empty()? {
-                let report = import::dry_run(config)?;
-                if report.projects > 0 {
-                    return Err(empty_db_error(&report));
-                }
-            }
-            Ok(Arc::new(store) as Arc<dyn PmStore>)
-        }
-        StorageBackend::Dual => {
-            let tree: Arc<dyn PmStore> = Arc::new(TreePmStore::new(config.clone()).await?);
-            Ok(Arc::new(DualPmStore::new(tree, config.clone())) as Arc<dyn PmStore>)
-        }
+    if config.storage_backend != StorageBackend::Db {
+        return Err(PmError::Internal(format!(
+            "storage_backend={} is retired; this build only supports db. \
+             Remove the override from acowork-pm.toml / ACOWORK_PM_STORAGE_BACKEND",
+            config.storage_backend
+        )));
     }
+    ensure_sqlite_authority(config)?;
+    Ok(Arc::new(SqlitePmStore::open(config.clone())?) as Arc<dyn PmStore>)
 }
 
-/// Shared refusal message for "the operator skipped the import window".
-fn empty_db_error(report: &import::MigrationReport) -> PmError {
-    PmError::Internal(format!(
-        "storage_backend=db but pm.sqlite is empty while the tree still holds \
-         {} project(s) (blocking findings: {}); run \
-         `acowork-pm --data-dir <dir> migrate --apply` in a stop-the-world \
-         window before switching",
-        report.projects,
-        report.blocking.len()
-    ))
+/// One-shot startup import. Idempotent: a non-empty v1 database is left alone.
+///
+/// The probe uses a read-only connection so deciding "do we need to import?"
+/// cannot create WAL sidecars, DDL or a `user_version` stamp on a database we
+/// might refuse. `import()` runs its own blocking scan and a single transaction.
+fn ensure_sqlite_authority(config: &PmConfig) -> Result<()> {
+    let path = config.sqlite_path();
+    let needs_import = if !path.is_file() {
+        true
+    } else {
+        let conn = rusqlite::Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .map_err(|e| PmError::Internal(format!("sqlite: {e}")))?;
+        let version = schema::user_version(&conn)?;
+        if version == 0 {
+            // A zero-byte / unversioned file. `import()` calls `schema::open()`,
+            // which refuses to adopt a DB that already has PM tables.
+            true
+        } else if version != schema::SCHEMA_VERSION {
+            return Err(PmError::Internal(format!(
+                "pm.sqlite schema v{version} is not understood by this binary (v{}); \
+                 refusing to start over an unmigrated database",
+                schema::SCHEMA_VERSION
+            )));
+        } else {
+            schema::is_empty(&conn)?
+        }
+    };
+    if !needs_import {
+        return Ok(());
+    }
+
+    let report = import::dry_run(config)?;
+    if report.has_blocking_issues() {
+        return Err(PmError::Internal(format!(
+            "startup import blocked ({} finding(s)): {}",
+            report.blocking.len(),
+            report.blocking.join(" | ")
+        )));
+    }
+    if report.projects == 0 {
+        // Fresh install: let `schema::open()` create an empty authority.
+        return Ok(());
+    }
+
+    let report = import::import(config)?;
+    tracing::info!(
+        projects = report.projects,
+        tasks = report.tasks,
+        activity_rows = report.activity_rows,
+        "one-shot JSON -> SQLite import complete; the tree is left intact as a rollback source"
+    );
+    Ok(())
 }
 
 impl PmService {
@@ -325,6 +342,7 @@ impl PmService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::tree::TreePmStore;
     use crate::types::TaskId;
     use std::path::PathBuf;
 
@@ -337,19 +355,26 @@ mod tests {
         }
     }
 
-    /// D6 step 4: `dual` is wireable, object-safe, and starts from a rebuilt
-    /// projection (an empty tree and an empty DB must already reconcile).
+    /// `filetree` / `dual` are config-compatibility types only: starting with
+    /// one must fail loudly instead of silently serving a stale commit point.
     #[tokio::test]
-    async fn dual_backend_is_wireable_and_starts_consistent() {
+    async fn retired_backends_are_rejected_at_startup() {
         let tmp = tempfile::tempdir().unwrap();
-        let cfg = test_config(StorageBackend::Dual, tmp.path());
-        let store = build_store(&cfg).await.unwrap();
-        assert!(store.list_projects().await.unwrap().is_empty());
-        assert_eq!(store.task_depth(&TaskId("t-nonexistent".into())), 0);
-        assert!(
-            import::reconcile(&cfg).unwrap().is_consistent(),
-            "startup must rebuild the projection from the tree"
-        );
+        for backend in [StorageBackend::FileTree, StorageBackend::Dual] {
+            let cfg = test_config(backend, tmp.path());
+            let err = match build_store(&cfg).await {
+                Ok(_) => panic!("{backend} must not be assembled"),
+                Err(e) => e.to_string(),
+            };
+            assert!(err.contains("only supports db"), "error was: {err}");
+            assert!(!cfg.sqlite_path().exists(), "rejection created pm.sqlite");
+            for suffix in ["-wal", "-shm"] {
+                assert!(
+                    !PathBuf::from(format!("{}{suffix}", cfg.sqlite_path().display())).exists(),
+                    "rejection created a pm.sqlite{suffix} sidecar"
+                );
+            }
+        }
     }
 
     #[tokio::test]
@@ -362,11 +387,12 @@ mod tests {
         assert!(store.corrupt_registry().read().is_empty());
     }
 
-    /// The stop-the-world import window is a hard precondition, not a
-    /// suggestion: an empty DB beside a populated tree must never come up and
-    /// render an empty board.
+    /// The whole point of the single-backend cutover: an existing JSON tree is
+    /// imported on the first start with no operator command, and a second
+    /// start is a no-op. The tree must stay intact as the rollback source and
+    /// as the host of attachment binaries.
     #[tokio::test]
-    async fn db_backend_refuses_to_start_when_the_import_was_skipped() {
+    async fn startup_imports_the_existing_tree_automatically() {
         use crate::types::CreateProject;
 
         let tmp = tempfile::tempdir().unwrap();
@@ -374,7 +400,7 @@ mod tests {
         let tree = TreePmStore::new(tree_cfg).await.unwrap();
         tree.create_project(
             CreateProject {
-                title: "still on the tree".into(),
+                title: "migrated from the tree".into(),
                 description: String::new(),
                 metadata: Default::default(),
             },
@@ -382,35 +408,60 @@ mod tests {
         )
         .await
         .unwrap();
+        let tree_before = count_tree_files(&tmp.path().join("projects"));
 
-        let db_cfg = test_config(StorageBackend::Db, tmp.path());
-        let err = match build_store(&db_cfg).await {
-            Ok(_) => panic!("empty db beside a populated tree must be refused"),
-            Err(e) => e.to_string(),
-        };
-        assert!(err.contains("migrate --apply"), "error was: {err}");
-        assert!(err.contains("1 project(s)"), "error was: {err}");
-        // A refused startup must leave *no* database behind. Otherwise a
-        // later `migrate --apply` sees a non-empty target, skips the import,
-        // and the operator correctly concludes the data vanished.
-        assert!(!db_cfg.sqlite_path().exists(), "refusal created pm.sqlite");
-        for suffix in ["-wal", "-shm"] {
-            assert!(
-                !PathBuf::from(format!("{}{suffix}", db_cfg.sqlite_path().display())).exists(),
-                "refusal created a pm.sqlite{suffix} sidecar"
-            );
-        }
+        let cfg = test_config(StorageBackend::Db, tmp.path());
+        let store = build_store(&cfg)
+            .await
+            .expect("first start must import the tree automatically");
+        let projects = store.list_projects().await.unwrap();
+        assert_eq!(projects.len(), 1, "imported project must be visible");
+        assert_eq!(projects[0].title, "migrated from the tree");
+        assert!(cfg.sqlite_path().exists(), "import must create pm.sqlite");
+        assert_eq!(
+            count_tree_files(&tmp.path().join("projects")),
+            tree_before,
+            "import must not modify the tree"
+        );
+
+        let again = build_store(&cfg)
+            .await
+            .expect("second start must be idempotent");
+        assert_eq!(again.list_projects().await.unwrap().len(), 1);
     }
 
-    /// The default backend returns an object-safe handle: both business and
-    /// maintenance methods are reachable without naming the concrete type.
+    fn count_tree_files(root: &std::path::Path) -> usize {
+        fn walk(path: &std::path::Path, n: &mut usize) {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.is_dir() {
+                        walk(&p, n);
+                    } else {
+                        *n += 1;
+                    }
+                }
+            }
+        }
+        let mut n = 0;
+        walk(root, &mut n);
+        n
+    }
+
+    /// Zero-config start: `PmConfig::default()` (with only data_dir pointed at
+    /// a temp dir) must build the SQLite authority without any operator step.
     #[tokio::test]
-    async fn build_store_returns_an_object_safe_tree_by_default() {
+    async fn default_config_builds_the_sqlite_authority() {
         let tmp = tempfile::tempdir().unwrap();
-        let cfg = test_config(StorageBackend::FileTree, tmp.path());
+        let cfg = PmConfig {
+            data_dir: tmp.path().to_path_buf(),
+            index_rebuild_on_start: false,
+            ..Default::default()
+        };
         let store = build_store(&cfg).await.unwrap();
         assert!(store.list_projects().await.unwrap().is_empty());
         assert_eq!(store.task_depth(&TaskId("t-nonexistent".into())), 0);
         assert!(store.corrupt_registry().read().is_empty());
+        assert!(cfg.sqlite_path().exists());
     }
 }
