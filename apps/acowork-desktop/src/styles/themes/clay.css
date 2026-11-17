@@ -25,7 +25,7 @@
      Without this the bubble keeps the default palette's translucent
      near-white, which composites into the tinted plane and vanishes
      (plane/bubble contrast 1.01 — the bubble is invisible). */
-  --color-chat-bubble: hsl(23 var(--theme-chroma) 100%);
+  --color-chat-bubble: hsl(23 var(--theme-chroma) 97%);
   --color-chat-title: hsl(22 var(--theme-chroma) 86%);
   --color-chat-input-bg: hsl(24 var(--theme-chroma) 95%);
   --color-chat-input-border: hsl(19 calc(var(--theme-chroma) * 0.55) 85%);
