@@ -1098,19 +1098,18 @@ impl SessionTask {
                     //
                     // The hint is built by the pure helper
                     // [`build_attachment_hint`] (kept module-level so the
-                    // tests below can pin the wire shape). Image uploads
-                    // (AttachedItem::ImageUpload) are NOT hinted here —
-                    // they flow into the multimodal `ContentPart::ImageUrl`
-                    // path below, so the LLM sees the picture directly.
-                    // Folders (AttachedFolder) are also intentionally
-                    // unhinted — the LLM has no tool to walk a directory
-                    // tree in one shot.
-                    let agent_home = Some(agent_loop.core.config.work_dir.clone());
-                    let enriched_content = build_attachment_hint(
-                        &content,
-                        attached_items.as_deref(),
-                        agent_home.as_deref(),
-                    );
+                    // tests below can pin the wire shape), but only *after*
+                    // the content parts are derived (below): the hint must
+                    // state what actually reached the model, and only the
+                    // derivation knows whether an image's pixels made it into
+                    // this message or were dropped (too large, format the
+                    // model cannot read, attachment store unavailable). A hint
+                    // built from the intent instead of the outcome is what
+                    // invited `image_read` on pictures that were already
+                    // inline.
+                    // Folders (AttachedFolder) are intentionally unhinted —
+                    // the LLM has no tool to walk a directory tree in one
+                    // shot.
 
                     // Per-turn skill selection (from the chat `command`) goes
                     // on the turn-scoped slot. One unconditional call:
@@ -1272,9 +1271,10 @@ impl SessionTask {
                             first_round,
                         );
 
-                    let final_content_parts: Option<
-                        Vec<acowork_core::providers::traits::ContentPart>,
-                    > = match attached_items.as_deref() {
+                    let (final_content_parts, enriched_content): (
+                        Option<Vec<acowork_core::providers::traits::ContentPart>>,
+                        String,
+                    ) = match attached_items.as_deref() {
                         Some(items) if !items.is_empty() => {
                             // Document parts need the model this turn will
                             // actually talk to, so the capability is resolved
@@ -1288,8 +1288,15 @@ impl SessionTask {
                             // Two derivations, one failure surface: an
                             // attachment the runtime cannot read stops the turn
                             // whichever channel it belonged to.
+                            // The derivation yields the parts *and* one
+                            // delivery verdict per image: the prompt hint is
+                            // built from the verdict, so an image dropped here
+                            // can never be announced to the model as attached.
                             let derived: Result<
-                                Option<Vec<acowork_core::providers::traits::ContentPart>>,
+                                (
+                                    Option<Vec<acowork_core::providers::traits::ContentPart>>,
+                                    crate::agent::attachment_to_image::ImageParts,
+                                ),
                                 crate::error::RuntimeError,
                             > = match (
                                 crate::agent::attachment_to_document::derive_document_parts(
@@ -1304,13 +1311,29 @@ impl SessionTask {
                                 )
                                 .await,
                             ) {
-                                (Ok(documents), Ok(images)) => {
-                                    Ok(merge_turn_parts(content_parts, documents, images))
+                                (Ok(documents), Ok(mut images)) => {
+                                    let parts = merge_turn_parts(
+                                        content_parts,
+                                        documents,
+                                        std::mem::take(&mut images.parts),
+                                    );
+                                    Ok((parts, images))
                                 }
                                 (Err(e), _) | (_, Err(e)) => Err(e),
                             };
                             match derived {
-                                Ok(parts) => parts,
+                                Ok((parts, images)) => {
+                                    // Only now can the hint tell the truth:
+                                    // a picture's pixels are in `parts` iff its
+                                    // verdict is `Delivered`.
+                                    let hint = build_attachment_hint(
+                                        &content,
+                                        Some(items),
+                                        Some(&agent_loop.core.config.work_dir),
+                                        Some(&images),
+                                    );
+                                    (parts, hint)
+                                }
                                 Err(e) => {
                                     tracing::error!(
                                         session_id = %session_id,
@@ -1346,7 +1369,9 @@ impl SessionTask {
                                 }
                             }
                         }
-                        _ => content_parts,
+                        // No attachments: nothing was derived, so there is
+                        // nothing to report — the human's words are the turn.
+                        _ => (content_parts, content.clone()),
                     };
 
                     // ADR-100 follow-up: the loop reads this turn's Chat
@@ -1651,6 +1676,12 @@ impl SessionTask {
                     let mut intent_content_parts: Option<
                         Vec<acowork_core::providers::traits::ContentPart>,
                     > = None;
+                    // The image derivation's verdicts (see `ImageParts`): the
+                    // hint is built after the workspace references join the
+                    // list, so the delivery facts have to outlive this block.
+                    let mut intent_images: Option<
+                        crate::agent::attachment_to_image::ImageParts,
+                    > = None;
                     let mut intent_attached_items: Option<
                         Vec<acowork_core::protocol::AttachedItem>,
                     > = if chat_attachment_ids.is_empty() {
@@ -1744,8 +1775,13 @@ impl SessionTask {
                                 )
                                 .await,
                             ) {
-                                (Ok(documents), Ok(images)) => {
-                                    intent_content_parts = merge_turn_parts(None, documents, images)
+                                (Ok(documents), Ok(mut images)) => {
+                                    intent_content_parts = merge_turn_parts(
+                                        None,
+                                        documents,
+                                        std::mem::take(&mut images.parts),
+                                    );
+                                    intent_images = Some(images);
                                 }
                                 (Err(e), _) | (_, Err(e)) => tracing::warn!(
                                     session_id = %session_id,
@@ -1768,6 +1804,7 @@ impl SessionTask {
                             &llm_message,
                             Some(items),
                             Some(agent_loop.core.config.work_dir.as_str()),
+                            intent_images.as_ref(),
                         );
                     }
                     last_user_message = Some((content.clone(), message_id.clone()));
@@ -2716,7 +2753,10 @@ fn merge_turn_parts(
 /// Append the attachment block a turn's prompt carries, one line per
 /// attachable item:
 /// - `attached_file` / `attached_selection` / `attached_folder` — the workspace path
-/// - `image_upload` — no line; its bytes travel as a `ContentPart::ImageUrl`
+/// - `image_upload` — the path **plus what the derivation actually did with the
+///   pixels** (see [`image_hint_line`]): `ImageUrl` parts travel with the
+///   request when the image was deliverable, and only the text line is left
+///   when it was not
 /// - `file_upload` — the on-disk path, **and** a PDF additionally travels as a
 ///   `ContentPart::Document` when the model declares pdf input
 ///
@@ -2725,6 +2765,11 @@ fn merge_turn_parts(
 /// budget, a mid-session model switch that drops the part) this line is the
 /// only pointer the agent has left to the file. See
 /// [`crate::agent::attachment_to_document`] for the gate.
+///
+/// For images the line is phrased from `images`, the verdicts the image
+/// derivation returned — never from the attachment list. The difference is the
+/// whole point: an image that was inlined needs no `image_read`, and one that
+/// was dropped must not be described as if the model had seen it.
 fn is_image_filename(path: &str) -> bool {
     let ext = path.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
     matches!(
@@ -2737,6 +2782,7 @@ fn build_attachment_hint(
     user_content: &str,
     items: Option<&[acowork_core::protocol::AttachedItem]>,
     work_dir: Option<&str>,
+    images: Option<&crate::agent::attachment_to_image::ImageParts>,
 ) -> String {
     let mut enriched = user_content.to_string();
     let Some(items) = items else {
@@ -2803,7 +2849,14 @@ fn build_attachment_hint(
                     (Some(w), Some(h)) => format!(", {w}x{h}"),
                     _ => String::new(),
                 };
-                format!("- image: `{filename}` (id={document_id}{dimensions}) — pixels were attached to this message; reopen with `image_read` on `{path}` if you need it again")
+                image_hint_line(
+                    filename,
+                    document_id,
+                    &dimensions,
+                    &path,
+                    format,
+                    images.and_then(|i| i.verdict(document_id)),
+                )
             },
             // A folder reference used to produce no line at all, so adding a
             // directory to the conversation was invisible to the Agent that
@@ -2839,6 +2892,57 @@ fn build_attachment_hint(
         );
     }
     enriched
+}
+
+/// One hint line for an uploaded image, phrased from the image derivation's
+/// [`crate::agent::attachment_to_image::ImageDelivery`] verdict.
+///
+/// The two ways this used to be wrong are the reason the verdict is a
+/// parameter:
+/// - `Delivered` was announced as "pixels were attached … reopen with
+///   `image_read`". The pixels are already in the request, so the only thing
+///   that instruction could produce was a redundant tool round-trip.
+/// - `Skipped` was announced the same way. The model then described a picture
+///   whose pixels it had never received.
+///
+/// `None` means the derivation did not run for this item (a path that got
+/// here without inlining); it degrades to the pre-inline wording, which is
+/// still actionable through `image_read`.
+fn image_hint_line(
+    filename: &str,
+    document_id: &str,
+    dimensions: &str,
+    path: &str,
+    format: &str,
+    delivery: Option<&crate::agent::attachment_to_image::ImageDelivery>,
+) -> String {
+    use crate::agent::attachment_to_image::{ImageDelivery, ImageSkip, MAX_INLINE_IMAGE_BYTES};
+
+    let head = format!("- image: `{filename}` (id={document_id}{dimensions})");
+    match delivery {
+        Some(ImageDelivery::Delivered) => format!(
+            "{head} — its pixels are part of this message; do not call \
+             `image_read` for it"
+        ),
+        Some(ImageDelivery::Skipped(ImageSkip::TooLarge)) => format!(
+            "{head} — over the {} MiB inline limit, so its pixels are NOT in \
+             this message; open it with `image_read` on `{path}`",
+            MAX_INLINE_IMAGE_BYTES / (1024 * 1024)
+        ),
+        Some(ImageDelivery::Skipped(ImageSkip::NotAnImage)) => format!(
+            "{head} — `{format}` is not a format the model can read, so its \
+             pixels are NOT in this message; convert it to png, then open it \
+             with `image_read` on `{path}`"
+        ),
+        Some(ImageDelivery::Skipped(ImageSkip::NoBlobStore)) => format!(
+            "{head} — the attachment store was unavailable, so its pixels are \
+             NOT in this message; open it with `image_read` on `{path}`"
+        ),
+        None => format!(
+            "{head} — its pixels were not inlined with this message; open it \
+             with `image_read` on `{path}`"
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -2981,10 +3085,99 @@ mod tests {
 
     use super::build_attachment_hint;
 
+    // ADR-046 §2.4 — image delivery: the hint states the *outcome* of the image
+    // derivation, not the attachment list.
+    //
+    // Regression this suite locks down: a pasted image reached the model as a
+    // `ContentPart::ImageUrl`, the hint still said "pixels were attached …
+    // reopen with `image_read`", and every paste bought a redundant tool
+    // round-trip. The mirror-image bug was worse: an image the derivation had
+    // dropped (>8 MiB, unsupported format, no attachment service) was announced
+    // as attached, so the model described a picture it never received.
+
+    use crate::agent::attachment_to_image::{ImageDelivery, ImageParts, ImageSkip};
+
+    fn image_upload_item() -> acowork_core::protocol::AttachedItem {
+        acowork_core::protocol::AttachedItem::ImageUpload {
+            document_id: "0123456789ab-3".to_string(),
+            filename: "shot.png".to_string(),
+            format: "png".to_string(),
+            size_bytes: 123,
+            width: Some(1280),
+            height: Some(800),
+            client_id: None,
+        }
+    }
+
+    /// The verdict map a real derivation would have returned for one item.
+    fn image_parts_with(document_id: &str, verdict: ImageDelivery) -> ImageParts {
+        let mut parts = ImageParts::default();
+        parts.record(document_id, verdict);
+        parts
+    }
+
+    /// A delivered image must forbid `image_read` — its pixels are already in
+    /// this very request.
+    #[test]
+    fn test_build_attachment_hint_delivered_image_forbids_redundant_image_read() {
+        let items = vec![image_upload_item()];
+        let images = image_parts_with("0123456789ab-3", ImageDelivery::Delivered);
+        let s = build_attachment_hint("look", Some(&items), Some("E:/ws"), Some(&images));
+        assert!(
+            s.contains(
+                "- image: `shot.png` (id=0123456789ab-3, 1280x800) — its pixels \
+                 are part of this message; do not call `image_read` for it"
+            ),
+            "{s}"
+        );
+        assert!(!s.contains("reopen with"), "{s}");
+    }
+
+    /// A dropped image must be announced as dropped, with the reason and the
+    /// path that makes `image_read` actionable.
+    #[test]
+    fn test_build_attachment_hint_dropped_image_is_not_announced_as_attached() {
+        let cases = [
+            (ImageSkip::TooLarge, "over the 8 MiB inline limit"),
+            (ImageSkip::NotAnImage, "not a format the model can read"),
+            (ImageSkip::NoBlobStore, "attachment store was unavailable"),
+        ];
+        for (skip, reason) in cases {
+            let items = vec![image_upload_item()];
+            let images = image_parts_with("0123456789ab-3", ImageDelivery::Skipped(skip));
+            let s = build_attachment_hint("look", Some(&items), Some("E:/ws"), Some(&images));
+            assert!(
+                s.contains("pixels are NOT in this message"),
+                "{skip:?}: {s}"
+            );
+            assert!(s.contains(reason), "{skip:?}: {s}");
+            assert!(
+                s.contains("`image_read` on `E:/ws/files/shot_0123456789ab-3.png`"),
+                "{skip:?}: {s}"
+            );
+            assert!(!s.contains("part of this message"), "{skip:?}: {s}");
+        }
+    }
+
+    /// No verdict (the derivation never saw this item) degrades to the
+    /// pre-inline wording instead of guessing either way.
+    #[test]
+    fn test_build_attachment_hint_image_upload_without_verdict_points_at_the_file() {
+        let items = vec![image_upload_item()];
+        let s = build_attachment_hint("look", Some(&items), Some("E:/ws"), None);
+        assert!(
+            s.contains(
+                "its pixels were not inlined with this message; open it with \
+                 `image_read` on `E:/ws/files/shot_0123456789ab-3.png`"
+            ),
+            "{s}"
+        );
+    }
+
     /// No attachments → user content returned verbatim (no hint block).
     #[test]
     fn test_build_attachment_hint_no_items_returns_verbatim() {
-        let s = build_attachment_hint("hello", None, Some("/work"));
+        let s = build_attachment_hint("hello", None, Some("/work"), None);
         assert_eq!(s, "hello");
     }
 
@@ -2992,7 +3185,7 @@ mod tests {
     /// rather than omitting the field for a turn with no attachments).
     #[test]
     fn test_build_attachment_hint_empty_vec_returns_verbatim() {
-        let s = build_attachment_hint("hello", Some(&[]), Some("/work"));
+        let s = build_attachment_hint("hello", Some(&[]), Some("/work"), None);
         assert_eq!(s, "hello");
     }
 
@@ -3007,7 +3200,7 @@ mod tests {
             name: "main.rs".to_string(),
             client_id: None,
         }];
-        let s = build_attachment_hint("review this", Some(&items), Some("/work"));
+        let s = build_attachment_hint("review this", Some(&items), Some("/work"), None);
         assert!(s.contains("- file: `/work/src/main.rs`"));
         assert!(s.contains("[Attached workspace files & uploads"));
         // The original user text is preserved verbatim — no [Attached
@@ -3026,7 +3219,7 @@ mod tests {
             end_line: 25,
             client_id: None,
         }];
-        let s = build_attachment_hint("x", Some(&items), Some("/work"));
+        let s = build_attachment_hint("x", Some(&items), Some("/work"), None);
         assert!(s.contains("- file: `/work/lib.rs` (L10-L25)"), "got: {s}");
 
         let items = vec![acowork_core::protocol::AttachedItem::AttachedSelection {
@@ -3036,7 +3229,7 @@ mod tests {
             end_line: 7,
             client_id: None,
         }];
-        let s = build_attachment_hint("x", Some(&items), Some("/work"));
+        let s = build_attachment_hint("x", Some(&items), Some("/work"), None);
         assert!(s.contains("- file: `/work/lib.rs` (L7)"), "got: {s}");
     }
 
@@ -3047,7 +3240,7 @@ mod tests {
             name: "shot.png".to_string(),
             client_id: None,
         }];
-        let s = build_attachment_hint("inspect", Some(&items), Some("E:/ws"));
+        let s = build_attachment_hint("inspect", Some(&items), Some("E:/ws"), None);
         assert!(
             s.contains("- file: `E:/ws/shot.png` (image — open with `image_read`)"),
             "{s}"
@@ -3058,17 +3251,10 @@ mod tests {
 
     #[test]
     fn test_build_attachment_hint_image_upload_emits_image_read_path() {
-        let items = vec![acowork_core::protocol::AttachedItem::ImageUpload {
-            document_id: "0123456789ab-3".to_string(),
-            filename: "shot.png".to_string(),
-            format: "png".to_string(),
-            size_bytes: 123,
-            width: Some(1280),
-            height: Some(800),
-            client_id: None,
-        }];
-        let s = build_attachment_hint("look", Some(&items), Some("E:/ws"));
-        assert!(s.contains("- image: `shot.png` (id=0123456789ab-3, 1280x800) — pixels were attached to this message; reopen with `image_read` on `E:/ws/files/shot_0123456789ab-3.png` if you need it again"), "{s}");
+        let items = vec![image_upload_item()];
+        let s = build_attachment_hint("look", Some(&items), Some("E:/ws"), None);
+        assert!(s.contains("- image: `shot.png` (id=0123456789ab-3, 1280x800)"), "{s}");
+        assert!(s.contains("E:/ws/files/shot_0123456789ab-3.png"), "{s}");
     }
 
     /// REGRESSION: `FileUpload` MUST show up in the hint block with
@@ -3084,7 +3270,7 @@ mod tests {
             size_bytes: 12345,
             client_id: None,
         }];
-        let s = build_attachment_hint("summarise this contract", Some(&items), Some("/work"));
+        let s = build_attachment_hint("summarise this contract", Some(&items), Some("/work"), None);
         assert!(s.starts_with("summarise this contract\n\n"));
         assert!(
             s.contains("- file: `report.pdf` (id=0123456789ab-3, format=pdf, path=/work/files/report_0123456789ab-3.pdf)"),
@@ -3121,7 +3307,7 @@ mod tests {
                 size_bytes: 100,
                 client_id: None,
             }];
-            let s = build_attachment_hint("x", Some(&items), Some("/work"));
+            let s = build_attachment_hint("x", Some(&items), Some("/work"), None);
             assert!(
                 s.contains(&format!("path=/work/files/report_0123456789ab-3.{ext}")),
                 "format={fmt} must yield .{ext} suffix in hint, got: {s}"
@@ -3143,7 +3329,7 @@ mod tests {
             size_bytes: 1,
             client_id: None,
         }];
-        let s = build_attachment_hint("x", Some(&items), None);
+        let s = build_attachment_hint("x", Some(&items), None, None);
         assert!(
             s.contains("path=<work_dir>/files/report_abc123-0.docx"),
             "without work_dir hint must use placeholder, got: {s}"
@@ -3178,7 +3364,7 @@ mod tests {
                 client_id: None,
             },
         ];
-        let s = build_attachment_hint("look at these", Some(&items), Some("/work"));
+        let s = build_attachment_hint("look at these", Some(&items), Some("/work"), None);
         let ws_idx = s.find("/work/src/lib.rs").expect("workspace hint present");
         let doc_idx = s.find("report.docx").expect("file upload hint present");
         assert!(
@@ -3206,7 +3392,7 @@ mod tests {
             name: "src".to_string(),
             client_id: None,
         }];
-        let s = build_attachment_hint("x", Some(&items), Some("/work"));
+        let s = build_attachment_hint("x", Some(&items), Some("/work"), None);
         assert!(s.contains("- folder: `/work/src` (src)"), "got: {s}");
         assert!(s.contains("list it before answering"), "got: {s}");
     }
@@ -3220,7 +3406,7 @@ mod tests {
             name: "core/src/chat_prompt.rs".to_string(),
             client_id: None,
         }];
-        let s = build_attachment_hint("你先看看这个", Some(&items), None);
+        let s = build_attachment_hint("你先看看这个", Some(&items), None, None);
         assert!(
             s.contains("- file: `E:/p/core/src/chat_prompt.rs` (core/src/chat_prompt.rs)"),
             "got: {s}"
@@ -3231,7 +3417,7 @@ mod tests {
             name: "/work/a.rs".to_string(),
             client_id: None,
         }];
-        let s = build_attachment_hint("x", Some(&bare), None);
+        let s = build_attachment_hint("x", Some(&bare), None, None);
         assert!(s.contains("- file: `/work/a.rs`"), "got: {s}");
         assert!(!s.contains("(/work/a.rs)"), "got: {s}");
     }

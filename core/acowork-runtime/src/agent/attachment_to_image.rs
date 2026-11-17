@@ -21,17 +21,22 @@
 //! ## Pipeline
 //!
 //! 1. `safe_mime(format)` whitelists the format string into a known
-//!    `image/<subtype>` MIME (PNG/JPG/GIF/WebP); anything else returns
-//!    `None` and the item is **silently skipped** — we don't try to
-//!    sniff bytes for MIME detection (ADR-046 §2.7: the runtime does
+//!    `image/<subtype>` MIME (PNG/JPG/GIF/WebP); anything else produces no
+//!    part and the item is recorded as `Skipped(NotAnImage)` — we don't try
+//!    to sniff bytes for MIME detection (ADR-046 §2.7: the runtime does
 //!    no image recognition).
 //! 2. `build_data_url(mime, bytes)` base64-encodes the bytes and glues
 //!    them into a single `data:<mime>;base64,<…>` URI.
 //! 3. `derive_image_parts_from_items(attachment, items)` iterates the
 //!    items, drops non-image variants, reads each image's bytes, and
-//!    produces a `Vec<ContentPart>` of `ImageUrl` parts (in attach
-//!    order). Empty input ⇒ empty output (the caller decides whether
-//!    that means "send nothing" or "prepend a Text part").
+//!    produces an [`ImageParts`] — the `ImageUrl` parts in attach order plus
+//!    one [`ImageDelivery`] verdict per item.
+//!
+//! Step 3's verdicts exist for the prompt hint: "did the pixels reach the
+//! model" is a fact only this module knows, and the hint is the model's only
+//! account of it. A hint that guessed used to announce `pixels were attached`
+//! for images dropped here, and to invite `image_read` for images already in
+//! the message.
 //!
 //! [`AttachedItem`]: acowork_core::protocol::AttachedItem
 //! [`AttachmentService`]: crate::usecases::AttachmentService
@@ -112,24 +117,79 @@ fn image_part(url: String, width: Option<u32>, height: Option<u32>) -> ContentPa
     }
 }
 
+/// What became of one attached image on its way to the model.
+///
+/// The derivation used to answer only "which parts did I produce", which left
+/// the prompt hint guessing: it announced `pixels were attached` for every
+/// `image_upload`, including the ones this module had just dropped. The hint is
+/// the model's only account of what it can see, so the derivation now reports
+/// the verdict per item and the hint states that verdict instead of the
+/// attachment list. `Skipped` is not an internal detail — it is the fact that
+/// turns a silent degradation into an instruction the model can act on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ImageDelivery {
+    /// The pixels are in this turn's `content_parts`.
+    Delivered,
+    /// The pixels are not in the request, for this reason.
+    Skipped(ImageSkip),
+}
+
+/// Why an `image_upload` item produced no part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageSkip {
+    /// `format` is not on the provider whitelist (svg, pdf, an unknown
+    /// extension): the item never belonged on the multimodal channel.
+    NotAnImage,
+    /// Bigger than [`MAX_INLINE_IMAGE_BYTES`] — the data URI would be resent on
+    /// every request that carries this message.
+    TooLarge,
+    /// The runtime has no [`AttachmentService`] (Phase B injection missing), so
+    /// no blob could be read at all.
+    NoBlobStore,
+}
+
+/// The two things the derivation owes its caller: the parts to send, and one
+/// verdict per `image_upload` item keyed by `document_id`.
+#[derive(Debug, Default)]
+pub struct ImageParts {
+    pub parts: Vec<ContentPart>,
+    verdicts: std::collections::HashMap<String, ImageDelivery>,
+}
+
+impl ImageParts {
+    /// Verdict for one `image_upload` item, or `None` when this turn never
+    /// offered that item to the derivation (a reference merged in later, for
+    /// instance) — the caller must then say "not inlined", not guess.
+    pub fn verdict(&self, document_id: &str) -> Option<&ImageDelivery> {
+        self.verdicts.get(document_id)
+    }
+
+    /// Record the fate of one item. `pub(crate)` rather than private so the
+    /// prompt-side tests can hand `build_attachment_hint` a verdict map without
+    /// standing up an `AttachmentService`.
+    pub(crate) fn record(&mut self, document_id: &str, verdict: ImageDelivery) {
+        self.verdicts.insert(document_id.to_string(), verdict);
+    }
+}
+
 /// Walk `items`, pull each `ImageUpload` variant through
-/// `attachment.read_file(document_id)`, and return a `Vec<ContentPart>`
-/// of `ImageUrl` parts in the order the user attached them.
+/// `attachment.read_file(document_id)`, and return the `ImageUrl` parts in the
+/// order the user attached them, plus a verdict per item.
 ///
 /// Behaviour:
-/// - Non-image variants are ignored silently.
-/// - Items whose `format` isn't a known image MIME are ignored
-///   silently (after a debug-level log).
-/// - Items whose blob can't be read return an error — the LLM call
-///   will not proceed without all attachments accounted for.
-/// - Items whose bytes exceed [`MAX_INLINE_IMAGE_BYTES`] are dropped
-///   with a `warn!` so operators can investigate; the JSONL system
-///   entry is still written so the agent sees the filename.
+/// - Non-image variants are ignored (they are not on this channel).
+/// - Items whose `format` isn't a known image MIME are recorded as
+///   [`ImageSkip::NotAnImage`] and announced to the caller.
+/// - Items whose bytes exceed [`MAX_INLINE_IMAGE_BYTES`] are recorded as
+///   [`ImageSkip::TooLarge`]; the JSONL system entry is still written, so the
+///   prompt hint can point the model at the on-disk file.
+/// - Items whose blob can't be read return an error — the LLM call will not
+///   proceed without all attachments accounted for.
 pub async fn derive_image_parts_from_items(
     attachment: &dyn AttachmentService,
     items: &[AttachedItem],
-) -> Result<Vec<ContentPart>, crate::error::RuntimeError> {
-    let mut parts = Vec::new();
+) -> Result<ImageParts, crate::error::RuntimeError> {
+    let mut out = ImageParts::default();
     for item in items {
         let AttachedItem::ImageUpload {
             document_id,
@@ -151,6 +211,7 @@ pub async fn derive_image_parts_from_items(
                 format = %format,
                 "skipping non-image attachment in multimodal pipeline"
             );
+            out.record(document_id, ImageDelivery::Skipped(ImageSkip::NotAnImage));
             continue;
         };
 
@@ -162,6 +223,7 @@ pub async fn derive_image_parts_from_items(
                 limit = MAX_INLINE_IMAGE_BYTES,
                 "image exceeds inline data-URI budget; dropping from multimodal payload"
             );
+            out.record(document_id, ImageDelivery::Skipped(ImageSkip::TooLarge));
             continue;
         }
 
@@ -172,9 +234,10 @@ pub async fn derive_image_parts_from_items(
         })?;
 
         let url = build_data_url(mime, &bytes);
-        parts.push(image_part(url, *width, *height));
+        out.parts.push(image_part(url, *width, *height));
+        out.record(document_id, ImageDelivery::Delivered);
     }
-    Ok(parts)
+    Ok(out)
 }
 
 /// Late-bound convenience wrapper around
@@ -185,10 +248,10 @@ pub async fn derive_image_parts_from_items(
 ///
 /// | `attachment_service` | `items`     | result                       |
 /// |----------------------|-------------|------------------------------|
-/// | `None`               | empty       | `Ok(vec![])`                 |
-/// | `None`               | any         | `Ok(vec![])` — silently no-op; **a warning log is emitted** so the operator notices images were dropped without runtime knowledge of the blob store |
-/// | `Some(svc)`          | empty       | `Ok(vec![])`                 |
-/// | `Some(svc)`          | any images  | `Ok(parts)`                  |
+/// | `None`               | empty       | no parts, no verdicts        |
+/// | `None`               | any         | no parts; every `image_upload` is `Skipped(NoBlobStore)` and **a warning log is emitted** — the caller still learns the pixels are not in the request, which is the difference between a degraded turn and a hallucinated one |
+/// | `Some(svc)`          | empty       | no parts, no verdicts        |
+/// | `Some(svc)`          | any images  | `Ok(parts)` + one verdict per item |
 /// | `Some(svc)`          | read fails  | `Err(RuntimeError)`          |
 ///
 /// Returned errors **must** propagate — silently dropping an image the
@@ -197,8 +260,9 @@ pub async fn derive_image_parts_from_items(
 pub async fn derive_image_parts(
     attachment_service: Option<&Arc<dyn AttachmentService>>,
     items: &[AttachedItem],
-) -> Result<Vec<ContentPart>, crate::error::RuntimeError> {
+) -> Result<ImageParts, crate::error::RuntimeError> {
     let Some(svc) = attachment_service else {
+        let mut out = ImageParts::default();
         if !items.is_empty() {
             tracing::warn!(
                 attached_count = items.len(),
@@ -206,7 +270,12 @@ pub async fn derive_image_parts(
                  runtime cannot derive multimodal image parts. Check Phase B injection."
             );
         }
-        return Ok(Vec::new());
+        for item in items {
+            if let AttachedItem::ImageUpload { document_id, .. } = item {
+                out.record(document_id, ImageDelivery::Skipped(ImageSkip::NoBlobStore));
+            }
+        }
+        return Ok(out);
     };
     derive_image_parts_from_items(svc.as_ref(), items).await
 }
@@ -352,8 +421,9 @@ mod tests {
     #[tokio::test]
     async fn derive_image_parts_from_empty_items_returns_empty_vec() {
         let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
-        let parts = derive_image_parts_from_items(&*svc, &[]).await.unwrap();
-        assert!(parts.is_empty());
+        let derived = derive_image_parts_from_items(&*svc, &[]).await.unwrap();
+        assert!(derived.parts.is_empty());
+        assert!(derived.verdict("img-1").is_none(), "no item, no verdict");
     }
 
     /// Only image items survive; file_upload / attached_file /
@@ -391,9 +461,9 @@ mod tests {
                 client_id: None,
             },
         ];
-        let parts = derive_image_parts_from_items(&*svc, &items).await.unwrap();
-        assert_eq!(parts.len(), 1);
-        match &parts[0] {
+        let derived = derive_image_parts_from_items(&*svc, &items).await.unwrap();
+        assert_eq!(derived.parts.len(), 1);
+        match &derived.parts[0] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/png;base64,"));
                 assert_eq!(image_url.width, Some(640));
@@ -401,18 +471,26 @@ mod tests {
             }
             other => panic!("expected ImageUrl, got {other:?}"),
         }
+        // Only the `image_upload` item is this channel's business, so only it
+        // gets a verdict: the hint must not claim anything about a file_upload
+        // or a workspace reference.
+        assert_eq!(derived.verdict("img-1"), Some(&ImageDelivery::Delivered));
+        assert!(derived.verdict("doc-1").is_none());
     }
 
-    /// ImageUpload with a non-image `format` (e.g. `pdf`) is silently
-    /// dropped — the JSONL system entry is still written so the agent
-    /// sees the filename, but the bytes never reach the multimodal
-    /// payload.
+    /// ImageUpload with a non-image `format` (e.g. `pdf`) produces no part.
+    /// The verdict is what makes that visible: the hint can then tell the model
+    /// the pixels are not coming instead of announcing that they are attached.
     #[tokio::test]
-    async fn derive_image_parts_skips_non_image_format_silently() {
+    async fn derive_image_parts_skips_non_image_format_with_a_verdict() {
         let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
         let items = vec![png_item("img-1", "pdf", 8)];
-        let parts = derive_image_parts_from_items(&*svc, &items).await.unwrap();
-        assert!(parts.is_empty());
+        let derived = derive_image_parts_from_items(&*svc, &items).await.unwrap();
+        assert!(derived.parts.is_empty());
+        assert_eq!(
+            derived.verdict("img-1"),
+            Some(&ImageDelivery::Skipped(ImageSkip::NotAnImage))
+        );
     }
 
     /// If the underlying blob store can't find the document_id, the
@@ -464,30 +542,34 @@ mod tests {
                 client_id: None,
             },
         ];
-        let parts = derive_image_parts_from_items(&*svc, &items).await.unwrap();
-        assert_eq!(parts.len(), 2);
-        match &parts[0] {
+        let derived = derive_image_parts_from_items(&*svc, &items).await.unwrap();
+        assert_eq!(derived.parts.len(), 2);
+        match &derived.parts[0] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/png;base64,"));
                 assert_eq!(image_url.width, Some(640));
             }
             _ => panic!("expected ImageUrl"),
         }
-        match &parts[1] {
+        match &derived.parts[1] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/jpeg;base64,"));
                 assert_eq!(image_url.width, None);
             }
             _ => panic!("expected ImageUrl"),
         }
+        assert_eq!(derived.verdict("img-1"), Some(&ImageDelivery::Delivered));
+        assert_eq!(derived.verdict("img-2"), Some(&ImageDelivery::Delivered));
     }
 
-    /// Images over [`MAX_INLINE_IMAGE_BYTES`] are silently dropped with a
-    /// warn log. JSONL system entry is still written (handled by
-    /// `loop_persist::write_attached_items` upstream), so the agent sees
-    /// the filename but the LLM doesn't see the picture.
+    /// Images over [`MAX_INLINE_IMAGE_BYTES`] are dropped with a warn log, and the
+    /// verdict says why — that is the whole point: the model gets an actionable
+    /// line (`too large to inline, open it with image_read`) instead of a false
+    /// "pixels were attached". The JSONL system entry is still written (handled
+    /// by `loop_persist::write_attached_items` upstream), so the on-disk path
+    /// the hint quotes exists.
     #[tokio::test]
-    async fn derive_image_parts_drops_oversized_images() {
+    async fn derive_image_parts_drops_oversized_images_with_a_verdict() {
         let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::with_blob(
             "huge",
             vec![0u8; MAX_INLINE_IMAGE_BYTES + 1],
@@ -501,36 +583,44 @@ mod tests {
             height: None,
             client_id: None,
         }];
-        let parts = derive_image_parts_from_items(&*svc, &items).await.unwrap();
-        assert!(parts.is_empty());
+        let derived = derive_image_parts_from_items(&*svc, &items).await.unwrap();
+        assert!(derived.parts.is_empty());
+        assert_eq!(
+            derived.verdict("huge"),
+            Some(&ImageDelivery::Skipped(ImageSkip::TooLarge))
+        );
     }
 
-    /// `derive_image_parts` with `None` svc + empty items → empty
-    /// output, no log noise expected.
+    /// `derive_image_parts` with `None` svc + empty items → no parts and no
+    /// verdicts, no log noise expected.
     #[tokio::test]
     async fn derive_image_parts_none_svc_empty_items() {
-        let parts = derive_image_parts(None, &[]).await.unwrap();
-        assert!(parts.is_empty());
+        let derived = derive_image_parts(None, &[]).await.unwrap();
+        assert!(derived.parts.is_empty());
+        assert!(derived.verdict("img-1").is_none());
     }
 
-    /// `derive_image_parts` with `None` svc + non-empty items → empty
-    /// output **and** the warn log must fire so operators notice
-    /// (smoke-tested via `tracing-test` would be heavyweight; we just
-    /// verify the no-panic, no-leak behaviour here).
+    /// `derive_image_parts` with `None` svc + non-empty items → no parts, the
+    /// warn log fires so operators notice, **and** every image carries a verdict
+    /// — a missing blob store is exactly the silent-failure case the hint has to
+    /// state out loud.
     #[tokio::test]
-    async fn derive_image_parts_none_svc_with_items_logs_warning_silently() {
+    async fn derive_image_parts_none_svc_with_items_reports_no_blob_store() {
         let items = vec![png_item("img-1", "png", 9)];
-        let parts = derive_image_parts(None, &items).await.unwrap();
-        assert!(parts.is_empty());
+        let derived = derive_image_parts(None, &items).await.unwrap();
+        assert!(derived.parts.is_empty());
+        assert_eq!(
+            derived.verdict("img-1"),
+            Some(&ImageDelivery::Skipped(ImageSkip::NoBlobStore))
+        );
     }
 
-    /// `derive_image_parts` with `Some(svc)` + empty items → empty
-    /// output.
+    /// `derive_image_parts` with `Some(svc)` + empty items → no parts.
     #[tokio::test]
     async fn derive_image_parts_some_svc_empty_items() {
         let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
-        let parts = derive_image_parts(Some(&svc), &[]).await.unwrap();
-        assert!(parts.is_empty());
+        let derived = derive_image_parts(Some(&svc), &[]).await.unwrap();
+        assert!(derived.parts.is_empty());
     }
 
     /// `derive_image_parts` end-to-end: Some(svc) + an image item →
@@ -542,14 +632,15 @@ mod tests {
             b"\x89PNG\r\n\x1a\nfake".to_vec(),
         ));
         let items = vec![png_item("img-1", "png", 8)];
-        let parts = derive_image_parts(Some(&svc), &items).await.unwrap();
-        assert_eq!(parts.len(), 1);
-        match &parts[0] {
+        let derived = derive_image_parts(Some(&svc), &items).await.unwrap();
+        assert_eq!(derived.parts.len(), 1);
+        match &derived.parts[0] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/png;base64,"));
             }
             _ => panic!("expected ImageUrl"),
         }
+        assert_eq!(derived.verdict("img-1"), Some(&ImageDelivery::Delivered));
     }
 
     /// `merge_content_parts`: no inputs on either side ⇒ `None`. The

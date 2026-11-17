@@ -2558,7 +2558,17 @@ impl AgentLoop {
             if let Some(conversation) = self.session.conversation.as_ref() {
                 // JSONL stores the recoverable path label only; inline base64 is
                 // deliberately kept in memory and never persisted.
-                conversation.append_message("user", &label, None);
+                //
+                // `internal`, not a plain user row: this is the Runtime pointing
+                // the *model* at a file, not the human speaking. The role has to
+                // be `User` on the wire (it is the only role every provider
+                // accepts image parts on, D2), so the transcript needs the
+                // marker to tell the two apart — without it the label renders as
+                // a user bubble nobody typed, and a restart's `RetryTurn` picks
+                // it up as the last thing the human said. Both readers already
+                // honour the marker (`convertConversationEntry` in the Desktop,
+                // `restorer` in the Runtime).
+                conversation.append_internal_message("user", &label);
             }
             self.session.history.append(ChatMessage {
                 role: acowork_core::providers::traits::MessageRole::User,
@@ -2792,6 +2802,101 @@ mod tests {
         }).expect("tool image label remains in history");
         assert!(reclaimed.content.contains("/tmp/shot.png"));
         assert!(reclaimed.content_parts.is_none());
+    }
+
+    /// The injected image label reaches the model as a `user` message (D2: the
+    /// only role every provider accepts image parts on) but it is **not** the
+    /// human speaking, so the row it leaves in the JSONL must carry the
+    /// `internal` marker.
+    ///
+    /// Both consumers depend on that marker, and neither is reachable from a
+    /// unit test of the conversation API: the Desktop transcript drops the row
+    /// (`convertConversationEntry`) instead of painting a user bubble the human
+    /// never typed, and the Runtime's own `RetryTurn` reads the transcript with
+    /// `last_user_row`, which would otherwise replay `<tool_image …/>` as the
+    /// last thing the human said after a restart.
+    #[tokio::test]
+    async fn the_tool_image_label_is_persisted_as_an_internal_row() {
+        use std::io::Read;
+        use std::sync::atomic::AtomicUsize;
+        use tempfile::tempdir;
+
+        let dir = tempdir().unwrap();
+        let work_dir = dir.path();
+        let session_id = "test-tool-image-internal";
+        let committed = Arc::new(AtomicUsize::new(0));
+        let config = crate::conversation::SessionConfig {
+            agent_id: "com.test.loop".to_string(),
+            workspace_id: None,
+            model: None,
+            provider: None,
+        };
+        let (conversation, _config_rx, _state_rx) = ConversationSession::new(
+            work_dir, session_id, config, 0, // max_sessions
+            committed,
+        )
+        .unwrap();
+        let conversation = Arc::new(conversation);
+
+        let provider = Arc::new(MockProvider::tool_call_then_text(
+            "fake_image",
+            r#"{"path":"/tmp/shot.png"}"#,
+            "done",
+        ));
+        let tools = entries(vec![Arc::new(ImagePartsTool)]);
+        let (mut agent_loop, _) = AgentLoop::new(
+            RuntimeConfig::default(),
+            test_manifest(),
+            provider,
+            tools,
+            test_budget(),
+            None,
+            Some(conversation.clone()),
+        );
+        let mut context_builder = ContextBuilder::new("You are a test agent.".to_string());
+        let result = agent_loop
+            .run("read image", &mut context_builder, None, None, None, None)
+            .await;
+        assert!(result.is_ok(), "tool image turn failed: {result:?}");
+        conversation
+            .flush_pending()
+            .await
+            .expect("flush should succeed");
+
+        let mut content = String::new();
+        std::fs::File::open(
+            work_dir
+                .join("conversations")
+                .join(format!("{session_id}.jsonl")),
+        )
+        .unwrap()
+        .read_to_string(&mut content)
+        .unwrap();
+
+        let label_rows: Vec<crate::conversation::ConversationEntry> = content
+            .lines()
+            .map(|line| serde_json::from_str::<crate::conversation::ConversationEntry>(line).unwrap())
+            .filter(|entry| entry.content.contains("<tool_image"))
+            .collect();
+        assert_eq!(label_rows.len(), 1, "exactly one image label row");
+        assert_eq!(label_rows[0].role, "user");
+        assert!(
+            label_rows[0].is_internal(),
+            "the image label must be an internal row, not a user turn: {}",
+            label_rows[0].content
+        );
+        // The human's own words stay the only replayable user row.
+        let replayable: Vec<_> = content
+            .lines()
+            .map(|line| serde_json::from_str::<crate::conversation::ConversationEntry>(line).unwrap())
+            .filter(|entry| entry.role == "user" && !entry.is_internal())
+            .collect();
+        assert_eq!(
+            replayable.len(),
+            1,
+            "only the human's turn is replayable: {replayable:?}"
+        );
+        assert!(!replayable[0].content.contains("<tool_image"));
     }
 
     fn test_manifest() -> acowork_core::AgentManifest {
