@@ -1,0 +1,128 @@
+/* themes/default.css — the Default palette, as a theme pack.
+
+   Every theme the app ships, including this one, is a file in this directory
+   that overrides the same token surface under `:root.theme-<id>`. Default used
+   to live inline in globals.css, which made it the odd one out: it was the only
+   palette a pack could not be compared against, the only one that could not be
+   selected as a scope, and the only one whose values were silently inherited by
+   the packs that did not override a token.
+
+   globals.css now declares the token NAMES (the `@theme` registry, which is what
+   makes Tailwind emit the utilities) and nothing else: the VALUE of every
+   pack-owned token comes from a file in this directory. A token that appears in
+   one pack must appear in all of them — that is what keeps a pack from quietly
+   borrowing default's value for a surface it means to tint. */
+
+/* Light scope. Scoped like every other pack rather than declared on plain
+   `:root`: Tailwind emits the `@theme` registry after these files, so a
+   `:root` declaration here would tie with it and lose to the self-reference.
+   The class is applied by initThemePacks() before React mounts, and the window
+   stays hidden until it has rendered. */
+:root.theme-default {
+  --color-bg: white;
+  --color-page-bg: hsl(0 0% 100%);
+  --color-panel-block: hsl(0 0% 98%);
+  --color-panel-inset: hsl(0 0% 100%);
+  --color-panel-inset-2: hsl(0 0% 98%);
+  --color-modal-surface: hsl(0 0% 100%);
+  --color-editor-canvas: #FFFFFF;
+  --color-nav-surface: hsl(0 0% 95%);
+  --color-nav-item-hover: hsl(240 6% 90%);
+  --color-nav-divider: hsl(0 0% 78%);
+  --color-right-panel: hsl(0 0% 95%);
+  --color-chat-body: hsl(0 0% 99%);
+  --color-chat-bubble: hsl(240 4.8% 95.9% / 0.6);
+  --color-chat-title: hsl(240 4.8% 86.1% / 0.3);
+  --color-chat-input-bg: hsl(0 0% 97%);
+  --color-chat-input-border: var(--color-border-outer);
+  --color-input-bg: hsl(0 0% 98%);
+  --color-input-border: hsl(240 5.9% 90.6%);
+  --color-border-outer: hsl(240 5.9% 90.6%);
+  --color-border-divider: hsl(240 5.9% 88%);
+  --color-menu-divider: hsl(240 5% 90%);
+  --color-text: hsl(240 10% 10%);
+  --color-text-secondary: hsl(0 0% 25%);
+  --color-text-tertiary: hsl(0 0% 40%);
+  --color-text-disabled: hsl(0 0% 70%);
+  --color-menu-text: hsl(240 4% 25%);
+  --color-menu-icon: hsl(240 4% 65%);
+  --color-menu-danger: hsl(0 72% 51%);
+  --color-menu-danger-hover: hsl(0 86% 97%);
+  --color-menu-warning: hsl(32 95% 44%);
+  --color-menu-warning-hover: hsl(48 100% 96%);
+  --color-danger-surface: hsl(0 86% 97%);
+  --color-danger-surface-hover: hsl(0 93% 94%);
+  --color-danger-border: hsl(0 93% 82%);
+  --color-danger-text: hsl(0 74% 42%);
+  --color-danger-text-strong: hsl(0 74% 32%);
+  --color-danger-icon: hsl(0 84% 60%);
+  --color-control-track: hsl(240 5% 83%);
+  --color-control-outline: hsl(240 4% 65%);
+  --color-highlight-locate: hsl(212 92% 55% / 0.14);
+  --color-muted: hsl(210 40% 96.1%);
+  --color-muted-foreground: hsl(215.4 16.3% 46.9%);
+  --shadow-menu: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+}
+
+/* Dark scope. `:root.theme-default` also matches a dark root, so the dark
+   values need their own scope — they cannot simply edit the block above. */
+:root.theme-default.dark {
+  --color-bg: hsl(240 10% 3.9%);
+  --color-page-bg: hsl(240 3.8% 8%);
+  --color-panel-block: hsl(240 3.8% 16.7%);
+  --color-panel-inset: hsl(240 3.8% 8%);
+  --color-panel-inset-2: hsl(240 3.8% 4%);
+  --color-modal-surface: hsl(240 5% 10%);
+  --color-editor-canvas: #1E1E1E;
+  --color-nav-surface: hsl(0 0% 11.7%);
+  --color-nav-item-hover: hsl(0 0% 22%);
+  --color-nav-divider: hsl(240 4% 35%);
+  --color-right-panel: hsl(0 0% 11.7%);
+  --color-chat-body: hsl(240 3.8% 8%);
+  --color-chat-bubble: hsl(240 3.8% 15.7% / 0.3);
+  --color-chat-title: hsl(240 5.2% 26.1% / 0.3);
+  --color-chat-input-bg: hsl(0 0% 11.7%);
+  --color-chat-input-border: var(--color-border-outer);
+  --color-input-bg: hsl(240 3.8% 16.7%);
+  --color-input-border: hsl(0 0% 18%);
+  --color-border-outer: hsl(0 0% 13%);
+  --color-border-divider: hsl(240 5% 17%);
+  --color-menu-divider: hsl(0 0% 20%);
+  --color-text: hsl(0 0% 90%);
+  --color-text-secondary: hsl(0 0% 80%);
+  --color-text-tertiary: hsl(0 0% 60%);
+  --color-text-disabled: hsl(0 0% 38%);
+  --color-menu-text: hsl(240 5% 85%);
+  --color-menu-icon: hsl(240 4% 46%);
+  --color-menu-danger: hsl(0 91% 71%);
+  --color-menu-danger-hover: hsl(0 63% 24% / 0.2);
+  --color-menu-warning: hsl(45 96% 60%);
+  --color-menu-warning-hover: hsl(32 89% 28% / 0.2);
+  --color-danger-surface: hsl(0 45% 16%);
+  --color-danger-surface-hover: hsl(0 45% 21%);
+  --color-danger-border: hsl(0 45% 30%);
+  --color-danger-text: hsl(0 91% 71%);
+  --color-danger-text-strong: hsl(0 91% 82%);
+  --color-danger-icon: hsl(0 91% 71%);
+  --color-control-track: hsl(240 4% 36%);
+  --color-control-outline: hsl(240 4% 46%);
+  --color-highlight-locate: hsl(212 92% 55% / 0.22);
+  --color-muted: hsl(222.2 47.4% 15%);
+  --color-muted-foreground: hsl(215.4 16.3% 65%);
+  --shadow-menu-dark: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.5);
+}
+
+/* Not a token, but pack-specific all the same: the default chat pane needs an
+   explicit outline to reach the contrast the tinted packs get from their
+   coloured plane. It lives here because a theme scope declared in globals.css
+   is what dev/ci.sh's CSS theme-pack red line exists to prevent — every rule
+   that only makes sense for one palette belongs to that palette's file. */
+:root.theme-default .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel),
+:root.theme-default .chat-pane-row > .relative > .bg-right-panel {
+  border-color: hsl(0 0% 75%);
+}
+
+:root.theme-default.dark .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel),
+:root.theme-default.dark .chat-pane-row > .relative > .bg-right-panel {
+  border-color: var(--color-border-outer);
+}

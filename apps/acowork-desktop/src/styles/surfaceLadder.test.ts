@@ -110,10 +110,11 @@ describe("theme pack surface ladder", () => {
     // inset < block and block > right-panel in dark. The assertions above
     // restate it per pack; this one fails with the pack name when the
     // DEFAULT itself drifts, so the bar moves with the palette.
-    const css = readFileSync(resolve(__dirname, "globals.css"), "utf8");
-    const lightStart = css.indexOf("@theme {");
+    // The default palette lives in themes/default.css like every other pack.
+    const css = readFileSync(resolve(THEMES_DIR, "default.css"), "utf8");
+    const lightStart = css.indexOf(":root.theme-default {");
     const lightEnd = css.indexOf("\n}", lightStart);
-    const darkStart = css.indexOf("\n.dark {");
+    const darkStart = css.indexOf(":root.theme-default.dark {");
     const darkEnd = css.indexOf("\n}", darkStart);
 
     const lightL = (t: string) => lightness(css, lightStart, lightEnd, t);

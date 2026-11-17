@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { THEME_PACKS } from "./themePacks";
+import { TINTED_PACKS } from "./themePacks";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const THEMES_DIR = resolve(__dirname, "themes");
@@ -16,7 +16,7 @@ function scopeValue(css: string, selector: string, token: string): string | unde
 
 describe("chat input theme borders", () => {
   it("uses a dedicated, softer border token in every theme scope", () => {
-    for (const pack of THEME_PACKS) {
+    for (const pack of TINTED_PACKS) {
       const css = readFileSync(resolve(THEMES_DIR, `${pack.id}.css`), "utf8");
       for (const scope of ["light", "dark"] as const) {
         const selector = scope === "light" ? `:root.theme-${pack.id} {` : `:root.theme-${pack.id}.dark {`;

@@ -19,7 +19,7 @@ import { AppearanceMenu } from "./AppearanceMenu";
 import { useSettingsStore } from "../../stores/settingsStore";
 import {
   DEFAULT_THEME_PACK,
-  THEME_PACKS,
+  TINTED_PACKS,
   applyThemePack,
 } from "../../styles/themePacks";
 
@@ -63,12 +63,12 @@ describe("AppearanceMenu", () => {
     expect(screen.queryByRole("radio")).toBeNull();
     fireEvent.click(trigger());
     // 3 theme-mode rows + the theme-pack rows (Default + every pack file).
-    expect(screen.getAllByRole("radio").length).toBe(3 + 1 + THEME_PACKS.length);
+    expect(screen.getAllByRole("radio").length).toBe(3 + 1 + TINTED_PACKS.length);
   });
 
   it("closes on Escape", () => {
     openMenu();
-    expect(screen.getAllByRole("radio").length).toBe(3 + 1 + THEME_PACKS.length);
+    expect(screen.getAllByRole("radio").length).toBe(3 + 1 + TINTED_PACKS.length);
     act(() => {
       fireEvent.keyDown(document, { key: "Escape" });
     });
@@ -175,7 +175,9 @@ describe("AppearanceMenu theme packs", () => {
 
     fireEvent.click(defaultRow());
     expect(root.classList.contains("theme-paper")).toBe(false);
-    expect(root.getAttribute("data-theme-pack")).toBeNull();
+    // Default is a pack like the others: it activates its own scope.
+    expect(root.classList.contains("theme-default")).toBe(true);
+    expect(root.getAttribute("data-theme-pack")).toBe("default");
     expect(localStorage.getItem("acowork-theme-pack")).toBeNull();
     expect(defaultRow().getAttribute("aria-checked")).toBe("true");
   });

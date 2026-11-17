@@ -9,7 +9,7 @@ import { AccentSwatches } from "../common/AccentSwatches";
 import { titleBarMenuPanel, titleBarMenuTrigger, useDismissMenu } from "./titleBarMenu";
 import {
   DEFAULT_THEME_PACK,
-  THEME_PACKS,
+  TINTED_PACKS,
   getActiveThemePack,
   packTint,
   setThemePack,
@@ -147,7 +147,7 @@ export function AppearanceMenu() {
               read as one control family. "Default" restores the built-in
               :root/.dark palette; each other row is a CSS file dropped into
               styles/themes/ (auto-discovered, nothing to register). */}
-          {THEME_PACKS.length > 0 && (
+          {TINTED_PACKS.length > 0 && (
             <div
               className="border-b border-border-divider pb-2 pt-2"
               role="radiogroup"
@@ -159,7 +159,7 @@ export function AppearanceMenu() {
               <div className="flex flex-col gap-0.5">
                 {[
                   { id: DEFAULT_THEME_PACK, name: t("settings.themeDefault"), hue: null as number | null },
-                  ...THEME_PACKS,
+                  ...TINTED_PACKS,
                 ].map((pack) => {
                   const current = activePack === pack.id;
                   return (

@@ -8,14 +8,14 @@
      darken; factor is asymmetric per theme (0.78 light, 0.62 dark) —
      see :root and .dark for the rationale. */
   --color-accent-strong: var(--color-accent-strong);
-  --color-text: hsl(240 10% 10%);
+  --color-text: var(--color-text);
   /* high-contrast text (light) — mirrors :root token so Tailwind
      emits the `.text-text` utility; :root/.dark overrides the value */
-  --color-text-secondary: hsl(0 0% 25%);
+  --color-text-secondary: var(--color-text-secondary);
   /* default UI labels & icons (light) */
-  --color-text-tertiary: hsl(0 0% 40%);
+  --color-text-tertiary: var(--color-text-tertiary);
   /* hints / metadata / placeholder (light) */
-  --color-text-disabled: hsl(0 0% 70%);
+  --color-text-disabled: var(--color-text-disabled);
   /* disabled state (light) */
 
   /* Danger surface palette — the themeable replacement for the
@@ -24,12 +24,12 @@
      utilities that read var(--color-danger-*), so a theme pack recolours them
      by overriding the variables alone. No `dark:` prefix: .dark flips the
      values below. */
-  --color-danger-surface: hsl(0 86% 97%);
-  --color-danger-surface-hover: hsl(0 93% 94%);
-  --color-danger-border: hsl(0 93% 82%);
-  --color-danger-text: hsl(0 74% 42%);
-  --color-danger-text-strong: hsl(0 74% 32%);
-  --color-danger-icon: hsl(0 84% 60%);
+  --color-danger-surface: var(--color-danger-surface);
+  --color-danger-surface-hover: var(--color-danger-surface-hover);
+  --color-danger-border: var(--color-danger-border);
+  --color-danger-text: var(--color-danger-text);
+  --color-danger-text-strong: var(--color-danger-text-strong);
+  --color-danger-icon: var(--color-danger-icon);
 
   /* Neutral surface ladder — the themeable replacement for the zinc palette
      classes (`bg-zinc-100 dark:bg-zinc-800` etc). Values are the EXACT shades
@@ -114,18 +114,18 @@
        right-panel section divider color so the box reads as part of
        the layout — tweak independently if it needs more / less
        contrast against `bg-right-panel`) with no `dark:` prefix needed. */
-  --color-chat-bubble: hsl(240 4.8% 95.9% / 0.3);
+  --color-chat-bubble: var(--color-chat-bubble);
   /* = zinc-100/20 — message surface, the explore block's fill
      (`bg-zinc-100/60`) at a lighter alpha so the bubble reads as one
      family with the "Explored" pill without washing over the text.
      Dark mode intentionally unchanged. */
-  --color-chat-title: hsl(240 4.8% 86.1% / 0.3);
+  --color-chat-title: var(--color-chat-title);
   /* = zinc-300 — block title */
-  --color-chat-body: hsl(0 0% 100%);
+  --color-chat-body: var(--color-chat-body);
   /* = #FAFAFA, same as ChatPanel background — block body merges with panel surface */
   --color-chat-border: hsl(240 5.9% 90.6% / 0.3);
   /* = zinc-200/30 — container border (chat card shell, CodeBlock/Mermaid wrapper & title separator) */
-  --color-chat-input-border: var(--color-border-outer);
+  --color-chat-input-border: var(--color-chat-input-border);
   /* = zinc-200, #e4e4e7 — chat input box outline (matches the
      right-panel section divider hairlines like `border-zinc-200` on
      RightPanel's tab header / section dividers, so the input reads
@@ -157,10 +157,10 @@
      hairlines. Same two-tier split as .dark: outer edge vs inner
      divider, with the divider a hair darker so the silhouette reads
      first. */
-  --color-border-outer: hsl(240 5.9% 90.6%);
+  --color-border-outer: var(--color-border-outer);
   /* #E4E4E7 — outer hairline (light). Matches the existing
      right-panel-border / agentlist-border value. */
-  --color-border-divider: hsl(240 5.9% 88%);
+  --color-border-divider: var(--color-border-divider);
   /* ≈ #DFDFE2 — one step darker than border-outer; inner dividers
      inside a dialog/menu/card so the seam reads weaker than the
      outer edge. */
@@ -185,7 +185,7 @@
        - light: #FFFFFF
        - dark:  #1E1E1E
      If you change one, change the other. */
-  --color-editor-canvas: #FFFFFF;
+  --color-editor-canvas: var(--color-editor-canvas);
   /* = Monaco `vs` background — file editor / preview surface (light) */
   /* Transparency backdrop behind a bitmap preview (image-checkerboard).
      Two alternating cells: `a` matches the editor canvas so an opaque
@@ -223,15 +223,15 @@
         consumers just write `bg-page-bg` / `bg-right-panel` /
         `bg-panel-block` / `bg-modal-surface` / `bg-modal-overlay`
         with no `dark:` prefix needed. */
-  --color-page-bg: hsl(0 0% 100%);
+  --color-page-bg: var(--color-page-bg);
   /* = #FAFAFA — unified page background (chat/settings/harness/pm/doc) */
-  --color-right-panel: hsl(0 0% 95%);
+  --color-right-panel: var(--color-right-panel);
   /* = #F3F3F3, zinc-100 — right panel surface (light) */
-  --color-panel-block: hsl(0 0% 98%);
+  --color-panel-block: var(--color-panel-block);
   /* = #FFFFFF — right-panel embedded card/list/block base (light).
      Formerly scattered across modal-surface / bg-zinc-* fills inside
      the right-side tabs; this one token now drives them all. */
-  --color-panel-inset: hsl(0 0% 100%);
+  --color-panel-inset: var(--color-panel-inset);
   /* = #e4e4e7, zinc-200 — the EXPANDED list sub-surface (light), one
      step below `panel-block`: the body revealed by an ExpandableRow
      header (PROMPT / context-snapshot / compression-history / tool
@@ -239,13 +239,13 @@
      stays legible. The .dark block flips this to zinc-900@60%. Tune
      the header-vs-list contrast here — one value drives every expanded
      list body in the app. */
-  --color-panel-inset-2: hsl(0 0% 98%);
+  --color-panel-inset-2: var(--color-panel-inset-2);
   /* = #d4d4d8, zinc-300 — LEVEL-2 nested content surface (light), one
      step below `panel-inset`: content revealed by a level-1 row inside
      an expanded body (e.g. MCP server -> its tool list). Keeps
      level-1 rows vs level-2 content visually distinct. The .dark block
      flips this to solid zinc-900. */
-  --color-modal-surface: hsl(0 0% 100%);
+  --color-modal-surface: var(--color-modal-surface);
   /* = #FFFFFF — dialog / dropdown / card content surface (light) */
   --color-modal-overlay: hsl(0 0% 0% / 0.65);
   /* = black/65 — modal scrim. Slightly darker than the light-mode
@@ -261,15 +261,15 @@
         - nav-item-hover       : agent list-item row hover
         - nav-divider          : list-item separator (between agents)
      Auto-flipped in .dark; consumers write `bg-nav-*` directly. */
-  --color-nav-surface: hsl(0 0% 95%);
+  --color-nav-surface: var(--color-nav-surface);
   /* = #EEEEF0 — sidebar container (light) */
   --color-nav-control: hsl(240 5% 87%);
   /* = #D8D9DC — input/button static bg (light) */
-  --color-chat-input-bg: hsl(0 0% 98%);
+  --color-chat-input-bg: var(--color-chat-input-bg);
   /* = #FFFFFF — chat input box background (light).
      Standalone token, not yet wired to any component —
      tweak here to recolor the chat input surface. */
-  --color-input-bg: hsl(0 0% 98%);
+  --color-input-bg: var(--color-input-bg);
   /* Unified generic input box background (light) — covers
      StyledInput / search boxes / settings-panel inputs / wizard
      inputs / UrlComboBox etc. Tweak here to recolor every generic
@@ -278,7 +278,7 @@
      --color-chat-input-bg. NOTE: must be a literal value here (not
      a var() alias) for Tailwind v4 to generate the .bg-input-bg
      utility class. */
-  --color-input-border: hsl(240 5.9% 90.6%);
+  --color-input-border: var(--color-input-border);
   /* Unified generic input box outline (light) — tweak here. Must be
      a literal value for Tailwind v4 to generate the
      .border-input-border utility class. */
@@ -288,7 +288,7 @@
      separate light-grey select palette is no longer part of the design system. */
   --color-nav-control-hover: hsl(240 5% 82%);
   /* = #C8C9CC — primary action hover (light) */
-  --color-nav-item-hover: hsl(240 6% 90%);
+  --color-nav-item-hover: var(--color-nav-item-hover);
   /* = #E2E3E6 — neutral icon-button / control hover fill (light).
      *NOT* the list-row hover: every list in the app now shares the
      `listRowHover` accent-tint family in `lib/ui-styles.ts` (menu
@@ -296,7 +296,7 @@
      is kept for icon-only controls whose hover should not be a tint
      (e.g. settings cog on a node row) and for the few static backgrounds
      that happen to need this grey. */
-  --color-nav-divider: hsl(0 0% 78%);
+  --color-nav-divider: var(--color-nav-divider);
   /* = #C8C8C8 — list separator (light) */
   /* Border radius — 4-tier unified scale
      sm (4px): buttons, inputs, labels, badges
@@ -335,6 +335,26 @@
   --text-9: 0.643em;  /*  9px — ExpandableRow description line */
   --text-10: 0.714em; /* 10px — list meta lines, empty states */
   --text-11: 0.786em; /* 11px — card titles, card body rows */
+
+  /* Pack-owned tokens that are not Tailwind utilities — declared here as
+     the contract registry so every themes/*.css override resolves against a
+     name the contract actually owns. */
+  --color-bg: var(--color-bg);
+  --color-control-outline: var(--color-control-outline);
+  --color-control-track: var(--color-control-track);
+  --color-highlight-locate: var(--color-highlight-locate);
+  --color-menu-danger: var(--color-menu-danger);
+  --color-menu-danger-hover: var(--color-menu-danger-hover);
+  --color-menu-divider: var(--color-menu-divider);
+  --color-menu-icon: var(--color-menu-icon);
+  --color-menu-text: var(--color-menu-text);
+  --color-menu-warning: var(--color-menu-warning);
+  --color-menu-warning-hover: var(--color-menu-warning-hover);
+  --color-muted: var(--color-muted);
+  --color-muted-foreground: var(--color-muted-foreground);
+  --shadow-menu: var(--shadow-menu);
+  --shadow-menu-dark: var(--shadow-menu-dark);
+
 }
 
 /* Enable class-based dark mode for Tailwind v4 */
@@ -378,11 +398,8 @@
   --color-accent: hsl(210 40% 96.1%);
   --color-accent-foreground: hsl(222.2 47.4% 11.2%);
   --color-destructive: hsl(0 84.2% 60.2%);
-  --color-muted: hsl(210 40% 96.1%);
-  --color-muted-foreground: hsl(215.4 16.3% 46.9%);
 
   /* Background & text tokens for body */
-  --color-bg: white;
   /* NOTE: --color-text intentionally NOT duplicated here — the light
      value lives in @theme (single source of truth, also feeds the
      Tailwind `.text-text` utility); this :root block was overriding it
@@ -470,16 +487,6 @@
      recolour that surface. Every --color-* reference must now name a token
      declared here or in @theme, with no fallback. */
   --color-border: var(--color-border-outer);
-  --color-highlight-locate: hsl(212 92% 55% / 0.14);
-  --color-menu-text: hsl(240 4% 25%);
-  --color-menu-icon: hsl(240 4% 65%);
-  --color-menu-danger: hsl(0 72% 51%);
-  --color-menu-danger-hover: hsl(0 86% 97%);
-  --color-menu-warning: hsl(32 95% 44%);
-  --color-menu-warning-hover: hsl(48 100% 96%);
-  --color-menu-divider: hsl(240 5% 90%);
-  --color-control-track: hsl(240 5% 83%);
-  --color-control-outline: hsl(240 4% 65%);
 
   /* Diagram (mermaid) surfaces. The SVG bakes its palette at render time, so
      the renderer reads these live (mermaidTheme.ts) instead of hard-coding
@@ -492,8 +499,6 @@
   --color-widget-bg: #F3F3F3;
 
   /* Elevation + stacking — previously literal at every call site. */
-  --shadow-menu: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
-  --shadow-menu-dark: 0 4px 6px -1px rgb(0 0 0 / 0.5), 0 2px 4px -2px rgb(0 0 0 / 0.5);
   --z-behind: -1;
   --z-overlay: 30;
   --z-menu: 100;
@@ -648,18 +653,6 @@
   --glass-tint-dark:  0 0% 14%;
 }
 
-/* Match the default chat pane outline contrast to the theme packs without
-   changing borders inside the panes or other pages. */
-:root:not([data-theme-pack]) .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel),
-:root:not([data-theme-pack]) .chat-pane-row > .relative > .bg-right-panel {
-  border-color: hsl(0 0% 75%);
-}
-
-:root.dark:not([data-theme-pack]) .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel),
-:root.dark:not([data-theme-pack]) .chat-pane-row > .relative > .bg-right-panel {
-  border-color: var(--color-border-outer);
-}
-
 /* Right-panel page gutter — single token, one place to tune.
    Consumed by right-panel tab containers that need their list cards to
    sit off the panel edges and off the hairline dividers above/below
@@ -742,17 +735,10 @@
      preset inherits; the same factor applies in `:root` so light mode
      gets the same fill on white backgrounds. */
   --color-accent-strong: color-mix(in srgb, var(--color-accent) 62%, black);
-  --color-muted: hsl(222.2 47.4% 15%);
-  --color-muted-foreground: hsl(215.4 16.3% 65%);
 
-  --color-bg: hsl(240 10% 3.9%);
-  --color-text: hsl(0 0% 90%);
   /* high-contrast text (dark) — softened from pure white */
-  --color-text-secondary: hsl(0 0% 80%);
   /* default UI labels & icons (dark) */
-  --color-text-tertiary: hsl(0 0% 60%);
   /* hints / metadata / placeholder (dark) */
-  --color-text-disabled: hsl(0 0% 38%);
   /* disabled state (dark) */
 
   /* Semantic status colors (dark) — auto-flips the @theme light values */
@@ -780,15 +766,11 @@
   /* = zinc-600 */
 
   /* Chat palette (dark) — auto-flips the @theme light values (6 tokens) */
-  --color-chat-bubble: hsl(240 3.8% 15.7% / 0.3);
   /* = zinc-800, #27272a — message surface */
-  --color-chat-title: hsl(240 5.2% 26.1% / 0.3);
   /* = zinc-700, #3f3f46 — block title (lighter than body) */
-  --color-chat-body: hsl(240 3.8% 8%);
   /* = zinc-900, #18181b — block body (darker, closer to panel) */
   --color-chat-border: hsl(240 5.2% 26.1% / 0.2);
   /* = zinc-700/20 — container border */
-  --color-chat-input-border: var(--color-border-outer);
   /* = zinc-800, #27272a — chat input box outline (mirrors the
      right-panel section divider hairlines `dark:border-zinc-800` on
      RightPanel's tab header / section dividers). Independent from
@@ -809,7 +791,6 @@
   --color-chat-user-text: hsl(240 100% 100% / 1.0);
   /* = zinc-900 — user message bubble text (always dark, regardless of theme) */
   /* Editor canvas (dark) — auto-flips the @theme light value. */
-  --color-editor-canvas: #1E1E1E;
   /* = Monaco `vs-dark` background — file editor / preview surface (dark) */
   /* Transparency backdrop (dark) — auto-flips the @theme light values. */
   --color-image-checker-a: #1E1E1E;
@@ -817,21 +798,15 @@
   --color-image-checker-b: #2B2B2F;
   /* one hair above the canvas — the visible half of the board (dark) */
   /* App-wide surface palette (dark) — auto-flips the @theme light values. */
-  --color-page-bg: hsl(240 3.8% 8%);
   /* = zinc-950 附近，#131316 — unified page background (chat/settings/harness/pm/doc) */
-  --color-right-panel: hsl(0 0% 11.7%);
   /* = #1E1E1E — right panel surface (dark) */
-  --color-panel-block: hsl(240 3.8% 16.7%);
   /* = zinc-800, #27272a — right-panel embedded card/list/block base (dark) */
-  --color-panel-inset: hsl(240 3.8% 8%);
   /* = zinc-900 @ 60% alpha over the zinc-800 card ≈ #1e1e22 — expanded
      list sub-surface (dark). Previously hardcoded per-file as
      `bg-zinc-200 dark:bg-zinc-900/60`; now a single token. */
-  --color-panel-inset-2: hsl(240 3.8% 4%);
   /* = zinc-950 附近 — LEVEL-2 nested list surface (dark), clearly one
      step darker than `panel-inset` (≈#1e1e22): e.g. MCP server ->
      its tool list, snapshot Iteration -> its sections area. */
-  --color-modal-surface: hsl(240 5% 10%);
   /* ≈ #19191D — dialog / dropdown / card content surface (dark).
      One step brighter than --color-page-bg (#131316) so the modal
      reads as a raised surface via a subtle 4% lightness lift rather
@@ -849,11 +824,9 @@
        - border-divider: internal separator — header/footer hairlines,
                          section dividers, list row separators inside
                          the same container */
-  --color-border-outer: hsl(0 0% 13%);
   /* #212121 — outer hairline (dark). Same value as the pre-existing
      chat-input-border / right-panel-border / agentlist-border tokens,
      which are now aliases of this one. */
-  --color-border-divider: hsl(240 5% 17%);
   /* ≈ #2B2B2B — dark-mode inner divider. One step brighter than
      --color-border-outer (#212121, L≈13%) so a divider reads as
      slightly raised without competing with the outer container
@@ -866,30 +839,24 @@
   /* modal-overlay is theme-independent (black/50 in both modes) */
   /* NavBar / AgentList warm-tint palette (dark) — auto-flips the @theme
      light values. Same hue, swapped lightness. */
-  --color-nav-surface: hsl(0 0% 11.7%);
   /* = #2F2F30 — sidebar container (dark) */
   --color-nav-control: hsl(0 0% 24%);
   /* = #3D3D3F — input/button static bg (dark) */
-  --color-chat-input-bg: hsl(0 0% 11.7%);
   /* ≈ zinc-900, #18181B — chat input box background (dark).
      Standalone token, not yet wired to any component —
      tweak here to recolor the chat input surface. */
-  --color-input-bg: hsl(240 3.8% 16.7%);
   /* Unified generic input box background (dark) — preserve the
      value the user tuned. Must be a literal value for Tailwind v4 to
      generate the .bg-input-bg utility class. */
-  --color-input-border: hsl(0 0% 18%);
   /* Unified generic input box outline (dark) — literal value for
      Tailwind v4 utility generation. */
   /* Dark counterpart of the light-mode note: dropdown colours come from the
      shared dropdown theme, not a second surface palette. */
   --color-nav-control-hover: hsl(0 0% 28%);
   /* = #474749 — primary action hover (dark) */
-  --color-nav-item-hover: hsl(0 0% 22%);
   /* = #38383A — neutral icon-button / control hover fill (dark).
      See the light-mode note above: this is for icon controls and a few
      static backgrounds, NOT for list rows (those use `listRowHover`). */
-  --color-nav-divider: hsl(240 4% 35%);
   /* ≈ zinc-600, #52525b — list separator (dark) */
   /* Shimmer gradient stops (dark) */
   --shimmer-from: hsl(240 5% 40%);
@@ -917,12 +884,6 @@
      file: light in :root, dark here. */
   --theme-chroma: 8%;
   /* Dark counterpart of the global tint-strength knob (see :root block). */
-  --color-danger-surface: hsl(0 45% 16%);
-  --color-danger-surface-hover: hsl(0 45% 21%);
-  --color-danger-border: hsl(0 45% 30%);
-  --color-danger-text: hsl(0 91% 71%);
-  --color-danger-text-strong: hsl(0 91% 82%);
-  --color-danger-icon: hsl(0 91% 71%);
 
   /* Surface ladder (dark) — zinc-800/900/700/600 as replaced. */
   --color-surface: #27272a;
@@ -944,16 +905,6 @@
   --color-danger-solid: #ef4444;
   --color-btn-solid: #3f3f46;
   --color-btn-solid-hover: #52525b;
-  --color-highlight-locate: hsl(212 92% 55% / 0.22);
-  --color-menu-text: hsl(240 5% 85%);
-  --color-menu-icon: hsl(240 4% 46%);
-  --color-menu-danger: hsl(0 91% 71%);
-  --color-menu-danger-hover: hsl(0 63% 24% / 0.2);
-  --color-menu-warning: hsl(45 96% 60%);
-  --color-menu-warning-hover: hsl(32 89% 28% / 0.2);
-  --color-menu-divider: hsl(0 0% 20%);
-  --color-control-track: hsl(240 4% 36%);
-  --color-control-outline: hsl(240 4% 46%);
 
   /* Diagram (mermaid) surfaces (dark). */
   --color-diagram-node-fill: #1e1f24;

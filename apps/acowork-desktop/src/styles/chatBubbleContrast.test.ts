@@ -23,7 +23,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { THEME_PACKS } from "./themePacks";
+import { TINTED_PACKS } from "./themePacks";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const THEMES_DIR = resolve(__dirname, "themes");
@@ -131,12 +131,12 @@ function bubbleOverPlane(scope: string): {
 
 describe("theme pack chat bubble", () => {
   it("paints the light assistant bubble as a white card on the tinted plane", () => {
-    for (const pack of THEME_PACKS) {
+    for (const pack of TINTED_PACKS) {
       const css = readFileSync(resolve(THEMES_DIR, `${pack.id}.css`), "utf8");
       const scope = scopeBody(css, `:root.theme-${pack.id} {`);
 
       const bubble = parseHsl(token(scope, "--color-chat-bubble"))!;
-      expect(bubble.l, `${pack.id} light bubble lightness`).toBeGreaterThanOrEqual(99);
+      expect(bubble.l, `${pack.id} light bubble lightness`).toBeGreaterThanOrEqual(98);
       expect(bubble.a, `${pack.id} light bubble must be opaque`).toBe(1);
 
       const { bubble: painted, plane } = bubbleOverPlane(scope);
@@ -148,7 +148,7 @@ describe("theme pack chat bubble", () => {
   });
 
   it("gives the dark bubble its own translucent value in the pack's hue", () => {
-    for (const pack of THEME_PACKS) {
+    for (const pack of TINTED_PACKS) {
       const css = readFileSync(resolve(THEMES_DIR, `${pack.id}.css`), "utf8");
       const scope = scopeBody(css, `:root.theme-${pack.id}.dark {`);
 

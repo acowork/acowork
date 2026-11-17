@@ -20,10 +20,11 @@ describe("chat pane spacing", () => {
   });
 
   it("only changes default chat pane borders, including dark mode", () => {
-    const css = src("styles/globals.css");
-    expect(css).toContain(":root:not([data-theme-pack]) .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel)");
-    expect(css).toContain(":root:not([data-theme-pack]) .chat-pane-row > .relative > .bg-right-panel");
-    expect(css).toContain(":root.dark:not([data-theme-pack]) .chat-pane-row > .relative > .bg-right-panel");
+    // Pack-specific rules live with the pack (styles/themes/), not globals.css.
+    const css = src("styles/themes/default.css");
+    expect(css).toContain(":root.theme-default .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel)");
+    expect(css).toContain(":root.theme-default .chat-pane-row > .relative > .bg-right-panel");
+    expect(css).toContain(":root.theme-default.dark .chat-pane-row > .relative > .bg-right-panel");
     expect(css).toContain("border-color: hsl(0 0% 75%)");
     expect(css).toContain("border-color: var(--color-border-outer)");
   });

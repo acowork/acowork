@@ -17,6 +17,7 @@ import { AppearanceTab } from "./SettingsPage";
 import {
   DEFAULT_THEME_PACK,
   THEME_PACKS,
+  TINTED_PACKS,
   applyThemePack,
   setThemePack,
 } from "../../styles/themePacks";
@@ -48,7 +49,7 @@ describe("Settings ▸ Appearance theme-pack picker", () => {
   it("lists Default plus every discovered pack, Default checked initially", () => {
     render(<AppearanceTab />);
     expect(packInput(DEFAULT_THEME_PACK).checked).toBe(true);
-    for (const pack of THEME_PACKS) {
+    for (const pack of TINTED_PACKS) {
       expect(packInput(pack.id), `missing row for ${pack.id}`).toBeTruthy();
       expect(packInput(pack.id).checked).toBe(false);
     }

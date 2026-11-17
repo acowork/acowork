@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   DEFAULT_THEME_PACK,
   THEME_PACKS,
+  TINTED_PACKS,
   applyThemePack,
   getActiveThemePack,
   initThemePacks,
@@ -71,6 +72,31 @@ describe("theme packs", () => {
     }
   });
 
+  it("keeps the palette VALUES out of globals.css", () => {
+    // globals.css owns the token NAMES (the `@theme` registry Tailwind reads to
+    // emit utilities); styles/themes/ owns their VALUES. A colour re-added to
+    // globals.css `:root`/`.dark` would still be beaten by every pack's class
+    // scope, so it looks harmless -- right up until a pack forgets a token and
+    // quietly borrows that leftover instead of failing.
+    const css = readFileSync(resolve(__dirname, "globals.css"), "utf8");
+    const NL = String.fromCharCode(10);
+    const block = (start: string) => {
+      const i = css.indexOf(start);
+      return i < 0 ? "" : css.slice(i, css.indexOf(NL + "}", i));
+    };
+    const registry = block("@theme {");
+    const surface = new Set<string>();
+    for (const pack of THEME_PACKS) {
+      for (const m of packCss(pack.id).matchAll(/\s*(--[a-zA-Z0-9-]+)\s*:/g)) surface.add(m[1]);
+    }
+    expect(surface.size).toBeGreaterThan(0);
+    for (const name of surface) {
+      expect(registry, `${name} is not registered in @theme`).toContain(`${name}: var(${name});`);
+      expect(block(":root {"), `${name} still has a value in globals.css :root`).not.toContain(`${name}:`);
+      expect(block(NL + ".dark {"), `${name} still has a value in globals.css .dark`).not.toContain(`${name}:`);
+    }
+  });
+
   it("scopes every pack to its own light and dark selectors", () => {
     for (const pack of THEME_PACKS) {
       const css = packCss(pack.id);
@@ -102,7 +128,9 @@ describe("theme packs", () => {
 
     applyThemePack(DEFAULT_THEME_PACK);
     expect(root.classList.contains(`theme-${REF_PACK}`)).toBe(false);
-    expect([...root.classList].filter((c) => c.startsWith("theme-"))).toEqual([]);
+    expect([...root.classList].filter((c) => c.startsWith("theme-"))).toEqual([
+      `theme-${DEFAULT_THEME_PACK}`,
+    ]);
     expect(getActiveThemePack()).toBe(DEFAULT_THEME_PACK);
   });
 

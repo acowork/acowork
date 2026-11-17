@@ -81,8 +81,22 @@ export const THEME_PACKS: ThemePack[] = Object.keys(modules)
   .sort((a, b) => a.id.localeCompare(b.id));
 
 /**
- * Activate a pack by id. `default` (or any unknown id, e.g. a stale value for
- * a pack that was removed) restores the built-in :root/.dark palette.
+ * Every pack except `default` — the set that actually paints a coloured
+ * surface. The pickers list `default` as their own first row (it has a
+ * localized label and no tint to preview), and the CSS contract tests that
+ * assert "a pack must not inherit the base palette for token X" are about the
+ * tinted packs: default IS the base palette, so those rules have nothing to
+ * check there.
+ */
+export const TINTED_PACKS: ThemePack[] = THEME_PACKS.filter(
+  (p) => p.id !== DEFAULT_THEME_PACK,
+);
+
+/**
+ * Activate a pack by id. Exactly one `theme-<id>` scope is ever on <html>;
+ * an unknown id (a stale value for a pack that was removed) leaves no scope at
+ * all, and the base `:root`/`:root.dark` declarations in themes/default.css
+ * still paint the default palette.
  */
 export function applyThemePack(id: string): void {
   if (typeof document === "undefined") return;

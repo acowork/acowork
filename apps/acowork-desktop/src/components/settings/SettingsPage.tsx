@@ -28,7 +28,7 @@ import { OverlayScrollbar } from "../common/OverlayScrollbar";
 import { log } from "../../lib/logger";
 import {
   DEFAULT_THEME_PACK,
-  THEME_PACKS,
+  TINTED_PACKS,
   getActiveThemePack,
   packTint,
   setThemePack,
@@ -987,7 +987,7 @@ export function AppearanceTab() {
     { label: t("settings.themeDefault"), value: DEFAULT_THEME_PACK },
     // Each pack's dot previews its tint (shared `packTint` with the
     // title-bar menu's row icons); "Default" has none and keeps zinc.
-    ...THEME_PACKS.map((p) => ({
+    ...TINTED_PACKS.map((p) => ({
       label: p.name,
       value: p.id,
       dotColor: packTint(p.hue),
