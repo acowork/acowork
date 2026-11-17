@@ -194,10 +194,15 @@ export const dialogButtonSecondary =
  * deliberately one step below `--color-chat-title`'s light value.
  */
 export const chatCardShell = "overflow-hidden rounded-md border border-chat-border";
-const chatCardTitleBarBase =
-  "flex w-full items-center gap-[7px] border-b border-border-divider px-3 py-[7px] text-left text-xs font-medium text-text";
-export const chatCardTitleBar = `${chatCardTitleBarBase} bg-chat-title`;
-export const chatCardTitleBarMuted = `${chatCardTitleBarBase} bg-surface/60 dark:bg-chat-title`;
+/** The title banner's own seam, parameterized because the muted variant wears a
+ *  fainter one (see `chatCardTitleBarMuted`). */
+const chatCardTitleBarBase = (border: string) =>
+  `flex w-full items-center gap-[7px] border-b ${border} px-3 py-[7px] text-left text-xs font-medium text-text`;
+export const chatCardTitleBar = `${chatCardTitleBarBase("border-border-divider")} bg-chat-title`;
+/** The muted banner's seam is the divider at half opacity: the run's title bar
+ *  sits above its own answer, and the full-strength line read as a hard cut
+ *  between two halves of one message. */
+export const chatCardTitleBarMuted = `${chatCardTitleBarBase("border-border-divider/50")} bg-surface/60 dark:bg-chat-title`;
 export const chatCardBody = "bg-chat-bubble px-3 py-2.5";
 
 // ── Interaction-card buttons ────────────────────────────────────────
