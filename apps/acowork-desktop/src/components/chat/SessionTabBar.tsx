@@ -857,7 +857,9 @@ export function SessionTabBar({ agentId, chatTab, onOpenChatHistory }: SessionTa
                     onClick={(e) => handleClose(e, sessionId)}
                     className={cn(
                       "shrink-0 rounded p-0.5 transition-opacity",
-                      isActive ? "opacity-60 hover:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15" : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
+                      // No reserved space when hidden — appears on hover, same
+                      // model as the file-editor tabs (see FileEditorPanel).
+                      isActive ? "opacity-60 hover:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15" : "hidden group-hover:flex opacity-60 hover:!opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                     )}
                   >
                     <X className="h-3 w-3" />

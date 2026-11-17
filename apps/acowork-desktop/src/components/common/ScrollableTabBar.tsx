@@ -112,7 +112,13 @@ export const ScrollableTabBar = forwardRef<ScrollableTabBarHandle, ScrollableTab
                 )}
                 <div
                     ref={scrollRef}
-                    className="flex flex-1 min-w-0 overflow-x-auto gap-0.5 cursor-grab active:cursor-grabbing [&::-webkit-scrollbar]:hidden pb-[1px]"
+                    // [&>*]:shrink-0 — direct children here are usually Tooltip
+                    // wrapper divs (min-w-0 by design). Without forcing them to
+                    // keep their content width, flex-shrink squashes them instead
+                    // of growing scrollWidth, so tabs overlap and the overflow
+                    // arrows never appear. A scrollable bar must never shrink its
+                    // items; that is the whole point of scrollWidth > clientWidth.
+                    className="flex flex-1 min-w-0 overflow-x-auto gap-0.5 cursor-grab active:cursor-grabbing [&::-webkit-scrollbar]:hidden [&>*]:shrink-0 pb-[1px]"
                     style={{ scrollbarWidth: "none", msOverflowStyle: "none" }}
                     onMouseDown={handleDragStart}
                 >

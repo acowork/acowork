@@ -1676,9 +1676,13 @@ export function FileEditorPanel({ width }: { width: number }) {
                                             onClick={(e) => handleClose(e, file)}
                                             className={cn(
                                                 "shrink-0 rounded p-0.5 transition-opacity",
+                                                // Hidden tabs don't reserve the X's ~20px —
+                                                // it appears on hover (VS Code model). Reserving
+                                                // it invisibly is what made every tab feel
+                                                // half-empty once tabs stopped squashing.
                                                 isActive
                                                     ? "opacity-60 hover:opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
-                                                    : "opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
+                                                    : "hidden group-hover:flex opacity-60 hover:!opacity-100 hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15",
                                             )}
                                         >
                                             <X className="h-3 w-3" />
