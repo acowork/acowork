@@ -20,35 +20,63 @@
 //!
 //! ## Pipeline
 //!
-//! 1. `safe_mime(format)` whitelists the format string into a known
+//! 1. [`model_accepts_image`] answers whether the target model takes image
+//!    input at all. When it does not, no part is produced and every image is
+//!    recorded as `Skipped(NoVisionCapability)` **before** the blob is read:
+//!    the request-side filter strips `ImageUrl` for exactly the same reason
+//!    (`context.rs` §7.6), so producing the part would only put base64 on the
+//!    wire that the model never receives.
+//! 2. `safe_mime(format)` whitelists the format string into a known
 //!    `image/<subtype>` MIME (PNG/JPG/GIF/WebP); anything else produces no
-//!    part and the item is recorded as `Skipped(NotAnImage)` — we don't try
-//!    to sniff bytes for MIME detection (ADR-046 §2.7: the runtime does
+//!    part and the item is recorded as `Skipped(FormatNotReadable)` — we don't
+//!    try to sniff bytes for MIME detection (ADR-046 §2.7: the runtime does
 //!    no image recognition).
-//! 2. `build_data_url(mime, bytes)` base64-encodes the bytes and glues
+//! 3. `build_data_url(mime, bytes)` base64-encodes the bytes and glues
 //!    them into a single `data:<mime>;base64,<…>` URI.
-//! 3. `derive_image_parts_from_items(attachment, items)` iterates the
+//! 4. `derive_image_parts_from_items(attachment, items, caps)` iterates the
 //!    items, drops non-image variants, reads each image's bytes, and
 //!    produces an [`ImageParts`] — the `ImageUrl` parts in attach order plus
 //!    one [`ImageDelivery`] verdict per item.
 //!
-//! Step 3's verdicts exist for the prompt hint: "did the pixels reach the
+//! Step 4's verdicts exist for the prompt hint: "did the pixels reach the
 //! model" is a fact only this module knows, and the hint is the model's only
 //! account of it. A hint that guessed used to announce `pixels were attached`
 //! for images dropped here, and to invite `image_read` for images already in
-//! the message.
+//! the message. `Delivered` therefore means "the pixels are in `parts` **and**
+//! the model accepts image input" — the two halves the hint has to promise.
 //!
 //! [`AttachedItem`]: acowork_core::protocol::AttachedItem
 //! [`AttachmentService`]: crate::usecases::AttachmentService
 
 use std::sync::Arc;
 
-use acowork_core::protocol::AttachedItem;
+use acowork_core::protocol::{AttachedItem, ModelCapabilitiesInfo};
 use acowork_core::providers::traits::{ContentPart, ImageUrlPart};
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
 use crate::usecases::AttachmentService;
+
+/// Does this model take an image as model input?
+///
+/// The **single** answer to that question: the request-side filter that strips
+/// `ContentPart::ImageUrl` for text-only models (`context.rs` §7.6), the
+/// `supports_image_input` flag `image_read` gates itself on, and this module's
+/// delivery verdict all call it, so a hint can never promise pixels the
+/// request will drop.
+///
+/// Unknown capability answers **yes**, the opposite of
+/// [`crate::agent::attachment_to_document::model_accepts_pdf`], and for the
+/// same underlying reason: a document part on an endpoint that cannot take one
+/// is a hard 400 that costs the whole turn, while a model that cannot see an
+/// image still answers the text. Sending is the recoverable failure here.
+/// `modalities: None` (catalogued model, no modality metadata) is therefore
+/// "go ahead", exactly as the §7.6 filter has always read it.
+pub fn model_accepts_image(caps: Option<&ModelCapabilitiesInfo>) -> bool {
+    caps.and_then(|c| c.modalities.as_ref())
+        .map(|m| m.input.iter().any(|s| s.eq_ignore_ascii_case("image")))
+        .unwrap_or(true)
+}
 
 /// Maximum single image size we will inline as a data URI (8 MiB).
 ///
@@ -128,7 +156,10 @@ fn image_part(url: String, width: Option<u32>, height: Option<u32>) -> ContentPa
 /// turns a silent degradation into an instruction the model can act on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ImageDelivery {
-    /// The pixels are in this turn's `content_parts`.
+    /// The pixels are in this turn's `content_parts` **and** the target model
+    /// accepts image input ([`model_accepts_image`]). Both halves are part of
+    /// the claim: a part the request filter later strips never reaches the
+    /// model, so calling it delivered would be the same lie in a new place.
     Delivered,
     /// The pixels are not in the request, for this reason.
     Skipped(ImageSkip),
@@ -137,9 +168,17 @@ pub enum ImageDelivery {
 /// Why an `image_upload` item produced no part.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ImageSkip {
+    /// The model does not take image input at all ([`model_accepts_image`]
+    /// said no) — `context.rs` §7.6 would strip the part from the request, so
+    /// it is never built. On this path the file is still on disk and
+    /// `image_read` still answers with its own "switch to a vision model"
+    /// error, which is the action a human can take.
+    NoVisionCapability,
     /// `format` is not on the provider whitelist (svg, pdf, an unknown
-    /// extension): the item never belonged on the multimodal channel.
-    NotAnImage,
+    /// extension). Not "this is not an image" — an svg *is* one — but "not a
+    /// format the model's image input can carry", which is why the hint names
+    /// converting it as the fix.
+    FormatNotReadable,
     /// Bigger than [`MAX_INLINE_IMAGE_BYTES`] — the data URI would be resent on
     /// every request that carries this message.
     TooLarge,
@@ -150,13 +189,23 @@ pub enum ImageSkip {
 
 /// The two things the derivation owes its caller: the parts to send, and one
 /// verdict per `image_upload` item keyed by `document_id`.
+///
+/// The field is private on purpose. A caller that can push a part, or set a
+/// verdict, on its own can build a pair that contradicts itself — a "delivered"
+/// image with no part, or a part the hint never accounts for — and the whole
+/// reason this type exists is that the prompt hint trusts it. Parts leave only
+/// through [`ImageParts::take_parts`], which keeps what is left behind honest.
 #[derive(Debug, Default)]
 pub struct ImageParts {
-    pub parts: Vec<ContentPart>,
+    parts: Vec<ContentPart>,
     verdicts: std::collections::HashMap<String, ImageDelivery>,
 }
 
 impl ImageParts {
+    /// The parts this derivation produced, in attach order.
+    pub fn parts(&self) -> &[ContentPart] {
+        &self.parts
+    }
     /// Verdict for one `image_upload` item, or `None` when this turn never
     /// offered that item to the derivation (a reference merged in later, for
     /// instance) — the caller must then say "not inlined", not guess.
@@ -164,11 +213,32 @@ impl ImageParts {
         self.verdicts.get(document_id)
     }
 
-    /// Record the fate of one item. `pub(crate)` rather than private so the
-    /// prompt-side tests can hand `build_attachment_hint` a verdict map without
-    /// standing up an `AttachmentService`.
-    pub(crate) fn record(&mut self, document_id: &str, verdict: ImageDelivery) {
+    /// Move the parts out, leaving the verdicts behind.
+    ///
+    /// The caller puts the parts into the message *before* it builds the hint,
+    /// and the hint is exactly what still needs the verdicts — so the two have
+    /// to be separable, and named as such. Reaching for `parts` directly and
+    /// `std::mem::take`ing it leaves a struct that describes verdicts for parts
+    /// it no longer holds; this method says that move out loud.
+    pub fn take_parts(&mut self) -> Vec<ContentPart> {
+        std::mem::take(&mut self.parts)
+    }
+
+    /// Record the fate of one item. Private: `ImageParts` is only meaningful
+    /// when its parts and its verdicts are produced together, and a caller
+    /// that can set either half alone can build the lying pair.
+    fn record(&mut self, document_id: &str, verdict: ImageDelivery) {
         self.verdicts.insert(document_id.to_string(), verdict);
+    }
+
+    /// A verdict-only instance, for tests that hand
+    /// `build_attachment_hint` a map without standing up an
+    /// [`AttachmentService`].
+    #[cfg(test)]
+    pub(crate) fn for_test(document_id: &str, verdict: ImageDelivery) -> Self {
+        let mut out = Self::default();
+        out.record(document_id, verdict);
+        out
     }
 }
 
@@ -178,8 +248,13 @@ impl ImageParts {
 ///
 /// Behaviour:
 /// - Non-image variants are ignored (they are not on this channel).
+/// - When `caps` says the model takes no image input, every image is recorded
+///   as [`ImageSkip::NoVisionCapability`] and **the blob is never read**: the
+///   part would be stripped from the request anyway (§7.6), and base64 for an
+///   image nobody can see is pure cost. This check runs before the format and
+///   size checks because it is the one fact the other two cannot fix.
 /// - Items whose `format` isn't a known image MIME are recorded as
-///   [`ImageSkip::NotAnImage`] and announced to the caller.
+///   [`ImageSkip::FormatNotReadable`] and announced to the caller.
 /// - Items whose bytes exceed [`MAX_INLINE_IMAGE_BYTES`] are recorded as
 ///   [`ImageSkip::TooLarge`]; the JSONL system entry is still written, so the
 ///   prompt hint can point the model at the on-disk file.
@@ -188,7 +263,9 @@ impl ImageParts {
 pub async fn derive_image_parts_from_items(
     attachment: &dyn AttachmentService,
     items: &[AttachedItem],
+    caps: Option<&ModelCapabilitiesInfo>,
 ) -> Result<ImageParts, crate::error::RuntimeError> {
+    let accepts_image = model_accepts_image(caps);
     let mut out = ImageParts::default();
     for item in items {
         let AttachedItem::ImageUpload {
@@ -204,6 +281,19 @@ pub async fn derive_image_parts_from_items(
             continue;
         };
 
+        if !accepts_image {
+            tracing::debug!(
+                document_id = %document_id,
+                filename = %filename,
+                "model takes no image input; not inlining attached image"
+            );
+            out.record(
+                document_id,
+                ImageDelivery::Skipped(ImageSkip::NoVisionCapability),
+            );
+            continue;
+        }
+
         let Some(mime) = safe_mime(format) else {
             tracing::debug!(
                 document_id = %document_id,
@@ -211,7 +301,10 @@ pub async fn derive_image_parts_from_items(
                 format = %format,
                 "skipping non-image attachment in multimodal pipeline"
             );
-            out.record(document_id, ImageDelivery::Skipped(ImageSkip::NotAnImage));
+            out.record(
+                document_id,
+                ImageDelivery::Skipped(ImageSkip::FormatNotReadable),
+            );
             continue;
         };
 
@@ -254,13 +347,21 @@ pub async fn derive_image_parts_from_items(
 /// | `Some(svc)`          | any images  | `Ok(parts)` + one verdict per item |
 /// | `Some(svc)`          | read fails  | `Err(RuntimeError)`          |
 ///
+/// `caps` is the target model's capability set and is forwarded unchanged;
+/// when the model takes no image input every image is `Skipped(
+/// NoVisionCapability)`, which outranks the `NoBlobStore` verdict of the
+/// `None`-service branch (the model is the outer gate — a readable blob still
+/// would not reach it).
+///
 /// Returned errors **must** propagate — silently dropping an image the
 /// user explicitly attached would be a worse failure mode than
 /// rejecting the whole turn.
 pub async fn derive_image_parts(
     attachment_service: Option<&Arc<dyn AttachmentService>>,
     items: &[AttachedItem],
+    caps: Option<&ModelCapabilitiesInfo>,
 ) -> Result<ImageParts, crate::error::RuntimeError> {
+    let accepts_image = model_accepts_image(caps);
     let Some(svc) = attachment_service else {
         let mut out = ImageParts::default();
         if !items.is_empty() {
@@ -272,33 +373,49 @@ pub async fn derive_image_parts(
         }
         for item in items {
             if let AttachedItem::ImageUpload { document_id, .. } = item {
-                out.record(document_id, ImageDelivery::Skipped(ImageSkip::NoBlobStore));
+                let skip = if accepts_image {
+                    ImageSkip::NoBlobStore
+                } else {
+                    ImageSkip::NoVisionCapability
+                };
+                out.record(document_id, ImageDelivery::Skipped(skip));
             }
         }
         return Ok(out);
     };
-    derive_image_parts_from_items(svc.as_ref(), items).await
+    derive_image_parts_from_items(svc.as_ref(), items, caps).await
 }
 
-/// Merge pre-existing `content_parts` (whatever the frontend opted to
-/// inline directly) with image parts derived from `attached_items`.
+/// Assemble one turn's part list: the caller's own parts first, then whole
+/// documents, then images.
 ///
-/// Order: text parts first, image parts after. Returns `None` if both
-/// sources are empty — in that case the caller should fall back to
-/// [`ChatMessage::user(text)`]; a multimodal message with no parts
-/// is rejected by some providers.
+/// The order is a reading order, not a technical necessity — every provider
+/// takes the list as it comes. Text first because it is what the human typed;
+/// documents before images because a document is "this file" while an image
+/// is "these pictures", and the large object reads more naturally first when
+/// both arrived in the same message.
 ///
-/// When the caller has already supplied content parts via the
-/// pre-ADR-046 `params.content_parts` channel, those parts are
-/// preserved verbatim and the derived image parts are appended after
-/// them — we never re-derive text, only images.
-pub fn merge_content_parts(
+/// `None` when everything is empty: a multimodal message with no parts is
+/// rejected by some providers, and a plain `ChatMessage::user(text)` is what
+/// the caller falls back to.
+///
+/// This is the **only** assembly rule for a turn's parts. It lives beside the
+/// two derivations that feed it (`attachment_to_image`,
+/// `attachment_to_document`) rather than in the caller, so a test can pin the
+/// real merge instead of a look-alike — which is how the e2e path
+/// (`tests/mqtt_e2e.rs`) exercises it.
+pub fn merge_turn_parts(
     frontend_parts: Option<Vec<ContentPart>>,
-    derived_images: Vec<ContentPart>,
+    documents: Vec<ContentPart>,
+    images: Vec<ContentPart>,
 ) -> Option<Vec<ContentPart>> {
     let mut all: Vec<ContentPart> = frontend_parts.unwrap_or_default();
-    all.extend(derived_images);
-    if all.is_empty() { None } else { Some(all) }
+    if all.is_empty() && documents.is_empty() && images.is_empty() {
+        return None;
+    }
+    all.extend(documents);
+    all.extend(images);
+    Some(all)
 }
 
 #[cfg(test)]
@@ -308,6 +425,35 @@ mod tests {
 
     use super::*;
     use crate::usecases::attachment::{AttachmentError, UploadFileParams, UploadedFileResponse};
+
+    /// Capabilities carrying exactly these input modalities.
+    fn caps_with_input(inputs: &[&str]) -> ModelCapabilitiesInfo {
+        ModelCapabilitiesInfo {
+            context_window: 200_000,
+            max_output_tokens: 8_192,
+            max_input_tokens: None,
+            supports_tool_calling: true,
+            supports_reasoning: None,
+            supports_attachment: None,
+            supports_temperature: None,
+            cost: None,
+            modalities: Some(acowork_core::protocol::ModelModalities {
+                input: inputs.iter().map(|s| s.to_string()).collect(),
+                output: vec!["text".to_string()],
+            }),
+            name: None,
+            family: None,
+            knowledge_cutoff: None,
+            default_reasoning_effort: None,
+            thinking_mode: None,
+            reasoning_efforts: None,
+        }
+    }
+
+    /// A vision model — what every test that is not about capability assumes.
+    fn vision() -> Option<ModelCapabilitiesInfo> {
+        Some(caps_with_input(&["text", "image"]))
+    }
 
     /// In-memory fake of [`AttachmentService`].
     ///
@@ -421,8 +567,8 @@ mod tests {
     #[tokio::test]
     async fn derive_image_parts_from_empty_items_returns_empty_vec() {
         let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
-        let derived = derive_image_parts_from_items(&*svc, &[]).await.unwrap();
-        assert!(derived.parts.is_empty());
+        let derived = derive_image_parts_from_items(&*svc, &[], vision().as_ref()).await.unwrap();
+        assert!(derived.parts().is_empty());
         assert!(derived.verdict("img-1").is_none(), "no item, no verdict");
     }
 
@@ -461,9 +607,9 @@ mod tests {
                 client_id: None,
             },
         ];
-        let derived = derive_image_parts_from_items(&*svc, &items).await.unwrap();
-        assert_eq!(derived.parts.len(), 1);
-        match &derived.parts[0] {
+        let derived = derive_image_parts_from_items(&*svc, &items, vision().as_ref()).await.unwrap();
+        assert_eq!(derived.parts().len(), 1);
+        match &derived.parts()[0] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/png;base64,"));
                 assert_eq!(image_url.width, Some(640));
@@ -485,11 +631,85 @@ mod tests {
     async fn derive_image_parts_skips_non_image_format_with_a_verdict() {
         let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
         let items = vec![png_item("img-1", "pdf", 8)];
-        let derived = derive_image_parts_from_items(&*svc, &items).await.unwrap();
-        assert!(derived.parts.is_empty());
+        let derived = derive_image_parts_from_items(&*svc, &items, vision().as_ref()).await.unwrap();
+        assert!(derived.parts().is_empty());
         assert_eq!(
             derived.verdict("img-1"),
-            Some(&ImageDelivery::Skipped(ImageSkip::NotAnImage))
+            Some(&ImageDelivery::Skipped(ImageSkip::FormatNotReadable))
+        );
+    }
+
+    /// The capability gate reads the catalog the way the request-side filter
+    /// does: an explicit `image` modal means yes, an explicit list without it
+    /// means no, and *unknown* means yes.
+    #[test]
+    fn model_accepts_image_follows_the_catalog_and_defaults_to_yes() {
+        assert!(model_accepts_image(Some(&caps_with_input(&["text", "image"]))));
+        assert!(model_accepts_image(Some(&caps_with_input(&["TEXT", "IMAGE"]))));
+        assert!(!model_accepts_image(Some(&caps_with_input(&["text", "pdf"]))));
+        // No capability info at all / no modalities block → don't filter —
+        // the same reading as `context.rs` §7.6, because the two call sites
+        // must not disagree.
+        assert!(model_accepts_image(None));
+        let mut caps = caps_with_input(&["text"]);
+        caps.modalities = None;
+        assert!(model_accepts_image(Some(&caps)));
+    }
+
+    /// A model that takes no image input gets no part, and **the blob is never
+    /// read**: the mock has no blob for `img-1`, so a read would have failed
+    /// the call. The verdict has to be `NoVisionCapability`, not `Delivered` —
+    /// §7.6 strips the part from the request, so `Delivered` would put the
+    /// hint's "pixels are part of this message" back to lying.
+    #[tokio::test]
+    async fn derive_image_parts_skips_images_when_the_model_has_no_vision() {
+        let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
+        let items = vec![png_item("img-1", "png", 8)];
+        let caps = caps_with_input(&["text"]);
+        let derived = derive_image_parts_from_items(&*svc, &items, Some(&caps))
+            .await
+            .expect("no blob read should happen, so no read error either");
+        assert!(derived.parts().is_empty());
+        assert_eq!(
+            derived.verdict("img-1"),
+            Some(&ImageDelivery::Skipped(ImageSkip::NoVisionCapability))
+        );
+    }
+
+    /// The vision gate outranks the other skip reasons: on a text-only model an
+    /// unreadable format changes nothing, and saying "convert it to png" would
+    /// send the model after a file it still could not be shown.
+    #[tokio::test]
+    async fn no_vision_outranks_format_and_size() {
+        let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
+        let caps = caps_with_input(&["text"]);
+        let items = vec![
+            png_item("img-svg", "svg", 8),
+            png_item("img-big", "png", MAX_INLINE_IMAGE_BYTES as u64 + 1),
+        ];
+        let derived = derive_image_parts_from_items(&*svc, &items, Some(&caps))
+            .await
+            .unwrap();
+        assert!(derived.parts().is_empty());
+        for id in ["img-svg", "img-big"] {
+            assert_eq!(
+                derived.verdict(id),
+                Some(&ImageDelivery::Skipped(ImageSkip::NoVisionCapability)),
+                "{id}"
+            );
+        }
+    }
+
+    /// Missing blob store + no vision: the model is the outer gate, so that is
+    /// the reason the hint states.
+    #[tokio::test]
+    async fn no_vision_outranks_the_missing_blob_store() {
+        let caps = caps_with_input(&["text"]);
+        let items = vec![png_item("img-1", "png", 9)];
+        let derived = derive_image_parts(None, &items, Some(&caps)).await.unwrap();
+        assert_eq!(
+            derived.verdict("img-1"),
+            Some(&ImageDelivery::Skipped(ImageSkip::NoVisionCapability))
         );
     }
 
@@ -501,7 +721,7 @@ mod tests {
         // No blob pre-loaded for "missing".
         let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
         let items = vec![png_item("missing", "png", 8)];
-        let err = derive_image_parts_from_items(&*svc, &items)
+        let err = derive_image_parts_from_items(&*svc, &items, vision().as_ref())
             .await
             .unwrap_err();
         // Wrapped under RuntimeError::Config per current helper impl.
@@ -542,16 +762,16 @@ mod tests {
                 client_id: None,
             },
         ];
-        let derived = derive_image_parts_from_items(&*svc, &items).await.unwrap();
-        assert_eq!(derived.parts.len(), 2);
-        match &derived.parts[0] {
+        let derived = derive_image_parts_from_items(&*svc, &items, vision().as_ref()).await.unwrap();
+        assert_eq!(derived.parts().len(), 2);
+        match &derived.parts()[0] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/png;base64,"));
                 assert_eq!(image_url.width, Some(640));
             }
             _ => panic!("expected ImageUrl"),
         }
-        match &derived.parts[1] {
+        match &derived.parts()[1] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/jpeg;base64,"));
                 assert_eq!(image_url.width, None);
@@ -583,8 +803,8 @@ mod tests {
             height: None,
             client_id: None,
         }];
-        let derived = derive_image_parts_from_items(&*svc, &items).await.unwrap();
-        assert!(derived.parts.is_empty());
+        let derived = derive_image_parts_from_items(&*svc, &items, vision().as_ref()).await.unwrap();
+        assert!(derived.parts().is_empty());
         assert_eq!(
             derived.verdict("huge"),
             Some(&ImageDelivery::Skipped(ImageSkip::TooLarge))
@@ -595,8 +815,8 @@ mod tests {
     /// verdicts, no log noise expected.
     #[tokio::test]
     async fn derive_image_parts_none_svc_empty_items() {
-        let derived = derive_image_parts(None, &[]).await.unwrap();
-        assert!(derived.parts.is_empty());
+        let derived = derive_image_parts(None, &[], vision().as_ref()).await.unwrap();
+        assert!(derived.parts().is_empty());
         assert!(derived.verdict("img-1").is_none());
     }
 
@@ -607,8 +827,8 @@ mod tests {
     #[tokio::test]
     async fn derive_image_parts_none_svc_with_items_reports_no_blob_store() {
         let items = vec![png_item("img-1", "png", 9)];
-        let derived = derive_image_parts(None, &items).await.unwrap();
-        assert!(derived.parts.is_empty());
+        let derived = derive_image_parts(None, &items, vision().as_ref()).await.unwrap();
+        assert!(derived.parts().is_empty());
         assert_eq!(
             derived.verdict("img-1"),
             Some(&ImageDelivery::Skipped(ImageSkip::NoBlobStore))
@@ -619,8 +839,8 @@ mod tests {
     #[tokio::test]
     async fn derive_image_parts_some_svc_empty_items() {
         let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::new());
-        let derived = derive_image_parts(Some(&svc), &[]).await.unwrap();
-        assert!(derived.parts.is_empty());
+        let derived = derive_image_parts(Some(&svc), &[], vision().as_ref()).await.unwrap();
+        assert!(derived.parts().is_empty());
     }
 
     /// `derive_image_parts` end-to-end: Some(svc) + an image item →
@@ -632,9 +852,9 @@ mod tests {
             b"\x89PNG\r\n\x1a\nfake".to_vec(),
         ));
         let items = vec![png_item("img-1", "png", 8)];
-        let derived = derive_image_parts(Some(&svc), &items).await.unwrap();
-        assert_eq!(derived.parts.len(), 1);
-        match &derived.parts[0] {
+        let derived = derive_image_parts(Some(&svc), &items, vision().as_ref()).await.unwrap();
+        assert_eq!(derived.parts().len(), 1);
+        match &derived.parts()[0] {
             ContentPart::ImageUrl { image_url } => {
                 assert!(image_url.url.starts_with("data:image/png;base64,"));
             }
@@ -643,17 +863,18 @@ mod tests {
         assert_eq!(derived.verdict("img-1"), Some(&ImageDelivery::Delivered));
     }
 
-    /// `merge_content_parts`: no inputs on either side ⇒ `None`. The
-    /// caller treats this as "plain ChatMessage::user(text)".
+    /// `merge_turn_parts`: nothing from any source ⇒ `None`. The caller treats
+    /// this as "plain `ChatMessage::user(text)`", because some providers reject
+    /// a multimodal message carrying no parts.
     #[test]
-    fn merge_content_parts_both_empty_returns_none() {
-        let merged = merge_content_parts(None, Vec::new());
+    fn merge_turn_parts_both_empty_returns_none() {
+        let merged = merge_turn_parts(None, Vec::new(), Vec::new());
         assert!(merged.is_none());
     }
 
-    /// `merge_content_parts`: only derived images ⇒ `Some(images)`.
+    /// `merge_turn_parts`: only derived images ⇒ `Some(images)`.
     #[test]
-    fn merge_content_parts_only_images_returns_some() {
+    fn merge_turn_parts_only_images_returns_some() {
         let images = vec![ContentPart::ImageUrl {
             image_url: ImageUrlPart {
                 url: "data:image/png;base64,AAAA".into(),
@@ -662,18 +883,19 @@ mod tests {
                 height: None,
             },
         }];
-        let merged = merge_content_parts(None, images.clone()).unwrap();
+        let merged = merge_turn_parts(None, Vec::new(), images).unwrap();
         assert_eq!(merged.len(), 1);
     }
 
-    /// `merge_content_parts`: text first, then images. Verifies the
-    /// LLM sees the user's text **before** the picture (ordering
-    /// matters for some vision models).
+    /// `merge_turn_parts`: text first, then documents, then images. The order
+    /// is a reading order — the human's words before the objects they point at,
+    /// and the large object (a document) before the pictures.
     #[test]
-    fn merge_content_parts_text_first_then_images() {
+    fn merge_turn_parts_reads_text_then_documents_then_images() {
         let frontend = vec![ContentPart::Text {
             text: "see this image:".into(),
         }];
+        let documents = vec![ContentPart::document("JVBERi0=", "report.pdf", Some(1))];
         let images = vec![ContentPart::ImageUrl {
             image_url: ImageUrlPart {
                 url: "data:image/png;base64,AAAA".into(),
@@ -682,9 +904,13 @@ mod tests {
                 height: None,
             },
         }];
-        let merged = merge_content_parts(Some(frontend), images).unwrap();
-        assert_eq!(merged.len(), 2);
+        let merged = merge_turn_parts(Some(frontend), documents, images).unwrap();
+        assert_eq!(merged.len(), 3);
         assert!(matches!(&merged[0], ContentPart::Text { text } if text == "see this image:"));
-        assert!(matches!(&merged[1], ContentPart::ImageUrl { .. }));
+        assert!(
+            matches!(&merged[1], ContentPart::Document { .. }),
+            "the document is the larger object and reads first"
+        );
+        assert!(matches!(&merged[2], ContentPart::ImageUrl { .. }));
     }
 }

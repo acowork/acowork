@@ -136,14 +136,12 @@ impl AgentLoop {
                 let git_nudge = self.core.git_nudge.clone();
                 let agent_id = self.core.config.agent_id.clone();
                 let model = self.resolve_current_model(None);
-                let supports_image_input = self
-                    .core
-                    .get_model_capabilities(&model)
-                    .and_then(|caps| {
-                        caps.modalities
-                            .map(|m| m.input.iter().any(|item| item == "image"))
-                    })
-                    .unwrap_or(true);
+                // Same predicate as the request-side image filter and the
+                // delivery verdict: `image_read` must refuse exactly when the
+                // model cannot take the pixels it would put in the request.
+                let supports_image_input = crate::agent::attachment_to_image::model_accepts_image(
+                    self.core.get_model_capabilities(&model).as_ref(),
+                );
                 let image_read_budget = self.image_read_budget.clone();
                 let tool_ctx = ToolContext {
                     supports_image_input,

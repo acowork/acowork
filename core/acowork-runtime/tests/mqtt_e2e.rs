@@ -176,7 +176,7 @@ fn test_session_lifecycle_state_machine_enum() {
 // covers the bytes path. This test covers the *shape* path that the LLM
 // actually consumes: when the desktop sends only `attached_items` (no
 // inline `content_parts` — the ADR-046 default), the Runtime's
-// `derive_image_parts` + `merge_content_parts` pipeline must produce a
+// `derive_image_parts` + `merge_turn_parts` pipeline must produce a
 // `ChatMessage` carrying `ContentPart::ImageUrl` entries with valid data
 // URLs. If this test fails, the LLM would receive a plain text message
 // and have no way to see the picture — exactly the user-reported bug.
@@ -186,7 +186,7 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
     use acowork_core::protocol::AttachedItem;
     use acowork_core::providers::traits::{ChatMessage as CoreChatMessage, ContentPart};
     use acowork_runtime::agent::attachment_to_image::{
-        derive_image_parts, merge_content_parts, ImageDelivery,
+        derive_image_parts, merge_turn_parts, model_accepts_image, ImageDelivery,
     };
     use std::sync::Arc;
 
@@ -250,7 +250,13 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
     let frontend_content_parts: Option<Vec<ContentPart>> = None;
 
     // Run the same derivation SessionTask does:
-    let derived = derive_image_parts(Some(&svc), &attached_items)
+    // The production call site passes the target model's capabilities. This
+    // test stands in for no particular model: `None` is "no opinion", which the
+    // capability gate reads as "do not filter" (the pre-existing behaviour for
+    // an un-catalogued model).
+    let caps = None;
+    assert!(model_accepts_image(caps));
+    let mut derived = derive_image_parts(Some(&svc), &attached_items, caps)
         .await
         .expect("derive_image_parts succeeds");
     // Both images are small and on the whitelist, so both must be delivered —
@@ -264,7 +270,9 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
         derived.verdict("img-2"),
         Some(&ImageDelivery::Delivered)
     );
-    let merged = merge_content_parts(frontend_content_parts, derived.parts);
+    // The production assembly rule, not a look-alike: `SessionTask` builds the
+    // turn's part list with exactly this function.
+    let merged = merge_turn_parts(frontend_content_parts, Vec::new(), derived.take_parts());
 
     // Build the exact ChatMessage shape the agent loop will pass to the
     // LLM. `user_multimodal` takes (text_for_logging, parts).

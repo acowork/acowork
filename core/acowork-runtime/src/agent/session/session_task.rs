@@ -1308,15 +1308,17 @@ impl SessionTask {
                                 crate::agent::attachment_to_image::derive_image_parts(
                                     agent_loop.core.attachment_service(),
                                     items,
+                                    caps.as_ref(),
                                 )
                                 .await,
                             ) {
                                 (Ok(documents), Ok(mut images)) => {
-                                    let parts = merge_turn_parts(
-                                        content_parts,
-                                        documents,
-                                        std::mem::take(&mut images.parts),
-                                    );
+                                    let parts =
+                                        crate::agent::attachment_to_image::merge_turn_parts(
+                                            content_parts,
+                                            documents,
+                                            images.take_parts(),
+                                        );
                                     Ok((parts, images))
                                 }
                                 (Err(e), _) | (_, Err(e)) => Err(e),
@@ -1772,15 +1774,17 @@ impl SessionTask {
                                 crate::agent::attachment_to_image::derive_image_parts(
                                     agent_loop.core.attachment_service(),
                                     &items,
+                                    caps.as_ref(),
                                 )
                                 .await,
                             ) {
                                 (Ok(documents), Ok(mut images)) => {
-                                    intent_content_parts = merge_turn_parts(
-                                        None,
-                                        documents,
-                                        std::mem::take(&mut images.parts),
-                                    );
+                                    intent_content_parts =
+                                        crate::agent::attachment_to_image::merge_turn_parts(
+                                            None,
+                                            documents,
+                                            images.take_parts(),
+                                        );
                                     intent_images = Some(images);
                                 }
                                 (Err(e), _) | (_, Err(e)) => tracing::warn!(
@@ -2722,34 +2726,6 @@ fn merge_intent_attachments(
     Some(merged)
 }
 
-/// Assemble one turn's part list: the caller's own parts first, then whole
-/// documents, then images.
-///
-/// The order is a reading order, not a technical necessity — every provider
-/// takes the list as it comes. Text first because it is what the human typed;
-/// documents before images because a document is "this file" while an image
-/// is "these pictures", and the large object reads more naturally first when
-/// both arrived in the same message.
-///
-/// `None` when everything is empty: a multimodal message with no parts is
-/// rejected by some providers, and a plain `ChatMessage::user(text)` is what
-/// the caller falls back to (the same contract
-/// [`crate::agent::attachment_to_image`] has always kept).
-fn merge_turn_parts(
-    frontend_parts: Option<Vec<acowork_core::providers::traits::ContentPart>>,
-    documents: Vec<acowork_core::providers::traits::ContentPart>,
-    images: Vec<acowork_core::providers::traits::ContentPart>,
-) -> Option<Vec<acowork_core::providers::traits::ContentPart>> {
-    let mut all: Vec<acowork_core::providers::traits::ContentPart> =
-        frontend_parts.unwrap_or_default();
-    if all.is_empty() && documents.is_empty() && images.is_empty() {
-        return None;
-    }
-    all.extend(documents);
-    all.extend(images);
-    Some(all)
-}
-
 /// Append the attachment block a turn's prompt carries, one line per
 /// attachable item:
 /// - `attached_file` / `attached_selection` / `attached_folder` — the workspace path
@@ -2882,11 +2858,16 @@ fn build_attachment_hint(
         } else {
             format!("{}\n\n", enriched)
         };
+        // The header must not contradict the per-item lines it introduces: it
+        // told the model to open every attachment, while an inlined image's own
+        // line says its pixels are already here. One carve-out keeps the two
+        // readable in the same breath.
         enriched = format!(
             "{}[Attached workspace files & uploads — the user pointed at these \
              to make the request. Open them (`file_read` / `doc_reader`, list a \
-             folder with `bash`) before answering; do not describe contents you \
-             have not read.]\n{}",
+             folder with `bash`) before answering, except an item whose line \
+             below says it is already part of this message; do not describe \
+             contents you have not read.]\n{}",
             sep,
             hint_lines.join("\n")
         );
@@ -2905,6 +2886,15 @@ fn build_attachment_hint(
 /// - `Skipped` was announced the same way. The model then described a picture
 ///   whose pixels it had never received.
 ///
+/// Every arm states a fact about *this* message and never a standing order:
+/// the line is written into the user turn and therefore replayed for the rest
+/// of the session, where it outlives the message it describes. "Do not call
+/// `image_read`" would then still be sitting in the history after an image
+/// part had been reclaimed (a mid-session switch to a text-only model strips
+/// them in `context.rs` §7.6), forbidding the one tool that could still get
+/// the picture back. `Delivered` says the pixels travel with this message,
+/// which the model can check against what it actually received.
+///
 /// `None` means the derivation did not run for this item (a path that got
 /// here without inlining); it degrades to the pre-inline wording, which is
 /// still actionable through `image_read`.
@@ -2920,19 +2910,27 @@ fn image_hint_line(
 
     let head = format!("- image: `{filename}` (id={document_id}{dimensions})");
     match delivery {
+        // Fact, not prohibition: the pixels are in the request the model is
+        // reading right now, so a `image_read` of the same file would only
+        // hand it the same picture a second time.
         Some(ImageDelivery::Delivered) => format!(
-            "{head} — its pixels are part of this message; do not call \
-             `image_read` for it"
+            "{head} — its pixels are already part of this message, so \
+             `image_read` on it would only send the same picture again"
+        ),
+        Some(ImageDelivery::Skipped(ImageSkip::NoVisionCapability)) => format!(
+            "{head} — this model takes no image input, so its pixels are NOT \
+             in this message; it is on disk at `{path}` and only a vision \
+             model can be shown it"
         ),
         Some(ImageDelivery::Skipped(ImageSkip::TooLarge)) => format!(
             "{head} — over the {} MiB inline limit, so its pixels are NOT in \
              this message; open it with `image_read` on `{path}`",
             MAX_INLINE_IMAGE_BYTES / (1024 * 1024)
         ),
-        Some(ImageDelivery::Skipped(ImageSkip::NotAnImage)) => format!(
-            "{head} — `{format}` is not a format the model can read, so its \
-             pixels are NOT in this message; convert it to png, then open it \
-             with `image_read` on `{path}`"
+        Some(ImageDelivery::Skipped(ImageSkip::FormatNotReadable)) => format!(
+            "{head} — `{format}` is not a format the model's image input can \
+             carry, so its pixels are NOT in this message; convert it to png, \
+             then open it with `image_read` on `{path}`"
         ),
         Some(ImageDelivery::Skipped(ImageSkip::NoBlobStore)) => format!(
             "{head} — the attachment store was unavailable, so its pixels are \
@@ -3047,31 +3045,6 @@ mod tests {
         );
     }
 
-    /// The turn's part list reads text, then whole documents, then images, and
-    /// an empty assembly is `None` rather than an empty array — some providers
-    /// reject a multimodal message with no parts.
-    #[test]
-    fn test_merge_turn_parts_reads_text_then_documents_then_images() {
-        use super::merge_turn_parts;
-        use acowork_core::providers::traits::ContentPart;
-
-        let text = || ContentPart::text("look at these");
-        let document = || ContentPart::document("JVBERi0=", "report.pdf", Some(1));
-        let image = || ContentPart::image_url("data:image/png;base64,AAAA");
-
-        assert!(merge_turn_parts(None, Vec::new(), Vec::new()).is_none());
-        let merged = merge_turn_parts(Some(vec![text()]), vec![document()], vec![image()]).unwrap();
-        assert!(matches!(&merged[0], ContentPart::Text { .. }));
-        assert!(
-            matches!(&merged[1], ContentPart::Document { .. }),
-            "the document is the larger object and reads first"
-        );
-        assert!(matches!(&merged[2], ContentPart::ImageUrl { .. }));
-        // A documents-only turn (the common PDF case) still gets its parts.
-        let docs_only = merge_turn_parts(None, vec![document()], Vec::new()).unwrap();
-        assert_eq!(docs_only.len(), 1);
-    }
-
     // -----------------------------------------------------------------
     // ADR-046 §2.4 — `build_attachment_hint` regression suite
     //
@@ -3111,26 +3084,38 @@ mod tests {
 
     /// The verdict map a real derivation would have returned for one item.
     fn image_parts_with(document_id: &str, verdict: ImageDelivery) -> ImageParts {
-        let mut parts = ImageParts::default();
-        parts.record(document_id, verdict);
-        parts
+        ImageParts::for_test(document_id, verdict)
     }
 
-    /// A delivered image must forbid `image_read` — its pixels are already in
-    /// this very request.
+    /// A delivered image's line states a fact (its pixels travel with this
+    /// message) instead of a standing order.
+    ///
+    /// The line lands in the user turn and is replayed for the rest of the
+    /// session, so "do not call `image_read`" would outlive the image part it
+    /// was written about — after a switch to a text-only model, `context.rs`
+    /// §7.6 strips those parts and `image_read` is the only way back.
     #[test]
-    fn test_build_attachment_hint_delivered_image_forbids_redundant_image_read() {
+    fn test_build_attachment_hint_delivered_image_states_the_fact_not_an_order() {
         let items = vec![image_upload_item()];
         let images = image_parts_with("0123456789ab-3", ImageDelivery::Delivered);
         let s = build_attachment_hint("look", Some(&items), Some("E:/ws"), Some(&images));
         assert!(
             s.contains(
                 "- image: `shot.png` (id=0123456789ab-3, 1280x800) — its pixels \
-                 are part of this message; do not call `image_read` for it"
+                 are already part of this message, so `image_read` on it would \
+                 only send the same picture again"
             ),
             "{s}"
         );
+        // The prohibition form is what this test exists to keep out.
+        assert!(!s.contains("do not call"), "{s}");
         assert!(!s.contains("reopen with"), "{s}");
+        // The header introduces the per-item lines; it must not order the model
+        // to open the one item whose line says it is already here.
+        assert!(
+            s.contains("except an item whose line below says it is already part"),
+            "{s}"
+        );
     }
 
     /// A dropped image must be announced as dropped, with the reason and the
@@ -3139,7 +3124,10 @@ mod tests {
     fn test_build_attachment_hint_dropped_image_is_not_announced_as_attached() {
         let cases = [
             (ImageSkip::TooLarge, "over the 8 MiB inline limit"),
-            (ImageSkip::NotAnImage, "not a format the model can read"),
+            (
+                ImageSkip::FormatNotReadable,
+                "not a format the model's image input can carry",
+            ),
             (ImageSkip::NoBlobStore, "attachment store was unavailable"),
         ];
         for (skip, reason) in cases {
@@ -3155,8 +3143,29 @@ mod tests {
                 s.contains("`image_read` on `E:/ws/files/shot_0123456789ab-3.png`"),
                 "{skip:?}: {s}"
             );
-            assert!(!s.contains("part of this message"), "{skip:?}: {s}");
+            // The header itself contains "already part of this message",
+            // so the check has to be the per-item claim.
+            assert!(!s.contains("its pixels are already part"), "{skip:?}: {s}");
         }
+    }
+
+    /// No vision: the pixels never reach the model even though the file is
+    /// readable, so the line must not send it after `image_read` — that tool
+    /// answers with the same "switch to a vision model" refusal, and the human
+    /// is the one who can act.
+    #[test]
+    fn test_build_attachment_hint_no_vision_names_the_real_blocker() {
+        let items = vec![image_upload_item()];
+        let images = image_parts_with(
+            "0123456789ab-3",
+            ImageDelivery::Skipped(ImageSkip::NoVisionCapability),
+        );
+        let s = build_attachment_hint("look", Some(&items), Some("E:/ws"), Some(&images));
+        assert!(s.contains("pixels are NOT in this message"), "{s}");
+        assert!(s.contains("this model takes no image input"), "{s}");
+        assert!(s.contains("only a vision model can be shown it"), "{s}");
+        assert!(!s.contains("image_read"), "{s}");
+        assert!(!s.contains("its pixels are already part"), "{s}");
     }
 
     /// No verdict (the derivation never saw this item) degrades to the

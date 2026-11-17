@@ -719,22 +719,21 @@ impl ContextBuilder {
         // `pdf` input without `image`, and dropping the document part here
         // would cost the turn its file on a path that has nothing to do with
         // images. Documents are 7.7's business.
-        if let Some(caps) = gateway_capabilities {
-            let supports_image = caps
-                .modalities
-                .as_ref()
-                .map(|m| m.input.iter().any(|s| s == "image"))
-                .unwrap_or(true); // true=don't filter when modalities unknown
-            if !supports_image {
-                for msg in &mut messages {
-                    if let Some(ref mut parts) = msg.content_parts {
-                        // Strip ImageUrl parts, leave the rest of the list alone
-                        parts.retain(|p| !matches!(p, ContentPart::ImageUrl { .. }));
-                        // If no text parts remain, set content_parts to None
-                        // to avoid sending an empty array to the API.
-                        if parts.is_empty() {
-                            msg.content_parts = None;
-                        }
+        //
+        // `model_accepts_image` is the same predicate the *derivation* uses to
+        // decide whether to inline at all (`attachment_to_image`), so the
+        // delivery verdict the prompt hint states and the filter applied here
+        // cannot drift: if this drops the part, the hint already said the
+        // pixels never arrived.
+        if !crate::agent::attachment_to_image::model_accepts_image(gateway_capabilities) {
+            for msg in &mut messages {
+                if let Some(ref mut parts) = msg.content_parts {
+                    // Strip ImageUrl parts, leave the rest of the list alone
+                    parts.retain(|p| !matches!(p, ContentPart::ImageUrl { .. }));
+                    // If no text parts remain, set content_parts to None
+                    // to avoid sending an empty array to the API.
+                    if parts.is_empty() {
+                        msg.content_parts = None;
                     }
                 }
             }
