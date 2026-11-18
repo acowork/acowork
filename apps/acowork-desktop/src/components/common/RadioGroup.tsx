@@ -7,6 +7,10 @@ interface RadioOption<T> {
      *  tint, so the row shows what picking it does). The selected dot keeps
      *  the accent treatment — selection must stay louder than preview. */
     dotColor?: string;
+    /** Optional glyph shown next to the label (e.g. Sun/Moon/Monitor for the
+     *  theme modes) so the row reads as a named state, not a bare radio.
+     *  Mirrors the title-bar appearance menu's theme rows. */
+    icon?: ReactNode;
 }
 
 interface RadioGroupProps<T> {
@@ -52,6 +56,9 @@ export function RadioGroup<T>({
                             }
                         />
                     </span>
+                    {opt.icon && (
+                        <span className="shrink-0 text-text-tertiary">{opt.icon}</span>
+                    )}
                     {opt.label}
                 </label>
             ))}

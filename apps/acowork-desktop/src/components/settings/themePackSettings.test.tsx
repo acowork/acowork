@@ -82,6 +82,16 @@ describe("Settings ▸ Appearance theme-pack picker", () => {
     expect(document.documentElement.classList.contains("theme-mist")).toBe(true);
   });
 
+  it("gives every theme-mode row a glyph, like the title-bar menu does", () => {
+    render(<AppearanceTab />);
+    for (const mode of ["light", "dark", "system"]) {
+      const row = document.querySelector(
+        `input[name="theme"][value="${mode}"]`,
+      )!.closest("label")!;
+      expect(row.querySelector("svg"), `missing glyph for ${mode}`).toBeTruthy();
+    }
+  });
+
   it("keeps the light/dark mode rows independent of the pack choice", () => {
     render(<AppearanceTab />);
     fireEvent.click(packInput("sage"));

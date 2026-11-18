@@ -632,7 +632,12 @@ export function SplashScreen({ onReady }: SplashScreenProps) {
                     <h1 className="leading-none">
                         <img src={brandMark} alt={t("splashScreen.altLogo")} width="331" />
                     </h1>
-                    <p className="text-sm font-medium uppercase tracking-[0.25em] text-text-tertiary ">
+                    {/* `tracking-[0.12em]`, not `0.25em`: the tagline is
+                        UPPERCASE, and at 0.25em the caps read as loose
+                        shouting — the word gaps swallow the letters. A
+                        wide tracking suits a short wordmark (ACOWORK),
+                        not a 48-character sentence. */}
+                    <p className="text-sm font-medium uppercase tracking-[0.12em] text-text-tertiary ">
                         Collaborate with your colleagues and AI agents
                     </p>
                 </div>

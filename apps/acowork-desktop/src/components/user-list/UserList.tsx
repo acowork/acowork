@@ -295,9 +295,10 @@ export const UserList = forwardRef<UserListHandle>(function UserList(_props, ref
   return (
     <div data-testid="user-list">
       {/* Same band as the node band and the project-groups band — see
-          `sidebarGroupBanner.ts`. `w-full` matches the user rows below
-          it: the band and the rows share one edge-to-edge width. */}
-      <div className={cn(SIDEBAR_GROUP_BANNER_CN, "w-full")}>
+          `sidebarGroupBanner.ts`, which owns the 1px inset on all sides.
+          No `w-full` here: the band plus a margin would overflow the
+          scroll viewport and get clipped. */}
+      <div className={SIDEBAR_GROUP_BANNER_CN}>
         <button
           type="button"
           onClick={() => setCollapsed((c) => !c)}
