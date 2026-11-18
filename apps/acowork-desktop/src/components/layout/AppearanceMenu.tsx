@@ -1,5 +1,6 @@
 import { useRef, useState, useSyncExternalStore } from "react";
-import { Check, Monitor, Moon, Palette, Sun } from "lucide-react";
+import { Check, Palette, type LucideIcon } from "lucide-react";
+import { THEME_MODE_ICONS } from "../../lib/themeModeIcons";
 import { useTranslation } from "../../i18n/useTranslation";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { listRowHover, listRowSelected } from "../../lib/ui-styles";
@@ -19,12 +20,12 @@ import type { Theme } from "../../lib/types";
 
 /** Theme-mode rows, in the order the Settings ▸ Appearance tab lists
  *  them. The glyph is part of the row (not just a check mark) so the
- *  three modes read as three named states, not a bare radio list. */
-const THEME_ROWS: { value: Theme; icon: typeof Sun }[] = [
-  { value: "light", icon: Sun },
-  { value: "dark", icon: Moon },
-  { value: "system", icon: Monitor },
-];
+ *  three modes read as three named states, not a bare radio list.
+ *  The glyphs come from `themeModeIcons` — the same map Settings ▸
+ *  Appearance draws its radio rows from, so both doors show one shape. */
+const THEME_ROWS: { value: Theme; icon: LucideIcon }[] = (
+  ["light", "dark", "system"] as const
+).map((value) => ({ value, icon: THEME_MODE_ICONS[value] }));
 
 /**
  * Title-bar appearance quick-settings — theme mode + global accent color.

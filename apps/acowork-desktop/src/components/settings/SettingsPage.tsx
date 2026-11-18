@@ -14,6 +14,7 @@ import { Switch } from "../common/Switch";
 import { getGatewayUrl, DEFAULT_THEME, DEFAULT_FONT_SIZE, DEFAULT_CONTENT_WIDTH, DEFAULT_OPACITY, DEFAULT_ACCENT_COLOR } from "../../lib/config";
 import { AccentSwatches } from "../common/AccentSwatches";
 import { Bug, HelpCircle, Monitor, User, SlidersHorizontal, Palette, Globe } from "lucide-react";
+import { ThemeModeIcon } from "../../lib/themeModeIcons";
 import { inputReadonly } from "../../lib/ui-styles";
 import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
@@ -1028,9 +1029,9 @@ export function AppearanceTab() {
             name="theme"
             value={theme}
             options={[
-              { label: t("settings.light"), value: "light" as const },
-              { label: t("settings.dark"), value: "dark" as const },
-              { label: t("settings.system"), value: "system" as const },
+              { label: t("settings.light"), value: "light" as const, icon: <ThemeModeIcon mode="light" /> },
+              { label: t("settings.dark"), value: "dark" as const, icon: <ThemeModeIcon mode="dark" /> },
+              { label: t("settings.system"), value: "system" as const, icon: <ThemeModeIcon mode="system" /> },
             ]}
             onChange={setTheme}
           />
