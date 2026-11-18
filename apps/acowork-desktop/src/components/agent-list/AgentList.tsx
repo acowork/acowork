@@ -886,10 +886,10 @@ export function AgentList({ width }: AgentListProps) {
         {selfUserId && (
           <div data-testid="project-group-section">
             {/* Same band as the node band and the Users band — see
-                `sidebarGroupBanner.ts`. `w-full` matches the agent rows
-                below it: the band and the rows share one edge-to-edge
-                width, so neither looks inset against the other. */}
-            <div className={cn(SIDEBAR_GROUP_BANNER_CN, "w-full")}>
+                `sidebarGroupBanner.ts`, which owns the 1px inset on all
+                sides. No `w-full` here: the band plus a margin would
+                overflow the scroll viewport and get clipped. */}
+            <div className={SIDEBAR_GROUP_BANNER_CN}>
               <button
                 type="button"
                 onClick={() => setGroupsCollapsed((c) => !c)}
@@ -1210,9 +1210,11 @@ function NodeGroupHeader({
         SIDEBAR_GROUP_BANNER_CN,
         // h-6 (24px) — a touch taller than a third of the agent row's
         // ~56px, so the node label has comfortable breathing room.
-        // `w-full` so the band is edge-to-edge like the agent rows below
-        // it — the band and the rows share one width.
-        "w-full items-center text-left",
+        // The 1px horizontal inset comes from the shared constant (all
+        // three bands) so the rounded corners are not clipped by the pane
+        // border; the width stays `auto` — a block box fills its parent
+        // minus the margins.
+        "items-center text-left",
         // `text-xs` + normal case, matching the agent / user row names
         // right below it. This header was `text-10 uppercase tracking-wide`
         // — nominally a size SMALLER than the rows, but caps + letter

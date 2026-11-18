@@ -47,9 +47,11 @@ describe("sidebar group banners are capsules", () => {
     // pill bolted onto a list of rectangles.
     expect(SIDEBAR_GROUP_BANNER_CN).toContain("rounded-md");
     expect(SIDEBAR_GROUP_BANNER_CN).not.toContain("rounded-full");
-    // A gap above and below, so the band reads as a label for the group
-    // under it instead of as another row in it.
-    expect(SIDEBAR_GROUP_BANNER_CN).toContain("my-1");
+    // A gap on all sides, so the band reads as a label for the group
+    // under it instead of as another row in it — and the SAME gap
+    // vertically and horizontally, so it sits evenly in its slot.
+    expect(SIDEBAR_GROUP_BANNER_CN).toContain("m-px");
+    expect(SIDEBAR_GROUP_BANNER_CN).not.toMatch(/\bmy-/);
     // NO outline: on a 24px band a hairline is the loudest thing in the
     // sidebar and the banner shouted over the agent rows it labels. The
     // fill step alone separates it — `panel-block` is one step above the
@@ -62,12 +64,15 @@ describe("sidebar group banners are capsules", () => {
     expect(SIDEBAR_GROUP_BANNER_CN).not.toContain("dark:");
   });
 
-  it("is full-bleed, like the agent rows it labels", () => {
-    // The rows below the banner run edge to edge (their selected state is
-    // an accent box with no margin). An inset banner next to them read
-    // as two different list styles sharing one sidebar, so the banner is
-    // full-bleed too — "either both have the margin or neither does".
-    expect(SIDEBAR_GROUP_BANNER_CN).not.toMatch(/\bmx-/);
+  it("insets 1px from the pane edge, so its corners are not clipped", () => {
+    // The band is a rounded pill; flush against the pane border its
+    // corners are cut off. `m-px` is the smallest inset that reads as
+    // "inside" without turning the band into a different list style —
+    // and it is the SAME inset on all four sides, so the band sits
+    // evenly in its slot.
+    expect(SIDEBAR_GROUP_BANNER_CN).toContain("m-px");
+    // No horizontal PADDING of its own — the inner button owns the text
+    // inset (`px-3`), exactly as the rows below it do.
     expect(SIDEBAR_GROUP_BANNER_CN).not.toMatch(/\bpx-/);
     // The rows themselves carry no horizontal margin either — asserted
     // on the source so the two cannot drift apart again.
@@ -98,10 +103,11 @@ describe("sidebar group banners are capsules", () => {
     expect(USER_LIST).toContain("SIDEBAR_GROUP_BANNER_CN");
   });
 
-  it("every band is full-bleed — no inset, no clipping", () => {
-    // The band runs edge to edge like the rows below it. `w-full` on a
-    // band that ALSO carries a horizontal margin would overflow the
-    // scroll viewport by the margin width, and the viewport clips it.
+  it("every band carries the shared 1px inset and never overflows", () => {
+    // `w-full` on a band that ALSO carries a horizontal margin would
+    // overflow the scroll viewport by the margin width, and the viewport
+    // clips it. So the inset lives in the shared constant and no call
+    // site adds `w-full` or its own margin on top.
     //
     // Comments are stripped first: these call sites explain the geometry,
     // and the prose must not be mistaken for a class.
@@ -109,26 +115,25 @@ describe("sidebar group banners are capsules", () => {
       s.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
 
     const bands = [
-      ...AGENT_LIST.matchAll(/<div className=\{cn\(SIDEBAR_GROUP_BANNER_CN[^}]*\}/g),
-      ...USER_LIST.matchAll(/<div className=\{SIDEBAR_GROUP_BANNER_CN[^}]*\}/g),
+      ...AGENT_LIST.matchAll(/<div className=\{(?:cn\()?SIDEBAR_GROUP_BANNER_CN[^}]*\}/g),
+      ...USER_LIST.matchAll(/<div className=\{(?:cn\()?SIDEBAR_GROUP_BANNER_CN[^}]*\}/g),
     ];
     expect(bands.length).toBeGreaterThan(0);
     for (const band of bands) {
       const classes = stripComments(band[0]);
-      // No horizontal margin of its own.
+      // No horizontal margin of its own — the constant owns the inset.
       expect(classes).not.toMatch(/"[^"]*\bmx-[^"]*"/);
-      // `w-full` is safe precisely BECAUSE there is no margin to
-      // overflow with — the band and the rows below it share one width.
-      expect(classes).toMatch(/"[^"]*\bw-full\b[^"]*"/);
+      // No `w-full` either: it would overflow the viewport by the inset.
+      expect(classes).not.toMatch(/"[^"]*\bw-full\b[^"]*"/);
     }
-    // The node header composes the constant with `cn(...)`; it must
-    // reach the same full-bleed width.
+    // The node header composes the constant with `cn(...)`; it must not
+    // re-add a margin or a fixed width on top of it.
     const nodeHeader = AGENT_LIST.slice(AGENT_LIST.indexOf("function NodeGroupHeader"));
     const nodeClasses = nodeHeader.slice(
       nodeHeader.indexOf("SIDEBAR_GROUP_BANNER_CN"),
       nodeHeader.indexOf(")}", nodeHeader.indexOf("SIDEBAR_GROUP_BANNER_CN")),
     );
     expect(stripComments(nodeClasses)).not.toMatch(/"[^"]*\bmx-[^"]*"/);
-    expect(stripComments(nodeClasses)).toMatch(/"[^"]*\bw-full\b[^"]*"/);
+    expect(stripComments(nodeClasses)).not.toMatch(/"[^"]*\bw-full\b[^"]*"/);
   });
 });

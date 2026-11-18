@@ -8,12 +8,11 @@
  * bars rather than as the labels they are.
  *
  * They now wear ONE rounded band:
- *   - FULL-BLEED horizontally, exactly like the agent / user / project-group
- *     rows below them (`rounded-md px-3 py-2`, no margin). An inset banner
- *     next to a full-bleed selected row read as two different list styles
- *     sharing one sidebar — the banner's rounded corners ended 6px short
- *     of the pane edge while the selected agent's accent box ran straight
- *     into it. The rows set the language; the banner joins them.
+ *   - 1px INSET on ALL sides (`m-px`), so the band's rounded corners are
+ *     not clipped by the pane border and the band sits evenly inside its
+ *     slot. Everything else stays as wide as the agent / user /
+ *     project-group rows below it — the rows set the language; the banner
+ *     joins them.
  *   - `rounded-md` (6px) — the SAME radius those rows wear. A band is a
  *     sibling of those rows, not a chip of its own kind, so it has to
  *     share their corner language. `rounded-full` was tried first and
@@ -27,8 +26,9 @@
  *     above the `nav-surface` it sits on, so the step in the surface
  *     ladder already draws the shape. Adding a border on top of a fill
  *     that already separates itself is what made it read as a box.
- *   - `my-1` keeps a small gap above and below, so the band reads as a
- *     label for the group under it instead of as another row in it.
+ *   - the 1px gap above and below (same `m-px`) keeps the band from
+ *     fusing with the rows around it, without the loose 4px vertical
+ *     rhythm the old `my-1` gave.
  *   - the `panel-block` fill is unchanged, so the banner still reads as a
  *     raised band over `nav-surface` — the contract the node header and
  *     the Users header both already carried.
@@ -41,4 +41,4 @@
  * drift apart on geometry, and nothing but a shared constant stops them.
  */
 export const SIDEBAR_GROUP_BANNER_CN =
-  "my-1 flex h-6 items-center rounded-md bg-panel-block";
+  "m-px flex h-6 items-center rounded-md bg-panel-block";
