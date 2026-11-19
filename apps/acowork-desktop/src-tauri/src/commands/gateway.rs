@@ -648,8 +648,14 @@ pub async fn spawn_gateway(
         // file; stdout/stderr stay inherited for the dev console.
         .stdin(std::process::Stdio::null())
         .env("ACOWORK_GATEWAY_DAEMON", "true")
-        .env("ACOWORK_GATEWAY_LOG_LEVEL", "debug")
-        .env("RUST_LOG", "debug,h2=info,hyper=info,hyper_util=info,tower=info")
+        // info by default: debug + a flapping remote node still floods the
+        // rolling log (capability re-register / inventory / rumqttd). Operators
+        // can raise the level from Settings when diagnosing.
+        .env("ACOWORK_GATEWAY_LOG_LEVEL", "info")
+        .env(
+            "RUST_LOG",
+            "info,rumqttd=off,rumqttc=off,h2=warn,hyper=warn,hyper_util=warn,tower=warn,tower_http=warn",
+        )
         .env(
             "ACOWORK_LSP_CONFIG_DIR",
             resource_dir.to_string_lossy().to_string(),

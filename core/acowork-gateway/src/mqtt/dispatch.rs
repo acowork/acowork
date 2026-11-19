@@ -7,7 +7,8 @@
 //!
 //! See `docs/zh/protocols/mqtt.md` §8 (Topic patterns).
 
-use std::sync::Arc;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use acowork_core::mqtt_proto::{
     data_envelope, DataEnvelope, NodeEnrollResult,
@@ -46,16 +47,22 @@ use crate::operation_store::SharedOperationStore;
 /// is a replay.
 const REPLAY_WINDOW: std::time::Duration = std::time::Duration::from_secs(10);
 
-/// Grace period a node's records survive after its last offline signal
-/// (ADR-055 §6.13.3). A node killed hard (no graceful shutdown) stops
-/// publishing forever; without removal its records — the `node.{id}`
-/// bootstrap subsystem above all — linger and leave the Desktop (and
-/// every `/api/nodes` consumer) showing a ghost entry. Since the
-/// `node.{id}` entry is Optional this no longer pins the aggregated
-/// phase in BOOTING; the removal keeps the fleet view truthful.
-/// The timer arms on offline and fires only if the node is still
-/// offline at expiry; a reconnect inside the window re-announces every
-/// retained record, so nothing is lost by waiting.
+/// Nodes for which we have already emitted an INFO "control plane ready".
+/// MQTT flaps demote→ready repeatedly; INFO only once per process lifetime
+/// keeps the rolling log readable while DEBUG still sees every edge.
+fn node_ready_info_once(node_id: &str) -> bool {
+    static SEEN: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let set = SEEN.get_or_init(|| Mutex::new(HashSet::new()));
+    set.lock().unwrap_or_else(|e| e.into_inner()).insert(node_id.to_string())
+}
+
+/// Historical ADR-055 §6.13.3 window. Disconnect no longer deletes a
+/// node's agents or the shared ownership table. A phone that cannot
+/// reach the broker used to arm this timer, the timer published empty
+/// retained topics, and the next Gateway start replayed those
+/// tombstones as uninstall — including for the PC node when that node
+/// had flapped in the same incident. Presence may go offline. Inventory
+/// and `agent_owners.json` stay until an explicit per-agent uninstall.
 pub const NODE_OFFLINE_REMOVAL_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// How often the reconcile loop re-aligns `running_agents` to the
@@ -461,20 +468,15 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         if let Some(node_id) = extract_node_id_from_status_topic(topic) {
             let payload_text = String::from_utf8_lossy(payload);
             let trimmed = payload_text.trim();
-            // ADR-055 §6.13.3: an empty retained status is a removal
-            // signal (the `nodes remove` CLI, or this dispatcher's own
-            // cleanup pass). Run the full record cleanup — it is
-            // convergent, so the echo of the cleanup's own publish
-            // finds no traces and stops.
+            // Fleet-wide: a status tombstone is presence only. It does
+            // not delete any node's agents. The same rule applies to
+            // the PC node, the phone, and every other node. Agent data
+            // changes when that node is online and publishes it.
             if trimmed.is_empty() {
                 tracing::info!(
                     node_id,
-                    "Node status retained cleared — running node record cleanup"
+                    "Node status retained cleared — presence only; agent data kept"
                 );
-                let ctx_cleanup = ctx.clone();
-                tokio::spawn(async move {
-                    remove_node_records(&ctx_cleanup, &node_id).await;
-                });
                 return;
             }
             let is_offline = trimmed == "offline";
@@ -502,16 +504,18 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                     if registry.state(&subsystem) == Some(crate::bootstrap::SubsystemState::Ready) {
                         let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Optional);
                         handle.mark_booting(Some(format!("node '{node_id}' reported offline")));
-                        tracing::info!(
+                        // DEBUG: MQTT flaps demote/promote many times per
+                        // minute; INFO here re-creates the log flood.
+                        tracing::debug!(
                             node_id,
                             "Node offline — demoted node.{node_id} to booting (ADR-059 §7.2)"
                         );
                     }
                 }
-                // ADR-055 §6.13.3: arm the permanent-offline cleanup
-                // timer — a node still offline when the grace period
-                // elapses is removed from the fleet records entirely.
-                schedule_node_offline_cleanup(ctx, &node_id);
+                // Offline is presence only. Do not arm a timer that
+                // deletes this node's agents. A different node's
+                // failure must not reach here and wipe the PC fleet,
+                // and this node being unreachable is not an uninstall.
             }
         }
     } else if topic_matches("acowork/nodes/+/ready", topic) {
@@ -559,7 +563,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
             {
                 let handle = registry.register(subsystem.clone(), crate::bootstrap::ReadinessKind::Optional);
                 handle.mark_booting(Some(format!("node '{node_id}' cleared NodeReady (offline)")));
-                tracing::info!(
+                tracing::debug!(
                     node_id,
                     "NodeReady retained cleared — demoted node.{node_id} to booting (ADR-059 §7.2)"
                 );
@@ -609,11 +613,19 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                     handle.mark_ready(Some(format!(
                         "node '{node_id_owned}' NodeReady (control plane up)"
                     )));
-                    tracing::info!(
-                        node_id = %node_id_owned,
-                        protocol_version = ready.protocol_version,
-                        "Node control plane ready (ADR-059 §7.2)"
-                    );
+                    if node_ready_info_once(&node_id_owned) {
+                        tracing::info!(
+                            node_id = %node_id_owned,
+                            protocol_version = ready.protocol_version,
+                            "Node control plane ready (ADR-059 §7.2)"
+                        );
+                    } else {
+                        tracing::debug!(
+                            node_id = %node_id_owned,
+                            protocol_version = ready.protocol_version,
+                            "NodeReady re-assert / re-ready after demote"
+                        );
+                    }
                 }
                 _ => {
                     tracing::warn!(
@@ -785,11 +797,13 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         let state_for_installed = ctx.state.clone();
         let payload_owned = payload.to_vec();
         let node_id_owned = node_id.clone();
-        // ADR-087 D7: the retained-inventory clear is the authoritative
-        // "this instance no longer exists" signal — prune its ownership
-        // row there (the uninstall handler prunes eagerly; this is the
-        // backstop for uninstalls the Gateway did not dispatch).
-        let agent_owners = ctx.agent_owners.clone();
+        // Empty retained payload drops the live inventory row only.
+        // Do NOT prune `agent_owners` here. Offline cleanup (ADR-055
+        // §6.13.3) publishes these empty retained messages for every
+        // instance on a node that missed the grace window; treating
+        // that echo as uninstall wiped `agent_owners.json` and Desktop
+        // then hid the fleet (ADR-087 fail-closed). Explicit uninstall
+        // still drops the row in the HTTP handler.
         // ADR-087 backstop: if the install's "ok" NodeEvent was lost
         // (QoS-1 drop, Gateway restart between dispatch and event), the
         // first inventory sighting still commits the staged owner row.
@@ -804,22 +818,37 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         // (install complete / retained replay / empty-payload clear)
         // must wake the publisher so subscribers (Desktop) refresh.
         let inventory_trigger = ctx.inventory_trigger.clone();
+        let registry_for_installed = ctx.node_registry.clone();
         tokio::spawn(async move {
-            let mut gw = state_for_installed.write().await;
+            // An empty retained payload is not a data sync. Apply it
+            // only when this node is online and the instance is
+            // actually hosted there (live uninstall). Offline, for
+            // every node, leaves the inventory untouched; the next
+            // online publish is what updates it.
             if payload_owned.is_empty() {
-                gw.remove_installed(&agent_id);
-                if let Some(store) = agent_owners.as_ref() {
-                    store
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .remove(&agent_id);
+                let online = registry_for_installed.read().await.is_online(&node_id_owned);
+                let mut gw = state_for_installed.write().await;
+                let hosted_here = gw
+                    .installed_agents
+                    .get(&agent_id)
+                    .is_some_and(|info| info.node_id == node_id_owned);
+                if online && hosted_here {
+                    gw.remove_installed(&agent_id);
+                    if let Some(t) = inventory_trigger.as_ref() {
+                        t.notify();
+                    }
+                    tracing::info!(node_id = %node_id_owned, agent_id, "Removed installed agent (online node cleared it)");
+                } else {
+                    tracing::debug!(
+                        node_id = %node_id_owned,
+                        agent_id,
+                        online,
+                        "Ignored empty installed clear — node offline or instance hosted elsewhere"
+                    );
                 }
-                if let Some(t) = inventory_trigger.as_ref() {
-                    t.notify();
-                }
-                tracing::info!(node_id = %node_id_owned, agent_id, "Removed installed agent (node retained cleared)");
                 return;
             }
+            let mut gw = state_for_installed.write().await;
             match DataEnvelope::decode(payload_owned.as_slice()) {
                 Ok(envelope) => {
                     if let Some(data_envelope::Payload::InstalledAgentInfo(info)) = envelope.payload
@@ -856,22 +885,31 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                         // admin. Mirrors `build_owner_record`: hosting
                         // node denormalized, shared-by-default package
                         // stays shared.
-                        if is_new
-                            && let (Some(owner), Some(owners)) = (
-                                default_owner_installed.as_ref(),
-                                agent_owners_installed.as_ref(),
-                            )
-                        {
-                            let mut rec = crate::gateway::ownership::OwnerRecord::new(Some(
-                                owner.clone(),
-                            ))
-                            .with_node(Some(node_id_owned.clone()));
-                            if info.agent_id == crate::http::permission::DEFAULT_SHARED_AGENT_PACKAGE
-                            {
-                                rec.visibility = crate::gateway::ownership::Visibility::Shared;
-                            }
+                        //
+                        // Not gated on `is_new`: a reconnect / retained
+                        // re-publish after the Gateway already knew the
+                        // instance (or after a storm cleared ownership
+                        // without clearing inventory) must still heal a
+                        // missing row. Without this, Desktop hides the
+                        // agents (fail-closed D7) even though MQTT
+                        // inventory is healthy — seen with Android Node
+                        // republish after enroll flaps.
+                        if let (Some(owner), Some(owners)) = (
+                            default_owner_installed.as_ref(),
+                            agent_owners_installed.as_ref(),
+                        ) {
                             let mut store = owners.lock().unwrap_or_else(|e| e.into_inner());
                             if store.get(&info.instance_id).is_none() {
+                                let mut rec = crate::gateway::ownership::OwnerRecord::new(Some(
+                                    owner.clone(),
+                                ))
+                                .with_node(Some(node_id_owned.clone()));
+                                if info.agent_id
+                                    == crate::http::permission::DEFAULT_SHARED_AGENT_PACKAGE
+                                {
+                                    rec.visibility =
+                                        crate::gateway::ownership::Visibility::Shared;
+                                }
                                 store.put_if_absent(&info.instance_id, rec);
                             }
                         }
@@ -893,17 +931,21 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
                             );
                         }
 
-                        tracing::info!(node_id = %node_id_owned, agent_id = %aid, "Aggregated installed agent from node");
-
-                        // Wake the inventory-change notifier — the
-                        // Desktop listens on `acowork/desktop/inventory`
-                        // and refetches `GET /api/agents` on each
-                        // signal. Idempotent if the same Node
-                        // re-publishes its retained inventory on
-                        // reconnect.
-                        if let Some(t) = inventory_trigger.as_ref() {
-                            t.notify();
+                        if is_new {
+                            tracing::info!(
+                                node_id = %node_id_owned,
+                                agent_id = %aid,
+                                "Aggregated installed agent from node"
+                            );
+                            // Wake Desktop only on a real inventory edge.
+                            // Re-publishes during MQTT flap must not
+                            // refetch `/api/agents` thousands of times/min.
+                            if let Some(t) = inventory_trigger.as_ref() {
+                                t.notify();
+                            }
                         }
+                        // Unchanged retained re-publish: no log. A flapping
+                        // node would otherwise DEBUG-spam under RUST_LOG=debug.
                     }
                 }
                 Err(e) => {
@@ -925,39 +967,13 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
     }
 }
 
-/// Arm (or re-arm) the permanent-offline cleanup timer for `node_id`
+/// Full record cleanup for one explicitly removed node
 /// (ADR-055 §6.13.3).
 ///
-/// Called on every live offline signal. The timer fires after
-/// [`NODE_OFFLINE_REMOVAL_GRACE`] and only acts when the node is still
-/// offline at expiry — a node that reconnects inside the window
-/// re-announces all of its retained records, so waiting is safe.
-/// Re-arms are idempotent in effect: a duplicated timer finds its
-/// traces already gone and no-ops.
-fn schedule_node_offline_cleanup(ctx: &DispatchContext, node_id: &str) {
-    let ctx_cleanup = ctx.clone();
-    let node_id_owned = node_id.to_string();
-    let registry = ctx.node_registry.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(NODE_OFFLINE_REMOVAL_GRACE).await;
-        if registry.read().await.is_online(&node_id_owned) {
-            tracing::debug!(
-                node_id = %node_id_owned,
-                "Node reconnected within grace period — cleanup skipped"
-            );
-            return;
-        }
-        tracing::warn!(
-            node_id = %node_id_owned,
-            grace_secs = NODE_OFFLINE_REMOVAL_GRACE.as_secs(),
-            "Node offline beyond grace period — removing its records (ADR-055 §6.13.3)"
-        );
-        remove_node_records(&ctx_cleanup, &node_id_owned).await;
-    });
-}
-
-/// Full record cleanup for a node that left the fleet for good
-/// (ADR-055 §6.13.3).
+/// `node_id` is the only scope. Installed and running rows hosted on
+/// any other node are left alone, and `agent_owners.json` is not
+/// rewritten here — a phone-node removal must not drop PC agents out
+/// of the shared ownership file.
 ///
 /// Removes the `node.{id}` readiness subsystem (the orchestrator
 /// recomputes the aggregated phase on the deregister broadcast), the
@@ -1045,19 +1061,18 @@ pub async fn remove_node_records(ctx: &DispatchContext, node_id: &str) {
             gw.cron_scheduler.unregister_agent(id);
         }
     }
-    // ADR-087 D7: instances that vanish with their node have no
-    // ownership left to govern — prune their rows (node rows stay; the
-    // machine's owner is an audit fact, and re-enrolling the same
-    // node_id keeps it).
-    if let Some(store) = ctx.agent_owners.as_ref() {
-        let mut guard = store.lock().unwrap_or_else(|e| e.into_inner());
-        for id in &all_instances {
-            guard.remove(id);
-        }
-    }
-    // Bulk uninstalls from a permanently-offline node also need to wake
-    // the inventory notifier (Desktop subscribes to one signal per
-    // change; coalescing handles the burst on the publish side).
+    // Do NOT prune `agent_owners` here. Offline cleanup is about live
+    // inventory / running tables; ownership is an audit + ACL fact that
+    // must survive Gateway restart and node flaps. Pruning on offline
+    // emptied `agent_owners.json` whenever a node missed the reconnect
+    // grace window (Desktop then hid every agent under ADR-087
+    // fail-closed). Ownership rows are removed only by the explicit
+    // uninstall handler. Clearing retained `…/installed` topics must
+    // not delete them — that echo is how a grace-window miss wipes
+    // the whole table.
+    // Bulk inventory clears from a permanently-offline node also need
+    // to wake the inventory notifier (Desktop subscribes to one signal
+    // per change; coalescing handles the burst on the publish side).
     if let Some(t) = ctx.inventory_trigger.as_ref() {
         t.notify();
     }
@@ -1455,7 +1470,11 @@ async fn process_enroll_message(
                 .await
                 .set_node_token(&node_id, node_token.clone());
 
-            tracing::info!(node_id = %node_id, reuse, "Node enrolled");
+            if reuse {
+                tracing::debug!(node_id = %node_id, "Node enroll reuse (already enrolled)");
+            } else {
+                tracing::info!(node_id = %node_id, reuse, "Node enrolled");
+            }
             publish_enroll_result(
                 &mqtt_client,
                 NodeEnrollResult {
@@ -3351,7 +3370,12 @@ mod tests {
             });
         }
 
-        // Feed an empty retained payload (the node confirming uninstall).
+        // Live uninstall: the node is online and clears one instance.
+        // An offline node sending the same empty payload must not get here.
+        ctx.node_registry
+            .write()
+            .await
+            .update_status_from_mqtt("acowork/nodes/node-test/status", b"online");
         let topic = acowork_core::node::node_agent_installed_topic(
             "node-test",
             "1a1a1a1a-0000-4000-8000-000000000077",

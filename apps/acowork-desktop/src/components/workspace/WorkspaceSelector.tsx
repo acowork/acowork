@@ -15,6 +15,7 @@ import { menuItemHover, menuItemSelected } from "../../lib/ui-styles";
 import { ToolbarDropdownTrigger } from "../common/ToolbarDropdown";
 import { Tooltip } from "../common/Tooltip";
 import { RemoteFolderPicker } from "./RemoteFolderPicker";
+import { nodeNeedsRemoteBrowse } from "./nodeNeedsRemoteBrowse";
 
 /** Stable empty list for the "this array is not ours" case (see the
  *  `workspaces` selector below) — a fresh `[]` per render would churn. */
@@ -34,9 +35,17 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
   // Undefined for locally-spawned agents on the Gateway machine, in which
   // case the picker falls back to browsing the Gateway filesystem (same
   // machine, equivalent result).
-  const browseTargetNodeId = useAgentStore((s) =>
+  const agentNodeId = useAgentStore((s) =>
     selectedAgentId ? s.agents[selectedAgentId]?.meta?.node_id : undefined,
   );
+  const agentAlive = useAgentStore((s) =>
+    selectedAgentId ? Boolean(s.agents[selectedAgentId]?.meta?.alive) : false,
+  );
+  const nodes = useAgentStore((s) => s.nodes);
+  // Only forward `?target=` when the agent runs on another machine; a
+  // loopback Node on this Desktop keeps the Tauri folder dialog.
+  const browseTargetNodeId =
+    agentNodeId && nodeNeedsRemoteBrowse(agentNodeId, nodes) ? agentNodeId : undefined;
   // Note: we intentionally do NOT gate `fetchWorkspaces` on
   // `s.agents[selectedAgentId]?.meta?.lifecycle` here (ADR-085;
   // formerly `meta.ready`). Bug B v3 fix — the lifecycle push arrives
@@ -46,6 +55,10 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
   // Instead, the store's `fetchWorkspaces` now owns the 503 retry loop
   // (see `lib/httpRetry.ts`) so transient 503s during Runtime port
   // registration recover transparently.
+  //
+  // We DO short-circuit when `alive=false`: a stopped agent has no
+  // Runtime HTTP endpoint, so `with503Retry` would spin ~60s of 503s and
+  // pin the dropdown on "Loading…". Clear the slot and wait for start.
   const { gatewayUrl, gatewayMode } = useSettingsStore();
   const { addToast } = useToast();
   const { sessionWorkspaceMap, loading, deniedReason: deniedReasonRaw, fetchWorkspaces, setSessionWorkspace, workspacesAgentId } =
@@ -94,6 +107,18 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
       useWorkspaceStore.getState().reset();
       return;
     }
+    if (!agentAlive) {
+      // Leave `workspacesAgentId` null so the moment the agent comes
+      // alive we fall through to fetchWorkspaces (claiming the slot
+      // with this id while stopped would skip that refetch).
+      useWorkspaceStore.setState({
+        workspaces: [],
+        workspacesAgentId: null,
+        loading: false,
+        deniedReason: null,
+      });
+      return;
+    }
     // `workspacesAgentId` is in the dependency list on purpose: starting
     // another agent fetches for *that* agent and overwrites this one's slot
     // (the list is one global array). When it does, re-fetch so the current
@@ -102,8 +127,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
     // slot describes this agent, there is nothing to re-fetch.
     if (workspacesAgentId === selectedAgentId) return;
     void fetchWorkspaces(selectedAgentId);
-  }, [selectedAgentId, workspacesAgentId, fetchWorkspaces]);
-
+  }, [selectedAgentId, workspacesAgentId, fetchWorkspaces, agentAlive]);
   // Close on outside click
   useEffect(() => {
     if (!open) return;
@@ -208,12 +232,17 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
     if (gatewayMode === "relay") {
       return;
     }
-    // Remote (LAN) mode: use RemoteFolderPicker to browse server filesystem
-    if (gatewayMode === "remote") {
+    // Browse the filesystem where the agent actually runs (ADR-055 L7-1):
+    // - Gateway in remote mode → RemoteFolderPicker (Gateway host)
+    // - Agent has a node_id (e.g. phone Node while Gateway is local) →
+    //   RemoteFolderPicker with `?target=<node_id>` so paths are on that
+    //   machine, not the Desktop
+    // Only fall back to the Tauri dialog when the agent is Gateway-local
+    // with no node_id — same machine as this Desktop.
+    if (gatewayMode === "remote" || browseTargetNodeId) {
       setShowRemotePicker(true);
       return;
     }
-    // Local mode: use Tauri native directory dialog
     try {
       const selected = await dialog.open({ directory: true });
       if (selected && selectedAgentId) {
@@ -390,8 +419,15 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
               {/* Divider */}
               <div className="mx-3 my-1 border-t border-border-divider" />
 
-              {loading ? (
+              {loading && agentAlive ? (
                 <div className="py-4 text-center text-xs text-text-tertiary">{t("workspace.loading")}</div>
+              ) : !agentAlive ? (
+                <div className="px-4 py-4 text-center">
+                  <div className="text-xs text-text-secondary">{t("workspace.agentStoppedTitle")}</div>
+                  <div className="mt-1 text-10 leading-relaxed text-text-tertiary">
+                    {t("workspace.agentStoppedHint")}
+                  </div>
+                </div>
               ) : deniedReason === "manage" ? (
                 // ADR-087: the empty list here is a 403, not "this agent
                 // has no workspaces". Without this the panel rendered
@@ -538,7 +574,7 @@ export function WorkspaceSelector({ dropDirection = "up", textHidden, readOnly, 
         )}
       </ToolbarDropdownTrigger>
 
-      {/* Remote folder picker (only shown in remote mode) */}
+      {/* Remote folder picker: Gateway host or agent Node (ADR-055 L7-1) */}
       {showRemotePicker && selectedAgentId && (
         <RemoteFolderPicker
           target={browseTargetNodeId}

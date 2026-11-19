@@ -152,7 +152,13 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           // L833, `min-h-[2.5rem]`) above, so the three right-panel banners
           // read as a single height family. Was `h-6` (24px) — visually
           // ~16px shorter than the other two banners.
-          "flex min-h-[2.5rem] w-full shrink-0 items-center gap-1.5 px-3 text-left",
+          // `pl-3.5` / `pr-2.5`: the workspace-selector row above is
+          // `px-1.5` + the trigger's `px-2`, so ITS folder icon starts
+          // 14px from the panel edge and its icon cluster ends 10px from
+          // it. This strip uses the same two numbers, so the git icon
+          // lines up under the folder icon and the three icons on the
+          // right line up with the three above them.
+          "flex min-h-[2.5rem] w-full shrink-0 items-center gap-1 pl-3.5 pr-2.5 text-left",
           // Sized to the rows it labels: `.file-tree-row` in globals.css sets
           // the tree and the status list below to `--ui-text-size` (12px at
           // the default base), so the banner takes the same step rather than
@@ -183,13 +189,9 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           isExpanded && "bg-surface-subtle",
         )}
       >
-      <ChevronRight
-        className={cn(
-          "h-3 w-3 shrink-0 transition-transform duration-150",
-          isExpanded && "rotate-90",
-        )}
-      />
-      <GitBranch className="h-3 w-3 shrink-0" />
+      {/* The git icon takes the folder icon's slot (14px, `gap-1`), so the
+          ref below it starts where the workspace name starts. */}
+      <GitBranch className="h-3.5 w-3.5 shrink-0" />
       {/* No `uppercase` here: the bar's siblings in this panel (the
           workspace-selector row and the file-search row, both
           `toolbarButton` / `text-xs`) are normal case, so uppercasing
@@ -214,12 +216,12 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
            right-hand content jumps when the fetch lands. */
         <Loader2 className="ml-auto h-3 w-3 shrink-0 animate-spin" />
       ) : (
-        /* `ml-auto` + `pr-0.5`: the icon cluster is pushed hard right so
-           its RIGHT edge lands where the workspace-selector row's icon
-           cluster ends (that row is `px-1.5` + `pr-1` = 10px from the
-           panel edge; this bar is `px-3` = 12px, so the cluster gives
-           back 2px). The two strips then read as one aligned column. */
-        <div className="ml-auto flex items-center gap-1 pr-0.5 shrink-0">
+        /* `ml-auto`: the icon cluster is pushed hard right, so its RIGHT
+           edge lands where the workspace-selector row's three-icon
+           cluster ends. The two strips then read as one aligned column.
+           THREE icons here (history, refresh, chevron) against the three
+           above (new file, new folder, refresh) — one icon per column. */
+        <div className="ml-auto flex items-center gap-1 shrink-0">
           {/* History picker button. Rendered as a <span role="button">
               because it sits inside the bar's own <button> — nested
               <button> is invalid HTML and React will warn. The class
@@ -281,6 +283,26 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
               </span>
             </Tooltip>
           </div>
+          {/* The expand chevron — the LAST of the three icons on the
+              right, where the workspace-selector row's third icon sits.
+              It used to open the strip from the LEFT edge; there it
+              pushed the ref and the git icon out of alignment with the
+              folder icon and the workspace name above. */}
+          {/* The chevron wears the SAME 24x24 box as the two icon buttons
+              beside it and as the three buttons in the workspace-selector
+              row above (`h-6 w-6`, `gap-1`). A bare 14px glyph would make
+              this cluster one box narrower than the row above, so the three
+              icons would sit in three DIFFERENT columns — the alignment
+              the strip is after. */}
+          <span className="inline-flex h-6 w-6 items-center justify-center">
+            <ChevronRight
+              data-testid="git-status-bar-chevron"
+              className={cn(
+                "h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform duration-150",
+                isExpanded && "rotate-90",
+              )}
+            />
+          </span>
         </div>
       )}
       </button>

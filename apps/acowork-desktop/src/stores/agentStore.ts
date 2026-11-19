@@ -1490,6 +1490,16 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
         console.warn(
           `[AgentStore] fetchLatestSession(${agentId}) HTTP ${resp.status} @${performance.now().toFixed(0)}ms`,
         );
+        // Non-403/404 failures (502 Bad Gateway, exhausted 503, etc.) are
+        // terminal for this fetch. Latch `sessionTitle` to null so the
+        // AgentList skeleton effect stops re-firing forever — leaving it
+        // `undefined` would hammer the Gateway (and flood logs) while the
+        // Runtime endpoint stays unreachable (e.g. phone advertising
+        // 127.0.0.1). A later start/select path resets to undefined.
+        set((state) => {
+          const key = storageKeyFor(state, agentId);
+          return key ? patchAgent(state, key, { sessionTitle: null }) : { agents: state.agents };
+        });
         return { status: "unavailable" };
       }
       const data = (await resp.json()) as {
@@ -1515,6 +1525,10 @@ export const useAgentStore = create<AgentStoreState>((set, get) => ({
       return { status: "ok", session_id: data.session_id, title };
     } catch (e) {
       log.error(`[AgentStore] fetchLatestSession(${agentId}) failed:`, e);
+      set((state) => {
+        const key = storageKeyFor(state, agentId);
+        return key ? patchAgent(state, key, { sessionTitle: null }) : { agents: state.agents };
+      });
       return { status: "unavailable" };
     }
   },

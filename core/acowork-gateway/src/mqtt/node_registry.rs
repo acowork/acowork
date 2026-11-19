@@ -81,9 +81,9 @@ impl NodeRegistry {
     ///
     /// `topic` must match `acowork/nodes/{node_id}/status`; payload is
     /// "online" / "offline" (UTF-8 text, mirrors the agent status
-    /// topic contract). An empty payload (retained clear, sent by the
-    /// `nodes remove` CLI) is a removal signal: the node's record is
-    /// dropped for good.
+    /// topic contract). An empty payload is the same as offline for
+    /// every node: presence only. The record and its agent data stay.
+    /// Inventory changes when that node is online and publishes them.
     pub fn update_status_from_mqtt(&mut self, topic: &str, payload: &[u8]) {
         let parts: Vec<&str> = topic.split('/').collect();
         if parts.len() != 4
@@ -111,17 +111,16 @@ impl NodeRegistry {
                 "offline"
             }
         };
-        // Empty payload = the retained status was cleared, i.e. the
-        // node left the fleet for good (ADR-055 §6.13.3, `nodes
-        // remove` CLI). Drop the record: the clear is a removal
-        // signal and must never resurrect a ghost entry.
+        // Empty payload is a retained clear. It is not a data update.
+        // Every node, local or remote: mark offline if we already know
+        // it, and do not create or delete a record.
         if payload_str.is_empty() {
-            let removed = self.nodes.remove(node_id).is_some();
-            tracing::info!(
-                node_id,
-                removed,
-                "Node status retained cleared — registry record dropped"
-            );
+            if let Some(entry) = self.nodes.get_mut(node_id) {
+                entry.online = false;
+                entry.online_since = None;
+                entry.last_updated = Instant::now();
+                tracing::info!(node_id, "Node status retained cleared — marked offline");
+            }
             return;
         }
 
@@ -150,6 +149,7 @@ impl NodeRegistry {
                 online_since: None,
             }
         });
+        let edge = entry.online != online;
         if online && !entry.online {
             entry.online_since = Some(Utc::now());
         } else if !online {
@@ -158,7 +158,11 @@ impl NodeRegistry {
         entry.online = online;
         entry.last_updated = now;
 
-        tracing::debug!(node_id, online, "Node registry status updated");
+        // Presence re-assert republishes retained `online` every few
+        // seconds; only log the false↔true edge so DEBUG stays readable.
+        if edge {
+            tracing::debug!(node_id, online, "Node registry status updated");
+        }
     }
 
     /// Update a node's metadata from a protobuf `DataEnvelope<NodeInfo>`
@@ -491,19 +495,19 @@ mod tests {
     }
 
     #[test]
-    fn empty_status_payload_drops_record() {
+    fn empty_status_payload_marks_offline_and_keeps_record() {
         let mut registry = NodeRegistry::new();
         registry.update_status_from_mqtt("acowork/nodes/local/status", b"online");
         assert!(registry.get("local").is_some());
 
-        // Retained clear (nodes remove) = removal signal.
+        // Retained clear is presence only. The node and its data stay.
         registry.update_status_from_mqtt("acowork/nodes/local/status", b"");
-        assert!(registry.get("local").is_none());
-        assert!(registry.list_nodes().is_empty());
+        assert!(!registry.is_online("local"));
+        assert!(registry.get("local").is_some());
 
-        // Clearing an unknown node is a no-op.
+        // Clearing an unknown node does not create a record.
         registry.update_status_from_mqtt("acowork/nodes/ghost/status", b"");
-        assert!(registry.list_nodes().is_empty());
+        assert!(registry.get("ghost").is_none());
     }
 
     #[test]
