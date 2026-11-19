@@ -5,7 +5,7 @@
 > 关联实施计划：S1 用户模式任务定义（归档于 `docs/_internal/archive/plan/zh/plan-p5.md`，本地查阅）
 >
 > **v2.0 修订说明**：本文档 v1.0 描述的布局（顶部标题栏带 Gateway 指示器、左侧导航栏 Chat/Models/Skills/Settings、右侧系统托盘动态状态、Models 独立视图、Vault/Providers 设置 Tab 等）与当前代码实现严重脱节。v2.0 依据 `apps/acowork-desktop` 实际代码逐节重写，以代码为准。
-> 主要差异：导航栏实为 5 个视图（Chat/Projects/Docs/Harness/Settings）+ 顶部头像；Gateway 状态移到底部状态栏；系统托盘仅含 Quit 菜单；无独立 Models 视图（Provider 管理在 Harness 视图）；Settings 为 Profile/General/Appearance/Gateway/Nodes 五个 Tab；聊天区为「Agent 列表 + 会话 + 可选文件编辑器 + 结果面板 + 右侧 40px 工具条」。
+> 主要差异：导航栏实为 5 个视图（Chat/Projects/Docs/Harness/Settings）+ 顶部头像；Gateway 状态移到底部状态栏；系统托盘仅含 Quit 菜单；无独立 Models 视图（Provider 管理在 Harness 视图）；Settings 为 Profile/General/Appearance/Gateway 四个 Tab（Nodes 不是独立 Tab，是 Gateway Tab 内的节点树区块）；聊天区为「Agent 列表 + 会话 + 可选文件编辑器 + 结果面板 + 右侧 40px 工具条」。
 
 ---
 
@@ -200,8 +200,9 @@
 - **常驻不自动消失** —— 休眠唤醒换网络后断线会持续存在，直到用户切换地址或重试成功
 - 有候选地址时显示数量角标，不展开浮层也知道"有东西可点"
 - 点击展开浮层（`w-80`，点外部 / Esc 关闭）：状态文案 → 候选地址纵向列表（每行一个 `btn-accent` 实心按钮，右侧显示延迟 ms，`max-h-56` 纵向滚动）→ 底部操作条
-- 本地模式（`gatewayMode === "local"`）：显示 "本地网关未运行" / 启动中显示 "正在启动本地网关"，提供 **[启动]** + **[重试]**
-- 远程模式：显示 "网关不可达"，提供 **[重试]**
+- 地址是本机（`isLoopbackGatewayUrl(gatewayUrl)`）：显示 "本地网关未运行" / 启动中显示 "正在启动本地网关"，提供 **[启动]** + **[重试]**
+- 地址不在本机：显示 "网关不可达"，提供 **[重试]**
+- 两者都是从**地址**推论出来的，不是用户选的模式（ADR-115）；文案也不再叫 "local Gateway"
 
 ---
 
@@ -448,7 +449,7 @@ Setup Tab 是全 Agent 级配置的唯一入口，7 张 level-1 折叠卡片自�
 | Profile | 用户身份：显示名、头像（上传/内置头像）、语言、时区、城市、职业 |
 | General | 日志：Gateway 日志级别、前端日志级别、日志文件大小/数量、删除日志；数据目录（只读，来自 `/api/config`）；关于；重置引导（Reset Onboarding） |
 | Appearance | 主题（light/dark/system）、强调色（`ACCENT_PRESETS` 色板）、内容宽度（40–100%）、字号（S–XXL）、窗口透明度（滑块 0–100%） |
-| Gateway | 运行模式（local/remote）、本地状态与 启动/停止/重启、远程 URL + 测试连接、已连接 Agents 列表（含模型信息、Debug 徽标） |
+| Gateway | 网关连接（传输方式 RadioGroup：直连 / 中继）+ 单一服务器地址选择器、本地状态与 启动/停止/重启、已连接 Agents 列表（含模型信息、Debug 徽标） |
 | Nodes | 节点拓扑（`GET /api/nodes`）：node_id / 在线状态 / OS / 架构 / 版本 / hostname / Agent 数（只读表格） |
 
 ### 6.1 Appearance 详细
@@ -491,11 +492,15 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 
 ### 7.3 Step 2: Gateway 连接
 
-**与 v1.0 差异**：增加了 **本地/远程模式选择**（RadioGroup）：
+**与 v1.0 差异**：**取消本地/远程模式选择**（RadioGroup），改为**单一服务器地址**（ADR-115）：
 
-- **本地模式**（推荐）：显示状态（Starting/Connected/Not started/Failed），失败显示 ErrorBox + [Start Local Gateway] 按钮；连接成功后 [下一步] 可用
-- **远程模式**：URL 输入（placeholder 默认 `http://127.0.0.1:19876`）+ [Apply] + 状态指示 + [Test Connection]
-- `canProceed = status === "connected"`（两种模式一致）
+- **地址选择器**（`GatewayAddressPicker`）：一个下拉列出 `localhost`（`http://127.0.0.1:19876`）、
+  最近连通地址、历史地址与当前地址；每一行带可达性圆点 + URL + 标记（当前 / 本机 / 最近连通）。
+  选中即切换，并重启 boot pipeline（选 `localhost` 时若本机没有 Gateway，会自动拉起一个）。
+- 「本地 / 远程」不再是用户可选的模式，而是**从地址推论**出来的（地址是否 loopback）；
+  直连（Direct）与中继（Relay）是两种**传输方式**，在设置页网关连接卡片里用 RadioGroup 切换。
+- 状态指示 + [Test Connection]（`canProceed = status === "connected"`）
+- 失败不再是死路：地址选错时可以在同一张卡片里改地址重试（登录页 / 首启页 / 设置页共用这一个控件）
 
 ### 7.4 Step 3: API Key 配置
 
@@ -660,7 +665,7 @@ Step 1: 欢迎 ──→ Step 2: Gateway ──→ Step 3: API Key ──→ Ste
 
 | Store | 职责 |
 |-------|------|
-| `settingsStore` | theme/osTheme/accentColor/fontSize/contentWidth/opacity/gatewayMode/gatewayUrl/logLevel，持久化 localStorage |
+| `settingsStore` | theme/osTheme/accentColor/fontSize/contentWidth/opacity/gatewayUrl/gatewayUrlHistory/lastGoodUrl/gatewayMode(推论)/relayActive/autoStartLocalNode/logLevel，持久化 localStorage |
 | `gatewayStore` | status/health/localState + checkHealth/startLocalGateway/stopLocalGateway/checkLocalStatus |
 | `agentStore` | agents(含 meta/profile/sessions/sessionTitle/tokenTotals)、selectedAgentId、fetchAgents/selectAgent/install/uninstall/start/stop/clone |
 | `chatStore` | agentStates → sessionStates（messages/tokenUsage/contextUsage/sessionStatus/model/provider/inputValue）、mqttConnected、MQTT 事件处理 |

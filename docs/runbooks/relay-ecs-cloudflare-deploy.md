@@ -375,16 +375,29 @@ enabled = true
 url = "wss://relay.acowork.ai/tunnel"
 ```
 
-或运行时启用：
+改完**重启 Gateway**（隧道在启动时按配置自动拉起，并自带重连与退避）。
+
+或在运行时启用——**注意 `/api/relay/*` 不在公开路径白名单里**：ADR-114 之后账号体系恒开，
+无令牌的匿名请求一律 401（见 `core/acowork-gateway/src/http/auth_middleware.rs` 的 `is_public_path`）。
+先登录换 access token，再带 `Authorization` 调管理接口：
 
 ```bash
-curl -X POST http://127.0.0.1:19876/api/relay/enable -H 'Content-Type: application/json' -d '{"url":"wss://relay.acowork.ai/tunnel"}'
+TOKEN=$(curl -s -X POST http://127.0.0.1:19876/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"<你的账号>","password":"<你的密码>"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
+curl -X POST http://127.0.0.1:19876/api/relay/enable \
+  -H "Authorization: Bearer $TOKEN" \
+  -H 'Content-Type: application/json' \
+  -d '{"url":"wss://relay.acowork.ai/tunnel"}'
 ```
 
-**验证**：
+**验证**（同样需要令牌）：
 
 ```bash
-curl -s http://127.0.0.1:19876/api/relay/status | python3 -m json.tool
+curl -s http://127.0.0.1:19876/api/relay/status \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 # 期望：{"enabled":true, "connected":true, "gw_id":"<UUID v4>"}
 ```
 
@@ -392,9 +405,13 @@ curl -s http://127.0.0.1:19876/api/relay/status | python3 -m json.tool
 
 ### 10.4 Desktop 远程连接
 
-1. Desktop 设置 → 连接模式选 **Remote / Relay**
-2. Gateway URL 填 `https://<gw-id>.relay.acowork.ai`（`<gw-id>` 来自 10.3 的 `/api/relay/status`）
+1. Desktop **设置 → 网关 → 网关连接**，传输方式选 **中继（Relay）**
+2. Gateway URL 填 `https://<gw-id>.relay.acowork.ai`（`<gw-id>` 来自 10.3 的 `/api/relay/status`，
+   Desktop 同一张卡片里也会直接显示设备 ID）
 3. 正常账号登录
+
+> 没有「本地 / 远程」切换了（ADR-115）：Desktop 只有一个服务器地址设置，直连与中继是两种**传输方式**，
+> 地址是否在本机是推论出来的。
 
 > Debug 端点远程返回 404 属**预期**（远程 ACL 加固）：relay 模式自动 disables DevMode、LSP Relay 显示不可用（设计文档 24 §8.2 F7）。剪贴板文件、附件、技能导入走字节流上传。
 
@@ -409,7 +426,7 @@ curl -s http://127.0.0.1:19876/api/relay/status | python3 -m json.tool
 | certbot 报 `Could not choose appropriate plugin` | 路线 A/B 混装，venv 看不到 RPM 插件 | 重装：走哪条路线就用哪条路线的 certbot |
 | `Permission denied (os error 13)` | `live/` `archive/` 是 0700，relay 用户进不去 | §7：给两个父目录 `x`，给文件 `r` |
 | `curl /health` 超时 | 灰云没配 / 安全组 443 没开 / 服务没起 | `dig +short relay.acowork.ai` 必须返回 ECS IP；`systemctl status` |
-| `/health` 通但设备域 502 | Gateway 隧道未建立 | Gateway 日志 + `curl /api/relay/status` |
+| `/health` 通但设备域 502 | Gateway 隧道未建立 | Gateway 日志 + `curl -H "Authorization: Bearer $TOKEN" /api/relay/status`（令牌见 §10.3） |
 | Desktop TLS 报错 | 证书缺通配符 SAN | 重跑 §6，确认 SAN 含两个域名 |
 | 证书 60 天后失效 | deploy hook 断了 | §10.2 单独验 hook。**不要**用 `--force-renewal` 试（LE 对相同域名集合限流 5 张/周） |
 | Desktop 能连但功能缺失 | 远程 ACL 按设计拦截 | debug/fs-browse 远程 404 属预期，见 §10.4 |

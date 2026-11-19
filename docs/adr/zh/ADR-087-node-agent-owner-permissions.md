@@ -2,6 +2,8 @@
 
 > **⚠ ADR-113 已取代本文 D2 / §实现步骤 4 中「`gateway_managed` 本机节点默认无主」的表述（2026-11-12）**：`gateway_managed` 协议字段已删除，启动者身份不得参与归属判定。当前口径：node 是否无主**只由 enrollment token 的 `owner_user_id`（或 `node_owners.json` 中无归属记录）决定**——CLI 签发的无主 token 或本地 supervisor 签发的无主 token 所 enroll 的 node 无主（admin-only），与「谁 spawn 了它」无关。D2 主决策「token 绑定创建者」及三档权限模型继续有效。详见 [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md)。
 
+> **⚠ ADR-114 废止了本文「Local 模式 no-op」的前提（2026-11-13）**：D7 / D8 / §测试 中作为总开关的 `AuthMode`（`AUTH_MODE = local | multi_user`）已删除——账号体系与网络拓扑解耦后**恒开**。因此「Local 模式整体 no-op」「`auth=None`（Local 模式）仍整层 no-op」「Local 模式回归 = 逐字节一致」这些分支不再存在；三档权限模型（manage / use / view）、单 owner + guest、fail-closed 归属判定继续有效，并且现在**始终生效**。「无 `AuthContext`」从一种部署模式变成运行时状态：仅未登录请求与 bootstrap 路径（`/api/bootstrap`、`/api/auth/first-login` 等 `is_public_path` 白名单）。详见 [ADR-114](./ADR-114-account-system-decoupled-from-network-topology.md)。
+
 **状态**：草案（v2 修订稿；Q1/Q2/Q4 与"单 owner + 多 guest"模型已决策，剩余见 §12）
 **日期**：2026-10-28（v2 修订：新增 D9 归属基数与 guest 模型——评审两问定调：不许多 owner，guest 是 use 档使用授权（非 manage）；Q1/Q2/Q4 落决策。v3 修订：权限轴从两档改为**三档 manage/use/view**——manage 收窄为"高权限/破坏性/agent 定义修改"，use 覆盖其余全部写，view 放开**元数据/定义类只读**；工作区文件内容、git 历史、memory、全局 search 等"内容读"仍归 use 不归 view（防 §7 方案 G 窃取）；start 归 use、stop 归 manage；permissions 名单公开归 view）
 **决策者**：（待定）

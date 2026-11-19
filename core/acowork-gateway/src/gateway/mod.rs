@@ -60,7 +60,8 @@ impl Gateway {
         // timestamps survive agent stop/restart. Loaded eagerly so the
         // /api/agents sort order is correct from the first request.
         let interaction_store = InteractionStore::new(std::path::Path::new(&data_dir));
-        let mut state = GatewayState::new(&vault_dir);
+        // ADR-116: vault holds secrets; installed apps live under data_dir.
+        let mut state = GatewayState::with_dirs(&vault_dir, &data_dir);
         state.interaction_store = Some(interaction_store.clone());
         state.last_interactions = interaction_store.load();
 
@@ -783,23 +784,24 @@ impl Gateway {
                 })
                 .unwrap_or_default()
         };
+        crate::app::install::cleanup_trash(&data_dir_path);
         for manifest in generic_apps {
-            let bin_name = if cfg!(windows) {
-                format!("{}.exe", manifest.process.binary)
-            } else {
-                manifest.process.binary.clone()
-            };
-            let cfg = crate::app::supervisor::config_from_manifest(
+            if let Err(e) = crate::app::supervisor::start_app(
+                &data_dir_path,
                 &manifest,
-                crate::lifecycle::process::sibling_binary(&bin_name),
-                data_dir_path.clone(),
-                data_dir_path.join("logs"),
+                shared_state.clone(),
                 format!("http://127.0.0.1:{}", http_config.port),
                 format!("http://127.0.0.1:{}/health", http_config.port),
                 Some(internal_service_token.clone()),
                 Some(publisher_token.clone()),
-            );
-            crate::app::supervisor::start_generic_app_supervisor(cfg, shared_state.clone());
+            ) {
+                tracing::error!(
+                    app = %manifest.id,
+                    error = %e,
+                    "generic app failed to start; routes will answer 503"
+                );
+                continue;
+            }
             tracing::info!(app = %manifest.id, "generic app supervisor started (ADR-116)");
         }
 
@@ -1893,6 +1895,7 @@ mod tests {
             memory: crate::config::MemoryConfig::default(),
             security: crate::config::SecurityConfig::default(),
             relay: crate::config::RelayClientConfig::default(),
+            apps: crate::config::AppsConfig::default(),
         }
     }
 

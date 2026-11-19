@@ -1,5 +1,12 @@
-import { type ComponentType } from "react";
+import { type ComponentType, useEffect, useState } from "react";
 import type { NavView } from "../../lib/types";
+import { listApps, type AppDto } from "../../lib/apps-api";
+import { fetchGalleryIndex } from "../../lib/appGallery";
+import {
+  hostedAppIconSrc,
+  hostedAppLetter,
+  hostedNavApps,
+} from "../../lib/hostedNavApps";
 import { NavButton } from "../common/NavButton";
 import { OutlineSettingsIcon, FilledSettingsIcon } from "../common/SettingsIcon";
 import { OutlineChatIcon, FilledChatIcon } from "../common/ChatIcon";
@@ -7,6 +14,7 @@ import { AccountMenu } from "../account/AccountMenu";
 import { useSettingsStore } from "../../stores/settingsStore";
 import { useAuthStore } from "../../stores/authStore";
 import { useProjectGroupStore } from "../../stores/projectGroupStore";
+import { useLayoutStore } from "../../stores/layoutStore";
 import { useTranslation } from "../../i18n/useTranslation";
 
 interface NavBarProps {
@@ -20,7 +28,6 @@ const topNavItems: { view: NavView; icon: ComponentType<{ className?: string }>;
   { view: "chat", icon: OutlineChatIcon, i18nKey: "navBar.chat" },
   { view: "projects", icon: OutlineProjectsIcon, i18nKey: "navBar.projects" },
   { view: "docs", icon: OutlineDocsIcon, i18nKey: "navBar.docs" },
-  { view: "extensions", icon: OutlineExtensionsIcon, i18nKey: "navBar.extensions" },
 ];
 
 const bottomNavItems: { view: NavView; icon: ComponentType<{ className?: string }>; i18nKey: string }[] = [
@@ -179,6 +186,43 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
   const unreadChats = useProjectGroupStore((s) =>
     [...s.groups, ...s.dms].reduce((n, g) => n + ((me ? g.unread?.[me] : 0) ?? 0), 0),
   );
+  const hostedAppId = useLayoutStore((s) => s.hostedAppId);
+  const hostedAppsEpoch = useLayoutStore((s) => s.hostedAppsEpoch);
+  const requestOpenHostedApp = useLayoutStore((s) => s.requestOpenHostedApp);
+  const [hostedApps, setHostedApps] = useState<AppDto[]>([]);
+  const [galleryIcons, setGalleryIcons] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    let cancelled = false;
+    const load = () => {
+      void listApps()
+        .then((apps) => {
+          if (!cancelled) setHostedApps(hostedNavApps(apps));
+        })
+        .catch(() => {
+          if (!cancelled) setHostedApps([]);
+        });
+      void fetchGalleryIndex()
+        .then((index) => {
+          if (cancelled) return;
+          const icons: Record<string, string> = {};
+          for (const app of index.apps) {
+            if (app.icon) icons[app.id] = app.icon;
+          }
+          setGalleryIcons(icons);
+        })
+        .catch(() => {
+          /* catalog offline — letter mark until the next focus */
+        });
+    };
+    load();
+    const onFocus = () => load();
+    window.addEventListener("focus", onFocus);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [hostedAppsEpoch]);
 
   return (
     <nav
@@ -203,10 +247,6 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           {currentView === view ? (
             view === "chat" ? (
               <FilledChatIcon className="h-6 w-6" />
-            ) : view === "extensions" ? (
-              <FilledExtensionsIcon className="h-6 w-6" />
-            ) : view === "harness" ? (
-              <FilledHarnessIcon className="h-6 w-6" />
             ) : view === "docs" ? (
               <FilledDocsIcon className="h-6 w-6" />
             ) : view === "projects" ? (
@@ -223,6 +263,60 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           )}
         </NavButton>
       ))}
+
+      {/* Hosted webview apps (ADR-116) — above the gallery so new installs
+          never push the gallery icon out of the last primary slot. */}
+      {hostedApps.map((app) => {
+        const active = currentView === "app" && hostedAppId === app.id;
+        const src = hostedAppIconSrc(app, galleryIcons);
+        return (
+          <NavButton
+            key={app.id}
+            active={active}
+            onClick={() => requestOpenHostedApp(app.id)}
+            tooltip={app.nav_label || app.name}
+            tooltipPosition="right"
+          >
+            {src ? (
+              <img
+                src={src}
+                alt=""
+                draggable={false}
+                className={
+                  active
+                    ? "h-6 w-6 rounded-md object-cover"
+                    : "h-6 w-6 rounded-md object-cover grayscale"
+                }
+              />
+            ) : (
+              <span
+                className="flex h-6 w-6 items-center justify-center rounded-md text-[11px] font-semibold"
+                style={{
+                  background: active
+                    ? "color-mix(in srgb, var(--color-accent) 22%, transparent)"
+                    : "var(--color-nav-surface, rgba(127,127,127,.18))",
+                }}
+              >
+                {hostedAppLetter(app)}
+              </span>
+            )}
+          </NavButton>
+        );
+      })}
+
+      {/* App Gallery stays under every installed app. */}
+      <NavButton
+        active={currentView === "extensions"}
+        onClick={() => onViewChange("extensions")}
+        tooltip={t("navBar.extensions")}
+        tooltipPosition="right"
+      >
+        {currentView === "extensions" ? (
+          <FilledExtensionsIcon className="h-6 w-6" />
+        ) : (
+          <OutlineExtensionsIcon className="h-6 w-6" />
+        )}
+      </NavButton>
 
       {/* Spacer */}
       <div className="flex-1" />

@@ -1289,7 +1289,7 @@ RAG 不属记忆面，仍由 Runtime 持有：
 - **发起人是身份，不是参数**：可见集合里的"我"取自 `x-user-id` 解析出的调用者，不接受客户端自报——
   否则任何人都能指名别人的可见集合。
 - **不做存在性 oracle**：不是本 chat 的参与者拿 404，与"chat 不存在"同形（`SessionScope::sees_chat`，
-  fail-closed）。本地模式（`SessionScope::Unfiltered`）没有账号体系，边界仍是 loopback 绑定本身，与其余 Runtime 面一致。
+  fail-closed）。`SessionScope::Unfiltered` **不是一种部署模式**（ADR-114 之后账号体系恒开）：它表示调用方没有携带 chat-scope 头——内部 / 受信调用者，或 admin 的通配范围。
 - **Gateway 不解释这两个参数**：与 `page` / `size` / `active` 一样 verbatim 透传。权限长在拥有执行会话
   的节点上，网关既读不到也不该读（ADR-009 §5）。
 - **`Closed` 仍可寻址**：不驻留不等于人已归档——调度器会重开它，所以列表不因驻留状态剔行；被剔除的

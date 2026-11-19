@@ -7,7 +7,7 @@
 
 use std::fs;
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use acowork_core::AgentManifest;
 use acowork_core::packaging::{PackageOptions, should_exclude_path};
@@ -225,6 +225,112 @@ fn walk_and_add(
         }
     }
 
+    Ok(())
+}
+
+/// Build an unsigned `.app` package from an application source directory
+/// (design doc 34 §6.2 / §6.12).
+///
+/// Required layout under `app_dir`:
+/// - `app.toml` with a valid `[package]` segment
+/// - `bin/{process.binary}` (and/or `bin/{process.binary}.exe`)
+/// - optional `ui/`, `assets/`, `LICENSE`
+///
+/// Unlike [`build_agent_package`], this does **not** apply agent exclusion
+/// rules — the whole tree (minus `.` / hidden) is packed. Signing is a
+/// separate step (`sign_package`); this helper only produces the ZIP.
+pub fn build_app_package(app_dir: &Path, output_path: &Path) -> Result<()> {
+    let manifest_path = app_dir.join("app.toml");
+    let text = fs::read_to_string(&manifest_path)?;
+    let manifest = acowork_core::app::AppManifest::from_toml(&text)
+        .map_err(|e| SignError::InvalidPackage(format!("invalid app.toml: {e}")))?;
+    let pkg = manifest.package.as_ref().ok_or_else(|| {
+        SignError::InvalidPackage("app.toml must declare a [package] segment".into())
+    })?;
+    acowork_core::app::validate_package_spec(pkg, &manifest.process.binary)
+        .map_err(SignError::InvalidPackage)?;
+
+    let entry = pkg
+        .entry
+        .clone()
+        .unwrap_or_else(|| acowork_core::app::default_package_entry(&manifest.process.binary));
+    let entry_path = app_dir.join(&entry);
+    // Accept either the exact entry or the non-.exe twin so authors can pack
+    // on a host that does not match the declared platform.
+    let entry_ok = entry_path.is_file()
+        || {
+            let alt = if entry.ends_with(".exe") {
+                Path::new(&entry[..entry.len() - 4]).to_path_buf()
+            } else {
+                PathBuf::from(format!("{entry}.exe"))
+            };
+            app_dir.join(alt).is_file()
+        }
+        || app_dir
+            .join("bin")
+            .join(&manifest.process.binary)
+            .is_file()
+        || app_dir
+            .join("bin")
+            .join(format!("{}.exe", manifest.process.binary))
+            .is_file();
+    if !entry_ok {
+        return Err(SignError::InvalidPackage(format!(
+            "package entry '{entry}' (or bin/{}) is missing",
+            manifest.process.binary
+        )));
+    }
+
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let output_file = fs::File::create(output_path)?;
+    let mut archive = zip::ZipWriter::new(output_file);
+    let opts = acowork_core::packaging::PackageOptions::default();
+    let zip_options = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .last_modified_time(archive_entry_time(&opts)?);
+
+    walk_and_add_app(app_dir, app_dir, &mut archive, zip_options)?;
+    archive.finish()?;
+    Ok(())
+}
+
+fn walk_and_add_app(
+    base_dir: &Path,
+    current_dir: &Path,
+    archive: &mut zip::ZipWriter<fs::File>,
+    zip_options: zip::write::SimpleFileOptions,
+) -> Result<()> {
+    let mut entries = fs::read_dir(current_dir)?
+        .filter_map(|entry| entry.ok())
+        .collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.file_name());
+
+    for entry in entries {
+        let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with('.') {
+            continue;
+        }
+        let relative = path.strip_prefix(base_dir).unwrap_or(&path);
+        let relative_str = relative.to_string_lossy().replace('\\', "/");
+        if relative_str.contains("..") {
+            return Err(SignError::InvalidPackage(format!(
+                "refusing path with '..': {relative_str}"
+            )));
+        }
+        if path.is_dir() {
+            walk_and_add_app(base_dir, &path, archive, zip_options)?;
+        } else {
+            let mut file = fs::File::open(&path)?;
+            let mut buffer = Vec::new();
+            file.read_to_end(&mut buffer)?;
+            archive.start_file(&relative_str, zip_options)?;
+            archive.write_all(&buffer)?;
+        }
+    }
     Ok(())
 }
 

@@ -49,7 +49,7 @@ their agents the same way they would alongside a human teammate.
 | 👥 **Multi-user, not single-actor** | Real accounts, roles, sessions, per-user audit. Humans and agents share the same chat / project / doc surface — no "AI side panel" silo. |
 | 🌐 **Distributed agents, one control plane** | Gateway brokers MQTT + HTTP reverse proxy; Node Agents run on every host that hosts Runtimes (GPU box / workstation / cloud VM) — single-host and multi-host share one protocol path. |
 | 🗂️ **AI-native project & document management** | `acowork-pm` and `acowork-doc` are first-class services; agents read, write, and collaborate on tasks and documents through REST + MCP — including real-time multi-user editing (Yjs CRDT). |
-| 🚀 **Standalone or cluster — same binary** | Start a single host for personal use; flip a flag and the same binary becomes a cluster across your team. No local-vs-remote code branches in Gateway. |
+| 🚀 **One binary, one machine or many** | Start a single host for personal use; enroll `acowork-node` on more machines and the same binary spans your team. No local-vs-remote code branches in Gateway. |
 | 🧩 **Two-stage sessions** | Chat to shape the plan, Execute to run it end-to-end. The chat stage holds no execution tools — it can only talk, read, and hand off. |
 | ⚙️ **Universal protocol** | One contract for runtimes, nodes, and devices. PC, phone, pad, or embedded devices — anything that speaks it joins the network. |
 | 🔒 **Process-level isolation** | Every Agent runs as an independent OS process with its own filesystem, memory database, and sandboxed tool execution. |
@@ -80,7 +80,7 @@ Four co-resident services sit on the same path, exposed to humans and agents ali
 `acowork-user` (accounts · roles) · `acowork-pm` (projects · tasks) · `acowork-doc` (document library) ·
 `acowork-memory` (memory service).
 
-**Standalone** — the Gateway auto-spawns one local Node. **Cluster** — enroll `acowork-node` on every host.
+**One machine** — the Gateway auto-spawns the local Node. **Many machines** — enroll `acowork-node` on each host.
 One binary, one protocol path, **zero local-vs-remote branches** in the Gateway.
 
 <p align="center">
@@ -99,34 +99,41 @@ One binary, one protocol path, **zero local-vs-remote branches** in the Gateway.
 Install the Desktop App for your platform — Windows `.msi`, macOS `.dmg`, Linux `.deb` / `.rpm` /
 AppImage. The installer bundles the Gateway and every service it supervises.
 
-On first launch, pick one of three Gateway modes.
+On first launch, pick a **transport**: **Direct** or **Relay**.
 
-### 1. Local
+There is no "local vs. remote" switch. The Desktop has exactly one connection setting — the
+Gateway server address. Whether that address is on this machine is *derived*, not chosen
+(ADR-115); `localhost` is simply the first entry in the address list.
 
-The app starts a Gateway for you.
+### 1. Direct
+
+Talk to a Gateway over its address.
 
 - **Step 1** — launch the Desktop App.
-- **Step 2** — choose **Local** in the Gateway mode picker.
+- **Step 2** — in **Settings → Gateway → Gateway Connection**, keep the **Direct** transport
+  and pick an address from the list (or type one).
 
-### 2. Remote
+Two common cases, same setting:
 
-Connect to a Gateway running on another machine.
+- **This machine** — `http://127.0.0.1:19876`. If no Gateway is listening there, the app
+  starts one for you. The Gateway auto-spawns one local Node Agent, so a single machine is a
+  complete deployment.
+- **Another machine** — start a Gateway there:
 
-- **Step 1** — on the Gateway machine, start it:
+  ```bash
+  acowork-gateway --daemon
+  ```
 
-```bash
-acowork-gateway --daemon
-```
+  then enter `http://<gateway-host>:19876`. Bind it wide for LAN access with
+  `--addr 0.0.0.0:19876 --mqtt-addr 0.0.0.0:19875 --advertise-host <gateway-host>`.
 
-- **Step 2** — launch the Desktop App.
-- **Step 3** — choose **Remote** and enter `http://<gateway-host>:19876`.
+### 2. Relay
 
-### 3. Relay
-
-Reach a Gateway through the cloud relay.
+Reach a Gateway through the cloud relay — for a NAT'd host, or a home Gateway you want on
+the go.
 
 - **Step 1** — on the Gateway machine, enable the tunnel in `gateway.toml`
-(`~/.acowork/acowork-gateway/config/`):
+(`~/.acowork/acowork-gateway/config/`) and restart the Gateway:
 
 ```toml
 [relay]
@@ -135,8 +142,13 @@ url = "wss://<relay-domain>/tunnel"
 ```
 
 - **Step 2** — launch the Desktop App.
-- **Step 3** — choose **Relay** and enter `https://<gw-id>.<relay-domain>`.
-The `<gw-id>` is shown in the Desktop App's Gateway settings.
+- **Step 3** — in **Settings → Gateway → Gateway Connection**, choose **Relay** and enter
+  `https://<gw-id>.<relay-domain>`. The `<gw-id>` is shown in the Desktop App's Gateway
+  settings.
+
+The relay address is always `https://` — it carries the WSS MQTT bridge. Operators can also
+flip the tunnel at runtime with `POST /api/relay/enable`, which needs a signed-in account
+token.
 
 Agents are created through the **Create Agent wizard** in the app.
 

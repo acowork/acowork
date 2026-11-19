@@ -15,6 +15,8 @@
 //! - `ticket` — capability tickets for the sandboxed webview.
 
 pub mod api;
+pub mod install;
+pub mod mcp_proxy;
 pub mod platform;
 pub mod proxy;
 pub mod registry;

@@ -344,7 +344,7 @@ function isReadOnly(canWrite: boolean | undefined): boolean {
   │                                          │ 探测 GET /api/status
   ├─ 有地址 ──→ 探测 GET /api/status ──失败──→ [断连屏]（显示上次地址 + 重试/更换）
   │                  │成功
-  │                  ├─ requires_setup=true ─→ [受限提示屏]（"Gateway 未完成初始化，请在桌面端完成设置"）
+  │                  ├─ account_state ≠ ready ─→ [受限提示屏]（uninitialized / needs_setup："Gateway 未完成初始化，请在桌面端完成设置"）
   │                  ├─ 无有效 token ───────→ [登录屏]
   │                  └─ 有 token ───────────→ 进入主界面（token 有效性由首个 401 触发刷新验证）
   │
@@ -352,7 +352,7 @@ function isReadOnly(canWrite: boolean | undefined): boolean {
                 └───失败──→ 表单内联错误（用户名或密码错误 / 网络不可达）
 ```
 
-**设计原则**：每个状态都有唯一的出口文案，不做"点了才知道"的试探。`/api/status` 是公开路径（无需 token），返回 `auth_mode / registration_open / requires_setup / version`——启动探测一次就够，不重复打。
+**设计原则**：每个状态都有唯一的出口文案，不做"点了才知道"的试探。`/api/status` 是公开路径（无需 token），返回 `account_state / registration_open / version`——启动探测一次就够，不重复打。（ADR-114 删掉了 `auth_mode`；`requires_setup` 从来不是线上字段，由 `account_state` 推导。）
 
 ### 7.2 连接屏（首启 / 更换地址）
 
@@ -362,7 +362,7 @@ function isReadOnly(canWrite: boolean | undefined): boolean {
 | 局域网发现 | **不做 mDNS/自动扫描**（v1）。原因：① 多 NIC 机器上广告地址与实际可达地址不一致（容器 bridge / WSL / VPN 网卡会广播错误 IP）；② 扫描类 UX 在移动网络权限下引入不必要的权限面。v1 用"桌面端显示本机局域网 IP + 手动输入"替代（设置 → 网关，v1.1 加配对码即消除此手工步骤） |
 | 校验 | 保存前必须 `GET /api/status` 探测成功；失败时显示具体原因（DNS 失败 / 超时 / 非 ACowork Gateway），**不落库** |
 | 版本提示 | 探测成功后显示 Gateway 版本号，让用户确认连的是预期实例 |
-| `auth_mode=local` | 提示"该 Gateway 为本地模式，移动端需多用户模式"，阻止进入登录 |
+| `account_state`（替代已删除的 `auth_mode`） | 三态如实展示（设置 → 网关）：`ready` 可登录；`needs_setup` / `uninitialized` 表示该 Gateway 还没有能登录的管理员账号 → 走受限提示屏，**引导去桌面端完成初始化**。「本地模式没有账号体系」这一分支随 ADR-114 一起消失了：账号体系恒开，网络拓扑不决定它存在与否 |
 | 更换入口 | 设置 → 网关 → 服务器地址（复用同一屏） |
 
 ### 7.3 登录屏

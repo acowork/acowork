@@ -48,7 +48,7 @@ ACowork 是一个**多用户、分布式、AI 原生的协作平台**。团队�
 | 👥 **多用户，而不是单 actor** | 真实账号、角色、会话、按用户审计。人和 AI agent 共享同一个聊天 / 项目 / 文档面板——没有「AI 侧边栏」这种孤岛。 |
 | 🌐 **分布式 Agent，一个控制面** | Gateway 负责 MQTT + HTTP 反代；Node Agent 跑在每台需要承载 Runtime 的主机（GPU 机 / 工位 / 云 VM）上——单机与多机走同一条协议路径。 |
 | 🗂️ **AI 原生的项目 & 文档管理** | `acowork-pm` 和 `acowork-doc` 是一等公民服务；Agent 通过 REST + MCP 读写任务与文档，并支持实时多人编辑（Yjs CRDT）。 |
-| 🚀 **Standalone 或集群——同一份二进制** | 单机自用就开 standalone；翻一个开关，同一份二进制成为横跨团队的集群。Gateway 代码里没有「本地 / 远程」分支。 |
+| 🚀 **同一份二进制，单机或多机** | 单机自用就起一个 Gateway；再在别的主机 enroll `acowork-node`，同一份二进制就横跨团队。Gateway 代码里没有「本地 / 远程」分支。 |
 | 🧩 **两阶段会话** | 先在 Chat 阶段把方案理清，再交给 Execute 端到端跑完。Chat 阶段不持有任何执行类工具——只能对话、读取、交接。 |
 | ⚙️ **统一协议** | Runtime、Node 与各类设备共用同一份契约。PC、手机、平板乃至嵌入式设备——只要能说这套协议，就能接入网络。 |
 | 🔒 **进程级隔离** | 每个 Agent 作为独立 OS 进程运行，自带文件系统、记忆数据库与沙箱化的工具执行。 |
@@ -78,7 +78,7 @@ ACowork 是一个**多用户、分布式、AI 原生的协作平台**。团队�
 `acowork-user`（账号 · 角色）· `acowork-pm`（项目 · 任务）· `acowork-doc`（文档库）·
 `acowork-memory`（记忆服务）。
 
-**Standalone** —— Gateway 在本机自动 spawn 一个本地 Node。**集群** —— 在每台主机接入 `acowork-node`。
+**单机** —— Gateway 在本机自动 spawn 一个本地 Node。**多机** —— 在每台主机接入 `acowork-node`。
 同一份二进制、同一条协议路径，Gateway 里**没有「本地 / 远程」分支**。
 
 <p align="center">
@@ -97,34 +97,37 @@ ACowork 是一个**多用户、分布式、AI 原生的协作平台**。团队�
 安装对应平台的 Desktop App——Windows `.msi`、macOS `.dmg`、Linux `.deb` / `.rpm` / AppImage。
 安装包内含 Gateway 及其托管的全部服务。
 
-首次启动时选择一种 Gateway 模式。
+首次启动时选择一种**传输方式**：**直连（Direct）** 或 **中继（Relay）**。
 
-### 1. 本地（Local）
+没有「本地 / 远程」开关。Desktop 只有**一个**连接设置——Gateway 服务器地址。该地址是否在本机是
+**推论**出来的，不是你选的（ADR-115）；`localhost` 只是地址列表里的第一项。
 
-由应用为你启动 Gateway。
+### 1. 直连（Direct）
+
+按地址直接连 Gateway。
 
 - **第 1 步**——启动 Desktop App。
-- **第 2 步**——在 Gateway 模式选择器中选择**本地**。
+- **第 2 步**——在 **设置 → 网关 → 网关连接** 里保持**直连**，从列表里选一个地址（也可以直接输入）。
 
-### 2. 远程（Remote）
+两种常见情况，用的是同一个设置：
 
-连接运行在另一台机器上的 Gateway。
+- **本机**——`http://127.0.0.1:19876`。如果那里没有 Gateway 在跑，应用会替你启动一个。
+  Gateway 会自动 spawn 一个本地 Node，所以单机就是一套完整部署。
+- **另一台机器**——在那台机器上启动 Gateway：
 
-- **第 1 步**——在 Gateway 所在机器上启动它：
+  ```bash
+  acowork-gateway --daemon
+  ```
 
-```bash
-acowork-gateway --daemon
-```
+  然后填入 `http://<gateway-host>:19876`。要让局域网能访问，用
+  `--addr 0.0.0.0:19876 --mqtt-addr 0.0.0.0:19875 --advertise-host <gateway-host>` 宽绑定。
 
-- **第 2 步**——启动 Desktop App。
-- **第 3 步**——选择**远程**，填入 `http://<gateway-host>:19876`。
+### 2. 中继（Relay）
 
-### 3. 中继（Relay）
-
-通过云端中继访问 Gateway。
+通过云端中继访问 Gateway——适合 NAT 后的主机，或者想在外面访问家里的 Gateway。
 
 - **第 1 步**——在 Gateway 所在机器的 `gateway.toml`
-（`~/.acowork/acowork-gateway/config/`）中启用隧道：
+（`~/.acowork/acowork-gateway/config/`）中启用隧道，然后重启 Gateway：
 
 ```toml
 [relay]
@@ -133,8 +136,11 @@ url = "wss://<relay-domain>/tunnel"
 ```
 
 - **第 2 步**——启动 Desktop App。
-- **第 3 步**——选择**中继**，填入 `https://<gw-id>.<relay-domain>`。
-`<gw-id>` 在 Desktop App 的 Gateway 设置里可以看到。
+- **第 3 步**——在 **设置 → 网关 → 网关连接** 里选择**中继**，填入
+  `https://<gw-id>.<relay-domain>`。`<gw-id>` 在 Desktop App 的 Gateway 设置里可以看到。
+
+中继地址必须是 `https://`——它承载 WSS MQTT 桥。运维也可以在运行时用
+`POST /api/relay/enable` 开关隧道，该接口需要已登录的账号令牌。
 
 Agent 在应用内通过**创建 Agent 向导**创建。
 

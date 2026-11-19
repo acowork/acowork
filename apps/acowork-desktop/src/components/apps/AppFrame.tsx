@@ -50,7 +50,13 @@ export function AppFrame({ app }: { app: AppDto }) {
         const accent =
             getComputedStyle(root).getPropertyValue("--color-accent").trim() || "#3b82f6";
         const theme = root.classList.contains("light") ? "light" : "dark";
-        win.postMessage({ channel: "acowork", type: "theme", theme, accent }, "*");
+        const locale =
+            root.lang ||
+            document.documentElement.getAttribute("lang") ||
+            navigator.language ||
+            "en";
+        win.postMessage({ channel: "acowork", type: "theme", theme, accent, locale }, "*");
+        win.postMessage({ channel: "acowork", type: "locale", locale }, "*");
     };
 
     useEffect(() => {

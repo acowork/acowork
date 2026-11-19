@@ -1089,7 +1089,15 @@ export interface TokenStatsResponse {
 }
 
 /** Navigation view type */
-export type NavView = "chat" | "extensions" | "harness" | "docs" | "projects" | "settings";
+export type NavView =
+    | "chat"
+    | "extensions"
+    | "harness"
+    | "docs"
+    | "projects"
+    | "settings"
+    /** Hosted webview app (ADR-116); pair with `layoutStore.hostedAppId`. */
+    | "app";
 
 /** Theme type */
 export type Theme = "light" | "dark" | "system";

@@ -88,7 +88,10 @@ async fn app_proxy_handler(
 
     // Control-plane routes are registered as exact routes in `app::api`;
     // never let them fall through to the upstream app.
-    if matches!(rest.as_str(), "session" | "enable" | "disable" | "session-ticket" | "mcp") {
+    if matches!(
+        rest.as_str(),
+        "session" | "enable" | "disable" | "session-ticket" | "mcp" | "versions" | "rollback"
+    ) {
         return (
             StatusCode::NOT_FOUND,
             axum::Json(serde_json::json!({ "error": "not an app channel" })),

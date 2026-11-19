@@ -5,7 +5,7 @@
 > Related Implementation Plan: S1 User Mode Task Definitions (archived in `docs/_internal/archive/plan/zh/plan-p5.md`, local reference)  
 >  
 > **v2.0 Revision Notes**: v1.0 of this document described a layout (top title bar with Gateway indicator, left navigation bar with Chat/Models/Skills/Settings, dynamic system tray status, independent Models view, Vault/Providers Settings tabs, etc.) that severely diverged from the current codebase. v2.0 has been completely rewritten section by section based on the actual code in `apps/acowork-desktop` to reflect the implementation as it stands.  
-> Key differences: the navigation bar now has 5 views (Chat/Projects/Docs/Harness/Settings) + top avatar; Gateway status moved to the bottom status bar; system tray only contains a Quit menu; no standalone Models view (Provider management lives in the Harness view); Settings has five tabs: Profile/General/Appearance/Gateway/Nodes; the chat area consists of "Agent List + Chat Panel + optional File Editor + Results Panel + 40px right toolbar".
+> Key differences: the navigation bar now has 5 views (Chat/Projects/Docs/Harness/Settings) + top avatar; Gateway status moved to the bottom status bar; system tray only contains a Quit menu; no standalone Models view (Provider management lives in the Harness view); Settings has four tabs: Profile/General/Appearance/Gateway (Nodes is not a tab of its own — it is the node tree section inside the Gateway tab); the chat area consists of "Agent List + Chat Panel + optional File Editor + Results Panel + 40px right toolbar".
 
 ---
 
@@ -200,8 +200,9 @@ Rendered only when `gatewayStatus === "error"` (steady‑state offline; startup 
 - **Never auto-dismisses** — a sleep/wake network switch leaves the gateway down until the user picks an address or a retry succeeds, so a fading toast would under-report a live problem
 - Shows a candidate count badge when reachable alternatives were found, so there is something to click without opening the popover
 - Click opens a popover (`w-80`, closes on outside click / Esc): status line → candidate list (one solid `btn-accent` row per address with its latency in ms, `max-h-56` vertical scroll) → action row
-- Local mode (`gatewayMode === "local"`): shows "本地网关未运行" / starting shows "正在启动本地网关", provides **[Start]** + **[Retry]**
-- Remote mode: shows "网关不可达", provides **[Retry]**
+- Address is this machine (`isLoopbackGatewayUrl(gatewayUrl)`): shows "本地网关未运行" / starting shows "正在启动本地网关", provides **[Start]** + **[Retry]**
+- Address is not this machine: shows "网关不可达", provides **[Retry]**
+- Both are **derived from the address**, not modes the user picks (ADR-115); the copy no longer says "local Gateway"
 
 ---
 
@@ -447,7 +448,7 @@ The Harness entry (puzzle icon) in the navigation bar opens `HarnessPage`, with 
 | Profile | User identity: display name, avatar (upload / built‑in), language, timezone, city, occupation |
 | General | Logs: Gateway log level, frontend log level, log file size/limit, delete logs; data directory (read‑only, from `/api/config`); About; Reset Onboarding |
 | Appearance | Theme (light/dark/system), accent colour (`ACCENT_PRESETS` palette), content width (40–100%), font size (S–XXL), window transparency (slider 0–100%) |
-| Gateway | Run mode (local/remote), local status & Start/Stop/Restart, remote URL + Test Connection, connected Agents list (with model info, Debug badge) |
+| Gateway | Gateway Connection (transport radio: Direct / Relay) + a single server-address picker, local status & Start/Stop/Restart, connected Agents list (with model info, Debug badge) |
 | Nodes | Node topology (`GET /api/nodes`): node_id / online status / OS / architecture / version / hostname / Agent count (read‑only table) |
 
 ### 6.1 Appearance Details
@@ -490,10 +491,12 @@ Brand logo + welcome message + **[Start Configuration]** (→ Step 2) + **[Skip 
 
 ### 7.3 Step 2: Gateway Connection
 
-**Differences from v1.0**: adds **local/remote mode selection** (RadioGroup):
+**Differences from v1.0**: the **local/remote mode selection (RadioGroup) is gone** (ADR-115) — there is a **single server address**:
 
-- **Local mode** (recommended): shows status (Starting/Connected/Not started/Failed); on failure shows ErrorBox + [Start Local Gateway] button; [Next] enabled once connected
-- **Remote mode**: URL input (placeholder default `http://127.0.0.1:19876`) + [Apply] + status indicator + [Test Connection]
+- **Address picker** (`GatewayAddressPicker`): one dropdown listing `localhost` (`http://127.0.0.1:19876`), the last-good address, the address history and the current address; every row carries a reachability dot + URL + tag (current / this machine / last connected). Picking one switches, and restarts the boot pipeline (when `localhost` is picked and nothing is listening, the app spawns a Gateway).
+- "Local" vs "remote" is no longer a user choice but **derived** from the address (whether it is loopback). **Direct** and **Relay** are the two **transports**, chosen with a RadioGroup in the settings page's Gateway Connection card.
+- Status indicator + [Test Connection] (`canProceed = status === "connected"`)
+- A failure is no longer a dead end: the same control is mounted on the login screen, the first-boot screen and the settings page, so the address can always be corrected and retried
 - `canProceed = status === "connected"` (same for both modes)
 
 ### 7.4 Step 3: API Key Configuration
@@ -659,7 +662,7 @@ All non‑fatal errors and successes are shown via Toast.
 
 | Store | Responsibility |
 |-------|----------------|
-| `settingsStore` | theme/osTheme/accentColor/fontSize/contentWidth/opacity/gatewayMode/gatewayUrl/logLevel, persisted to localStorage |
+| `settingsStore` | theme/osTheme/accentColor/fontSize/contentWidth/opacity/gatewayUrl/gatewayUrlHistory/lastGoodUrl/gatewayMode(derived)/relayActive/autoStartLocalNode/logLevel, persisted to localStorage |
 | `gatewayStore` | status/health/localState + checkHealth/startLocalGateway/stopLocalGateway/checkLocalStatus |
 | `agentStore` | agents(including meta/profile/sessions/sessionTitle/tokenTotals), selectedAgentId, fetchAgents/selectAgent/install/uninstall/start/stop/clone |
 | `chatStore` | agentStates → sessionStates (messages/tokenUsage/contextUsage/sessionStatus/model/provider/inputValue), mqttConnected, MQTT event handling |

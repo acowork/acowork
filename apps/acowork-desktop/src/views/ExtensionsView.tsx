@@ -1,91 +1,163 @@
 /**
- * ExtensionsView — the hosted-application workbench (ADR-116).
+ * ExtensionsView — hosted Apps workbench (ADR-116) + App Gallery browser.
  *
- * Two-column capsule layout shared with PM / DOC: search + list on the left
- * (`bg-nav-surface`), detail / app frame on the right (`bg-page-bg`). The
- * right column is a CONTENT main area, not the chat view's 6-tab inspector
- * (`bg-right-panel`), so it uses `bg-page-bg` like ProjectBoard / DocEditor.
- *
- * The list is driven by `GET /api/apps` (Gateway app registry). Selecting an
- * app shows its declared contract; "Open" loads the app's own front end in a
- * sandboxed iframe. The Desktop contributes the container and the
- * postMessage bridge only — the app owns the page, the Gateway owns identity
- * and routing. Note this view is about *applications*, not the Agent Hub
- * (PRD F7): keep those two concepts separate.
- *
- * The aria labels / placeholders remain hardcoded English: no `extensions`
- * i18n namespace exists yet, and introducing one here would be unrelated to
- * wiring the data. 5 locales stay untouched.
+ * Left: card list (gallery catalog merged with local installs).
+ * Right: README + install / open / lifecycle actions (VS Code–style).
+ * Agents stay in Agent Library (PRD F7) — never mixed into this view.
  */
-import { useEffect, useState } from "react";
-import { Search } from "lucide-react";
-import { AppFrame } from "../components/apps/AppFrame";
+import { useEffect, useMemo, useRef, useState } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import { ExternalLink, Search } from "lucide-react";
 import { CAPSULE_PANE_CN } from "../components/common/capsule";
 import { SplitHandle } from "../components/common/SplitHandle";
 import { StyledInput } from "../components/common/StyledInput";
 import { useDragResize } from "../hooks/useDragResize";
-import { listApps, setAppEnabled, type AppDto } from "../lib/apps-api";
+import {
+    filterGalleryCards,
+    fetchGalleryIndex,
+    mergeGalleryCards,
+    type GalleryCard,
+    type InstallBadge,
+} from "../lib/appGallery";
+import {
+    installAppFromUrl,
+    installAppPackage,
+    installErrorMessage,
+    listAppVersions,
+    listApps,
+    rollbackApp,
+    setAppEnabled,
+    uninstallApp,
+    type AppDto,
+    type AppVersionInfo,
+} from "../lib/apps-api";
+import { useLayoutStore } from "../stores/layoutStore";
 import { cn } from "../lib/utils";
-import { listRowHover } from "../lib/ui-styles";
+import { useTranslation } from "../i18n/useTranslation";
 
-const ariaLabel = {
-    search: "Search apps",
-    list: "Apps list",
-    detail: "App details",
-    resizeSidebar: "Resize apps sidebar",
-};
+function badgeClass(badge: InstallBadge): string {
+    switch (badge) {
+        case "installed":
+        case "builtin":
+            return "bg-ok-solid/15 text-ok-text";
+        case "update":
+            return "bg-warning-solid/15 text-warning-text";
+        case "available":
+            return "bg-accent-strong/15 text-accent-text";
+        default:
+            return "bg-nav-surface text-text-tertiary border border-border-divider";
+    }
+}
 
-function statusColor(app: AppDto): string {
+function statusDot(app: AppDto | null): string {
+    if (!app) return "bg-text-tertiary";
     if (app.status === "ready") return "bg-ok-solid";
     if (app.status === "disabled") return "bg-text-tertiary";
     return "bg-warning-solid";
 }
 
 export function ExtensionsView() {
+    const { t } = useTranslation();
+    const fileRef = useRef<HTMLInputElement>(null);
     const [query, setQuery] = useState("");
     const [selectedId, setSelectedId] = useState<string | null>(null);
     const [apps, setApps] = useState<AppDto[]>([]);
-    const [openedId, setOpenedId] = useState<string | null>(null);
+    const [cards, setCards] = useState<GalleryCard[]>([]);
+    const [galleryError, setGalleryError] = useState<string | null>(null);
     const [busy, setBusy] = useState(false);
+    const requestOpenHostedApp = useLayoutStore((s) => s.requestOpenHostedApp);
+    const bumpHostedAppsEpoch = useLayoutStore((s) => s.bumpHostedAppsEpoch);
     const [actionError, setActionError] = useState<string | null>(null);
+    const [versions, setVersions] = useState<AppVersionInfo[]>([]);
+    const [currentVersion, setCurrentVersion] = useState<string | null>(null);
+    const [confirmUninstall, setConfirmUninstall] = useState(false);
+    const [purgeData, setPurgeData] = useState(false);
+    const [installPct, setInstallPct] = useState<number | null>(null);
 
-    const reload = async () => {
-        if (typeof fetch !== "function") return;
+    const reloadLocal = async () => {
+        if (typeof fetch !== "function") return [];
         try {
             const next = await listApps();
             setApps(next);
             setActionError(null);
+            return next;
         } catch {
-            // Gateway unreachable / not yet authenticated: keep the honest
-            // empty state rather than rendering placeholder rows.
+            return [] as AppDto[];
+        }
+    };
+
+    const reloadAll = async () => {
+        const local = await reloadLocal();
+        try {
+            const index = await fetchGalleryIndex();
+            setGalleryError(null);
+            setCards(mergeGalleryCards(index.apps, local));
+        } catch (e) {
+            setGalleryError(e instanceof Error ? e.message : String(e));
+            // Still show local installs when the catalog is unreachable.
+            setCards(mergeGalleryCards([], local));
         }
     };
 
     useEffect(() => {
-        void reload();
+        void reloadAll();
     }, []);
 
-    // 与 pm / docs 左侧栏一致的可拖动宽度（localStorage 持久化）
+    useEffect(() => {
+        setCards((prev) => {
+            // Re-merge when local apps change but gallery entries are already loaded.
+            const galleryApps = prev.map((c) => c.gallery).filter(Boolean) as NonNullable<
+                GalleryCard["gallery"]
+            >[];
+            // Dedupe by id (prev may already be local-only cards).
+            const unique = new Map(galleryApps.map((g) => [g.id, g]));
+            return mergeGalleryCards([...unique.values()], apps);
+        });
+    }, [apps]);
+
+    useEffect(() => {
+        if (!selectedId) {
+            setVersions([]);
+            setCurrentVersion(null);
+            return;
+        }
+        const app = apps.find((a) => a.id === selectedId);
+        if (!app || app.builtin || !app.installed_version) {
+            setVersions([]);
+            setCurrentVersion(null);
+            return;
+        }
+        void listAppVersions(selectedId)
+            .then((v) => {
+                setVersions(v.versions);
+                setCurrentVersion(v.current);
+            })
+            .catch(() => {
+                setVersions([]);
+                setCurrentVersion(null);
+            });
+    }, [selectedId, apps]);
+
     const sidebar = useDragResize({
         storageKey: "acowork-extensions-list-width",
-        defaultWidth: 240,
-        minWidth: 160,
-        maxWidth: 400,
+        defaultWidth: 320,
+        minWidth: 240,
+        maxWidth: 480,
     });
 
-    const visible = apps.filter((e) =>
-        `${e.name} ${e.id}`.toLowerCase().includes(query.trim().toLowerCase()),
+    const visible = useMemo(
+        () => filterGalleryCards(cards, query),
+        [cards, query],
     );
-    const selected = apps.find((e) => e.id === selectedId) ?? null;
-    const opened = apps.find((e) => e.id === openedId) ?? null;
+    const selected = visible.find((c) => c.id === selectedId) ?? cards.find((c) => c.id === selectedId) ?? null;
 
-    // 上下键在可见项之间移动选中（标准 listbox 模式）；列表为空时无事发生。
     const moveSelection = (key: string) => {
         if (visible.length === 0) return;
         const at = visible.findIndex((e) => e.id === selectedId);
         const next = key === "ArrowDown"
-            ? Math.min(at + 1, visible.length - 1)
-            : Math.max(at - 1, 0);
+            ? Math.min(at < 0 ? 0 : at + 1, visible.length - 1)
+            : Math.max(at < 0 ? 0 : at - 1, 0);
         setSelectedId(visible[next]?.id ?? visible[0].id);
     };
 
@@ -94,10 +166,8 @@ export function ExtensionsView() {
         setActionError(null);
         try {
             await setAppEnabled(app.id, !app.enabled);
-            // Disabling the app we are currently viewing must close its
-            // iframe immediately; the session is no longer valid there.
-            if (app.enabled) setOpenedId(null);
-            await reload();
+            await reloadLocal();
+            bumpHostedAppsEpoch();
         } catch (e) {
             setActionError(e instanceof Error ? e.message : String(e));
         } finally {
@@ -105,20 +175,108 @@ export function ExtensionsView() {
         }
     };
 
+    const onInstallFile = async (file: File | undefined) => {
+        if (!file) return;
+        setBusy(true);
+        setActionError(null);
+        setInstallPct(0);
+        try {
+            const result = await installAppPackage(file, setInstallPct);
+            await reloadAll();
+            bumpHostedAppsEpoch();
+            if (result.app?.id) setSelectedId(result.app.id);
+            else if (result.app_id) setSelectedId(result.app_id);
+        } catch (e) {
+            setActionError(installErrorMessage(e));
+        } finally {
+            setBusy(false);
+            setInstallPct(null);
+            if (fileRef.current) fileRef.current.value = "";
+        }
+    };
+
+    const onInstallUrl = async (card: GalleryCard) => {
+        const pkg = card.gallery?.package;
+        if (!pkg?.url || !pkg.sha256) return;
+        setBusy(true);
+        setActionError(null);
+        try {
+            const result = await installAppFromUrl(pkg.url, pkg.sha256);
+            await reloadAll();
+            bumpHostedAppsEpoch();
+            if (result.app?.id) setSelectedId(result.app.id);
+            else setSelectedId(card.id);
+        } catch (e) {
+            setActionError(installErrorMessage(e));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const onRollback = async (version: string) => {
+        if (!selected?.installed) return;
+        setBusy(true);
+        setActionError(null);
+        try {
+            await rollbackApp(selected.installed.id, version);
+            await reloadLocal();
+        } catch (e) {
+            setActionError(installErrorMessage(e));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const onUninstall = async () => {
+        if (!selected?.installed || selected.installed.builtin) return;
+        setBusy(true);
+        setActionError(null);
+        try {
+            await uninstallApp(selected.installed.id, purgeData);
+            setConfirmUninstall(false);
+            setPurgeData(false);
+            setSelectedId(null);
+            await reloadAll();
+            bumpHostedAppsEpoch();
+        } catch (e) {
+            setActionError(installErrorMessage(e));
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    const openInstalled = (app: AppDto) => {
+        // Built-ins keep dedicated main-nav views (same as the left rail).
+        if (app.builtin) {
+            if (app.id === "pm") useLayoutStore.getState().requestNavView("projects");
+            else if (app.id === "doc") useLayoutStore.getState().requestNavView("docs");
+            return;
+        }
+        requestOpenHostedApp(app.id);
+    };
+
+    const badgeLabel = (badge: InstallBadge) => {
+        switch (badge) {
+            case "installed":
+                return t("extensions.badgeInstalled");
+            case "update":
+                return t("extensions.badgeUpdate");
+            case "available":
+                return t("extensions.badgeAvailable");
+            case "builtin":
+                return t("extensions.badgeBuiltin");
+            default:
+                return t("extensions.badgeCatalogOnly");
+        }
+    };
+
     return (
-        // `w-full` matters for the same reason as in DocsView: as an
-        // AppLayout flex item this root would otherwise size itself to its
-        // content and leave bare vibrancy to the right of the capsule.
         <div className="flex h-full min-h-0 w-full flex-1">
-            {/* 左栏：搜索吸顶 + 列表独立滚动（滚动不带搜索框） */}
             <aside
                 className={cn(CAPSULE_PANE_CN, "h-full shrink-0 bg-nav-surface text-xs")}
                 style={{ width: sidebar.width }}
             >
-                {/* `border-b` matches the other sidebar headers (SectionPane,
-                    DocTreeSidebar, ProjectSidebar) so the search band is
-                    separated from the list the same way everywhere. */}
-                <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center border-b border-border-divider px-3">
+                <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center gap-2 border-b border-border-divider px-3">
                     <div className="relative min-w-0 flex-1">
                         <Search
                             className="absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-text-tertiary"
@@ -128,16 +286,38 @@ export function ExtensionsView() {
                             type="text"
                             value={query}
                             onChange={(e) => setQuery(e.target.value)}
-                            placeholder={ariaLabel.search}
-                            aria-label={ariaLabel.search}
+                            placeholder={t("extensions.search")}
+                            aria-label={t("extensions.search")}
                             className="rounded-md bg-input-bg pl-7 py-1.5 pr-2"
                         />
                     </div>
+                    <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => fileRef.current?.click()}
+                        className="shrink-0 rounded-md border border-border-divider px-2 py-1 text-[11px] text-text-secondary disabled:opacity-50"
+                        title={t("extensions.installLocal")}
+                    >
+                        {t("extensions.installLocal")}
+                    </button>
+                    <input
+                        ref={fileRef}
+                        type="file"
+                        accept=".app,application/octet-stream"
+                        className="hidden"
+                        onChange={(e) => void onInstallFile(e.target.files?.[0])}
+                    />
                 </div>
+
+                {galleryError && (
+                    <div className="border-b border-border-divider px-3 py-2 text-[11px] text-warning-text">
+                        {t("extensions.galleryUnavailable")}: {galleryError}
+                    </div>
+                )}
 
                 <div
                     role="listbox"
-                    aria-label={ariaLabel.list}
+                    aria-label={t("extensions.list")}
                     aria-controls="extensions-detail"
                     tabIndex={-1}
                     onKeyDown={(e) => {
@@ -145,45 +325,72 @@ export function ExtensionsView() {
                         e.preventDefault();
                         moveSelection(e.key);
                     }}
-                    className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-1.5"
+                    className="min-h-0 flex-1 space-y-1.5 overflow-y-auto overflow-x-hidden p-2"
                 >
-                    {visible.map((e, index) => {
-                        const active = e.id === selectedId;
-                        const isLast = index === visible.length - 1;
+                    {visible.map((card) => {
+                        const active = card.id === selectedId;
                         return (
                             <button
-                                key={e.id}
+                                key={card.id}
                                 type="button"
                                 role="option"
                                 aria-selected={active}
                                 onClick={() => {
-                                    setSelectedId(e.id);
-                                    setOpenedId(null);
+                                    setSelectedId(card.id);
+                                    setConfirmUninstall(false);
                                 }}
                                 className={cn(
-                                    "relative flex w-full items-center gap-2 rounded-md px-3 py-2.5 text-left transition-colors duration-150",
+                                    "flex w-full gap-3 rounded-lg border px-3 py-2.5 text-left transition-colors duration-150",
                                     active
-                                        ? "bg-accent-strong/90 text-white"
-                                        : cn("text-text-secondary ", listRowHover),
-                                    !isLast &&
-                                        "row-divider-b",
+                                        ? "border-accent-strong/40 bg-accent-strong/10"
+                                        : "border-border-divider bg-page-bg/40 hover:bg-page-bg/80",
                                 )}
                             >
-                                <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusColor(e))} />
-                                <span className={cn("min-w-0 flex-1 truncate", active && "text-white")}>
-                                    {e.name}
-                                </span>
-                                <span className={cn("shrink-0 text-[11px]", active ? "text-white/80" : "text-text-tertiary")}>
-                                    {e.version}
-                                </span>
+                                <div className="flex h-10 w-10 shrink-0 items-center justify-center overflow-hidden rounded-md border border-border-divider bg-nav-surface">
+                                    {card.icon ? (
+                                        <img
+                                            src={card.icon}
+                                            alt=""
+                                            className="h-full w-full object-cover"
+                                        />
+                                    ) : (
+                                        <span className="text-sm font-medium text-text-tertiary">
+                                            {card.name.slice(0, 1).toUpperCase()}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-2">
+                                        <span className="truncate text-[12px] font-medium text-text-primary">
+                                            {card.name}
+                                        </span>
+                                        <span className={cn("h-1.5 w-1.5 shrink-0 rounded-full", statusDot(card.installed))} />
+                                    </div>
+                                    <div className="mt-0.5 truncate text-[11px] text-text-tertiary">
+                                        {card.publisherLabel}
+                                        {card.versionLabel && card.versionLabel !== "—"
+                                            ? ` · ${card.versionLabel}`
+                                            : ""}
+                                    </div>
+                                    <div className="mt-1 line-clamp-2 text-[11px] leading-snug text-text-secondary">
+                                        {card.summary}
+                                    </div>
+                                    <span
+                                        className={cn(
+                                            "mt-1.5 inline-block rounded px-1.5 py-0.5 text-[10px]",
+                                            badgeClass(card.badge),
+                                        )}
+                                    >
+                                        {badgeLabel(card.badge)}
+                                    </span>
+                                </div>
                             </button>
                         );
                     })}
 
-                    {/* 空列表时保持诚实的空态，绝不塞假条目。 */}
                     {visible.length === 0 && (
                         <div className="px-3 py-8 text-center text-xs text-text-tertiary">
-                            No apps available yet.
+                            {t("extensions.empty")}
                         </div>
                     )}
                 </div>
@@ -191,82 +398,221 @@ export function ExtensionsView() {
 
             <SplitHandle
                 onMouseDown={sidebar.onHandleMouseDown}
-                ariaLabel={ariaLabel.resizeSidebar}
+                ariaLabel={t("extensions.resizeSidebar")}
             />
 
-            {/* 右栏：详情 / 应用 iframe。底色取 `bg-page-bg`（内容主区），
-                不是 chat 的 `bg-right-panel`。 */}
             <div
                 id="extensions-detail"
                 role="tabpanel"
-                aria-label={ariaLabel.detail}
+                aria-label={t("extensions.detail")}
                 className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 overflow-hidden bg-page-bg")}
             >
-                {opened ? (
+                {selected ? (
                     <div className="flex h-full min-h-0 flex-col">
-                        <div className="flex shrink-0 items-center justify-end gap-2 border-b border-border-divider px-3 py-1.5">
-                            <span className="mr-auto text-xs text-text-tertiary">{opened.name}</span>
-                            <button
-                                type="button"
-                                onClick={() => setOpenedId(null)}
-                                className="rounded-md border border-border-divider px-2 py-1 text-xs text-text-secondary"
-                            >
-                                Back
-                            </button>
-                        </div>
-                        <div className="min-h-0 flex-1">
-                            <AppFrame app={opened} />
-                        </div>
-                    </div>
-                ) : selected ? (
-                    <div className="flex h-full flex-col gap-4 overflow-y-auto p-5 text-xs">
-                        <div>
-                            <div className="text-sm text-text-primary">{selected.name}</div>
-                            <div className="mt-1 text-text-tertiary">
-                                {selected.description || selected.id}
+                        <div className="shrink-0 border-b border-border-divider px-5 py-4">
+                            <div className="flex gap-4">
+                                <div className="flex h-14 w-14 shrink-0 items-center justify-center overflow-hidden rounded-xl border border-border-divider bg-nav-surface">
+                                    {selected.icon ? (
+                                        <img src={selected.icon} alt="" className="h-full w-full object-cover" />
+                                    ) : (
+                                        <span className="text-lg text-text-tertiary">
+                                            {selected.name.slice(0, 1).toUpperCase()}
+                                        </span>
+                                    )}
+                                </div>
+                                <div className="min-w-0 flex-1">
+                                    <div className="text-base font-medium text-text-primary">{selected.name}</div>
+                                    <div className="mt-0.5 text-xs text-text-tertiary">
+                                        {selected.publisherLabel}
+                                        {selected.gallery?.license ? ` · ${selected.gallery.license}` : ""}
+                                    </div>
+                                    <div className="mt-2 text-xs text-text-secondary">{selected.summary}</div>
+                                </div>
                             </div>
+
+                            {installPct !== null && (
+                                <div className="mt-3 text-xs text-text-tertiary">
+                                    {t("extensions.installing")} {installPct}%
+                                </div>
+                            )}
+                            {actionError && (
+                                <div className="mt-3 text-xs text-danger-text">{actionError}</div>
+                            )}
+
+                            <div className="mt-4 flex flex-wrap items-center gap-2">
+                                {selected.badge === "available" || selected.badge === "update" ? (
+                                    <button
+                                        type="button"
+                                        disabled={busy}
+                                        onClick={() => void onInstallUrl(selected)}
+                                        className="rounded-md btn-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                                    >
+                                        {selected.badge === "update"
+                                            ? t("extensions.update")
+                                            : t("extensions.install")}
+                                    </button>
+                                ) : null}
+
+                                {selected.badge === "catalog_only" && selected.gallery?.repository ? (
+                                    <a
+                                        href={selected.gallery.repository}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center gap-1 rounded-md border border-border-divider px-3 py-1.5 text-xs text-text-secondary"
+                                    >
+                                        {t("extensions.openRepo")}
+                                        <ExternalLink className="h-3 w-3" aria-hidden />
+                                    </a>
+                                ) : null}
+
+                                {selected.installed && (
+                                    <>
+                                        <button
+                                            type="button"
+                                            disabled={busy}
+                                            onClick={() => void toggle(selected.installed!)}
+                                            className="rounded-md border border-border-divider px-3 py-1.5 text-xs text-text-secondary disabled:opacity-50"
+                                        >
+                                            {selected.installed.enabled
+                                                ? t("extensions.disable")
+                                                : t("extensions.enable")}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            disabled={
+                                                !selected.installed.enabled ||
+                                                selected.installed.status !== "ready"
+                                            }
+                                            onClick={() => openInstalled(selected.installed!)}
+                                            className="rounded-md btn-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
+                                        >
+                                            {t("extensions.open")}
+                                        </button>
+                                        {!selected.installed.builtin && !confirmUninstall && (
+                                            <button
+                                                type="button"
+                                                disabled={busy}
+                                                onClick={() => setConfirmUninstall(true)}
+                                                className="rounded-md border border-border-divider px-3 py-1.5 text-xs text-text-tertiary disabled:opacity-50"
+                                            >
+                                                {t("extensions.uninstall")}
+                                            </button>
+                                        )}
+                                    </>
+                                )}
+
+                                {selected.gallery?.repository && selected.badge !== "catalog_only" && (
+                                    <a
+                                        href={selected.gallery.repository}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        className="inline-flex items-center gap-1 text-[11px] text-text-tertiary hover:text-text-secondary"
+                                    >
+                                        {t("extensions.repository")}
+                                        <ExternalLink className="h-3 w-3" aria-hidden />
+                                    </a>
+                                )}
+                            </div>
+
+                            {!selected.installed?.builtin && confirmUninstall && (
+                                <div className="mt-3 rounded-md border border-border-divider bg-nav-surface p-3 text-xs">
+                                    <div className="mb-2 text-text-secondary">{t("extensions.uninstallConfirm")}</div>
+                                    <label className="mb-3 flex items-center gap-2 text-text-tertiary">
+                                        <input
+                                            type="checkbox"
+                                            checked={purgeData}
+                                            onChange={(e) => setPurgeData(e.target.checked)}
+                                        />
+                                        {t("extensions.purgeData")}
+                                    </label>
+                                    <div className="flex justify-end gap-2">
+                                        <button
+                                            type="button"
+                                            onClick={() => setConfirmUninstall(false)}
+                                            className="rounded-md border border-border-divider px-3 py-1.5"
+                                        >
+                                            {t("extensions.cancel")}
+                                        </button>
+                                        <button
+                                            type="button"
+                                            disabled={busy}
+                                            onClick={() => void onUninstall()}
+                                            className="rounded-md border border-danger-border px-3 py-1.5 text-danger-text disabled:opacity-50"
+                                        >
+                                            {t("extensions.uninstall")}
+                                        </button>
+                                    </div>
+                                </div>
+                            )}
                         </div>
-                        <dl className="grid grid-cols-[120px_1fr] gap-y-2 text-text-secondary">
-                            <dt className="text-text-tertiary">Status</dt>
-                            <dd className="flex items-center gap-2">
-                                <span className={cn("h-1.5 w-1.5 rounded-full", statusColor(selected))} />
-                                {selected.status}
-                                {selected.port ? ` · port ${selected.port}` : ""}
-                            </dd>
-                            <dt className="text-text-tertiary">Version</dt>
-                            <dd>{selected.version}</dd>
-                            <dt className="text-text-tertiary">Runtime</dt>
-                            <dd>{selected.runtime}{selected.builtin ? " · built-in" : ""}</dd>
-                            <dt className="text-text-tertiary">MCP</dt>
-                            <dd className="break-all">{selected.mcp_gateway_path}</dd>
-                            <dt className="text-text-tertiary">App UI</dt>
-                            <dd className="break-all">/api/apps/{selected.id}{selected.ui_path}</dd>
-                            <dt className="text-text-tertiary">Permissions</dt>
-                            <dd>{selected.permissions.join(", ") || "none"}</dd>
-                        </dl>
-                        {actionError && (
-                            <div className="text-danger-text">{actionError}</div>
-                        )}
-                        <div className="mt-auto flex items-center justify-end gap-2 border-t border-border-divider pt-3">
-                            <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => void toggle(selected)}
-                                className="rounded-md border border-border-divider px-3 py-1.5 text-xs text-text-secondary disabled:opacity-50"
-                            >
-                                {selected.enabled ? "Disable" : "Enable"}
-                            </button>
-                            <button
-                                type="button"
-                                disabled={!selected.enabled || selected.status !== "ready"}
-                                onClick={() => setOpenedId(selected.id)}
-                                className="rounded-md btn-accent px-3 py-1.5 text-xs text-white disabled:opacity-50"
-                            >
-                                Open app
-                            </button>
+
+                        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+                            {selected.gallery?.readme_md ? (
+                                <div className="prose prose-sm prose-zinc dark:prose-invert max-w-none text-text-secondary">
+                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                        {selected.gallery.readme_md}
+                                    </ReactMarkdown>
+                                </div>
+                            ) : selected.installed ? (
+                                <dl className="grid grid-cols-[120px_1fr] gap-y-2 text-xs text-text-secondary">
+                                    <dt className="text-text-tertiary">{t("extensions.status")}</dt>
+                                    <dd className="flex items-center gap-2">
+                                        <span className={cn("h-1.5 w-1.5 rounded-full", statusDot(selected.installed))} />
+                                        {selected.installed.status}
+                                        {selected.installed.port ? ` · port ${selected.installed.port}` : ""}
+                                    </dd>
+                                    <dt className="text-text-tertiary">{t("extensions.version")}</dt>
+                                    <dd>{selected.installed.installed_version || selected.installed.version}</dd>
+                                    <dt className="text-text-tertiary">{t("extensions.runtime")}</dt>
+                                    <dd>
+                                        {selected.installed.runtime}
+                                        {selected.installed.builtin ? ` · ${t("extensions.builtin")}` : ""}
+                                    </dd>
+                                    <dt className="text-text-tertiary">MCP</dt>
+                                    <dd className="break-all">{selected.installed.mcp_gateway_path}</dd>
+                                    <dt className="text-text-tertiary">{t("extensions.appUi")}</dt>
+                                    <dd className="break-all">
+                                        /api/apps/{selected.installed.id}{selected.installed.ui_path}
+                                    </dd>
+                                </dl>
+                            ) : (
+                                <div className="text-xs text-text-tertiary">{t("extensions.noReadme")}</div>
+                            )}
+
+                            {versions.length > 0 && (
+                                <div className="mt-6 rounded-md border border-border-divider p-3 text-xs">
+                                    <div className="mb-2 text-text-tertiary">{t("extensions.versions")}</div>
+                                    <ul className="space-y-1">
+                                        {versions.map((v) => (
+                                            <li key={v.version} className="flex items-center gap-2">
+                                                <span className="min-w-0 flex-1 font-mono">
+                                                    {v.version}
+                                                    {v.current || v.version === currentVersion
+                                                        ? ` · ${t("extensions.current")}`
+                                                        : ""}
+                                                </span>
+                                                {!v.current && v.version !== currentVersion && (
+                                                    <button
+                                                        type="button"
+                                                        disabled={busy}
+                                                        onClick={() => void onRollback(v.version)}
+                                                        className="rounded border border-border-divider px-2 py-0.5 text-[11px] disabled:opacity-50"
+                                                    >
+                                                        {t("extensions.rollback")}
+                                                    </button>
+                                                )}
+                                            </li>
+                                        ))}
+                                    </ul>
+                                </div>
+                            )}
                         </div>
                     </div>
-                ) : null}
+                ) : (
+                    <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
+                        {t("extensions.selectHint")}
+                    </div>
+                )}
             </div>
         </div>
     );

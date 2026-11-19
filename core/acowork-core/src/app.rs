@@ -17,11 +17,28 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// Directory under the Gateway data dir holding user-installed app manifests.
+/// Directory under the Gateway data dir holding install ledgers + package
+/// contents (and, for local development, flat `*.toml` overlays).
 pub const APPS_DIR_NAME: &str = "apps";
+
+/// Directory under the Gateway data dir holding per-app private data.
+/// Separated from `APPS_DIR_NAME` so upgrades never collide with user data
+/// (design doc 34 §6.4). The Gateway creates the directory and passes it via
+/// `ACOWORK_APP_DATA_DIR`; it never reads the contents.
+pub const APP_DATA_DIR_NAME: &str = "app-data";
+
+/// Host contract version currently supported by the Gateway. Packages with a
+/// higher `app_api` are rejected at install time.
+pub const APP_API_VERSION: u32 = 1;
+
+/// Maximum `.app` package size (design doc 34 §6.2).
+pub const MAX_APP_PACKAGE_BYTES: u64 = 200 * 1024 * 1024;
 
 /// Persisted "disabled" set. Absence means every registered app is enabled.
 pub const DISABLED_STATE_FILE: &str = "apps_disabled.json";
+
+/// Install ledger filename under `apps/{id}/`.
+pub const APP_STATE_FILE: &str = "state.json";
 
 /// Built-in PM application declaration (ADR-064 process, ADR-116 app).
 pub const PM_APP_TOML: &str = r#"
@@ -131,9 +148,9 @@ pub enum AppUiMode {
 /// Process declaration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppProcessSpec {
-    /// Executable name only — never a path. Resolved next to the Gateway
-    /// binary by the supervisor, which prevents an app manifest from
-    /// launching an arbitrary filesystem location.
+    /// Executable name only — never a path. Resolved by the three-tier
+    /// binary lookup (installed package entry → flat `apps/{id}/` → sibling
+    /// of the Gateway binary).
     pub binary: String,
     pub port_hint: u16,
     #[serde(default)]
@@ -218,6 +235,37 @@ pub struct AppPermissions {
     pub platform: Vec<String>,
 }
 
+/// `[package]` segment — required inside a distributable `.app`, optional for
+/// built-in / flat-toml development manifests (design doc 34 §6.3).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AppPackageSpec {
+    /// Host contract version. Not the app's semver.
+    #[serde(default)]
+    pub app_api: u32,
+    /// Target platforms, e.g. `windows-x86_64`, `linux-x86_64`, `macos-aarch64`.
+    #[serde(default)]
+    pub platforms: Vec<String>,
+    /// Relative entry path inside the package root. Defaults to
+    /// `bin/{process.binary}` (+ `.exe` on Windows at resolve time).
+    #[serde(default)]
+    pub entry: Option<String>,
+    /// When true, install requires a Platform signature.
+    #[serde(default)]
+    pub platform_app: bool,
+}
+
+/// Platform-side install ledger at `apps/{id}/state.json`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppInstallState {
+    pub current: String,
+    #[serde(default)]
+    pub fingerprint: Option<String>,
+    #[serde(default)]
+    pub origin: String,
+    #[serde(default)]
+    pub installed_at: String,
+}
+
 /// Full declaration of one hosted application.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppManifest {
@@ -237,6 +285,9 @@ pub struct AppManifest {
     pub activation: AppActivationSpec,
     #[serde(default)]
     pub permissions: AppPermissions,
+    /// Present on packaged installs; absent on built-ins and flat toml.
+    #[serde(default, rename = "package")]
+    pub package: Option<AppPackageSpec>,
 }
 
 impl AppManifest {
@@ -290,7 +341,98 @@ pub fn validate_manifest(m: &AppManifest) -> Result<(), String> {
     if m.process.runtime == AppRuntime::Legacy && m.process.legacy_slot.is_none() {
         return Err("legacy apps must declare process.legacy_slot".to_string());
     }
+    if let Some(pkg) = &m.package {
+        validate_package_spec(pkg, &m.process.binary)?;
+    }
     Ok(())
+}
+
+/// Validate the optional `[package]` segment. Called both for manifests that
+/// carry it (installed packages) and when an installer asserts the section.
+pub fn validate_package_spec(pkg: &AppPackageSpec, binary: &str) -> Result<(), String> {
+    if pkg.app_api == 0 {
+        return Err("package.app_api must be >= 1".to_string());
+    }
+    if pkg.app_api > APP_API_VERSION {
+        return Err(format!(
+            "package.app_api {} is newer than host support ({APP_API_VERSION})",
+            pkg.app_api
+        ));
+    }
+    if pkg.platforms.is_empty() {
+        return Err("package.platforms must list at least one target".to_string());
+    }
+    for p in &pkg.platforms {
+        if p.trim().is_empty() || p.contains("..") || p.contains('/') || p.contains('\\') {
+            return Err(format!("invalid package.platforms entry: {p:?}"));
+        }
+    }
+    if let Some(entry) = &pkg.entry {
+        if entry.trim().is_empty()
+            || entry.starts_with('/')
+            || entry.starts_with('\\')
+            || entry.contains("..")
+        {
+            return Err(format!(
+                "package.entry must be a relative path without '..': {entry:?}"
+            ));
+        }
+    } else if binary.is_empty() {
+        return Err("package.entry defaults to bin/{{binary}} but binary is empty".to_string());
+    }
+    Ok(())
+}
+
+/// Current host platform token used in `package.platforms` comparisons.
+pub fn current_platform_token() -> String {
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    // Normalize to the design-doc vocabulary (windows-x86_64, linux-x86_64,
+    // macos-aarch64 / macos-x86_64).
+    let os = match os {
+        "macos" => "macos",
+        "windows" => "windows",
+        other => other,
+    };
+    let arch = match arch {
+        "x86_64" => "x86_64",
+        "aarch64" => "aarch64",
+        other => other,
+    };
+    format!("{os}-{arch}")
+}
+
+/// Default package entry relative to the package root.
+pub fn default_package_entry(binary: &str) -> String {
+    if cfg!(windows) {
+        format!("bin/{binary}.exe")
+    } else {
+        format!("bin/{binary}")
+    }
+}
+
+/// Load `apps/{id}/state.json` + `versions/{current}/app.toml`. Returns
+/// `Ok(None)` when the directory is not an install ledger (e.g. `.staging`).
+fn load_installed_manifest(app_dir: &Path) -> Result<Option<AppManifest>, String> {
+    let state_path = app_dir.join(APP_STATE_FILE);
+    if !state_path.is_file() {
+        return Ok(None);
+    }
+    let state_text = std::fs::read_to_string(&state_path)
+        .map_err(|e| format!("read {}: {e}", state_path.display()))?;
+    let state: AppInstallState = serde_json::from_str(&state_text)
+        .map_err(|e| format!("parse {}: {e}", state_path.display()))?;
+    if state.current.trim().is_empty() || state.current.contains("..") || state.current.contains('/')
+    {
+        return Err(format!("invalid state.current {:?}", state.current));
+    }
+    let manifest_path = app_dir
+        .join("versions")
+        .join(&state.current)
+        .join("app.toml");
+    let text = std::fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
+    Ok(Some(AppManifest::from_toml(&text)?))
 }
 
 /// An app id is a URL segment, a data-dir name and a cookie path component.
@@ -331,12 +473,53 @@ impl AppRegistry {
         }
     }
 
-    /// Load built-ins, then overlay user-installed `{data_dir}/apps/*.toml`
-    /// and the persisted disabled set. Invalid user manifests are skipped
-    /// with a warning rather than taking the Gateway down.
+    /// Load built-ins, then overlay installed package ledgers and flat
+    /// `{data_dir}/apps/*.toml` development manifests, plus the persisted
+    /// disabled set. Invalid user manifests are skipped with a warning rather
+    /// than taking the Gateway down.
+    ///
+    /// Priority (design doc 34 §6.4): installed `apps/{id}/versions/{current}`
+    /// wins over a flat `apps/{id}.toml` of the same id.
     pub fn load(data_dir: &Path) -> Self {
         let mut registry = Self::builtin();
         let dir = data_dir.join(APPS_DIR_NAME);
+
+        // 1) Installed packages (high priority).
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            let mut ids: Vec<_> = entries
+                .flatten()
+                .filter(|e| e.path().is_dir())
+                .filter(|e| {
+                    let name = e.file_name();
+                    let name = name.to_string_lossy();
+                    !name.starts_with('.') && is_valid_app_id(&name)
+                })
+                .collect();
+            ids.sort_by_key(|e| e.file_name());
+            for entry in ids {
+                let app_dir = entry.path();
+                match load_installed_manifest(&app_dir) {
+                    Ok(Some(manifest)) => {
+                        if manifest.builtin {
+                            tracing::warn!(
+                                path = %app_dir.display(),
+                                "installed app claims builtin=true; ignored"
+                            );
+                            continue;
+                        }
+                        registry.apps.insert(manifest.id.clone(), manifest);
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!(
+                        path = %app_dir.display(),
+                        error = %e,
+                        "skipping invalid installed app"
+                    ),
+                }
+            }
+        }
+
+        // 2) Flat `apps/*.toml` (low priority; installed id wins).
         if let Ok(entries) = std::fs::read_dir(&dir) {
             let mut paths: Vec<_> = entries
                 .flatten()
@@ -356,6 +539,24 @@ impl AppRegistry {
                             );
                             continue;
                         }
+                        if let Some(existing) = registry.apps.get(&manifest.id) {
+                            if existing.builtin {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    id = %manifest.id,
+                                    "flat toml cannot override builtin id; ignored"
+                                );
+                                continue;
+                            }
+                            if existing.package.is_some() {
+                                tracing::warn!(
+                                    path = %path.display(),
+                                    id = %manifest.id,
+                                    "flat toml shadowed by installed package; ignored"
+                                );
+                                continue;
+                            }
+                        }
                         registry.apps.insert(manifest.id.clone(), manifest);
                     }
                     Err(e) => tracing::warn!(
@@ -368,6 +569,26 @@ impl AppRegistry {
         }
         registry.disabled = Self::load_disabled(data_dir);
         registry
+    }
+
+    /// Re-read disk and replace this registry in place (design doc 34 §6.10).
+    /// Preserves nothing from the previous in-memory view except what is
+    /// still on disk — callers must re-project process state separately.
+    pub fn reload(&mut self, data_dir: &Path) {
+        let next = Self::load(data_dir);
+        self.apps = next.apps;
+        self.disabled = next.disabled;
+    }
+
+    /// Read the install ledger for one app id, if present.
+    pub fn read_install_state(data_dir: &Path, app_id: &str) -> Option<AppInstallState> {
+        let path = data_dir
+            .join(APPS_DIR_NAME)
+            .join(app_id)
+            .join(APP_STATE_FILE);
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str(&text).ok())
     }
 
     /// Build from explicit parts (tests / programmatic registration).
@@ -524,6 +745,10 @@ window.addEventListener('message', (e) => {
   if (d.type === 'theme') {
     document.documentElement.dataset.theme = d.theme || 'dark';
     if (d.accent) document.documentElement.style.setProperty('--accent', d.accent);
+    if (d.locale) document.documentElement.lang = d.locale;
+  }
+  if (d.type === 'locale' && d.locale) {
+    document.documentElement.lang = d.locale;
   }
 });
 document.getElementById('refresh').addEventListener('click', refresh);
@@ -598,6 +823,98 @@ mod tests {
         let disabled: BTreeSet<String> = ["doc".to_string()].into_iter().collect();
         AppRegistry::save_disabled(&dir, &disabled).unwrap();
         assert_eq!(AppRegistry::load_disabled(&dir), disabled);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn package_spec_rejects_unsupported_app_api() {
+        let pkg = AppPackageSpec {
+            app_api: APP_API_VERSION + 1,
+            platforms: vec![current_platform_token()],
+            entry: Some("bin/acowork-pm".into()),
+            platform_app: false,
+        };
+        assert!(validate_package_spec(&pkg, "acowork-pm").is_err());
+    }
+
+    #[test]
+    fn load_prefers_installed_package_over_flat_toml() {
+        let dir = std::env::temp_dir().join(format!("acowork-app-load-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let app_dir = dir.join(APPS_DIR_NAME).join("demo");
+        let version_dir = app_dir.join("versions").join("1.0.0");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        let installed = r#"
+id = "demo"
+version = "1.0.0"
+name = "Demo Installed"
+icon = "box"
+builtin = false
+
+[process]
+runtime = "generic"
+binary = "acowork-demo"
+port_hint = 18100
+health_path = "/health"
+
+[mcp]
+path = "/mcp"
+gateway_path = "/api/demo/mcp"
+
+[ui]
+path = "/ui/"
+
+[ui.nav]
+label = "Demo"
+
+[package]
+app_api = 1
+platforms = ["windows-x86_64", "linux-x86_64", "macos-aarch64", "macos-x86_64"]
+entry = "bin/acowork-demo"
+"#;
+        std::fs::write(version_dir.join("app.toml"), installed).unwrap();
+        std::fs::write(
+            app_dir.join(APP_STATE_FILE),
+            r#"{"current":"1.0.0","origin":"upload","installed_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+        // Flat toml with same id but different name — must lose.
+        std::fs::write(
+            dir.join(APPS_DIR_NAME).join("demo.toml"),
+            r#"
+id = "demo"
+version = "0.0.1"
+name = "Demo Flat"
+icon = "box"
+
+[process]
+runtime = "generic"
+binary = "acowork-demo"
+port_hint = 18100
+health_path = "/health"
+
+[mcp]
+path = "/mcp"
+gateway_path = "/api/demo/mcp"
+
+[ui]
+path = "/ui/"
+
+[ui.nav]
+label = "Flat"
+"#,
+        )
+        .unwrap();
+        let registry = AppRegistry::load(&dir);
+        let demo = registry.get("demo").unwrap();
+        assert_eq!(demo.name, "Demo Installed");
+        assert!(demo.package.is_some());
+
+        let mut registry = registry;
+        // Wipe install and reload → flat toml becomes visible.
+        let _ = std::fs::remove_dir_all(&app_dir);
+        registry.reload(&dir);
+        assert_eq!(registry.get("demo").unwrap().name, "Demo Flat");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

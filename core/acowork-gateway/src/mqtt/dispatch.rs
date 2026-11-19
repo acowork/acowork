@@ -202,9 +202,9 @@ pub struct DispatchContext {
     pub auth_enabled: bool,
     /// ADR-087: default owner for resources with no interactive owner —
     /// the earliest-created admin (server scenario: whoever can start the
-    /// Gateway on that machine is the admin). `None` in local mode (no
-    /// account system; ownerless = "the machine is the owner") and while
-    /// no admin account exists yet. The two convergence points (enroll
+    /// Gateway on that machine is the admin). `None` only while no admin
+    /// account exists yet — ADR-114 retired the mode in which the account
+    /// system could be absent altogether. The two convergence points (enroll
     /// accept, first inventory landing) fall back to this so bypass
     /// paths (CLI-issued tokens, CLI installs) stop minting ownerless
     /// rows.

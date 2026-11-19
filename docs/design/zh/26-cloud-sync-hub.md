@@ -84,7 +84,7 @@
 | F9 | **远程 HTTP 调用面不大但有 32 个路径模板**：移动端去重后共 **32 个 `/api/*` 路径**，其中 Gateway 原生 15 个、经反代到其他独立服务 17 个（user 6 / doc 4 / pm 7） | `apps/acowork-mobile/src/lib/api.ts`（实测 `sed` 去重统计） | 显式声明每个远程 op 的成本可接受；**但远程面横跨 4 个服务**，见 F14 |
 | F14 | 上述 17 个路径**不是 Gateway 自己实现的**：`/api/auth/*`、`/api/users/*` → `user_proxy`；`/api/pm/*` → `pm_proxy`；`/api/doc/*` → `doc_proxy`，均由 Gateway 反向代理到独立进程（ADR-084 / ADR-064 / ADR-070） | [core/acowork-gateway/src/http/routes.rs:280](../../../core/acowork-gateway/src/http/routes.rs#L280)、`user_proxy.rs` / `pm_proxy.rs` / `doc_proxy.rs` 模块头 | Hub 的 `dispatcher` **必须能触达这 4 个服务**；见 §6.4 |
 | F10 | **远程事件面也很小**：实际消费的 envelope 类型仅 4 种（`session_message=15`、`session_state=18`、`AskQuestion`、`ToolApprovalNeeded`） | `apps/acowork-mobile/src/lib/proto-wire.ts` | 命名流白名单可行，无需暴露通用 topic 订阅 |
-| F11 | Gateway 已有远程模式运行时开关 `POST /api/relay/enable\|disable` 与 `RelayClientConfig` | [core/acowork-gateway/src/config.rs:196](../../../core/acowork-gateway/src/config.rs#L196) | 「模式选择」挂载点已存在，并存不需要新造控制面 |
+| F11 | Gateway 已有远程隧道的运行时开关 `POST /api/relay/enable\|disable` 与 `RelayClientConfig` | [core/acowork-gateway/src/config.rs:196](../../../core/acowork-gateway/src/config.rs#L196) | 「模式选择」挂载点已存在，并存不需要新造控制面 |
 | F12 | 已有 protobuf `DataEnvelope` oneof 编码先例与手写 wire codec | `proto-wire.ts` / `mqtt-wire.ts` | Hub 信封沿用同一风格，客户端无需引入 protobuf 全量运行时 |
 | F13 | 设备身份已有 `relay_identity.json`（Ed25519，0600 明文，私钥不出 Gateway） | 24 §7.3 v0.2.1、[core/acowork-gateway/src/relay/identity.rs](../../../core/acowork-gateway/src/relay/identity.rs) | **两种模式共用同一把设备私钥**（P2 约束的基础） |
 
@@ -152,7 +152,7 @@ graph TD
         RT["Node Agent / Runtime（不变）"]
         GW --- RT
     end
-    MOBILE["Mobile / Desktop（Hub 远程模式）"] -->|"HTTPS POST 命令<br/>SSE 或长轮询下行<br/>单一 Hub 域名"| IDP
+    MOBILE["Mobile / Desktop（Hub 传输）"] -->|"HTTPS POST 命令<br/>SSE 或长轮询下行<br/>单一 Hub 域名"| IDP
     IDP --> CDISP
     CDISP -->|"poll 取命令 + results 回投"| GW
     GW -->|"POST events（带 seq）"| ELOG
@@ -438,7 +438,7 @@ graph TD
 sequenceDiagram
     participant C as 新设备（Mobile）
     participant H as Hub
-    participant L as 已在场设备（Desktop 本地模式）
+    participant L as 已在场设备（Desktop，地址为回环）
     participant G as Gateway
     C->>H: 提交配对请求（账户凭据 + 设备公钥）
     H->>G: 经既有可信通道转发配对请求（不执行，仅转达）

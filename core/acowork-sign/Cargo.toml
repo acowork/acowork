@@ -16,6 +16,10 @@ name = "acowork-pack"
 path = "src/bin/pack.rs"
 
 [[bin]]
+name = "acowork-pack-app"
+path = "src/bin/pack_app.rs"
+
+[[bin]]
 name = "acowork-sign"
 path = "src/bin/sign.rs"
 

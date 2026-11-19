@@ -8,21 +8,28 @@
 //! Failure is non-fatal: a broken app never takes the Gateway down. Its
 //! routes answer `503 + Retry-After: 2` until it becomes ready again.
 
-use std::collections::BTreeMap;
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tokio::time::sleep;
 
 use acowork_core::health::supervisor_defaults;
 use acowork_core::supervisor::{RestartHistory, backoff_with_jitter};
 
-use crate::app::registry::AppProcessState;
+use crate::app::registry::{resolve_app_binary, AppProcessState};
 use crate::gateway::state::GatewayState;
 
 pub type SharedState = Arc<RwLock<GatewayState>>;
+
+/// Stop signals for running generic supervisors (design doc 34 §6.10).
+static APP_STOP: Mutex<Option<HashMap<String, watch::Sender<bool>>>> = Mutex::new(None);
+
+fn stop_map() -> std::sync::MutexGuard<'static, Option<HashMap<String, watch::Sender<bool>>>> {
+    APP_STOP.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Everything the generic supervisor needs to launch one app.
 #[derive(Clone)]
@@ -47,15 +54,121 @@ pub struct GenericAppConfig {
 
 /// Spawn the supervisor task for one generic app.
 pub fn start_generic_app_supervisor(cfg: GenericAppConfig, state: SharedState) {
+    let (tx, rx) = watch::channel(false);
+    {
+        let mut guard = stop_map();
+        let map = guard.get_or_insert_with(HashMap::new);
+        // Replacing an existing supervisor: signal the old one to stop.
+        if let Some(old) = map.insert(cfg.app_id.clone(), tx) {
+            let _ = old.send(true);
+        }
+    }
     tokio::spawn(async move {
-        run_supervisor(cfg, state).await;
+        run_supervisor(cfg, state, rx).await;
     });
 }
 
-async fn run_supervisor(cfg: GenericAppConfig, state: SharedState) {
+/// Stop a running generic supervisor and clear its process table entry.
+pub async fn stop_app(app_id: &str, state: &SharedState) {
+    if let Some(map) = stop_map().as_mut() {
+        if let Some(tx) = map.remove(app_id) {
+            let _ = tx.send(true);
+        }
+    }
+    if let Some(proc) = {
+        let mut gw = state.write().await;
+        gw.app_processes.remove(app_id)
+    } {
+        let _ = crate::lifecycle::process::kill_agent_process(proc.pid).await;
+    }
+}
+
+/// Resolve binary + start a generic app declared in the registry.
+/// Returns an error string when the binary cannot be resolved; the caller
+/// should surface `status=error` without rolling back an install.
+pub fn start_app(
+    data_dir: &Path,
+    manifest: &acowork_core::app::AppManifest,
+    state: SharedState,
+    gateway_url: String,
+    gateway_health_url: String,
+    internal_service_token: Option<String>,
+    publisher_token: Option<String>,
+) -> Result<(), String> {
+    if manifest.process.runtime != acowork_core::app::AppRuntime::Generic {
+        return Err("start_app only applies to generic runtime apps".into());
+    }
+    let binary = resolve_app_binary(data_dir, manifest)?;
+    let app_data = data_dir
+        .join(acowork_core::app::APP_DATA_DIR_NAME)
+        .join(&manifest.id);
+    std::fs::create_dir_all(&app_data)
+        .map_err(|e| format!("create app-data: {e}"))?;
+    let cfg = config_from_manifest(
+        manifest,
+        binary,
+        data_dir.to_path_buf(),
+        data_dir.join("logs"),
+        gateway_url,
+        gateway_health_url,
+        internal_service_token,
+        publisher_token,
+    );
+    start_generic_app_supervisor(cfg, state);
+    Ok(())
+}
+
+/// Restart = stop then start (used after install / rollback).
+pub async fn restart_app(
+    data_dir: &Path,
+    manifest: &acowork_core::app::AppManifest,
+    state: SharedState,
+    gateway_url: String,
+    gateway_health_url: String,
+    internal_service_token: Option<String>,
+    publisher_token: Option<String>,
+) -> Result<(), String> {
+    stop_app(&manifest.id, &state).await;
+    start_app(
+        data_dir,
+        manifest,
+        state,
+        gateway_url,
+        gateway_health_url,
+        internal_service_token,
+        publisher_token,
+    )
+}
+
+async fn run_supervisor(
+    cfg: GenericAppConfig,
+    state: SharedState,
+    mut stop: watch::Receiver<bool>,
+) {
     let mut history = RestartHistory::new();
     loop {
-        spawn_and_monitor(&cfg, &state).await;
+        if *stop.borrow() {
+            clear_state(&cfg.app_id, &state).await;
+            return;
+        }
+        tokio::select! {
+            _ = spawn_and_monitor(&cfg, &state) => {}
+            _ = stop.changed() => {
+                if *stop.borrow() {
+                    // Best-effort kill of the current process.
+                    if let Some(proc) = {
+                        let mut gw = state.write().await;
+                        gw.app_processes.remove(&cfg.app_id)
+                    } {
+                        let _ = crate::lifecycle::process::kill_agent_process(proc.pid).await;
+                    }
+                    return;
+                }
+            }
+        }
+        if *stop.borrow() {
+            return;
+        }
         let attempts = history.record(supervisor_defaults::RESTART_WINDOW);
         if attempts as u32 > supervisor_defaults::MAX_RESTART_ATTEMPTS {
             tracing::error!(
@@ -72,7 +185,15 @@ async fn run_supervisor(cfg: GenericAppConfig, state: SharedState) {
             supervisor_defaults::RESTART_BACKOFF_MAX,
         );
         tracing::info!(app = %cfg.app_id, attempt = attempts, ?backoff, "restarting app");
-        sleep(backoff).await;
+        tokio::select! {
+            _ = sleep(backoff) => {}
+            _ = stop.changed() => {
+                if *stop.borrow() {
+                    clear_state(&cfg.app_id, &state).await;
+                    return;
+                }
+            }
+        }
     }
 }
 
@@ -263,7 +384,11 @@ pub fn config_from_manifest(
         health_path: manifest.process.health_path.clone(),
         gateway_health_url,
         gateway_url,
-        data_dir: data_dir.join("apps").join(&manifest.id),
+        // Design doc 34 §6.4: private data lives under app-data/{id}, never
+        // under apps/{id} (that tree holds the install ledger + package).
+        data_dir: data_dir
+            .join(acowork_core::app::APP_DATA_DIR_NAME)
+            .join(&manifest.id),
         extra_args: manifest.process.extra_args.clone(),
         env: manifest.process.env.clone(),
         internal_service_token,
@@ -296,7 +421,7 @@ mod tests {
             None,
         );
         assert_eq!(cfg.port_file, PathBuf::from("/data/pm.port"));
-        assert_eq!(cfg.data_dir, PathBuf::from("/data/apps/pm"));
+        assert_eq!(cfg.data_dir, PathBuf::from("/data/app-data/pm"));
         assert_eq!(expand("{gateway_url}", &cfg), "http://127.0.0.1:19876");
         assert_eq!(
             expand("{internal_service_token}", &cfg),

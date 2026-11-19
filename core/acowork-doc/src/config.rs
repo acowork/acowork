@@ -2,14 +2,15 @@
 //!
 //! Config precedence (highest first):
 //!
-//! 1. Environment variable (`ACOWORK_DOC_DATA_DIR`)
-//! 2. TOML config file (`--config <path>`, default `./acowork-doc.toml`)
-//! 3. [`DocConfig::default`]
+//! 1. `ACOWORK_APP_DATA_DIR` (hosted-app supervisor, ADR-116)
+//! 2. `ACOWORK_DOC_DATA_DIR` (legacy / standalone override)
+//! 3. TOML config file (`--config <path>`, default `./acowork-doc.toml`)
+//! 4. [`DocConfig::default`] → `$HOME/.acowork/acowork-doc/`
 //!
-//! The data directory resolves to `$HOME/.acowork/acowork-doc/` (peer of
-//! `acowork-pm/`, `acowork-gateway/`, `acowork-node/`) — see plan decision
-//! D-2. The Gateway only manages the process lifecycle (spawn / port / MCP
-//! injection); service tuning parameters live here, parsed independently.
+//! Built-in DOC keeps the home-relative default (plan D-2). Cloned installs
+//! must use `ACOWORK_APP_DATA_DIR` so they do not share that tree. The Gateway
+//! only manages process lifecycle (spawn / port / MCP injection); service
+//! tuning parameters live here, parsed independently.
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -20,8 +21,10 @@ use std::path::PathBuf;
 pub struct DocConfig {
     /// Data root (document library tree location).
     ///
-    /// Resolution: env `ACOWORK_DOC_DATA_DIR` → TOML `data_dir` →
-    /// [`default_data_dir`]. Default `$HOME/.acowork/acowork-doc/`.
+    /// Resolution: `ACOWORK_APP_DATA_DIR` → `ACOWORK_DOC_DATA_DIR` → TOML
+    /// `data_dir` → [`default_data_dir`]. Built-in default is
+    /// `$HOME/.acowork/acowork-doc/`; hosted-app installs use
+    /// `{gateway_data}/app-data/{id}`.
     #[serde(default = "default_data_dir")]
     pub data_dir: PathBuf,
 
@@ -70,15 +73,21 @@ pub struct DocConfig {
     pub gateway_token: Option<String>,
 }
 
-/// Default data directory: `$ACOWORK_DOC_DATA_DIR`, else
-/// `$HOME/.acowork/acowork-doc/`.
+/// Default data directory resolution (highest first):
 ///
-/// The env override is what makes the process testable and what lets the
-/// Gateway relocate the library without a TOML file. It used to be
-/// documented in [`DocConfig::data_dir`] without being read here — a knob
-/// that silently did nothing, which meant a "throwaway" instance wrote
-/// straight into the user's real library.
+/// 1. `ACOWORK_APP_DATA_DIR` — hosted-app framework (ADR-116): each installed
+///    app instance gets its own private tree under `{data_dir}/app-data/{id}`.
+/// 2. `ACOWORK_DOC_DATA_DIR` — legacy / standalone override.
+/// 3. `$HOME/.acowork/acowork-doc/` — built-in DOC default.
+///
+/// Without (1), a cloned install of the same binary would share the built-in
+/// library and corrupt it.
 pub fn default_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("ACOWORK_APP_DATA_DIR")
+        && !dir.trim().is_empty()
+    {
+        return PathBuf::from(dir);
+    }
     if let Ok(dir) = std::env::var("ACOWORK_DOC_DATA_DIR")
         && !dir.trim().is_empty()
     {
@@ -191,5 +200,27 @@ mod tests {
             ..DocConfig::default()
         };
         assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn app_data_dir_env_wins_over_legacy() {
+        // Hosted-app clones must not share ~/.acowork/acowork-doc with the
+        // built-in instance. ACOWORK_APP_DATA_DIR is the supervisor contract.
+        let prev_app = std::env::var_os("ACOWORK_APP_DATA_DIR");
+        let prev_doc = std::env::var_os("ACOWORK_DOC_DATA_DIR");
+        unsafe {
+            std::env::set_var("ACOWORK_APP_DATA_DIR", "D:/tmp/app-data/doc-clone");
+            std::env::set_var("ACOWORK_DOC_DATA_DIR", "D:/tmp/legacy-doc");
+        }
+        let dir = default_data_dir();
+        match prev_app {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_APP_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_APP_DATA_DIR") },
+        }
+        match prev_doc {
+            Some(v) => unsafe { std::env::set_var("ACOWORK_DOC_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("ACOWORK_DOC_DATA_DIR") },
+        }
+        assert_eq!(dir, PathBuf::from("D:/tmp/app-data/doc-clone"));
     }
 }

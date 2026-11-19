@@ -51,6 +51,9 @@ import { PmSettingsPanel } from "../../views/pm/PmSettingsPanel";
 import { DocsView } from "../../views/DocsView";
 import { DocSettingsPanel } from "../../views/doc/DocSettingsPanel";
 import { ExtensionsView } from "../../views/ExtensionsView";
+import { AppFrame } from "../apps/AppFrame";
+import { CAPSULE_PANE_CN } from "../common/capsule";
+import { listApps, type AppDto } from "../../lib/apps-api";
 import { MqttDebugControls } from "../debug/MqttDebugControls";
 import { Tooltip } from "../common/Tooltip";
 import { useChatStore } from "../../stores/chatStore";
@@ -61,7 +64,6 @@ import { GlobalSearchDialog } from "../search/GlobalSearchDialog";
 import { useTranslation } from "../../i18n/useTranslation";
 import { AlertTriangle, Bot, Check, Cpu, RefreshCw } from "lucide-react";
 import { ChunkLoadBoundary } from "../common/ErrorBoundary";
-import { CAPSULE_PANE_CN } from "../common/capsule";
 import { log } from "../../lib/logger";
 // Pane floors and the overflow ladder live in panelClamp.ts so the drag
 // ceiling, the effect below and the tests all rank the same numbers.
@@ -976,6 +978,9 @@ export function AppLayout() {
     if (view === "settings") {
       setSettingsInitialTab("profile");
     }
+    if (view !== "app") {
+      useLayoutStore.getState().setHostedAppId(null);
+    }
     setCurrentView(view);
   }, []);
 
@@ -992,6 +997,27 @@ export function AppLayout() {
     const target = useLayoutStore.getState().navViewRequest;
     if (target) setCurrentView(target);
   }, [navViewRequestSeq]);
+
+  const hostedAppId = useLayoutStore((s) => s.hostedAppId);
+  const [hostedAppDto, setHostedAppDto] = useState<AppDto | null>(null);
+  useEffect(() => {
+    if (currentView !== "app" || !hostedAppId) {
+      setHostedAppDto(null);
+      return;
+    }
+    let cancelled = false;
+    void listApps()
+      .then((apps) => {
+        if (cancelled) return;
+        setHostedAppDto(apps.find((a) => a.id === hostedAppId) ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setHostedAppDto(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [currentView, hostedAppId]);
 
   // Sidebar resize handlers
   const handleMouseMove = useCallback((e: MouseEvent) => {
@@ -1393,12 +1419,28 @@ export function AppLayout() {
           </div>
         )}
 
+        {currentView === "app" && (
+          <div className="flex flex-1 overflow-hidden rounded-xl">
+            <div className={cn(CAPSULE_PANE_CN, "min-w-0 flex-1 overflow-hidden")}>
+              {hostedAppDto ? (
+                <AppFrame app={hostedAppDto} />
+              ) : (
+                <div className="flex h-full items-center justify-center text-xs text-text-tertiary">
+                  {hostedAppId ? `Opening ${hostedAppId}…` : "No app selected"}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Right rail placeholder for the remaining non-chat views — keeps the
             40px right column reserved so window chrome stays symmetric when
             switching between nav targets. projects / docs now own a real
             ViewSettingsRail above; settings / harness / extensions keep the
             empty placeholder. */}
-        {currentView !== "chat" && currentView !== "projects" && currentView !== "docs" && (
+        {currentView !== "chat" &&
+          currentView !== "projects" &&
+          currentView !== "docs" && (
           <aside className="w-10 shrink-0 py-2 dark:border-zinc-800" aria-hidden="true" />
         )}
       </div>

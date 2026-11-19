@@ -1,0 +1,41 @@
+id = "doc-clone"
+version = "1.0.0"
+name = "文档库（克隆验证）"
+description = "DOC binary cloned as a hosted app to validate ADR-116 install / MCP / data isolation"
+icon = "file-text"
+builtin = false
+
+[process]
+runtime = "generic"
+binary = "acowork-doc"
+port_hint = 18181
+health_path = "/health"
+
+[process.env]
+ACOWORK_DOC_GATEWAY_TOKEN = "{internal_service_token}"
+
+[mcp]
+path = "/mcp"
+protocol = "streamable-http"
+auto_inject = true
+gateway_path = "/api/apps/doc-clone/mcp"
+
+[ui]
+path = "/ui/"
+mode = "webview"
+
+[ui.nav]
+label = "文档克隆"
+icon = "file-text"
+order = 25
+
+[activation]
+events = ["onStartup", "onNavigate"]
+
+[permissions]
+platform = ["identity.read", "context.read", "agents.read", "notify"]
+
+[package]
+app_api = 1
+platforms = ["windows-x86_64", "linux-x86_64", "macos-aarch64", "macos-x86_64"]
+entry = "bin/acowork-doc"

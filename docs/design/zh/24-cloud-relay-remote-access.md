@@ -48,6 +48,17 @@
 > 6. **回滚关系**：Gateway 配置 `remote.transport = relay | hub | off` 逐 Gateway 灰度。
 >    Hub 模式出问题一行开关回切本文路径，本文代码不动；反之亦然。两模块（`src/relay/` 与 `src/hub/`）
 >    **互斥运行**，仅共享设备身份与 ACL 裁决层，禁止相互依赖。
+>
+> **v0.3.1 修订要点**（Desktop 连接模型收敛，决策记录见 [ADR-115](../../adr/zh/ADR-115-desktop-single-server-address-model.md)）：
+>
+> 1. **§8.0 的「三拓扑」不再等于三种可选模式**。客户端只剩**一个输入（服务器地址）+ 一个传输选择
+>    （Direct / Relay）**。`GatewayMode` 三态枚举**保留在 Rust 侧**（仍决定 MQTT transport、SavePlan、relay ACL、
+>    owned 进程清理），但**前端不再持久化它、用户不再书写它**——`local` / `remote` 由地址是否回环**推论**，
+>    那个可以和地址互相矛盾的第二个旋钮因此消失（ADR-115）。被删的是 localStorage key `acowork-gateway-mode`
+>    与 `setGatewayMode()` 一族，不是枚举本身。
+> 2. **本文的工程内容一字不改**：单隧道、SNI 字节管道、`:19877` / `:19874` 专用 listener、Ed25519
+>    设备鉴权、RemoteOrigin ACL、协议冻结全部照旧。改的只是 §8.0 / §8.1 对「客户端如何表达走中继」
+>    的描述——从「选第三种模式」改为「选中继域名地址 + 打开 Relay 传输」，改造项的结论与工作量不变。
 
 ---
 
@@ -91,7 +102,7 @@ Desktop App 以同机进程身份直连。产品需要支持：
 | F3 | Gateway HTTP 已有 token 认证（HttpAuth），但信任模型建立在 localhost 之上，ACL 注释自述 "single-user phase — permissive" | `rumqttd.toml` §ACL、`core/acowork-gateway/src/http/auth.rs` | 暴露公网前必须完成安全硬化（§7），这是 Phase 1 的**准入门槛**而非收尾工作 |
 | F4 | 平台存在多用户账户体系（AUTH_MODE=multi_user）与用户域服务 | ADR-076、ADR-084（`core/acowork-user`） | 设备注册与中继凭据发放应挂接账户体系，不另造一套身份 |
 | F5 | Node Agent 负责 Runtime 进程生命周期；`install_path` 等为 node-local 路径，跨机 fs 直读即 5xx | ADR-055、AGENTS.md「Gateway boundary」 | 远程模式下客户端不得假设与 Gateway 同机；附件等必须走 Gateway HTTP API |
-| F6 | Desktop 的 `GatewayClient` 已支持 `with_base_url / set_base_url`，MQTT 客户端连 `127.0.0.1:19875`（TCP） | `apps/acowork-desktop/src-tauri/src/gateway_client.rs`、`mqtt_client.rs` | Desktop 远程化改造集中在传输层与连接模式管理，API 层基本不动 |
+| F6 | Desktop 的 `GatewayClient` 已支持 `with_base_url / set_base_url`，MQTT 客户端连 `127.0.0.1:19875`（TCP） | `apps/acowork-desktop/src-tauri/src/gateway_client.rs`、`mqtt_client.rs` | Desktop 远程化改造集中在传输层与地址/传输选择管理，API 层基本不动 |
 | F7 | Desktop 承担本机 Gateway 生命周期管理（spawn/监控），并有 clipboard、附件落盘等同机命令 | `apps/acowork-desktop/src-tauri/src/commands/` | 远程模式存在能力降级，需显式清单化（§8） |
 | F8 | DevMode 调试协议走 MQTT + HTTP，高频交互 | ADR-048、`core/acowork-gateway/src/http/debug_mqtt.rs` | 调试通道默认禁止远程访问 |
 
@@ -394,7 +405,7 @@ sequenceDiagram
 
 | 凭据 | 持有方 | 签发/验证方 | 用途 | 吊销 |
 |------|--------|--------|------|------|
-| 用户 token（现有 access/refresh） | Desktop/Mobile App | 内网 user service（ADR-084）签发，**Gateway 侧验签**（`user_verifier`） | 业务 API 与 MQTT CONNECT 认证（本地/LAN/Relay 三模式同一套） | 现有机制（改密/登出/refresh 失效），对远程即时生效 |
+| 用户 token（现有 access/refresh） | Desktop/Mobile App | 内网 user service（ADR-084）签发，**Gateway 侧验签**（`user_verifier`） | 业务 API 与 MQTT CONNECT 认证（Direct 本机 / Direct 局域网 / Relay 同一套） | 现有机制（改密/登出/refresh 失效），对远程即时生效 |
 | 设备密钥对（gw-id + Ed25519 keypair） | Gateway relay-client（**v0.2.1：私钥存配置目录 `0600` `relay_identity.json`，不进密码保险库**） | Gateway 生成；中继 TOFU 登记公钥并 pinning；挑战-响应验证 | 隧道 REGISTER 鉴权 | admin API 删设备记录 → 踢隧道；ROTATE_KEY 换钥 |
 | 中继服务端证书 | 中继 | 公网 CA（SAN: `relay.example.com` + `*.relay.example.com`） | 客户端/隧道 TLS | 常规轮换 |
 
@@ -424,37 +435,44 @@ sequenceDiagram
 
 ## 8. 客户端改造
 
-### 8.0 三拓扑模型（v0.2 新增：现有 local/remote 语义澄清）
+### 8.0 接入模型：一个地址 + 两种传输（v0.3.1 按 ADR-115 重写；原「三拓扑模型」）
 
-中继落地后平台共有三种接入拓扑。**拓扑是 Desktop 的连接属性**；Gateway 侧 `relay.enabled`
-与之正交（单机版 Gateway 也可开启中继供手机接入）：
+Gateway 侧 `relay.enabled` 与客户端接入方式正交（单机版 Gateway 也可开启中继供手机接入）。
+客户端侧的设置只有一项：**服务器地址**；外加一个**传输选择（Direct / Relay）**。下表三列
+**不是三种可选模式**——前两列是同一种传输（Direct）在两类地址取值下的表现，「本机 / 局域网」
+由地址是否回环推论得出，用户从不选它；只有第三列是另一种传输：
 
-| | ① Standalone 单机 | ② LAN 直连（现有 `remote`） | ③ Relay 外网中继（新增） |
+| | Direct · 回环地址（原 `local` 语义） | Direct · 局域网地址（原 `remote` 语义） | Relay（叠加的入站通道） |
 |---|---|---|---|
-| Desktop `GatewayMode` | `Local`（不变） | `Remote`（不变，语义=内网直连） | `Relay`（新增，持久化串 `"relay"`） |
+| 用户实际填的 | 地址 `127.0.0.1:19876` | 地址 `<lan-ip>:19876` | 传输选 Relay + 设备域 `https://<gw-id>.relay.example.com` |
 | HTTP base_url | `http://127.0.0.1:19876` | `http://<lan-ip>:19876` | `https://<gw-id>.relay.example.com` |
 | MQTT 传输 | TCP `127.0.0.1:19875` | TCP `<lan-ip>:19875`（host 由 base_url 推导 + `/api/status` 动态端口，现状） | **WSS** `wss://<gw-id>.relay.example.com/mqtt`（rumqttc `Transport::Wss`，broker_addr 为完整 URL） |
 | Gateway 生命周期 | probe-or-spawn（现状） | 不 spawn（现状） | 不 spawn + DEVICE_OFFLINE 显式提示 |
 | 信任级别 | localhost 全能力 | 现状语义，不动 | 远程 ACL（专用 listener + RemoteOrigin guard） |
 
-> 现有 `GatewayMode::Local/Remote` 二态（`state.rs`）扩为三态；持久化串 `"local"/"remote"`
-> 向后兼容不动，仅新增 `"relay"`。MQTT 连接幂等守卫（`endpoint_matches`）需将传输类型纳入端点身份。
+> **`GatewayMode` 三态（`state.rs`：`Local` / `Remote` / `Relay`）确实落地了，但 ADR-115 撤掉了它的「输入」身份**：
+> 「模式 + 地址」双旋钮可以长期停在自相矛盾的状态，是实测故障链的根因，因此改为**地址是唯一持久化事实**，
+> mode 由 `deriveGatewayMode(url, relayActive)` 推导后经 `pushGatewayConfigToRust()` 下发（Rust 侧
+> `state.gateway_mode` 仍是权威判定源）。localStorage key `acowork-gateway-mode` 与 `setGatewayMode()` /
+> `requestGatewayModeChange()` / `applyGatewayUrl()` 全部删除，无兼容分支。
+> MQTT 连接幂等守卫（`endpoint_matches`）按上述结论把**传输类型纳入端点身份**——这一条与模式模型无关，仍然成立。
 
-> **v0.3 补充**：新增第四拓扑 **④ Hub**（`GatewayMode::Hub`，持久化串 `"hub"`），设计见
-> [26-cloud-sync-hub.md §9.1](./26-cloud-sync-hub.md)。Hub 模式下 **base_url 指向 Hub 域名而非 Gateway 设备域，
-> 且不使用 MQTT**（无 `:19874` 远程 listener、无 `/mqtt` WS 桥）。三种远程相关拓扑的
+> **v0.3 补充**：新增第三种传输 **④ Hub**（应用层消息中枢，设计见
+> [26-cloud-sync-hub.md §9.1](./26-cloud-sync-hub.md)；**尚未实施**）。Hub 下 **base_url 指向 Hub 域名而非 Gateway 设备域，
+> 且不使用 MQTT**（无 `:19874` 远程 listener、无 `/mqtt` WS 桥）。落地时按 ADR-115 的模型表达为
+> 「地址 + 传输选择」，**不引入新的持久化 mode 字段**。三种远程相关传输的
 > 能力集合必须完全相同，由 `RemoteSurfaceManifest` 单一来源保证（26 §6 / P1 约束）；
-> 客户端侧模式差异只允许存在于 transport 适配器内，业务层不得按模式分支（P3 约束）。
+> 客户端侧差异只允许存在于 transport 适配器内，业务层不得按传输分支（P3 约束）。
 
-### 8.1 Desktop：从「本机伴侣」到「三模客户端」
+### 8.1 Desktop：从「本机伴侣」到「多传输客户端」
 
 | 改造项 | 内容 | 工作量评估 |
 |--------|------|-----------|
-| 连接模式管理 | `GatewayMode` 加 `Relay` 变态；Relay 模式 base_url 指向 `https://<gw-id>.relay.example.com`（复用 `set_base_url`，F6） | 小 |
+| 传输选择 | 设置页一个 RadioGroup（Direct / Relay）+ 单一地址输入；Relay 传输下 base_url 指向 `https://<gw-id>.relay.example.com`（复用 `set_base_url`，F6）。**前端不持久化 mode**：`GatewayMode` 由地址 + relay 开关推论后下发给 Rust（ADR-115，§8.0） | 小 |
 | MQTT 传输 | `acowork-mqtt-session::MqttClientConfig` 加 `transport` 字段（`Tcp` / `Wss(url)`）；rumqttc workspace 依赖启用 `websocket` feature；`Transport::Wss` 时 broker_addr 填完整 URL | 小-中 |
-| 远程访问面板 | 设置页：relay 模式选择 + 「远程访问」面板（Gateway 地址、gw-id 展示、隧道状态轮询 `GET /api/relay/status`） | 中 |
-| 生命周期解耦 | Relay 模式下禁用本机 Gateway spawn/监控（复用现有 mode != Local 分支）；断开仅提示 DEVICE_OFFLINE | 小 |
-| 同机命令降级 | clipboard、附件本地落盘等命令（F7）在 Relay 模式下：附件走 Gateway HTTP API；剪贴板仅传内容不落远端路径。② LAN 直连模式同样适用该清单（同机假设在两模式下均不成立） | 中 |
+| 远程访问面板 | 设置页：relay 传输开关 + 「远程访问」面板（Gateway 地址、gw-id 展示、隧道状态轮询 `GET /api/relay/status`） | 中 |
+| 生命周期解耦 | Relay 传输下禁用本机 Gateway spawn/监控（走现有「地址非回环 ⇒ 不 spawn」的推论分支）；断开仅提示 DEVICE_OFFLINE | 小 |
+| 同机命令降级 | clipboard、附件本地落盘等命令（F7）在 Relay 传输下：附件走 Gateway HTTP API；剪贴板仅传内容不落远端路径。**局域网 Direct 同样适用该清单**（同机假设在这两种接入下均不成立，与 ADR-115 的推论一致） | 中 |
 
 ### 8.2 远程模式能力降级清单（产品需确认）
 
@@ -475,7 +493,7 @@ Mobile 的登录/设备授权流程依赖 ADR-076 账户体系（acowork-user）
 
 ### 8.4 账号融合（v0.2 新增）
 
-三模式下**账号体系唯一**（内网 acowork-user），无云端镜像账号：
+两种传输下**账号体系唯一**（内网 acowork-user），无云端镜像账号：
 
 1. **登录即达**：远程客户端的 `/api/auth/login` / `/api/auth/refresh` 是被中继透传的普通 HTTP，
    直接到达内网 user service——远程设备用同一套账号密码登录，拿同一套 token。
@@ -501,7 +519,7 @@ Mobile 的登录/设备授权流程依赖 ADR-076 账户体系（acowork-user）
 |------|------|---------|---------|
 | **Phase 0**（零开发） | 内部用 Tailscale 将手机接入内网 Gateway，验证 Mobile 协议兼容性（MQTT-over-WS 可用性、rumqttc WS 传输、流式推送体验） | 移动端全链路 demo 通过 | 删除 tailnet，无残留 |
 | **Phase 1**（脚手架） | 完成 §7 安全硬化 S1–S4；用 FRP（vhost HTTP + TCP/WS）搭单用户中继，限定内部设备 | 安全清单评审通过 + 内部远程日用一周 | 关闭 `relay.enabled`；FRP 下线 |
-| **Phase 2**（终态中继） | 自研 `acowork-relay`（§5），多租户 + 限流 + 审计；Desktop 三模改造（§8）；Mobile 接入 | 对外发布远程访问功能 | 中继独立部署，故障时 Gateway 回落纯本地模式，产品功能降级但不损坏数据 |
+| **Phase 2**（终态中继） | 自研 `acowork-relay`（§5），多租户 + 限流 + 审计；Desktop 多传输改造（§8）；Mobile 接入 | 对外发布远程访问功能 | 中继独立部署，故障时 Gateway 回落 Direct 直连路径，产品功能降级但不损坏数据 |
 | **Phase 3**（可选演进） | QUIC 承载、TLS 透传（模式 B）、多实例水平扩展、rumqttd 订阅级 ACL（§7.2 差距） | 按运营数据决策 | 承载层可协商降级回 WSS |
 
 Phase 1 → Phase 2 对 App 侧协议不变（同为 HTTPS + MQTT-over-WS，域名切换即可），FRP 可无缝下线。
@@ -514,7 +532,7 @@ Phase 1 → Phase 2 对 App 侧协议不变（同为 HTTPS + MQTT-over-WS，域�
 | M1 | acowork-relay server | core workspace 新成员（不进 Desktop 打包）：SNI/Host 分流、设备域字节管道（tag 首字节 + `TEARDOWN_GRACE` 告别帧保证 + 502 前置 drain 防 RST）、服务域 axum（`/tunnel` + admin + health）、设备存储（JSON 持久化，存公钥）、隧道注册表（单活+GOAWAY，abort 式拆除）、限流；单测 + 集成测试（握手/转发/单活/TOFU pinning/TOFU 关闭/502） | ✅ |
 | M2 | Gateway relay-client | `src/relay/` 模块：出站 WSS+yamux、挑战-响应、入站流 tag 分流转发 `:19877`、`[relay]` 配置段、Ed25519 身份文件（v0.2.1：不进 vault）、enable/disable/status API（持久化到 gateway.toml）、断线退避重连、Ping/Pong 保活 | ✅（`:19877` listener 属 M3，测试期以回环 echo 代替） |
 | M3 | 远程 ACL 硬化 | rumqttd 第二 listener `:19874`（严格 auth handler：仅 `user:*:desktop:*`/`user:*:mobile:*` + 有效 access token + sub 与 client_id 交叉核验；verifier 每次 CONNECT 从 GatewayState 现读，随 user service 生命周期启闭；端口冲突仅跳过不拖垮主 broker）；axum 第二 listener `:19877`（RemoteOrigin guard：debug/fs-browse/配置写 404、`X-ACowork-Node-Token` 403；`/mqtt` WS 桥接路由在主 Router 层栈之外挂载，MQTT 自带 CONNECT 鉴权） | ✅ |
-| M4 | Desktop 三态模式 | `GatewayMode` 加 `Relay`（持久化串 `"relay"`，向后兼容）；mqtt-session 加 `MqttTransport`（`Tcp`/`Wss(url)`）字段并在 `build_mqtt_options` 统一处理 rumqttc 的 URL-in-host 语义（WSS 用平台根证书）；`chat_mqtt.rs` 按模式选端点（Relay→WSS `<base_url>/mqtt` + 账户 access token 作 CONNECT 密码，client_id name 段取 token `sub`；**soft-restart 凭据刷新器**解决 token 15 分钟过期后重连被无 CONNACK 静默丢弃的问题）；幂等守卫 `endpoint_matches` 以 `MqttEndpoint`（传输+地址）为身份；切离 local 模式即停本机 Gateway | ✅ |
+| M4 | Desktop 三态模式（**已由 ADR-115 修订**：枚举与 `"relay"` 串保留，但 mode 改为前端按地址推论后下发，前端不再持久化，用户只选 Direct / Relay） | `GatewayMode` 加 `Relay`（持久化串 `"relay"`，向后兼容）；mqtt-session 加 `MqttTransport`（`Tcp`/`Wss(url)`）字段并在 `build_mqtt_options` 统一处理 rumqttc 的 URL-in-host 语义（WSS 用平台根证书）；`chat_mqtt.rs` 按模式选端点（Relay→WSS `<base_url>/mqtt` + 账户 access token 作 CONNECT 密码，client_id name 段取 token `sub`；**soft-restart 凭据刷新器**解决 token 15 分钟过期后重连被无 CONNACK 静默丢弃的问题）；幂等守卫 `endpoint_matches` 以 `MqttEndpoint`（传输+地址）为身份；切离 local 模式即停本机 Gateway | ✅ |
 | M5 | Desktop 远程 UI | 设置页 + 引导页 relay 模式选项；`RelayTunnelPanel`（5s 轮询 `GET /api/relay/status`：gw-id/relay_url/session_id/connected_at/last_error，只读——enable/disable 已被远程 ACL 404）；offsite 语义收敛（SplashScreen 候选探测、AgentList 节点分组、URL 卡片均 `!== local`）；relay 模式 fs-browse 按钮降级（`/api/fs/browse` 被 §7.2 ACL 挡）；i18n 5 locale | ✅ |
 | M6 | E2E 验证 | `tests/relay_full_path_e2e.rs` 全链路（relay → 隧道 → 真实 :19877 listener → ACL → `/mqtt` WS 桥 → 严格 broker → token 鉴权）；**抓出并修复生产 bug**：axum WS 桥不回显 `mqtt` 子协议（rumqttc WSS 客户端握手校验回显，缺省即 `SubprotocolHeaderMissing`——M3 裸 tungstenite 测试未暴露）。实现报告 `report-relay-phase2-implementation.md` | ✅ |
 
@@ -539,7 +557,7 @@ Phase 1 → Phase 2 对 App 侧协议不变（同为 HTTPS + MQTT-over-WS，域�
 - ADR-048（DevMode 调试协议）、ADR-055（Node 拓扑）、ADR-076（多用户账户体系）、ADR-080（advertise-host 漂移自愈）、ADR-084（用户域服务）
 - `core/acowork-gateway/configs/rumqttd.toml` — Broker 监听与 ACL 现状
 - `core/acowork-gateway/src/mqtt/broker.rs` — rumqttd 0.20 auth handler（仅 CONNECT 三元组）与多 v4 listener 能力实证
-- `apps/acowork-desktop/src-tauri/src/state.rs` / `commands/gateway.rs` — 现有 `GatewayMode::Local/Remote` 双态与 spawn 跳过逻辑
+- `apps/acowork-desktop/src-tauri/src/state.rs` / `commands/gateway.rs` — `GatewayMode::Local/Remote/Relay` 三态与 spawn 跳过逻辑。**注意（ADR-115）**：该枚举是**推论结果**，由前端 `deriveGatewayMode(url, relayActive)` 算出后经 `pushGatewayConfigToRust()` 下发，不再是用户输入、不再独立持久化
 - `apps/acowork-desktop/src-tauri/src/commands/chat_mqtt.rs` — MQTT host 推导与 `/api/status` 动态端口链路
 - rumqttc 0.25 `eventloop.rs` — Ws/Wss 传输要求 `broker_addr` 为完整 URL（`split_url`）；`Sec-WebSocket-Protocol: mqtt` 强制子协议
 - 外部咨询稿 `relay-server.md`（FRP + MQTT Bridge 方案，否决理由见 §3.2）

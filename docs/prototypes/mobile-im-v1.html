@@ -2317,7 +2317,7 @@ function pageReview() {
 /* ============================================================
    5. 设置 = Desktop SettingsPage（4 个一级 Tab → 二级页）
    ============================================================ */
-const p_state = { theme: "system", fontScale: 1, opacity: 100, autoSplit: "auto", gatewayMode: "relay", docsOpen: null, notif: true, compact: true };
+const p_state = { theme: "system", fontScale: 1, opacity: 100, autoSplit: "auto", transport: "relay", docsOpen: null, notif: true, compact: true };
 
 function pageSettingsList() {
   const rowDef = (icon, tint, title, desc, page, extra = "") => `
@@ -2506,24 +2506,35 @@ function pageSettingsGateway() {
       <div class="group" style="margin-top:12px">
         <div class="group-card">
           <div class="row static" style="display:block;padding:12px 16px">
-            <div style="font-size:13px;color:var(--label-2);margin-bottom:8px">网关模式</div>
+            <div style="font-size:13px;color:var(--label-2);margin-bottom:8px">传输方式</div>
             <div class="segmented">
-              ${[["local", "本地"], ["remote", "局域网"], ["relay", "中继"]].map(([v, l]) =>
-                `<button class="${p_state.gatewayMode === v ? "on" : ""}" data-act="gwm" data-v="${v}">${l}</button>`).join("")}
+              ${[["direct", "直连 Direct"], ["relay", "中继 Relay"]].map(([v, l]) =>
+                `<button class="${p_state.transport === v ? "on" : ""}" data-act="tx" data-v="${v}">${l}</button>`).join("")}
+            </div>
+            <div style="font-size:11px;color:var(--label-3);margin-top:8px;line-height:1.5">
+              移动端<b>没有</b>本机 / 局域网之分：那是 Desktop 按地址是否回环<b>推论</b>出来的（ADR-115），
+              这里只有一个传输选择 + 一个地址。
             </div>
           </div>
           <div class="row static"><span class="lead">${ICON.cloud}</span><span class="grow"><span class="t">状态</span></span>
             <span class="pill green">已连接</span></div>
           <div class="row static"><span class="lead">${ICON.gauge}</span><span class="grow"><span class="t">版本</span></span><span class="value">1.4.2</span></div>
         </div>
-        <div class="group-note">移动端<b>没有</b>本地 Gateway 进程，因此「启动 / 停止 / 重启 Gateway」与本地模式在 v1 不可用（对应 Desktop settings.localGateway）。</div>
+        <div class="group-note">移动端<b>没有</b>本地 Gateway 进程，因此「启动 / 停止 / 重启 Gateway」整组在 v1 不可用（对应 Desktop settings.localGateway）。</div>
       </div>
       <div class="group">
         <div class="group-title">连接</div>
         <div class="group-card">
           <div class="row static" style="display:block;padding:12px 16px">
             <div style="font-size:13px;color:var(--label-2);margin-bottom:6px">Gateway 地址</div>
-            <div class="field"><input value="https://relay.acowork.dev" /></div>
+            <div class="field"><input value="${p_state.transport === "relay"
+              ? "https://&lt;gw-id&gt;.relay.acowork.dev"
+              : "http://192.168.1.20:19876"}" /></div>
+            <div style="font-size:11px;color:var(--label-3);margin-top:6px">
+              ${p_state.transport === "relay"
+                ? "中继地址必须是 https（隧道是 WSS）。"
+                : "直连填 Gateway 自己的地址；同一局域网内可达即可。"}
+            </div>
           </div>
           <button class="row" data-act="toast" data-toast="连接测试通过（284ms）"><span class="lead">${ICON.refresh}</span><span class="grow"><span class="t">测试连接</span></span><span class="chev">${ICON.chev}</span></button>
           <button class="row" data-act="toast" data-toast="地址已保存"><span class="lead">${ICON.check}</span><span class="grow"><span class="t">保存并应用</span></span></button>
@@ -2895,7 +2906,7 @@ Object.assign(ACTIONS, {
   "col": (el) => { curPage().col = el.dataset.col; render(); },
   "theme": (el) => { p_state.theme = el.dataset.theme; applyTheme(); render(); },
   "accent": (el) => { document.documentElement.style.setProperty("--accent", el.dataset.accent); toast("高亮色已更新"); },
-  "gwm": (el) => { p_state.gatewayMode = el.dataset.v; render(); toast("网关模式：" + el.textContent); },
+  "tx": (el) => { p_state.transport = el.dataset.v; render(); toast("传输方式：" + el.textContent); },
   /* 多会话相关动作 */
   "dsess":   (el) => openSheet("session-actions", `${el.dataset.agent}::${el.dataset.sid}`),
   "dnewsess": (el) => { closeDrawer(); setTimeout(() => { newSession(el.dataset.agent); }, 200); },

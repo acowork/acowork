@@ -346,7 +346,7 @@ Cold start
   │                                          │ probe GET /api/status
   ├─ address saved ──→ probe /api/status ─fail→ [Disconnected screen] (last address + retry/change)
   │                  │ok
-  │                  ├─ requires_setup=true ─→ [Restricted notice] ("Gateway not initialized — finish setup on Desktop")
+  │                  ├─ account_state ≠ ready ─→ [Restricted notice] (uninitialized / needs_setup: "Gateway not initialized — finish setup on Desktop")
   │                  ├─ no valid token ─────→ [Login screen]
   │                  └─ token present ──────→ main UI (validity proven by the first 401 triggering refresh)
   │
@@ -354,7 +354,7 @@ Cold start
                      └──fail──→ inline form error (wrong credentials / unreachable)
 ```
 
-**Principle**: every state has exactly one labeled exit; no "tap and see". `/api/status` is public (no token) and returns `auth_mode / registration_open / requires_setup / version` — one probe per launch is enough.
+**Principle**: every state has exactly one labeled exit; no "tap and see". `/api/status` is public (no token) and returns `account_state / registration_open / version` — one probe per launch is enough. (ADR-114 deleted `auth_mode`; `requires_setup` was never a wire field — it is derived from `account_state`.)
 
 ### 7.2 Connect screen (first launch / change address)
 
@@ -364,7 +364,7 @@ Cold start
 | LAN discovery | **No mDNS/auto-scan in v1.** On multi-NIC machines the advertised address often is not the reachable one (container bridge / WSL / VPN adapters broadcast wrong IPs), and scanning adds a needless permission surface on mobile. v1 substitutes "Desktop shows its LAN IP + manual entry" (Settings → Gateway); pairing codes in v1.1 remove even this manual step |
 | Validation | `GET /api/status` must succeed before saving; failures show the concrete cause (DNS / timeout / not an ACowork Gateway) and are **not persisted** |
 | Version display | After a successful probe show the Gateway version so users confirm the right instance |
-| `auth_mode=local` | "This Gateway runs in local mode; mobile requires multi-user mode" — login is blocked |
+| `account_state` (replaces the deleted `auth_mode`) | Rendered verbatim in Settings → Gateway: `ready` means login is possible; `needs_setup` / `uninitialized` mean the Gateway has no signable-in administrator yet → the restricted notice sends the user to finish setup on Desktop. The "local mode has no account system" branch disappeared with ADR-114: the account system is always on, and network topology does not decide whether it exists |
 | Change entry | Settings → Gateway → server address (same screen reused) |
 
 ### 7.3 Login screen

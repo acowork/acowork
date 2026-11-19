@@ -997,8 +997,9 @@ Conventions:
   resolved out of `x-user-id`, never from the query string — otherwise anybody could name somebody else's
   visible set.
 - **No existence oracle**: a caller who is not a participant of this chat gets the same 404 as a chat that
-  does not exist (`SessionScope::sees_chat`, fail-closed). Local mode (`SessionScope::Unfiltered`) has no
-  account system, so the boundary stays the loopback bind itself, as on every other Runtime surface.
+  does not exist (`SessionScope::sees_chat`, fail-closed). `SessionScope::Unfiltered` is **not a deployment mode** (ADR-114 keeps the
+  account system always on): it means the caller supplied no chat-scope header — an internal or trusted
+  caller, or the wildcard admin scope.
 - **The Gateway does not interpret these two parameters**: forwarded verbatim like `page` / `size` /
   `active`. The permission lives on the node that owns the execution sessions, which the proxy can neither
   read nor should (ADR-009 §5).

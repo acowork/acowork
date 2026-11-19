@@ -379,18 +379,29 @@ enabled = true
 url = "wss://relay.<你的域名>/tunnel"
 ```
 
-或运行时启用：
+改完**重启 Gateway**（隧道在启动时按配置自动拉起，并自带重连与退避）。
+
+或在运行时启用——**注意 `/api/relay/*` 不在公开路径白名单里**：ADR-114 之后账号体系恒开，
+无令牌的匿名请求一律 401（`is_public_path` 见 `core/acowork-gateway/src/http/auth_middleware.rs`）。
+先登录换 access token，再带 `Authorization` 调管理接口：
 
 ```bash
+TOKEN=$(curl -s -X POST http://127.0.0.1:19876/api/auth/login \
+  -H 'Content-Type: application/json' \
+  -d '{"username":"<你的账号>","password":"<你的密码>"}' \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])')
+
 curl -X POST http://127.0.0.1:19876/api/relay/enable \
+  -H "Authorization: Bearer $TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"url":"wss://relay.<你的域名>/tunnel"}'
 ```
 
-**验证**：
+**验证**（同样需要令牌）：
 
 ```bash
-curl -s http://127.0.0.1:19876/api/relay/status | python3 -m json.tool
+curl -s http://127.0.0.1:19876/api/relay/status \
+  -H "Authorization: Bearer $TOKEN" | python3 -m json.tool
 # 期望：{"enabled":true, "connected":true, "gw_id":"<UUID v4>"}
 ```
 
@@ -398,9 +409,13 @@ curl -s http://127.0.0.1:19876/api/relay/status | python3 -m json.tool
 
 ### 9.4 Desktop 远程连接
 
-1. Desktop 设置 → 连接模式选 **Relay**
-2. Gateway URL 填 `https://<gw-id>.relay.<你的域名>`（`<gw-id>` 来自 9.3 的 `/api/relay/status`）
+1. Desktop **设置 → 网关 → 网关连接**，传输方式选 **中继（Relay）**
+2. Gateway URL 填 `https://<gw-id>.relay.<你的域名>`（`<gw-id>` 来自 9.3 的 `/api/relay/status`，
+   Desktop 同一张卡片里也会直接显示设备 ID）
 3. 用普通账号登录
+
+> 没有「本地 / 远程」切换了（ADR-115）：Desktop 只有一个服务器地址设置，直连与中继是两种**传输方式**，
+> 地址是否在本机是推论出来的。
 
 > Debug 端点远程返回 404 属**预期**（远程 ACL 加固）：relay 模式自动禁用 DevMode、LSP Relay 显示不可用（设计文档 24 §8.2）。
 
@@ -461,7 +476,7 @@ journalctl -t acowork-relay-cert --since "-5 min" --no-pager
 | 5 | **CPU 积分**（突发性能实例 t5/t6） | 控制台 → 实例 → 监控 | 积分耗尽 → CPU 被限到基准，服务看起来"死"了 |
 | 6 | **公网 IP 是否变了** | 对比控制台公网 IP 与 `dig` 结果 | 非 EIP 的公网 IP 在停/开机后**会变** → 同步 DNS |
 | 7 | **服务与日志** | `systemctl status acowork-relay`、`journalctl -u acowork-relay -n 100` | 进程崩溃 / 证书读不到 |
-| 8 | **隧道而非 relay** | `curl /health` 通 + `curl /api/relay/status` 异常 | 是 Gateway 隧道断了，不是 relay 挂了 |
+| 8 | **隧道而非 relay** | `curl /health` 通 + `curl /api/relay/status` 异常 | 是 Gateway 隧道断了，不是 relay 挂了（`/api/relay/status` 需要令牌，见 §9.3） |
 
 **诊断用临时换端口**（仅诊断，**不要当生产方案**）：
 
@@ -476,7 +491,7 @@ journalctl -t acowork-relay-cert --since "-5 min" --no-pager
 | 症状 | 原因 | 处理 |
 |------|------|------|
 | `curl /health` 超时 | DNS 没指对 / 安全组 443 没开 / 服务没起 / 未备案被拦 | `dig +short relay.<域名>` 必须返回 ECS IP；`systemctl status`；查 §11.1 第 1 项 |
-| `/health` 通但设备域 502 | Gateway 隧道未建立 | Gateway 日志 + `curl /api/relay/status` |
+| `/health` 通但设备域 502 | Gateway 隧道未建立 | Gateway 日志 + `curl -H "Authorization: Bearer $TOKEN" /api/relay/status`（令牌见 §9.3） |
 | 设备域报**连接失败 / TLS 错误**（不是 502） | 泛解析没配 / 证书缺通配符 SAN | 回 §2 与 §5.1 的两条验证 |
 | Desktop TLS 报错 | 证书 SAN 不含 `*.<域名>` | 重跑 §5.1 验证 |
 | 证书 60 天后失效 | 续期 hook 断了 | §10 验证；**不要**用 `--force-renewal` 硬试（LE 对相同域名集合有限流） |

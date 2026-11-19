@@ -207,6 +207,27 @@ pub struct GatewayConfig {
     /// `enabled = true`.
     #[serde(default)]
     pub relay: RelayClientConfig,
+
+    /// Hosted-application install trust knobs (ADR-116 / design doc 34 §6.6).
+    #[serde(default)]
+    pub apps: AppsConfig,
+}
+
+/// Hosted-application packaging / install configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppsConfig {
+    /// When true, unsigned `.app` packages are accepted with a warning.
+    /// Default is false — installing an app starts a local process.
+    #[serde(default)]
+    pub allow_unsigned: bool,
+}
+
+impl Default for AppsConfig {
+    fn default() -> Self {
+        Self {
+            allow_unsigned: false,
+        }
+    }
 }
 
 /// Cloud relay client configuration (design doc 24 §8.2, Gateway side).
@@ -1007,6 +1028,10 @@ impl GatewayConfig {
                 .as_ref()
                 .map(|c| c.relay.clone())
                 .unwrap_or_default(),
+            apps: file_config
+                .as_ref()
+                .map(|c| c.apps.clone())
+                .unwrap_or_default(),
         };
 
         config.validate()?;
@@ -1128,6 +1153,7 @@ impl Default for GatewayConfig {
             memory: MemoryConfig::default(),
             security: SecurityConfig::default(),
             relay: RelayClientConfig::default(),
+            apps: AppsConfig::default(),
         }
     }
 }

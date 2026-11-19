@@ -405,8 +405,21 @@ pub struct GatewayState {
 }
 
 impl GatewayState {
-    /// Create new empty state with vault at the given directory
+    /// Create new empty state with vault at the given directory.
+    ///
+    /// Convenience for tests that share one temp directory for vault + data.
+    /// Production boot must use [`Self::with_dirs`] so the app registry reads
+    /// `{data_dir}/apps` (ADR-116), not the vault tree.
     pub fn new(vault_dir: &str) -> Self {
+        Self::with_dirs(vault_dir, vault_dir)
+    }
+
+    /// Create state with distinct vault and data directories.
+    ///
+    /// `AppRegistry` loads installed packages from `{data_dir}/apps` — the same
+    /// tree `app::install` writes. Loading from `vault_dir` leaves installed
+    /// apps invisible to `/api/apps` and the generic supervisor after restart.
+    pub fn with_dirs(vault_dir: &str, data_dir: &str) -> Self {
         Self {
             installed_agents: HashMap::new(),
             agent_identity: HashMap::new(),
@@ -442,7 +455,7 @@ impl GatewayState {
             memory_process: None,
             memory_mcp_url: None,
             app_registry: Arc::new(std::sync::RwLock::new(
-                acowork_core::app::AppRegistry::load(std::path::Path::new(vault_dir)),
+                acowork_core::app::AppRegistry::load(std::path::Path::new(data_dir)),
             )),
             app_processes: std::collections::HashMap::new(),
         }
@@ -761,6 +774,78 @@ mod tests {
         assert!(state.running_agents.is_empty());
         assert!(!state.vault.is_unlocked());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Production vault_dir ≠ data_dir. Registry must read installed packages
+    /// from data_dir; loading from vault left Gallery stuck on "Install" and
+    /// hid hosted-app nav slots after Gateway restart.
+    #[test]
+    fn with_dirs_loads_app_registry_from_data_dir_not_vault() {
+        let vault = temp_vault_dir("apps-vault");
+        let data = temp_vault_dir("apps-data");
+        let app_dir = std::path::Path::new(&data).join("apps").join("figcraft");
+        let version_dir = app_dir.join("versions").join("0.18.1");
+        std::fs::create_dir_all(&version_dir).unwrap();
+        std::fs::write(
+            version_dir.join("app.toml"),
+            r#"
+id = "figcraft"
+version = "0.18.1"
+name = "FigCraft"
+icon = "figcraft"
+builtin = false
+
+[process]
+runtime = "generic"
+binary = "figcraft-acowork"
+port_hint = 18110
+health_path = "/health"
+
+[mcp]
+path = "/mcp"
+gateway_path = "/api/apps/figcraft/mcp"
+
+[ui]
+path = "/ui/"
+
+[ui.nav]
+label = "FigCraft"
+
+[package]
+app_api = 1
+platforms = ["windows-x86_64", "linux-x86_64", "macos-aarch64", "macos-x86_64"]
+entry = "bin/figcraft-acowork"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            app_dir.join("state.json"),
+            r#"{"current":"0.18.1","origin":"url","installed_at":"2026-01-01T00:00:00Z"}"#,
+        )
+        .unwrap();
+
+        let wrong = GatewayState::new(&vault);
+        assert!(
+            wrong
+                .app_registry
+                .read()
+                .unwrap()
+                .get("figcraft")
+                .is_none(),
+            "vault-only load must not see data_dir installs"
+        );
+
+        let state = GatewayState::with_dirs(&vault, &data);
+        let manifest = state
+            .app_registry
+            .read()
+            .unwrap()
+            .get("figcraft")
+            .cloned();
+        assert_eq!(manifest.as_ref().map(|m| m.name.as_str()), Some("FigCraft"));
+
+        let _ = std::fs::remove_dir_all(&vault);
+        let _ = std::fs::remove_dir_all(&data);
     }
 
     /// `started_at` backs `GET /api/status`'s `uptime_secs`, which the

@@ -373,6 +373,7 @@ pub fn build_router(state: AppState) -> Router {
         // ticket-authenticated inside `app::proxy`. Order matters: exact
         // routes are merged before the catch-all.
         .merge(crate::app::api::app_routes())
+        .merge(crate::app::mcp_proxy::app_mcp_routes())
         .merge(crate::app::platform::platform_routes())
         .merge(crate::http::debug_mqtt::debug_mqtt_routes())
         .merge(crate::http::settings_api::settings_routes())

@@ -1,7 +1,7 @@
 # 单机模拟 ACowork 远程部署 - Runbook
 
 > 心智模型：**没有 local/remote 两套拓扑**。本机 = `127.0.0.1`，远程 = 局域网 IP，端口完全一样（HTTP :19876 / MQTT :19875 / Node 代理 :19900 / Node LSP :19878）。
-> 区别仅在于 IP（loopback vs LAN）和 bind 地址（`127.0.0.1` vs `0.0.0.0`）。Gateway/Node/Runtime 一律用同一种方式启动（下文的命令即是）；「远程方式」三字仅指它们都**手动启动、不依赖 Desktop**。Desktop 的 Local 模式只是「在探测不到 Gateway 时替你 spawn」——见 §4.2。
+> 区别仅在于 IP（loopback vs LAN）和 bind 地址（`127.0.0.1` vs `0.0.0.0`）。Gateway/Node/Runtime 一律用同一种方式启动（下文的命令即是）；「远程方式」三字仅指它们都**手动启动、不依赖 Desktop**。Desktop 侧也**没有 local/remote 模式开关**（ADR-115）：唯一设置是服务器地址，local/remote 由地址推论而来；地址在本机时 Desktop 才会在「探测不到 Gateway 时替你 spawn」——见 §4.2。
 
 ---
 
@@ -9,7 +9,7 @@
 
 ```mermaid
 graph LR
-    Desktop["acowork-desktop<br/>(Tauri)<br/>Local 模式=可能 spawn<br/>Remote 模式=纯连接"] -->|HTTP :19876| Gateway
+    Desktop["acowork-desktop<br/>(Tauri)<br/>单一服务器地址<br/>本机地址=可能 spawn"] -->|HTTP :19876| Gateway
     Desktop <-->|MQTT :19875| Gateway
     Gateway["acowork-gateway<br/>HTTP :19876 · MQTT :19875<br/>--no-spawn-local-node 可选"] -->|store| Packages
     Node["acowork-node<br/>(独立进程，手动 enroll)<br/>proxy :19900 · LSP :19878"]
@@ -17,15 +17,15 @@ graph LR
     Node -->|spawn/kill| Runtime["acowork-runtime<br/>127.0.0.1:random"]
 ```
 
-「三端各跑各的」原则（本模拟场景；Desktop Local 模式会自动 spawn，见 §4.2）：
+「三端各跑各的」原则（本模拟场景；地址在本机时 Desktop 会自动 spawn，见 §4.2）：
 
 | 端 | 谁启动 | bind | 默认端口 | 启动方式 |
 |---|---|---|---|---|
 | Gateway | 用户手启（前台或 daemon） | HTTP+MQTT 听 `0.0.0.0`（或本机 IP） | :19876 / :19875 | `--daemon` |
 | Node | 用户手启（前台 daemon） | proxy 听 `0.0.0.0` | :19900 / :19878 | `start` |
-| Desktop | `npm run tauri dev` | Tauri 内 | Local 或 Remote 模式 + URL（**Gateway 行为与配置一致**，见 §4.2） |
+| Desktop | `npm run tauri dev` | Tauri 内 | 传输方式（Direct / Relay）+ 地址（**Gateway 行为与配置一致**，见 §4.2） |
 
-**模拟要点：Gateway 与 Node 都手动启动**。Gateway 默认会 spawn 一个以本机机器名命名的 Node Agent（如 `nytb`，ADR-055 §6.11），本模拟要单独起 Node，用 `--no-spawn-local-node` 关掉（见 §2）。Desktop 不 spawn（选 Remote）或 probe-then-spawn（选 Local，见 §4.2）——但不管哪种，**下面 Gateway/Node 的命令完全一样**。
+**模拟要点：Gateway 与 Node 都手动启动**。Gateway 默认会 spawn 一个以本机机器名命名的 Node Agent（如 `nytb`，ADR-055 §6.11），本模拟要单独起 Node，用 `--no-spawn-local-node` 关掉（见 §2）。Desktop 对非本机地址不 spawn，对本机地址 probe-then-spawn（见 §4.2）——但不管哪种，**下面 Gateway/Node 的命令完全一样**。
 
 ---
 
@@ -178,11 +178,19 @@ $env:ACOWORK_GATEWAY_ALLOWED_NODE_IPS = "192.168.1.20,192.168.1.0/24"   # 可选
 启动日志预期：
 
 ```
-enrolling node 'sim-node-1' against gateway 192.168.1.20:19875
-enrollment accepted, node_id = sim-node-1
-node proxy listening on 0.0.0.0:19900
-MQTT connected, subscribing acowork/nodes/sim-node-1/#
+Node Agent starting   node_id=…  gateway=192.168.1.20:19875
+Node MQTT (re)connected — running bootstrap
+Node enrollment request published
+Node bootstrap complete
+Node reverse proxy listening   addr=0.0.0.0:19900
+Node token persisted to identity.json
 ```
+
+> **关于 enrollment token**：上面的命令没带 `--token` 也能 enroll 成功，是因为本模拟的 Gateway 跑的是
+> `mqtt.auth_enabled = false`（当前 shipped 默认，ADR-055 §6.8）——此时 Gateway 跳过 token 校验直接发长期
+> `node_token`。**代价是这台机器落进无主状态**（`node_owners.json` 里没有归属记录，按 ADR-087 D7 只有 admin
+> 能 manage）。要绑定账号就签一个一次性 token 带上：见 [enroll-remote-node.md](./enroll-remote-node.md)。
+> `auth_enabled = true` 时不带 token 会被 `rejected ("enrollment token required")` 直接拒掉。
 
 > **关键：这次没有端口冲突**。`19900` 和 `19878` 是默认 canonical 端口，可以直接用，不需要像 v1 那样改 `:19901`/`:19879`。
 
@@ -206,7 +214,7 @@ MQTT connected, subscribing acowork/nodes/sim-node-1/#
 
 ---
 
-## 4. 启动 Desktop App（Remote 模式连本机/远程 Gateway）
+## 4. 启动 Desktop App（直连本机/远程 Gateway）
 
 ### 4.1 构建+启动
 
@@ -219,37 +227,48 @@ npm run tauri dev              # 启动 Tauri 窗口
 
 > `core:build:debug` 会从 `core\target\debug\release\` 拷 binary 到 `apps\acowork-desktop\src-tauri\bin\`。如果你用的方法 A 分目录的，需要把 gateway 从 `gw/release/` 拷过去。
 
-### 4.2 Desktop 模式语义：本地 vs 远程 = 同一套 Gateway 拓扑
+### 4.2 Desktop 连接语义：单一地址 = 同一套 Gateway 拓扑
 
-**Gateway/Node/Runtime 没有 local/remote 之分**——两种模式下它们的命令行、配置、端口、bind
-地址完全一致。`local/remote` 只是 Desktop App 内部的概念，唯一差别是：
+**Gateway/Node/Runtime 没有 local/remote 之分**——它们的命令行、配置、端口、bind 地址完全一致。
+Desktop 侧也**没有 local/remote 模式开关了**（ADR-115）：唯一用户可见的设置是**服务器地址**，
+`local` / `remote` 是**从地址推论**出来的（地址是否 loopback），不是用户选的。
 
-| | 本地模式（Local） | 远程模式（Remote） |
+用户可见的只有两种**传输方式**（设置 → 网关 → 网关连接 里的 RadioGroup）：
+
+| | 直连（Direct） | 中继（Relay） |
+|---|---|---|
+| 地址 | 一个 Gateway 地址（`127.0.0.1` / LAN IP / 主机名） | `https://<gw-id>.<relay-domain>`，永远是 https |
+| 通路 | 直连 Gateway 的 HTTP `:19876` + MQTT `:19875` | 出站 WSS 隧道经云端中继转进来 |
+| Gateway 要做什么 | 什么都不用做 | 配 `[relay] enabled = true` 并重启 |
+
+**关键**：两种传输方式下 Gateway/Node 的命令一模一样。地址是否在本机只影响一件事——
+Desktop 要不要替你 spawn 它。
+
+| | 地址在本机（loopback，推论出的 local） | 地址不在本机（推论出的 remote） |
 |---|---|---|
 | Desktop 启动时 | **probe-then-spawn**：先探测 `{url}/health`，没响应才 spawn Gateway 子进程（ownership = `owned`） | **不 spawn**：假定你已手动启动 Gateway（ownership = `foreign`） |
-| URL | 默认 `http://127.0.0.1:19876`，可改成任何地址（含本机 LAN IP） | 手动填，本机 IP / 局域网 IP 均可 |
-| Desktop spawn 的 Gateway | **loopback-only**：强制 `--addr 127.0.0.1:19876 --mqtt-addr 127.0.0.1:19875`（CLI > TOML），不随配置文件/环境变量变成 0.0.0.0；其 spawn 的 local node 也恒连 `127.0.0.1`（ADR-055 §6.3.3 #4）——local 链路免疫换网换 IP。**local 只服务本机**，外部 Node 连不上本机 spawn 的 Gateway（符合 local 语义）；要接远程 Node 请用远程模式 | 不 spawn，bind 由你的 `gateway.toml` / 启动参数决定（跨机需 `0.0.0.0`） |
+| Desktop spawn 的 Gateway | 绑定 `0.0.0.0:{port}`，但 Desktop 会把 base_url 归一到 `http://127.0.0.1:19876`（`adopt_spawned_base_url`）——loopback 免疫换网换 IP | 不 spawn，bind 由你的 `gateway.toml` / 启动参数决定（跨机需 `0.0.0.0`） |
 | Gateway 配置文件 | 同一个 `gateway.toml` | 同一个 `gateway.toml` |
-| Desktop 退出 | 弹出三选项（见 §4.2.2） | 直接退出，绝不 kill 远程 Gateway |
+| Desktop 退出 | 弹三选项（见 §4.2.2） | 直接退出，绝不 kill 远程 Gateway |
 
 **单机模拟的三个场景**（同一台电脑、端口全一样、无端口竞争）：
 
 ```mermaid
 flowchart TB
-    subgraph S1["场景 1：本地模式 + 手动先启 Gateway（adopt-foreign）"]
-        A1["手动启动 gateway.exe"] --> B1["Desktop 选 Local 模式<br/>URL=http://127.0.0.1:19876"]
+    subgraph S1["场景 1：本机地址 + 手动先启 Gateway（adopt-foreign）"]
+        A1["手动启动 gateway.exe"] --> B1["Desktop 地址选 http://127.0.0.1:19876"]
         B1 --> C1["探测 /health 200 → 直接连上<br/>ownership='foreign'，不重复 spawn"]
         C1 --> D1["设置页显示：Running（无 Stop 按钮）<br/>+ 提示「非 Desktop 启动」"]
         D1 --> E1["Desktop 退出：无弹窗，Gateway 继续运行"]
     end
-    subgraph S2["场景 2：本地模式 + Desktop spawn（owned）"]
-        A2["不手动启动任何 Gateway"] --> B2["Desktop 选 Local 模式"]
+    subgraph S2["场景 2：本机地址 + Desktop spawn（owned）"]
+        A2["不手动启动任何 Gateway"] --> B2["Desktop 地址选 http://127.0.0.1:19876"]
         B2 --> C2["探测失败 → spawn gateway 子进程<br/>ownership='owned'"]
         C2 --> D2["设置页显示：Running + Stop/Restart 按钮"]
         D2 --> E2["Desktop 退出：弹三选项<br/>Yes=连 Gateway 一起退 / No=保 Gateway 运行 / Cancel=不退出"]
     end
-    subgraph S3["场景 3：远程模式连本机 Gateway（原『远程模式』语义）"]
-        A3["手动启动 gateway.exe（本机）"] --> B3["Desktop 选 Remote 模式<br/>URL=http://127.0.0.1:19876 或 LAN IP"]
+    subgraph S3["场景 3：非本机地址连本机 Gateway"]
+        A3["手动启动 gateway.exe（本机）"] --> B3["Desktop 地址填 http://127.168.1.20:19876 或本机 LAN IP"]
         B3 --> C3["Desktop 只轮询 /health，不 spawn"]
     end
 ```
@@ -259,52 +278,57 @@ flowchart TB
 
 ### 4.2.1 连接步骤
 
-**本地模式（场景 1 / 2）**：
+**直连（场景 1 / 2 / 3 通用）**：
 
-`Settings → Gateway Tab` → RadioGroup 切到 **Local** → URL 默认
-`http://127.0.0.1:19876`（也可手动改）→ 若状态是 `Stopped`，点 **Start Gateway**
-（或重启 App 让 SplashScreen 走 probe-then-spawn）。
+`Settings → Gateway Tab → 网关连接` → 传输方式保持 **Direct** → 地址列表里选一项或直接输入
+（列表第一项恒为 `http://127.0.0.1:19876`，标记「本机」）→ 若本机那项状态是 `Stopped`，
+点 **Start Gateway**（或重启 App 让 SplashScreen 走 probe-then-spawn）。
 
-**远程模式（场景 3）**：
+> 选中的地址若连不上，**不是死路**：地址控件在登录页 / 首启页 / 设置页是同一个，
+> 随时可以改地址重试。
 
-`Settings → Gateway Tab` → RadioGroup 切到 **Remote** → URL 填
-`http://192.168.1.20:19876`（或单机 `http://127.0.0.1:19876`）→ **Apply** +
-**Test Connection** → connected。
+**中继**：传输方式选 **Relay** → 填 `https://<gw-id>.<relay-domain>`（`gw-id` 由 Gateway 的
+`/api/relay/status` 给出，Desktop 同一张卡片里也直接显示）。
 
-**首次启动（Onboarding）**：Step 2「Gateway 连接」选模式后，本地模式点 **Start Local
-Gateway**（自动起）；远程模式填 URL → **Apply** → **Test Connection**。
+**首次启动（Onboarding）**：Step 2「Gateway 连接」只有一个地址选择器 + 状态指示 +
+[Test Connection]——没有模式 RadioGroup 了。
 
-### 4.2.2 Desktop 退出语义（改动 4）
+### 4.2.2 Desktop 退出语义
 
-本地模式且 Desktop **owned** 该 Gateway（自己 spawn 的）时，退出弹三选项：
+Desktop **owned** 那个 Gateway（自己 spawn 的）时，退出弹三选项：
 
 - **Quit and Stop Gateway** → taskkill 整棵进程树后退出（Gateway + local node + Runtime）
 - **Quit, Keep Gateway Running** → Desktop 直接退，Gateway 留在后台继续服务
 - **Cancel** → 中止退出
 
-本地模式但 Gateway 是 **foreign**（手动先启、Desktop 只是连上）→ **不弹窗直接退出**，Gateway
-不受影响。远程模式同理。所以 Desktop 退出**永远不会静默 kill 你没让它启动的进程**。
+Gateway 是 **foreign**（手动先启、Desktop 只是连上）→ **不弹窗直接退出**，Gateway
+不受影响。非本机地址同理。所以 Desktop 退出**永远不会静默 kill 你没让它启动的进程**。
 
 底层机制：
 
 ```
-localStorage["acowork-gateway-mode"] = "local" | "remote"
-localStorage["acowork-gateway-url"]  = "http://<host>:19876"
+localStorage["acowork-gateway-url"]            = "http://<host>:19876"   # 唯一的连接设置
+localStorage["acowork-gateway-url-history"]    = [...]                    # 成功连过的地址
+localStorage["acowork-gateway-last-good-url"]  = "http://<host>:19876"
+localStorage["acowork-gateway-relay-active"]  = true|false               # 只由中继入口置位
         ↓
-Tauri command set_gateway_config({mode, url})     # 两种模式都接受用户 URL（改动 1：不再强制覆盖 local URL）
+store.commitGatewayUrl(url) → deriveGatewayMode(url, relayActive)  # 模式是推论，不是输入
         ↓
-本地模式: init_local_gateway → probe /health → 通=foreign / 不通=spawn(owned)，等 bootstrap READY
-        ↓  ownership 写入 gatewayStore.localOwnership（改动 3：新字段，不改旧 localState 状态机）
-远程模式: 不 spawn，只轮询 /health + /api/bootstrap
+Tauri command set_gateway_config({mode, url})  # mode = local|remote|relay，供 Rust 侧决定是否 spawn / MQTT transport / ACL
+        ↓
+local: init_local_gateway → probe /health → 通=foreign / 不通=spawn(owned)，等 bootstrap READY
+        ↓  ownership 写入 gatewayStore.localOwnership
+remote / relay: 不 spawn，只轮询 /health + /api/bootstrap
 ```
 
 关键代码：
 
-- 前端持久化：[apps/acowork-desktop/src/stores/settingsStore.ts:367-380](../../apps/acowork-desktop/src/stores/settingsStore.ts)
-- Tauri 命令（probe-then-spawn + ownership）：[apps/acowork-desktop/src-tauri/src/commands/gateway.rs:64-210](../../apps/acowork-desktop/src-tauri/src/commands/gateway.rs)
-- SplashScreen boot：[apps/acowork-desktop/src/components/layout/SplashScreen.tsx:27-80](../../apps/acowork-desktop/src/components/layout/SplashScreen.tsx)
-- 退出三选项对话框：[apps/acowork-desktop/src-tauri/src/tray/events.rs:8-72](../../apps/acowork-desktop/src-tauri/src/tray/events.rs)
-- Onboarding 流程：[apps/acowork-desktop/src/components/onboarding/OnboardingFlow.tsx:206-345](../../apps/acowork-desktop/src/components/onboarding/OnboardingFlow.tsx)
+- 前端持久化与模式推论：[apps/acowork-desktop/src/stores/settingsStore.ts](../../apps/acowork-desktop/src/stores/settingsStore.ts) · 推论纯函数：[apps/acowork-desktop/src/lib/gatewayUrl.ts](../../apps/acowork-desktop/src/lib/gatewayUrl.ts)
+- Tauri 命令（probe-then-spawn + ownership）：[apps/acowork-desktop/src-tauri/src/commands/gateway.rs](../../apps/acowork-desktop/src-tauri/src/commands/gateway.rs)
+- SplashScreen boot：[apps/acowork-desktop/src/components/layout/SplashScreen.tsx](../../apps/acowork-desktop/src/components/layout/SplashScreen.tsx)
+- 地址选择控件：[apps/acowork-desktop/src/components/connection/GatewayAddressPicker.tsx](../../apps/acowork-desktop/src/components/connection/GatewayAddressPicker.tsx)
+- 退出三选项对话框：[apps/acowork-desktop/src-tauri/src/tray/events.rs](../../apps/acowork-desktop/src-tauri/src/tray/events.rs)
+- Onboarding 流程：[apps/acowork-desktop/src/components/onboarding/OnboardingFlow.tsx](../../apps/acowork-desktop/src/components/onboarding/OnboardingFlow.tsx)
 
 ### 4.3 MQTT 通道自动发现
 
@@ -348,17 +372,17 @@ Desktop MQTT client 通过 Gateway `/api/status` 拿到 broker host:port 自动�
 | `nodes list` 出现 `local` 节点 | 同上 | 同上 |
 | Gateway 启动失败：`acowork-node not found` | 启了 `--daemon` 但同级目录没 `acowork-node.exe` | 要么把 binary 放回去，要么传 `--no-spawn-local-node` |
 | Node `connect refused 19875` | MQTT 还在绑 127.0.0.1 | `gateway.toml` 改 `mqtt.host = "0.0.0.0"`，或启动时 `--mqtt-addr 0.0.0.0:19875` |
-| Desktop Remote 模式 `connection refused` | URL 用了 127.0.0.1 但 Gateway 在另一台机器 | URL 改成 Gateway 机器的实际 LAN IP |
+| Desktop `connection refused` | URL 用了 127.0.0.1 但 Gateway 在另一台机器 | 地址改成 Gateway 机器的实际 LAN IP |
 | HTTP 对某机器回 `403 forbidden`（JSON `peer IP not allowed...`） | 配了非空 `[security].allowed_node_ips` 而对方 IP 不在列表 | 把该 IP / CIDR 加进白名单（TOML 或 env，**改后重启 Gateway**）；本地 Desktop 不受影响（127.0.0.1 恒放行） |
 | Node 连 Gateway MQTT 秒断、日志无 CONNACK | MQTT TCP pre-filter 拦截（非白名单 IP） | 同上——Node 机器 IP 加入 `allowed_node_ips`；空列表 = 全放行 |
-| Desktop 本地模式退出不弹三选项 | Gateway 是 foreign（手动先启 / 远程）——**符合预期** | 只有 Desktop 自己 spawn 的 Gateway（owned）才弹 |
-| Desktop 本地模式设置页只有 Start 没有 Stop | Gateway foreign（手动先启），Desktop 不接管 | 不接管=不 kill；要管理就 Stop 手动进程后点 Start（此时 Desktop 才 spawn=owned） |
+| Desktop 退出不弹三选项 | Gateway 是 foreign（手动先启 / 远程）——**符合预期** | 只有 Desktop 自己 spawn 的 Gateway（owned）才弹 |
+| Desktop 设置页只有 Start 没有 Stop | Gateway foreign（手动先启），Desktop 不接管 | 不接管=不 kill；要管理就 Stop 手动进程后点 Start（此时 Desktop 才 spawn=owned） |
 | Node 启动报 `address in use :19900` | Gateway 仍启了 local node | 检查 `[local_node] enabled` |
 | `advertise_host` 没生效，Runtime 找不到 embed | 没设或 LAN IP 拼错 | `gateway.toml` 设 + Desktop 重启 |
 | `packages_dir` 跑到了 `<gateway_home>/config/packages` 旧位置 | 升级前的数据（手动移走即可，不再写新代码兼容） | `mv <gateway_home>/config/packages <node_home>/packages` |
 | Tunnel 场景（WSL↔宿主机） | 同上 | ssh -L 端口转发 19876 + 19875 |
 | 笔记本换 Wi-Fi 热点后，Gateway 反代 Runtime 返回 503 | Node / Runtime 还抱着旧 IP（Node 未用 `--addr auto`） | Node 用 `--addr auto` 重启；之后换网 60s 内控制面 + Runtime 可达性自动恢复（ADR-055 §6.3.3），无需重启任何进程 |
-| local 模式：Desktop spawn 的 Gateway / node 日志里地址是 127.0.0.1 | 设计如此（loopback-only 不变式） | 正常现象；local 只服务本机，跨机请用远程模式手动起 Gateway |
+| 地址在本机：Desktop spawn 的 Gateway / node 日志里地址是 127.0.0.1 | 设计如此（loopback 不变式，见 §4.2） | 正常现象；本机 spawn 的 Gateway 只服务本机，跨机请手动起 Gateway 并填它的 LAN 地址 |
 
 日志位置：
 

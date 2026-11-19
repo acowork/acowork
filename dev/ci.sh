@@ -913,6 +913,42 @@ run_css_theme_redline() {
 # no longer be added to one mode and quietly missing from the other — the
 # previous split had `run_node_redline` and `run_mqtt_redline` reachable only
 # from `all`, which is the mode nobody runs on a small change.
+# ADR-116: Gateway must not read app private data under app-data/, and the
+# Desktop must not import an application's front-end sources — apps load only
+# through the Gateway-proxied iframe at runtime.
+run_app_framework_redline() {
+    echo "Checking ADR-116 hosted-app framework red lines..."
+    local failed=0
+    local gw="$SCRIPT_DIR/../core/acowork-gateway/src"
+    local hits
+    hits=$(grep -rnE 'app-data|APP_DATA_DIR_NAME' --include='*.rs' "$gw" \
+        | grep -E 'fs::read|fs::read_to_string|fs::write|File::open|std::fs::read' \
+        | grep -vE ':[0-9]+:[[:space:]]*//' \
+        | grep -vE 'create_dir_all|ACOWORK_APP_DATA_DIR|config_from_manifest|join\(.*APP_DATA' \
+        || true)
+    if [ -n "$hits" ]; then
+        echo "ERROR: Gateway appears to read app-data contents (ADR-116):"
+        echo "$hits"
+        failed=1
+    fi
+
+    local desk="$SCRIPT_DIR/../apps/acowork-desktop/src"
+    local imports
+    imports=$(grep -rnE "from ['\"].*/(acowork-pm|acowork-doc)(/|['\"])|from ['\"]@acowork/(pm|doc)" \
+        --include='*.ts' --include='*.tsx' "$desk" \
+        || true)
+    if [ -n "$imports" ]; then
+        echo "ERROR: Desktop imports app front-end sources (ADR-116):"
+        echo "$imports"
+        failed=1
+    fi
+
+    if [ "$failed" -ne 0 ]; then
+        exit 1
+    fi
+    echo "Hosted-app framework red line: OK"
+}
+
 run_all_redlines() {
     run_node_redline
     run_mqtt_redline
@@ -931,6 +967,7 @@ run_all_redlines() {
     run_ort_api_redline
     run_agent_skill_tool_redline
     run_css_theme_redline
+    run_app_framework_redline
 }
 
 run_clippy() {

@@ -11,13 +11,21 @@
 //! injected plus an `X-App-Id` header. The app's webview never sees a platform
 //! token; it talks to its own backend, which forwards platform reads.
 
+use std::convert::Infallible;
+use std::time::Duration;
+
 use axum::{
     Json, Router,
-    extract::{Extension, State},
+    extract::{Extension, Path, State},
     http::{HeaderMap, StatusCode, header},
-    response::IntoResponse,
+    response::{
+        IntoResponse,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
+use futures_util::stream::StreamExt;
+use tokio_stream::wrappers::IntervalStream;
 
 use crate::http::auth_middleware::AuthContext;
 use crate::http::routes::AppState;
@@ -26,6 +34,8 @@ pub const CAP_IDENTITY_READ: &str = "identity.read";
 pub const CAP_CONTEXT_READ: &str = "context.read";
 pub const CAP_AGENTS_READ: &str = "agents.read";
 pub const CAP_NOTIFY: &str = "notify";
+pub const CAP_SECRETS_READ: &str = "secrets.read";
+pub const CAP_EVENTS: &str = "events.subscribe";
 
 pub fn platform_routes() -> Router<AppState> {
     Router::new()
@@ -33,6 +43,8 @@ pub fn platform_routes() -> Router<AppState> {
         .route("/api/platform/context", get(context))
         .route("/api/platform/agents", get(agents))
         .route("/api/platform/notify", post(notify))
+        .route("/api/platform/events", get(events))
+        .route("/api/platform/secrets/{name}", get(secret))
 }
 
 /// Resolve the calling app and check one declared capability.
@@ -175,4 +187,97 @@ async fn notify(
     // in the structured log keeps the surface side-effect free.
     tracing::info!(app = ?headers.get(header::HOST), level, message, "app notification");
     Json(serde_json::json!({ "accepted": true })).into_response()
+}
+
+/// SSE event channel for apps that declared `events.subscribe`.
+/// Emits a heartbeat every 15s; richer event fan-out can layer on later.
+async fn events(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Some(err) = authorize(&state, &headers, CAP_EVENTS) {
+        return err;
+    }
+    let app_id = headers
+        .get("x-app-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("unknown")
+        .to_string();
+    let stream = IntervalStream::new(tokio::time::interval(Duration::from_secs(15))).map(
+        move |_| {
+            let data = serde_json::json!({
+                "type": "heartbeat",
+                "app_id": app_id,
+                "ts": now_unix(),
+            });
+            Ok::<Event, Infallible>(Event::default().event("platform").data(data.to_string()))
+        },
+    );
+    Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(Duration::from_secs(15)))
+        .into_response()
+}
+
+/// App-scoped Vault secret read. Keys are namespaced as `app/{app_id}/{name}`
+/// so one app cannot read another app's secrets. Requires `secrets.read`.
+async fn secret(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(name): Path<String>,
+) -> impl IntoResponse {
+    if let Some(err) = authorize(&state, &headers, CAP_SECRETS_READ) {
+        return err;
+    }
+    if name.is_empty() || name.contains('/') || name.contains("..") {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid secret name" })),
+        )
+            .into_response();
+    }
+    let app_id = headers
+        .get("x-app-id")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    if app_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "x-app-id required" })),
+        )
+            .into_response();
+    }
+    // App secrets live under `{data_dir}/app-secrets/{app_id}/{name}`. The
+    // Gateway never crosses into another app's directory. Full Vault-backed
+    // encryption can replace this file store without changing the HTTP shape.
+    let gw = state.gateway_state.read().await;
+    let Some(data_dir) = gw.config.as_ref().map(|c| std::path::PathBuf::from(&c.data_dir)) else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "data_dir unavailable" })),
+        )
+            .into_response();
+    };
+    drop(gw);
+    let path = data_dir.join("app-secrets").join(&app_id).join(&name);
+    match std::fs::read_to_string(&path) {
+        Ok(value) => Json(serde_json::json!({ "name": name, "value": value })).into_response(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "secret_not_found", "name": name })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+    }
+}
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }

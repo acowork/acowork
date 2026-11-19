@@ -100,6 +100,23 @@ interface LayoutState {
     requestNavView: (view: NavView) => void;
 
     /**
+     * Active hosted-app id when `NavView === "app"` (ADR-116 webview slot).
+     * Cleared when switching to a built-in nav target.
+     */
+    hostedAppId: string | null;
+    setHostedAppId: (id: string | null) => void;
+    /**
+     * Open a hosted app in the main shell (left-nav slot), not an inline
+     * panel inside Extensions. Same consume-once seq as `requestNavView`.
+     */
+    openHostedAppRequestSeq: number;
+    openHostedAppRequestId: string | null;
+    requestOpenHostedApp: (id: string) => void;
+    /** Bump so NavBar re-fetches `/api/apps` after install / uninstall. */
+    hostedAppsEpoch: number;
+    bumpHostedAppsEpoch: () => void;
+
+    /**
      * Monotonically-increasing counter for "open the harness page on this
      * tab" requests (ADR-104: the MCP recommendation group sends the
      * user to the MCP tab to enter an API key). `HarnessPage` owns its active
@@ -159,7 +176,25 @@ export const useLayoutStore = create<LayoutState>((set) => ({
         set((state) => ({
             navViewRequest: view,
             navViewRequestSeq: state.navViewRequestSeq + 1,
+            // Leaving a hosted-app slot when peers request a built-in view.
+            ...(view !== "app" ? { hostedAppId: null } : {}),
         })),
+
+    hostedAppId: null,
+    setHostedAppId: (id) => set({ hostedAppId: id }),
+    openHostedAppRequestSeq: 0,
+    openHostedAppRequestId: null,
+    requestOpenHostedApp: (id) =>
+        set((state) => ({
+            openHostedAppRequestId: id,
+            openHostedAppRequestSeq: state.openHostedAppRequestSeq + 1,
+            hostedAppId: id,
+            navViewRequest: "app",
+            navViewRequestSeq: state.navViewRequestSeq + 1,
+        })),
+    hostedAppsEpoch: 0,
+    bumpHostedAppsEpoch: () =>
+        set((state) => ({ hostedAppsEpoch: state.hostedAppsEpoch + 1 })),
 
     harnessTabRequestSeq: 0,
     harnessTabRequest: null,
