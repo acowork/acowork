@@ -92,6 +92,7 @@ describe("AppFrame", () => {
 
         const sandbox = frame.getAttribute("sandbox") ?? "";
         expect(sandbox).toContain("allow-scripts");
+        expect(sandbox).toContain("allow-downloads");
         expect(sandbox).not.toContain("allow-same-origin");
     });
 

@@ -3,9 +3,14 @@
  *
  * The Desktop contributes only an iframe container and a narrow postMessage
  * bridge. The app owns its DOM, routing and bundle; the Gateway owns the
- * session ticket and the reverse proxy. `allow-same-origin` is deliberately
- * absent: with an opaque origin the app cannot reach the Desktop window's
- * DOM, storage or tokens, while its fetches still carry the session ticket.
+ * session ticket and the reverse proxy. The frame always loads through
+ * `getGatewayUrl()`, so a Desktop pointed at a remote Gateway still opens
+ * the app running on that machine.
+ *
+ * `allow-same-origin` is deliberately absent: with an opaque origin the app
+ * cannot reach the Desktop window's DOM, storage or tokens, while its
+ * fetches still carry the session ticket. `allow-downloads` is present so
+ * the app can save files through the browser download path.
  */
 import { useEffect, useRef, useState } from "react";
 import { getGatewayUrl } from "../../lib/config";
@@ -107,7 +112,7 @@ export function AppFrame({ app }: { app: AppDto }) {
                 ref={frameRef}
                 src={src}
                 title={app.name}
-                sandbox="allow-scripts allow-forms allow-popups"
+                sandbox="allow-scripts allow-forms allow-popups allow-downloads"
                 onLoad={pushTheme}
                 className="min-h-0 w-full flex-1 border-0 bg-page-bg"
             />
