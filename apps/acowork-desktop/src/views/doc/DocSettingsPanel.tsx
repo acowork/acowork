@@ -27,17 +27,24 @@ interface DocSettingsPanelProps {
   width: number;
   onResizeStart?: (e: React.MouseEvent) => void;
   onClose: () => void;
+  /** Rendered inside the hover drawer: the drawer owns the geometry, so the
+   *  panel fills it instead of bringing its own gutter and resize handle
+   *  (see `RightPanelDrawer.tsx`). */
+  overlay?: boolean;
 }
 
-export function DocSettingsPanel({ width, onResizeStart, onClose }: DocSettingsPanelProps) {
+export function DocSettingsPanel({ width, onResizeStart, onClose, overlay = false }: DocSettingsPanelProps) {
   const { t } = useTranslation();
   const [trashOpen, setTrashOpen] = useState(false);
   const healthy = useDocHealthStore((s) => s.healthy);
   const selectedNode = useDocTreeStore((s) => s.selectedNode);
 
   return (
-    <div className="relative ml-1 flex shrink-0 flex-col" style={{ width }}>
-      {onResizeStart && (
+    <div
+      className={cn("relative flex shrink-0 flex-col", overlay ? "h-full w-full" : "ml-1")}
+      style={overlay ? undefined : { width }}
+    >
+      {!overlay && onResizeStart && (
         <div
           className="group absolute -left-1 top-0 bottom-0 z-10 w-1 cursor-col-resize"
           onMouseDown={onResizeStart}
@@ -51,14 +58,19 @@ export function DocSettingsPanel({ width, onResizeStart, onClose }: DocSettingsP
             与中间内容列的头部横线对齐。 */}
         <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center justify-between border-b border-border-divider px-[var(--tab-px)] text-[length:var(--tab-font-size)] font-medium leading-[var(--tab-line-height)] text-text-tertiary">
           <span>{t("doc.settingsPanel.title")}</span>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t("common.close")}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
-          >
-            ×
-          </button>
+          {/* No × in a peek: the hover drawer dismisses on pointer-out, and a
+              close button that re-opened under the still-inside pointer is
+              worse than no button (see PmSettingsPanel). */}
+          {!overlay && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label={t("common.close")}
+              className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
+            >
+              ×
+            </button>
+          )}
         </div>
 
         <OverlayScrollbar fill="flex" className="p-3">

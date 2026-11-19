@@ -11,10 +11,12 @@
  *   1. Every open editor tab (`kind === "file"`) — a file stays watched even
  *      when the workspace panel is closed / another tab is active. This is the
  *      "file open, tree closed → file keeps watching" rule.
- *   2. When the right-side workspace panel is visible (activePanelTab ===
- *      "workspace" AND the panel is not collapsed): the root of the current
- *      agent's current session workspace (""), plus every directory currently
- *      expanded in the file tree (per-session `treeExpandedPaths`).
+ *   2. When the right-side workspace panel is visible — `workspacePanelVisible`
+ *      in `components/layout/rightPanelGate.ts`, which counts the pinned panel
+ *      AND the hover drawer that previews it while the layout stays collapsed:
+ *      the root of the current agent's current session workspace (""), plus
+ *      every directory currently expanded in the file tree (per-session
+ *      `treeExpandedPaths`).
  *
  * The module is framework-agnostic: it subscribes to the relevant Zustand
  * stores and reports on a debounce. A group that disappears from the derived
@@ -24,6 +26,7 @@
 
 import { useFileEditorStore } from "../stores/fileEditorStore";
 import { useLayoutStore } from "../stores/layoutStore";
+import { workspacePanelVisible } from "../components/layout/rightPanelGate";
 import { useChatStore } from "../stores/chatStore";
 import { useAgentStore } from "../stores/agentStore";
 import { useWorkspaceStore } from "../stores/workspaceStore";
@@ -67,8 +70,14 @@ export function deriveWatchGroups(): Map<GroupKey, string[]> {
     }
 
     // 2. Visible workspace panel → root + expanded directories.
+    //
+    // "Visible" is `workspacePanelVisible`, not `activePanelTab === "workspace"
+    // && !rightPanelCollapsed`: the hover drawer previews the tree while the
+    // layout stays collapsed, and a tree the user is looking at has to keep
+    // updating — otherwise the drawer shows a snapshot and the file they
+    // hovered for is missing from it.
     const layout = useLayoutStore.getState();
-    if (layout.activePanelTab === "workspace" && !layout.rightPanelCollapsed) {
+    if (workspacePanelVisible(layout)) {
         const agentId = useAgentStore.getState().selectedAgentId;
         if (agentId) {
             const sessionId = useChatStore.getState().getActiveSessionId(agentId);

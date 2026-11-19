@@ -116,13 +116,21 @@
    explicit outline to reach the contrast the tinted packs get from their
    coloured plane. It lives here because a theme scope declared in globals.css
    is what dev/ci.sh's CSS theme-pack red line exists to prevent — every rule
-   that only makes sense for one palette belongs to that palette's file. */
+   that only makes sense for one palette belongs to that palette's file.
+
+   The `.right-drawer` branch is the hover preview of the very same panel
+   (components/layout/RightPanelDrawer.tsx): it is not a child of the row but
+   a sibling that floats over it, so it needs its own selector — and without
+   it the previewed panel would draw a lighter outline than the pinned one,
+   which reads as two different surfaces. */
 :root.theme-default .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel),
-:root.theme-default .chat-pane-row > .relative > .bg-right-panel {
+:root.theme-default .chat-pane-row > .relative > .bg-right-panel,
+:root.theme-default .right-drawer > .relative > .bg-right-panel {
   border-color: hsl(0 0% 75%);
 }
 
 :root.theme-default.dark .chat-pane-row > :is(.bg-nav-surface, .bg-chat-body, .bg-right-panel),
-:root.theme-default.dark .chat-pane-row > .relative > .bg-right-panel {
+:root.theme-default.dark .chat-pane-row > .relative > .bg-right-panel,
+:root.theme-default.dark .right-drawer > .relative > .bg-right-panel {
   border-color: var(--color-border-outer);
 }

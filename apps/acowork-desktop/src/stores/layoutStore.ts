@@ -47,6 +47,23 @@ interface LayoutState {
     setRightPanelCollapsed: (collapsed: boolean | ((prev: boolean) => boolean)) => void;
 
     /**
+     * The tab the hover drawer is currently previewing, or `null`.
+     *
+     * The drawer is a *preview*: it floats over the row while
+     * `rightPanelCollapsed` stays true, so the layout keeps the width the user
+     * gave the file editor. That also means `collapsed` alone no longer answers
+     * "is this panel on screen?" — and the answer matters to consumers that
+     * hold no DOM of their own, above all the demand-driven fs-watch set in
+     * `lib/workspaceFsWatch.ts`, which must keep watching the tree the drawer is
+     * showing or the previewed file list goes stale under the user's cursor.
+     *
+     * Written by `AppLayout` (the drawer's owner), read through
+     * `layout/rightPanelGate.ts`'s `visiblePanelTab`. Never persisted.
+     */
+    hoverPanelTab: PanelTab | null;
+    setHoverPanelTab: (tab: PanelTab | null) => void;
+
+    /**
      * Whether the pm view's right settings panel is open. Separate from
      * `rightPanelCollapsed` (which belongs to the chat view's agent panel);
      * the two share only the rail geometry and the panel width.
@@ -123,6 +140,9 @@ export const useLayoutStore = create<LayoutState>((set) => ({
                     ? (collapsed as (prev: boolean) => boolean)(state.rightPanelCollapsed)
                     : collapsed,
         })),
+
+    hoverPanelTab: null,
+    setHoverPanelTab: (tab) => set({ hoverPanelTab: tab }),
 
     pmPanelOpen: false,
     setPmPanelOpen: (open) =>
