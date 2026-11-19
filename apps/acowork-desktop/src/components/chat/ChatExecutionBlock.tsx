@@ -190,8 +190,11 @@ function stateText(
 }
 
 /** One-line summary for a round row, the way a tool row shows its arguments:
- *  whitespace folded, cut at the width a row can hold. */
-function summarize(text: string, max = 60): string {
+ *  whitespace folded, and clipped only at a size no row can draw. The width a
+ *  row actually has is the CSS `truncate` on the row's span — a character count
+ *  here is not a width, and cutting at one truncated rows that still had room
+ *  (the same defect `ExploreBlock`'s tool rows had). */
+function summarize(text: string, max = 500): string {
   const collapsed = text.replace(/\s+/g, " ").trim();
   return collapsed.length > max
     ? `${collapsed.slice(0, max - 1)}…`
@@ -843,7 +846,10 @@ function RoundItem({
           <span className="shrink-0 font-medium text-text-secondary ">
             {t("chatView.block.roundN", { n: index + 1 })}
           </span>
-          <span className="min-w-0 flex-1 truncate ml-1 text-left text-text-tertiary ">
+          <span
+            className="min-w-0 flex-1 truncate ml-1 text-left text-text-tertiary "
+            title={summary}
+          >
             {summary}
           </span>
         </button>

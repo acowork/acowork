@@ -387,3 +387,80 @@ describe("ExploreBlock — the authorization opens the block, whatever the block
     expect(header(container).getAttribute("aria-expanded")).toBe("false");
   });
 });
+
+/**
+ * The row's text is the row's TEXT, not its layout. `summarizeToolCall` used
+ * to cut the summary at 60 characters before it reached the DOM, so a row in a
+ * wide window still showed `sed -n 140,240p apps/acowork-desktop/src/…` while
+ * half its width was empty: the clip that decides where a one-line row ends is
+ * the CSS `truncate` on the row's span, which measures the width that is
+ * actually left after the icon, the label and the status column.
+ *
+ * jsdom performs no layout, so this guards the two things the fix is made of:
+ * the whole summary reaches the DOM (no early `…`), and the element that clips
+ * it is the one that can (the `truncate` span, carrying the full text as its
+ * `title` so the part CSS hid stays reachable).
+ */
+describe("ExploreBlock — the tool row uses the width it has", () => {
+  /** A `bash` row whose command is longer than the 60 chars the row used to cut at. */
+  function longCommandCall(command: string): ChatMessage {
+    return {
+      id: "c-long",
+      type: "tool_call",
+      content: JSON.stringify({ command }),
+      timestamp: 1000,
+      toolName: "bash",
+      toolCallId: "call-long",
+    };
+  }
+
+  /** Render the block and open it, so the row is in the DOM. */
+  function openRow(command: string): HTMLElement {
+    const { container } = render(
+      <ExploreBlock items={[longCommandCall(command)]} isStreaming={false} />,
+    );
+    fireEvent.click(header(container));
+    return container;
+  }
+
+  /** The row's clipping span — the element that owns the truncation. */
+  function summarySpan(container: HTMLElement): HTMLElement {
+    const span = container.querySelector("span.truncate") as HTMLElement | null;
+    expect(span).toBeTruthy();
+    return span!;
+  }
+
+  it("hands the whole command to the DOM instead of cutting it at 60 characters", () => {
+    const command = "sed -n 140,240p apps/acowork-desktop/src/components/layout/RightPanel.tsx | grep -n button";
+    expect(command.length).toBeGreaterThan(60);
+
+    const span = summarySpan(openRow(command));
+
+    // The text is verbatim: no early `…` standing in for room the row had.
+    expect(span.textContent).toBe(command);
+    expect(span.textContent).not.toContain("…");
+  });
+
+  it("leaves the clipping to CSS, and keeps the hidden tail reachable", () => {
+    const span = summarySpan(openRow("grep -rn explore apps/acowork-desktop/src/components/chat | head -40"));
+
+    // `truncate` + `min-w-0` + `flex-1` is what turns the row's leftover width
+    // into the clip point; without them the row would grow past its column.
+    expect(span.className).toContain("min-w-0");
+    expect(span.className).toContain("flex-1");
+    // Whatever CSS clips is still readable on hover.
+    expect(span.getAttribute("title")).toBe(span.textContent);
+  });
+
+  it("folds a multi-line command onto the row's one line", () => {
+    const span = summarySpan(openRow("for f in *.tsx; do\n  grep -q $f src\n"));
+
+    expect(span.textContent).toBe("for f in *.tsx; do grep -q $f src");
+  });
+
+  it("still bounds the row's text, so a pathological argument cannot bloat every row", () => {
+    const span = summarySpan(openRow(`cat <<'EOF'\n${"x".repeat(5000)}\nEOF`));
+
+    expect(span.textContent!.length).toBeLessThan(1000);
+  });
+});

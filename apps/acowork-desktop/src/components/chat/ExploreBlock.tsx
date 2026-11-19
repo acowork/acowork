@@ -48,6 +48,22 @@ const EXPLORE_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.9)";
 /** Font size for detail panels (params/result): 80% of app font size */
 const EXPLORE_DETAIL_FONT_SIZE = "calc(var(--ui-font-size, 0.875rem) * 0.8)";
 
+/**
+ * The one-line row text is clipped by CSS (`truncate` on the row's span), not
+ * here — see `summarizeToolCall`. This is only the guard the DOM needs: fold
+ * the whitespace so a multi-line argument stays on one line, and cap the
+ * string at a length no window can draw, so a pathological argument cannot
+ * hide 100 KB of text in every row of an expanded block.
+ */
+const SUMMARY_MAX_CHARS = 500;
+
+function clipSummary(s: string): string {
+  const collapsed = s.replace(/\s+/g, " ").trim();
+  return collapsed.length > SUMMARY_MAX_CHARS
+    ? `${collapsed.slice(0, SUMMARY_MAX_CHARS)}…`
+    : collapsed;
+}
+
 function isShellTool(name: string): boolean {
   return SHELL_TOOLS.includes(name);
 }
@@ -67,9 +83,21 @@ function formatDuration(ms: number): string {
  * Build the one-line summary that appears right of a tool name in the
  * ExploreBlock chip, e.g. `file_read  src/foo.rs (L1-L50)`.
  *
+ * The summary is the row's TEXT, not its layout: the row's span carries
+ * `min-w-0 flex-1 truncate`, so the clipping to the width actually left over
+ * after the icon, the tool label and the status column is CSS's job. Cutting
+ * the string here at a fixed character count truncated rows that had room to
+ * spare (a `sed -n 140,240p apps/…` line gave up at 60 characters while the
+ * row still had half its width empty), and a character count is not a width
+ * anyway — it depends on the font size and on how much of the row the label
+ * took. What is left here is only the guard the DOM needs: whitespace is
+ * folded so a multi-line command stays one line, and the string is capped at
+ * a size no window can render, so a pathological payload (a heredoc script
+ * in `command`) does not put 100 KB of hidden text in every row.
+ *
  * Per-tool rules — derived from the Rust builtin schemas under
  * `core/acowork-runtime/src/tools/builtin/*.rs`:
- *  - shell              : command (verbatim, truncated to 60 chars)
+ *  - shell              : command (whitespace folded, clipped at SUMMARY_MAX_CHARS)
  *  - file_read          : path (L{start_line}–L{end_line})
  *  - file_write         : path [mode=append]
  *  - file_edit          : path (N chars)
@@ -98,8 +126,6 @@ function summarizeToolCall(
   isShell = false,
 ): string {
   const asString = (v: unknown): string => (typeof v === "string" ? v : "");
-  const truncate = (s: string, max = 60): string =>
-    s.length > max ? s.slice(0, max - 1) + "…" : s;
 
   // Helper: extract "Total: N" footer from a tool result.
   const extractTotal = (re: RegExp, emptyMatch: string): string | null => {
@@ -111,7 +137,7 @@ function summarizeToolCall(
   };
 
   if (isShell) {
-    return truncate(asString(params.command));
+    return clipSummary(asString(params.command));
   }
 
   switch (toolName) {
@@ -177,7 +203,7 @@ function summarizeToolCall(
     }
     case "memory_store":
     case "mcp_memory__memory_store": {
-      const content = truncate(asString(params.content), 40);
+      const content = clipSummary(asString(params.content));
       const category = asString(params.category);
       return category ? `${content} (${category})` : content;
     }
@@ -192,7 +218,7 @@ function summarizeToolCall(
       return target && action ? `${target} → ${action}` : target || action;
     }
     case "ask_user_question": {
-      const q = truncate(asString(params.question), 50);
+      const q = clipSummary(asString(params.question));
       const opts = Array.isArray(params.options) ? params.options.length : 0;
       return opts > 0 ? `${q} (${opts} options)` : q;
     }
@@ -223,7 +249,7 @@ function summarizeToolCall(
         return `${action} ${file}:${line}${char != null ? `:${char}` : ""}`;
       }
       const q = asString(params.query);
-      return q ? `${action} "${truncate(q, 30)}"` : action;
+      return q ? `${action} "${clipSummary(q)}"` : action;
     }
     default: {
       // Fallback: pick the first non-empty string field by name preference.
@@ -241,7 +267,7 @@ function summarizeToolCall(
       else if (Array.isArray(value)) preview = `[${value.length}]`;
       else if (value && typeof value === "object") preview = "{…}";
       else preview = String(value);
-      return `${key}: ${preview.slice(0, 60)}`;
+      return `${key}: ${clipSummary(preview)}`;
     }
   }
 }
@@ -702,7 +728,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
     const params = JSON.parse(call.content || "{}");
     summary = summarizeToolCall(toolName, params, result, isShell);
   } catch {
-    summary = call.content.slice(0, 60);
+    summary = clipSummary(call.content);
   }
 
   // Detect compressed tool result (replaced by context_recall placeholder)
@@ -718,7 +744,10 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
           <Icon className="h-3.5 w-3.5 shrink-0 text-text-tertiary" />
           <span className="shrink-0 font-medium text-text-secondary ">{toolLabel}</span>
           {summary && (
-            <span className="min-w-0 flex-1 truncate ml-1 text-left text-text-tertiary ">
+            <span
+              className="min-w-0 flex-1 truncate ml-1 text-left text-text-tertiary "
+              title={summary}
+            >
               {summary}
             </span>
           )}
