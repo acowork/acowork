@@ -711,7 +711,7 @@ function ToolCallItem({ call, result, pendingApproval, currentSessionId, onAppro
   return (
     <div className="min-w-0">
       <div
-        className="flex min-w-0 w-full items-center gap-2 rounded-md bg-surface-hover px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
+        className="flex min-w-0 w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <button className="flex min-w-0 flex-1 items-center gap-2" onClick={() => setShowDetails(!showDetails)}>

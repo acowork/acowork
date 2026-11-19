@@ -84,14 +84,6 @@ import type { CardAnswerHandler, CardChoice } from "../../lib/chatCardAnswer";
 import { BLOCK_DETAIL_FONT_SIZE, BLOCK_FONT_SIZE } from "./blockTypeScale";
 import { runBlockToText } from "../../lib/runBlockText";
 
-/** How many of a session's rounds stay visible when the block is opened. The
- *  older ones are one click away inside the block: the list is already a scroll
- *  container, and a long run should not push the rest of the transcript down. */
-const RECENT_ROUNDS = 2;
-/** How many more each reveal adds, so "show earlier" never dumps a hundred rows
- *  into a 240px pane at once. */
-const REVEAL_STEP = 5;
-
 interface ChatExecutionBlockProps {
   /** The session's folded rounds, in order; the newest is the block's anchor. */
   block: RunBlock;
@@ -366,33 +358,12 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
       ? stateText(t, sessionStatus)
       : "") || t(statusKey(outcomeStatus));
 
-  // Rounds beyond the recent window stay in the block, one click away — except
-  // the ones the transcript could not draw anywhere else. Two kinds qualify:
-  //  * a round that owns this Chat's own question. Its `user_message` row was
-  //    folded into the block (one sentence, one place), so windowing the round
-  //    away hides the human's own words from the whole transcript and leaves the
-  //    visible rows looking like the agent answering questions nobody asked here;
-  //  * a round parked on an unanswered card: an answerable thing behind "show
-  //    earlier" is not answerable (D8).
-  // Rounds the block produced on its own — the human turned to the execution
-  // surface, or the session kept iterating — stay behind the reveal, which is
-  // what keeps a long run from pushing the transcript down.
-  const [revealed, setRevealed] = useState(0);
-  const pinned = new Set<number>();
-  block.rounds.forEach((round, i) => {
-    if (round.showUserLine && round.triggerRow) pinned.add(i);
-    const entry = entries[round.ref];
-    if (entry?.status === "pending" && entry.projection?.card) pinned.add(i);
-  });
-  const start = Math.max(
-    0,
-    block.rounds.length - RECENT_ROUNDS - revealed,
-  );
-  const shownIndices = block.rounds
-    .map((_, i) => i)
-    .filter((i) => i >= start || pinned.has(i));
-  const shown = shownIndices.map((i) => block.rounds[i]!);
-  const hiddenOlder = block.rounds.length - shownIndices.length;
+  // Every round of the session is listed when the block is opened: the list is
+  // already a scroll container, so a long run scrolls inside the card instead of
+  // hiding its history behind a "show earlier" click. The rows keep the
+  // session's own order and numbering, so nothing is renumbered by the view.
+  const shownIndices = block.rounds.map((_, i) => i);
+  const shown = block.rounds;
 
   // Folded by default, and it stays folded until the human opens it. A run that
   // is still working does not unfold itself either: the freshest answer is
@@ -705,22 +676,13 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
                     }}
                   >
                     <div className="flex flex-col gap-0.5">
-                      {hiddenOlder > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => setRevealed((n) => n + REVEAL_STEP)}
-                          className="self-start rounded px-1 py-0.5 text-text-tertiary underline underline-offset-2 hover:text-text-secondary"
-                        >
-                          {t("chatView.block.olderRounds", { count: hiddenOlder })}
-                        </button>
-                      )}
                       {shown.map((round, i) => (
                         <RoundItem
                           key={round.ref}
                           round={round}
                           /** The row's label is its position in the SESSION's list,
-                           *  so a pinned round above the window keeps its own
-                           *  number instead of being renumbered by the window. */
+                           *  so it keeps its own number instead of being
+                           *  renumbered by the view. */
                           index={shownIndices[i]!}
                           chatSessionId={chatSessionId}
                           instanceId={instanceId}
@@ -872,7 +834,7 @@ function RoundItem({
 
   return (
     <div className="min-w-0" data-seq={round.roundRow.seq}>
-      <div className="flex min-w-0 w-full items-center gap-2 rounded-md bg-surface-hover px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
+      <div className="flex min-w-0 w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left transition-colors hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15">
         <button
           className="flex min-w-0 flex-1 items-center gap-2"
           onClick={() => setOpen((v) => !v)}

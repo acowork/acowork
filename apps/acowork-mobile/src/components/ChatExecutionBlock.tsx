@@ -51,13 +51,6 @@ import { useAgentStore } from '../stores/agentStore'
 import { Sheet } from './ui'
 import type { BlockCard, ChatBlockEntry, LiveStatus } from '../lib/types'
 
-/** How many of a session's rounds stay visible when the block is opened. On a
- *  phone the transcript itself scrolls, so the freshest pair is what a reader
- *  came for; the rest are one tap away inside the block. */
-const RECENT_ROUNDS = 2
-/** How many more each reveal adds, so "show earlier" never dumps a long run on
- *  a 390pt screen at once. */
-const REVEAL_STEP = 4
 
 interface ChatExecutionBlockProps {
   /** The session's folded rounds, in order; the newest is the block's anchor. */
@@ -188,22 +181,12 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
     (liveStatus && isActiveStatus(liveStatus) ? liveStatusText(liveStatus) : '') ||
     blockStatusText(outcome)
 
-  // Rounds beyond the recent window stay in the block, one tap away — except the
-  // round that owns this Chat's own question. Its `user_message` row was folded
-  // into the block (one sentence, one place), so windowing that round away hides
-  // the human's own words from the whole transcript and leaves the visible rows
-  // looking like the agent answering questions nobody asked here. Rounds the
-  // block produced on its own stay behind the reveal, which is what keeps a long
-  // run from pushing the conversation off a 390pt screen.
-  const [revealed, setRevealed] = useState(0)
-  const pinned = new Set<number>()
-  block.rounds.forEach((round, i) => {
-    if (round.showUserLine && round.triggerRow) pinned.add(i)
-  })
-  const start = Math.max(0, block.rounds.length - RECENT_ROUNDS - revealed)
-  const shownIndices = block.rounds.map((_, i) => i).filter((i) => i >= start || pinned.has(i))
-  const shown = shownIndices.map((i) => block.rounds[i]!)
-  const hiddenOlder = block.rounds.length - shownIndices.length
+  // Every round of the session is listed when the block is opened: the card body
+  // scrolls, so a long run scrolls inside the card instead of hiding its
+  // history behind a "show earlier" tap. Rows keep the session's own order and
+  // numbering, so nothing is renumbered by the view.
+  const shownIndices = block.rounds.map((_, i) => i)
+  const shown = block.rounds
 
   // The desktop block's state machine, copied: collapsed by default. The ONE
   // condition that opens the block on its own is an unanswered card — an
@@ -372,21 +355,12 @@ export const ChatExecutionBlock = memo(function ChatExecutionBlock({
 
         {open ? (
           <div className="explore-body">
-            {hiddenOlder > 0 ? (
-              <button
-                type="button"
-                className="chat-run-older"
-                onClick={() => setRevealed((n) => n + REVEAL_STEP)}
-              >
-                {tr('查看更早 {{n}} 轮', { n: hiddenOlder })}
-              </button>
-            ) : null}
             {shown.map((round, i) => (
               <RoundItem
                 key={round.ref}
                 round={round}
-                /** The label is the round's position in the SESSION, so a pinned
-                 *  round above the window keeps its own number. */
+                /** The label is the round's position in the SESSION, so it keeps
+                 *  its own number instead of being renumbered by the view. */
                 index={shownIndices[i]!}
                 chatSessionId={chatSessionId}
                 entry={entries[round.ref]}

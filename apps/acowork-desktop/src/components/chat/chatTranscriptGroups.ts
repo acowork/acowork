@@ -249,8 +249,8 @@ export function buildTranscriptItems(
   // was at the bottom, the back-and-forth gone. Position is a property of the
   // exchange, not of its latest round, so it is fixed at the exchange's start.
   //
-  // Nothing is lost by it. The block reads `RECENT_ROUNDS` newest rounds and
-  // scrolls, `keyOfSeq` still maps every folded seq to this block's key (so a
+  // Nothing is lost by it. The block lists every round and scrolls,
+  // `keyOfSeq` still maps every folded seq to this block's key (so a
   // locate on a new round lands on the block), and the virtual list keyed on
   // the anchor row now keeps ONE identity for the block's lifetime instead of
   // rebuilding it — and dropping its height cache — on every round.

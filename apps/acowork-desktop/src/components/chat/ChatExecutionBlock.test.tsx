@@ -899,7 +899,7 @@ describe("ChatExecutionBlock", () => {
     ).toBeTruthy();
   });
 
-  it("a long run keeps its older rounds inside the block, one click away", () => {
+  it("a long run lists every round in the block, with no reveal step", () => {
     const entries: Record<string, ChatBlockEntry | undefined> = {};
     const rounds: RoundItem[] = [];
     for (let n = 1; n <= 6; n++) {
@@ -912,11 +912,8 @@ describe("ChatExecutionBlock", () => {
       rounds.push(round);
     }
     renderBlock(entries, {}, blockOf(rounds));
-    // Two recent rounds visible, the rest folded in the block itself.
-    expect(screen.getAllByText("chatView.block.roundN")).toHaveLength(2);
-    fireEvent.click(screen.getByText("chatView.block.olderRounds"));
-    // One step reveals the whole backlog of a six-round run, and the affordance
-    // disappears once there is nothing older left to show.
+    // Every round is on screen as soon as the block opens — no window, no
+    // "show earlier" click.
     expect(screen.getAllByText("chatView.block.roundN")).toHaveLength(6);
     expect(screen.queryByText("chatView.block.olderRounds")).toBeNull();
   });
