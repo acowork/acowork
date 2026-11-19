@@ -791,7 +791,7 @@ mod tests {
             r#"
 id = "figcraft"
 version = "0.18.1"
-name = "FigCraft"
+name = "FigCraft (ACowork)"
 icon = "figcraft"
 builtin = false
 
@@ -809,7 +809,7 @@ gateway_path = "/api/apps/figcraft/mcp"
 path = "/ui/"
 
 [ui.nav]
-label = "FigCraft"
+label = "FigCraft (ACowork)"
 
 [package]
 app_api = 1
@@ -842,7 +842,10 @@ entry = "bin/figcraft-acowork"
             .unwrap()
             .get("figcraft")
             .cloned();
-        assert_eq!(manifest.as_ref().map(|m| m.name.as_str()), Some("FigCraft"));
+        assert_eq!(
+            manifest.as_ref().map(|m| m.name.as_str()),
+            Some("FigCraft (ACowork)")
+        );
 
         let _ = std::fs::remove_dir_all(&vault);
         let _ = std::fs::remove_dir_all(&data);
