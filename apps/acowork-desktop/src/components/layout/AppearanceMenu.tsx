@@ -222,6 +222,10 @@ export function AppearanceMenu() {
               customColor={customAccent}
               onChange={setAccentColor}
               className="px-1"
+              /* The popover is 320px wide; twelve swatches do not fit on one
+                 line, so they take two lines of six. Settings ▸ Appearance
+                 has the room for one line of twelve. */
+              columns={6}
             />
           </div>
         </div>

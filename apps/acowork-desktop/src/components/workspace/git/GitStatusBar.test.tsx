@@ -171,13 +171,17 @@ describe("GitStatusBar", () => {
     expect(screen.getByText("1 changes")).toBeTruthy();
   });
 
-  it("shows the not-a-repo label when isRepo is false", () => {
+  it("renders nothing when the workspace is not a git repository", () => {
+    // A workspace with no repo has nothing for the strip to say: the
+    // strip is not drawn at all, rather than drawn saying "Not a Git
+    // repository" in the middle of the file tree's header stack.
     setEntry({
       data: { isRepo: false, branch: null, error: "not_a_repo", truncated: false, changes: [] },
       loading: false,
     });
-    render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
-    expect(screen.getByText("Not a Git repository")).toBeTruthy();
+    const { container } = render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
+    expect(container.querySelector("[data-testid='git-status-bar']")).toBeNull();
+    expect(screen.queryByText("Not a Git repository")).toBeNull();
   });
 
   it("renders a spinner while loading (no refresh button)", () => {
@@ -417,10 +421,10 @@ describe("GitStatusBar", () => {
   // covered by the file list — anchor it ABOVE the bar in BOTH
   // states.
 
-  it("opens the history popover upward when the panel is collapsed", () => {
-    // The banner sits at the bottom of the workspace panel; there's
-    // no room below it for the popover (panel bottom / chat input
-    // area). Anchor above the bar instead.
+  it("opens the history popover downward when the panel is collapsed", () => {
+    // The strip now sits in the panel's HEADER stack, so the space
+    // below it is the search row and the file tree — the dropdown
+    // opens downward in every state.
     mocks.isExpanded.mockReturnValue(false);
     setEntry({
       data: { isRepo: true, branch: "main", error: null, truncated: false, changes: [] },
@@ -429,7 +433,7 @@ describe("GitStatusBar", () => {
     render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
     fireEvent.click(screen.getByTestId("git-status-bar-history"));
     expect(pickerProps).toHaveLength(1);
-    expect(pickerProps[0].placement).toBe("top");
+    expect(pickerProps[0].placement).toBe("bottom");
   });
 
   it("opens the history popover downward when the expanded file list has 6+ rows", () => {
@@ -452,7 +456,12 @@ describe("GitStatusBar", () => {
     expect(pickerProps[0].placement).toBe("bottom");
   });
 
-  it("opens the history popover upward when the expanded file list is short (<6 rows)", () => {
+  it("opens the history popover downward when the expanded file list is short (<6 rows)", () => {
+    // The strip moved into the panel's HEADER stack (between the
+    // workspace selector and the file search), so the space below it is
+    // the search row and the file tree — the dropdown opens downward
+    // regardless of how long the change list is. It used to sit at the
+    // panel's bottom edge and flip upward when the panel was short.
     mocks.isExpanded.mockReturnValue(true);
     setEntry({
       data: {
@@ -466,12 +475,10 @@ describe("GitStatusBar", () => {
     });
     render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
     fireEvent.click(screen.getByTestId("git-status-bar-history"));
-    expect(pickerProps[0].placement).toBe("top");
+    expect(pickerProps[0].placement).toBe("bottom");
   });
 
-  it("opens the history popover upward at the 5-row boundary", () => {
-    // Pins the 6-row threshold — just below the boundary the
-    // popover should still flip upward.
+  it("opens the history popover downward at the 5-row boundary", () => {
     mocks.isExpanded.mockReturnValue(true);
     setEntry({
       data: {
@@ -485,14 +492,10 @@ describe("GitStatusBar", () => {
     });
     render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
     fireEvent.click(screen.getByTestId("git-status-bar-history"));
-    expect(pickerProps[0].placement).toBe("top");
+    expect(pickerProps[0].placement).toBe("bottom");
   });
 
-  it("opens the history popover upward when collapsed even with 6+ rows", () => {
-    // Regression: the bar reads `changes` from the store regardless
-    // of expand state, so a collapsed banner with N>6 uncommitted
-    // files used to key off `changes` alone and open downward into
-    // the panel bottom edge — clipped, invisible. Must flip upward.
+  it("opens the history popover downward when collapsed even with 6+ rows", () => {
     mocks.isExpanded.mockReturnValue(false);
     setEntry({
       data: {
@@ -506,6 +509,6 @@ describe("GitStatusBar", () => {
     });
     render(<GitStatusBar agentId="a1" workspaceId="ws1" />);
     fireEvent.click(screen.getByTestId("git-status-bar-history"));
-    expect(pickerProps[0].placement).toBe("top");
+    expect(pickerProps[0].placement).toBe("bottom");
   });
 });

@@ -226,6 +226,8 @@ fetchWorkspaces: async (agentId: string) => {
     // A newer request may have superseded us while we waited on the
     // retry loop — drop the result so the winner's data wins. The winner
     // owns `loading`, so this path deliberately leaves it set.
+    // A newer request owns `loading`. Only clear it here when we are still
+    // the latest — otherwise a superseded call would blank the winner's spinner.
     if (seq !== fetchSeq) return;
     if (resp.status === 503) {
       // All retries exhausted; with503Retry returned the last 503. Claim the

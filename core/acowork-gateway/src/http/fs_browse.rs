@@ -348,13 +348,28 @@ async fn proxy_fs_browse_to_node(
         url.push_str("&show_hidden=true");
     }
 
+    // Node HTTP is fail-closed on `X-ACowork-Node-Token` once enrolled
+    // (ADR-055 Phase 5a) — same attachment `PATCH /api/nodes/{id}` uses.
+    // Omitting it yields a permanent 403 `invalid node token` from the
+    // phone / remote Node, which Desktop surfaces as this proxy error.
+    let token = crate::http::proxy::node_token_for(state, target)
+        .await
+        .ok_or_else(|| {
+            ApiError::service_unavailable(&format!("Node '{target}' has no token yet"))
+        })?;
+
     let client = crate::http::proxy::runtime_http_client();
-    let resp = client.get(&url).send().await.map_err(|e| {
-        ApiError::service_unavailable(&format!(
-            "Failed to reach node '{}' at {}: {}",
-            target, endpoint, e
-        ))
-    })?;
+    let resp = client
+        .get(&url)
+        .header("X-ACowork-Node-Token", token)
+        .send()
+        .await
+        .map_err(|e| {
+            ApiError::service_unavailable(&format!(
+                "Failed to reach node '{}' at {}: {}",
+                target, endpoint, e
+            ))
+        })?;
 
     let status = resp.status();
     if !status.is_success() {

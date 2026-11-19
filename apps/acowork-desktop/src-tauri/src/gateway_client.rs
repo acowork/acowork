@@ -424,8 +424,12 @@ impl GatewayClient {
 
     /// Create a new GatewayClient with a custom base URL
     pub fn with_base_url(base_url: String) -> Self {
+        // Agent start/stop wait on a Node control round-trip (Gateway default
+        // COMMAND_TIMEOUT = 10s). Remote Android cold-starts need headroom
+        // above that or Desktop surfaces a opaque reqwest timeout against
+        // `http://127.0.0.1:19876/.../start` instead of the real node error.
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(10))
+            .timeout(std::time::Duration::from_secs(45))
             .build()
             .expect("failed to build reqwest client");
         Self {

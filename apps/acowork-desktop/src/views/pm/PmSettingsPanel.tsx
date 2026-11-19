@@ -39,9 +39,13 @@ interface PmSettingsPanelProps {
   width: number;
   onResizeStart?: (e: React.MouseEvent) => void;
   onClose: () => void;
+  /** Rendered inside the hover drawer: the drawer owns the geometry, so the
+   *  panel fills it instead of bringing its own gutter and resize handle
+   *  (see `RightPanelDrawer.tsx`). */
+  overlay?: boolean;
 }
 
-export function PmSettingsPanel({ width, onResizeStart, onClose }: PmSettingsPanelProps) {
+export function PmSettingsPanel({ width, onResizeStart, onClose, overlay = false }: PmSettingsPanelProps) {
   const { t } = useTranslation();
   const project = usePmProjectStore((s) => s.selected);
   // The backend gates every project mutation on owner-or-admin (PM's
@@ -52,8 +56,11 @@ export function PmSettingsPanel({ width, onResizeStart, onClose }: PmSettingsPan
   const canGovern = canGovernProject(project, self);
 
   return (
-    <div className="relative ml-1 flex shrink-0 flex-col" style={{ width }}>
-      {onResizeStart && (
+    <div
+      className={cn("relative flex shrink-0 flex-col", overlay ? "h-full w-full" : "ml-1")}
+      style={overlay ? undefined : { width }}
+    >
+      {!overlay && onResizeStart && (
         <div
           className="group absolute -left-1 top-0 bottom-0 z-10 w-1 cursor-col-resize"
           onMouseDown={onResizeStart}
@@ -67,14 +74,20 @@ export function PmSettingsPanel({ width, onResizeStart, onClose }: PmSettingsPan
             与中间内容列的头部横线对齐。 */}
         <div className="flex min-h-[var(--ui-list-header-h)] shrink-0 items-center justify-between border-b border-border-divider px-[var(--tab-px)] text-[length:var(--tab-font-size)] font-medium leading-[var(--tab-line-height)] text-text-tertiary">
           <span>{t("pm.settingsPanel.title")}</span>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label={t("common.close")}
-            className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
-          >
-            ×
-          </button>
+          {/* The close affordance belongs to a pinned panel. In the hover
+              drawer the dismissal contract is "move the pointer away", and a
+              × that dismissed on click would immediately re-open under the
+              still-inside pointer — so there is no × to offer. */}
+          {!overlay && (
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label={t("common.close")}
+              className="rounded px-1.5 text-sm text-text-tertiary hover:bg-[var(--color-accent)]/10 hover:text-text-secondary dark:hover:bg-[var(--color-accent)]/15"
+            >
+              ×
+            </button>
+          )}
         </div>
 
         {!project ? (

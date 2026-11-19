@@ -16,14 +16,23 @@ interface GroupRightNavBarProps {
   /** `true` = the members panel is expanded (gear reads active). */
   expanded: boolean;
   onToggle: () => void;
+  /** `true` while the members panel floats over the chat as the hover drawer. */
+  drawerOpen?: boolean;
+  /** Pointer rested onto the gear (see `ViewSettingsRail`). */
+  onHoverStart?: () => void;
+  /** Pointer left the rail. */
+  onHoverEnd?: () => void;
 }
 
-export function GroupRightNavBar({ expanded, onToggle }: GroupRightNavBarProps) {
+export function GroupRightNavBar({ expanded, onToggle, drawerOpen, onHoverStart, onHoverEnd }: GroupRightNavBarProps) {
   return (
     <ViewSettingsRail
       expanded={expanded}
       onToggle={onToggle}
       tooltipKey="groupMembers.title"
+      drawerOpen={drawerOpen}
+      onHoverStart={onHoverStart}
+      onHoverEnd={onHoverEnd}
     />
   );
 }

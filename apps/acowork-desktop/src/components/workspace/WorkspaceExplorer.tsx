@@ -963,6 +963,38 @@ export function WorkspaceExplorer() {
                 </div>
             </div>
 
+            {/* ADR-078 decision 6 — the git strip sits BETWEEN the workspace
+                selector row and the file-search row, not at the bottom of
+                the panel: the bottom strip read as a status bar of the
+                whole right panel, and it pushed the file tree's own
+                scroll area to the bottom edge. Here the strip is one more
+                header strip in the panel's header stack, and the search
+                row + file tree simply flow below it — an expanded list
+                pushes them down instead of squeezing them.
+                Collapsed by default (the store's `expandedKey` starts
+                null); expanded, the strip is capped at half the panel
+                height so a long change list cannot swallow the tree.
+                Hidden when the workspace is not a git repository
+                (`isRepo === false`) — the strip has nothing to say there. */}
+            {gitContext && (
+                /* `shrink-0` + `max-h-1/2`: the strip takes its natural
+                   height and never gives ground to the file tree below it;
+                   when expanded, the change list is capped at half the
+                   panel height and scrolls inside it. */
+                <div className="flex min-h-0 shrink-0 flex-col max-h-1/2">
+                    <GitStatusBar
+                        agentId={gitContext.agentId}
+                        workspaceId={gitContext.workspaceId}
+                    />
+                    {gitExpanded && (
+                        <GitStatusPanel
+                            agentId={gitContext.agentId}
+                            workspaceId={gitContext.workspaceId}
+                        />
+                    )}
+                </div>
+            )}
+
             {/* Search box with file-search dropdown (Ctrl+P-style).
                 Vertical padding (`py-1.5`) and min-h (`2.5rem`) are kept in
                 sync with the workspace-selector toolbar row above so the
@@ -1172,37 +1204,6 @@ export function WorkspaceExplorer() {
                 />
             )}
 
-            {/* ADR-078 decision 6 (2026-XX revision) — GitStatusBar lives at the
-                bottom of the workspace panel. Source = currently selected
-                session workspace (independent of any open editor file). Hidden
-                when: agent not running (above early-return), workspace is
-                __agent_home__ (no repo context), or this panel itself is not
-                the active right-panel tab (parent RightPanel handles that).
-                The wrapper reserves `pb-3` of empty panel-background below
-                the git strip so neither the collapsed bar nor the expanded
-                panel touches RightPanel's `rounded-xl` (12px) bottom corners
-                — matches the chat input's `mb-3` buffer (ChatPanel.tsx
-                L2467). FileTree (flex-1) is unaffected since the padding
-                lives on the wrapper, not on the panel.
-                `max-h-1/2` caps the strip at half the workspace area — up
-                from the prior `max-h-[200px]` cap which surfaced too
-                little on repos with many uncommitted files. The cap
-                resolves against WorkspaceExplorer's definite flex-1
-                height (parent chain: RightPanel clip → tab content). */}
-            {gitContext && (
-                <div className="flex min-h-0 flex-col pb-3 max-h-1/2">
-                    <GitStatusBar
-                        agentId={gitContext.agentId}
-                        workspaceId={gitContext.workspaceId}
-                    />
-                    {gitExpanded && (
-                        <GitStatusPanel
-                            agentId={gitContext.agentId}
-                            workspaceId={gitContext.workspaceId}
-                        />
-                    )}
-                </div>
-            )}
         </div>
     );
 }

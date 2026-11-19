@@ -9,7 +9,12 @@
 
 import { describe, it, expect } from "vitest";
 
-import { memoryTabAvailable, memoryTabFallback } from "./rightPanelGate";
+import {
+    memoryTabAvailable,
+    memoryTabFallback,
+    visiblePanelTab,
+    workspacePanelVisible,
+} from "./rightPanelGate";
 
 const ON = { agentRunning: true, memoryServiceReady: true };
 
@@ -51,3 +56,55 @@ describe("memoryTabFallback", () => {
     });
 });
 
+
+describe("visiblePanelTab", () => {
+    const pinned = { activePanelTab: "memory", rightPanelCollapsed: false, hoverPanelTab: null };
+
+    it("is the active tab when the panel is pinned open", () => {
+        expect(visiblePanelTab(pinned)).toBe("memory");
+    });
+
+    it("is nothing while the layout is collapsed", () => {
+        expect(visiblePanelTab({ ...pinned, rightPanelCollapsed: true })).toBeNull();
+    });
+
+    it("is the previewed tab while the drawer is up — collapsed no longer means invisible", () => {
+        expect(visiblePanelTab({ activePanelTab: "memory", rightPanelCollapsed: true, hoverPanelTab: "workspace" }))
+            .toBe("workspace");
+    });
+
+    it("prefers the peek over the pinned tab, because a peek means the pinned panel is not mounted at all", () => {
+        // `AppLayout` mounts `RightPanel` only when `!rightPanelCollapsed`, so
+        // while the drawer is up the pinned tab is off screen. Reporting both
+        // would let the fs-watch subscribe to a tree nobody can see.
+        expect(visiblePanelTab({ ...pinned, hoverPanelTab: "workspace" })).toBe("workspace");
+    });
+
+    it("treats a missing hover field as no peek (older callers and fixtures)", () => {
+        expect(visiblePanelTab({ activePanelTab: "status", rightPanelCollapsed: false })).toBe("status");
+    });
+});
+
+describe("workspacePanelVisible", () => {
+    it("is true for a pinned workspace tab", () => {
+        expect(workspacePanelVisible({ activePanelTab: "workspace", rightPanelCollapsed: false })).toBe(true);
+    });
+
+    it("is true for a workspace tab the drawer is only previewing", () => {
+        // The whole reason this helper exists: a tree the user is looking at
+        // has to keep refreshing, or the peek shows a snapshot and the file
+        // they hovered for is missing from it.
+        expect(workspacePanelVisible({ activePanelTab: "status", rightPanelCollapsed: true, hoverPanelTab: "workspace" }))
+            .toBe(true);
+    });
+
+    it("is false while a different tab is peeked", () => {
+        expect(workspacePanelVisible({ activePanelTab: "workspace", rightPanelCollapsed: true, hoverPanelTab: "memory" }))
+            .toBe(false);
+    });
+
+    it("is false when nothing is on screen", () => {
+        expect(workspacePanelVisible({ activePanelTab: "workspace", rightPanelCollapsed: true, hoverPanelTab: null }))
+            .toBe(false);
+    });
+});

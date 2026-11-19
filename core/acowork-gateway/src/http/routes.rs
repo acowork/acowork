@@ -186,11 +186,18 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
     let uri = crate::http::workspace_preview::redact_preview_ticket(redact_access_token(
         req.uri().clone(),
     ));
+    // Desktop / health probes hit `/health` many times per second — keep
+    // those at DEBUG so the rolling log stays readable at INFO.
+    let quiet = uri.path() == "/health";
     let msg = format!(
         "HTTP request: origin={} method={} uri={}",
         origin, method, uri
     );
-    tracing::info!("{}", msg);
+    if quiet {
+        tracing::debug!("{}", msg);
+    } else {
+        tracing::info!("{}", msg);
+    }
     let response = next.run(req).await;
     let acao = response
         .headers()
@@ -202,7 +209,11 @@ async fn log_request_origin(req: Request, next: Next) -> axum::response::Respons
         response.status(),
         acao
     );
-    tracing::info!("{}", msg);
+    if quiet {
+        tracing::debug!("{}", msg);
+    } else {
+        tracing::info!("{}", msg);
+    }
     response
 }
 

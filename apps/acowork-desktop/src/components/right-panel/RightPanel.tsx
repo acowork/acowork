@@ -44,6 +44,15 @@ interface RightPanelProps {
   onResizeStart?: (e: React.MouseEvent) => void;
   activeTab: "debug" | "status" | "setup" | "memory" | "workspace";
   onTabChange: (tab: "debug" | "status" | "setup" | "memory" | "workspace") => void;
+  /**
+   * Rendered inside the hover drawer instead of the pinned layout slot. The
+   * drawer owns the geometry (position, width, the slide), so the panel must
+   * fill it and must NOT bring its own layout furniture: the `ml-0.5` gutter
+   * and the left-edge resize handle both belong to a pane that is a flex
+   * child of the row, and a handle on an overlay would let you resize a
+   * panel that has no width of its own.
+   */
+  overlay?: boolean;
 }
 
 // Stable empty array reference to avoid Zustand selector infinite loop
@@ -55,7 +64,7 @@ const EMPTY_MESSAGES: ChatMessage[] = [];
 // zone threshold keeps the shadow from flickering on tiny scrollTop jitter.
 const RIGHT_PANEL_TOP_SHADOW_THRESHOLD_PX = 4;
 
-export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTab, onTabChange }: RightPanelProps & { width: number }) {
+export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTab, onTabChange, overlay = false }: RightPanelProps & { width: number }) {
   const { selectedAgentId } = useAgentStore();
   const selectedAgent = useAgentStore((s) => s.selectedAgentId ? s.agents[s.selectedAgentId]?.meta : undefined);
   // Design doc 24 §8.2 (F7): the debug RPC tunnels through the Gateway
@@ -479,14 +488,22 @@ export function RightPanel({ width, isDebugMode = false, onResizeStart, activeTa
   }, [selectedAgentId, selectedAgent?.alive, agentStatusOpen, agentTotalSignal, refetchTokenStats]);
 
   return (
-    <div className="relative flex flex-col shrink-0 ml-0.5" style={{ width }}>
-      {/* Resize handle overlay — sits at the left edge */}
-      <div
-        className="absolute -left-[3px] top-0 bottom-0 w-1 cursor-col-resize z-10 group"
-        onMouseDown={onResizeStart}
-      >
-        <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
-      </div>
+    <div
+      className={cn("relative flex flex-col shrink-0", overlay ? "h-full w-full" : "ml-0.5")}
+      style={overlay ? undefined : { width }}
+    >
+      {/* Resize handle overlay — sits at the left edge. Only for a pinned
+          pane: the drawer's width is the layout's width, not this panel's,
+          so dragging its edge would resize nothing while looking like it
+          should. */}
+      {!overlay && (
+        <div
+          className="absolute -left-[3px] top-0 bottom-0 w-1 cursor-col-resize z-10 group"
+          onMouseDown={onResizeStart}
+        >
+          <div className="absolute inset-y-0 left-0 w-1 group-hover:bg-[var(--color-accent)]/30 group-active:bg-[var(--color-accent)]/60 transition-colors" />
+        </div>
+      )}
       {/* Clip container — owns the rounded-xl surface + overflow-hidden so the
           full-bleed tab content (each tab root paints bg-right-panel) gets
           clipped to the rounded box: the bottom-left corner stays symmetric

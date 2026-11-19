@@ -76,6 +76,13 @@ vi.mock("../common/ToastProvider", () => ({
   showToast: vi.fn(),
 }));
 
+// Keep suggested_host as-is in unit tests (no real LAN probe).
+vi.mock("../../lib/pairing", () => ({
+  resolvePairingBaseUrl: vi.fn(async () => {
+    throw new Error("no-lan-in-test");
+  }),
+}));
+
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { AgentLibraryDialog } from "./AgentLibraryDialog";
 import { resetHubIndexCache } from "../../lib/agentHub";
@@ -178,6 +185,7 @@ function mockCatalog(agents: unknown[]) {
     if (command === "build_remote_node_command") {
       return {
         mqtt_port: 1883,
+        http_port: 19876,
         token: "tok-remote-113",
         token_ttl_seconds: 3600,
         suggested_host: "10.0.0.5",
@@ -584,10 +592,17 @@ describe("install target (REQ-008 / REQ-009)", () => {
     expect(h.invoke).not.toHaveBeenCalledWith("build_remote_node_command");
 
     fireEvent.click(guide);
-    const command = await screen.findByText(
-      "acowork-node start --gateway 10.0.0.5:1883 --token tok-remote-113",
-    );
-    expect(command.tagName.toLowerCase()).toBe("code");
+    expect(
+      await screen.findByText(
+        "acowork://enroll?gateway=http%3A%2F%2F10.0.0.5%3A19876&token=tok-remote-113",
+      ),
+    ).toBeDefined();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeCliToggle" }));
+    expect(
+      await screen.findByText(
+        "acowork-node start --gateway 10.0.0.5:1883 --token tok-remote-113",
+      ),
+    ).toBeDefined();
     await waitFor(() =>
       expect(h.invoke).toHaveBeenCalledWith("build_remote_node_command"),
     );
@@ -595,12 +610,18 @@ describe("install target (REQ-008 / REQ-009)", () => {
       h.invoke.mock.calls.filter(([cmd]) => cmd === "build_remote_node_command"),
     ).toHaveLength(1);
     expect(h.invoke).not.toHaveBeenCalledWith("create_local_node");
-    expect(screen.getByRole("button", { name: "agentHub.remoteNodeCopy" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "agentHub.remoteNodeCopyEnroll" })).toBeDefined();
+    expect(screen.getByRole("button", { name: "agentHub.remoteNodeCopyCli" })).toBeDefined();
 
-    // The host is editable, so a loopback default can be replaced with the
-    // address a remote machine can actually reach.
+    // Host starts as a click-to-edit address; open the field then replace it.
+    fireEvent.click(screen.getByRole("button", { name: "agentHub.remoteNodeHostEdit" }));
     const host = screen.getByRole("textbox", { name: "agentHub.remoteNodeHost" });
     fireEvent.change(host, { target: { value: "gateway.internal" } });
+    expect(
+      await screen.findByText(
+        "acowork://enroll?gateway=http%3A%2F%2Fgateway.internal%3A19876&token=tok-remote-113",
+      ),
+    ).toBeDefined();
     expect(
       await screen.findByText(
         "acowork-node start --gateway gateway.internal:1883 --token tok-remote-113",
@@ -612,10 +633,12 @@ describe("install target (REQ-008 / REQ-009)", () => {
     h.agent.nodes = [];
     await renderLibraryTab();
     fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeGuide" }));
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeCliToggle" }));
     await screen.findByText(
       "acowork-node start --gateway 10.0.0.5:1883 --token tok-remote-113",
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "agentHub.remoteNodeHostEdit" }));
     const host = screen.getByRole("textbox", { name: "agentHub.remoteNodeHost" });
     fireEvent.change(host, { target: { value: "gw; rm -rf $HOME `id`" } });
     // Shell metacharacters and whitespace never reach the copyable command.
@@ -636,6 +659,7 @@ describe("install target (REQ-008 / REQ-009)", () => {
       if (command === "build_remote_node_command") {
         return {
           mqtt_port: 1883,
+          http_port: 19876,
           token: "tok-v6",
           token_ttl_seconds: 3600,
           suggested_host: "::1",
@@ -645,6 +669,12 @@ describe("install target (REQ-008 / REQ-009)", () => {
     });
     await renderLibraryTab();
     fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeGuide" }));
+    expect(
+      await screen.findByText(
+        "acowork://enroll?gateway=http%3A%2F%2F%5B%3A%3A1%5D%3A19876&token=tok-v6",
+      ),
+    ).toBeDefined();
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeCliToggle" }));
     expect(
       await screen.findByText("acowork-node start --gateway [::1]:1883 --token tok-v6"),
     ).toBeDefined();
@@ -664,10 +694,12 @@ describe("install target (REQ-008 / REQ-009)", () => {
     h.agent.nodes = [];
     await renderLibraryTab();
     fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeGuide" }));
+    fireEvent.click(await screen.findByRole("button", { name: "agentHub.remoteNodeCliToggle" }));
     await screen.findByText(
       "acowork-node start --gateway 10.0.0.5:1883 --token tok-remote-113",
     );
 
+    fireEvent.click(screen.getByRole("button", { name: "agentHub.remoteNodeHostEdit" }));
     const host = screen.getByRole("textbox", { name: "agentHub.remoteNodeHost" });
     fireEvent.change(host, { target: { value: "--help.evil" } });
     expect(

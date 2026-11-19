@@ -15,6 +15,7 @@ import { Dropdown } from "../common/Dropdown";
 import { ListBox, ExpandableRow } from "../common/list";
 import { subTypeOptions } from "./nodeTypeI18n";
 import { indexHealthBanner } from "./indexHealth";
+import { visiblePanelTab } from "../layout/rightPanelGate";
 import { cn } from "../../lib/utils";
 
 export function MemoryPanel() {
@@ -130,19 +131,23 @@ export function MemoryPanel() {
     void fetchNodes(selectedAgentId);
   }, [filters, page, pageSize, selectedAgentId, isAgentRunning, fetchNodes]);
 
-  // Re-fetch when the memory tab becomes visible (e.g. agent was started
-  // while another tab was active, so data was never loaded for the running agent)
-  const activePanelTab = useLayoutStore((s) => s.activePanelTab);
+  // Re-fetch when the memory tab becomes visible — pinned into the layout or
+  // previewed by the hover drawer (agent was started while another tab was
+  // active, so data was never loaded for the running agent). `visiblePanelTab`
+  // rather than `activePanelTab` because the drawer shows this panel while the
+  // layout still reports it collapsed, and a peek at stale memory is worse
+  // than no peek.
+  const memoryPanelVisible = useLayoutStore((s) => visiblePanelTab(s) === "memory");
   useEffect(() => {
     if (!selectedAgentId || !isAgentRunning) return;
-    if (activePanelTab !== "memory") return;
+    if (!memoryPanelVisible) return;
     void fetchNodes(selectedAgentId);
     void fetchStats(selectedAgentId);
     void fetchDistillerStatus(selectedAgentId);
     void fetchForgettingStatus(selectedAgentId);
     void resumeRebuild(selectedAgentId);
   }, [
-    activePanelTab,
+    memoryPanelVisible,
     selectedAgentId,
     isAgentRunning,
     fetchNodes,

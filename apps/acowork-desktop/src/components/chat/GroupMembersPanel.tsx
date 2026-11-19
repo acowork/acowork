@@ -46,6 +46,10 @@ export { withOwner };
 interface GroupMembersPanelProps {
   width: number;
   onResizeStart?: (e: React.MouseEvent) => void;
+  /** Rendered inside the hover drawer: the drawer owns the geometry, so the
+   *  panel fills it instead of bringing its own gutter and resize handle
+   *  (see `RightPanelDrawer.tsx`). */
+  overlay?: boolean;
 }
 
 /** Dispatcher. A `user_group` is governed by its chat-session participants
@@ -64,13 +68,14 @@ export function GroupMembersPanel(props: GroupMembersPanelProps) {
         group={group}
         width={props.width}
         onResizeStart={props.onResizeStart}
+        overlay={props.overlay}
       />
     );
   }
   return <ProjectGroupMembersPanel {...props} />;
 }
 
-function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelProps) {
+function ProjectGroupMembersPanel({ width, onResizeStart, overlay = false }: GroupMembersPanelProps) {
   const { t } = useTranslation();
   const group = useProjectGroupStore(
     (s) => s.groups.find((g) => g.session_id === s.activeGroupId) ?? null,
@@ -124,8 +129,11 @@ function ProjectGroupMembersPanel({ width, onResizeStart }: GroupMembersPanelPro
   );
 
   return (
-    <div className="relative ml-0.5 flex shrink-0 flex-col" style={{ width }}>
-      {onResizeStart && (
+    <div
+      className={cn("relative flex shrink-0 flex-col", overlay ? "h-full w-full" : "ml-0.5")}
+      style={overlay ? undefined : { width }}
+    >
+      {!overlay && onResizeStart && (
         <div
           className="group absolute -left-[3px] top-0 bottom-0 z-10 w-1 cursor-col-resize"
           onMouseDown={onResizeStart}

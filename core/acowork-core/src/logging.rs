@@ -228,6 +228,12 @@ pub fn build_env_filter(base_level: &str) -> tracing_subscriber::EnvFilter {
         .unwrap_or_else(|_| EnvFilter::new(base_level));
     // MQTT frame trace (rumqttc::state logs a `Publish.` line per frame).
     filter = filter.add_directive("rumqttc=warn".parse().expect("valid directive"));
+    // Embedded broker (rumqttd) logs every route/ack/forward at DEBUG —
+    // with 5 s node presence + agent status heartbeats that is hundreds
+    // of lines per minute and drowns out Gateway WARN/ERROR (LOG-001).
+    // off: even ERROR ("Duplicate client_id") floods when a remote node
+    // MQTT-flaps; the Gateway's own dispatch logs cover the topology.
+    filter = filter.add_directive("rumqttd=off".parse().expect("valid directive"));
     // TLS handshake/alert frame trace.
     filter = filter.add_directive("rustls=warn".parse().expect("valid directive"));
     // reqwest/hyper connection-level traces are per-request noise.

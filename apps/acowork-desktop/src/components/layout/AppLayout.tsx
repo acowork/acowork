@@ -11,6 +11,9 @@ import { RightPanel } from "../right-panel/RightPanel";
 import { RightNavBar } from "./RightNavBar";
 import { GroupRightNavBar } from "./GroupRightNavBar";
 import { ViewSettingsRail } from "./ViewSettingsRail";
+import { RightPanelDrawer } from "./RightPanelDrawer";
+import { useRightPanelDrawer } from "./useRightPanelDrawer";
+import { isPanelTabKey, type DrawerKey } from "./rightPanelDrawerState";
 // FileEditorPanel is lazy-loaded: its module graph pulls in monaco-editor
 // (~170 kB) plus monaco-languageclient's vscode-api stack (~1 MB) via
 // useLspClientPool. Keeping it out of the entry chunk is what actually
@@ -402,6 +405,58 @@ export function AppLayout() {
   const activeIsDm = useProjectGroupStore(
     (s) => s.activeGroupId != null && s.dms.some((d) => d.session_id === s.activeGroupId),
   );
+
+  // ── Right-side hover drawer ───────────────────────────────────────────
+  // Hovering a collapsed right rail previews its panel as an overlay, so a
+  // glance at the workspace tree / memory / a settings panel does not cost
+  // layout width. One drawer serves every right rail (agent panel tabs,
+  // group members, pm, docs) because they all mean the same thing: "this
+  // rail owns a panel that is not currently on screen".
+  //
+  // `peekable` = the rail has a panel AND that panel is not pinned. A pinned
+  // panel needs no preview, and a rail with nothing behind it (a DM, an
+  // agent-less chat, settings/harness views) must not open an empty overlay.
+  const peekable =
+    (currentView === "chat" &&
+      rightPanelCollapsed &&
+      (!!selectedAgentId || (!!activeGroupId && !activeIsDm))) ||
+    (currentView === "projects" && !pmPanelOpen) ||
+    (currentView === "docs" && !docPanelOpen);
+  // The peek belongs to a view AND its subject: peeking the workspace tree of
+  // one agent must not survive a switch to another agent or to the pm view.
+  const rightDrawer = useRightPanelDrawer(
+    peekable,
+    `${currentView}:${selectedAgentId ?? activeGroupId ?? ""}`,
+  );
+
+  /** The panel a peek shows. `key` is what the rail hovered; the switch is
+   *  the single place that maps rail → surface, so a new right rail adds one
+   *  case here and one `onHoverStart` on its tile. */
+  const drawerContent = (key: DrawerKey) => {
+    switch (key) {
+      case "group_members":
+        return <GroupMembersPanel key={key} width={rightWidth} overlay />;
+      case "view_pm":
+        return <PmSettingsPanel key={key} width={rightWidth} overlay onClose={() => setPmPanelOpen(true)} />;
+      case "view_docs":
+        return <DocSettingsPanel key={key} width={rightWidth} overlay onClose={() => setDocPanelOpen(true)} />;
+      default:
+        // Agent panel tab. `onTabChange` / `onCollapse` are inert: the
+        // drawer's tab is whatever tile the pointer is on, and it leaves when
+        // the pointer does.
+        return (
+          <RightPanel
+            key={key}
+            overlay
+            width={rightWidth}
+            isDebugMode={isDebugMode}
+            activeTab={key}
+            onTabChange={() => {}}
+            onCollapse={() => {}}
+          />
+        );
+    }
+  };
   // The name is server-side: the Runtime owns it in the instance's
   // `agent_config.json`, the Gateway mirrors it into its list view. No
   // local fallback — a second source is how the two names drifted apart.
@@ -1171,8 +1226,18 @@ export function AppLayout() {
           affordance must be permanent, but a full-width strip across the
           top of every view out-shouted the content it was reporting. */}
 
-      {/* Main content area */}
-      <div className="flex flex-1 overflow-hidden">
+      {/* Main content area — `relative` is the positioning context for the
+          hover drawer (`RightPanelDrawer`), which overlays the view row.
+
+          This box MUST stay `overflow-hidden` and not become `overflow-clip`.
+          It is a `flex-1` item of the column above it, and a flex item's
+          automatic minimum size is content-based unless the item is a scroll
+          container: `hidden` is one, `clip` is not. Switching it to `clip`
+          let the row's min-height resolve to the chat pane's content height,
+          which pushed the whole app taller than the window. The drawer's
+          transformed overflow is contained one level down, inside its own
+          abspos clip layer — see RightPanelDrawer.tsx. */}
+      <div className="relative flex flex-1 overflow-hidden">
         {/* Navigation bar — 48px */}
         <NavBar currentView={currentView} onViewChange={handleViewChange} onAvatarClick={handleAvatarClick} />
 
@@ -1306,6 +1371,15 @@ export function AppLayout() {
           </div>
         )}
 
+        {/* Hover drawer overlay — sits in the same box as the rails so it can
+            cover the view row and slide out past the window edge. Mounted
+            only while a peek exists (`rightDrawer.key`), including the
+            slide-out frames, so the dismissal is an animation and not a
+            vanish. */}
+        <RightPanelDrawer drawer={rightDrawer} width={rightWidth}>
+          {rightDrawer.key ? drawerContent(rightDrawer.key) : null}
+        </RightPanelDrawer>
+
         {/* Right rail — 40px column. Renders the agent-config nav buttons
             when an agent is selected; otherwise stays as an empty
             placeholder of the same width and padding so the window chrome
@@ -1327,6 +1401,9 @@ export function AppLayout() {
               agentRunning={selectedAgent?.alive ?? false}
               memoryServiceReady={memoryServiceReady}
               collapsed={rightPanelCollapsed}
+              drawerTab={rightDrawer.open ? isPanelTabKey(rightDrawer.key) : null}
+              onTabHover={(tab) => rightDrawer.enter(tab)}
+              onHoverEnd={rightDrawer.railLeave}
             />
           ) : activeGroupId && !activeIsDm ? (
             // Group chat: a single settings tile toggles the members panel.
@@ -1337,6 +1414,9 @@ export function AppLayout() {
             <GroupRightNavBar
               expanded={!rightPanelCollapsed}
               onToggle={toggleRightPanel}
+              drawerOpen={rightDrawer.open && rightDrawer.key === "group_members"}
+              onHoverStart={() => rightDrawer.enter("group_members")}
+              onHoverEnd={rightDrawer.railLeave}
             />
           ) : (
             // DM (`user_user`) / EmptyChatPane: no RightNavBar items yet (the
@@ -1389,6 +1469,9 @@ export function AppLayout() {
             expanded={pmPanelOpen}
             onToggle={() => setPmPanelOpen((v) => !v)}
             tooltipKey="pm.settingsPanel.title"
+            drawerOpen={rightDrawer.open && rightDrawer.key === "view_pm"}
+            onHoverStart={() => rightDrawer.enter("view_pm")}
+            onHoverEnd={rightDrawer.railLeave}
           />
         )}
 
@@ -1410,6 +1493,9 @@ export function AppLayout() {
             expanded={docPanelOpen}
             onToggle={() => setDocPanelOpen((v) => !v)}
             tooltipKey="doc.settingsPanel.title"
+            drawerOpen={rightDrawer.open && rightDrawer.key === "view_docs"}
+            onHoverStart={() => rightDrawer.enter("view_docs")}
+            onHoverEnd={rightDrawer.railLeave}
           />
         )}
 

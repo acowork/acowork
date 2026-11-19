@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { X, Plus, Trash2, FolderOpen, AlertCircle } from "lucide-react";
 import { useSettingsStore } from "../../stores/settingsStore";
+import { useAgentStore } from "../../stores/agentStore";
 import { useToast } from "../common/ToastProvider";
 import { ConfirmDialog } from "../common/ConfirmDialog";
 import { open } from "@tauri-apps/plugin-dialog";
@@ -8,6 +9,7 @@ import { StyledInput } from "../common/StyledInput";
 import { Dropdown } from "../common/Dropdown";
 import { RemoteFolderPicker } from "./RemoteFolderPicker";
 import { useTranslation } from "../../i18n/useTranslation";
+import { nodeNeedsRemoteBrowse } from "./nodeNeedsRemoteBrowse";
 
 interface WorkspaceDir {
   id: string;
@@ -225,6 +227,7 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
       {/* Add Workspace Dialog */}
       {showAddDialog && (
         <AddWorkspaceDialog
+          agentId={agentId}
           onClose={() => setShowAddDialog(false)}
           onAdd={handleAdd}
           recentPaths={workspaces.map(w => w.path)}
@@ -263,9 +266,14 @@ export function WorkspaceManager({ agentId, onClose }: WorkspaceManagerProps) {
 
 // ─── Add Workspace Dialog ──────────────────────────────────────────────────
 
-function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onClose: () => void; onAdd: (path: string, alias: string, access: "read-only" | "read-write") => void; recentPaths: string[] }) {
+function AddWorkspaceDialog({ agentId, onClose, onAdd, recentPaths: _recentPaths }: { agentId: string; onClose: () => void; onAdd: (path: string, alias: string, access: "read-only" | "read-write") => void; recentPaths: string[] }) {
   const { t } = useTranslation();
   const { gatewayMode } = useSettingsStore();
+  const agentNodeId = useAgentStore((s) => s.agents[agentId]?.meta?.node_id);
+  const nodes = useAgentStore((s) => s.nodes);
+  // Only forward `?target=` when the agent runs on another machine.
+  const browseTargetNodeId =
+    agentNodeId && nodeNeedsRemoteBrowse(agentNodeId, nodes) ? agentNodeId : undefined;
   const [path, setPath] = useState("");
   const [alias, setAlias] = useState("");
   const [access, setAccess] = useState<"read-only" | "read-write">("read-only");
@@ -278,7 +286,9 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
     if (gatewayMode === "relay") {
       return;
     }
-    if (gatewayMode === "remote") {
+    // Same rule as WorkspaceSelector: agent node_id ⇒ remote picker,
+    // even when Gateway itself is running in local mode on this Desktop.
+    if (gatewayMode === "remote" || browseTargetNodeId) {
       setShowRemotePicker(true);
       return;
     }
@@ -328,7 +338,9 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
                 disabled={gatewayMode === "relay"}
                 className="rounded-md border border-border-strong px-3 py-2 text-sm hover:bg-[var(--color-accent)]/10 disabled:opacity-40 dark:hover:bg-[var(--color-accent)]/15"
               >
-                {gatewayMode === "remote" ? t("workspace.remoteBrowseBtn") : t("workspace.buttonBrowse")}
+                {gatewayMode === "remote" || browseTargetNodeId
+                  ? t("workspace.remoteBrowseBtn")
+                  : t("workspace.buttonBrowse")}
               </button>
             </div>
           </div>
@@ -424,9 +436,10 @@ function AddWorkspaceDialog({ onClose, onAdd, recentPaths: _recentPaths }: { onC
         </div>
       </div>
 
-      {/* Remote folder picker (only shown in remote mode) */}
+      {/* Remote folder picker — Gateway host or agent node (ADR-055 L7-1) */}
       {showRemotePicker && (
         <RemoteFolderPicker
+          target={browseTargetNodeId}
           onSelect={(selectedPath: string) => {
             setShowRemotePicker(false);
             setPath(selectedPath);

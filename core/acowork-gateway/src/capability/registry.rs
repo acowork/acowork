@@ -62,13 +62,21 @@ impl CapabilityRegistry {
         definition: acowork_core::CapabilityDef,
     ) {
         let key = Self::make_key(instance_id, action);
-        tracing::info!(
-            instance_id,
-            agent_id,
-            action,
-            "Registering capability: {}",
-            key
-        );
+        // Node reconnect re-publishes retained InstalledAgentInfo; the
+        // upsert path re-registers the same keys. INFO only on insert so
+        // a flap cannot spam "Registering capability" thousands of times.
+        let is_new = !self.capabilities.contains_key(&key);
+        if is_new {
+            tracing::info!(
+                instance_id,
+                agent_id,
+                action,
+                "Registering capability: {}",
+                key
+            );
+        }
+        // Re-register on retained inventory replay: silent. DEBUG here
+        // still floods the Gateway log when a node MQTT-flaps.
         self.capabilities.insert(
             key,
             RegisteredCapability {

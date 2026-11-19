@@ -715,6 +715,7 @@
 :root.accent-orange { --color-accent: #f97316; --glass-tint-light:  24 8% 92%; --glass-tint-dark:  24 8% 14%; }
 :root.accent-amber  { --color-accent: #f59e0b; --glass-tint-light:  38 8% 92%; --glass-tint-dark:  38 8% 14%; }
 :root.accent-pink   { --color-accent: #ec4899; --glass-tint-light: 330 8% 92%; --glass-tint-dark: 330 8% 14%; }
+:root.accent-coffee { --color-accent: #645050; --glass-tint-light:   0 8% 92%; --glass-tint-dark:   0 8% 14%; }
 
 /* Dark mode overrides */
 .dark {
@@ -1943,6 +1944,67 @@ input[type="radio"]:checked {
 
 .dot-breathing {
   animation: dot-breathe 1.8s ease-in-out infinite;
+}
+
+/* ── Right-panel hover drawer ─────────────────────────────────────────
+   The right rail previews a collapsed panel by sliding it over the chat /
+   file panes instead of re-flowing them (components/layout/
+   RightPanelDrawer.tsx). Two keyframes rather than one transition: the
+   surface is mounted on hover intent, so a transition would have no start
+   value to animate from on the frame it appears — an animation runs from
+   its `from` state regardless of when the element entered the tree.
+
+   `--drawer-rail-offset` is the rail the drawer parks itself left of, set
+   inline by RightPanelDrawer.tsx. The exit has to travel that extra strip
+   as well as the panel's own width, or a 40px sliver of a "closed" drawer
+   stays visible under the rail.
+
+   `DRAWER_RETRACT_MS` in rightPanelDrawerState.ts is the unmount timer for
+   right-drawer-out and MUST stay equal to its 180ms — the global
+   prefers-reduced-motion rule zeroes the duration, so the drawer still
+   behaves there, it just snaps. */
+@keyframes right-drawer-in {
+  from {
+    transform: translateX(calc(100% + var(--drawer-rail-offset, 40px)));
+  }
+
+  to {
+    transform: translateX(0);
+  }
+}
+
+@keyframes right-drawer-out {
+  from {
+    transform: translateX(0);
+  }
+
+  to {
+    transform: translateX(calc(100% + var(--drawer-rail-offset, 40px)));
+  }
+}
+
+/* Elevation, not a border: the drawer overlaps content, so it needs the
+   left-edge shadow to read as the top layer. Both packs declare a shadow
+   token, but `--shadow-menu` falls downward and would vanish against the
+   rail — this surface needs the shadow sideways.
+
+   `--z-overlay` and not a literal: the drawer floats above the panes but
+   below every menu and dialog, which is exactly where that token sits. */
+.right-drawer {
+  box-shadow: -10px 0 22px -12px rgb(0 0 0 / 0.25);
+  animation: right-drawer-in 180ms ease-out;
+  z-index: var(--z-overlay);
+}
+
+.dark .right-drawer {
+  box-shadow: -10px 0 22px -12px rgb(0 0 0 / 0.55);
+}
+
+/* `forwards` keeps the last frame while React waits out the unmount timer;
+   without it the panel pops back into place for one frame before it is
+   removed. */
+.right-drawer[data-open="false"] {
+  animation: right-drawer-out 180ms ease-in forwards;
 }
 
 /* ── Chat toolbar responsive collapse (JS-driven) ──

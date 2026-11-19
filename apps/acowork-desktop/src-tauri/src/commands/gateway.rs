@@ -648,8 +648,14 @@ pub async fn spawn_gateway(
         // file; stdout/stderr stay inherited for the dev console.
         .stdin(std::process::Stdio::null())
         .env("ACOWORK_GATEWAY_DAEMON", "true")
-        .env("ACOWORK_GATEWAY_LOG_LEVEL", "debug")
-        .env("RUST_LOG", "debug,h2=info,hyper=info,hyper_util=info,tower=info")
+        // info by default: debug + a flapping remote node still floods the
+        // rolling log (capability re-register / inventory / rumqttd). Operators
+        // can raise the level from Settings when diagnosing.
+        .env("ACOWORK_GATEWAY_LOG_LEVEL", "info")
+        .env(
+            "RUST_LOG",
+            "info,rumqttd=off,rumqttc=off,h2=warn,hyper=warn,hyper_util=warn,tower=warn,tower_http=warn",
+        )
         .env(
             "ACOWORK_LSP_CONFIG_DIR",
             resource_dir.to_string_lossy().to_string(),
@@ -1000,16 +1006,19 @@ async fn mint_enrollment_token(
 }
 
 /// ADR-113: everything the Desktop needs to build a copy-pasteable
-/// `acowork-node start` command for a DIFFERENT machine.
+/// enroll payload for a DIFFERENT machine (Android Host paste / QR, or
+/// `acowork-node start` on a CLI host).
 ///
 /// The Desktop cannot know which address is routable from that machine,
 /// so `suggested_host` is only a starting point — the UI lets the user
-/// edit the host and renders the final command locally. The MQTT port
-/// and enrollment token are real values from this Gateway, not
+/// edit the host and renders the final payload locally. The HTTP/MQTT
+/// ports and enrollment token are real values from this Gateway, not
 /// placeholders.
 #[derive(Debug, Clone, Serialize)]
 pub struct RemoteNodeCommand {
     pub mqtt_port: u16,
+    /// Gateway HTTP port — Android Host dials this, not MQTT.
+    pub http_port: u16,
     pub token: String,
     pub token_ttl_seconds: u64,
     pub suggested_host: String,
@@ -1025,6 +1034,7 @@ pub async fn build_remote_node_command(
     let parsed = reqwest::Url::parse(&base_url)
         .map_err(|e| format!("bad gateway base_url {base_url}: {e}"))?;
     let suggested_host = parsed.host_str().unwrap_or("127.0.0.1").to_string();
+    let http_port = parsed.port().unwrap_or(19876);
     let status = client
         .system_status()
         .await
@@ -1032,6 +1042,7 @@ pub async fn build_remote_node_command(
     let token = mint_enrollment_token(&client, &base_url, TTL_SECONDS).await?;
     Ok(RemoteNodeCommand {
         mqtt_port: status.mqtt_port,
+        http_port,
         token,
         token_ttl_seconds: TTL_SECONDS,
         suggested_host,

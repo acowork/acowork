@@ -18,6 +18,17 @@ interface RightNavBarProps {
    *  the standalone service, not just a running agent — without it every
    *  panel request answers 503. Unknown (never read) counts as false. */
   memoryServiceReady: boolean;
+  /**
+   * The tab the hover drawer is previewing, or `null`. Only meaningful while
+   * `collapsed` — it lights the tile whose floating panel is on screen, so the
+   * rail and the drawer never disagree about which one is "open".
+   */
+  drawerTab?: PanelTab | null;
+  /** Pointer rested onto a tile. The rail's owner decides whether that earns
+   *  a drawer (layout/useRightPanelDrawer.ts) — the rail only reports. */
+  onTabHover?: (tab: PanelTab) => void;
+  /** Pointer left the rail as a whole. */
+  onHoverEnd?: () => void;
 }
 
 interface NavItem {
@@ -33,7 +44,7 @@ interface NavItem {
 // fill-only lucide glyph cannot express the active state consistently with
 // the rest of the rail.
 
-export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, memoryServiceReady }: RightNavBarProps) {
+export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, memoryServiceReady, drawerTab = null, onTabHover, onHoverEnd }: RightNavBarProps) {
   const { t } = useTranslation();
 
   const items: NavItem[] = [
@@ -82,18 +93,32 @@ export function RightNavBar({ activeTab, onTabChange, agentRunning, collapsed, m
   ];
 
   return (
-    <nav className="flex w-10 shrink-0 flex-col items-center gap-2 py-2 dark:border-zinc-800">
+    <nav
+      className="flex w-10 shrink-0 flex-col items-center gap-2 py-2 dark:border-zinc-800"
+      onMouseLeave={onHoverEnd}
+    >
       {items
         .filter((item) => item.show)
         .map(({ tab, i18nKey }, index) => {
-          const isActive = !collapsed && activeTab === tab;
+          // A tile reads active in two situations: its panel is pinned into
+          // the layout, or its panel is floating over it as the hover drawer.
+          // The drawer only exists while collapsed, so the two can't overlap.
+          const isDrawer = collapsed && drawerTab === tab;
+          // ONE flag for both the button tint and the glyph swap. They used to
+          // be driven separately (`isActive` for the icons), which left a
+          // peeked tile half-lit: accent colour with an outline glyph, so the
+          // rail disagreed with the drawer about which panel is on screen.
+          const isActive = (!collapsed && activeTab === tab) || isDrawer;
           return (
             <NavButton
               key={tab}
               active={isActive}
               onClick={() => onTabChange(tab)}
-              tooltip={t(i18nKey)}
+              // The drawer covers the space to the left of this rail where the
+              // tooltip bubble lives, so it is dropped while the drawer is up.
+              tooltip={isDrawer ? "" : t(i18nKey)}
               tooltipPosition="left"
+              onMouseEnter={onTabHover ? () => onTabHover(tab) : undefined}
               // First button's top edge aligns with the SessionTabBar/RightPanel border-b (~33px)
               className={index === 0 ? "mt-[25px]" : undefined}
             >

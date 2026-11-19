@@ -10,6 +10,7 @@ import { AgentDetailDialog } from "./AgentDetailDialog";
 import { CloneDialog } from "./CloneDialog";
 import { PermissionDialog, type PermissionTarget } from "./PermissionDialog";
 import { AgentLibraryDialog } from "./AgentLibraryDialog";
+import { RemoteNodeEnrollDialog } from "../nodes/RemoteNodeEnrollDialog";
 import { PublishWizard } from "./PublishWizard";
 import { CreateWizard } from "./CreateWizard";
 import { AgentAvatar } from "../common/AgentAvatar";
@@ -19,7 +20,7 @@ import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
 import { COUNT_BADGE_NEUTRAL_CN } from "../common/sidebarCountBadge";
 import { SIDEBAR_GROUP_BANNER_CN } from "../common/sidebarGroupBanner";
-import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor, MessagesSquare } from "lucide-react";
+import { Play, Square, Trash2, Info, Copy, Plus, Search, Package, Sparkles, Bug, ChevronRight, UserCog, Settings, Server, Monitor, MessagesSquare, Smartphone } from "lucide-react";
 import { StyledInput } from "../common/StyledInput";
 import { invoke } from "@tauri-apps/api/core";
 import { isProcessing, instanceIdOf, type AgentInfo, type CloneResponse } from "../../lib/types";
@@ -148,6 +149,7 @@ export function AgentList({ width }: AgentListProps) {
   const [libraryDialog, setLibraryDialog] = useState<{ open: boolean; nodeId?: string }>({
     open: false,
   });
+  const [remoteEnrollOpen, setRemoteEnrollOpen] = useState(false);
 
   // "Create account" menu item gate. Mirrors the same canInvite logic used
   // by the old user-list banner "+" (see ADR-076 §决策 6): admins always,
@@ -1035,6 +1037,19 @@ export function AgentList({ width }: AgentListProps) {
                   {t("agentList.createLocalNode")}
                 </button>
               )}
+              {selfAccount && (
+                <button
+                  onClick={() => {
+                    setAddMenuOpen(false);
+                    setRemoteEnrollOpen(true);
+                  }}
+                  data-testid="add-menu-remote-node"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-xs text-text-secondary transition-colors hover:bg-[var(--color-accent)]/5 dark:hover:bg-[var(--color-accent)]/10"
+                >
+                  <Smartphone className="h-3.5 w-3.5" />
+                  {t("agentList.enrollRemoteNode")}
+                </button>
+              )}
               {canInviteUser && (
                 <button
                   onClick={() => {
@@ -1085,6 +1100,11 @@ export function AgentList({ width }: AgentListProps) {
         open={libraryDialog.open}
         initialNodeId={libraryDialog.nodeId}
         onClose={() => setLibraryDialog({ open: false })}
+      />
+
+      <RemoteNodeEnrollDialog
+        open={remoteEnrollOpen}
+        onClose={() => setRemoteEnrollOpen(false)}
       />
 
       {/* Confirm dialog */}

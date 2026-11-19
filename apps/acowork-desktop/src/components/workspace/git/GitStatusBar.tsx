@@ -96,17 +96,13 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
   // "you're viewing X's file list, not your worktree".
   const viewingCommit = viewingRev !== "";
 
-  // Direction of the history dropdown. Anchor ABOVE the bar whenever
-  // the popover (~288px) wouldn't fit between the bar and the
-  // panel's bottom edge — i.e. the panel is collapsed (banner sits
-  // flush at the panel bottom; `changes` still reads the store and
-  // can be any N, so we MUST NOT key off `changes` alone), OR the
-  // expanded file list is short (<6 rows, banner still near the
-  // panel bottom). With a long expanded list (≥ 6 rows) the file
-  // list pushes the banner up into the middle of the workspace,
-// downward has room, and opening upward would cover the FileTree.
-  const historyPlacement: "top" | "bottom" =
-    !isExpanded || changes < 6 ? "top" : "bottom";
+  // Direction of the history dropdown. The strip now lives in the panel's
+  // HEADER stack (between the workspace selector and the file search), so
+  // the space below it is the search row and the file tree — the dropdown
+  // always opens DOWNWARD. (It used to sit at the panel's bottom edge and
+  // flipped upward when the panel was short; that geometry is gone with
+  // the move.)
+  const historyPlacement: "top" | "bottom" = "bottom";
 
   // Branch name is an IDENTIFIER, not a label: the whole bar is
   // `uppercase` to match the NodeGroupHeader spec, but rendering
@@ -125,6 +121,14 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
       : ref
         ? `${ref} · ${meta}`
         : meta;
+
+  // A workspace that is not a git repository has nothing for this strip to
+  // say, and a strip that reads "Not a Git repository" is noise where the
+  // file tree is the subject — so the strip is NOT rendered at all. The
+  // check waits for the data: before the first fetch lands there is no
+  // verdict, and rendering the bar optimistically would flash a strip
+  // that a moment later disappears.
+  if (data && !data.isRepo) return null;
 
   return (
     // The wrapper div uses `display: contents` so it doesn't break the
@@ -148,7 +152,13 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           // L833, `min-h-[2.5rem]`) above, so the three right-panel banners
           // read as a single height family. Was `h-6` (24px) — visually
           // ~16px shorter than the other two banners.
-          "flex min-h-[2.5rem] w-full shrink-0 items-center gap-1.5 px-3 text-left",
+          // `pl-3.5` / `pr-2.5`: the workspace-selector row above is
+          // `px-1.5` + the trigger's `px-2`, so ITS folder icon starts
+          // 14px from the panel edge and its icon cluster ends 10px from
+          // it. This strip uses the same two numbers, so the git icon
+          // lines up under the folder icon and the three icons on the
+          // right line up with the three above them.
+          "flex min-h-[2.5rem] w-full shrink-0 items-center gap-1 pl-3.5 pr-2.5 text-left",
           // Sized to the rows it labels: `.file-tree-row` in globals.css sets
           // the tree and the status list below to `--ui-text-size` (12px at
           // the default base), so the banner takes the same step rather than
@@ -159,7 +169,14 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           "text-[length:var(--ui-text-size)] tracking-wide",
           "text-text-tertiary hover:text-text-secondary",
           "transition-colors duration-150",
-          "border-y border-nav-divider/40 dark:border-zinc-600/40",
+          // `border-b` only, not `border-y`: the strip sits directly under the
+          // workspace-selector row, which already draws its own `border-b`.
+          // A top border here doubled the divider into two hairlines.
+          // `border-border-divider`, the SAME token the workspace-selector row and
+          // the file-search row draw: this strip is a header strip in their
+          // stack, and a hairline at 40% opacity read as a fainter divider
+          // than its two neighbours.
+          "border-b border-border-divider",
           // Subtle elevation when expanded. Collapsed = transparent so the
           // banner blends into `bg-right-panel` (the workspace surface);
           // expanded = `bg-surface-subtle` / `` so the banner
@@ -172,13 +189,9 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           isExpanded && "bg-surface-subtle",
         )}
       >
-      <ChevronRight
-        className={cn(
-          "h-3 w-3 shrink-0 transition-transform duration-150",
-          isExpanded && "rotate-90",
-        )}
-      />
-      <GitBranch className="h-3 w-3 shrink-0" />
+      {/* The git icon takes the folder icon's slot (14px, `gap-1`), so the
+          ref below it starts where the workspace name starts. */}
+      <GitBranch className="h-3.5 w-3.5 shrink-0" />
       {/* No `uppercase` here: the bar's siblings in this panel (the
           workspace-selector row and the file-search row, both
           `toolbarButton` / `text-xs`) are normal case, so uppercasing
@@ -198,9 +211,17 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
         )}
       </span>
       {loading ? (
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+        /* `ml-auto` so the spinner sits at the SAME right edge the icon
+           cluster takes when the status is loaded — otherwise the strip's
+           right-hand content jumps when the fetch lands. */
+        <Loader2 className="ml-auto h-3 w-3 shrink-0 animate-spin" />
       ) : (
-        <div className="flex items-center gap-1 pr-1 shrink-0">
+        /* `ml-auto`: the icon cluster is pushed hard right, so its RIGHT
+           edge lands where the workspace-selector row's three-icon
+           cluster ends. The two strips then read as one aligned column.
+           THREE icons here (history, refresh, chevron) against the three
+           above (new file, new folder, refresh) — one icon per column. */
+        <div className="ml-auto flex items-center gap-1 shrink-0">
           {/* History picker button. Rendered as a <span role="button">
               because it sits inside the bar's own <button> — nested
               <button> is invalid HTML and React will warn. The class
@@ -262,6 +283,26 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
               </span>
             </Tooltip>
           </div>
+          {/* The expand chevron — the LAST of the three icons on the
+              right, where the workspace-selector row's third icon sits.
+              It used to open the strip from the LEFT edge; there it
+              pushed the ref and the git icon out of alignment with the
+              folder icon and the workspace name above. */}
+          {/* The chevron wears the SAME 24x24 box as the two icon buttons
+              beside it and as the three buttons in the workspace-selector
+              row above (`h-6 w-6`, `gap-1`). A bare 14px glyph would make
+              this cluster one box narrower than the row above, so the three
+              icons would sit in three DIFFERENT columns — the alignment
+              the strip is after. */}
+          <span className="inline-flex h-6 w-6 items-center justify-center">
+            <ChevronRight
+              data-testid="git-status-bar-chevron"
+              className={cn(
+                "h-3.5 w-3.5 shrink-0 text-text-tertiary transition-transform duration-150",
+                isExpanded && "rotate-90",
+              )}
+            />
+          </span>
         </div>
       )}
       </button>
