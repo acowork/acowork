@@ -715,6 +715,7 @@
 :root.accent-orange { --color-accent: #f97316; --glass-tint-light:  24 8% 92%; --glass-tint-dark:  24 8% 14%; }
 :root.accent-amber  { --color-accent: #f59e0b; --glass-tint-light:  38 8% 92%; --glass-tint-dark:  38 8% 14%; }
 :root.accent-pink   { --color-accent: #ec4899; --glass-tint-light: 330 8% 92%; --glass-tint-dark: 330 8% 14%; }
+:root.accent-coffee { --color-accent: #645050; --glass-tint-light:   0 8% 92%; --glass-tint-dark:   0 8% 14%; }
 
 /* Dark mode overrides */
 .dark {

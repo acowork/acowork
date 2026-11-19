@@ -5,7 +5,7 @@
  * does: `--color-accent`, the CSS glass tints, and the macOS native vibrancy
  * RGB. Only the last is a computation the shipped presets hide — they hard-code
  * it — so this pins that the formula reproduces their values exactly. If it
- * drifts, a custom color tints the glass differently from the ten swatches
+ * drifts, a custom color tints the glass differently from the shipped swatches
  * beside it, which is the one thing a synthesized preset must not do.
  */
 import { describe, it, expect } from "vitest";
@@ -55,7 +55,7 @@ describe("resolveAccentPreset", () => {
     expect(r.hue).toBe(p.hue);
   });
 
-  it("synthesizes a custom preset for a hex outside the ten", () => {
+  it("synthesizes a custom preset for a hex outside the shipped ones", () => {
     const r = resolveAccentPreset("#d4228a");
     expect(r.id).toBe(CUSTOM_ACCENT_ID);
     expect(r.hex).toBe("#d4228a");

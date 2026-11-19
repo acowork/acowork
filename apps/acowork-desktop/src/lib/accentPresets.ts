@@ -133,6 +133,18 @@ export const ACCENT_PRESETS: AccentPreset[] = [
     glassRgbLight: { r: 236, g: 233, b: 235 },
     glassRgbDark: { r: 39, g: 33, b: 36 },
   },
+  {
+    id: "coffee",
+    // rgb(100, 80, 80) — a deep, desaturated brown. The one preset that is
+    // deliberately NOT a saturated hue: it anchors the warm end of the wheel
+    // where a bright color would shout.
+    hex: "#645050",
+    hue: 0,
+    glassTintLight: "0 8% 92%",
+    glassTintDark: "0 8% 14%",
+    glassRgbLight: { r: 236, g: 233, b: 233 },
+    glassRgbDark: { r: 39, g: 33, b: 33 },
+  },
 ];
 
 /** Lookup an AccentPreset by its id (e.g. "blue"). Returns undefined if missing. */
@@ -151,7 +163,7 @@ export function getAccentPresetByHex(hex: string): AccentPreset | undefined {
 export const DEFAULT_ACCENT_PRESET: AccentPreset = ACCENT_PRESETS[0];
 
 /** `id` of a synthesized preset. Not a CSS class target: globals.css only
- *  ships `.accent-{id}` blocks for the ten shipped presets, so a custom
+ *  ships `.accent-{id}` blocks for the eleven shipped presets, so a custom
  *  accent gets its glass tints written inline on `<html>` instead
  *  (see `settingsStore.applyAccentPreset`). */
 export const CUSTOM_ACCENT_ID = "custom";
@@ -227,7 +239,7 @@ export function presetFromHex(hex: string): AccentPreset {
 
 /** Resolve any accent hex to a preset: a shipped one if it matches, otherwise
  *  a synthesized custom preset. This is what lets `accentColor` hold a color
- *  outside the ten presets without being coerced back to blue. */
+ *  outside the shipped presets without being coerced back to blue. */
 export function resolveAccentPreset(hex: string): AccentPreset {
   return getAccentPresetByHex(hex) ?? presetFromHex(hex);
 }

@@ -1,5 +1,5 @@
 /**
- * AccentSwatches — the ten presets plus a custom color.
+ * AccentSwatches — the eleven presets plus a custom color.
  *
  * Shared by the title-bar menu and Settings ▸ Appearance, so this pins the
  * control itself rather than either host. What is worth pinning is the custom
@@ -42,7 +42,7 @@ describe("AccentSwatches", () => {
     setAccent(BLUE);
   });
 
-  it("renders the ten presets plus one custom slot", () => {
+  it("renders the eleven presets plus one custom slot", () => {
     render(<AccentSwatches value={BLUE} customColor={null} onChange={() => {}} />);
     expect(document.querySelectorAll("[data-accent-id]")).toHaveLength(ACCENT_PRESETS.length + 1);
   });
@@ -67,7 +67,7 @@ describe("AccentSwatches", () => {
 
   it("shows a plus when there is no custom color, an edit badge when there is", () => {
     // Without the badge a saved custom color is just another plain circle,
-    // indistinguishable from the ten presets beside it — and the "+" the user
+    // indistinguishable from the eleven presets beside it — and the "+" the user
     // clicked is gone, so nothing says the slot is still clickable.
     const { unmount } = render(
       <AccentSwatches value={BLUE} customColor={null} onChange={() => {}} />,

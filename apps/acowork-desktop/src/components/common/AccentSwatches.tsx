@@ -6,7 +6,7 @@ import { cn } from "../../lib/utils";
 import { Tooltip } from "../common/Tooltip";
 
 /**
- * Accent color picker — the ten presets plus a custom color, shared by the
+ * Accent color picker — the eleven presets plus a custom color, shared by the
  * title-bar menu and Settings ▸ Appearance.
  *
  * Both entry points drive the same `settingsStore.accentColor`, so they must
@@ -37,6 +37,7 @@ export function AccentSwatches({
   customColor,
   onChange,
   className,
+  columns = 12,
 }: {
   /** The active accent as `#rrggbb`. */
   value: string;
@@ -48,6 +49,11 @@ export function AccentSwatches({
   /** Layout classes for the row; the two hosts space their grids alike
    *  today but own different containers. */
   className?: string;
+  /** How many swatches fit on one line. The count is TWELVE (eleven presets
+   *  plus the custom slot) and the two hosts have different widths, so they
+   *  split it differently: Settings ▸ Appearance is wide enough for one line
+   *  of twelve, the title-bar popover is not — it takes two lines of six. */
+  columns?: 6 | 12;
 }) {
   const { t } = useTranslation();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -58,7 +64,22 @@ export function AccentSwatches({
   const customActive = hasCustom && value.toLowerCase() === customColor.toLowerCase();
 
   return (
-    <div className={cn("relative flex flex-wrap gap-[14px]", className)}>
+    /* A fixed-column grid, not a wrapping flex row: eleven presets plus the
+       custom slot make TWELVE swatches, and a flex row broke at whatever
+       width the host happened to be, so the second line held a ragged
+       remainder and the two doors looked like different controls. The
+       column count is the host's call — Settings takes one line of twelve,
+       the narrow title-bar popover two lines of six. */
+    <div
+      className={cn(
+        // `justify-items-center`: a grid item stretches to its cell by
+        // default, which would left-align the swatch inside a cell wider
+        // than the swatch and space the row unevenly.
+        "relative grid justify-items-center gap-x-1 gap-y-2",
+        columns === 6 ? "grid-cols-6" : "grid-cols-12",
+        className,
+      )}
+    >
       {ACCENT_PRESETS.map((c) => {
         const current = value.toLowerCase() === c.hex.toLowerCase();
         return (
@@ -70,7 +91,12 @@ export function AccentSwatches({
               aria-pressed={current}
               data-accent-id={c.id}
               className={cn(
-                "flex h-9 w-9 items-center justify-center rounded-full transition-transform",
+                // 32px, not 36px: twelve slots (eleven presets + the custom
+                // one) have to fit the narrowest host — the title-bar popover
+                // — in one clean line, and the Settings row keeps its twelve
+                // on one line too. The gap shrank with the swatch for the
+                // same reason.
+                "flex h-8 w-8 items-center justify-center rounded-full transition-transform",
                 current
                   ? "scale-110 ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
                   : "hover:scale-105",
@@ -111,7 +137,7 @@ export function AccentSwatches({
           aria-pressed={customActive}
           data-accent-id="custom"
           className={cn(
-            "relative flex h-9 w-9 items-center justify-center rounded-full border transition-transform",
+            "relative flex h-8 w-8 items-center justify-center rounded-full border transition-transform",
             customActive
               ? "scale-110 border-transparent ring-2 ring-offset-2 ring-offset-white dark:ring-offset-zinc-900"
               : hasCustom
@@ -132,9 +158,9 @@ export function AccentSwatches({
           {hasCustom ? (
             <span
               data-accent-edit-badge=""
-              className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-btn-solid text-white shadow-sm"
+              className="absolute -bottom-0.5 -right-0.5 flex h-3 w-3 items-center justify-center rounded-full bg-btn-solid text-white shadow-sm"
             >
-              <Pencil className="h-2 w-2" strokeWidth={2.5} />
+              <Pencil className="h-1.5 w-1.5" strokeWidth={3} />
             </span>
           ) : (
             <Plus className="h-4 w-4" />

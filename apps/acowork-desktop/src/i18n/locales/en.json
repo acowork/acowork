@@ -33,6 +33,7 @@
     "orange": "Orange",
     "amber": "Amber",
     "pink": "Pink",
+    "coffee": "Coffee",
     "custom": "Custom color"
   },
   "navBar": {
@@ -915,6 +916,8 @@
     "defaultWorkingDirectory": "Default working directory",
     "noMatchingWorkspaces": "No matching workspaces",
     "noWorkspacesConfigured": "No workspaces configured",
+    "agentStoppedTitle": "Agent is stopped",
+    "agentStoppedHint": "Start the agent to load and manage workspaces.",
     "deniedTitle": "Workspaces not visible",
     "deniedHint": "This agent is shared with you, but its workspaces are visible only to the owner and authorized users. Ask the owner to add you, or just describe your working directory in the conversation.",
     "treeLoadFailed": "Failed to load workspace ({{detail}})",

@@ -96,17 +96,13 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
   // "you're viewing X's file list, not your worktree".
   const viewingCommit = viewingRev !== "";
 
-  // Direction of the history dropdown. Anchor ABOVE the bar whenever
-  // the popover (~288px) wouldn't fit between the bar and the
-  // panel's bottom edge — i.e. the panel is collapsed (banner sits
-  // flush at the panel bottom; `changes` still reads the store and
-  // can be any N, so we MUST NOT key off `changes` alone), OR the
-  // expanded file list is short (<6 rows, banner still near the
-  // panel bottom). With a long expanded list (≥ 6 rows) the file
-  // list pushes the banner up into the middle of the workspace,
-// downward has room, and opening upward would cover the FileTree.
-  const historyPlacement: "top" | "bottom" =
-    !isExpanded || changes < 6 ? "top" : "bottom";
+  // Direction of the history dropdown. The strip now lives in the panel's
+  // HEADER stack (between the workspace selector and the file search), so
+  // the space below it is the search row and the file tree — the dropdown
+  // always opens DOWNWARD. (It used to sit at the panel's bottom edge and
+  // flipped upward when the panel was short; that geometry is gone with
+  // the move.)
+  const historyPlacement: "top" | "bottom" = "bottom";
 
   // Branch name is an IDENTIFIER, not a label: the whole bar is
   // `uppercase` to match the NodeGroupHeader spec, but rendering
@@ -125,6 +121,14 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
       : ref
         ? `${ref} · ${meta}`
         : meta;
+
+  // A workspace that is not a git repository has nothing for this strip to
+  // say, and a strip that reads "Not a Git repository" is noise where the
+  // file tree is the subject — so the strip is NOT rendered at all. The
+  // check waits for the data: before the first fetch lands there is no
+  // verdict, and rendering the bar optimistically would flash a strip
+  // that a moment later disappears.
+  if (data && !data.isRepo) return null;
 
   return (
     // The wrapper div uses `display: contents` so it doesn't break the
@@ -159,7 +163,14 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
           "text-[length:var(--ui-text-size)] tracking-wide",
           "text-text-tertiary hover:text-text-secondary",
           "transition-colors duration-150",
-          "border-y border-nav-divider/40 dark:border-zinc-600/40",
+          // `border-b` only, not `border-y`: the strip sits directly under the
+          // workspace-selector row, which already draws its own `border-b`.
+          // A top border here doubled the divider into two hairlines.
+          // `border-border-divider`, the SAME token the workspace-selector row and
+          // the file-search row draw: this strip is a header strip in their
+          // stack, and a hairline at 40% opacity read as a fainter divider
+          // than its two neighbours.
+          "border-b border-border-divider",
           // Subtle elevation when expanded. Collapsed = transparent so the
           // banner blends into `bg-right-panel` (the workspace surface);
           // expanded = `bg-surface-subtle` / `` so the banner
@@ -198,9 +209,17 @@ export function GitStatusBar({ agentId, workspaceId }: GitStatusBarProps) {
         )}
       </span>
       {loading ? (
-        <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+        /* `ml-auto` so the spinner sits at the SAME right edge the icon
+           cluster takes when the status is loaded — otherwise the strip's
+           right-hand content jumps when the fetch lands. */
+        <Loader2 className="ml-auto h-3 w-3 shrink-0 animate-spin" />
       ) : (
-        <div className="flex items-center gap-1 pr-1 shrink-0">
+        /* `ml-auto` + `pr-0.5`: the icon cluster is pushed hard right so
+           its RIGHT edge lands where the workspace-selector row's icon
+           cluster ends (that row is `px-1.5` + `pr-1` = 10px from the
+           panel edge; this bar is `px-3` = 12px, so the cluster gives
+           back 2px). The two strips then read as one aligned column. */
+        <div className="ml-auto flex items-center gap-1 pr-0.5 shrink-0">
           {/* History picker button. Rendered as a <span role="button">
               because it sits inside the bar's own <button> — nested
               <button> is invalid HTML and React will warn. The class
