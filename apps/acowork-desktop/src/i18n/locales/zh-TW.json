@@ -2264,6 +2264,8 @@
     "update": "更新",
     "openRepo": "開啟儲存庫",
     "repository": "儲存庫",
+    "homepage": "首頁",
+    "upstream": "上游專案",
     "noReadme": "此應用尚無說明文件。",
     "selectHint": "選擇一個應用以檢視詳細資料。"
   }

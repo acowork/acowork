@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
+    catalogVersionIsNewer,
     filterGalleryCards,
+    galleryAttributionLinks,
     mergeGalleryCards,
     type GalleryApp,
 } from "./appGallery";
@@ -76,6 +78,36 @@ describe("mergeGalleryCards", () => {
         expect(cards.map((c) => c.id)).toEqual(["figcraft", "doc"]);
         expect(cards[1].badge).toBe("builtin");
     });
+
+    it("does not offer Update when the local install is newer than the catalog", () => {
+        const cards = mergeGalleryCards(
+            [gallery({ id: "figcraft", name: "FigCraft", latest_version: "0.18.1" })],
+            [
+                installed({
+                    id: "figcraft",
+                    name: "FigCraft (ACowork)",
+                    installed_version: "0.18.2",
+                }),
+            ],
+        );
+        expect(cards[0].badge).toBe("installed");
+    });
+
+    it("offers Update only when the catalog version is newer", () => {
+        const cards = mergeGalleryCards(
+            [gallery({ id: "figcraft", name: "FigCraft", latest_version: "0.18.2" })],
+            [installed({ id: "figcraft", name: "FigCraft", installed_version: "0.18.1" })],
+        );
+        expect(cards[0].badge).toBe("update");
+    });
+});
+
+describe("catalogVersionIsNewer", () => {
+    it("treats 0.18.2 as newer than 0.18.1", () => {
+        expect(catalogVersionIsNewer("0.18.2", "0.18.1")).toBe(true);
+        expect(catalogVersionIsNewer("0.18.1", "0.18.2")).toBe(false);
+        expect(catalogVersionIsNewer("0.18.2", "0.18.2")).toBe(false);
+    });
 });
 
 describe("filterGalleryCards", () => {
@@ -88,5 +120,30 @@ describe("filterGalleryCards", () => {
             [],
         );
         expect(filterGalleryCards(cards, "design").map((c) => c.id)).toEqual(["a"]);
+    });
+});
+
+describe("galleryAttributionLinks", () => {
+    it("drops a homepage that repeats the repository and keeps a distinct upstream", () => {
+        expect(
+            galleryAttributionLinks({
+                repository: "https://github.com/acowork/figcraft-app",
+                homepage: "https://github.com/acowork/figcraft-app",
+                upstream: "https://github.com/storytold/figcraft",
+            }),
+        ).toEqual([
+            { kind: "repository", href: "https://github.com/acowork/figcraft-app" },
+            { kind: "upstream", href: "https://github.com/storytold/figcraft" },
+        ]);
+    });
+
+    it("does not treat an upstream product site as the listing homepage", () => {
+        expect(
+            galleryAttributionLinks({
+                repository: "https://github.com/acowork/figcraft-app",
+                homepage: "https://github.com/acowork/figcraft-app",
+                upstream: "https://getartcraft.com/apps/figcraft",
+            }).map((l) => l.kind),
+        ).toEqual(["repository", "upstream"]);
     });
 });

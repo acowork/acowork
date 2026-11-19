@@ -70,6 +70,6 @@ describe("hosted app icon helpers", () => {
     });
 
     it("letter comes from nav_label", () => {
-        expect(hostedAppLetter(app({ id: "figcraft", nav_label: "FigCraft" }))).toBe("F");
+        expect(hostedAppLetter(app({ id: "figcraft", nav_label: "FigCraft (ACowork)" }))).toBe("F");
     });
 });

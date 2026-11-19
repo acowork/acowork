@@ -2,7 +2,7 @@
  * Which installed apps earn a left-nav slot (ADR-116).
  *
  * Built-in PM/DOC keep their dedicated `projects` / `docs` views; only
- * non-builtin webview apps (e.g. FigCraft) appear as dynamic nav icons.
+ * non-builtin webview apps (e.g. FigCraft (ACowork)) appear as dynamic nav icons.
  */
 import type { AppDto } from "./apps-api";
 

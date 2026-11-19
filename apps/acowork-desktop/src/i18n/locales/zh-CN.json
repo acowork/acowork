@@ -2729,6 +2729,8 @@
     "update": "更新",
     "openRepo": "打开仓库",
     "repository": "仓库",
+    "homepage": "主页",
+    "upstream": "上游项目",
     "noReadme": "该应用暂无说明文档。",
     "selectHint": "选择一个应用查看详情。"
   }

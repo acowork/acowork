@@ -16,7 +16,9 @@ import { useDragResize } from "../hooks/useDragResize";
 import {
     filterGalleryCards,
     fetchGalleryIndex,
+    galleryAttributionLinks,
     mergeGalleryCards,
+    type GalleryAttributionKind,
     type GalleryCard,
     type InstallBadge,
 } from "../lib/appGallery";
@@ -48,6 +50,12 @@ function badgeClass(badge: InstallBadge): string {
         default:
             return "bg-nav-surface text-text-tertiary border border-border-divider";
     }
+}
+
+function attributionKey(kind: GalleryAttributionKind): string {
+    if (kind === "homepage") return "extensions.homepage";
+    if (kind === "upstream") return "extensions.upstream";
+    return "extensions.repository";
 }
 
 function statusDot(app: AppDto | null): string {
@@ -501,17 +509,26 @@ export function ExtensionsView() {
                                     </>
                                 )}
 
-                                {selected.gallery?.repository && selected.badge !== "catalog_only" && (
-                                    <a
-                                        href={selected.gallery.repository}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        className="inline-flex items-center gap-1 text-[11px] text-text-tertiary hover:text-text-secondary"
-                                    >
-                                        {t("extensions.repository")}
-                                        <ExternalLink className="h-3 w-3" aria-hidden />
-                                    </a>
-                                )}
+                                {selected.gallery
+                                    ? galleryAttributionLinks(selected.gallery)
+                                          .filter(
+                                              (link) =>
+                                                  selected.badge !== "catalog_only" ||
+                                                  link.kind !== "repository",
+                                          )
+                                          .map((link) => (
+                                              <a
+                                                  key={link.kind}
+                                                  href={link.href}
+                                                  target="_blank"
+                                                  rel="noreferrer"
+                                                  className="inline-flex items-center gap-1 text-[11px] text-text-tertiary hover:text-text-secondary"
+                                              >
+                                                  {t(attributionKey(link.kind))}
+                                                  <ExternalLink className="h-3 w-3" aria-hidden />
+                                              </a>
+                                          ))
+                                    : null}
                             </div>
 
                             {!selected.installed?.builtin && confirmUninstall && (

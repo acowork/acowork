@@ -2274,6 +2274,8 @@
     "update": "업데이트",
     "openRepo": "저장소 열기",
     "repository": "저장소",
+    "homepage": "홈페이지",
+    "upstream": "업스트림",
     "noReadme": "README가 없습니다.",
     "selectHint": "앱을 선택해 세부 정보를 보세요."
   }

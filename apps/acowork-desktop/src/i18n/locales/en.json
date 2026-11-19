@@ -2718,6 +2718,8 @@
     "update": "Update",
     "openRepo": "Open repository",
     "repository": "Repository",
+    "homepage": "Homepage",
+    "upstream": "Upstream",
     "noReadme": "No README for this app.",
     "selectHint": "Select an app to view details."
   }

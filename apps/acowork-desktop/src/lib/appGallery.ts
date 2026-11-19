@@ -52,6 +52,34 @@ export interface GalleryIndex {
 
 export type InstallBadge = "installed" | "update" | "available" | "catalog_only" | "builtin";
 
+export type GalleryAttributionKind = "repository" | "homepage" | "upstream";
+
+export interface GalleryAttributionLink {
+    kind: GalleryAttributionKind;
+    href: string;
+}
+
+/**
+ * Distinct origin links for a catalog card. Homepage that repeats the
+ * repository is omitted so a fork is not presented as the upstream product.
+ */
+export function galleryAttributionLinks(
+    app: Pick<GalleryApp, "repository" | "homepage" | "upstream">,
+): GalleryAttributionLink[] {
+    const seen = new Set<string>();
+    const links: GalleryAttributionLink[] = [];
+    const push = (kind: GalleryAttributionKind, href?: string | null) => {
+        const url = (href || "").trim();
+        if (!url || seen.has(url)) return;
+        seen.add(url);
+        links.push({ kind, href: url });
+    };
+    push("repository", app.repository);
+    push("homepage", app.homepage);
+    push("upstream", app.upstream);
+    return links;
+}
+
 export interface GalleryCard {
     /** Catalog id, or local-only app id. */
     id: string;
@@ -100,9 +128,31 @@ export async function fetchGalleryIndex(url = galleryIndexUrl()): Promise<Galler
     return { ...body, base_url: base };
 }
 
-function versionsDiffer(a: string | null | undefined, b: string | null | undefined): boolean {
-    if (!a || !b) return false;
-    return a.trim() !== b.trim();
+/** Numeric dotted version, ignoring a leading `v` and any `-` / `+` suffix. */
+function versionParts(v: string): number[] {
+    const core = v.trim().replace(/^v/i, "").split(/[-+]/)[0] ?? "";
+    return core.split(".").map((p) => {
+        const n = Number.parseInt(p, 10);
+        return Number.isFinite(n) ? n : 0;
+    });
+}
+
+/** True only when the catalog version is strictly newer than the install. */
+export function catalogVersionIsNewer(
+    catalog: string | null | undefined,
+    installed: string | null | undefined,
+): boolean {
+    if (!catalog?.trim() || !installed?.trim()) return false;
+    const a = versionParts(catalog);
+    const b = versionParts(installed);
+    const n = Math.max(a.length, b.length);
+    for (let i = 0; i < n; i++) {
+        const av = a[i] ?? 0;
+        const bv = b[i] ?? 0;
+        if (av > bv) return true;
+        if (av < bv) return false;
+    }
+    return false;
 }
 
 export function mergeGalleryCards(
@@ -119,11 +169,12 @@ export function mergeGalleryCards(
         let badge: InstallBadge = "catalog_only";
         if (local?.builtin) badge = "builtin";
         else if (local?.installed_version || (local && !local.builtin)) {
-            badge =
-                g.latest_version &&
-                versionsDiffer(g.latest_version, local.installed_version || local.version)
-                    ? "update"
-                    : "installed";
+            badge = catalogVersionIsNewer(
+                g.latest_version,
+                local.installed_version || local.version,
+            )
+                ? "update"
+                : "installed";
         } else if (g.package?.url && g.package?.sha256) {
             badge = "available";
         }
