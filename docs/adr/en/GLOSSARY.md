@@ -153,7 +153,19 @@ The most frequently translated cluster; 压缩 must render consistently.
 | 头像 | avatar | |
 | 成本 / 预算跟踪 / 限流 | cost / budget tracking / rate limiting | |
 
-## 9. Section headings & normative words
+## 9. Hosted applications
+
+| Chinese | English | Notes |
+|---------|---------|-------|
+| 托管应用 | hosted application | ADR-116; not a plug-in |
+| 用户画布 | user canvas | left-nav webview; MCP does not attach |
+| Agent 工作态 | agent working state | in-process session keyed `(app_id, actor, conversation)` |
+| 聊天预览 | chat preview | durable-pane iframe; never a transcript row |
+| 共编 | co-edit | only inside the app's own UI |
+| hosted adapter | hosted adapter | ACowork glue binary, e.g. `figcraft-acowork` |
+| `library` / `visual` / `none` | `library` / `visual` / `none` | `ui.canvas.kind` (ADR-118) |
+
+## 10. Section headings & normative words
 
 | Chinese | English |
 |---------|---------|

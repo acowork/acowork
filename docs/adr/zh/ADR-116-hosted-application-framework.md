@@ -131,3 +131,4 @@ MCP **刻意不放在 `/api/apps/{id}/` 通配下**：Agent 侧继续走已验�
 - **memory**：右侧导航栏嵌入 UI 属于"面板型"应用，需要另立 UI 贡献点契约，之后再纳入。
 - `ExtensionsView` 的 i18n 命名空间仍未建立（原有 TODO 保留）；本轮未改 5 个语言包。
 - 建议 CI 增补两条 red line：`dev/ci.sh` 的 `run_all_redlines` 中检查 Gateway 不读 app 数据目录、Desktop 不 import 应用前端代码。
+- **双画布**（本 ADR 只定了托管壳，没定 Agent 改哪一份状态）：[ADR-118](./ADR-118-hosted-app-dual-canvas.md) / [设计文档 35](../../design/zh/35-hosted-app-dual-canvas.md)。左侧导航 = 用户画布；MCP 默认不 attach；聊天预览走常驻栏 iframe。

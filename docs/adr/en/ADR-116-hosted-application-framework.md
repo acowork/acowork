@@ -124,3 +124,4 @@ MCP is deliberately **not** under the `/api/apps/{id}/` wildcard: Agents keep th
 - **memory**: embedded right-panel apps need a separate UI contribution contract before being folded in.
 - `ExtensionsView`'s i18n namespace is still missing (pre-existing TODO); no locale files were changed.
 - Proposed CI red lines in `dev/ci.sh::run_all_redlines`: Gateway must not read app data directories; Desktop must not import app front-end code.
+- **Dual canvas** (this ADR defined the hosting shell, not which copy of state an agent mutates): [ADR-118](./ADR-118-hosted-app-dual-canvas.md) / [design doc 35](../../design/en/35-hosted-app-dual-canvas.md). Left nav = user canvas; MCP does not attach by default; chat preview is a durable-pane iframe.

@@ -440,3 +440,4 @@ curl -H "Authorization: Bearer $TOKEN" \
 - **legacy slot**：PM/DOC 通过 `legacy_slot` 映射到既有 `pm_process` / `doc_process` 状态字段，避免改动已有身份注入测试；这是有意的迁移桥，不是长期结构。
 - **`navigation_guard.rs`**：桌面端 iframe 目标为 Gateway 反代路径（`http(s)` + 深层路径），需要在部署时确认导航防火墙对该前缀放行；当前 `UrlPreviewView` 的 iframe 例外是同一机制。
 - `ExtensionsView` 仍无 `extensions` i18n 命名空间（沿用原有 TODO）。
+- **用户画布 vs Agent 工作态**（ADR-116 未规定 Agent 改哪一份状态）：见 [ADR-118](../../adr/zh/ADR-118-hosted-app-dual-canvas.md) 与 [设计文档 35](./35-hosted-app-dual-canvas.md)。左侧导航是用户画布；MCP 默认不 attach；`visual` 应用的聊天预览是常驻栏 iframe，不是转录行。
