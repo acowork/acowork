@@ -2906,14 +2906,30 @@ fn image_hint_line(
     format: &str,
     delivery: Option<&crate::agent::attachment_to_image::ImageDelivery>,
 ) -> String {
-    use crate::agent::attachment_to_image::{ImageDelivery, ImageSkip, MAX_INLINE_IMAGE_BYTES};
+    use crate::agent::attachment_to_image::{
+        DeliveredImage, ImageDelivery, ImageSkip, MAX_INLINE_IMAGE_BYTES,
+    };
 
     let head = format!("- image: `{filename}` (id={document_id}{dimensions})");
     match delivery {
         // Fact, not prohibition: the pixels are in the request the model is
         // reading right now, so a `image_read` of the same file would only
         // hand it the same picture a second time.
-        Some(ImageDelivery::Delivered) => format!(
+        //
+        // When the picture was downscaled on the way in, the hint says so
+        // and names both resolutions: the model must not believe it is
+        // looking at the full-resolution original, and it must know that
+        // `image_read` on the file is the way to see the detail it lost.
+        Some(ImageDelivery::Delivered(DeliveredImage::Downscaled {
+            delivered: (width, height),
+            source: (source_width, source_height),
+        })) => format!(
+            "{head} — its pixels are already part of this message (downscaled to \
+             {width}x{height} for delivery, from {source_width}x{source_height}), so \
+             `image_read` on `{path}` is only worth it if you need the \
+             full-resolution detail"
+        ),
+        Some(ImageDelivery::Delivered(_)) => format!(
             "{head} — its pixels are already part of this message, so \
              `image_read` on it would only send the same picture again"
         ),
@@ -3068,7 +3084,7 @@ mod tests {
     // dropped (>8 MiB, unsupported format, no attachment service) was announced
     // as attached, so the model described a picture it never received.
 
-    use crate::agent::attachment_to_image::{ImageDelivery, ImageParts, ImageSkip};
+    use crate::agent::attachment_to_image::{DeliveredImage, ImageDelivery, ImageParts, ImageSkip};
 
     fn image_upload_item() -> acowork_core::protocol::AttachedItem {
         acowork_core::protocol::AttachedItem::ImageUpload {
@@ -3097,7 +3113,12 @@ mod tests {
     #[test]
     fn test_build_attachment_hint_delivered_image_states_the_fact_not_an_order() {
         let items = vec![image_upload_item()];
-        let images = image_parts_with("0123456789ab-3", ImageDelivery::Delivered);
+        let images = image_parts_with(
+            "0123456789ab-3",
+            ImageDelivery::Delivered(DeliveredImage::FullResolution {
+                size: Some((1280, 800)),
+            }),
+        );
         let s = build_attachment_hint("look", Some(&items), Some("E:/ws"), Some(&images));
         assert!(
             s.contains(
@@ -3114,6 +3135,28 @@ mod tests {
         // to open the one item whose line says it is already here.
         assert!(
             s.contains("except an item whose line below says it is already part"),
+            "{s}"
+        );
+    }
+
+    /// A downscaled image must say so — the model must not believe it is
+    /// looking at the full-resolution original, and it must know that
+    /// `image_read` is the way to recover the detail it lost.
+    #[test]
+    fn test_build_attachment_hint_downscaled_image_states_the_delivered_resolution() {
+        let items = vec![image_upload_item()];
+        let images = image_parts_with(
+            "0123456789ab-3",
+            ImageDelivery::Delivered(DeliveredImage::Downscaled {
+                delivered: (1568, 784),
+                source: (3840, 1920),
+            }),
+        );
+        let s = build_attachment_hint("look", Some(&items), Some("E:/ws"), Some(&images));
+        assert!(s.contains("downscaled to 1568x784"), "{s}");
+        assert!(s.contains("from 3840x1920"), "{s}");
+        assert!(
+            s.contains("`image_read` on `E:/ws/files/shot_0123456789ab-3.png`"),
             "{s}"
         );
     }

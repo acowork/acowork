@@ -102,6 +102,20 @@ pub const TOOL_DECODE_BUDGET: DecodeBudget = DecodeBudget {
     max_pixels: 64_000_000,
 };
 
+/// The budget for a human-attached image.
+///
+/// 24 MP decodes to ~96 MiB of RGBA, which is the peak we are willing to
+/// pay on a desktop that is also running the model — and it still covers
+/// every realistic attachment: 4K/5K screenshots (8.3–14.7 MP) and 12–24 MP
+/// phone photos (4032×3024 … 6000×4000). A larger source is *not* decoded
+/// and therefore not delivered raw either (see
+/// `attachment_to_image::prepare_image_payload`): sending a 48 MP photo
+/// untouched is the exact cost this budget exists to prevent.
+pub const ATTACHMENT_DECODE_BUDGET: DecodeBudget = DecodeBudget {
+    max_side_px: 8192,
+    max_pixels: 24_000_000,
+};
+
 /// One supported raster format: magic bytes → decoder format → MIME.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RasterFormat {
@@ -170,6 +184,23 @@ pub struct EncodedRaster {
     pub height: u32,
 }
 
+/// The outcome of a downscale attempt.
+#[derive(Debug, Clone)]
+pub struct Downscale {
+    /// The re-encoded payload (NOT the original bytes).
+    pub bytes: Vec<u8>,
+    /// MIME of `bytes` — always describes the payload actually sent.
+    pub mime: &'static str,
+    /// Width of the delivered raster.
+    pub width: u32,
+    /// Height of the delivered raster.
+    pub height: u32,
+    /// Width of the source raster.
+    pub source_width: u32,
+    /// Height of the source raster.
+    pub source_height: u32,
+}
+
 /// Why a downscale could not be performed.
 ///
 /// Only [`RasterError::PayloadTooLarge`] is a final answer; the rest mean
@@ -191,6 +222,50 @@ pub enum RasterError {
     },
     /// Decode or encode failed (corrupt payload, out of memory).
     Failed(String),
+}
+
+/// Downscale `bytes` so that neither side exceeds `max_side`.
+///
+/// Returns `Ok(None)` when no downscale is needed or possible:
+///
+/// - the raster already fits → nothing to do (the caller keeps the
+///   original bytes, so a small image is never re-encoded),
+/// - the header cannot be read → we do not know the size, so we do not
+///   touch the bytes,
+/// - the source is over `budget` → decoding it is exactly what the guard
+///   forbids, so the bytes are handed back untouched.
+///
+/// The caller decides what an untouched image means: the attachment
+/// pipeline keeps it, `image_read` refuses it.
+pub fn downscale(
+    bytes: &[u8],
+    format: &RasterFormat,
+    max_side: u32,
+    budget: DecodeBudget,
+    max_payload_bytes: usize,
+) -> Result<Option<Downscale>, RasterError> {
+    let Some((src_w, src_h)) = dimensions(bytes, format) else {
+        return Err(RasterError::NotDecodable);
+    };
+    if src_w.max(src_h) <= max_side {
+        return Ok(None);
+    }
+    if !budget.accepts(src_w, src_h) {
+        return Err(RasterError::OverDecodeBudget);
+    }
+
+    let img = decode_bounded(bytes, format, budget)
+        .map_err(|e| RasterError::Failed(e.to_string()))?;
+    let encoded = resize_and_encode(&img, format.format, max_side, max_payload_bytes)?;
+
+    Ok(Some(Downscale {
+        bytes: encoded.bytes,
+        mime: encoded.mime,
+        width: encoded.width,
+        height: encoded.height,
+        source_width: src_w,
+        source_height: src_h,
+    }))
 }
 
 /// Resize a decoded image into the delivery box and encode it within a byte
@@ -328,6 +403,25 @@ pub fn encode_raster(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use image::{DynamicImage, ImageBuffer, Rgb};
+
+    /// The 8 MiB inline budget the attachment pipeline uses; tests only need
+    /// "large enough" and "just too small" endpoints.
+    const PAYLOAD: usize = 8 * 1024 * 1024;
+
+    fn gradient(w: u32, h: u32) -> DynamicImage {
+        let buf: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(w, h, |x, y| {
+            Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+        });
+        DynamicImage::ImageRgb8(buf)
+    }
+
+    fn encode_png(img: &DynamicImage) -> Vec<u8> {
+        let mut buf = Vec::new();
+        img.write_to(Cursor::new(&mut buf), ImageFormat::Png)
+            .unwrap();
+        buf
+    }
 
     #[test]
     fn sniffs_the_four_supported_formats() {
@@ -354,5 +448,141 @@ mod tests {
         assert_eq!(sniff_bytes(b"II*\x00"), None);
         assert_eq!(sniff_bytes(b"<svg xmlns="), None);
         assert_eq!(sniff_bytes(b""), None);
+    }
+
+    #[test]
+    fn a_small_raster_is_left_untouched() {
+        let bytes = encode_png(&gradient(100, 80));
+        assert!(
+            downscale(
+                &bytes,
+                &PNG,
+                1568,
+                ATTACHMENT_DECODE_BUDGET,
+                PAYLOAD
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn a_large_raster_is_downscaled_to_the_cap() {
+        let bytes = encode_png(&gradient(2000, 1000));
+        let scaled = downscale(
+            &bytes,
+            &PNG,
+            1568,
+            ATTACHMENT_DECODE_BUDGET,
+            PAYLOAD,
+        )
+        .unwrap()
+        .expect("downscaled");
+        assert_eq!(scaled.source_width, 2000);
+        assert_eq!(scaled.source_height, 1000);
+        assert_eq!(scaled.width, 1568);
+        assert_eq!(scaled.height, 784);
+        assert_eq!(scaled.mime, "image/png");
+        // The delivered raster is what a decoder sees now.
+        assert_eq!(dimensions(&scaled.bytes, &PNG), Some((1568, 784)));
+    }
+
+    #[test]
+    fn downscale_is_deterministic() {
+        let bytes = encode_png(&gradient(2000, 1000));
+        let run = || {
+            downscale(
+                &bytes,
+                &PNG,
+                1568,
+                ATTACHMENT_DECODE_BUDGET,
+                PAYLOAD,
+            )
+            .unwrap()
+            .unwrap()
+        };
+        assert_eq!(run().bytes, run().bytes);
+    }
+
+    /// The budget is a parameter, not a constant: the attachment pipeline
+    /// refuses to decode a source it cannot afford, and that decision has to
+    /// happen on the header — before a single pixel is allocated.
+    #[test]
+    fn a_source_over_the_budget_is_never_decoded() {
+        let bytes = encode_png(&gradient(100, 80));
+        let tiny = DecodeBudget {
+            max_side_px: 8192,
+            max_pixels: 100,
+        };
+        assert!(matches!(
+            downscale(&bytes, &PNG, 50, tiny, PAYLOAD),
+            Err(RasterError::OverDecodeBudget)
+        ));
+    }
+
+    #[test]
+    fn the_budget_accepts_its_own_boundary() {
+        let budget = ATTACHMENT_DECODE_BUDGET;
+        assert!(budget.accepts(4000, 3000));
+        assert!(!budget.accepts(8192, 8192));
+        assert!(!budget.accepts(budget.max_side_px + 1, 10));
+    }
+
+    #[test]
+    fn a_corrupt_payload_is_an_error_not_a_panic() {
+        let err = downscale(
+            b"not an image at all",
+            &PNG,
+            1568,
+            ATTACHMENT_DECODE_BUDGET,
+            PAYLOAD,
+        );
+        assert!(matches!(
+            err,
+            Err(RasterError::NotDecodable) | Err(RasterError::Failed(_))
+        ));
+    }
+
+    /// A source that scales successfully but whose PNG is over the byte
+    /// budget is delivered as JPEG — the picture is not dropped for the
+    /// sake of its container.
+    #[test]
+    fn an_over_budget_png_falls_back_to_jpeg() {
+        let bytes = encode_png(&gradient(2000, 1000));
+        // First pass with no byte pressure: this is the PNG the natural
+        // policy would produce.
+        let png = downscale(
+            &bytes,
+            &PNG,
+            1568,
+            ATTACHMENT_DECODE_BUDGET,
+            PAYLOAD,
+        )
+        .unwrap()
+        .expect("downscaled");
+        assert_eq!(png.mime, "image/png");
+
+        // One byte under that PNG, we must switch encodings rather than fail.
+        let tighter = downscale(
+            &bytes,
+            &PNG,
+            1568,
+            ATTACHMENT_DECODE_BUDGET,
+            png.bytes.len() - 1,
+        )
+        .unwrap()
+        .expect("still delivered");
+        assert_eq!(tighter.mime, "image/jpeg");
+        assert!(tighter.bytes.len() < png.bytes.len());
+        assert_eq!(dimensions(&tighter.bytes, &JPEG), Some((1568, 784)));
+    }
+
+    #[test]
+    fn a_payload_budget_nothing_can_meet_is_reported() {
+        let bytes = encode_png(&gradient(2000, 1000));
+        match downscale(&bytes, &PNG, 1568, ATTACHMENT_DECODE_BUDGET, 8) {
+            Err(RasterError::PayloadTooLarge { size }) => assert!(size > 8),
+            other => panic!("expected PayloadTooLarge, got {other:?}"),
+        }
     }
 }

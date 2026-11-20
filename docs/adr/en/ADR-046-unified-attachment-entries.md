@@ -202,6 +202,26 @@ Finder / Explorer treats it as an executable — that MUST be avoided.
 - on-disk readability, replay, and `open -t` preview all follow this allowlist
 - the `read_file` implementation accepts both `documents/<doc_id>.<safe_ext>` and the legacy `<doc_id>` filename (legacy fallback) so older developer-disk data stays readable
 
+### 2.9 Outbound raster policy (added 2026-10)
+
+The "no image recognition, no header reads, no `image` crate" rule in §2.7 constrains the **upload ingest** endpoint: `POST /sessions/{sid}/files` still stores the bytes untouched, not one bit changed.
+
+**Outbound** (assembling this turn's attachments into a model request) is a different path, and its behaviour is fixed here:
+
+| Fact | Rule |
+|---|---|
+| Delivered long side | 1568 px (`image_raster::DEFAULT_MAX_SIDE_PX`, the same value as `image_read`'s `high`: the largest raster OpenAI's `high` detail and Anthropic image input accept without rescaling server-side) |
+| Decode memory budget | `image_raster::ATTACHMENT_DECODE_BUDGET` = 24 MP (~96 MiB RGBA). A source outside that budget is **neither decoded nor delivered raw** — it is skipped as `ImageSkip::TooLarge`; the file stays on disk and the prompt hint points at it, so `image_read` can still reach it |
+| Image within the long-side cap | Delivered byte-for-byte, never re-encoded (a small picture is not worth the quality loss) |
+| Delivered MIME | Comes from **magic-byte sniffing**, never from the upload's extension; a downscaled WebP/GIF is re-encoded as PNG, JPEG stays JPEG |
+| Per-item payload | Still bounded by the 8 MiB inline budget; a PNG over it is re-encoded as JPEG at fixed quality first, and only skipped if that also fails |
+| Determinism | Filter, JPEG quality and output encoding are constants (ADR-060 prefix cache: byte-stable across turns of the session) |
+| What the model is told | On a downscale the prompt hint states both the delivered and the source size, so the model cannot believe it is looking at the original |
+
+**Why this is needed**: an uploaded 4K screenshot used to be base64'd verbatim, so the model paid for its full pixel bill on **every** request of the session, while simply dropping an explicit human attachment is not acceptable either. Downscaling is the only answer that satisfies both "the human attached it, the model must see it" and "the model must not be billed for pixels it cannot use".
+
+**Boundary**: this policy applies to image modality only. PDFs follow the document clause in §2.4, every other file is a structured reference, and no bytes of either enter the request.
+
 ## 3. Final directory structure
 
 ```

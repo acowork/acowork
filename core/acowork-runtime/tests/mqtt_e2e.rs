@@ -262,14 +262,14 @@ async fn adr046_image_pipeline_produces_multimodal_chat_message_shape() {
     // Both images are small and on the whitelist, so both must be delivered —
     // the prompt hint is built from these verdicts, and a `Skipped` here would
     // have told the model the pixels never arrived.
-    assert_eq!(
+    assert!(matches!(
         derived.verdict("img-1"),
-        Some(&ImageDelivery::Delivered)
-    );
-    assert_eq!(
+        Some(ImageDelivery::Delivered(_))
+    ));
+    assert!(matches!(
         derived.verdict("img-2"),
-        Some(&ImageDelivery::Delivered)
-    );
+        Some(ImageDelivery::Delivered(_))
+    ));
     // The production assembly rule, not a look-alike: `SessionTask` builds the
     // turn's part list with exactly this function.
     let merged = merge_turn_parts(frontend_content_parts, Vec::new(), derived.take_parts());
