@@ -1429,27 +1429,60 @@ async fn process_enroll_message(
             // creator (CLI-issued, Gateway-spawned local node before an
             // admin existed) fall back to the default owner, so no
             // enroll path mints an ownerless node when an admin exists.
-            if consume_enrollment_token
-                && let (Some(token), Some(owners)) =
-                    (enrollment_token.as_deref(), node_owners.as_ref())
-            {
-                let owner = enrollment_tokens
-                    .as_ref()
-                    .and_then(|store| {
-                        store
-                            .lock()
-                            .unwrap_or_else(|e| e.into_inner())
-                            .token_owner(token)
+            //
+            // Deliberately NOT gated on `consume_enrollment_token`. That
+            // guard made attribution a side effect of broker auth: with
+            // `[mqtt] auth_enabled = false` (the single-machine default)
+            // `decide_enroll` never consumes a token, so every node
+            // enrolled through this path stayed ownerless — and
+            // `can_view` is fail-closed on a missing row (ADR-087 D7).
+            // The device was online, registered, and republishing its
+            // readiness subsystem, yet absent from `GET /api/nodes` for
+            // every non-admin caller, with nothing logged. Attribution
+            // is a product decision, so it runs whenever an enroll was
+            // accepted.
+            if let Some(owners) = node_owners.as_ref() {
+                let presented = enrollment_token
+                    .as_deref()
+                    .filter(|t| !t.is_empty());
+                let owner = presented
+                    .and_then(|token| {
+                        enrollment_tokens.as_ref().and_then(|store| {
+                            store
+                                .lock()
+                                .unwrap_or_else(|e| e.into_inner())
+                                .token_owner(token)
+                        })
                     })
                     .or_else(|| default_owner.clone());
-                if let Some(owner) = owner {
-                    owners
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .put_if_absent(
-                            &node_id,
-                            crate::gateway::ownership::OwnerRecord::new(Some(owner)),
+                match owner {
+                    Some(owner) => {
+                        owners
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .put_if_absent(
+                                &node_id,
+                                crate::gateway::ownership::OwnerRecord::new(Some(owner)),
+                            );
+                    }
+                    // Ownerless is correct only in Local mode, where no
+                    // account exists to attribute to and the machine is
+                    // the owner. A token that was actually presented but
+                    // resolves to nobody is the silent case worth
+                    // naming: the symptom is a device that is online and
+                    // invisible.
+                    None if presented.is_some() => {
+                        tracing::warn!(
+                            node_id = %node_id,
+                            "enrolled node could not be attributed (token creator unknown, no default owner) — non-admin callers will not see it until it is claimed"
                         );
+                    }
+                    None => {
+                        tracing::debug!(
+                            node_id = %node_id,
+                            "enrolled node left ownerless (Local mode semantics)"
+                        );
+                    }
                 }
             }
 
@@ -3441,6 +3474,48 @@ mod tests {
             rec.and_then(|r| r.owner_user_id).as_deref(),
             Some("admin-1"),
             "ownerless token + default owner ⇒ bound node row"
+        );
+    }
+
+    #[tokio::test]
+    async fn enroll_attributes_owner_with_broker_auth_disabled() {
+        // Regression: attribution must not depend on consuming the
+        // enrollment token. With `[mqtt] auth_enabled = false` — the
+        // single-machine default — `decide_enroll` never consumes a
+        // token, so the previous `if consume_enrollment_token` guard
+        // skipped attribution entirely and left the node ownerless.
+        // `can_view` is fail-closed on a missing row (ADR-087 D7), so
+        // the symptom was a device that is online, registered, and
+        // absent from `GET /api/nodes` for the very account that
+        // enrolled it — with nothing logged anywhere.
+        let dir = temp_test_dir("enroll-attr-no-auth");
+        let tokens = crate::mqtt::new_shared_enrollment_store(&dir);
+        let node_tokens = crate::mqtt::new_shared_node_token_store(&dir);
+        let owners = crate::gateway::ownership::new_shared_node_owners(&dir);
+        // What `POST /api/nodes/enrollment-tokens` mints for a signed-in
+        // non-admin caller: the record carries its creator.
+        let token = tokens
+            .lock()
+            .unwrap()
+            .create_token(std::time::Duration::from_secs(60), Some("user-7".to_string()));
+        process_enroll_message(
+            enroll_payload("phone-3", Some(&token)),
+            "phone-3".to_string(),
+            crate::mqtt::node_registry::new_shared_registry(),
+            None,
+            Some(tokens),
+            Some(node_tokens),
+            Some(owners.clone()),
+            false,
+            Some("admin-1".to_string()),
+        )
+        .await;
+        let rec = owners.lock().unwrap().get("phone-3").cloned();
+        assert_eq!(
+            rec.and_then(|r| r.owner_user_id).as_deref(),
+            Some("user-7"),
+            "auth disabled ⇒ the token is not consumed, but its creator still owns the node \
+             (and must win over `default_owner`)"
         );
     }
 
