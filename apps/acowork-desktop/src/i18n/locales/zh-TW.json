@@ -1075,6 +1075,10 @@
     },
     "copy": "複製",
     "previewBadge": "預覽",
+    "openPreview": "預覽",
+    "visualCanvas": {
+      "open": "開啟畫布"
+    },
     "showSource": "顯示原始碼",
     "previewLoading": "正在載入預覽...",
     "previewDoubleClickHint": "雙擊切換到編輯器",

@@ -48,7 +48,7 @@ function tab(relPath: string) {
 
 describe("isDocPreviewFile", () => {
   it("covers the no-base64 extensions but not csv", () => {
-    for (const n of ["a.PDF", "a.docx", "a.doc", "a.xlsx", "a.xls", "a.pptx", "a.ppt"]) {
+    for (const n of ["a.PDF", "a.docx", "a.doc", "a.xlsx", "a.xls", "a.pptx", "a.ppt", "a.figcraft"]) {
       expect(isDocPreviewFile(n)).toBe(true);
     }
     // csv keeps the text read — its content is the editor buffer.
@@ -87,6 +87,16 @@ describe("document tabs skip the base64 content load", () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const f = tab("docs/data.csv");
     expect(f.content).toBe("a,b\n1,2");
+  });
+
+  it("openPreview on a figcraft file skips the JSON read", async () => {
+    await useFileEditorStore.getState().openPreview("a1", "ws1", "designs/home.figcraft");
+    expect(fetchSpy).not.toHaveBeenCalled();
+    const f = tab("designs/home.figcraft");
+    expect(f.loading).toBe(false);
+    expect(f.content).toBe("");
+    expect(f.mimeType).toBe("application/x-figcraft");
+    expect(f.mode).toBe("preview");
   });
 
   it("unknown document extensions still skip (empty MIME, viewer branches on name)", async () => {

@@ -1633,6 +1633,9 @@
     "copy": "Copy",
     "previewBadge": "Preview",
     "openPreview": "Preview",
+    "visualCanvas": {
+      "open": "Open canvas"
+    },
     "showSource": "Show source",
     "previewDisabled": "Preview is not available for this file",
     "previewLoading": "Loading preview...",

@@ -33,6 +33,8 @@ import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { UrlPreviewView } from "./UrlPreviewView";
 import { WorkspaceHtmlPreview } from "./WorkspaceHtmlPreview";
 import { ImageViewer } from "./ImageViewer";
+import { VisualAppPreview } from "./VisualAppPreview";
+import { isVisualCanvasFile } from "./visualCanvas";
 import type { ImagePoint, ImageRect } from "./imageViewerGeometry";
 import { GitVirtualNav } from "./GitVirtualNav";
 import { CommitPicker } from "./CommitPicker";
@@ -118,7 +120,7 @@ const OfficePdfViewer = lazy(() => import("./OfficePdfViewer"));
  * (and the source toggle) still work; only its PREVIEW goes to the
  * sheet renderer.
  */
-const DOC_SOURCE_HIDDEN_RE = /\.(?:pdf|docx|doc|xlsx|xls|pptx|ppt)$/i;
+const DOC_SOURCE_HIDDEN_RE = /\.(?:pdf|docx|doc|xlsx|xls|pptx|ppt|figcraft)$/i;
 /** Extensions rendered by the sheet viewer (SheetJS reads csv/xls/xlsx). */
 const SHEET_EXT_RE = /\.(?:xlsx|xls|csv)$/i;
 /** Office formats converted to PDF by the local engine for a faithful,
@@ -2064,6 +2066,10 @@ export function FileEditorPanel({ width }: { width: number }) {
                             padding: { top: 8 },
                         }}
                     />
+                ) : isVisualCanvasFile(activeFile.fileName) ? (
+                    // ADR-118: visual hosted-app artefact. Preview is an
+                    // AppFrame in this editor pane — never a chat bubble.
+                    <VisualAppPreview file={activeFile} />
                 ) : isDocumentViewerFile(activeFile) ? (
                     // Document preview stack (pdf / xlsx / xls / csv / docx /
                     // pptx / legacy doc·ppt card). These tabs skip the

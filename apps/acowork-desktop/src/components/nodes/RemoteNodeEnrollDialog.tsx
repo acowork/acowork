@@ -2,6 +2,9 @@
  * Modal wrapper around RemoteNodeEnrollPanel — opened from the Agent-list
  * `+` menu ("Start a node elsewhere"), always available even when a local
  * node already exists.
+ *
+ * Three-zone dialog chrome (header / body / footer), matching the other
+ * app-wide dialogs: the footer carries the single Close action.
  */
 import { useTranslation } from "../../i18n/useTranslation";
 import { RemoteNodeEnrollPanel } from "./RemoteNodeEnrollPanel";
@@ -25,7 +28,7 @@ export function RemoteNodeEnrollDialog({
         aria-label={t("agentHub.remoteNodeGuide")}
         className="relative z-10 w-full max-w-sm overflow-hidden rounded-md border border-border-outer bg-modal-surface shadow-xl"
       >
-        <header className="flex items-center justify-between border-b border-border-divider px-4 py-3">
+        <header className="flex items-center justify-between border-b border-border-divider px-5 py-3 min-h-[var(--ui-dialog-zone-h)]">
           <h3 className="text-sm font-semibold text-text">{t("agentHub.remoteNodeGuide")}</h3>
           <button
             type="button"
@@ -36,10 +39,19 @@ export function RemoteNodeEnrollDialog({
             ×
           </button>
         </header>
-        <div className="px-4 py-5">
+        <div className="px-5 py-5">
           {/* Remount on each open so a fresh token is minted. */}
           <RemoteNodeEnrollPanel />
         </div>
+        <footer className="flex items-center justify-end border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
+          >
+            {t("common.close")}
+          </button>
+        </footer>
       </div>
     </div>
   );

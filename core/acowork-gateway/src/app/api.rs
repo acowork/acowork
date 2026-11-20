@@ -56,6 +56,10 @@ pub struct AppDto {
     pub mcp_url: Option<String>,
     pub ui_path: String,
     pub ui_mode: String,
+    /// ADR-118 preview channel: `library` | `visual` | `none` | empty.
+    pub canvas_kind: String,
+    /// Template such as `/?file={workspace_file}` for `visual` apps.
+    pub canvas_preview_path: String,
     pub nav_label: String,
     pub nav_icon: String,
     pub nav_order: i32,
@@ -112,6 +116,8 @@ fn to_dto(
         mcp_url: app_mcp_url(gw, manifest),
         ui_path: manifest.ui.path.clone(),
         ui_mode: ui_mode.to_string(),
+        canvas_kind: manifest.ui.canvas.kind.clone(),
+        canvas_preview_path: manifest.ui.canvas.preview_path.clone(),
         nav_label: manifest.ui.nav.label.clone(),
         nav_icon: manifest.ui.nav.icon.clone(),
         nav_order: manifest.ui.nav.order,
@@ -565,7 +571,10 @@ async fn delete_app(
         )
             .into_response();
     };
-    crate::app::supervisor::stop_app(&id, &state.gateway_state).await;
+    let pid = crate::app::supervisor::stop_app(&id, &state.gateway_state).await;
+    if let Some(pid) = pid {
+        crate::app::supervisor::wait_process_gone(pid, std::time::Duration::from_secs(5)).await;
+    }
     if let Err(e) = uninstall_app(&dir, &id, q.purge_data) {
         return install_err_response(e);
     }

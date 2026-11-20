@@ -1086,6 +1086,10 @@
     },
     "copy": "Copy",
     "previewBadge": "미리보기",
+    "openPreview": "미리보기",
+    "visualCanvas": {
+      "open": "캔버스 열기"
+    },
     "showSource": "소스 보기",
     "previewLoading": "미리보기 로딩 중...",
     "previewDoubleClickHint": "더블클릭하여 에디터에서 열기",

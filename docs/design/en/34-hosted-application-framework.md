@@ -288,6 +288,9 @@ Error codes are **stable strings** so the Desktop can map them to user-facing co
 | `app_id_reserved` | 409 | Attempt to overwrite a builtin |
 | `version_exists` | 409 | Same version installed twice |
 | `binary_missing` | 400 | `bin/` missing or not executable |
+| `app_not_installed` | 404 | Uninstall: install directory is missing |
+| `invalid_app_id` | 400 | Uninstall/operate on an id that is not a valid app id |
+| `uninstall_failed` | 500 | Could not move the install directory to `.trash` (Windows directory move / file in use) |
 
 ### 6.9 Upgrade / rollback / uninstall semantics
 

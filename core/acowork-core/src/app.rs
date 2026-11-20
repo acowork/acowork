@@ -210,12 +210,27 @@ pub struct AppNavSpec {
     pub order: i32,
 }
 
+/// How Desktop previews this app's Agent artefacts (ADR-118).
+///
+/// Distinguishes the preview channel, not whether a file exists:
+/// `library` (DOC/PM) opens a library resource; `visual` (FigCraft) opens a
+/// workspace file in this app's iframe; `none` uses Monaco / ImageViewer.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AppCanvasSpec {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub preview_path: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppUiSpec {
     pub path: String,
     #[serde(default)]
     pub mode: AppUiMode,
     pub nav: AppNavSpec,
+    #[serde(default)]
+    pub canvas: AppCanvasSpec,
 }
 
 /// Lazy activation hints. Informational in the first release: built-in apps
@@ -340,6 +355,19 @@ pub fn validate_manifest(m: &AppManifest) -> Result<(), String> {
     }
     if m.process.runtime == AppRuntime::Legacy && m.process.legacy_slot.is_none() {
         return Err("legacy apps must declare process.legacy_slot".to_string());
+    }
+    let canvas_kind = m.ui.canvas.kind.trim();
+    if !canvas_kind.is_empty() && !matches!(canvas_kind, "library" | "visual" | "none") {
+        return Err(format!(
+            "ui.canvas.kind must be library, visual, or none, got {:?}",
+            m.ui.canvas.kind
+        ));
+    }
+    if canvas_kind == "visual" && m.ui.canvas.preview_path.trim().is_empty() {
+        return Err("ui.canvas.preview_path is required when kind is visual".to_string());
+    }
+    if m.ui.canvas.preview_path.contains("..") {
+        return Err("ui.canvas.preview_path must not contain '..'".to_string());
     }
     if let Some(pkg) = &m.package {
         validate_package_spec(pkg, &m.process.binary)?;
@@ -789,6 +817,42 @@ mod tests {
         }
         assert!(is_valid_app_id("pm"));
         assert!(is_valid_app_id("my_app-2"));
+    }
+
+    #[test]
+    fn visual_canvas_spec_parses_from_toml() {
+        let text = r#"
+id = "figcraft"
+version = "1.0.0"
+name = "FigCraft"
+icon = "figcraft"
+
+[process]
+runtime = "generic"
+binary = "figcraft-acowork"
+port_hint = 18090
+health_path = "/health"
+
+[mcp]
+path = "/mcp"
+auto_inject = true
+gateway_path = "/api/apps/figcraft/mcp"
+
+[ui]
+path = "/ui/"
+
+[ui.nav]
+label = "FigCraft"
+
+[ui.canvas]
+kind = "visual"
+preview_path = "/?file={workspace_file}"
+"#;
+        let m = AppManifest::from_toml(text).unwrap();
+        assert_eq!(m.ui.canvas.kind, "visual");
+        assert_eq!(m.ui.canvas.preview_path, "/?file={workspace_file}");
+        assert!(m.mcp.auto_inject);
+        assert!(AppManifest::from_toml(PM_APP_TOML).unwrap().ui.canvas.kind.is_empty());
     }
 
     #[test]

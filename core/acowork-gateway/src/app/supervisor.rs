@@ -69,18 +69,36 @@ pub fn start_generic_app_supervisor(cfg: GenericAppConfig, state: SharedState) {
 }
 
 /// Stop a running generic supervisor and clear its process table entry.
-pub async fn stop_app(app_id: &str, state: &SharedState) {
+///
+/// Returns the PID that was signalled, if any, so uninstall can wait until
+/// Windows releases the directory handle on `apps/{id}/versions/.../bin`.
+pub async fn stop_app(app_id: &str, state: &SharedState) -> Option<u32> {
     if let Some(map) = stop_map().as_mut() {
         if let Some(tx) = map.remove(app_id) {
             let _ = tx.send(true);
         }
     }
-    if let Some(proc) = {
+    let pid = {
         let mut gw = state.write().await;
-        gw.app_processes.remove(app_id)
-    } {
-        let _ = crate::lifecycle::process::kill_agent_process(proc.pid).await;
+        gw.app_processes.remove(app_id).map(|p| p.pid)
+    };
+    if let Some(pid) = pid {
+        let _ = crate::lifecycle::process::kill_agent_process(pid).await;
     }
+    pid
+}
+
+/// Poll until `pid` is gone, or `timeout` elapses. Best-effort: uninstall
+/// still proceeds if the process table lags.
+pub async fn wait_process_gone(pid: u32, timeout: Duration) {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if !crate::lifecycle::process::check_health(pid).await {
+            return;
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+    tracing::warn!(pid, "app process still listed after kill; continuing uninstall");
 }
 
 /// Resolve binary + start a generic app declared in the registry.

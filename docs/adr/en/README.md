@@ -31,7 +31,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | Why changing the Gateway bind address must never change the login regime, and how first-boot setup works | [ADR-114](./ADR-114-account-system-decoupled-from-network-topology.md) |
 | Why Desktop has ONE connection setting (a server address) and no local/remote choice, and what happens when that address is wrong | [ADR-115](./ADR-115-desktop-single-server-address-model.md) |
 | How a hosted app is registered, proxied and shown in an iframe | [ADR-116](./ADR-116-hosted-application-framework.md) |
-| Which copy of state an agent mutates in a hosted app, and how chat previews it | [ADR-118](./ADR-118-hosted-app-dual-canvas.md) |
+| How an agent’s hosted-app artifact is a workspace file (like an image), and how chat previews it | [ADR-118](./ADR-118-hosted-app-dual-canvas.md) |
 
 ## Index
 
@@ -147,7 +147,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 115 | [ADR-115](./ADR-115-desktop-single-server-address-model.md) | Desktop Single-Server-Address Model — `local` / `remote` Demoted to an Inference from the Address; One Address Control on Every Screen; Restartable Boot Gate | Implemented; supersedes the mode+address two-knob connection settings left after ADR-114 | [zh](../zh/ADR-115-desktop-single-server-address-model.md) |
 | 116 | [ADR-116](./ADR-116-hosted-application-framework.md) | Hosted Application Framework (Applications, Not Plug-ins) — PM / DOC as the Blueprint | Accepted | [zh](../zh/ADR-116-hosted-application-framework.md) |
 | 117 | [ADR-117](./ADR-117-pm-storage-read-path-and-sqlite-triggers.md) | PM Storage Evolution — Fix the Read Path, Then Converge on a SQLite-Only Backend | Decided and terminalised | [zh](../zh/ADR-117-pm-storage-read-path-and-sqlite-triggers.md) |
-| 118 | [ADR-118](./ADR-118-hosted-app-dual-canvas.md) | Dual Canvas for Hosted Apps — User Surface vs Agent Working State | Accepted (not yet implemented; FigCraft is the first `visual` app) | [zh](../zh/ADR-118-hosted-app-dual-canvas.md) |
+| 118 | [ADR-118](./ADR-118-hosted-app-dual-canvas.md) | Dual Canvas for Hosted Apps — User Surface vs Agent Workspace File | Accepted (not yet implemented; FigCraft is the first `visual` app) | [zh](../zh/ADR-118-hosted-app-dual-canvas.md) |
 
 ---
 

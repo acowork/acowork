@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { listApps, setAppEnabled, mintAppTicket, AppApiError, type AppDto } from "./apps-api";
+import { listApps, setAppEnabled, mintAppTicket, AppApiError, installErrorMessage, type AppDto } from "./apps-api";
 
 vi.mock("./config", () => ({ getGatewayUrl: () => "http://127.0.0.1:19876" }));
 
@@ -114,5 +114,11 @@ describe("apps-api control plane", () => {
             message: "capability_not_declared",
         });
         await expect(listApps()).rejects.toBeInstanceOf(AppApiError);
+    });
+
+    it("does not map uninstall failures to the malformed-package copy", () => {
+        expect(installErrorMessage(new AppApiError(500, "move to trash: access denied", "uninstall_failed"))).toContain("卸载失败");
+        expect(installErrorMessage(new AppApiError(404, "app not installed", "app_not_installed"))).toBe("应用未安装");
+        expect(installErrorMessage(new AppApiError(400, "bad zip", "package_malformed"))).toBe("应用包格式无效");
     });
 });

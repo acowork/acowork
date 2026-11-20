@@ -10,7 +10,7 @@
  * 5. skipIfDirty reload guard (review M-3: in-flight edits never clobbered).
  */
 
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import {
     handleFsChanged,
     handleGitStatusChanged,
@@ -22,6 +22,9 @@ import {
 import { useWorkspaceStore } from "../stores/workspaceStore";
 import { useFileTreeStore, treeKey, __seedTreeNode } from "../stores/fileTree";
 import { useFileEditorStore, type OpenFile } from "../stores/fileEditorStore";
+import { useAgentStore } from "../stores/agentStore";
+import { useChatStore } from "../stores/chatStore";
+import { resetVisualCanvasAutoOpenForTests } from "../components/editor/visualCanvas";
 
 // ── Mocks ────────────────────────────────────────────────────────────────
 
@@ -558,5 +561,53 @@ describe("ADR-078 follow-up: git-changed nudge → git status refresh", () => {
         });
         await flushRefreshDebounce();
         expect(fetchUrls.some((u) => u.includes("/git/status"))).toBe(false);
+    });
+});
+
+describe("ADR-118: auto-open visual canvas preview", () => {
+    const realOpenPreview = useFileEditorStore.getState().openPreview;
+
+    beforeEach(() => {
+        resetVisualCanvasAutoOpenForTests();
+        useAgentStore.setState({ selectedAgentId: "agent-1" });
+        useChatStore.setState({
+            agentStates: {
+                "agent-1": {
+                    sessionStates: {},
+                    activeSessionId: "sess-1",
+                    openSessionIds: ["sess-1"],
+                    lastLoadedSessionId: null,
+                    isSessionInitLoading: false,
+                    preferredModel: null,
+                    preferredProvider: null,
+                    llmAvailability: "unspecified",
+                    tabsRestoredFromRuntime: false,
+                },
+            },
+        } as never);
+        useWorkspaceStore.setState({ sessionWorkspaceMap: { "sess-1": "ws-1" } });
+        useFileEditorStore.setState({ openPreview: vi.fn().mockResolvedValue(undefined) });
+    });
+
+    afterEach(() => {
+        resetVisualCanvasAutoOpenForTests();
+        useAgentStore.setState({ selectedAgentId: null });
+        useFileEditorStore.setState({ openPreview: realOpenPreview });
+    });
+
+    it("opens preview once for a created .figcraft in the active workspace", async () => {
+        await handleFsChanged(fsEvent([{ kind: "created", path: "designs/home.figcraft" }]));
+        const openPreview = useFileEditorStore.getState().openPreview;
+        expect(openPreview).toHaveBeenCalledTimes(1);
+        expect(openPreview).toHaveBeenCalledWith("agent-1", "ws-1", "designs/home.figcraft");
+
+        await handleFsChanged(fsEvent([{ kind: "modified", path: "designs/home.figcraft" }]));
+        expect(openPreview).toHaveBeenCalledTimes(1);
+    });
+
+    it("ignores figcraft writes in another workspace or agent", async () => {
+        useWorkspaceStore.setState({ sessionWorkspaceMap: { "sess-1": "ws-other" } });
+        await handleFsChanged(fsEvent([{ kind: "created", path: "home.figcraft" }]));
+        expect(useFileEditorStore.getState().openPreview).not.toHaveBeenCalled();
     });
 });

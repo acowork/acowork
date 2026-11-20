@@ -75,7 +75,7 @@ describe("AppFrame", () => {
             const url = new URL(src);
             expect(url.origin).toBe(GATEWAY);
             expect(url.pathname).toBe(`/api/apps/${id}/ui/`);
-            expect(url.search).toBe("");
+            expect(url.searchParams.get("control")).toBe("1");
             expect(url.hash).toBe(`#ticket=${TICKET}`);
             expect(src).not.toContain("?ticket");
             expect(mint).toHaveBeenCalledWith(id);
@@ -94,6 +94,59 @@ describe("AppFrame", () => {
         expect(sandbox).toContain("allow-scripts");
         expect(sandbox).toContain("allow-downloads");
         expect(sandbox).not.toContain("allow-same-origin");
+    });
+
+    it("puts visual-preview search in the query and keeps the ticket in the fragment", async () => {
+        render(
+            <AppFrame
+                app={makeApp("figcraft")}
+                search="?file=designs/a.figcraft&control=1"
+            />,
+        );
+        const frame = await waitFor(() => {
+            const el = document.querySelector("iframe");
+            expect(el).not.toBeNull();
+            return el as HTMLIFrameElement;
+        });
+        const src = frame.getAttribute("src") ?? "";
+        const url = new URL(src);
+        expect(url.pathname).toBe("/api/apps/figcraft/ui/");
+        expect(url.searchParams.get("file")).toBe("designs/a.figcraft");
+        expect(url.searchParams.get("control")).toBe("1");
+        expect(url.hash).toBe(`#ticket=${TICKET}`);
+        expect(src).not.toContain("?ticket");
+    });
+
+    it("re-posts theme when the shell light/dark class changes", async () => {
+        const posted: Array<Record<string, unknown>> = [];
+        render(<AppFrame app={makeApp("pm")} />);
+        const frame = await waitFor(() => {
+            const el = document.querySelector("iframe");
+            expect(el).not.toBeNull();
+            return el as HTMLIFrameElement;
+        });
+        Object.defineProperty(frame, "contentWindow", {
+            configurable: true,
+            value: {
+                postMessage: (data: Record<string, unknown>) => {
+                    posted.push(data);
+                },
+            },
+        });
+        frame.dispatchEvent(new Event("load"));
+        expect(posted.some((p) => p.type === "theme")).toBe(true);
+
+        posted.length = 0;
+        document.documentElement.classList.add("dark");
+        await waitFor(() => {
+            expect(posted.some((p) => p.type === "theme" && p.theme === "dark")).toBe(true);
+        });
+
+        posted.length = 0;
+        document.documentElement.classList.remove("dark");
+        await waitFor(() => {
+            expect(posted.some((p) => p.type === "theme" && p.theme === "light")).toBe(true);
+        });
     });
 
     it("shows an inline error instead of an empty frame when minting fails", async () => {

@@ -440,7 +440,7 @@ function detectLanguage(fileName: string): string {
 // client-side inferred `mimeType`; the viewer keys off the MIME to pick
 // the renderer. CSV deliberately stays on the text path (its JSON
 // content is cheap plain text, and the sheet viewer reads the blob).
-const DOC_PREVIEW_EXT_RE = /\.(?:pdf|docx|doc|xlsx|xls|pptx|ppt)$/i;
+const DOC_PREVIEW_EXT_RE = /\.(?:pdf|docx|doc|xlsx|xls|pptx|ppt|figcraft)$/i;
 
 /** Whether this file is rendered by a document viewer instead of Monaco. */
 export function isDocPreviewFile(fileName: string): boolean {
@@ -458,6 +458,7 @@ const DOC_MIME_MAP: Record<string, string> = {
     doc: "application/msword",
     xls: "application/vnd.ms-excel",
     ppt: "application/vnd.ms-powerpoint",
+    figcraft: "application/x-figcraft",
 };
 
 function inferDocMimeType(fileName: string): string {

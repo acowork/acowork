@@ -162,6 +162,12 @@ pub(crate) async fn start_http_server(
     // ADR-087 D7 / review M4: staged installs (HTTP stages, MQTT dispatch
     // commits on inventory / drops on failure).
     pending_installs: crate::gateway::ownership::SharedPendingInstalls,
+    // ADR-055 Phase 5a: the node credential store. `DELETE /api/nodes/{id}`
+    // revokes through it; without it a deleted node keeps a valid token.
+    node_tokens: crate::mqtt::SharedNodeTokenStore,
+    // ADR-059 §7.2: replay guard — node teardown forgets the entry so a
+    // deleted id cannot be resurrected by a stale retained replay.
+    node_replay_guard: std::sync::Arc<crate::mqtt::dispatch::NodeReplayGuard>,
 ) -> Result<(), GatewayError> {
     if !http_config.enabled {
         tracing::info!("HTTP API disabled by configuration");
@@ -192,6 +198,8 @@ pub(crate) async fn start_http_server(
     app_state.agent_owners = Some(agent_owners);
     app_state.enrollment_tokens = Some(enrollment_tokens);
     app_state.pending_installs = Some(pending_installs);
+    app_state.node_tokens = Some(node_tokens);
+    app_state.node_replay_guard = Some(node_replay_guard);
     // ADR-087 §4: one-shot migration filling the denormalized
     // `node_id` on agent ownership rows written before the field
     // existed. Runs before the first request so the ACL cascade never

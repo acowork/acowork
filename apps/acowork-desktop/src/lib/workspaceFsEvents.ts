@@ -40,10 +40,14 @@ import { useFileTreeStore, treeKey, isReadyNode } from "../stores/fileTree";
 import { useFileEditorStore } from "../stores/fileEditorStore";
 import { useSettingsStore } from "../stores/settingsStore";
 import { useGitStore } from "../stores/gitStore";
+import { useAgentStore } from "../stores/agentStore";
+import { useChatStore } from "../stores/chatStore";
+import { useWorkspaceStore } from "../stores/workspaceStore";
 import { DEFAULT_GATEWAY_URL } from "./config";
 import { showToast } from "../components/common/ToastProvider";
 import { log } from "./logger";
 import { initWorkspaceWatchReporter, disposeWorkspaceWatchReporter } from "./workspaceFsWatch";
+import { shouldAutoOpenVisualCanvas } from "../components/editor/visualCanvas";
 
 /** One aggregated change within a 500ms window (Runtime → Desktop). */
 export interface FsChange {
@@ -332,7 +336,39 @@ export async function handleFsChanged(ev: WorkspaceFsChangeEvent): Promise<void>
     // (any visible path event → full status refresh — see decision 8).
     useGitStore.getState().notifyFsChanged(ev.instance_id, ev.workspace_id);
     refreshTreesForChanges(ev);
+    maybeAutoOpenVisualCanvas(ev);
     await handleEditorConflicts(ev);
+}
+
+/**
+ * ADR-118: the first write of a visual canvas file in the selected agent's
+ * current session workspace opens the editor preview. Once per path so a
+ * later save does not steal the tab the reader already has open.
+ */
+function maybeAutoOpenVisualCanvas(ev: WorkspaceFsChangeEvent): void {
+    const selectedAgentId = useAgentStore.getState().selectedAgentId;
+    const sessionId = selectedAgentId
+        ? useChatStore.getState().getActiveSessionId(selectedAgentId)
+        : null;
+    const activeWorkspaceId = sessionId
+        ? useWorkspaceStore.getState().getSessionWorkspaceId(sessionId)
+        : null;
+    for (const change of ev.changes) {
+        if (!shouldAutoOpenVisualCanvas({
+            kind: change.kind,
+            path: change.path,
+            instanceId: ev.instance_id,
+            workspaceId: ev.workspace_id,
+            selectedAgentId,
+            activeWorkspaceId,
+        })) continue;
+        if (!selectedAgentId) continue;
+        void useFileEditorStore.getState().openPreview(
+            selectedAgentId,
+            ev.workspace_id,
+            change.path,
+        );
+    }
 }
 
 /**

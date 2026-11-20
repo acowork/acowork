@@ -8,7 +8,7 @@
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 use uuid::Uuid;
@@ -356,7 +356,7 @@ pub fn uninstall_app(
     purge_data: bool,
 ) -> Result<(), InstallError> {
     if !is_valid_app_id(app_id) {
-        return Err(InstallError::new("package_malformed", 400, "invalid app id"));
+        return Err(InstallError::new("invalid_app_id", 400, "invalid app id"));
     }
     if matches!(app_id, "pm" | "doc") {
         return Err(InstallError::new(
@@ -367,7 +367,7 @@ pub fn uninstall_app(
     }
     let app_dir = data_dir.join(APPS_DIR_NAME).join(app_id);
     if !app_dir.exists() {
-        return Err(InstallError::new("package_malformed", 404, "app not installed"));
+        return Err(InstallError::new("app_not_installed", 404, "app not installed"));
     }
     let trash = data_dir
         .join(APPS_DIR_NAME)
@@ -375,17 +375,76 @@ pub fn uninstall_app(
         .join(format!("{app_id}.{}", now_unix()));
     if let Some(parent) = trash.parent() {
         fs::create_dir_all(parent).map_err(|e| {
-            InstallError::new("package_malformed", 500, format!("trash: {e}"))
+            InstallError::new("uninstall_failed", 500, format!("trash: {e}"))
         })?;
     }
-    fs::rename(&app_dir, &trash).map_err(|e| {
-        InstallError::new("package_malformed", 500, format!("move to trash: {e}"))
+    // Windows `std::fs::rename` uses MoveFileEx(MOVEFILE_REPLACE_EXISTING),
+    // which MSDN forbids for directories — uninstall then 500s even after
+    // the app process is gone. MoveFileW (or Unix rename) is the directory move.
+    move_dir_retry(&app_dir, &trash).map_err(|e| {
+        tracing::error!(app = %app_id, error = %e, "uninstall: move to trash failed");
+        InstallError::new("uninstall_failed", 500, format!("move to trash: {e}"))
     })?;
     if purge_data {
         let data = data_dir.join(APP_DATA_DIR_NAME).join(app_id);
         let _ = fs::remove_dir_all(data);
     }
     Ok(())
+}
+
+fn move_dir_retry(src: &Path, dst: &Path) -> io::Result<()> {
+    const ATTEMPTS: u32 = 20;
+    let mut last = None;
+    for attempt in 0..ATTEMPTS {
+        match move_dir(src, dst) {
+            Ok(()) => return Ok(()),
+            Err(e) if is_sharing_violation(&e) && attempt + 1 < ATTEMPTS => {
+                std::thread::sleep(Duration::from_millis(50));
+                last = Some(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| io::Error::new(io::ErrorKind::Other, "move_dir retry exhausted")))
+}
+
+fn is_sharing_violation(err: &io::Error) -> bool {
+    matches!(
+        err.raw_os_error(),
+        Some(5) | Some(32) | Some(33) // ACCESS_DENIED / SHARING_VIOLATION / LOCK_VIOLATION
+    )
+}
+
+fn move_dir(src: &Path, dst: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        move_dir_windows(src, dst)
+    }
+    #[cfg(not(windows))]
+    {
+        fs::rename(src, dst)
+    }
+}
+
+/// `MoveFileW` without `MOVEFILE_REPLACE_EXISTING` — that flag cannot move a directory.
+#[cfg(windows)]
+fn move_dir_windows(src: &Path, dst: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    fn wide(p: &Path) -> Vec<u16> {
+        p.as_os_str().encode_wide().chain(Some(0)).collect()
+    }
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn MoveFileW(lp_existing_file_name: *const u16, lp_new_file_name: *const u16) -> i32;
+    }
+    let src_w = wide(src);
+    let dst_w = wide(dst);
+    let ok = unsafe { MoveFileW(src_w.as_ptr(), dst_w.as_ptr()) };
+    if ok == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 /// Drop trash directories older than 7 days.
@@ -734,6 +793,50 @@ entry = "{entry}"
         fs::create_dir_all(&data).unwrap();
         let err = install_app_package(&data, &pkg, &InstallOptions::default()).unwrap_err();
         assert_eq!(err.code, "unsigned_package");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn uninstall_moves_a_nonempty_tree_to_trash() {
+        let root = std::env::temp_dir().join(format!(
+            "acowork-app-uninstall-{}-{}",
+            std::process::id(),
+            now_unix()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let app_dir = root.join(APPS_DIR_NAME).join("demoapp");
+        fs::create_dir_all(app_dir.join("versions").join("1.0.0").join("bin")).unwrap();
+        fs::write(
+            app_dir.join("versions").join("1.0.0").join("bin").join("demoapp.exe"),
+            b"not-a-real-binary",
+        )
+        .unwrap();
+        fs::write(app_dir.join("state.json"), "{}").unwrap();
+        uninstall_app(&root, "demoapp", false).unwrap();
+        assert!(!app_dir.exists());
+        let trash = root.join(APPS_DIR_NAME).join(".trash");
+        let found = fs::read_dir(&trash)
+            .unwrap()
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().starts_with("demoapp."));
+        assert!(found, "expected demoapp.* in {:?}", trash);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn uninstall_missing_app_is_not_package_malformed() {
+        let root = std::env::temp_dir().join(format!(
+            "acowork-app-uninstall-missing-{}-{}",
+            std::process::id(),
+            now_unix()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let err = uninstall_app(&root, "demoapp", false).unwrap_err();
+        assert_eq!(err.code, "app_not_installed");
+        assert_eq!(err.http, 404);
+        let bad = uninstall_app(&root, "Not Valid", false).unwrap_err();
+        assert_eq!(bad.code, "invalid_app_id");
         let _ = fs::remove_dir_all(&root);
     }
 }

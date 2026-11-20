@@ -289,6 +289,9 @@ entry = "bin/acowork-pm"
 | `app_id_reserved` | 409 | 试图覆盖 builtin |
 | `version_exists` | 409 | 同版本重复安装 |
 | `binary_missing` | 400 | `bin/` 缺失或不可执行 |
+| `app_not_installed` | 404 | 卸载时安装目录不存在 |
+| `invalid_app_id` | 400 | 卸载/操作的 id 不是合法应用 id |
+| `uninstall_failed` | 500 | 安装目录无法移入 `.trash`（Windows 目录移动 / 文件占用） |
 
 ### 6.9 升级 / 回滚 / 卸载语义
 

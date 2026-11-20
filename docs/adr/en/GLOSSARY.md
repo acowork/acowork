@@ -159,8 +159,8 @@ The most frequently translated cluster; 压缩 must render consistently.
 |---------|---------|-------|
 | 托管应用 | hosted application | ADR-116; not a plug-in |
 | 用户画布 | user canvas | left-nav webview; MCP does not attach |
-| Agent 工作态 | agent working state | in-process session keyed `(app_id, actor, conversation)` |
-| 聊天预览 | chat preview | durable-pane iframe; never a transcript row |
+| Agent 工作态 / Agent 产物 | agent working state / agent artifact | a file in that agent's workspace; not conversation memory |
+| 聊天预览 | chat preview | open that workspace file in the editor pane; never a transcript-row iframe |
 | 共编 | co-edit | only inside the app's own UI |
 | hosted adapter | hosted adapter | ACowork glue binary, e.g. `figcraft-acowork` |
 | `library` / `visual` / `none` | `library` / `visual` / `none` | `ui.canvas.kind` (ADR-118) |

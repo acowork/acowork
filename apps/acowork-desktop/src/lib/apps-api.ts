@@ -23,6 +23,10 @@ export interface AppDto {
     mcp_url: string | null;
     ui_path: string;
     ui_mode: string;
+    /** ADR-118 preview channel: `library` | `visual` | `none`. */
+    canvas_kind?: string;
+    /** Template such as `/?file={workspace_file}` for visual apps. */
+    canvas_preview_path?: string;
     nav_label: string;
     nav_icon: string;
     nav_order: number;
@@ -155,6 +159,9 @@ export function installErrorMessage(err: unknown): string {
             version_exists: "该版本已安装",
             binary_missing: "应用包缺少可执行文件",
             platform_signature_required: "该应用需要平台签名",
+            app_not_installed: "应用未安装",
+            invalid_app_id: "应用 ID 无效",
+            uninstall_failed: "卸载失败：安装目录被占用或无法移入回收站",
         };
         return map[err.code] ?? err.message;
     }

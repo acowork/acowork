@@ -5,6 +5,8 @@ import { ThinkBlock } from "./ThinkBlock";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cardButtonAccent, cardButtonNeutral } from "../../lib/ui-styles";
 import { OverlayScrollbar } from "../common/OverlayScrollbar";
+import { VisualCanvasCard } from "./VisualCanvasCard";
+import { findVisualCanvasRelPath, visualCanvasShotSeq } from "../editor/visualCanvas";
 
 interface ExploreBlockProps {
   items: ChatMessage[];
@@ -321,6 +323,8 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
   // fold effect re-fire) on renders that changed nothing about the block.
   const pairedItems = useMemo(() => buildPairedItems(items), [items]);
   const stepCount = pairedItems.length;
+  const visualCanvasPath = useMemo(() => findVisualCanvasRelPath(items), [items]);
+  const visualCanvasShotSeqValue = useMemo(() => visualCanvasShotSeq(items), [items]);
 
   // Count tool_calls that have NOT yet been paired with a tool_result.
   // Derived once here so the collapsed-header "M running" badge can read
@@ -485,6 +489,16 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
           <ChevronRight className="ml-auto h-3.5 w-3.5 shrink-0 text-text-tertiary" />
         )}
       </button>
+
+      {visualCanvasPath && (
+        <div className="mt-1.5">
+          <VisualCanvasCard
+            relPath={visualCanvasPath}
+            sessionId={currentSessionId}
+            reloadSeq={visualCanvasShotSeqValue}
+          />
+        </div>
+      )}
 
       {/* Expanded content: full ThinkBlock + paired ToolCall rendering */}
       {expanded && (

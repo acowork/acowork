@@ -19,5 +19,7 @@ pub use install::{
     run_install, run_install_with_output,
 };
 pub use protocol::{JsonRpcRequest, JsonRpcResponse, MCP_PROTOCOL_VERSION, McpToolDef};
-pub use transport::{McpTransportConn, ServerOutputSink, create_transport};
+pub use transport::{
+    MCP_WORKSPACE_ROOT_HEADER, McpTransportConn, ServerOutputSink, create_transport,
+};
 pub use wrapper::McpToolWrapper;

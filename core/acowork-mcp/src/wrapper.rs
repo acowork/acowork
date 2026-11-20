@@ -249,7 +249,7 @@ impl acowork_core::tools::Tool for McpToolWrapper {
     async fn execute(
         &self,
         params: serde_json::Value,
-        _work_dir: Option<&str>,
+        work_dir: Option<&str>,
     ) -> acowork_core::error::Result<acowork_core::tools::ToolResult> {
         // Strip the `approved` field before forwarding to the MCP server.
         // ACowork's security model may inject `approved: bool` into tool calls
@@ -262,7 +262,11 @@ impl acowork_core::tools::Tool for McpToolWrapper {
             other => other,
         };
 
-        match self.registry.call_tool(&self.prefixed_name, args).await {
+        match self
+            .registry
+            .call_tool_in_workspace(&self.prefixed_name, args, work_dir)
+            .await
+        {
             Ok(output) => {
                 let (content, content_parts) = parse_tool_result(&output);
                 Ok(acowork_core::tools::ToolResult {
@@ -530,6 +534,21 @@ mod tests {
             !err.to_lowercase().contains("approved"),
             "approved field should have been stripped, but got: {err}"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_forwards_workspace_root_to_http_transport() {
+        let (registry, root) = crate::client::registry_with_mock_tool_result_and_root(json!({
+            "content": [{ "type": "text", "text": "ok" }]
+        }));
+        let def = make_def("render", Some("Test"), json!({}));
+        let wrapper = McpToolWrapper::new("mcp_test__render".to_string(), def, registry);
+        let result = wrapper
+            .execute(json!({}), Some("/tmp/agent-ws"))
+            .await
+            .unwrap();
+        assert!(result.ok);
+        assert_eq!(root.lock().unwrap().as_deref(), Some("/tmp/agent-ws"));
     }
 
     #[tokio::test]

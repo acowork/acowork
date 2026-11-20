@@ -1,291 +1,236 @@
-# Design Doc 35: Dual canvas for hosted apps (user surface / agent working state / chat preview)
+# Design Doc 35: Dual canvas for hosted apps (user surface / workspace file / preview)
 
-**Version**: 1.0 (2026-11-19)
+**Version**: 1.1 (2026-11-19; agent document is a workspace file, matching image generation)
 **Status**: Accepted, not yet implemented (first `visual` app: FigCraft)
 **Authoritative decision**: [ADR-118](../../adr/en/ADR-118-hosted-app-dual-canvas.md)
 **Depends on**: [ADR-116](../../adr/en/ADR-116-hosted-application-framework.md) · [Design doc 34](./34-hosted-application-framework.md)
 
 > The Chinese document is the source of truth. This English counterpart is kept in the same commit by convention.
 >
-> This is the **working-state contract** on top of ADR-116. Process, reverse proxy, tickets and catalog remain as in doc 34. This document specifies how the user canvas, the agent working state and the chat preview stay separate, and the checklist a new app must follow.
+> This is the **artifact contract** on top of ADR-116. Process, reverse proxy, tickets and catalog remain as in doc 34.
 
 ---
 
 ## 1. Positioning
 
-A hosted app presents up to three surfaces. Any of them may be absent; they MUST NOT be mixed:
+Same as an agent **generating an image**:
 
-| Surface | Who uses it | Where state lives | Entry |
+1. Create a file in that agent's workspace;
+2. Edit, save, preview, edit again on that file;
+3. When done, leave it in the workspace, upload to DOC, or send it to another agent / the user.
+
+**Always start from a file.** Not from "the in-memory canvas bound to this chat".
+
+Three surfaces may be absent; they MUST NOT treat the UI the user is editing as the agent's file:
+
+| Surface | Who uses it | Source of truth | Entry |
 |---|---|---|---|
-| **User canvas** | the signed-in user | that user's Desktop webview (and the user's files under the app data directory) | left nav → `AppFrame` → `/api/apps/{id}/ui/` |
-| **Agent working state** | one agent instance in one chat | a session **inside the app process**, keyed | Runtime → `{mcp.gateway_path}` → `POST /mcp` |
-| **Chat preview** | the user wanting to see what the agent drew | a read-only projection; source of truth remains the agent working state | chat card → durable pane iframe → `/ui/` with a canvas query |
+| **User canvas** | the signed-in user | the document the user opened in the app | left nav → `AppFrame` → `/api/apps/{id}/ui/` |
+| **Agent artifact** | an agent | **a file in that agent's workspace** | Runtime MCP → app `open_file` / `save_file` / edit tools |
+| **Preview** | the user watching the agent | read-only open of that workspace path | chat file card → editor-pane viewer (images: `ImageViewer`; `.figcraft`: app iframe) |
 
-DOC / PM are **library**: the agent writes a shared durable store; the user sees the result by opening that resource; a live third-surface canvas is unnecessary. FigCraft and peers are **visual**: the agent's document lives in a session; without opening the preview the user does not see it live.
+`library` (DOC / PM): the artifact key lives in the app's own store; opening the resource shows it — a "file" that does not sit in the agent workspace. `visual` (FigCraft and design files that need a dedicated viewer): the artifact key is a workspace path.
 
-Platform chat is **not co-edit by default**. Co-edit happens only when the app's own UI hosts a chat / agent (only then may MCP attach to the user canvas).
+Platform chat is **not co-edit by default**.
 
 ---
 
 ## 2. Architecture
 
 ```
-Desktop                                              Gateway                         App process (one per app_id)
-┌─────────────────────────────┐                     ┌──────────────┐                ┌─────────────────────────────┐
-│ Left-nav AppFrame           │  ticket + /ui/      │ app::proxy   │                │ User static bundle          │
-│  = user canvas (no MCP)     │────────────────────►│              │───────────────►│ does not hold agent sessions│
-│                             │                     │              │                │                             │
-│ Chat transcript: canvas card│                     │ app::mcp_    │  X-MCP-Actor   │ Agent session table         │
-│  (no iframe)                │                     │  proxy       │  X-MCP-Conv.   │  key = (actor, conversation)│
-│                             │                     │              │───────────────►│  Headless / equivalent      │
-│ Editor pane: preview AppFrame│ ticket + /ui/?canvas│              │                │  POST /mcp → that session   │
-│  = read-only viewer         │────────────────────►│              │───────────────►│  GET /api/canvas/… project  │
-└─────────────────────────────┘                     └──────────────┘                └─────────────────────────────┘
-        ▲                                                                                    │
-        │  theme / locale postMessage                                                        │
-        └────────────────────────────────────────────────────────────────────────────────────┘
-                              Agent Runtime uses MCP only; it never touches the user iframe
+Agent workspace (on the Node)          App process (one per app_id)
+┌──────────────────────────┐           ┌──────────────────────────────┐
+│  ridgeline.figcraft      │◄─ open/ ─►│ Headless / engine: that file │
+│  cover.png               │   save    │ editor cache, not authority  │
+└────────────┬─────────────┘           │ POST /mcp carries path       │
+             │                         └──────────────────────────────┘
+             │ existing workspace file API
+             ▼
+Desktop chat card → editor pane previews that path
+  png  → ImageViewer
+  figcraft → AppFrame /ui/?file=… (read-only projection)
+Left-nav AppFrame = the user's own document; MCP does not attach
 ```
 
-One process, many sessions. Canvas isolation does not mean more processes.
+One app process MAY have several workspace files open (cached by path). Isolation is the **agent workspace directory**.
 
 ---
 
 ## 3. `app.toml` additions
 
-Every section from doc 34 stays. Add:
+Keep every section from doc 34. Add:
 
 ```toml
 [ui.canvas]
-# library = shared durable store (DOC / PM). Opening a resource shows agent writes.
-# visual  = in-session canvas (FigCraft and peers). MUST offer the chat preview channel.
-# none    = no user-webview working state.
+# library = artifact in the app's own store (DOC / PM).
+# visual  = artifact is an agent workspace file; preview uses this app's iframe.
+# none    = no dedicated viewer (Monaco / ImageViewer already handle it).
 kind = "visual"
 
-# For visual: UI path of the preview iframe, relative to this app's /ui/.
-# The app projects the canvas session id in the query into a read-only view.
-preview_path = "/?canvas={canvas_id}"
+preview_path = "/?file={workspace_file}"
 ```
 
-| Field | Default | Notes |
-|---|---|---|
-| `ui.canvas.kind` | `library` (when there is a webview) or `none` | Undeclared built-in PM/DOC count as `library`; MCP-only services as `none` |
-| `ui.canvas.preview_path` | absent | Required for `visual`. `{canvas_id}` is replaced by the platform with a URL-safe session key |
-
-`[mcp].auto_inject = true` remains the switch into `acowork/global/mcps` (doc 34). A `visual` app that agents should call MUST turn it on.
+`kind` is the **preview channel**, not "whether there is a file". Images are `none` (ImageViewer exists); `.figcraft` is `visual`; a DOC document is `library`.
 
 ---
 
-## 4. Agent working state
+## 4. Agent artifact = workspace file
 
-### 4.1 Key
+### 4.1 Primary key
 
 ```
-canvas_id = app_id + actor_id + conversation_id
+file_id = (instance_id, workspace_id, relative_path)
 ```
 
-- `actor_id`: `X-MCP-Actor`, already verified by the Gateway as an installed instance_id.
-- `conversation_id`: `X-MCP-Conversation`, the current chat session id, sent by the Runtime on every MCP HTTP request.
-- Missing actor: refuse write tools (same spirit as DOC's anonymous read-only; the exact read-only set is the app's).
-- Missing conversation: refuse write tools. MUST NOT reuse "the only session in the process".
+Chat, preview and MCP `path` all cite it. `conversation_id` MUST NOT be the primary key.
 
-Same agent, two chats = two working states. The user's left-nav canvas **does not** have this key and does not enter this table.
+### 4.2 Lifecycle (same as generating an image)
 
-### 4.2 Authority and lifetime
+| Step | What happens |
+|---|---|
+| Create | Agent writes a new file in the workspace (FigCraft: `save_file` / `file.save` to a workspace path; or `export` then `file_write` bytes). An empty file still counts |
+| Edit | MCP `open_file` that path (if not open) → edit tools → `save_file`. Disk is authority |
+| Preview | User opens the card; the viewer reads workspace file bytes |
+| Edit again | MCP on the same path; preview re-reads or takes a snapshot |
+| Handoff | File is already in the workspace: copy, open in left-nav FigCraft, import to `doc`, send the path |
 
-- Source of truth: in-process in the app (MAY also persist under `app-data/{id}/canvases/{canvas_id}/`; the key is still the one above).
-- Created on the first write tool for that key.
-- Destroyed by the app's own GC (idle timeout, session-ended notification — the latter is a later platform capability and does not block this version). A process restart MAY drop unexported visual sessions; apps that need to keep them persist themselves.
-- `tools/call` MUST NOT require the preview iframe to be online.
+An in-process open document is a cache of that path. After restart, `open_file` again. Unsaved edits MAY be lost; the app SHOULD save after any tool that should show up in preview.
 
-### 4.3 MCP HTTP
+### 4.3 Paths and roots
 
-As in doc 34: a single `POST /mcp`, stateless Streamable HTTP subset. The app dispatches JSON-RPC to the `Server` / tool table **for that request's key**, not a process-wide singleton.
+The caller is `X-MCP-Actor`. The Runtime supplies the **workspace root bound to that actor's current session** (recommended header `X-MCP-Workspace-Root`, an absolute path on the Node; or the adapter resolves it via a platform API).
 
-Gateway `/api/apps/{id}/mcp` (and the declared `gateway_path`) remains reverse-proxy + actor checks. Tool lists, screenshots and exports are the app's.
+The adapter MUST:
 
-### 4.4 Relationship to library apps
+- set FigCraft (and peers) automation read/write roots to that root (or a declared subdirectory);
+- refuse paths outside it;
+- resolve relative tool paths against it.
 
-DOC / PM "working state" is a document / task in the library, addressed by resource id, not an anonymous canvas. They:
+If the root is missing, write tools fail with a clear error. MUST NOT write into the app process's own `data_dir` as a fallback.
 
-- keep using `X-MCP-Actor` to sign writes (already shipped);
-- do **not** need a canvas per chat;
-- do **not** need a preview iframe;
-- the existing "open this document / task" from chat already covers "see the result".
+### 4.4 MCP HTTP
 
-A new library app follows the same path: shared store + the user opens a resource. Do not implement visual preview "for consistency".
+As in doc 34: `POST /mcp`. `open_file` / `save_file` / `create_node` act on the **opened workspace file**. One process MAY keep several documents open by path (FigCraft already has a `document` parameter).
+
+### 4.5 Library apps
+
+DOC / PM MUST NOT be rewritten as "write workspace then upload". Their artifacts are library records. Chat "open this document" is already the preview. Workspace-file rules apply to **visual file types** and ordinary attachments.
 
 ---
 
 ## 5. User canvas
 
-- Entry, ticket, sandbox, identity injection: unchanged from doc 34.
-- Desktop MAY unmount the iframe when leaving that nav item (if the user's document lives only in WASM, draft recovery is the app's problem, not a platform MCP problem).
-- MUST NOT register that iframe as an MCP Backend.
-- Theme: §7.
+- Entry, ticket, sandbox: doc 34.
+- The user opening the agent's `.figcraft` from the workspace tree into left-nav FigCraft is user behaviour.
+- MUST NOT register the user iframe as an MCP Backend.
 
 ---
 
-## 6. Chat preview (`kind = visual` only)
+## 6. Preview
 
 ### 6.1 Transcript card
 
-When this conversation has a `tools/call` against that app's MCP (success is enough), chat inserts (or updates) a canvas card that is **not** a live iframe in a windowed row:
+Same as image attachments: workspace-relative path, optional thumbnail, "Open". No iframe in the card.
 
-- app name, optional title, latest `screenshot` / export thumbnail (placeholder if none);
-- action: "Open canvas".
+### 6.2 Editor pane
 
-The card is an ordinary message / attachment and scrolls with the windowed transcript. **No iframe inside the card.**
+Opening uses the existing "open workspace file" slot:
 
-### 6.2 Durable iframe
+| Extension | Viewer |
+|---|---|
+| png / jpg / … | `ImageViewer` (existing) |
+| pdf / md / … | existing previewers |
+| `figcraft` (and extensions declared `kind = visual`) | `AppFrame` on that app's `preview_path`, file bytes handed to the app |
 
-"Open canvas" mounts the preview in the **file-editor column** (the same slot as opening a workspace file; if no file is open, expand that column). Requirements:
+`.figcraft` is added to `isWorkspacePreviewable`. Closing preview does not affect MCP.
 
-1. Reuse `AppFrame` (same sandbox: no `allow-same-origin`, `allow-downloads` present).
-2. `src` = Gateway `/api/apps/{id}/ui/` + expanded `preview_path` + ticket in the fragment (ticket still never goes in the query).
-3. `canvas_id` is a query or the app's agreed preview parameter; it names the agent session, not a user id.
-4. The iframe stays mounted until the user closes the preview or switches to another conversation's preview. Switching chat sessions unmounts it or replaces it with that conversation's canvas.
-5. The preview MAY open automatically after the first successful MCP tool for that app in the turn; idle chat MUST NOT preload WASM.
+### 6.3 Following edits
 
-### 6.3 How the preview follows working state
-
-The preview is a projection. Apps pick one or both:
-
-| Mode | How | When |
-|---|---|---|
-| Snapshot | After each write tool, refresh document bytes / PNG; the preview page polls or `GET /api/canvas/{canvas_id}/snapshot` | Cheapest |
-| Injected control | The adapter injects a script into the served `index.html`: add `?control`, listen for `acowork` theme, feed snapshots into the page's existing file-open API | When the preview should look like the real editor |
-
-MUST NOT register the preview iframe as the only MCP Backend. It MAY also attach for display; a disconnect MUST NOT fail tools.
+After `save_file`, the preview re-fetches bytes. The iframe MUST NOT be the only open engine copy.
 
 ### 6.4 Why not in the bubble
 
-`VirtualRowList` only mounts rows near the viewport. FigCraft-class WASM in a row would restart on scroll and fork from the in-process source of truth. The preview MUST sit in a durable pane **outside** the transcript.
+`VirtualRowList` unmounts rows. Images already use "card + open"; `.figcraft` does too.
 
 ---
 
 ## 7. Theme and locale
 
-ADR-116 already has `AppFrame` `postMessage` on load / `ready`:
-
-```json
-{ "channel": "acowork", "type": "theme", "theme": "light|dark", "accent": "#…", "locale": "zh-CN" }
-```
-
-This contract adds two rules:
-
-1. Desktop MUST push again when the `documentElement` light/dark class changes (both the user canvas and an open preview iframe need it).
-2. App side: the hosted adapter's injected script listens and maps onto the app's own theme commands (FigCraft: `view.themeLight` / `view.themeDark`, or `ui.set { theme }`). Default `system` follows the OS and **will not** follow the ACowork shell; a visual app inside the iframe SHOULD use the value the shell pushed.
-
-Apps MAY ignore accent. Locale is best-effort.
-
-**Do not** patch upstream `index.html` or the UI crate for theme; injection happens when the adapter serves `/ui/`.
+`AppFrame` `postMessage`s on load / `ready` and when the light/dark class changes. The adapter injects a listener; FigCraft maps to `view.themeLight` / `view.themeDark`. Do not use `system` inside the iframe (that follows the OS). Do not patch upstream `index.html`.
 
 ---
 
 ## 8. Handoff and co-edit
 
-**Handoff (default)**: the agent writes a resource the app can open (`.figcraft`, a document id, an exported PNG). The user opening it on the left-nav canvas is user behaviour; afterwards it is the user's document.
+The file is already in the workspace. Handoff is that path: user copy / left-nav open / DOC import / send to another agent.
 
-**Co-edit (explicit, later)**: the app UI embeds chat, and the canvas the user has open is the one being edited. Only then may that user canvas be attached. The path "platform left-nav + platform chat" never co-edits automatically.
+Co-edit: only after the app UI embeds chat. Platform chat never co-edits automatically.
 
 ---
 
-## 9. Hosted adapter (where changes go)
+## 9. Hosted adapter
 
-In the upstream repo (or fork), ACowork-specific code concentrates in one binary / crate, e.g. `apps/{name}-acowork`:
-
-| Responsibility | Lives here | Does not live here |
+| Responsibility | Adapter | Not here |
 |---|---|---|
-| ADR-116 CLI (`--host` / `--port` / `--port-file` / `--gateway-health-url`) | adapter `main` | upstream desktop `main` |
-| `GET /health`, `GET /ui/*`, `POST /mcp` | adapter | upstream |
-| Session table keyed `(actor, conversation)` | adapter | a process-wide upstream MCP singleton |
-| Preview snapshot API | adapter | upstream |
-| Inject control / theme / canvas script into `index.html` | adapter response path | upstream `index.html` source |
-| `packaging/acowork/app.toml` | adapter packaging dir | upstream release config |
-
-The adapter MAY **depend on** the upstream MCP / engine crate (e.g. `figcraft-mcp::Server::handle`) and implement its own `Backend` pointing at a Headless session. Do not rewrite the upstream tools table to speak HTTP.
-
-Path adaptation (no real filesystem on the Web: read `open_file`'s path as bytes, then the engine's `{name, data}`) also lives in the adapter Backend.
+| ADR-116 CLI, `/health`, `/ui/`, `POST /mcp` | adapter | upstream desktop `main` |
+| Actor → workspace root → automation roots | adapter | upstream |
+| Open/save workspace files by path | adapter Backend + upstream `open_file`/`save_file` | anonymous Headless as authority |
+| Feed workspace bytes into the preview iframe | adapter | upstream `index.html` |
+| Theme injection | adapter response | upstream sources |
 
 ---
 
 ## 10. Platform-shell obligations
 
-An app that follows this document can be hosted. The rows below are **ACowork Desktop / Runtime** duties, so each app does not invent its own chat UI.
-
 | # | Layer | Duty |
 |---|---|---|
-| P1 | Runtime | MCP HTTP requests carry `X-MCP-Conversation: {session_id}` |
-| P2 | Gateway | `app::mcp_proxy` forwards that header (do not strip it as forged identity) |
-| P3 | Desktop `AppFrame` | Re-push theme / locale when the theme class changes |
-| P4 | Desktop chat | `kind=visual` and this conversation called that app's MCP → canvas card + open editor-pane preview |
-| P5 | Desktop layout | Preview uses `AppFrame`, `src` expanded from `preview_path`; it MUST NOT overwrite left-nav `hostedAppId` (user canvas and preview MAY coexist: one in `view=app`, one in chat's file column) |
-
-The user opening FigCraft on the left and opening an agent preview in chat are two `AppFrame` instances, two tickets, two URLs. Coexistence is allowed.
+| P1 | Runtime | MCP requests carry `X-MCP-Actor` and the current workspace root (`X-MCP-Workspace-Root` or equivalent) |
+| P2 | Gateway | Forward that header; workspace **bytes** still use the existing workspace file API |
+| P3 | Desktop `AppFrame` | Re-push theme on class change |
+| P4 | Desktop workspace / chat | `.figcraft` is previewable; chat card opens the editor pane |
+| P5 | Desktop layout | Preview `AppFrame` MUST NOT overwrite left-nav `hostedAppId` |
 
 ---
 
 ## 11. New-app checklist
 
-When adding a hosted app, tick in order:
+Doc 34 hosting rules, plus:
 
-**Doc 34 (hosting)**
+1. Choose `ui.canvas.kind` (preview channel, not "has a file")
+2. `visual`: artifact in the agent workspace; MCP paths confined to that root; declare extension + `preview_path`
+3. `library`: write the app store; do not "unify" onto workspace files
+4. MCP does not attach to the left-nav iframe
+5. Preview is not a chat bubble
+6. Glue stays in the adapter
+7. Out-of-root paths error; no fall-through to "whatever is open"
 
-1. `app.toml`: `id` / `process` / `mcp` / `ui` / `permissions` / `package`
-2. Generic process: `/health` + `/ui/` + `POST /mcp`
-3. Bind `127.0.0.1` only; go through the Gateway proxy
-4. Set `mcp.auto_inject` according to whether agents should see the catalog entry
-5. Desktop does not import the app's front end
-
-**This document (working state)**
-
-6. Choose `ui.canvas.kind`
-7. `library`: MCP writes the shared store, signed with `X-MCP-Actor`; the user opens the resource to see the result
-8. `visual`: in-process session table keyed `(actor, conversation)`; preview URL; adapter injects theme
-9. MCP does **not** attach to the left-nav user iframe
-10. Do not put a webview in a chat bubble
-11. Glue stays in the hosted adapter
-12. Multi-user: missing session → error, never "whatever is currently attached"
-
-**FigCraft mapping (first visual app)**
-
-- User canvas: the packed `/ui/` WASM, left nav.
-- Agent working state: `figcraft-mcp` Headless (or equivalent Session), tabled by key; `auto_inject = true`.
-- Preview: chat card + editor-pane `AppFrame`; injected script feeds snapshots / `?control`.
-- Theme: injected listener on `acowork` theme → `view.themeLight` / `view.themeDark`.
-- Do not change `crates/mcp`, `crates/engine`, or `apps/figcraft-web/index.html`.
+FigCraft: left-nav WASM for the user; workspace `*.figcraft` + engine for the agent; editor-pane iframe to preview the file; do not change `crates/mcp`, `crates/engine`, or `apps/figcraft-web/index.html`.
 
 ---
 
 ## 12. Security
 
-Continuing doc 34:
-
-- `canvas_id` in the preview URL is not a credential. The page still needs a ticket; the app server authorises with `X-App-User` + the canvas key: only "this preview is the agent document in this user's current chat" may return a snapshot. Practical shape: Desktop opens the preview with a session ticket; the app checks that ticket's user against the conversation that owns the canvas — or binds the snapshot to the user the ticket was minted for, with `canvas_id` in the query required to be a session that user may see (the platform MAY later encode the canvas into the ticket domain; until then the app at least requires a logged-in user).
-- The MCP path still strips `X-App-User` and friends; an agent cannot read someone else's user canvas by asserting a user id.
-- Preview sandbox matches the user canvas: no `allow-same-origin`.
-
-The first implementation MAY simplify: snapshot endpoints require a valid ticket, and the `canvas_id`'s `actor` is an installed agent on this Gateway. Cross-user invisibility then rests on "you do not know the canvas_id". Tightening authorisation is a follow-up; this document MUST NOT describe "guess the id, see someone else's document" as a feature.
+- Preview reads workspace files under existing workspace permissions.
+- MCP paths stay inside `X-MCP-Actor`'s workspace root.
+- Preview sandbox matches the user canvas.
 
 ---
 
 ## 13. Verification (when implementing)
 
-1. User A opens the app on the left and draws; user B's agent `tools/call` MUST NOT appear on A's left-nav canvas.
-2. Same user, two chats, same agent: two working states; opening each preview MUST NOT write across.
-3. Close the preview iframe, `tools/call` still succeeds, reopen preview, latest snapshot is there.
-4. Scrolling chat or collapsing explore blocks MUST NOT unmount the preview-pane iframe.
-5. Switching ACowork light/dark, the user canvas and an open preview follow the shell, not the OS.
-6. With `auto_inject = false` the catalog has no server; with `true`, the global MCP list contains `{mcp.gateway_path}`.
-7. The adapter's diff against upstream `index.html` is empty (injection is only in the HTTP response).
+1. After the agent creates `designs/a.figcraft`, the workspace tree shows it; left-nav FigCraft does **not** spontaneously show that document.
+2. Close preview, MCP edit + `save_file`, disk updates; reopen preview shows the new content.
+3. Paths outside the workspace are refused.
+4. User B's agent writes its own workspace; user A's tree does not contain that file.
+5. Scrolling chat does not unmount the editor-pane preview iframe.
+6. ACowork light/dark: an open preview follows the shell.
+7. Adapter diff against upstream `index.html` is empty.
 
 ---
 
 ## 14. Boundaries
 
-- Session-ended notification and canvas GC protocol: not done. Apps MAY use their own idle timeout.
-- Binding the preview ticket to a canvas: the tightening in §12.
+- Final header name for the workspace root may match Runtime when implementing; the meaning does not change.
 - In-app co-edit: out of this version.
-- memory panel UI: still excluded.
-- Mobile: Desktop first in this version; whether mobile mounts a preview pane is separate. Red lines 1–3 (user canvas, agent authority in-process, no iframe in the transcript) still apply.
+- memory panel: still excluded.
+- Mobile: Desktop first; "the artifact is a workspace file" still holds.
