@@ -814,6 +814,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
         // HTTP staging) are attributed to the default owner instead of
         // staying ownerless.
         let default_owner_installed = ctx.default_owner.clone();
+        let node_owners_installed = ctx.node_owners.clone();
         // Inventory-change signal: every mutation to installed_agents
         // (install complete / retained replay / empty-payload clear)
         // must wake the publisher so subscribers (Desktop) refresh.
@@ -880,38 +881,39 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
 
                         // ADR-087: no staged row was committed (CLI /
                         // bypass install) and no owner row exists — mint
-                        // one for the default owner so the instance is
-                        // never ownerless in a deployment that has an
-                        // admin. Mirrors `build_owner_record`: hosting
-                        // node denormalized, shared-by-default package
-                        // stays shared.
+                        // one so the instance is never ownerless. Prefer
+                        // the Gateway default owner; if that lookup is
+                        // empty, take the hosting node's owner. Desktop
+                        // fail-closes on a missing row (hides the agent)
+                        // even when MQTT inventory is healthy — that is
+                        // how a phone node's agents vanished after a
+                        // Gateway restart while `user first-admin` was
+                        // unset. Local mode still stays rowless when
+                        // neither source exists.
                         //
                         // Not gated on `is_new`: a reconnect / retained
-                        // re-publish after the Gateway already knew the
-                        // instance (or after a storm cleared ownership
-                        // without clearing inventory) must still heal a
-                        // missing row. Without this, Desktop hides the
-                        // agents (fail-closed D7) even though MQTT
-                        // inventory is healthy — seen with Android Node
-                        // republish after enroll flaps.
-                        if let (Some(owner), Some(owners)) = (
+                        // re-publish after ownership was cleared must
+                        // still heal.
+                        let owner = owner_for_installed_instance(
                             default_owner_installed.as_ref(),
-                            agent_owners_installed.as_ref(),
-                        ) {
-                            let mut store = owners.lock().unwrap_or_else(|e| e.into_inner());
-                            if store.get(&info.instance_id).is_none() {
-                                let mut rec = crate::gateway::ownership::OwnerRecord::new(Some(
-                                    owner.clone(),
-                                ))
+                            node_owners_installed.as_ref(),
+                            &node_id_owned,
+                        );
+                        if let (Some(owner), Some(owners)) =
+                            (owner, agent_owners_installed.as_ref())
+                        {
+                            let mut rec = crate::gateway::ownership::OwnerRecord::new(Some(owner))
                                 .with_node(Some(node_id_owned.clone()));
-                                if info.agent_id
-                                    == crate::http::permission::DEFAULT_SHARED_AGENT_PACKAGE
-                                {
-                                    rec.visibility =
-                                        crate::gateway::ownership::Visibility::Shared;
-                                }
-                                store.put_if_absent(&info.instance_id, rec);
+                            if info.agent_id
+                                == crate::http::permission::DEFAULT_SHARED_AGENT_PACKAGE
+                            {
+                                rec.visibility = crate::gateway::ownership::Visibility::Shared;
                             }
+                            // `put_if_absent` is the whole check: an existing
+                            // row (staged, healed on a previous pass, or
+                            // transferred by an admin) is never overwritten.
+                            crate::gateway::ownership::lock(owners)
+                                .put_if_absent(&info.instance_id, rec);
                         }
 
                         // ADR-055 §3.2 / S3.3: register the manifest-declared
@@ -1151,6 +1153,27 @@ pub async fn remove_node_records(ctx: &DispatchContext, node_id: &str) {
     }
 
     tracing::info!(node_id, "Node records removed");
+}
+
+/// Who should own an instance that just landed in inventory with no
+/// staged install row.
+///
+/// Default owner first (CLI / first-admin). If that is unset, the
+/// hosting node's owner — a phone that enrolled under a user still
+/// gets a row so Desktop does not hide the agent.
+fn owner_for_installed_instance(
+    default_owner: Option<&String>,
+    node_owners: Option<&crate::gateway::ownership::SharedOwnershipStore>,
+    node_id: &str,
+) -> Option<String> {
+    if let Some(id) = default_owner.filter(|s| !s.is_empty()) {
+        return Some(id.clone());
+    }
+    // One lock, taken and dropped here: the caller locks `agent_owners`
+    // afterwards, so no two stores are ever held at once.
+    let store = node_owners?;
+    let guard = crate::gateway::ownership::lock(store);
+    guard.get(node_id).and_then(|r| r.owner_user_id.clone())
 }
 
 /// Extract `(node_id, agent_id)` from
@@ -3536,5 +3559,69 @@ mod tests {
             owners.lock().unwrap().get("1a1a1a1a-0000-4000-8000-0000000000cd").is_none(),
             "no default owner ⇒ no minted row"
         );
+    }
+
+    #[tokio::test]
+    async fn installed_landing_uses_node_owner_when_default_owner_missing() {
+        const NODE_ID: &str = "1a1a1a1a-0000-4000-8000-00000000ab01";
+        // Gateway restart with `user first-admin` unset used to leave
+        // remote-node inventory ownerless; Desktop then hid the agents.
+        let registry = crate::bootstrap::SubsystemReadinessRegistry::new_shared();
+        let mut ctx = ctx_with_registry(registry);
+        let dir = temp_test_dir("landing-node-owner");
+        ctx.agent_owners = Some(crate::gateway::ownership::new_shared_agent_owners(&dir));
+        let nodes_dir = dir.join("nodes");
+        std::fs::create_dir_all(&nodes_dir).unwrap();
+        ctx.node_owners = Some(crate::gateway::ownership::new_shared_node_owners(&nodes_dir));
+        {
+            // Same key and same shape the enroll handler writes
+            // (`put_if_absent(&node_id, ...)` off the enroll topic), so this
+            // fake store row stands in for a real enrollment: first
+            // enrollment binds the token's creator as the node owner.
+            let mut nodes = ctx.node_owners.as_ref().unwrap().lock().unwrap();
+            nodes.put(
+                NODE_ID,
+                crate::gateway::ownership::OwnerRecord::new(Some("node-owner-1".into())),
+            );
+        }
+        let info = acowork_core::mqtt_proto::InstalledAgentInfo {
+            agent_id: "com.acowork.test".to_string(),
+            version: "1.0.0".to_string(),
+            name: "Test".to_string(),
+            install_path: "/tmp/pkg/abc".to_string(),
+            manifest_toml: "agent_id = \"com.acowork.test\"\nversion = \"1.0.0\"\n\
+                name = \"Test\"\ndescription = \"\"\nauthor = \"\"\nruntime_version = \"0.1.0\""
+                .to_string(),
+            instance_id: "1a1a1a1a-0000-4000-8000-0000000000ef".to_string(),
+            identity: None,
+        };
+        let envelope = acowork_core::mqtt_proto::DataEnvelope {
+            version: 1,
+            payload: Some(
+                acowork_core::mqtt_proto::data_envelope::Payload::InstalledAgentInfo(info),
+            ),
+        };
+        let payload = prost::Message::encode_to_vec(&envelope);
+        let topic = acowork_core::node::node_agent_installed_topic(
+            NODE_ID,
+            "1a1a1a1a-0000-4000-8000-0000000000ef",
+        );
+        handle_message(&topic, &payload, &ctx);
+        let store = ctx.agent_owners.clone().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            {
+                let guard = store.lock().unwrap();
+                if let Some(rec) = guard.get("1a1a1a1a-0000-4000-8000-0000000000ef") {
+                    assert_eq!(rec.owner_user_id.as_deref(), Some("node-owner-1"));
+                    assert_eq!(rec.node_id.as_deref(), Some(NODE_ID));
+                    return;
+                }
+            }
+            if std::time::Instant::now() > deadline {
+                panic!("node-owner backstop did not mint an owner row within 2s");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
     }
 }
