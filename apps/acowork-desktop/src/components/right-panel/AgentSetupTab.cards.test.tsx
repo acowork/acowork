@@ -189,12 +189,13 @@ describe("AgentSetupTab card composition", () => {
     expect(screen.getByLabelText("tool_1").closest(".overlay-scrollbar-viewport")).toBe(panelViewport);
   });
 
-  // ── ADR-104 recommendation card: default expand state ────────────────
+  // ── ADR-104 recommendation card: collapsed + red dot ─────────────────
   //
   // The rule itself lives in `lib/mcpRecommendations.ts`; what only an
   // integration test can prove is the TIMING — the panel starts with an empty
   // recommendation list and fills it when `/tools` answers, and the card must
-  // not be painted in a state it will immediately contradict.
+  // not be painted in a state it will immediately contradict. It also must not
+  // join the "first card expanded" set: only the first card of the panel opens.
 
   it("does not paint the recommendation card before its list has loaded", async () => {
     recommendedRows = [recommended("active")];
@@ -209,12 +210,13 @@ describe("AgentSetupTab card composition", () => {
     expect(recommendationHeader().getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("opens the recommendation card when a suggestion is still unhandled", async () => {
+  it("keeps the recommendation card collapsed and dots the header when a suggestion is unhandled", async () => {
     recommendedRows = [recommended("installed_inactive")];
     render(<AgentSetupTab />);
 
     await waitFor(() => expect(cardHeaders().length).toBe(8));
-    expect(recommendationHeader().getAttribute("aria-expanded")).toBe("true");
+    expect(recommendationHeader().getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("mcp-recommendation-dot")).not.toBeNull();
   });
 
   it("renders exactly one Prompts & Skills card (no duplicate after the move)", async () => {

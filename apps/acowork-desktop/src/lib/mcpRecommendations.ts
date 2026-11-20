@@ -1,5 +1,5 @@
-//! ADR-104 — which recommendation states count as "handled", and the group's
-//! default-expand rule derived from it.
+//! ADR-104 — which recommendation states count as "handled", and the header's
+//! red-dot reminder derived from it.
 //!
 //! `state` is derived server-side (`build_recommendation_views` in the
 //! Runtime) from `agent_mcp.json` × the merged install list; this module never
@@ -29,7 +29,7 @@ export function isHandledRecommendation(state: McpRecommendationState): boolean 
 
 /**
  * True while at least one suggestion still needs a user decision — i.e. while
- * the group must be visible without a click.
+ * the collapsed card must carry its red dot.
  *
  * Takes the state field only (`{ state }`), because callers that have already
  * projected the rows as something narrower can still ask the question.

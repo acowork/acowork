@@ -33,16 +33,16 @@
 //! states — they are process state and must not be persisted, or a crash
 //! would leave a permanent "installing" row (same reasoning as ADR-091 §5.8).
 //!
-//! ## Why the card is not always open
+//! ## Why the card is never open by default
 //!
 //! The group sits in the Setup panel's single scrolling column, between the
-//! Builtin Tools card and the MCP switch list. A package whose suggestions the
-//! user has already dealt with would otherwise re-open an empty-looking block
-//! on every visit — the exact "recommendation group becoming noise" risk
-//! ADR-104 §8 names. So the card opens by default only while something is
-//! still unhandled, and the default is decided from the loaded list rather
-//! than from whatever the panel happened to hold at mount time (see
-//! `RecommendationCard`).
+//! Builtin Tools card and the MCP switch list. Expanding it on its own steals
+//! most of the viewport from the cards the user actually came for — the exact
+//! "recommendation group becoming noise" risk ADR-104 §8 names. So the card
+//! always starts collapsed; the header carries a red dot while something is
+//! still unhandled (`hasUnhandledRecommendation`), which is the reminder
+//! without the takeover. The dot disappears once every row is `active` or
+//! `dismissed`.
 
 import { useCallback, useMemo, useState } from "react";
 import { AlertTriangle, Check, Download, Loader2, Play, RotateCcw } from "lucide-react";
@@ -101,29 +101,21 @@ export function McpRecommendationGroup({ agentId, recommendations, onReload }: P
  * The card itself — header, rows, ignored disclosure and per-row in-flight
  * state.
  *
- * ## Default expand rule (ADR-104 §8, "the recommendation group becoming
- * noise")
+ * ## Default state (ADR-104 §8, "the recommendation group becoming noise")
  *
- * Open only while some suggestion still needs a decision (`not_installed` /
- * `installed_inactive`, see `hasUnhandledRecommendation`). Once every row is
- * `active` or `dismissed` the card starts collapsed; the header keeps the
- * count, so the group stays reachable without a click on every panel open.
+ * Always collapsed. While some suggestion still needs a decision
+ * (`not_installed` / `installed_inactive`, see `hasUnhandledRecommendation`)
+ * the header shows a red dot; a collapsed card plus a dot is a nudge, an
+ * auto-expanded card is a takeover of the panel's scroll column.
  *
- * The decision is taken **once per mount**, deliberately not derived on every
- * render:
- *
- *   - a user's own toggle must not be re-decided, and
- *   - acting on the last pending row (activate / ignore) reloads the list,
- *     which would otherwise shut the card under the user's cursor mid-click.
- *
- * A different agent is a different mount (the gate unmounts while the new list
- * loads), so each agent still gets its own default.
+ * The dot is derived on every render (unlike `open`, which is the user's own
+ * state): acting on the last pending row reloads the list, and the dot must go
+ * out with it.
  */
 function RecommendationCard({ agentId, recommendations, onReload }: Props) {
   const { t } = useTranslation();
-  // Mount-time snapshot — see the doc above. `RecommendationCard` is only ever
-  // mounted with a loaded list.
-  const [open, setOpen] = useState(() => hasUnhandledRecommendation(recommendations));
+  // The card is never auto-opened — see the doc above.
+  const [open, setOpen] = useState(false);
   const [showDismissed, setShowDismissed] = useState(false);
   const [phases, setPhases] = useState<Record<string, RowPhase>>({});
   const [errors, setErrors] = useState<Record<string, string>>({});
@@ -214,6 +206,12 @@ function RecommendationCard({ agentId, recommendations, onReload }: Props) {
   // ignored rows are still declared by the package.
   const pending = visible.filter((r) => r.state === "not_installed").length;
 
+  // Header nudge: something is still one click away from being useful.
+  // `aria-hidden` because the count in the title and the description line
+  // under the card already say it in words — the dot is only the attention
+  // marker, not the only carrier of the information.
+  const needsAttention = hasUnhandledRecommendation(recommendations);
+
   return (
     <div>
       <ListBox dividers={false}>
@@ -221,6 +219,15 @@ function RecommendationCard({ agentId, recommendations, onReload }: Props) {
           open={open}
           onToggle={() => setOpen((v) => !v)}
           title={t("agentSetup.mcpRecommended", { count: recommendations.length })}
+          meta={
+            needsAttention ? (
+              <span
+                aria-hidden
+                data-testid="mcp-recommendation-dot"
+                className="h-1.5 w-1.5 rounded-full bg-[var(--color-destructive)]"
+              />
+            ) : undefined
+          }
           ariaLabel={t("agentSetup.mcpRecommended", { count: recommendations.length })}
           bodyClassName="rounded-b-md border-t border-border-divider bg-panel-inset"
         >
