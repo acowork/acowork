@@ -61,6 +61,7 @@ Every original user intent and explicit constraint from the conversation, even i
 - GOOD <summary> (plain prose — always do this):
   用户要求查找包含 running 与 retry 的 UI 元素，助手通过 grep 检索 chat 组件，最终定位到 RetryWaitBanner。
 - The placeholder text \"[Tool result compressed...]\" in tool results is opaque. Acknowledge it with a short phrase like \"(earlier tool results were compressed)\" instead of reproducing it.
+- Images: the conversation transcript shows each image the agent looked at as a bare `<tool_image .../>` label — the pixels themselves are not part of this text and you cannot see them. Do NOT describe, guess at, or invent what an image contains. Refer to it by its label (e.g. \"the agent looked at shot.png\") and let the reference carry forward; the file is still on disk and can be read again with image_read. Never rewrite, normalize, or drop a `<tool_image .../>` label you are given.
 - Output MUST contain exactly two blocks (<summary>, <user_intent>) with no extra prose before <summary>, between blocks, or after </user_intent>. The legacy `<entities>` and `<triples>` blocks are no longer emitted (ADR-057 D5/D6 — triples-removed).
 - Language (MUST follow):
   - First, detect the language of the conversation inside <conversation>...</conversation>. If you can identify it confidently (the conversation is long enough or clearly monolingual — e.g. contains CJK characters, or is clearly English prose), use THAT language for <summary> and <user_intent>.

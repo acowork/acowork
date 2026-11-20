@@ -20,11 +20,12 @@ use std::sync::Arc;
 use acowork_core::protocol::ProtocolType;
 #[cfg(test)]
 use acowork_core::providers::traits::ChatRequest;
-use acowork_core::providers::traits::{ChatMessage, MessageRole, Provider, ToolCall};
+use acowork_core::providers::traits::{ChatMessage, ContentPart, MessageRole, Provider, ToolCall};
 
 use crate::agent::compression_constants::SUMMARY_TOKEN_BUDGET;
+use crate::agent::image_context;
 use crate::error::RuntimeError;
-use crate::token::counter::TokenCounter;
+use crate::token::counter::{TokenCounter, estimate_image_tokens};
 
 // ── ADR-061 v3 placeholder constants (revived from ADR-052 stubs) ─────
 //
@@ -67,6 +68,95 @@ pub(crate) fn make_compressed_placeholder(tool_name: &str) -> String {
 /// (rather than "Assistant") in the summary prompt, so the LLM knows
 /// it is reading a previous compaction output rather than a fresh turn.
 pub(crate) const COMPACTION_SUMMARY_NAME: &str = "compaction_summary";
+
+// ── Image references across a compaction ───────────────────────────────
+
+/// How many image references a compaction summary may carry forward.
+///
+/// The footer is priced into the summary budget, so it is capped: twenty
+/// `<tool_image path="…"/>` lines are ≈ 400 tokens, which is noise next to a
+/// summary, while an unbounded list from a long image-editing session would
+/// eat the space the summary itself needs.
+pub const MAX_SUMMARY_IMAGE_REFS: usize = 20;
+
+/// Drop the oldest `lines.len() - keep` entries, keeping the newest tail.
+///
+/// A conversation that read twenty-five files is far more likely to want the
+/// last five again than the first five — the same reason the tail rounds, not
+/// the head ones, survive compaction.
+fn truncate_oldest(lines: &mut Vec<String>, keep: usize) {
+    if lines.len() > keep {
+        let excess = lines.len() - keep;
+        lines.drain(..excess);
+    }
+}
+
+/// Append the machine-generated image-reference footer to a compaction summary.
+///
+/// Two facts have to survive the middle being dropped: *which files* the model
+/// was looking at, and that the pixels are gone from the request but not from
+/// disk. Both are known here and neither is available to the summarizer — it is
+/// handed a text transcript in which an image part contributes exactly its
+/// `<tool_image …/>` label, so asking it to "list the images" would only invite
+/// a paraphrase of a line it can already copy. Generating the list from history
+/// keeps the summary honest and makes the output deterministic (a test can
+/// assert the exact text).
+fn with_image_reference_footer(summary: &str, refs: &[String]) -> String {
+    let footer = image_reference_footer(refs);
+    if footer.is_empty() {
+        return summary.to_string();
+    }
+    let mut out = String::with_capacity(summary.len() + footer.len());
+    out.push_str(summary);
+    out.push_str(&footer);
+    out
+}
+
+/// The footer text on its own: exactly what [`with_image_reference_footer`]
+/// appends.
+///
+/// Separate from it because the plan has to *price* the marker it is about to
+/// write. Pricing the summary alone undercounted the marker by up to
+/// [`MAX_SUMMARY_IMAGE_REFS`] lines, which is the amount by which level 5 could
+/// then break its "guaranteed to fit" contract (ADR-061 §19.5) *after* passing
+/// the plan-time check. One function, so the projection and the writer cannot
+/// disagree.
+fn image_reference_footer(refs: &[String]) -> String {
+    if refs.is_empty() {
+        return String::new();
+    }
+    let mut refs = refs.to_vec();
+    truncate_oldest(&mut refs, MAX_SUMMARY_IMAGE_REFS);
+    let mut out = String::with_capacity(96 * refs.len() + 192);
+    out.push('\n');
+    out.push('\n');
+    out.push_str(
+        "[images shown earlier — the pixels left with the history above; the files are \
+         still on disk, re-read one with image_read if you need to see it again]",
+    );
+    out.push('\n');
+    for line in &refs {
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// References of image-carrying messages a plan keeps nothing of.
+///
+/// Deduplicated on the way out: a session that read the same file five times
+/// names it once. Order is message order (oldest first); the footer keeps the
+/// newest [`MAX_SUMMARY_IMAGE_REFS`] of them, because those are the ones the
+/// model is most likely to return to.
+fn dropped_image_references(msgs: &[ChatMessage], kept: &HashSet<usize>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    msgs.iter()
+        .enumerate()
+        .filter(|(index, msg)| !kept.contains(index) && image_context::carries_image(msg))
+        .flat_map(|(_, msg)| image_context::message_image_references(msg))
+        .filter(|line| seen.insert(line.clone()))
+        .collect()
+}
 
 // ── ADR-061 v3: 5-level round-atomic compression types ─────────────────────
 
@@ -144,6 +234,13 @@ pub(crate) struct CompressionPlan {
     projected_tokens: u64,
     /// Retention stats for the level metadata block.
     stats: RetentionStats,
+    /// `<tool_image …/>` references of image messages this plan drops outright.
+    ///
+    /// A folded message keeps its own label in the transcript and needs no entry
+    /// here; only a message that leaves entirely loses its label with it. The
+    /// list rides in the summary marker, which is where the model finds out what
+    /// it used to be looking at and how to get it back.
+    image_refs: Vec<String>,
 }
 
 /// Build the summary marker content: level metadata block (§9) prepended
@@ -156,6 +253,7 @@ fn build_summary_marker(
     ratio: f64,
     stats: &RetentionStats,
     summary: &str,
+    image_refs: &[String],
 ) -> String {
     format!(
         "[compressed: level={}]\n  user_messages: {} ({})\n  assistant_messages: {} ({})\n  tool_messages: {} ({})\n  tokens: {} -> {} (ratio {:.1}%)\n\n{}",
@@ -169,7 +267,27 @@ fn build_summary_marker(
         original_tokens,
         new_tokens,
         ratio * 100.0,
-        summary
+        with_image_reference_footer(summary, image_refs)
+    )
+}
+
+/// What [`HistoryManager::append_tool_image`] did with one round's image parts.
+pub struct ToolImageAppend {
+    /// Parts actually handed to the wire.
+    pub appended: usize,
+    /// Parts dropped because byte-identical pixels were already in history.
+    pub deduped: usize,
+}
+
+/// The line telling the model that identical pixels were already above.
+///
+/// Stated as an address, not an omission: "the bytes were not re-sent" without
+/// saying where they are reads as "the image was dropped", which is exactly the
+/// kind of ambiguity that sends a model off to re-read the file.
+fn tool_image_dedup_note(deduped: usize) -> String {
+    format!(
+        "<tool_image note=\"{deduped} image(s) identical to pixels already in this conversation \
+         above — those bytes were not re-sent\"/>"
     )
 }
 
@@ -451,12 +569,24 @@ impl HistoryManager {
         Arc::clone(&self.messages)
     }
 
-    /// Get mutable reference to messages (copy-on-write).
+    /// Mutable access to the message buffer (copy-on-write), **private on
+    /// purpose**.
     ///
-    /// When other `Arc` clones exist (e.g. a debug snapshot), this clones
-    /// the buffer once; subsequent mutations reuse that buffer. When this
-    /// is the sole owner, the buffer is mutated in place with zero copies.
-    pub fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
+    /// Every in-place rewrite of history invalidates the provider's prefix
+    /// cache from the first changed byte onward: the prompt is a byte prefix,
+    /// and a cache hit after an edit is impossible, so the cost of one dropped
+    /// image part or one folded tool result is the whole remainder of the
+    /// conversation, not the edited message. That is why history is append-only
+    /// (ADR-060 Block B) and why this accessor is not a public door: a mutation
+    /// path has to be a named method that knows what it is trading — the
+    /// compaction paths ([`Self::replace_middle_with_summary`],
+    /// [`Self::abandon_tool_result`], [`Self::clear_round`]), the debug rewind
+    /// ([`Self::truncate_to`]), and the document expiry at a round boundary
+    /// ([`Self::drop_documents_from_previous_rounds`]) — and each one has to
+    /// recompute the counters it just invalidated. Adding a caller? Add the
+    /// method here, state its cache cost, and return a count so the caller can
+    /// log it; do not widen this.
+    fn messages_mut(&mut self) -> &mut Vec<ChatMessage> {
         Arc::make_mut(&mut self.messages)
     }
 
@@ -708,93 +838,89 @@ impl HistoryManager {
         dropped
     }
 
-    /// Default session-wide budget for retained image parts (approximately eight
-    /// 1568px screenshots at common provider rates).
-    pub const DEFAULT_IMAGE_TOKEN_BUDGET: u64 = 12_000;
+    /// Append the model-directed image message for one tool round, with its
+    /// image parts deduplicated by content address.
+    ///
+    /// This replaces the retired image-token budget
+    /// (`reclaim_image_parts_over_budget`): a quota answered "how much of the
+    /// context may images take",
+    /// which is not a property of the task — an image-editing session's working
+    /// set is two or three pictures that change every round, and any number
+    /// chosen for it is either always hit or never hit. Capacity is the global
+    /// context budget's job and compaction is the only way it shrinks
+    /// ([`Self::replace_middle_with_summary`], which keeps the tail rounds'
+    /// pixels in place). What an image part actually needs is (a) a price that
+    /// matches what the provider will bill and (b) no duplicate bytes, both of
+    /// which live here or in the estimator.
+    ///
+    /// Dedupe is closed-world: only parts still live in history count, so a
+    /// second read of the same file at the same `detail` appends a text-only
+    /// message that says the pixels are already above, and costs nothing.
+    ///
+    /// Returns what happened so the caller can log it.
+    ///
+    /// `input_budget` is the compaction denominator the session is running
+    /// against. The message text carries the price of these bytes and — only
+    /// when the conversation is genuinely close to the line — how full it is;
+    /// see [`image_context::cost_note`] for why the percentage is conditional.
+    pub fn append_tool_image(
+        &mut self,
+        label: String,
+        parts: Vec<ContentPart>,
+        input_budget: u64,
+    ) -> ToolImageAppend {
+        let live = image_context::live_image_hashes(&self.messages);
+        let (kept, deduped) = image_context::dedup_parts(parts, &live);
 
-    /// Resolve the independently configurable session image-token budget.
-    /// `ACOWORK_IMAGE_TOKEN_BUDGET` overrides the default (12k tokens).
-    pub fn configured_image_token_budget() -> u64 {
-        std::env::var("ACOWORK_IMAGE_TOKEN_BUDGET")
-            .ok()
-            .and_then(|value| value.parse::<u64>().ok())
-            .unwrap_or(Self::DEFAULT_IMAGE_TOKEN_BUDGET)
-    }
-
-    /// Reclaim oldest inline image parts only when cumulative image tokens exceed
-    /// the session budget. Labels remain in message text so the model can reopen
-    /// the image by path. This is deliberately independent of document expiry.
-    pub fn reclaim_image_parts_over_budget(&mut self, budget: u64) -> usize {
-        use crate::token::counter::estimate_image_tokens;
-        use acowork_core::providers::traits::ContentPart;
-
-        let image_token_total = |messages: &[ChatMessage], protocol: &ProtocolType| {
-            messages
+        // One author for one message: the label, the price of what is being
+        // appended, and the dedupe outcome are composed here — the caller passes
+        // what it read, not how to describe it. Splitting that across the agent
+        // loop and this method would leave two places that must agree on the
+        // format of a line the model reads.
+        let mut content = label;
+        if !kept.is_empty() {
+            let image_tokens = kept
                 .iter()
-                .filter(|msg| msg.name.as_deref() == Some("tool_image"))
-                .flat_map(|msg| msg.content_parts.iter().flatten())
                 .filter_map(|part| match part {
                     ContentPart::ImageUrl { image_url } => Some(estimate_image_tokens(
-                        protocol,
+                        &self.protocol_type,
                         image_url.width,
                         image_url.height,
                         image_url.detail.as_deref(),
                     )),
                     _ => None,
                 })
-                .sum::<u64>()
-        };
-        let protocol_type = self.protocol_type.clone();
-        let before_tokens = image_token_total(&self.messages, &protocol_type);
-        if before_tokens <= budget {
-            return 0;
+                .sum::<u64>();
+            content.push('\n');
+            content.push_str(&image_context::cost_note(
+                self.current_tokens,
+                input_budget,
+                image_tokens,
+                kept.len(),
+            ));
+        }
+        if deduped > 0 {
+            content.push_str(&format!("\n{}", tool_image_dedup_note(deduped)));
         }
 
-        let mut remaining = before_tokens;
-        let mut dropped: Vec<(usize, u64, String)> = Vec::new();
-        for (message_index, msg) in self.messages_mut().iter_mut().enumerate() {
-            if msg.name.as_deref() != Some("tool_image") {
-                continue;
-            }
-            let Some(parts) = msg.content_parts.as_mut() else {
-                continue;
-            };
-            let label = msg.content.clone();
-            let mut retained = Vec::with_capacity(parts.len());
-            for part in parts.drain(..) {
-                match part {
-                    ContentPart::ImageUrl { image_url } if remaining > budget => {
-                        let tokens = estimate_image_tokens(
-                            &protocol_type,
-                            image_url.width,
-                            image_url.height,
-                            image_url.detail.as_deref(),
-                        );
-                        remaining = remaining.saturating_sub(tokens);
-                        dropped.push((message_index, tokens, label.clone()));
-                    }
-                    other => retained.push(other),
-                }
-            }
-            *parts = retained;
-            if parts.is_empty() {
-                msg.content_parts = None;
-            }
-        }
-        if !dropped.is_empty() {
-            let dropped_tokens: u64 = dropped.iter().map(|(_, tokens, _)| *tokens).sum();
-            let dropped_messages: Vec<usize> = dropped.iter().map(|(index, _, _)| *index).collect();
-            let dropped_labels: Vec<&str> =
-                dropped.iter().map(|(_, _, label)| label.as_str()).collect();
+        let appended = kept.len();
+        self.append(ChatMessage {
+            role: MessageRole::User,
+            name: Some(image_context::TOOL_IMAGE_MESSAGE_NAME.to_string()),
+            content,
+            content_parts: if kept.is_empty() { None } else { Some(kept) },
+            ..Default::default()
+        });
+
+        if deduped > 0 {
             tracing::info!(
-                budget_tokens = budget, before_tokens, after_tokens = remaining,
-                dropped_images = dropped.len(), dropped_tokens, message_indices = ?dropped_messages,
-                labels = ?dropped_labels, "Reclaimed oldest image parts over session budget"
+                appended,
+                deduped,
+                "Image part(s) deduplicated by content address"
             );
-            self.recalibrate_tokens();
-            self.recompute_byte_counters();
         }
-        dropped.len()
+
+        ToolImageAppend { appended, deduped }
     }
 
     /// Sanitize message history to remove or fix corrupted entries.
@@ -1922,40 +2048,64 @@ impl HistoryManager {
             .take_while(|m| matches!(m.role, MessageRole::System))
             .count();
 
+        // The newest picture in the session. Compaction may summarize the
+        // conversation *about* an image; it must not take the image the agent is
+        // working on away from the very next request. Folding (levels 1-4) keeps
+        // this one verbatim and reduces the older ones to their labels; level 5
+        // retains it alongside the last user message.
+        let newest_image_index = msgs.iter().rposition(image_context::carries_image);
+
         // Level 5 (formerly level 8): only system + latest real user message
         // survive; all the rest goes to the summary. "Current user message" =
         // last non-marker User message (§19.1 note — compaction markers are
         // User-role too, so they must be excluded here).
+        //
+        // The newest image message survives with it (ADR-061 §19.5 keeps *one*
+        // input guaranteed to fit; a picture costs at most a few thousand tokens
+        // and the alternative is that an image-editing session compacted itself
+        // blind and spent its first post-compaction move re-reading the file).
         if level == 5 {
             let last_user = msgs.iter().rposition(|m| {
                 matches!(m.role, MessageRole::User)
                     && m.name.as_deref() != Some(COMPACTION_SUMMARY_NAME)
             });
+            let mut keep: Vec<usize> = [last_user, newest_image_index].into_iter().flatten().collect();
+            keep.sort_unstable();
+            keep.dedup();
+            let kept: HashSet<usize> = keep.iter().copied().collect();
+
             let mut retained: Vec<ChatMessage> = msgs[..system_count].to_vec();
-            let mut user_kept = 0usize;
-            if let Some(ui) = last_user {
-                retained.push(msgs[ui].clone());
-                user_kept = 1;
+            for &index in &keep {
+                retained.push(msgs[index].clone());
             }
+            let user_kept = keep
+                .iter()
+                .filter(|&&i| matches!(msgs[i].role, MessageRole::User))
+                .count();
+            let image_refs = dropped_image_references(msgs, &kept);
             let retained_tokens = self.count_slice_tokens(&retained);
             return CompressionPlan {
                 level,
                 retained,
                 original_tokens: self.current_tokens,
                 retained_tokens,
-                projected_tokens: retained_tokens + self.estimate_marker_tokens(summary),
+                projected_tokens: retained_tokens
+                    + self.estimate_marker_tokens(summary, &image_refs),
                 stats: RetentionStats {
                     user_messages: user_kept,
                     assistant_messages: 0,
                     tool_messages: 0,
-                    user_desc: if user_kept > 0 {
-                        "last 1".to_string()
-                    } else {
+                    user_desc: if user_kept == 0 {
                         "none".to_string()
+                    } else if keep.len() > user_kept {
+                        "last 1 + newest image".to_string()
+                    } else {
+                        "last 1".to_string()
                     },
                     assistant_desc: "none".to_string(),
                     tool_desc: "none".to_string(),
                 },
+                image_refs,
             };
         }
 
@@ -2033,7 +2183,23 @@ impl HistoryManager {
                 MessageRole::System => retained.push(msg.clone()),
                 MessageRole::User => {
                     user_kept += 1;
-                    retained.push(msg.clone());
+                    // Every user message survives at these levels, so a
+                    // reference never has to be re-stated in the marker — but
+                    // its pixels do not all have to survive with it. Fold the
+                    // older pictures to their labels (the same trade the round
+                    // scanner makes for tool results): the transcript still says
+                    // which file was read, and the agent can pay for that file
+                    // once more if it actually needs it, instead of carrying
+                    // every screenshot it ever took for the rest of the session.
+                    if i != newest_image_index.unwrap_or(usize::MAX)
+                        && image_context::carries_image(msg)
+                    {
+                        let mut folded = msg.clone();
+                        image_context::fold_image_parts(&mut folded);
+                        retained.push(folded);
+                    } else {
+                        retained.push(msg.clone());
+                    }
                 }
                 MessageRole::Assistant => {
                     let rank = assistant_rank[i];
@@ -2103,8 +2269,15 @@ impl HistoryManager {
             retained,
             original_tokens: self.current_tokens,
             retained_tokens,
-            projected_tokens: retained_tokens + self.estimate_marker_tokens(summary),
+            // Priced with an empty footer because levels 1-4 write none (see
+            // `image_refs` below) - the projection still goes through the one
+            // function that composes the marker.
+            projected_tokens: retained_tokens + self.estimate_marker_tokens(summary, &[]),
             stats,
+            // Nothing carries an image out of the transcript at these levels:
+            // a user message is kept, folded or not, and a folded message keeps
+            // its own label. The marker therefore has no reference to restate.
+            image_refs: Vec::new(),
         }
     }
 
@@ -2143,6 +2316,7 @@ impl HistoryManager {
                 ratio,
                 &plan.stats,
                 summary,
+                &plan.image_refs,
             ),
             name: Some(COMPACTION_SUMMARY_NAME.to_string()),
             ..Default::default()
@@ -2191,10 +2365,16 @@ impl HistoryManager {
             .sum()
     }
 
-    /// Estimate the to-be-inserted summary marker's tokens: precise summary
-    /// text count plus a fixed overhead for the level metadata block (§9).
-    fn estimate_marker_tokens(&self, summary: &str) -> u64 {
-        crate::token::count_text(summary) as u64 + 64
+    /// Estimate the to-be-inserted summary marker's tokens: the summary text,
+    /// the image-reference footer it will carry, plus a fixed overhead for the
+    /// level metadata block (section 9).
+    ///
+    /// Prices the *whole* marker string, not the pieces that were convenient:
+    /// a projection that omits the footer lets a plan that reports "fits" write
+    /// a marker that does not.
+    fn estimate_marker_tokens(&self, summary: &str, image_refs: &[String]) -> u64 {
+        let footer = image_reference_footer(image_refs);
+        (crate::token::count_text(summary) + crate::token::count_text(&footer)) as u64 + 64
     }
 }
 
@@ -2233,61 +2413,261 @@ mod tests {
     }
 
     #[test]
-    fn image_parts_are_retained_across_rounds_below_budget() {
-        let image = sized_image(512, 512, "FIRST");
-        let mut hm = HistoryManager::new(100_000);
+    fn a_second_read_of_the_same_bytes_appends_a_pointer_not_pixels() {
+        let label = |name: &str| format!("<tool_image path=\"/tmp/{name}\"/>");
+        let mut hm = HistoryManager::new(1_000_000);
         hm.set_protocol_type(ProtocolType::OpenAI);
-        let mut image_message =
-            ChatMessage::user_multimodal("<tool_image path=\"/tmp/first.png\"/>", vec![image]);
-        image_message.name = Some("tool_image".into());
-        hm.append(image_message);
-        let before = hm.token_count();
-        assert_eq!(hm.reclaim_image_parts_over_budget(12_000), 0);
-        assert_eq!(hm.reclaim_image_parts_over_budget(12_000), 0);
-        assert!(hm.token_count() >= before);
+
+        let first =
+            hm.append_tool_image(label("shot.png"), vec![sized_image(1568, 1176, "SAME")], 218_000);
+        assert_eq!(first.appended, 1);
+        assert_eq!(first.deduped, 0);
+        // The message states its own price, in the same units as the budget.
         assert!(
             hm.messages()[0]
-                .content_parts
-                .as_ref()
-                .unwrap()
-                .iter()
-                .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
+                .content
+                .contains("image cost: 1 image \u{2248} 765 tokens"),
+            "{}",
+            hm.messages()[0].content
+        );
+        let tokens_after_first = hm.token_count();
+
+        // Same bytes, same detail → the model already has these pixels above.
+        let second =
+            hm.append_tool_image(label("copy.png"), vec![sized_image(1568, 1176, "SAME")], 218_000);
+        assert_eq!(second.appended, 0, "the pixels must not be sent twice");
+        assert_eq!(second.deduped, 1);
+        assert!(
+            hm.messages()[1]
+                .content
+                .contains("identical to pixels already in this conversation"),
+            "the model has to be told where the pixels are: {}",
+            hm.messages()[1].content
+        );
+        assert!(hm.messages()[1].content_parts.is_none());
+
+        // The second append costs its label and nothing else — two orders of
+        // magnitude cheaper than the 765-token duplicate it replaced.
+        assert!(
+            hm.token_count() - tokens_after_first < 100,
+            "duplicate read cost {} tokens",
+            hm.token_count() - tokens_after_first
+        );
+
+        // A different payload is a different image and travels normally.
+        let third =
+            hm.append_tool_image(label("other.png"), vec![sized_image(1568, 1176, "OTHER")], 218_000);
+        assert_eq!(third.appended, 1);
+        assert_eq!(third.deduped, 0);
+    }
+
+    /// Levels 1-4 keep every user message, so an image message never leaves the
+    /// transcript - but its *pixels* do not all have to come along. The newest
+    /// picture stays byte-for-byte; older ones become their label, the same trade
+    /// the round scanner makes for tool results.
+    #[test]
+    fn compaction_folds_old_pictures_and_keeps_the_newest_pixels() {
+        let mut hm = HistoryManager::new(1_000_000);
+        hm.set_protocol_type(ProtocolType::OpenAI);
+        hm.append(make_message(MessageRole::System, "sys"));
+        hm.append(ChatMessage::user("start"));
+        hm.append_tool_image(
+            "<tool_image path=\"/tmp/old.png\"/>".into(),
+            vec![sized_image(512, 512, "OLD")],
+            218_000,
+        );
+        hm.append(ChatMessage::assistant("I can see the old shot"));
+        hm.append_tool_image(
+            "<tool_image path=\"/tmp/new.png\"/>".into(),
+            vec![sized_image(512, 512, "NEW")],
+            218_000,
+        );
+        hm.append(ChatMessage::user("now what?"));
+        hm.append(ChatMessage::assistant("answer"));
+
+        let history_tokens = hm.token_count();
+        let plan = hm.build_level_plan(1, hm.messages(), "Summary Q1");
+
+        // Exactly one message still carries pixels, and it is the newest one.
+        let with_pixels: Vec<&ChatMessage> = plan
+            .retained
+            .iter()
+            .filter(|m| image_context::carries_image(m))
+            .collect();
+        assert_eq!(with_pixels.len(), 1, "one working set, not a museum");
+        assert!(with_pixels[0].content.contains("/tmp/new.png"));
+
+        // The older one survives as its label plus an explicit note.
+        let folded = plan
+            .retained
+            .iter()
+            .find(|m| m.content.contains("/tmp/old.png"))
+            .expect("the older reference stays in the transcript");
+        assert!(folded.content_parts.is_none());
+        assert!(folded.content.contains("pixels removed by compaction"));
+        assert!(folded.content.contains("image_read"));
+
+        // Which is the point: the plan is cheaper than the history it replaces.
+        assert!(
+            plan.retained_tokens < history_tokens,
+            "retained {} vs {}",
+            plan.retained_tokens,
+            history_tokens
+        );
+        // Nothing left the transcript wholesale, so nothing needs restating.
+        assert!(plan.image_refs.is_empty());
+    }
+
+    /// Level 5 is the floor: system + the last user message. It keeps the newest
+    /// picture too, and every image that does leave is named in the marker - the
+    /// model must not wake up blind to a task it was doing.
+    #[test]
+    fn level5_keeps_the_newest_picture_and_names_the_rest() {
+        let mut hm = HistoryManager::new(1_000_000);
+        hm.set_protocol_type(ProtocolType::OpenAI);
+        hm.append(make_message(MessageRole::System, "sys"));
+        hm.append(ChatMessage::user("start"));
+        hm.append_tool_image(
+            "<tool_image path=\"/tmp/old.png\"/>".into(),
+            vec![sized_image(512, 512, "OLD")],
+            218_000,
+        );
+        hm.append(ChatMessage::assistant("I can see the old shot"));
+        hm.append(ChatMessage::user("keep going"));
+        hm.append_tool_image(
+            "<tool_image path=\"/tmp/editing.png\"/>".into(),
+            vec![sized_image(512, 512, "EDITING")],
+            218_000,
+        );
+        hm.append(ChatMessage::assistant("working on it"));
+
+        let plan = hm.build_level_plan(5, hm.messages(), "Summary Q1");
+        assert_eq!(plan.level, 5);
+
+        let with_pixels: Vec<&ChatMessage> = plan
+            .retained
+            .iter()
+            .filter(|m| image_context::carries_image(m))
+            .collect();
+        assert_eq!(with_pixels.len(), 1);
+        assert!(with_pixels[0].content.contains("/tmp/editing.png"));
+
+        // The dropped picture is named, the kept one is not (no double bookkeeping).
+        assert!(plan.image_refs.iter().any(|r| r.contains("/tmp/old.png")));
+        assert!(!plan.image_refs.iter().any(|r| r.contains("/tmp/editing.png")));
+
+        hm.set_max_tokens(plan.projected_tokens);
+        let applied = hm
+            .apply_compression(plan, "Summary Q1", 0.0)
+            .expect("level 5 fits by construction");
+        assert_eq!(applied.level, 5);
+
+        let marker = hm
+            .messages()
+            .iter()
+            .find(|m| m.name.as_deref() == Some(COMPACTION_SUMMARY_NAME))
+            .expect("the summary marker is in the transcript");
+        // It sits right after the leading system block, never before it.
+        assert_eq!(hm.messages()[0].role, MessageRole::System);
+        assert!(marker.content.contains("Summary Q1"));
+        assert!(marker.content.contains("/tmp/old.png"), "{}", marker.content);
+        assert!(marker.content.contains("re-read one with image_read"));
+        assert!(!marker.content.contains("/tmp/editing.png"), "{}", marker.content);
+    }
+
+    /// ADR-060: an append must not change a single byte *before* the append
+    /// point, because that is the whole basis of prompt-prefix caching. This is
+    /// the property the retired image reclaim violated (it deleted parts out of
+    /// the middle of history before every round); it is asserted here so that
+    /// the next in-place rewrite has to break a test, not just a review.
+    #[test]
+    fn appending_never_rewrites_an_earlier_message() {
+        let mut hm = HistoryManager::new(1_000_000);
+        hm.set_protocol_type(ProtocolType::OpenAI);
+        hm.append(make_message(MessageRole::System, "sys"));
+        hm.append(ChatMessage::user("look at this"));
+        hm.append_tool_image(
+            "<tool_image path=\"/tmp/a.png\"/>".into(),
+            vec![sized_image(64, 64, "AAA")],
+            218_000,
+        );
+        let before: Vec<String> = hm
+            .messages()
+            .iter()
+            .map(|m| serde_json::to_string(m).expect("message serializes"))
+            .collect();
+
+        // A full round later: an assistant turn, the *same* file again, a new turn.
+        hm.append(ChatMessage::assistant("I see it"));
+        hm.append_tool_image(
+            "<tool_image path=\"/tmp/a.png\"/>".into(),
+            vec![sized_image(64, 64, "AAA")],
+            218_000,
+        );
+        hm.append(ChatMessage::user("and now"));
+
+        for (index, snapshot) in before.iter().enumerate() {
+            assert_eq!(
+                &serde_json::to_string(&hm.messages()[index]).expect("message serializes"),
+                snapshot,
+                "message {index} was rewritten by a later append"
+            );
+        }
+
+        // Re-reading the same bytes appends a reference, not pixels.
+        let reread = &hm.messages()[4];
+        assert!(
+            reread.content_parts.is_none(),
+            "identical bytes must not be sent twice"
+        );
+        assert!(
+            reread.content.contains("already in this conversation"),
+            "{}",
+            reread.content
         );
     }
 
+    /// The marker projection and the marker writer must agree about the image
+    /// footer: the footer is part of the prompt, so it is part of the price.
     #[test]
-    fn image_budget_reclaims_oldest_parts_but_keeps_path_labels() {
-        let mut hm = HistoryManager::new(100_000);
-        hm.set_protocol_type(ProtocolType::OpenAI);
-        let mut old_image = ChatMessage::user_multimodal(
-            "<tool_image path=\"/tmp/old.png\"/>",
-            vec![sized_image(512, 512, "OLD")],
+    fn the_marker_projection_prices_the_footer_the_writer_adds() {
+        let hm = HistoryManager::new(1_000_000);
+        let refs: Vec<String> = (0..5)
+            .map(|i| format!("<tool_image path=\"/tmp/shot-{i}.png\"/>"))
+            .collect();
+        let footer = image_reference_footer(&refs);
+        assert!(!footer.is_empty());
+        assert_eq!(
+            with_image_reference_footer("body", &refs),
+            format!("body{footer}")
         );
-        old_image.name = Some("tool_image".into());
-        hm.append(old_image);
-        hm.append(ChatMessage::assistant("continue"));
-        let mut new_image = ChatMessage::user_multimodal(
-            "<tool_image path=\"/tmp/new.png\"/>",
-            vec![sized_image(512, 512, "NEW")],
-        );
-        new_image.name = Some("tool_image".into());
-        hm.append(new_image);
-        let old_tokens = hm.token_count();
 
-        assert_eq!(hm.reclaim_image_parts_over_budget(300), 1);
-        assert!(hm.messages()[0].content.contains("/tmp/old.png"));
-        assert!(hm.messages()[0].content_parts.is_none());
-        assert!(hm.messages()[2].content.contains("/tmp/new.png"));
-        assert!(
-            hm.messages()[2]
-                .content_parts
-                .as_ref()
-                .unwrap()
-                .iter()
-                .any(|part| matches!(part, ContentPart::ImageUrl { .. }))
+        let priced_with_footer = hm.estimate_marker_tokens("body", &refs);
+        let priced_without = hm.estimate_marker_tokens("body", &[]);
+        assert_eq!(
+            priced_with_footer - priced_without,
+            crate::token::count_text(&footer) as u64,
+            "the footer must be priced in full"
         );
-        assert!(hm.token_count() < old_tokens);
-        assert_eq!(hm.reclaim_image_parts_over_budget(300), 0);
+    }
+
+    /// The cap keeps the *newest* addresses: a session that read twenty-five
+    /// files wants the last five again, not the first five.
+    #[test]
+    fn the_footer_keeps_the_newest_addresses_and_drops_the_oldest() {
+        let refs: Vec<String> = (0..MAX_SUMMARY_IMAGE_REFS + 5)
+            .map(|i| format!("<tool_image path=\"/tmp/shot-{i}.png\"/>"))
+            .collect();
+        let footer = image_reference_footer(&refs);
+        assert_eq!(
+            footer
+                .lines()
+                .filter(|line| line.starts_with("<tool_image"))
+                .count(),
+            MAX_SUMMARY_IMAGE_REFS
+        );
+        assert!(footer.contains(&format!("shot-{}.png", MAX_SUMMARY_IMAGE_REFS + 4)));
+        assert!(!footer.contains("shot-0.png"));
     }
 
     #[test]
@@ -3933,7 +4313,7 @@ mod tests {
             assistant_desc: "last 5".to_string(),
             tool_desc: "within last 5 assistants".to_string(),
         };
-        let marker = build_summary_marker(3, 1000, 400, 0.6, &stats, "body summary");
+        let marker = build_summary_marker(3, 1000, 400, 0.6, &stats, "body summary", &[]);
         assert!(marker.starts_with("[compressed: level=3]\n"));
         assert!(marker.contains("user_messages: all (7)"));
         assert!(marker.contains("assistant_messages: last 5 (5)"));

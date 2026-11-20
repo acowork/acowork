@@ -13,7 +13,7 @@
 //! they cause the debug panel and status panel to show contradictory numbers.
 pub mod counter;
 
-pub use counter::{TokenCounter, estimate_image_tokens};
+pub use counter::{TokenCounter, estimate_image_tokens, provider_input_dimensions};
 
 /// The single unified entry point for token counting in ACowork.
 ///
