@@ -6,16 +6,18 @@ import { useCallback, useRef, useState } from "react";
  *
  * The bottom toolbar row (model / reasoning / workspace / skills buttons +
  * an icon-only right cluster) must keep all buttons non-overlapping when
- * the panel width narrows. We measure each button's full width vs. its
- * icon-only width and greedily fold labels — starting from the leftmost
- * button and moving rightward — until the row fits.
+ * the panel width narrows. Folding runs left → right: while the row is too
+ * narrow for every label, drop the leftmost remaining label back to its icon,
+ * measure again, and repeat — a folded button shows its icon only, no chevron.
  *
  * DOM contract (provided by `ToolbarDropdownTrigger` and the host toolbar):
  *  - the toolbar container is the element the returned ref is attached to;
  *  - each foldable button wrapper carries `data-toolbar-btn="<id>"`;
  *  - inside it, the label span carries `data-toolbar-text` and the chevron
  *    carries `data-toolbar-chevron`;
- *  - the icon-only right cluster carries `data-toolbar-cluster="right"`.
+ *  - the foldable cluster carries `data-toolbar-cluster="left"` and the
+ *    icon-only cluster `data-toolbar-cluster="right"` (measured, not counted,
+ *    so adding a button needs no change here).
  *
  * Returns `{ setToolbarRef, textHidden }`:
  *  - `setToolbarRef` — attach to the toolbar div as a ref callback;
@@ -92,19 +94,20 @@ export function useToolbarCollapse(): {
           id: el.dataset.toolbarBtn as string,
           text: el.querySelector<HTMLElement>("[data-toolbar-text]"),
           chev: el.querySelector<HTMLElement>("[data-toolbar-chevron]"),
-          // icon-only width (text hidden) — measured first so it's stable.
-          iconWidth: el.offsetWidth,
         }));
 
-        // Reveal all text/chevron to read true full widths.
-        spans.forEach(({ text, chev }) => {
-          if (text) text.style.display = "";
-          if (chev) chev.style.display = "";
-        });
-        const fullWidths = els.map((el) => el.offsetWidth);
+        const setText = (i: number, display: "" | "none") => {
+          const { text, chev } = spans[i];
+          if (text) text.style.display = display;
+          if (chev) chev.style.display = display;
+        };
 
-        const GAP = 4;
-        const totalGaps = (els.length - 1) * GAP;
+        const leftCluster = node.querySelector<HTMLElement>(
+          '[data-toolbar-cluster="left"]',
+        );
+        // No left cluster, no measurable row: bail and let the observers
+        // schedule another pass once the toolbar is actually mounted.
+        if (!leftCluster) return;
 
         // Layout constants: container padding (px-3 = 12px each side),
         // gap-2 between the left cluster and right cluster.
@@ -124,30 +127,46 @@ export function useToolbarCollapse(): {
         // tick re-measures. Upgrade: hoist this into a ResizeObserver
         // on the right cluster itself so it never races.
         const RIGHT_CLUSTER_W = rightCluster?.offsetWidth ?? 0;
-        const available = node.offsetWidth - PAD_X - FLEX_GAP - RIGHT_CLUSTER_W;
+        // `offsetWidth` is integer-rounded on both sides, so a row measured
+        // "exactly fitting" can still be a pixel or two over. The slack
+        // makes the fold fire slightly BEFORE the squeeze would start, which
+        // is where the labels go to zero and the chevron is left stranded.
+        const SLACK = 4;
+        const available =
+          node.offsetWidth - PAD_X - FLEX_GAP - RIGHT_CLUSTER_W - SLACK;
 
-        // Progressive collapse from LEFT to RIGHT (matches the
-        // documented product behavior: model hides first, then effort,
-        // then ws, then sk — preserving the rightmost buttons, which
-        // are usually the most context-relevant).
+        // Progressive collapse from LEFT to RIGHT (the product rule: model
+        // hides first, then effort, then ws, then sk — the rightmost, usually
+        // most context-relevant buttons survive longest).
         //
-        //   1. Start with all buttons fully visible.
-        //   2. If totalFull > available, fold the leftmost button.
-        //   3. Recheck; if still overflowing, fold the next leftmost.
-        //   4. Stop when it fits OR every button is folded.
+        // Each step is a REAL measurement, not a prediction: fold the
+        // leftmost button, read the row again, fold the next one if it still
+        // does not fit, and stop when it fits or every button is folded.
         //
-        // Folding a button changes total width by exactly
-        // (fullWidth - iconWidth) — the button stays in the row, its
-        // trailing gap-1 to the next button is unchanged.
-        const fold = foldLeftToRight(fullWidths, spans.map((s) => s.iconWidth), available, totalGaps);
+        // The read has to happen in a layout that CANNOT squeeze. The trigger
+        // chain is shrinkable by design (`min-w-0 truncate`, see
+        // ToolbarDropdown.shrink.test.tsx), so an over-full row truncates the
+        // labels — `Me…`, `ACowo…` — instead of overflowing, and every button
+        // then reports its truncated width: the fold never fires and the row
+        // sits there with half a label and a stranded chevron. `min-width:
+        // max-content` on the left cluster forces its labels to their whole
+        // width, so a deficit shows up as an overflowing row that the fold can
+        // actually see. Restored before this frame paints — never visible.
+        spans.forEach((_, i) => setText(i, ""));
+        leftCluster.style.minWidth = "max-content";
+
+        const fold = spans.map(() => false);
+        for (let i = 0; i < els.length; i++) {
+          if (leftCluster.offsetWidth <= available) break;
+          fold[i] = true;
+          setText(i, "none");
+        }
+
+        leftCluster.style.minWidth = "";
 
         // Apply visibility to DOM synchronously (user sees correct
         // layout this frame), THEN sync React state.
-        spans.forEach(({ text, chev }, i) => {
-          const display = fold[i] ? "none" : "";
-          if (text) text.style.display = display;
-          if (chev) chev.style.display = display;
-        });
+        spans.forEach((_, i) => setText(i, fold[i] ? "none" : ""));
 
         setTextHidden((prev) => {
           let changed = false;
@@ -215,24 +234,4 @@ export function useToolbarCollapse(): {
   }, []);
 
   return { setToolbarRef, textHidden };
-}
-
-/**
- * The greedy fold math, extracted pure so it can be unit-tested without a
- * DOM. Returns, per button (left → right), whether its label folds.
- */
-export function foldLeftToRight(
-  fullWidths: number[],
-  iconWidths: number[],
-  available: number,
-  totalGaps: number,
-): boolean[] {
-  const fold = new Array<boolean>(fullWidths.length).fill(false);
-  let current = fullWidths.reduce((a, b) => a + b, 0) + totalGaps;
-  for (let i = 0; i < fullWidths.length; i++) {
-    if (current <= available) break;
-    fold[i] = true;
-    current -= fullWidths[i] - iconWidths[i];
-  }
-  return fold;
 }

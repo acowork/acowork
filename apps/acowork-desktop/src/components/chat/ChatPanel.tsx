@@ -2782,7 +2782,10 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
             className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]"
           >
             {/* Left: feature buttons */}
-            <div className="flex items-center gap-1 min-w-0 overflow-visible">
+            <div
+              data-toolbar-cluster="left"
+              className="flex items-center gap-1 min-w-0 overflow-visible"
+            >
               {/* `+` menu — one trigger for everything the message can carry:
                   skills, MCP server / tool switches, builtin tool switches and
                   attachments. Replaces the former standalone skills dropdown
