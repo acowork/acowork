@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useMemo, useRef, lazy, Suspense } from "react";
+import { useState, useCallback, useEffect, useLayoutEffect, useMemo, useRef, lazy, Suspense } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import type { NavView } from "../../lib/types";
 import { NavBar } from "./NavBar";
@@ -70,7 +70,8 @@ import { ChunkLoadBoundary } from "../common/ErrorBoundary";
 import { log } from "../../lib/logger";
 // Pane floors and the overflow ladder live in panelClamp.ts so the drag
 // ceiling, the effect below and the tests all rank the same numbers.
-import { MIN_CHAT_WIDTH, MIN_FILE_WIDTH, MIN_RIGHT_WIDTH, clampFileWidth, filePaneCeiling, fitPanesToViewport, initialFileWidth } from "./panelClamp";
+import { MIN_FILE_WIDTH, MIN_RIGHT_WIDTH, clampFileWidth, filePaneCeiling, fitPanesToViewport, initialFileWidth, sharedFilePaneWidth } from "./panelClamp";
+import { initFilePanelAutoState, reduceFilePanelAuto } from "./filePanelAutoCollapse";
 
 /** Settings tab type — keep in sync with SettingsPage */
 type SettingsTab = "gateway" | "appearance" | "general" | "profile";
@@ -170,11 +171,50 @@ export function AppLayout() {
   // the mount / first-open paths guessing "right panel collapsed ⇒ it costs
   // nothing" — a narrower bound than the drag path, for the same policy.
   const selectedAgentId = useAgentStore((s) => s.selectedAgentId);
+  const activeGroupId = useProjectGroupStore((s) => s.activeGroupId);
+  // A `user_user` pair (the smallest group) renders through GroupChatPanel but
+  // has no members surface to manage — hide the group right-panel / settings
+  // tile for it and keep the 40px rail as an empty placeholder.
+  const activeIsDm = useProjectGroupStore(
+    (s) => s.activeGroupId != null && s.dms.some((d) => d.session_id === s.activeGroupId),
+  );
   // Width the right panel actually occupies in the chat-view row. Mirrors the
-  // render condition on `<RightPanel>` below (`!rightPanelCollapsed &&
-  // selectedAgentId`) — counting it while it is not mounted would clamp the
+  // render conditions on `<RightPanel>` / `<GroupMembersPanel>` below
+  // (`!rightPanelCollapsed && (selectedAgentId || (activeGroupId &&
+  // !activeIsDm))`) — counting it while it is not mounted would clamp the
   // file pane against ~340px that nothing is using.
-  const rightPaneWidth = !rightPanelCollapsed && selectedAgentId ? rightWidth : 0;
+  const rightSlotOccupied = !!selectedAgentId || (!!activeGroupId && !activeIsDm);
+  const rightPaneWidth = !rightPanelCollapsed && rightSlotOccupied ? rightWidth : 0;
+
+  // ── Live window width ────────────────────────────────────────────────
+  // The cluster is positioned absolutely inside the global bar with
+  // `right: ${windowW - bounds.right}px`, so we need the live window width
+  // in pixels. Tauri webviews fire `resize` on the window object (not just
+  // `window` resize) — we listen on both. Throttled with `requestAnimationFrame`
+  // to keep drag-to-resize cheap.
+  //
+  // It is resolved HERE, above the pane widths, because the fair split
+  // between the file pane and the chat pane is a function of it.
+  const [windowWidth, setWindowWidth] = useState<number>(
+    () => (typeof window !== "undefined" ? window.innerWidth : 0),
+  );
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    let rafId: number | null = null;
+    const schedule = () => {
+      if (rafId !== null) return;
+      rafId = requestAnimationFrame(() => {
+        rafId = null;
+        setWindowWidth(window.innerWidth);
+      });
+    };
+    window.addEventListener("resize", schedule);
+    return () => {
+      window.removeEventListener("resize", schedule);
+      if (rafId !== null) cancelAnimationFrame(rafId);
+    };
+  }, []);
+
   const [fileWidth, setFileWidth] = useState(() => {
     if (typeof window === "undefined") return DEFAULT_FILE_WIDTH;
     return initialFileWidth({
@@ -185,6 +225,100 @@ export function AppLayout() {
   });
   const hasOpenFiles = useFileEditorStore((s) => s.openFiles.length > 0);
   const fileWidthInitialized = useRef(false);
+
+  // ── The file pane's width: a fair split with the chat pane ───────────
+  // The file pane and the chat pane sit side by side and SHARE the row.
+  // ChatPanel is `flex-1` and the file pane is `shrink-0` with a fixed
+  // width, so whatever the file pane does not take, the chat pane gets.
+  //
+  // The first attempt at the auto-collapse feature lent the right panel's
+  // width to the file pane (`fileWidth += panelWidth`). That was wrong: the
+  // file pane was then as wide as it could possibly be, which pushed the
+  // chat pane onto its 338px floor and made the conversation unreadable —
+  // the opposite of "give the file tab room". The reader's ask is a fair
+  // SPLIT: the two panes each take half of what they share.
+  //
+  // So the rendered width is DERIVED from the row's budget
+  // (`sharedFilePaneWidth`), not from a transfer. The reader's drag still
+  // wins: a drag is a recorded intent, and the split is only the default
+  // for a pane that was never sized by hand.
+  //
+  // `filePaneUserSized` is that "sized by hand" flag. It is STATE, not a
+  // ref: it decides which width the pane renders with, so a change to it
+  // has to re-render the layout.
+  //
+  // It starts FALSE even when a width was recorded: the recorded width was
+  // chosen against a DIFFERENT layout (before the panel folded, or on a
+  // different window), and restoring it silently overrode the split — which
+  // is why the split appeared to do nothing. The split is the default; a
+  // width recorded under the old rule only becomes the reader's choice again
+  // when they drag the pane themselves.
+  const [filePaneUserSized, setFilePaneUserSized] = useState(false);
+  /** The fair split of the row the file pane and the chat pane share. */
+  const splitFileWidth = sharedFilePaneWidth({
+    windowWidth: window.innerWidth,
+    sidebarWidth,
+    rightWidth: rightPaneWidth,
+  });
+  /**
+   * The width the file pane actually renders with.
+   *
+   * The reader's own width when they have sized the pane, the fair split
+   * otherwise. The split tracks the row, so it follows the window and the
+   * right panel as they change — which is what makes the collapse give the
+   * space back without the pane jumping to its maximum.
+   */
+  const renderedFileWidth = filePaneUserSized ? fileWidth : splitFileWidth;
+
+  // Ref mirrors of the two, for the code that runs outside React's render:
+  // the window-resize handler reads them from a listener closure, and the
+  // drag reads the width it starts from.
+  const fileWidthRef = useRef(fileWidth);
+  fileWidthRef.current = fileWidth;
+  const filePaneUserSizedRef = useRef(filePaneUserSized);
+  filePaneUserSizedRef.current = filePaneUserSized;
+
+  // ── The file pane borrows the right panel's width ────────────────────
+  // A file tab appearing folds the right panel away, so the file pane gets
+  // the width the panel was taking; closing the last file gives it back.
+  //
+  // The rule lives in `filePanelAutoCollapse.ts` as a pure reducer: it is
+  // edge-triggered (a level-triggered rule would collapse the panel again
+  // the moment the reader opened it by hand), it distinguishes OUR fold from
+  // the reader's own click, and it never touches the selected tab.
+  //
+  // The reducer's state is a ref, not React state: this effect must not
+  // re-render the layout on its own, and the layout is already re-rendering
+  // whenever either input changes.
+  const fileAutoStateRef = useRef(
+    initFilePanelAutoState(!useLayoutStore.getState().rightPanelCollapsed),
+  );
+  // A LAYOUT effect, not a passive one: the fold must land in the same
+  // frame the file pane appears. A passive effect would let the browser
+  // paint one frame with BOTH the panel and the file pane — the exact
+  // squeeze this feature exists to remove.
+  useLayoutEffect(() => {
+    const prev = fileAutoStateRef.current;
+    const decision = reduceFilePanelAuto(prev, { type: "files", hasFiles: hasOpenFiles });
+    fileAutoStateRef.current = decision.state;
+    if (decision.action.kind === "collapse") {
+      setRightPanelCollapsed(true);
+    } else if (decision.action.kind === "expand") {
+      setRightPanelCollapsed(false);
+    }
+  }, [hasOpenFiles, setRightPanelCollapsed]);
+
+  // The reader's own moves of the panel: they decide what the file pane
+  // gives back. Without this the echo of our own fold would be read as the
+  // reader collapsing it by hand, and the restore would be cancelled.
+  useLayoutEffect(() => {
+    const prev = fileAutoStateRef.current;
+    const decision = reduceFilePanelAuto(prev, {
+      type: "panel",
+      expanded: !rightPanelCollapsed,
+    });
+    fileAutoStateRef.current = decision.state;
+  }, [rightPanelCollapsed]);
 
   // [DEBUG] Mount diagnostic — print state immediately after webview reload
   const mountLoggedRef = useRef(false);
@@ -228,8 +362,6 @@ export function AppLayout() {
   // user keeps it running; stop / start is the only transition.
 
   // Refs to track latest panel widths for proportional window-resize scaling
-  const fileWidthValueRef = useRef(fileWidth);
-  fileWidthValueRef.current = fileWidth;
   const sidebarWidthRef = useRef(sidebarWidth);
   sidebarWidthRef.current = sidebarWidth;
   const rightWidthRef = useRef(rightWidth);
@@ -248,7 +380,12 @@ export function AppLayout() {
   //
   // Nothing is written back here: the key records *user intent*, and an
   // auto-sized width is not a decision the user made. Only the drag persists.
-  useEffect(() => {
+  //
+  // This seeds the pane's OWN width — the one a drag would move. The width
+  // the pane RENDERS with is `renderedFileWidth`, which is the fair split
+  // until the reader sizes the pane by hand. So this effect no longer
+  // decides what the reader sees; it only restores a recorded intent.
+  useLayoutEffect(() => {
     if (hasOpenFiles && !fileWidthInitialized.current) {
       fileWidthInitialized.current = true;
       const ceiling = filePaneCeiling({ windowWidth: window.innerWidth, sidebarWidth, rightWidth: rightPaneWidth });
@@ -256,16 +393,15 @@ export function AppLayout() {
         initialFileWidth({
           storedWidth: readStoredFileWidth(),
           ceiling,
-          // `ceiling + MIN_CHAT_WIDTH` is exactly the budget the pane shares
-          // with ChatPanel; halving it keeps neither surface at its floor.
-          fallbackWidth: (ceiling + MIN_CHAT_WIDTH) / 2,
+          // The fair split, floored by the pane's own minimum.
+          fallbackWidth: splitFileWidth,
         }),
       );
     }
     if (!hasOpenFiles) {
       fileWidthInitialized.current = false;
     }
-  }, [hasOpenFiles, sidebarWidth, rightPaneWidth]);
+  }, [hasOpenFiles, sidebarWidth, rightPaneWidth, splitFileWidth]);
 
   const gatewayStatus = useGatewayStore((s) => s.status);
   const gatewayAlive = useGatewayStore((s) => s.gatewayAlive);
@@ -363,29 +499,6 @@ export function AppLayout() {
 
   // ── Window width tracking ────────────────────────────────────────────
   // The cluster is positioned absolutely inside the global bar with
-  // `right: ${windowW - bounds.right}px`, so we need the live window width
-  // in pixels. Tauri webviews fire `resize` on the window object (not just
-  // `window` resize) — we listen on both. Throttled with `requestAnimationFrame`
-  // to keep drag-to-resize cheap.
-  const [windowWidth, setWindowWidth] = useState<number>(
-    () => (typeof window !== "undefined" ? window.innerWidth : 0),
-  );
-  useEffect(() => {
-    if (typeof window === "undefined") return;
-    let rafId: number | null = null;
-    const schedule = () => {
-      if (rafId !== null) return;
-      rafId = requestAnimationFrame(() => {
-        rafId = null;
-        setWindowWidth(window.innerWidth);
-      });
-    };
-    window.addEventListener("resize", schedule);
-    return () => {
-      window.removeEventListener("resize", schedule);
-      if (rafId !== null) cancelAnimationFrame(rafId);
-    };
-  }, []);
   // Determine if selected agent is in debug mode.
   // ADR-048 follow-up: key off `debug_state` (current capability), not
   // `dev_mode` (startup intent) — DevMode can be flipped on at runtime
@@ -397,14 +510,8 @@ export function AppLayout() {
   const isDebugMode = selectedAgent?.debug_state === "enabled" && selectedAgent?.alive;
   // Middle-panel routing: agent session wins; otherwise an open group / DM
   // chat session takes the pane. An explicit empty state at the bottom
-  // handles "neither".
-  const activeGroupId = useProjectGroupStore((s) => s.activeGroupId);
-  // A `user_user` pair (the smallest group) renders through GroupChatPanel but
-  // has no members surface to manage — hide the group right-panel / settings
-  // tile for it and keep the 40px rail as an empty placeholder.
-  const activeIsDm = useProjectGroupStore(
-    (s) => s.activeGroupId != null && s.dms.some((d) => d.session_id === s.activeGroupId),
-  );
+  // handles "neither". (`activeGroupId` / `activeIsDm` are resolved further
+  // up, next to the right-pane width they feed.)
 
   // ── Right-side hover drawer ───────────────────────────────────────────
   // Hovering a collapsed right rail previews its panel as an overlay, so a
@@ -971,10 +1078,15 @@ export function AppLayout() {
 
       // Scale the file panel by the available-space ratio; ChatPanel (flex-1) gets the rest.
       // This preserves the same proportion of file vs session within the available space.
+      //
+      // Only a pane the reader sized by hand is scaled. A pane on the fair
+      // split needs no scaling: the split is a function of the window width,
+      // so it already followed the resize — scaling it too would move it
+      // away from the split.
       const hasFiles = useFileEditorStore.getState().openFiles.length > 0;
-      if (hasFiles) {
+      if (hasFiles && filePaneUserSizedRef.current) {
         const newFile = clampFileWidth(
-          fileWidthValueRef.current * ratio,
+          fileWidthRef.current * ratio,
           filePaneCeiling({
             windowWidth: newWindowWidth,
             sidebarWidth: sidebarWidthRef.current,
@@ -1004,10 +1116,10 @@ export function AppLayout() {
   // converges rather than oscillating.
   useEffect(() => {
     if (!hasOpenFiles || !windowWidth) return;
-    const fit = fitPanesToViewport({ windowWidth, sidebarWidth, fileWidth, rightWidth: rightPaneWidth });
-    if (fit.fileWidth !== fileWidth) setFileWidth(fit.fileWidth);
+    const fit = fitPanesToViewport({ windowWidth, sidebarWidth, fileWidth: renderedFileWidth, rightWidth: rightPaneWidth });
+    if (fit.fileWidth !== renderedFileWidth) setFileWidth(fit.fileWidth);
     if (fit.rightWidth !== rightPaneWidth) setRightWidth(fit.rightWidth);
-  }, [windowWidth, sidebarWidth, fileWidth, rightPaneWidth, hasOpenFiles]);
+  }, [windowWidth, sidebarWidth, renderedFileWidth, rightPaneWidth, hasOpenFiles]);
 
   const toggleRightPanel = useCallback(() => {
     setRightPanelCollapsed((prev) => !prev);
@@ -1166,7 +1278,10 @@ export function AppLayout() {
     const newWidth = clampFileWidth(startWidthFile.current - delta, maxFileWidthRef.current);
     currentWidthRefFile.current = newWidth;
     setFileWidth(newWidth);
-  }, []);
+    // A drag is the reader sizing the pane by hand. From here on their width
+    // wins over the fair split — the split is the DEFAULT, not a ceiling.
+    setFilePaneUserSized(true);
+  }, [setFilePaneUserSized]);
 
   const handleMouseUpFile = useCallback(() => {
     if (!isResizingFile.current) return;
@@ -1174,6 +1289,9 @@ export function AppLayout() {
     document.body.style.userSelect = '';
     document.removeEventListener("mousemove", handleMouseMoveFile);
     document.removeEventListener("mouseup", handleMouseUpFile);
+    // Persist the reader's OWN width. The pixels the right panel lent to the
+    // file pane are on loan, not a choice: recording them would restore a
+    // pane wider than the reader ever dragged it, on the next first open.
     localStorage.setItem(FILE_WIDTH_KEY, String(currentWidthRefFile.current));
   }, [handleMouseMoveFile]);
 
@@ -1182,8 +1300,10 @@ export function AppLayout() {
     document.body.style.userSelect = 'none';
     isResizingFile.current = true;
     startXFile.current = e.clientX;
-    startWidthFile.current = fileWidth;
-    currentWidthRefFile.current = fileWidth;
+    // The drag starts from the width the pane is RENDERED with: the fair
+    // split until the reader sizes it, and their own width afterwards.
+    startWidthFile.current = renderedFileWidth;
+    currentWidthRefFile.current = renderedFileWidth;
     // Ceiling for the drag: whatever the row can spare once ChatPanel has its
     // floor — the same function the overflow ladder agrees with (that
     // equivalence is asserted in panelClamp.test.ts), so a drag can no longer
@@ -1191,7 +1311,7 @@ export function AppLayout() {
     maxFileWidthRef.current = filePaneCeiling({ windowWidth, sidebarWidth, rightWidth: rightPaneWidth });
     document.addEventListener("mousemove", handleMouseMoveFile);
     document.addEventListener("mouseup", handleMouseUpFile);
-  }, [handleMouseMoveFile, handleMouseUpFile, fileWidth, sidebarWidth, rightPaneWidth, windowWidth]);
+  }, [handleMouseMoveFile, handleMouseUpFile, renderedFileWidth, sidebarWidth, rightPaneWidth, windowWidth]);
 
   // ── ADR-081: global search shortcut (Ctrl/Cmd+Shift+F) ──────────────
   // Window-level handler so the dialog opens regardless of focus; while the
@@ -1336,11 +1456,11 @@ export function AppLayout() {
                       <div
                         aria-hidden="true"
                         className={cn(CAPSULE_PANE_CN, "shrink-0 bg-right-panel")}
-                        style={{ width: fileWidth }}
+                        style={{ width: renderedFileWidth }}
                       />
                     }
                   >
-                    <FileEditorPanel width={fileWidth} />
+                    <FileEditorPanel width={renderedFileWidth} />
                   </Suspense>
                 </ChunkLoadBoundary>
               </>

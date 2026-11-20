@@ -20,9 +20,9 @@ describe("agentSetupCards", () => {
     expect(open).toEqual(AGENT_SETUP_CARDS.slice(0, DEFAULT_EXPANDED_CARD_COUNT));
   });
 
-  it("starts the cards after the third one collapsed", () => {
+  it("starts the cards after the first one collapsed", () => {
     const collapsed = AGENT_SETUP_CARDS.slice(DEFAULT_EXPANDED_CARD_COUNT);
-    // Guards against the list shrinking to <= 3 entries, which would make the
+    // Guards against the list shrinking to a single entry, which would make the
     // "the rest stay collapsed" half of the rule vacuous.
     expect(collapsed.length).toBeGreaterThan(0);
     for (const id of collapsed) expect(defaultOpenForCard(id)).toBe(false);

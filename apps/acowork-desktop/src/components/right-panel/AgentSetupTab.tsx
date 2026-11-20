@@ -255,7 +255,7 @@ export function AgentSetupTab() {
   // Seven level-1 collapsible cards, all on the one box-card grammar the
   // Status / Memory panels use. The list got this long when the Tools
   // panel's Builtin / MCP cards and the Debug panel's Prompts & Skills
-  // card moved in, so the panel shows the FIRST THREE expanded and starts
+  // card moved in, so the panel shows only the FIRST card expanded and starts
   // the rest collapsed — one rule, stated once in `agentSetupCards.ts`,
   // which also owns the render order. The user can open every card; only
   // the initial value comes from there.

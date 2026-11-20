@@ -129,8 +129,8 @@ export interface InitialFileWidthInput {
  *   - **A width the user dragged to wins.** It is the only recorded intent,
  *     and with the fixed cap gone that intent spans hundreds of pixels, so
  *     silently substituting the default is a visible loss.
- *   - **Otherwise the caller's fallback** — 450 on mount, and half of the row
- *     the pane shares with ChatPanel on a first open.
+ *   - **Otherwise the caller's fallback** — 450 on mount, and the fair split
+ *     below on a first open.
  *
  * Either way the row's ceiling applies last, so restoring a width from a wider
  * window can never reach the overflow ladder's doorstep.
@@ -138,6 +138,49 @@ export interface InitialFileWidthInput {
 export function initialFileWidth({ storedWidth, ceiling, fallbackWidth }: InitialFileWidthInput): number {
   const wanted = storedWidth != null && Number.isFinite(storedWidth) ? storedWidth : fallbackWidth;
   return clampFileWidth(wanted, ceiling);
+}
+
+export interface SharedPaneSplitInput {
+  /** Live viewport width in CSS pixels. */
+  windowWidth: number;
+  /** Width of the agent list on the left. */
+  sidebarWidth: number;
+  /** Width the right panel actually occupies — 0 when it is not rendered. */
+  rightWidth: number;
+}
+
+/**
+ * The fair split between the file pane and the chat pane.
+ *
+ * The two panes sit side by side in the chat-view row and SHARE it: ChatPanel
+ * is `flex-1` and the file pane is `shrink-0` with a fixed width, so whatever
+ * the file pane does not take, the chat pane gets.
+ *
+ * A fair split gives each of them HALF of the width they share. The chat
+ * pane's floor (`MIN_CHAT_WIDTH`) is a floor, not a bonus: it is subtracted
+ * from the shared width only to decide whether a 50/50 split would starve
+ * the chat pane, and the surplus goes back into the split. Subtracting it
+ * and then halving the remainder would leave the chat pane permanently
+ * wider than the file pane by exactly that floor — which is the bug this
+ * function first shipped with.
+ *
+ * Both floors are floors, not targets: when the shared width cannot give
+ * both panes their minimum, the file pane takes what it needs up to its own
+ * floor and the overflow ladder (`fitPanesToViewport`) resolves the rest.
+ */
+export function sharedFilePaneWidth({
+  windowWidth,
+  sidebarWidth,
+  rightWidth,
+}: SharedPaneSplitInput): number {
+  const shared = windowWidth - CHROME_WIDTH - sidebarWidth - rightWidth;
+  // Not enough for both panes at their floors: the file pane takes its
+  // floor and the ladder sorts out the deficit.
+  if (shared < MIN_CHAT_WIDTH + MIN_FILE_WIDTH) return MIN_FILE_WIDTH;
+  // A 50/50 split — but the chat pane's floor wins when half would starve
+  // it, and the file pane's floor wins when half would be below its own.
+  const half = Math.floor(shared / 2);
+  return Math.min(Math.max(half, MIN_FILE_WIDTH), shared - MIN_CHAT_WIDTH);
 }
 
 export interface PaneFitInput {

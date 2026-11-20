@@ -31,6 +31,7 @@ import {
   filePaneCeiling,
   fitPanesToViewport,
   initialFileWidth,
+  sharedFilePaneWidth,
 } from "./panelClamp";
 
 /** Rigid-panes total plus chrome must never exceed the viewport. */
@@ -200,5 +201,73 @@ describe("initialFileWidth", () => {
 
   it("still never goes below the floor", () => {
     expect(initialFileWidth({ storedWidth: 40, ceiling, fallbackWidth: 450 })).toBe(MIN_FILE_WIDTH);
+  });
+});
+
+describe("sharedFilePaneWidth", () => {
+  // The reader's ask: opening a file tab gives the file pane room, but the
+  // chat pane must stay readable — the two panes SHARE the row.
+  //
+  // The bug this replaced: the file pane was lent the right panel's width
+  // on top of what it already had, so it grew to its maximum and pushed the
+  // chat pane onto its 338px floor. The second bug: the chat pane's floor
+  // was subtracted and the REMAINDER halved, so the chat pane stayed wider
+  // than the file pane by exactly 338px — a split that was not a split.
+  it("splits the row evenly between the file pane and the chat pane", () => {
+    // 1920 - 94 chrome - 240 sidebar - 340 right = 1246 shared → 623 each.
+    const w = sharedFilePaneWidth({ windowWidth: 1920, sidebarWidth: 240, rightWidth: 340 });
+    expect(w).toBe(623);
+  });
+
+  it("leaves the chat pane exactly as wide as the file pane", () => {
+    // The chat pane is `flex-1`: it takes whatever the file pane does not.
+    // So the panes are equal exactly when the file pane takes half — which
+    // holds whenever the window is wide enough for both floors.
+    for (const windowWidth of [1568, 1920, 2560]) {
+      const w = sharedFilePaneWidth({ windowWidth, sidebarWidth: 240, rightWidth: 340 });
+      const chat = windowWidth - CHROME_WIDTH - 240 - 340 - w;
+      expect(chat).toBe(w);
+    }
+  });
+
+  it("keeps the chat pane readable when half would starve it", () => {
+    // 1280 - 94 - 240 - 340 = 606 shared; half is 303, which is below the
+    // chat pane's 338 floor. The floor wins: the chat pane stays readable
+    // and the file pane takes what is left.
+    const w = sharedFilePaneWidth({ windowWidth: 1280, sidebarWidth: 240, rightWidth: 340 });
+    const chat = 1280 - CHROME_WIDTH - 240 - 340 - w;
+    expect(chat).toBe(MIN_CHAT_WIDTH);
+    expect(w).toBe(606 - MIN_CHAT_WIDTH);
+  });
+
+  it("does not charge the chat pane's floor to the file pane", () => {
+    // The floor is a FLOOR, not a deduction: the shared width is halved, and
+    // only a split that would starve the chat pane is ruled out below.
+    const shared = 1920 - CHROME_WIDTH - 240 - 340;
+    expect(sharedFilePaneWidth({ windowWidth: 1920, sidebarWidth: 240, rightWidth: 340 }))
+      .toBe(Math.floor(shared / 2));
+  });
+
+  it("never goes below the file pane's own floor", () => {
+    const w = sharedFilePaneWidth({ windowWidth: 700, sidebarWidth: 240, rightWidth: 0 });
+    expect(w).toBe(MIN_FILE_WIDTH);
+  });
+
+  it("gives the file pane MORE room once the right panel is folded away", () => {
+    // The collapse's whole point: the file pane gets half of the panel's
+    // width (the other half goes to the chat pane).
+    const withPanel = sharedFilePaneWidth({ windowWidth: 1920, sidebarWidth: 240, rightWidth: 340 });
+    const withoutPanel = sharedFilePaneWidth({ windowWidth: 1920, sidebarWidth: 240, rightWidth: 0 });
+    expect(withoutPanel).toBeGreaterThan(withPanel);
+    expect(withoutPanel - withPanel).toBe(170);
+  });
+
+  it("keeps the row inside the window", () => {
+    // Whatever the split is, the two panes plus the chrome must fit.
+    for (const windowWidth of [1280, 1600, 1920, 2560]) {
+      const w = sharedFilePaneWidth({ windowWidth, sidebarWidth: 240, rightWidth: 340 });
+      const occupied = CHROME_WIDTH + MIN_CHAT_WIDTH + 240 + w + 340;
+      expect(occupied).toBeLessThanOrEqual(windowWidth);
+    }
   });
 });

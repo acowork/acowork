@@ -457,7 +457,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
           }
         }}
         aria-expanded={expanded}
-        className="flex w-fit items-center gap-2 rounded-md bg-surface/60 px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
+        className="flex w-fit items-center gap-2 rounded-md bg-transparent px-2.5 py-1.5 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
         style={{ fontSize: EXPLORE_FONT_SIZE }}
       >
         <Search className="h-3.5 w-3.5 shrink-0 text-text-tertiary " />
@@ -491,7 +491,7 @@ export const ExploreBlock = React.memo(function ExploreBlock({ items, isStreamin
         <OverlayScrollbar
           ref={contentRef}
           maxHeight={144}
-          containerClassName="flex-none max-h-60 ml-2 mt-1 rounded-md border-l-2 border-border-strong bg-surface/60"
+          containerClassName="flex-none max-h-60 ml-2 mt-1 rounded-md border-l-2 border-border-strong bg-transparent"
           className="pl-3 pr-2 py-2 overscroll-contain"
           onViewportWheel={(event) => {
             if (event.deltaY !== 0) event.stopPropagation();
