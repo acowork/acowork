@@ -506,7 +506,12 @@
     "contextPermissions": "権限",
     "nodePermissions": "ノードの権限",
     "noAccess": "アクセス権がありません",
-    "projectGroupsBanner": "プロジェクトグループ"
+    "projectGroupsBanner": "プロジェクトグループ",
+    "showInactiveNodes_one": "非アクティブなノード {{count}} 件を表示",
+    "showInactiveNodes_other": "非アクティブなノード {{count}} 件を表示",
+    "hideInactiveNodes_one": "非アクティブなノード {{count}} 件を隠す",
+    "hideInactiveNodes_other": "非アクティブなノード {{count}} 件を隠す",
+    "nodeDeleted": "この Gateway からノードを削除しました"
   },
   "cloneDialog": {
     "skeleton": "スケルトン",
@@ -2163,7 +2168,12 @@
     "claiming": "取得中…",
     "claimOwnerHint": "この{{kind}}には所有者がいないため、あなたが管理でき、現時点では{{pub}}に設定できません。所有権を主張すると公開設定を変更できます。",
     "agent": "エージェント",
-    "node": "ノード"
+    "node": "ノード",
+    "deleteNode": "削除",
+    "deleteTitle": "このノードを削除しますか？",
+    "deleteConfirm": "{{name}} をこの Gateway から削除し、アクセス資格情報を失効させます。デバイス側のアンインストールは行われません。ここに表示されるエージェントはデバイスが自己申告した記録にすぎず、デバイスが復帰する場合は再登録が必要になり、実際にインストール済みのエージェントは再び表示されます。",
+    "deleteConfirmLabel": "ノードを削除",
+    "deleteFailed": "ノードの削除に失敗しました"
   },
   "groupChat": {
     "members": "{{count}} 人のメンバー",

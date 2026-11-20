@@ -309,6 +309,19 @@ impl NodeTokenStore {
         token
     }
 
+    /// Revoke and drop a node's long-lived credential
+    /// (`DELETE /api/nodes/{id}`). Without this the deletion would be
+    /// bookkeeping only: the device keeps a valid MQTT CONNECT password
+    /// and a valid `X-ACowork-Node-Token`, so it could rejoin under the
+    /// id the Gateway just forgot. Returns false when there was no record.
+    pub fn remove(&mut self, node_id: &str) -> bool {
+        if self.nodes.remove(node_id).is_none() {
+            return false;
+        }
+        self.persist();
+        true
+    }
+
     /// Whether `password` matches the node's persisted token
     /// (constant-time compare; false when the node is not enrolled).
     pub fn node_token_matches(&self, node_id: &str, password: &str) -> bool {

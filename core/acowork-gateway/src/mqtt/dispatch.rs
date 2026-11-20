@@ -967,6 +967,42 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
     }
 }
 
+/// The handles node teardown needs — a deliberate subset of
+/// [`DispatchContext`] so the HTTP layer can run exactly the same cleanup
+/// without owning the whole dispatch context. Keeping it small is what lets
+/// `DELETE /api/nodes/{id}` and the MQTT-side cleanup share one
+/// implementation instead of two that drift apart.
+#[derive(Clone)]
+pub struct NodeCleanup {
+    pub agent_registry: SharedAgentRegistry,
+    pub node_registry: SharedNodeRegistry,
+    /// Publishes the retained clears. `None` in tests without a broker.
+    pub mqtt_client: Option<Arc<GatewayMqttClient>>,
+    pub state: SharedState,
+    pub bootstrap_registry: Option<SharedSubsystemReadinessRegistry>,
+    pub node_replay_guard: Arc<NodeReplayGuard>,
+    pub inventory_trigger: Option<crate::mqtt::InventoryNotifierTrigger>,
+}
+
+/// How much of a node's history teardown removes. The two scopes exist
+/// because the single behaviour that used to run on the offline grace
+/// timer conflated "this node is unreachable right now" with "this device
+/// was uninstalled", and wiped persisted per-agent data on a Wi-Fi blip
+/// (reverted 2026-11-19, `a158c410`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NodeRemoval {
+    /// Forget the node's PRESENCE: registry record, readiness subsystem,
+    /// the derived agent tables, and the retained topics. Gateway-owned
+    /// user data — `agent_owners` rows and persisted cron entries —
+    /// survives, because a re-enrolled device keeps its `node_id` and must
+    /// find those facts still there. Correct scope for an explicit delete.
+    Presence,
+    /// Also drop the durable per-agent data. Only correct when the device
+    /// is known to be gone for good — which nothing can establish
+    /// automatically, so no timer may pick this scope.
+    Full,
+}
+
 /// Full record cleanup for one explicitly removed node
 /// (ADR-055 §6.13.3).
 ///
@@ -988,7 +1024,7 @@ pub fn handle_plaintext_message(topic: &str, payload: &[u8], ctx: &DispatchConte
 /// remain the call is a pure no-op. The retained-clear publications
 /// echo back through the dispatcher and re-enter this function; the
 /// trace check makes that echo a no-op, so cleanup cannot loop.
-pub async fn remove_node_records(ctx: &DispatchContext, node_id: &str) {
+pub async fn remove_node_records(ctx: &NodeCleanup, node_id: &str, scope: NodeRemoval) {
     let subsystem = SubsystemId(format!("node.{}", node_id));
 
     // Gather traces first (one read pass) so the no-op decision and
@@ -1083,8 +1119,13 @@ pub async fn remove_node_records(ctx: &DispatchContext, node_id: &str) {
         }
     }
     // Persisted cron entries (blocking file I/O off the async runtime,
-    // same pattern as the HTTP uninstall path).
-    let cron_store = ctx.state.read().await.cron_store.clone();
+    // same pattern as the HTTP uninstall path). Gated by `scope`: cron
+    // rows are durable user data, and a node that re-enrolls under the
+    // same id would otherwise come back to an emptied schedule.
+    let cron_store = match scope {
+        NodeRemoval::Full => ctx.state.read().await.cron_store.clone(),
+        NodeRemoval::Presence => None,
+    };
     if let Some(store) = cron_store {
         for id in &all_instances {
             let store = store.clone();

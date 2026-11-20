@@ -644,7 +644,12 @@
     "nodePermissions": "节点权限",
     "noAccess": "无访问权限",
     "projectGroupsBanner": "群组",
-    "newGroup": "新建群组"
+    "newGroup": "新建群组",
+    "showInactiveNodes_one": "显示 {{count}} 个不活跃节点",
+    "showInactiveNodes_other": "显示 {{count}} 个不活跃节点",
+    "hideInactiveNodes_one": "隐藏 {{count}} 个不活跃节点",
+    "hideInactiveNodes_other": "隐藏 {{count}} 个不活跃节点",
+    "nodeDeleted": "已从本网关移除该节点"
   },
   "agentHub": {
     "dialogTitle": "Agent 库",
@@ -2608,7 +2613,12 @@
     "claiming": "认领中…",
     "claimOwnerHint": "该{{kind}}无归属，因此仅你可管理，且暂时无法设为{{pub}}。认领归属后即可调整可见性。",
     "agent": "Agent",
-    "node": "节点"
+    "node": "节点",
+    "deleteNode": "删除",
+    "deleteTitle": "删除该节点？",
+    "deleteConfirm": "将从本网关移除 {{name}}，并吊销它的接入凭证。设备上的内容不会被卸载——这里显示的 agent 只是设备自行上报的记录。它若重新上线必须重新注册，届时它真实安装的 agent 会重新出现。",
+    "deleteConfirmLabel": "删除节点",
+    "deleteFailed": "删除节点失败"
   },
   "groupChat": {
     "members": "{{count}} 名成员",

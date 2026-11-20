@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from "react";
+import { Trash2 } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { cn } from "../../lib/utils";
 import { listRowHover } from "../../lib/ui-styles";
@@ -17,8 +18,10 @@ import {
   patchAgentOwner,
   patchNodeOwner,
   patchNodeName,
+  deleteNode,
   type ResourcePermissions,
 } from "../../lib/gateway-api";
+import { ConfirmDialog } from "../common/ConfirmDialog";
 import { ErrorBox } from "../common/ErrorBox";
 import { StyledInput } from "../common/StyledInput";
 import { Switch } from "../common/Switch";
@@ -31,6 +34,22 @@ export interface PermissionTarget {
   id: string;
   /** Display name for the dialog header. */
   name: string;
+  /**
+   * Nodes only: whether the node is currently online. The Gateway refuses
+   * to delete an online node (409), so the entry is only offered when this
+   * is explicitly `false` — `undefined` means the caller did not say, and
+   * offering a delete that is certain to be refused is worse than offering
+   * nothing.
+   */
+  online?: boolean;
+  /**
+   * Nodes only: the caller's `can_manage` bit from `/api/nodes`. Deletion
+   * is a MANAGE op, not an attribution one, so it must not borrow
+   * `can_attribute` (a guest with a manage grant can delete; an owner
+   * without one could not). Absent = a pre-ADR-087 Gateway, which the
+   * sidebar already treats as manageable.
+   */
+  canManage?: boolean;
 }
 
 interface PermissionDialogProps {
@@ -45,6 +64,12 @@ interface PermissionDialogProps {
    * next poll. Ignored for agents (no rename).
    */
   onRenamedNode?: (nodeId: string, nodeName: string) => void;
+  /**
+   * Called after a node delete succeeds so the caller drops the group from
+   * its list. Without it the sidebar keeps rendering a node the Gateway has
+   * already forgotten, until the next topology refresh.
+   */
+  onNodeDeleted?: (nodeId: string) => void;
 }
 
 /**
@@ -75,7 +100,7 @@ export function isValidNodeName(name: string): boolean {
  *   therefore gets the picker; an owner sees the same row as read-only
  *   text, which is what it always was.
  */
-export function PermissionDialog({ open, target, onClose, onRenamedNode }: PermissionDialogProps) {
+export function PermissionDialog({ open, target, onClose, onRenamedNode, onNodeDeleted }: PermissionDialogProps) {
   const { t } = useTranslation();
   const [perms, setPerms] = useState<ResourcePermissions | null>(null);
   const [users, setUsers] = useState<DirectoryUser[]>([]);
@@ -95,6 +120,13 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
   /** ADR-075 D4: the node's display name (`node_name`). Only nodes have
    *  one — `target.name` is what the sidebar already renders. */
   const [nodeName, setNodeName] = useState<string>("");
+  /** Two-step delete: the footer button arms the confirmation, the
+   *  ConfirmDialog runs the request. */
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  /** Separate from `saveError`: that box is labelled "failed to save", and
+   *  a refused delete is not a save that went wrong. */
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
 
   const load = useCallback(async () => {
@@ -195,6 +227,11 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
   // the dialog opens on a (possibly different) node.
   useEffect(() => {
     setNodeName(target?.kind === "node" ? (target.name ?? "") : "");
+    // An armed confirmation must never survive a switch of target: the
+    // user clicked Delete on `apk-phone`, cancelled nothing, and the parent
+    // reopened the dialog on another node.
+    setConfirmDelete(false);
+    setDeleting(false);
   }, [target]);
 
   // Focus close on open — keyed on `open` ALONE.
@@ -214,12 +251,22 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
     closeRef.current?.focus();
   }, [open]);
 
-  // Escape to close (same affordance as the detail dialog).
-  useEscapeClose(open, onClose);
+  // Escape to close (same affordance as the detail dialog). Suspended while
+  // the delete confirmation is up: both dialogs listen on `window`, so one
+  // keypress would otherwise close the settings dialog behind it too.
+  useEscapeClose(open && !confirmDelete, onClose);
 
   if (!open || !target) return null;
 
   const editable = perms?.can_attribute === true;
+  // Delete is offered only where the Gateway would accept it: a node that
+  // is explicitly offline, managed by this caller. `online === undefined`
+  // (the caller did not say) is treated as "not offered" rather than
+  // guessed, because the request is certain to be refused with 409.
+  const canDeleteNode =
+    target.kind === "node" &&
+    target.online === false &&
+    target.canManage !== false;
   // Agent vocabulary is shared/private, node's is public/private (ADR-087 D6).
   const onValue = target.kind === "agent" ? "shared" : "public";
   const onLabel = t(
@@ -317,6 +364,34 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
    * who can reach the agent — an authorization decision that belongs to
    * the admin, not to this button. Claim, then flip the switch.
    */
+  /**
+   * Forget this node on the Gateway and revoke its credential.
+   *
+   * The device is NOT uninstalled, and the confirmation copy has to say so:
+   * the agent rows the Gateway holds for a node are a projection of the
+   * device's own retained inventory publishes, so they come back with the
+   * device. What does not come back is the credential — rejoining now needs
+   * a fresh enrollment, which is the only effect that makes this call more
+   * than a refresh of a list.
+   */
+  const handleDeleteNode = async () => {
+    if (!target || target.kind !== "node") return;
+    setDeleting(true);
+    try {
+      await deleteNode(target.id);
+      onNodeDeleted?.(target.id);
+      onClose();
+    } catch (e) {
+      // `HttpApiError` carries the Gateway's own reason (online / not
+      // yours / this machine's node) — that is the message the user needs,
+      // not a generic failure.
+      setDeleteError(e instanceof Error ? e.message : String(e));
+      setConfirmDelete(false);
+    } finally {
+      setDeleting(false);
+    }
+  };
+
   const handleClaim = async () => {
     if (!perms || !target) return;
     const me = useAuthStore.getState().account;
@@ -672,27 +747,61 @@ export function PermissionDialog({ open, target, onClose, onRenamedNode }: Permi
           {saveError && (
             <ErrorBox message={`${t("permissionDialog.saveFailed")}: ${saveError}`} onClose={() => setSaveError(null)} />
           )}
-        </div>
 
-        {/* Footer */}
-        <div className="flex items-center justify-end gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
-          <button
-            onClick={onClose}
-            className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
-          >
-            {t("common.cancel")}
-          </button>
-          {editable && (
-            <button
-              onClick={() => void handleSave()}
-              disabled={!dirty || saving}
-              className="rounded-md bg-accent-strong px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {t("common.confirm")}
-            </button>
+          {deleteError && (
+            <ErrorBox message={`${t("permissionDialog.deleteFailed")}: ${deleteError}`} onClose={() => setDeleteError(null)} />
           )}
         </div>
+
+        {/* Footer. `justify-between` because the irreversible action is
+            deliberately on the opposite side of the form's own buttons:
+            sitting next to Cancel/Confirm is where mis-clicks happen. */}
+        <div className="flex items-center justify-between gap-2 border-t border-border-divider px-5 min-h-[var(--ui-dialog-zone-h)]">
+          {canDeleteNode ? (
+            <button
+              type="button"
+              data-testid="permission-dialog-delete-node"
+              disabled={deleting}
+              onClick={() => setConfirmDelete(true)}
+              className="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-danger-icon transition-colors hover:bg-[var(--color-danger)]/10 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Trash2 className="h-3.5 w-3.5 shrink-0" />
+              {t("permissionDialog.deleteNode")}
+            </button>
+          ) : (
+            // Keeps Cancel/Confirm right-aligned when there is nothing to
+            // delete (an online node, an agent, a caller who cannot manage).
+            <span />
+          )}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              className="rounded-md px-3 py-1.5 text-xs font-medium text-text-secondary hover:bg-[var(--color-accent)]/10 dark:hover:bg-[var(--color-accent)]/15"
+            >
+              {t("common.cancel")}
+            </button>
+            {editable && (
+              <button
+                onClick={() => void handleSave()}
+                disabled={!dirty || saving}
+                className="rounded-md bg-accent-strong px-3 py-1.5 text-xs font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {t("common.confirm")}
+              </button>
+            )}
+          </div>
+        </div>
       </div>
+
+      <ConfirmDialog
+        open={confirmDelete}
+        title={t("permissionDialog.deleteTitle")}
+        message={t("permissionDialog.deleteConfirm", { name: target.name })}
+        confirmLabel={t("permissionDialog.deleteConfirmLabel")}
+        destructive
+        onConfirm={() => void handleDeleteNode()}
+        onCancel={() => setConfirmDelete(false)}
+      />
     </div>
   );
 }

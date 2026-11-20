@@ -644,7 +644,12 @@
     "nodePermissions": "Node permissions",
     "noAccess": "No access",
     "projectGroupsBanner": "Groups",
-    "newGroup": "New group"
+    "newGroup": "New group",
+    "showInactiveNodes_one": "Show {{count}} inactive node",
+    "showInactiveNodes_other": "Show {{count}} inactive nodes",
+    "hideInactiveNodes_one": "Hide {{count}} inactive node",
+    "hideInactiveNodes_other": "Hide {{count}} inactive nodes",
+    "nodeDeleted": "Node removed from this Gateway"
   },
   "agentHub": {
     "dialogTitle": "Agent Library",
@@ -2597,7 +2602,12 @@
     "claiming": "Taking ownership…",
     "claimOwnerHint": "This {{kind}} has no owner, so only you can manage it and it cannot be made {{pub}} yet. Take ownership to set its visibility.",
     "agent": "agent",
-    "node": "node"
+    "node": "node",
+    "deleteNode": "Delete",
+    "deleteTitle": "Delete this node?",
+    "deleteConfirm": "This removes {{name}} from this Gateway and revokes its access credential. Nothing is uninstalled on the device itself — the agents shown here are only what the device reports about itself. If it comes back it must enroll again, and whatever it really has installed will appear again.",
+    "deleteConfirmLabel": "Delete node",
+    "deleteFailed": "Failed to delete the node"
   },
   "groupChat": {
     "members": "{{count}} members",

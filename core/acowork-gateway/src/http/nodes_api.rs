@@ -49,6 +49,14 @@ pub struct NodeResponse {
     /// the node has never been observed online).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub online_since: Option<String>,
+    /// UTC time the Gateway last observed ANY message from this node
+    /// (RFC 3339). `online_since` answers "when did it come up"; this
+    /// answers "when did we last hear from it", which is what a client
+    /// needs to decide that an offline row is stale rather than recent —
+    /// a node that dropped 20 s ago is still worth showing, one silent for
+    /// a week is a ghost.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_at: Option<String>,
     /// Display name (slug, renameable, ADR-075 D2) from the info snapshot.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_name: Option<String>,
@@ -219,6 +227,7 @@ pub async fn list_nodes(
                 node_id: n.node_id,
                 online: n.online,
                 online_since: n.online_since.map(|t| t.to_rfc3339()),
+                last_seen_at: Some(n.last_seen_at.to_rfc3339()),
                 node_name: n.node_name.clone(),
                 control_ready,
                 hostname,
@@ -564,13 +573,142 @@ async fn claim_node(
     Ok(Json(serde_json::json!({ "owner_user_id": ctx.user_id })))
 }
 
+/// `DELETE /api/nodes/{id}` — forget this node on this Gateway and
+/// revoke its credential.
+///
+/// What this does NOT do is worth stating up front, because the name is
+/// ambitious: **nothing is uninstalled on the device.** The agent rows the
+/// Gateway holds for a node are a projection of the device's own retained
+/// publishes (`acowork/nodes/{id}/agents/{instance}/installed`), so an
+/// offline device cannot be told to remove anything — dropping those rows
+/// refreshes the projection, it does not touch the device. If the device
+/// comes back it republishes them and they reappear, which is correct.
+///
+/// What is removed is the part where the Gateway *is* the source of truth:
+///
+/// * the node's long-lived token (`node_tokens.json`). Revoking it is the
+///   point of the call: without it the device keeps a valid MQTT CONNECT
+///   password and a valid `X-ACowork-Node-Token` and can simply rejoin
+///   under the id that was just deleted, making the operation theatre.
+/// * the node's ownership row (`node_owners.json`) — owner, guests,
+///   visibility. A node that no longer exists must not keep an ACL entry.
+///
+/// `agent_owners` rows and persisted cron entries survive deliberately:
+/// a re-enrolled device keeps its `node_id` (it lives in the device's
+/// `identity.json`), so wiping its schedules would be unrecoverable
+/// user-data loss for a call that only claims to forget a presence. This
+/// is the same reasoning that made the offline-grace cleanup too
+/// destructive to keep (2026-11-19, `a158c410`).
+///
+/// Guards, in order: unknown → 404; online → 409 (an online node is a live
+/// machine; the UI only offers Delete for offline ones, so this is the
+/// backstop for a stale client); this machine's own node → 409 (the
+/// supervisor brings it straight back); caller cannot manage → 403, which
+/// the generic ACL gate has already enforced by route declaration.
+async fn delete_node(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    auth: Option<Extension<AuthContext>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let ctx = auth.as_ref().map(|e| &e.0);
+
+    let registry = state
+        .node_registry
+        .as_ref()
+        .ok_or_else(|| ApiError::internal("node registry unavailable"))?;
+
+    {
+        let reg = registry.read().await;
+        let Some(node) = reg.get(&id) else {
+            return Err(ApiError::not_found(&format!("Node '{id}' is not known")));
+        };
+        if node.online {
+            return Err(ApiError::conflict(&format!(
+                "Node '{id}' is online — stop it before deleting"
+            )));
+        }
+        if reg.is_local_node(&id) {
+            return Err(ApiError::conflict(&format!(
+                "Node '{id}' is this machine's own node — the Gateway supervises it and will bring it back, so it cannot be deleted here"
+            )));
+        }
+    }
+
+    // The route declares Manage on the node (see `permission::extract_target`),
+    // so the ACL has already applied `can_manage` to the same row this checks.
+    // Kept because every other node write does it handler-side too, and the
+    // message here can name the node.
+    if !permission::caller_can_manage(ctx, node_owner_rec(&state, &id).as_ref()) {
+        return Err(ApiError::forbidden(&format!(
+            "User is not allowed to manage node '{id}'"
+        )));
+    }
+
+    let cleanup = crate::mqtt::dispatch::NodeCleanup {
+        agent_registry: state
+            .agent_registry
+            .clone()
+            .ok_or_else(|| ApiError::internal("agent registry unavailable"))?,
+        node_registry: registry.clone(),
+        mqtt_client: state.mqtt_gateway_client.clone(),
+        state: state.gateway_state.clone(),
+        bootstrap_registry: state.bootstrap_registry.clone(),
+        node_replay_guard: state
+            .node_replay_guard
+            .clone()
+            .ok_or_else(|| ApiError::internal("node replay guard unavailable"))?,
+        inventory_trigger: state.inventory_trigger.clone(),
+    };
+
+    // `Presence` scope: registry record, readiness subsystem, derived agent
+    // tables, and the retained topics. Clearing the retained payloads is what
+    // makes the removal stick — a retained `info` replay re-materialises a
+    // record for an unknown node at the next Gateway start, which is exactly
+    // how a deleted node comes back as a permanent "offline" row.
+    crate::mqtt::dispatch::remove_node_records(
+        &cleanup,
+        &id,
+        crate::mqtt::dispatch::NodeRemoval::Presence,
+    )
+    .await;
+
+    // Revoke the credential: the only irreversible part, and the one with
+    // real security weight.
+    let token_revoked = match state.node_tokens.as_ref() {
+        Some(store) => {
+            let mut store = store
+                .lock()
+                .map_err(|_| ApiError::internal("node token store poisoned"))?;
+            store.remove(&id)
+        }
+        // No store wired (auth disabled / tests): nothing to revoke.
+        None => false,
+    };
+
+    if let Some(mut owners) = ownership::lock_shared(&state.node_owners) {
+        owners.remove(&id);
+    }
+
+    tracing::info!(
+        node_id = %id,
+        token_revoked,
+        actor = ctx.map(|c| c.user_id.as_str()).unwrap_or("local"),
+        "Node deleted: records removed, retained topics cleared, credential revoked"
+    );
+
+    Ok(Json(serde_json::json!({
+        "removed": id,
+        "token_revoked": token_revoked,
+    })))
+}
+
 /// Route definitions for the node management API.
 pub fn nodes_routes() -> Router<AppState> {
     Router::new()
         .route("/api/nodes", get(list_nodes))
         .route("/api/nodes/enrollment-tokens", post(create_enrollment_token))
         .route("/api/nodes/{id}/permissions", get(get_node_permissions))
-        .route("/api/nodes/{id}", patch(patch_node))
+        .route("/api/nodes/{id}", patch(patch_node).delete(delete_node))
         .route("/api/nodes/{id}/visibility", patch(patch_node_visibility))
         .route("/api/nodes/{id}/guests", patch(patch_node_guests))
         .route("/api/nodes/{id}/owner", patch(patch_node_owner))
@@ -1083,6 +1221,7 @@ mod tests {
             node_id: "nicholas-pc".to_string(),
             online: true,
             online_since: Some("2026-09-13T05:10:21+00:00".to_string()),
+            last_seen_at: Some("2026-09-13T05:10:21+00:00".to_string()),
             node_name: Some("nicholas-pc".to_string()),
             control_ready: None,
             hostname: Some("NICHOLAS-PC".to_string()),
@@ -1334,5 +1473,218 @@ mod tests {
             .expect_err("claim without a user must fail");
         let resp: axum::response::Response = err.into_response();
         assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+    }
+
+    // ---- DELETE /api/nodes/{id} -------------------------------------
+
+    /// Everything the delete path touches, wired: both registries, the
+    /// replay guard, an ownership row and a minted node token.
+    fn delete_state(node_id: &str, owner: Option<&str>) -> AppState {
+        let mut state = state_with_node_owner_pub(node_id, owner, &[], Visibility::Private);
+        state.agent_registry = Some(Arc::new(RwLock::new(
+            crate::mqtt::agent_registry::AgentRegistry::default(),
+        )));
+        state.node_replay_guard =
+            Some(Arc::new(crate::mqtt::dispatch::NodeReplayGuard::default()));
+        let dir = crate::test_support::unique_temp_dir(format!(
+            "acowork-test-node-del-{}-{}",
+            std::process::id(),
+            node_id
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        state.node_tokens = Some(crate::mqtt::new_shared_node_token_store(&dir));
+        state.agent_owners = Some(crate::gateway::ownership::new_shared_agent_owners(&dir));
+        state
+    }
+
+    /// How a real node ends up offline-but-known: it announced online and
+    /// then went away (LWT or an explicit offline status).
+    async fn mark_offline(state: &AppState, node_id: &str) {
+        mark_online(state, node_id).await;
+        state
+            .node_registry
+            .as_ref()
+            .unwrap()
+            .write()
+            .await
+            .update_status_from_mqtt(&format!("acowork/nodes/{node_id}/status"), b"offline");
+    }
+
+    #[tokio::test]
+    async fn delete_removes_record_revokes_token_and_drops_owner_row() {
+        // The three durable effects of the call. A forgotten node that keeps
+        // its token can rejoin under the same id, which makes the deletion
+        // theatre; a leftover ownership row keeps a ghost in the ACL table.
+        let state = delete_state("gpu-1", Some("alice"));
+        mark_offline(&state, "gpu-1").await;
+        let token = state
+            .node_tokens
+            .as_ref()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .upsert("gpu-1");
+
+        let body = delete_node(
+            State(state.clone()),
+            Path("gpu-1".to_string()),
+            Some(user_ctx("alice")),
+        )
+        .await
+        .expect("the owner may delete their offline node")
+        .0;
+        assert_eq!(body["token_revoked"], true);
+
+        assert!(
+            state
+                .node_registry
+                .as_ref()
+                .unwrap()
+                .read()
+                .await
+                .get("gpu-1")
+                .is_none(),
+            "registry record must be gone"
+        );
+        {
+            let store = state.node_tokens.as_ref().unwrap().lock().unwrap();
+            assert!(store.get_token("gpu-1").is_none(), "credential must be revoked");
+            assert!(
+                !store.node_token_matches("gpu-1", &token),
+                "the old token must stop authenticating"
+            );
+        }
+        assert!(
+            ownership::lock(state.node_owners.as_ref().unwrap())
+                .get("gpu-1")
+                .is_none(),
+            "ownership row must be dropped"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_unknown_node() {
+        let state = delete_state("gpu-1", Some("alice"));
+        let err = delete_node(
+            State(state),
+            Path("nope".to_string()),
+            Some(user_ctx("alice")),
+        )
+        .await
+        .expect_err("an unknown node id is not deletable");
+        let resp: axum::response::Response = err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn delete_rejects_online_node_and_leaves_it_intact() {
+        // An online node is a live machine: nothing about its state is stale,
+        // so a client that asks to delete it is acting on old information.
+        let state = delete_state("gpu-1", Some("alice"));
+        mark_online(&state, "gpu-1").await;
+        let err = delete_node(
+            State(state.clone()),
+            Path("gpu-1".to_string()),
+            Some(user_ctx("alice")),
+        )
+        .await
+        .expect_err("an online node must not be deletable");
+        let resp: axum::response::Response = err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::CONFLICT);
+        assert!(state
+            .node_registry
+            .as_ref()
+            .unwrap()
+            .read()
+            .await
+            .get("gpu-1")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_the_gateways_own_machine_node() {
+        // The supervisor respawns it, so deleting the record would be undone
+        // within seconds. Refuse instead of answering 200 for a no-op.
+        let state = delete_state("local-node", Some("alice"));
+        state
+            .node_registry
+            .as_ref()
+            .unwrap()
+            .write()
+            .await
+            .set_local_node_anchor("local-node");
+        mark_offline(&state, "local-node").await;
+        let err = delete_node(
+            State(state),
+            Path("local-node".to_string()),
+            Some(user_ctx("alice")),
+        )
+        .await
+        .expect_err("the anchored local node must not be deletable");
+        let resp: axum::response::Response = err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn delete_requires_manage_rights() {
+        // Calling the handler directly bypasses the ACL middleware, so this
+        // pins the handler-side check that is the second line of defence.
+        let state = delete_state("gpu-1", Some("alice"));
+        mark_offline(&state, "gpu-1").await;
+        let err = delete_node(
+            State(state.clone()),
+            Path("gpu-1".to_string()),
+            Some(user_ctx("mallory")),
+        )
+        .await
+        .expect_err("a stranger may not delete someone else's node");
+        let resp: axum::response::Response = err.into_response();
+        assert_eq!(resp.status(), axum::http::StatusCode::FORBIDDEN);
+        assert!(state
+            .node_registry
+            .as_ref()
+            .unwrap()
+            .read()
+            .await
+            .get("gpu-1")
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn delete_keeps_agent_ownership_and_cron() {
+        // The cascade must NOT reach durable user data: a re-enrolled device
+        // keeps its node_id, and wiping schedules it can no longer see is
+        // unrecoverable loss for a call that only forgets a presence.
+        let state = delete_state("gpu-1", Some("alice"));
+        mark_offline(&state, "gpu-1").await;
+        {
+            let mut owners = ownership::lock(state.agent_owners.as_ref().unwrap());
+            owners.put(
+                "i-on-gpu",
+                ownership::OwnerRecord {
+                    owner_user_id: Some("alice".to_string()),
+                    guests: Default::default(),
+                    visibility: Visibility::Private,
+                    created_at: chrono::Utc::now(),
+                    node_id: Some("gpu-1".to_string()),
+                },
+            );
+        }
+
+        delete_node(
+            State(state.clone()),
+            Path("gpu-1".to_string()),
+            Some(user_ctx("alice")),
+        )
+        .await
+        .expect("delete succeeds");
+
+        assert!(
+            ownership::lock(state.agent_owners.as_ref().unwrap())
+                .get("i-on-gpu")
+                .is_some(),
+            "agent ownership rows are not the node delete's business"
+        );
     }
 }

@@ -1000,6 +1000,7 @@ function normalizeNode(raw: Record<string, unknown>): NodeInfo {
     node_id: (snakeOrCamel("node_id", "nodeId") ?? "") as string,
     online: raw.online === true,
     online_since: snakeOrCamel("online_since", "onlineSince") as string | undefined,
+    last_seen_at: snakeOrCamel("last_seen_at", "lastSeenAt") as string | undefined,
     node_name: snakeOrCamel("node_name", "nodeName") as string | undefined,
     control_ready: typeof controlReady === "boolean" ? controlReady : undefined,
     hostname: raw.hostname as string | undefined,
@@ -1108,6 +1109,30 @@ export const patchNodeVisibility = (id: string, visibility: string) =>
   patchPermissions("nodes", id, "visibility", { visibility });
 export const patchNodeGuests = (id: string, guests: string[]) =>
   patchPermissions("nodes", id, "guests", { guests });
+
+/**
+ * Forget a node on this Gateway and revoke its credential
+ * (`DELETE /api/nodes/{id}`).
+ *
+ * The Gateway refuses an ONLINE node (409) and its own machine's node, so
+ * the caller must present this only for an offline one. What it does NOT do
+ * is uninstall anything on the device: the agent rows a Gateway holds for a
+ * node are a projection of the device's own retained inventory publishes,
+ * so if the device comes back they reappear. Revoking the token is the
+ * durable part — without it the device could rejoin under the id that was
+ * just deleted.
+ */
+export async function deleteNode(id: string): Promise<void> {
+  const resp = await fetch(
+    `${getGatewayUrl()}/api/nodes/${encodeURIComponent(id)}`,
+    { method: "DELETE" },
+  );
+  if (!resp.ok) {
+    // `HttpApiError` carries the parsed denial so the dialog can surface
+    // the Gateway's own reason (online / not yours / local node) verbatim.
+    throw await httpApiError(resp);
+  }
+}
 
 /**
  * Claim or transfer ownership (ADR-087 D7). Admin only — transfer is an

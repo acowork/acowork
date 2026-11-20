@@ -122,6 +122,11 @@ export interface NodeInfo {
   node_id: string;
   online: boolean;
   online_since?: string;
+  /** UTC time the Gateway last observed any message from this node.
+   *  Absent on a Gateway older than this field: the offline display window
+   *  then cannot be evaluated, so the node is never hidden (see
+   *  `isStaleOfflineNode`). */
+  last_seen_at?: string;
   /** ADR-075 D2: display name (slug, renameable) — never a routing key. */
   node_name?: string;
   /**
