@@ -46,6 +46,12 @@ Two defects fixed by the same change: the "page is taking longer" hint that neve
 (an iframe still dispatches `onLoad` when XFO refuses it) and the "open in browser" button
 that did nothing (`target="_blank"` with no new-window handler).
 
+Two edges settled afterwards. A download inside a preview is still refused — there is no
+download shelf and no destination UI — but the refusal is now reported and offers the system
+browser, instead of a click that visibly does nothing. And the loopback refusal is scoped to
+the app's own `devUrl` port rather than every `localhost` port: a dev server an agent is
+working on is the page this host is most useful for.
+
 ### A turn's output is one row under the reply (ADR-119)
 
 A turn can run a hundred tool calls and fold them into a dozen collapsed `Explored (N steps)`
