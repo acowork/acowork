@@ -1323,7 +1323,7 @@
     "openPreview": "预览",
     "showSource": "显示源码",
     "previewDisabled": "当前文件不支持预览",
-    "previewLoading": "正在加载预览...",
+    "previewLoading": "页面加载中",
     "previewDoubleClickHint": "双击切换到编辑器",
     "previewLoadFailed": "预览加载失败",
     "previewRetry": "重试",
@@ -1392,13 +1392,11 @@
     "loadingUrl": "正在加载页面...",
     "urlLoadError": "此页面无法加载",
     "openInBrowser": "在浏览器中打开",
-    "previewLoading": "页面加载中",
     "previewAddressLabel": "预览地址",
     "previewErrorTitle": "无法在内嵌浏览器中打开此页面",
     "previewErrorBlockedScheme": "仅支持预览 http / https 地址。",
     "previewErrorInvalidUrl": "地址格式无效。",
     "previewErrorFailed": "预览窗口启动失败",
-    "previewRetry": "重试",
     "navBack": "后退",
     "navForward": "前进",
     "navRefresh": "刷新",
@@ -2738,5 +2736,12 @@
     "repository": "仓库",
     "noReadme": "该应用暂无说明文档。",
     "selectHint": "选择一个应用查看详情。"
+  },
+  "deliverables": {
+    "title": "本轮产出（{{count}}）",
+    "title_one": "本轮产出",
+    "openFailed": "无法打开 {{filename}}",
+    "imageAlt": "{{filename}} 的缩略图",
+    "size": "{{size}}"
   }
 }

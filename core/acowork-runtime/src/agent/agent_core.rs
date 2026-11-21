@@ -1543,6 +1543,23 @@ impl AgentCore {
         self.git_nudge = Some(slots);
     }
 
+    /// The shared workspace-directory resolver, when the runtime bound one.
+    ///
+    /// `git_nudge` carries it (both handles are bound at the same startup point
+    /// from the same `Arc`), so this accessor exists to name the *general*
+    /// purpose: a caller that is not the git nudge — turn deliverables, for
+    /// one — must not have to know that bundle's shape to ask "which
+    /// workspaces does this agent serve?".
+    ///
+    /// `None` means the loop was built without startup wiring (unit tests).
+    /// Callers that need to address a file by workspace id must degrade, not
+    /// guess.
+    pub(crate) fn workspace_resolver(
+        &self,
+    ) -> Option<&crate::tools::workspace_resolver::SharedResolver> {
+        self.git_nudge.as_ref().map(|slots| &slots.resolver)
+    }
+
     /// ADR-046: bind the blob store used to read uploaded files. Called
     /// from Phase B of `session_init` once the workspace services are
     /// in place. `None` means image uploads are silently dropped at the

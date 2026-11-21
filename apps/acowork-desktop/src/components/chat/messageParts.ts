@@ -26,6 +26,7 @@
  * a `ChatMessage`.
  */
 import type { ChatMessage } from "../../lib/types";
+import { DELIVERABLES_META_TYPE } from "../../lib/deliverableFiles";
 
 /** `metadata.type` of an attachment entry (ADR-046 §2.5) — the backend
  *  `AttachmentMeta` serde tag. */
@@ -41,6 +42,20 @@ export const ATTACHMENT_META_TYPES: ReadonlySet<string> = new Set([
  *  `MessagePartMeta` serde tag. */
 export const MESSAGE_REF_META_TYPES: ReadonlySet<string> = new Set(["context_ref"]);
 
+/**
+ * Rows whose metadata the loader must keep even though they do **not** fold
+ * into the user turn above them.
+ *
+ * The deliverables row (ADR-119) belongs to the *assistant's* answer: its
+ * metadata is the entire content of the row (the files a turn produced), so
+ * dropping it leaves a blank system bubble. But it must not join
+ * [`isUserTurnPart`], or the thumbnails would fold under the human's words.
+ * Hence two sets: "keep the metadata" and "folds into the user turn" are
+ * different questions, and this is the first row that answers them
+ * differently.
+ */
+export const STANDALONE_META_TYPES: ReadonlySet<string> = new Set([DELIVERABLES_META_TYPE]);
+
 /** Loader-side predicate: does this entry's metadata mark it as a turn part?
  *
  *  Callers use it for the narrower question it answers first — "is this row's
@@ -53,7 +68,11 @@ export function isTurnPartMeta(
   if (role !== "system" || !meta) return false;
   const metaType = meta.type;
   if (typeof metaType !== "string") return false;
-  return ATTACHMENT_META_TYPES.has(metaType) || MESSAGE_REF_META_TYPES.has(metaType);
+  return (
+    ATTACHMENT_META_TYPES.has(metaType) ||
+    MESSAGE_REF_META_TYPES.has(metaType) ||
+    STANDALONE_META_TYPES.has(metaType)
+  );
 }
 
 /** Check if a message is an attachment entry (ADR-046 §2.5). */
@@ -68,6 +87,16 @@ export function isMessageRefPart(msg: ChatMessage): boolean {
   if (msg.type !== "system") return false;
   const metaType = msg.metadata?.type as string | undefined;
   return metaType !== undefined && MESSAGE_REF_META_TYPES.has(metaType);
+}
+
+/** Check if a message is the turn's deliverables row (ADR-119).
+ *
+ *  Loader-side predicate only — it says "keep this row's metadata", never
+ *  "fold this row into the user turn". */
+export function isStandalonePart(msg: ChatMessage): boolean {
+  if (msg.type !== "system") return false;
+  const metaType = msg.metadata?.type as string | undefined;
+  return metaType !== undefined && STANDALONE_META_TYPES.has(metaType);
 }
 
 /** Any row that folds into the user turn above it. */

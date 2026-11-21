@@ -143,9 +143,11 @@ impl AgentLoop {
                     self.core.get_model_capabilities(&model).as_ref(),
                 );
                 let image_read_budget = self.image_read_budget.clone();
+                let produced_files = self.produced_files.clone();
                 let tool_ctx = ToolContext {
                     supports_image_input,
                     image_read_budget: Some(image_read_budget),
+                    produced_files: Some(produced_files),
                     work_dir,
                     session_id: session_id.clone(),
                     current_user_message: self.current_turn_user_message.clone(),

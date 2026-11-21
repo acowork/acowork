@@ -45,3 +45,21 @@ apply. Alongside it:
 Two defects fixed by the same change: the "page is taking longer" hint that never fired
 (an iframe still dispatches `onLoad` when XFO refuses it) and the "open in browser" button
 that did nothing (`target="_blank"` with no new-window handler).
+
+### A turn's output is one row under the reply (ADR-119)
+
+A turn can run a hundred tool calls and fold them into a dozen collapsed `Explored (N steps)`
+blocks. The files and images that turn *produced* now get their own row under the last
+assistant message: thumbnails for images, capsules for documents, one row per turn regardless
+of step count.
+
+The rule is general, not browser-specific: the Runtime persists the image bytes a tool
+returned, records the files a tool declared, and writes one `system` row
+(`metadata.type = "deliverables"`) at the turn's single exit. Nothing in either side reads a
+tool name — swap the Playwright MCP for any other image-returning MCP and the diff is empty.
+Only `(workspace_id, rel_path)` crosses the message channel; the desktop re-fetches the bytes
+through the ordinary workspace file route and caches them in the existing LRU, and a click
+opens the existing editor image viewer. Images from the built-in `image_read` tool, previously
+visible to the model but never to the user, now appear there too.
+
+Known gap in v1: a file written by `bash` is not visible (only `file_write` declares).

@@ -1082,10 +1082,10 @@
     "copy": "Copy",
     "previewBadge": "미리보기",
     "showSource": "소스 보기",
-    "previewLoading": "미리보기 로딩 중...",
+    "previewLoading": "페이지 로드 중",
     "previewDoubleClickHint": "더블클릭하여 에디터에서 열기",
     "previewLoadFailed": "미리보기 로딩 실패",
-    "previewRetry": "재시도",
+    "previewRetry": "다시 시도",
     "docViewer": {
       "saveAs": "다른 이름으로 저장",
       "openExternally": "외부 앱에서 열기",
@@ -1151,13 +1151,11 @@
     "loadingUrl": "페이지 로딩 중...",
     "urlLoadError": "이 페이지를 불러올 수 없습니다",
     "openInBrowser": "브라우저에서 열기",
-    "previewLoading": "페이지 로드 중",
     "previewAddressLabel": "미리보기 주소",
     "previewErrorTitle": "앱 내 브라우저에서 이 페이지를 열 수 없습니다",
     "previewErrorBlockedScheme": "http / https 주소만 미리볼 수 있습니다.",
     "previewErrorInvalidUrl": "주소 형식이 올바르지 않습니다.",
     "previewErrorFailed": "미리보기 화면을 시작하지 못했습니다",
-    "previewRetry": "다시 시도",
     "navBack": "뒤로",
     "navForward": "앞으로",
     "navRefresh": "새로고침",
@@ -2283,5 +2281,12 @@
     "repository": "저장소",
     "noReadme": "README가 없습니다.",
     "selectHint": "앱을 선택해 세부 정보를 보세요."
+  },
+  "deliverables": {
+    "title": "이번 턴 산출물 ({{count}})",
+    "title_one": "이번 턴 산출물",
+    "openFailed": "{{filename}}을(를) 열 수 없습니다",
+    "imageAlt": "{{filename}} 썸네일",
+    "size": "{{size}}"
   }
 }

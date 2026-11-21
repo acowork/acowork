@@ -1693,6 +1693,7 @@ async fn execute_info_tool(
         supports_image_input: true,
         image_read_budget: None,
         work_dir: Some(deps.work_dir.clone()),
+        produced_files: None,
         // The router turn belongs to the chat, not to any execution
         // session: no session-node exclusion, and the user's message is
         // the semantic query source for memory recall. The chat id is

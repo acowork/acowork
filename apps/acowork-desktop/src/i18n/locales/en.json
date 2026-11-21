@@ -1630,10 +1630,10 @@
     "openPreview": "Preview",
     "showSource": "Show source",
     "previewDisabled": "Preview is not available for this file",
-    "previewLoading": "Loading preview...",
+    "previewLoading": "Loading page",
     "previewDoubleClickHint": "Double-click to open in editor",
     "previewLoadFailed": "Failed to load preview",
-    "previewRetry": "Retry",
+    "previewRetry": "Try again",
     "docViewer": {
       "saveAs": "Save as",
       "openExternally": "Open externally",
@@ -1699,13 +1699,11 @@
     "loadingUrl": "Loading page...",
     "urlLoadError": "This page could not be loaded",
     "openInBrowser": "Open in browser",
-    "previewLoading": "Loading page",
     "previewAddressLabel": "Preview address",
     "previewErrorTitle": "This page could not be opened in the in-app browser",
     "previewErrorBlockedScheme": "Only http and https addresses can be previewed.",
     "previewErrorInvalidUrl": "That address is not a valid URL.",
     "previewErrorFailed": "The preview surface failed to start",
-    "previewRetry": "Try again",
     "navBack": "Back",
     "navForward": "Forward",
     "navRefresh": "Refresh",
@@ -2727,5 +2725,12 @@
     "repository": "Repository",
     "noReadme": "No README for this app.",
     "selectHint": "Select an app to view details."
+  },
+  "deliverables": {
+    "title": "Deliverables from this turn ({{count}})",
+    "title_one": "Deliverable from this turn",
+    "openFailed": "Cannot open {{filename}}",
+    "imageAlt": "Thumbnail of {{filename}}",
+    "size": "{{size}}"
   }
 }

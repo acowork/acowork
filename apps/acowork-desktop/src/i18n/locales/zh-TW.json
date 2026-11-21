@@ -1071,7 +1071,7 @@
     "copy": "複製",
     "previewBadge": "預覽",
     "showSource": "顯示原始碼",
-    "previewLoading": "正在載入預覽...",
+    "previewLoading": "頁面載入中",
     "previewDoubleClickHint": "雙擊切換到編輯器",
     "previewLoadFailed": "預覽載入失敗",
     "previewRetry": "重試",
@@ -1140,13 +1140,11 @@
     "loadingUrl": "正在載入頁面...",
     "urlLoadError": "此頁面無法載入",
     "openInBrowser": "在瀏覽器中開啟",
-    "previewLoading": "頁面載入中",
     "previewAddressLabel": "預覽位址",
     "previewErrorTitle": "無法在內嵌瀏覽器中開啟此頁面",
     "previewErrorBlockedScheme": "僅支援預覽 http / https 位址。",
     "previewErrorInvalidUrl": "位址格式無效。",
     "previewErrorFailed": "預覽視窗啟動失敗",
-    "previewRetry": "重試",
     "navBack": "後退",
     "navForward": "前進",
     "navRefresh": "重新整理",
@@ -2273,5 +2271,12 @@
     "repository": "儲存庫",
     "noReadme": "此應用尚無說明文件。",
     "selectHint": "選擇一個應用以檢視詳細資料。"
+  },
+  "deliverables": {
+    "title": "本輪產出（{{count}}）",
+    "title_one": "本輪產出",
+    "openFailed": "無法開啟 {{filename}}",
+    "imageAlt": "{{filename}} 的縮圖",
+    "size": "{{size}}"
   }
 }

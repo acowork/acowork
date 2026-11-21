@@ -57,6 +57,41 @@ pub struct TokenUsage {
     pub output_tokens: u64,
 }
 
+/// One file a tool produced while executing **this turn**.
+///
+/// This is the *declaration* channel, not a discovery mechanism: a tool that
+/// writes a file knows whether the file existed beforehand, so it reports the
+/// fact instead of leaving the agent loop to infer it from mtimes (which a
+/// checkout or a copy makes into a lie) or from scanning the workspace (which
+/// costs the node real IO and still cannot attribute a write to this turn).
+///
+/// Absolute paths are carried here because that is what a tool holds; the loop
+/// maps them onto `(workspace_id, rel_path)` at turn end, which is the only
+/// shape that may leave the node (a node-local absolute path breaks as soon as
+/// the desktop is on another machine, and leaks the node's layout).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProducedFile {
+    /// Absolute path of the file as the tool wrote it.
+    pub abs_path: String,
+    /// `true` when the file did not exist before this write. Only a *created*
+    /// file is a deliverable — rewriting a source file is process, not output.
+    pub created: bool,
+    /// Size in bytes after the write.
+    pub bytes: u64,
+    /// MIME type when the writer knows it.
+    pub mime: Option<String>,
+}
+
+/// Per-turn collection point for [`ProducedFile`] declarations.
+///
+/// Shared (`Arc`) so parallel tool calls in one turn all land in the same list;
+/// owned by the session loop, handed to each call through
+/// [`ToolContext::produced_files`] — the same shape as
+/// [`ToolContext::image_read_budget`], and for the same reason: the tool
+/// instances themselves are shared across concurrent sessions, so per-turn state
+/// must never live on them.
+pub type ProducedFileSink = Arc<Mutex<Vec<ProducedFile>>>;
+
 /// Per-call execution context resolved by the agent loop.
 ///
 /// Carries SESSION-SCOPED state to tools that need it (memory recall /
@@ -100,12 +135,34 @@ pub struct ToolContext {
     /// `None` for a turn that belongs to no execution session (the chat
     /// router).
     pub initiator: Option<String>,
+    /// Per-turn collector for the files this turn's tools produce.
+    ///
+    /// `None` when the caller has no turn to attribute to (debug replay, the
+    /// chat router's pre-extraction calls): a tool then simply records nothing.
+    pub produced_files: Option<ProducedFileSink>,
 }
 
 impl Default for ToolContext {
     fn default() -> Self {
         Self { supports_image_input: true, image_read_budget: None, work_dir: None,
-            session_id: None, current_user_message: None, chat_session_id: None, initiator: None }
+            session_id: None, current_user_message: None, chat_session_id: None, initiator: None,
+            produced_files: None }
+    }
+}
+
+impl ToolContext {
+    /// Report one file this call produced. No-op when the call has no turn to
+    /// attribute to, so writers never branch on whether the sink exists.
+    ///
+    /// `created` is the caller's own knowledge ("did this path exist before I
+    /// wrote it"), never a guess: a wrong `true` here puts a rewritten source
+    /// file in the user's deliverables row.
+    pub fn record_produced_file(&self, file: ProducedFile) {
+        if let Some(sink) = &self.produced_files
+            && let Ok(mut files) = sink.lock()
+        {
+            files.push(file);
+        }
     }
 }
 

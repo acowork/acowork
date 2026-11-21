@@ -1355,6 +1355,7 @@ mod tests {
             supports_image_input: true,
             image_read_budget: None,
             work_dir: None,
+            produced_files: None,
             session_id: Some("sess-1".to_string()),
             current_user_message: None,
             chat_session_id: Some("cs-1".to_string()),

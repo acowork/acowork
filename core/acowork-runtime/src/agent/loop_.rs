@@ -463,6 +463,11 @@ pub struct AgentLoop {
     /// Per-turn read_image budget shared by parallel tool calls.
     pub(crate) image_read_budget:
         Arc<std::sync::Mutex<acowork_core::tools::traits::ImageReadBudget>>,
+    /// Files this turn's tools declared, drained into one deliverables row when
+    /// the turn ends (`turn_deliverables`). Shared the same way as the budget
+    /// above: parallel tool calls of one turn append to the same list, while a
+    /// concurrent session appends to its own.
+    pub(crate) produced_files: acowork_core::tools::traits::ProducedFileSink,
 
     /// ADR-032 C4b: Compression action receiver.
     ///
@@ -639,6 +644,7 @@ impl AgentLoop {
             current_turn_user_message: None,
             output_budget_resends: 0,
             image_read_budget: Arc::new(std::sync::Mutex::new(Default::default())),
+            produced_files: Default::default(),
             compress_action_rx: None,
             pending_intent: None,
             chat_writeback: None,
@@ -719,6 +725,7 @@ impl AgentLoop {
             current_turn_user_message: None,
             output_budget_resends: 0,
             image_read_budget: Arc::new(std::sync::Mutex::new(Default::default())),
+            produced_files: Default::default(),
             compress_action_rx: None,
             pending_intent: None,
             chat_writeback: None,
@@ -780,6 +787,9 @@ impl AgentLoop {
                 .conversation
                 .as_ref()
                 .and_then(|c| c.initiator()),
+            // Pre-extraction happens before the turn's loop starts, so there is
+            // no turn to attribute a produced file to.
+            produced_files: None,
         };
         match tool.execute_with_context(params, &ctx).await {
             Ok(result) if result.ok => Ok(result.content),
@@ -1091,6 +1101,10 @@ impl AgentLoop {
         // closure, because closing a round clears the writer's active round —
         // asking afterwards would return the next turn's id, or none at all.
         let round_id = self.current_round_id();
+        // Deliverables first, while the round is still open: the row belongs to
+        // this turn's round (`append_message_with_id` stamps the active round),
+        // and it must land after the assistant row it sits under.
+        crate::agent::turn_deliverables::write_turn_row(self);
         if let Some(conv) = &self.session.conversation {
             match &outcome {
                 Err(_) => conv.end_round("failed", None),
@@ -1313,6 +1327,9 @@ impl AgentLoop {
             // instances.
             self.current_turn_user_message = Some(user_message.to_string());
             *self.image_read_budget.lock().unwrap() = Default::default();
+            // Deliverables are per-turn too: last turn's list must not leak
+            // into this turn's row.
+            self.produced_files.lock().unwrap().clear();
             self.output_budget_resends = 0;
             // ADR-060 §5.5 erratum: the message is appended to history only.
             // It is NOT re-staged as a "Block D" tail duplicate — `build()`
@@ -2487,6 +2504,11 @@ impl AgentLoop {
         for (tc, output) in deduped_calls.iter().zip(tagged_results.iter()) {
             tool_contents.push(output.content.clone());
             if !output.parts.is_empty() {
+                // Persist the bytes and declare them to this turn. Deliberately
+                // before the label/parts merge below and independent of it:
+                // whether the model gets to *see* the image (capability, budget)
+                // and whether the human gets to *open* it are two questions.
+                self.absorb_image_parts(tc, &output.parts);
                 let label = output.image_path.as_deref().map(|path| {
                     let escaped = path.replace('&', "&amp;").replace('"', "&quot;").replace('<', "&lt;").replace('>', "&gt;");
                     format!("<tool_image tool=\"{}\" path=\"{}\"/>", tc.function.name, escaped)

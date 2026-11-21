@@ -5,6 +5,8 @@ import { AgentAvatar } from "../common/AgentAvatar";
 import { ExploreBlock } from "./ExploreBlock";
 import { MessageBubble } from "./MessageBubble";
 import { UserWithAttachmentsBubble } from "./UserWithAttachmentsBubble";
+import { ChatDeliverablesRow } from "./ChatDeliverablesRow";
+import { isDeliverablesRow } from "../../lib/deliverableFiles";
 import type { MessageBlock } from "./messageFolder";
 import { shouldShowAgentAvatar, shouldShowTrailingAgentHeader } from "./avatarAnchor";
 import type { ChatListAdapterV2 } from "./chatListAdapter";
@@ -688,6 +690,17 @@ export const VirtualMessageList = React.forwardRef<
                 {/* Regular message */}
                 {item.type !== "explore_group" && item.type !== "user_with_parts" && (() => {
                   const msg = item.items[0];
+                  // ADR-119: the turn's deliverables row. A `system` entry that
+                  // is nobody's part — it describes what the turn produced, and
+                  // it draws its own line of thumbnails instead of a bubble.
+                  if (isDeliverablesRow(msg)) {
+                    return (
+                      <ChatDeliverablesRow
+                        message={msg}
+                        agentId={selectedAgentId as string | undefined}
+                      />
+                    );
+                  }
                   // ADR-050 post-C5 fix: isLive assistant block -> streaming preview
                   if (item.isLive && msg.type === "assistant") {
                     return (
