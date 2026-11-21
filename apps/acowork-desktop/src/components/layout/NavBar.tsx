@@ -292,9 +292,13 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
               <span
                 className="flex h-6 w-6 items-center justify-center rounded-md text-[11px] font-semibold"
                 style={{
+                  // Both branches are `color-mix(... transparent)` off a theme
+                  // token: a literal fallback inside `var()` would win on every
+                  // theme that does not declare the token, which is exactly the
+                  // hard-coded colour the theme-pack red line exists to catch.
                   background: active
                     ? "color-mix(in srgb, var(--color-accent) 22%, transparent)"
-                    : "var(--color-nav-surface, rgba(127,127,127,.18))",
+                    : "color-mix(in srgb, var(--color-text-tertiary) 18%, transparent)",
                 }}
               >
                 {hostedAppLetter(app)}
