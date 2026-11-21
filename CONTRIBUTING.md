@@ -179,7 +179,7 @@ Everything below is what CI runs. Run it **before** you open a PR.
 
 | Job | Command | Catches |
 |---|---|---|
-| `redlines` | `./dev/ci.sh redlines` | the 14 architecture red lines, in seconds, before anything compiles |
+| `redlines` | `./dev/ci.sh redlines` | every architecture red line (the table below is the list), in seconds, before anything compiles |
 | `core` | `./dev/ci.sh check` → `clippy` → `test` → `integration`, plus a strict `cargo test -p acowork-embed --features download-ort` | compile, lints, unit + cross-crate e2e; `check` also verifies `VERSION` against all seven generated copies |
 | `packages` | `cargo test -p acowork-sign --test example_packages`, `cargo test -p acowork-core --test hub_interop -- --ignored`, `sync-official.py --check --report-only` | a shipped `.agent` that does not match its source; a hub mirror that drifted |
 | `web` | `npm ci && npm run test && npm run build` (desktop + mobile) | 350 desktop + 38 mobile test files, i18n coverage, the scroll-container backlog |
@@ -226,6 +226,10 @@ discussed.
 | `run_ort_api_redline` | `ort` API level must not exceed the oldest supported ONNX Runtime | — |
 | `run_chat_projection_redline` | the chat projection keeps its registry fallback, write contract and row shapes | Design 31 §6 |
 | `run_agent_skill_tool_redline` | an agent may not reach for a raw file tool where a skill owns the write | docs/plan §8 |
+| `run_css_theme_redline` | a UI colour must come from a theme token, never a literal or a `var()` fallback | — |
+| `run_app_framework_redline` | the Gateway may not read a hosted app's private data (ADR-116) | ADR-116 |
+| `run_desktop_ipc_scope_redline` | a capability is scoped by webview label, and a preview webview holds none | ADR-118 §D4 |
+| `run_deliverables_coupling_redline` | the deliverables row must not know which tool produced a file | ADR-119 §可证伪判据 |
 
 Every one of them is a grep over **production** code: `scan_production` skips everything from
 a file's first `#[cfg(test)]` marker onward. A test fixture that hand-rolls a path or echoes

@@ -1039,12 +1039,19 @@ run_deliverables_coupling_redline() {
     # *names* a screenshot is the opposite of the coupling this guard hunts — it
     # is the swap test, asserting that an image-returning tool lands in the row
     # without the production code knowing which tool it was. Only the code that
-    # ships can couple, so scanning stops at `#[cfg(test)]`.
+    # ships can couple, so scanning stops at `#[cfg(test)]` — the same marker
+    # convention `scan_production` (above) documents. Two scanners, one
+    # convention: change it in both, or a violation hides in the gap.
+    #
+    # Comment lines are skipped because "we deliberately do not branch on the
+    # browser here" is the design being explained, not violated. Only whole-line
+    # comments are recognised (`//`, `/*`, `*`, `{/*`), so trailing prose after
+    # code still counts — write the explanation on its own line.
     offenders=$(awk '
         FNR == 1 { in_tests = 0 }
         /^#\[cfg\(test\)\]/ { in_tests = 1 }
         in_tests { next }
-        $0 ~ /^[[:space:]]*(\/\/|\/\*|\*)/ { next }
+        $0 ~ /^[[:space:]]*(\/\/|\/\*|\*|\{\/\*)/ { next }
         $0 ~ /(playwright|[Ss]creenshot|browser|chromium|mcp_[a-z0-9]+__)/ { print FILENAME ":" FNR ":" $0; next }
         $0 ~ /(tool_?[Nn]ame|function\.name)[[:space:]]*(==|!=|===|!==)/ { print FILENAME ":" FNR ":" $0 }
     ' "$rust_mod" "$ts_lib" "$ts_row" 2>/dev/null || true)

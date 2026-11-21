@@ -14,7 +14,8 @@ ACowork is a decentralized, high-security, scalable AI Agent runtime platform. E
 
 **CI is GitHub Actions** (`.github/workflows/ci.yml`, on `github.com/acowork/ACowork` — the
 Gitee remote is a mirror, GitHub is the review home). Every job calls `dev/ci.sh`, so the
-script is the contract and the workflow is only a scheduler: `redlines` (the 14 greps),
+script is the contract and the workflow is only a scheduler: `redlines` (every
+architecture grep — the list is `run_all_redlines`),
 `core` (check + clippy + test + integration + strict embed), `packages` (shipped `.agent`
 freshness + hub mirror interop), `web` (desktop + mobile `npm run test` and `build`).
 
@@ -33,10 +34,13 @@ cargo test                     # unit + integration tests
 # ./dev/ci.sh all              # redlines + check + clippy + test + integration + smoke
 ```
 
-> `dev/ci.sh check` runs **all 14** red lines. It used to run 12, with
-> `run_node_redline` and `run_mqtt_redline` reachable only from `all` — the mode
-> nobody runs for a small change. If you add a red line, add it to
-> `run_all_redlines`, never to a single mode.
+> `dev/ci.sh check` runs **every** red line — `run_all_redlines` is the list, and
+> no count is stated here on purpose: a number in the docs cannot be verified by
+> reading the docs, and it had already drifted by four when it was last audited.
+> The lines used to be unevenly reachable (`run_node_redline` and
+> `run_mqtt_redline` ran only under `all` — the mode nobody runs for a small
+> change). If you add a red line, add it to `run_all_redlines`, never to a single
+> mode.
 
 ### Desktop App (Tauri v2)
 
