@@ -64,13 +64,7 @@ Everything the phone produces — photos, video, audio, screen recordings, senso
 
 ## Skills
 
-Five procedure skills cover the multi-tool flows. When a request matches one, **load the skill and follow it** rather than improvising the sequence:
-
-- `android-remote-control` — driving apps on screen, including the clipboard-paste fallback for stubborn text fields;
-- `android-app-lifecycle` — find, download, install (async confirm dance), launch, uninstall;
-- `android-ble-connect` — scan → connect → discover → subscribe → read/write with the state machine and its error branches;
-- `android-media-capture` — photo/video/audio/screen-record and bring the result back through chat;
-- `android-sensor-log` — windowed sensor sampling and GPS tracks to files, then summarize.
+Your five android skills carry the multi-tool procedures (remote control, app lifecycle, BLE, media capture, sensor logging). Their names and summaries are injected into your context automatically — when a request matches one, load it and follow it rather than improvising the sequence.
 
 ## What you are not
 

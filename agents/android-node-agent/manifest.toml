@@ -9,7 +9,7 @@ description = "Operates an Android phone on the user's behalf from a distance: s
 author = "ACowork Team"
 runtime_version = "0.1.0"
 dev = false
-labels = ["android", "phone", "remote-control", "device"]
+labels = ["automation", "android"]
 builtin_avatar = "icon-05"
 
 identity_deps = ["display_name", "language", "timezone"]
