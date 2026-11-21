@@ -27,48 +27,145 @@ const RATIO_MAX: f64 = 10.0;
 
 // ── Image Token Estimation ──────────────────────────────────────────────
 
-/// Estimate token count for an image based on protocol type.
+/// Anthropic scales the long side down to this before tokenizing: pixels above
+/// it are delivered to nobody and billed to nobody.
+pub const ANTHROPIC_IMAGE_MAX_SIDE: u32 = 1568;
+/// Anthropic bills roughly one token per 750 *delivered* pixels.
+const ANTHROPIC_PIXELS_PER_TOKEN: u64 = 750;
+
+/// OpenAI's first step: scale the image down to fit this square.
+pub const OPENAI_IMAGE_FIT_BOX: u32 = 2048;
+/// OpenAI's second step: scale the *shortest* side to this — up **or** down.
+/// The upscale is why a 300×300 thumbnail costs four tiles, not one.
+pub const OPENAI_IMAGE_SHORT_SIDE: u32 = 768;
+const OPENAI_IMAGE_TILE: u32 = 512;
+const OPENAI_BASE_TOKENS: u64 = 85;
+const OPENAI_TOKENS_PER_TILE: u64 = 170;
+
+/// Gemini cuts an image into 768×768 tiles of 258 tokens each (one tile for
+/// anything that fits inside a single tile).
+pub const GEMINI_IMAGE_TILE: u32 = 768;
+const GEMINI_TOKENS_PER_TILE: u64 = 258;
+
+/// The dimensions the provider actually tokenizes, after its documented
+/// downscale / upscale steps.
 ///
-/// Different LLM providers use different image tokenization strategies.
-/// When width/height are unknown (None), a conservative default of 512×512 is used.
+/// This is the number that has to feed the estimate: the raster we hand to
+/// the wire is *not* what the provider bills. Pricing the pre-delivery raster
+/// overstated a 4000×3000 `detail=original` image 6.5× on Anthropic (12.0M px
+/// against the 1.84M px actually seen) and overstated a 1568-wide screenshot
+/// 2.8× on OpenAI (which scales the shortest side to 768 before counting
+/// 512-px tiles). A phantom overestimate like that is not cosmetic: the
+/// compaction line is a percentage of the projection, so it fires on a
+/// context that was never full and pays a full cache miss plus a lossy
+/// summary for it.
+pub fn provider_input_dimensions(
+    protocol_type: &ProtocolType,
+    width: u32,
+    height: u32,
+    detail: Option<&str>,
+) -> (u32, u32) {
+    let (w, h) = (width.max(1), height.max(1));
+
+    match protocol_type {
+        // ADR-103 §3: the Responses shape bills images with the same
+        // tokenization as Chat Completions. `Unknown` is the read-side
+        // tolerance value (falls back to OpenAI behavior, D3).
+        ProtocolType::OpenAI | ProtocolType::Responses | ProtocolType::Unknown => {
+            if detail == Some("low") {
+                // Flat rate: the dimensions do not participate in the bill.
+                return (w, h);
+            }
+            let (w, h) = fit_within(w, h, OPENAI_IMAGE_FIT_BOX);
+            let (w, h) = scale_short_side_to(w, h, OPENAI_IMAGE_SHORT_SIDE);
+            // The documented second step overshoots the fit box whenever the
+            // aspect ratio is narrower than `2048:768` (≈2.67:1). Clamping
+            // back keeps a paper-thin image from claiming an absurd share of
+            // the budget on an unverifiable extrapolation of the formula.
+            fit_within(w, h, OPENAI_IMAGE_FIT_BOX)
+        }
+        ProtocolType::Anthropic => scale_long_side_to(w, h, ANTHROPIC_IMAGE_MAX_SIDE),
+        // No resize step is documented for the tile schemes: tiles are
+        // counted on the delivered pixels.
+        ProtocolType::Google | ProtocolType::Ollama => (w, h),
+    }
+}
+
+/// Estimate the token count one image part will cost the provider.
+///
+/// The bill is `f(delivered dimensions)`, never `f(file dimensions)`:
+/// [`provider_input_dimensions`] supplies the former, so the answer matches
+/// what `usage.prompt_tokens` reports for the same image (within a few
+/// percent, which `calibrate_from_usage` absorbs on the next turn).
+///
+/// When width/height are unknown (None), a 512×512 default is assumed — the
+/// same best-effort rule the document arm uses. Callers that know the
+/// delivered size (every path through `image_read`) must pass it.
 pub fn estimate_image_tokens(
     protocol_type: &ProtocolType,
     width: Option<u32>,
     height: Option<u32>,
     detail: Option<&str>,
 ) -> u64 {
-    // Default to 512×512 when dimensions are unknown (conservative estimate).
-    let w = width.unwrap_or(512) as u64;
-    let h = height.unwrap_or(512) as u64;
+    let w = width.unwrap_or(512);
+    let h = height.unwrap_or(512);
+    let (dw, dh) = provider_input_dimensions(protocol_type, w, h, detail);
+    let (dw, dh) = (u64::from(dw), u64::from(dh));
 
     match protocol_type {
-        // ADR-103 §3: the Responses shape bills images with the same
-        // tokenization formula as Chat Completions. `Unknown` is the
-        // read-side tolerance value (falls back to OpenAI behavior, D3).
         ProtocolType::OpenAI | ProtocolType::Responses | ProtocolType::Unknown => {
-            // OpenAI: "low" detail uses fixed 85 tokens.
-            // "high"/"auto" tiles the image at 512×512.
             if detail == Some("low") {
-                return 85;
+                return OPENAI_BASE_TOKENS;
             }
-            let tiles_w = w.div_ceil(512);
-            let tiles_h = h.div_ceil(512);
-            85 + 170 * tiles_w * tiles_h
+            let tiles = dw.div_ceil(u64::from(OPENAI_IMAGE_TILE))
+                * dh.div_ceil(u64::from(OPENAI_IMAGE_TILE));
+            OPENAI_BASE_TOKENS + OPENAI_TOKENS_PER_TILE * tiles
         }
-        ProtocolType::Anthropic => {
-            // Anthropic: approximately 1 token per 750 pixels.
-            (w * h) / 750
-        }
+        ProtocolType::Anthropic => (dw * dh) / ANTHROPIC_PIXELS_PER_TOKEN,
         ProtocolType::Google => {
-            // Google Gemini: approximately 1 token per 258 pixels.
-            (w * h) / 258
+            GEMINI_TOKENS_PER_TILE
+                * dw.div_ceil(u64::from(GEMINI_IMAGE_TILE))
+                * dh.div_ceil(u64::from(GEMINI_IMAGE_TILE))
         }
-        ProtocolType::Ollama => {
-            // Ollama models typically don't support vision.
-            // Use conservative estimate for any vision-capable Ollama models.
-            (w * h) / 258
-        }
+        // Unverified legacy fallback: no published tiling scheme to model, so
+        // the pixel-to-token ratio stays as it was.
+        ProtocolType::Ollama => (dw * dh) / 258,
     }
+}
+
+/// Scale uniformly so the long side becomes at most `max_side` (downscale only).
+fn scale_long_side_to(w: u32, h: u32, max_side: u32) -> (u32, u32) {
+    let long = w.max(h);
+    if long <= max_side {
+        return (w, h);
+    }
+    scale_uniform(w, h, f64::from(max_side) / f64::from(long))
+}
+
+/// Scale uniformly so the image fits inside a `box_side` square (downscale only).
+fn fit_within(w: u32, h: u32, box_side: u32) -> (u32, u32) {
+    let long = w.max(h);
+    if long <= box_side {
+        return (w, h);
+    }
+    scale_uniform(w, h, f64::from(box_side) / f64::from(long))
+}
+
+/// Scale uniformly so the shortest side becomes `target` (up or down).
+fn scale_short_side_to(w: u32, h: u32, target: u32) -> (u32, u32) {
+    let short = w.min(h);
+    if short == target {
+        return (w, h);
+    }
+    scale_uniform(w, h, f64::from(target) / f64::from(short))
+}
+
+/// Apply one uniform scale factor, rounding and never collapsing to zero.
+fn scale_uniform(w: u32, h: u32, factor: f64) -> (u32, u32) {
+    (
+        ((f64::from(w) * factor).round() as u32).max(1),
+        ((f64::from(h) * factor).round() as u32).max(1),
+    )
 }
 
 // ── Document Token Estimation ──────────────────────────────────────
@@ -316,7 +413,6 @@ mod tests {
         );
     }
 
-
     #[test]
     fn test_count_text_default_ratio() {
         let counter = TokenCounter::new();
@@ -455,12 +551,130 @@ mod adr103_counter_tests {
         }
         // Spot-check the canonical numbers: 1024x1024 high = 85 + 170*4.
         assert_eq!(
-            estimate_image_tokens(&ProtocolType::Responses, Some(1024), Some(1024), Some("high")),
+            estimate_image_tokens(
+                &ProtocolType::Responses,
+                Some(1024),
+                Some(1024),
+                Some("high")
+            ),
             85 + 170 * 4
         );
         assert_eq!(
-            estimate_image_tokens(&ProtocolType::Responses, Some(1024), Some(1024), Some("low")),
+            estimate_image_tokens(
+                &ProtocolType::Responses,
+                Some(1024),
+                Some(1024),
+                Some("low")
+            ),
             85
         );
+    }
+}
+// ── Image preprocessing model: the estimate must match what is billed ──
+//
+// Regression guard for the phantom-overestimate bug: the old formulas were
+// applied to the *pre-delivery* raster, so a 4000×3000 `detail=original`
+// image was priced 6.5× its real cost on Anthropic and a 1568-wide screenshot
+// 2.8× its real cost on OpenAI. That inflated the projection, fired compaction
+// early, and cost a full prefix-cache miss plus a lossy summary each time.
+#[cfg(test)]
+mod image_preprocessing_model_tests {
+    use super::{estimate_image_tokens, provider_input_dimensions};
+    use acowork_core::protocol::ProtocolType;
+
+    #[test]
+    fn anthropic_sees_the_long_side_capped_raster() {
+        // 12.0M px delivered as 1568×1176 → 1.84M px seen by the provider.
+        assert_eq!(
+            provider_input_dimensions(&ProtocolType::Anthropic, 4000, 3000, Some("original")),
+            (1568, 1176)
+        );
+        // 1568×1176 = 1_843_968 px / 750 ≈ 2_458 tokens — not 16_000.
+        assert_eq!(
+            estimate_image_tokens(
+                &ProtocolType::Anthropic,
+                Some(4000),
+                Some(3000),
+                Some("original")
+            ),
+            2_458
+        );
+        // A raster already inside the ceiling is untouched.
+        assert_eq!(
+            estimate_image_tokens(
+                &ProtocolType::Anthropic,
+                Some(1568),
+                Some(1176),
+                Some("high")
+            ),
+            2_458
+        );
+    }
+
+    #[test]
+    fn openai_scales_the_short_side_before_counting_tiles() {
+        // fit 2048 → 2048×1536, short side 1536 → 768 → 1024×768 → 2×2 tiles.
+        assert_eq!(
+            estimate_image_tokens(&ProtocolType::OpenAI, Some(4000), Some(3000), Some("high")),
+            85 + 170 * 4
+        );
+        // A 1568-wide screenshot is not 12 tiles once the shortest side is
+        // scaled: it is 1024×768, the same 4 tiles.
+        assert_eq!(
+            estimate_image_tokens(&ProtocolType::OpenAI, Some(1568), Some(1176), Some("high")),
+            85 + 170 * 4
+        );
+        // The upscale direction: 300×300 becomes 768×768 → 4 tiles, so the old
+        // single-tile answer understated it.
+        assert_eq!(
+            estimate_image_tokens(&ProtocolType::OpenAI, Some(300), Some(300), Some("high")),
+            85 + 170 * 4
+        );
+        // `low` stays a flat rate whatever the size.
+        assert_eq!(
+            estimate_image_tokens(&ProtocolType::OpenAI, Some(4000), Some(3000), Some("low")),
+            85
+        );
+    }
+
+    #[test]
+    fn a_paper_thin_image_cannot_claim_an_absurd_share() {
+        // The documented short-side upscale would take 8000×10 to 614400×768.
+        // Clamping back to the fit box keeps the bill at 4 tiles instead of
+        // 2400 — an unverifiable extrapolation must not trigger compaction.
+        assert_eq!(
+            estimate_image_tokens(&ProtocolType::OpenAI, Some(8000), Some(10), Some("high")),
+            85 + 170 * 4
+        );
+    }
+
+    #[test]
+    fn gemini_prices_whole_tiles() {
+        // 1568×1176 → 3×2 tiles of 258 tokens.
+        assert_eq!(
+            estimate_image_tokens(&ProtocolType::Google, Some(1568), Some(1176), Some("high")),
+            258 * 6
+        );
+        // Anything inside one tile is one tile — not 300*300/258 ≈ 348.
+        assert_eq!(
+            estimate_image_tokens(&ProtocolType::Google, Some(300), Some(300), Some("high")),
+            258
+        );
+    }
+
+    #[test]
+    fn unknown_dimensions_stay_inside_one_delivery() {
+        // No dimensions means "assume 512×512", and the answer must be in the
+        // range a real 512×512 image costs on each protocol — not a
+        // conservative number that happens to look safe but distorts the meter.
+        for protocol in [
+            ProtocolType::OpenAI,
+            ProtocolType::Anthropic,
+            ProtocolType::Google,
+        ] {
+            let unknown = estimate_image_tokens(&protocol, None, None, Some("high"));
+            let known = estimate_image_tokens(&protocol, Some(512), Some(512), Some("high"));
+            assert_eq!(unknown, known, "{protocol:?}");
+        }
     }
 }

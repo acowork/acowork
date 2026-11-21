@@ -17,6 +17,8 @@ import { CAPSULE_PANE_CN } from "../common/capsule";
 import { X, Save, Loader2, FileText, MessageSquarePlus, Eye, Code2, Locate, RefreshCw, XSquare, Files, AlertCircle } from "lucide-react";
 import Editor, { DiffEditor, type OnMount } from "@monaco-editor/react";
 import { initMonaco } from "../../lib/monacoBootstrap";
+import { getActiveThemePack, subscribeThemePacks } from "../../styles/themePacks";
+import { ensureSurfaceTheme, lastSurfaceThemeName } from "./monacoSurfaceTheme";
 import { ScrollableTabBar } from "../common/ScrollableTabBar";
 import { TabItem } from "../common/tab";
 import { SetiIcon } from "../common/SetiIcon";
@@ -652,13 +654,40 @@ export function FileEditorPanel({ width }: { width: number }) {
     // registered once in the store (see settingsStore.ts). This avoids
     // each component registering its own listener.
     const osTheme = useSettingsStore((s) => s.osTheme);
-    const monacoTheme = useMemo(() => {
-        if (theme === "dark") return "vs-dark";
-        if (theme === "light") return "vs";
-        return osTheme === "dark" ? "vs-dark" : "vs";
-    }, [theme, osTheme]);
+    const isDarkSurface = theme === "dark" || (theme === "system" && osTheme === "dark");
 
-    const resolvedMonacoTheme = monacoTheme;
+    // The document surface — Monaco's `editor.background` — is the same
+    // `--color-editor-canvas` the preview pane paints, so one theme pack tints
+    // both. Monaco's built-in `vs`/`vs-dark` carry hardcoded #FFFFFF/#1E1E1E and
+    // are invisible to packs; sourcing the editor from the token is what lets
+    // the tab strip read the token too instead of matching the editor's literal.
+    //
+    // Registered imperatively rather than only through the `theme` prop: child
+    // effects run before this component's, so the wrapper's own `setTheme(newName)`
+    // can land before the name is defined. Applying the theme here as well makes
+    // the repaint deterministic.
+    const [surfaceTheme, setSurfaceTheme] = useState<string | null>(lastSurfaceThemeName);
+    const [themePackId, setThemePackId] = useState(getActiveThemePack);
+
+    useEffect(() => subscribeThemePacks(() => setThemePackId(getActiveThemePack())), []);
+
+    useEffect(() => {
+        let cancelled = false;
+        // Already loaded by lib/monacoBootstrap; the dynamic import is just how
+        // this module reaches the instance without a mount callback, so a pane
+        // that only ever shows the diff view still gets a tinted surface.
+        import("monaco-editor").then(({ editor }) => {
+            if (cancelled) return;
+            const name = ensureSurfaceTheme(editor, isDarkSurface);
+            setSurfaceTheme(name);
+            editor.setTheme(name);
+        });
+        return () => { cancelled = true; };
+    }, [isDarkSurface, themePackId]);
+
+    // Until the surface theme is registered, the matching built-in is the
+    // closest correct paint — #FFFFFF/#1E1E1E are exactly its own values.
+    const resolvedMonacoTheme = surfaceTheme ?? (isDarkSurface ? "vs-dark" : "vs");
 
     // Compute Monaco editor font size in pixels from global fontSize (rem-based).
     // Root font size is 16px by browser default, so fontSize rem * 16 = px.
@@ -1618,17 +1647,23 @@ export function FileEditorPanel({ width }: { width: number }) {
             className={cn(CAPSULE_PANE_CN, "relative shrink-0 bg-right-panel")}
             style={{ width }}
         >
-            {/* Tab bar — bg must match the Monaco editor surface (vs=#FFFFFF in
-                light, vs-dark=#1E1E1E in dark) so the strip and the editor body
-                read as a single panel. Previously used `bg-right-panel` which is
-                #F3F3F3 in light, producing a visible two-tone header above the
-                white editor body. The dark values of `right-panel` and `vs-dark`
-                already coincide (#1E1E1E), so the `dark:bg-right-panel` arm is a
-                no-op there but kept for explicitness.
+            {/* Tab bar — reads `--color-editor-canvas`, the same token the
+                preview paints and that Monaco's registered surface theme now
+                resolves to, so strip, code body and rendered body are one
+                panel in every theme pack and both modes.
+
+                It used to read `bg-white dark:bg-right-panel`, hardcoded to
+                Monaco's built-in `vs`/`vs-dark` values. That was written to fix
+                a real seam (`right-panel` #F3F3F3 against a #FFFFFF editor) but
+                it fixed it by copying the symptom: the built-ins are not
+                pack-aware, so the literal pinned the strip to the default
+                palette and left it white over a tinted preview. The defect was
+                upstream — see components/editor/monacoSurfaceTheme.ts.
+
                 `pt-[5px]` (not `mt-[5px]`) so the 5 px of top padding is filled
                 by the tab strip's own bg rather than leaking the outer panel's
-                `bg-right-panel` (#F3F3F3) and reintroducing the same seam. */}
-            <div className="flex bg-white dark:bg-right-panel select-none px-0.5 gap-0.5 pt-[5px] border-b border-border-divider">
+                `bg-right-panel` and reintroducing the same seam. */}
+            <div className="flex bg-editor-canvas select-none px-0.5 gap-0.5 pt-[5px] border-b border-border-divider">
                 <ScrollableTabBar
                     activeItemSelector={activeFileId ? `[data-file-id="${activeFileId}"]` : undefined}
                     activeItemId={activeFileId ?? undefined}

@@ -20,26 +20,18 @@
 //! Failure messages give the next action, never a bare cause (§4.2
 //! failure table — copy the strings, do not paraphrase).
 
-use std::io::{Cursor, Read};
+use std::io::Read;
 use std::path::Path;
 
 use acowork_core::providers::traits::{ContentPart, ImageUrlPart};
 use acowork_core::tools::traits::{Tool, ToolContext, ToolResult, ToolSpec};
 use async_trait::async_trait;
-use image::codecs::jpeg::JpegEncoder;
-use image::{ImageFormat, ImageReader, Limits};
+use image::{ImageFormat, ImageReader};
 use serde_json::Value;
 
 use crate::agent::attachment_to_image::{MAX_INLINE_IMAGE_BYTES, build_data_url};
+use crate::util::image_raster::{self, RasterFormat, decode_bounded_from_path, sniff_bytes};
 
-/// Hard ceiling on either source dimension before decoding (design doc
-/// §4.6: header pre-check first, decoder `Limits` as the second net).
-const MAX_SIDE_PX: u32 = 8192;
-/// Total pixel budget for the source image (decompression-bomb guard).
-const MAX_SOURCE_PIXELS: u64 = 64_000_000;
-/// Fixed JPEG re-encode quality when downscaling. Constant, never
-/// content-derived: the payload must be byte-stable across calls.
-const JPEG_QUALITY: u8 = 85;
 const DEFAULT_MAX_IMAGES_PER_TURN: usize = 6;
 const DEFAULT_MAX_BASE64_BYTES_PER_TURN: usize = 24 * 1024 * 1024;
 
@@ -86,64 +78,6 @@ enum Detail {
     Low,
     High,
     Original,
-}
-
-/// One supported raster format: magic bytes → decoder format → MIME.
-struct Sniffed {
-    name: &'static str,
-    format: ImageFormat,
-    mime: &'static str,
-}
-
-const PNG: Sniffed = Sniffed {
-    name: "png",
-    format: ImageFormat::Png,
-    mime: "image/png",
-};
-const JPEG: Sniffed = Sniffed {
-    name: "jpeg",
-    format: ImageFormat::Jpeg,
-    mime: "image/jpeg",
-};
-const GIF: Sniffed = Sniffed {
-    name: "gif",
-    format: ImageFormat::Gif,
-    mime: "image/gif",
-};
-const WEBP: Sniffed = Sniffed {
-    name: "webp",
-    format: ImageFormat::WebP,
-    mime: "image/webp",
-};
-
-/// Identify the format from the first 12 bytes.
-///
-/// Why magic bytes and not the extension: a wrong guess costs one
-/// provider 400 that poisons the whole turn, and screenshots are
-/// routinely mislabelled. This does NOT contradict ADR-046 §2.7
-/// ("runtime does not do image recognition"): that rule constrains the
-/// **upload-ingest** path, where sniffing would classify user content
-/// the runtime has no business interpreting. `image_read` is an
-/// explicit read-image action — the caller already declared the file is
-/// an image; the sniff only picks the decoder.
-///
-/// BMP/TIFF/APNG are out of scope in v1 (design doc §4.2): the five
-/// provider protocols accept the four formats below natively.
-fn sniff_magic(head: &[u8]) -> Option<&'static Sniffed> {
-    if head.len() >= 8 && head[..8] == [0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A] {
-        return Some(&PNG);
-    }
-    if head.len() >= 3 && head[..3] == [0xFF, 0xD8, 0xFF] {
-        return Some(&JPEG);
-    }
-    if head.len() >= 6 && (head[..6] == *b"GIF87a" || head[..6] == *b"GIF89a") {
-        return Some(&GIF);
-    }
-    // RIFF????WEBP — the 4 bytes after "RIFF" are the (variable) size.
-    if head.len() >= 12 && head[..4] == *b"RIFF" && head[8..12] == *b"WEBP" {
-        return Some(&WEBP);
-    }
-    None
 }
 
 /// True when the head looks like SVG (text markup, not a raster).
@@ -340,10 +274,8 @@ fn execute_inner(params: Value, work_dir: Option<&str>) -> ToolResult {
             ));
         }
     };
-    if src_w > MAX_SIDE_PX
-        || src_h > MAX_SIDE_PX
-        || u64::from(src_w) * u64::from(src_h) > MAX_SOURCE_PIXELS
-    {
+    let budget = image_raster::TOOL_DECODE_BUDGET;
+    if !budget.accepts(src_w, src_h) {
         return fail(format!(
             "image dimensions {src_w}x{src_h} exceed the decode budget"
         ));
@@ -365,8 +297,9 @@ fn execute_inner(params: Value, work_dir: Option<&str>) -> ToolResult {
     let needs_scale = max_side.is_some_and(|cap| src_w.max(src_h) > cap);
 
     let (payload, out_w, out_h, scaled, out_mime) = if needs_scale {
-        let cap = max_side.unwrap_or(MAX_SIDE_PX);
-        let img = match decode_bounded(&full_path, sniffed.format) {
+        let cap = max_side.unwrap_or(image_raster::DEFAULT_MAX_SIDE_PX);
+        let img = match decode_bounded_from_path(&full_path, sniffed, image_raster::TOOL_DECODE_BUDGET)
+        {
             Ok(img) => img,
             Err(_) => {
                 return fail(format!(
@@ -375,12 +308,23 @@ fn execute_inner(params: Value, work_dir: Option<&str>) -> ToolResult {
                 ));
             }
         };
-        let resized = img.resize(cap, cap, image::imageops::FilterType::Lanczos3);
-        let out_w = resized.width();
-        let out_h = resized.height();
-        let (out_format, mime) = output_format(sniffed.format);
-        let payload = match encode_raster(&resized, out_format) {
-            Ok(p) => p,
+        // Resize + encode + the 8 MiB payload policy live in the shared
+        // raster module (also used by the attachment pipeline), so "what a
+        // downscale produces" is one fact and not two. That includes the
+        // deterministic JPEG fallback before a payload is called too large.
+        let encoded = match image_raster::resize_and_encode(
+            &img,
+            sniffed.format,
+            cap,
+            MAX_INLINE_IMAGE_BYTES,
+        ) {
+            Ok(encoded) => encoded,
+            Err(image_raster::RasterError::PayloadTooLarge { size }) => {
+                return fail(format!(
+                    "image too large after downscale ({} > 8 MiB); crop or re-encode at lower quality",
+                    human_size(size)
+                ));
+            }
             Err(_) => {
                 return fail(format!(
                     "failed to encode resized {} image; retry with detail=low",
@@ -388,13 +332,7 @@ fn execute_inner(params: Value, work_dir: Option<&str>) -> ToolResult {
                 ));
             }
         };
-        if payload.len() > MAX_INLINE_IMAGE_BYTES {
-            return fail(format!(
-                "image too large after downscale ({} > 8 MiB); crop or re-encode at lower quality",
-                human_size(payload.len())
-            ));
-        }
-        (payload, out_w, out_h, true, mime)
+        (encoded.bytes, encoded.width, encoded.height, true, encoded.mime)
     } else {
         // Passthrough ships the file bytes as-is, so the 8 MiB budget
         // is a statement about the *file* — and the pixel pre-check
@@ -492,8 +430,8 @@ fn read_head(path: &Path, n: usize) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn sniff_head(path: &Path) -> std::io::Result<Option<&'static Sniffed>> {
-    Ok(sniff_magic(&read_head(path, 12)?))
+fn sniff_head(path: &Path) -> std::io::Result<Option<&'static RasterFormat>> {
+    Ok(sniff_bytes(&read_head(path, 12)?))
 }
 
 fn open_reader(
@@ -512,58 +450,9 @@ fn header_dimensions(path: &Path, format: ImageFormat) -> image::ImageResult<(u3
     open_reader(path, format)?.into_dimensions()
 }
 
-/// Full decode, with the same budgets re-asserted as decoder limits
-/// (the header pre-check is the first net; this is the second, for
-/// formats whose reported size lies).
-fn decode_bounded(path: &Path, format: ImageFormat) -> image::ImageResult<image::DynamicImage> {
-    let mut reader = open_reader(path, format)?;
-    // `Limits` is `#[non_exhaustive]` upstream — field assignment,
-    // not a struct literal.
-    let mut limits = Limits::default();
-    limits.max_image_width = Some(MAX_SIDE_PX);
-    limits.max_image_height = Some(MAX_SIDE_PX);
-    reader.limits(limits);
-    reader.decode()
-}
-
-/// Output format (and its MIME) after a downscale. JPEG keeps JPEG at
-/// the fixed quality; everything else becomes PNG. The `image` crate's
-/// WebP encoder is lossless-only (VP8L) — re-encoding a downscaled
-/// lossy WebP as VP8L inflates photo content several-fold and burns
-/// the 8 MiB payload budget for no perceptual gain. PNG keeps alpha
-/// (GIF/WebP sources), is deterministic at fixed encoder settings,
-/// and the data URI's MIME always describes the payload actually sent,
-/// not the file on disk.
-fn output_format(source: ImageFormat) -> (ImageFormat, &'static str) {
-    match source {
-        ImageFormat::Jpeg => (ImageFormat::Jpeg, "image/jpeg"),
-        _ => (ImageFormat::Png, "image/png"),
-    }
-}
-
-/// Deterministic re-encode after a downscale. `format` is the
-/// *output* format from [`output_format`] (JPEG or PNG only).
-/// Animated GIFs collapse to the first frame (decode() yields frame 0)
-/// — v1 accepts that.
-fn encode_raster(img: &image::DynamicImage, format: ImageFormat) -> image::ImageResult<Vec<u8>> {
-    let mut buf = Vec::new();
-    match format {
-        ImageFormat::Jpeg => {
-            // JPEG has no alpha channel: flattening is the encoder's
-            // call, quality is ours and CONSTANT (determinism).
-            let rgb = img.to_rgb8();
-            let mut cursor = Cursor::new(&mut buf);
-            JpegEncoder::new_with_quality(&mut cursor, JPEG_QUALITY).encode(
-                rgb.as_raw(),
-                rgb.width(),
-                rgb.height(),
-                image::ExtendedColorType::Rgb8,
-            )?;
-        }
-        other => img.write_to(Cursor::new(&mut buf), other)?,
-    }
-    Ok(buf)
-}
+// The output format and the deterministic re-encode after a downscale live
+// in [`crate::util::image_raster`], shared with the attachment pipeline, so
+// "what a downscale produces" is one fact and not two.
 
 #[cfg(test)]
 mod tests {
@@ -941,17 +830,5 @@ mod tests {
         assert_eq!(detail_wire(&Detail::Low), "low");
         assert_eq!(detail_wire(&Detail::Auto), "auto");
         assert_eq!(detail_wire(&Detail::High), "high");
-    }
-
-    #[test]
-    fn magic_sniffing_accepts_only_the_four() {
-        assert!(
-            sniff_magic(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 0]).is_some()
-        );
-        assert!(sniff_magic(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0, 0, 0, 0, 0, 0, 0]).is_some());
-        assert!(sniff_magic(b"GIF89a\x01\x00\x01\x00\x00\x00").is_some());
-        assert!(sniff_magic(b"RIFF\x24\x00\x00\x00WEBPVP8 ").is_some());
-        assert!(sniff_magic(b"%PDF-1.4\x00\x00\x00\x00").is_none());
-        assert!(sniff_magic(b"BM\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00").is_none());
     }
 }

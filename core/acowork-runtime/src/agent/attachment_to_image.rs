@@ -89,6 +89,21 @@ pub fn model_accepts_image(caps: Option<&ModelCapabilitiesInfo>) -> bool {
 /// We log a warning so operators can notice disk-heavy uploads.
 pub const MAX_INLINE_IMAGE_BYTES: usize = 8 * 1024 * 1024;
 
+/// Long-side cap for an image the human attached.
+///
+/// A pasted 4K screenshot costs the model its full pixel bill **on every
+/// request of the session** (the data URI lives in the session history), so
+/// the delivered raster is capped at the same 1568 px `image_read`'s `high`
+/// detail uses: it is the largest raster OpenAI's `high` detail and
+/// Anthropic's image input both accept without rescaling server-side, and
+/// past it the pixels cost tokens no model can use.
+///
+/// Oversized images are **downscaled**, not dropped: the human explicitly
+/// attached the picture, and a 1568 px version still shows what the picture
+/// shows. The original blob stays on disk untouched, so `image_read` can
+/// still open it at full resolution.
+pub const ATTACHMENT_MAX_SIDE_PX: u32 = crate::util::image_raster::DEFAULT_MAX_SIDE_PX;
+
 /// Map a user-supplied `format` (lowercased extension — e.g. `"png"`,
 /// `"jpeg"`, `"gif"`) to an `image/<subtype>` MIME. Whitelisted rather
 /// than pass-through, mirroring [`crate::usecases::attachment_impl`]:
@@ -128,19 +143,26 @@ pub fn build_data_url(mime: &str, bytes: &[u8]) -> String {
     out
 }
 
-/// Construct a single `ContentPart::ImageUrl` from a data URL and the
-/// optional width/height the desktop reported when uploading.
+/// Construct a single `ContentPart::ImageUrl` from a data URL and the size of
+/// the raster it carries.
 ///
-/// Width/height are hint metadata used for token estimation; we
-/// preserve them when present so the token-counter can be more
-/// accurate. They don't affect the multimodal model itself.
-fn image_part(url: String, width: Option<u32>, height: Option<u32>) -> ContentPart {
+/// Width/height are hint metadata used for token estimation; we preserve them
+/// when known so the token-counter can be more accurate. They don't affect the
+/// multimodal model itself.
+///
+/// **`size` describes the delivered raster, not the uploaded file.** Passing
+/// the file's dimensions when the picture was downscaled on the way in would
+/// price the part at the *source* pixel count — the token estimate would then
+/// describe a raster the model never receives. [`DeliveredImage`] is the only
+/// place that fact lives, which is why the caller hands over
+/// [`DeliveredImage::delivered_size`] rather than deciding for itself.
+fn image_part(url: String, size: Option<(u32, u32)>) -> ContentPart {
     ContentPart::ImageUrl {
         image_url: ImageUrlPart {
             url,
             detail: None,
-            width,
-            height,
+            width: size.map(|(w, _)| w),
+            height: size.map(|(_, h)| h),
         },
     }
 }
@@ -160,9 +182,53 @@ pub enum ImageDelivery {
     /// accepts image input ([`model_accepts_image`]). Both halves are part of
     /// the claim: a part the request filter later strips never reaches the
     /// model, so calling it delivered would be the same lie in a new place.
-    Delivered,
+    ///
+    /// The raster that travelled may be a **downscaled** copy of the uploaded
+    /// file, so the variant carries what was actually delivered. The hint
+    /// must not claim full resolution when the model got a thumbnail.
+    Delivered(DeliveredImage),
     /// The pixels are not in the request, for this reason.
     Skipped(ImageSkip),
+}
+
+/// The delivered raster of one attached image: what actually went on the
+/// wire, and what the original file was.
+///
+/// The model only ever sees the delivered raster, so reporting the source
+/// dimensions as if they were the delivered ones would overstate what it can
+/// read (a 4K screenshot delivered at 1568 px does not show 4K detail). The
+/// two cases are a closed set, so they are an enum rather than a
+/// `{ width, height, source_width, source_height, scaled }` struct: that
+/// shape has to encode "no downscale" as `delivered == source`, and "size
+/// unknown" as a zero sentinel — two invariant conventions every consumer
+/// would have to remember. Here an unreachable state is unrepresentable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeliveredImage {
+    /// The uploaded bytes travelled unchanged, at full file resolution.
+    FullResolution {
+        /// Size of the raster on the wire; `None` when neither the file
+        /// header nor the upload-time claim could tell us (a payload this
+        /// module cannot decode).
+        size: Option<(u32, u32)>,
+    },
+    /// The model received a downscaled copy of the uploaded file.
+    Downscaled {
+        /// Size of the raster on the wire.
+        delivered: (u32, u32),
+        /// Size of the uploaded file.
+        source: (u32, u32),
+    },
+}
+
+impl DeliveredImage {
+    /// The size the token estimate must price: the raster the model gets,
+    /// never the file on disk.
+    pub fn delivered_size(&self) -> Option<(u32, u32)> {
+        match *self {
+            Self::FullResolution { size } => size,
+            Self::Downscaled { delivered, .. } => Some(delivered),
+        }
+    }
 }
 
 /// Why an `image_upload` item produced no part.
@@ -179,8 +245,14 @@ pub enum ImageSkip {
     /// format the model's image input can carry", which is why the hint names
     /// converting it as the fix.
     FormatNotReadable,
-    /// Bigger than [`MAX_INLINE_IMAGE_BYTES`] — the data URI would be resent on
-    /// every request that carries this message.
+    /// Cannot be delivered inside the inline budget: either the payload
+    /// exceeds [`MAX_INLINE_IMAGE_BYTES`] after a downscale (the data URI
+    /// would be resent on every request that carries this message), or the
+    /// source is outside
+    /// [`crate::util::image_raster::ATTACHMENT_DECODE_BUDGET`] so it cannot be
+    /// downscaled at all — and shipping it raw would cost the same per-request
+    /// pixel bill this pipeline exists to prevent. The file stays on disk and
+    /// the prompt hint names it, so `image_read` is still the way in.
     TooLarge,
     /// The runtime has no [`AttachmentService`] (Phase B injection missing), so
     /// no blob could be read at all.
@@ -255,9 +327,12 @@ impl ImageParts {
 ///   size checks because it is the one fact the other two cannot fix.
 /// - Items whose `format` isn't a known image MIME are recorded as
 ///   [`ImageSkip::FormatNotReadable`] and announced to the caller.
-/// - Items whose bytes exceed [`MAX_INLINE_IMAGE_BYTES`] are recorded as
-///   [`ImageSkip::TooLarge`]; the JSONL system entry is still written, so the
-///   prompt hint can point the model at the on-disk file.
+/// - Items whose raster is larger than [`ATTACHMENT_MAX_SIDE_PX`] are
+///   **downscaled** before they go on the wire (see
+///   [`prepare_image_payload`]); the original blob is untouched on disk.
+/// - Items whose payload still exceeds [`MAX_INLINE_IMAGE_BYTES`] after that
+///   are recorded as [`ImageSkip::TooLarge`]; the JSONL system entry is still
+///   written, so the prompt hint can point the model at the on-disk file.
 /// - Items whose blob can't be read return an error — the LLM call will not
 ///   proceed without all attachments accounted for.
 pub async fn derive_image_parts_from_items(
@@ -308,29 +383,221 @@ pub async fn derive_image_parts_from_items(
             continue;
         };
 
-        if *size_bytes as usize > MAX_INLINE_IMAGE_BYTES {
-            tracing::warn!(
-                document_id = %document_id,
-                filename = %filename,
-                size_bytes,
-                limit = MAX_INLINE_IMAGE_BYTES,
-                "image exceeds inline data-URI budget; dropping from multimodal payload"
-            );
-            out.record(document_id, ImageDelivery::Skipped(ImageSkip::TooLarge));
-            continue;
-        }
-
         let bytes = attachment.read_file(document_id).await.map_err(|e| {
             crate::error::RuntimeError::Config(format!(
                 "read attachment {document_id} ({filename}): {e}"
             ))
         })?;
+        let payload_len = bytes.len();
 
-        let url = build_data_url(mime, &bytes);
-        out.parts.push(image_part(url, *width, *height));
-        out.record(document_id, ImageDelivery::Delivered);
+        // The recorded size is the upload-time claim; the bytes we just read
+        // are the fact. The claim is only compared so a blob that changed on
+        // disk after upload is visible in the log — the payload budget is
+        // enforced against the bytes that actually travel.
+        if *size_bytes as usize > payload_len + 4096 {
+            tracing::warn!(
+                document_id = %document_id,
+                filename = %filename,
+                size_bytes,
+                actual_bytes = payload_len,
+                "attachment size changed after upload; trusting the bytes on disk"
+            );
+        }
+
+        // Decode + re-encode is pure CPU — hundreds of milliseconds for a 4K
+        // screenshot — so it runs on the blocking pool, never on the worker
+        // that is assembling this turn. The document path next to it makes
+        // the same hand-off (`attachment_to_document::scan_and_encode`).
+        let claimed_size = (*width).zip(*height);
+        let prepared = match tokio::task::spawn_blocking(move || {
+            prepare_image_payload(
+                bytes,
+                mime,
+                claimed_size,
+                crate::util::image_raster::ATTACHMENT_DECODE_BUDGET,
+            )
+        })
+        .await
+        {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(ImageSkip::TooLarge)) => {
+                tracing::warn!(
+                    document_id = %document_id,
+                    filename = %filename,
+                    size_bytes = payload_len,
+                    limit = MAX_INLINE_IMAGE_BYTES,
+                    "attached image cannot be delivered inside the inline data-URI budget; dropping from multimodal payload"
+                );
+                out.record(document_id, ImageDelivery::Skipped(ImageSkip::TooLarge));
+                continue;
+            }
+            Ok(Err(skip)) => {
+                out.record(document_id, ImageDelivery::Skipped(skip));
+                continue;
+            }
+            Err(e) => {
+                // The blocking task panicked (a decoder bug). Fail the turn
+                // rather than silently present an attachment the model never
+                // received.
+                return Err(crate::error::RuntimeError::Config(format!(
+                    "prepare attached image {document_id} ({filename}): {e}"
+                )));
+            }
+        };
+
+        if let DeliveredImage::Downscaled { delivered, source } = prepared.delivery {
+            tracing::info!(
+                document_id = %document_id,
+                filename = %filename,
+                source = format!("{}x{}", source.0, source.1),
+                delivered = format!("{}x{}", delivered.0, delivered.1),
+                payload_bytes = prepared.bytes.len(),
+                "downscaled attached image before delivery to the model"
+            );
+        }
+
+        let url = build_data_url(prepared.mime, &prepared.bytes);
+        // The delivered raster's real dimensions, so the token estimate prices
+        // the picture the model actually receives — never the file on disk.
+        let size = prepared.delivery.delivered_size();
+        out.parts.push(image_part(url, size));
+        out.record(document_id, ImageDelivery::Delivered(prepared.delivery));
     }
     Ok(out)
+}
+
+/// The raster that will travel to the model, after any downscaling.
+pub struct PreparedImage {
+    /// The payload bytes (the downscaled copy, or the original bytes).
+    pub bytes: Vec<u8>,
+    /// The MIME that describes `bytes` — when they are a raster we could
+    /// decode, this is the delivered MIME, which may differ from the declared
+    /// one after a downscale (a downscaled JPEG stays JPEG, a downscaled WebP
+    /// becomes PNG).
+    pub mime: &'static str,
+    /// What the model will be told it received. The sizes live here and
+    /// nowhere else, so one place decides both what the token estimate prices
+    /// and what the prompt hint claims — the two that must never disagree.
+    pub delivery: DeliveredImage,
+}
+
+/// Prepare an attachment's bytes for delivery to the model.
+///
+/// **Synchronous and CPU-bound on purpose** — it decodes and re-encodes
+/// pixels. Every caller must hand it a `Vec<u8>` to the blocking pool
+/// (`spawn_blocking`), never call it inline in an async body: a Lanczos3
+/// downscale of a 4K screenshot is hundreds of milliseconds of pure CPU, and
+/// this sits on the turn-assembly path. See
+/// [`crate::agent::attachment_to_document`] for the same hand-off on the
+/// document side.
+///
+/// Policy:
+/// - A raster larger than [`ATTACHMENT_MAX_SIDE_PX`] is downscaled (the
+///   shared [`crate::util::image_raster`] physics) and re-encoded
+///   deterministically. The delivered dimensions are the **downscaled** ones,
+///   so the token estimate describes what the model receives.
+/// - A raster within the cap travels **byte-for-byte** — no re-encode: a
+///   small picture is not worth the quality loss. Its MIME is taken from the
+///   sniffed bytes, not from the upload's extension, so a mislabelled file
+///   does not reach the provider as a data URL that lies about itself.
+/// - A raster **outside [`crate::util::image_raster::ATTACHMENT_DECODE_BUDGET`]**
+///   is [`ImageSkip::TooLarge`], *not* a passthrough: we cannot downscale it
+///   within the memory we are willing to spend, and delivering a 48 MP photo
+///   untouched is exactly the per-request pixel bill this pipeline exists to
+///   prevent. The blob stays on disk and the prompt hint points at it, so
+///   `image_read` can still reach it.
+/// - Bytes that are not a decodable raster at all travel unchanged (this
+///   module does no image recognition, ADR-046 §2.7 — a corrupt upload is a
+///   fact about the human's file, not a runtime policy).
+/// - A payload still over [`MAX_INLINE_IMAGE_BYTES`] after all that is
+///   [`ImageSkip::TooLarge`]; [`crate::util::image_raster::resize_and_encode`]
+///   has already tried the JPEG re-encode before saying so.
+fn prepare_image_payload(
+    bytes: Vec<u8>,
+    declared_mime: &'static str,
+    fallback: Option<(u32, u32)>,
+    budget: crate::util::image_raster::DecodeBudget,
+) -> Result<PreparedImage, ImageSkip> {
+    use crate::util::image_raster as rasterlib;
+    use crate::util::image_raster::RasterError;
+
+    let Some(raster) = rasterlib::sniff_bytes(&bytes) else {
+        return passthrough(bytes, declared_mime, fallback);
+    };
+
+    // Header-only read, for the size to report if the bytes end up not being
+    // touched. `downscale` parses the same header itself — it is a standalone
+    // entry point and must not trust its caller — and a second header parse
+    // is noise next to a Lanczos3 decode plus a re-encode.
+    let header = rasterlib::dimensions(&bytes, raster);
+    let declared_size = header.or(fallback);
+
+    match rasterlib::downscale(
+        &bytes,
+        raster,
+        ATTACHMENT_MAX_SIDE_PX,
+        budget,
+        MAX_INLINE_IMAGE_BYTES,
+    ) {
+        Ok(Some(scaled)) => Ok(PreparedImage {
+            bytes: scaled.bytes,
+            mime: scaled.mime,
+            delivery: DeliveredImage::Downscaled {
+                delivered: (scaled.width, scaled.height),
+                source: (scaled.source_width, scaled.source_height),
+            },
+        }),
+        Ok(None) => passthrough(bytes, raster.mime, declared_size),
+        Err(RasterError::OverDecodeBudget) => {
+            tracing::warn!(
+                source = ?header,
+                max_pixels = budget.max_pixels,
+                "attached image is outside the decode budget; not inlining it raw"
+            );
+            Err(ImageSkip::TooLarge)
+        }
+        Err(reason @ RasterError::PayloadTooLarge { .. }) => {
+            tracing::warn!(
+                source = ?header,
+                ?reason,
+                "downscaled attached image still exceeds the inline data-URI budget"
+            );
+            Err(ImageSkip::TooLarge)
+        }
+        Err(reason) => {
+            tracing::debug!(
+                ?reason,
+                "attached image could not be decoded; delivering the original bytes"
+            );
+            passthrough(bytes, raster.mime, declared_size)
+        }
+    }
+}
+
+/// The unchanged-bytes path — one policy, whatever made us take it.
+///
+/// Both hazards of a passthrough live here and nowhere else: the payload
+/// budget is enforced against the bytes that actually travel, and the
+/// reported size falls back from the file header to the upload-time claim
+/// (the desktop measured the file; it is the best fact available when the
+/// payload cannot be read).
+///
+/// `bytes` is **moved**, never cloned: a passthrough is by definition the
+/// same blob that was just read, and copying it would double the peak for a
+/// file we are about to base64 anyway.
+fn passthrough(
+    bytes: Vec<u8>,
+    mime: &'static str,
+    size: Option<(u32, u32)>,
+) -> Result<PreparedImage, ImageSkip> {
+    if bytes.len() > MAX_INLINE_IMAGE_BYTES {
+        return Err(ImageSkip::TooLarge);
+    }
+    Ok(PreparedImage {
+        bytes,
+        mime,
+        delivery: DeliveredImage::FullResolution { size },
+    })
 }
 
 /// Late-bound convenience wrapper around
@@ -620,7 +887,12 @@ mod tests {
         // Only the `image_upload` item is this channel's business, so only it
         // gets a verdict: the hint must not claim anything about a file_upload
         // or a workspace reference.
-        assert_eq!(derived.verdict("img-1"), Some(&ImageDelivery::Delivered));
+        assert_eq!(
+            derived.verdict("img-1"),
+            Some(&ImageDelivery::Delivered(DeliveredImage::FullResolution {
+                size: Some((640, 480)),
+            }))
+        );
         assert!(derived.verdict("doc-1").is_none());
     }
 
@@ -778,8 +1050,14 @@ mod tests {
             }
             _ => panic!("expected ImageUrl"),
         }
-        assert_eq!(derived.verdict("img-1"), Some(&ImageDelivery::Delivered));
-        assert_eq!(derived.verdict("img-2"), Some(&ImageDelivery::Delivered));
+        assert!(matches!(
+            derived.verdict("img-1"),
+            Some(ImageDelivery::Delivered(_))
+        ));
+        assert!(matches!(
+            derived.verdict("img-2"),
+            Some(ImageDelivery::Delivered(_))
+        ));
     }
 
     /// Images over [`MAX_INLINE_IMAGE_BYTES`] are dropped with a warn log, and the
@@ -860,7 +1138,10 @@ mod tests {
             }
             _ => panic!("expected ImageUrl"),
         }
-        assert_eq!(derived.verdict("img-1"), Some(&ImageDelivery::Delivered));
+        assert!(matches!(
+            derived.verdict("img-1"),
+            Some(ImageDelivery::Delivered(_))
+        ));
     }
 
     /// `merge_turn_parts`: nothing from any source ⇒ `None`. The caller treats
@@ -870,6 +1151,199 @@ mod tests {
     fn merge_turn_parts_both_empty_returns_none() {
         let merged = merge_turn_parts(None, Vec::new(), Vec::new());
         assert!(merged.is_none());
+    }
+
+    // ── Attachment downscaling (the token-savings path) ──────────────────
+
+    /// A deterministic PNG of the given size.
+    fn sample_png(width: u32, height: u32) -> Vec<u8> {
+        use image::{DynamicImage, ImageBuffer, Rgb};
+        let buf: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(width, height, |x, y| {
+            Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+        });
+        let mut out = Vec::new();
+        DynamicImage::ImageRgb8(buf)
+            .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+            .expect("png encodes");
+        out
+    }
+
+    /// A deterministic JPEG of the given size (used to model a file whose
+    /// extension lies about its contents).
+    fn sample_jpeg(width: u32, height: u32) -> Vec<u8> {
+        use image::ImageBuffer;
+        let img: ImageBuffer<image::Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(width, height, |x, y| {
+                image::Rgb([(x % 256) as u8, (y % 256) as u8, 40])
+            });
+        let mut out = Vec::new();
+        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 85)
+            .encode(
+                img.as_raw(),
+                width,
+                height,
+                image::ExtendedColorType::Rgb8,
+            )
+            .expect("jpeg encodes");
+        out
+    }
+
+    /// A source we cannot *afford* to decode is skipped, never shipped raw.
+    ///
+    /// Shipping it unchanged would put the whole 48 MP pixel bill on every
+    /// subsequent request — the exact cost this pipeline exists to prevent.
+    /// The budget is a parameter precisely so this decision is testable
+    /// without allocating a 24 MP image.
+    #[test]
+    fn an_over_budget_source_is_skipped_rather_than_delivered_raw() {
+        // Over the 1568 cap (so a downscale is wanted) AND over the pixel
+        // budget (so it cannot be decoded). A source *under* the cap is
+        // never decoded at all, so the budget cannot apply to it.
+        let bytes = sample_png(2000, 1000);
+        let tight = crate::util::image_raster::DecodeBudget {
+            max_side_px: 8192,
+            max_pixels: 1_000_000,
+        };
+        let prepared = prepare_image_payload(bytes, "image/png", Some((2000, 1000)), tight);
+        assert_eq!(prepared.err(), Some(ImageSkip::TooLarge));
+    }
+
+    /// A file whose bytes disagree with its extension reaches the provider
+    /// with the MIME the bytes actually are. Sending `image/png` over JPEG
+    /// bytes is a 400 that takes the whole turn down.
+    #[tokio::test]
+    async fn a_mislabelled_upload_is_delivered_with_its_real_mime() {
+        let jpeg = sample_jpeg(320, 240);
+        let svc: Arc<dyn AttachmentService> =
+            Arc::new(MockAttachment::with_blob("img-1", jpeg.clone()));
+        // Declared as a PNG (`format` is the upload's extension).
+        let items = vec![png_item("img-1", "png", jpeg.len() as u64)];
+        let derived = derive_image_parts(Some(&svc), &items, vision().as_ref())
+            .await
+            .unwrap();
+
+        match &derived.parts()[0] {
+            ContentPart::ImageUrl { image_url } => assert!(
+                image_url.url.starts_with("data:image/jpeg;base64,"),
+                "the data URL must describe the bytes, got {}",
+                &image_url.url[..24]
+            ),
+            other => panic!("expected ImageUrl, got {other:?}"),
+        }
+    }
+
+    /// A large pasted screenshot is **downscaled** on the way to the model.
+    ///
+    /// This is the whole point of the change: the uploaded bytes went to
+    /// the model verbatim before, so a 4K screenshot cost its full pixel
+    /// bill on every request of the session. The delivered raster must be
+    /// capped, and the part's dimensions must describe the *delivered*
+    /// raster — the token estimate reads those numbers.
+    #[tokio::test]
+    async fn a_large_attached_image_is_downscaled_before_it_reaches_the_model() {
+        let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::with_blob(
+            "img-1",
+            sample_png(3000, 1500),
+        ));
+        let items = vec![png_item("img-1", "png", 3000)];
+        let derived = derive_image_parts(Some(&svc), &items, vision().as_ref())
+            .await
+            .unwrap();
+
+        assert_eq!(derived.parts().len(), 1);
+        match &derived.parts()[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!(
+                    (image_url.width, image_url.height),
+                    (Some(ATTACHMENT_MAX_SIDE_PX), Some(ATTACHMENT_MAX_SIDE_PX / 2)),
+                    "the part prices the delivered raster, not the uploaded file"
+                );
+            }
+            other => panic!("expected ImageUrl, got {other:?}"),
+        }
+        // The verdict names the source too, so the hint can be honest about
+        // what the model is NOT looking at.
+        match derived.verdict("img-1") {
+            Some(ImageDelivery::Delivered(DeliveredImage::Downscaled { delivered, source })) => {
+                assert_eq!(*source, (3000, 1500));
+                assert_eq!(delivered.0, ATTACHMENT_MAX_SIDE_PX);
+            }
+            other => panic!("expected a delivered verdict, got {other:?}"),
+        }
+    }
+
+    /// A small attached image is delivered **byte-for-byte** — no re-encode,
+    /// no quality loss, and the delivered dimensions are read from the
+    /// header (not guessed).
+    #[tokio::test]
+    async fn a_small_attached_image_is_delivered_untouched() {
+        let raw = sample_png(320, 240);
+        let svc: Arc<dyn AttachmentService> =
+            Arc::new(MockAttachment::with_blob("img-1", raw.clone()));
+        let items = vec![png_item("img-1", "png", raw.len() as u64)];
+        let derived = derive_image_parts(Some(&svc), &items, vision().as_ref())
+            .await
+            .unwrap();
+
+        match &derived.parts()[0] {
+            ContentPart::ImageUrl { image_url } => {
+                assert_eq!((image_url.width, image_url.height), (Some(320), Some(240)));
+                let encoded = image_url.url.split_once(',').unwrap().1;
+                use base64::Engine as _;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .unwrap();
+                assert_eq!(decoded, raw, "a small picture is never re-encoded");
+            }
+            other => panic!("expected ImageUrl, got {other:?}"),
+        }
+        match derived.verdict("img-1") {
+            Some(ImageDelivery::Delivered(DeliveredImage::FullResolution {
+                size: Some((320, 240)),
+            })) => {}
+            other => panic!("expected a delivered verdict, got {other:?}"),
+        }
+    }
+
+    /// A payload that is not a decodable raster is passed through — this
+    /// module does no image recognition (ADR-046 §2.7) — but the size
+    /// budget still applies.
+    #[tokio::test]
+    async fn a_non_raster_payload_is_passed_through() {
+        let svc: Arc<dyn AttachmentService> = Arc::new(MockAttachment::with_blob(
+            "img-1",
+            b"\x89PNG\r\n\x1a\nfake".to_vec(),
+        ));
+        let items = vec![png_item("img-1", "png", 16)];
+        let derived = derive_image_parts(Some(&svc), &items, vision().as_ref())
+            .await
+            .unwrap();
+        assert_eq!(derived.parts().len(), 1);
+        assert!(matches!(
+            derived.verdict("img-1"),
+            Some(ImageDelivery::Delivered(_))
+        ));
+    }
+
+    /// The downscale is deterministic: the same upload produces the same
+    /// bytes on every turn (ADR-060 prefix-cache stability).
+    #[tokio::test]
+    async fn the_downscale_is_deterministic() {
+        let raw = sample_png(2000, 1000);
+        let mut urls = Vec::new();
+        for _ in 0..2 {
+            let svc: Arc<dyn AttachmentService> =
+                Arc::new(MockAttachment::with_blob("img-1", raw.clone()));
+            let items = vec![png_item("img-1", "png", raw.len() as u64)];
+            let derived = derive_image_parts(Some(&svc), &items, vision().as_ref())
+                .await
+                .unwrap();
+            match &derived.parts()[0] {
+                ContentPart::ImageUrl { image_url } => urls.push(image_url.url.clone()),
+                other => panic!("expected ImageUrl, got {other:?}"),
+            }
+        }
+        assert_eq!(urls[0], urls[1]);
     }
 
     /// `merge_turn_parts`: only derived images ⇒ `Some(images)`.

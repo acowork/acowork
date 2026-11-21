@@ -7,8 +7,8 @@
  *   The panel grew from four cards to seven when the (since removed) Tools panel's Builtin /
  *   MCP cards and the Debug panel's Prompts & Skills card moved in (the Tools
  *   tab no longer exists as a rail entry). Seven cards all expanded is a
- *   scroll wall, so exactly the FIRST `DEFAULT_EXPANDED_CARD_COUNT` cards open
- *   on mount and every card after them starts collapsed.
+ *   scroll wall, so only the FIRST `DEFAULT_EXPANDED_CARD_COUNT` card opens on
+ *   mount and every card after it starts collapsed.
  *
  *   That rule has to be stated once. If each card kept its own literal initial
  *   value, inserting a card in the middle would silently break the count and
@@ -44,7 +44,7 @@ export const AGENT_SETUP_CARDS: readonly AgentSetupCardId[] = [
 ];
 
 /** How many leading cards start expanded; the rest start collapsed. */
-export const DEFAULT_EXPANDED_CARD_COUNT = 3;
+export const DEFAULT_EXPANDED_CARD_COUNT = 1;
 
 /** Whether a card starts expanded, derived from its position in the registry. */
 export function defaultOpenForCard(id: AgentSetupCardId): boolean {
@@ -56,7 +56,7 @@ export function defaultOpenForCard(id: AgentSetupCardId): boolean {
  * The initial open-state map for the whole panel. One object instead of seven
  * `useState` calls: every `ExpandableRow` reads its own key, and `toggleCard`
  * flips one key, so the cards can never disagree with the registry about
- * which ones are "the first three".
+ * which one is "the first".
  */
 export function initialCardOpenState(): Record<AgentSetupCardId, boolean> {
   const state = {} as Record<AgentSetupCardId, boolean>;

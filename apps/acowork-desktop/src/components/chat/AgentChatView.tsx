@@ -1639,7 +1639,10 @@ export function AgentChatView({ agentId, sessionId }: AgentChatViewProps) {
             Skills are intentionally absent — not session-seeded, no chat-message
             channel, so nothing to show here (hidden, not disabled). */}
         <div ref={setToolbarRef} className="@container/tb flex items-center justify-between gap-2 px-3 pb-2 min-w-[264px]">
-          <div className="flex items-center gap-1 min-w-0 overflow-visible">
+          <div
+            data-toolbar-cluster="left"
+            className="flex items-center gap-1 min-w-0 overflow-visible"
+          >
             {availableModels.length > 0 && agentModel && (
               <ModelMenu
                 wrapperRef={undefined}

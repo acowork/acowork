@@ -12,7 +12,7 @@
 //!   1. ORDER — the three migrated cards land BELOW the four original ones,
 //!      so the panel's reading order is stable (see `agentSetupCards.ts`).
 //!   2. DEFAULT EXPAND — seven cards all open is a scroll wall, so only the
-//!      first three start expanded. `ExpandableRow` publishes that as
+//!      first card starts expanded. `ExpandableRow` publishes that as
 //!      `aria-expanded`, which is what this test reads.
 //!
 //! The cards themselves are rendered for real (not stubbed): the point is that
@@ -148,15 +148,15 @@ describe("AgentSetupTab card composition", () => {
     ]);
   });
 
-  it("starts only the first three cards expanded", async () => {
+  it("starts only the first card expanded", async () => {
     render(<AgentSetupTab />);
 
     await waitFor(() => expect(cardHeaders().length).toBe(7));
 
     expect(cardHeaders().map((el) => el.getAttribute("aria-expanded"))).toEqual([
       "true",
-      "true",
-      "true",
+      "false",
+      "false",
       "false",
       "false",
       "false",
@@ -189,12 +189,13 @@ describe("AgentSetupTab card composition", () => {
     expect(screen.getByLabelText("tool_1").closest(".overlay-scrollbar-viewport")).toBe(panelViewport);
   });
 
-  // ── ADR-104 recommendation card: default expand state ────────────────
+  // ── ADR-104 recommendation card: collapsed + red dot ─────────────────
   //
   // The rule itself lives in `lib/mcpRecommendations.ts`; what only an
   // integration test can prove is the TIMING — the panel starts with an empty
   // recommendation list and fills it when `/tools` answers, and the card must
-  // not be painted in a state it will immediately contradict.
+  // not be painted in a state it will immediately contradict. It also must not
+  // join the "first card expanded" set: only the first card of the panel opens.
 
   it("does not paint the recommendation card before its list has loaded", async () => {
     recommendedRows = [recommended("active")];
@@ -209,12 +210,13 @@ describe("AgentSetupTab card composition", () => {
     expect(recommendationHeader().getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("opens the recommendation card when a suggestion is still unhandled", async () => {
+  it("keeps the recommendation card collapsed and dots the header when a suggestion is unhandled", async () => {
     recommendedRows = [recommended("installed_inactive")];
     render(<AgentSetupTab />);
 
     await waitFor(() => expect(cardHeaders().length).toBe(8));
-    expect(recommendationHeader().getAttribute("aria-expanded")).toBe("true");
+    expect(recommendationHeader().getAttribute("aria-expanded")).toBe("false");
+    expect(screen.queryByTestId("mcp-recommendation-dot")).not.toBeNull();
   });
 
   it("renders exactly one Prompts & Skills card (no duplicate after the move)", async () => {
@@ -242,6 +244,11 @@ describe("AgentSetupTab default reasoning effort options", () => {
   const inheritLabel = () => i18n.t("agentSetup.defaultReasoningInherit");
   const autoLabel = () => i18n.t("chatPanel.reasoningAuto");
 
+  /** Model Parameters starts collapsed (only Agent Info opens); open it. */
+  function openModelParamsCard() {
+    fireEvent.click(screen.getByLabelText(i18n.t("agentSetup.sectionModelParams")));
+  }
+
   /** The default-reasoning <select>: the one carrying the "no default" row. */
   function effortSelect(): HTMLSelectElement {
     const sel = Array.from(document.querySelectorAll<HTMLSelectElement>("select")).find(
@@ -264,6 +271,7 @@ describe("AgentSetupTab default reasoning effort options", () => {
     stubFetch();
     render(<AgentSetupTab />);
     await waitFor(() => expect(cardHeaders().length).toBe(7));
+    openModelParamsCard();
 
     // Exact match on the removed option's label: a substring check would
     // also hit 「自动（跟随模型默认）」 and pass no matter what.
@@ -275,6 +283,9 @@ describe("AgentSetupTab default reasoning effort options", () => {
     seedAgent({ defaultReasoningEffort: "auto" });
     stubFetch();
     render(<AgentSetupTab />);
+
+    await waitFor(() => expect(cardHeaders().length).toBe(7));
+    openModelParamsCard();
 
     await waitFor(() => expect(effortSelect().value).toBe("auto"));
     // Not the raw token the option list would otherwise append unchanged.

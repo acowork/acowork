@@ -114,6 +114,11 @@ function isCardExpanded(): boolean {
   return cardHeader().getAttribute("aria-expanded") === "true";
 }
 
+/** The header's unhandled-reminder dot. */
+function hasDot(): boolean {
+  return screen.queryByTestId("mcp-recommendation-dot") !== null;
+}
+
 /** Open the card the way a user does: a collapsed card keeps its rows out of
  *  the DOM, so any assertion about row content has to start here. */
 function expandCard() {
@@ -142,6 +147,7 @@ describe("McpRecommendationGroup", () => {
 
   it("shows the author's rationale and the tools that would be gained", () => {
     renderGroup([rec()]);
+    expandCard();
     expect(screen.getByText("web research")).toBeTruthy();
     expect(
       screen.getByText(i18n.t("agentSetup.mcpRecommendTools", { tools: "brave_web_search" })),
@@ -151,6 +157,7 @@ describe("McpRecommendationGroup", () => {
   it("materializes a not_installed declaration through the Gateway", async () => {
     const onReload = vi.fn();
     renderGroup([rec()], onReload);
+    expandCard();
 
     fireEvent.click(screen.getByRole("button", { name: i18n.t("agentSetup.mcpRecommendInstall") }));
 
@@ -181,6 +188,7 @@ describe("McpRecommendationGroup", () => {
         required_secrets: [],
       }),
     ]);
+    expandCard();
 
     fireEvent.click(screen.getByRole("button", { name: i18n.t("agentSetup.mcpRecommendInstall") }));
 
@@ -195,12 +203,14 @@ describe("McpRecommendationGroup", () => {
 
   it("offers no install button for a hosted server the platform publishes", () => {
     renderGroup([rec({ key: "pm", source: "hosted", preset: undefined, hosted: "pm" })]);
+    expandCard();
     expect(screen.queryByRole("button", { name: i18n.t("agentSetup.mcpRecommendInstall") })).toBeNull();
   });
 
   it("activates an installed server through the store's single activation path", async () => {
     const onReload = vi.fn();
     renderGroup([rec({ state: "installed_inactive" })], onReload);
+    expandCard();
 
     fireEvent.click(screen.getByRole("button", { name: i18n.t("agentSetup.mcpRecommendActivate") }));
 
@@ -244,6 +254,7 @@ describe("McpRecommendationGroup", () => {
 
   it("dismisses a live suggestion", async () => {
     renderGroup([rec()]);
+    expandCard();
     fireEvent.click(screen.getByRole("button", { name: i18n.t("agentSetup.mcpRecommendIgnore") }));
 
     await waitFor(() =>
@@ -257,6 +268,7 @@ describe("McpRecommendationGroup", () => {
 
   it("names the missing secret and routes the user to where it is configured", () => {
     renderGroup([rec()]);
+    expandCard();
     expect(
       screen.getByText(i18n.t("agentSetup.mcpRecommendNeedsSecrets", { secrets: "BRAVE_API_KEY" })),
     ).toBeTruthy();
@@ -272,6 +284,7 @@ describe("McpRecommendationGroup", () => {
   it("surfaces a failed install instead of silently doing nothing", async () => {
     materializeError = "unknown MCP preset 'brave-search'";
     renderGroup([rec()]);
+    expandCard();
 
     fireEvent.click(screen.getByRole("button", { name: i18n.t("agentSetup.mcpRecommendInstall") }));
 
@@ -290,6 +303,7 @@ describe("McpRecommendationGroup", () => {
     materializeStatus = 200;
     const onReload = vi.fn();
     renderGroup([rec()], onReload);
+    expandCard();
 
     fireEvent.click(screen.getByRole("button", { name: i18n.t("agentSetup.mcpRecommendInstall") }));
 
@@ -297,16 +311,15 @@ describe("McpRecommendationGroup", () => {
     expect(screen.queryByText(/Action failed/)).toBeNull();
   });
 });
-
-// ── Default expand state ────────────────────────────────────────────────
+// ── Collapsed by default + red dot ──────────────────────────────────────
 //
-// ADR-104 §8 ("the recommendation group becoming noise"): the card opens by
-// default only while some suggestion still needs a decision, and the header
-// keeps the count so a collapsed group stays discoverable. The rule that maps
-// lifecycle states to "handled" lives in `lib/mcpRecommendations.ts` and has
-// its own suite — what is asserted here is the wiring: WHEN the default is
-// decided, and that the user's own toggle is never re-decided.
-describe("McpRecommendationGroup — default expand state", () => {
+// ADR-104 §8 ("the recommendation group becoming noise"): the card never opens
+// on its own — an auto-expanded block would claim the Setup panel's single
+// scroll column. While something still needs a decision the collapsed header
+// carries a red dot instead. The rule that maps lifecycle states to "handled"
+// lives in `lib/mcpRecommendations.ts` and has its own suite — what is asserted
+// here is the wiring.
+describe("McpRecommendationGroup — collapsed by default + red dot", () => {
   beforeEach(() => {
     materializeStatus = 201;
     materializeError = null;
@@ -319,46 +332,47 @@ describe("McpRecommendationGroup — default expand state", () => {
     vi.restoreAllMocks();
   });
 
-  it("starts expanded while a suggestion is still installable", () => {
+  it("starts collapsed while a suggestion is still installable", () => {
     renderGroup([rec({ state: "not_installed" })]);
-    expect(isCardExpanded()).toBe(true);
+    expect(isCardExpanded()).toBe(false);
+    expect(hasDot()).toBe(true);
   });
 
-  it("starts expanded while an installed suggestion is not started yet", () => {
-    // `installed_inactive` is still one click away from done — the user has to
-    // see it without hunting for the card.
+  it("starts collapsed while an installed suggestion is not started yet", () => {
     renderGroup([rec({ state: "installed_inactive" })]);
-    expect(isCardExpanded()).toBe(true);
+    expect(isCardExpanded()).toBe(false);
+    expect(hasDot()).toBe(true);
   });
 
-  it("starts expanded when only one of several suggestions is unhandled", () => {
+  it("marks the header when only one of several suggestions is unhandled", () => {
     renderGroup([
       rec({ key: "a", state: "active" }),
       rec({ key: "b", state: "dismissed" }),
       rec({ key: "c", state: "installed_inactive" }),
     ]);
-    expect(isCardExpanded()).toBe(true);
+    expect(isCardExpanded()).toBe(false);
+    expect(hasDot()).toBe(true);
   });
 
-  it("starts collapsed once every suggestion is active or ignored", () => {
+  it("shows neither expansion nor dot once every suggestion is active or ignored", () => {
     renderGroup([
       rec({ key: "a", state: "active" }),
       rec({ key: "b", state: "dismissed" }),
     ]);
     // Collapsed, not hidden: the header still reports the declaration count.
     expect(isCardExpanded()).toBe(false);
-    expect(
-      cardHeader().textContent,
-    ).toContain(i18n.t("agentSetup.mcpRecommended", { count: 2 }));
+    expect(hasDot()).toBe(false);
+    expect(cardHeader().textContent).toContain(
+      i18n.t("agentSetup.mcpRecommended", { count: 2 }),
+    );
   });
 
-  it("keeps the user's collapse when a reload re-delivers the same unhandled list", () => {
-    // The default for this list is "expanded"; the user closed it anyway, and
-    // the reload after any row action must not pop it back open.
+  it("keeps the user's own expansion when a reload re-delivers the list", () => {
+    // Nothing opens automatically, but a card the user opened must not slam
+    // shut when a row action reloads the list under the cursor.
     const { rerender } = renderGroup([rec({ state: "installed_inactive" })]);
+    expandCard();
     expect(isCardExpanded()).toBe(true);
-    fireEvent.click(cardHeader());
-    expect(isCardExpanded()).toBe(false);
 
     rerender(
       <McpRecommendationGroup
@@ -367,15 +381,12 @@ describe("McpRecommendationGroup — default expand state", () => {
         onReload={() => {}}
       />,
     );
-    expect(isCardExpanded()).toBe(false);
+    expect(isCardExpanded()).toBe(true);
   });
 
-  it("stays open while the user works through the list", () => {
-    // Activating the last pending row flips the list to "all handled"; the
-    // default for that list is collapsed, but the card must not slam shut under
-    // the cursor that just clicked it.
+  it("drops the dot as soon as the list becomes all handled", () => {
     const { rerender } = renderGroup([rec({ state: "not_installed" })]);
-    expect(isCardExpanded()).toBe(true);
+    expect(hasDot()).toBe(true);
 
     rerender(
       <McpRecommendationGroup
@@ -384,26 +395,17 @@ describe("McpRecommendationGroup — default expand state", () => {
         onReload={() => {}}
       />,
     );
-    expect(isCardExpanded()).toBe(true);
+    expect(hasDot()).toBe(false);
   });
 
-  it("decides again for a different agent instead of reusing the previous answer", () => {
+  it("mounts no card at all while the next agent's list is still empty", () => {
     // The host empties the list while the next agent's `/tools` is in flight
     // (see ToolsCards: the list is stamped with its agent), so the card is
-    // unmounted in between and its successor decides from its own rows.
+    // unmounted in between and never paints a stale default.
     const { rerender } = renderGroup([rec({ state: "not_installed" })]);
-    expect(isCardExpanded()).toBe(true);
+    expect(isCardExpanded()).toBe(false);
 
     rerender(<McpRecommendationGroup agentId="agent-2" recommendations={[]} onReload={() => {}} />);
     expect(screen.queryAllByRole("button")).toHaveLength(0);
-
-    rerender(
-      <McpRecommendationGroup
-        agentId="agent-2"
-        recommendations={[rec({ state: "active" })]}
-        onReload={() => {}}
-      />,
-    );
-    expect(isCardExpanded()).toBe(false);
   });
 });

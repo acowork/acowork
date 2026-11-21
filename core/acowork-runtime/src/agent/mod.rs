@@ -13,6 +13,7 @@ pub mod context;
 mod e2e_prompt_cache;
 pub mod git_nudge;
 pub mod history;
+pub mod image_context;
 pub mod inbound;
 pub mod intent_accept;
 pub mod intent_turn;

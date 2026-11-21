@@ -5,7 +5,7 @@
 > **⚠ ADR-114 废止了本文「Local 模式 no-op」的前提（2026-11-13）**：D7 / D8 / §测试 中作为总开关的 `AuthMode`（`AUTH_MODE = local | multi_user`）已删除——账号体系与网络拓扑解耦后**恒开**。因此「Local 模式整体 no-op」「`auth=None`（Local 模式）仍整层 no-op」「Local 模式回归 = 逐字节一致」这些分支不再存在；三档权限模型（manage / use / view）、单 owner + guest、fail-closed 归属判定继续有效，并且现在**始终生效**。「无 `AuthContext`」从一种部署模式变成运行时状态：仅未登录请求与 bootstrap 路径（`/api/bootstrap`、`/api/auth/first-login` 等 `is_public_path` 白名单）。详见 [ADR-114](./ADR-114-account-system-decoupled-from-network-topology.md)。
 
 **状态**：草案（v2 修订稿；Q1/Q2/Q4 与"单 owner + 多 guest"模型已决策，剩余见 §12）
-**日期**：2026-10-28（v2 修订：新增 D9 归属基数与 guest 模型——评审两问定调：不许多 owner，guest 是 use 档使用授权（非 manage）；Q1/Q2/Q4 落决策。v3 修订：权限轴从两档改为**三档 manage/use/view**——manage 收窄为"高权限/破坏性/agent 定义修改"，use 覆盖其余全部写，view 放开**元数据/定义类只读**；工作区文件内容、git 历史、memory、全局 search 等"内容读"仍归 use 不归 view（防 §7 方案 G 窃取）；start 归 use、stop 归 manage；permissions 名单公开归 view）
+**日期**：2026-10-28（v2 修订：新增 D9 归属基数与 guest 模型——评审两问定调：不许多 owner，guest 是 use 档使用授权（非 manage）；Q1/Q2/Q4 落决策。v3 修订：权限轴从两档改为**三档 manage/use/view**——manage 收窄为"高权限/破坏性/agent 定义修改"，use 覆盖其余全部写，view 放开**元数据/定义类只读**；工作区文件内容、git 历史、memory、全局 search 等"内容读"仍归 use 不归 view（防 §7 方案 G 窃取）；start 归 use、stop 归 manage；permissions 名单公开归 view）；v4 修订（2026-11）：D3 增补归属解析顺序——`agent_owners.json` 无行时按 hosting node 的 owner 兜底，与 ADR-113 口径一致）
 **决策者**：（待定）
 
 **前置**：
@@ -31,7 +31,7 @@
 |---|---|---|
 | D1 | owner 存哪 | **Gateway 侧新增两个持久化归属表**（`node_owners.json`、`agent_owners.json`，与 `node_tokens.json` 同目录同范式）。**不进 MQTT proto**：Node 上报的 inventory 仍是"存在性权威"（ADR-055 §6.5），归属是 Gateway 的策略数据，Node 不感知用户 |
 | D2 | node owner 从哪来 | **enrollment token 绑定创建者**：multi_user 模式下新增 `POST /api/nodes/enrollment-tokens`（需登录），token 记录带 `owner_user_id`，enroll 成功即写 `node_owners.json`。CLI 签发的 token 无主 → 该 node 无主（admin-only）。`gateway_managed` 本机节点默认无主 |
-| D3 | agent owner 从哪来 | **谁装谁所有**：`POST /api/agents/install` / `ensure` / `clone` 成功派发时，以 `instance_id` 为键写入 `agent_owners.json`，owner = 调用者 `AuthContext.user_id`。admin 天然可装任意 node（Q2 已决策，见 §12），装出的 agent owner = admin；guest 在共享 node 上装的 agent owner = guest 本人（D9 规则 3） |
+| D3 | agent owner 从哪来 | **谁装谁所有**：`POST /api/agents/install` / `ensure` / `clone` 成功派发时，以 `instance_id` 为键写入 `agent_owners.json`，owner = 调用者 `AuthContext.user_id`。admin 天然可装任意 node（Q2 已决策，见 §12），装出的 agent owner = admin；guest 在共享 node 上装的 agent owner = guest 本人（D9 规则 3）；**归属行缺失时按 hosting node 的 owner 兜底**（§5 D3 增补，口径与 ADR-113 一致） |
 | D4 | 三档门控 | **manage = owner ∨ admin**（窄）：Node 门控——install/uninstall 到该 node、fs browse、rename、enroll 归属；Agent 门控——stop/upgrade/clone/debug、agent 定义类配置写（config/prompts/skills/model/workspace 增删改/avatar/manifest）、memory 破坏写、删 session、权限设置。**use = owner ∨ guest ∨ admin**（宽）：除 manage 外一切写——start、聊天、session 增改、文件/git 读写、memory 检索、全局 search、interactions；**内容类读**（工作区文件/git 历史/memory/search）也归 use。**view = use ∨ published**：agent 定义/元数据只读（列表/详情/config 定义读/status/头像/permissions 名单）。详见 D4 门控表 |
 | D5 | 执行点 | **Gateway 反代入口**（`http/proxy.rs` 路由策略表 + `agents.rs`/`nodes_api.rs`/`fs_browse.rs` handler 头部）。Runtime 不引入 owner 概念（它拿不到也不该拿归属真相）；`x-user-id` scope 机制原样保留，只用于 session 过滤 |
 | D6 | agent 可见性与使用 | agent 新增 `visibility`：`private`（仅 use 名单 = owner ∨ guest ∨ admin 可见、可用）与 `shared`（**所有登录用户可见**，但**仍只有 use 名单能用**——开 session 聊天需 owner 授权为 guest，session 之间按 ADR-076 隔离）。**visibility 只决定"看得到"，不决定"能不能用"**；"用"永远走 use 名单。默认值：用户手动 install/ensure/clone 出的实例落 `private`；**onboarding 预装的 default agent 落 `shared`**（Q1 已决策，见 §12）——注意这只让它对全员**可见**，能否聊天仍取决于是否被加进 guest 名单 |
@@ -156,6 +156,16 @@ agent_owners.json   # instance_id (UUID v4, ADR-073) → { owner_user_id: Option
 - `ensure` 命中已存在实例时**不改** owner（幂等语义只约束存在性，不约束归属）。
 - Local 模式无 `AuthContext` → 写入 `owner=None`，反正 Local 不校验（D8）。
 - **visibility 初始值**：install/ensure/clone 写表时默认 `Private`；唯一例外是 Desktop onboarding 预装的 default agent（ADR-077 bundled 包）落 `Shared`——团队部署开箱即用地让 default agent 对全员**可见**（注意：`shared` 只放开可见，能否聊天仍需 owner 逐个加进 guest 名单，见 D6）。default agent 的 owner 仍 = 执行 onboarding 的首个用户，之后 owner 可改回 private。
+
+**归属解析顺序（增补，2026-11）** —— 回答"`agent_owners.json` 里没有这一行时怎么办"：
+
+1. `agent_owners.json[instance_id].owner_user_id` 有值（含 admin claim/转移后的值）→ 它就是唯一真相，到此为止。
+2. 缺失 → 用该实例的 hosting `node_id` 查 `node_owners.json[node_id].owner_user_id`，有值则用它。这不是新的信任源，而是与 ADR-113 定下的口径一致：**node 的归属只由 `node_owners.json` 决定**，装在这台机器上的 agent 继承这台机器的归属，比"无主"更接近事实。
+3. 仍然缺失 → `owner=None`，按 D7 fail-closed：只有 admin 可见可用。
+
+**为什么必须有第 2 步**：旧实现只查第 1 步。Gateway 重启后若默认 owner 尚未确定（未设 `user first-admin`），`agent_owners.json` 里没有行的实例一律落 `None`，fail-closed 生效过头——手机节点上已安装、且 `node_owners.json` 明明记得归属的 agent 会整个从 Desktop 消失，用户既用不了也无法自证，这是可用性事故而不是安全边界。实现见 `owner_for_installed_instance`（[dispatch.rs:1164](../../../core/acowork-gateway/src/mqtt/dispatch.rs#L1164)）。
+
+**边界**：兜底只在**解析**时生效，不物化写入 `agent_owners.json`——一旦该实例被 claim 或重装而有了真 owner，第 1 步先命中并覆盖它；兜底也不改变 D4 的门控算术（它给的只是一个 owner 值，manage/use/view 三档照旧计算），且不适用于 node 自身归属（node 只走第 1、3 步的语义）。
 
 ### D4：两级门控 + 权限矩阵
 

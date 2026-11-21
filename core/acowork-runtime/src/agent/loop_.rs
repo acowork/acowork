@@ -1301,16 +1301,13 @@ impl AgentLoop {
                     "Expired previous rounds' inlined documents at the round boundary"
                 );
             }
-            let reclaimed_images = self
-                .session
-                .history
-                .reclaim_image_parts_over_budget(HistoryManager::configured_image_token_budget());
-            if reclaimed_images > 0 {
-                tracing::debug!(
-                    reclaimed_images,
-                    "Reclaimed image parts at the round boundary"
-                );
-            }
+            // No image reclaim here: images are append-only, and the only thing that
+            // shrinks the context is compaction (`replace_middle_with_summary`),
+            // which keeps the newest picture's pixels in its tail. An image
+            // budget used to delete the oldest parts at this boundary — that
+            // rewrote the middle of history on every image-heavy round, so every
+            // round was a full prefix-cache miss. See the v2 design doc
+            // `t-e185607c` §1 for why a quota is the wrong instrument.
             // Per-turn text for ToolContext (kept for the WHOLE turn).
             // Lives on this per-session loop, never on agent-shared tool
             // instances.
@@ -2570,13 +2567,23 @@ impl AgentLoop {
                 // `restorer` in the Runtime).
                 conversation.append_internal_message("user", &label);
             }
-            self.session.history.append(ChatMessage {
-                role: acowork_core::providers::traits::MessageRole::User,
-                name: Some("tool_image".to_string()),
-                content: label,
-                content_parts: Some(image_parts),
-                ..Default::default()
-            });
+            // Content-addressed append (design doc §4-B/D): the history owns both
+            // halves — dedupe by payload identity, and the cost line the model
+            // needs in order to decide whether to read again — because it is also
+            // the owner of the token count and of the message text. The loop's
+            // only input is the denominator this session is compacting against.
+            let append = self.session.history.append_tool_image(
+                label,
+                image_parts,
+                self.context_trim_budget(current_model),
+            );
+            if append.deduped > 0 {
+                tracing::debug!(
+                    appended = append.appended,
+                    deduped = append.deduped,
+                    "Appended tool image round with deduplicated parts"
+                );
+            }
         }
 
         // ── ⑨ Post-execution loop detection ──
@@ -2794,14 +2801,19 @@ mod tests {
             ))
         }));
 
-        // The same in-memory message is reclaimed only when the explicit
-        // budget is exceeded; the durable path label remains available.
-        assert_eq!(agent_loop.history_mut().reclaim_image_parts_over_budget(0), 1);
-        let reclaimed = agent_loop.history().messages().iter().find(|message| {
+        // Append-only: the pixels are never reclaimed out of the middle of
+        // history (that was the cache-missing rewrite), and the message that
+        // carries them also tells the model what they cost.
+        let carried = agent_loop.history().messages().iter().find(|message| {
             message.name.as_deref() == Some("tool_image")
-        }).expect("tool image label remains in history");
-        assert!(reclaimed.content.contains("/tmp/shot.png"));
-        assert!(reclaimed.content_parts.is_none());
+        }).expect("tool image message remains in history");
+        assert!(carried.content.contains("/tmp/shot.png"));
+        assert!(carried.content_parts.is_some(), "pixels stay where they were appended");
+        assert!(
+            carried.content.contains("[image cost:") && carried.content.contains("tokens"),
+            "the image message must carry its own price: {}",
+            carried.content
+        );
     }
 
     /// The injected image label reaches the model as a `user` message (D2: the
