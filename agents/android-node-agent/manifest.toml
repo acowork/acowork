@@ -2,7 +2,7 @@
 # The phone-side agent for ACowork on Android: remote phone control — observe the screen, act on it, manage apps, capture media and sensor data, and talk to BLE/USB peripherals. Everything it produces goes back to the chat, because the user is not holding the phone.
 
 agent_id = "com.acowork.android-node"
-version = "0.1.0"
+version = "0.1.1"
 name = "AndroidNode"
 role = "Phone Remote Operator"
 description = "Operates an Android phone on the user's behalf from a distance: screen observation and automation, app install and launch, media and sensor capture, location, speech, clipboard, notifications, and BLE/USB peripherals. All results are delivered through chat."
@@ -10,7 +10,7 @@ author = "ACowork Team"
 runtime_version = "0.1.0"
 dev = false
 labels = ["automation", "android"]
-builtin_avatar = "icon-05"
+avatar = "assets/avatar.jpg"
 
 identity_deps = ["display_name", "language", "timezone"]
 
