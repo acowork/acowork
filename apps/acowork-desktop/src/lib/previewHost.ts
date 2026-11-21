@@ -55,10 +55,19 @@ export interface PreviewNewWindowRequest {
 
 export type PreviewHistoryDirection = "back" | "forward";
 
+/** A preview page tried to download a file; the app refuses and offers the browser. */
+export interface PreviewDownloadRequest {
+    url: string;
+    /** Label of the session that requested it. */
+    from: string;
+}
+
 /** Emitted on every observable state change of any session. */
 export const PREVIEW_STATE_EVENT = "preview://state";
 /** Emitted when a page asks for a new window. */
 export const PREVIEW_NEW_WINDOW_EVENT = "preview://new-window";
+/** Emitted when a page asks to download a file (refused; see `host.rs`). */
+export const PREVIEW_DOWNLOAD_EVENT = "preview://download";
 
 /**
  * Error codes the Rust commands answer with, typed so the UI can branch on the
@@ -175,6 +184,14 @@ export function subscribePreviewNewWindow(
     handler: (request: PreviewNewWindowRequest) => void,
 ): Promise<UnlistenFn> {
     return listen<PreviewNewWindowRequest>(PREVIEW_NEW_WINDOW_EVENT, (event) =>
+        handler(event.payload),
+    );
+}
+
+export function subscribePreviewDownload(
+    handler: (request: PreviewDownloadRequest) => void,
+): Promise<UnlistenFn> {
+    return listen<PreviewDownloadRequest>(PREVIEW_DOWNLOAD_EVENT, (event) =>
         handler(event.payload),
     );
 }

@@ -24,7 +24,7 @@
 | D2 | Navigation policy | The policy is **parameterised by webview role** (`NavigationRole::{App, Preview}`) and `navigation_policy.rs` is its single implementation. `App` behaviour is unchanged (the old allow-list moved over line for line); `Preview` is the complement: `http/https` top-level navigation allowed, every other scheme refused |
 | D3 | Session lifecycle | The Rust `PreviewRegistry` holds `label → {url,title,phase,visible,bounds}` with **at most 3 live sessions** and LRU eviction (`MAX_LIVE_SESSIONS`). The frontend binds a label to **tab identity** (`OpenFile.id`); switching tabs **parks** the session, closing the tab destroys it |
 | D4 | Permission boundary | `capabilities/default.json` moves from `windows: ["main"]` to `webviews: ["main"]`. The `windows` key grants **every webview of that window** — including the previews hosting third-party sites — the IPC surface. `dev/ci.sh` gains `run_desktop_ipc_scope_redline` to pin this |
-| D5 | Popups and downloads | In-page `window.open` / `target="_blank"`: Rust answers `NewWindowResponse::Deny` and emits `preview://new-window`; the frontend **opens a new preview tab** (falling back to the system browser without a workspace context). `on_download` refuses everything (no destination UI exists; refusing beats dropping files where the user cannot find them) |
+| D5 | Popups and downloads | In-page `window.open` / `target="_blank"`: Rust answers `NewWindowResponse::Deny` and emits `preview://new-window`; the frontend **opens a new preview tab** (falling back to the system browser without a workspace context). `on_download` refuses everything (no destination UI exists; refusing beats dropping files where the user cannot find them), but the refusal is **no longer silent**: `preview://download` lets the frontend offer "open in browser" |
 | D6 | `unstable` feature | **Accepted.** `add_child` is only exported behind `tauri`'s `unstable` feature today. An exact `=2.12.3` pin plus a red line plus integration tests keep that dependency surface narrow — see §5 |
 | D7 | Explicitly out of scope | No `iframe` fallback (two rendering paths mean two coordinate systems and two permission models — exactly what this ADR removes); no browser-in-a-separate-window (see §6); no `file://` / `data:` / `javascript:` previews (the `Preview` policy refuses them); no download manager |
 
@@ -93,7 +93,7 @@ So `navigation_policy.rs` exposes `is_allowed(role, url)`:
 | Role | Rule | Basis |
 |---|---|---|
 | `App` | The original allow-list (dev server / gateway / bundled pages), everything else refused | **Line-for-line equivalent** to the pre-change behaviour (`navigation_guard.rs` is now only a call site) |
-| `Preview` | `http` / `https` allowed, every other scheme refused | Complement semantics: a preview is the door to the outside world and needs no knowledge of internal addresses |
+| `Preview` | `http` / `https` allowed, every other scheme refused; the app's **own** surfaces are refused (`tauri.localhost` / `asset.localhost`, plus the one loopback port `devUrl` occupies in a debug build) | Complement semantics: a preview is the door to the outside world and needs no knowledge of internal addresses. Refusing our own surfaces is the other half of that sentence — a preview is not a second main window. Loopback is refused **per port**, not wholesale: the dev server an agent runs on this machine (any other port) is precisely what this capability is most useful for — the desktop is a projection (see §Consequences) |
 
 The role comes from `webview.label()` (`PREVIEW_LABEL_PREFIX = "preview-"`), never from the frontend. `open_preview` validates the URL with the same policy **before creating anything**, so a bad scheme yields a `blocked_scheme:` error instead of a blank webview.
 
@@ -122,6 +122,7 @@ The role comes from `webview.label()` (`PREVIEW_LABEL_PREFIX = "preview-"`), nev
 
 - `window.open`: `Deny` + a `preview://new-window` event → the frontend calls `openUrl(agentId, url)` to open another preview tab (with a workspace context) or `openExternal(url)` without one. Rationale: no unreclaimable native windows, and it matches the browser expectation of "new tab".
 - Downloads: `on_download` refuses. Without a download panel there is no trustworthy destination; silently dropping files into `%TEMP%` would be worse.
+- Refusing, however, is not the same as staying **silent**: the refusal emits `preview://download` (`{url, from}`), and `usePreviewBridge` raises a warning toast whose action is "open in browser" (`openExternal(url)`). The difference is visibility — before, clicking a download link did nothing and read as a broken page; now the user knows what happened and has a path that completes.
 - "Open in browser": now goes through `openExternal` (`plugin-shell`'s `open`, with `shell:allow-open` granted to the main webview only) instead of a `target="_blank"` `<a>` — that path is denied by default in Tauri v2 with no handler installed.
 
 ### D6 Accepting `unstable`, and containing it

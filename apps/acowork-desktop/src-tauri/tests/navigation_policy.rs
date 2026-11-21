@@ -130,7 +130,9 @@ fn preview_role_refuses_our_own_surfaces() {
 }
 
 #[test]
-fn preview_role_refuses_the_dev_server_in_debug_builds() {
+fn preview_role_refuses_the_apps_own_dev_server_in_debug_builds() {
+    // `devUrl` in `tauri.conf.json`: in a debug build this loopback origin is
+    // the app itself, so it is our surface like `tauri.localhost` is.
     #[cfg(debug_assertions)]
     {
         assert!(!is_allowed(
@@ -141,5 +143,23 @@ fn preview_role_refuses_the_dev_server_in_debug_builds() {
             NavigationRole::Preview,
             &url("http://127.0.0.1:5173/")
         ));
+    }
+}
+
+#[test]
+fn preview_role_admits_a_local_dev_server_that_is_not_ours() {
+    // The reason the loopback refusal is port-scoped rather than blanket: an
+    // agent building a frontend on this machine is the case the preview host
+    // exists for, and its server is on some other port.
+    for candidate in [
+        "http://localhost:3000/",
+        "http://localhost:8080/app",
+        "http://127.0.0.1:19876/health",
+        "http://localhost/",
+    ] {
+        assert!(
+            is_allowed(NavigationRole::Preview, &url(candidate)),
+            "preview role must admit {candidate}"
+        );
     }
 }

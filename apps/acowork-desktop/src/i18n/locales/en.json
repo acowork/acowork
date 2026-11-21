@@ -1699,6 +1699,7 @@
     "loadingUrl": "Loading page...",
     "urlLoadError": "This page could not be loaded",
     "openInBrowser": "Open in browser",
+    "downloadBlocked": "This page tried to download a file. Downloads are not supported in the in-app browser.",
     "previewAddressLabel": "Preview address",
     "previewErrorTitle": "This page could not be opened in the in-app browser",
     "previewErrorBlockedScheme": "Only http and https addresses can be previewed.",

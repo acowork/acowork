@@ -1392,6 +1392,7 @@
     "loadingUrl": "正在加载页面...",
     "urlLoadError": "此页面无法加载",
     "openInBrowser": "在浏览器中打开",
+    "downloadBlocked": "该页面尝试下载文件。应用内浏览器不支持下载，可在系统浏览器中完成。",
     "previewAddressLabel": "预览地址",
     "previewErrorTitle": "无法在内嵌浏览器中打开此页面",
     "previewErrorBlockedScheme": "仅支持预览 http / https 地址。",

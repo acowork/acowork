@@ -24,7 +24,7 @@
 | D2 | 导航策略 | 策略**按 webview 角色参数化**（`NavigationRole::{App, Preview}`），`navigation_policy.rs` 是唯一实现。`App` 行为零变化（原 allow-list 逐条搬移），`Preview` 是补集：允许 `http/https` 顶层导航，其余协议一律拒绝 |
 | D3 | 会话生命周期 | Rust 侧 `PreviewRegistry` 持有 `label → {url,title,phase,visible,bounds}`，**上限 3 个存活会话**、LRU 驱逐（`MAX_LIVE_SESSIONS`）；前端按**标签页身份**（`OpenFile.id`）绑定 label，切 tab **只停放不销毁**，关 tab 才销毁 |
 | D4 | 权限边界 | `capabilities/default.json` 由 `windows: ["main"]` 改为 `webviews: ["main"]`。`windows` 键会让**该窗口的所有 webview**（含承载第三方站点的预览）继承 IPC 权限；`dev/ci.sh` 新增 `run_desktop_ipc_scope_redline` 红线钉死这条 |
-| D5 | 弹窗与下载 | 页面内 `window.open` / `target="_blank"`：Rust 返回 `NewWindowResponse::Deny` 并发 `preview://new-window`，前端**开新预览标签**（无工作区上下文时退回系统浏览器）；`on_download` 一律拒绝（没有落盘目的地 UI，宁可拒绝也不把文件丢到用户找不到的地方） |
+| D5 | 弹窗与下载 | 页面内 `window.open` / `target="_blank"`：Rust 返回 `NewWindowResponse::Deny` 并发 `preview://new-window`，前端**开新预览标签**（无工作区上下文时退回系统浏览器）；`on_download` 一律拒绝（没有落盘目的地 UI，宁可拒绝也不把文件丢到用户找不到的地方），但**拒绝不再静默**：发 `preview://download`，前端用 toast 提供「在浏览器中打开」 |
 | D6 | `unstable` feature | **接受**。`add_child` 目前只在 `tauri` 的 `unstable` feature 下可用；用 `=2.12.3` 精确锁版本 + 红线 + 集成测试把这个依赖面收窄，见 §5 |
 | D7 | 明确不做 | 不做 iframe 兜底（两套渲染路径＝两套坐标系/两套权限，正是要消灭的东西）；不做独立窗口内的浏览器（`BrowserWindow` 方案见 §6 备选）；不做 `file://` / `data:` / `javascript:` 预览（Preview 角色策略拒绝）；不做下载管理 |
 
@@ -93,7 +93,7 @@ navigation_guard（插件级 on_navigation）  ← navigation_policy::is_allowed
 | 角色 | 规则 | 判据 |
 |---|---|---|
 | `App` | 原白名单（dev server / gateway / 内置页面），其余拒绝 | 与改造前**逐条等价**（`navigation_guard.rs` 只剩调用） |
-| `Preview` | `http` / `https` 允许，其余协议拒绝 | 补集语义：预览是「通向外部世界」的入口，不需要知道内网地址 |
+| `Preview` | `http` / `https` 允许，其余协议拒绝；**本应用自身的面**拒绝（`tauri.localhost` / `asset.localhost`，以及 debug 构建下 `devUrl` 那一个 loopback 端口） | 补集语义：预览是「通向外部世界」的入口，不需要知道内网地址。拒绝自家是同一句话的另一半——预览不是「第二个主窗口」。loopback **按端口**拒绝而不是整段拒绝：agent 在本机起的 dev server（其它端口）恰恰是这个能力最有用的场景，desktop 只是投影，见 §Consequences |
 
 角色由 `webview.label()` 决定（`PREVIEW_LABEL_PREFIX = "preview-"`），不依赖前端自报。`open_preview` 命令在**创建之前**用同一策略校验 URL，于是非法协议得到 `blocked_scheme:` 的明确错误，而不是一个空白 webview。
 
@@ -122,6 +122,7 @@ navigation_guard（插件级 on_navigation）  ← navigation_policy::is_allowed
 
 - `window.open`：`Deny` + `preview://new-window` 事件 → 前端 `openUrl(agentId, url)` 开新预览标签（有工作区上下文时），否则 `openExternal(url)`。理由：不产生无法回收的原生窗口，且与浏览器「新标签」预期一致。
 - 下载：`on_download` 返回拒绝。没有下载面板就没有可信的落盘位置，静默把文件丢到 `%TEMP%` 是更坏的行为。
+- 但「拒绝」不等于「静默」：拒绝的同时发 `preview://download`（`{url, from}`），`usePreviewBridge` 弹一条 warning toast，动作是「在浏览器中打开」（`openExternal(url)`）。差别是可见的——此前点下载链接毫无反应，用户读作「页面坏了」；现在他知道发生了什么，并且有一条能完成的出路。
 - 「在浏览器中打开」：改走 `openExternal`（`plugin-shell` 的 `open`，`shell:allow-open` 只授给主 webview），不再用 `target="_blank"` 的 `<a>`——那条路径在 Tauri v2 里默认被拒且无 handler。
 
 ### D6 `unstable` 的接受与收口

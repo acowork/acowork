@@ -15,7 +15,7 @@
 //! - `registry` holds the data model (sessions, phases, bounds, eviction) and is
 //!   covered by pure unit tests.
 //! - This module owns the Tauri objects: create/position/show/hide/destroy
-//!   webviews, and translate engine callbacks into `preview://state` events.
+//!   webviews, and translate engine callbacks into `preview://` events.
 //!   The frontend is a *controller* here, never the source of truth.
 //!
 //! ## Windows: creation must stay async
@@ -36,7 +36,7 @@
 use std::sync::Mutex;
 
 use serde::Serialize;
-use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
+use tauri::webview::{DownloadEvent, NewWindowResponse, PageLoadEvent, WebviewBuilder};
 use tauri::{
     AppHandle, Emitter, EventTarget, LogicalPosition, LogicalSize, Manager, Url, Webview,
     WebviewUrl,
@@ -55,6 +55,12 @@ pub const STATE_EVENT: &str = "preview://state";
 /// Emitted when a page requests `window.open`. Payload:
 /// `{ "url": "…", "from": "preview-2" }`. The frontend opens a new preview tab.
 pub const NEW_WINDOW_EVENT: &str = "preview://new-window";
+
+/// Emitted when a page asks to download a file. Payload:
+/// `{ "url": "…", "from": "preview-2" }`. The download is refused — the app has
+/// no download shelf and no destination UI — so the frontend turns the refusal
+/// into an offer to open the same URL in the system browser.
+pub const DOWNLOAD_EVENT: &str = "preview://download";
 
 /// Managed state: the session registry behind a lock.
 ///
@@ -160,7 +166,9 @@ pub async fn preview_open(
         let app_title = app.clone();
         let app_load = app.clone();
         let app_new_window = app.clone();
+        let app_download = app.clone();
         let from_label = label.clone();
+        let download_label = label.clone();
         let title_label = label.clone();
         let load_label = label.clone();
         WebviewBuilder::new(&label, WebviewUrl::External(parsed))
@@ -207,9 +215,25 @@ pub async fn preview_open(
                 );
                 NewWindowResponse::Deny
             })
-            // Downloads need a destination UI we do not have yet: refuse rather
-            // than let WebView2 drop files somewhere the user cannot find.
-            .on_download(|_webview, _event| false)
+            // Refusing is the safe half of this choice — the app has no download
+            // shelf and no destination UI, so letting WebView2 write to a folder
+            // nobody points at is worse than not writing at all. Refusing
+            // *silently* is not safe, it is only invisible: the link does
+            // nothing and the user reads that as a broken page. So the URL goes
+            // to the frontend, which offers the one surface that does own a
+            // download shelf: the system browser.
+            .on_download(move |_webview, event| {
+                if let DownloadEvent::Requested { url, .. } = event {
+                    let _ = app_download.emit_to(
+                        EventTarget::AnyLabel {
+                            label: MAIN_WEBVIEW.to_string(),
+                        },
+                        DOWNLOAD_EVENT,
+                        serde_json::json!({ "url": url.to_string(), "from": download_label }),
+                    );
+                }
+                false
+            })
             .zoom_hotkeys_enabled(true)
             .enable_clipboard_access()
             .devtools(cfg!(debug_assertions))

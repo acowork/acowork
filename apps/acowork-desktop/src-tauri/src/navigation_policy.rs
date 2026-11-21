@@ -32,6 +32,12 @@ use tauri::Url;
 /// including the main webview, labelled `main` — gets [`NavigationRole::App`].
 pub const PREVIEW_LABEL_PREFIX: &str = "preview-";
 
+/// Port the app's own frontend is served from in a debug build (`devUrl` in
+/// `tauri.conf.json`). Consulted only by [`is_allowed_for_preview`], and only
+/// in debug builds: a release build has no dev server to collide with.
+#[cfg(debug_assertions)]
+const DEV_APP_DEV_PORT: u16 = 5173;
+
 /// Which navigation rule set applies to a webview.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NavigationRole {
@@ -136,8 +142,19 @@ fn is_allowed_for_preview(url: &Url) -> bool {
             if host == "tauri.localhost" || host == "asset.localhost" {
                 return false;
             }
+            // A debug build serves the app *itself* from Vite (`devUrl`), so
+            // that one loopback origin is our own UI wearing an `http` scheme —
+            // the same surface the two checks above refuse.
+            //
+            // Only that port, deliberately. A blanket loopback refusal (the
+            // shape this started as) also refused the local dev server an agent
+            // is building, and watching that page is the most useful thing this
+            // host does: the desktop is a projection of the agent's work, not
+            // its browser (ADR-118 §Consequences). Release builds have no dev
+            // server, so the check is compiled out rather than evaluated.
             #[cfg(debug_assertions)]
-            if host == "localhost" || host == "127.0.0.1" {
+            if url.port() == Some(DEV_APP_DEV_PORT) && (host == "localhost" || host == "127.0.0.1")
+            {
                 return false;
             }
             true
