@@ -135,14 +135,20 @@ fn preview_role_refuses_the_apps_own_dev_server_in_debug_builds() {
     // the app itself, so it is our surface like `tauri.localhost` is.
     #[cfg(debug_assertions)]
     {
-        assert!(!is_allowed(
-            NavigationRole::Preview,
-            &url("http://localhost:5173/")
-        ));
-        assert!(!is_allowed(
-            NavigationRole::Preview,
-            &url("http://127.0.0.1:5173/")
-        ));
+        for candidate in [
+            "http://localhost:5173/",
+            "http://127.0.0.1:5173/",
+            // The IPv6 spelling of the same origin. `Url` normalises it, so the
+            // expanded form arrives as `[::1]` too — both must be refused, or
+            // the rule is one `curl` away from being bypassed.
+            "http://[::1]:5173/",
+            "http://[0:0:0:0:0:0:0:1]:5173/",
+        ] {
+            assert!(
+                !is_allowed(NavigationRole::Preview, &url(candidate)),
+                "the app's own dev origin must be refused: {candidate}"
+            );
+        }
     }
 }
 
@@ -154,7 +160,8 @@ fn preview_role_admits_a_local_dev_server_that_is_not_ours() {
     for candidate in [
         "http://localhost:3000/",
         "http://localhost:8080/app",
-        "http://127.0.0.1:19876/health",
+        "http://[::1]:3000/",
+        "http://127.0.0.1:3001/",
         "http://localhost/",
     ] {
         assert!(
@@ -162,4 +169,33 @@ fn preview_role_admits_a_local_dev_server_that_is_not_ours() {
             "preview role must admit {candidate}"
         );
     }
+}
+
+/// `navigation_policy` restates one fact `tauri.conf.json` owns — the port the
+/// app's own frontend is served from. This test is the link between them: if the
+/// bundler moves and the constant does not, the refusal above silently protects
+/// nothing (a page that happens to be our own UI becomes previewable).
+#[test]
+fn the_refused_loopback_port_is_the_dev_url_port() {
+    let raw = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/tauri.conf.json"))
+        .expect("tauri.conf.json sits next to the crate manifest");
+    let config: serde_json::Value = serde_json::from_str(&raw).expect("tauri.conf.json is JSON");
+    let dev_url = config["build"]["devUrl"]
+        .as_str()
+        .expect("build.devUrl is configured");
+    let port: u16 = dev_url
+        .rsplit(':')
+        .next()
+        .and_then(|tail| tail.trim_end_matches('/').parse().ok())
+        .expect("build.devUrl carries an explicit port");
+
+    #[cfg(debug_assertions)]
+    assert!(
+        !is_allowed(
+            NavigationRole::Preview,
+            &url(&format!("http://localhost:{port}/"))
+        ),
+        "the dev server on {dev_url} must be refused by the Preview role in a debug build — \
+         DEV_APP_DEV_PORT and build.devUrl disagree"
+    );
 }

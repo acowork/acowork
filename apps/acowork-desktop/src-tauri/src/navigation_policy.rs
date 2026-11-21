@@ -146,6 +146,13 @@ fn is_allowed_for_preview(url: &Url) -> bool {
             // that one loopback origin is our own UI wearing an `http` scheme —
             // the same surface the two checks above refuse.
             //
+            // Loopback has three canonical spellings, and `Url` normalises the
+            // IPv6 one on parse: `[0:0:…:1]` arrives as `[::1]`. All three are
+            // listed because an origin check that answers differently for two
+            // spellings of one origin is not an origin check — the first cut of
+            // this rule compared only the first two and let `[::1]:5173`
+            // through (measured, not assumed).
+            //
             // Only that port, deliberately. A blanket loopback refusal (the
             // shape this started as) also refused the local dev server an agent
             // is building, and watching that page is the most useful thing this
@@ -153,7 +160,8 @@ fn is_allowed_for_preview(url: &Url) -> bool {
             // its browser (ADR-118 §Consequences). Release builds have no dev
             // server, so the check is compiled out rather than evaluated.
             #[cfg(debug_assertions)]
-            if url.port() == Some(DEV_APP_DEV_PORT) && (host == "localhost" || host == "127.0.0.1")
+            if url.port() == Some(DEV_APP_DEV_PORT)
+                && matches!(host, "localhost" | "127.0.0.1" | "[::1]")
             {
                 return false;
             }
