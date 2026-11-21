@@ -949,6 +949,43 @@ run_app_framework_redline() {
     echo "Hosted-app framework red line: OK"
 }
 
+run_desktop_ipc_scope_redline() {
+    echo "Checking ADR-118 in-app browser IPC-scope red line..."
+    local failed=0
+    local caps="$SCRIPT_DIR/../apps/acowork-desktop/src-tauri/capabilities"
+    local hits
+
+    # `windows: ["…"]` makes a capability apply to *every* webview of the
+    # matching window (tauri-utils acl/capability.rs: "the capability will be
+    # enabled on all the webviews of that window, regardless of the value of
+    # webviews"). The in-app browser (src-tauri/src/browser/) puts untrusted
+    # third-party documents in exactly such child webviews, so a window-scoped
+    # capability hands a rendered website the app's IPC surface — `shell:allow-
+    # open`, `fs`, … . Capabilities must therefore be scoped by webview label.
+    hits=$(grep -rnE '"windows"[[:space:]]*:[[:space:]]*\[[[:space:]]*"' \
+        --include='*.json' "$caps" || true)
+    if [ -n "$hits" ]; then
+        echo "ERROR: capability is scoped by window label, so preview webviews inherit it (ADR-118):"
+        echo "$hits"
+        failed=1
+    fi
+    if ! grep -qE '"webviews"' "$caps/default.json"; then
+        echo "ERROR: capabilities/default.json must scope main-capability by \"webviews\" (ADR-118)."
+        failed=1
+    fi
+    hits=$(grep -rnE '"preview' --include='*.json' "$caps" || true)
+    if [ -n "$hits" ]; then
+        echo "ERROR: a capability names a preview webview; previews must hold no IPC permission (ADR-118):"
+        echo "$hits"
+        failed=1
+    fi
+
+    if [ "$failed" -ne 0 ]; then
+        exit 1
+    fi
+    echo "In-app browser IPC-scope red line: OK"
+}
+
 run_all_redlines() {
     run_node_redline
     run_mqtt_redline
@@ -968,6 +1005,7 @@ run_all_redlines() {
     run_agent_skill_tool_redline
     run_css_theme_redline
     run_app_framework_redline
+    run_desktop_ipc_scope_redline
 }
 
 run_clippy() {

@@ -438,5 +438,5 @@ curl -H "Authorization: Bearer $TOKEN" \
 - **启停语义**：`enable` / `disable` 是平台侧准入（catalog / 导航 / 反代），进程生命周期在 Gateway 启动期决定；动态 spawn/kill 与安装联动属于 §6.10 的 P3 范围。
 - **无 SSE**：平台接口的事件订阅（`/api/platform/events`）尚未实现，应用目前只能轮询 `/api/platform/*`。
 - **legacy slot**：PM/DOC 通过 `legacy_slot` 映射到既有 `pm_process` / `doc_process` 状态字段，避免改动已有身份注入测试；这是有意的迁移桥，不是长期结构。
-- **`navigation_guard.rs`**：桌面端 iframe 目标为 Gateway 反代路径（`http(s)` + 深层路径），需要在部署时确认导航防火墙对该前缀放行；当前 `UrlPreviewView` 的 iframe 例外是同一机制。
+- **`navigation_policy.rs`**：桌面端 `AppFrame` iframe 的目标是 Gateway 反代路径（`http(s)` + 深层路径），需要在部署时确认导航防火墙对该前缀放行。ADR-118 之后该例外已按 webview 角色显式建模（`NavigationRole::App` 白名单 / `NavigationRole::Preview` 允许外部 `http(s)`），`UrlPreviewView` 不再是 iframe 而是子 Webview。
 - `ExtensionsView` 仍无 `extensions` i18n 命名空间（沿用原有 TODO）。

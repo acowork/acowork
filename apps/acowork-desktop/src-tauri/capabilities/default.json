@@ -1,7 +1,7 @@
 {
   "identifier": "main-capability",
-  "description": "Main capability for the main window",
-  "windows": [
+  "description": "Main capability for the app's own webview. Scoped by webview label, never by window label: `windows: [\"main\"]` would grant every child webview of the window — including the in-app browser's preview webviews (ADR-118) — the IPC surface, so a rendered third-party site could call shell:allow-open / fs / ... . Keep this on `webviews`.",
+  "webviews": [
     "main"
   ],
   "permissions": [

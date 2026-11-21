@@ -25,11 +25,13 @@
 //!    Tauri command is needed (ADR-077). The idempotent
 //!    `POST /api/agents/ensure` path is used by the Agent library dialog.
 
+pub mod browser;
 mod commands;
 mod gateway_client;
 mod hub_client;
 mod mqtt_client;
 mod navigation_guard;
+pub mod navigation_policy;
 mod process_stop;
 mod state;
 mod tray;
@@ -629,6 +631,9 @@ pub fn run() {
         // See `navigation_guard.rs` for the allow-list rationale.
         .plugin(navigation_guard::init())
         .manage(AppState::new())
+        // In-app browser host (ADR-118): process-wide session registry for the
+        // URL preview's child webviews.
+        .manage(browser::PreviewHost::default())
         .invoke_handler(tauri::generate_handler![
             commands::agent::list_agents,
             commands::agent::get_agent_detail,
@@ -751,6 +756,18 @@ pub fn run() {
             // virtual adapters that sort first in enumeration).
             commands::netinfo::get_local_ipv4_addresses,
             commands::netinfo::get_default_route_ipv4,
+            // In-app browser host (ADR-118): external URL previews render in
+            // their own child webview, because sites that send
+            // `X-Frame-Options: deny` cannot be framed. See src/browser/.
+            browser::host::preview_open,
+            browser::host::preview_set_bounds,
+            browser::host::preview_set_visible,
+            browser::host::preview_navigate,
+            browser::host::preview_reload,
+            browser::host::preview_history,
+            browser::host::preview_close,
+            browser::host::preview_close_all,
+            browser::host::preview_list,
         ])
         .setup(|app| {
             tray::setup(app)?;

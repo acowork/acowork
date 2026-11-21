@@ -102,5 +102,14 @@ export function WorkspaceHtmlPreview({ agentId, workspaceId, relPath, fileName }
         );
     }
 
-    return <UrlPreviewView url={state.url} fileName={fileName} />;
+    // Session key follows the editor tab identity
+    // (`${agentId}:${workspaceId}:${relPath}`, see fileEditorStore OpenFile.id)
+    // so switching tabs parks and resumes this preview instead of reloading it.
+    return (
+        <UrlPreviewView
+            url={state.url}
+            fileName={fileName}
+            sessionKey={`${agentId}:${workspaceId}:${relPath}`}
+        />
+    );
 }

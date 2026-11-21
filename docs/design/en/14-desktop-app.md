@@ -536,6 +536,24 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 ```
 
+### 7.5 In-App Browser (Workspace URL / HTML Preview)
+
+The panel's page preview is **not an `iframe`** — it is a same-window **child webview** (`Window::add_child`). There is exactly one reason: an `iframe` cannot display any site that declares `X-Frame-Options` / `CSP frame-ancestors` (github.com and google.com both do), because the engine enforces it on the embedded document and no frontend trick bypasses it. A child webview loads the page as a **top-level document** and is unaffected. See [ADR-118](../adr/en/ADR-118-desktop-in-app-browser-child-webview.md).
+
+| Layer | Location | Responsibility |
+|---|---|---|
+| IPC contract | `src/lib/previewHost.ts` | Command/event types, error-code parsing (`unknown_preview` / `blocked_scheme` / …), URL normalisation |
+| Session projection | `src/stores/previewSessionStore.ts` | `tab id → label → PreviewState`, survives remounts |
+| Host | `src/components/editor/WebPreviewHost.tsx` | Measure the DOM rect → create/reuse the session → push geometry and visibility |
+| Chrome | `src/components/editor/UrlPreviewView.tsx` | Toolbar + error card (both must sit outside the webview rect) |
+| Rust | `src-tauri/src/browser/` + `navigation_policy.rs` | Session registry (LRU ≤ 3), `add_child` creation, role-scoped navigation policy |
+
+Three hard constraints follow from "the native layer is always above the HTML":
+
+1. Toolbar / loading indicator / error card must not overlap the preview area;
+2. Whenever an HTML overlay opens (modal, dropdown, context menu, lightbox) the webview must be hidden via `preview_set_visible(false)`, driven by `useNativeOverlayCoverage`'s `elementFromPoint` hit test;
+3. `capabilities/default.json` must scope by `webviews` (not `windows`), otherwise a preview webview inherits `shell` / `fs` permissions — pinned by `dev/ci.sh`'s `run_desktop_ipc_scope_redline`.
+
 ## 8. Gateway HTTP API (New)
 
 Gateway needs to add an HTTP API layer for Desktop App and CLI. This is an independent consumer from the existing Socket API (for Agent Runtime).
@@ -622,3 +640,5 @@ HTTP port is configurable, default `19876`. Listens only on `127.0.0.1`, not exp
 | System tray | Close hides without exit | Standard desktop app behavior; Gateway is persistent, Desktop App as GUI frontend should also be persistent |
 | Single instance | tauri-plugin-single-instance | Avoid multi-window chaos; second launch focuses existing window |
 | Gateway status detection | Poll /health | Simple and reliable; 5s interval sufficient; degrade to 30s on failure |
+| In-app page preview | Same-window child webview (`add_child`) | An `iframe` is hard-constrained by `X-Frame-Options` / CSP, so mainstream sites are blank by definition; a child webview loads the page as a top-level document — same approach as Cursor / VS Code Simple Browser (ADR-118) |
+| Preview webview permissions | Zero IPC permissions (capability scoped by `webviews`) | Previews render third-party pages; scoping by `windows` would hand any site `shell:allow-open` / `fs` / … |

@@ -8,7 +8,12 @@ license = "Apache-2.0"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["protocol-asset", "tray-icon", "image-png", "macos-private-api"] }
+# `unstable` gates the multiwebview API (`Window::add_child`) used by the
+# in-app browser host (ADR-118). The version is pinned exactly because that API
+# is not covered by tauri's semver promises: upgrading is a deliberate act that
+# must re-run `browser::host`'s integration tests. Confine every multiwebview
+# call to src/browser/ so a bump can only break one module.
+tauri = { version = "=2.12.3", features = ["protocol-asset", "tray-icon", "image-png", "macos-private-api", "unstable"] }
 tauri-plugin-shell = "2"
 tauri-plugin-store = "2"
 tauri-plugin-single-instance = "2"

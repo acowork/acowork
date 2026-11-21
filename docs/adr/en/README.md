@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 103 / 103 documents translated.
+**Coverage**: 104 / 104 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -30,6 +30,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | Why installs must name an explicit `node_id`, and why a Node's launcher is not protocol state | [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md) |
 | Why changing the Gateway bind address must never change the login regime, and how first-boot setup works | [ADR-114](./ADR-114-account-system-decoupled-from-network-topology.md) |
 | Why Desktop has ONE connection setting (a server address) and no local/remote choice, and what happens when that address is wrong | [ADR-115](./ADR-115-desktop-single-server-address-model.md) |
+| Why the in-app page preview is a native child webview instead of an `<iframe>`, and why a preview must hold zero IPC permissions | [ADR-118](./ADR-118-desktop-in-app-browser-child-webview.md) |
 
 ## Index
 
@@ -143,6 +144,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 113 | [ADR-113](./ADR-113-protocol-self-consistency-explicit-node-target.md) | Protocol Self-Consistency — Launch Relationships Stay Out of the Protocol, Installs Must Name an Explicit `node_id` | Implemented; supersedes the `gateway_managed` clauses of ADR-055 / ADR-075 / ADR-087 | [zh](../zh/ADR-113-protocol-self-consistency-explicit-node-target.md) |
 | 114 | [ADR-114](./ADR-114-account-system-decoupled-from-network-topology.md) | Account System Decoupled from Network Topology — Accounts Are Always On; `AccountSystemState` + Local-Only First-Boot Setup | Implemented; supersedes the `AUTH_MODE` clauses of ADR-076 § Decision 12 | [zh](../zh/ADR-114-account-system-decoupled-from-network-topology.md) |
 | 115 | [ADR-115](./ADR-115-desktop-single-server-address-model.md) | Desktop Single-Server-Address Model — `local` / `remote` Demoted to an Inference from the Address; One Address Control on Every Screen; Restartable Boot Gate | Implemented; supersedes the mode+address two-knob connection settings left after ADR-114 | [zh](../zh/ADR-115-desktop-single-server-address-model.md) |
+| 118 | [ADR-118](./ADR-118-desktop-in-app-browser-child-webview.md) | Desktop In-App Browser — Hosting Third-Party Pages in a Child Webview (`add_child`), Role-Parameterised Navigation, and Zero IPC Permission for Previews | Implemented (Windows verified; macOS/Linux untested) | [zh](../zh/ADR-118-desktop-in-app-browser-child-webview.md) |
 
 ---
 

@@ -33,6 +33,9 @@ import {
 } from "../common/ContextMenu";
 import { MarkdownPreviewView } from "./MarkdownPreviewView";
 import { UrlPreviewView } from "./UrlPreviewView";
+import { usePreviewBridge } from "../../hooks/usePreviewBridge";
+import { closeAllPreviews, closePreview } from "../../lib/previewHost";
+import { usePreviewSessionStore } from "../../stores/previewSessionStore";
 import { WorkspaceHtmlPreview } from "./WorkspaceHtmlPreview";
 import { ImageViewer } from "./ImageViewer";
 import type { ImagePoint, ImageRect } from "./imageViewerGeometry";
@@ -1168,6 +1171,22 @@ export function FileEditorPanel({ width }: { width: number }) {
         }
     }, [openFiles]);
 
+    // ── Native preview browser event bridge (ADR-118) ───────────────────
+    // Installed once, here: `preview://state` / `preview://new-window` are
+    // process-wide events, and this component owns the tab list that decides
+    // which session belongs to which tab.
+    usePreviewBridge(activeFile?.agentId ?? null);
+
+    // A parked preview webview is a native surface with no React owner once this
+    // panel is gone: nothing could ever show or close it again. Closing all here
+    // is the only place that knows "the tab strip itself disappeared".
+    useEffect(() => {
+        return () => {
+            void closeAllPreviews().catch(() => {});
+            usePreviewSessionStore.getState().reset();
+        };
+    }, []);
+
     // ── Register file disposer with fileEditorStore ──────────────────────
     //
     // The store calls this disposer once per removed file BEFORE mutating
@@ -1198,6 +1217,14 @@ export function FileEditorPanel({ width }: { width: number }) {
             // 3. Per-file view-state cleanup -- cursor/scroll position
             //    for a closed file is meaningless after this point.
             viewStatesRef.current.delete(file.relPath);
+            // 4. Native preview surface (ADR-118) -- a closed tab owns no
+            //    webview. Without this the webview would linger as a native
+            //    surface the UI can no longer address, until LRU eviction.
+            const previewLabel = usePreviewSessionStore.getState().labels[file.id];
+            if (previewLabel) {
+                void closePreview(previewLabel).catch(() => {});
+                usePreviewSessionStore.getState().detach(file.id);
+            }
         });
         return unregister;
     }, [lspClient]);
@@ -1862,7 +1889,7 @@ export function FileEditorPanel({ width }: { width: number }) {
                         {t("fileEditor.emptyState")}
                     </div>
                 ) : activeFile.kind === "url" ? (
-                    <UrlPreviewView url={activeFile.url || activeFile.relPath} fileName={activeFile.fileName} />
+                    <UrlPreviewView url={activeFile.url || activeFile.relPath} fileName={activeFile.fileName} sessionKey={activeFile.id} />
                 ) : activeFile.kind === "diff" ? (
                     // ADR-078 decision 7 — read-only side-by-side diff of the
                     // original (HEAD) vs. working-tree content. GitDiffKind

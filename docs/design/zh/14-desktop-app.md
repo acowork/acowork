@@ -535,6 +535,24 @@ default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 ```
 
+### 7.5 内嵌浏览器（工作区 URL / HTML 预览）
+
+面板里的网页预览**不是 `iframe`**，而是同窗口的**子 Webview**（`Window::add_child`）。原因只有一条：`iframe` 无法显示任何声明了 `X-Frame-Options` / `CSP frame-ancestors` 的站点（github.com、google.com 都是），该限制由浏览器内核在被嵌入文档侧强制执行，前端无法绕过；子 Webview 把页面当**顶层文档**加载，因此不受影响。详见 [ADR-118](../adr/zh/ADR-118-desktop-in-app-browser-child-webview.md)。
+
+| 层 | 位置 | 职责 |
+|---|---|---|
+| IPC 契约 | `src/lib/previewHost.ts` | 命令/事件类型、错误码解析（`unknown_preview` / `blocked_scheme` / …）、URL 规范化 |
+| 会话投影 | `src/stores/previewSessionStore.ts` | `标签页 id → label → PreviewState`，跨挂载存活 |
+| 宿主 | `src/components/editor/WebPreviewHost.tsx` | 测量 DOM rect → 建会话/复用 → 推几何与可见性 |
+| 外壳 | `src/components/editor/UrlPreviewView.tsx` | 工具栏 + 错误卡（必须落在 webview 矩形之外） |
+| Rust | `src-tauri/src/browser/` + `navigation_policy.rs` | 会话注册表（LRU ≤ 3）、`add_child` 创建、按角色分流的导航策略 |
+
+三条由「原生层永远在 HTML 之上」推导出的硬约束：
+
+1. 工具栏/加载指示/错误卡不得覆盖预览区；
+2. 任何 HTML 浮层（模态、下拉、右键菜单、灯箱）打开时必须 `preview_set_visible(false)`，由 `useNativeOverlayCoverage` 的 `elementFromPoint` 命中检测驱动；
+3. `capabilities/default.json` 必须用 `webviews`（而非 `windows`）限定作用域，否则预览 webview 会继承 `shell`/`fs` 等权限——`dev/ci.sh` 的 `run_desktop_ipc_scope_redline` 钉死这一点。
+
 ## 8. Gateway HTTP API（新增）
 
 Gateway 需要新增一层 HTTP API 供 Desktop App 和 CLI 使用。这与现有的 Socket API（Agent Runtime 用）是两个独立的消费端。
@@ -621,3 +639,5 @@ HTTP 端口可配置，默认 `19876`。仅监听 `127.0.0.1`，不对外暴露�
 | 系统托盘 | 关闭隐藏不退出 | 标准桌面应用行为；Gateway 常驻，Desktop App 作为其 GUI 前端也应常驻 |
 | 单实例 | tauri-plugin-single-instance | 避免多窗口混乱，第二次启动聚焦已有窗口 |
 | Gateway 状态检测 | 轮询 /health | 简单可靠；5s 间隔足够；失败后降级到 30s |
+| 内置网页预览 | 同窗口子 Webview（`add_child`） | `iframe` 受 `X-Frame-Options` / CSP 强制约束，主流站点必然白屏；子 Webview 以顶层文档加载，与 Cursor / VS Code Simple Browser 同构（ADR-118） |
+| 预览 webview 权限 | 零 IPC 权限（capability 用 `webviews` 限定） | 预览会渲染第三方页面；用 `windows` 限定会让任意站点获得 `shell:allow-open` / `fs` 等 IPC 面 |

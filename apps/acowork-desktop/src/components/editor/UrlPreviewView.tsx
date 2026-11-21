@@ -1,138 +1,137 @@
-import { useState, useCallback, useRef, useEffect, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useState, type KeyboardEvent } from "react";
 import { useTranslation } from "../../i18n/useTranslation";
-import { Loader2, ExternalLink, ArrowLeft, ArrowRight, RefreshCw } from "lucide-react";
+import { Loader2, ExternalLink, ArrowLeft, ArrowRight, RefreshCw, AlertTriangle } from "lucide-react";
+import {
+    normalizePreviewUrl,
+    previewHistory,
+    reloadPreview,
+    navigatePreview,
+    parsePreviewError,
+    type PreviewError,
+} from "../../lib/previewHost";
+import { openExternal } from "../../lib/openExternal";
+import { usePreviewSessionStore } from "../../stores/previewSessionStore";
+import { WebPreviewHost } from "./WebPreviewHost";
 
 interface UrlPreviewViewProps {
     url: string;
     fileName: string;
+    /**
+     * Identity of the owning tab. Defaults to the URL so ad-hoc callers still
+     * get session reuse; editor tabs pass their `OpenFile.id`.
+     */
+    sessionKey?: string;
 }
 
 /**
- * Renders an external URL in a sandboxed iframe with:
- *  - Navigation toolbar (back, forward, refresh, editable URL bar, open-in-browser)
- *  - Loading spinner on initial load; after 5s shows a non-blocking hint
- *    for pages that block iframe embedding (e.g. Baidu, GitHub).
- *  - Internal links (including target="_blank") navigate within the iframe.
+ * In-app browser surface: navigation toolbar + native webview below it.
  *
- * URL bar is editable: user can type a URL and press Enter to navigate.
+ * ADR-118 — why a native webview and not an `<iframe>`:
+ *   `X-Frame-Options: deny` / `CSP frame-ancestors 'none'` are enforced by the
+ *   engine on the *embedded* document, so github.com, google.com and the like
+ *   render blank in a frame no matter what the frontend does. The preview runs
+ *   as a child webview (`Webview::add_child`) that loads the page as a
+ *   top-level document, which those headers do not restrict — the same approach
+ *   as Cursor / VS Code Simple Browser.
  *
- * Note: Many major websites (Baidu, GitHub, Google) block iframe embedding via
- * X-Frame-Options or CSP. In this case the iframe remains blank. The user can
- * use the "Open in browser" button or type a compatible URL.
+ * Layout consequence: the native surface is composited **above** the HTML, so
+ * nothing can be drawn over it. Every control therefore lives in this toolbar
+ * (outside the webview rect), and failure states replace the surface instead of
+ * overlaying it.
  */
-export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
+export function UrlPreviewView({ url, fileName, sessionKey }: UrlPreviewViewProps) {
     const { t } = useTranslation();
-    const [loading, setLoading] = useState(true);
-    const [showSlowHint, setShowSlowHint] = useState(false);
-    const iframeRef = useRef<HTMLIFrameElement>(null);
-    const [currentUrl, setCurrentUrl] = useState(url);
+    const key = sessionKey ?? url;
+
+    const label = usePreviewSessionStore((s) => s.labels[key]);
+    const state = usePreviewSessionStore((s) => (label ? s.states[label] : undefined));
+    // Navigate away from an errored session by remounting the host.
+    const [hostEpoch, setHostEpoch] = useState(0);
+
+    const [openError, setOpenError] = useState<PreviewError | null>(null);
     const [urlInputValue, setUrlInputValue] = useState(url);
     const [isEditingUrl, setIsEditingUrl] = useState(false);
-    const slowTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-    const clearSlowTimer = useCallback(() => {
-        if (slowTimerRef.current) {
-            clearTimeout(slowTimerRef.current);
-            slowTimerRef.current = null;
-        }
-    }, []);
+    const currentUrl = state?.url || url;
+    const loading = !state || state.phase === "loading";
 
-    // Reset when the outer URL changes (user clicked a different link in chat)
     useEffect(() => {
-        setCurrentUrl(url);
         setUrlInputValue(url);
-        setLoading(true);
-        setShowSlowHint(false);
         setIsEditingUrl(false);
-        clearSlowTimer();
-        // Show "page is taking longer" hint after 5 seconds
-        slowTimerRef.current = setTimeout(() => {
-            setShowSlowHint(true);
-        }, 5000);
-        return clearSlowTimer;
-    }, [url, clearSlowTimer]);
+        setOpenError(null);
+        setHostEpoch(0);
+    }, [url]);
 
-    const handleLoad = useCallback(() => {
-        setLoading(false);
-        setShowSlowHint(false);
-        clearSlowTimer();
-
-        // Try to sync the URL bar (same-origin only)
-        try {
-            const href = iframeRef.current?.contentWindow?.location.href;
-            if (href && href !== currentUrl) {
-                setCurrentUrl(href);
-                if (!isEditingUrl) {
-                    setUrlInputValue(href);
-                }
-            }
-        } catch {
-            // Cross-origin — can't read location; keep the original URL
-        }
-    }, [currentUrl, isEditingUrl, clearSlowTimer]);
+    const handleOpenError = useCallback((error: PreviewError) => setOpenError(error), []);
 
     const handleRefresh = useCallback(() => {
-        const iframe = iframeRef.current;
-        if (!iframe) return;
-        iframe.src = currentUrl;
-        setLoading(true);
-        setShowSlowHint(false);
-        clearSlowTimer();
-        slowTimerRef.current = setTimeout(() => {
-            setShowSlowHint(true);
-        }, 5000);
-    }, [currentUrl, clearSlowTimer]);
-
-    const navigateToUrl = useCallback((targetUrl: string) => {
-        if (!targetUrl) return;
-        const normalized = targetUrl.startsWith("http://") || targetUrl.startsWith("https://")
-            ? targetUrl
-            : `https://${targetUrl}`;
-        setCurrentUrl(normalized);
-        setUrlInputValue(normalized);
-        setLoading(true);
-        setShowSlowHint(false);
-        setIsEditingUrl(false);
-        clearSlowTimer();
-        slowTimerRef.current = setTimeout(() => {
-            setShowSlowHint(true);
-        }, 5000);
-    }, [clearSlowTimer]);
-
-    const handleUrlKeyDown = useCallback((e: KeyboardEvent<HTMLInputElement>) => {
-        if (e.key === "Enter") {
-            navigateToUrl(urlInputValue);
+        if (!label) {
+            setOpenError(null);
+            setHostEpoch((epoch) => epoch + 1);
+            return;
         }
-    }, [urlInputValue, navigateToUrl]);
+        void reloadPreview(label).catch((error) => setOpenError(parsePreviewError(error)));
+    }, [label]);
 
-    const handleUrlBlur = useCallback(() => {
-        setIsEditingUrl(false);
-        setUrlInputValue(currentUrl);
-    }, [currentUrl]);
+    const handleHistory = useCallback(
+        (direction: "back" | "forward") => {
+            if (!label) return;
+            void previewHistory(label, direction).catch(() => {
+                /* ends of history are no-ops, not errors */
+            });
+        },
+        [label],
+    );
+
+    const navigateToUrl = useCallback(
+        (raw: string) => {
+            const target = normalizePreviewUrl(raw);
+            if (!target) return;
+            setIsEditingUrl(false);
+            setUrlInputValue(target);
+            setOpenError(null);
+            if (!label) {
+                setHostEpoch((epoch) => epoch + 1);
+                return;
+            }
+            void navigatePreview(label, target).catch((error) =>
+                setOpenError(parsePreviewError(error)),
+            );
+        },
+        [label],
+    );
+
+    const handleUrlKeyDown = useCallback(
+        (e: KeyboardEvent<HTMLInputElement>) => {
+            if (e.key === "Enter") navigateToUrl(urlInputValue);
+            if (e.key === "Escape") {
+                setIsEditingUrl(false);
+                setUrlInputValue(currentUrl);
+            }
+        },
+        [urlInputValue, currentUrl, navigateToUrl],
+    );
+
+    const errorText = openError ? describePreviewError(openError, t) : null;
 
     return (
-        <div className="flex h-full w-full flex-col">
-            {/* ── Navigation Toolbar ── */}
+        <div className="flex h-full w-full flex-col" aria-label={fileName} role="region">
+            {/* ── Navigation toolbar (outside the native surface, by necessity) ── */}
             <div className="flex shrink-0 items-center gap-1 border-b border-border-divider bg-surface-subtle px-2 py-1.5">
-                {/* Back */}
                 <button
-                    onClick={() => { try { iframeRef.current?.contentWindow?.history.back(); } catch {} }}
+                    onClick={() => handleHistory("back")}
                     className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                     title={t("fileEditor.navBack")}
                 >
                     <ArrowLeft className="h-3.5 w-3.5" />
                 </button>
-
-                {/* Forward */}
                 <button
-                    onClick={() => { try { iframeRef.current?.contentWindow?.history.forward(); } catch {} }}
+                    onClick={() => handleHistory("forward")}
                     className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
                     title={t("fileEditor.navForward")}
                 >
                     <ArrowRight className="h-3.5 w-3.5" />
                 </button>
-
-                {/* Refresh */}
                 <button
                     onClick={handleRefresh}
                     className="rounded p-1 text-text-tertiary transition-colors hover:bg-[var(--color-accent)]/10  dark:hover:bg-[var(--color-accent)]/15"
@@ -141,69 +140,104 @@ export function UrlPreviewView({ url, fileName }: UrlPreviewViewProps) {
                     <RefreshCw className="h-3.5 w-3.5" />
                 </button>
 
-                {/* Editable URL bar — now an <input> that can be focused and edited */}
+                {loading && !openError && (
+                    <span title={t("fileEditor.previewLoading")} className="flex shrink-0">
+                        <Loader2 className="h-3.5 w-3.5 animate-spin text-text-tertiary" />
+                    </span>
+                )}
+
+                {/* Editable URL bar */}
                 <div className="mx-1 flex-1 overflow-hidden rounded bg-modal-surface">
                     <input
                         type="text"
+                        aria-label={t("fileEditor.previewAddressLabel")}
                         value={isEditingUrl ? urlInputValue : currentUrl}
-                        onChange={(e) => { setUrlInputValue(e.target.value); setIsEditingUrl(true); }}
-                        onFocus={() => { setUrlInputValue(currentUrl); setIsEditingUrl(true); }}
-                        onBlur={handleUrlBlur}
+                        onChange={(e) => {
+                            setUrlInputValue(e.target.value);
+                            setIsEditingUrl(true);
+                        }}
+                        onFocus={() => {
+                            setUrlInputValue(currentUrl);
+                            setIsEditingUrl(true);
+                        }}
+                        onBlur={() => {
+                            setIsEditingUrl(false);
+                            setUrlInputValue(currentUrl);
+                        }}
                         onKeyDown={handleUrlKeyDown}
                         className="w-full border-0 bg-transparent px-2 py-1 text-xs text-text-secondary outline-none placeholder-text-disabled focus:ring-0  dark:focus:text-zinc-100"
                         placeholder={currentUrl}
                     />
                 </div>
 
-                {/* Open in external browser */}
-                <a
-                    href={currentUrl}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                {/* Open in the system browser — a real top-level browser window,
+                    the fallback for anything the in-app surface should not host. */}
+                <button
+                    onClick={() => {
+                        void openExternal(currentUrl).catch(() => {});
+                    }}
                     className="flex shrink-0 items-center gap-1 rounded px-2 py-1 text-xs text-info transition-colors hover:bg-info-surface"
                     title={t("fileEditor.openInBrowser")}
                 >
                     <ExternalLink className="h-3.5 w-3.5" />
-                </a>
+                </button>
             </div>
 
-            {/* ── Iframe container ── */}
-            <div className="relative flex-1">
-                {/* Loading spinner */}
-                {loading && (
-                    <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 bg-right-panel">
-                        <Loader2 className="h-8 w-8 animate-spin text-text-tertiary" />
-                        <span className="text-sm text-text-tertiary">{t("fileEditor.loadingUrl")}</span>
-                    </div>
-                )}
-
-                {/* Slow-load hint (shows after 5s if page hasn't loaded) — non-blocking */}
-                {showSlowHint && loading && (
-                    <div className="absolute bottom-0 left-0 right-0 z-20 flex items-center justify-center gap-2 bg-warning-surface px-3 py-2 text-xs text-warning-quiet">
-                        <span>{t("fileEditor.iframeBlockedHint")}</span>
-                        <a
-                            href={currentUrl}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="inline-flex items-center gap-1 font-medium text-info underline underline-offset-2 hover:text-info"
+            {/* ── Surface ── */}
+            <div className="relative min-h-0 flex-1 bg-modal-surface">
+                {errorText ? (
+                    <div className="flex h-full flex-col items-center justify-center gap-3 px-8 text-center">
+                        <AlertTriangle className="h-8 w-8 text-warning" />
+                        <div className="text-sm text-text-secondary">
+                            {t("fileEditor.previewErrorTitle")}
+                        </div>
+                        <div className="max-w-md text-xs text-text-tertiary">{errorText}</div>
+                        <button
+                            onClick={() => {
+                                setOpenError(null);
+                                setHostEpoch((epoch) => epoch + 1);
+                            }}
+                            className="rounded border border-border-divider px-3 py-1 text-xs text-text-secondary transition-colors hover:bg-surface-subtle"
                         >
-                            {t("fileEditor.openInBrowser")}
-                            <ExternalLink className="h-3 w-3" />
-                        </a>
+                            {t("fileEditor.previewRetry")}
+                        </button>
                     </div>
+                ) : (
+                    <WebPreviewHost
+                        key={`${key}:${hostEpoch}`}
+                        sessionKey={key}
+                        url={url}
+                        active
+                        onError={handleOpenError}
+                    />
                 )}
-
-                {/* Iframe — allow-popups so target="_blank" links navigate or open in system browser */}
-                <iframe
-                    ref={iframeRef}
-                    key={currentUrl}
-                    src={currentUrl}
-                    className="h-full w-full border-0 bg-modal-surface"
-                    sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-                    title={fileName}
-                    onLoad={handleLoad}
-                />
             </div>
         </div>
     );
+}
+
+/**
+ * Turn a typed backend error into a user-facing sentence.
+ *
+ * The codes are part of the command contract (`previewHost.ts`); anything
+ * unrecognised shows the raw detail so a real engine failure is never hidden
+ * behind a generic "failed".
+ */
+function describePreviewError(
+    error: PreviewError,
+    t: (key: string) => string,
+): string {
+    switch (error.code) {
+        case "blocked_scheme":
+            return t("fileEditor.previewErrorBlockedScheme");
+        case "invalid_url":
+            return t("fileEditor.previewErrorInvalidUrl");
+        case "create_failed":
+        case "main_window_missing":
+            return `${t("fileEditor.previewErrorFailed")} (${error.code}: ${error.detail})`;
+        case "unknown_preview":
+        case "other":
+        default:
+            return error.detail || error.code;
+    }
 }
