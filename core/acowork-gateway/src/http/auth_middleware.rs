@@ -90,6 +90,39 @@ pub const CHAT_SCOPE_HEADER: &str = "x-acowork-chat-scope";
 /// carries the impersonated id in `x-user-id` only.
 pub const ADMIN_SCOPE_HEADER: &str = "x-acowork-scope-admin";
 
+/// Is `name` one of the headers that assert **who the caller is** — the family
+/// whose only trusted writer is this module (ADR-076 §决策 4)?
+///
+/// Every reverse proxy in the Gateway forwards inbound headers, so every one of
+/// them has to drop this family first: a client-supplied copy would reach the
+/// downstream service as an identity the caller asserted about itself. Stated
+/// as one predicate, beside the constants, for two reasons:
+///
+/// - a proxy says the *rule* ("identity headers never cross") instead of
+///   enumerating constants, and cannot forget one;
+/// - a new identity header is stripped everywhere by construction, because it
+///   is added here and nowhere else.
+///
+/// The enumeration this replaced was already incomplete rather than wrong
+/// (`mcp_proxy` stripped `x-auth-role` but forwarded the session-scope pair) —
+/// which is the failure mode a per-site list always has. The ADR-076 red line
+/// deliberately does **not** list this function's callers: this file is the one
+/// place the constants may appear, and a proxy that merely asks "is this an
+/// identity header?" is not a writer.
+pub fn is_identity_assertion_header(name: &str) -> bool {
+    // `HeaderName::as_str()` is lowercase-normalised, and every constant here
+    // is lowercase, so exact matching is also the case-insensitive answer.
+    matches!(
+        name,
+        USER_SCOPE_HEADER
+            | ADMIN_SCOPE_HEADER
+            | CHAT_SCOPE_HEADER
+            | acowork_core::auth::AUTH_USER_HEADER
+            | acowork_core::auth::AUTH_ROLE_HEADER
+            | acowork_core::auth::AUTH_AS_USER_HEADER
+    )
+}
+
 /// Scope value meaning "no filtering" — the administrator view.
 pub const SCOPE_ALL: &str = "*";
 
@@ -637,6 +670,34 @@ mod tests {
         assert_eq!(scope_value(&ctx("a-1", Role::Admin, None)), SCOPE_ALL);
         // Admin with as_user → that user.
         assert_eq!(scope_value(&ctx("a-1", Role::Admin, Some("u-2"))), "u-2");
+    }
+
+    /// The family predicate is the one list a proxy consults. Its *coverage* is
+    /// the security property: a header that is missing here is forwarded to a
+    /// downstream service as if the Gateway had written it.
+    #[test]
+    fn the_identity_family_covers_every_trusted_writer_header() {
+        for name in [
+            USER_SCOPE_HEADER,
+            ADMIN_SCOPE_HEADER,
+            CHAT_SCOPE_HEADER,
+            acowork_core::auth::AUTH_USER_HEADER,
+            acowork_core::auth::AUTH_ROLE_HEADER,
+            acowork_core::auth::AUTH_AS_USER_HEADER,
+        ] {
+            assert!(is_identity_assertion_header(name), "{name} must be stripped");
+        }
+        // Peers, not identity: these are ordinary forwarded headers.
+        for name in ["x-mcp-actor", "authorization", "content-type", "x-acowork-node-token"] {
+            assert!(
+                !is_identity_assertion_header(name),
+                "{name} is not an identity claim and must not be dropped by the family rule"
+            );
+        }
+        // The comparison is exact against a lowercase set, and `HeaderName`'s
+        // own `as_str()` is what makes that the case-insensitive answer.
+        assert!(is_identity_assertion_header("x-user-id"));
+        assert!(!is_identity_assertion_header("X-User-Id"));
     }
 
     #[test]

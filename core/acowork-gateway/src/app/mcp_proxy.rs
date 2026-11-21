@@ -8,7 +8,9 @@
 //! Identity policy (mirrors `doc_proxy` MCP path):
 //! - Validate `X-MCP-Actor`: instance id ∈ `installed_agents` → pass through;
 //!   otherwise strip (anonymous / read-only tools).
-//! - Never forward `X-ACowork-Node-Token` or client-forged `x-auth-role`.
+//! - Never forward `X-ACowork-Node-Token`, and never forward any member of the
+//!   trusted-identity header family (`auth_middleware::is_identity_assertion_header`) —
+//!   a client-supplied identity must not reach an app as if the Gateway wrote it.
 //! - App disabled or process not ready → `503 + Retry-After: 2`.
 
 use axum::Router;
@@ -143,7 +145,12 @@ fn build_mcp_headers(headers: &HeaderMap, gw: &GatewayState) -> HeaderMap {
         if name == acowork_core::auth::NODE_TOKEN_HEADER {
             continue;
         }
-        if name == acowork_core::auth::AUTH_ROLE_HEADER {
+        // The whole trusted-identity family, not just the role: this proxy
+        // forwards to an app's MCP upstream, and the app authenticates agents
+        // through `X-MCP-Actor` alone. Everything else in the family arrived
+        // from the client as a claim about itself (ADR-076 §决策 4), so the
+        // session-scope pair must not ride along either.
+        if crate::http::auth_middleware::is_identity_assertion_header(name.as_str()) {
             continue;
         }
         if name == "x-mcp-actor" {
@@ -367,6 +374,65 @@ label = "Clone"
         .await;
         assert_eq!(status, StatusCode::OK);
         assert!(body.get("x-mcp-actor").is_none());
+    }
+
+    /// ADR-076 §决策 4: nobody but the Gateway may assert an identity, and this
+    /// proxy is the last hop before a third-party app. The role was stripped
+    /// before this test existed; the session-scope pair was forwarded by
+    /// omission, which is exactly the bug a per-site list produces.
+    #[tokio::test]
+    async fn the_whole_identity_family_is_stripped() {
+        let state = test_state();
+        add_agent(&state, AGENT).await;
+        let port = start_echo_mcp().await;
+        register_clone(&state, Some(port), true).await;
+        let (status, body) = call(
+            state,
+            "/api/apps/doc-clone/mcp",
+            &[
+                ("x-user-id", "u-alice"),
+                ("x-auth-role", "admin"),
+                ("x-auth-user", "u-alice"),
+                ("x-auth-as-user", "u-bob"),
+                ("x-acowork-scope-admin", "a-1"),
+                ("x-acowork-chat-scope", "chat-1"),
+            ],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        for name in [
+            "x-user-id",
+            "x-auth-role",
+            "x-auth-user",
+            "x-auth-as-user",
+            "x-acowork-scope-admin",
+            "x-acowork-chat-scope",
+        ] {
+            assert!(
+                body.get(name).is_none(),
+                "{name} reached the app as if the Gateway had written it"
+            );
+        }
+    }
+
+    /// The node token is a machine credential, not an identity claim, and is
+    /// stripped by name rather than by family — pinned so the family predicate
+    /// cannot be "simplified" into covering it and silently letting a client
+    /// present one.
+    #[tokio::test]
+    async fn the_node_token_never_reaches_an_app() {
+        let state = test_state();
+        add_agent(&state, AGENT).await;
+        let port = start_echo_mcp().await;
+        register_clone(&state, Some(port), true).await;
+        let (status, body) = call(
+            state,
+            "/api/apps/doc-clone/mcp",
+            &[("X-ACowork-Node-Token", "node-secret")],
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body.get("x-acowork-node-token").is_none());
     }
 
     #[tokio::test]

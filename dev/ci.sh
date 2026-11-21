@@ -333,8 +333,21 @@ run_gateway_auth_scope_redline() {
     # it is a fourth trusted *writer*, not a second *authority*. The property
     # the red line protects (never assert an identity from a client claim) is
     # unchanged.
+    #
+    # A *forwarding* site is not a writer, and the two must not be conflated: a
+    # proxy that strips this family now asks
+    # `auth_middleware::is_identity_assertion_header` (which lives in an allowed
+    # file) instead of naming the constants, so `mcp_proxy` stays out of the
+    # allowlist — adding it would blind the guard to that file's real production
+    # code, and it forwards headers for a living.
+    #
+    # `ADMIN_SCOPE_HEADER` / `CHAT_SCOPE_HEADER` joined the pattern after
+    # `mcp_proxy` was caught forwarding them: same family, same forgery vector,
+    # previously unguarded because ADR-076 §决策 4 only named the auth-* pair. A
+    # new identity header must be added here AND to the predicate; the predicate
+    # is what strips it, this is what notices a second writer.
     offenders=$(scan_production \
-        '(USER_SCOPE_HEADER|"x-user-id"|AUTH_USER_HEADER|AUTH_ROLE_HEADER|AUTH_AS_USER_HEADER|"x-auth-)' \
+        '(USER_SCOPE_HEADER|"x-user-id"|AUTH_USER_HEADER|AUTH_ROLE_HEADER|AUTH_AS_USER_HEADER|"x-auth-|ADMIN_SCOPE_HEADER|"x-acowork-scope-admin"|CHAT_SCOPE_HEADER|"x-acowork-chat-scope")' \
         "$root" \
         '/http/(auth_middleware|user_proxy|doc_proxy|intent_api)\.rs$')
     if [ -n "$offenders" ]; then
