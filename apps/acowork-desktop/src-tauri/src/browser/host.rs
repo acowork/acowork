@@ -105,6 +105,31 @@ impl From<&PreviewSession> for PreviewStateDto {
     }
 }
 
+/// Wire shape of one refused download. Two single-word fields, so no rename is
+/// needed; the type exists so the two sides of `preview://download` cannot drift
+/// (a hand-built `json!` on one side and an interface on the other is one typo
+/// away from an event nobody reads).
+#[derive(Debug, Clone, Serialize)]
+pub struct PreviewDownloadDto {
+    /// The URL the page asked to download — verbatim, including a `blob:` or
+    /// `data:` URL. The host does not rewrite it: what a browser can do with it
+    /// is the frontend's decision (`downloadActionUrl` in `previewHost.ts`).
+    pub url: String,
+    /// Session label that requested it (`preview-N`).
+    pub from: String,
+}
+
+/// The payload for [`DOWNLOAD_EVENT`].
+///
+/// Pulled out of the `on_download` closure so the wire shape is testable without
+/// a live webview (`tests/preview_download_dto.rs`).
+pub fn download_request(url: &Url, from: &str) -> PreviewDownloadDto {
+    PreviewDownloadDto {
+        url: url.to_string(),
+        from: from.to_string(),
+    }
+}
+
 /// Push one session's state to the frontend. Best-effort: a failed emit (the
 /// window is going away) must not abort a command.
 fn emit_state(app: &AppHandle, session: &PreviewSession) {
@@ -229,7 +254,7 @@ pub async fn preview_open(
                             label: MAIN_WEBVIEW.to_string(),
                         },
                         DOWNLOAD_EVENT,
-                        serde_json::json!({ "url": url.to_string(), "from": download_label }),
+                        download_request(&url, &download_label),
                     );
                 }
                 false

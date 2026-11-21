@@ -197,6 +197,30 @@ export function subscribePreviewDownload(
 }
 
 /**
+ * Which URL the "open in browser" action of a refused download should target.
+ *
+ * The download URL is the right target only when a browser can fetch it on its
+ * own. A page that builds a CSV or a PNG in memory downloads a `blob:` (or
+ * `data:`) URL, which is meaningless outside the page that created it — and the
+ * shell plugin's default `open` scope accepts `mailto:` / `tel:` / `http(s)` only,
+ * so handing it a `blob:` URL produces a click that silently does nothing, which
+ * is the exact failure this toast exists to remove.
+ *
+ * The page itself is then the useful target, and `from` is the label that maps to
+ * it (`PreviewState.url` is kept current by `preview://state`). `null` means "no
+ * action" — better a warning with nothing to click than a dead button.
+ */
+export function downloadActionUrl(
+    downloadUrl: string,
+    pageUrl: string | null | undefined,
+): string | null {
+    const isHttp = (candidate: string | null | undefined): candidate is string =>
+        typeof candidate === "string" && /^https?:\/\//i.test(candidate);
+    if (isHttp(downloadUrl)) return downloadUrl;
+    return isHttp(pageUrl) ? pageUrl : null;
+}
+
+/**
  * Normalise user input from the address bar: bare hosts get `https://`.
  * Kept next to the rest of the protocol so both the toolbar and any future
  * caller share one rule.

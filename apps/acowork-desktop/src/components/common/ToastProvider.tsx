@@ -11,8 +11,15 @@ interface Toast {
 }
 
 interface ToastContextValue {
-  addToast: (toast: Omit<Toast, "id">) => void;
+  addToast: (toast: ToastInput) => void;
 }
+
+/**
+ * A toast before it is queued. Exported so a producer that builds one *elsewhere*
+ * (e.g. `downloadToast` in `usePreviewBridge`) declares the same shape instead of
+ * restating it — a copy would drift silently, since both sides are structural.
+ */
+export type ToastInput = Omit<Toast, "id">;
 
 /**
  * ADR-038: imperative-toast bridge for non-React callers (e.g. zustand stores,
@@ -24,7 +31,7 @@ interface ToastContextValue {
  */
 export const TOAST_EVENT = "acowork:toast";
 
-export function showToast(toast: Omit<Toast, "id">): void {
+export function showToast(toast: ToastInput): void {
   window.dispatchEvent(new CustomEvent(TOAST_EVENT, { detail: toast }));
 }
 
@@ -39,7 +46,7 @@ let nextId = 0;
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
 
-  const addToast = useCallback((toast: Omit<Toast, "id">) => {
+  const addToast = useCallback((toast: ToastInput) => {
     const id = nextId++;
     setToasts((prev) => [...prev.slice(-2), { ...toast, id }]); // max 3
   }, []);

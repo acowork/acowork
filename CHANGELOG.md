@@ -48,7 +48,9 @@ that did nothing (`target="_blank"` with no new-window handler).
 
 Two edges settled afterwards. A download inside a preview is still refused — there is no
 download shelf and no destination UI — but the refusal is now reported and offers the system
-browser, instead of a click that visibly does nothing. And the loopback refusal is scoped to
+browser — the download URL when a browser can fetch it, the page itself when the file was
+  generated in memory (`blob:`), and no action at all when neither is openable — instead of a
+  click that visibly does nothing. And the loopback refusal is scoped to
 the app's own `devUrl` port rather than every `localhost` port: a dev server an agent is
 working on is the page this host is most useful for.
 
