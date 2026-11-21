@@ -999,6 +999,75 @@ run_desktop_ipc_scope_redline() {
     echo "In-app browser IPC-scope red line: OK"
 }
 
+# ADR-119 §Falsifiability: the deliverables row must not know **what** produced
+# a file. The whole point of the design is that swapping the Playwright MCP for
+# any other image-returning MCP is a no-op in both processes — so a tool name, a
+# product name or an MCP tool prefix appearing in the deliverables code path is
+# the design being violated, not a style nit.
+#
+# Three checks, because the failure has three shapes:
+#
+#   1. product vocabulary in *code* (a `screenshot`/`playwright` branch is the
+#      coupling; the same word in a comment explaining why there is no branch is
+#      documentation, so leading-comment lines are skipped);
+#   2. an identity comparison (`tool_name ==`, `toolName ===`) — the generic
+#      form of the same mistake;
+#   3. the runtime module importing a concrete tool module, which is the
+#      compile-time version of both.
+#
+# The four scanned files must exist: a renamed file would make every grep pass
+# vacuously, and a guard that cannot fail is worse than none.
+run_deliverables_coupling_redline() {
+    echo "Checking ADR-119 deliverables decoupling red line..."
+    local root="$SCRIPT_DIR/.."
+    local rust_mod="$root/core/acowork-runtime/src/agent/turn_deliverables.rs"
+    local ts_lib="$root/apps/acowork-desktop/src/lib/deliverableFiles.ts"
+    local ts_row="$root/apps/acowork-desktop/src/components/chat/ChatDeliverablesRow.tsx"
+    local f
+    for f in "$rust_mod" "$ts_lib" "$ts_row"; do
+        if [ ! -f "$f" ]; then
+            echo "ERROR: the ADR-119 red line points at a file that no longer exists:"
+            echo "  $f"
+            echo "Point run_deliverables_coupling_redline at the new location — a guard"
+            echo "over a missing file passes vacuously."
+            exit 1
+        fi
+    done
+
+    local offenders
+    # The test region is out of scope, and not as a convenience: a unit test that
+    # *names* a screenshot is the opposite of the coupling this guard hunts — it
+    # is the swap test, asserting that an image-returning tool lands in the row
+    # without the production code knowing which tool it was. Only the code that
+    # ships can couple, so scanning stops at `#[cfg(test)]`.
+    offenders=$(awk '
+        FNR == 1 { in_tests = 0 }
+        /^#\[cfg\(test\)\]/ { in_tests = 1 }
+        in_tests { next }
+        $0 ~ /^[[:space:]]*(\/\/|\/\*|\*)/ { next }
+        $0 ~ /(playwright|[Ss]creenshot|browser|chromium|mcp_[a-z0-9]+__)/ { print FILENAME ":" FNR ":" $0; next }
+        $0 ~ /(tool_?[Nn]ame|function\.name)[[:space:]]*(==|!=|===|!==)/ { print FILENAME ":" FNR ":" $0 }
+    ' "$rust_mod" "$ts_lib" "$ts_row" 2>/dev/null || true)
+    if [ -n "$offenders" ]; then
+        echo "ERROR: the deliverables code path branches on what produced a file (ADR-119):"
+        echo "$offenders"
+        echo "Tools declare files and image parts; the Runtime decides what to show."
+        echo "A tool name here means the row stops being general — see ADR-119"
+        echo "§Falsifiability for the swap test this protects."
+        exit 1
+    fi
+
+    if grep -qE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod" 2>/dev/null; then
+        echo "ERROR: turn_deliverables.rs imports a concrete tool module (ADR-119):"
+        grep -nE '^[[:space:]]*use[[:space:]]+crate::tools::builtin' "$rust_mod"
+        echo "The module owns the rules, not the tool set; a tool-side dependency"
+        echo "turns \"any MCP that returns an image\" back into \"that one MCP\"."
+        exit 1
+    fi
+
+    echo "Deliverables decoupling red line: OK"
+}
+
 run_all_redlines() {
     run_node_redline
     run_mqtt_redline
@@ -1019,6 +1088,7 @@ run_all_redlines() {
     run_css_theme_redline
     run_app_framework_redline
     run_desktop_ipc_scope_redline
+    run_deliverables_coupling_redline
 }
 
 run_clippy() {
