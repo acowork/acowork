@@ -39,7 +39,7 @@ use std::time::Duration;
 
 use axum::{
     body::Body,
-    extract::{Path, RawQuery, State},
+    extract::{DefaultBodyLimit, Path, RawQuery, State},
     http::{HeaderMap, HeaderName, Method, StatusCode},
     response::{IntoResponse, Response},
     routing::any,
@@ -64,6 +64,12 @@ pub fn router(state: NodeHttpState) -> Router {
         .route("/agents/{id}/{*rest}", any(proxy_agent))
         // ADR-089 D2: Gateway → loopback LSP relay bridge (HTTP + WS).
         .route("/relay/{*rest}", any(relay::proxy_relay))
+        // The proxy buffers the whole request body (`Bytes`) to forward it, so
+        // axum's 2 MiB `DefaultBodyLimit` default would reject a hosted-app save
+        // of a large document (base64 rides in the JSON body). Match the Gateway
+        // and Runtime global cap (64 MiB); per-service limits stay the source of
+        // truth for user-facing caps.
+        .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .with_state(state)
 }
 
@@ -461,6 +467,25 @@ mod tests {
             .oneshot(proxy_request(Some("secret-token")))
             .await
             .unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// A hosted-app save rides a multi-MiB base64 body through this proxy. The
+    /// handler buffers the whole body (`Bytes`), so without an explicit
+    /// `DefaultBodyLimit` axum's 2 MiB default rejects it with 413 before routing.
+    /// With the cap raised, a >2 MiB body reaches routing (unknown agent → 503),
+    /// exactly like the small-body case above.
+    #[tokio::test]
+    async fn proxy_accepts_body_over_axum_default_limit() {
+        let app = router(http_state(Some("secret-token")));
+        let big = vec![b'a'; 3 * 1024 * 1024];
+        let req = axum::http::Request::builder()
+            .uri("/agents/com.test.foo/workspaces/file")
+            .method("PUT")
+            .header("X-ACowork-Node-Token", "secret-token")
+            .body(Body::from(big))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
