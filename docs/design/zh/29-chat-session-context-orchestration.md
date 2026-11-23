@@ -66,6 +66,8 @@ Block C 与当前消息合并成一条 user 消息，避免连续两条 user 消
 ## Scenario                      // 1:1 或 group，两个稳定变体
 <scenario text>
 — 两种情况都追加 —
+## Capabilities                  // agent 能力面 + 唯一入口（见 §3.7）
+<capability text>
 ## Identity                      // 用户语言 / 时区（identity_context）
 <identity text>
 ```
@@ -117,7 +119,7 @@ Block A 禁止出现：
 - 随机数、请求 id、消息 id；
 - 任何按 HashMap 顺序序列化的结构。
 
-`identity_context` 只在用户语言/时区变化时改变（低频），可接受。
+`identity_context` 只在用户语言/时区变化时改变（低频），可接受。`## Capabilities`（§3.7）只从 agent 级能力集派生、并按名称排序，与轮次无关；能力集本身变了（装/卸 MCP、增删 skill）前缀才 miss 一次，属预期。
 
 ### 3.6 与 execute prompt 的隔离
 
@@ -131,6 +133,22 @@ router **不加载**：
 | skills summary | 执行技能，router 无对应工具 |
 | workspace prompt file（AGENTS.md） | 项目执行规范，应由执行会话读取 |
 | retrieved memory | 每轮变化，破坏 Block A 稳定性；且属于执行上下文 |
+
+`## Capabilities` 只列 skill 名与工具名，不含 SKILL.md 正文、工具 schema 或 skills summary 文本，因此不与上表的「skills summary 不加载」冲突：给 router 的是「有什么」，不是「怎么用」——怎么用由执行会话读 SKILL.md。
+
+### 3.7 `## Capabilities`：能力面与唯一入口
+
+chat 轮里 router 的 wire 工具只有两个 act 与两个只读工具（§3.2），而 agent 真正的能力——MCP server、skills、内置工具——只在执行会话里可用。缺这一段时，模型对「我能做什么」的全部认知就是那几个工具；而「你能做 X 吗」按内核决策规则属于关于自身的小闲聊、可直接文字回答不路由，Safety 尾块又禁止承诺结果，于是「我不能」成了唯一自洽的答案——哪怕执行会话完全具备该能力。清单本身也不够：只知道手里有 `shell` 却不知道怎么用，模型要么声称已经做过，要么发明一个 `session_config` 开关。
+
+段落由 `chat_router::prompt::build_capability_section` 生成，规则在前、数据在后：
+
+1. 规则只点约束、一句一条：清单里的能力 router 一件都跑不了（上文那两个只读 lookup 是唯一例外）；从能力到动作只有一扇门 `exec_session_create`，门前不需要开任何开关（新建 session 已自带全部 `available now`，`session_config` 不是开关）；「你能做 X 吗」只回一句，背后若是一个真实请求，同一轮就路由——不写这一句，内核「不路由针对自己的对话」会让旧答案重新自洽；`(+N more)` 表示清单被截断，不能当「没装」读。
+2. `- available now:` MCP server（按 `mcp_<server>__<tool>` 汇总出 server 名与工具数）、skill 名、内置工具名；
+3. `- declared but not installed:` manifest `[[mcp_servers]]` 减去已连接的 server——二元结论由代码算好，不把集合差留给一个小模型。
+
+追加点与 `## Identity` 相同（`build_block_a` 内、`# Safety` 尾块之后），所以 `chat.md` 覆盖能换掉人格，换不掉「我能做什么、怎么用」这一句：它陈述的是 agent 事实，不是人格文案。没有任何一项能力时整段省略，空包拿到与从前逐字节相同的 Block A。每组名称上限 12 / 16 / 32（server / skill / 内置工具）、声明缺口 8 个、单个名字 40 字节，溢出渲染成 `(+N more)` 并在规则里教会模型不要把缺口读成「没装」。整节不解释模型已经知道的事（`# Safety` 尾块已有的「不承诺结果」不复述）。满配实测 1004 B。
+
+数据只来自 agent 级集合（manifest、`core.all_tools`、skill registry），与轮次无关，因而对同一能力集字节稳定、进缓存前缀；能力集本身变化（装卸 MCP、增删 skill）才让前缀 miss 一次。
 
 ## 4. Block B：append-only 历史投影
 
@@ -357,6 +375,7 @@ S2  idle      3h    task   Review ADR-098
 - **缓存标记**：Anthropic 序列化后 `cache_control` 只出现在预期位置；OpenAI 请求不携带该字段。
 - **prompt 分层**：任一份非空白 `chat.md` 整段替换内置 chat prompt；缺省回退内置默认（基座 + manifest 人格 + 场景段）；`chat.md` 不进入 execute prompt。
 - **回归**：窗口裁剪后路由结果与未裁剪时一致（MockProvider 固定输出）。
+- **能力自知**：`## Capabilities` 对同一能力集字节稳定（与输入顺序无关）；唯一入口名取自 `EXEC_SESSION_CREATE_TOOL` 常量；`declared but not installed` 是集合差；空能力集返回 `None`（空包的 Block A 逐字节不变）；`chat.md` 覆盖后它仍在、且排在 `## Identity` 之前；每组超限渲染 `(+N more)`、单个超长名不破预算。
 
 ## 10. 与其他文档的关系
 
@@ -395,3 +414,13 @@ S2  idle      3h    task   Review ADR-098
 **决策三：硬拦截是防御纵深**。`continuation_refused=true` 且模型无-act 时：首次注入一条反馈消息重试一次；重试仍无-act 则 `degrade()`，绝不写 `agent_message` 行。它守护的是工具化的残余路径（超时、进程重启、陈旧卡片），与工具化互补而非替代。
 
 **可观测性**。决策日志（`chat-router-decisions.jsonl`）新增 `confirm_wait_ms`（挂起等待时长）与 `confirm_result`（`continue`/`new_task`/`timeout`）两列，均 `skip_serializing_if` 可选；`act` 列出现 `exec_session_route_confirm:S_x` 即代表本轮写过卡。
+
+## 13. 修订（2026-11-23）：`## Capabilities`——agent 能力面进入 Block A
+
+**缺陷形状**。人在 chat 里问「你能做 X 吗」，router 答「我不能」，而 X 恰恰是执行会话的强项：MCP 具在，只是不在 router 手里。取证是三处叠加——router 的 wire 工具只有 act 与两个只读工具；内核 `CHAT_ROUTER_BASE_PROMPT` 写死「这四个 act 就是你的全部工具」，并把「关于自身的问题」归入不路由、直接文字回答的一类；Safety 尾块禁止承诺结果。agent 的真实能力面（`[[mcp_servers]]`、`core.all_tools`、skill registry）从未进入 router 上下文，所以「我不能」是唯一自洽的答案。
+
+**决策：清单进 Block A，且必须带上唯一入口**。只给清单会制造第二种困惑——知道有 `shell` 却不知道怎么启用——因此规则与数据一起加、规则在前：清单里的能力一件都不可在 router 内执行；从能力到动作只有 `exec_session_create` 一扇门；门前没有开关（SessionToolLayer 的 B 层只能减不能加，`session_config` 不是启用按钮）。`declared but not installed` 的差集由代码算好。位置与 `## Identity` 同一处（尾块之后），`chat.md` 覆盖删不掉它。
+
+**否决的替代方案**。其一，只加一句「永远不要说你不能」的禁令：对真的没有的能力会说谎。其二，新增只读的 `agent_capabilities` 工具：每次多一轮模型调用，而拒答恰恰发生在模型不觉得需要调它的时候——留作升级路径，触发条件就是清单被 `(+N more)` 截断。
+
+**未动的边界**。内核（5 KiB 预算，§3.2）、wire 工具集、Safety 尾块、ADR-099 D6 的结构性边界全部不变：本节只是把已存在的能力事实写进上下文，router 依然拿不到任何一个执行工具。

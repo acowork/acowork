@@ -66,6 +66,8 @@ Block C and the current message are merged into one user message to avoid two co
 ## Scenario                      // 1:1 or group, two stable variants
 <scenario text>
 — appended in both cases —
+## Capabilities                  // the agent's capability face + its only door (see §3.7)
+<capability text>
 ## Identity                      // user language / timezone (identity_context)
 <identity text>
 ```
@@ -117,7 +119,7 @@ Block A must not contain:
 - random values, request ids, message ids;
 - any structure serialised in HashMap order.
 
-`identity_context` changes only when the user's language/timezone changes (low frequency) and is acceptable.
+`identity_context` changes only when the user's language/timezone changes (low frequency) and is acceptable. `## Capabilities` (§3.7) derives only from the agent-level capability set and is name-sorted, so it is turn-independent; only a change of that set (MCP server or skill added/removed) costs a prefix miss, which is expected.
 
 ### 3.6 Isolation from the execute prompt
 
@@ -131,6 +133,22 @@ The router loads none of:
 | skills summary | execution skills; the router has no matching tools |
 | workspace prompt file (AGENTS.md) | project execution conventions; belongs to the execution session |
 | retrieved memory | changes every turn (breaks Block A) and belongs to execution context |
+
+`## Capabilities` lists skill names and tool names only — no SKILL.md body, no tool schemas, no skills-summary text — so it does not contradict the "skills summary is not loaded" row above: the router is told *what* exists, not *how* to use it; how to use it is the execution session's job of reading SKILL.md.
+
+### 3.7 `## Capabilities`: the capability face and its only door
+
+On a chat turn the router's wire tools are the two acts plus two read-only tools (§3.2), while the agent's real capabilities — MCP servers, skills, builtin tools — exist only inside an execution session. Without this section the model's entire picture of "what I can do" is that short list; and "can you do X" falls under the kernel's decision rules as small talk about itself, answerable in plain text without routing, while the safety tail forbids promising outcomes — so "I can't" is the only self-consistent answer, even when the execution sessions are fully equipped for X. The inventory alone is not enough either: a model that knows it holds `shell` but not how to reach it either claims it already did the work or invents a `session_config` switch.
+
+The section is produced by `chat_router::prompt::build_capability_section`, rules first and data after:
+
+1. The rules state constraints only, one clause each: not one listed capability is the router's to run (the two read-only lookups above are the sole exception); exactly one door leads from a capability to action, `exec_session_create`, with nothing to enable first (a new session already carries everything under `available now`, and `session_config` is not a switch); "can you do X" gets one sentence, and is routed in the same turn when a real job sits behind it — without that clause the kernel's "never route conversation addressed to you" makes the old answer self-consistent again; `(+N more)` means the list was truncated and must not be read as "not installed".
+2. `- available now:` MCP servers (grouped from `mcp_<server>__<tool>`, with a tool count each), skill names, builtin tool names;
+3. `- declared but not installed:` the manifest's `[[mcp_servers]]` minus the servers that are actually connected — a binary conclusion the code computes, so a small model never has to do the set difference.
+
+The append point is the same as `## Identity` (inside `build_block_a`, after the `# Safety` tail), so a `chat.md` override can replace the persona but cannot delete the one statement of what the agent can do and how to use it: it states agent facts, not persona prose. With no capability at all the section is omitted entirely, and a bare package gets Block A byte-identical to before. Per-group name caps are 12 / 16 / 32 (servers / skills / builtin tools), 8 declared gaps, 40 bytes per name; overflow renders as `(+N more)`, and the rules teach the model not to read absence behind that marker as "not set up". The section explains nothing the model already knows (the safety tail's "do not promise results" is not restated). A fully equipped agent measures 1004 B.
+
+The data comes only from agent-level sets (manifest, `core.all_tools`, the skill registry) and never from the turn, so it is byte-stable for a given capability set and lives inside the cached prefix; only a change of the set itself (an MCP server or skill added/removed) costs one prefix miss.
 
 ## 4. Block B: Append-Only History Projection
 
@@ -357,6 +375,7 @@ Metrics are observational only and never change routing behaviour.
 - **Cache markers**: after Anthropic serialisation, `cache_control` appears only at the intended positions; OpenAI requests do not carry it.
 - **Prompt layering**: any non-blank `chat.md` replaces the whole built-in chat prompt; absent, the built-in default (kernel + manifest persona + scenario) is used; `chat.md` never enters the execute prompt.
 - **Regression**: routing results after a trim equal those without a trim (fixed MockProvider output).
+- **Capability self-knowledge**: `## Capabilities` is byte-stable for a given capability set (independent of input order); its single door is taken from the `EXEC_SESSION_CREATE_TOOL` constant; `declared but not installed` is a set difference; an empty capability set returns `None` (a bare package's Block A is byte-identical); it survives a `chat.md` override and still precedes `## Identity`; each group over its cap renders `(+N more)` and one oversized name cannot break the budget.
 
 ## 10. Relationship to Other Documents
 
@@ -395,3 +414,13 @@ Parking occupies the chat's drain task (the per-chat serial invariant already ru
 **Decision 3: the hard interception is defense in depth.** When `continuation_refused=true` and the model produces no act: one feedback message is injected and the turn retries once; a second no-act degrades — and never writes an `agent_message` row. It guards the residual paths of the tool design (timeout, process restart, stale cards); it complements the tool, it does not replace it.
 
 **Observability.** The decision log (`chat-router-decisions.jsonl`) gains two optional columns: `confirm_wait_ms` (how long the turn parked) and `confirm_result` (`continue` / `new_task` / `timeout`). An `act` value of `exec_session_route_confirm:S_x` means this turn wrote a card.
+
+## 13. Revision (2026-11-23): `## Capabilities` — the agent's capability face enters Block A
+
+**Defect shape.** Asked "can you do X" in a chat, the router answered "I can't" — while X was exactly what the execution sessions are good at: the MCP server was there, just not in the router's hands. Three things compounded: the router's wire tools are the acts plus two read-only tools; the kernel `CHAT_ROUTER_BASE_PROMPT` states that those four acts are all its tools, and classifies "questions about yourself" as answerable without routing; and the safety tail forbids promising outcomes. The agent's real capability face (`[[mcp_servers]]`, `core.all_tools`, the skill registry) never reached the router's context, so "I can't" was the only self-consistent answer.
+
+**Decision: the inventory goes into Block A, and it must carry the only door.** An inventory alone creates the second confusion — knowing `shell` is there but not how to enable it — so rules and data are added together, rules first: not one listed capability is runnable by the router; exactly one door leads from a capability to action, `exec_session_create`; there is no switch in front of it (the SessionToolLayer's B layer can only subtract, and `session_config` is not an enable button). The `declared but not installed` difference is computed in code. The section is appended at the same point as `## Identity` (after the tail), so a `chat.md` override cannot delete it.
+
+**Rejected alternatives.** (1) A prompt-only "never say you can't" prohibition: it lies about capabilities the agent genuinely lacks. (2) A new read-only `agent_capabilities` tool: it costs one extra model call per turn, and the refusal happens precisely when the model does not think it needs to call anything — kept as the upgrade path, triggered when the inventory gets truncated to `(+N more)`.
+
+**Boundaries left untouched.** The kernel (5 KiB budget, §3.2), the wire tool set, the safety tail and ADR-099 D6's structural boundary are all unchanged: this revision only writes already-existing capability facts into the context, and the router still holds no execution tool.

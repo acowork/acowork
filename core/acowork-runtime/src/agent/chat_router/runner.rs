@@ -44,7 +44,7 @@ use super::context::{
     TurnContext, WindowBudget,
 };
 use super::decision::{append_decision, DecisionRecord};
-use super::prompt::{build_block_a, surface_label, PersonaSource};
+use super::prompt::{build_block_a, build_capability_section, surface_label, PersonaSource};
 use super::tool::{
     memory_recall_tool_name, parse_exec_session_create, parse_exec_session_route_confirm,
     parse_exec_session_read_round, router_tools, Act, ActError, AliasTable,
@@ -644,6 +644,35 @@ async fn run_turn(
         // The instance's name, not the package's: the agent must call itself
         // what the human calling it sees, or the two drift apart mid-dialogue.
         let instance_name = core.instance_name();
+        let capabilities = {
+            // Chat turns are the one surface where the agent must state its own
+            // capability face without being able to act on it: this router's
+            // wire tools are the four acts plus the lookups, while the actual
+            // work (MCP servers, skills, builtin tools) only ever happens in an
+            // execution session. The section therefore carries both halves —
+            // the inventory AND the single door, `exec_session_create` —
+            // because an inventory without the door makes the model invent a
+            // setup step before it dares route.
+            //
+            // Derived from the agent-level set only (never the turn, never the
+            // session), so the bytes are stable across turns and stay inside
+            // the cached prefix.
+            let declared_mcp: Vec<&str> = core
+                .manifest
+                .mcp_servers
+                .iter()
+                .filter_map(|decl| decl.key())
+                .collect();
+            let tool_names: Vec<String> = core.all_tools.iter().map(|t| t.name()).collect();
+            let tool_names: Vec<&str> = tool_names.iter().map(String::as_str).collect();
+            let skill_names: Vec<String> = core
+                .skill_registry
+                .read()
+                .map(|registry| registry.all_skills().iter().map(|s| s.name.clone()).collect())
+                .unwrap_or_default();
+            let skills: Vec<&str> = skill_names.iter().map(String::as_str).collect();
+            build_capability_section(&declared_mcp, &tool_names, &skills)
+        };
         let block_a = build_block_a(
             &PersonaSource {
                 name: &instance_name,
@@ -652,6 +681,7 @@ async fn run_turn(
             },
             session_prompt.or(package_persona.as_deref()),
             &chat_kind,
+            capabilities.as_deref(),
             guard.identity_context(),
         );
         let candidates = if continuation_refused {
