@@ -264,8 +264,23 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
         </NavButton>
       ))}
 
-      {/* Hosted webview apps (ADR-116) — above the gallery so new installs
-          never push the gallery icon out of the last primary slot. */}
+      {/* App Gallery keeps a fixed slot (4th) — installing an app must never
+          move it; hosted app icons are appended below it in install order. */}
+      <NavButton
+        active={currentView === "extensions"}
+        onClick={() => onViewChange("extensions")}
+        tooltip={t("navBar.extensions")}
+        tooltipPosition="right"
+      >
+        {currentView === "extensions" ? (
+          <FilledExtensionsIcon className="h-6 w-6" />
+        ) : (
+          <OutlineExtensionsIcon className="h-6 w-6" />
+        )}
+      </NavButton>
+
+      {/* Hosted webview apps (ADR-116) — appended below the gallery, oldest
+          install first, so a new install lands at the bottom of the list. */}
       {hostedApps.map((app) => {
         const active = currentView === "app" && hostedAppId === app.id;
         const src = hostedAppIconSrc(app, galleryIcons);
@@ -303,20 +318,6 @@ export function NavBar({ currentView, onViewChange, onAvatarClick }: NavBarProps
           </NavButton>
         );
       })}
-
-      {/* App Gallery stays under every installed app. */}
-      <NavButton
-        active={currentView === "extensions"}
-        onClick={() => onViewChange("extensions")}
-        tooltip={t("navBar.extensions")}
-        tooltipPosition="right"
-      >
-        {currentView === "extensions" ? (
-          <FilledExtensionsIcon className="h-6 w-6" />
-        ) : (
-          <OutlineExtensionsIcon className="h-6 w-6" />
-        )}
-      </NavButton>
 
       {/* Spacer */}
       <div className="flex-1" />

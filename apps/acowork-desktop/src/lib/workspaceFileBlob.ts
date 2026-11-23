@@ -290,6 +290,37 @@ export function invalidateWorkspaceFileBlob(
 }
 
 /**
+ * Seed the cache with bytes we just wrote ourselves (hosted-app save). The
+ * writer already holds the exact post-save bytes, so re-reading them from
+ * disk on the next preview mount is a wasted round-trip — and deleting the
+ * entry instead leaves a mounted preview holding the pre-save blob. Priming
+ * keeps the next open (tab switch remounts the preview) serving the saved
+ * bytes without a fetch and without re-delivering the document to a live
+ * iframe (which would drop cursor / undo).
+ *
+ * ponytail: a fetch already in flight for this key when we prime can still
+ * resolve afterwards and overwrite the prime with pre-save bytes; the window
+ * is a save landing mid-load. Upgrade path = per-key epoch guard in loadEntry.
+ */
+export function primeWorkspaceFileBlob(
+    agentId: string,
+    workspaceId: string,
+    relPath: string,
+    bytes: Uint8Array,
+): void {
+    const key = cacheKey(agentId, workspaceId, relPath);
+    const prev = cache.get(key);
+    const blob = new Blob([new Uint8Array(bytes)]);
+    inFlight.delete(key);
+    storeEntry(key, {
+        blob,
+        blobUrl: URL.createObjectURL(blob),
+        mime: prev?.mime ?? "application/octet-stream",
+        size: blob.size,
+    });
+}
+
+/**
  * Save one workspace file through the OS save dialog.
  *
  * The URL crosses the bridge, not the bytes — Rust (`download_attachment`)

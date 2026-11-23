@@ -2292,5 +2292,14 @@
     "upstream": "업스트림",
     "noReadme": "README가 없습니다.",
     "selectHint": "앱을 선택해 세부 정보를 보세요."
+  },
+  "saveAs": {
+    "title": "다른 이름으로 저장",
+    "location": "위치",
+    "folder": "폴더",
+    "root": "워크스페이스 루트",
+    "noSubfolders": "하위 폴더 없음",
+    "name": "파일 이름",
+    "save": "저장"
   }
 }

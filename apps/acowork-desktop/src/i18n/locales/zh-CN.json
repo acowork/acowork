@@ -2746,5 +2746,14 @@
     "upstream": "上游项目",
     "noReadme": "该应用暂无说明文档。",
     "selectHint": "选择一个应用查看详情。"
+  },
+  "saveAs": {
+    "title": "另存为",
+    "location": "位置",
+    "folder": "文件夹",
+    "root": "工作区根目录",
+    "noSubfolders": "没有子文件夹",
+    "name": "文件名",
+    "save": "保存"
   }
 }

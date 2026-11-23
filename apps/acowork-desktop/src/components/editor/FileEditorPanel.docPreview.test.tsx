@@ -120,6 +120,9 @@ vi.mock("../../lib/config", () => ({
   getGatewayUrl: () => "http://gw.test",
   DEFAULT_GATEWAY_URL: "http://gw.test",
 }));
+vi.mock("../../lib/apps-api", () => ({
+  listApps: () => Promise.resolve([]),
+}));
 vi.mock("../../lib/chatComposerBridge", () => ({
   insertIntoChatComposer: vi.fn(),
   attachImageToChatComposer: vi.fn(),
@@ -272,12 +275,12 @@ describe("FileEditorPanel document preview branch", () => {
       mtimeMs: 99,
     });
     // The JS renderer is still handed over as the degraded fallback.
-    expect(screen.getByTestId("sheet-viewer")).toBeTruthy();
+    expect(await screen.findByTestId("sheet-viewer")).toBeTruthy();
     cleanup();
     h.viewerProps.length = 0;
     renderWith(docFile("legacy.xls", "docs/legacy.xls", { mode: "edit" }));
     expect(await screen.findByTestId("office-pdf-viewer")).toBeTruthy();
-    expect(screen.getByTestId("sheet-viewer")).toBeTruthy();
+    expect(await screen.findByTestId("sheet-viewer")).toBeTruthy();
   });
 
   it("routes csv to the sheet viewer in preview mode only — edit mode stays Monaco", async () => {
@@ -299,11 +302,11 @@ describe("FileEditorPanel document preview branch", () => {
   it("routes docx and pptx through the PDF wrapper with their own fallback", async () => {
     renderWith(docFile("paper.docx", "docs/paper.docx"));
     expect(await screen.findByTestId("office-pdf-viewer")).toBeTruthy();
-    expect(screen.getByTestId("docx-viewer")).toBeTruthy();
+    expect(await screen.findByTestId("docx-viewer")).toBeTruthy();
     h.viewerProps.length = 0;
     renderWith(docFile("deck.pptx", "docs/deck.pptx"));
     expect(await screen.findByTestId("office-pdf-viewer")).toBeTruthy();
-    expect(screen.getByTestId("pptx-viewer")).toBeTruthy();
+    expect(await screen.findByTestId("pptx-viewer")).toBeTruthy();
   });
 
   it("routes legacy .doc / .ppt through the wrapper too, with the card as fallback", async () => {

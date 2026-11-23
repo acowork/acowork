@@ -25,7 +25,7 @@ import { SetiIcon } from "../common/SetiIcon";
 import { getFileIcon } from "../workspace/FileTree/fileIcons";
 import { registerLspProviders, disposeModelForFile, unpinPreviewModel } from "./lspProviders";
 import { LspDocumentTracker } from "./LspDocumentTracker";
-import { WORKSPACE_PREVIEW_EXT_RE } from "./filePreview";
+import { HOSTED_PREVIEW_EXT_RE, WORKSPACE_PREVIEW_EXT_RE } from "./filePreview";
 import {
   ContextMenu,
   useContextMenu,
@@ -36,7 +36,8 @@ import { UrlPreviewView } from "./UrlPreviewView";
 import { WorkspaceHtmlPreview } from "./WorkspaceHtmlPreview";
 import { ImageViewer } from "./ImageViewer";
 import { VisualAppPreview } from "./VisualAppPreview";
-import { isVisualCanvasFile } from "./visualCanvas";
+import { isHostedPreviewCandidate, pickVisualApp } from "./visualCanvas";
+import { listApps, type AppDto } from "../../lib/apps-api";
 import type { ImagePoint, ImageRect } from "./imageViewerGeometry";
 import { GitVirtualNav } from "./GitVirtualNav";
 import { CommitPicker } from "./CommitPicker";
@@ -118,11 +119,13 @@ const OfficePdfViewer = lazy(() => import("./OfficePdfViewer"));
  * Document extensions with NO Monaco path at all — the tab's `content`
  * is empty by design (fileEditorStore skips the base64 JSON read for
  * them), so falling through to the editor would show a blank page.
- * CSV is deliberately absent: its content loads as text, so edit mode
- * (and the source toggle) still work; only its PREVIEW goes to the
- * sheet renderer.
+ * This is the same table the store reads: `HOSTED_PREVIEW_EXT_RE` in
+ * `./filePreview`. CSV and the image formats with a built-in viewer are
+ * deliberately absent: their content loads as text / bytes, so edit mode
+ * (and the source toggle) still work; only their PREVIEW goes to the
+ * sheet / image renderer.
  */
-const DOC_SOURCE_HIDDEN_RE = /\.(?:pdf|docx|doc|xlsx|xls|pptx|ppt|figcraft)$/i;
+const DOC_SOURCE_HIDDEN_RE = HOSTED_PREVIEW_EXT_RE;
 /** Extensions rendered by the sheet viewer (SheetJS reads csv/xls/xlsx). */
 const SHEET_EXT_RE = /\.(?:xlsx|xls|csv)$/i;
 /** Office formats converted to PDF by the local engine for a faithful,
@@ -248,6 +251,20 @@ export function FileEditorPanel({ width }: { width: number }) {
     useEffect(() => {
         setDiffEditor(null);
     }, [activeFileId]);
+    const [hostedApps, setHostedApps] = useState<AppDto[] | null>(null);
+    useEffect(() => {
+        let cancelled = false;
+        void listApps()
+            .then((apps) => {
+                if (!cancelled) setHostedApps(apps);
+            })
+            .catch(() => {
+                if (!cancelled) setHostedApps([]);
+            });
+        return () => {
+            cancelled = true;
+        };
+    }, []);
     // Monaco is loaded in the background (lib/monacoBootstrap.ts) so first
     // paint does not wait for it; gate <Editor> on it being ready. A failed
     // load must not leave an eternal spinner with no trace — monacoBootstrap
@@ -311,6 +328,11 @@ export function FileEditorPanel({ width }: { width: number }) {
     const codeEditorOverriddenRef = useRef(false);
 
     const activeFile = openFiles.find((f) => f.id === activeFileId) ?? null;
+    const visualApp =
+        activeFile && hostedApps ? pickVisualApp(hostedApps, activeFile.fileName) : null;
+    const waitForVisualApp =
+        !!activeFile && hostedApps === null && isHostedPreviewCandidate(activeFile.fileName);
+
 
     // Diff banner commit pickers. The two banners ("HEAD" / "Working
     // Tree") on a diff tab are buttons - clicking opens this picker
@@ -2101,9 +2123,18 @@ export function FileEditorPanel({ width }: { width: number }) {
                             padding: { top: 8 },
                         }}
                     />
-                ) : isVisualCanvasFile(activeFile.fileName) ? (
+                ) : waitForVisualApp ? (
+                    <div className="flex h-full items-center justify-center gap-2 text-xs text-text-tertiary">
+                        <Loader2 className="h-4 w-4 animate-spin" />
+                        {t("fileEditor.previewLoading")}
+                    </div>
+                ) : visualApp ? (
                     // ADR-118: visual hosted-app artefact. Preview is an
                     // AppFrame in this editor pane — never a chat bubble.
+                    // An enabled visual app that declared this extension
+                    // takes over the built-in office/PDF viewers. It unmounts
+                    // with the tab: a kept-alive frame holds a wasm instance and
+                    // its fonts (100 MB+) for no gain once a cold start is cheap.
                     <VisualAppPreview file={activeFile} />
                 ) : isDocumentViewerFile(activeFile) ? (
                     // Document preview stack (pdf / xlsx / xls / csv / docx /

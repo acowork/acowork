@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { AppDto } from "../../lib/apps-api";
 import {
     findVisualCanvasRelPath,
+    isHostedPreviewCandidate,
     isVisualCanvasFile,
     pickVisualApp,
     previewPngRelPath,
@@ -31,6 +32,7 @@ function app(partial: Partial<AppDto> & Pick<AppDto, "id">): AppDto {
         ui_mode: "webview",
         canvas_kind: "visual",
         canvas_preview_path: "/?file={workspace_file}",
+        canvas_extensions: partial.id === "figcraft" ? ["figcraft"] : [],
         nav_label: partial.id,
         nav_icon: "",
         nav_order: 40,
@@ -41,10 +43,13 @@ function app(partial: Partial<AppDto> & Pick<AppDto, "id">): AppDto {
 }
 
 describe("visual canvas preview", () => {
-    it("treats .figcraft as a visual workspace file", () => {
+    it("treats branded craft files as visual workspace files", () => {
         expect(isVisualCanvasFile("home.figcraft")).toBe(true);
         expect(isVisualCanvasFile("HOME.FIGCRAFT")).toBe(true);
+        expect(isVisualCanvasFile("talk.deckcraft")).toBe(true);
+        expect(isVisualCanvasFile("mark.vectorcraft")).toBe(true);
         expect(isVisualCanvasFile("home.png")).toBe(false);
+        expect(isVisualCanvasFile("letter.docx")).toBe(false);
     });
 
     it("builds a query with file + control and keeps the ticket out of search", () => {
@@ -56,6 +61,17 @@ describe("visual canvas preview", () => {
         expect(q).not.toContain("ticket");
     });
 
+    it("keeps the query stable across documents when the app does not want a path", () => {
+        // The document reaches the app through `openFile`. A per-file query
+        // would change the iframe src, reload the frame, and make the app load
+        // its fonts again for every document — see the font hand-over.
+        const plain = app({ id: "wordcraft", canvas_preview_path: "" });
+        const a = visualPreviewSearch(plain, "reports/a.docx");
+        const b = visualPreviewSearch(plain, "reports/b.docx");
+        expect(a).toBe(b);
+        expect(new URLSearchParams(a.slice(1)).get("control")).toBe("1");
+    });
+
     it("picks the visual app for a figcraft file", () => {
         const picked = pickVisualApp(
             [app({ id: "pm", canvas_kind: "library", builtin: true }), app({ id: "figcraft" })],
@@ -63,6 +79,50 @@ describe("visual canvas preview", () => {
         );
         expect(picked?.id).toBe("figcraft");
         expect(pickVisualApp([app({ id: "figcraft" })], "a.png")).toBeNull();
+    });
+
+    it("routes office/pdf files to the visual app that declared them", () => {
+        const word = app({ id: "wordcraft", canvas_extensions: ["docx", "doc"], nav_order: 41 });
+        const pdf = app({ id: "pdfcraft", canvas_extensions: ["pdf"], nav_order: 44 });
+        const fig = app({ id: "figcraft", canvas_extensions: ["figcraft"], nav_order: 40 });
+        expect(pickVisualApp([fig, word, pdf], "a.docx")?.id).toBe("wordcraft");
+        expect(pickVisualApp([fig, word, pdf], "a.pdf")?.id).toBe("pdfcraft");
+        expect(pickVisualApp([fig, word, pdf], "a.figcraft")?.id).toBe("figcraft");
+        expect(pickVisualApp([fig], "a.docx")).toBeNull();
+        expect(pickVisualApp([word], "a.figcraft")).toBeNull();
+    });
+
+    it("routes photos to LightCraft and vector art to VectorCraft", () => {
+        const light = app({
+            id: "lightcraft",
+            canvas_extensions: ["dng", "cr3", "jpg", "png"],
+            nav_order: 46,
+        });
+        const vector = app({
+            id: "vectorcraft",
+            canvas_extensions: ["svg", "ai", "eps"],
+            nav_order: 45,
+        });
+        const apps = [light, vector];
+        expect(pickVisualApp(apps, "shots/IMG_0421.CR3")?.id).toBe("lightcraft");
+        expect(pickVisualApp(apps, "a.dng")?.id).toBe("lightcraft");
+        expect(pickVisualApp(apps, "photo.png")?.id).toBe("lightcraft");
+        expect(pickVisualApp(apps, "logo.svg")?.id).toBe("vectorcraft");
+        expect(pickVisualApp(apps, "logo.ai")?.id).toBe("vectorcraft");
+        // A disabled app claims nothing: the built-in viewer stays in charge.
+        expect(pickVisualApp([{ ...light, enabled: false }], "a.dng")).toBeNull();
+        // Two apps on one extension: nav order, then id — never a coin flip.
+        const a = app({ id: "alpha", canvas_extensions: ["png"], nav_order: 50 });
+        const b = app({ id: "beta", canvas_extensions: ["png"], nav_order: 50 });
+        expect(pickVisualApp([a, b], "x.png")?.id).toBe("alpha");
+        expect(pickVisualApp([b, a], "x.png")?.id).toBe("alpha");
+    });
+
+    it("counts photo and vector files as hosted-preview candidates", () => {
+        expect(isHostedPreviewCandidate("a.dng")).toBe(true);
+        expect(isHostedPreviewCandidate("a.docx")).toBe(true);
+        expect(isHostedPreviewCandidate("notes.md")).toBe(false);
+        expect(isHostedPreviewCandidate("a.png")).toBe(false);
     });
 
     it("maps a figcraft path to its sibling preview png", () => {

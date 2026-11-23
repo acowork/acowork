@@ -6,13 +6,20 @@
  * handed to the frame as openFile.
  */
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, waitFor } from "@testing-library/react";
+import { act, render, waitFor } from "@testing-library/react";
 import { VisualAppPreview } from "./VisualAppPreview";
+import { useFileEditorStore } from "../../stores/fileEditorStore";
 import type { OpenFile } from "../../stores/fileEditorStore";
 import type { AppDto } from "../../lib/apps-api";
 
 const h = vi.hoisted(() => ({
-    frames: [] as Array<{ app: AppDto; search?: string; openFile?: { name: string; bytes: Uint8Array } | null }>,
+    frames: [] as Array<{
+        app: AppDto;
+        search?: string;
+        openFile?: { name: string; bytes: Uint8Array } | null;
+        onSaveFile?: (f: { name: string; bytes: Uint8Array; saveAs: boolean }) => Promise<void>;
+    }>,
+    saveHostedAppFile: vi.fn(async () => undefined),
     listApps: vi.fn(),
     blob: {
         blob: null as Blob | null,
@@ -25,7 +32,12 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock("../apps/AppFrame", () => ({
-    AppFrame: (props: { app: AppDto; search?: string; openFile?: { name: string; bytes: Uint8Array } | null }) => {
+    AppFrame: (props: {
+        app: AppDto;
+        search?: string;
+        openFile?: { name: string; bytes: Uint8Array } | null;
+        onSaveFile?: (f: { name: string; bytes: Uint8Array; saveAs: boolean }) => Promise<void>;
+    }) => {
         h.frames.push(props);
         return <div data-testid="visual-app-frame" />;
     },
@@ -33,6 +45,10 @@ vi.mock("../apps/AppFrame", () => ({
 
 vi.mock("../../lib/apps-api", () => ({
     listApps: () => h.listApps(),
+}));
+
+vi.mock("../../lib/workspaceFileSave", () => ({
+    saveHostedAppFile: h.saveHostedAppFile,
 }));
 
 vi.mock("../../hooks/useWorkspaceFileBlob", () => ({
@@ -61,6 +77,7 @@ const figcraftApp: AppDto = {
     ui_mode: "webview",
     canvas_kind: "visual",
     canvas_preview_path: "/?file={workspace_file}",
+    canvas_extensions: ["figcraft"],
     nav_label: "FigCraft",
     nav_icon: "figcraft",
     nav_order: 40,
@@ -109,5 +126,33 @@ describe("VisualAppPreview", () => {
             expect(last?.openFile?.name).toBe("home.figcraft");
             expect(Array.from(last!.openFile!.bytes)).toEqual([1, 2, 3]);
         });
+    });
+    it("keeps the document it handed over across an unrelated re-render", async () => {
+        // The app reloads the document whenever `openFile` changes identity, so
+        // a re-render of this pane must not hand it a fresh object.
+        const { rerender } = render(<VisualAppPreview file={file()} />);
+        await waitFor(() => expect(h.frames[h.frames.length - 1]?.openFile).toBeTruthy());
+        const handed = h.frames[h.frames.length - 1].openFile;
+
+        rerender(<VisualAppPreview file={{ ...file() }} />);
+
+        const last = h.frames[h.frames.length - 1];
+        expect(last.openFile).toBe(handed);
+    });
+    it("stamps the tab after a save, so the write's own fs echo cannot reload the app", async () => {
+        const noted = vi.spyOn(useFileEditorStore.getState(), "noteHostedAppSave");
+        render(<VisualAppPreview file={file()} />);
+        await waitFor(() => expect(h.frames[h.frames.length - 1]?.onSaveFile).toBeTruthy());
+
+        await act(async () => {
+            await h.frames[h.frames.length - 1].onSaveFile!({
+                name: "home.figcraft",
+                bytes: new Uint8Array([9]),
+                saveAs: false,
+            });
+        });
+
+        expect(h.saveHostedAppFile).toHaveBeenCalledTimes(1);
+        expect(noted).toHaveBeenCalledWith("a1:ws1:designs/home.figcraft");
     });
 });

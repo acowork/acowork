@@ -2291,5 +2291,14 @@
     "upstream": "アップストリーム",
     "noReadme": "README がありません。",
     "selectHint": "アプリを選択して詳細を表示します。"
+  },
+  "saveAs": {
+    "title": "名前を付けて保存",
+    "location": "保存先",
+    "folder": "フォルダー",
+    "root": "ワークスペースのルート",
+    "noSubfolders": "サブフォルダーはありません",
+    "name": "ファイル名",
+    "save": "保存"
   }
 }

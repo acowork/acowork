@@ -48,11 +48,28 @@ function tab(relPath: string) {
 
 describe("isDocPreviewFile", () => {
   it("covers the no-base64 extensions but not csv", () => {
-    for (const n of ["a.PDF", "a.docx", "a.doc", "a.xlsx", "a.xls", "a.pptx", "a.ppt", "a.figcraft"]) {
+    for (const n of [
+      "a.PDF",
+      "a.docx",
+      "a.doc",
+      "a.xlsx",
+      "a.xls",
+      "a.pptx",
+      "a.ppt",
+      "a.figcraft",
+      "a.deckcraft",
+      "a.vectorcraft",
+      "a.dng",
+      "a.cr3",
+      "a.heic",
+      "a.psd",
+      "a.ai",
+      "a.eps",
+    ]) {
       expect(isDocPreviewFile(n)).toBe(true);
     }
-    // csv keeps the text read — its content is the editor buffer.
-    for (const n of ["a.csv", "a.md", "a.png", "notes.txt"]) {
+    // csv and the formats with a built-in viewer keep their read path.
+    for (const n of ["a.csv", "a.md", "a.png", "a.svg", "notes.txt"]) {
       expect(isDocPreviewFile(n)).toBe(false);
     }
   });

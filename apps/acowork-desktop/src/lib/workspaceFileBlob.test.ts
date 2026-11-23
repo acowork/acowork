@@ -29,6 +29,7 @@ import {
     fetchWorkspaceFileBlobUrl,
     invalidateWorkspaceFileBlob,
     openWorkspaceFileExternally,
+    primeWorkspaceFileBlob,
     saveWorkspaceFileToDisk,
     workspaceFileUrlForRust,
 } from "./workspaceFileBlob";
@@ -140,6 +141,16 @@ describe("cache", () => {
         const b = await fetchWorkspaceFileBlobUrl("a", "w", "dup.pdf");
         expect(fetchMock).toHaveBeenCalledTimes(1);
         expect(b.blobUrl).toBe(a.blobUrl);
+    });
+
+    it("prime seeds the just-saved bytes so the next read needs no fetch", async () => {
+        const before = await fetchWorkspaceFileBlob("a", "w", "saved.pptx");
+        expect(before.blob.size).toBe(5); // "bytes" from the mocked fetch
+        primeWorkspaceFileBlob("a", "w", "saved.pptx", new Uint8Array([115, 97, 118, 101, 100, 33]));
+        const after = await fetchWorkspaceFileBlob("a", "w", "saved.pptx");
+        expect(fetchMock).toHaveBeenCalledTimes(1);
+        expect(after.blob).not.toBe(before.blob);
+        expect(after.blob.size).toBe(6); // "saved!" — the primed bytes, not the stale fetch
     });
 
     it("deduplicates concurrent reads of the same key into one fetch", async () => {

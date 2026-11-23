@@ -2282,5 +2282,14 @@
     "upstream": "上游專案",
     "noReadme": "此應用尚無說明文件。",
     "selectHint": "選擇一個應用以檢視詳細資料。"
+  },
+  "saveAs": {
+    "title": "另存新檔",
+    "location": "位置",
+    "folder": "資料夾",
+    "root": "工作區根目錄",
+    "noSubfolders": "沒有子資料夾",
+    "name": "檔案名稱",
+    "save": "儲存"
   }
 }

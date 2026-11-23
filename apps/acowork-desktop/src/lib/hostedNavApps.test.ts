@@ -42,6 +42,22 @@ describe("hostedNavApps", () => {
     it("drops disabled status", () => {
         expect(hostedNavApps([app({ id: "x", status: "disabled" })])).toEqual([]);
     });
+
+    it("orders by install time so a new install is appended last", () => {
+        const slots = hostedNavApps([
+            app({ id: "new", installed_at: "1700000002" }),
+            app({ id: "old", installed_at: "1700000001" }),
+        ]);
+        expect(slots.map((a) => a.id)).toEqual(["old", "new"]);
+    });
+
+    it("keeps undated apps last and falls back to nav_order", () => {
+        const slots = hostedNavApps([
+            app({ id: "undated", nav_order: 41 }),
+            app({ id: "dated", installed_at: "1700000001" }),
+        ]);
+        expect(slots.map((a) => a.id)).toEqual(["dated", "undated"]);
+    });
 });
 
 describe("hosted app icon helpers", () => {

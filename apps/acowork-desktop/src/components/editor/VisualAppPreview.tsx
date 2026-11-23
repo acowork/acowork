@@ -5,12 +5,13 @@
  * Bytes come from the workspace file API; the iframe is a viewer, not the
  * MCP backend.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Loader2, AlertCircle } from "lucide-react";
 import { useTranslation } from "../../i18n/useTranslation";
 import { listApps, type AppDto } from "../../lib/apps-api";
+import { saveHostedAppFile } from "../../lib/workspaceFileSave";
 import { useWorkspaceFileBlob } from "../../hooks/useWorkspaceFileBlob";
-import type { OpenFile } from "../../stores/fileEditorStore";
+import { useFileEditorStore, type OpenFile } from "../../stores/fileEditorStore";
 import { AppFrame } from "../apps/AppFrame";
 import { pickVisualApp, visualPreviewSearch } from "./visualCanvas";
 
@@ -27,6 +28,26 @@ export function VisualAppPreview({ file }: { file: OpenFile }) {
             relPath: file.relPath,
         },
         { mode: "blob", reloadSeq: file.previewSeq },
+    );
+
+    /**
+     * Write-back (ADR-118): the app's Save lands on the workspace file the tab
+     * was opened on; a Save As / Export asks the user where the new file goes.
+     */
+    const onSaveFile = useCallback(
+        async ({ name, bytes, saveAs }: { name: string; bytes: Uint8Array; saveAs: boolean }) => {
+            await saveHostedAppFile({
+                bound: { agentId: file.agentId, workspaceId: file.workspaceId, relPath: file.relPath },
+                saveAs,
+                name,
+                bytes,
+            });
+            // Our own write bounces back as an fs event. Without this stamp the
+            // tab reloads the blob, the app is handed the document again, and it
+            // re-opens it on screen — the "save refreshes the whole app" bug.
+            useFileEditorStore.getState().noteHostedAppSave(file.id);
+        },
+        [file.agentId, file.workspaceId, file.relPath, file.id],
     );
 
     useEffect(() => {
@@ -57,6 +78,18 @@ export function VisualAppPreview({ file }: { file: OpenFile }) {
             cancelled = true;
         };
     }, [blobState.blob]);
+
+    /**
+     * Stable identity: `AppFrame` re-sends the document whenever this prop
+     * changes, and the app treats a re-sent document as a fresh open (it
+     * reloads, dropping cursor and undo). A bare object literal made every
+     * re-render of this pane — a file-tree refresh, a status tick — look like
+     * an edit from outside.
+     */
+    const openFile = useMemo(
+        () => (bytes ? { name: file.fileName, bytes } : null),
+        [file.fileName, bytes],
+    );
 
     if (appError) {
         return (
@@ -94,7 +127,8 @@ export function VisualAppPreview({ file }: { file: OpenFile }) {
         <AppFrame
             app={app}
             search={visualPreviewSearch(app, file.relPath)}
-            openFile={bytes ? { name: file.fileName, bytes } : null}
+            openFile={openFile}
+            onSaveFile={onSaveFile}
         />
     );
 }

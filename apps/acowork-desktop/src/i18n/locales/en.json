@@ -2735,5 +2735,14 @@
     "upstream": "Upstream",
     "noReadme": "No README for this app.",
     "selectHint": "Select an app to view details."
+  },
+  "saveAs": {
+    "title": "Save As",
+    "location": "Location",
+    "folder": "Folder",
+    "root": "Workspace root",
+    "noSubfolders": "No subfolders",
+    "name": "File name",
+    "save": "Save"
   }
 }

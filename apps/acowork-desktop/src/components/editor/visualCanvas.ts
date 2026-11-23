@@ -1,20 +1,70 @@
 /**
- * Visual hosted-app preview (ADR-118): workspace files such as `.figcraft`
- * that need the app iframe rather than Monaco / ImageViewer.
+ * Visual hosted-app preview (ADR-118): workspace files whose preview is
+ * the hosted-app iframe rather than Monaco / ImageViewer / the built-in
+ * document viewers.
+ *
+ * Routing is data-driven: each visual app declares `canvas_extensions`.
+ * The `figcraft` id still matches `.figcraft` when that list is empty so
+ * already-installed FigCraft packages keep working. An enabled visual app
+ * that lists `docx` / `xlsx` / `pptx` / `pdf` takes those over from the
+ * built-in viewers; one that lists an image or vector format takes it over
+ * from ImageViewer.
  */
 import type { AppDto } from "../../lib/apps-api";
 import type { ChatMessage } from "../../lib/types";
+import { HOSTED_PREVIEW_EXT_RE, NATIVE_CRAFT_EXTS, previewExtRe } from "./filePreview";
 
-/** Extensions whose workspace preview is a hosted visual-app iframe. */
-export const VISUAL_CANVAS_EXT_RE = /\.figcraft$/i;
+/**
+ * Native craft formats: a workspace preview tab opens them in the app
+ * iframe even before `listApps` returns. Office / PDF / photo / vector
+ * files stay on their built-in viewers until a matching visual app is
+ * enabled (`HOSTED_PREVIEW_EXT_RE` is the wider candidate set).
+ */
+export const VISUAL_CANVAS_EXT_RE = previewExtRe(NATIVE_CRAFT_EXTS);
+
+export function fileExtension(name: string): string | null {
+    const base = name.replace(/\\/g, "/").split("/").pop() ?? "";
+    const i = base.lastIndexOf(".");
+    if (i <= 0 || i === base.length - 1) return null;
+    return base.slice(i + 1).toLowerCase();
+}
 
 export function isVisualCanvasFile(name: string): boolean {
     return VISUAL_CANVAS_EXT_RE.test(name);
 }
 
+/** Branded canvas, or a format a hosted visual app may take over. */
+export function isHostedPreviewCandidate(name: string): boolean {
+    return HOSTED_PREVIEW_EXT_RE.test(name);
+}
+
+function normalizeExt(ext: string): string {
+    return ext.trim().replace(/^\./, "").toLowerCase();
+}
+
+/** Extensions a visual app owns. Empty list: FigCraft fallback only. */
+export function visualExtsOf(app: AppDto): string[] {
+    const declared = (app.canvas_extensions ?? []).map(normalizeExt).filter(Boolean);
+    if (declared.length) return declared;
+    if (app.id === "figcraft") return ["figcraft"];
+    return [];
+}
+
+export function appOwnsVisualExt(app: AppDto, ext: string): boolean {
+    if (!app.enabled) return false;
+    if ((app.canvas_kind || "").toLowerCase() !== "visual") return false;
+    return visualExtsOf(app).includes(ext);
+}
+
 /** Sibling thumbnail written by the hosted-app adapter after `screenshot`. */
-export function previewPngRelPath(figcraftRel: string): string {
-    return figcraftRel.replace(/\.figcraft$/i, ".preview.png");
+export function previewPngRelPath(rel: string): string {
+    const n = rel.replace(/\\/g, "/");
+    const slash = n.lastIndexOf("/");
+    const dir = slash >= 0 ? n.slice(0, slash + 1) : "";
+    const base = slash >= 0 ? n.slice(slash + 1) : n;
+    const dot = base.lastIndexOf(".");
+    const stem = dot > 0 ? base.slice(0, dot) : base;
+    return `${dir}${stem}.preview.png`;
 }
 
 /**
@@ -27,10 +77,10 @@ export function visualCanvasRelFromPath(path: string): string | null {
     if (!n) return null;
     const abs = n.startsWith("/") || /^[A-Za-z]:\//.test(n);
     const rel = abs ? (n.split("/").pop() ?? "") : n.replace(/^\/+/, "");
-    return isVisualCanvasFile(rel) ? rel : null;
+    return isHostedPreviewCandidate(rel) ? rel : null;
 }
 
-/** Last `.figcraft` `path` among tool_calls that already succeeded. */
+/** Last visual-canvas `path` among tool_calls that already succeeded. */
 export function findVisualCanvasRelPath(items: ChatMessage[]): string | null {
     const successIds = new Set<string>();
     for (const item of items) {
@@ -74,7 +124,9 @@ export function resetVisualCanvasAutoOpenForTests(): void {
 /**
  * First write of a visual canvas file in the selected agent's current
  * workspace opens the editor preview once. Later saves of the same path
- * do not steal focus.
+ * do not steal focus. Takeover of an office / image / vector file is on
+ * explicit open, not auto-open, so a missing hosted app does not replace
+ * the built-in viewer.
  */
 export function shouldAutoOpenVisualCanvas(input: {
     kind: string;
@@ -100,24 +152,33 @@ export function shouldAutoOpenVisualCanvas(input: {
 
 /**
  * Query string appended to the app `ui_path`. Ticket stays in the fragment.
- * `control=1` opts into `window.figcraft` so the adapter-injected bridge can
+ * `control=1` opts into `window.<app>` so the adapter-injected bridge can
  * call `openFile` / theme commands.
  */
 export function visualPreviewSearch(app: AppDto, relPath: string): string {
-    const tmpl = (app.canvas_preview_path || "?file={workspace_file}").trim();
-    const filled = tmpl.replaceAll("{workspace_file}", relPath);
+    // The file travels through `openFile`, not through the URL. Putting the path
+    // in the query changed the iframe's src for every document, so switching
+    // files reloaded the frame — a fresh wasm instance per open, which threw
+    // away every font the app had loaded and paid for it again. Apps that really
+    // do read a path out of the URL declare it in `canvas_preview_path`.
+    const tmpl = (app.canvas_preview_path || "").trim();
+    const filled = tmpl.includes("{workspace_file}") ? tmpl.replaceAll("{workspace_file}", relPath) : tmpl;
     const qIndex = filled.indexOf("?");
     const raw = qIndex >= 0 ? filled.slice(qIndex + 1) : filled.replace(/^\//, "");
     const params = new URLSearchParams(raw);
-    params.set("file", relPath);
     if (!params.has("control")) params.set("control", "1");
     return `?${params.toString()}`;
 }
 
-/** Prefer a `canvas.kind = visual` app; FigCraft is the first of those. */
+/**
+ * Prefer the enabled visual app that declared this file's extension. Two
+ * apps claiming one extension resolve by nav order, then id — a stable
+ * winner beats a random one, and the loser is still reachable in the app.
+ */
 export function pickVisualApp(apps: AppDto[], fileName: string): AppDto | null {
-    if (!isVisualCanvasFile(fileName)) return null;
-    const visual = apps.find((a) => (a.canvas_kind || "").toLowerCase() === "visual" && a.enabled);
-    if (visual) return visual;
-    return apps.find((a) => a.id === "figcraft" && a.enabled) ?? null;
+    const ext = fileExtension(fileName);
+    if (!ext) return null;
+    const owners = apps.filter((a) => appOwnsVisualExt(a, ext));
+    owners.sort((a, b) => a.nav_order - b.nav_order || a.id.localeCompare(b.id));
+    return owners[0] ?? null;
 }

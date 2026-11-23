@@ -3,8 +3,19 @@
  *
  * Built-in PM/DOC keep their dedicated `projects` / `docs` views; only
  * non-builtin webview apps (e.g. FigCraft (ACowork)) appear as dynamic nav icons.
+ *
+ * Order is install time (oldest first) so a freshly installed app is appended
+ * at the bottom of the list and never reshuffles the existing icons. Apps
+ * without an install stamp (legacy ledgers) fall back to the manifest
+ * `nav_order`, then id, to stay deterministic.
  */
 import type { AppDto } from "./apps-api";
+
+function installStamp(app: AppDto): number {
+    const raw = (app.installed_at ?? "").trim();
+    const secs = Number(raw);
+    return Number.isFinite(secs) && secs > 0 ? secs : 0;
+}
 
 export function hostedNavApps(apps: AppDto[]): AppDto[] {
     return apps
@@ -16,7 +27,16 @@ export function hostedNavApps(apps: AppDto[]): AppDto[] {
                 a.status !== "disabled",
         )
         .slice()
-        .sort((a, b) => a.nav_order - b.nav_order || a.id.localeCompare(b.id));
+        .sort((a, b) => {
+            const sa = installStamp(a);
+            const sb = installStamp(b);
+            if (sa !== sb) {
+                // Undated apps (0) sort last; two dated apps by install time.
+                if (sa === 0 || sb === 0) return sa === 0 ? 1 : -1;
+                return sa - sb;
+            }
+            return a.nav_order - b.nav_order || a.id.localeCompare(b.id);
+        });
 }
 
 /**
