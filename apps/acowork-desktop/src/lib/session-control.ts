@@ -329,6 +329,13 @@ export function sendMessage(
     command?: string;
     /** Opaque JSON string (not an object) — the Runtime parses it. */
     params_json?: string;
+    /** One-step send: this message was typed into a surface that was showing a
+     *  running turn, and it should take effect now instead of after that turn
+     *  finishes. The Runtime hands the message over FIRST and only then aborts
+     *  the turn that was running when the message arrived, so the message
+     *  itself is never the casualty. Omitted = the plain "becomes the next
+     *  turn" semantic (mobile and every older client). */
+    interrupt?: boolean;
   },
 ): Promise<void> {
   return controlRequest("POST", `/api/agents/${agentId}/sessions/${sessionId}/messages`, body);

@@ -957,6 +957,7 @@ async fn dispatch_inbound(
             params_json,
             answerable_by,
             speaker,
+            interrupt,
         } => {
             // Parse params_json to extract attached_items (ADR-046 replaces
             // the prior document_ids + content_parts + attached_context
@@ -1042,6 +1043,14 @@ async fn dispatch_inbound(
             // separate critical sections an idle eviction can land, and its
             // only symptom would be a bare "Session not found" with no event —
             // exactly the silent drop `session_not_opened` exists to prevent.
+            //
+            // One-step send: `interrupt` means "the human was looking at a
+            // running turn and wants this message to take effect now". The
+            // ordering that makes it safe — capture the running generation,
+            // hand the message over, abort only on a successful handoff — is
+            // owned by `SessionManager::send_to_session_superseding`, next to
+            // the two maps it reads. This arm only chooses the delivery
+            // primitive; it does not sequence the abort itself.
             {
                 let mut guard = session_manager.lock().await;
                 if !guard.is_session_active(&session_id) {
@@ -1062,52 +1071,58 @@ async fn dispatch_inbound(
                         reason, session_id
                     )));
                 }
-                let sent = guard.send_to_session(
-                    &session_id,
-                    SessionMessage::ChatMessage {
-                        content,
-                        message_id: message_id.clone(),
-                        chat_trigger_row_id,
-                        active_skill,
-                        attached_items,
-                        content_parts,
-                        // Written straight against the execution surface: no
-                        // Chat row precedes it, so there is nothing to thread
-                        // a card under (ADR-100 Rev. 8 / D14). The session's
-                        // own chat binding still supplies the chat and the
-                        // caller supplies who can answer, so `session_task`
-                        // completes the surface there — the reference row and
-                        // any interactive card land on it (ADR-106 Rev. 6).
-                        // ADR-106 D2: the round id is derived from this turn's
-                        // own inbound id, which is the same value `run()` will
-                        // mint, so the surface names the round even for a loop
-                        // with no conversation writer.
-                        // ADR-106 §2.2 availability gate, the honest form:
-                        // this transport carries a message a VERIFIED HUMAN
-                        // ACCOUNT wrote (the HTTP `/messages` action's
-                        // Gateway-checked caller uid, the same value
-                        // `answerable_by` holds). A non-empty caller uid is
-                        // therefore a human participant of the chat this
-                        // turn is accountable to — `Some(true)`. An empty
-                        // uid (no account system) stays answerable-by nobody,
-                        // so the card gate fails closed on `card_target`
-                        // alone and `has_human` must not claim otherwise.
-                        // This was `None`, and `None` was a lie with a
-                        // symptom: the iteration-limit branch requires
-                        // `Some(true)` to park the round on a pause card, so
-                        // every chat turn that hit the limit fell through to
-                        // the legacy indefinite `Paused` — a card the
-                        // execution surface shows and the Chat never learns
-                        // of (the "no Continue button in the block" defect).
-                        surface: crate::agent::intent_turn::TurnSurface::new(
-                            String::new(),
-                            &message_id,
-                            &answerable_by,
-                            Some(!answerable_by.is_empty()),
-                        ),
-                        speaker,
-                    },
-                );
+                let message = SessionMessage::ChatMessage {
+                    content,
+                    message_id: message_id.clone(),
+                    chat_trigger_row_id,
+                    active_skill,
+                    attached_items,
+                    content_parts,
+                    // Written straight against the execution surface: no
+                    // Chat row precedes it, so there is nothing to thread
+                    // a card under (ADR-100 Rev. 8 / D14). The session's
+                    // own chat binding still supplies the chat and the
+                    // caller supplies who can answer, so `session_task`
+                    // completes the surface there — the reference row and
+                    // any interactive card land on it (ADR-106 Rev. 6).
+                    // ADR-106 D2: the round id is derived from this turn's
+                    // own inbound id, which is the same value `run()` will
+                    // mint, so the surface names the round even for a loop
+                    // with no conversation writer.
+                    // ADR-106 §2.2 availability gate, the honest form:
+                    // this transport carries a message a VERIFIED HUMAN
+                    // ACCOUNT wrote (the HTTP `/messages` action's
+                    // Gateway-checked caller uid, the same value
+                    // `answerable_by` holds). A non-empty caller uid is
+                    // therefore a human participant of the chat this
+                    // turn is accountable to — `Some(true)`. An empty
+                    // uid (no account system) stays answerable-by nobody,
+                    // so the card gate fails closed on `card_target`
+                    // alone and `has_human` must not claim otherwise.
+                    // This was `None`, and `None` was a lie with a
+                    // symptom: the iteration-limit branch requires
+                    // `Some(true)` to park the round on a pause card, so
+                    // every chat turn that hit the limit fell through to
+                    // the legacy indefinite `Paused` — a card the
+                    // execution surface shows and the Chat never learns
+                    // of (the "no Continue button in the block" defect).
+                    surface: crate::agent::intent_turn::TurnSurface::new(
+                        String::new(),
+                        &message_id,
+                        &answerable_by,
+                        Some(!answerable_by.is_empty()),
+                    ),
+                    speaker,
+                };
+                // `interrupt` only picks the delivery primitive. The ordering
+                // that keeps the abort off this message's own turn — capture
+                // the generation, hand off, abort only on success — belongs to
+                // `send_to_session_superseding`, not to this routing arm.
+                let sent = if interrupt {
+                    guard.send_to_session_superseding(&session_id, message)
+                } else {
+                    guard.send_to_session(&session_id, message)
+                };
                 if let Err(e) = sent {
                     // The task can also vanish between the check above and this
                     // handoff. When that is what happened, the human's words are

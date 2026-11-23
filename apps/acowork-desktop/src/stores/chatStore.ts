@@ -337,17 +337,16 @@ function getUserSenderInfo(): { senderDisplayName?: string } {
 // ---------------------------------------------------------------------------
 
 /** State for a single conversation session within an agent. */
-export interface QueuedMessage {
-  content: string;
-  attachedItems: AttachedItem[];
-}
-
 /**
  * ADR-099 (design 27 §5.5.5): an inbound intent routed into a session while it
- * was already busy, mirrored from the backend `session_state` push. Unlike the
- * frontend-only `queuedMessages` (drafts the user parked locally), this is the
- * real server-side queue — e.g. a chat-forwarded message waiting for the
- * running execute session to pick it up.
+ * was already busy, mirrored from the backend `session_state` push — e.g. a
+ * chat-forwarded message waiting for the running execute session to pick it up.
+ *
+ * This is the ONLY queue the execution surface shows. It used to sit above a
+ * second, frontend-only queue of locally parked drafts; that one is gone: a
+ * message typed while a turn is running is now sent immediately with
+ * `interrupt: true` (the Runtime aborts the running turn and runs the message
+ * as the next one), so parking the draft first was a click that bought nothing.
  */
 export interface PendingIntent {
   message_id: string;
@@ -471,12 +470,10 @@ interface SessionChatState {
   lastAccessed: number;
   /** Per-session todo list (from todo_write tool) */
   todos: TodoItem[];
-  /** Per-session queued messages (typed during streaming, sent when agent becomes idle) */
-  queuedMessages: QueuedMessage[];
   /**
    * ADR-099 (design 27 §5.5.5): intents routed into this session while it was
    * busy, mirrored from the backend `session_state` push. Shown in the
-   * execution pending queue alongside the local `queuedMessages`.
+   * execution pending queue box.
    */
   pendingIntents: PendingIntent[];
   /** Per-session selected model */
@@ -584,7 +581,6 @@ const DEFAULT_SESSION_STATE: SessionChatState = {
   sessionStatus: null,
   lastAccessed: 0,
   todos: [],
-  queuedMessages: [],
   pendingIntents: [],
   model: null,
   provider: null,
@@ -1154,7 +1150,11 @@ interface ChatStore {
   providerAccounts: Record<string, ProviderAccount[]>;
 
   // ---- Actions ----
-  sendMessage: (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[]) => Promise<void>;
+  /** Send a user message. `opts.interrupt` says the surface was showing a
+   *  running turn and this message should take effect now — the Runtime hands
+   *  the message over first and only then aborts that turn (one-step send;
+   *  the old flow parked the draft and required a second stop click). */
+  sendMessage: (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[], opts?: { interrupt?: boolean }) => Promise<void>;
   stopCurrentMessage: (agentId: string) => Promise<void>;
   sendStop: (agentId: string) => void;
   /** Clear session state for a specific agent's active session */
@@ -1421,8 +1421,6 @@ interface ChatStore {
   removeAttachedContext: (agentId: string, sessionId: string, id: string) => void;
   /** Clear all attached chat context for a session */
   clearAttachedContext: (agentId: string, sessionId: string) => void;
-  /** Add a message to the per-session queue (typed during streaming) */
-  addQueuedMessage: (agentId: string, sessionId: string, message: QueuedMessage) => void;
   /** Remove a single attachment entry from the in-memory message list.
    *
    *  Each ADR-046 attachment (file_upload / image_upload / attached_*)
@@ -1435,10 +1433,6 @@ interface ChatStore {
    *  Bidirectional sync (delete from JSONL + tell the runtime) is
    *  deferred to a follow-up; see ADR-046 follow-ups. */
   removeMessageAttachment: (agentId: string, sessionId: string, messageId: string) => void;
-  /** Remove a message from the per-session queue by index */
-  removeQueuedMessage: (agentId: string, sessionId: string, index: number) => void;
-  /** Replace the entire per-session queue (e.g. after sending all) */
-  setQueuedMessages: (agentId: string, sessionId: string, messages: QueuedMessage[]) => void;
   /** Dismiss the server-side error banner. */
   clearServerError: (agentId: string, sessionId: string) => void;
   /** ADR-047: Pull session state (status/ratio/todos/context_usage) from backend.
@@ -2416,7 +2410,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         loadError: null,
         sessionStatus: null,
         todos: [],
-        queuedMessages: [],
         pendingIntents: [],
         model: null,
         provider: null,
@@ -2462,7 +2455,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   // ADR-033: connectStream removed — MQTT connection is managed by the Rust backend.
   // The frontend no longer creates WebSocket connections.
 
-  sendMessage: async (content: string, agentId: string, command?: string, attachedItems?: AttachedItem[]) => {
+  sendMessage: async (
+    content: string,
+    agentId: string,
+    command?: string,
+    attachedItems?: AttachedItem[],
+    opts?: { interrupt?: boolean },
+  ) => {
     const sessionId = getAgentState(get(), agentId).activeSessionId;
 
     // Add user message to the active session's state
@@ -2641,6 +2640,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         content,
         command: command ?? "",
         params_json: paramsJson,
+        // One-step send: the composer passes `interrupt` when a turn was
+        // running at click time. The Runtime orders the two facts (hand the
+        // message over, then abort that turn) — the client sends one request
+        // and never has to sequence a second one.
+        ...(opts?.interrupt ? { interrupt: true } : {}),
       });
       log.debug("[ChatStore] Message sent via HTTP:", userMsgId);
       // Touch the user's last-interaction timestamp so the next Gateway
@@ -3569,24 +3573,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     set((state) => updateSessionState(state, agentId, sessionId, { attachedContext: [] }));
   },
 
-  addQueuedMessage: (agentId: string, sessionId: string, message: QueuedMessage) => {
-    set((state) => {
-      const ss = getSessionState(state, agentId, sessionId);
-      return updateSessionState(state, agentId, sessionId, {
-        queuedMessages: [...ss.queuedMessages, message],
-      });
-    });
-  },
-
-  removeQueuedMessage: (agentId: string, sessionId: string, index: number) => {
-    set((state) => {
-      const ss = getSessionState(state, agentId, sessionId);
-      return updateSessionState(state, agentId, sessionId, {
-        queuedMessages: ss.queuedMessages.filter((_, i) => i !== index),
-      });
-    });
-  },
-
   removeMessageAttachment: (agentId: string, sessionId: string, messageId: string) => {
     set((state) => {
       const ss = getSessionState(state, agentId, sessionId);
@@ -3594,10 +3580,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         messages: ss.messages.filter((m) => m.id !== messageId),
       });
     });
-  },
-
-  setQueuedMessages: (agentId: string, sessionId: string, messages: QueuedMessage[]) => {
-    set((state) => updateSessionState(state, agentId, sessionId, { queuedMessages: messages }));
   },
 
   clearServerError: (agentId: string, sessionId: string) => {

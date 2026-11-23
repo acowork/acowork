@@ -24,13 +24,14 @@ import * as sessionControl from "../../lib/session-control";
 import { useActiveSessionReadOnly } from "../../lib/session-write-access";
 import { useInitiatorIdentity } from "../../lib/sessionInitiator";
 import type { SpeakerKind } from "./speakerBubble";
-import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Pencil, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock, RefreshCw } from "lucide-react";
+import { Bot, Play, Send, ChevronDown, ChevronRight, ChevronLeft, ChevronsDown, ChevronsUp, Wrench, AlertTriangle, X, Square, Plus, Layers, Loader, Image, Brain, Circle, CircleDot, Clipboard, Upload, Check, Clock, RefreshCw } from "lucide-react";
 import type { ChatMessage, ModelEntry, ProviderAccount } from "../../lib/types";
 import { ContextUsageIcon } from "./ContextUsageIcon";
 import { SessionVisibilityToggle } from "./SessionVisibilityToggle";
 import { blockIndexOfRawMessage } from "./messageFolder";
 import { PlaceholderBar } from "./PlaceholderBar";
 import { useSessionScope } from "./useSessionScope";
+import { composerButtonState } from "./composerButton";
 import { VirtualMessageList, type VirtualMessageListHandle } from "./VirtualMessageList";
 import { OverlayScrollbar, OverlayScrollTarget } from "../common/OverlayScrollbar";
 import { OVERLAY_SCROLL_HOST_CLASS, OVERLAY_SCROLL_VIEWPORT_CLASS } from "../common/overlayScrollThumb";
@@ -250,8 +251,8 @@ type InputPlaceholderKey =
   | "inputMessageReconnecting"
   | "inputParamsStale"
   | "inputMessageStale"
-  | "inputParamsQueueing"
-  | "inputMessageQueueing"
+  | "inputParamsInterrupt"
+  | "inputMessageInterrupt"
   | "inputGatewayDisconnected";
 
 function getInputPlaceholderKey(
@@ -260,9 +261,10 @@ function getInputPlaceholderKey(
   activeSkill: boolean,
   sending: boolean,
 ): InputPlaceholderKey {
-  // Agent is busy — Enter will queue the message. Hint the user up-front
-  // so they don't think Enter is a no-op while waiting for the stream.
-  if (sending) return activeSkill ? "inputParamsQueueing" : "inputMessageQueueing";
+  // Agent is busy — Enter sends the message now and interrupts the running
+  // turn (one-step send). Say so up-front: the click is not a no-op and it is
+  // not "wait your turn" either.
+  if (sending) return activeSkill ? "inputParamsInterrupt" : "inputMessageInterrupt";
   if (gatewayStatus !== "connected") return "inputGatewayDisconnected";
   switch (effective) {
     case "connecting":
@@ -605,8 +607,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   const isLoadingSession = sessionState?.isLoadingSession ?? false;
   const loadError = sessionState?.loadError ?? null;
   const todos = sessionState?.todos ?? [];
-  /** Per-session queued messages — persisted in chatStore across agent switches */
-  const queuedMessages = sessionState?.queuedMessages ?? [];
   /** ADR-099 (design 27 §5.5.5): intents routed into this session while it was
    *  busy (e.g. chat-forwarded messages), mirrored from the backend push. */
   const pendingIntents = sessionState?.pendingIntents ?? [];
@@ -751,6 +751,14 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // defaults, eliminating the class of bugs where per-session refs/state
   // leak across session switches.
   const session = useSessionScope(currentSessionId);
+  // One-step send (single source of truth for the composer button AND for
+  // `handleSend`): a draft can be sent while a turn is running, an in-flight
+  // upload cannot be sent at all.
+  const hasUploading = session.pendingAttachedItems.some((p) => p.status === "uploading");
+  const hasResolvedItems = session.pendingAttachedItems.some(
+    (p) => p.status === "success" && p.item !== undefined,
+  );
+  const hasDraft = session.inputValue.trim().length > 0 || hasResolvedItems;
 
   // ── Textarea DOM ref ────────────────────────────────────────────────
   // Needed by:
@@ -1217,18 +1225,26 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
 
   const handleSend = async () => {
     const content = session.inputValue.trim();
-    const hasItems = session.pendingAttachedItems.some(
-      (it) => it.status === "success" && it.item !== undefined,
-    );
-    const hasUploading = session.pendingAttachedItems.some(
-      (it) => it.status === "uploading",
-    );
 
     // The button stays enabled when empty; an empty click is a silent
     // no-op — no "message is empty" toast, it fired on fast-typing
     // misclicks and annoyed more than it helped.
-    if (!content && !hasItems) return;
-    if (sending || !selectedAgentId || hasUploading) return;
+    if (!hasDraft) return;
+    if (!selectedAgentId || hasUploading) return;
+
+    // One-step send. `sending` no longer blocks the send: a message typed
+    // into a surface that is showing a running turn is sent immediately with
+    // `interrupt`, and the Runtime hands it over FIRST and only then aborts
+    // the turn that was running — the effect the user used to assemble with
+    // two clicks (park the draft, then press stop again) minus the parking.
+    //
+    // `sending` is the backend's phase (`isProcessing(sessionStatus)`), the
+    // freshest fact the client has. It can lag the last `session_state` push
+    // by a frame, and the two errors are not symmetric: a needless
+    // `interrupt` aborts a retired generation (a no-op), while a missing one
+    // only delays the message to the next turn — the old behaviour, never a
+    // lost message.
+    const interrupt = sending;
 
     // Collect resolved (success) AttachedItem[] for the optimistic bubble
     // and the MQTT `attached_items` payload. Backfill workspace refs
@@ -1262,67 +1278,24 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
       }
     }
 
-    void sendMessage(content, selectedAgentId, activeSkill?.name, attachedItems.length > 0 ? attachedItems : undefined).then(() => {
+    void sendMessage(
+      content,
+      selectedAgentId,
+      activeSkill?.name,
+      attachedItems.length > 0 ? attachedItems : undefined,
+      interrupt ? { interrupt: true } : undefined,
+    ).then(() => {
       clearActiveSkill();
     });
   };
 
-  // Stop button dual-action:
-  //   input/attachments present → queue the complete message
-  //   input empty             → send queued messages + stop, or just stop
-  const queueCurrentInput = () => {
-    const content = session.inputValue.trim();
-    const pending = session.pendingAttachedItems;
-    const hasUploading = pending.some((p) => p.status === "uploading");
-    const attachedItems = pending
-      .filter((p) => p.status === "success" && p.item !== undefined)
-      .map((p) => p.item!);
-    if (
-      hasUploading
-      || (!content && attachedItems.length === 0)
-      || !selectedAgentId
-      || !currentSessionId
-    ) return false;
-
-    useChatStore.getState().addQueuedMessage(selectedAgentId, currentSessionId, {
-      content,
-      attachedItems,
-    });
-    session.setInputValue("");
-    session.setPendingAttachedItems((prev) => prev.filter((p) => p.status !== "success"));
-    return true;
-  };
-
-  const handleStop = async () => {
-    const hasDraft = session.inputValue.trim().length > 0 || session.pendingAttachedItems.length > 0;
-    if (hasDraft) {
-      if (session.pendingAttachedItems.some((p) => p.status === "uploading")) return;
-      if (queueCurrentInput()) return;
-    }
-    if (queuedMessages.length > 0 && selectedAgentId && currentSessionId) {
-      // Click with queued messages: send all queued + stop current loop.
-      const msgs = [...queuedMessages];
-      useChatStore.getState().setQueuedMessages(selectedAgentId, currentSessionId, []);
-
-      // Jump to bottom first if scrolled up, so optimistic inserts
-      // don't break the sliding window (same as handleSend).  Use
-      // scrollController.jumpToBottom so the state machine goes
-      // through "jumping" while ensureLatestInCache runs.
-      const ss = useChatStore.getState().getSessionState(selectedAgentId, currentSessionId);
-      if (ss.messageOffset > 0) {
-        await scrollController.jumpToBottom();
-      }
-
-      for (const msg of msgs) {
-        void sendMessage(msg.content, selectedAgentId, activeSkill?.name, msg.attachedItems).then(() => {
-          clearActiveSkill();
-        });
-      }
-      sendStop(selectedAgentId);
-    } else if (selectedAgentId) {
-      // No queued messages: just stop
-      sendStop(selectedAgentId);
-    }
+  // Stop button: stops, and nothing else. Sending is `handleSend` — while a
+  // turn runs, Enter and the composer button send with `interrupt` instead of
+  // parking the draft in a local queue (the queue is gone: it only delayed
+  // delivery by one click).
+  const handleStop = () => {
+    if (!selectedAgentId) return;
+    sendStop(selectedAgentId);
   };
 
   // Continue button (iterationLimit / loopDetected pause): jump to
@@ -1340,30 +1313,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     }
     continueExecution(selectedAgentId);
   }, [selectedAgentId, currentSessionId, continueExecution, scrollController]);
-
-  const handleRemoveQueued = (index: number) => {
-    if (selectedAgentId && currentSessionId) {
-      useChatStore.getState().removeQueuedMessage(selectedAgentId, currentSessionId, index);
-    }
-  };
-
-  const handleEditQueued = (index: number) => {
-    const queued = queuedMessages[index];
-    session.setInputValue(queued.content);
-    if (queued.attachedItems.length > 0) {
-      session.setPendingAttachedItems((prev) => [
-        ...prev,
-        ...queued.attachedItems.map((item) => ({
-          tempId: `queued-${crypto.randomUUID()}`,
-          status: "success" as const,
-          item,
-        })),
-      ]);
-    }
-    if (selectedAgentId && currentSessionId) {
-      useChatStore.getState().removeQueuedMessage(selectedAgentId, currentSessionId, index);
-    }
-  };
 
   // File upload handler: opens the dialog and dispatches to the shared
   // upload pipeline. The pipeline handles both documents and images and
@@ -1595,6 +1544,17 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
   // is display-side, and a superseded probe's late failure kept the box
   // disabled after MQTT had already healed (2026-09-22 incident).
   const inputDisabled = effectiveConnection !== "connected";
+
+  // The Send/Stop decision is a pure function with its own tests
+  // (`composerButton.test.ts`); the JSX below only renders its answer, so the
+  // icon, the click, the tooltip and the aria-label cannot drift apart.
+  const composer = composerButtonState({
+    sending,
+    hasDraft,
+    hasUploading,
+    readOnly: readOnlySession,
+    connected: !inputDisabled,
+  });
 
   // ── Cross-platform paste handling ──────────────────────────────────
   // Three entry points — keyboard (Ctrl+V / ⌘+V), context-menu "Paste",
@@ -1910,17 +1870,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
     // Clear the answered question from the queue by requestId
     useChatStore.getState().resolveQuestion(selectedAgentId, requestId);
   };
-
-  // Auto-send queued messages when agent finishes execution
-  useEffect(() => {
-    if (!sending && queuedMessages.length > 0 && selectedAgentId && currentSessionId) {
-      const msgs = [...queuedMessages];
-      useChatStore.getState().setQueuedMessages(selectedAgentId, currentSessionId, []);
-      for (const msg of msgs) {
-        void sendMessage(msg.content, selectedAgentId, activeSkill?.name, msg.attachedItems);
-      }
-    }
-  }, [sending]);
 
   // ── Empty state: no agents at all ──
   // Renders inside the same chat-panel-shaped shell as the live view
@@ -2553,52 +2502,6 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
           </div>
         )}
 
-        {/* Queued messages box — separate box above the input area,
-          flush against input, slightly narrower for layered depth */}
-        {queuedMessages.length > 0 && (
-          <div className={cn(
-            "mx-12 mb-0 border border-b-0 border-border-outer bg-surface-subtle/80 overflow-hidden",
-            todos.length > 0 || pendingIntents.length > 0 ? "" : "rounded-t-md"
-          )}>
-            <div className="flex items-center px-2.5 py-1.5 border-b border-border-divider">
-              <span className="text-10 font-medium text-text-tertiary  uppercase tracking-wider">
-                {t("chatPanel.messageQueue", { count: queuedMessages.length })}
-              </span>
-            </div>
-            <div className="max-h-[7.5rem] overflow-y-auto">
-              {queuedMessages.map((msg, i) => (
-                <div
-                  key={i}
-                  className={`group flex items-start gap-1.5 px-2.5 py-1.5 border-b border-border-divider last:border-b-0 ${listRowHover}`}
-                >
-                  <span className="shrink-0 text-10 mt-0.5 text-text-tertiary  select-none">{i + 1}.</span>
-                  <span className="flex-1 min-w-0 text-xs text-text-secondary truncate leading-relaxed">
-                    {msg.content || msg.attachedItems.map((item) => item.type === "file_upload" || item.type === "image_upload" ? item.filename : item.name).join(", ")}
-                  </span>
-                  <div className="flex items-center gap-0.5 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                    <button
-                      type="button"
-                      onClick={() => handleEditQueued(i)}
-                      className="rounded-sm p-0.5 text-text-tertiary hover:text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10"
-                      aria-label={`Edit message ${i + 1}`}
-                    >
-                      <Pencil size={12} />
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveQueued(i)}
-                      className="rounded-sm p-0.5 text-text-tertiary hover:text-danger-icon hover:bg-danger-surface"
-                      aria-label={`Remove message ${i + 1}`}
-                    >
-                      <X size={12} />
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
         {/* Unified input container with toolbar */}
         <div className="mx-6 mb-3 rounded-xl border border-chat-input-border bg-chat-input-bg">
           {/* Active skill badge */}
@@ -2751,11 +2654,11 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                 // Rationale: spurious Enter events (macOS keyboard repeat, WKWebView
                 // focus/keyboard quirks during window resize, accidental keypresses)
                 // previously triggered urgent_stop and silently killed the stream.
-                if (!sending) {
-                  handleSend();
-                  return;
-                }
-                queueCurrentInput();
+                //
+                // While a turn runs this is the same "send and interrupt" action
+                // as the composer button (it used to park the draft in a local
+                // queue that only a second stop click could release).
+                handleSend();
               }}
               onCompositionEnd={() => {
                 lastCompositionEndRef.current = Date.now();
@@ -2855,14 +2758,17 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                 <SessionVisibilityToggle agentId={selectedAgentId} sessionId={currentSessionId} />
               )}
 
-              {/* Send/Stop button with tooltip above */}
-              <Tooltip content={sending
-                ? (session.inputValue.trim()
-                  ? t("chatPanel.addToQueue")
-                  : queuedMessages.length > 0
-                    ? t("chatPanel.sendQueuedAndStop")
-                    : t("chatPanel.stop"))
-                : t("chatPanel.sendMessage")}>
+              {/* Send/Stop button with tooltip above.
+                  One control, and the icon says what the click does
+                  (`composerButtonState`, derived once above):
+                    - a draft is present      → Send   (while running: sends
+                                                        AND interrupts the turn)
+                    - running, empty composer → Square (stop)
+                    - idle, empty composer    → Send   (silent no-op, as before)
+                  The old three-way behaviour (queue / send-queue-and-stop /
+                  stop) is gone: parking the draft first was a click that only
+                  delayed delivery. */}
+              <Tooltip content={t(`chatPanel.${composer.labelKey}`)}>
                 <button
                   // The `sending` branch needs its own `disabled:` styles too:
                   // a viewer watching the owner's stream lands here with the
@@ -2872,27 +2778,11 @@ export function ChatPanel({ embedded = false }: { embedded?: boolean }) {
                     toolbarIconButton,
                     sending && "text-[var(--color-accent)] hover:bg-[var(--color-accent)]/10",
                   )}
-                  onClick={sending ? handleStop : handleSend}
-                  disabled={
-                    // ADR-076 §决策 4: a session shared with us is read-only
-                    // — sending is write-gated server-side (404), and so is
-                    // stopping someone else's stream.
-                    //
-                    // Empty input is NOT a disable condition: a dead button
-                    // has no affordance to explain why, so the button stays
-                    // live; an empty click in `handleSend` is a silent
-                    // no-op. Uploading attachments still disables (the
-                    // payload can't be assembled mid-upload).
-                    readOnlySession
-                      ? true
-                      : sending
-                        ? false
-                        : (inputDisabled
-                          || session.pendingAttachedItems.some((p) => p.status === "uploading"))
-                  }
-                  aria-label={sending ? (session.inputValue.trim() ? t("chatPanel.addToQueue") : queuedMessages.length > 0 ? t("chatPanel.sendQueuedAndStop") : t("chatPanel.stop")) : t("chatPanel.sendMessage")}
+                  onClick={composer.mode === "stop" ? handleStop : handleSend}
+                  disabled={composer.disabled}
+                  aria-label={t(`chatPanel.${composer.labelKey}`)}
                 >
-                  {sending ? <Square size={16} fill="currentColor" /> : <Send size={16} />}
+                  {composer.mode === "stop" ? <Square size={16} fill="currentColor" /> : <Send size={16} />}
                 </button>
               </Tooltip>
             </div>

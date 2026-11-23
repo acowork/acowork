@@ -2142,6 +2142,58 @@ impl SessionManager {
         }
     }
 
+    /// One-step send (ADR-044 §4.5): hand `msg` to the session task **and**
+    /// abort the turn that was running when it arrived, as one operation.
+    ///
+    /// This is the delivery primitive behind `ChatMessage { interrupt: true }`
+    /// — the desktop composer's "send while a turn is running", which used to
+    /// be two user actions (park the draft locally, then press stop) and two
+    /// independent HTTP requests whose order the client could not guarantee.
+    ///
+    /// The ordering is the whole correctness argument, and it lives here
+    /// because this is the layer that owns both facts (`sessions` and
+    /// `cancel_handles`):
+    ///
+    /// 1. **Capture the generation first.** [`Self::cancel_handle`] returns a
+    ///    snapshot of the *current* `CancelHandle`. `SessionCore::
+    ///    begin_new_request` installs a fresh one at every `run_inner` entry,
+    ///    so a captured handle is retired — and cancelling it a no-op — once
+    ///    the turn it names has ended. That is what keeps the abort from
+    ///    landing on the turn this very message opens.
+    /// 2. **Hand off, and only then abort.** A full or closed channel means
+    ///    the human's words were dropped; aborting the running turn as well
+    ///    would lose both. On `Err` nothing is cancelled.
+    ///
+    /// An idle session is the ordinary no-op case: the captured generation is
+    /// already retired, the message is delivered, and the cancel costs nothing.
+    ///
+    /// Lock discipline (2026-08-20 incident): the caller holds the
+    /// session-manager mutex, and `CancelHandle::cancel` only takes the
+    /// generation's own `parking_lot` slot and wakes waiters — it never
+    /// re-enters this mutex, so holding it across the cancel is safe.
+    pub fn send_to_session_superseding(
+        &mut self,
+        session_id: &str,
+        msg: SessionMessage,
+    ) -> Result<()> {
+        let superseded = self.cancel_handle(session_id);
+        self.send_to_session(session_id, msg)?;
+        if let Some(handle) = superseded {
+            handle.cancel(crate::cancellation::CancellationReason::UserStop {
+                source: crate::cancellation::StopSource::ChatPanel {
+                    agent_id: self.agent_id().to_string(),
+                    session_id: session_id.to_string(),
+                },
+                reason: "superseded_by_user_message".to_string(),
+            });
+            tracing::info!(
+                session_id = %session_id,
+                "ADR-044 §4.5: one-step send — running turn superseded by the user's message"
+            );
+        }
+        Ok(())
+    }
+
     /// Record a routed intent in the target session's pending queue so the
     /// execution UI can show it while the session is still busy (ADR-099,
     /// design 27 §5.5.5).
@@ -7306,5 +7358,220 @@ mod tests {
             "an empty policy must persist as None (inherit the agent layer)"
         );
         assert!(!manager.set_session_tool_policy("no-such-session", None));
+    }
+
+    // ── One-step send: `send_to_session_superseding` ─────────────────────
+    //
+    // ADR-044 §4.5. "Send while a turn is running" used to be two requests
+    // (POST /messages, then POST /stop) whose order the client could not
+    // guarantee. It is one delivery primitive now, and the ordering IS the
+    // feature: capture the running generation → hand the message over →
+    // abort, and only if the handoff succeeded.
+    //
+    // These drive the real method against a real SessionManager (the same
+    // hand-injected `SessionHandle` pattern as the debug-mode test above), so
+    // they fail if the ordering breaks — not merely if the cancel primitive
+    // changes.
+
+    /// A bare manager holding one injected session task: a real mpsc inbox of
+    /// `capacity`, plus a registered cancel-generation slot the test controls.
+    fn manager_with_one_session(
+        capacity: usize,
+    ) -> (
+        SessionManager,
+        tokio::sync::mpsc::Receiver<SessionMessage>,
+        Arc<parking_lot::Mutex<CancelHandle>>,
+        String,
+    ) {
+        use crate::agent::session::session_handle::SessionHandle;
+        use crate::agent::session_state::{SessionRuntimeSnapshot, SessionStatus};
+
+        let manifest = acowork_core::AgentManifest::from_toml(
+            r#"
+            agent_id = "com.test.supersede"
+            version = "1.0.0"
+            name = "Test one-step send"
+            description = "Pin send_to_session_superseding ordering"
+            author = "test"
+            runtime_version = "0.1.0"
+
+            [llm]
+            provider = "mock"
+            model = "test-model"
+            "#,
+        )
+        .unwrap();
+        let provider = Arc::new(acowork_core::providers::mock::MockProvider::single_text(
+            "test",
+        ));
+        let core = Arc::new(AgentCore::new(
+            crate::config::RuntimeConfig::default(),
+            manifest,
+            provider,
+            Vec::<crate::agent::agent_core::BuiltinToolEntry>::new(),
+        ));
+        let mut manager = SessionManager::new(core, SessionManagerConfig::default());
+
+        let sid = "s-supersede".to_string();
+        let (inbound_tx, inbound_rx) = tokio::sync::mpsc::channel::<SessionMessage>(capacity);
+        let (agent_inbound_tx, _agent_inbound_rx) =
+            tokio::sync::mpsc::channel::<crate::agent::inbound::InboundMessage>(1);
+        let (_status_tx, status_rx) = tokio::sync::watch::channel(SessionStatus::Idle);
+        manager.sessions.insert(
+            sid.clone(),
+            SessionHandle {
+                session_id: sid.clone(),
+                inbound_tx,
+                agent_inbound_tx,
+                join_handle: tokio::spawn(async {}),
+                status_rx,
+                last_active_at: std::sync::Mutex::new(std::time::Instant::now()),
+                pending_debug_handles: Arc::new(tokio::sync::Mutex::new(None)),
+                snapshot: Arc::new(std::sync::RwLock::new(SessionRuntimeSnapshot {
+                    session_id: sid.clone(),
+                    status: r#""idle""#.to_string(),
+                    model: None,
+                    provider: None,
+                    account_id: None,
+                    ratio: None,
+                    todos_json: None,
+                    context_usage: None,
+                })),
+                workspace_id: Arc::new(std::sync::RwLock::new("__agent_home__".to_string())),
+                current_work_dir: Arc::new(std::sync::RwLock::new(None)),
+                conversation: None,
+            },
+        );
+
+        // The generation the running turn owns. `create_session` registers the
+        // task's own slot; here the test owns it so it can also swap it, which
+        // is what `SessionCore::begin_new_request` does at every turn entry.
+        let slot = Arc::new(parking_lot::Mutex::new(CancelHandle::new()));
+        manager.cancel_handles.insert(sid.clone(), Arc::clone(&slot));
+
+        (manager, inbound_rx, slot, sid)
+    }
+
+    /// The payload the execution surface actually posts.
+    fn one_step_chat_message(text: &str) -> SessionMessage {
+        let message_id = format!("m-{text}");
+        SessionMessage::ChatMessage {
+            content: text.to_string(),
+            message_id: message_id.clone(),
+            chat_trigger_row_id: String::new(),
+            active_skill: None,
+            attached_items: None,
+            content_parts: None,
+            surface: crate::agent::intent_turn::TurnSurface::new(
+                String::new(),
+                &message_id,
+                "nicholas",
+                Some(true),
+            ),
+            speaker: None,
+        }
+    }
+
+    /// The feature: the message reaches the session inbox AND the turn that
+    /// was running when it arrived is aborted, in one call.
+    #[tokio::test]
+    async fn superseding_send_delivers_the_message_and_aborts_the_running_turn() {
+        let (mut manager, mut inbox, slot, sid) = manager_with_one_session(4);
+        let running = slot.lock().clone();
+
+        manager
+            .send_to_session_superseding(&sid, one_step_chat_message("now"))
+            .expect("handoff must succeed");
+
+        match inbox.try_recv().expect("message must be in the inbox") {
+            SessionMessage::ChatMessage { content, .. } => assert_eq!(content, "now"),
+            other => panic!("expected ChatMessage, got {other:?}"),
+        }
+        assert!(running.is_cancelled(), "the running turn must be aborted");
+        match running.reason() {
+            Some(crate::cancellation::CancellationReason::UserStop { reason, .. }) => {
+                assert_eq!(reason, "superseded_by_user_message");
+            }
+            other => panic!("expected a user stop, got {other:?}"),
+        }
+    }
+
+    /// The invariant that keeps a one-step send from losing both facts: a
+    /// dropped message must NOT take the running turn down with it.
+    #[tokio::test]
+    async fn superseding_send_never_aborts_when_the_handoff_fails() {
+        let (mut manager, mut inbox, slot, sid) = manager_with_one_session(1);
+        let running = slot.lock().clone();
+        // Fill the inbox so the next handoff hits backpressure.
+        manager
+            .send_to_session(&sid, one_step_chat_message("first"))
+            .expect("first handoff fills the capacity-1 channel");
+
+        let err = manager
+            .send_to_session_superseding(&sid, one_step_chat_message("dropped"))
+            .expect_err("a full channel must refuse the message");
+        assert!(err.to_string().contains("full"), "{err}");
+
+        assert!(
+            !running.is_cancelled(),
+            "a message nobody received must not abort the running turn"
+        );
+        assert!(running.reason().is_none());
+        // The refused message is not in the inbox either — no partial delivery.
+        match inbox.try_recv().expect("the first message is still queued") {
+            SessionMessage::ChatMessage { content, .. } => assert_eq!(content, "first"),
+            other => panic!("expected ChatMessage, got {other:?}"),
+        }
+        assert!(inbox.try_recv().is_err(), "the dropped message must not appear");
+    }
+
+    /// The capture reads the slot **through** the Arc at call time, so it aims
+    /// at the generation that is current when the message arrives — never a
+    /// stale clone held from an earlier turn (ADR-044 §4.5).
+    ///
+    /// Here the turn the human first saw has already ended and another one
+    /// started before the message lands: that newer turn is the one running
+    /// when the message arrives, so it is the one the send supersedes.
+    ///
+    /// The companion property — the abort can never land on the turn this
+    /// message itself opens — follows from the capture preceding the handoff
+    /// inside the method, plus `SessionCore::begin_new_request` swapping the
+    /// slot at every turn entry (pinned by the cancellation integration tests:
+    /// a retired generation is inert once the slot moves on).
+    #[tokio::test]
+    async fn superseding_send_captures_the_generation_current_at_call_time() {
+        let (mut manager, mut inbox, slot, sid) = manager_with_one_session(4);
+        let retired = slot.lock().clone();
+        // The turn running when the message arrives.
+        let current = CancelHandle::new();
+        *slot.lock() = current.clone();
+
+        manager
+            .send_to_session_superseding(&sid, one_step_chat_message("now"))
+            .expect("handoff must succeed");
+
+        assert!(inbox.try_recv().is_ok(), "message must be delivered");
+        assert!(
+            current.is_cancelled(),
+            "the generation current at arrival is the one superseded"
+        );
+        assert!(
+            !retired.is_cancelled(),
+            "an already-retired generation must not be touched"
+        );
+    }
+
+    /// An evicted / never-registered session has no generation to abort; the
+    /// delivery itself is still attempted and reports its own error.
+    #[tokio::test]
+    async fn superseding_send_without_a_registered_generation_still_delivers() {
+        let (mut manager, mut inbox, _slot, sid) = manager_with_one_session(4);
+        manager.cancel_handles.remove(&sid);
+
+        manager
+            .send_to_session_superseding(&sid, one_step_chat_message("now"))
+            .expect("no cancel slot is the ordinary no-op case, not an error");
+
+        assert!(inbox.try_recv().is_ok(), "message must be delivered");
     }
 }

@@ -894,6 +894,21 @@ pub(crate) struct SendMessageBody {
     /// `content_parts` out of it itself.
     #[serde(default)]
     pub(crate) params_json: String,
+    /// "I was looking at a running turn and I want this message to take effect
+    /// now." Absent (the default, i.e. every client before this field existed)
+    /// keeps the plain `enqueue` semantic: the message becomes the next turn
+    /// when the current one ends.
+    ///
+    /// The desktop composer used to synthesize this from two user actions —
+    /// type into the local queue, then press the stop button a second time —
+    /// which is exactly one user intent spread over two round trips, in an
+    /// order the client could not guarantee. Here it is one request; the
+    /// ordering (hand the message off **before** aborting the running turn, and
+    /// only abort the generation that was running when the message arrived) is
+    /// resolved by `gateway_loop::dispatch_inbound`, which is the layer that
+    /// knows both facts.
+    #[serde(default)]
+    pub(crate) interrupt: bool,
 }
 
 /// Make sure `sid` has a live session task before an action is dispatched to it.
@@ -1009,6 +1024,10 @@ pub(crate) async fn post_send_message(
             // client carries about a binding it may not know.
             answerable_by: scope.caller_uid().unwrap_or_default().to_string(),
             speaker,
+            // Passed through untouched: the dispatch funnel owns what
+            // "interrupt" means and in which order it happens. This handler
+            // only answers "may this caller write this session".
+            interrupt: body.interrupt,
         },
     )
     .await;

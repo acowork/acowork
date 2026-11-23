@@ -274,6 +274,22 @@ pub enum InboundMessage {
         /// write, because by then the caller uid is gone: `SessionMessage` and
         /// the loop know the session, not the account that pressed Enter.
         speaker: Option<acowork_core::turn_speaker::TurnSpeaker>,
+        /// The human sent this message from a surface that was showing a
+        /// running turn, and expects it to take effect now rather than after
+        /// that turn finishes (plan: one-step send, superseding the desktop's
+        /// former "queue, then press stop again" two-click flow).
+        ///
+        /// `false` — the default, and every producer before this field existed
+        /// — is the plain `enqueue` semantic: the message waits in the session
+        /// task's inbox and becomes the next turn.
+        ///
+        /// `true` is resolved by `gateway_loop::dispatch_inbound`, which owns
+        /// the ordering: capture the running request's cancel generation,
+        /// hand the message off, and only then cancel that captured
+        /// generation. The turn that was running when the message arrived
+        /// ends; the message itself opens the next one.
+        #[serde(default)]
+        interrupt: bool,
     },
     /// ADR-029 + ADR-052: agent-level builtin-tool enabled-flag update.
     ///

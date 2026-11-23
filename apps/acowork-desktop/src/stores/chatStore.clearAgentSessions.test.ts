@@ -42,7 +42,6 @@ function seedSession(agentId: string, sessionId: string) {
                         pendingApproval: { req1: { tool_call_id: "t1" } } as never,
                         pendingQuestions: [{ request_id: "q1" }] as never,
                         todos: [{ id: "todo1" }] as never,
-                        queuedMessages: [{ content: "queued" }] as never,
                         treeExpandedPaths: ["/foo"] as never,
                         attachedContext: [{ type: "file", content: bigBlob }] as never,
                         toolProgress: { t1: { elapsedMs: 100, timeoutMs: 1000 } } as never,
@@ -100,7 +99,6 @@ describe("chatStore.clearAgentSessions", () => {
         expect(ss.pendingApproval).toEqual({});
         expect(ss.pendingQuestions).toEqual([]);
         expect(ss.todos).toEqual([]);
-        expect(ss.queuedMessages).toEqual([]);
         expect(ss.treeExpandedPaths).toEqual([]);
         expect(ss.attachedContext).toEqual([]);
         expect(ss.toolProgress).toEqual({});

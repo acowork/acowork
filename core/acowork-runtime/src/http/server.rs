@@ -7502,6 +7502,10 @@ mod tests {
                     "message_id": "m1",
                     "command": "",
                     "params_json": "{\"a\":1}",
+                    // One-step send: the flag must survive the envelope
+                    // untouched — the dispatch funnel, not this handler,
+                    // decides what it means.
+                    "interrupt": true,
                 }),
             ),
             ("stop", serde_json::json!({ "reason": "user_requested" })),
@@ -7553,6 +7557,7 @@ mod tests {
                         message_id,
                         params_json,
                         answerable_by,
+                        interrupt,
                         ..
                     },
                 ) => {
@@ -7560,6 +7565,7 @@ mod tests {
                         && message_id == "m1"
                         && params_json == r#"{"a":1}"#
                         && answerable_by == "u-owner"
+                        && *interrupt
                 }
                 ("stop", InboundMessage::Stop { reason }) => reason == "user_requested",
                 ("continue", InboundMessage::ContinueExecution { session_id, reason }) => {
