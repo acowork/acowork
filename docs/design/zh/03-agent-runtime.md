@@ -8,6 +8,8 @@ Agent Runtime 是平台提供的唯一二进制可执行文件，类似 Android 
 
 > **v3.7 变更（2026-05-28）**：上下文压缩策略大幅简化——见 [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md)。核心变更：放弃程序化折叠策略（Tool Result 折叠、内容折叠 Phase 1），上下文压缩回归 LLM 摘要作为唯一正常路径手段。日常压缩流程简化为：70% 告警 → 80% LLM 摘要（完整上下文，不折叠） → 95% emergency_trim 安全网。
 
+> **v3.10 变更（2026-11-23）**：上下文第 1 层（System Prompt）由单文件拆为两段——`prompts/system.md`（角色身份，场景无关）+ `prompts/rules.md`（业务场景规则/约束/工作流），段序由运行时固定为 `system.md` → `rules.md` → 其余按文件名——见 [ADR-120](../../adr/zh/ADR-120-system-and-rules-prompt-split.md)。
+
 > **v3.9 变更（2026-05-28）**：Compaction 与 Distillation 统一——见 [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md)。核心变更：Compaction 摘要与 Session 蒸馏合并为单次 Compact Model 调用，摘要文本同时用于内存替换和 SQLite 经历层写入（"摘要即蒸馏"）。经历层写入来源简化为仅 Compaction 和 Session 关闭蒸馏，移除每轮对话实时写入。SessionState 新增 `is_compacted` 标志控制尾部蒸馏决策。
 
 **交叉引用**：
@@ -224,7 +226,7 @@ Prompt Builder 按以下顺序拼接上下文，越靠前优先级越高（LLM �
 
 | 顺序 | 部分 | 来源 | 说明 |
 |------|------|------|------|
-| 1 | System Prompt | `prompts/system.md` + `prompts/constraints.md` | Agent 身份定义和行为约束，不可被后续覆盖 |
+| 1 | System Prompt | `prompts/system.md` + `prompts/rules.md` | Agent 身份定义（角色通用属性）+ 业务场景规则（系统记录、工具边界、交付位置、审批门、工作流）。段序由运行时固定为 `system.md` → `rules.md` → 其余按文件名，见 [ADR-120](../../adr/zh/ADR-120-system-and-rules-prompt-split.md)；不可被后续覆盖 |
 | 2 | Identity Context | Gateway 注入 | 用户身份信息（name、city 等），Agent "认识"用户 |
 | 2.5 | Autobiographical | AutobiographicalNode（`label=Autobiographical`） | Agent 自我认知（Identity/Capability/Limitation），注入上限 200 token。History Manager 在构建上下文时检测 History 节点数量，超过 10 条时自动触发规则引擎合并（按时间线拼接事件描述、去重、截断至 200 token，零 LLM 调用），合并由 Runtime 的后台任务执行，不需要用户干预。Phase 3 可升级为 LLM 语义摘要 |
 | 2.8 | Workspace Context | Gateway 推送 | 工作区环境信息（当前选中 + 高权重 Top2，最多 3 个） |

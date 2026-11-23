@@ -1,8 +1,10 @@
 # Agent 打包格式（.agent）
 
-> 版本：v3.3 | 更新日期：2026-04-17
+> 版本：v3.4 | 更新日期：2026-11-23
 
 ---
+
+> **v3.4 变更（2026-11-23）**：`prompts/` 拆为 `system.md`（角色身份）+ `rules.md`（业务场景规则/约束/工作流），运行时固定段序 `system.md` → `rules.md` → 其余按文件名——见 [ADR-120](../../adr/zh/ADR-120-system-and-rules-prompt-split.md)。包结构中原本列出的 `tools.md` / `constraints.md` 实际并不存在，一并按现状修正。
 
 ## 1. 包结构
 
@@ -11,10 +13,9 @@
 ```
 <agent_id>.agent
 ├── manifest.toml          # 必需，元数据 + LLM 配置 + 权限 + 工具声明
-├── prompts/               # System prompt 模板
-│   ├── system.md          # 主系统提示词
-│   ├── tools.md           # 工具使用说明
-│   └── constraints.md     # 约束和安全规则
+├── prompts/               # 提示词模板（ADR-120）
+│   ├── system.md          # 角色身份：通用属性（专长、原则、表达方式），与业务场景无关
+│   └── rules.md           # 业务场景规则：系统记录、工具边界、交付位置、审批门、工作流
 ├── config/                # 默认配置文件（用户可覆盖）
 │   └── settings.toml
 ├── data/                  # 初始数据（如空 SQLite 记忆层 快照）
@@ -31,6 +32,19 @@
 
 - 包大小上限 **50 MB**（安装时校验，超出拒绝安装）。
 - `skills/*/references/` 仅允许不可执行的数据文件（JSON 模板、Markdown 文档等）。如需动态执行逻辑，应通过 `tools/` 下的 WASM 工具实现。
+
+### 1.1 `prompts/` 的两段式拆分（ADR-120）
+
+`prompts/` 下的每个 `.md` 都是一段**对话系统提示词**，运行时按固定顺序拼接：`system.md` → `rules.md` → 其余文件按文件名升序，每段包一层 `## {文件名词干}`。两段的职责边界是"换掉它是否换了角色"：
+
+| 文件 | 内容 | 什么时候改 |
+|------|------|-----------|
+| `system.md` | 角色身份：是谁、擅长什么、坚持什么原则、怎么表达 | 角色本身变了（通常意味着一个新包） |
+| `rules.md` | 业务场景规则：谁是系统记录、允许用哪些工具、交付物落哪个目录、有哪些审批门、按什么工作流推进、什么不做 | 同一个角色落地到另一个业务场景 |
+
+`rules.md` 是**普通对话段**，不是任务指令覆盖项（不在 `OVERRIDABLE_PROMPTS` 名单内）：它进入主系统提示词，并且可以在实例的 Setup 面板「提示词与技能」里直接编辑后热重载——这就是"落地不同业务场景之后的定制"通道。包内 `rules.md` 只是默认值，包升级会覆盖实例内的定制。
+
+`OVERRIDABLE_PROMPTS` 名单内的文件名（`summary.md`、`title.md`、`compact-template.md`、`abstention.md`、`chat.md`）是**任务指令**，用同名的包级文件替换运行时内置常量，**不**进入主系统提示词，详见 [ADR-063](../../adr/zh/ADR-063-package-level-prompt-override.md)。
 
 ## 2. 包签名机制
 

@@ -1,8 +1,10 @@
 # Agent Packaging Format (.agent)
 
-> Version: v3.3 | Last Updated: 2026-04-17
+> Version: v3.4 | Last Updated: 2026-11-23
 
 ---
+
+> **v3.4 Change (2026-11-23)**: `prompts/` splits into `system.md` (role identity) + `rules.md` (business-scenario rules / constraints / workflow), with the Runtime fixing the section order as `system.md` → `rules.md` → the rest by filename — see [ADR-120](../../adr/en/ADR-120-system-and-rules-prompt-split.md). The `tools.md` / `constraints.md` entries the structure used to list never existed; they are corrected here.
 
 ## 1. Package Structure
 
@@ -11,10 +13,9 @@ The `.agent` file is essentially a ZIP archive. Agent packages **contain no exec
 ```
 <agent_id>.agent
 ├── manifest.toml          # Required: metadata + LLM config + permissions + tool declarations
-├── prompts/               # System prompt templates
-│   ├── system.md          # Main system prompt
-│   ├── tools.md           # Tool usage instructions
-│   └── constraints.md     # Constraints and safety rules
+├── prompts/               # Prompt templates (ADR-120)
+│   ├── system.md          # Role identity: general attributes (expertise, principles, expression); scenario-agnostic
+│   └── rules.md           # Business-scenario rules: system of record, tool boundaries, deliverable areas, gates, workflow
 ├── config/                # Default config files (user-overridable)
 │   └── settings.toml
 ├── data/                  # Initial data (e.g. empty SQLite memory layer snapshot)
@@ -31,6 +32,19 @@ The `.agent` file is essentially a ZIP archive. Agent packages **contain no exec
 
 - Package size limit **50 MB** (validated at install time; oversized packages are rejected).
 - `skills/*/references/` only allows non-executable data files (JSON templates, Markdown docs, etc.). Dynamic execution logic must be implemented via WASM tools under `tools/`.
+
+### 1.1 The two-part split of `prompts/` (ADR-120)
+
+Every `.md` under `prompts/` is a **dialog system-prompt section**. The Runtime splices them in a fixed order — `system.md` → `rules.md` → everything else by filename — wrapping each in `## {file stem}`. The boundary between the two named files is "does replacing it replace the role?":
+
+| File | Content | When it changes |
+|------|---------|-----------------|
+| `system.md` | Role identity: who it is, what it is expert in, which principles it holds, how it speaks | The role itself changed (usually a new package) |
+| `rules.md` | Business-scenario rules: what is the system of record, which tools are allowed, where deliverables land, which approval gates exist, which workflow to follow, what not to do | The same role lands in a different business scenario |
+
+`rules.md` is an **ordinary dialog section**, not an instruction override (it is not in `OVERRIDABLE_PROMPTS`): it is part of the main system prompt and it can be edited per instance in the Setup panel's Prompts & Skills card, with a hot reload on save — that is the customization path for "landing in a different business scenario". The packaged `rules.md` is only the default; a package upgrade overwrites instance-level customization.
+
+Filenames in `OVERRIDABLE_PROMPTS` (`summary.md`, `title.md`, `compact-template.md`, `abstention.md`, `chat.md`) are **task instructions**: a package file of that name replaces a built-in Runtime constant and does **not** enter the main system prompt — see [ADR-063](../../adr/en/ADR-063-package-level-prompt-override.md).
 
 ## 2. Package Signing Mechanism
 

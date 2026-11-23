@@ -1,10 +1,19 @@
 //! System prompt builder (from prompts/ + skills/)
 //!
 //! Assembles the complete system prompt from:
-//! 1. prompts/system.md — Agent identity definition
-//! 2. prompts/constraints.md — Behavioral constraints
-//! 3. prompts/*.md — Additional prompt sections
+//! 1. prompts/system.md — Agent identity: who the agent is, what it is an
+//!    expert in, how it thinks and writes. Scenario-agnostic (ADR-120).
+//! 2. prompts/rules.md — The business-scenario contract: system of record,
+//!    tool boundaries, deliverable locations, gates, workflow. This is the
+//!    file a deployment replaces to land the same role in another scenario
+//!    (ADR-120).
+//! 3. prompts/*.md — Additional prompt sections, by filename
 //! 4. skills/*/SKILL.md — Skill instructions
+//!
+//! Section order is fixed by [`PROMPT_SECTION_ORDER`], not by the
+//! filesystem: a plain filename sort would put `rules.md` *before*
+//! `system.md`, so the scenario contract would precede the identity it
+//! constrains.
 //!
 //! # Package-level prompt overrides (ADR-063)
 //!
@@ -46,6 +55,35 @@ use crate::skills::parser::SkillRegistry;
 /// directive, not a dialog identity section, so [`build_system_prompt_with_mode`]
 /// skips it when assembling the main system prompt.
 pub const COMPACTION_PROMPT_FILE: &str = "summary.md";
+
+/// Filename of the agent identity section inside `prompts/` (ADR-120).
+///
+/// Holds the role's scenario-agnostic attributes: identity, domain
+/// expertise, professional principles, communication style. It is a normal
+/// dialog section — NOT one of [`OVERRIDABLE_PROMPTS`] — so it is assembled
+/// into the main system prompt and appears in the Setup panel's prompt tree.
+pub const SYSTEM_PROMPT_FILE: &str = "system.md";
+
+/// Filename of the business-scenario rules section inside `prompts/`
+/// (ADR-120).
+///
+/// Holds what the deployment — not the role — decides: which services are
+/// the system of record, which tools are allowed, where deliverables land,
+/// which approval gates apply, and the workflow that ties them together.
+/// Splitting it out of `system.md` is what makes "same agent, different
+/// business scenario" a file swap instead of a prompt rewrite.
+///
+/// Like [`SYSTEM_PROMPT_FILE`] it is a normal dialog section: assembled into
+/// the main system prompt, editable per installed instance through the
+/// Setup panel, never one of the task-instruction overrides.
+pub const RULES_PROMPT_FILE: &str = "rules.md";
+
+/// Deterministic order of the main dialog prompt sections.
+///
+/// Files listed here come first, in this order; every other
+/// `prompts/*.md` follows in filename order. Identity precedes the contract
+/// it is constrained by, and both precede incidental sections.
+pub const PROMPT_SECTION_ORDER: &[&str] = &[SYSTEM_PROMPT_FILE, RULES_PROMPT_FILE];
 
 /// Canonical list of package-level LLM prompt overrides (ADR-063).
 ///
@@ -109,6 +147,20 @@ fn overridable_filenames() -> &'static HashSet<&'static str> {
 /// skip these files when assembling the main dialog system prompt.
 pub fn is_overridable_prompt(filename: &str) -> bool {
     overridable_filenames().contains(filename)
+}
+
+/// Rank of a prompt filename in [`PROMPT_SECTION_ORDER`]; anything not
+/// listed sorts after every listed entry.
+///
+/// Matching is **exact and case-sensitive**, in lockstep with
+/// [`is_overridable_prompt`]: on a case-insensitive filesystem a package
+/// carrying `Rules.md` must not silently gain the pinned position of
+/// `rules.md` while being read as an ordinary section elsewhere.
+fn prompt_section_rank(filename: &str) -> usize {
+    PROMPT_SECTION_ORDER
+        .iter()
+        .position(|pinned| *pinned == filename)
+        .unwrap_or(PROMPT_SECTION_ORDER.len())
 }
 
 /// Generic loader for any file in [`OVERRIDABLE_PROMPTS`].
@@ -322,10 +374,11 @@ pub struct SystemPromptParts {
 
 /// Build system prompt from package files with explicit skill mode.
 ///
-/// Reads prompt files in alphabetical order and concatenates them into
-/// `SystemPromptParts.base`. Skill injection is returned separately
-/// (`skills_summary`) so the caller can place it on a distinct
-/// `ContextBuilder` section — see [`SystemPromptParts`] docs.
+/// Reads prompt files in the order fixed by [`PROMPT_SECTION_ORDER`]
+/// (`system.md`, then `rules.md`), then alphabetically for the rest, and
+/// concatenates them into `SystemPromptParts.base`. Skill injection is
+/// returned separately (`skills_summary`) so the caller can place it on a
+/// distinct `ContextBuilder` section — see [`SystemPromptParts`] docs.
 ///
 /// `skill_mode` controls skills behavior:
 /// - `Manual`: `skills_summary = None`.
@@ -344,7 +397,17 @@ pub fn build_system_prompt_with_mode(
     let prompts_dir = package_dir.join("prompts");
     if prompts_dir.exists() {
         let mut prompt_files = collect_markdown_files(&prompts_dir)?;
-        prompt_files.sort();
+        // ADR-120: identity first, then the business-scenario contract,
+        // then the rest by filename. A plain `sort()` is not enough —
+        // `rules.md` sorts before `system.md`, which would put the contract
+        // ahead of the identity it constrains.
+        prompt_files.sort_by(|a, b| {
+            let a_name = a.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            let b_name = b.file_name().and_then(|n| n.to_str()).unwrap_or_default();
+            prompt_section_rank(a_name)
+                .cmp(&prompt_section_rank(b_name))
+                .then_with(|| a_name.cmp(b_name))
+        });
 
         for path in &prompt_files {
             // Use filename (without extension) as section header
@@ -981,6 +1044,93 @@ Be friendly and welcoming.
         assert!(prompt.contains("test agent"));
         assert!(prompt.contains("Txt summary directive."));
         assert!(prompt.contains("## summary"));
+    }
+
+    // ── ADR-120: system.md / rules.md split + fixed section order ──
+
+    /// `rules.md` is a normal dialog section: assembled into the main
+    /// system prompt (unlike the task-instruction overrides) and never
+    /// routed through the `load_optional_prompt` override chain.
+    #[test]
+    fn test_rules_prompt_is_a_dialog_section_not_an_override() {
+        assert!(!is_overridable_prompt(RULES_PROMPT_FILE));
+        assert_eq!(RULES_PROMPT_FILE, "rules.md");
+        assert_eq!(SYSTEM_PROMPT_FILE, "system.md");
+    }
+
+    /// Identity, then contract, then everything else by filename. The naive
+    /// filename sort this replaces would have emitted `rules` first.
+    #[test]
+    fn test_section_order_is_system_then_rules_then_others() {
+        let dir = std::env::temp_dir().join("acowork-test-section-order");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        for (name, body) in [
+            ("rules.md", "RULES BODY"),
+            ("system.md", "SYSTEM BODY"),
+            ("aaa.md", "AAA BODY"),
+            ("zzz.md", "ZZZ BODY"),
+        ] {
+            fs::write(dir.join("prompts").join(name), body).unwrap();
+        }
+
+        let prompt = build_system_prompt(&dir).unwrap();
+        let idx = |needle: &str| {
+            prompt
+                .find(needle)
+                .unwrap_or_else(|| panic!("{needle} missing from prompt: {prompt}"))
+        };
+        assert!(idx("SYSTEM BODY") < idx("RULES BODY"), "{prompt}");
+        assert!(idx("RULES BODY") < idx("AAA BODY"), "{prompt}");
+        assert!(idx("AAA BODY") < idx("ZZZ BODY"), "{prompt}");
+    }
+
+    /// The pinned position is matched case-sensitively, in lockstep with
+    /// `is_overridable_prompt`. Asserted on the rank function directly: a
+    /// case-insensitive filesystem cannot even hold `rules.md` and
+    /// `Rules.md` side by side, so a two-file fixture would test the OS.
+    #[test]
+    fn test_section_rank_pins_exact_filenames_only() {
+        assert_eq!(prompt_section_rank("system.md"), 0);
+        assert_eq!(prompt_section_rank("rules.md"), 1);
+        assert_eq!(prompt_section_rank("Rules.md"), PROMPT_SECTION_ORDER.len());
+        assert_eq!(prompt_section_rank("RULES.md"), PROMPT_SECTION_ORDER.len());
+        assert_eq!(prompt_section_rank("aaa.md"), PROMPT_SECTION_ORDER.len());
+    }
+
+    /// A capitalised `Rules.md` is an ordinary section, so it lands in the
+    /// filename-order slot after the pinned `system.md` — it never takes
+    /// `rules.md`'s position ahead of incidental sections.
+    #[test]
+    fn test_case_variant_rules_sorts_as_an_ordinary_section() {
+        let dir = std::env::temp_dir().join("acowork-test-section-order-case");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        for (name, body) in [
+            ("system.md", "SYSTEM BODY"),
+            ("Rules.md", "CAPITAL RULES BODY"),
+            ("zzz.md", "ZZZ BODY"),
+        ] {
+            fs::write(dir.join("prompts").join(name), body).unwrap();
+        }
+
+        let prompt = build_system_prompt(&dir).unwrap();
+        let idx = |needle: &str| prompt.find(needle).expect("section present");
+        assert!(idx("SYSTEM BODY") < idx("CAPITAL RULES BODY"), "{prompt}");
+        assert!(idx("CAPITAL RULES BODY") < idx("ZZZ BODY"), "{prompt}");
+    }
+
+    /// A package that has not migrated yet keeps working: `system.md` alone
+    /// is a valid, complete prompt.
+    #[test]
+    fn test_build_system_prompt_without_rules_is_unchanged() {
+        let dir = std::env::temp_dir().join("acowork-test-no-rules-section");
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(dir.join("prompts")).unwrap();
+        fs::write(dir.join("prompts").join("system.md"), "Only identity.").unwrap();
+
+        let prompt = build_system_prompt(&dir).unwrap();
+        assert_eq!(prompt, "## system\n\nOnly identity.");
     }
 
     // ── ADR-063: OVERRIDABLE_PROMPTS + is_overridable_prompt + load_optional_prompt ──

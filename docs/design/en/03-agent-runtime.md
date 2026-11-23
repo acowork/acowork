@@ -8,6 +8,8 @@ Agent Runtime is the only binary executable provided by the platform, similar to
 
 > **v3.7 Change (2026-05-28)**: Context compression strategy greatly simplified — see [ADR-010](../../adr/zh/ADR-010-context-compression-simplification.md). Core change: abandon programmatic folding strategies (Tool Result folding, content folding Phase 1); context compression returns to LLM summary as the sole normal path means. Daily compression flow simplified to: 70% alert → 80% LLM summary (complete context, no folding) → 95% emergency_trim safety net.
 
+> **v3.10 Change (2026-11-23)**: Context layer 1 (System Prompt) splits from one file into two — `prompts/system.md` (role identity, scenario-agnostic) + `prompts/rules.md` (business-scenario rules / constraints / workflow), with the Runtime fixing the section order as `system.md` → `rules.md` → the rest by filename — see [ADR-120](../../adr/en/ADR-120-system-and-rules-prompt-split.md).
+
 > **v3.9 Change (2026-05-28)**: Compaction and Distillation unified — see [ADR-011](../../adr/zh/ADR-011-compaction-as-distillation.md). Core change: Compaction summary and Session distillation merge into a single Compact Model call; summary text used simultaneously for memory replacement and SQLite memory layer experience layer writing ("summary is distillation"). Experience layer write sources simplified to only Compaction and Session close distillation, removing per-round conversation real-time write. SessionState adds `is_compacted` flag to control tail distillation decision.
 
 **Cross-references**:
@@ -220,7 +222,7 @@ Prompt Builder splices context in the following order, higher priority is more f
 
 | Order | Part | Source | Description |
 |-------|------|--------|-------------|
-| 1 | System Prompt | `prompts/system.md` + `prompts/constraints.md` | Agent identity definition and behavior constraints, cannot be overridden later |
+| 1 | System Prompt | `prompts/system.md` + `prompts/rules.md` | Agent identity (role attributes) + business-scenario rules (system of record, tool boundaries, deliverable areas, approval gates, workflow). Section order is fixed by the Runtime as `system.md` → `rules.md` → the rest by filename; see [ADR-120](../../adr/en/ADR-120-system-and-rules-prompt-split.md). Cannot be overridden later |
 | 2 | Identity Context | Gateway injection | User identity info (name, city etc.), Agent "knows" user |
 | 2.5 | Autobiographical | SQLite memory layer AutobiographicalNode | Agent self-cognition (Identity/Capability/Limitation), injection cap 200 tokens. History Manager detects History node count when building context; exceeds 10 triggers rule engine merge (concatenate events by timeline, deduplicate, truncate to 200 tokens, zero LLM calls); merge executed by Runtime background task, no user intervention needed. Phase 3 can upgrade to LLM semantic summary |
 | 2.8 | Workspace Context | Gateway push | Workspace environment info (current selection + high-weight Top2, max 3) |

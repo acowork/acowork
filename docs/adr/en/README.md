@@ -4,7 +4,7 @@
 > these files are translations maintained alongside it. When the two disagree, the Chinese
 > document governs.
 
-**Coverage**: 104 / 104 documents translated.
+**Coverage**: 105 / 105 documents translated.
 
 Numbering notes: `037` is unused; `061` and `062` each have two files (a decision and its
 companion report), so the count exceeds the number of unique ADR numbers.
@@ -32,6 +32,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | Why Desktop has ONE connection setting (a server address) and no local/remote choice, and what happens when that address is wrong | [ADR-115](./ADR-115-desktop-single-server-address-model.md) |
 | Why the in-app page preview is a native child webview instead of an `<iframe>`, and why a preview must hold zero IPC permissions | [ADR-118](./ADR-118-desktop-in-app-browser-child-webview.md) |
 | Why a turn's produced files and images are one row under the assistant reply, and why the tool names never appear in that code path | [ADR-119](./ADR-119-turn-deliverables-row.md) |
+| Why an agent's system prompt is two files — role identity vs. business-scenario rules — and which one a deployment replaces | [ADR-120](./ADR-120-system-and-rules-prompt-split.md) |
 
 ## Index
 
@@ -147,6 +148,7 @@ ADRs are not a sequence to be read front to back. Suggested entry points:
 | 115 | [ADR-115](./ADR-115-desktop-single-server-address-model.md) | Desktop Single-Server-Address Model — `local` / `remote` Demoted to an Inference from the Address; One Address Control on Every Screen; Restartable Boot Gate | Implemented; supersedes the mode+address two-knob connection settings left after ADR-114 | [zh](../zh/ADR-115-desktop-single-server-address-model.md) |
 | 118 | [ADR-118](./ADR-118-desktop-in-app-browser-child-webview.md) | Desktop In-App Browser — Hosting Third-Party Pages in a Child Webview (`add_child`), Role-Parameterised Navigation, and Zero IPC Permission for Previews | Implemented (Windows verified; macOS/Linux untested) | [zh](../zh/ADR-118-desktop-in-app-browser-child-webview.md) |
 | 119 | [ADR-119](./ADR-119-turn-deliverables-row.md) | Turn Deliverables Row — Files and Images a Turn Produced, Summarised as One Transcript Row | Accepted (implemented, Windows verified) | [zh](../zh/ADR-119-turn-deliverables-row.md) |
+| 120 | [ADR-120](./ADR-120-system-and-rules-prompt-split.md) | Splitting the Agent System Prompt: `system.md` (Role Identity) and `rules.md` (Business-Scenario Rules) | Accepted (implemented) | [zh](../zh/ADR-120-system-and-rules-prompt-split.md) |
 
 ---
 
