@@ -92,3 +92,12 @@ agents/.signing-keys/
 
 # Local scratch at the repo root (probe/debug scripts)
 dev-tmp/
+
+# Local build scratch (packages, probes, web zips); the bridge pipeline stays tracked.
+build/*
+!build/hosted-bridge.js
+!build/apply-bridge.py
+!build/hosted-bridge.check.js
+!build/verify-apps.sh
+!build/rebuild-and-pack.sh
+!build/bridge-harness.html

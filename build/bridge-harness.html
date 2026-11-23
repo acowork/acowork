@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>bridge-harness:pending</title>
+<style>
+  html,body{margin:0;font:12px system-ui;background:#111;color:#eee}
+  #out{white-space:pre-wrap;padding:8px}
+  iframe{width:640px;height:420px;border:1px solid #444;background:#fff}
+</style>
+</head>
+<body>
+<div id="out">waiting</div>
+<iframe id="app" sandbox="allow-scripts allow-same-origin allow-forms allow-popups allow-downloads"></iframe>
+<script>
+// Harness for the ACowork <-> craft-app iframe bridge. Runs the app in the SAME sandbox ACowork
+// uses (no allow-same-origin), reports what the bridge posts back, in the document title so that
+// `chrome --headless --dump-dom` can be grepped without a CDP client.
+const app = new URL(location.href).searchParams.get("app") || "app";
+const src = new URL(location.href).searchParams.get("src");
+const sampleUrl = new URL(location.href).searchParams.get("sample");
+let sampleBytes = null;
+let ready = false;
+// Bytes can arrive after the app said ready (a slow sample fetch): send then, not never.
+function sendOpen() {
+  if (!ready || !sampleBytes) return;
+  note("sent-openFile " + name + " " + sampleBytes.length + "B");
+  frame.contentWindow.postMessage({ channel: "acowork", type: "openFile", name, bytes: sampleBytes, id: 1 }, "*");
+}
+const name = new URL(location.href).searchParams.get("name") || "sample.bin";
+const log = [];
+const out = document.getElementById("out");
+const frame = document.getElementById("app");
+
+function note(s) {
+  log.push(s);
+  out.textContent = log.join("\n");
+  document.title = "bridge-harness:" + log.join(" | ");
+}
+
+window.addEventListener("message", (e) => {
+  const d = e.data;
+  if (!d || d.channel !== "acowork") return;
+  if (d.type === "ready") {
+    note("ready");
+    ready = true;
+    // ACowork pushes theme and then the file it was asked to open.
+    frame.contentWindow.postMessage({ channel: "acowork", type: "theme", theme: "dark" }, "*");
+    sendOpen();
+  } else if (d.type === "opened") {
+    note("opened " + (d.name || "?"));
+  } else if (d.type === "openFailed") {
+    note("openFailed " + (d.error || "?"));
+  } else if (d.type === "saveFile") {
+    note("saveFile " + (d.name || "?") + " " + (d.bytes ? d.bytes.length : 0) + "B");
+  } else if (d.type === "notify") {
+    note("notify " + d.message);
+  }
+});
+
+frame.addEventListener("load", () => note("iframe-load"));
+if (sampleUrl) {
+  fetch(sampleUrl).then((r) => r.arrayBuffer()).then((b) => { sampleBytes = new Uint8Array(b); note("sample " + sampleBytes.length + "B"); sendOpen(); });
+} else { sampleBytes = new Uint8Array(0); }
+frame.src = src;
+setTimeout(() => note("timeout"), 20000);
+</script>
+</body>
+</html>
